@@ -76,7 +76,7 @@ describe("fake claude", () => {
     assert.equal(lines[0].type, "control_response");
     const echoes = lines.filter((l) => l.type === "user" && l.uuid === "u-1");
     assert.equal(echoes.length, 1, "duplicate uuid is not echoed twice");
-    assert.equal(lines.at(-1)?.type, "result");
+    assert.equal(lines.filter((l) => l.type !== "command_lifecycle").at(-1)?.type, "result");
     assert.equal(log.filter((e) => e.kind === "in").length, 3);
   });
 

@@ -1,0 +1,60 @@
+{
+  "description": "One foreground Bash call is stopped on its own with stop_task; the call fails and the turn carries on.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "init": {
+        "tools": []
+      }
+    },
+    {
+      "tool": {
+        "id": "tu_1",
+        "name": "Bash",
+        "input": {
+          "command": "node -e \"setTimeout(()=>{},60000)\""
+        }
+      }
+    },
+    {
+      "taskStarted": {
+        "taskId": "bt_1",
+        "toolUseId": "tu_1",
+        "description": "long wait"
+      }
+    },
+    {
+      "await": {
+        "type": "control_request",
+        "request": {
+          "subtype": "stop_task",
+          "task_id": "bt_1"
+        }
+      },
+      "as": "st",
+      "timeoutMs": 20000
+    },
+    {
+      "reply": "st",
+      "response": {}
+    },
+    {
+      "toolResult": {
+        "id": "tu_1",
+        "text": "Exit code 137\n\n[killed]",
+        "isError": true
+      }
+    },
+    {
+      "text": "That command was stopped; carrying on."
+    },
+    {
+      "result": "done"
+    }
+  ]
+}

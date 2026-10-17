@@ -1,0 +1,34 @@
+{
+  "description": "Answers differently when started with --resume, so a test can see the worker resumed the native session.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "init": {
+        "tools": []
+      }
+    },
+    {
+      "if": {
+        "flag": "--resume"
+      },
+      "then": [
+        {
+          "text": "Continuing the resumed session."
+        }
+      ],
+      "else": [
+        {
+          "text": "A fresh session."
+        }
+      ]
+    },
+    {
+      "result": "done"
+    }
+  ]
+}

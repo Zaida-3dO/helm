@@ -1,0 +1,43 @@
+{
+  "description": "A manual /compact submission while idle: the CLI reports a compaction boundary and ends the turn.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "init": {
+        "tools": []
+      }
+    },
+    {
+      "if": {
+        "saved": "p",
+        "contains": "/compact"
+      },
+      "then": [
+        {
+          "emit": {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "session_id": "fake-session",
+            "compact_metadata": {
+              "trigger": "manual",
+              "pre_tokens": 1200
+            }
+          }
+        }
+      ],
+      "else": [
+        {
+          "text": "That was not a compaction."
+        }
+      ]
+    },
+    {
+      "result": ""
+    }
+  ]
+}

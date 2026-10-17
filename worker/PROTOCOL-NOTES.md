@@ -34,7 +34,7 @@ shapes, the choices behind them, and what was observed of the real CLI.
 | `set_thinking_level` | `{id, level}`; `level` is one of `low medium high xhigh max`. `data: {effort, applies:"next_turn"}`. |
 | `extension_ui_response` | `{id, value?, confirmed?, cancelled?, goto?}`; no response. An unknown or stale `id` is ignored. |
 | `shutdown` | No id. Interrupts a running turn, closes the CLI's stdin, waits up to 3 s, then kills the tree. |
-| `compact`, `deliver_now`, `stop_tool`, `withdraw` | Answered with a failure ("not supported by this worker yet"). Wait limit and per-tool Stop come later. |
+| `compact`, `deliver_now`, `stop_tool`, `withdraw` | See "Delivery, steering and tool control" below. |
 
 Every command carrying an `id` gets exactly one `response`; a second answer for the same id is
 suppressed in `HostChannel` and logged to stderr.
@@ -130,3 +130,114 @@ User rows: when Claude acknowledges a submission the worker emits `message_start
   native binary. Wrapper scripts (`.cmd`, `.bat`, `.ps1`, ...) are refused, including an explicit
   `claude.command` in `launch.json`. The CLI's process tree is ended with `taskkill /T /F` on
   Windows (a process group kill on Linux); the host's Job Object is the backstop.
+
+## Observed CLI behaviour (claude.exe 2.1.289, 2026-10-17)
+
+Observed by driving the real CLI over stream-json (haiku, a neutral temp folder, `CLAUDECODE`
+stripped, setting sources `project,local`). Control-request names were cross-checked against the
+public Agent SDK type definitions; no SDK code is used or copied.
+
+- **Message lifecycle.** The CLI reports capability `msg_lifecycle_v1` in `system/init` and writes
+  `{type:"command_lifecycle", command_uuid, state}` for every user message that carries a uuid.
+  States: `queued` (written within milliseconds of receipt), `started` (the CLI took the message
+  into a turn), `completed` (that turn ended) and `cancelled`.
+  - A message sent while idle goes `queued` then `started` at once; the `--replay-user-messages`
+    echo follows about a second later.
+  - A message sent **during** a turn goes `queued` and then waits. At the next tool boundary (after
+    the running tool calls return) the CLI writes the echo and `started`, and the same turn's next
+    model request sees it. A message still waiting when the turn ends opens the next turn.
+  - So `started` is the "read" signal, distinct from the acknowledgement (`queued`). The first
+    rule, "the echo is the ack", is too late for a mid-turn message: its echo only arrives when it
+    is read, which can be minutes behind a long tool call.
+- **Foreground tasks.** A foreground Bash call becomes a CLI task about 3–4 s after it starts:
+  `system/task_started {task_id, tool_use_id, is_backgrounded:false, task_type:"local_bash"}`.
+  Before that there is no task to move or stop. Subagent calls report `task_type:"local_agent"`.
+- **`background_tasks {tool_use_id?}`** answers `{backgrounded:true}`. The blocked call returns at
+  once with a tool result saying it was moved to the background (with its task id) and the turn
+  carries on. With no `tool_use_id` every foreground task moves. The CLI then writes
+  `system/background_tasks_changed {tasks:[{task_id, task_type, description}]}` (the full list
+  each time) and `system/task_updated {task_id, patch}`; on completion `task_notification`.
+- **`stop_task {task_id}`** works on a foreground Bash task too: that call fails (`Exit code 137`,
+  `[killed]`, `is_error`) and the turn carries on. So per-tool Stop is available for Bash once the
+  call is a task.
+- **`cancel_async_message {message_uuid}`** answers `{cancelled:true}` and writes lifecycle
+  `cancelled` for a message that is still waiting; `{cancelled:false}` once it has been read.
+- **`interrupt {cancel_queued?}`** answers `{still_queued:[uuid...]}`; with `cancel_queued:true`
+  it answers `{still_queued:[], cancelled:[uuid...]}` and writes lifecycle `cancelled` for each.
+  An interrupt that lands during a foreground Bash call did **not** end the turn until that shell
+  finished (30 s in that run).
+- **`priority:"now"`** on a user message sent during a Bash call did not interrupt anything in
+  2.1.289; it was only queued.
+- **Hooks.** `initialize` takes `hooks: {PreToolUse: [{matcher:"Bash", hookCallbackIds:[id]}]}`.
+  Each matching call sends `control_request {subtype:"hook_callback", callback_id, tool_use_id,
+  input:{hook_event_name:"PreToolUse", tool_name, tool_input, tool_use_id, permission_mode, ...}}`.
+  Answering `{hookSpecificOutput:{hookEventName:"PreToolUse", permissionDecision:"deny",
+  permissionDecisionReason}}` fails the call; the model sees an error tool result starting
+  `PreToolUse:Bash hook error:` followed by the reason. `additionalContext` adds a note to the call.
+  Hooks fire in bypass-permissions mode too. The CLI echoes each `control_response` we send back
+  on stdout; the worker ignores responses it did not ask for.
+- **Native tools to disallow** (from the `init` tool list): `CronCreate`, `CronDelete`,
+  `CronList`, `ScheduleWakeup`, `RemoteTrigger` (schedules), `EnterWorktree`, `ExitWorktree`
+  (worktrees).
+
+## Delivery, steering and tool control
+
+**Launch.** `sendBehavior {longCommands: "off"|"warn"|"redirect", optIn: bool}`. When the level is
+not `off`, the worker appends its own short "Long commands" rule to `appendSystemPrompt` and
+registers the PreToolUse hook in `initialize`.
+
+**Acknowledgement and delivery.**
+- A prompt is acknowledged (`{success:true, data:{submissionId, state:"accepted"}}`) on lifecycle
+  `queued` for its uuid, or on the echo, whichever comes first. Still 30 s, still never resent.
+- Event `submission_delivered {submissionId}` when lifecycle `started` arrives (or the echo, for a
+  CLI without lifecycle records). For a prompt that opens a turn it follows the acknowledgement at
+  once; for a steer it marks the tool boundary at which Claude read it.
+- The user row (`message_start`/`message_end`, role `user`) is now emitted at delivery rather
+  than at the acknowledgement, so a steer lands in the transcript where Claude read it. For a
+  turn-opening prompt the two moments are milliseconds apart.
+- `prompt {streamingBehavior:"steer"}` is written as is. `priority:"now"` is written and, when a
+  turn is running, followed by a plain `interrupt` so the message survives and opens the next turn
+  (the CLI's own `priority` alone did not interrupt, see the observations above). That turn settles with
+  `agent_settled {outcome:"stopped", superseded:true}`, so the host can label it "Superseded by
+  your message" rather than as a user Stop.
+
+**Commands.**
+
+| Command | Shape and answer |
+|---|---|
+| `get_state` | `data` adds `capabilities {withdraw, deliverNow, stopTool, compact}` (all `true` for Claude Code 2.1.289) and `cliVersion` (the CLI's `get_binary_version` answer; `null` if it does not answer within 3 s). |
+| `abort` | Before the interrupt, any foreground tasks are moved to the background (otherwise the interrupt waits for the shell). The interrupt is sent with `cancel_queued:true`; `data` adds `cancelledSubmissionIds`: our submissions the CLI dropped, which the host returns to the front of its queue. |
+| `withdraw` | `{id, submissionId}` → `data {withdrawn}`; `false` when Claude has already read it (or it is unknown). Uses `cancel_async_message`. |
+| `deliver_now` | `{id, submissionId, reason:"wait_limit"\|"send_now", minRunMs}` → `data {result, moved?}`. `stopped`: no turn is running. `nothing_waiting`: that submission is no longer unread. `waiting`: an approval, question or plan is open, or no foreground Bash or subagent call has run for `minRunMs` yet. `unblocked` with `moved:[toolCallId...]`: those calls were moved to the background. It never ends the turn. With `reason:"send_now"` and nothing to move, a plain interrupt is sent instead and the answer is `delivering`. |
+| `stop_tool` | `{id, toolCallId, sentAtMs}` → `data {stopped}`. A missing or more than 5 s old `sentAtMs` is refused (`success:false`). A call that is not a stoppable foreground Bash task answers `stopped:false`. Uses `stop_task`. |
+| `compact` | `{id}`; refused while a turn runs. Sends an internal `/compact` user message and answers `data {state:"compacting"}`; emits `compaction_start {}` then `compaction_end {trigger, ok}` (`ok:false` when the turn ends without a compaction boundary). The compaction runs as a CLI turn, so the host also sees `agent_start` / `agent_settled` for it. |
+
+**Events.**
+
+| Event | Fields |
+|---|---|
+| `submission_delivered` | `submissionId` |
+| `background_tasks` | `tasks: [{id, title, command?, kind:"shell"\|"agent", startedAt}]`, the full list each time |
+| `long_command` | `toolCallId, action:"denied"\|"reminded"\|"escaped", reason` |
+| `tool_execution_start` | adds `stoppable: false` |
+| `tool_execution_update` | `toolCallId, stoppable: true` once the call is a foreground task that `stop_task` can end |
+| `compaction_start` | — |
+
+`deliver_now`, `withdraw`, `stop_tool` and `compact` are refused, like `prompt`, until `get_state`
+has been answered.
+
+**Long-command rule.** The classifier and the deny-once policy are in
+`worker/src/drivers/claude/longcmd.ts`; the hook answers as in the observations above. Choices made
+here: the test and build script names also include `lint`; `-v` is not treated as a
+version flag (it means verbose to most test runners); a `timeout N cmd` prefix is looked through,
+and Windows `timeout /t N` counts as a sleep; `bash -c`, `cmd /c` and `powershell -Command`
+strings are parsed as nested commands. Subagent calls are recognised by the hook input's
+`agent_id`, or by a tool call id the worker saw in a subagent's assistant record.
+
+**Native tools.** `--disallowedTools` names the seven tools in the observations above.
+
+**Fake claude.** `fakes/claude/fake-claude.ts` reproduces the lifecycle above (queued at once;
+read at once when idle, otherwise at a `{"read": true}` step or the turn's end) and answers
+`cancel_async_message` and `interrupt {cancel_queued}` from its list of unread messages. Its header
+documents the fixture steps (hooks, replies to control requests, conditions, loops,
+shorthand records).

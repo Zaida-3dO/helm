@@ -19,6 +19,8 @@ tauri = { version = "2", features = [] }
 helm-core.workspace = true
 helm-ipc.workspace = true
 helm-platform.workspace = true
+helm-chats.workspace = true
+helm-workers.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 log.workspace = true

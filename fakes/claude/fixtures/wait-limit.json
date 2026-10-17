@@ -1,0 +1,80 @@
+{
+  "description": "A blocking foreground Bash call becomes a CLI task, the client moves it to the background with background_tasks, the turn continues and the waiting steer is read.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "init": {
+        "tools": []
+      }
+    },
+    {
+      "tool": {
+        "id": "tu_1",
+        "name": "Bash",
+        "input": {
+          "command": "node server.js"
+        }
+      }
+    },
+    {
+      "hook": {
+        "toolUseId": "tu_1",
+        "input": {
+          "command": "node server.js"
+        }
+      },
+      "as": "h1"
+    },
+    {
+      "taskStarted": {
+        "taskId": "bt_1",
+        "toolUseId": "tu_1",
+        "description": "node server.js"
+      }
+    },
+    {
+      "await": {
+        "type": "control_request",
+        "request": {
+          "subtype": "background_tasks"
+        }
+      },
+      "as": "bg",
+      "timeoutMs": 30000
+    },
+    {
+      "reply": "bg",
+      "response": {
+        "backgrounded": true
+      }
+    },
+    {
+      "backgroundTasks": [
+        {
+          "taskId": "bt_1",
+          "description": "node server.js"
+        }
+      ]
+    },
+    {
+      "toolResult": {
+        "id": "tu_1",
+        "text": "Command was manually backgrounded by user with ID: bt_1."
+      }
+    },
+    {
+      "read": true
+    },
+    {
+      "text": "The server keeps running in the background; noted your message."
+    },
+    {
+      "result": "done"
+    }
+  ]
+}

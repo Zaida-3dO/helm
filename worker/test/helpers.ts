@@ -26,6 +26,7 @@ export interface StartOpts {
   claude?: Json;
   limits?: Json;
   env?: Record<string, string | undefined>;
+  sendBehavior?: Json;
 }
 
 export function readJsonl(p: string): Json[] {
@@ -47,6 +48,7 @@ export function startWithFixture(name: string, opts: StartOpts = {}): Started {
     harness: "claude",
     claude: { command: process.execPath, commandArgs: [FAKE_CLAUDE, fixturePath], ...(opts.claude ?? {}) },
     limits,
+    ...(opts.sendBehavior ? { sendBehavior: opts.sendBehavior } : {}),
   };
   const host = new FakeHost({
     launcher: WORKER,

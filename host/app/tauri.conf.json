@@ -22,7 +22,7 @@
       "csp": {
         "default-src": "'none'",
         "script-src": "'self'",
-        "style-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
         "font-src": "'self'",
         "img-src": "'self'",
         "connect-src": "ipc: http://ipc.localhost",
@@ -32,6 +32,9 @@
         "object-src": "'none'",
         "media-src": "'none'"
       },
+      "dangerousDisableAssetCspModification": [
+        "style-src"
+      ],
       "freezePrototype": true,
       "capabilities": [
         "main"
@@ -40,6 +43,9 @@
   },
   "bundle": {
     "active": false,
+    "resources": {
+      "../../worker/src/": "worker/src/"
+    },
     "icon": [
       "icons/icon.png",
       "icons/icon.ico"

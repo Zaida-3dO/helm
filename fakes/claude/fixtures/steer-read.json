@@ -1,0 +1,50 @@
+{
+  "description": "A steer sent during a tool call waits unread, is read at the next tool boundary, and the same turn's reply acts on it.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "init": {
+        "tools": []
+      }
+    },
+    {
+      "tool": {
+        "id": "tu_1",
+        "name": "Bash",
+        "input": {
+          "command": "ls"
+        }
+      }
+    },
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "s",
+      "timeoutMs": 15000
+    },
+    {
+      "sleep": 150
+    },
+    {
+      "toolResult": {
+        "id": "tu_1",
+        "text": "a.txt"
+      }
+    },
+    {
+      "read": true
+    },
+    {
+      "text": "Noted your message: {{s.message.content.0.text}}"
+    },
+    {
+      "result": "done"
+    }
+  ]
+}

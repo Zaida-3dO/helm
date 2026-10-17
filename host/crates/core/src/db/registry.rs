@@ -28,6 +28,7 @@ pub struct MigrationRegistry {
     pub(crate) initializers: Vec<Step>,
     pub(crate) one_time: Vec<Step>,
     pub(crate) recovery: Vec<Step>,
+    pub(crate) capture: Vec<Step>,
 }
 
 impl MigrationRegistry {
@@ -48,6 +49,13 @@ impl MigrationRegistry {
 
     pub fn recovery_step(&mut self, name: &'static str, run: StepFn) -> &mut Self {
         Self::push(&mut self.recovery, name, run);
+        self
+    }
+
+    /// A step that runs inside the recovery transaction **before** core recovery rewrites any
+    /// status, so it still sees which chats were running (restart-continuation capture).
+    pub fn recovery_capture(&mut self, name: &'static str, run: StepFn) -> &mut Self {
+        Self::push(&mut self.capture, name, run);
         self
     }
 

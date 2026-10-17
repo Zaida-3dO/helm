@@ -10,7 +10,15 @@
     "test": "node --test \"src/**/*.test.ts\""
   },
   "dependencies": {
+    "@lexical/history": "^0.52.0",
+    "@lexical/plain-text": "^0.52.0",
+    "@lexical/react": "^0.52.0",
+    "@lexical/utils": "^0.52.0",
     "@tauri-apps/api": "^2.12.4",
+    "highlight.js": "^11.12.0",
+    "marked": "^18.1.1",
+    "mermaid": "^12.2.0",
+    "lexical": "^0.52.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },

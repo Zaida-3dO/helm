@@ -1,0 +1,229 @@
+// The pure renderer: Markdown text in, safe HTML out. No DOM, no network, no `api`.
+//
+// Safety model: the HTML is built here, not passed through. Raw HTML in the source is
+// reduced to inert, escaped markers; link destinations pass an allowlist; images are never
+// emitted with a remote `src`. Callers can therefore assign the result to `innerHTML` as is.
+import { Marked, Renderer } from 'marked';
+import type { Tokens, TokenizerAndRendererExtension } from 'marked';
+import { canonicalCalloutType, defaultCalloutTitle, parseCalloutHead } from './callouts.ts';
+import { escapeAttr, escapeHtml } from './escape.ts';
+import { splitFrontmatter } from './frontmatter.ts';
+import type { Property } from './frontmatter.ts';
+import { highlightCode } from './highlight.ts';
+import { classifyHref, isImageName, parseWikilink, targetAttrs } from './links.ts';
+import type { LinkTarget } from './links.ts';
+
+export interface RenderOptions {
+  /** The last block may be unfinished: an open Mermaid fence stays a code block. */
+  streaming?: boolean;
+  /** Enables Mermaid diagrams. Off for previews. */
+  interactive?: boolean;
+  /**
+   * The text is itself an embedded note: frontmatter is dropped and embeds inside it render as
+   * plain links, so embedding stays one level deep.
+   */
+  nested?: boolean;
+}
+
+/** Set for the duration of one synchronous render. */
+let ctx: Required<RenderOptions> = { streaming: false, interactive: false, nested: false };
+
+function attrString(attrs: Array<[string, string]>): string {
+  return attrs.map(([k, v]) => ` ${k}="${escapeAttr(v)}"`).join('');
+}
+
+function anchor(target: LinkTarget, innerHtml: string, extraClass = '', title = ''): string {
+  const href = target.kind === 'url' ? (target.href ?? '#') : '#';
+  const cls = `md-link md-link-${target.kind}${extraClass ? ` ${extraClass}` : ''}`;
+  const titleAttr = title ? ` title="${escapeAttr(title)}"` : '';
+  return (
+    `<a class="${cls}" href="${escapeAttr(href)}" rel="noopener noreferrer"` +
+    `${attrString(targetAttrs(target))}${titleAttr}>${innerHtml}</a>`
+  );
+}
+
+function vaultLabel(target: LinkTarget): string {
+  if (target.alias) return target.alias;
+  const base = target.note ?? '';
+  const tail = target.heading ? ` > ${target.heading}` : target.block ? ` > ^${target.block}` : '';
+  return `${base}${tail}` || '#';
+}
+
+const wikilink: TokenizerAndRendererExtension = {
+  name: 'wikilink',
+  level: 'inline',
+  start(src: string) {
+    const at = src.indexOf('[[');
+    if (at < 0) return undefined;
+    return at > 0 && src[at - 1] === '!' ? at - 1 : at;
+  },
+  tokenizer(src: string) {
+    const m = /^(!?)\[\[([^[\]\n]+)\]\]/.exec(src);
+    if (!m) return undefined;
+    const target = parseWikilink(m[2] as string);
+    if (!target) return undefined;
+    return { type: 'wikilink', raw: m[0], embed: m[1] === '!', target };
+  },
+  renderer(token) {
+    const target = (token as unknown as { target: LinkTarget }).target;
+    const embed = (token as unknown as { embed: boolean }).embed;
+    const label = escapeHtml(vaultLabel(target));
+    if (!embed || ctx.nested) return anchor(target, label, embed ? 'md-embed-link' : '');
+    const image = isImageName(target.note ?? '');
+    const kind = image ? 'image' : 'note';
+    const attrs = attrString(targetAttrs(target));
+    // Spans, not divs: an embed sits inside a paragraph. The body is filled in later, from
+    // `resolveEmbed`, by the component.
+    return (
+      `<span class="md-embed md-embed-${kind}" data-md-embed="${kind}"${attrs}>` +
+      `${anchor(target, label, 'md-embed-title')}<span class="md-embed-body" hidden></span></span>`
+    );
+  },
+};
+
+function fenceClosed(raw: string): boolean {
+  const lines = raw.replace(/\s+$/, '').split('\n');
+  const open = /^ {0,3}(`{3,}|~{3,})/.exec(lines[0] ?? '');
+  if (!open || lines.length < 2) return false;
+  const fence = open[1] as string;
+  const close = new RegExp(`^ {0,3}\\${fence[0]}{${fence.length},}[ \\t]*$`);
+  return close.test(lines[lines.length - 1] as string);
+}
+
+const SAFE_DATA_IMAGE = /^data:image\/(?:png|jpe?g|gif|webp|avif|bmp);base64,[a-z0-9+/=]+$/i;
+
+function renderPropertyValues(prop: Property): string {
+  if (prop.values.length === 0) return '<span class="md-prop-empty"></span>';
+  const items = prop.values.map((v) => md.parseInline(v) as string);
+  if (!prop.list) return items.join('');
+  return `<ul class="md-prop-list">${items.map((i) => `<li>${i}</li>`).join('')}</ul>`;
+}
+
+function renderProperties(props: Property[]): string {
+  const rows = props
+    .map((p) => {
+      const key = p.key ? `<dt>${escapeHtml(p.key)}</dt>` : '<dt></dt>';
+      return `<div class="md-prop">${key}<dd>${renderPropertyValues(p)}</dd></div>`;
+    })
+    .join('');
+  return (
+    '<details class="md-properties"><summary>Properties</summary>' +
+    `<dl class="md-properties-list">${rows}</dl></details>\n`
+  );
+}
+
+const md = new Marked({ gfm: true, breaks: false, async: false });
+
+md.use({
+  extensions: [wikilink],
+  renderer: {
+    // Raw HTML becomes an inert marker. <br> is the one tag agents lean on in table cells.
+    html(token: Tokens.HTML | Tokens.Tag) {
+      const text = token.text.trim();
+      if (/^<br\s*\/?>$/i.test(text)) return '<br>';
+      if (/^<!--[\s\S]*-->$/.test(text)) return '';
+      if (token.block) {
+        return `<pre class="md-raw-html"><code>${escapeHtml(text)}</code></pre>\n`;
+      }
+      return `<code class="md-raw-html">${escapeHtml(token.text)}</code>`;
+    },
+
+    link(this: Renderer, token: Tokens.Link) {
+      const inner = this.parser.parseInline(token.tokens);
+      const target = classifyHref(token.href);
+      if (!target) return inner;
+      return anchor(target, inner, '', token.title ?? '');
+    },
+
+    // Never an <img> with a remote or relative src: the app fetches nothing it was not asked to.
+    image(token: Tokens.Image) {
+      if (SAFE_DATA_IMAGE.test(token.href)) {
+        const title = token.title ? ` title="${escapeAttr(token.title)}"` : '';
+        return `<img class="md-image" src="${escapeAttr(token.href)}" alt="${escapeAttr(token.text)}"${title}>`;
+      }
+      const label = escapeHtml(token.text || token.href);
+      const target = classifyHref(token.href);
+      return target ? anchor(target, label, 'md-image-link', token.title ?? '') : label;
+    },
+
+    code(token: Tokens.Code) {
+      const lang = (token.lang ?? '').trim().split(/\s+/)[0] ?? '';
+      const safeLang = lang.replace(/[^A-Za-z0-9_+#.-]/g, '');
+      if (
+        safeLang.toLowerCase() === 'mermaid' &&
+        ctx.interactive &&
+        !ctx.nested &&
+        (!ctx.streaming || fenceClosed(token.raw))
+      ) {
+        // The source stays visible as a code block until the component swaps in the SVG.
+        return (
+          '<div class="md-mermaid" data-md-mermaid>' +
+          `<pre class="md-code"><code>${escapeHtml(token.text)}</code></pre></div>\n`
+        );
+      }
+      const langAttr = safeLang ? ` data-lang="${escapeAttr(safeLang)}"` : '';
+      const langClass = safeLang ? ` language-${escapeAttr(safeLang)}` : '';
+      return (
+        `<pre class="md-code"${langAttr}><code class="hljs${langClass}">` +
+        `${highlightCode(token.text, safeLang.toLowerCase())}</code></pre>\n`
+      );
+    },
+
+    table(this: Renderer, token: Tokens.Table) {
+      const html = Renderer.prototype.table.call(this, token);
+      return `<div class="md-table-wrap">${html}</div>\n`;
+    },
+
+    blockquote(this: Renderer, token: Tokens.Blockquote) {
+      const first = token.tokens[0];
+      const head = first && first.type === 'paragraph' ? parseCalloutHead(first.text) : null;
+      if (!head) return false;
+
+      const canon = canonicalCalloutType(head.type);
+      const titleHtml = head.title
+        ? (md.parseInline(head.title) as string)
+        : escapeHtml(defaultCalloutTitle(head.type));
+      const restHtml = head.rest.trim() ? `<p>${md.parseInline(head.rest) as string}</p>\n` : '';
+      const bodyHtml = restHtml + this.parser.parse(token.tokens.slice(1));
+      const content = bodyHtml.trim() ? `<div class="md-callout-content">${bodyHtml}</div>` : '';
+      const dataType = escapeAttr(head.type.toLowerCase());
+      const cls = `md-callout md-callout-${canon}`;
+      if (head.fold === '') {
+        return (
+          `<div class="${cls}" data-callout="${dataType}">` +
+          `<div class="md-callout-title">${titleHtml}</div>${content}</div>\n`
+        );
+      }
+      const open = head.fold === '+' ? ' open' : '';
+      return (
+        `<details class="${cls}" data-callout="${dataType}"${open}>` +
+        `<summary class="md-callout-title">${titleHtml}</summary>${content}</details>\n`
+      );
+    },
+  },
+});
+
+/** Escaped text on a plain block: what the UI shows when rendering fails or times out. */
+export function renderPlain(text: string): string {
+  return `<p class="md-plain">${escapeHtml(text)}</p>`;
+}
+
+/** Renders Markdown (with the Obsidian quirks) to safe HTML. Never throws. */
+export function renderToHtml(text: string, options: RenderOptions = {}): string {
+  const previous = ctx;
+  ctx = {
+    streaming: options.streaming ?? false,
+    interactive: options.interactive ?? false,
+    nested: options.nested ?? false,
+  };
+  try {
+    const normalised = text.replace(/\r\n?/g, '\n');
+    const { properties, body } = splitFrontmatter(normalised, ctx.streaming);
+    const head = properties && !ctx.nested ? renderProperties(properties) : '';
+    return head + (md.parse(body) as string);
+  } catch {
+    return renderPlain(text);
+  } finally {
+    ctx = previous;
+  }
+}

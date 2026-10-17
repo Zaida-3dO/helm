@@ -2,6 +2,7 @@
 // channel. Submissions, stop, model/effort, interactions and process control.
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { HostChannel, ResponseBody } from "../../protocol/channel.ts";
 import { describeFault, LineReader, MAX_RECORD_BYTES } from "../../protocol/lines.ts";
 import type { Driver } from "../../protocol/server.ts";
@@ -10,6 +11,7 @@ import { isAlive, treeKill } from "../../process/kill.ts";
 import { buildClaudeArgs, modelTakesEffort } from "./args.ts";
 import { buildClaudeEnv } from "./env.ts";
 import { Interactions } from "./interactions.ts";
+import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE } from "./longcmd.ts";
 import { assertNotShim, resolveClaude, type Resolved } from "./resolve.ts";
 import { StreamTranslator } from "./translate.ts";
 
@@ -23,6 +25,14 @@ const DEFAULTS = {
   modelAckMs: 10_000,
   shutdownGraceMs: 3_000,
 };
+/** Short limits for the send-behaviour controls: a slow answer must not hold up the host. */
+const QUICK_CONTROL_MS = 5_000;
+const VERSION_PROBE_MS = 3_000;
+/** A stop_tool line older than this is refused. */
+const STOP_TOOL_MAX_AGE_MS = 5_000;
+const DEFAULT_MIN_RUN_MS = 10_000;
+/** The callback id the worker registers for its PreToolUse hook (long-command rule). */
+export const LONG_COMMAND_HOOK_ID = "helm-long-commands";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -33,6 +43,30 @@ interface Submission {
   settle?: (b: ResponseBody) => void;
   timer?: NodeJS.Timeout;
   text: string;
+  /** Claude has read it (lifecycle `started`, or the echo on a CLI without lifecycle records). */
+  delivered: boolean;
+  /** Withdrawn by the user, or dropped by the CLI on an interrupt. */
+  dropped: boolean;
+}
+
+/** A root tool call that is running. */
+interface LiveTool {
+  id: string;
+  name: string;
+  startedAt: number;
+  /** Set once the CLI has registered the call as a foreground task (about 3–4 s in). */
+  taskId?: string;
+  taskKind?: "shell" | "agent";
+  background: boolean;
+  command?: string;
+}
+
+interface BackgroundTask {
+  id: string;
+  title: string;
+  command?: string;
+  kind: "shell" | "agent";
+  startedAt: number;
 }
 
 interface PendingControl {
@@ -73,6 +107,16 @@ export class ClaudeDriver implements Driver {
   private pendingModel: string | undefined;
   private pendingEffort: string | undefined;
   private resolved: Resolved | undefined;
+  private readonly longCommands: LongCommandPolicy;
+  private readonly liveTools = new Map<string, LiveTool>();
+  /** task id → tool call id, from task_started. */
+  private readonly taskTools = new Map<string, string>();
+  /** Tool call ids that belong to subagents (exempt from the long-command rule). */
+  private readonly subagentTools = new Set<string>();
+  private readonly backgroundTasks = new Map<string, BackgroundTask>();
+  /** A send-now interrupt is in flight: the turn ends superseded, not stopped by the user. */
+  private superseding = false;
+  private compacting: { boundary: boolean } | undefined;
 
   constructor(launch: Launch, channel: HostChannel, deps: DriverDeps) {
     this.launch = launch;
@@ -82,7 +126,9 @@ export class ClaudeDriver implements Driver {
     const c = launch.claude ?? {};
     this.model = c.model;
     this.effort = isEffort(c.effort) ? c.effort : DEFAULT_EFFORT;
-    this.translator = new StreamTranslator({ emit: (e) => this.ch.emit(e), diag: deps.diag });
+    const level = launch.sendBehavior?.longCommands;
+    this.longCommands = new LongCommandPolicy(isLongCommandLevel(level) ? level : "off");
+    this.translator = new StreamTranslator({ emit: (e) => this.onTranslated(e), diag: deps.diag });
     this.interactions = new Interactions({
       emit: (e) => this.ch.emit(e),
       reply: (requestId, response) => this.controlReply(requestId, response),
@@ -108,7 +154,7 @@ export class ClaudeDriver implements Driver {
       this.resolved = resolveClaude({ env: this.deps.env });
       command = this.resolved.path;
     }
-    const args = [...(c.commandArgs ?? []), ...buildClaudeArgs(c)];
+    const args = [...(c.commandArgs ?? []), ...buildClaudeArgs(c, { promptRule: this.longCommands.enabled ? PROMPT_RULE : undefined })];
     const env = buildClaudeEnv(this.deps.env, { apiKeyMode: c.apiKeyMode === true, chatId: this.launch.chatId });
     const child = spawn(command, args, {
       cwd: this.launch.cwd ?? process.cwd(),
@@ -141,18 +187,58 @@ export class ClaudeDriver implements Driver {
     child.stdout?.on("end", () => reader.end());
     child.stdin?.on("error", (e) => this.deps.diag(`claude stdin: ${e.message}`));
 
-    const init = await this.control({ subtype: "initialize" }, this.limits.controlTimeoutMs);
+    const initRequest: Json = { subtype: "initialize" };
+    if (this.longCommands.enabled) initRequest.hooks = { PreToolUse: [{ matcher: "Bash", hookCallbackIds: [LONG_COMMAND_HOOK_ID] }] };
+    const init = await this.control(initRequest, this.limits.controlTimeoutMs);
     const models = Array.isArray(init.models)
       ? (init.models as Json[]).map((m) => ({ id: m.value ?? m.id, name: m.displayName ?? m.value, description: m.description }))
       : [];
+    let cliVersion: string | null = null;
+    try {
+      const v = await this.control({ subtype: "get_binary_version" }, VERSION_PROBE_MS);
+      if (typeof v.version === "string") cliVersion = v.version;
+    } catch {
+      // An older CLI without the request: the version stays unknown.
+    }
     return {
       harness: "claude",
       executable: this.resolved.path,
       executableSource: this.resolved.source,
+      cliVersion,
       model: this.model ?? null,
       effort: modelTakesEffort(this.model) ? this.effort : null,
       models,
+      // All four were observed working on claude 2.1.289 (worker/PROTOCOL-NOTES.md).
+      capabilities: { withdraw: true, deliverNow: true, stopTool: true, compact: true },
     };
+  }
+
+  /** Events from the translator, with the tool bookkeeping the send-behaviour controls need. */
+  private onTranslated(e: Json): void {
+    if (e.type === "tool_execution_start") {
+      const id = String(e.toolCallId);
+      const args = obj(e.args);
+      this.liveTools.set(id, {
+        id,
+        name: String(e.toolName ?? ""),
+        startedAt: Date.now(),
+        background: false,
+        command: typeof args.command === "string" ? args.command : undefined,
+      });
+      this.ch.emit({ ...e, stoppable: false });
+      return;
+    }
+    if (e.type === "tool_execution_end") {
+      const t = this.liveTools.get(String(e.toolCallId));
+      if (t?.taskId) this.taskTools.delete(t.taskId);
+      this.liveTools.delete(String(e.toolCallId));
+    }
+    if (e.type === "compaction_end") {
+      if (this.compacting) this.compacting.boundary = true;
+      this.ch.emit({ ...e, ok: true });
+      return;
+    }
+    this.ch.emit(e);
   }
 
   async shutdown(reason: string): Promise<void> {
@@ -266,13 +352,17 @@ export class ClaudeDriver implements Driver {
         return;
       case "result":
         return this.onResult(rec);
+      case "command_lifecycle":
+        return this.onLifecycle(rec);
       case "system":
         if (rec.subtype === "init" && typeof rec.model === "string") this.model = rec.model;
+        this.onTaskRecord(rec);
         this.translator.handle(rec);
         return;
       case "stream_event":
       case "assistant":
-        if (!rec.parent_tool_use_id) this.openTurnIfNeeded();
+        if (rec.parent_tool_use_id) this.noteSubagentTools(rec);
+        else this.openTurnIfNeeded();
         this.translator.handle(rec);
         return;
       default:
@@ -296,7 +386,7 @@ export class ClaudeDriver implements Driver {
         if (this.stopping) return this.controlReply(requestId, { behavior: "deny", message: "The turn is stopping." });
         return this.interactions.onCanUseTool(requestId, req);
       case "hook_callback":
-        return this.controlReply(requestId, {});
+        return this.onHook(requestId, req);
       case "elicitation":
         return this.controlReply(requestId, { action: "decline" });
       default:
@@ -304,19 +394,134 @@ export class ClaudeDriver implements Driver {
     }
   }
 
-  /** A replayed user message carrying one of our submission ids is that submission's ack. */
+  /**
+   * A replayed user message carrying one of our submission ids. The CLI only replays a message
+   * when it reads it, so on a CLI without lifecycle records the echo is both ack and delivery.
+   */
   private onUserEcho(rec: Json): boolean {
     const uuid = typeof rec.uuid === "string" ? rec.uuid : undefined;
     if (!uuid) return false;
     const sub = this.subs.get(uuid);
     if (!sub) return false;
-    if (sub.state === "dispatching") {
-      this.openTurnIfNeeded();
-      this.settleSub(sub, { success: true, data: { submissionId: sub.id, state: "accepted" } }, "accepted");
-      this.ch.emit({ type: "message_start", message: { id: sub.id, role: "user", content: [] } });
-      this.ch.emit({ type: "message_end", message: { id: sub.id, role: "user", content: [{ type: "text", text: sub.text }], status: "complete", submissionId: sub.id } });
-    }
+    this.ackSub(sub);
+    this.deliverSub(sub);
     return true;
+  }
+
+  /** `command_lifecycle`: queued is the acknowledgement, started is the read (worker/PROTOCOL-NOTES.md). */
+  private onLifecycle(rec: Json): void {
+    const sub = this.subs.get(String(rec.command_uuid ?? ""));
+    if (!sub) return; // internal messages (/compact) and uuids we never sent
+    switch (rec.state) {
+      case "queued":
+        return this.ackSub(sub);
+      case "started":
+        this.ackSub(sub);
+        return this.deliverSub(sub);
+      case "cancelled":
+        sub.dropped = true;
+        return;
+      default:
+        return;
+    }
+  }
+
+  private ackSub(sub: Submission): void {
+    if (sub.state !== "dispatching") return;
+    this.settleSub(sub, { success: true, data: { submissionId: sub.id, state: "accepted" } }, "accepted");
+  }
+
+  /** Claude has read the message: its user row goes into the transcript here, in reading order. */
+  private deliverSub(sub: Submission): void {
+    if (sub.delivered || sub.dropped) return;
+    sub.delivered = true;
+    this.openTurnIfNeeded();
+    this.ch.emit({ type: "message_start", message: { id: sub.id, role: "user", content: [] } });
+    this.ch.emit({ type: "message_end", message: { id: sub.id, role: "user", content: [{ type: "text", text: sub.text }], status: "complete", submissionId: sub.id } });
+    this.ch.emit({ type: "submission_delivered", submissionId: sub.id });
+  }
+
+  /** task_started / task_updated / background_tasks_changed (worker/PROTOCOL-NOTES.md, "Observed CLI behaviour"). */
+  private onTaskRecord(rec: Json): void {
+    switch (rec.subtype) {
+      case "task_started": {
+        const taskId = String(rec.task_id ?? "");
+        const toolId = String(rec.tool_use_id ?? "");
+        const t = this.liveTools.get(toolId);
+        if (!taskId || !t) return;
+        t.taskId = taskId;
+        t.taskKind = rec.task_type === "local_agent" ? "agent" : "shell";
+        t.background = rec.is_backgrounded === true;
+        this.taskTools.set(taskId, toolId);
+        if (!t.background && t.taskKind === "shell") this.ch.emit({ type: "tool_execution_update", toolCallId: toolId, stoppable: true });
+        return;
+      }
+      case "task_updated": {
+        const toolId = this.taskTools.get(String(rec.task_id ?? ""));
+        const t = toolId ? this.liveTools.get(toolId) : undefined;
+        if (t && obj(rec.patch).is_backgrounded === true && !t.background) {
+          t.background = true;
+          if (t.taskKind === "shell") this.ch.emit({ type: "tool_execution_update", toolCallId: t.id, stoppable: false });
+        }
+        return;
+      }
+      case "background_tasks_changed": {
+        const now = Date.now();
+        const next = new Map<string, BackgroundTask>();
+        for (const raw of Array.isArray(rec.tasks) ? rec.tasks : []) {
+          const x = obj(raw);
+          if (x.ambient === true) continue;
+          const id = String(x.task_id ?? "");
+          if (!id) continue;
+          const prev = this.backgroundTasks.get(id);
+          const toolId = this.taskTools.get(id);
+          next.set(id, {
+            id,
+            title: String(x.description ?? ""),
+            command: prev?.command ?? (toolId ? this.liveTools.get(toolId)?.command : undefined),
+            kind: x.task_type === "local_agent" ? "agent" : "shell",
+            startedAt: prev?.startedAt ?? now,
+          });
+        }
+        this.backgroundTasks.clear();
+        for (const [k, v] of next) this.backgroundTasks.set(k, v);
+        this.ch.emit({ type: "background_tasks", tasks: [...next.values()] });
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  private noteSubagentTools(rec: Json): void {
+    if (rec.type !== "assistant") return;
+    const content = obj(rec.message).content;
+    for (const b of Array.isArray(content) ? content : []) {
+      const block = obj(b);
+      if (block.type === "tool_use" && typeof block.id === "string") this.subagentTools.add(block.id);
+    }
+  }
+
+  /** PreToolUse hook: the long-command rule. Anything else is allowed. */
+  private onHook(requestId: string, req: Json): void {
+    const input = obj(req.input);
+    const toolUseId = String(req.tool_use_id ?? input.tool_use_id ?? "");
+    const isRootBash = req.callback_id === LONG_COMMAND_HOOK_ID && input.tool_name === "Bash" && !input.agent_id && !this.subagentTools.has(toolUseId);
+    if (!isRootBash) return this.controlReply(requestId, {});
+    const d = this.longCommands.decide(obj(input.tool_input));
+    switch (d.kind) {
+      case "allow":
+        return this.controlReply(requestId, {});
+      case "escape":
+        this.ch.emit({ type: "long_command", toolCallId: toolUseId, action: "escaped", reason: d.reason });
+        return this.controlReply(requestId, {});
+      case "remind":
+        this.ch.emit({ type: "long_command", toolCallId: toolUseId, action: "reminded", reason: d.reason });
+        return this.controlReply(requestId, { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: d.text } });
+      case "deny":
+        this.ch.emit({ type: "long_command", toolCallId: toolUseId, action: "denied", reason: d.reason });
+        return this.controlReply(requestId, { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: d.text } });
+    }
   }
 
   private openTurnIfNeeded(): void {
@@ -327,14 +532,23 @@ export class ClaudeDriver implements Driver {
 
   private onResult(rec: Json): void {
     const wasStopping = this.stopping;
-    const outcome = this.translator.onResult(rec, wasStopping);
+    const superseded = this.superseding && !wasStopping;
+    this.superseding = false;
+    const outcome = this.translator.onResult(rec, wasStopping || superseded);
     clearTimeout(this.stopTimer);
     this.stopping = false;
     this.interactions.dismissAll();
+    this.longCommands.endTurn();
+    if (this.compacting) {
+      if (!this.compacting.boundary) this.ch.emit({ type: "compaction_end", trigger: "manual", ok: false });
+      this.compacting = undefined;
+    }
     const wasOpen = this.turnOpen;
     this.turnOpen = false;
     if (!wasOpen && !wasStopping) return;
     const e: Json = { type: "agent_settled", outcome };
+    // Send now ended the turn: the host shows it as superseded by the user's message.
+    if (superseded) e.superseded = true;
     if (outcome === "error") e.error = typeof rec.result === "string" && rec.result ? rec.result : String(rec.subtype ?? "error");
     if (this.sessionId) e.sessionId = this.sessionId;
     this.ch.emit(e);
@@ -372,7 +586,7 @@ export class ClaudeDriver implements Driver {
 
     let settle!: (b: ResponseBody) => void;
     const result = new Promise<ResponseBody>((r) => (settle = r));
-    const sub: Submission = { id: sid, state: "dispatching", result, settle, text };
+    const sub: Submission = { id: sid, state: "dispatching", result, settle, text, delivered: false, dropped: false };
     this.subs.set(sid, sub);
 
     if (!this.turnOpen) await this.applyPendingSettings();
@@ -384,9 +598,13 @@ export class ClaudeDriver implements Driver {
       session_id: this.sessionId ?? "",
       uuid: sid,
     };
-    if (cmd.priority === "now") msg.priority = "now";
+    const now = cmd.priority === "now";
+    if (now) msg.priority = "now";
     try {
       this.write(msg);
+      // The CLI's priority alone did not interrupt a running tool (observed live): a plain interrupt
+      // ends the turn and this message, still queued, opens the next one.
+      if (now && this.turnOpen && !this.stopping) this.sendNowInterrupt();
     } catch (e) {
       // Nothing reached Claude: a plain refusal, not uncertain.
       this.subs.delete(sid);
@@ -403,16 +621,119 @@ export class ClaudeDriver implements Driver {
 
   async abort(cmd: Json): Promise<ResponseBody> {
     const data = { continueQueue: cmd.continueQueue === true, userOnly: cmd.userOnly === true };
-    if (this.dead || !this.child) return { success: true, data: { ...data, state: "idle" } };
+    if (this.dead || !this.child) return { success: true, data: { ...data, state: "idle", cancelledSubmissionIds: [] } };
     const inFlight = [...this.subs.values()].some((s) => s.state === "dispatching");
-    if (!this.turnOpen && !inFlight) return { success: true, data: { ...data, state: "idle" } };
+    if (!this.turnOpen && !inFlight) return { success: true, data: { ...data, state: "idle", cancelledSubmissionIds: [] } };
     this.markStopping();
+    // An interrupt waits for a running foreground shell (observed live); move those out of the way
+    // first by sending running shells to the background.
+    if ([...this.liveTools.values()].some((t) => t.taskId && !t.background)) {
+      try {
+        await this.control({ subtype: "background_tasks" }, QUICK_CONTROL_MS);
+      } catch (e) {
+        this.deps.diag(`background before stop failed: ${(e as Error).message}`);
+      }
+    }
+    const cancelledSubmissionIds: string[] = [];
     try {
-      await this.control({ subtype: "interrupt" }, this.limits.controlTimeoutMs);
+      const r = await this.control({ subtype: "interrupt", cancel_queued: true }, this.limits.controlTimeoutMs);
+      for (const id of Array.isArray(r.cancelled) ? r.cancelled : []) {
+        const sub = this.subs.get(String(id));
+        if (!sub || sub.delivered) continue; // ignore uuids we never sent (the CLI may list its own)
+        sub.dropped = true;
+        cancelledSubmissionIds.push(sub.id);
+      }
     } catch (e) {
       this.deps.diag(`interrupt failed: ${(e as Error).message}`);
     }
-    return { success: true, data: { ...data, state: "stopping" } };
+    return { success: true, data: { ...data, state: "stopping", cancelledSubmissionIds } };
+  }
+
+  private sendNowInterrupt(): void {
+    this.superseding = true;
+    this.control({ subtype: "interrupt" }, this.limits.controlTimeoutMs).catch((e: Error) => this.deps.diag(`send-now interrupt failed: ${e.message}`));
+  }
+
+  /** The wait limit and Send now (worker/PROTOCOL-NOTES.md, "Delivery, steering and tool control"). */
+  async deliverNow(cmd: Json): Promise<ResponseBody> {
+    const sid = typeof cmd.submissionId === "string" ? cmd.submissionId : "";
+    const reason = cmd.reason === "send_now" ? "send_now" : "wait_limit";
+    const minRunMs = typeof cmd.minRunMs === "number" && cmd.minRunMs >= 0 ? cmd.minRunMs : DEFAULT_MIN_RUN_MS;
+    if (this.dead || !this.turnOpen || this.stopping) return { success: true, data: { result: "stopped" } };
+    const sub = this.subs.get(sid);
+    if (!sub || sub.state !== "accepted" || sub.delivered || sub.dropped) return { success: true, data: { result: "nothing_waiting" } };
+    // Never act while the task waits on the user (approval, question or plan).
+    if (this.interactions.size > 0) return { success: true, data: { result: "waiting" } };
+    const now = Date.now();
+    const eligible = [...this.liveTools.values()].filter((t) => t.taskId && !t.background && now - t.startedAt >= minRunMs);
+    if (eligible.length === 0) {
+      if (reason === "send_now") {
+        this.sendNowInterrupt();
+        return { success: true, data: { result: "delivering" } };
+      }
+      return { success: true, data: { result: "waiting" } };
+    }
+    const moved: string[] = [];
+    for (const t of eligible) {
+      try {
+        const r = await this.control({ subtype: "background_tasks", tool_use_id: t.id }, QUICK_CONTROL_MS);
+        if (r.backgrounded === true) {
+          t.background = true;
+          moved.push(t.id);
+        }
+      } catch (e) {
+        this.deps.diag(`background_tasks for ${t.id} failed: ${(e as Error).message}`);
+      }
+    }
+    return { success: true, data: moved.length > 0 ? { result: "unblocked", moved } : { result: "waiting" } };
+  }
+
+  /** Takes back a steer Claude has not read yet (cancel async message). */
+  async withdraw(cmd: Json): Promise<ResponseBody> {
+    const sub = this.subs.get(typeof cmd.submissionId === "string" ? cmd.submissionId : "");
+    if (!sub || sub.delivered || sub.dropped || this.dead) return { success: true, data: { withdrawn: false } };
+    try {
+      const r = await this.control({ subtype: "cancel_async_message", message_uuid: sub.id }, QUICK_CONTROL_MS);
+      if (r.cancelled === true && !sub.delivered) {
+        sub.dropped = true;
+        this.ackSub(sub); // written and now withdrawn: the prompt itself succeeded
+        return { success: true, data: { withdrawn: true } };
+      }
+      return { success: true, data: { withdrawn: false } };
+    } catch (e) {
+      return { success: false, error: (e as Error).message };
+    }
+  }
+
+  /** Fails one running foreground Bash call (stop task). */
+  async stopTool(cmd: Json): Promise<ResponseBody> {
+    const sentAt = typeof cmd.sentAtMs === "number" ? cmd.sentAtMs : NaN;
+    if (!(Date.now() - sentAt <= STOP_TOOL_MAX_AGE_MS)) return { success: false, error: "stop_tool line is missing sentAtMs or is more than 5 s old" };
+    const t = this.liveTools.get(typeof cmd.toolCallId === "string" ? cmd.toolCallId : "");
+    if (!t || !t.taskId || t.background || t.taskKind !== "shell" || this.dead) return { success: true, data: { stopped: false } };
+    try {
+      await this.control({ subtype: "stop_task", task_id: t.taskId }, QUICK_CONTROL_MS);
+      return { success: true, data: { stopped: true } };
+    } catch (e) {
+      return { success: false, error: (e as Error).message };
+    }
+  }
+
+  /** Manual compaction: an internal /compact message, refused while a turn runs. */
+  async compact(_cmd: Json): Promise<ResponseBody> {
+    if (this.shuttingDown || this.dead) return { success: false, error: "task is finishing" };
+    const inFlight = [...this.subs.values()].some((s) => s.state === "dispatching");
+    if (this.turnOpen || inFlight || this.compacting) return { success: false, error: "cannot compact while a turn is running" };
+    this.compacting = { boundary: false };
+    this.ch.emit({ type: "compaction_start" });
+    try {
+      this.write({ type: "user", message: { role: "user", content: [{ type: "text", text: "/compact" }] }, parent_tool_use_id: null, session_id: this.sessionId ?? "", uuid: randomUUID() });
+    } catch (e) {
+      this.compacting = undefined;
+      this.ch.emit({ type: "compaction_end", trigger: "manual", ok: false });
+      return { success: false, error: (e as Error).message };
+    }
+    return { success: true, data: { state: "compacting" } };
   }
 
   /** Stop requested (abort, or Stop turn on an approval). Arms the settle deadline. */

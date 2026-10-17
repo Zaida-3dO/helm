@@ -1,0 +1,53 @@
+{
+  "description": "A turn with a running foreground Bash task is stopped: the client backgrounds the shell, interrupts with cancel_queued, and the CLI reports the waiting steers it dropped.",
+  "autoBackground": true,
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "init": {
+        "tools": []
+      }
+    },
+    {
+      "tool": {
+        "id": "tu_1",
+        "name": "Bash",
+        "input": {
+          "command": "node -e \"setTimeout(()=>{},60000)\""
+        }
+      }
+    },
+    {
+      "taskStarted": {
+        "taskId": "bt_1",
+        "toolUseId": "tu_1",
+        "description": "long wait"
+      }
+    },
+    {
+      "await": {
+        "type": "control_request",
+        "request": {
+          "subtype": "interrupt"
+        }
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "toolResult": {
+        "id": "tu_1",
+        "text": "Command was manually backgrounded by user with ID: bt_1.",
+        "isError": false
+      }
+    },
+    {
+      "result": "",
+      "isError": true
+    }
+  ]
+}

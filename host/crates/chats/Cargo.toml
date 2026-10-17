@@ -1,0 +1,25 @@
+[package]
+name = "helm-chats"
+description = "Chats: the chat records, ops and events the renderer sees, and the per-chat machinery behind them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+helm-platform.workspace = true
+helm-workers.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

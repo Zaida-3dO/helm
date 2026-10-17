@@ -37,6 +37,9 @@ pub const SIDEBAR_VIEW: PrefKey = PrefKey::classified("sidebarView");
 pub const TERMINAL_HEIGHT: PrefKey = PrefKey::classified("terminalHeight");
 pub const THEME: PrefKey = PrefKey::classified("theme");
 pub const COMPACT_SIDEBAR: PrefKey = PrefKey::classified("compactSidebar");
+/// Send behaviour. Stored as the keys that differ from the defaults, which
+/// live in `helm-chats` (`send_behavior::HOME_DEFAULTS`); validated here by shape.
+pub const SEND_BEHAVIOR: PrefKey = PrefKey::classified("sendBehavior");
 
 /// Keys the generic `preference` op accepts. Every other key has its own feature operation.
 /// The list starts with the layout keys and grows it
@@ -50,6 +53,7 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     TERMINAL_HEIGHT,
     THEME,
     COMPACT_SIDEBAR,
+    SEND_BEHAVIOR,
 ];
 
 /// The stored value, or `None` when the row is missing or its JSON does not parse.
@@ -99,8 +103,35 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
         "sidebarWidth" => int_in(200, 4096, "must be 200 to 4096"),
         "inspectorWidth" => int_in(280, 4096, "must be 280 to 4096"),
         "terminalHeight" => int_in(80, 4096, "must be 80 to 4096"),
+        "sendBehavior" => validate_send_behavior(value),
         _ => Ok(()),
     }
+}
+
+/// `sendBehavior` holds a subset of its six keys; unknown keys are refused.
+fn validate_send_behavior(value: &Value) -> Result<(), PrefError> {
+    let bad = |why: &'static str| PrefError::Invalid {
+        key: "sendBehavior",
+        why,
+    };
+    let Some(map) = value.as_object() else {
+        return Err(bad("must be an object"));
+    };
+    for (k, v) in map {
+        let ok = match k.as_str() {
+            "mode" => matches!(v.as_str(), Some("queue" | "asap" | "interrupt")),
+            "showChoices" | "stopSendsWaiting" | "toolStop" => v.is_boolean(),
+            "waitLimitSeconds" => {
+                v.is_null() || v.as_u64().is_some_and(|n| (5..=3600).contains(&n))
+            }
+            "longCommands" => matches!(v.as_str(), Some("off" | "warn" | "redirect")),
+            _ => return Err(bad("has an unknown key")),
+        };
+        if !ok {
+            return Err(bad("has a value out of range"));
+        }
+    }
+    Ok(())
 }
 
 /// Write a known key through the single writer. `Value::Null` deletes the row.
@@ -188,6 +219,28 @@ mod tests {
         assert!(matches!(r, Err(PrefError::Invalid { .. })));
         assert!(db
             .write(|tx| set_generic(tx, "sidebarView", &json!("activity")))
+            .is_ok());
+    }
+
+    #[test]
+    fn send_behavior_refuses_unknown_keys_and_bad_values() {
+        let (_d, db) = temp_db(&MigrationRegistry::new());
+        let ok = json!({"mode": "queue", "waitLimitSeconds": null, "toolStop": false});
+        assert!(db.write(|tx| set_generic(tx, "sendBehavior", &ok)).is_ok());
+        for bad in [
+            json!({"mode": "sideways"}),
+            json!({"waitLimitSeconds": 4}),
+            json!({"waitLimitSeconds": 3601}),
+            json!({"longCommands": "loud"}),
+            json!({"toolStop": "yes"}),
+            json!({"colour": "red"}),
+            json!([1]),
+        ] {
+            let r = db.write(|tx| set_generic(tx, "sendBehavior", &bad));
+            assert!(matches!(r, Err(PrefError::Invalid { .. })), "{bad}");
+        }
+        assert!(db
+            .write(|tx| set_generic(tx, "sendBehavior", &json!({"waitLimitSeconds": 5})))
             .is_ok());
     }
 

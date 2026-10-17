@@ -14,12 +14,21 @@ export interface Driver {
   setModel(cmd: Json): Promise<ResponseBody>;
   setThinkingLevel(cmd: Json): Promise<ResponseBody>;
   uiResponse(resp: UiResponse): void;
+  deliverNow(cmd: Json): Promise<ResponseBody>;
+  withdraw(cmd: Json): Promise<ResponseBody>;
+  stopTool(cmd: Json): Promise<ResponseBody>;
+  compact(cmd: Json): Promise<ResponseBody>;
   /** Ends the harness. Resolves when the child is gone. */
   shutdown(reason: string): Promise<void>;
 }
 
-/** Commands the protocol names but this worker does not implement yet (they answer with a refusal). */
-const NOT_YET = new Set(["compact", "deliver_now", "stop_tool", "withdraw"]);
+/** Commands that are answered only once the harness is ready (as `prompt` is). */
+const AFTER_READY: Record<string, keyof Pick<Driver, "deliverNow" | "withdraw" | "stopTool" | "compact">> = {
+  deliver_now: "deliverNow",
+  withdraw: "withdraw",
+  stop_tool: "stopTool",
+  compact: "compact",
+};
 
 export interface ServeOptions {
   input: Readable;
@@ -105,10 +114,22 @@ export function serve(opts: ServeOptions): void {
       case "shutdown":
         void finish(0, "shutdown requested");
         return;
+      case "deliver_now":
+      case "withdraw":
+      case "stop_tool":
+      case "compact": {
+        if (!id) return diag(`${type} without id ignored`);
+        if (!readyAnswered) {
+          channel.respond(id, type, { success: false, error: "worker not ready: get_state has not completed" });
+          return;
+        }
+        const method = AFTER_READY[type];
+        answer(id, type, driver[method](cmd));
+        return;
+      }
       default:
         if (id) {
-          const error = NOT_YET.has(type) ? `${type} is not supported by this worker yet` : `unknown command: ${type}`;
-          channel.respond(id, type, { success: false, error });
+          channel.respond(id, type, { success: false, error: `unknown command: ${type}` });
         } else {
           diag(`ignoring unknown command ${type}`);
         }

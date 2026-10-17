@@ -1,0 +1,68 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { formatElapsed, layout, type Item } from './workBlocks.ts';
+import { row } from '../dev/fixtures.ts';
+
+function turn() {
+  return [
+    row({ id: 1, role: 'user', text: 'do it', timestamp: 0 }),
+    row({ id: 2, role: 'assistant', text: 'let me look', timestamp: 1000 }),
+    row({ id: 3, role: 'toolResult', toolName: 'Read', timestamp: 2000 }),
+    row({ id: 4, role: 'toolResult', toolName: 'Bash', status: 'error', timestamp: 3000 }),
+    row({ id: 5, role: 'assistant', text: 'done', timestamp: 65_000 }),
+  ];
+}
+
+const shape = (items: Item[]) =>
+  items.map((i) => (i.kind === 'row' ? i.row.id : `fold[${i.rows.map((r) => r.id).join(',')}]`));
+
+test('a settled turn folds its work, keeping errors and the final reply', () => {
+  const items = layout(turn(), false);
+  assert.deepEqual(shape(items), [1, 'fold[2,3]', 4, 5]);
+  const fold = items.find((i) => i.kind === 'fold');
+  assert.equal(fold?.kind === 'fold' && fold.elapsedMs, 65_000);
+});
+
+test('a live turn never folds', () => {
+  assert.deepEqual(shape(layout(turn(), true)), [1, 2, 3, 4, 5]);
+});
+
+test('an earlier turn folds while the latest is live; expanding unfolds it', () => {
+  const rows = [
+    ...turn(),
+    row({ id: 6, role: 'user', timestamp: 70_000 }),
+    row({ id: 7, role: 'toolResult', timestamp: 71_000 }),
+  ];
+  assert.deepEqual(shape(layout(rows, true)), [1, 'fold[2,3]', 4, 5, 6, 7]);
+  assert.deepEqual(shape(layout(rows, true, new Set(['k1']))), [1, 2, 3, 4, 5, 6, 7]);
+});
+
+test('context, retry and interrupted rows stay visible', () => {
+  const rows = [
+    row({ id: 1, role: 'user' }),
+    row({ id: 2, role: 'context', text: 'compacted' }),
+    row({ id: 3, role: 'assistant', text: 'x', details: { retry: { state: 'recovered', attempt: 1 } } }),
+    row({ id: 4, role: 'toolResult' }),
+    row({ id: 8, role: 'toolResult', status: 'interrupted' }),
+    row({ id: 5, role: 'assistant', text: 'reply' }),
+  ];
+  assert.deepEqual(shape(layout(rows, false)), [1, 'fold[4]', 2, 3, 8, 5]);
+});
+
+test('formatElapsed', () => {
+  assert.equal(formatElapsed(4_400), '4s');
+  assert.equal(formatElapsed(65_000), '1m 5s');
+  assert.equal(formatElapsed(3_720_000), '1h 2m');
+});
+
+test('a steer read mid-turn stays in the turn and is never folded', () => {
+  const rows = [
+    row({ id: 1, role: 'user' }),
+    row({ id: 2, role: 'toolResult' }),
+    row({ id: 3, role: 'user', text: 'also this', details: { mode: 'steer' } }),
+    row({ id: 4, role: 'toolResult' }),
+    row({ id: 5, role: 'assistant', text: 'reply' }),
+  ];
+  assert.deepEqual(shape(layout(rows, true)), [1, 2, 3, 4, 5]);
+  assert.deepEqual(shape(layout(rows, false)), [1, 'fold[2,4]', 3, 5]);
+});

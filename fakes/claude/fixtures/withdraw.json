@@ -1,0 +1,52 @@
+{
+  "description": "Two steers wait during a tool call; the client withdraws one with cancel_async_message before the boundary, and only the other is read.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "init": {
+        "tools": []
+      }
+    },
+    {
+      "tool": {
+        "id": "tu_1",
+        "name": "Bash",
+        "input": {
+          "command": "ls"
+        }
+      }
+    },
+    {
+      "await": {
+        "type": "control_request",
+        "request": {
+          "subtype": "cancel_async_message"
+        }
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "sleep": 100
+    },
+    {
+      "toolResult": {
+        "id": "tu_1",
+        "text": "a.txt"
+      }
+    },
+    {
+      "read": true
+    },
+    {
+      "text": "Read what was left."
+    },
+    {
+      "result": "done"
+    }
+  ]
+}

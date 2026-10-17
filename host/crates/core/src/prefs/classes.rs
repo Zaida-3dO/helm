@@ -96,6 +96,11 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         "agentSettingsAll",
         UserOnly("Lets chats change every setting, so only you can turn it on."),
     ),
+    // An internal setting that only the user sets.
+    (
+        "sendBehavior",
+        UserOnly("Changes how your own messages reach a running agent, so only you set it."),
+    ),
 ];
 
 /// Dynamic keys under fixed prefixes: all internal.

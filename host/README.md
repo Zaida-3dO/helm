@@ -8,6 +8,8 @@ and the Tauri app binary under `host/app/`.
 | `helm-platform` | `crates/platform` | OS traits: credential key store (Windows Credential Manager), owner-only ACLs, reparse-point refusal, atomic replace with retry, single-instance pipe, quit dialog; no-op power, badge and sound stubs |
 | `helm-ipc` | `crates/ipc` | The one `api(op, args)` command: op registry, dispatcher (window label, trusted origin, `maintenance` lock, 2 `inspections` permits), the tagged event channel |
 | `helm-core` | `crates/core` | Profile and `app.lock`, private atomic files, SQLite (WAL, one writer, snapshot readers), migrations, revisions, preferences, credential envelopes, startup recovery, quit |
+| `helm-chats` | `crates/chats` | Chats: the record shapes, op arguments and events the UI sees (exported to `ui/src/api/generated/` with ts-rs; `bindings_are_current` keeps them in step), the chat ops, and the send-behaviour defaults |
+| `helm-workers` | `crates/workers` | Worker supervision: one kill-on-close Job Object per worker tree, the registry environment, Node resolution (no shims, Node 22.19+), `worker/src` staged per content hash, `launch.json`, `claude-runtime.json`, the debug-only `HELM_TEST_CLAUDE` seam, and the worker process with its 96 MiB record limit and 16 KB stderr tail |
 | `helm-app` | `app` | The Tauri 2 binary `helm`: main window, CSP, capabilities, registration file |
 
 Any new crate under `host/crates/` joins the workspace by itself (the members list is a glob).

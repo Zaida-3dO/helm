@@ -3,10 +3,19 @@
 //
 // It speaks stream-json on stdin/stdout and replays a scripted fixture. It answers the control
 // requests a real CLI answers (initialize, set_model, apply_flag_settings, set_permission_mode,
-// interrupt) and, when started with --replay-user-messages, echoes user messages (deduplicated
-// by uuid, as the real CLI does). Everything it receives is appended to $FAKE_CLAUDE_LOG.
+// interrupt, cancel_async_message) and, when started with --replay-user-messages, acknowledges
+// user messages the way claude 2.1.289 does (worker/PROTOCOL-NOTES.md, "Observed CLI behaviour"):
+//   - every new uuid gets `command_lifecycle queued` at once;
+//   - when no turn is running, the message is read at once: `command_lifecycle started` plus the
+//     replayed user record, and a turn is now running;
+//   - during a turn the message waits, unread, until the script reaches a `{"read": true}` step
+//     (a tool boundary), or the turn's `result` (it then opens the next turn);
+//   - `result` ends the turn and sends `command_lifecycle completed` for the messages it read.
+// Everything it receives is appended to $FAKE_CLAUDE_LOG.
 //
-// Fixture: { "description", "replay"?: bool, "autoInterrupt"?: bool, "steps": Step[] }
+// Fixture: { "description", "replay"?: bool, "lifecycle"?: bool, "autoInterrupt"?: bool,
+//            "autoBackground"?: bool (answer background_tasks with {backgrounded:true}), "steps": Step[] }
+// Raw steps:
 //   { "await": <partial record>, "as"?: name, "timeoutMs"?: n }  wait for a matching stdin record
 //   { "emit": <record> }                    write one record; "{{name.path}}" strings are filled in
 //                                           from saved records, "{{repeat:x:N}}" becomes N x's
@@ -15,6 +24,25 @@
 //   { "sleep": ms }
 //   { "exit": code }                        exit at once (a crash, mid-turn if you like)
 //   { "hang": true }                        stop answering anything (a CLI that never settles)
+// Control steps:
+//   { "read": true }                        tool boundary: read every waiting message
+//   { "reply": name, "response": {...} }    answer a saved control_request with success
+//   { "if": Cond, "then": Step[], "else"?: Step[] }
+//        Cond = { "saved": name, "match": pattern } | { "saved": name, "contains": text }
+//             | { "flag": "--resume" } | { "unread": true }
+//   { "repeat": Step[], "times"?: n }       loop (forever when no times: until stdin closes)
+// Shorthand steps (session "fake-session" unless "sessionId" is set at the fixture top level):
+//   { "init": { "tools"?: [], "permissionMode"?: s } }       system/init
+//   { "text": s, "id"?: s }                 a streamed assistant text message
+//   { "tool": { "id", "name", "input", "parent"? } }          an assistant tool_use message
+//   { "toolResult": { "id", "text", "isError"?, "parent"? } }  the tool's result
+//   { "taskStarted": { "taskId", "toolUseId", "background"?, "type"? } }
+//   { "backgroundTasks": [ { "taskId", "description", "type"? } ] }
+//   { "hook": { "toolUseId", "tool"?, "input" }, "as"?: name }
+//        a PreToolUse hook_callback for the first PreToolUse callback the client registered in
+//        initialize; the client's answer is saved under "as". No registration: nothing is sent and
+//        "as" is saved as {"none": true}.
+//   { "result": s, "isError"?: bool, "subtype"?: s }          end the turn
 
 import fs from "node:fs";
 
@@ -26,9 +54,17 @@ if (!fixturePath) {
   process.stderr.write("fake-claude: fixture path required\n");
   process.exit(64);
 }
-const fixture = JSON.parse(fs.readFileSync(fixturePath, "utf8")) as { steps: Step[]; replay?: boolean; autoInterrupt?: boolean };
+const fixture = JSON.parse(fs.readFileSync(fixturePath, "utf8")) as {
+  steps: Step[];
+  replay?: boolean;
+  lifecycle?: boolean;
+  autoInterrupt?: boolean;
+  autoBackground?: boolean;
+  sessionId?: string;
+};
 const flags = process.argv.slice(3);
 const logPath = process.env.FAKE_CLAUDE_LOG;
+const SESSION = fixture.sessionId ?? "fake-session";
 
 function log(entry: Json): void {
   if (logPath) fs.appendFileSync(logPath, JSON.stringify(entry) + "\n");
@@ -36,15 +72,43 @@ function log(entry: Json): void {
 log({ kind: "start", argv: flags, envKeys: Object.keys(process.env).sort(), pid: process.pid });
 
 const replay = fixture.replay !== false && flags.includes("--replay-user-messages");
+const lifecycle = replay && fixture.lifecycle !== false;
 const autoInterrupt = fixture.autoInterrupt !== false;
 let hung = false;
+let stdinClosed = false;
 const seenUuids = new Set<string>();
 const inbox: Json[] = [];
 let waiter: { match: Json; resolve: (r: Json) => void } | undefined;
 const saved: Record<string, Json> = {};
+/** A turn is running: new user messages wait unread until a tool boundary. */
+let busy = false;
+/** Messages that arrived during a turn and have not been read. */
+let unread: Json[] = [];
+/** Messages read during the current turn (completed when it ends). */
+let readThisTurn: string[] = [];
+let msgSeq = 0;
 
 function out(rec: Json): void {
   process.stdout.write(JSON.stringify(rec) + "\n");
+}
+
+function life(uuid: string, state: string): void {
+  if (lifecycle) out({ type: "command_lifecycle", command_uuid: uuid, state, uuid: `life-${state}-${uuid}`, session_id: SESSION });
+}
+
+function readMessage(rec: Json): void {
+  const uuid = String(rec.uuid ?? "");
+  if (uuid) {
+    life(uuid, "started");
+    readThisTurn.push(uuid);
+  }
+  if (replay) out({ ...rec, isReplay: true });
+}
+
+function readAll(): void {
+  const batch = unread;
+  unread = [];
+  for (const r of batch) readMessage(r);
 }
 
 function matches(rec: unknown, pattern: unknown): boolean {
@@ -76,19 +140,34 @@ function fill(v: unknown): unknown {
   return v;
 }
 
-function autoAnswer(rec: Json): void {
-  if (rec.type === "user" && replay) {
-    const uuid = typeof rec.uuid === "string" ? rec.uuid : undefined;
-    if (uuid && seenUuids.has(uuid)) return;
-    if (uuid) seenUuids.add(uuid);
+function onUser(rec: Json): void {
+  if (!replay) return;
+  const uuid = typeof rec.uuid === "string" ? rec.uuid : undefined;
+  if (uuid && seenUuids.has(uuid)) return;
+  if (uuid) {
+    seenUuids.add(uuid);
+    life(uuid, "queued");
+  }
+  if (!lifecycle) {
+    // Lifecycle off: echo at once.
     out({ ...rec, isReplay: true });
     return;
   }
+  if (busy) unread.push(rec);
+  else {
+    busy = true;
+    readMessage(rec);
+  }
+}
+
+function autoAnswer(rec: Json): void {
+  if (rec.type === "user") return onUser(rec);
   if (rec.type !== "control_request") return;
   const req = (rec.request ?? {}) as Json;
   const ok = (response: Json) => out({ type: "control_response", response: { subtype: "success", request_id: rec.request_id, response } });
   switch (req.subtype) {
     case "initialize":
+      saved.init = req;
       return ok({
         commands: [],
         models: [
@@ -96,13 +175,33 @@ function autoAnswer(rec: Json): void {
           { value: "haiku", displayName: "Haiku", description: "fake haiku" },
         ],
       });
+    case "get_binary_version":
+      return ok({ version: "0.0.0-fake" });
     case "set_model":
     case "apply_flag_settings":
     case "set_permission_mode":
       return ok({});
-    case "interrupt":
-      if (autoInterrupt) ok({});
+    case "background_tasks":
+      if (fixture.autoBackground === true) return ok({ backgrounded: true });
       return;
+    case "cancel_async_message": {
+      const id = String(req.message_uuid ?? "");
+      const i = unread.findIndex((u) => u.uuid === id);
+      if (i === -1) return ok({ cancelled: false });
+      unread.splice(i, 1);
+      life(id, "cancelled");
+      return ok({ cancelled: true });
+    }
+    case "interrupt": {
+      if (!autoInterrupt) return;
+      if (req.cancel_queued === true) {
+        const cancelled = unread.map((u) => String(u.uuid ?? "")).filter(Boolean);
+        unread = [];
+        for (const id of cancelled) life(id, "cancelled");
+        return ok({ still_queued: [], cancelled });
+      }
+      return ok({ still_queued: unread.map((u) => String(u.uuid ?? "")).filter(Boolean) });
+    }
     default:
       return;
   }
@@ -153,18 +252,125 @@ process.stdin.on("data", (chunk: string) => {
   }
 });
 process.stdin.on("end", () => {
+  stdinClosed = true;
   log({ kind: "stdin_end" });
   if (!hung) process.exit(0);
 });
 
-async function run(): Promise<void> {
-  for (const step of fixture.steps) {
+// ---- shorthand records -------------------------------------------------------------------
+
+const se = (event: Json, parent: unknown = null) => ({ type: "stream_event", event, parent_tool_use_id: parent, session_id: SESSION });
+
+function endTurn(rec: Json): void {
+  out(rec);
+  const done = readThisTurn;
+  readThisTurn = [];
+  for (const id of done) life(id, "completed");
+  busy = false;
+  if (lifecycle && unread.length > 0) {
+    // Messages still waiting open the next turn, as the real CLI's queue does.
+    busy = true;
+    readAll();
+  }
+}
+
+function shorthand(step: Step): boolean {
+  if (step.init) {
+    const i = step.init as Json;
+    out({ type: "system", subtype: "init", session_id: SESSION, model: "claude-fake", permissionMode: i.permissionMode ?? "default", tools: i.tools ?? [], capabilities: ["msg_lifecycle_v1", "interrupt_receipt_v1", "interrupt_cancel_queued_v1"] });
+    return true;
+  }
+  if (typeof step.text === "string") {
+    const id = typeof step.id === "string" ? step.id : `msg_fake_${++msgSeq}`;
+    const text = fill(step.text) as string;
+    out(se({ type: "message_start", message: { id, model: "claude-fake", content: [] } }));
+    out(se({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }));
+    out(se({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }));
+    out(se({ type: "content_block_stop", index: 0 }));
+    out(se({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 3 } }));
+    out(se({ type: "message_stop" }));
+    out({ type: "assistant", message: { id, model: "claude-fake", content: [{ type: "text", text }] }, parent_tool_use_id: null, session_id: SESSION });
+    return true;
+  }
+  if (step.tool) {
+    const t = fill(step.tool) as Json;
+    const id = `msg_fake_${++msgSeq}`;
+    const parent = t.parent ?? null;
+    if (!parent) out(se({ type: "message_start", message: { id, model: "claude-fake", content: [] } }));
+    out({ type: "assistant", message: { id, model: "claude-fake", content: [{ type: "tool_use", id: t.id, name: t.name, input: t.input ?? {} }] }, parent_tool_use_id: parent, session_id: SESSION });
+    if (!parent) out(se({ type: "message_stop" }));
+    return true;
+  }
+  if (step.toolResult) {
+    const r = fill(step.toolResult) as Json;
+    out({
+      type: "user",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: r.id, content: [{ type: "text", text: r.text ?? "" }], is_error: r.isError === true }] },
+      parent_tool_use_id: r.parent ?? null,
+      session_id: SESSION,
+    });
+    return true;
+  }
+  if (step.taskStarted) {
+    const t = fill(step.taskStarted) as Json;
+    out({ type: "system", subtype: "task_started", task_id: t.taskId, tool_use_id: t.toolUseId, description: t.description ?? "task", is_backgrounded: t.background === true, task_type: t.type ?? "local_bash", session_id: SESSION });
+    return true;
+  }
+  if (Array.isArray(step.backgroundTasks)) {
+    const tasks = (fill(step.backgroundTasks) as Json[]).map((t) => ({ task_id: t.taskId, task_type: t.type ?? "local_bash", description: t.description ?? "" }));
+    out({ type: "system", subtype: "background_tasks_changed", tasks, session_id: SESSION });
+    return true;
+  }
+  if (typeof step.result === "string") {
+    const isError = step.isError === true;
+    endTurn({
+      type: "result",
+      subtype: typeof step.subtype === "string" ? step.subtype : isError ? "error_during_execution" : "success",
+      is_error: isError,
+      result: fill(step.result),
+      session_id: SESSION,
+      usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      total_cost_usd: 0.001,
+      duration_ms: 5,
+      num_turns: 1,
+    });
+    return true;
+  }
+  return false;
+}
+
+function hookCallbackId(): string | undefined {
+  const hooks = (saved.init?.hooks ?? {}) as Json;
+  const pre = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as Json[]) : [];
+  for (const m of pre) {
+    const ids = m.hookCallbackIds;
+    if (Array.isArray(ids) && typeof ids[0] === "string") return ids[0];
+  }
+  return undefined;
+}
+
+function cond(c: Json): boolean {
+  if (typeof c.flag === "string") return flags.includes(c.flag);
+  if (c.unread === true) return unread.length > 0;
+  const s = typeof c.saved === "string" ? saved[c.saved] : undefined;
+  if (typeof c.contains === "string") return s !== undefined && JSON.stringify(s).includes(c.contains);
+  if (c.match !== undefined) return s !== undefined && matches(s, c.match);
+  return false;
+}
+
+let hookSeq = 0;
+
+/** Runs steps; resolves false when the script must stop (exit or hang). */
+async function run(steps: Step[]): Promise<boolean> {
+  for (const step of steps) {
     if (step.await) {
-      const rec = await awaitRecord(step.await as Json, Number(step.timeoutMs ?? 10_000));
+      const rec = await awaitRecord(fill(step.await) as Json, Number(step.timeoutMs ?? 10_000));
       saved.last = rec;
       if (typeof step.as === "string") saved[step.as] = rec;
     } else if (step.emit) {
-      out(fill(step.emit) as Json);
+      const rec = fill(step.emit) as Json;
+      if (rec.type === "result") endTurn(rec);
+      else out(rec);
     } else if (typeof step.emitRaw === "string") {
       process.stdout.write(step.emitRaw + (step.newline === false ? "" : "\n"));
     } else if (typeof step.emitOversize === "number") {
@@ -176,19 +382,59 @@ async function run(): Promise<void> {
       log({ kind: "exit", code: step.exit });
       // Flush stdout before dying so the worker sees what came before the crash.
       process.stdout.write("", () => process.exit(step.exit as number));
-      return;
+      return false;
     } else if (step.hang) {
       hung = true;
       log({ kind: "hang" });
       setInterval(() => {}, 60_000); // keep the process alive until killed
-      return;
+      return false;
+    } else if (step.read) {
+      readAll();
+    } else if (typeof step.reply === "string") {
+      const req = saved[step.reply];
+      if (!req) throw new Error(`fake-claude: reply names "${step.reply}", which was never saved`);
+      out({ type: "control_response", response: { subtype: "success", request_id: req?.request_id, response: fill(step.response ?? {}) } });
+    } else if (step.hook) {
+      const h = fill(step.hook) as Json;
+      const as = typeof step.as === "string" ? step.as : "hook";
+      const cb = hookCallbackId();
+      if (!cb) {
+        saved[as] = { none: true };
+        continue;
+      }
+      const request_id = `fake-hook-${++hookSeq}`;
+      out({
+        type: "control_request",
+        request_id,
+        request: {
+          subtype: "hook_callback",
+          callback_id: cb,
+          input: { session_id: SESSION, hook_event_name: "PreToolUse", tool_name: h.tool ?? "Bash", tool_input: h.input ?? {}, tool_use_id: h.toolUseId, permission_mode: "default" },
+          tool_use_id: h.toolUseId,
+        },
+      });
+      saved[as] = await awaitRecord({ type: "control_response", response: { request_id } }, Number(step.timeoutMs ?? 10_000));
+    } else if (step.if) {
+      const branch = cond(step.if as Json) ? step.then : step.else;
+      if (Array.isArray(branch) && !(await run(branch as Step[]))) return false;
+    } else if (Array.isArray(step.repeat)) {
+      const times = typeof step.times === "number" ? step.times : Infinity;
+      for (let i = 0; i < times && !stdinClosed; i++) {
+        if (!(await run(step.repeat as Step[]))) return false;
+      }
+    } else if (!shorthand(step)) {
+      throw new Error(`fake-claude: unknown step ${JSON.stringify(step).slice(0, 200)}`);
     }
   }
-  log({ kind: "script_done" });
+  return true;
 }
 
-run().catch((e: Error) => {
-  log({ kind: "script_error", message: e.message });
-  process.stderr.write(`${e.message}\n`);
-  process.exit(70);
-});
+run(fixture.steps)
+  .then((finished) => {
+    if (finished) log({ kind: "script_done" });
+  })
+  .catch((e: Error) => {
+    log({ kind: "script_error", message: e.message });
+    process.stderr.write(`${e.message}\n`);
+    process.exit(70);
+  });

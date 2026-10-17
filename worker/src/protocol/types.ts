@@ -27,11 +27,18 @@ export interface LaunchLimits {
   shutdownGraceMs?: number;
 }
 
+/** Workers receive only these send-behaviour fields at launch. */
+export interface SendBehaviorLaunch {
+  longCommands?: "off" | "warn" | "redirect";
+  optIn?: boolean;
+}
+
 export interface Launch {
   chatId: string;
   harness?: "claude";
   cwd?: string;
   claude?: ClaudeLaunch;
+  sendBehavior?: SendBehaviorLaunch;
   /** Test-only overrides; production launches omit this. */
   limits?: LaunchLimits;
 }

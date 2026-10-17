@@ -8,8 +8,10 @@ use helm_ipc::OpRegistry;
 
 pub fn ops(reg: &mut OpRegistry) {
     helm_core::ops::register_ops(reg);
+    helm_chats::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
     helm_core::ops::register_migrations(reg);
+    helm_chats::register_migrations(reg);
 }

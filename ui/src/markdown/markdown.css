@@ -1,0 +1,117 @@
+/* Markdown module styles. Colours come from the app's custom properties where it defines them;
+   the fallbacks keep the module readable on its own. */
+
+.md-root {
+  --md-fg: var(--fg, #e6e6e6);
+  --md-muted: var(--fg-muted, #9aa0a6);
+  --md-border: var(--border, #3a3d42);
+  --md-surface: var(--surface, #1e2023);
+  --md-accent: var(--accent, #6ea8fe);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.md-root > :first-child { margin-top: 0; }
+.md-root > :last-child { margin-bottom: 0; }
+
+.md-root a { color: var(--md-accent); text-decoration: underline; cursor: pointer; }
+.md-root a.md-link-vault { text-decoration-style: dotted; }
+
+.md-root code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-size: 0.9em; }
+.md-root :not(pre) > code { background: var(--md-surface); border-radius: 4px; padding: 0.1em 0.35em; }
+
+.md-code {
+  background: var(--md-surface);
+  border: 1px solid var(--md-border);
+  border-radius: 6px;
+  padding: 0.7em 0.9em;
+  overflow-x: auto;
+}
+.md-code code { background: none; padding: 0; }
+
+.md-raw-html { color: var(--md-muted); }
+.md-plain { white-space: pre-wrap; }
+
+.md-table-wrap { overflow-x: auto; margin: 0.8em 0; }
+.md-root table { border-collapse: collapse; }
+.md-root th, .md-root td { border: 1px solid var(--md-border); padding: 0.3em 0.6em; }
+.md-root th { background: var(--md-surface); }
+
+.md-root blockquote {
+  margin: 0.8em 0;
+  padding-left: 0.9em;
+  border-left: 3px solid var(--md-border);
+  color: var(--md-muted);
+}
+
+.md-image { max-width: 100%; height: auto; }
+
+/* Highlighting (highlight.js token classes) */
+.hljs-comment, .hljs-quote { color: #7f8c98; font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag { color: #c792ea; }
+.hljs-string, .hljs-regexp, .hljs-addition { color: #a5d6a7; }
+.hljs-number, .hljs-built_in, .hljs-type { color: #f2b077; }
+.hljs-title, .hljs-section, .hljs-name, .hljs-selector-id, .hljs-selector-class { color: #82aaff; }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-template-variable { color: #ffcb6b; }
+.hljs-symbol, .hljs-bullet, .hljs-link, .hljs-meta { color: #89ddff; }
+.hljs-deletion { color: #ef9a9a; }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 700; }
+
+/* Frontmatter properties */
+.md-properties {
+  margin: 0 0 1em;
+  border: 1px solid var(--md-border);
+  border-radius: 6px;
+  background: var(--md-surface);
+}
+.md-properties > summary { cursor: pointer; padding: 0.35em 0.7em; color: var(--md-muted); font-size: 0.9em; }
+.md-properties-list { margin: 0; padding: 0.2em 0.7em 0.6em; display: grid; gap: 0.25em; }
+.md-prop { display: grid; grid-template-columns: minmax(6em, 10em) 1fr; gap: 0.6em; }
+.md-prop dt { color: var(--md-muted); }
+.md-prop dd { margin: 0; }
+.md-prop-list { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 0.3em; }
+.md-prop-list li { border: 1px solid var(--md-border); border-radius: 999px; padding: 0 0.6em; }
+
+/* Callouts */
+.md-callout {
+  --md-callout: #4f8cff;
+  margin: 0.8em 0;
+  border-left: 4px solid var(--md-callout);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--md-callout) 12%, transparent);
+}
+.md-callout-title {
+  display: block;
+  padding: 0.45em 0.8em;
+  font-weight: 600;
+  color: var(--md-callout);
+}
+summary.md-callout-title { cursor: pointer; }
+.md-callout-content { padding: 0 0.8em 0.6em; color: var(--md-fg); }
+.md-callout-content > :first-child { margin-top: 0; }
+.md-callout-content > :last-child { margin-bottom: 0; }
+.md-callout-abstract, .md-callout-info { --md-callout: #3ab0d0; }
+.md-callout-todo { --md-callout: #4f8cff; }
+.md-callout-tip { --md-callout: #2fc4b2; }
+.md-callout-success { --md-callout: #3fb950; }
+.md-callout-question, .md-callout-warning { --md-callout: #e0a030; }
+.md-callout-failure, .md-callout-danger, .md-callout-bug { --md-callout: #e5534b; }
+.md-callout-example { --md-callout: #a371f7; }
+.md-callout-quote { --md-callout: #8b949e; }
+
+/* Embeds */
+.md-embed {
+  display: block;
+  margin: 0.6em 0;
+  border: 1px solid var(--md-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.md-embed-title { display: block; padding: 0.35em 0.7em; background: var(--md-surface); font-size: 0.9em; }
+.md-embed-body { display: block; padding: 0.5em 0.8em; }
+
+/* Mermaid */
+.md-mermaid { margin: 0.8em 0; overflow-x: auto; }
+.md-mermaid-rendered svg { max-width: 100%; height: auto; }
+.md-mermaid-message { color: #e5534b; font-size: 0.9em; margin-bottom: 0.4em; }

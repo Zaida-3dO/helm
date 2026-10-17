@@ -111,14 +111,15 @@ describe("launch and handshake", () => {
     }
   });
 
-  test("unknown and not-yet-supported commands get exactly one failure response", async () => {
+  test("unknown commands get exactly one failure response; commands such as compact wait for get_state", async () => {
     const s = startWithFixture("streaming");
     try {
+      const early = await s.host.request({ type: "compact" });
+      assert.match(String(early.error), /not ready/);
       await s.host.ready();
       const a = await s.host.request({ type: "frobnicate" });
       assert.equal(a.success, false);
-      const b = await s.host.request({ type: "compact" });
-      assert.match(String(b.error), /not supported/);
+      assert.match(String(a.error), /unknown command/);
     } finally {
       await s.done();
     }
@@ -625,13 +626,18 @@ describe("model and effort", () => {
   });
 });
 
-test("every fake claude fixture is used by a test in this file", async () => {
+test("every fake claude fixture is used by a worker test or a fake test", async () => {
   const fs = await import("node:fs");
   const path = await import("node:path");
   const { FIXTURES } = await import("./helpers.ts");
-  const src = fs.readFileSync(new URL(import.meta.url), "utf8");
+  const { fileURLToPath } = await import("node:url");
+  const dirs = [path.dirname(fileURLToPath(import.meta.url)), path.resolve(FIXTURES, "../../test")];
+  const src = dirs
+    .flatMap((d) => fs.readdirSync(d).filter((n: string) => n.endsWith(".test.ts")).map((n: string) => fs.readFileSync(path.join(d, n), "utf8")))
+    .join("\n");
   for (const f of fs.readdirSync(FIXTURES).filter((n: string) => n.endsWith(".json"))) {
     const name = path.basename(f, ".json");
-    assert.ok(src.includes(`startWithFixture("${name}"`) || src.includes(`startWithFixture('${name}'`), `fixture ${name} has no test`);
+    const used = src.includes(`startWithFixture("${name}"`) || src.includes(`new Fake("${name}"`);
+    assert.ok(used, `fixture ${name} has no test`);
   }
 });

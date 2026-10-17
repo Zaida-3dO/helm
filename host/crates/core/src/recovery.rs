@@ -2,17 +2,20 @@
 //!
 //! One transaction, so a crash part-way leaves the database as it was:
 //!
+//! 0. registered capture steps run first, while running chats still read as running (
+//!    restart-continuation capture);
 //! 1. chats that were `running`, `starting`, `stopping` or `importing` become `interrupted`, with
 //!    an explanatory error;
 //! 2. open runs (no `ended_at`) are interrupted;
-//! 3. in-flight submissions (`dispatching`) become `uncertain`, never to be resent automatically;
+//! 3. in-flight submissions (`dispatching`, and `accepted` ones the harness may not have read)
+//!    become `uncertain`, never to be resent automatically;
 //! 4. streaming messages become `interrupted`;
 //! 5. retry markers are cleared;
 //! 6. every registered feature recovery step runs (finishing or rolling back its intents).
 //!
-//! Submission states: only `dispatching` counts as in flight. `queued` submissions stay queued,
-//! because the follow-up queue is durable by design.
-//! Restart-continuation capture lands with the worker integration.
+//! Submission states: `dispatching` and `accepted`
+//! count as in flight. `queued` submissions stay queued, because the follow-up queue is durable by
+//! design.
 
 use crate::db::{Database, MigrationRegistry};
 
@@ -30,6 +33,9 @@ pub struct RecoveryReport {
 pub fn run(db: &Database, registry: &MigrationRegistry) -> rusqlite::Result<RecoveryReport> {
     let now = crate::now_ms();
     db.write(|tx| {
+        for step in &registry.capture {
+            (step.run)(tx)?;
+        }
         let chats = tx.execute(
             "UPDATE chats SET status = 'interrupted', error = ?1, updated_at = ?2 \
              WHERE status IN ('running', 'starting', 'stopping', 'importing')",
@@ -40,7 +46,7 @@ pub fn run(db: &Database, registry: &MigrationRegistry) -> rusqlite::Result<Reco
             [now],
         )?;
         let submissions = tx.execute(
-            "UPDATE submissions SET state = 'uncertain' WHERE state = 'dispatching'",
+            "UPDATE submissions SET state = 'uncertain' WHERE state IN ('dispatching', 'accepted')",
             [],
         )?;
         let messages = tx.execute(
@@ -110,7 +116,7 @@ mod tests {
             RecoveryReport {
                 chats: 4,
                 runs: 1,
-                submissions: 1,
+                submissions: 2,
                 messages: 1,
                 retry_markers: 1
             }
@@ -130,7 +136,7 @@ mod tests {
                 &db,
                 "SELECT id || '=' || state FROM submissions ORDER BY id"
             ),
-            ["s-fly=uncertain", "s-ok=accepted", "s-q=queued"]
+            ["s-fly=uncertain", "s-ok=uncertain", "s-q=queued"]
         );
         assert_eq!(
             col(&db, "SELECT id || '=' || status FROM runs ORDER BY id"),
@@ -149,6 +155,23 @@ mod tests {
             run(&db, &MigrationRegistry::new()).unwrap(),
             RecoveryReport::default()
         );
+    }
+
+    fn capture_running(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS captured(id TEXT);
+             INSERT INTO captured SELECT id FROM chats WHERE status = 'running';",
+        )
+    }
+
+    #[test]
+    fn capture_steps_see_chats_before_they_are_interrupted() {
+        let (_d, db) = temp_db(&MigrationRegistry::new());
+        seed(&db);
+        let mut reg = MigrationRegistry::new();
+        reg.recovery_capture("capture", capture_running);
+        run(&db, &reg).unwrap();
+        assert_eq!(col(&db, "SELECT id FROM captured"), ["run"]);
     }
 
     fn failing_step(_tx: &Transaction<'_>) -> rusqlite::Result<()> {

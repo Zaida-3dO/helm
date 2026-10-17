@@ -8,7 +8,18 @@ export function modelTakesEffort(model: string | undefined): boolean {
   return !model || !/haiku/i.test(model);
 }
 
-export function buildClaudeArgs(c: ClaudeLaunch): string[] {
+/**
+ * Native tools the app replaces: schedules and wakeups belong to the
+ * app's schedules, folders to its worktrees. Names read from claude 2.1.289's init tool list.
+ */
+export const DISALLOWED_TOOLS = ["CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "RemoteTrigger", "EnterWorktree", "ExitWorktree"] as const;
+
+export interface ArgOptions {
+  /** The long-command rule, appended to the main chat's instructions when the rule is on. */
+  promptRule?: string;
+}
+
+export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[] {
   const args = [
     "-p",
     "--input-format",
@@ -24,13 +35,16 @@ export function buildClaudeArgs(c: ClaudeLaunch): string[] {
     "stdio",
     "--setting-sources",
     (c.settingSources ?? ["user", "project", "local"]).join(","),
+    "--disallowedTools",
+    DISALLOWED_TOOLS.join(","),
   ];
   if (c.model) args.push("--model", c.model);
   const effort = isEffort(c.effort) ? c.effort : DEFAULT_EFFORT;
   if (modelTakesEffort(c.model)) args.push("--effort", effort);
   if (c.skipPermissions) args.push("--permission-mode", "bypassPermissions", "--allow-dangerously-skip-permissions");
   if (c.resumeSessionId) args.push("--resume", c.resumeSessionId);
-  if (c.appendSystemPrompt) args.push("--append-system-prompt", c.appendSystemPrompt);
+  const append = [c.appendSystemPrompt, opts.promptRule].filter((x): x is string => typeof x === "string" && x.length > 0).join("\n\n");
+  if (append) args.push("--append-system-prompt", append);
   if (c.settings && Object.keys(c.settings).length > 0) args.push("--settings", JSON.stringify(c.settings));
   if (c.extraArgs) args.push(...c.extraArgs);
   return args;

@@ -1,0 +1,125 @@
+{
+  "description": "A classified Bash call goes through the PreToolUse hook; when denied it is re-run in the background and the background chip shows it until it completes.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "init": {
+        "tools": []
+      }
+    },
+    {
+      "tool": {
+        "id": "tu_1",
+        "name": "Bash",
+        "input": {
+          "command": "npm test"
+        }
+      }
+    },
+    {
+      "hook": {
+        "toolUseId": "tu_1",
+        "input": {
+          "command": "npm test"
+        }
+      },
+      "as": "h1"
+    },
+    {
+      "if": {
+        "saved": "h1",
+        "match": {
+          "response": {
+            "response": {
+              "hookSpecificOutput": {
+                "permissionDecision": "deny"
+              }
+            }
+          }
+        }
+      },
+      "then": [
+        {
+          "toolResult": {
+            "id": "tu_1",
+            "text": "PreToolUse:Bash hook error: {{h1.response.response.hookSpecificOutput.permissionDecisionReason}}",
+            "isError": true
+          }
+        },
+        {
+          "tool": {
+            "id": "tu_2",
+            "name": "Bash",
+            "input": {
+              "command": "npm test",
+              "run_in_background": true
+            }
+          }
+        },
+        {
+          "hook": {
+            "toolUseId": "tu_2",
+            "input": {
+              "command": "npm test",
+              "run_in_background": true
+            }
+          },
+          "as": "h2"
+        },
+        {
+          "taskStarted": {
+            "taskId": "bg_1",
+            "toolUseId": "tu_2",
+            "background": true,
+            "description": "npm test"
+          }
+        },
+        {
+          "backgroundTasks": [
+            {
+              "taskId": "bg_1",
+              "description": "npm test"
+            }
+          ]
+        },
+        {
+          "toolResult": {
+            "id": "tu_2",
+            "text": "Command running in background with ID: bg_1"
+          }
+        },
+        {
+          "text": "Tests are running in the background."
+        },
+        {
+          "sleep": 1500
+        },
+        {
+          "backgroundTasks": []
+        },
+        {
+          "text": "The background tests passed."
+        }
+      ],
+      "else": [
+        {
+          "toolResult": {
+            "id": "tu_1",
+            "text": "tests passed"
+          }
+        },
+        {
+          "text": "Tests passed in the foreground."
+        }
+      ]
+    },
+    {
+      "result": "done"
+    }
+  ]
+}

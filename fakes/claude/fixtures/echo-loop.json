@@ -1,0 +1,27 @@
+{
+  "description": "Any number of turns in one process: each prompt is answered with its own text.",
+  "steps": [
+    {
+      "repeat": [
+        {
+          "await": {
+            "type": "user"
+          },
+          "as": "p",
+          "timeoutMs": 600000
+        },
+        {
+          "init": {
+            "tools": []
+          }
+        },
+        {
+          "text": "You said: {{p.message.content.0.text}}"
+        },
+        {
+          "result": "done"
+        }
+      ]
+    }
+  ]
+}

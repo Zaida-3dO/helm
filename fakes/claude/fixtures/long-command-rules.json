@@ -1,0 +1,247 @@
+{
+  "description": "A run of root and subagent Bash calls, each sent through the PreToolUse hook, so a test can read every hook answer from the fake's log.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "init": {
+        "tools": []
+      }
+    },
+    {
+      "tool": {
+        "id": "r1",
+        "name": "Bash",
+        "input": {
+          "command": "npm test"
+        }
+      }
+    },
+    {
+      "hook": {
+        "toolUseId": "r1",
+        "input": {
+          "command": "npm test"
+        }
+      },
+      "as": "h1"
+    },
+    {
+      "toolResult": {
+        "id": "r1",
+        "text": "denied",
+        "isError": true
+      }
+    },
+    {
+      "tool": {
+        "id": "r2",
+        "name": "Bash",
+        "input": {
+          "command": "npm test"
+        }
+      }
+    },
+    {
+      "hook": {
+        "toolUseId": "r2",
+        "input": {
+          "command": "npm test"
+        }
+      },
+      "as": "h2"
+    },
+    {
+      "toolResult": {
+        "id": "r2",
+        "text": "ran"
+      }
+    },
+    {
+      "tool": {
+        "id": "r3",
+        "name": "Bash",
+        "input": {
+          "command": "cargo build --release"
+        }
+      }
+    },
+    {
+      "hook": {
+        "toolUseId": "r3",
+        "input": {
+          "command": "cargo build --release"
+        }
+      },
+      "as": "h3"
+    },
+    {
+      "toolResult": {
+        "id": "r3",
+        "text": "denied",
+        "isError": true
+      }
+    },
+    {
+      "tool": {
+        "id": "r4",
+        "name": "Bash",
+        "input": {
+          "command": "git status"
+        }
+      }
+    },
+    {
+      "hook": {
+        "toolUseId": "r4",
+        "input": {
+          "command": "git status"
+        }
+      },
+      "as": "h4"
+    },
+    {
+      "toolResult": {
+        "id": "r4",
+        "text": "clean"
+      }
+    },
+    {
+      "tool": {
+        "id": "r5",
+        "name": "Bash",
+        "input": {
+          "command": "cargo build --release"
+        }
+      }
+    },
+    {
+      "hook": {
+        "toolUseId": "r5",
+        "input": {
+          "command": "cargo build --release"
+        }
+      },
+      "as": "h5"
+    },
+    {
+      "toolResult": {
+        "id": "r5",
+        "text": "denied",
+        "isError": true
+      }
+    },
+    {
+      "tool": {
+        "id": "a1",
+        "name": "Task",
+        "input": {
+          "description": "helper",
+          "prompt": "build it"
+        }
+      }
+    },
+    {
+      "tool": {
+        "id": "s1",
+        "name": "Bash",
+        "input": {
+          "command": "npm run build"
+        },
+        "parent": "a1"
+      }
+    },
+    {
+      "hook": {
+        "toolUseId": "s1",
+        "input": {
+          "command": "npm run build"
+        }
+      },
+      "as": "h6"
+    },
+    {
+      "toolResult": {
+        "id": "s1",
+        "text": "built",
+        "parent": "a1"
+      }
+    },
+    {
+      "toolResult": {
+        "id": "a1",
+        "text": "helper done"
+      }
+    },
+    {
+      "tool": {
+        "id": "r6",
+        "name": "Bash",
+        "input": {
+          "command": "npm run dev",
+          "run_in_background": true
+        }
+      }
+    },
+    {
+      "hook": {
+        "toolUseId": "r6",
+        "input": {
+          "command": "npm run dev",
+          "run_in_background": true
+        }
+      },
+      "as": "h7"
+    },
+    {
+      "toolResult": {
+        "id": "r6",
+        "text": "started"
+      }
+    },
+    {
+      "text": "All calls done."
+    },
+    {
+      "result": "done"
+    },
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p2"
+    },
+    {
+      "tool": {
+        "id": "r7",
+        "name": "Bash",
+        "input": {
+          "command": "cargo build --release"
+        }
+      }
+    },
+    {
+      "hook": {
+        "toolUseId": "r7",
+        "input": {
+          "command": "cargo build --release"
+        }
+      },
+      "as": "h8"
+    },
+    {
+      "toolResult": {
+        "id": "r7",
+        "text": "denied",
+        "isError": true
+      }
+    },
+    {
+      "result": "done"
+    }
+  ]
+}
