@@ -99,7 +99,8 @@ fn list_projects_pages_with_get_only_and_sends_the_bearer_token() {
         }
     }));
     let c = Client::new(&server.base, token()).unwrap();
-    let got = c.list_projects().unwrap();
+    let (got, complete) = c.list_projects().unwrap();
+    assert!(complete);
     assert_eq!(
         got.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
         ["p1", "p2", "p3"]

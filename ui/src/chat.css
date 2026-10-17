@@ -1,10 +1,5 @@
-/* Chat list, transcript, dock, interaction cards, queue and composer. */
-
-:root {
-  --ok: #7fc48a;
-  --warn: #e0b45c;
-  --user: #262a33;
-}
+/* The chat view: transcript, dock, interaction cards, queue and composer. Colours come from
+   the design tokens (styles.css), light and dark. */
 
 .sidebar {
   display: flex;
@@ -53,7 +48,7 @@ input,
 select {
   background: var(--bg);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 6px;
   padding: 6px 8px;
   font: inherit;
@@ -77,7 +72,7 @@ select {
 
 .chat-item.selected {
   background: var(--bg);
-  border-color: var(--border);
+  border-color: var(--line);
 }
 
 .chat-title {
@@ -96,9 +91,9 @@ button.small {
 }
 
 button.primary {
-  background: var(--accent);
-  color: #16181d;
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  color: var(--on-accent-fill);
+  border-color: var(--accent-fill);
 }
 
 button.primary:disabled {
@@ -130,7 +125,7 @@ button.link {
   align-items: baseline;
   gap: 12px;
   padding: 12px 24px 8px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--line);
   min-width: 0;
 }
 
@@ -153,7 +148,7 @@ button.link {
   font-size: 12px;
   padding: 1px 8px;
   border-radius: 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
 }
 
 .s-running,
@@ -208,8 +203,8 @@ button.link {
 }
 
 .row-user .bubble {
-  background: var(--user);
-  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
   border-radius: 10px;
   padding: 8px 12px;
   max-width: 80%;
@@ -244,7 +239,7 @@ button.link {
   font-size: 12px;
   text-align: center;
   color: var(--muted);
-  border-top: 1px dashed var(--border);
+  border-top: 1px dashed var(--line);
   padding-top: 8px;
 }
 
@@ -262,7 +257,7 @@ button.link {
   margin-top: 4px;
   padding: 4px 8px;
   border-radius: 6px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
 }
 
 .error-row,
@@ -273,13 +268,13 @@ button.link {
 
 .retry-retrying,
 .retry-waiting {
-  color: var(--warn);
+  color: var(--warning);
 }
 
 .tool-card {
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel);
+  background: var(--surface);
   font-size: 13px;
   overflow: hidden;
 }
@@ -316,7 +311,7 @@ button.link {
 }
 
 .tool-status.complete {
-  color: var(--ok);
+  color: var(--tone-test);
 }
 
 .tool-status.failed,
@@ -325,7 +320,7 @@ button.link {
 }
 
 .tool-output-wrap {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
 }
 
 .tool-output,
@@ -350,7 +345,7 @@ button.link {
 }
 
 .change-view {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
 }
 
 .change-line {
@@ -376,7 +371,7 @@ button.link {
   align-items: center;
   gap: 10px;
   padding: 6px 24px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
   font-size: 12px;
   min-width: 0;
 }
@@ -399,7 +394,7 @@ button.link {
 
 .bg-chip {
   position: relative;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 10px;
   padding: 1px 8px;
   cursor: default;
@@ -413,8 +408,8 @@ button.link {
   flex-direction: column;
   gap: 4px;
   min-width: 260px;
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-radius: 8px;
   padding: 8px;
   z-index: 5;
@@ -430,7 +425,7 @@ button.link {
   border: 1px solid var(--accent);
   border-radius: 8px;
   padding: 10px 12px;
-  background: var(--panel);
+  background: var(--surface);
 }
 
 .ia-title {
@@ -471,7 +466,7 @@ button.link {
 .notice {
   margin: 6px 24px;
   padding: 6px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 6px;
   display: flex;
   gap: 8px;
@@ -501,7 +496,7 @@ button.link {
   display: flex;
   gap: 8px;
   align-items: center;
-  border: 1px dashed var(--border);
+  border: 1px dashed var(--line);
   border-radius: 8px;
   padding: 4px 8px;
   font-size: 13px;
@@ -531,7 +526,7 @@ button.link {
 
 .composer {
   padding: 8px 24px 12px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
 }
 
 .composer-error {
@@ -542,7 +537,7 @@ button.link {
 .editor {
   position: relative;
   background: var(--bg);
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 8px;
 }
 
@@ -593,13 +588,13 @@ button.link {
 
 .chip {
   font-size: 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 10px;
   padding: 1px 8px;
 }
 
 .chip-open {
-  color: var(--warn);
+  color: var(--warning);
 }
 
 @media (max-width: 640px) {
@@ -611,7 +606,7 @@ button.link {
     width: 100%;
     max-height: 30vh;
     border-right: none;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--line);
     padding: 8px 12px;
   }
 
@@ -634,4 +629,87 @@ button.link {
   .row-user .bubble {
     max-width: 92%;
   }
+}
+
+.edit-message {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(100%, 720px);
+}
+.edit-message textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  resize: vertical;
+}
+.edit-note {
+  font-size: 11px;
+}
+.edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.row-edit {
+  align-self: flex-end;
+}
+
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.attachment-thumb {
+  position: relative;
+  display: inline-flex;
+  align-items: flex-start;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 2px;
+}
+.attachment-thumb img {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.transcript-box {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.selection-toolbar {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.18);
+}
+.composer-dock {
+  display: flex;
+  flex-direction: column;
+}
+.composer-dock-stack {
+  max-height: min(50vh, 520px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.skill-menu {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }

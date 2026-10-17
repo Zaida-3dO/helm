@@ -13,6 +13,9 @@ import { resolveKey, sendTooltip, stopTooltip, type KeyContext, type SendShortcu
 import { ModelPicker } from './ModelPicker.tsx';
 import { PermissionChip } from './PermissionChip.tsx';
 import { orderPending, itemState } from './queue.ts';
+import { refusal, toBase64, type Attached } from './attachments.ts';
+import { Recall } from './recall.ts';
+import { rankSkills, skillQuery, type Skill } from './skills.ts';
 import { accessoriesAt, collectSendContributions, mountComposer, type AccessoryContext } from './slots.ts';
 
 export interface ComposerProps {
@@ -26,6 +29,8 @@ export interface ComposerProps {
   onMove: (delta: -1 | 1) => void;
   /** A recovered or withdrawn text lands here. */
   registerSetText: (f: (text: string) => void) => void;
+  /** This chat's earlier prompts, newest first, for Up/Down recall. */
+  recall?: string[];
 }
 
 const uid = () => globalThis.crypto.randomUUID();
@@ -34,7 +39,7 @@ export function isBusy(status: ChatRecord['status']): boolean {
   return status === 'running' || status === 'starting' || status === 'stopping';
 }
 
-export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, onMove, registerSetText }: ComposerProps) {
+export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, onMove, registerSetText, recall = [] }: ComposerProps) {
   const editor = useRef<EditorHandle>(null);
   const [error, setError] = useState<string | null>(null);
   const [empty, setEmpty] = useState(!chat.draft);
@@ -86,11 +91,43 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
 
   const newestQueued = () => orderPending(pending).filter((s) => itemState(s) === 'queued').at(-1);
 
+  // Attached images: stored on add, sent by id, thumbnails as blob: URLs.
+  const [attached, setAttached] = useState<Attached[]>([]);
+  const attachedRef = useRef<Attached[]>([]);
+  attachedRef.current = attached;
+  useEffect(() => () => attachedRef.current.forEach((a) => URL.revokeObjectURL(a.url)), []);
+  const addFiles = useCallback(
+    async (files: File[]) => {
+      for (const f of files) {
+        const why = refusal(attachedRef.current, f);
+        if (why) {
+          setError(why);
+          continue;
+        }
+        try {
+          const r = await ops.attach(chat.id, f.name || 'image', f.type, await toBase64(f));
+          const a: Attached = { id: r.attachmentId, name: f.name || 'image', size: f.size, url: URL.createObjectURL(f) };
+          attachedRef.current = [...attachedRef.current, a];
+          setAttached(attachedRef.current);
+        } catch (e) {
+          setError(e instanceof ApiError ? e.message : String(e));
+        }
+      }
+    },
+    [ops, chat.id],
+  );
+  const removeAttached = (id: string) =>
+    setAttached((list) => {
+      list.filter((a) => a.id === id).forEach((a) => URL.revokeObjectURL(a.url));
+      return list.filter((a) => a.id !== id);
+    });
+
   const send = useCallback(
     async (action: SendAction) => {
       const text = editor.current?.getText() ?? '';
+      const images = attachedRef.current;
       setError(null);
-      if (!text.trim()) {
+      if (!text.trim() && images.length === 0) {
         // Empty-composer shortcuts: steer or send now the newest queued message.
         const q = newestQueued();
         if (q && action === 'steer') await ops.submissionAction(q.id, 'steerNow').catch(() => undefined);
@@ -100,7 +137,13 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       const token = saver.beginSend();
       try {
         const extra = collectSendContributions(chat.id);
-        await ops.send(chat.id, uid(), text, action, saver.revision, { origin: 'composer', context: extra.context });
+        await ops.send(chat.id, uid(), text, action, saver.revision, {
+          origin: 'composer',
+          context: extra.context,
+          attachments: images.map((a) => a.id),
+        });
+        images.forEach((a) => URL.revokeObjectURL(a.url));
+        setAttached((list) => list.filter((a) => !images.includes(a)));
         if (saver.sent(token, (editor.current?.getText() ?? '') === text)) {
           editor.current?.setText('');
           setEmpty(true);
@@ -130,11 +173,40 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
     [chat.id, ops],
   );
 
+  // Prompt recall and skill completion.
+  const recaller = useRef(new Recall());
+  const [draftText, setDraftText] = useState(chat.draft);
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const skillPrefix = skillQuery(draftText);
+  useEffect(() => {
+    if (skillPrefix === null || skills.length > 0) return;
+    void ops
+      .skills(chat.id)
+      .then(setSkills)
+      .catch(() => undefined);
+  }, [skillPrefix, skills.length, ops, chat.id]);
+  const skillMatches = skillPrefix === null ? [] : rankSkills(skills, skillPrefix);
+  const showText = (t: string) => {
+    editor.current?.setText(t);
+    saver.edit(t);
+    setEmpty(!t);
+    setDraftText(t);
+  };
+
   const onKey = useCallback(
     (e: KeyboardEvent): boolean => {
       if (e.altKey && !e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
         onMove(e.key === 'ArrowUp' ? -1 : 1);
         return true;
+      }
+      const plain = !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.isComposing;
+      if (plain && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && attachedRef.current.length === 0) {
+        const current = editor.current?.getText() ?? '';
+        const next = e.key === 'ArrowUp' ? recaller.current.up(recall, current) : recaller.current.down(current);
+        if (next !== null) {
+          showText(next);
+          return true;
+        }
       }
       const r = resolveKey({ key: e.key, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey }, ctx);
       if (r.kind === 'send') {
@@ -148,13 +220,15 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       }
       return false;
     },
-    [ctx, send, stop, busy, onMove],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ctx, send, stop, busy, onMove, recall],
   );
 
   const onChange = useCallback(
     (text: string) => {
       setEmpty(!text);
       saver.edit(text);
+      setDraftText(text);
     },
     [saver],
   );
@@ -164,7 +238,26 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   const toolbar = accessoriesAt('toolbar');
 
   return (
-    <div className="composer">
+    <div
+      className="composer"
+      onPaste={(e) => {
+        const files = [...e.clipboardData.files].filter((f) => f.type.startsWith('image/'));
+        if (files.length) {
+          e.preventDefault();
+          void addFiles(files);
+        }
+      }}
+      onDragOver={(e) => {
+        if ([...e.dataTransfer.items].some((i) => i.kind === 'file')) e.preventDefault();
+      }}
+      onDrop={(e) => {
+        const files = [...e.dataTransfer.files];
+        if (files.length) {
+          e.preventDefault();
+          void addFiles(files);
+        }
+      }}
+    >
       {above.length > 0 && (
         <div className="composer-above">
           {above.map((a) => (
@@ -177,6 +270,27 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       {error && (
         <div className="composer-error error" data-testid="composer-error">
           {error}
+        </div>
+      )}
+      {attached.length > 0 && (
+        <div className="composer-attachments" data-testid="composer-attachments">
+          {attached.map((a) => (
+            <span key={a.id} className="attachment-thumb" title={a.name}>
+              <img src={a.url} alt={a.name} />
+              <button type="button" className="small link" aria-label={`Remove ${a.name}`} onClick={() => removeAttached(a.id)}>
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      {skillMatches.length > 0 && (
+        <div className="skill-menu" role="listbox" aria-label="Skills" data-testid="skill-menu">
+          {skillMatches.map((s) => (
+            <button key={s.name} type="button" role="option" className="small" title={s.description} onClick={() => showText(`/${s.name} `)}>
+              /{s.name}
+            </button>
+          ))}
         </div>
       )}
       <Editor
@@ -207,7 +321,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
             Stop
           </button>
         )}
-        <button type="button" className="primary" data-testid="send" disabled={empty} title={sendTooltip(ctx, busy)} onClick={() => void send('default')}>
+        <button type="button" className="primary" data-testid="send" disabled={empty && attached.length === 0} title={sendTooltip(ctx, busy)} onClick={() => void send('default')}>
           {busy ? (behavior.mode === 'asap' ? 'Steer' : behavior.mode === 'queue' ? 'Queue' : 'Interrupt') : 'Send'}
         </button>
       </div>

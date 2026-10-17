@@ -435,6 +435,8 @@ pub enum ContextKind {
     Restart,
     /// The boundary a fork's history ends with ("Forked from <title>").
     Fork,
+    /// The marker an edit leaves where the new branch starts.
+    Edit,
 }
 
 /// The `details` bag of a message row. Every field is optional and absent when unset.
@@ -909,6 +911,78 @@ pub struct ChatForkArgs {
     #[serde(default)]
     #[ts(optional)]
     pub excerpt: Option<String>,
+}
+
+/// `message_edit_open`: `messageId` is a user row's id.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MessageEditOpenArgs {
+    pub chat_id: String,
+    #[ts(type = "number")]
+    pub message_id: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageEditOpenResult {
+    #[ts(type = "number")]
+    pub message_id: i64,
+    /// Pass back on resend; a message that changed meanwhile refuses it.
+    #[ts(type = "number")]
+    pub revision: i64,
+    pub text: String,
+}
+
+/// `message_resend`: replaces the message and everything after it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MessageResendArgs {
+    pub chat_id: String,
+    #[ts(type = "number")]
+    pub message_id: i64,
+    #[ts(type = "number")]
+    pub revision: i64,
+    pub submission_id: String,
+    pub text: String,
+}
+
+/// `chat_rename`: a manual title, 1–512 bytes; it always wins over an automatic one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatRenameArgs {
+    pub chat_id: String,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TitleSuggestResult {
+    pub title: String,
+}
+
+/// `attachment_put`: one image, base64. PNG, JPEG, GIF or WebP.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentPutArgs {
+    pub chat_id: String,
+    pub name: String,
+    pub mime: String,
+    /// The file's bytes, base64.
+    pub bytes: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentPutResult {
+    pub attachment_id: String,
+}
+
+/// One of the CLI's commands or skills, as `get_state` reported it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
 }
 
 /// `chat_mute`: mute or unmute (user-only: no agent tool reads or writes it).

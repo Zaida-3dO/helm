@@ -697,6 +697,10 @@ fn row_from(r: &Row<'_>, revision: i64) -> rusqlite::Result<RawRow> {
             // the host fills what the database knows.
             attention: row_attention(status, false, false, pinned),
             pinned,
+            unread: false,
+            muted: false,
+            stalled: false,
+            last_activity_at: 0,
             archived: r.get::<_, i64>(8)? != 0,
             position: r.get(9)?,
             created_at: r.get(10)?,
@@ -778,6 +782,14 @@ fn finish(tx: &Transaction<'_>, raw: Vec<RawRow>) -> rusqlite::Result<Vec<Sideba
     raw.into_iter()
         .map(|mut r| {
             r.row.depth = chat_ancestors(tx, &r.row.chat_id, MAX_DEPTH)?.len() as u8;
+            // Unread, mute and stall come from the chats crate's own record (one source of truth).
+            if let Some(c) = helm_chats::archive::chat_record(tx, &r.row.chat_id, r.row.revision)? {
+                r.row.unread = c.unread.mark_token.is_some() || c.unread.completion_id.is_some();
+                r.row.muted = c.muted;
+                r.row.stalled = c.stalled;
+                r.row.last_activity_at = c.last_activity_at;
+                r.row.attention = row_attention(r.row.status, r.row.unread, false, r.row.pinned);
+            }
             Ok(r.row)
         })
         .collect()

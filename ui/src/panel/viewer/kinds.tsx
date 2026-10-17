@@ -13,6 +13,7 @@ import type { TabContext } from '../registry.ts';
 import { FileViewer } from './FileViewer.tsx';
 import type { Location } from './FileViewer.tsx';
 import { useLayer } from '../../ui/index.ts';
+import { report } from '../context/store.ts';
 import { basename, displayPath, pathKey } from './paths.ts';
 
 interface FileTabData extends Location {
@@ -42,6 +43,7 @@ function FileTabBody({ tab, ctx }: { tab: PanelTab; ctx: TabContext }) {
     (loc: Location, view: FileView | null) => {
       const d = tab.data as FileTabData;
       const kind = view?.kind ?? d.currentKind;
+      report(tab.id, kind === 'dir' ? { kind: 'folder', path: loc.path } : { kind: 'file', path: loc.path, ...(loc.line ? { line: loc.line } : {}) });
       if (d.current === loc.path && d.currentKind === kind) return;
       ctx.setData({ ...d, current: loc.path, currentKind: kind });
       ctx.setTitle(basename(loc.path));
@@ -51,7 +53,15 @@ function FileTabBody({ tab, ctx }: { tab: PanelTab; ctx: TabContext }) {
     [tab],
   );
   const o = useMemo(() => ops(), []);
-  return <FileViewer ops={o} start={start} chatId={tab.set === '' ? null : tab.set} visible={ctx.visible} onLocation={onLocation} />;
+  const onSelection = useCallback(
+    (sel: { startLine: number; endLine: number; text: string } | null) => {
+      const d = tab.data as FileTabData;
+      const path = d.current ?? d.path;
+      report(tab.id, sel ? { kind: 'file', path, selection: sel } : { kind: 'file', path });
+    },
+    [tab],
+  );
+  return <FileViewer ops={o} start={start} chatId={tab.set === '' ? null : tab.set} visible={ctx.visible} onLocation={onLocation} onSelection={onSelection} />;
 }
 
 type AppState = { state: 'idle' } | { state: 'ready'; name: string } | { state: 'none' } | { state: 'refused'; reason: string };

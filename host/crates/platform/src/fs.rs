@@ -123,6 +123,18 @@ pub fn is_owner_only(path: &Path) -> io::Result<bool> {
     imp::is_owner_only(path)
 }
 
+/// Security attributes whose DACL grants only the current user (protected, one ACE), for kernel
+/// objects such as the single-instance pipe.
+#[cfg(windows)]
+pub use imp::OwnerOnlySa;
+
+/// True when a kernel object (a pipe, an event...) has a protected DACL with one ACE, for the
+/// current user. `handle` must be open with READ_CONTROL.
+#[cfg(windows)]
+pub fn handle_is_owner_only(handle: windows_sys::Win32::Foundation::HANDLE) -> io::Result<bool> {
+    imp::handle_is_owner_only(handle)
+}
+
 /// Atomically replace `to` with `from` (both on the same volume), durably.
 ///
 /// Windows: `MoveFileExW` with replace and write-through, retried with backoff while another
@@ -164,25 +176,28 @@ mod imp {
     use std::io;
     use std::path::Path;
     use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::GENERIC_ALL;
     use windows_sys::Win32::Foundation::{
         CloseHandle, LocalFree, ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
         ERROR_SUCCESS, HANDLE,
     };
     use windows_sys::Win32::Security::Authorization::{
-        GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W,
-        NO_MULTIPLE_TRUSTEE, SET_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER,
-        TRUSTEE_W,
+        GetNamedSecurityInfoW, GetSecurityInfo, SetEntriesInAclW, SetNamedSecurityInfoW,
+        EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SET_ACCESS, SE_FILE_OBJECT, SE_KERNEL_OBJECT,
+        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
     };
     use windows_sys::Win32::Security::{
         AclSizeInformation, EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl,
-        GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION,
+        GetTokenInformation, InitializeSecurityDescriptor, SetSecurityDescriptorControl,
+        SetSecurityDescriptorDacl, TokenUser, ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION,
         CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, NO_INHERITANCE, OBJECT_INHERIT_ACE,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED, TOKEN_QUERY,
-        TOKEN_USER,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+        SECURITY_DESCRIPTOR, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, FILE_ALL_ACCESS, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
+    use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     /// The current user's SID, copied out of the process token.
@@ -262,6 +277,104 @@ mod imp {
             }
         }
         Ok(())
+    }
+
+    /// An owner-only SECURITY_ATTRIBUTES; keep it alive while the object is being created.
+    pub struct OwnerOnlySa {
+        _sid: UserSid,
+        acl: *mut ACL,
+        _sd: Box<SECURITY_DESCRIPTOR>,
+        sa: Box<SECURITY_ATTRIBUTES>,
+    }
+
+    // The pointers are owned by this value and only read by the OS during creation calls.
+    unsafe impl Send for OwnerOnlySa {}
+
+    impl OwnerOnlySa {
+        pub fn new() -> io::Result<Self> {
+            let sid = UserSid::current()?;
+            let access = EXPLICIT_ACCESS_W {
+                grfAccessPermissions: GENERIC_ALL,
+                grfAccessMode: SET_ACCESS,
+                grfInheritance: NO_INHERITANCE,
+                Trustee: TRUSTEE_W {
+                    pMultipleTrustee: null_mut(),
+                    MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                    TrusteeForm: TRUSTEE_IS_SID,
+                    TrusteeType: TRUSTEE_IS_USER,
+                    ptstrName: sid.psid().cast(),
+                },
+            };
+            let mut acl: *mut ACL = null_mut();
+            // SAFETY: valid inputs; the ACL is freed in Drop; the descriptor and attributes are
+            // boxed so their addresses stay stable while the OS reads them.
+            unsafe {
+                let rc = SetEntriesInAclW(1, &access, null_mut(), &mut acl);
+                if rc != ERROR_SUCCESS {
+                    return Err(io::Error::from_raw_os_error(rc as i32));
+                }
+                let mut sd: Box<SECURITY_DESCRIPTOR> = Box::new(std::mem::zeroed());
+                let psd: PSECURITY_DESCRIPTOR = (&mut *sd as *mut SECURITY_DESCRIPTOR).cast();
+                if InitializeSecurityDescriptor(psd, SECURITY_DESCRIPTOR_REVISION) == 0
+                    || SetSecurityDescriptorDacl(psd, 1, acl, 0) == 0
+                    || SetSecurityDescriptorControl(psd, SE_DACL_PROTECTED, SE_DACL_PROTECTED) == 0
+                {
+                    let e = io::Error::last_os_error();
+                    LocalFree(acl.cast());
+                    return Err(e);
+                }
+                let sa = Box::new(SECURITY_ATTRIBUTES {
+                    nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                    lpSecurityDescriptor: psd,
+                    bInheritHandle: 0,
+                });
+                Ok(Self {
+                    _sid: sid,
+                    acl,
+                    _sd: sd,
+                    sa,
+                })
+            }
+        }
+
+        /// The SECURITY_ATTRIBUTES pointer for a create call.
+        pub fn as_ptr(&mut self) -> *mut core::ffi::c_void {
+            (&mut *self.sa as *mut SECURITY_ATTRIBUTES).cast()
+        }
+    }
+
+    impl Drop for OwnerOnlySa {
+        fn drop(&mut self) {
+            // SAFETY: the ACL came from SetEntriesInAclW.
+            unsafe {
+                LocalFree(self.acl.cast());
+            }
+        }
+    }
+
+    pub fn handle_is_owner_only(handle: HANDLE) -> io::Result<bool> {
+        let sid = UserSid::current()?;
+        let mut dacl: *mut ACL = null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+        // SAFETY: out-pointers are valid; sd is freed with LocalFree; dacl points into sd.
+        unsafe {
+            let rc = GetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                &mut dacl,
+                null_mut(),
+                &mut sd,
+            );
+            if rc != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(rc as i32));
+            }
+            let result = check_dacl(sd, dacl, sid.psid());
+            LocalFree(sd);
+            Ok(result)
+        }
     }
 
     pub fn is_owner_only(path: &Path) -> io::Result<bool> {

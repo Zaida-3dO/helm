@@ -94,7 +94,8 @@ const pathref: TokenizerAndRendererExtension = {
     const re = /[\s(["'](?=[~./\\A-Za-z0-9_@-])/g;
     for (let m = re.exec(src); m; m = re.exec(src)) {
       const run = PROSE_PATH_RUN.exec(src.slice(m.index + 1));
-      if (run && pathInProse(trimProseRun(run[0]))) return m.index;
+      // Every prose path form has a slash; ordinary words skip the full check.
+      if (run && /[\\/]/.test(run[0]) && pathInProse(trimProseRun(run[0]))) return m.index;
     }
     return undefined;
   },

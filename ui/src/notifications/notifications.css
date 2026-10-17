@@ -1,0 +1,67 @@
+/* The completion stack, bottom-right. Opaque like every floating notice. */
+.notice-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(360px, calc(100vw - 36px));
+}
+.completion-notice {
+  align-items: flex-start;
+  max-width: none;
+  padding: 10px 10px 8px 14px;
+}
+.notice-main {
+  flex: 1;
+  min-width: 0;
+}
+.notice-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.notice-title {
+  font-weight: 570;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.notice-project {
+  color: var(--secondary);
+  font-size: calc(11 * var(--ui-unit));
+  white-space: nowrap;
+}
+.notice-x {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+}
+.notice-preview {
+  color: var(--secondary);
+  font-size: calc(12 * var(--ui-unit));
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.notice-actions {
+  display: flex;
+  gap: 14px;
+  margin-top: 4px;
+}
+.notice-reply {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.notice-reply .ui-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+}

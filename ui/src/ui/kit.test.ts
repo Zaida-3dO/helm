@@ -4,7 +4,7 @@ import { LayerStack } from './layers.ts';
 import { KeyRegistry, chordOf, normaliseChord } from './keys.ts';
 import { ToastSlot } from './toasts.ts';
 import { nextIndex, placeAtPoint, placeBelow } from './place.ts';
-import { folderLabel } from '../topbar/label.ts';
+import { folderLabel, startsDrag } from '../topbar/label.ts';
 
 const key = (k: string, mods: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean } = {}, target?: unknown) => ({
   key: k,
@@ -179,4 +179,14 @@ test('the breadcrumb takes the last folder segment on Windows and POSIX paths', 
   assert.equal(folderLabel('/home/x/proj/'), 'proj');
   assert.equal(folderLabel('C:/a/b'), 'b');
   assert.equal(folderLabel(null), '');
+});
+
+test('a window drag starts only on bare bar surface, left button, no Ctrl', () => {
+  const bare = { closest: () => null };
+  const onButton = { closest: (sel: string) => (sel.includes('button') ? {} : null) };
+  assert.equal(startsDrag(bare, 0, false), true);
+  assert.equal(startsDrag(onButton, 0, false), false);
+  assert.equal(startsDrag(bare, 2, false), false, 'right button');
+  assert.equal(startsDrag(bare, 0, true), false, 'Ctrl held');
+  assert.equal(startsDrag(null, 0, false), false);
 });

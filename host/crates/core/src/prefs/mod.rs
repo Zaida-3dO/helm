@@ -48,6 +48,9 @@ pub const APPEARANCE: PrefKey = PrefKey::classified("appearance");
 pub const KEYBINDINGS: PrefKey = PrefKey::classified("keybindings");
 /// Minutes without worker output before a running chat shows as stalled (1 to 1440, default 5).
 pub const STALL_MINUTES: PrefKey = PrefKey::classified("stallMinutes");
+/// Transcript element toggles: `{tokens, turnTime, fileChanges, timeline}` each
+/// `shown` or `hidden`; strict on write, a missing key reads as shown.
+pub const CHAT_ELEMENTS: PrefKey = PrefKey::classified("chatElements");
 
 /// Keys the generic `preference` op accepts. Every other key has its own feature operation.
 /// The list starts with the layout keys and grows it
@@ -66,6 +69,7 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     APPEARANCE,
     KEYBINDINGS,
     STALL_MINUTES,
+    CHAT_ELEMENTS,
 ];
 
 /// The stored value, or `None` when the row is missing or its JSON does not parse.
@@ -116,6 +120,22 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
         "inspectorWidth" => int_in(280, 4096, "must be 280 to 4096"),
         "terminalHeight" => int_in(80, 4096, "must be 80 to 4096"),
         "stallMinutes" => int_in(1, 1440, "must be 1 to 1440"),
+        "chatElements" => match value.as_object() {
+            Some(m)
+                if m.iter().all(|(k, v)| {
+                    matches!(
+                        k.as_str(),
+                        "tokens" | "turnTime" | "fileChanges" | "timeline"
+                    ) && matches!(v.as_str(), Some("shown" | "hidden"))
+                }) =>
+            {
+                Ok(())
+            }
+            _ => Err(PrefError::Invalid {
+                key: k,
+                why: "maps tokens, turnTime, fileChanges and timeline to shown or hidden",
+            }),
+        },
         "sendBehavior" => validate_send_behavior(value),
         "selection" => validate_selection(value),
         "appearance" => match value.as_str() {

@@ -15,9 +15,17 @@ import { InteractionCard } from './transcript/InteractionCard.tsx';
 import type { LinkTarget } from './transcript/Markdown.tsx';
 import type { RowContext } from './transcript/Rows.tsx';
 import { Transcript } from './transcript/Transcript.tsx';
+import type { EditState } from './transcript/EditMessage.tsx';
 import { forkAction } from './transcript/forkAction.ts';
 import { registerMessageAction } from './transcript/slots.ts';
 import { useShell } from './shell/context.ts';
+import { useLayer } from './ui/index.ts';
+import { accessoriesAt } from './composer/slots.ts';
+import { recallPrompts } from './composer/recall.ts';
+import { SelectionToolbar } from './transcript/SelectionToolbar.tsx';
+// Settings → Chat registers itself.
+import './settings/chat/index.tsx';
+import { parseChatElements, type ChatElements } from './settings/chat/elements.ts';
 
 export interface ChatViewProps {
   chatId: string;
@@ -31,10 +39,23 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   const view = useSyncExternalStore(store.subscribe, () => store.view(chatId));
   const [notice, setNotice] = useState<string | null>(null);
   const [jumpTo, setJumpTo] = useState<number | null>(null);
+  const [editing, setEditing] = useState<EditState | null>(null);
   const setTextRef = useRef<(text: string) => void>(() => undefined);
 
   useEffect(() => store.watch(chatId), [store, chatId]);
   const shell = useShell();
+  // Transcript element toggles, read once and followed on change.
+  const [elements, setElements] = useState<ChatElements>({});
+  useEffect(() => {
+    void shell
+      .api<unknown>('preference_get', { key: 'chatElements' })
+      .then((v) => setElements(parseChatElements(v)))
+      .catch(() => undefined);
+    return shell.bus.on('preferences', (e) => {
+      const changed = (e.changed ?? {}) as Record<string, unknown>;
+      if ('chatElements' in changed) setElements(parseChatElements(changed.chatElements));
+    });
+  }, [shell]);
   useEffect(
     () => registerMessageAction(forkAction(ops, (id) => shell.select(id), (m) => setNotice(`Could not fork: ${m}`))),
     [ops, shell],
@@ -110,24 +131,41 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       latestAssistantId,
       running: busy,
       interactionOpen,
+      elements,
+      editing,
+      onEdit: (row: MessageRow) => {
+        ops
+          .editOpen(chatId, row.id)
+          .then((o) => setEditing({ rowId: o.messageId, revision: o.revision, text: o.text }))
+          .catch((e: unknown) => setNotice(e instanceof Error ? e.message : String(e)));
+      },
+      onResend: async (text: string) => {
+        if (!editing) return;
+        await ops.resend(chatId, editing.rowId, editing.revision, text);
+        setEditing(null);
+      },
+      onCancelEdit: () => setEditing(null),
       canStopTool: (row: MessageRow) =>
         behavior.toolStop && Boolean(thread?.capabilities.stopTool) && Boolean(row.details?.stoppable) && row.status === 'streaming',
       onStopTool: stopTool,
       onLink: (t: LinkTarget) =>
         setNotice(t.kind === 'url' ? `Links open in a later version: ${t.href ?? ''}` : `Vault links open in a later version: ${t.note ?? ''}`),
     }),
-    [behavior.toolStop, thread?.capabilities.stopTool, stopTool, chatId, latestAssistantId, busy, interactionOpen],
+    [behavior.toolStop, thread?.capabilities.stopTool, stopTool, chatId, latestAssistantId, busy, interactionOpen, editing, ops, elements],
   );
 
-  // Esc anywhere in the chat stops the turn and lets the queue continue.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || !busy || e.defaultPrevented) return;
+  // Escape while the chat works stops the turn and lets the queue continue. It is the lowest
+  // layer of the shell's Escape stack (menus, popovers, search, dialogs and panels go first).
+  useLayer(
+    'composer',
+    busy,
+    () => {
       void ops.stop(chatId, true).catch(() => undefined);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [busy, ops, chatId]);
+    },
+    () => busy,
+  );
+
+  const transcriptBox = useRef<HTMLDivElement>(null);
 
   const onMove = useCallback(
     (delta: -1 | 1) => {
@@ -161,6 +199,8 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
           </button>
         </div>
       )}
+      <div className="transcript-box" ref={transcriptBox}>
+      <SelectionToolbar chatId={chatId} container={transcriptBox} blocked={interactionOpen} />
       <Transcript
         rows={view.rows}
         live={busy}
@@ -178,10 +218,15 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         }}
         onFollowChange={(f) => store.setKeep(chatId, f ? 'newest' : 'oldest')}
       />
+      </div>
       {thread && <ActivityDock chat={chat} thread={thread} turnStartedAt={turnStartedAt} onStopTool={stopTool} />}
       {thread?.interactions.map((i) => (
         <InteractionCard key={i.id} interaction={i} onAnswer={(id, a) => void ops.answer(chatId, id, a).catch(() => undefined)} />
       ))}
+      {/* The composer dock: banners, then other areas' dock items (the
+          review tray), then the queue, in one capped, scrolling live region above the box. */}
+      <div className="composer-dock" role="region" aria-label="Composer" aria-live="polite" data-testid="composer-dock">
+      <div className="composer-dock-stack">
       {chat.status === 'interrupted' && (
         <div className="banner" data-testid="interrupted-banner">
           <span>{chat.error ?? 'This chat was interrupted. Nothing saved was lost; check the chat before continuing.'}</span>
@@ -192,8 +237,15 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
           )}
         </div>
       )}
+      {accessoriesAt('dock').map((a) => (
+        <div key={a.id} className="composer-accessory" data-accessory={a.id}>
+          {a.render({ chat, thread, busy, draftEmpty: !chat.draft })}
+        </div>
+      ))}
       <QueueList pending={view.pending} thread={thread} running={busy} ops={ops} chatId={chatId} />
+      </div>
       <Composer
+        recall={recallPrompts(view.rows)}
         chat={chat}
         thread={thread}
         pending={view.pending}
@@ -205,6 +257,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
           setTextRef.current = f;
         }}
       />
+      </div>
     </div>
   );
 }

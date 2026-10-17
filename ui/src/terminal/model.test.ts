@@ -57,3 +57,4 @@ test('tab dots: background output marks unseen, seeing clears it, exit sticks', 
   assert.equal(nextTabState('unseen', 'exit', false), 'exited');
   assert.equal(nextTabState('exited', 'output', false), 'exited');
 });
+

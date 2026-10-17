@@ -4,7 +4,8 @@
 
 import type { EventBus } from '../api/events.ts';
 import type { ProjectNode, ProjectOps, SidebarRow, SidebarView, BoardSyncState } from '../api/projects.ts';
-import type { ChatRecord } from '../api/types.ts';
+import type { AttentionSummary, ChatRecord } from '../api/types.ts';
+import { rowAttention } from './status.ts';
 import { loadMore } from './paging.ts';
 
 export interface ViewPaging {
@@ -21,6 +22,7 @@ export interface SidebarSnapshot {
   paging: Record<SidebarView, ViewPaging>;
   sync: BoardSyncState | null;
   error: string | null;
+  needsYou: ReadonlySet<string>;
 }
 
 const freshPaging = (): ViewPaging => ({ cursor: null, complete: false, loading: false, error: null, started: false });
@@ -35,6 +37,7 @@ export class SidebarData {
     archived: freshPaging(),
   };
   private sync: BoardSyncState | null = null;
+  private needsYou: ReadonlySet<string> = new Set();
   private error: string | null = null;
   private listeners = new Set<() => void>();
   snapshot: SidebarSnapshot = this.make();
@@ -59,6 +62,7 @@ export class SidebarData {
       paging: { ...this.paging },
       sync: this.sync,
       error: this.error,
+      needsYou: this.needsYou,
     };
   }
 
@@ -107,12 +111,31 @@ export class SidebarData {
   /** A chat record from the `chat` event: patch what the row shows, or fetch a new row. */
   chat(c: ChatRecord): void {
     const prev = this.rows.get(c.id);
-    if (!prev) {
+    if (!prev || prev.archived !== c.archived || prev.parentChatId !== c.parentChatId || c.sideSourceId) {
       void this.refetch([c.id]);
       return;
     }
-    if (prev.title === c.title && prev.status === c.status && prev.updatedAt === c.updatedAt) return;
-    this.rows.set(c.id, { ...prev, title: c.title, status: c.status, updatedAt: c.updatedAt });
+    const unread = c.unread.markToken !== null || c.unread.completionId !== null;
+    const next: SidebarRow = {
+      ...prev,
+      title: c.title,
+      status: c.status,
+      updatedAt: c.updatedAt,
+      pinned: c.pinned,
+      unread,
+      muted: c.muted,
+      stalled: c.stalled,
+      lastActivityAt: c.lastActivityAt,
+    };
+    next.attention = rowAttention({ status: c.status, unread, lingering: false, pinned: c.pinned });
+    if (JSON.stringify(next) === JSON.stringify(prev)) return;
+    this.rows.set(c.id, next);
+    this.emit();
+  }
+
+  /** Chats waiting on the user, from the attention summary. */
+  attention(summary: AttentionSummary): void {
+    this.needsYou = new Set(summary.needsYou.map((r) => r.chatId));
     this.emit();
   }
 
@@ -174,6 +197,8 @@ export class SidebarData {
       bus.on('project', (e) => this.project(e.project as ProjectNode)),
       bus.on('sidebar', (e) => void this.refetch((e.chatIds as string[]) ?? [])),
       bus.on('chat', (e) => this.chat(e.chat as ChatRecord)),
+      bus.on('attention', (e) => this.attention(e.summary as AttentionSummary)),
+      bus.on('chat_removed', (e) => void this.refetch([String(e.chatId)])),
       bus.on('board_sync', (e) => {
         this.setSync(e.state as BoardSyncState);
         void this.loadProjects();

@@ -14,9 +14,12 @@
 //! | [`runtime`] | the runtime service, the worker spawner seam, quit drain |
 //! | `actor` | one task per chat: worker, streaming, tools, interactions, Stop, timers |
 //! | [`submit`] | sends, queue actions, model changes, restart continuation |
+//! | [`titles`] | automatic titles through `helpers/titles`, renames, suggestions |
+//! | [`attachments`] | image attachments and their limits |
 //! | [`archive`] | archive and restore inside a caller's transaction |
 //! | [`attention`] | the attention summary behind the badge, tray and row marks |
 //! | [`delete`] | hard delete and its batched, retried file cleanup |
+//! | [`edit`] | two-phase, crash-safe edit and resend |
 //! | [`fork`] | forks and side-chat creation |
 //! | [`manage`] | archive, restore, delete, unread marks and completion acks |
 //! | [`seams`] | traits other crates implement (panel context, project gate) |
@@ -24,11 +27,13 @@
 
 mod actor;
 pub mod archive;
+pub mod attachments;
 pub mod attention;
 pub mod bindings;
 pub mod catalogue;
 pub mod clock;
 pub mod delete;
+pub mod edit;
 pub mod fork;
 pub mod manage;
 pub mod ops;
@@ -42,6 +47,7 @@ pub mod send_behavior;
 pub mod session_log;
 pub mod store;
 pub mod submit;
+pub mod titles;
 pub mod types;
 
 pub use ops::register_ops;
@@ -68,6 +74,8 @@ pub fn reconcile_all(
             rows.collect::<rusqlite::Result<Vec<String>>>()
         })
         .unwrap_or_default();
+    // Edits a crash left staged.
+    edit::recover_all(db, &profile.path(""), clock.next());
     // Files a hard delete could not remove last time.
     let n = delete::run_cleanup(db, &profile.path(""));
     if n > 0 {

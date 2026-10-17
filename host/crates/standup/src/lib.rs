@@ -370,9 +370,11 @@ impl Client {
         }
     }
 
-    /// Every board project, every page (bounded at [`MAX_PAGES`]), including those whose work is
-    /// all finished: `GET /api/projects?includeCompleted=true&limit=200[&cursor=…]`.
-    pub fn list_projects(&self) -> Result<Vec<BoardProject>, StandupError> {
+    /// Every board project, every page, including those whose work is all finished:
+    /// `GET /api/projects?includeCompleted=true&limit=200[&cursor=…]`. The flag is false when the
+    /// read stopped at [`MAX_PAGES`] with more to come, so the caller must not treat what is
+    /// missing as gone.
+    pub fn list_projects(&self) -> Result<(Vec<BoardProject>, bool), StandupError> {
         let mut out = Vec::new();
         let mut cursor: Option<String> = None;
         for _ in 0..MAX_PAGES {
@@ -385,10 +387,10 @@ impl Client {
             out.extend(page.projects);
             match page.next_cursor {
                 Some(c) if !c.is_empty() => cursor = Some(c),
-                _ => return Ok(out),
+                _ => return Ok((out, true)),
             }
         }
-        Ok(out)
+        Ok((out, false))
     }
 
     /// Board search for Mod+K: `GET /api/search?q=…&limit=…`.

@@ -40,6 +40,17 @@ impl TauriShell {
     }
 }
 
+impl TauriShell {
+    /// Show the main window only if it has never been shown (the start-up fallback).
+    pub fn show_if_hidden(&self) {
+        if let Some(w) = self.app.get_webview_window(MAIN_WINDOW) {
+            if !w.is_visible().unwrap_or(true) {
+                let _ = w.show();
+            }
+        }
+    }
+}
+
 impl AppControl for TauriShell {
     fn show_main(&self) {
         if let Some(w) = self.app.get_webview_window(MAIN_WINDOW) {
@@ -68,8 +79,14 @@ pub fn build_main_window(app: &tauri::App, profile: &Profile, debug: bool) -> ta
     helm_core::privfs::create_private_dir_all(&data_dir)?;
     WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
         .title("Helm")
-        .inner_size(1200.0, 800.0)
-        .min_inner_size(640.0, 420.0)
+        // Restored size 1220 x 820, minimum 760 x 540, opens maximised, created
+        // hidden and shown by the UI's `window_ready` once the first frame is drawn. Helm draws
+        // its own caption, so the native frame is off.
+        .inner_size(1220.0, 820.0)
+        .min_inner_size(760.0, 540.0)
+        .maximized(true)
+        .visible(false)
+        .decorations(false)
         .data_directory(data_dir)
         .on_navigation(move |url| {
             let ok = main_window_may_navigate(url.as_str(), debug);

@@ -6,6 +6,9 @@
 //! | `chat_restore` | maintenance | [`ChatIdArgs`] → [`ChatRecord`] (refused in an archived project) |
 //! | `chat_delete` | maintenance | [`ChatIdArgs`] → `null` (archived and idle only; emits `chat_removed`) |
 //! | `chat_fork` | maintenance | [`ChatForkArgs`] → [`ChatRecord`] (see [`crate::fork`]) |
+//! | `message_edit_open` | blocking | [`MessageEditOpenArgs`] → [`MessageEditOpenResult`] |
+//! | `message_resend` | maintenance | [`MessageResendArgs`] → [`ChatSendResult`] (two-phase; see [`crate::edit`]) |
+//! | `attachment_put` | maintenance | [`AttachmentPutArgs`] → [`AttachmentPutResult`] (see [`crate::attachments`]) |
 //! | `chat_mute` | maintenance | [`ChatMuteArgs`] → [`ChatRecord`] (user-only) |
 //! | `attention_address` | maintenance | [`ChatIdArgs`] → `null` (out of the attention groups until new activity) |
 //! | `attention_snooze` | maintenance | [`AttentionSnoozeArgs`] → `null` (out until the time, or new activity) |
@@ -38,6 +41,9 @@ pub fn register(reg: &mut OpRegistry) {
         .blocking("unread_clear", OpClass::Maintenance, unread_clear)
         .blocking("completion_ack", OpClass::Maintenance, completion_ack)
         .blocking("chat_fork", OpClass::Maintenance, chat_fork)
+        .blocking("message_edit_open", OpClass::Blocking, message_edit_open)
+        .blocking("message_resend", OpClass::Maintenance, message_resend)
+        .blocking("attachment_put", OpClass::Maintenance, attachment_put)
         .blocking("chat_mute", OpClass::Maintenance, chat_mute)
         .blocking("attention_address", OpClass::Maintenance, attention_address)
         .blocking("attention_snooze", OpClass::Maintenance, attention_snooze);
@@ -245,6 +251,62 @@ fn chat_fork(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         ctx.events.emit(e);
     }
     to_value(&changed(ctx, &forked.chat_id)?)
+}
+
+fn message_edit_open(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: MessageEditOpenArgs = parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let o = crate::edit::open(&db, &a.chat_id, a.message_id).map_err(ApiError::from)?;
+    to_value(&MessageEditOpenResult {
+        message_id: o.message_id,
+        revision: o.revision,
+        text: o.text,
+    })
+}
+
+fn message_resend(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: MessageResendArgs = parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let profile = ctx.services.need::<Profile>()?;
+    let rt = ctx.services.need::<ChatRuntime>()?;
+    let submission =
+        crate::edit::stage(&db, &profile.path("sessions"), &a).map_err(ApiError::from)?;
+    // Phase two runs in the chat's actor once its worker has closed.
+    rt.command(&a.chat_id, crate::actor::Cmd::ApplyEdit)?;
+    let chat = changed(ctx, &a.chat_id)?;
+    to_value(&ChatSendResult { submission, chat })
+}
+
+fn attachment_put(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    use base64::Engine as _;
+    let a: AttachmentPutArgs = parse_args(args)?;
+    // Base64 is about 4/3 of the bytes: refuse an oversized payload before decoding it.
+    if a.bytes.len() > crate::attachments::MAX_IMAGE_BYTES / 3 * 4 + 8 {
+        return Err(ApiError::new("too_large", "An image can be at most 25 MB."));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(a.bytes.as_bytes())
+        .map_err(|_| ApiError::bad_args("bytes must be base64."))?;
+    let db = ctx.services.need::<Database>()?;
+    let profile = ctx.services.need::<Profile>()?;
+    let dir = profile.path("attachments");
+    let r = db
+        .write(|tx| {
+            crate::attachments::put(
+                tx,
+                &dir,
+                &a.chat_id,
+                &a.name,
+                &a.mime,
+                &bytes,
+                helm_core::now_ms(),
+            )
+        })
+        .map_err(sql)?
+        .map_err(ApiError::from)?;
+    to_value(&AttachmentPutResult {
+        attachment_id: r.id,
+    })
 }
 
 fn chat_mute(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {

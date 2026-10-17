@@ -47,8 +47,34 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("model_catalogue", OpClass::Blocking, model_catalogue)
         .async_op("tool_stop", tool_stop)
         .blocking("chat_compact", OpClass::Maintenance, chat_compact)
-        .blocking("attention_get", OpClass::Blocking, attention_get);
+        .blocking("attention_get", OpClass::Blocking, attention_get)
+        .blocking("chat_rename", OpClass::Maintenance, chat_rename)
+        .async_op("title_suggest", title_suggest)
+        .blocking("skills_list", OpClass::Blocking, skills_list);
     crate::manage::register(reg);
+}
+
+/// `skills_list`: what the chat's worker reported; empty until it has run once.
+fn skills_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatIdArgs = parse_args(args)?;
+    to_value(&runtime(ctx)?.skills(&a.chat_id))
+}
+
+fn chat_rename(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatRenameArgs = parse_args(args)?;
+    to_value(&crate::titles::rename(
+        &runtime(ctx)?,
+        &a.chat_id,
+        &a.title,
+    )?)
+}
+
+async fn title_suggest(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatIdArgs = parse_args(args)?;
+    let rt = runtime(&ctx)?;
+    to_value(&TitleSuggestResult {
+        title: crate::titles::suggest(&rt, &a.chat_id).await?,
+    })
 }
 
 /// `attention_get`: the summary as it stands. Without a runtime (tests) it is
@@ -458,6 +484,9 @@ pub(crate) mod tests {
             ("tool_stop", OpClass::Async),
             ("chat_compact", OpClass::Maintenance),
             ("attention_get", OpClass::Blocking),
+            ("chat_rename", OpClass::Maintenance),
+            ("title_suggest", OpClass::Async),
+            ("skills_list", OpClass::Blocking),
             ("chat_archive", OpClass::Maintenance),
             ("chat_restore", OpClass::Maintenance),
             ("chat_delete", OpClass::Maintenance),
@@ -465,6 +494,9 @@ pub(crate) mod tests {
             ("unread_clear", OpClass::Maintenance),
             ("completion_ack", OpClass::Maintenance),
             ("chat_fork", OpClass::Maintenance),
+            ("message_edit_open", OpClass::Blocking),
+            ("message_resend", OpClass::Maintenance),
+            ("attachment_put", OpClass::Maintenance),
             ("chat_mute", OpClass::Maintenance),
             ("attention_address", OpClass::Maintenance),
             ("attention_snooze", OpClass::Maintenance),

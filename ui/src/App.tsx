@@ -7,7 +7,7 @@ import type { EventBus } from './api/events.ts';
 import { ActionRow, LeafSlots } from './actions/index.ts';
 import { SearchDialog } from './search/index.ts';
 import { chatOps } from './api/ops.ts';
-import { Sidebar } from './sidebar/index.ts';
+import { ChatMenu, ProjectTags, Sidebar } from './sidebar/index.ts';
 import { ChatView } from './ChatView.tsx';
 import { SidePanel } from './panel/index.ts';
 import type { SendShortcut } from './composer/keymap.ts';
@@ -22,6 +22,7 @@ import { KEYBINDINGS_PREF, keys, layers, ToastSlotView } from './ui/index.ts';
 import { ChatStore } from './state/store.ts';
 import { TopBar } from './topbar/TopBar.tsx';
 import { TerminalDock } from './terminal/TerminalDock.tsx';
+import { Notifications } from './notifications/Notifications.tsx';
 
 export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers: Flushers }) {
   const ops = useMemo(() => chatOps(api), [api]);
@@ -67,6 +68,10 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
       .catch(() => undefined);
     return () => off();
   }, [api]);
+  // The window is created hidden and shown once the first frame is ready.
+  useEffect(() => {
+    requestAnimationFrame(() => void api('window_ready').catch(() => undefined));
+  }, [api]);
   // The one Escape router and the one shortcut dispatcher (ui/layers.ts, ui/keys.ts).
   useEffect(() => layers.install(document), []);
   useEffect(() => keys.install(window), []);
@@ -107,7 +112,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
         <Sidebar /> {/* chat and project tree */}
       </aside>
       <main className="shell-main">
-        <TopBar actionRow={<ActionRow chatId={chatId} />} chatMenu={null /* <ChatMenu chatId={chatId} /> */} />
+        <TopBar actionRow={<ActionRow chatId={chatId} />} chatMenu={<ChatMenu chatId={chatId} />} tags={<ProjectTags chatId={chatId} />} />
         <div className="shell-chat">
           {chatId ? (
             <ChatView key={chatId} chatId={chatId} store={shell.store} ops={shell.ops} flushers={flushers} sendShortcut={sendShortcut} />
@@ -119,7 +124,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
       </main>
       <SidePanel api={shell.api} chatId={chatId} /> {/* side panel */}
       <ToastSlotView />
-      {null /* <Notifications /> (the completion stack, bottom-right) */}
+      <Notifications />
       <SettingsDialog />
       <SearchDialog /> {/* Mod+K search */}
       <LeafSlots /> {/* registers the action slots */}

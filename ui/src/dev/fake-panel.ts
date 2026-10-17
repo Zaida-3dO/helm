@@ -60,10 +60,92 @@ function read(path: string): FileView {
   return { path, kind: 'dir', size: 0, entries, truncated: false };
 }
 
+/** A made-up vault for the vault-doc tab: an ambiguous name, an embed and a heading. */
+const NOTES: Record<string, string> = {
+  'Plans/Roadmap.md': '# Roadmap\n\nSee [[Ideas]] and ![[Ideas#Later]].\n\n## Now\n\nShip the panel.\n',
+  'Ideas.md': '# Ideas\n\n## Soon\n\nA few.\n\n## Later\n\nThe embedded part.\n',
+  'Daily/Ideas.md': '# Daily ideas\n',
+};
+
 export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   let saved: unknown = { version: 1, sets: {} };
+  const contextOn = new Set<string>();
+  let comments: Array<Record<string, unknown>> = [];
+  // A made-up working tree: one staged, one partly staged, one untracked file and a conflict.
+  let records = [
+    { path: 'src/app.ts', status: 'M', section: 'staged', partial: false, added: 2, removed: 1 },
+    { path: 'src/values.ts', status: 'M', section: 'staged', partial: true, added: 1, removed: 0 },
+    { path: 'src/values.ts', status: 'M', section: 'unstaged', partial: true, added: 3, removed: 3 },
+    { path: 'docs/new-note.md', status: 'U', section: 'unstaged', partial: false },
+    { path: 'merge-me.txt', status: 'UU', section: 'conflicts', partial: false },
+  ];
+  const view = () => ({ repoTop: FAKE_ROOT, branch: 'main', records, truncated: false });
+  const diffFor = (path: string) =>
+    [
+      `--- a/${path}`,
+      `+++ b/${path}`,
+      '@@ -1,30 +1,30 @@',
+      ...Array.from({ length: 12 }, (_, i) => ` unchanged line ${i + 1}`),
+      '-const before = 1;',
+      '+const after = 2;',
+      ...Array.from({ length: 17 }, (_, i) => ` unchanged line ${i + 14}`),
+      '',
+    ].join('\n');
   const handler: FakeOpHandler = (op, args) => {
     switch (op) {
+      case 'panel_context_get':
+        return { on: contextOn.has(String(args.chatId)) };
+      case 'panel_context_set':
+        if (args.on) contextOn.add(String(args.chatId));
+        else contextOn.delete(String(args.chatId));
+        return { on: Boolean(args.on) };
+      case 'review_comment_add': {
+        const c = { ...args, quote: '(quoted lines)', createdAt: Date.now() } as Record<string, unknown>;
+        delete c.chatId;
+        delete c.fingerprint;
+        comments.push(c);
+        return c;
+      }
+      case 'review_comment_list':
+        return comments;
+      case 'review_comment_remove':
+        comments = comments.filter((c) => c.id !== args.id);
+        return comments;
+      case 'review_comment_clear':
+        comments = [];
+        return comments;
+      case 'vault_list':
+        return [{ name: 'Demo Vault', path: 'C:\\Demo\\vault', source: 'obsidian', isDefault: true }];
+      case 'vault_resolve': {
+        const note = String(args.note ?? '').toLowerCase();
+        const exact = Object.keys(NOTES).find((k) => k.toLowerCase() === `${note}.md`);
+        if (exact) return { vault: 'Demo Vault', path: exact };
+        const hits = Object.keys(NOTES).filter((k) => k.toLowerCase() === `${note}.md` || k.toLowerCase().endsWith(`/${note}.md`) || k.toLowerCase() === note);
+        if (hits.length === 0) throw new ApiError('not_found', `No note named "${String(args.note)}" in this vault.`);
+        return hits.length === 1 ? { vault: 'Demo Vault', path: hits[0] } : { vault: 'Demo Vault', candidates: hits };
+      }
+      case 'vault_read': {
+        const path = String(args.path);
+        const text = NOTES[path];
+        if (text === undefined) throw new ApiError('not_found', 'The file was not found.');
+        return { vault: 'Demo Vault', path, title: path.split('/').pop()!.replace(/\.md$/, ''), fullPath: `C:\\Demo\\vault\\${path}`, text, truncated: false };
+      }
+      case 'vault_open_in_obsidian':
+        return null;
+      case 'changes':
+        return view();
+      case 'diff':
+        return { patch: diffFor(String(args.path)), fullContext: true, truncated: false };
+      case 'changes_stage':
+      case 'changes_unstage': {
+        const to = op === 'changes_stage' ? 'staged' : 'unstaged';
+        const from = op === 'changes_stage' ? 'unstaged' : 'staged';
+        const hit = records.find((r) => r.path === args.path && r.section === from);
+        if (!hit) throw new ApiError('conflict', 'The changes list is out of date. Refresh it and try again.');
+        records = records.filter((r) => r !== hit && !(r.path === hit.path && r.section === to));
+        records.push({ ...hit, section: to, partial: false, status: hit.status === 'U' ? 'A' : hit.status });
+        return { changes: view(), noop: false };
+      }
       case 'file_read':
       case 'dir_list':
         return read(String(args.path ?? ''));
@@ -98,5 +180,5 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         throw new ApiError('refused', 'This operation is not available here.');
     }
   };
-  return { prefixes: ['file_', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_', 'path_resolve', 'quick_open'], handler };
+  return { prefixes: ['file_', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_', 'path_resolve', 'quick_open', 'changes', 'diff', 'vault_', 'panel_context_', 'review_comment_'], handler };
 }

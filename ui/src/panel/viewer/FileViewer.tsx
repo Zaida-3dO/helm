@@ -72,9 +72,11 @@ export interface FileViewerProps {
   root?: string;
   /** Hide the navigation row (the Files slot draws its own). */
   compact?: boolean;
+  /** The source view's highlighted lines, for the side panel context. */
+  onSelection?: (sel: { startLine: number; endLine: number; text: string } | null) => void;
 }
 
-export function FileViewer({ ops, start, chatId, visible, onLocation, root, compact }: FileViewerProps) {
+export function FileViewer({ ops, start, chatId, visible, onLocation, root, compact, onSelection }: FileViewerProps) {
   const [history, setHistory] = useState<{ stack: Location[]; index: number }>({ stack: [start], index: 0 });
   const [view, setView] = useState<FileView | null>(null);
   const [loadedFor, setLoadedFor] = useState<Location | null>(null);
@@ -320,7 +322,7 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
     );
   } else {
     body = (
-      <CodeView text={view.text ?? ''} language={view.language} wrap={wrap} line={loc.line} endLine={loc.endLine} column={loc.column} />
+      <CodeView text={view.text ?? ''} language={view.language} wrap={wrap} line={loc.line} endLine={loc.endLine} column={loc.column} onSelection={onSelection} />
     );
   }
 

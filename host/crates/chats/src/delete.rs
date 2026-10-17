@@ -43,7 +43,7 @@ pub fn allowed(rel: &str) -> bool {
         "sessions" => [".jsonl", ".jsonl.torn", ".claude.json"]
             .iter()
             .any(|ext| name.strip_suffix(ext).is_some_and(is_uuid)),
-        "workers" => is_uuid(name),
+        "workers" | "attachments" if is_uuid(name) => true,
         "artifacts" => name.strip_suffix(".json").is_some_and(|h| {
             h.len() == 64
                 && h.bytes()
@@ -106,6 +106,13 @@ pub fn delete_in_tx(
         let names = st.query_map([chat_id], |r| r.get::<_, String>(0))?;
         for n in names {
             rels.push(format!("artifacts/{}", n?));
+        }
+    }
+    {
+        let mut st = tx.prepare("SELECT id FROM chat_attachments WHERE chat_id = ?1")?;
+        let ids = st.query_map([chat_id], |r| r.get::<_, String>(0))?;
+        for id in ids {
+            rels.push(format!("attachments/{}", id?));
         }
     }
     for rel in rels {

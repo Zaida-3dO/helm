@@ -190,7 +190,12 @@ fn connection_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     to_value(&connection(&db, &creds))
 }
 
-pub fn read_state(tx: &Transaction<'_>, configured: bool) -> rusqlite::Result<BoardSyncState> {
+/// The sync state; `project_count` counts live board projects of the current address only.
+pub fn read_state(
+    tx: &Transaction<'_>,
+    configured: bool,
+    url: Option<&str>,
+) -> rusqlite::Result<BoardSyncState> {
     let row: Option<(Option<i64>, Option<String>)> = tx
         .query_row(
             "SELECT last_sync_at, error FROM board_sync_state WHERE id = 1",
@@ -199,8 +204,8 @@ pub fn read_state(tx: &Transaction<'_>, configured: bool) -> rusqlite::Result<Bo
         )
         .optional()?;
     let count: i64 = tx.query_row(
-        "SELECT count(*) FROM board_projects WHERE stale = 0",
-        [],
+        "SELECT count(*) FROM board_projects WHERE stale = 0 AND board_url IS ?1",
+        [url],
         |r| r.get(0),
     )?;
     let (last_sync_at, error) = row.unwrap_or((None, None));
@@ -246,7 +251,9 @@ async fn sync(ctx: OpCtx, _args: Value) -> Result<Value, ApiError> {
             let msg = e.to_string();
             db.write(|tx| record_result(tx, helm_core::now_ms(), Some(&msg)))
                 .map_err(internal)?;
-            let s = db.snapshot(|tx| read_state(tx, false)).map_err(internal)?;
+            let s = db
+                .snapshot(|tx| read_state(tx, false, None))
+                .map_err(internal)?;
             emit_state(&ctx, &s);
             return to_value(&s);
         }
@@ -254,21 +261,32 @@ async fn sync(ctx: OpCtx, _args: Value) -> Result<Value, ApiError> {
     if let Some(link) = ctx.services.get::<BoardLink>() {
         link.set(Some(client.clone()));
     }
+    let base = client.base().to_owned();
     // One sync at a time; a second caller gets the current state with `syncing: true`.
     if SYNCING.swap(true, Ordering::SeqCst) {
-        return to_value(&db.snapshot(|tx| read_state(tx, true)).map_err(internal)?);
+        return to_value(
+            &db.snapshot(|tx| read_state(tx, true, Some(&base)))
+                .map_err(internal)?,
+        );
     }
-    if let Ok(s) = db.snapshot(|tx| read_state(tx, true)) {
+    // Cleared on every exit, including a cancelled or panicking sync.
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            SYNCING.store(false, Ordering::SeqCst);
+        }
+    }
+    let clear = Clear;
+    if let Ok(s) = db.snapshot(|tx| read_state(tx, true, Some(&base))) {
         emit_state(&ctx, &s);
     }
-    let base = client.base().to_owned();
     let fetched = tokio::task::spawn_blocking(move || client.list_projects())
         .await
         .unwrap_or_else(|_| Err(StandupError::BadResponse("the sync stopped".into())));
     let now = helm_core::now_ms();
     let outcome = db.write(|tx| match &fetched {
-        Ok(projects) => {
-            apply_sync(tx, &base, projects, now)?;
+        Ok((projects, complete)) => {
+            apply_sync(tx, &base, projects, *complete, now)?;
             record_result(tx, now, None)
         }
         Err(e) => {
@@ -276,9 +294,11 @@ async fn sync(ctx: OpCtx, _args: Value) -> Result<Value, ApiError> {
             record_result(tx, now, Some(&e.to_string()))
         }
     });
-    SYNCING.store(false, Ordering::SeqCst);
+    drop(clear);
     outcome.map_err(internal)?;
-    let s = db.snapshot(|tx| read_state(tx, true)).map_err(internal)?;
+    let s = db
+        .snapshot(|tx| read_state(tx, true, Some(&base)))
+        .map_err(internal)?;
     emit_state(&ctx, &s);
     to_value(&s)
 }
@@ -290,17 +310,19 @@ async fn sync(ctx: OpCtx, _args: Value) -> Result<Value, ApiError> {
 /// - A known one takes the board's title and fields, unless the incoming `lastActivity` is older
 ///   than the stored one (an out-of-order read), which is ignored.
 /// - Local state (rename, icon, colour, pin, order, collapse, nesting) is never touched.
-/// - Every project of this board address missing from the sync is marked stale, never deleted.
+/// - Every project of this board address missing from a complete sync is marked stale, never
+///   deleted. A sync cut short at the page cap marks nothing stale.
 ///
 /// Returns how many projects the sync named.
 pub fn apply_sync(
     tx: &Transaction<'_>,
     url: &str,
     projects: &[BoardProject],
+    complete: bool,
     now: i64,
 ) -> rusqlite::Result<usize> {
     let mut seen = std::collections::HashSet::new();
-    for p in projects {
+    for (i, p) in projects.iter().enumerate() {
         seen.insert(p.id.as_str());
         let known: Option<(String, Option<String>)> = tx
             .query_row(
@@ -342,9 +364,10 @@ pub fn apply_sync(
             }
             None => {
                 let pid = uuid::Uuid::new_v4().to_string();
+                // Newer sorts first, so the board's own order is kept among new projects.
                 tx.execute(
                     "INSERT INTO projects(id, kind, name, created_at) VALUES (?1, 'board', ?2, ?3)",
-                    params![pid, p.title, now],
+                    params![pid, p.title, now - i as i64],
                 )?;
                 tx.execute(
                     "INSERT INTO board_projects(project_id, board_url, board_project_id, title,
@@ -369,6 +392,9 @@ pub fn apply_sync(
                 )?;
             }
         }
+    }
+    if !complete {
+        return Ok(projects.len());
     }
     let mut st = tx.prepare(
         "SELECT project_id, board_project_id FROM board_projects WHERE board_url = ?1 AND stale = 0",

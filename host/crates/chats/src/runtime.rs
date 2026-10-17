@@ -102,6 +102,17 @@ pub type Spawned = (Arc<dyn WorkerLink>, mpsc::Receiver<WorkerOutput>);
 
 pub trait Spawner: Send + Sync {
     fn spawn(&self, req: &SpawnRequest) -> Result<Spawned, String>;
+
+    /// Run the titles helper on one job and answer the title (blocking; [`crate::titles`]).
+    fn run_title(&self, _job: &Value) -> Result<String, String> {
+        Err("titles are not available".into())
+    }
+}
+
+/// The title-job limits: at most 2 helper runs at once, 8 jobs in all.
+pub(crate) struct TitleQueue {
+    pub slots: tokio::sync::Semaphore,
+    pub jobs: std::sync::atomic::AtomicUsize,
 }
 
 struct ProcessLink(helm_workers::WorkerProcess);
@@ -223,6 +234,34 @@ impl Spawner for ProcessSpawner {
         .map_err(|e| format!("Helm could not start the worker: {e}"))?;
         Ok((Arc::new(ProcessLink(proc_)), rx))
     }
+
+    fn run_title(&self, job: &Value) -> Result<String, String> {
+        // helpers/titles beside the worker's source (`<repo>/worker/src` → `<repo>/helpers`).
+        let script = self
+            .worker_source
+            .as_ref()
+            .and_then(|w| {
+                w.parent()?
+                    .parent()
+                    .map(|r| r.join("helpers/titles/src/main.ts"))
+            })
+            .filter(|p| p.is_file())
+            .ok_or("Helm could not find its titles helper.")?;
+        let env = helm_workers::env::base_environment();
+        let node = resolve_node(&NodeLookup::for_worker(&env)).map_err(|e| e.to_string())?;
+        let mut job = job.clone();
+        let (runtime, _) = ClaudeRuntime::load(&self.profile_dir);
+        if let Some(t) = test_claude(
+            self.debug,
+            std::env::var("HELM_TEST_CLAUDE").ok().as_deref(),
+        ) {
+            job["command"] = Value::String(t.command);
+            job["commandArgs"] = serde_json::json!(t.args);
+        } else if !runtime.executable.is_empty() {
+            job["command"] = Value::String(runtime.executable);
+        }
+        crate::titles::run_helper(&node.path, &script, env.into_pairs(), &job)
+    }
 }
 
 /// What other threads can see of an actor without asking it.
@@ -232,6 +271,8 @@ pub(crate) struct Live {
     pub last_used: Instant,
     /// Running with no worker output for the stall limit.
     pub stalled: bool,
+    /// The skills the worker's `get_state` reported.
+    pub skills: Vec<SkillInfo>,
     /// The panel-context generation: bumped on each worker launch and compaction.
     pub context_gen: u64,
 }
@@ -253,6 +294,7 @@ pub(crate) struct Shared {
     pub shutting_down: AtomicBool,
     /// The last published attention summary ([`crate::attention::publish`]).
     pub attention: Mutex<Option<AttentionSummary>>,
+    pub titles: TitleQueue,
 }
 
 /// The runtime service.
@@ -281,6 +323,10 @@ impl ChatRuntime {
                 actors: Mutex::new(HashMap::new()),
                 shutting_down: AtomicBool::new(false),
                 attention: Mutex::new(None),
+                titles: TitleQueue {
+                    slots: tokio::sync::Semaphore::new(crate::titles::MAX_CONCURRENT),
+                    jobs: std::sync::atomic::AtomicUsize::new(0),
+                },
             }),
         };
         rt.start_tick();
@@ -357,6 +403,14 @@ impl ChatRuntime {
                 "Helm is busy with this chat; your message is saved, send it again in a moment.",
             )
         })
+    }
+
+    /// The skills the chat's worker reported; empty before its first launch.
+    pub fn skills(&self, chat_id: &str) -> Vec<SkillInfo> {
+        let map = self.sh.actors.lock().unwrap();
+        map.get(chat_id)
+            .map(|h| h.live.lock().unwrap().skills.clone())
+            .unwrap_or_default()
     }
 
     /// The chat's panel-context generation (0 before its first worker launch).

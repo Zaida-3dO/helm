@@ -69,6 +69,8 @@ pub(crate) enum Cmd {
     Retire,
     /// The maintenance tick: mark the chat stalled if it has had no output for `after`.
     StallCheck { after: std::time::Duration },
+    /// Apply the staged edit once the worker has closed, then send its submission.
+    ApplyEdit,
 }
 
 pub(crate) const STOP_TIMEOUT_ERROR: &str =
@@ -154,6 +156,8 @@ struct Actor {
     last_output: Instant,
     /// When `chat_activity.last_activity_at` was last written (writes are at most every 15 s).
     activity_written: Option<Instant>,
+    /// An edit waits for the worker to close.
+    edit_waiting: bool,
 }
 
 pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
@@ -191,6 +195,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         has_worker: false,
         last_used: Instant::now(),
         stalled: false,
+        skills: Vec::new(),
         context_gen: 0,
     }));
     let actor = Actor {
@@ -218,6 +223,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         finished: false,
         last_output: Instant::now(),
         activity_written: None,
+        edit_waiting: false,
     };
     sh.handle.spawn(actor.run(rx));
     ActorHandle { tx, live }
@@ -568,7 +574,15 @@ impl Actor {
             .get("capabilities")
             .and_then(|c| serde_json::from_value(c.clone()).ok())
             .unwrap_or_default();
-        self.live.lock().unwrap().thread.capabilities = caps;
+        let skills: Vec<SkillInfo> = data
+            .get("skills")
+            .and_then(|s| serde_json::from_value(s.clone()).ok())
+            .unwrap_or_default();
+        {
+            let mut live = self.live.lock().unwrap();
+            live.thread.capabilities = caps;
+            live.skills = skills;
+        }
         if let Some(models) = crate::catalogue::from_get_state(&data) {
             if crate::catalogue::store(&self.sh.cfg.profile_dir, models).is_ok() {
                 self.emit(ChatEvent::Catalogue {
@@ -649,6 +663,9 @@ impl Actor {
         }
         for r in self.shutdown_replies.drain(..) {
             let _ = r.send(());
+        }
+        if std::mem::take(&mut self.edit_waiting) {
+            self.apply_edit();
         }
         if self.retiring
             || self
@@ -749,6 +766,41 @@ impl Actor {
         self.set_status(status, error);
         self.save_binding();
         self.emit_thread();
+    }
+
+    /// Phase two of an edit, then send the edited message.
+    fn apply_edit(&mut self) {
+        // The log and Claude's session change under us: reopen both from scratch.
+        self.log = None;
+        self.native_session = None;
+        let rev = self.sh.clock.next();
+        match crate::edit::apply(&self.sh.db, &self.sh.cfg.profile_dir, &self.chat_id, rev) {
+            Ok(Some(sid)) => {
+                self.emit(ChatEvent::Refresh {
+                    chat_id: self.chat_id.clone(),
+                });
+                self.emit_queue();
+                self.emit_chat();
+                self.dispatch(&sid, false);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::error!("chat {}: edit not applied: {}", self.chat_id, e.message);
+                let id = self.chat_id.clone();
+                self.write(|t| {
+                    t.execute(
+                        "UPDATE submissions SET state = 'rejected' WHERE id = (SELECT submission_id FROM pending_edits WHERE chat_id = ?1)",
+                        [&id],
+                    )?;
+                    t.execute("DELETE FROM pending_edits WHERE chat_id = ?1", [&id])
+                });
+                self.context_row(
+                    ContextKind::Notice,
+                    "The edit could not be applied; your message is kept in the queue to recover.",
+                );
+                self.emit_queue();
+            }
+        }
     }
 
     /// Worker output arrived: note the activity (written at most every 15 s) and end a stall.
@@ -985,6 +1037,17 @@ impl Actor {
                     l.terminate();
                 }
             }
+            Cmd::ApplyEdit => {
+                if self.link.is_some() {
+                    // Phase two needs the worker closed: shut it down and apply on exit.
+                    self.edit_waiting = true;
+                    if let Some(l) = &self.link {
+                        l.send(&json!({"type": "shutdown"}));
+                    }
+                } else {
+                    self.apply_edit();
+                }
+            }
             Cmd::StallCheck { after } => {
                 let stalled = self.live.lock().unwrap().stalled;
                 if self.status().is_busy() && !stalled && self.last_output.elapsed() >= after {
@@ -1076,6 +1139,17 @@ impl Actor {
             })
             .ok()
             .flatten();
+        // Attached images go as stream-json image blocks with the prompt.
+        let images = self
+            .sh
+            .db
+            .snapshot(|t| {
+                crate::attachments::images_for(t, &self.sh.cfg.profile_dir.join("attachments"), sid)
+            })
+            .unwrap_or_default();
+        if !images.is_empty() {
+            cmd["images"] = json!(images);
+        }
         // A message fork's carried history goes once, with its first prompt.
         let carry: Option<String> = self
             .write(|t| {

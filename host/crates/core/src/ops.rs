@@ -8,6 +8,7 @@
 //! | `quit_request` | async | the quit sequence (confirmation, `quitting`, drain, checkpoint, exit) |
 //! | `quit_ready` | blocking | the UI reports drafts and settings saved |
 //! | `window_hide` | blocking | hide the main window (closing only hides it) |
+//! | `window_ready` | blocking | the UI drew its first frame: show the window created hidden |
 
 use crate::db::{Database, MigrationRegistry};
 use crate::lifecycle::{PlatformDialogs, QuitCoordinator, QuitOutcome, Shell, Workers};
@@ -22,6 +23,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("preference", OpClass::Maintenance, preference_set)
         .blocking("quit_ready", OpClass::Blocking, quit_ready)
         .blocking("window_hide", OpClass::Blocking, window_hide)
+        .blocking("window_ready", OpClass::Blocking, window_ready)
         .async_op("quit_request", quit_request);
 }
 
@@ -80,6 +82,11 @@ fn quit_ready(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
 
 fn window_hide(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
     ctx.services.need::<Shell>()?.0.hide_main();
+    Ok(Value::Null)
+}
+
+fn window_ready(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+    ctx.services.need::<Shell>()?.0.show_main();
     Ok(Value::Null)
 }
 

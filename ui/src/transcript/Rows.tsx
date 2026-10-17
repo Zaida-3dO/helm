@@ -4,6 +4,7 @@
 
 import { memo, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
+import { EditMessage, type EditState } from './EditMessage.tsx';
 import { Markdown, type LinkTarget } from './Markdown.tsx';
 import { messageActionsFor, rowFootersFor, type SlotContext } from './slots.ts';
 import { ToolCard } from './ToolCard.tsx';
@@ -19,6 +20,13 @@ export interface RowContext {
   latestAssistantId: number | null;
   running: boolean;
   interactionOpen: boolean;
+  /** Transcript element toggles; a missing key is shown. */
+  elements?: { tokens?: 'shown' | 'hidden'; turnTime?: 'shown' | 'hidden'; fileChanges?: 'shown' | 'hidden'; timeline?: 'shown' | 'hidden' };
+  /** Edit and resend: the message being edited, if any. */
+  editing?: EditState | null;
+  onEdit?: (row: MessageRow) => void;
+  onResend?: (text: string) => Promise<void>;
+  onCancelEdit?: () => void;
 }
 
 function slotContext(row: MessageRow, ctx: RowContext): SlotContext {
@@ -67,6 +75,7 @@ const CONTEXT_LABEL: Record<string, string> = {
   notice: 'Notice',
   restart: 'Helm restarted',
   fork: 'Fork',
+  edit: 'Edited',
 };
 
 function Thinking({ text, streaming }: { text: string; streaming: boolean }) {
@@ -100,10 +109,19 @@ export const Row = memo(function Row({ row, ctx }: { row: MessageRow; ctx: RowCo
   if (row.role === 'user') {
     return (
       <div className={`row row-user status-${row.status}`} {...common} title={new Date(row.timestamp).toLocaleString()}>
-        <div className="bubble">
-          <Markdown text={row.text} onLink={ctx.onLink} />
-        </div>
+        {ctx.editing?.rowId === row.id && ctx.onResend && ctx.onCancelEdit ? (
+          <EditMessage edit={ctx.editing} onResend={ctx.onResend} onCancel={ctx.onCancelEdit} />
+        ) : (
+          <div className="bubble">
+            <Markdown text={row.text} onLink={ctx.onLink} />
+          </div>
+        )}
         {row.status !== 'complete' && <div className="row-meta muted">{row.status}</div>}
+        {row.status === 'complete' && !ctx.running && ctx.onEdit && ctx.editing?.rowId !== row.id && (
+          <button type="button" className="small link row-edit" data-testid="edit-message-button" title="Edit and resend" onClick={() => ctx.onEdit?.(row)}>
+            Edit
+          </button>
+        )}
         <Slots row={row} ctx={ctx} />
       </div>
     );
@@ -139,7 +157,7 @@ export const Row = memo(function Row({ row, ctx }: { row: MessageRow; ctx: RowCo
           {RETRY_TEXT[retry.state]} {retry.attempt > 1 ? `(attempt ${retry.attempt})` : ''}
         </div>
       )}
-      {usage && row.status === 'complete' && (
+      {usage && row.status === 'complete' && ctx.elements?.tokens !== 'hidden' && (
         <div className="row-meta muted">
           {usage.inputTokens + usage.cacheReadTokens} in · {usage.outputTokens} out
         </div>

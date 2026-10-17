@@ -171,7 +171,8 @@ pub fn chat_send(
     context: Option<&crate::seams::SendContext>,
 ) -> Result<ChatSendResult, ApiError> {
     let origin = a.origin.unwrap_or_default();
-    if a.text.trim().is_empty() {
+    let attachments: Vec<String> = a.attachments.clone().unwrap_or_default();
+    if a.text.trim().is_empty() && attachments.is_empty() {
         return Err(ApiError::bad_args("There is nothing to send."));
     }
     if a.text.len() > store::MAX_SUBMISSION_BYTES {
@@ -203,7 +204,7 @@ pub fn chat_send(
     }
     enum Out {
         Repeat(Submission),
-        New(Submission, bool),
+        New(Submission, bool, Option<bool>),
     }
     let out = rt
         .db()
@@ -255,6 +256,7 @@ pub fn chat_send(
                     _ => (SubmissionMode::Steer, SubmissionState::Saved, None),
                 }
             };
+            let title_job = crate::titles::wants_job(tx, &a.chat_id)?;
             let block = match (payload, context) {
                 (Some(p), Some(b)) => match b.0.build(tx, &a.chat_id, p, gen) {
                     Ok(block) => Some(block),
@@ -273,10 +275,17 @@ pub fn chat_send(
                     origin: origin.into(),
                     priority,
                     admission: AdmissionClass::Exempt,
-                    attachments: a.attachments.as_deref().unwrap_or(&[]),
+                    attachments: &attachments,
                     now,
                 },
             )?;
+            if !attachments.is_empty() {
+                if let Err(r) = crate::attachments::link(tx, &a.chat_id, &sid, &attachments)? {
+                    // Undo the submission: nothing of this send is kept but the draft.
+                    tx.execute("DELETE FROM submissions WHERE id = ?1", [&sid])?;
+                    return Ok(Err(ApiError::from(r)));
+                }
+            }
             if let Some(block) = block {
                 tx.execute(
                     "INSERT INTO submission_context(submission_id, text) VALUES (?1, ?2)",
@@ -307,12 +316,12 @@ pub fn chat_send(
                 // A busy send: the user row appears when the harness echoes it.
             }
             let sub = store::get_submission(tx, &sid)?.expect("just inserted");
-            Ok(Ok(Out::New(sub, state != SubmissionState::Queued)))
+            Ok(Ok(Out::New(sub, state != SubmissionState::Queued, title_job)))
         })
         .map_err(sql)??;
     let submission = match out {
         Out::Repeat(s) => s,
-        Out::New(s, dispatch) => {
+        Out::New(s, dispatch, title_job) => {
             if let Some(live) = rt.sh.actors.lock().unwrap().get(&a.chat_id) {
                 live.live.lock().unwrap().thread.queue_held = false;
             }
@@ -331,6 +340,9 @@ pub fn chat_send(
                 }
             }
             emit_queue(rt, &a.chat_id);
+            if let Some(forked) = title_job {
+                crate::titles::start(rt, &a.chat_id, crate::titles::job(&s.text, None, forked));
+            }
             s
         }
     };

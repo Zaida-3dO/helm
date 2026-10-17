@@ -145,6 +145,14 @@ pub struct SidebarRow {
     pub status: ChatStatus,
     pub attention: Option<RowAttention>,
     pub pinned: bool,
+    /// A manual unread mark or an unread completion (the chat's `unread`).
+    pub unread: bool,
+    /// Muted: drawn as a quiet bell-off mark.
+    pub muted: bool,
+    /// Running with no worker output for a while.
+    pub stalled: bool,
+    #[ts(type = "number")]
+    pub last_activity_at: i64,
     pub archived: bool,
     #[ts(type = "number | null")]
     pub position: Option<i64>,

@@ -36,6 +36,7 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_shell::register_services(services, events);
     helm_projects::register_services(services, events);
     helm_terminal::register_services(services, events);
+    helm_panel::register_services(services, events);
 }
 
 // Launch contributors: the chats crate adds `pub fn launch_contributors(...)` here together

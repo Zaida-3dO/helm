@@ -606,7 +606,8 @@ fn bp(id: &str, title: &str, last: &str) -> BoardProject {
 }
 
 fn sync(db: &Database, projects: &[BoardProject]) {
-    db.write(|tx| apply_sync(tx, BOARD, projects, 5)).unwrap();
+    db.write(|tx| apply_sync(tx, BOARD, projects, true, 5))
+        .unwrap();
 }
 
 fn by_board_id(db: &Database, board_id: &str) -> ProjectNode {
@@ -636,7 +637,7 @@ fn a_sync_mirrors_board_projects_at_the_top_level_and_updates_them() {
     assert_eq!(a.name, "Alpha");
     assert!(a.parent_id.is_none());
     assert_eq!(
-        db.snapshot(|tx| read_state(tx, true))
+        db.snapshot(|tx| read_state(tx, true, Some(BOARD)))
             .unwrap()
             .project_count,
         2
@@ -694,7 +695,7 @@ fn a_vanished_project_goes_stale_and_its_chats_stay() {
         "the chat stays under it"
     );
     assert_eq!(
-        db.snapshot(|tx| read_state(tx, true))
+        db.snapshot(|tx| read_state(tx, true, Some(BOARD)))
             .unwrap()
             .project_count,
         1
@@ -778,13 +779,89 @@ fn a_failed_sync_keeps_the_last_good_time_and_shows_the_error() {
         )
     })
     .unwrap();
-    let s = db.snapshot(|tx| read_state(tx, true)).unwrap();
+    let s = db.snapshot(|tx| read_state(tx, true, Some(BOARD))).unwrap();
     assert_eq!(s.last_sync_at, Some(100));
     assert_eq!(
         s.error.as_deref(),
         Some("Couldn't reach Agent Standup; showing the last sync.")
     );
     db.write(|tx| record_result(tx, 300, None)).unwrap();
-    let s = db.snapshot(|tx| read_state(tx, true)).unwrap();
+    let s = db.snapshot(|tx| read_state(tx, true, Some(BOARD))).unwrap();
     assert_eq!((s.last_sync_at, s.error), (Some(300), None));
+}
+
+#[test]
+fn a_sync_cut_short_marks_nothing_stale_and_counts_only_this_address() {
+    let (_d, db) = temp_db();
+    sync(
+        &db,
+        &[
+            bp("a", "Alpha", "2026-10-17T10:00:00Z"),
+            bp("b", "Beta", "2026-10-17T10:00:00Z"),
+        ],
+    );
+    db.write(|tx| {
+        apply_sync(
+            tx,
+            BOARD,
+            &[bp("a", "Alpha", "2026-10-17T10:00:00Z")],
+            false,
+            6,
+        )
+    })
+    .unwrap();
+    assert!(
+        !by_board_id(&db, "b").board.unwrap().stale,
+        "a partial read is not proof b is gone"
+    );
+    db.write(|tx| {
+        apply_sync(
+            tx,
+            "https://other.example",
+            &[bp("z", "Other", "2026-10-17T10:00:00Z")],
+            true,
+            7,
+        )
+    })
+    .unwrap();
+    assert_eq!(
+        db.snapshot(|tx| read_state(tx, true, Some(BOARD)))
+            .unwrap()
+            .project_count,
+        2
+    );
+}
+
+#[test]
+fn rows_carry_unread_mute_and_stall_from_the_chat_record() {
+    let (_d, db) = temp_db();
+    let c = chat_in(&db, "C:/w/app", 1);
+    assert!(!row(&db, &c).unread);
+    db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET status = 'interrupted' WHERE id = ?1",
+            [&c],
+        )
+    })
+    .unwrap();
+    assert_eq!(row(&db, &c).attention, Some(RowAttention::Interrupted));
+    // Rows the chats crate writes in its own tables (test-only direct inserts).
+    db.write(|tx| {
+        tx.execute(
+            "INSERT INTO unread_marks(chat_id, token, marked_at) VALUES (?1, 't', 1)",
+            [&c],
+        )?;
+        tx.execute(
+            "INSERT INTO chat_mutes(chat_id, muted_at) VALUES (?1, 1)",
+            [&c],
+        )
+    })
+    .unwrap();
+    let r = row(&db, &c);
+    assert!(r.unread && r.muted);
+    assert_eq!(
+        r.attention,
+        Some(RowAttention::Unread),
+        "unread outranks interrupted"
+    );
 }

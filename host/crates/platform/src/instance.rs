@@ -74,6 +74,17 @@ mod imp {
         pipe.flush()
     }
 
+    /// Each pipe instance gets a protected DACL with one ACE for the current user, so no other
+    /// account on the machine can connect (and remote clients are rejected outright).
+    pub fn create_owner_only(
+        opts: &mut ServerOptions,
+        name: &str,
+    ) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+        let mut sa = crate::fs::OwnerOnlySa::new()?;
+        // SAFETY: `sa` outlives the call and holds a valid SECURITY_ATTRIBUTES.
+        unsafe { opts.create_with_security_attributes_raw(name, sa.as_ptr()) }
+    }
+
     pub async fn serve(
         endpoint: Endpoint,
         on_focus: impl Fn() + Send + Sync + 'static,
@@ -83,14 +94,11 @@ mod imp {
             .access_outbound(false)
             .pipe_mode(PipeMode::Byte)
             .reject_remote_clients(true);
-        let mut server = opts
-            .clone()
-            .first_pipe_instance(true)
-            .create(&endpoint.name)?;
+        let mut server = create_owner_only(opts.clone().first_pipe_instance(true), &endpoint.name)?;
         loop {
             server.connect().await?;
             let mut connected = server;
-            server = opts.create(&endpoint.name)?;
+            server = create_owner_only(&mut opts, &endpoint.name)?;
             let mut buf = [0u8; 16];
             // Bounded read: anything other than the focus line is ignored.
             let n =
@@ -143,6 +151,32 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    /// SH9: the single-instance pipe's DACL has exactly one ACE, for the current user, and is
+    /// protected from inheritance. Mutation check: creating with plain `opts.create(...)` fails it.
+    #[test]
+    #[cfg(windows)]
+    fn the_pipe_is_owner_only() {
+        use std::os::windows::io::AsRawHandle;
+        use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let name = format!(r"\\.\pipe\helm-test-{}", uuid::Uuid::new_v4().simple());
+            let mut opts = ServerOptions::new();
+            opts.access_inbound(true)
+                .pipe_mode(PipeMode::Byte)
+                .reject_remote_clients(true)
+                .first_pipe_instance(true);
+            let server = super::imp::create_owner_only(&mut opts, &name).unwrap();
+            assert!(crate::fs::handle_is_owner_only(server.as_raw_handle() as _).unwrap());
+            // The default security a plain create gives is not owner-only.
+            let plain = ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(format!("{name}-plain"))
+                .unwrap();
+            assert!(!crate::fs::handle_is_owner_only(plain.as_raw_handle() as _).unwrap());
+        });
+    }
 
     #[test]
     fn a_second_launch_signal_reaches_the_first() {

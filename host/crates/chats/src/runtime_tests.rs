@@ -100,6 +100,10 @@ impl FakeWorker {
 pub struct FakeSpawner {
     tx: mpsc::UnboundedSender<FakeWorker>,
     pub fail: Mutex<Option<String>>,
+    /// The titles helper's answer, after `title_delay`.
+    pub title: Mutex<Result<String, String>>,
+    pub title_delay: Mutex<Duration>,
+    pub title_jobs: Mutex<Vec<Value>>,
 }
 
 impl Spawner for FakeSpawner {
@@ -114,14 +118,19 @@ impl Spawner for FakeSpawner {
             out: otx.clone(),
             terminated: AtomicBool::new(false),
         });
-        self.tx
-            .send(FakeWorker {
-                req: req.clone(),
-                cmds: crx,
-                out: otx,
-            })
-            .unwrap();
+        // A test that has already finished no longer listens; that is not this test's failure.
+        let _ = self.tx.send(FakeWorker {
+            req: req.clone(),
+            cmds: crx,
+            out: otx,
+        });
         Ok((link, orx))
+    }
+
+    fn run_title(&self, job: &Value) -> Result<String, String> {
+        self.title_jobs.lock().unwrap().push(job.clone());
+        std::thread::sleep(*self.title_delay.lock().unwrap());
+        self.title.lock().unwrap().clone()
     }
 }
 
@@ -165,6 +174,9 @@ pub fn harness_with(limits: Limits) -> H {
     let spawner = Arc::new(FakeSpawner {
         tx,
         fail: Mutex::new(None),
+        title: Mutex::new(Err("no titles in this test".into())),
+        title_delay: Mutex::new(Duration::ZERO),
+        title_jobs: Mutex::new(Vec::new()),
     });
     let rt = ChatRuntime::new(
         db.clone(),
@@ -564,12 +576,13 @@ async fn an_abnormal_end_holds_the_queue_until_resume() {
         "the queued message is not sent"
     );
     assert_eq!(h.state(&queued), "queued");
-    assert_eq!(
+    // The hold is written just after the status (a loaded machine can see the gap).
+    h.until("held", |h| {
         h.col(&format!(
             "SELECT chat_id FROM chat_queue_holds WHERE chat_id = '{chat}'"
-        )),
-        std::slice::from_ref(&chat)
-    );
+        )) == std::slice::from_ref(&chat)
+    })
+    .await;
     let got = h
         .api
         .call(&main(), "chat_get", json!({"chatId": chat}))
@@ -1264,7 +1277,7 @@ async fn a_silent_running_chat_shows_as_stalled_until_output() {
         ..limits()
     });
     // One minute is 100 ms in the test limits.
-    h.db.write(|tx| helm_core::prefs::set_generic(tx, "stallMinutes", &json!(6)))
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "stallMinutes", &json!(10)))
         .unwrap();
     let (chat, _, w) = running_turn(&mut h).await;
     let flag = |h: &H| {
@@ -1272,7 +1285,7 @@ async fn a_silent_running_chat_shows_as_stalled_until_output() {
             "SELECT stalled FROM chat_activity WHERE chat_id = '{chat}'"
         ))
     };
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
     assert_ne!(flag(&h), ["1"], "not before the limit");
     h.until("stalled", |h| flag(h) == ["1"]).await;
     let a = h.call("attention_get", json!({})).await.unwrap();
@@ -1595,4 +1608,350 @@ async fn forks_are_placed_below_the_source_and_side_chats_stay_hidden() {
         .await
         .unwrap_err();
     assert!(refused.message.contains("Promote"));
+}
+
+fn user_row(h: &H, chat: &str, text: &str) -> i64 {
+    h.col(&format!(
+        "SELECT id FROM messages WHERE chat_id = '{chat}' AND role = 'user' AND text = '{text}'"
+    ))[0]
+        .parse()
+        .unwrap()
+}
+
+/// Resend replaces the message and everything after it; the old branch is kept inactive,
+/// its submissions are superseded, the worker restarts fresh and gets the edited text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_edit_replaces_the_branch_and_keeps_the_old_one_inactive() {
+    let mut h = harness();
+    let chat = h.create().await;
+    let mut w = first_turn(&mut h, &chat).await;
+    finished_turn(&h, &mut w, &chat, "second", "m2", "answer two").await;
+    let second = user_row(&h, &chat, "second");
+    let o = h
+        .call(
+            "message_edit_open",
+            json!({"chatId": chat, "messageId": second}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(o["text"], "second");
+    let stale = h
+        .call(
+            "message_resend",
+            json!({"chatId": chat, "messageId": second, "revision": o["revision"].as_i64().unwrap() + 1,
+                   "submissionId": uuid::Uuid::new_v4().to_string(), "text": "x"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(stale.message.contains("changed while you were editing"));
+    h.call(
+        "draft_save",
+        json!({"chatId": chat, "text": "my draft", "revision": helm_core::now_ms() + 5}),
+    )
+    .await
+    .unwrap();
+    let sid = uuid::Uuid::new_v4().to_string();
+    h.call(
+        "message_resend",
+        json!({"chatId": chat, "messageId": second, "revision": o["revision"],
+               "submissionId": sid, "text": "second, edited"}),
+    )
+    .await
+    .unwrap();
+    // Phase two waits for the worker to close.
+    w.expect("shutdown").await;
+    w.exit().await;
+    let mut w2 = h.worker().await;
+    assert_eq!(
+        w2.req.resume_session_id, None,
+        "Claude's session cannot be cut, so it starts fresh"
+    );
+    w2.ready().await;
+    let p = w2.expect("prompt").await;
+    assert_eq!(p["text"], "second, edited");
+    let carried = p["context"].as_str().unwrap();
+    assert!(carried.contains("User: first") && !carried.contains("answer two"));
+    let t = texts(&h, &chat);
+    assert!(t.contains(&"user:first".to_owned()) && t.contains(&"assistant:answer one".to_owned()));
+    assert!(
+        !t.iter()
+            .any(|x| x == "user:second" || x.contains("answer two")),
+        "{t:?}"
+    );
+    assert!(t.iter().any(|x| x.starts_with("context:Message edited")));
+    let inactive = h.col(&format!(
+        "SELECT text FROM messages WHERE chat_id = '{chat}' AND active = 0 ORDER BY id"
+    ));
+    assert_eq!(inactive, ["second", "answer two"], "the old branch is kept");
+    let old = h.col(&format!(
+        "SELECT state FROM submissions WHERE chat_id = '{chat}' AND text = 'second'"
+    ));
+    assert_eq!(old, ["superseded"]);
+    let draft = h.col(&format!("SELECT draft FROM chats WHERE id = '{chat}'"));
+    assert_eq!(draft, ["my draft"], "the draft is left alone");
+}
+
+/// A crash between stage and apply is repaired at startup; the message waits for Recover.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crash_between_stage_and_apply_is_repaired_at_startup() {
+    let mut h = harness();
+    let chat = h.create().await;
+    let mut w = first_turn(&mut h, &chat).await;
+    finished_turn(&h, &mut w, &chat, "second", "m2", "answer two").await;
+    let first = user_row(&h, &chat, "first");
+    let o = crate::edit::open(&h.db, &chat, first).unwrap();
+    let sid = uuid::Uuid::new_v4().to_string();
+    crate::edit::stage(
+        &h.db,
+        &h.profile.path("sessions"),
+        &crate::types::MessageResendArgs {
+            chat_id: chat.clone(),
+            message_id: first,
+            revision: o.revision,
+            submission_id: sid.clone(),
+            text: "first, edited".into(),
+        },
+    )
+    .unwrap();
+    // "Crash": nothing applied it. Startup recovery does.
+    crate::edit::recover_all(&h.db, &h.profile.path(""), 1);
+    assert!(h.col("SELECT chat_id FROM pending_edits").is_empty());
+    assert_eq!(
+        h.state(&sid),
+        "rejected",
+        "kept for Recover, never sent unseen"
+    );
+    let active = h.col(&format!(
+        "SELECT role || ':' || text FROM messages WHERE chat_id = '{chat}' AND active = 1 AND role != 'context'"
+    ));
+    assert!(
+        active.is_empty(),
+        "everything from the edited message on is inactive: {active:?}"
+    );
+    // Applying again changes nothing.
+    crate::edit::recover_all(&h.db, &h.profile.path(""), 2);
+    let log = crate::session_log::read(&crate::session_log::log_path(
+        &h.profile.path("sessions"),
+        &chat,
+    ))
+    .unwrap();
+    let markers = log
+        .entries
+        .iter()
+        .filter(|e| e["id"].as_str().is_some_and(|i| i.starts_with("c:edit:")))
+        .count();
+    assert_eq!(markers, 1);
+    let marker = log
+        .entries
+        .iter()
+        .find(|e| e["id"].as_str().is_some_and(|i| i.starts_with("c:edit:")))
+        .unwrap();
+    assert!(
+        marker["parentId"].is_null(),
+        "the branch starts where the first message did"
+    );
+}
+
+/// Edits are refused while the chat works, and only for the user's sent messages.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edits_are_refused_while_busy_and_for_replies() {
+    let mut h = harness();
+    let chat = h.create().await;
+    let mut w = first_turn(&mut h, &chat).await;
+    let reply_id: i64 = h.col(&format!(
+        "SELECT id FROM messages WHERE chat_id = '{chat}' AND role = 'assistant'"
+    ))[0]
+        .parse()
+        .unwrap();
+    let r = h
+        .call(
+            "message_edit_open",
+            json!({"chatId": chat, "messageId": reply_id}),
+        )
+        .await
+        .unwrap_err();
+    assert!(r.message.contains("Only your own"));
+    let first = user_row(&h, &chat, "first");
+    h.send(&chat, "busy now", "default").await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    h.until("running", |h| h.status(&chat) == "running").await;
+    let busy = h
+        .call(
+            "message_edit_open",
+            json!({"chatId": chat, "messageId": first}),
+        )
+        .await
+        .unwrap_err();
+    assert!(busy.message.contains("Wait for the turn"));
+}
+
+fn title_of(h: &H, chat: &str) -> (String, String) {
+    let t = h
+        .col(&format!("SELECT title FROM chats WHERE id = '{chat}'"))
+        .pop()
+        .unwrap();
+    let s = h
+        .col(&format!("SELECT COALESCE(state, '') || '/' || COALESCE(job, '') FROM chat_titles WHERE chat_id = '{chat}'"))
+        .pop()
+        .unwrap_or_default();
+    (t, s)
+}
+
+/// The first send writes the fallback at once, then the automatic title replaces it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_chat_gets_its_fallback_then_an_automatic_title() {
+    let h = harness();
+    *h.spawner.title.lock().unwrap() = Ok("Fix the login redirect".into());
+    *h.spawner.title_delay.lock().unwrap() = Duration::from_millis(150);
+    let chat = h.create().await;
+    h.send(
+        &chat,
+        "
+  the login page redirects twice after sign-in, please look
+more detail",
+        "default",
+    )
+    .await;
+    assert_eq!(
+        title_of(&h, &chat).0,
+        "the login page redirects twice after sign-in, please look",
+        "fallback: the first non-blank line"
+    );
+    h.until("generated", |h| {
+        title_of(h, &chat) == ("Fix the login redirect".into(), "generated/".into())
+    })
+    .await;
+    let jobs = h.spawner.title_jobs.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["forked"], false);
+    // Later sends start no new job.
+    h.send(&chat, "and another", "queue").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(h.spawner.title_jobs.lock().unwrap().len(), 1);
+}
+
+/// A manual rename wins over a title that arrives later; a failed job keeps the fallback.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_manual_rename_wins_and_a_failure_keeps_the_fallback() {
+    let h = harness();
+    *h.spawner.title.lock().unwrap() = Ok("Generated title".into());
+    *h.spawner.title_delay.lock().unwrap() = Duration::from_millis(200);
+    let chat = h.create().await;
+    h.send(&chat, "do the thing", "default").await;
+    let bad = h
+        .call("chat_rename", json!({"chatId": chat, "title": "  "}))
+        .await
+        .unwrap_err();
+    assert_eq!(bad.code, "bad_args");
+    let r = h
+        .call("chat_rename", json!({"chatId": chat, "title": "My name"}))
+        .await
+        .unwrap();
+    assert_eq!(r["titleState"], "manual");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        title_of(&h, &chat),
+        ("My name".into(), "manual/".into()),
+        "the rename wins"
+    );
+    // A failing helper leaves the fallback and marks the job failed.
+    *h.spawner.title.lock().unwrap() = Err("no".into());
+    *h.spawner.title_delay.lock().unwrap() = Duration::ZERO;
+    let other = h.create().await;
+    h.send(&other, "second chat", "default").await;
+    h.until("failed", |h| {
+        title_of(h, &other) == ("second chat".into(), "fallback/failed".into())
+    })
+    .await;
+    // A suggestion is answered, not written.
+    *h.spawner.title.lock().unwrap() = Ok("Suggested".into());
+    h.until("the user row", |h| {
+        !h.col(&format!(
+            "SELECT id FROM messages WHERE chat_id = '{other}' AND role = 'user'"
+        ))
+        .is_empty()
+    })
+    .await;
+    let s = h
+        .call("title_suggest", json!({"chatId": other}))
+        .await
+        .unwrap();
+    assert_eq!(s["title"], "Suggested");
+    assert_eq!(title_of(&h, &other).0, "second chat");
+}
+
+/// An attached image rides the prompt as an image block; an image-only send is allowed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attached_images_ride_the_prompt() {
+    use base64::Engine as _;
+    let mut h = harness();
+    let chat = h.create().await;
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend(10u32.to_be_bytes());
+    png.extend(10u32.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0]);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+    let put = h
+        .call(
+            "attachment_put",
+            json!({"chatId": chat, "name": "shot.png", "mime": "image/png", "bytes": b64}),
+        )
+        .await
+        .unwrap();
+    let id = put["attachmentId"].as_str().unwrap().to_owned();
+    h.call(
+        "chat_send",
+        json!({"chatId": chat, "submissionId": uuid::Uuid::new_v4().to_string(), "text": "",
+               "action": "default", "draftRevision": 0, "attachments": [id]}),
+    )
+    .await
+    .unwrap();
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert_eq!(p["images"][0]["mimeType"], "image/png");
+    assert_eq!(p["images"][0]["data"], b64.as_str());
+    // A second send with the same attachment is refused and saves nothing.
+    let again = h
+        .call(
+            "chat_send",
+            json!({"chatId": chat, "submissionId": uuid::Uuid::new_v4().to_string(), "text": "x",
+                   "action": "queue", "draftRevision": 0, "attachments": [id]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(again.code, "bad_args");
+    assert_eq!(h.col("SELECT count(*) FROM submissions"), ["1"]);
+}
+
+/// The skills a worker reports at get_state are what skills_list answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn skills_come_from_the_workers_get_state() {
+    let mut h = harness();
+    let chat = h.create().await;
+    assert_eq!(
+        h.call("skills_list", json!({"chatId": chat}))
+            .await
+            .unwrap(),
+        json!([])
+    );
+    h.send(&chat, "hi", "default").await;
+    let mut w = h.worker().await;
+    let c = w.expect("get_state").await;
+    w.respond(
+        &c,
+        json!({"capabilities": {}, "skills": [{"name": "review", "description": "Review the diff"}]}),
+    )
+    .await;
+    h.until("skills", |h| !h.rt.skills(&chat).is_empty()).await;
+    let s = h
+        .call("skills_list", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    assert_eq!(
+        s,
+        json!([{"name": "review", "description": "Review the diff"}])
+    );
 }

@@ -212,6 +212,13 @@ export class ClaudeDriver implements Driver {
       model: this.model ?? null,
       effort: modelTakesEffort(this.model) ? this.effort : null,
       models,
+      // The CLI's own commands and skills, invoked as "/name" at the start of a message.
+      skills: Array.isArray(init.commands)
+        ? (init.commands as Json[])
+            .filter((c) => typeof c.name === "string" && c.name)
+            .slice(0, 500)
+            .map((c) => ({ name: String(c.name), description: typeof c.description === "string" ? c.description.slice(0, 500) : "" }))
+        : [],
       // All four were observed working on claude 2.1.289 (worker/PROTOCOL-NOTES.md).
       capabilities: { withdraw: true, deliverNow: true, stopTool: true, compact: true },
     };

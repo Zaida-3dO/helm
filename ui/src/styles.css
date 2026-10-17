@@ -846,3 +846,66 @@ dd {
   line-height: 1.75;
   color: var(--secondary);
 }
+
+/* Helm's own caption buttons at the top bar's right edge. */
+.topbar {
+  padding-right: 0;
+}
+.topbar-actions {
+  margin-right: 8px;
+}
+.caption {
+  display: flex;
+  align-self: stretch;
+  margin-right: 0;
+}
+.caption-btn {
+  width: 46px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--secondary);
+}
+.caption-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+.caption-btn.close:hover:not(:disabled) {
+  background: #c42b1c;
+  color: #ffffff;
+}
+.crumb-title {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 480;
+  color: var(--text);
+  cursor: var(--cursor-default);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crumb-title:hover:not(:disabled) {
+  background: none;
+}
+.crumb-title:focus-visible {
+  outline-offset: 3px;
+}
+.crumb-rename {
+  font-size: calc(12 * var(--ui-unit));
+  padding: 3px 6px !important;
+  min-width: 160px;
+}
+.tags-strip {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--line);
+}

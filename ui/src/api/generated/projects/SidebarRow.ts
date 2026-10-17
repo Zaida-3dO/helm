@@ -14,4 +14,16 @@ folderProjectId: string, folderPath: string,
 /**
  * Stored nesting depth, 0–2. The sidebar recomputes the drawn depth from the rows it holds.
  */
-depth: number, parentChatId: string | null, hasChildren: boolean, status: ChatStatus, attention: RowAttention | null, pinned: boolean, archived: boolean, position: number | null, createdAt: number, updatedAt: number, revision: number, };
+depth: number, parentChatId: string | null, hasChildren: boolean, status: ChatStatus, attention: RowAttention | null, pinned: boolean, 
+/**
+ * A manual unread mark or an unread completion (the chat's `unread`).
+ */
+unread: boolean, 
+/**
+ * Muted: drawn as a quiet bell-off mark.
+ */
+muted: boolean, 
+/**
+ * Running with no worker output for a while.
+ */
+stalled: boolean, lastActivityAt: number, archived: boolean, position: number | null, createdAt: number, updatedAt: number, revision: number, };

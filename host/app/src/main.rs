@@ -190,6 +190,12 @@ fn run_app(
             app.manage(dispatcher);
 
             shell::build_main_window(app, &profile, debug)?;
+            // If the UI never reports its first frame (a broken bundle), show the window anyway.
+            let late = shell.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(4));
+                late.show_if_hidden();
+            });
             // The tray, hotkey, badge and keep-awake start from the launch attention summary.
             if let Some(svc) = shell_svc {
                 let host = tray::TauriShellHost::new(handle.clone());

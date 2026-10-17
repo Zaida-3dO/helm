@@ -13,6 +13,8 @@
 //! | `chat_attention` | per chat: when its attention was marked addressed, and a snooze |
 //! | trigger `restart_cancel_changed_chat` | drops a pending continuation on archive or a project, harness, model or effort change |
 //! | `chat_forks` | fork ids and what they were asked for, for idempotent forks |
+//! | `pending_edits` | an edit staged with its submission, applied once the worker closes ([`crate::edit`]) |
+//! | `chat_attachments` | images attached to a chat, then to the submission that sent them ([`crate::attachments`]) |
 //! | `fork_carry` | a message fork's carried history, sent once with its first prompt ([`crate::fork`]) |
 //! | `chat_file_cleanup` | files a hard delete left behind, removed after commit and retried at startup ([`crate::delete`]) |
 //! | `submission_context` | the panel-context block a composer send carried |
@@ -105,6 +107,26 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              chat_id         TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
              created_at      INTEGER NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS pending_edits (
+             chat_id        TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             submission_id  TEXT NOT NULL,
+             entry_id       TEXT NOT NULL,
+             log_len        INTEGER NOT NULL,
+             marker_id      TEXT NOT NULL,
+             created_at     INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS chat_attachments (
+             id             TEXT PRIMARY KEY,
+             chat_id        TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+             name           TEXT NOT NULL,
+             mime           TEXT NOT NULL,
+             bytes          INTEGER NOT NULL,
+             width          INTEGER NOT NULL,
+             height         INTEGER NOT NULL,
+             submission_id  TEXT,
+             created_at     INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS chat_attachments_submission ON chat_attachments(submission_id);
          CREATE TABLE IF NOT EXISTS fork_carry (
              chat_id  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
              text     TEXT NOT NULL

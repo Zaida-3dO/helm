@@ -404,10 +404,21 @@ impl SessionLog {
     /// Append `entry` as the child of the last entry. An id that is
     /// already in the log is not written again; returns whether it was written.
     pub fn append(&mut self, entry: &mut Entry) -> io::Result<bool> {
+        let parent = self.last_id.clone();
+        self.append_with_parent(entry, parent)
+    }
+
+    /// Append `entry` under `parent`, starting a branch when that is not the last entry (an
+    /// edit's marker). Later appends chain from it. Idempotent on the id.
+    pub fn append_with_parent(
+        &mut self,
+        entry: &mut Entry,
+        parent: Option<String>,
+    ) -> io::Result<bool> {
         if self.ids.contains(entry.id()) {
             return Ok(false);
         }
-        entry.set_parent(self.last_id.clone());
+        entry.set_parent(parent);
         let mut line = String::new();
         if self.needs_newline {
             line.push('\n');

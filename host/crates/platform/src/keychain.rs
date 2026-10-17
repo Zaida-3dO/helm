@@ -1,8 +1,9 @@
 //! The OS store for each profile's credential encryption key.
 //!
 //! The key lives in Windows Credential Manager (DPAPI-protected, per user),
-//! reached through the `keyring` crate. There is deliberately no plaintext fallback: when the store
-//! fails, credential access stops.
+//! or on Linux in the Secret Service (GNOME Keyring, KWallet) over D-Bus, both reached through the
+//! `keyring` crate. There is deliberately no plaintext fallback: when the store fails or is
+//! missing, credential access stops.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -28,7 +29,7 @@ pub trait Keychain: Send + Sync {
 }
 
 pub struct NativeKeychain {
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     service: String,
 }
 
@@ -51,7 +52,7 @@ impl Default for NativeKeychain {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 impl Keychain for NativeKeychain {
     fn get_key(&self, account: &str) -> Result<Option<[u8; 32]>, KeychainError> {
         let entry = keyring::Entry::new(&self.service, account)
@@ -84,8 +85,8 @@ impl Keychain for NativeKeychain {
     }
 }
 
-/// Linux: no Secret Service integration yet, so credentials are unavailable (never plaintext).
-#[cfg(not(windows))]
+/// Other platforms: no store, so credentials are unavailable (never plaintext).
+#[cfg(not(any(windows, target_os = "linux")))]
 impl Keychain for NativeKeychain {
     fn get_key(&self, _account: &str) -> Result<Option<[u8; 32]>, KeychainError> {
         Err(KeychainError::Unavailable)

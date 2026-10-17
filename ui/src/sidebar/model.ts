@@ -20,7 +20,7 @@ export const HEIGHTS = {
 } as const;
 
 export type ListItem =
-  | { kind: 'header'; key: string; project: ProjectNode; depth: number; height: number; collapsed: boolean }
+  | { kind: 'header'; key: string; project: ProjectNode; depth: number; height: number; collapsed: boolean; subtitle: string | null }
   | {
       kind: 'chat';
       key: string;
@@ -131,6 +131,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
   }
   const selectedGroup = o.selectedChatId ? rows.find((r) => r.chatId === o.selectedChatId)?.groupProjectId : undefined;
   const { roots, kids } = projectChildren(projects);
+  const byId = new Map(projects.map((p) => [p.id, p]));
 
   // Which groups to draw: in the archived view only those holding an archived chat (or archived
   // themselves, or with such a descendant). A stale board group with no chats is dropped.
@@ -155,13 +156,15 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
   const emitGroup = (p: ProjectNode, depth: number, path: Set<string>) => {
     if (path.has(p.id) || !visible(p)) return;
     const collapsed = p.collapsed && p.id !== selectedGroup;
+    const subtitle = headerSubtitle(p, byId);
     out.push({
       kind: 'header',
       key: `h:${p.id}`,
       project: p,
       depth: Math.min(depth, MAX_DEPTH),
-      height: h.header,
+      height: subtitle ? h.headerSubtitle : h.header,
       collapsed,
+      subtitle,
     });
     if (collapsed) return;
     const next = new Set(path).add(p.id);
@@ -204,6 +207,14 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     }
   }
   return out;
+}
+
+/** The muted line under a header: where a board project's chats
+ *  start, shown once on the header, or that it is no longer on the board. */
+export function headerSubtitle(p: ProjectNode, byId: ReadonlyMap<string, ProjectNode>): string | null {
+  if (p.board?.stale) return 'Not on the board';
+  if (p.kind === 'board' && p.primaryFolderProjectId) return byId.get(p.primaryFolderProjectId)?.path ?? null;
+  return null;
 }
 
 /** Ancestors of a chat among held rows, nearest first (to auto-expand the open chat's parents). */

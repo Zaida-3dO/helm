@@ -573,6 +573,11 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       return c.chat;
     },
     attention_address: () => null,
+    attachment_put: () => ({ attachmentId: uid() }),
+    skills_list: () => [
+      { name: 'review', description: 'Review the current changes' },
+      { name: 'compact', description: 'Compact the conversation' },
+    ],
     attention_snooze: () => null,
     unread_mark: (a) => {
       const c = find(a.chatId);

@@ -75,6 +75,23 @@ export function chatOps(api: Api) {
     markUnread: (chatId: string) => api<ChatRecord>('unread_mark', { chatId }),
     clearUnread: (chatId: string, token: string) => api<ChatRecord>('unread_clear', { chatId, token }),
     ackCompletion: (chatId: string, completionId: string) => api<ChatRecord>('completion_ack', { chatId, completionId }),
+    /** Open a sent message for editing. */
+    editOpen: (chatId: string, messageId: number) =>
+      api<{ messageId: number; revision: number; text: string }>('message_edit_open', { chatId, messageId }),
+    /** Replace a sent message and everything after it; the old branch is kept. */
+    resend: (chatId: string, messageId: number, revision: number, text: string) =>
+      api<{ submission: Submission; chat: ChatRecord }>('message_resend', {
+        chatId,
+        messageId,
+        revision,
+        submissionId: globalThis.crypto.randomUUID(),
+        text,
+      }),
+    /** The CLI's commands and skills for this chat; empty until it has run. */
+    skills: (chatId: string) => api<{ name: string; description: string }[]>('skills_list', { chatId }),
+    /** Store one image for the next send; `bytes` is base64. */
+    attach: (chatId: string, name: string, mime: string, bytes: string) =>
+      api<{ attachmentId: string }>('attachment_put', { chatId, name, mime, bytes }),
     /** Fork a chat (whole, or at an assistant reply); a side chat quotes `excerpt`. */
     fork: (chatId: string, opts: { messageId?: number; side?: boolean; excerpt?: string } = {}) =>
       api<ChatRecord>('chat_fork', { chatId, forkId: globalThis.crypto.randomUUID(), ...opts }),

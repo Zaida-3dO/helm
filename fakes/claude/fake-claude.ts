@@ -185,7 +185,7 @@ function autoAnswer(rec: Json): void {
     case "initialize":
       saved.init = req;
       return ok({
-        commands: [],
+        commands: Array.isArray((fixture as { commands?: unknown }).commands) ? (fixture as { commands: unknown[] }).commands : [],
         models: [
           { value: "default", displayName: "Default", description: "fake default" },
           { value: "haiku", displayName: "Haiku", description: "fake haiku" },

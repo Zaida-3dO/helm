@@ -136,7 +136,14 @@ pub fn carry_text(entries: &[Map<String, Value>]) -> Option<String> {
 }
 
 /// A row still streaming in the source: role, text, tool name, call id, details, timestamp.
-type LiveRow = (String, String, Option<String>, Option<String>, Option<String>, i64);
+type LiveRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+);
 
 /// What `chat_fork` was asked for, checked.
 pub struct ForkRequest<'a> {

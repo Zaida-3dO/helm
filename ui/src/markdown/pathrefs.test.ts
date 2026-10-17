@@ -32,7 +32,7 @@ test('inline code: whole tokens that look like paths', () => {
   ] as const) {
     assert.equal(pathInCode(code)?.path, path, code);
   }
-  for (const code of ['npm test', 'const x = 1', 'https://a.example/b.ts', 'www.x.com/a.js', '1.2.3', '2026/10/17', '1/2', 'foo', 'a|b.ts', 'C:', 'repo@main:src/a.ts', 'mailto:a@b.co', 'x\ny/z.ts']) {
+  for (const code of ['/api/health', '/admin/products/x', 'npm test', 'const x = 1', 'https://a.example/b.ts', 'www.x.com/a.js', '1.2.3', '2026/10/17', '1/2', 'foo', 'a|b.ts', 'C:', 'repo@main:src/a.ts', 'mailto:a@b.co', 'x\ny/z.ts']) {
     assert.equal(pathInCode(code), null, code);
   }
 });
@@ -48,7 +48,7 @@ test('prose: only the unmistakable forms', () => {
   ] as const) {
     assert.equal(pathInProse(word)?.path, path, word);
   }
-  for (const word of ['and/or', '1/2', '2026/10/17', 'v1.2.3', 'package.json', 'src/app', r`C:\x`, 'https://a.example/x.ts', '/help', 'TCP/IP', 'client/server']) {
+  for (const word of ['/api/health', '/admin/products/x', 'and/or', '1/2', '2026/10/17', 'v1.2.3', 'package.json', 'src/app', r`C:\x`, 'https://a.example/x.ts', '/help', 'TCP/IP', 'client/server']) {
     assert.equal(pathInProse(word), null, word);
   }
 });

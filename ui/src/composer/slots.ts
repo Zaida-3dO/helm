@@ -23,7 +23,8 @@ export interface AccessoryContext {
 
 export interface ComposerAccessory {
   id: string;
-  placement: 'above' | 'toolbar';
+  /** `dock`: the composer dock's stack above the box (the review tray). */
+  placement: 'above' | 'toolbar' | 'dock';
   render: (ctx: AccessoryContext) => ReactNode;
 }
 

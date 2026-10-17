@@ -81,7 +81,8 @@ export function pathInCode(text: string): PathSuffix | null {
   const segs = segmentsOf(p);
   if (segs.length === 0 || allNumeric(segs)) return null;
   if (drive || /^~([\\/]|$)/.test(p) || /^\.\.?[\\/]/.test(p)) return p.length > 3 || /^~/.test(p) ? s : null;
-  if (/^[\\/]/.test(p)) return segs.length >= 2 ? s : null;
+  // Rooted at `/` names no drive: only Git Bash's `/c/...` form is a file (`/api/x` is a route).
+  if (/^[\\/]/.test(p)) return /^[\\/][a-z][\\/]./i.test(p) ? s : null;
   if (/[\\/]/.test(p)) return /[a-z]/i.test(p) ? s : null;
   // A bare `name.ext` with a recognised extension, but never a version or a number.
   if (hasExtension(p) && !/^[\d.]+$/.test(p) && /^[\w.@+-]+$/.test(p)) return s;
@@ -100,7 +101,7 @@ export function pathInProse(word: string): PathSuffix | null {
   if (/^\.\.?[\\/]./.test(p)) return s;
   // Absolute paths of two or more segments: `C:\a\b`, `/c/a/b`.
   if (/^[a-z]:[\\/]/i.test(p)) return segs.length >= 3 ? s : null;
-  if (/^[\\/]/.test(p)) return segs.length >= 2 && /[a-z]/i.test(p) ? s : null;
+  if (/^[\\/]/.test(p)) return /^[\\/][a-z][\\/]./i.test(p) ? s : null;
   // `seg/…/name.ext`: at least two segments, ending in a recognised extension.
   if (segs.length >= 2 && hasExtension(segs[segs.length - 1] as string) && /^[\w@.+-]/.test(p)) return s;
   return null;

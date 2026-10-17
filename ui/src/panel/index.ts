@@ -1,6 +1,10 @@
 // The side panel's public surface. Import from here, not from the files.
 // The built-in kinds (file tabs, the Files slot) register themselves on import.
 import './viewer/kinds.tsx';
+import './changes/register.tsx';
+import './vault/kind.tsx';
+import './context/register.tsx';
+import '../settings/vaults/index.tsx';
 export { SidePanel } from './SidePanel.tsx';
 export type { SidePanelProps } from './SidePanel.tsx';
 export {

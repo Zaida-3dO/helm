@@ -69,6 +69,11 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ),
     // Panel.
     ("panel_tab_sets", Data),
+    ("panel_context", UserOnly("The side panel eye toggle is yours alone; no agent tool reads or changes it.")),
+    ("panel_context_sent", Data),
+    ("review_comments", Data),
+    ("panel_vaults", UserOnly("The Obsidian vaults Helm reads are yours to add in Settings; agents never change them.")),
+    ("panel_vault_default", UserOnly("Your default vault for note links; only you set it in Settings.")),
     // Search.
     ("search_opens", Data),
     // Actions.

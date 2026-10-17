@@ -66,6 +66,14 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         ChatMuteArgs,
         AttentionSnoozeArgs,
         ChatForkArgs,
+        MessageEditOpenArgs,
+        MessageEditOpenResult,
+        MessageResendArgs,
+        ChatRenameArgs,
+        TitleSuggestResult,
+        AttachmentPutArgs,
+        AttachmentPutResult,
+        SkillInfo,
     );
     let mut files: Vec<String> = std::fs::read_dir(dir)
         .map_err(|e| e.to_string())?

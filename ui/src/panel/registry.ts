@@ -188,7 +188,9 @@ export function isPanelVisible(): boolean {
 
 // Dev builds only (vite dev, never the bundled app): a console handle for checking the panel by hand.
 if (import.meta.env?.DEV && typeof window !== 'undefined') {
-  (window as unknown as Record<string, unknown>).__helmPanel = { panelStore, registerPanelKind, openInPanel, showSlot };
+  void import('./links.ts').then(({ handleLink }) => {
+    (window as unknown as Record<string, unknown>).__helmPanel = { panelStore, registerPanelKind, openInPanel, showSlot, handleLink };
+  });
 }
 
 export function kindTitle(tab: Readonly<PanelTab>): string {
