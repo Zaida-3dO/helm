@@ -469,6 +469,9 @@ mod tests {
         ));
         // 2. Executable content behind a harmless extension.
         for (name, bytes) in [
+            // A program behind a launch-type extension must fail at step 2, not 3: the order is
+            // part of the contract.
+            ("run.ps1", b"MZ\x90\x00".as_slice()),
             ("pe.txt", b"MZ\x90\x00".as_slice()),
             ("script.txt", b"#!/bin/sh".as_slice()),
             ("elf.dat", b"\x7fELF".as_slice()),
@@ -559,6 +562,33 @@ mod tests {
                 app(r"C:\Program Files\Editor\editor.exe")
             ))
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_anywhere_along_the_path_is_refused_for_files_and_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(target.join("inner")).unwrap();
+        std::fs::write(target.join("a.pdf"), "%PDF").unwrap();
+        let link = dir.path().join("link");
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(
+            made,
+            "mklink /J needs no privilege; the test must not skip itself"
+        );
+        for p in [link.clone(), link.join("inner"), link.join("a.pdf")] {
+            let r = check(&s(&p), &PrivateRoots::default(), &trusted(), &|_| {
+                panic!("asked")
+            });
+            assert!(matches!(r, Err(Refusal::Path(_))), "{p:?}: {r:?}");
+        }
     }
 
     #[test]

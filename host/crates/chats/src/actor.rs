@@ -505,11 +505,17 @@ impl Actor {
         let Some(chat) = self.chat() else {
             return false;
         };
-        let binding = ClaudeBinding::load(&self.sh.cfg.sessions(), &self.chat_id);
-        let resume = binding
-            .filter(|b| b.cwd == chat.cwd && b.harness_switch_id.is_none())
-            .and_then(|b| b.native_session_id);
-        self.native_session = resume.clone();
+        let binding = ClaudeBinding::load(&self.sh.cfg.sessions(), &self.chat_id)
+            .filter(|b| b.cwd == chat.cwd && b.harness_switch_id.is_none());
+        let own = binding.as_ref().and_then(|b| b.native_session_id.clone());
+        // A whole-chat fork's first launch resumes its source's session as a new one.
+        let fork_of = binding
+            .as_ref()
+            .filter(|_| own.is_none())
+            .and_then(|b| b.fork_of.clone());
+        self.native_session = own.clone();
+        let fork_session = fork_of.is_some();
+        let resume = own.or(fork_of);
         let sb = self.live.lock().unwrap().thread.send_behavior;
         let req = SpawnRequest {
             chat_id: self.chat_id.clone(),
@@ -517,6 +523,7 @@ impl Actor {
             model: chat.model.clone(),
             effort: chat.effort.clone(),
             resume_session_id: resume,
+            fork_session,
             send_behavior: sb,
         };
         match self.sh.spawner.spawn(&req) {
@@ -805,6 +812,7 @@ impl Actor {
             last_leaf_id: leaf,
             harness_switch_id: None,
             updated_at: now(),
+            fork_of: None,
         };
         if b.native_session_id.is_some() {
             if let Err(e) = b.save(&self.sh.cfg.sessions(), &self.chat_id) {
@@ -1068,6 +1076,25 @@ impl Actor {
             })
             .ok()
             .flatten();
+        // A message fork's carried history goes once, with its first prompt.
+        let carry: Option<String> = self
+            .write(|t| {
+                use rusqlite::OptionalExtension;
+                let c: Option<String> = t
+                    .query_row(
+                        "SELECT text FROM fork_carry WHERE chat_id = ?1",
+                        [&self.chat_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                t.execute("DELETE FROM fork_carry WHERE chat_id = ?1", [&self.chat_id])?;
+                Ok(c)
+            })
+            .flatten();
+        let context = match (carry, context) {
+            (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+            (a, b) => a.or(b),
+        };
         if let Some(c) = context {
             // A separate content block after the text.
             cmd["context"] = json!(c);

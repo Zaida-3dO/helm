@@ -75,6 +75,9 @@ export function chatOps(api: Api) {
     markUnread: (chatId: string) => api<ChatRecord>('unread_mark', { chatId }),
     clearUnread: (chatId: string, token: string) => api<ChatRecord>('unread_clear', { chatId, token }),
     ackCompletion: (chatId: string, completionId: string) => api<ChatRecord>('completion_ack', { chatId, completionId }),
+    /** Fork a chat (whole, or at an assistant reply); a side chat quotes `excerpt`. */
+    fork: (chatId: string, opts: { messageId?: number; side?: boolean; excerpt?: string } = {}) =>
+      api<ChatRecord>('chat_fork', { chatId, forkId: globalThis.crypto.randomUUID(), ...opts }),
     /** User-only: mute keeps a chat out of the badge, needs-you, toasts and the tray. */
     mute: (chatId: string, muted: boolean) => api<ChatRecord>('chat_mute', { chatId, muted }),
     /** Out of the attention groups until something new happens in the chat. */

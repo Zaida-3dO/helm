@@ -6,8 +6,9 @@
 import { driveForm, isRemoteOrDevicePath } from './paths.ts';
 
 export interface LinkTarget {
-  kind: 'url' | 'vault';
-  /** `url` only: the href as written (http, https, mailto, file, or a plain path). */
+  /** `path`: a file path written in inline code or plain text, resolved by the host on click. */
+  kind: 'url' | 'vault' | 'path';
+  /** `url`: the href as written (http, https, mailto, file, or a plain path). `path`: the path as written, with any line suffix. */
   href?: string;
   /** `vault` only: the note name or path, without `.md`. Empty means the current note. */
   note?: string;
@@ -143,7 +144,7 @@ export function targetAttrs(target: LinkTarget): Array<[string, string]> {
 /** Reads a target back from the attributes written by {@link targetAttrs}. */
 export function targetFromAttrs(get: (name: string) => string | null): LinkTarget | null {
   const kind = get('data-md-kind');
-  if (kind !== 'url' && kind !== 'vault') return null;
+  if (kind !== 'url' && kind !== 'vault' && kind !== 'path') return null;
   const target: LinkTarget = { kind };
   const href = get('data-md-href');
   const note = get('data-md-note');

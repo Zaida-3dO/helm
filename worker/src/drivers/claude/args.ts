@@ -43,6 +43,7 @@ export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[
   if (modelTakesEffort(c.model)) args.push("--effort", effort);
   if (c.skipPermissions) args.push("--permission-mode", "bypassPermissions", "--allow-dangerously-skip-permissions");
   if (c.resumeSessionId) args.push("--resume", c.resumeSessionId);
+  if (c.resumeSessionId && c.forkSession === true) args.push("--fork-session");
   const append = [c.appendSystemPrompt, opts.promptRule].filter((x): x is string => typeof x === "string" && x.length > 0).join("\n\n");
   if (append) args.push("--append-system-prompt", append);
   // fastMode is always explicit: the launch's own field is its only owner.

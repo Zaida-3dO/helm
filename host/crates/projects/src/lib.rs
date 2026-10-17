@@ -11,7 +11,7 @@
 //! | [`schema`] | side tables and the archived-project triggers |
 //! | [`store`] | project and sidebar reads and writes: names, nesting, order, archive, paging |
 //! | [`ops`] | the `api` ops |
-//! | [`board`] | the Agent Standup connection and sync ops |
+//! | [`board`] | the Agent Standup connection, the read-only sync and the mirror; the project gate |
 //! | [`bindings`] | `ui/src/api/generated/projects/` |
 
 pub mod bindings;
@@ -24,6 +24,7 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
+pub use board::register_services;
 pub use ops::register_ops;
 
 pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {

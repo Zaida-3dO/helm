@@ -71,6 +71,14 @@ test("skip permissions, resume and settings flags", () => {
   assert.equal(buildClaudeArgs({}).includes("--permission-mode"), false);
 });
 
+test("a fork's first launch resumes as a new session; --fork-session needs a session to resume", () => {
+  const a = buildClaudeArgs({ resumeSessionId: "s-1", forkSession: true });
+  assert.equal(flag(a, "--resume"), "s-1");
+  assert.ok(a.includes("--fork-session"));
+  assert.equal(buildClaudeArgs({ forkSession: true }).includes("--fork-session"), false);
+  assert.equal(buildClaudeArgs({ resumeSessionId: "s-1" }).includes("--fork-session"), false);
+});
+
 test("fastMode is always explicit, strictly boolean, and only the launch's own field sets it", () => {
   assert.deepEqual(JSON.parse(flag(buildClaudeArgs({}), "--settings") ?? "null"), { fastMode: false });
   // A customization that sets fastMode is dropped; the launch field wins.

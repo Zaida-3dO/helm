@@ -68,10 +68,10 @@ class PanelStore {
   /** The host bridge, set by the side panel when it mounts; kinds read it to make their ops. */
   api: Api | null = null;
   /** The modal viewer: the fallback when a file cannot open as a tab. */
-  modal: { path: string; line?: number; column?: number; chatId: string | null; nonce: number } | null = null;
+  modal: { path: string; line?: number; endLine?: number; column?: number; chatId: string | null; nonce: number } | null = null;
   private modalSeq = 0;
 
-  openModal(path: string, opts: { line?: number; column?: number; chatId: string | null }): void {
+  openModal(path: string, opts: { line?: number; endLine?: number; column?: number; chatId: string | null }): void {
     this.modal = { path, ...opts, nonce: ++this.modalSeq };
     this.changed();
   }

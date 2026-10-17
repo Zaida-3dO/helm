@@ -19,6 +19,7 @@ import { HOME_SEND_BEHAVIOR } from '../api/types.ts';
 import { leafFakeOps } from './fake-leaf.ts';
 import { projectsFakeOps } from './fake-projects.ts';
 import { panelFakeOps } from './fake-panel.ts';
+import { shellFakeOps } from './fake-shell.ts';
 
 type Emit = (payload: unknown) => void;
 
@@ -46,6 +47,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const leaf = leafFakeOps(); registerFakeOps(leaf.prefixes, leaf.handler); }
 { const sb = projectsFakeOps(); registerFakeOps(sb.prefixes, sb.handler); }
 { const panel = panelFakeOps(); registerFakeOps(panel.prefixes, panel.handler); }
+{ const sh = shellFakeOps(); registerFakeOps(sh.prefixes, sh.handler); }
 
 export function fakeOpFor(op: string): FakeOpHandler | undefined {
   return extraOps.find((r) => r.prefixes.some((p) => op.startsWith(p)))?.handler;

@@ -39,6 +39,19 @@ export interface DefaultHandlerResult {
   refusal: HandlerRefusal | null;
 }
 
+export interface QuickItem {
+  path: string;
+  label: string;
+  kind: 'dir' | 'file' | 'link';
+  score: number;
+}
+
+export interface QuickResult {
+  mode: 'path' | 'files';
+  items: QuickItem[];
+  partial: boolean;
+}
+
 export function panelOps(api: Api) {
   return {
     fileRead: (path: string, chatId?: string | null) =>
@@ -47,6 +60,10 @@ export function panelOps(api: Api) {
     openDefault: (path: string) => api<null>('file_open_default', { path }),
     reveal: (path: string) => api<null>('file_reveal', { path }),
     chatFolder: (chatId: string) => api<{ path: string | null }>('chat_folder', { chatId }),
+    pathResolve: (path: string, chatId?: string | null) =>
+      api<{ path: string; kind: 'file' | 'dir' }>('path_resolve', chatId ? { chatId, path } : { path }),
+    quickOpen: (query: string, chatId?: string | null, reload = false) =>
+      api<QuickResult>('quick_open', { ...(chatId ? { chatId } : {}), query, ...(reload ? { reload } : {}) }),
     tabsGet: () => api<unknown>('panel_tabs_get', {}),
     tabsSave: (value: unknown) => api<null>('panel_tabs_save', { value }),
   };

@@ -15,6 +15,8 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_projects::register_ops(reg);
     helm_panel::register_ops(reg);
     helm_search::register_ops(reg);
+    helm_shell::register_ops(reg);
+    helm_terminal::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -31,7 +33,9 @@ pub fn migrations(reg: &mut MigrationRegistry) {
 /// are in place, so a crate can read those here. Signature for a crate's function:
 /// `pub fn register_services(services: &mut helm_ipc::Services, events: &Arc<dyn EventSink>)`.
 pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
-    let _ = (services, events);
+    helm_shell::register_services(services, events);
+    helm_projects::register_services(services, events);
+    helm_terminal::register_services(services, events);
 }
 
 // Launch contributors: the chats crate adds `pub fn launch_contributors(...)` here together

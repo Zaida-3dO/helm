@@ -699,6 +699,10 @@ pub struct ClaudeBinding {
     pub last_leaf_id: Option<String>,
     pub harness_switch_id: Option<String>,
     pub updated_at: i64,
+    /// A whole-chat fork that has not run yet: the source's native session, resumed once with
+    /// `--fork-session` ([`crate::fork`]). Cleared when the fork saves its own session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_of: Option<String>,
 }
 
 pub const BINDING_MAX_BYTES: usize = 16 * 1024;
@@ -985,6 +989,7 @@ mod tests {
             last_leaf_id: Some("m:9".into()),
             harness_switch_id: None,
             updated_at: 5,
+            fork_of: None,
         };
         b.save(dir.path(), "c").unwrap();
         assert_eq!(ClaudeBinding::load(dir.path(), "c"), Some(b));

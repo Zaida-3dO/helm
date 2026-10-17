@@ -12,6 +12,8 @@
 //! | `chat_activity` | per chat: the last worker output time and the stalled flag |
 //! | `chat_attention` | per chat: when its attention was marked addressed, and a snooze |
 //! | trigger `restart_cancel_changed_chat` | drops a pending continuation on archive or a project, harness, model or effort change |
+//! | `chat_forks` | fork ids and what they were asked for, for idempotent forks |
+//! | `fork_carry` | a message fork's carried history, sent once with its first prompt ([`crate::fork`]) |
 //! | `chat_file_cleanup` | files a hard delete left behind, removed after commit and retried at startup ([`crate::delete`]) |
 //! | `submission_context` | the panel-context block a composer send carried |
 //! | view `chat_search_source` | the searchable message text the search crate indexes ([`crate::search_source`]) |
@@ -95,6 +97,18 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
          BEGIN
              DELETE FROM restart_continuations WHERE chat_id = new.id;
          END;
+         CREATE TABLE IF NOT EXISTS chat_forks (
+             fork_id         TEXT PRIMARY KEY,
+             source_chat_id  TEXT NOT NULL,
+             message_id      INTEGER,
+             side            INTEGER NOT NULL DEFAULT 0,
+             chat_id         TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+             created_at      INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS fork_carry (
+             chat_id  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             text     TEXT NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS chat_file_cleanup (
              rel        TEXT PRIMARY KEY,
              queued_at  INTEGER NOT NULL

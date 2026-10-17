@@ -1,0 +1,21 @@
+[package]
+name = "helm-shell"
+description = "The Windows shell around Helm: shell settings, the tray menu model with the microphone picker, the hotkey, taskbar badge, keep-awake, notifications and the debug probe."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+helm-platform.workspace = true
+helm-chats.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
+
+[dev-dependencies]
+tempfile.workspace = true

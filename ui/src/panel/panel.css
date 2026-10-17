@@ -15,7 +15,7 @@
   --sp-muted: var(--muted);
   --sp-accent: var(--accent);
   --sp-shadow: var(--shadow);
-  --sp-u: var(--u, 1px);
+  --sp-u: var(--ui-unit);
 }
 
 .side-panel {
@@ -628,4 +628,93 @@ html[data-panel-maximized] .shell-main {
   .fv-modal {
     height: 100%;
   }
+}
+
+/* ---- Quick open ---- */
+
+.qo-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.qo-error {
+  color: var(--error);
+}
+
+.qo-input {
+  width: 100%;
+  font-size: calc(17 * var(--ui-unit));
+  letter-spacing: -0.2px;
+}
+
+.qo-list {
+  margin-top: 8px;
+  min-height: 245px;
+  max-height: 470px;
+  overflow: auto;
+}
+
+.qo-group {
+  padding: 10px 15px 4px;
+  font-size: calc(10 * var(--ui-unit));
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--secondary);
+}
+
+.qo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 15px;
+  border-radius: 7px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.qo-row[aria-selected='true'] {
+  background: var(--surface-alt);
+}
+
+.qo-name {
+  flex: 0 1 auto;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(12 * var(--ui-unit));
+  font-weight: 530;
+}
+
+.qo-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(10 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.qo-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 40px 10px;
+  color: var(--secondary);
+  font-size: calc(12 * var(--ui-unit));
+}
+
+.qo-hint {
+  font-size: calc(11 * var(--ui-unit));
+}
+
+/* Path links in replies read as links, not as plain code. */
+.md-root a.md-link-path {
+  text-decoration-style: dotted;
 }

@@ -12,7 +12,7 @@ export const FAKE_ROOT = 'C:\\Demo\\project';
 const LONG = Array.from({ length: 400 }, (_, i) => `export const value${i} = ${i} * 2; // line ${i + 1}`).join('\n');
 
 const FILES: Record<string, string> = {
-  'README.md': '# Demo project\n\nSee [the guide](docs/guide.md) and `src/app.ts`.\n\n> [!note]\n> A callout.\n',
+  'README.md': '# Demo project\n\nSee [the guide](docs/guide.md) and `src/app.ts:3`, or src/values.ts:120-125 in prose.\n\n> [!note]\n> A callout.\n',
   'docs\\guide.md': '# Guide\n\nBack to the [readme](../README.md).\n',
   'src\\app.ts': `import { value1 } from './values';\n\nexport function main(): number {\n  return value1 + 1;\n}\n`,
   'src\\values.ts': LONG,
@@ -76,6 +76,19 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         return null;
       case 'chat_folder':
         return { path: FAKE_ROOT };
+      case 'path_resolve': {
+        const raw = String(args.path ?? '').replace(/^\.[\\/]/, '');
+        const abs = /^[a-z]:/i.test(raw) ? raw : `${FAKE_ROOT}\\${raw.replace(/\//g, '\\')}`;
+        const v = read(abs);
+        return { path: abs, kind: v.kind === 'dir' ? 'dir' : 'file' };
+      }
+      case 'quick_open': {
+        const q = String(args.query ?? '').toLowerCase();
+        const items = Object.keys(FILES)
+          .filter((k) => k.toLowerCase().includes(q))
+          .map((k, i) => ({ path: `${FAKE_ROOT}\\${k}`, label: k, kind: 'file', score: 100 - i }));
+        return { mode: 'files', items, partial: false };
+      }
       case 'panel_tabs_get':
         return saved;
       case 'panel_tabs_save':
@@ -85,5 +98,5 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         throw new ApiError('refused', 'This operation is not available here.');
     }
   };
-  return { prefixes: ['file_', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_'], handler };
+  return { prefixes: ['file_', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_', 'path_resolve', 'quick_open'], handler };
 }

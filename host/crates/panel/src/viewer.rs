@@ -87,9 +87,13 @@ fn io_err(e: std::io::Error) -> ReadError {
     }
 }
 
-/// Checks a renderer-supplied path: lexical gate first, then private roots. No contents are read.
+/// Checks a renderer-supplied path: the lexical gate, then no links along it (a no-follow stat per
+/// component), then private roots. No contents are read.
 pub fn admit(raw: &str, roots: &PrivateRoots) -> Result<std::path::PathBuf, ReadError> {
     let path = pathgate::check(raw).map_err(|r| ReadError::Refused(r.message().into()))?;
+    // Links anywhere along the path are refused before anything opens or follows it: the identity
+    // check below opens each ancestor, and a folder link could point at a network share.
+    helm_platform::fs::refuse_links_along(&path).map_err(io_err)?;
     if roots.contains(&path) {
         return Err(ReadError::Refused(PRIVATE_MESSAGE.into()));
     }

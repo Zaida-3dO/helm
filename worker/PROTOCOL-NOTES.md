@@ -241,3 +241,16 @@ read at once when idle, otherwise at a `{"read": true}` step or the turn's end) 
 `cancel_async_message` and `interrupt {cancel_queued}` from its list of unread messages. Its header
 documents the fixture steps (hooks, replies to control requests, conditions, loops,
 shorthand records).
+
+## Forks, context and fast mode
+
+- **Fork launch field.** `claude.forkSession: true` together with `claude.resumeSessionId` adds
+  `--fork-session`: the CLI resumes the source chat's session as a new session, so a whole-chat
+  fork carries Claude's history without the worker touching any transcript file. The host sets it
+  only on a fork's first launch; afterwards the fork's own session id is resumed as usual. A
+  message fork cannot be cut that way, so it starts a fresh session and its first prompt carries
+  the history up to the chosen reply as a `context` block.
+- **`prompt.context`** (string, optional): sent to Claude as a second text content block after
+  the message text. The host uses it for the panel-context block and a fork's carried history.
+- **`claude.fastMode`** (boolean): always sent as `--settings {"fastMode": …}`; a `fastMode` key
+  inside `claude.settings` is dropped, and anything but `true` is off.

@@ -5,7 +5,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { Api } from '../api/client.ts';
 import { panelOps } from '../api/panel.ts';
-import { useShell } from '../shell/context.ts';
+import { useBinding, useLayer } from '../ui/index.ts';
 import { CloseIcon, FileDiffIcon, FolderTreeIcon, MaximizeIcon, PlusIcon, QuestionIcon, RestoreIcon } from './icons.tsx';
 import { configureLinks } from './links.ts';
 import { entrySlot, SLOTS, slotEntry } from './model.ts';
@@ -14,6 +14,7 @@ import { kindTitle, panelStore, togglePanel } from './registry.ts';
 import type { TabContext } from './registry.ts';
 import { startTabSync } from './sync.ts';
 import { ViewerModal } from './viewer/kinds.tsx';
+import { QuickOpen } from './quickopen/QuickOpen.tsx';
 import './panel.css';
 
 export const PANEL_MIN_WIDTH = 280;
@@ -42,11 +43,6 @@ function useWindowFocused(): boolean {
     };
   }, []);
   return focused;
-}
-
-/** True while a dialog, menu, picker or listbox is open: they own Escape. */
-function somethingOwnsEscape(): boolean {
-  return Boolean(document.querySelector('[role="dialog"], [role="menu"], [role="listbox"], dialog[open]'));
 }
 
 function clampWidth(w: number): number {
@@ -89,25 +85,14 @@ export function SidePanel({ api, chatId }: SidePanelProps) {
     };
   }, [maximized]);
 
-  // Mod+Shift+I toggles the panel, through the shell's command registry.
-  const shell = useShell();
-  useEffect(
-    () => shell.registerCommand('panel.toggle', { title: 'Toggle side panel', keys: 'Mod+Shift+I', run: togglePanel }),
-    [shell],
-  );
+  // Ctrl+Shift+I toggles the panel, through the shared key registry.
+  useBinding({ id: 'panel.toggle', title: 'Toggle side panel', defaultKeys: 'Ctrl+Shift+I', run: togglePanel });
 
-  // Escape anywhere restores a maximised panel unless a dialog, menu or picker owns it. Capture
-  // phase, so the composer's Stop never sees that Escape.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.defaultPrevented && panelStore.model.maximized && !somethingOwnsEscape()) {
-        e.preventDefault();
-        panelStore.update((mm) => mm.setMaximized(false));
-      }
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, []);
+  // Escape restores a maximised panel (a "panel" layer: menus, popovers and dialogs go first).
+  useLayer('panel', maximized, () => panelStore.update((mm) => mm.setMaximized(false)));
+  // Escape pressed inside the panel never reaches the composer's Stop: swallowed while focus is in it.
+  const asideRef = useRef<HTMLElement>(null);
+  useLayer('panel', visible, () => true, () => Boolean(asideRef.current?.contains(document.activeElement)));
 
   const displayed = m.displayed(chatId);
   const active = m.activeEntry(chatId);
@@ -145,6 +130,7 @@ export function SidePanel({ api, chatId }: SidePanelProps) {
       <>
         <LinkNotice />
         <ViewerModal />
+        <QuickOpen chatId={chatId} />
       </>
     );
   }
@@ -158,11 +144,8 @@ export function SidePanel({ api, chatId }: SidePanelProps) {
         className={maximized ? 'side-panel maximized' : 'side-panel'}
         data-testid="side-panel"
         aria-label="Side panel"
+        ref={asideRef}
         style={maximized ? undefined : { width: clampWidth(panelStore.width) }}
-        onKeyDown={(e) => {
-          // Escape inside the panel never reaches the composer's Stop.
-          if (e.key === 'Escape') e.preventDefault();
-        }}
       >
         {!maximized && <Resizer />}
         <div className="sp-header">
@@ -217,6 +200,7 @@ export function SidePanel({ api, chatId }: SidePanelProps) {
       </aside>
       <LinkNotice />
       <ViewerModal />
+      <QuickOpen chatId={chatId} />
     </>
   );
 }
@@ -431,6 +415,9 @@ function PlusMenu() {
   // Asked on each render: an entry's `enabled()` may change at any time.
   const entries = [...panelStore.kinds.values()].flatMap((k) => (k.menuEntry && k.menuEntry.enabled() ? [k.menuEntry] : []));
 
+  // An open "+" menu owns Escape: it closes only the menu.
+  useLayer('menu', open, () => setOpen(false));
+
   useEffect(() => {
     if (!open) return;
     firstItem.current?.focus();
@@ -446,14 +433,6 @@ function PlusMenu() {
     <div
       className="sp-plus"
       ref={wrap}
-      onKeyDown={(e) => {
-        if (e.key === 'Escape' && open) {
-          // An open "+" menu owns Escape: it closes only the menu.
-          e.preventDefault();
-          e.stopPropagation();
-          setOpen(false);
-        }
-      }}
     >
       <button
         type="button"

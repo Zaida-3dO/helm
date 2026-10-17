@@ -8,6 +8,8 @@ pub const PAGE_SIZE: i64 = 100;
 pub const MAX_LISTED_CHATS: i64 = 500;
 pub const MAX_SUBMISSION_BYTES: usize = 2 * 1024 * 1024;
 pub const DEFAULT_TITLE: &str = "New chat";
+/// The fallback title's length.
+pub const FALLBACK_TITLE_CHARS: usize = 72;
 
 const CHAT_COLUMNS: &str = "c.id, c.project_id, COALESCE(p.path, ''), c.title, c.status, c.error, \
      c.model, c.thinking, c.draft, c.draft_revision, c.created_at, c.updated_at, c.pinned, \

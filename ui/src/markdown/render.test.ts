@@ -390,3 +390,27 @@ test('rendering never throws, even on hostile input', () => {
   assert.equal(typeof html, 'string');
   assert.equal(typeof renderToHtml('[[' + 'a'.repeat(100_000) + ']]'), 'string');
 });
+
+// ---- Clickable paths ----
+
+test('inline code holding a whole path becomes a path link around the code', () => {
+  const html = renderToHtml('Edit `src/app.ts:12` then run `npm test`.');
+  assert.match(html, /<a class="md-link md-link-path md-path" href="#"[^>]*data-md-kind="path" data-md-href="src\/app.ts:12"><code>src\/app.ts:12<\/code><\/a>/);
+  assert.match(html, /<code>npm test<\/code>/);
+  assert.ok(!/data-md-href="npm test"/.test(html));
+});
+
+test('plain-text paths become path links; URLs, fractions and dates do not', () => {
+  const html = renderToHtml('See ~/notes/plan.md and (./build.sh), or src/a/b.ts:3. Not 1/2, 2026/10/17, and/or https://x.example/a/b.ts.');
+  assert.match(html, /data-md-href="~\/notes\/plan.md"/);
+  assert.match(html, /\(<a [^>]*data-md-href=".\/build.sh"/);
+  assert.match(html, /data-md-href="src\/a\/b.ts:3">src\/a\/b.ts:3<\/a>\./, 'the sentence dot stays outside');
+  for (const not of ['1/2', '2026/10/17', 'and/or']) assert.ok(!html.includes(`data-md-href="${not}"`), not);
+  assert.match(html, /<a class="md-link md-link-url" href="https:\/\/x.example\/a\/b.ts"/);
+  assert.equal((html.match(/md-link-path/g) ?? []).length, 3);
+});
+
+test('a path inside link text is not linked twice', () => {
+  const html = renderToHtml('[open src/a/b.ts](https://x.example)');
+  assert.equal((html.match(/<a /g) ?? []).length, 1);
+});

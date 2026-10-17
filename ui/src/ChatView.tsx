@@ -15,6 +15,9 @@ import { InteractionCard } from './transcript/InteractionCard.tsx';
 import type { LinkTarget } from './transcript/Markdown.tsx';
 import type { RowContext } from './transcript/Rows.tsx';
 import { Transcript } from './transcript/Transcript.tsx';
+import { forkAction } from './transcript/forkAction.ts';
+import { registerMessageAction } from './transcript/slots.ts';
+import { useShell } from './shell/context.ts';
 
 export interface ChatViewProps {
   chatId: string;
@@ -31,6 +34,11 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   const setTextRef = useRef<(text: string) => void>(() => undefined);
 
   useEffect(() => store.watch(chatId), [store, chatId]);
+  const shell = useShell();
+  useEffect(
+    () => registerMessageAction(forkAction(ops, (id) => shell.select(id), (m) => setNotice(`Could not fork: ${m}`))),
+    [ops, shell],
+  );
 
   const reload = useCallback(async () => {
     const [{ chat, thread }, page] = await Promise.all([ops.get(chatId), ops.page(chatId)]);

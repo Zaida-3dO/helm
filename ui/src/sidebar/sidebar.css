@@ -39,8 +39,24 @@
   color: inherit;
   background: none;
   border: none;
+  border-radius: 0;
   padding: 0;
-  cursor: pointer;
+  gap: 0;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.sb-root .sb-name:hover:not(:disabled),
+.sb-root .sb-toggle:hover:not(:disabled) {
+  background: none;
+}
+
+.sb-root .sb-act,
+.sb-root .sb-toggle,
+.sb-root .sb-children,
+.sb-root .sb-more,
+.sb-root .sb-nav {
+  justify-content: center;
 }
 
 .sb-brand {
@@ -583,4 +599,44 @@
   font-size: 11.5px;
   text-align: left;
   color: var(--sb-secondary);
+}
+
+/* ---- Agent Standup sync line ---- */
+
+.sb-sync {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -4px 22px 6px;
+  font-size: 11px;
+  color: var(--sb-secondary);
+}
+
+.sb-sync[hidden] {
+  display: none;
+}
+
+.sb-sync[data-state='error'] .sb-sync-text {
+  color: var(--error);
+}
+
+.sb-sync-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.sb-root .sb-sync-refresh {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--sb-secondary);
+}
+
+.sb-root .sb-sync-refresh:hover {
+  background: var(--sb-hover);
+  color: var(--sb-text);
 }

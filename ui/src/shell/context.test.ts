@@ -107,3 +107,18 @@ test('settings panes sort by order then title, replace by id, and filter by titl
   offA();
   offS();
 });
+
+test('the global hotkey is checked against the one key map', async () => {
+  const { hotkeyProblem } = await import('../settings/shell/hotkey.ts');
+  const list = [
+    { id: 'settings.toggle', title: 'Settings', chord: 'Ctrl+,' },
+    { id: 'app.globalHotkey', title: 'Show Helm', chord: 'Ctrl+Alt+H' },
+  ];
+  assert.equal(hotkeyProblem('ctrl+alt+h', list), null, 'its own current chord is fine');
+  assert.match(hotkeyProblem('Ctrl+,', list) ?? '', /already used by "Settings"/);
+  assert.match(hotkeyProblem('Alt+F4', list) ?? '', /belongs to Windows/);
+  assert.match(hotkeyProblem('Win+H', list) ?? '', /belongs to Windows/);
+  assert.match(hotkeyProblem('H', list) ?? '', /needs Ctrl/);
+  assert.equal(hotkeyProblem('F9', list), null);
+  assert.match(hotkeyProblem('Hyper+H', list) ?? '', /not a shortcut/);
+});

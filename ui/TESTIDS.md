@@ -6,9 +6,12 @@ breaks those checks, so change them only together with the checks. Everything el
 
 | Hook | Element | Attributes |
 |---|---|---|
-| `new-chat` | "New chat" button in the chat list | |
+| `new-chat` | "New chat" button in the sidebar | |
 | `folder-input` | Folder path input beside it (the last value is remembered) | |
-| `chat-item` | One chat in the chat list | `data-chat-id`, `data-status` |
+| `chat-item` | One chat row in the sidebar | `data-chat-id`, `data-status`, `data-depth` (chat nesting 0–2), `data-group` (the project it is shown under) |
+| `sidebar-group` | One project header in the sidebar | `data-project-id`, `data-kind` (`folder` `board`), `data-depth` (project nesting 0–2) |
+| `board-sync` | The Agent Standup sync line under the view switch | `data-state` (`never` `unconfigured` `syncing` `ok` `error`) |
+| `board-url`, `board-token`, `board-token-state`, `board-test`, `board-last-sync` | Settings → Projects connection fields: address, write-only token, "set"/"not set", Test connection, last sync | |
 | `chat-view` | The open chat | `data-chat-id`, `data-chat-status` |
 | `chat-status` | The chat's status pill | text = the status |
 | `composer` | The editable message box (Lexical `contenteditable`) | |
@@ -44,6 +47,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `shell` / `topbar` / `topbar-title` / `panel-toggle` | App frame and top bar | `panel-toggle`: `aria-pressed` |
 | `settings` / `settings-pane` / `appearance` | Settings dialog, a pane, the General pane's colour-mode control | `settings-pane`: `data-pane` = pane id; tabs are `.settings-tab[data-tab]`; `appearance` segments are `[data-value]` (`system` `light` `dark`) |
 | `toast-slot` / `notice` | The generic toast slot (top-centre) and its toast | `notice`: `data-kind` (`error` `info` `restored` `undo` `reorganize`) |
+| `terminal-dock` / `terminal-tab` / `terminal-session` | Terminal dock, a session tab, a session's view | `terminal-dock`: `data-open`; `terminal-tab`: `data-state` (`idle` `unseen` `running` `exited`), `aria-selected`; `terminal-session`: `data-session` = id, `data-tail` = the last lines of output (the WebGL renderer has no DOM rows) |
 | `action-row` / `action-button` / `action-overflow` / `action-menu` | One-click buttons in the top bar: the row, a top-bar button, the "..." trigger, its menu | `action-button`: `data-action` = the seed id (`update` `needs-me` `ship-it` `close-session` `new-session`) or the button id; menu entries are `[role=menuitem][data-item]` with the seed id (`git-sync`) |
 | `quick-replies` / `quick-reply` | Continue, Yes and No chips above the composer | `quick-reply`: `data-reply` = `continue` `yes` `no` |
 | `option-buttons` / `option-button` / `option-amend` | Inline Option 1, Option A, ... under the latest reply, and the pencil that drafts the answer | `option-button`: `data-option` = the label |

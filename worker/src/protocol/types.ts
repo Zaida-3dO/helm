@@ -18,6 +18,8 @@ export interface ClaudeLaunch {
   /** Claude Code's fast mode, sent on every launch as `--settings {"fastMode":…}`. Only this field
    * sets it: a `fastMode` inside `settings` is dropped. Anything but `true` is off. */
   fastMode?: boolean;
+  /** With `resumeSessionId`: resume it as a new session (`--fork-session`), a fork's first launch. */
+  forkSession?: boolean;
   settingSources?: string[];
   extraArgs?: string[];
 }

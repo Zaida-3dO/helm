@@ -27,6 +27,9 @@ pub struct ClaudeLaunch {
     pub append_system_prompt: Option<String>,
     /// Claude Code's fast mode from `claude-runtime.json`; always sent (`--settings`).
     pub fast_mode: bool,
+    /// Resume `resumeSessionId` as a new session (`--fork-session`); absent unless set.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub fork_session: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -151,6 +154,7 @@ pub fn claude_launch(
         resume_session_id,
         append_system_prompt: None,
         fast_mode: runtime.fast_mode,
+        fork_session: false,
     };
     if let Some(t) = test {
         c.command = Some(t.command.clone());

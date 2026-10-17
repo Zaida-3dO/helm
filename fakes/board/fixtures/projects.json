@@ -1,0 +1,9 @@
+{
+  "projects": [
+    { "id": "fb-desktop", "title": "Desktop app", "headline": "The workspace app", "area": "desktop-app", "repo": "desktop", "priority": "p1", "lastActivity": "2026-10-17T12:00:00.000Z" },
+    { "id": "fb-website", "title": "Website", "headline": null, "area": "web", "repo": "site", "priority": "p2", "lastActivity": "2026-10-16T09:30:00.000Z" },
+    { "id": "fb-home", "title": "Home automations", "headline": "Lights and heating", "area": "home", "repo": null, "priority": "p2", "lastActivity": "2026-10-15T18:00:00.000Z" },
+    { "id": "fb-finances", "title": "Finances", "headline": null, "area": "money", "repo": "ledger", "priority": "p3", "lastActivity": "2026-10-14T08:00:00.000Z" },
+    { "id": "fb-research", "title": "Research notes", "headline": null, "area": "notes", "repo": null, "priority": "p3", "lastActivity": "2026-10-13T08:00:00.000Z" }
+  ]
+}

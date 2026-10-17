@@ -11,6 +11,7 @@ import { splitFrontmatter } from './frontmatter.ts';
 import type { Property } from './frontmatter.ts';
 import { highlightCode } from './highlight.ts';
 import { classifyHref, isImageName, parseWikilink, targetAttrs } from './links.ts';
+import { pathInCode, pathInProse, PROSE_PATH_RUN, trimProseRun } from './pathrefs.ts';
 import type { LinkTarget } from './links.ts';
 
 export interface RenderOptions {
@@ -81,6 +82,37 @@ const wikilink: TokenizerAndRendererExtension = {
   },
 };
 
+/** A boundary before a prose path: start of text, whitespace or an opening bracket or quote. */
+const PATH_LEAD = /[\s(["']/;
+
+/** Plain-text file paths become `path` links. Inside link text, never. */
+const pathref: TokenizerAndRendererExtension = {
+  name: 'pathref',
+  level: 'inline',
+  start(src: string) {
+    // Report the boundary character before a candidate, so the tokenizer can see it.
+    const re = /[\s(["'](?=[~./\\A-Za-z0-9_@-])/g;
+    for (let m = re.exec(src); m; m = re.exec(src)) {
+      const run = PROSE_PATH_RUN.exec(src.slice(m.index + 1));
+      if (run && pathInProse(trimProseRun(run[0]))) return m.index;
+    }
+    return undefined;
+  },
+  tokenizer(src: string) {
+    if ((this as unknown as { lexer: { state: { inLink: boolean } } }).lexer.state.inLink) return undefined;
+    const lead = src.length > 0 && PATH_LEAD.test(src.charAt(0)) ? src.charAt(0) : '';
+    const run = PROSE_PATH_RUN.exec(src.slice(lead.length));
+    if (!run) return undefined;
+    const text = trimProseRun(run[0]);
+    if (!pathInProse(text)) return undefined;
+    return { type: 'pathref', raw: lead + text, lead, text };
+  },
+  renderer(token) {
+    const t = token as unknown as { lead: string; text: string };
+    return `${escapeHtml(t.lead)}${anchor({ kind: 'path', href: t.text }, escapeHtml(t.text), 'md-path')}`;
+  },
+};
+
 function fenceClosed(raw: string): boolean {
   const lines = raw.replace(/\s+$/, '').split('\n');
   const open = /^ {0,3}(`{3,}|~{3,})/.exec(lines[0] ?? '');
@@ -115,7 +147,7 @@ function renderProperties(props: Property[]): string {
 const md = new Marked({ gfm: true, breaks: false, async: false });
 
 md.use({
-  extensions: [wikilink],
+  extensions: [wikilink, pathref],
   renderer: {
     // Raw HTML becomes an inert marker. <br> is the one tag agents lean on in table cells.
     html(token: Tokens.HTML | Tokens.Tag) {
@@ -133,6 +165,12 @@ md.use({
       const target = classifyHref(token.href);
       if (!target) return inner;
       return anchor(target, inner, '', token.title ?? '');
+    },
+
+    // Inline code that is a whole file path is also a `path` link.
+    codespan(token: Tokens.Codespan) {
+      const code = `<code>${escapeHtml(token.text)}</code>`;
+      return pathInCode(token.text) ? anchor({ kind: 'path', href: token.text.trim() }, code, 'md-path') : code;
     },
 
     // Never an <img> with a remote or relative src: the app fetches nothing it was not asked to.

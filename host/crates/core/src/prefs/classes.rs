@@ -95,6 +95,25 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     ("stallMinutes", Later),
     // The open chat and project, restored at launch.
     ("selection", Internal),
+    // User-only: they change what Helm does outside its window.
+    (
+        "globalHotkey",
+        UserOnly("A system-wide shortcut works in every app, so only you set it."),
+    ),
+    (
+        "notifications",
+        UserOnly(
+            "Where notices about your chats appear, including outside Helm, is yours to choose.",
+        ),
+    ),
+    (
+        "dictationMic",
+        UserOnly("Which microphone Helm listens on is yours to choose."),
+    ),
+    (
+        "terminalShell",
+        UserOnly("The shell your terminal runs is yours to choose."),
+    ),
     // User-only.
     (
         "agentSettingsAll",

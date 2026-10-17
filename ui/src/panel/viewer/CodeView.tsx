@@ -14,6 +14,8 @@ export interface CodeViewProps {
   wrap: boolean;
   /** 1-based line to show and mark. */
   line?: number;
+  /** The last line of a marked range (inclusive). */
+  endLine?: number;
   column?: number;
   /** The current selection as 1-based lines, for the side panel context. */
   onSelection?: (sel: { startLine: number; endLine: number; text: string } | null) => void;
@@ -39,15 +41,16 @@ const theme = EditorView.theme({
   },
 });
 
-function decorations(text: string, language: string | undefined, line: number | undefined, state: EditorState) {
+function decorations(text: string, language: string | undefined, line: number | undefined, endLine: number | undefined, state: EditorState) {
   const marks = tokenRanges(text, language).map((r) => Decoration.mark({ class: r.className }).range(r.from, r.to));
   if (line && line >= 1 && line <= state.doc.lines) {
-    marks.push(Decoration.line({ class: 'cv-target-line' }).range(state.doc.line(line).from));
+    const last = Math.min(state.doc.lines, Math.max(line, endLine ?? line));
+    for (let n = line; n <= last; n++) marks.push(Decoration.line({ class: 'cv-target-line' }).range(state.doc.line(n).from));
   }
   return Decoration.set(marks, true);
 }
 
-export function CodeView({ text, language, wrap, line, column, onSelection }: CodeViewProps) {
+export function CodeView({ text, language, wrap, line, endLine, column, onSelection }: CodeViewProps) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const selectionCb = useRef(onSelection);
@@ -61,7 +64,7 @@ export function CodeView({ text, language, wrap, line, column, onSelection }: Co
       EditorState.readOnly.of(true),
       lineNumbers(),
       theme,
-      EditorView.decorations.of(decorations(text, language, line, base)),
+      EditorView.decorations.of(decorations(text, language, line, endLine, base)),
       EditorView.updateListener.of((u) => {
         if (!u.selectionSet || !selectionCb.current) return;
         const r = u.state.selection.main;
@@ -90,7 +93,7 @@ export function CodeView({ text, language, wrap, line, column, onSelection }: Co
       v.destroy();
       view.current = null;
     };
-  }, [text, language, wrap, line, column]);
+  }, [text, language, wrap, line, endLine, column]);
 
   return <div className="cv-host" data-testid="code-view" ref={host} />;
 }

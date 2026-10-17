@@ -5,6 +5,7 @@
 //! | `chat_archive` | maintenance | [`ChatIdArgs`] → [`ChatRecord`] (refused while busy; idempotent; retires the idle worker) |
 //! | `chat_restore` | maintenance | [`ChatIdArgs`] → [`ChatRecord`] (refused in an archived project) |
 //! | `chat_delete` | maintenance | [`ChatIdArgs`] → `null` (archived and idle only; emits `chat_removed`) |
+//! | `chat_fork` | maintenance | [`ChatForkArgs`] → [`ChatRecord`] (see [`crate::fork`]) |
 //! | `chat_mute` | maintenance | [`ChatMuteArgs`] → [`ChatRecord`] (user-only) |
 //! | `attention_address` | maintenance | [`ChatIdArgs`] → `null` (out of the attention groups until new activity) |
 //! | `attention_snooze` | maintenance | [`AttentionSnoozeArgs`] → `null` (out until the time, or new activity) |
@@ -36,6 +37,7 @@ pub fn register(reg: &mut OpRegistry) {
         .blocking("unread_mark", OpClass::Maintenance, unread_mark)
         .blocking("unread_clear", OpClass::Maintenance, unread_clear)
         .blocking("completion_ack", OpClass::Maintenance, completion_ack)
+        .blocking("chat_fork", OpClass::Maintenance, chat_fork)
         .blocking("chat_mute", OpClass::Maintenance, chat_mute)
         .blocking("attention_address", OpClass::Maintenance, attention_address)
         .blocking("attention_snooze", OpClass::Maintenance, attention_snooze);
@@ -216,6 +218,33 @@ fn completion_ack(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         return Err(not_found());
     }
     to_value(&changed(ctx, &a.chat_id)?)
+}
+
+fn chat_fork(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatForkArgs = parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let profile = ctx.services.need::<Profile>()?;
+    let gate = |tx: &Transaction<'_>, p: &str| project_archived(ctx, tx, p);
+    let forked = crate::fork::fork(
+        &db,
+        &profile.path(""),
+        &crate::fork::ForkRequest {
+            source: &a.chat_id,
+            fork_id: &a.fork_id,
+            message_id: a.message_id,
+            side: a.side.unwrap_or(false),
+            excerpt: a.excerpt.as_deref(),
+        },
+        &gate,
+    )
+    .map_err(ApiError::from)?;
+    if !forked.moved.is_empty() {
+        let mut e = helm_ipc::AppEvent::new("sidebar");
+        e.fields
+            .insert("chatIds".into(), serde_json::json!(forked.moved));
+        ctx.events.emit(e);
+    }
+    to_value(&changed(ctx, &forked.chat_id)?)
 }
 
 fn chat_mute(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {

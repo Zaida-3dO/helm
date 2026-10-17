@@ -7,6 +7,7 @@
 
 pub mod registry;
 pub mod schema;
+pub mod tables;
 
 pub use registry::{MigrationRegistry, Step};
 

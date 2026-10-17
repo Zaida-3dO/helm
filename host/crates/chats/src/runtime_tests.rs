@@ -918,6 +918,7 @@ async fn a_restart_continuation_is_sent_once_with_the_native_session() {
         last_leaf_id: None,
         harness_switch_id: None,
         updated_at: 1,
+        fork_of: None,
     }
     .save(&sessions, &chat)
     .unwrap();
@@ -1381,4 +1382,217 @@ async fn a_changed_chat_loses_its_pending_continuation() {
     assert!(h
         .col("SELECT chat_id FROM restart_continuations")
         .is_empty());
+}
+
+/// One finished turn with a reply, on the fake worker.
+async fn finished_turn(h: &H, w: &mut FakeWorker, chat: &str, prompt: &str, mid: &str, text: &str) {
+    h.send(chat, prompt, "default").await;
+    let p = w.expect("prompt").await;
+    ack(w, &p).await;
+    echo(w, p["submissionId"].as_str().unwrap()).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "message_start", "message": {"id": mid, "role": "assistant", "content": []}}))
+        .await;
+    w.emit(json!({"type": "message_end", "message": {"id": mid, "role": "assistant", "content": [{"type": "text", "text": text}], "status": "complete"}}))
+        .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(chat) == "idle").await;
+}
+
+fn texts(h: &H, chat: &str) -> Vec<String> {
+    h.col(&format!(
+        "SELECT role || ':' || text FROM messages WHERE chat_id = '{chat}' AND active = 1 ORDER BY timestamp, id"
+    ))
+}
+
+async fn first_turn(h: &mut H, chat: &str) -> FakeWorker {
+    h.send(chat, "first", "default").await;
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    echo(&w, p["submissionId"].as_str().unwrap()).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    reply(h, &w, "m1", "answer one").await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(chat) == "idle").await;
+    w
+}
+
+/// A whole-chat fork copies the history, ends it with a boundary, is idempotent on the fork
+/// id, and its first launch resumes the source's Claude session as a new one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_whole_chat_fork_copies_history_and_resumes_as_a_new_session() {
+    let mut h = harness();
+    let chat = h.create().await;
+    let _w = first_turn(&mut h, &chat).await;
+    let sessions = h.profile.path("sessions");
+    crate::session_log::ClaudeBinding {
+        native_session_id: Some("native-src".into()),
+        cwd: h.work.to_string_lossy().into_owned(),
+        last_leaf_id: None,
+        harness_switch_id: None,
+        updated_at: 1,
+        fork_of: None,
+    }
+    .save(&sessions, &chat)
+    .unwrap();
+    let fid = uuid::Uuid::new_v4().to_string();
+    let f = h
+        .call("chat_fork", json!({"chatId": chat, "forkId": fid}))
+        .await
+        .unwrap();
+    let fork = f["id"].as_str().unwrap().to_owned();
+    assert_eq!(f["title"], "Fork · first");
+    let again = h
+        .call("chat_fork", json!({"chatId": chat, "forkId": fid}))
+        .await
+        .unwrap();
+    assert_eq!(again["id"], fork.as_str(), "idempotent on the fork id");
+    let clash = h
+        .call(
+            "chat_fork",
+            json!({"chatId": chat, "forkId": fid, "messageId": 1}),
+        )
+        .await
+        .unwrap_err();
+    assert!(clash.message.contains("already in use"));
+    let t = texts(&h, &fork);
+    assert_eq!(
+        t[..2],
+        ["user:first".to_owned(), "assistant:answer one".to_owned()]
+    );
+    assert_eq!(t.last().unwrap(), "context:Forked from first");
+    // The fork's first launch resumes the source's session with --fork-session.
+    h.send(&fork, "carry on", "default").await;
+    let w2 = h.worker().await;
+    assert_eq!(w2.req.resume_session_id.as_deref(), Some("native-src"));
+    assert!(w2.req.fork_session);
+}
+
+/// A message fork stops at the chosen reply, starts a fresh session, and its first prompt
+/// carries the history up to there, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_fork_is_cut_at_the_reply_and_carries_it_once() {
+    let mut h = harness();
+    let chat = h.create().await;
+    let mut w = first_turn(&mut h, &chat).await;
+    finished_turn(&h, &mut w, &chat, "second", "m2", "answer two").await;
+    let m1: i64 = h.col("SELECT id FROM messages WHERE source_key LIKE 'm:%:m1'")[0]
+        .parse()
+        .unwrap();
+    let f = h
+        .call(
+            "chat_fork",
+            json!({"chatId": chat, "forkId": uuid::Uuid::new_v4().to_string(), "messageId": m1}),
+        )
+        .await
+        .unwrap();
+    let fork = f["id"].as_str().unwrap().to_owned();
+    assert_eq!(f["draft"], "", "a message fork starts with an empty draft");
+    let t = texts(&h, &fork);
+    assert!(t.contains(&"assistant:answer one".to_owned()));
+    assert!(
+        !t.iter().any(|x| x.contains("two")),
+        "nothing after the reply"
+    );
+    h.send(&fork, "go on", "default").await;
+    let mut w2 = h.worker().await;
+    assert_eq!(w2.req.resume_session_id, None, "a fresh session");
+    w2.ready().await;
+    let p = w2.expect("prompt").await;
+    let carried = p["context"].as_str().unwrap();
+    assert!(carried.contains("User: first") && carried.contains("Assistant: answer one"));
+    assert!(!carried.contains("answer two"));
+    ack(&w2, &p).await;
+    w2.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("fork idle", |h| h.status(&fork) == "idle").await;
+    h.send(&fork, "next", "default").await;
+    let p = w2.expect("prompt").await;
+    assert!(p.get("context").is_none(), "carried once");
+    // A user row is not a fork point.
+    let u: i64 = h.col("SELECT id FROM messages WHERE role = 'user' LIMIT 1")[0]
+        .parse()
+        .unwrap();
+    let bad = h
+        .call(
+            "chat_fork",
+            json!({"chatId": chat, "forkId": uuid::Uuid::new_v4().to_string(), "messageId": u}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(bad.code, "refused");
+}
+
+/// Placement and creation: a fork lands right below its source and later rows shift; a
+/// side chat quotes its excerpt, is hidden from the list and is never placed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forks_are_placed_below_the_source_and_side_chats_stay_hidden() {
+    let mut h = harness();
+    let a = h.create().await;
+    let _w = first_turn(&mut h, &a).await;
+    let b = h.create().await;
+    h.db.write(|tx| {
+        tx.execute("UPDATE chats SET position = 0 WHERE id = ?1", [&a])?;
+        tx.execute("UPDATE chats SET position = 1 WHERE id = ?1", [&b])
+    })
+    .unwrap();
+    let f = h
+        .call(
+            "chat_fork",
+            json!({"chatId": a, "forkId": uuid::Uuid::new_v4().to_string()}),
+        )
+        .await
+        .unwrap();
+    let fork = f["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        h.col("SELECT id FROM chats WHERE position IS NOT NULL ORDER BY position"),
+        [a.clone(), fork.clone(), b.clone()]
+    );
+    let sidebar = h.events("sidebar");
+    assert_eq!(sidebar.last().unwrap()["chatIds"], json!([b, fork]));
+    let mid: i64 = h.col(&format!(
+        "SELECT id FROM messages WHERE chat_id = '{a}' AND source_key LIKE 'm:%:m1'"
+    ))[0]
+        .parse()
+        .unwrap();
+    let long = "x".repeat(16_001);
+    let bad = h
+        .call(
+            "chat_fork",
+            json!({"chatId": a, "forkId": uuid::Uuid::new_v4().to_string(), "messageId": mid, "side": true, "excerpt": long}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(bad.code, "bad_args");
+    let side = h
+        .call(
+            "chat_fork",
+            json!({"chatId": a, "forkId": uuid::Uuid::new_v4().to_string(), "messageId": mid, "side": true, "excerpt": "answer one"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(side["sideSourceId"], a.as_str());
+    assert_eq!(side["draft"], "Regarding this excerpt:\n\n> answer one\n\n");
+    assert_eq!(side["title"], "Side chat · first");
+    let list = h.call("chat_list", json!({})).await.unwrap();
+    assert!(
+        !list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == side["id"]),
+        "hidden until promoted"
+    );
+    let refused = h
+        .call(
+            "chat_fork",
+            json!({"chatId": side["id"], "forkId": uuid::Uuid::new_v4().to_string()}),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.message.contains("Promote"));
 }

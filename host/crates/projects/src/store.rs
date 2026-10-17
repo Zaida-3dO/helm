@@ -338,7 +338,12 @@ fn project_height(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<usize> {
 /// self-nesting, cycles and anything that would put the project or its subtree past depth index 2.
 pub fn set_parent(tx: &Transaction<'_>, id: &str, parent: Option<&str>) -> Res<()> {
     let Some(parent) = parent else {
+        // Moving to the top level is itself a local edit: it wins over any board parent later.
         tx.execute("DELETE FROM project_parents WHERE project_id = ?1", [id])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO project_top_level(project_id) VALUES (?1)",
+            [id],
+        )?;
         return Ok(());
     };
     if parent == id {
@@ -359,6 +364,7 @@ pub fn set_parent(tx: &Transaction<'_>, id: &str, parent: Option<&str>) -> Res<(
     if depth + project_height(tx, id)? > MAX_DEPTH {
         return Err(bad("Projects nest at most three levels deep."));
     }
+    tx.execute("DELETE FROM project_top_level WHERE project_id = ?1", [id])?;
     tx.execute(
         "INSERT INTO project_parents(project_id, parent_id, source) VALUES (?1, ?2, 'local')
          ON CONFLICT(project_id) DO UPDATE SET parent_id = excluded.parent_id, source = 'local'",
@@ -599,8 +605,12 @@ pub fn archive_project(tx: &Transaction<'_>, id: &str) -> Res<Vec<String>> {
         let rows = st.query_map([id], |r| r.get(0))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
+    let now = helm_core::now_ms();
     for c in &ids {
-        tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [c])?;
+        // The chats crate's own archive step (busy chats were refused above).
+        if let Err(r) = helm_chats::archive::archive_in_tx(tx, c, now)? {
+            return Err(Refusal::Refused(r.message));
+        }
         tx.execute(
             "INSERT OR IGNORE INTO project_archive_members(project_id, chat_id) VALUES (?1, ?2)",
             [id, c],
@@ -637,8 +647,11 @@ pub fn restore_project(tx: &Transaction<'_>, id: &str) -> Res<Vec<String>> {
         let rows = st.query_map([id], |r| r.get(0))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
+    let now = helm_core::now_ms();
     for c in &ids {
-        tx.execute("UPDATE chats SET archived = 0 WHERE id = ?1", [c])?;
+        if let Err(r) = helm_chats::archive::restore_in_tx(tx, c, now)? {
+            return Err(Refusal::Refused(r.message));
+        }
     }
     tx.execute(
         "DELETE FROM project_archive_members WHERE project_id = ?1",

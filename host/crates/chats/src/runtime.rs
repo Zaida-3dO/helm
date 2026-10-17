@@ -87,6 +87,8 @@ pub struct SpawnRequest {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub resume_session_id: Option<String>,
+    /// Resume `resume_session_id` as a new session (`--fork-session`): a fork's first launch.
+    pub fork_session: bool,
     pub send_behavior: SendBehavior,
 }
 
@@ -189,6 +191,7 @@ impl Spawner for ProcessSpawner {
             req.resume_session_id.clone(),
         );
         claude.append_system_prompt = contrib::system_prompt(&extras);
+        claude.fork_session = req.fork_session;
         let launch = Launch {
             chat_id: req.chat_id.clone(),
             harness: "claude",

@@ -9,6 +9,7 @@
 
 mod registrations;
 mod shell;
+mod tray;
 
 use helm_core::db::{Database, DbError, MigrationRegistry};
 use helm_core::lifecycle::{PlatformDialogs, QuitCoordinator, Shell, Workers};
@@ -121,12 +122,21 @@ fn run_app(
 ) {
     let debug = cfg!(debug_assertions);
     let app = tauri::Builder::default()
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| tray::on_shortcut(app, event.state()))
+                .build(),
+        )
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![api])
         .setup(move |app| {
             let handle = app.handle().clone();
             let shell = Arc::new(shell::TauriShell::new(handle.clone()));
-            let events: Arc<dyn helm_ipc::EventSink> =
-                Arc::new(shell::TauriEvents::new(handle.clone()));
+            // Events pass the shell service on their way out.
+            let tapped = Arc::new(tray::TappedEvents::new(Arc::new(shell::TauriEvents::new(
+                handle.clone(),
+            ))));
+            let events: Arc<dyn helm_ipc::EventSink> = tapped.clone();
             let worker_source = helm_workers::stage::default_source(
                 debug,
                 app.path().resource_dir().ok().as_deref(),
@@ -165,6 +175,13 @@ fn run_app(
             services.insert(Arc::new(Shell(shell.clone())));
             services.insert(Arc::new(platform.clone()));
             registrations::services(&mut services, &events);
+            let shell_svc = services.get::<helm_shell::ShellService>();
+            if let Some(t) = services.get::<helm_terminal::TerminalManager>() {
+                app.manage(t);
+            }
+            if let Some(svc) = &shell_svc {
+                tapped.attach(svc.clone());
+            }
             let ctx = OpCtx {
                 services: Arc::new(services),
                 events,
@@ -173,6 +190,20 @@ fn run_app(
             app.manage(dispatcher);
 
             shell::build_main_window(app, &profile, debug)?;
+            // The tray, hotkey, badge and keep-awake start from the launch attention summary.
+            if let Some(svc) = shell_svc {
+                let host = tray::TauriShellHost::new(handle.clone());
+                app.manage(host.clone());
+                app.manage(svc.clone());
+                if let Err(e) = host.install(svc.clone()) {
+                    log::error!("tray icon: {e}");
+                }
+                match runtime.attention() {
+                    Ok(s) => svc.on_summary(s, true),
+                    Err(e) => log::warn!("launch attention summary: {e}"),
+                }
+                svc.attach(host);
+            }
             // Chats that were working when Helm last closed get their one continuation.
             runtime.start_continuations();
 
@@ -202,7 +233,17 @@ fn run_app(
         .build(tauri::generate_context!())
         .expect("failed to build the Tauri app");
 
-    app.run(|_app, event| {
+    app.run(|app, event| {
+        if let tauri::RunEvent::Exit = event {
+            // Release keep-awake and never take it again.
+            if let Some(svc) = app.try_state::<Arc<helm_shell::ShellService>>() {
+                svc.shutdown();
+            }
+            // Every terminal's tree ends with the app.
+            if let Some(t) = app.try_state::<Arc<helm_terminal::TerminalManager>>() {
+                t.shutdown();
+            }
+        }
         if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
             // No code means "the last window went away", which never quits Helm: only an explicit
             // quit (which passes a code) does.
@@ -225,8 +266,42 @@ mod tests {
         assert!(ops.contains("app_info"));
         assert!(ops.contains("quit_request"));
         assert!(ops.contains("chat_send"), "the chats crate is registered");
+        assert!(
+            ops.contains("shell_settings_get"),
+            "the shell crate is registered"
+        );
         let mut m = MigrationRegistry::new();
         registrations::migrations(&mut m);
+    }
+
+    /// Every table any registered crate creates has a class.
+    #[test]
+    fn every_table_is_classified() {
+        let dir = std::env::temp_dir().join(format!("helm-tables-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut m = MigrationRegistry::new();
+        registrations::migrations(&mut m);
+        let db = Database::open(&dir.join("t.sqlite3"), &m).unwrap();
+        let names: Vec<String> = db
+            .snapshot(|tx| {
+                let mut st = tx.prepare(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                )?;
+                let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap();
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+        let missing: Vec<&String> = names
+            .iter()
+            .filter(|n| helm_core::db::tables::table_class(n).is_none())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "unclassified tables (add a line to helm_core::db::tables::CLASSIFIED_TABLES): {missing:?}"
+        );
+        assert!(names.len() >= 6, "the migrations ran: {names:?}");
     }
 
     #[test]

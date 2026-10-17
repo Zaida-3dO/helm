@@ -585,3 +585,206 @@ fn chat_nesting_stops_at_depth_index_2_and_refuses_cycles() {
     nest(&c, None).unwrap();
     assert_eq!(row(&db, &c).depth, 0);
 }
+
+// ---- SB2/SB3/SB4 the read-only mirror --------------------------------------------------------
+
+use crate::board::{apply_sync, read_state, record_result};
+use helm_standup::BoardProject;
+
+const BOARD: &str = "https://board.example";
+
+fn bp(id: &str, title: &str, last: &str) -> BoardProject {
+    BoardProject {
+        id: id.into(),
+        title: title.into(),
+        headline: None,
+        area: Some("desktop-app".into()),
+        repo: None,
+        priority: Some("p2".into()),
+        last_activity: Some(last.into()),
+    }
+}
+
+fn sync(db: &Database, projects: &[BoardProject]) {
+    db.write(|tx| apply_sync(tx, BOARD, projects, 5)).unwrap();
+}
+
+fn by_board_id(db: &Database, board_id: &str) -> ProjectNode {
+    db.snapshot(|tx| store::list_projects(tx, true))
+        .unwrap()
+        .into_iter()
+        .find(|p| {
+            p.board
+                .as_ref()
+                .is_some_and(|b| b.board_project_id == board_id)
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_sync_mirrors_board_projects_at_the_top_level_and_updates_them() {
+    let (_d, db) = temp_db();
+    sync(
+        &db,
+        &[
+            bp("a", "Alpha", "2026-10-17T10:00:00Z"),
+            bp("b", "Beta", "2026-10-17T10:00:00Z"),
+        ],
+    );
+    let a = by_board_id(&db, "a");
+    assert_eq!(a.kind, ProjectKind::Board);
+    assert_eq!(a.name, "Alpha");
+    assert!(a.parent_id.is_none());
+    assert_eq!(
+        db.snapshot(|tx| read_state(tx, true))
+            .unwrap()
+            .project_count,
+        2
+    );
+    sync(
+        &db,
+        &[
+            bp("a", "Alpha 2", "2026-10-17T11:00:00Z"),
+            bp("b", "Beta", "2026-10-17T10:00:00Z"),
+        ],
+    );
+    assert_eq!(by_board_id(&db, "a").name, "Alpha 2");
+    assert_eq!(
+        by_board_id(&db, "a").id,
+        a.id,
+        "the same local project, not a new one"
+    );
+}
+
+#[test]
+fn an_older_last_activity_is_ignored() {
+    let (_d, db) = temp_db();
+    sync(&db, &[bp("a", "New title", "2026-10-17T12:00:00Z")]);
+    sync(&db, &[bp("a", "Old title", "2026-10-17T09:00:00Z")]);
+    assert_eq!(by_board_id(&db, "a").name, "New title");
+}
+
+#[test]
+fn a_vanished_project_goes_stale_and_its_chats_stay() {
+    let (_d, db) = temp_db();
+    sync(
+        &db,
+        &[
+            bp("a", "Alpha", "2026-10-17T10:00:00Z"),
+            bp("b", "Beta", "2026-10-17T10:00:00Z"),
+        ],
+    );
+    let a = by_board_id(&db, "a");
+    let c = chat_in(&db, "C:/w/app", 1);
+    organize(
+        &db,
+        ChatOrganizeArgs {
+            chat_id: c.clone(),
+            group_project_id: Some(a.id.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    sync(&db, &[bp("b", "Beta", "2026-10-17T10:00:00Z")]);
+    let a2 = by_board_id(&db, "a");
+    assert!(a2.board.unwrap().stale);
+    assert_eq!(
+        row(&db, &c).group_project_id,
+        a.id,
+        "the chat stays under it"
+    );
+    assert_eq!(
+        db.snapshot(|tx| read_state(tx, true))
+            .unwrap()
+            .project_count,
+        1
+    );
+    // It comes back when the board lists it again.
+    sync(&db, &[bp("a", "Alpha", "2026-10-17T10:00:00Z")]);
+    assert!(!by_board_id(&db, "a").board.unwrap().stale);
+}
+
+#[test]
+fn local_edits_and_a_three_level_local_tree_survive_a_resync() {
+    let (_d, db) = temp_db();
+    let all = [
+        bp("a", "Alpha", "2026-10-17T10:00:00Z"),
+        bp("b", "Beta", "2026-10-17T10:00:00Z"),
+        bp("c", "Gamma", "2026-10-17T10:00:00Z"),
+    ];
+    sync(&db, &all);
+    let (a, b, c) = (
+        by_board_id(&db, "a").id,
+        by_board_id(&db, "b").id,
+        by_board_id(&db, "c").id,
+    );
+    set_parent(&db, &b, Some(&a)).unwrap();
+    set_parent(&db, &c, Some(&b)).unwrap();
+    let mut e = upd(&a, &db);
+    e.name = Some("My alpha".into());
+    e.icon = Some(Some("🚀".into()));
+    e.colour = Some(Some("teal".into()));
+    e.pinned = Some(true);
+    e.collapsed = Some(true);
+    update(&db, e).unwrap();
+    // The board renames it meanwhile.
+    sync(
+        &db,
+        &[
+            bp("a", "Alpha renamed", "2026-10-17T11:00:00Z"),
+            all[1].clone(),
+            all[2].clone(),
+        ],
+    );
+    let n = node(&db, &a);
+    assert_eq!(n.name, "My alpha", "the local rename wins");
+    let board = n.board.clone().unwrap();
+    assert_eq!(board.title, "Alpha renamed", "the board title is mirrored");
+    assert!(board.edited_locally);
+    assert_eq!(
+        (
+            n.icon.as_deref(),
+            n.colour.as_deref(),
+            n.pinned,
+            n.collapsed
+        ),
+        (Some("🚀"), Some("teal"), true, true)
+    );
+    assert_eq!(node(&db, &b).parent_id.as_deref(), Some(a.as_str()));
+    assert_eq!(node(&db, &c).parent_id.as_deref(), Some(b.as_str()));
+    // Moving one to the top level is recorded as a local edit.
+    set_parent(&db, &c, None).unwrap();
+    let top: i64 = db
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT count(*) FROM project_top_level WHERE project_id = ?1",
+                [&c],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(top, 1);
+}
+
+#[test]
+fn a_failed_sync_keeps_the_last_good_time_and_shows_the_error() {
+    let (_d, db) = temp_db();
+    db.write(|tx| record_result(tx, 100, None)).unwrap();
+    db.write(|tx| {
+        record_result(
+            tx,
+            200,
+            Some("Couldn't reach Agent Standup; showing the last sync."),
+        )
+    })
+    .unwrap();
+    let s = db.snapshot(|tx| read_state(tx, true)).unwrap();
+    assert_eq!(s.last_sync_at, Some(100));
+    assert_eq!(
+        s.error.as_deref(),
+        Some("Couldn't reach Agent Standup; showing the last sync.")
+    );
+    db.write(|tx| record_result(tx, 300, None)).unwrap();
+    let s = db.snapshot(|tx| read_state(tx, true)).unwrap();
+    assert_eq!((s.last_sync_at, s.error), (Some(300), None));
+}

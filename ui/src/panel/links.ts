@@ -9,6 +9,7 @@
 
 import type { LinkTarget } from '../markdown/links.ts';
 import { driveForm, isRemoteOrDevicePath } from '../markdown/paths.ts';
+import { splitPathSuffix } from '../markdown/pathrefs.ts';
 
 export const MAX_LINK_BYTES = 8 * 1024;
 
@@ -17,7 +18,9 @@ const CONTROL = /[\u0000-\u001f\u007f]/;
 
 export type GateResult =
   | { action: 'external'; url: string }
-  | { action: 'file'; path: string; line?: number; column?: number }
+  | { action: 'file'; path: string; line?: number; endLine?: number; column?: number }
+  /** A path written in a reply that the host must resolve (`~`, chat-relative, Git Bash `/c/`). */
+  | { action: 'path'; path: string; line?: number; endLine?: number; column?: number }
   | { action: 'vault'; note: string; heading?: string; block?: string; vault?: string }
   | { action: 'anchor'; heading?: string; block?: string }
   | { action: 'refuse'; reason: string };
@@ -122,6 +125,22 @@ export function gateTarget(target: unknown): GateResult {
     return refuse(REFUSED.relative);
   }
 
+  if (t.kind === 'path') {
+    const raw = typeof t.href === 'string' ? t.href.trim() : '';
+    if (!raw) return refuse(REFUSED.empty);
+    if (CONTROL.test(raw) || new TextEncoder().encode(raw).length > MAX_LINK_BYTES) return refuse(REFUSED.malformed);
+    if (isRemoteOrDevicePath(raw)) return refuse(REFUSED.share);
+    const { path, line, endLine, column } = splitPathSuffix(raw);
+    if (isRemoteOrDevicePath(path)) return refuse(REFUSED.share);
+    const drive = driveForm(path);
+    if (drive === 'relative') return refuse(REFUSED.driveRelative);
+    const out: { path: string; line?: number; endLine?: number; column?: number } = { path };
+    if (line !== undefined) out.line = line;
+    if (endLine !== undefined) out.endLine = endLine;
+    if (column !== undefined) out.column = column;
+    return drive === 'absolute' ? { action: 'file', ...out } : { action: 'path', ...out };
+  }
+
   if (t.kind === 'vault') {
     const note = typeof t.note === 'string' ? t.note : '';
     const heading = typeof t.heading === 'string' && t.heading ? t.heading : undefined;
@@ -156,6 +175,7 @@ export interface LinkContext {
 }
 
 type FileRoute = (req: Extract<GateResult, { action: 'file' }>, ctx: LinkContext) => Promise<boolean> | boolean;
+type PathRoute = (req: Extract<GateResult, { action: 'path' }>, ctx: LinkContext) => Promise<boolean | string> | boolean | string;
 type VaultRoute = (
   req: Extract<GateResult, { action: 'vault' | 'anchor' }>,
   ctx: LinkContext,
@@ -166,7 +186,7 @@ interface LinkDeps {
   notify: (message: string) => void;
 }
 
-const routes: { file?: FileRoute; vault?: VaultRoute } = {};
+const routes: { file?: FileRoute; vault?: VaultRoute; path?: PathRoute } = {};
 let deps: LinkDeps = {
   openExternal: () => Promise.reject(new Error('The link handler is not connected yet.')),
   notify: (m) => console.warn(m),
@@ -180,7 +200,8 @@ export function configureLinks(next: Partial<LinkDeps>): void {
 /** The file viewer and the vault doc tab register where their links go. Returns an unregister. */
 export function registerLinkRoute(kind: 'file', route: FileRoute): () => void;
 export function registerLinkRoute(kind: 'vault', route: VaultRoute): () => void;
-export function registerLinkRoute(kind: 'file' | 'vault', route: FileRoute | VaultRoute): () => void {
+export function registerLinkRoute(kind: 'path', route: PathRoute): () => void;
+export function registerLinkRoute(kind: 'file' | 'vault' | 'path', route: FileRoute | VaultRoute | PathRoute): () => void {
   (routes as Record<string, unknown>)[kind] = route;
   return () => {
     if ((routes as Record<string, unknown>)[kind] === route) delete (routes as Record<string, unknown>)[kind];
@@ -210,6 +231,13 @@ export async function handleLink(target: LinkTarget, ctx: LinkContext): Promise<
         const route = routes.file;
         if (!route) return fail(NOT_AVAILABLE);
         return (await route(gate, ctx)) ? { ok: true, action: 'file' } : fail('The file could not be opened.');
+      }
+      case 'path': {
+        const route = routes.path;
+        if (!route) return fail(NOT_AVAILABLE);
+        const r = await route(gate, ctx);
+        if (r === true) return { ok: true, action: 'path' };
+        return fail(typeof r === 'string' ? r : 'The file could not be opened.');
       }
       case 'vault':
       case 'anchor': {

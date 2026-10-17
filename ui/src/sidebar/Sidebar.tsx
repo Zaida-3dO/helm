@@ -6,13 +6,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
 import type { ChatOps } from '../api/ops.ts';
-import { projectOps, type ProjectNode, type SidebarRow, type SidebarView } from '../api/projects.ts';
+import { projectOps, type BoardSyncState, type ProjectNode, type SidebarRow, type SidebarView } from '../api/projects.ts';
 import type { ChatStore } from '../state/store.ts';
 import { SETTINGS_DIALOG } from '../settings/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { SidebarData, errorText } from './data.ts';
 import { buildList, chatAncestors, type ListItem } from './model.ts';
 import { ATTENTION_LABEL, age, trailingIndicator } from './status.ts';
+import { startSyncTriggers, syncDisplay, type SyncHost } from './sync.ts';
 import { layout, visibleRange } from './virtual.ts';
 import './sidebar.css';
 
@@ -73,6 +74,27 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   useEffect(() => {
     if (!snap.paging[view].started) void data.page(view);
   }, [view, data, snap.paging]);
+
+  // Agent Standup sync triggers. A failure only shows in the status line.
+  const runSync = useCallback(() => {
+    pops
+      .sync()
+      .then((s) => {
+        data.setSync(s);
+        void data.loadProjects();
+      })
+      .catch(() => undefined);
+  }, [pops, data]);
+  useEffect(
+    () =>
+      startSyncTriggers({
+        sync: runSync,
+        state: () => data.snapshot.sync,
+        host: window as unknown as SyncHost,
+        visible: () => document.visibilityState === 'visible',
+      }),
+    [runSync, data],
+  );
 
   // The open chat's ancestors expand so it is visible.
   useEffect(() => {
@@ -169,6 +191,19 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const lay = useMemo(() => layout(heights), [heights]);
   const [start, end] = visibleRange(lay, heights, scrollTop, viewport);
 
+  // After a new chat or any selection, the open chat's row scrolls into view if it is out of view,
+  // so it is mounted and findable.
+  const selectedIndex = selected ? items.findIndex((i) => i.kind === 'chat' && i.row.chatId === selected) : -1;
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el || selectedIndex < 0) return;
+    const top = lay.offsets[selectedIndex]!;
+    const bottom = top + heights[selectedIndex]!;
+    if (top < el.scrollTop) el.scrollTop = top;
+    else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight;
+    // Only when the selection or its position changes, not on every scroll.
+  }, [selected, selectedIndex]);
+
   return (
     <div className="sb-root" data-view={view} data-compact={compact ? 'true' : 'false'}>
       <div className="sb-brand">Helm</div>
@@ -216,6 +251,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           </div>
         )}
       </div>
+      <BoardSyncLine state={snap.sync} now={now} onRefresh={runSync} />
       <div
         className="sb-list"
         ref={listRef}
@@ -292,6 +328,30 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       />
     );
   }
+}
+
+function BoardSyncLine({ state, now, onRefresh }: { state: BoardSyncState | null; now: number; onRefresh: () => void }) {
+  const d = syncDisplay(state);
+  const text =
+    d === 'syncing'
+      ? 'Syncing Agent Standup…'
+      : d === 'error'
+        ? state?.error
+        : d === 'ok' && state?.lastSyncAt
+          ? `Agent Standup synced ${age(state.lastSyncAt, now)}${age(state.lastSyncAt, now) === 'now' ? '' : ' ago'}`
+          : null;
+  return (
+    <div className="sb-sync" data-testid="board-sync" data-state={d} hidden={d === 'unconfigured' || d === 'never'}>
+      <span className="sb-sync-text" role="status">
+        {text}
+      </span>
+      {d !== 'syncing' && (
+        <button type="button" className="sb-sync-refresh" onClick={onRefresh}>
+          Refresh
+        </button>
+      )}
+    </div>
+  );
 }
 
 function GroupHeader({

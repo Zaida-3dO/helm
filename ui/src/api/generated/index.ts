@@ -10,6 +10,7 @@ export type { Capabilities } from './Capabilities.ts';
 export type { CatalogueSource } from './CatalogueSource.ts';
 export type { ChatCreateArgs } from './ChatCreateArgs.ts';
 export type { ChatEvent } from './ChatEvent.ts';
+export type { ChatForkArgs } from './ChatForkArgs.ts';
 export type { ChatGetResult } from './ChatGetResult.ts';
 export type { ChatIdArgs } from './ChatIdArgs.ts';
 export type { ChatMuteArgs } from './ChatMuteArgs.ts';

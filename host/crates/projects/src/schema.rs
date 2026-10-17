@@ -9,10 +9,13 @@
 //! | `chat_groups` | the group a chat is shown under when it is not its folder project |
 //! | `project_archive_members` | exactly which chats a project archive archived, so restore brings back only those |
 //! | `board_projects` | the read-only Agent Standup mirror: one row per board project |
-//! | `board_sync_state` | the last sync's time, error and count (one row) |
+//! | `board_sync_state` | the last sync's time and error (one row) |
+//! | `board_connection` | the Agent Standup address (one row); the token is in the credential store |
+//! | `project_top_level` | projects the user moved to the top level, so a board parent never re-nests them |
 //!
-//! Two triggers make an archived project refuse work at the database: no new
-//! chat may be inserted into it, and none of its chats may be un-archived, until it is restored.
+//! Three triggers make an archived project refuse work at the database: no new
+//! chat may be inserted into it, none of its chats may be un-archived, and no chat may be grouped
+//! under it, until it is restored.
 
 use helm_core::db::MigrationRegistry;
 use rusqlite::Transaction;
@@ -71,6 +74,13 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              last_sync_at  INTEGER,
              error         TEXT,
              project_count INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE IF NOT EXISTS board_connection (
+             id   INTEGER PRIMARY KEY CHECK (id = 1),
+             url  TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS project_top_level (
+             project_id  TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE
          );
          CREATE INDEX IF NOT EXISTS chats_sidebar_order ON chats(archived, pinned DESC, position, created_at DESC, id);
          CREATE TRIGGER IF NOT EXISTS projects_archived_refuse_insert

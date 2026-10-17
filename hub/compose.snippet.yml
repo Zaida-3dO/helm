@@ -1,0 +1,20 @@
+# Service block for the home server's MCP compose group. The host port and
+# the memory-folder path are placeholders. HUB_TOKENS
+# (client:token[:ro|rw],...) lives in the env file, which is never committed.
+services:
+  helm-hub:
+    build: ./helm-hub
+    image: helm-hub:latest
+    container_name: helm-hub
+    restart: unless-stopped
+    user: "1000:100"
+    env_file: ./helm-hub/.env # HUB_TOKENS
+    environment:
+      - TZ=Europe/London
+    volumes:
+      - ./helm-hub/data:/data # hub.db (SQLite, WAL)
+      - /path/to/memory-folder:/mnt/memory:ro # source for `helm-hub import`
+    ports:
+      - "<host-port>:8000" # LAN and VPN only; never behind a public proxy
+    mem_limit: 64m
+    cpus: 0.5

@@ -17,6 +17,7 @@
 //! | [`archive`] | archive and restore inside a caller's transaction |
 //! | [`attention`] | the attention summary behind the badge, tray and row marks |
 //! | [`delete`] | hard delete and its batched, retried file cleanup |
+//! | [`fork`] | forks and side-chat creation |
 //! | [`manage`] | archive, restore, delete, unread marks and completion acks |
 //! | [`seams`] | traits other crates implement (panel context, project gate) |
 //! | [`search_source`] | the searchable message text the search crate indexes |
@@ -28,6 +29,7 @@ pub mod bindings;
 pub mod catalogue;
 pub mod clock;
 pub mod delete;
+pub mod fork;
 pub mod manage;
 pub mod ops;
 pub mod runtime;

@@ -14,6 +14,8 @@ import { dirname, displayPath, joinPath, splitSegments } from './paths.ts';
 export interface Location {
   path: string;
   line?: number;
+  /** The last line of a linked range. */
+  endLine?: number;
   column?: number;
 }
 
@@ -152,10 +154,11 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
       let rel: string | null = null;
       if (t.kind === 'url' && t.href && relative(t.href)) rel = t.href;
       else if (t.kind === 'vault' && !t.vault && t.note && relative(t.note)) rel = `${t.note}.md`;
+      else if (t.kind === 'path' && t.href && relative(t.href)) rel = t.href;
       if (base && rel) {
-        const gate = gateTarget({ kind: 'url', href: joinPath(base, rel) });
+        const gate = gateTarget({ kind: 'path', href: joinPath(base, rel) });
         if (gate.action === 'file') {
-          go({ path: gate.path, line: gate.line, column: gate.column });
+          go({ path: gate.path, line: gate.line, endLine: gate.endLine, column: gate.column });
           return;
         }
       }
@@ -239,7 +242,12 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
           </span>
         ))}
       </nav>
-      {loc.line ? <span className="fv-line">Line {loc.line}{loc.column ? `, column ${loc.column}` : ''}</span> : null}
+      {loc.line ? (
+        <span className="fv-line">
+          {loc.endLine && loc.endLine > loc.line ? `Lines ${loc.line}–${loc.endLine}` : `Line ${loc.line}`}
+          {loc.column ? `, column ${loc.column}` : ''}
+        </span>
+      ) : null}
     </div>
   );
 
@@ -312,7 +320,7 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
     );
   } else {
     body = (
-      <CodeView text={view.text ?? ''} language={view.language === 'markdown' ? 'markdown' : view.language} wrap={wrap} line={loc.line} column={loc.column} />
+      <CodeView text={view.text ?? ''} language={view.language} wrap={wrap} line={loc.line} endLine={loc.endLine} column={loc.column} />
     );
   }
 

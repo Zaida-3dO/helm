@@ -7,7 +7,7 @@
     "ui",
     "worker",
     "fakes",
-    "helpers/*",
+    "helpers",
     "checks"
   ],
   "engines": {

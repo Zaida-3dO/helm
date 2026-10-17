@@ -464,6 +464,7 @@ pub(crate) mod tests {
             ("unread_mark", OpClass::Maintenance),
             ("unread_clear", OpClass::Maintenance),
             ("completion_ack", OpClass::Maintenance),
+            ("chat_fork", OpClass::Maintenance),
             ("chat_mute", OpClass::Maintenance),
             ("attention_address", OpClass::Maintenance),
             ("attention_snooze", OpClass::Maintenance),

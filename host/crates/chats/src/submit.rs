@@ -283,6 +283,16 @@ pub fn chat_send(
                     params![sid, block.text],
                 )?;
             }
+            // The fallback title: the first non-blank line, at most 72
+            // characters, replacing only "New chat" and never a manual title.
+            if let Some(line) = a.text.lines().map(str::trim).find(|l| !l.is_empty()) {
+                let fallback: String = line.chars().take(store::FALLBACK_TITLE_CHARS).collect();
+                tx.execute(
+                    "UPDATE chats SET title = ?1 WHERE id = ?2 AND title = ?3
+                       AND NOT EXISTS(SELECT 1 FROM chat_titles t WHERE t.chat_id = ?2 AND t.state = 'manual')",
+                    params![fallback, a.chat_id, store::DEFAULT_TITLE],
+                )?;
+            }
             // Clear the draft unless the composer has saved a newer one meanwhile. A send from a
             // button, a notification or a quick reply never touches the draft.
             if origin == SendOrigin::Composer {

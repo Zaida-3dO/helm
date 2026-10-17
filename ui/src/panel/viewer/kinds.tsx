@@ -12,6 +12,7 @@ import { openInPanel, panelStore, registerPanelKind, registerPanelSlot } from '.
 import type { TabContext } from '../registry.ts';
 import { FileViewer } from './FileViewer.tsx';
 import type { Location } from './FileViewer.tsx';
+import { useLayer } from '../../ui/index.ts';
 import { basename, displayPath, pathKey } from './paths.ts';
 
 interface FileTabData extends Location {
@@ -33,7 +34,10 @@ function validLocalPath(p: unknown): p is string {
 
 function FileTabBody({ tab, ctx }: { tab: PanelTab; ctx: TabContext }) {
   const data = tab.data as FileTabData;
-  const start = useMemo<Location>(() => ({ path: data.path, line: data.line, column: data.column }), [data.path, data.line, data.column]);
+  const start = useMemo<Location>(
+    () => ({ path: data.path, line: data.line, endLine: data.endLine, column: data.column }),
+    [data.path, data.line, data.endLine, data.column],
+  );
   const onLocation = useCallback(
     (loc: Location, view: FileView | null) => {
       const d = tab.data as FileTabData;
@@ -122,11 +126,31 @@ registerLinkRoute('file', (req, ctx) => {
   const path = displayPath(req.path);
   const data: FileTabData = { path };
   if (req.line) data.line = req.line;
+  if (req.endLine) data.endLine = req.endLine;
   if (req.column) data.column = req.column;
   if (!openInPanel('file', pathKey(path), data, { intent: 'user', chatId: ctx.chatId })) {
-    panelStore.openModal(path, { line: req.line, column: req.column, chatId: ctx.chatId });
+    panelStore.openModal(path, { line: req.line, endLine: req.endLine, column: req.column, chatId: ctx.chatId });
   }
   return true;
+});
+
+/** Paths written in replies: the host resolves `~`, chat-relative and `/c/` forms, then they open
+ *  like any file link. A missing path is explained by the host's message. */
+registerLinkRoute('path', async (req, ctx) => {
+  try {
+    const r = await ops().pathResolve(req.path, ctx.chatId);
+    const path = displayPath(r.path);
+    const data: FileTabData = { path };
+    if (r.kind === 'file' && req.line) data.line = req.line;
+    if (r.kind === 'file' && req.endLine) data.endLine = req.endLine;
+    if (r.kind === 'file' && req.column) data.column = req.column;
+    if (!openInPanel('file', pathKey(path), data, { intent: 'user', chatId: ctx.chatId })) {
+      panelStore.openModal(path, { line: data.line, endLine: data.endLine, column: data.column, chatId: ctx.chatId });
+    }
+    return true;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
 });
 
 /** The Inspector's Files slot: the chat's project folder, one level at a time. */
@@ -162,22 +186,12 @@ registerPanelSlot('files', { title: 'Files', render: ({ chatId, visible }) => <F
 export function ViewerModal() {
   const modal = panelStore.modal;
   const start = useMemo<Location | null>(
-    () => (modal ? { path: modal.path, line: modal.line, column: modal.column } : null),
+    () => (modal ? { path: modal.path, line: modal.line, endLine: modal.endLine, column: modal.column } : null),
     // A new nonce is a new open, even of the same path.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [modal?.nonce],
   );
-  useEffect(() => {
-    if (!modal) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.defaultPrevented) {
-        e.preventDefault();
-        panelStore.closeModal();
-      }
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [modal]);
+  useLayer('dialog', Boolean(modal), () => panelStore.closeModal());
   if (!modal || !start || !panelStore.api) return null;
   return (
     <div className="fv-modal-backdrop" onClick={(e) => e.target === e.currentTarget && panelStore.closeModal()}>

@@ -66,6 +66,7 @@ const CONTEXT_LABEL: Record<string, string> = {
   effortChange: 'Effort changed',
   notice: 'Notice',
   restart: 'Helm restarted',
+  fork: 'Fork',
 };
 
 function Thinking({ text, streaming }: { text: string; streaming: boolean }) {

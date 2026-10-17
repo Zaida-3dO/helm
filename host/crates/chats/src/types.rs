@@ -433,6 +433,8 @@ pub enum ContextKind {
     EffortChange,
     Notice,
     Restart,
+    /// The boundary a fork's history ends with ("Forked from <title>").
+    Fork,
 }
 
 /// The `details` bag of a message row. Every field is optional and absent when unset.
@@ -889,6 +891,24 @@ pub struct ToolStopResult {
 pub struct UnreadClearArgs {
     pub chat_id: String,
     pub token: String,
+}
+
+/// `chat_fork`: `forkId` is a fresh UUID per request; a repeat answers the same
+/// fork. `messageId` forks from that assistant reply; `side` with an `excerpt` makes a side chat.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatForkArgs {
+    pub chat_id: String,
+    pub fork_id: String,
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub message_id: Option<i64>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub side: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub excerpt: Option<String>,
 }
 
 /// `chat_mute`: mute or unmute (user-only: no agent tool reads or writes it).

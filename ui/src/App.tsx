@@ -13,12 +13,15 @@ import { SidePanel } from './panel/index.ts';
 import type { SendShortcut } from './composer/keymap.ts';
 import { SETTINGS_DIALOG, SettingsDialog } from './settings/index.ts';
 import './settings/general.tsx';
+import './settings/shell/ShellPane.tsx';
+import { GLOBAL_HOTKEY_BINDING, shellOps } from './api/shell.ts';
 import { ShellController, ShellProvider, useSelection, useShell } from './shell/context.ts';
 import type { Flushers } from './shell/quit.ts';
 import { connectAppearance } from './shell/theme.ts';
 import { KEYBINDINGS_PREF, keys, layers, ToastSlotView } from './ui/index.ts';
 import { ChatStore } from './state/store.ts';
 import { TopBar } from './topbar/TopBar.tsx';
+import { TerminalDock } from './terminal/TerminalDock.tsx';
 
 export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers: Flushers }) {
   const ops = useMemo(() => chatOps(api), [api]);
@@ -43,6 +46,27 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
       if (KEYBINDINGS_PREF in changed) keys.loadUserMap(changed[KEYBINDINGS_PREF]);
     });
   }, [api, bus]);
+  // The tray, a toast or the hotkey asked to open a chat.
+  useEffect(
+    () =>
+      bus.on('shell_open_chat', (e) => {
+        const id = (e as { chatId?: unknown }).chatId;
+        if (typeof id === 'string') shell.select(id);
+      }),
+    [bus, shell],
+  );
+  // The global hotkey lives in the same key map as every other shortcut (scope "global": the host
+  // registers it with Windows; the window listener never fires it).
+  useEffect(() => {
+    let off = () => {};
+    shellOps(api)
+      .get()
+      .then((v) => {
+        off = keys.register({ id: GLOBAL_HOTKEY_BINDING, title: 'Show or hide Helm (anywhere in Windows)', defaultKeys: v.settings.globalHotkey, scope: 'global' });
+      })
+      .catch(() => undefined);
+    return () => off();
+  }, [api]);
   // The one Escape router and the one shortcut dispatcher (ui/layers.ts, ui/keys.ts).
   useEffect(() => layers.install(document), []);
   useEffect(() => keys.install(window), []);
@@ -91,7 +115,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
             <div className="empty-main">Pick a chat, or enter a folder and press New chat.</div>
           )}
         </div>
-        {null /* <TerminalDock /> */}
+        <TerminalDock />
       </main>
       <SidePanel api={shell.api} chatId={chatId} /> {/* side panel */}
       <ToastSlotView />

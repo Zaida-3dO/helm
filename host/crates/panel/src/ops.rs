@@ -7,6 +7,8 @@
 //! | `file_open_default` | maintenance | `{path}` → `null`: re-runs every check, then opens |
 //! | `file_reveal` | maintenance | `{path}` → `null`: Explorer with the item selected |
 //! | `chat_folder` | blocking | `{chatId}` → `{path \| null}`: the chat's project folder |
+//! | `path_resolve` | blocking | `{chatId?, path}` → `{path, kind: "file" \| "dir"}`: a path written in a reply |
+//! | `quick_open` | heavy | `{chatId?, query, reload?}` → `{mode: "path" \| "files", items, partial}` |
 //! | `panel_tabs_get` / `panel_tabs_save` | blocking / maintenance | `{}` → `panelTabs` v1 / `{value}` → `null` |
 //!
 //! Arguments are parsed strictly. Refusals come back as `{code: "refused", message}`; the message
@@ -15,7 +17,7 @@
 use crate::handler::{self, Decision};
 use crate::private::PrivateRoots;
 use crate::viewer::{self, ReadError};
-use crate::{pathgate, tabs};
+use crate::{pathgate, quick, resolve, tabs};
 use helm_core::db::Database;
 use helm_core::profile::Profile;
 use helm_ipc::{ApiError, OpClass, OpCtx, OpRegistry};
@@ -31,6 +33,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("file_open_default", OpClass::Maintenance, file_open_default)
         .blocking("file_reveal", OpClass::Maintenance, file_reveal)
         .blocking("chat_folder", OpClass::Blocking, chat_folder)
+        .blocking("path_resolve", OpClass::Blocking, path_resolve)
+        .blocking("quick_open", OpClass::Heavy, quick_open)
         .blocking("panel_tabs_get", OpClass::Blocking, panel_tabs_get)
         .blocking("panel_tabs_save", OpClass::Maintenance, panel_tabs_save);
 }
@@ -118,14 +122,14 @@ struct ChatArgs {
     chat_id: String,
 }
 
-fn chat_folder(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let a: ChatArgs = parse(args)?;
+/// The chat's project folder, when it passes the gate.
+fn folder_of(ctx: &OpCtx, chat_id: &str) -> Result<Option<String>, ApiError> {
     let db = ctx.services.need::<Database>()?;
     let path: Option<String> = db
         .snapshot(|tx| {
             tx.query_row(
                 "SELECT p.path FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
-                [&a.chat_id],
+                [chat_id],
                 |r| r.get::<_, Option<String>>(0),
             )
             .optional()
@@ -133,8 +137,85 @@ fn chat_folder(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .map_err(|e| ApiError::internal(e.to_string()))?
         .flatten();
     // A folder the gate would refuse is reported as none, so the UI never lists it.
-    let path = path.filter(|p| pathgate::check(p).is_ok());
-    Ok(json!({ "path": path }))
+    Ok(path.filter(|p| pathgate::check(p).is_ok()))
+}
+
+fn chat_folder(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatArgs = parse(args)?;
+    Ok(json!({ "path": folder_of(ctx, &a.chat_id)? }))
+}
+
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(Into::into)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ResolveArgs {
+    #[serde(default)]
+    chat_id: Option<String>,
+    path: String,
+}
+
+fn path_resolve(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ResolveArgs = parse(args)?;
+    let folder = match &a.chat_id {
+        Some(id) => folder_of(ctx, id)?.map(std::path::PathBuf::from),
+        None => None,
+    };
+    let home = home_dir();
+    match resolve::resolve(
+        &a.path,
+        home.as_deref(),
+        folder.as_deref(),
+        &private_roots(ctx),
+    ) {
+        Ok(resolve::Resolved::File(p)) => Ok(json!({"path": p.to_string_lossy(), "kind": "file"})),
+        Ok(resolve::Resolved::Dir(p)) => Ok(json!({"path": p.to_string_lossy(), "kind": "dir"})),
+        Err(m) if m.starts_with("Not found") => Err(ApiError::new("not_found", m)),
+        Err(m) => Err(refused(m)),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct QuickArgs {
+    #[serde(default)]
+    chat_id: Option<String>,
+    query: String,
+    #[serde(default)]
+    reload: bool,
+}
+
+fn quick_open(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: QuickArgs = parse(args)?;
+    let folder = match &a.chat_id {
+        Some(id) => folder_of(ctx, id)?.map(std::path::PathBuf::from),
+        None => None,
+    };
+    let roots = private_roots(ctx);
+    let q = a.query.trim();
+    let result = if q.is_empty() {
+        quick::QuickResult {
+            mode: "files",
+            items: vec![],
+            partial: false,
+        }
+    } else if quick::looks_like_path(q) {
+        quick::complete(q, home_dir().as_deref(), folder.as_deref(), &roots).map_err(refused)?
+    } else {
+        match folder.as_deref() {
+            Some(f) => quick::fuzzy(q, f, &roots, a.reload).map_err(refused)?,
+            None => quick::QuickResult {
+                mode: "files",
+                items: vec![],
+                partial: false,
+            },
+        }
+    };
+    serde_json::to_value(result).map_err(|e| ApiError::internal(e.to_string()))
 }
 
 fn panel_tabs_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {

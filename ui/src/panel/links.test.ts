@@ -123,3 +123,16 @@ test('a failing host call becomes a refusal notice rather than an unhandled reje
   assert.deepEqual(await handleLink(url('https://example.com'), { chatId: null }), { ok: false, reason: 'refused by host' });
   assert.deepEqual(notices, ['refused by host']);
 });
+
+test('written paths: drives open directly, everything else is resolved by the host', () => {
+  const p = (href: string) => gateTarget({ kind: 'path', href });
+  assert.deepEqual(p('C:/src/a.ts:10-20'), { action: 'file', path: 'C:/src/a.ts', line: 10, endLine: 20 });
+  assert.deepEqual(p(r`C:\src\a.ts`), { action: 'file', path: r`C:\src\a.ts` });
+  assert.deepEqual(p('~/notes/a.md'), { action: 'path', path: '~/notes/a.md' });
+  assert.deepEqual(p('src/a.ts#L3-L9'), { action: 'path', path: 'src/a.ts', line: 3, endLine: 9 });
+  assert.deepEqual(p('C:x'), { action: 'refuse', reason: REFUSED.driveRelative });
+  for (const bad of [r`\\host\share\a.ts`, '//host/share/a.ts:3', r`\\?\C:\a`, '%5C%5Chost%5Cx']) {
+    assert.deepEqual(p(bad), { action: 'refuse', reason: REFUSED.share }, bad);
+  }
+  assert.equal(p('').action, 'refuse');
+});
