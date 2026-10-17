@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+# New crates under host/crates/ join the workspace automatically.
+members = ["host/crates/*", "host/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+rust-version = "1.89"
+
+[workspace.dependencies]
+helm-core = { path = "host/crates/core" }
+helm-ipc = { path = "host/crates/ipc" }
+helm-platform = { path = "host/crates/platform" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+aes-gcm = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
+log = "0.4"
+
+[profile.dev]
+# Keeps debug builds of the Tauri app reasonably quick to link on Windows.
+debug = 1

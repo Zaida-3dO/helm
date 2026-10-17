@@ -1,0 +1,25 @@
+{
+  "name": "helm",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Helm: npm workspaces for the renderer, worker, helpers, fakes and checks.",
+  "workspaces": [
+    "ui",
+    "worker",
+    "fakes",
+    "helpers",
+    "checks"
+  ],
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build:debug": "tauri build --debug --no-bundle",
+    "test": "npm test --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.3"
+  }
+}

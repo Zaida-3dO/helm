@@ -1,0 +1,28 @@
+{
+  "description": "The CLI exits leaving half a record with no newline.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "emit": {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "fake-session",
+        "model": "claude-fake",
+        "permissionMode": "default",
+        "tools": []
+      }
+    },
+    {
+      "emitRaw": "{\"type\":\"stream_event\",\"event\":",
+      "newline": false
+    },
+    {
+      "exit": 0
+    }
+  ]
+}

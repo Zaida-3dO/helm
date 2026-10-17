@@ -1,0 +1,13 @@
+{
+  "name": "@helm/fakes",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Test fakes: a fake Claude Code CLI that replays stream-json fixtures, and a fake host that drives a worker and asserts the worker protocol.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\""
+  }
+}

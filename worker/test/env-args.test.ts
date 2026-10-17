@@ -1,0 +1,72 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { buildClaudeArgs } from "../src/drivers/claude/args.ts";
+import { buildClaudeEnv, STRIPPED_UNLESS_API_KEY_MODE } from "../src/drivers/claude/env.ts";
+
+const base = {
+  PATH: "/bin",
+  ANTHROPIC_API_KEY: "k",
+  ANTHROPIC_AUTH_TOKEN: "t",
+  ANTHROPIC_BASE_URL: "u",
+  CLAUDE_CODE_OAUTH_TOKEN: "o",
+  CLAUDECODE: "1",
+  CLAUDE_CODE_ENTRYPOINT: "cli",
+  KEEP_ME: "yes",
+};
+
+test("credential and nesting variables are stripped by default", () => {
+  const env = buildClaudeEnv(base, {});
+  for (const k of STRIPPED_UNLESS_API_KEY_MODE) assert.equal(env[k], undefined, k);
+  assert.equal(env.CLAUDE_CODE_ENTRYPOINT, undefined);
+  assert.equal(env.KEEP_ME, "yes");
+  assert.equal(env.PATH, "/bin");
+});
+
+test("stripping is case-insensitive (Windows env names)", () => {
+  const env = buildClaudeEnv({ anthropic_api_key: "k", ClaudeCode: "1" }, {});
+  assert.deepEqual(Object.keys(env).filter((k) => /anthropic|claudecode/i.test(k)), []);
+});
+
+test("API-key mode keeps them", () => {
+  const env = buildClaudeEnv(base, { apiKeyMode: true });
+  for (const k of STRIPPED_UNLESS_API_KEY_MODE) assert.equal(env[k], base[k], k);
+});
+
+test("non-essential traffic and auto-update are off", () => {
+  const env = buildClaudeEnv({}, { chatId: "c1" });
+  assert.equal(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, "1");
+  assert.equal(env.DISABLE_AUTOUPDATER, "1");
+  assert.equal(env.HELM_CHAT_ID, "c1");
+});
+
+function flag(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  return i === -1 ? undefined : args[i + 1];
+}
+
+test("stream-json both ways, partial messages, replayed user messages, stdio permission prompts", () => {
+  const a = buildClaudeArgs({});
+  assert.ok(a.includes("-p"));
+  assert.equal(flag(a, "--input-format"), "stream-json");
+  assert.equal(flag(a, "--output-format"), "stream-json");
+  assert.ok(a.includes("--include-partial-messages"));
+  assert.ok(a.includes("--replay-user-messages"));
+  assert.equal(flag(a, "--permission-prompt-tool"), "stdio");
+  assert.equal(flag(a, "--setting-sources"), "user,project,local");
+});
+
+test("effort defaults to xhigh; haiku gets none; an unknown effort falls back to the default", () => {
+  assert.equal(flag(buildClaudeArgs({}), "--effort"), "xhigh");
+  assert.equal(flag(buildClaudeArgs({ effort: "low", model: "opus" }), "--effort"), "low");
+  assert.equal(flag(buildClaudeArgs({ effort: "bogus" }), "--effort"), "xhigh");
+  assert.equal(buildClaudeArgs({ model: "haiku", effort: "low" }).includes("--effort"), false);
+  assert.equal(flag(buildClaudeArgs({ model: "haiku" }), "--model"), "haiku");
+});
+
+test("skip permissions, resume and settings flags", () => {
+  const a = buildClaudeArgs({ skipPermissions: true, resumeSessionId: "s-1", settings: { fastMode: true } });
+  assert.equal(flag(a, "--permission-mode"), "bypassPermissions");
+  assert.equal(flag(a, "--resume"), "s-1");
+  assert.deepEqual(JSON.parse(flag(a, "--settings") ?? "null"), { fastMode: true });
+  assert.equal(buildClaudeArgs({}).includes("--permission-mode"), false);
+});

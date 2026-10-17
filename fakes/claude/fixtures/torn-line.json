@@ -1,0 +1,27 @@
+{
+  "description": "A torn line: a JSON record cut off mid-way but newline-terminated.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "emit": {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "fake-session",
+        "model": "claude-fake",
+        "permissionMode": "default",
+        "tools": []
+      }
+    },
+    {
+      "emitRaw": "{\"type\":\"assistant\",\"message\":{\"id\":"
+    },
+    {
+      "sleep": 5000
+    }
+  ]
+}

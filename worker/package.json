@@ -1,0 +1,18 @@
+{
+  "name": "@helm/worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Helm chat worker: one Node process per active root chat, speaking the worker protocol over stdio and driving a harness (Claude Code).",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "bin": {
+    "helm-worker": "./src/main.ts"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "node --test --test-concurrency=4 \"test/*.test.ts\"",
+    "test:live": "node --test \"test/live/*.test.ts\""
+  }
+}

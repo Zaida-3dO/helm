@@ -1,0 +1,15 @@
+{
+  "description": "The CLI never echoes the user message: the prompt must become uncertain, never resent.",
+  "replay": false,
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "sleep": 60000
+    }
+  ]
+}

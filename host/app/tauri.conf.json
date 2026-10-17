@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Helm",
+  "version": "0.1.0",
+  "identifier": "app.helm.home",
+  "build": {
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../../ui/dist",
+    "beforeDevCommand": {
+      "script": "npm run dev -w ui",
+      "cwd": "../.."
+    },
+    "beforeBuildCommand": {
+      "script": "npm run build -w ui",
+      "cwd": "../.."
+    }
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [],
+    "security": {
+      "csp": {
+        "default-src": "'none'",
+        "script-src": "'self'",
+        "style-src": "'self'",
+        "font-src": "'self'",
+        "img-src": "'self'",
+        "connect-src": "ipc: http://ipc.localhost",
+        "base-uri": "'none'",
+        "form-action": "'none'",
+        "frame-src": "'none'",
+        "object-src": "'none'",
+        "media-src": "'none'"
+      },
+      "freezePrototype": true,
+      "capabilities": [
+        "main"
+      ]
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ]
+  }
+}

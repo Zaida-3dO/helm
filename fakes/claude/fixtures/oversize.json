@@ -1,0 +1,27 @@
+{
+  "description": "A record over the worker's limit (the test lowers the limit to keep the fixture small).",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "emit": {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "fake-session",
+        "model": "claude-fake",
+        "permissionMode": "default",
+        "tools": []
+      }
+    },
+    {
+      "emitOversize": 20000
+    },
+    {
+      "sleep": 5000
+    }
+  ]
+}

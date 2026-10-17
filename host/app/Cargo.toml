@@ -1,0 +1,25 @@
+[package]
+name = "helm-app"
+description = "The Helm desktop app: Tauri 2 shell around the host crates."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+default-run = "helm"
+
+[[bin]]
+name = "helm"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+helm-core.workspace = true
+helm-ipc.workspace = true
+helm-platform.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+log.workspace = true
+env_logger = "0.11"

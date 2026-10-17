@@ -1,0 +1,264 @@
+{
+  "description": "Two turns; the first lingers so the test can change model and effort mid-turn.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p1"
+    },
+    {
+      "emit": {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "fake-session",
+        "model": "claude-fake",
+        "permissionMode": "default",
+        "tools": []
+      }
+    },
+    {
+      "emit": {
+        "type": "stream_event",
+        "event": {
+          "type": "message_start",
+          "message": {
+            "id": "msg_1",
+            "model": "claude-fake",
+            "content": []
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "stream_event",
+        "event": {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text",
+            "text": ""
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "stream_event",
+        "event": {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "first"
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "stream_event",
+        "event": {
+          "type": "content_block_stop",
+          "index": 0
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "stream_event",
+        "event": {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "end_turn"
+          },
+          "usage": {
+            "output_tokens": 5
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "stream_event",
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "assistant",
+        "message": {
+          "id": "msg_1",
+          "model": "claude-fake",
+          "content": [
+            {
+              "type": "text",
+              "text": "first"
+            }
+          ]
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "sleep": 400
+    },
+    {
+      "emit": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "done",
+        "session_id": "fake-session",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cache_read_input_tokens": 2,
+          "cache_creation_input_tokens": 1
+        },
+        "total_cost_usd": 0.001,
+        "duration_ms": 12,
+        "num_turns": 1
+      }
+    },
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p2"
+    },
+    {
+      "emit": {
+        "type": "stream_event",
+        "event": {
+          "type": "message_start",
+          "message": {
+            "id": "msg_2",
+            "model": "claude-fake",
+            "content": []
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "stream_event",
+        "event": {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text",
+            "text": ""
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "stream_event",
+        "event": {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "second"
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "stream_event",
+        "event": {
+          "type": "content_block_stop",
+          "index": 0
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "stream_event",
+        "event": {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "end_turn"
+          },
+          "usage": {
+            "output_tokens": 5
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "stream_event",
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "assistant",
+        "message": {
+          "id": "msg_2",
+          "model": "claude-fake",
+          "content": [
+            {
+              "type": "text",
+              "text": "second"
+            }
+          ]
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "done",
+        "session_id": "fake-session",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cache_read_input_tokens": 2,
+          "cache_creation_input_tokens": 1
+        },
+        "total_cost_usd": 0.001,
+        "duration_ms": 12,
+        "num_turns": 1
+      }
+    }
+  ]
+}

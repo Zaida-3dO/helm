@@ -1,0 +1,55 @@
+# Runs ONLY when started by hand or on a PR carrying the `checkpoint` label (CLAUDE.md, CI).
+# Actions minutes are limited and Windows bills double: never add a push trigger or an
+# unconditional pull_request job.
+name: checkpoint
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled, opened, reopened, synchronize]
+
+concurrency:
+  group: checkpoint-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'checkpoint')
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # npm install rather than npm ci: a new workspace (worker/, fakes/) joins without a lockfile edit.
+      - run: npm install --no-audit --no-fund
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: npm run typecheck -w ui
+      - run: npm test
+      - run: npx tauri build --debug --no-bundle
+
+  linux-check:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'checkpoint')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tauri system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev
+      - name: Build the renderer (the app embeds ui/dist)
+        run: |
+          npm install --no-audit --no-fund
+          npm run build -w ui
+      - run: cargo check --workspace --all-targets

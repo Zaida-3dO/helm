@@ -1,0 +1,48 @@
+{
+  "description": "The CLI acknowledges the interrupt but never settles; the worker must close it.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "emit": {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "fake-session",
+        "model": "claude-fake",
+        "permissionMode": "default",
+        "tools": []
+      }
+    },
+    {
+      "emit": {
+        "type": "stream_event",
+        "event": {
+          "type": "message_start",
+          "message": {
+            "id": "msg_h",
+            "model": "claude-fake",
+            "content": []
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "await": {
+        "type": "control_request",
+        "request": {
+          "subtype": "interrupt"
+        }
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "hang": true
+    }
+  ]
+}

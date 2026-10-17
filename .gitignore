@@ -1,0 +1,20 @@
+# Rust
+target/
+# Node
+node_modules/
+dist/
+.vite/
+coverage/
+# Local
+*.log
+.env
+.env.*
+!.env.example
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+# Tauri generated schemas
+host/app/gen/

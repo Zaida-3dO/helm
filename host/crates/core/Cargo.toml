@@ -1,0 +1,27 @@
+[package]
+name = "helm-core"
+description = "Profile, private files, database, revisions, preferences, credentials, recovery and quit."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-platform.workspace = true
+helm-ipc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+aes-gcm.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+log.workspace = true
+getrandom = "0.3"
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

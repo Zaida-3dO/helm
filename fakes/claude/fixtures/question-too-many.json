@@ -1,0 +1,123 @@
+{
+  "description": "AskUserQuestion with five questions: over the limit of four, so the worker denies it.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "emit": {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "fake-session",
+        "model": "claude-fake",
+        "permissionMode": "default",
+        "tools": []
+      }
+    },
+    {
+      "emit": {
+        "type": "control_request",
+        "request_id": "q-5",
+        "request": {
+          "subtype": "can_use_tool",
+          "tool_name": "AskUserQuestion",
+          "input": {
+            "questions": [
+              {
+                "question": "Q1?",
+                "header": "T1",
+                "options": [
+                  {
+                    "label": "A"
+                  },
+                  {
+                    "label": "B"
+                  }
+                ]
+              },
+              {
+                "question": "Q2?",
+                "header": "T2",
+                "options": [
+                  {
+                    "label": "A"
+                  },
+                  {
+                    "label": "B"
+                  }
+                ]
+              },
+              {
+                "question": "Q3?",
+                "header": "T3",
+                "options": [
+                  {
+                    "label": "A"
+                  },
+                  {
+                    "label": "B"
+                  }
+                ]
+              },
+              {
+                "question": "Q4?",
+                "header": "T4",
+                "options": [
+                  {
+                    "label": "A"
+                  },
+                  {
+                    "label": "B"
+                  }
+                ]
+              },
+              {
+                "question": "Q5?",
+                "header": "T5",
+                "options": [
+                  {
+                    "label": "A"
+                  },
+                  {
+                    "label": "B"
+                  }
+                ]
+              }
+            ]
+          },
+          "tool_use_id": "tu_1"
+        }
+      }
+    },
+    {
+      "await": {
+        "type": "control_response",
+        "response": {
+          "request_id": "q-5"
+        }
+      },
+      "as": "ans"
+    },
+    {
+      "emit": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "done",
+        "session_id": "fake-session",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cache_read_input_tokens": 2,
+          "cache_creation_input_tokens": 1
+        },
+        "total_cost_usd": 0.001,
+        "duration_ms": 12,
+        "num_turns": 1
+      }
+    }
+  ]
+}

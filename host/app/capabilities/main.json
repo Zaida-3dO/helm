@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The main window only: the one api command, the event channel, and basic window controls (sec 2.2).",
+  "windows": ["main"],
+  "permissions": [
+    "allow-api",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close"
+  ]
+}
