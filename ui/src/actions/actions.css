@@ -1,0 +1,77 @@
+/* Action buttons: layout only. Buttons, inputs, menus and segmented controls come from the
+   shared kit (ui/src/ui); tokens from styles.css. */
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.action-row .action-button {
+  border-radius: var(--radius-pill, 999px);
+  padding-block: 2px;
+  font-size: calc(12 * var(--ui-unit, 1px));
+}
+
+.action-row-notice {
+  font-size: calc(12 * var(--ui-unit, 1px));
+}
+
+.quick-replies,
+.option-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+}
+
+.quick-reply,
+.option-button {
+  border-radius: var(--radius-pill, 999px);
+}
+
+.option-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.actions-pane label {
+  display: block;
+  font-size: calc(12 * var(--ui-unit, 1px));
+  color: var(--secondary);
+  margin-bottom: 2px;
+}
+
+.actions-pane .action-edit {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.actions-pane .action-edit.is-hidden {
+  opacity: 0.7;
+}
+
+.actions-pane select {
+  width: 100%;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.actions-pane .action-edit-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}

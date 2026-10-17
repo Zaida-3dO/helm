@@ -1,12 +1,12 @@
-/* Markdown module styles. Colours come from the app's custom properties where it defines them;
-   the fallbacks keep the module readable on its own. */
+/* Markdown module styles. Every colour is a design token from styles.css: syntax
+   colours from --syn-*, callouts from the project colours, text and lines from the base set. */
 
 .md-root {
-  --md-fg: var(--fg, #e6e6e6);
-  --md-muted: var(--fg-muted, #9aa0a6);
-  --md-border: var(--border, #3a3d42);
-  --md-surface: var(--surface, #1e2023);
-  --md-accent: var(--accent, #6ea8fe);
+  --md-fg: var(--text);
+  --md-muted: var(--secondary);
+  --md-border: var(--line);
+  --md-surface: var(--surface-alt);
+  --md-accent: var(--link-color);
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
@@ -17,7 +17,7 @@
 .md-root a { color: var(--md-accent); text-decoration: underline; cursor: pointer; }
 .md-root a.md-link-vault { text-decoration-style: dotted; }
 
-.md-root code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-size: 0.9em; }
+.md-root code { font-family: var(--font-mono); font-size: 0.9em; }
 .md-root :not(pre) > code { background: var(--md-surface); border-radius: 4px; padding: 0.1em 0.35em; }
 
 .md-code {
@@ -46,15 +46,18 @@
 
 .md-image { max-width: 100%; height: auto; }
 
-/* Highlighting (highlight.js token classes) */
-.hljs-comment, .hljs-quote { color: #7f8c98; font-style: italic; }
-.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag { color: #c792ea; }
-.hljs-string, .hljs-regexp, .hljs-addition { color: #a5d6a7; }
-.hljs-number, .hljs-built_in, .hljs-type { color: #f2b077; }
-.hljs-title, .hljs-section, .hljs-name, .hljs-selector-id, .hljs-selector-class { color: #82aaff; }
-.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-template-variable { color: #ffcb6b; }
-.hljs-symbol, .hljs-bullet, .hljs-link, .hljs-meta { color: #89ddff; }
-.hljs-deletion { color: #ef9a9a; }
+/* Highlighting (highlight.js token classes; the file viewer reuses them as CodeMirror marks) */
+.hljs-comment, .hljs-quote { color: var(--syn-comment); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-doctag { color: var(--syn-keyword); }
+.hljs-literal, .hljs-number { color: var(--syn-number); }
+.hljs-string, .hljs-regexp { color: var(--syn-string); }
+.hljs-type, .hljs-built_in { color: var(--syn-type); }
+.hljs-title, .hljs-section, .hljs-name, .hljs-selector-id, .hljs-selector-class { color: var(--syn-function); }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-template-variable, .hljs-property { color: var(--syn-property); }
+.hljs-symbol, .hljs-bullet, .hljs-link, .hljs-meta, .hljs-operator { color: var(--syn-operator); }
+.hljs-punctuation { color: var(--syn-punctuation); }
+.hljs-addition { color: var(--diff-add-text); background: var(--diff-add-bg); }
+.hljs-deletion { color: var(--diff-del-text); background: var(--diff-del-bg); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 700; }
 
@@ -75,7 +78,7 @@
 
 /* Callouts */
 .md-callout {
-  --md-callout: #4f8cff;
+  --md-callout: var(--project-blue);
   margin: 0.8em 0;
   border-left: 4px solid var(--md-callout);
   border-radius: 6px;
@@ -85,20 +88,20 @@
   display: block;
   padding: 0.45em 0.8em;
   font-weight: 600;
-  color: var(--md-callout);
+  /* The callout colour marks the edge and tint; the title stays in text colour so it reads at 4.5:1. */
+  color: var(--md-fg);
 }
 summary.md-callout-title { cursor: pointer; }
 .md-callout-content { padding: 0 0.8em 0.6em; color: var(--md-fg); }
 .md-callout-content > :first-child { margin-top: 0; }
 .md-callout-content > :last-child { margin-bottom: 0; }
-.md-callout-abstract, .md-callout-info { --md-callout: #3ab0d0; }
-.md-callout-todo { --md-callout: #4f8cff; }
-.md-callout-tip { --md-callout: #2fc4b2; }
-.md-callout-success { --md-callout: #3fb950; }
-.md-callout-question, .md-callout-warning { --md-callout: #e0a030; }
-.md-callout-failure, .md-callout-danger, .md-callout-bug { --md-callout: #e5534b; }
-.md-callout-example { --md-callout: #a371f7; }
-.md-callout-quote { --md-callout: #8b949e; }
+.md-callout-abstract, .md-callout-info, .md-callout-tip { --md-callout: var(--project-teal); }
+.md-callout-todo { --md-callout: var(--project-blue); }
+.md-callout-success { --md-callout: var(--project-green); }
+.md-callout-question, .md-callout-warning { --md-callout: var(--project-orange); }
+.md-callout-failure, .md-callout-danger, .md-callout-bug { --md-callout: var(--error); }
+.md-callout-example { --md-callout: var(--project-purple); }
+.md-callout-quote { --md-callout: var(--secondary); }
 
 /* Embeds */
 .md-embed {
@@ -114,4 +117,4 @@ summary.md-callout-title { cursor: pointer; }
 /* Mermaid */
 .md-mermaid { margin: 0.8em 0; overflow-x: auto; }
 .md-mermaid-rendered svg { max-width: 100%; height: auto; }
-.md-mermaid-message { color: #e5534b; font-size: 0.9em; margin-bottom: 0.4em; }
+.md-mermaid-message { color: var(--error); font-size: 0.9em; margin-bottom: 0.4em; }

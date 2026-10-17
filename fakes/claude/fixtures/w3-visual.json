@@ -1,0 +1,114 @@
+{
+  "description": "Visual check (checks/e2e/w3-visual.e2e.ts). Each turn branches on a tag in its prompt: [LINKS] a reply with a vault wikilink ([[Fixture Note]]), a file link to src/main.ts line 3, a 'C:javascript:' link the link gate must refuse and an https link; [OPTIONS] a numbered-options reply ending in a question; [QUESTION] a reply ending in '?'; [BUSY] a turn that runs a 4 s tool, reading waiting messages at its boundary (press Update meanwhile: it steers in); anything else answers 'Done.' at once, which leaves a completion behind for the toast checks.",
+  "autoBackground": true,
+  "steps": [
+    {
+      "repeat": [
+        {
+          "await": {
+            "type": "user"
+          },
+          "as": "p",
+          "timeoutMs": 3600000
+        },
+        {
+          "init": {}
+        },
+        {
+          "if": {
+            "saved": "p",
+            "contains": "[LINKS]"
+          },
+          "then": [
+            {
+              "text": "Here are the links for the check.\n\n- The fixture note: [[Fixture Note]]\n- A file at a line: [main.ts line 3](src/main.ts#L3)\n- A link the gate must refuse: [do not open](C:javascript:alert(1))\n- A web page: [Example](https://example.com/)\n\nThat is all of them."
+            },
+            {
+              "result": "done"
+            }
+          ],
+          "else": [
+            {
+              "if": {
+                "saved": "p",
+                "contains": "[OPTIONS]"
+              },
+              "then": [
+                {
+                  "text": "There are three ways to do this:\n\n1. Patch the reader in place.\n2. Rewrite the reader behind a flag.\n3. Leave it and document the limit.\n\nWhich option should I take?"
+                },
+                {
+                  "result": "done"
+                }
+              ],
+              "else": [
+                {
+                  "if": {
+                    "saved": "p",
+                    "contains": "[QUESTION]"
+                  },
+                  "then": [
+                    {
+                      "text": "I finished the first pass and the tests are green. Shall I carry on with the second pass?"
+                    },
+                    {
+                      "result": "done"
+                    }
+                  ],
+                  "else": [
+                    {
+                      "if": {
+                        "saved": "p",
+                        "contains": "[BUSY]"
+                      },
+                      "then": [
+                        {
+                          "text": "Working on it: first I list the folder."
+                        },
+                        {
+                          "tool": {
+                            "id": "tu_busy_{{p.uuid}}",
+                            "name": "Bash",
+                            "input": {
+                              "command": "ls"
+                            }
+                          }
+                        },
+                        {
+                          "sleep": 4000
+                        },
+                        {
+                          "read": true
+                        },
+                        {
+                          "toolResult": {
+                            "id": "tu_busy_{{p.uuid}}",
+                            "text": "README.md\nsrc\n"
+                          }
+                        },
+                        {
+                          "text": "The folder has a README and a src folder."
+                        },
+                        {
+                          "result": "done"
+                        }
+                      ],
+                      "else": [
+                        {
+                          "text": "Done. Nothing else to report."
+                        },
+                        {
+                          "result": "done"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,586 @@
+/* The sidebar. Colours come only from the design-system tokens in
+   ui/src/styles.css, never literal colours. */
+
+.sb-root {
+  --sb-sidebar: var(--sidebar, var(--panel));
+  --sb-text: var(--text);
+  --sb-secondary: var(--secondary, var(--muted));
+  --sb-muted: var(--muted);
+  --sb-hover: var(--hover, var(--border));
+  --sb-selected: var(--selected, var(--border));
+  --sb-surface: var(--surface, var(--panel));
+  --sb-surface-alt: var(--surface-alt, var(--panel));
+  --sb-line: var(--line, var(--border));
+  --sb-line-strong: var(--line-strong, var(--border));
+  --sb-accent-mark: var(--accent-mark, var(--accent));
+  --sb-select-share: var(--chat-selected-accent, 10%);
+  --sb-chat-h: 34px;
+  --sb-header-h: 38px;
+  --sb-bar-inset: 8px;
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--sb-sidebar);
+  color: var(--sb-secondary);
+  font-size: 13px;
+}
+
+.sb-root[data-compact='true'] {
+  --sb-chat-h: 26px;
+  --sb-header-h: 32px;
+  --sb-bar-inset: 6px;
+}
+
+.sb-root button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.sb-brand {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  padding: 0 17px;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  color: var(--sb-text);
+}
+
+.sb-new-chat {
+  display: flex;
+  gap: 6px;
+  padding: 0 11px 14px;
+}
+
+.sb-new-chat input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--sb-line-strong);
+  background: var(--sb-surface);
+  color: var(--sb-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.sb-root .sb-nav {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--sb-text);
+}
+
+.sb-root .sb-nav:hover,
+.sb-root .sb-foot:hover,
+.sb-root .sb-foot[aria-pressed='true'] {
+  background: var(--sb-hover);
+}
+
+.sb-error {
+  margin: 0 12px 8px;
+  font-size: 12px;
+  color: var(--error);
+}
+
+.sb-section {
+  height: 29px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 15px 0 22px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 550;
+  color: var(--sb-muted);
+}
+
+.sb-root[data-view='activity'] .sb-section {
+  margin-bottom: 17px;
+}
+
+.sb-switch {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--sb-hover) 40%, var(--sb-sidebar));
+}
+
+.sb-root .sb-switch button {
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 550;
+  color: var(--sb-muted);
+}
+
+.sb-root .sb-switch button:hover {
+  color: var(--sb-text);
+}
+
+.sb-root .sb-switch button[aria-pressed='true'] {
+  color: var(--sb-text);
+  background: color-mix(in srgb, var(--sb-surface) 55%, transparent);
+}
+
+.sb-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 10px;
+  position: relative;
+}
+
+.sb-list:focus-visible {
+  outline: none;
+}
+
+.sb-list-inner {
+  position: relative;
+}
+
+.sb-slot {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+.sb-empty {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--sb-muted);
+}
+
+.sb-root .sb-more {
+  display: block;
+  margin: 6px auto;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--sb-muted);
+}
+
+.sb-root .sb-more:hover {
+  background: var(--sb-surface-alt);
+}
+
+.sb-pin-break {
+  margin: 6px 10px 0;
+  border-top: 1px solid var(--sb-line);
+}
+
+/* ---- project header ---- */
+
+.sb-header {
+  position: relative;
+  height: var(--sb-header-h);
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: 7px;
+  color: var(--sb-secondary);
+}
+
+.sb-header[data-current='true'] {
+  color: var(--sb-text);
+}
+
+.sb-header[data-coloured='true'] {
+  background: color-mix(in srgb, var(--group-colour) 8%, transparent);
+}
+
+.sb-root .sb-toggle {
+  width: 16px;
+  height: 34px;
+  flex: none;
+  color: var(--group-colour, var(--sb-muted));
+  font-size: 11px;
+}
+
+.sb-root .sb-name {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-right: 3px;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.sb-icon {
+  width: 16px;
+  flex: none;
+  text-align: center;
+  color: var(--group-colour, inherit);
+  font-size: 13px;
+}
+
+.sb-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.sb-edited {
+  font-size: 11px;
+  color: var(--sb-muted);
+}
+
+.sb-count {
+  flex: none;
+  font-size: 11px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--group-colour, var(--sb-secondary)) 55%, var(--sb-muted));
+}
+
+.sb-subtitle {
+  position: absolute;
+  left: 42px;
+  bottom: -4px;
+  font-size: 11px;
+  line-height: 1.25;
+  color: var(--sb-muted);
+}
+
+.sb-actions,
+.sb-row-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sb-header:hover .sb-actions,
+.sb-header:focus-within .sb-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.sb-root .sb-header .sb-act {
+  width: 24px;
+  height: 30px;
+  border-radius: 5px;
+  color: var(--sb-muted);
+}
+
+.sb-root .sb-act:hover {
+  background: var(--sb-hover);
+}
+
+/* ---- chat row ---- */
+
+.sb-chat-wrap {
+  position: relative;
+  height: var(--sb-chat-h);
+  border-radius: 6px;
+}
+
+.sb-chat-wrap[data-coloured='true'] {
+  background: color-mix(in srgb, var(--group-colour) 8%, transparent);
+}
+
+.sb-root .sb-chat {
+  position: relative;
+  width: 100%;
+  height: var(--sb-chat-h);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 9px 0 27.5px;
+  border-radius: 6px;
+  color: var(--sb-secondary);
+  text-align: left;
+}
+
+.sb-chat-wrap:hover .sb-chat {
+  background: var(--sb-hover);
+}
+
+.sb-chat-wrap[data-coloured='true']:hover .sb-chat {
+  background: color-mix(in srgb, var(--group-colour) 8%, transparent);
+}
+
+.sb-chat-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sb-chat-title {
+  font-size: 14px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: color-mix(in srgb, var(--sb-text) 85%, var(--sb-sidebar));
+}
+
+.sb-chat-sub {
+  font-size: 11px;
+  color: var(--sb-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.sb-root[data-view='activity'] .sb-chat {
+  height: calc(var(--sb-chat-h) + 20px);
+  padding-left: 12px;
+}
+
+.sb-root[data-view='activity'] .sb-chat-wrap {
+  height: calc(var(--sb-chat-h) + 20px);
+}
+
+.sb-ind {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--sb-muted);
+}
+
+/* Running, unread and lingering marks move to the trailing edge; the title keeps its alignment. */
+.sb-chat-wrap[data-trailing='true'] .sb-ind {
+  order: 1;
+}
+
+.sb-chat-wrap[data-trailing='true'] .sb-chat-text {
+  margin-left: 22px;
+}
+
+.sb-ind-running {
+  border: 2px solid var(--sb-accent-mark);
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: sb-turn 7.2s linear infinite;
+}
+
+.sb-ind-lingering {
+  border: 2px dotted var(--sb-accent-mark);
+  border-radius: 50%;
+  animation: sb-turn 18s linear infinite;
+}
+
+.sb-ind-unread::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.sb-ind-interrupted::before {
+  content: '';
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--interrupted, var(--sb-muted));
+}
+
+@keyframes sb-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sb-ind-running,
+  .sb-ind-lingering {
+    animation: none;
+  }
+}
+
+.sb-age {
+  flex: none;
+  font-size: 10px;
+  color: var(--sb-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.sb-agg {
+  flex: none;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sb-text) 9%, transparent);
+  color: var(--sb-secondary);
+  font-size: 10.5px;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.sb-root .sb-children {
+  position: absolute;
+  z-index: 4;
+  left: 7px;
+  top: calc((var(--sb-chat-h) - 22px) / 2);
+  width: 17px;
+  height: 22px;
+  border-radius: 4px;
+  color: var(--sb-muted);
+}
+
+.sb-root .sb-children[data-snug='true'] {
+  left: 30.5px;
+}
+
+.sb-root .sb-children:hover {
+  background: var(--sb-surface);
+  color: var(--sb-text);
+}
+
+.sb-chat-wrap .sb-children[data-snug='true'] ~ .sb-chat .sb-chat-text {
+  padding-left: 17px;
+}
+
+/* Unread result. */
+.sb-chat-wrap:has(.sb-ind-unread) .sb-chat {
+  color: var(--sb-text);
+  background: linear-gradient(105deg, color-mix(in srgb, var(--accent) 12%, transparent), color-mix(in srgb, var(--accent) 3%, transparent) 75%);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 44%, transparent);
+}
+
+.sb-chat-wrap:has(.sb-ind-unread) .sb-chat-title {
+  font-weight: 600;
+  color: var(--sb-text);
+}
+
+/* Selected (open) chat: the tint fill, accent-mark ring, top highlight and left bar.
+   A selected row that is also unread takes the selected style. */
+.sb-chat-wrap[data-selected='true'] .sb-chat,
+.sb-chat-wrap[data-selected='true']:hover .sb-chat {
+  /* The default theme's precomputed fill. */
+  background: var(
+    --chat-selected-fill,
+    color-mix(in srgb, var(--accent) var(--sb-select-share), color-mix(in srgb, var(--sb-selected) 90%, var(--sb-text)))
+  );
+  box-shadow:
+    inset 0 0 0 1px var(--sb-accent-mark),
+    inset 0 2px 0 color-mix(in srgb, var(--sb-surface) 38%, transparent);
+}
+
+.sb-chat-wrap[data-selected='true'][data-coloured='true'] .sb-chat {
+  background: color-mix(in srgb, var(--group-colour) 16%, color-mix(in srgb, var(--sb-selected) 90%, var(--sb-text)));
+}
+
+.sb-chat-wrap[data-selected='true'] .sb-chat::before {
+  content: '';
+  position: absolute;
+  z-index: 3;
+  left: 5px;
+  top: var(--sb-bar-inset);
+  bottom: var(--sb-bar-inset);
+  width: 3px;
+  border-radius: 2px;
+  background: var(--sb-accent-mark);
+  pointer-events: none;
+}
+
+.sb-chat-wrap[data-selected='true'] .sb-chat-title {
+  color: var(--sb-text);
+  font-weight: 650;
+}
+
+.sb-chat-wrap[data-selected='true'] .sb-age,
+.sb-chat-wrap[data-selected='true'] .sb-chat-sub {
+  color: color-mix(in srgb, var(--sb-text) var(--chat-selected-quiet, 30%), var(--sb-muted));
+}
+
+.sb-root .sb-chat:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Hover actions and keep-clear rules: actions never cover the status indicator,
+   a flag or the title's text. */
+.sb-row-actions {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 6px;
+  align-items: center;
+}
+
+.sb-root .sb-row-actions .sb-act {
+  width: 23px;
+  height: 24px;
+  border-radius: 5px;
+  color: var(--sb-secondary);
+}
+
+.sb-root .sb-row-actions .sb-act:hover {
+  background: var(--sb-surface);
+  color: var(--sb-text);
+}
+
+.sb-chat-wrap:hover .sb-row-actions,
+.sb-chat-wrap:focus-within .sb-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Idle row: reserve 59 px on the right; age and the collapsed-children aggregate give way. */
+.sb-chat-wrap:not([data-trailing='true']):hover .sb-chat,
+.sb-chat-wrap:not([data-trailing='true']):focus-within .sb-chat {
+  padding-right: 59px;
+}
+
+.sb-chat-wrap:hover .sb-age,
+.sb-chat-wrap:focus-within .sb-age,
+.sb-chat-wrap:hover .sb-agg,
+.sb-chat-wrap:focus-within .sb-agg {
+  display: none;
+}
+
+/* Busy row: the actions shift 35 px left so the trailing indicator stays visible to their right,
+   and the title reserves 57 px. */
+.sb-chat-wrap[data-trailing='true']:hover .sb-row-actions,
+.sb-chat-wrap[data-trailing='true']:focus-within .sb-row-actions {
+  right: 35px;
+}
+
+.sb-chat-wrap[data-trailing='true']:hover .sb-chat-text,
+.sb-chat-wrap[data-trailing='true']:focus-within .sb-chat-text {
+  margin-right: 57px;
+}
+
+/* ---- footer ---- */
+
+.sb-footer {
+  padding: 7px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sb-root .sb-foot {
+  width: 100%;
+  padding: 5px 9px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  text-align: left;
+  color: var(--sb-secondary);
+}

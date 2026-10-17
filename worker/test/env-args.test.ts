@@ -64,9 +64,19 @@ test("effort defaults to xhigh; haiku gets none; an unknown effort falls back to
 });
 
 test("skip permissions, resume and settings flags", () => {
-  const a = buildClaudeArgs({ skipPermissions: true, resumeSessionId: "s-1", settings: { fastMode: true } });
+  const a = buildClaudeArgs({ skipPermissions: true, resumeSessionId: "s-1", fastMode: true, settings: { other: 1 } });
   assert.equal(flag(a, "--permission-mode"), "bypassPermissions");
   assert.equal(flag(a, "--resume"), "s-1");
-  assert.deepEqual(JSON.parse(flag(a, "--settings") ?? "null"), { fastMode: true });
+  assert.deepEqual(JSON.parse(flag(a, "--settings") ?? "null"), { other: 1, fastMode: true });
   assert.equal(buildClaudeArgs({}).includes("--permission-mode"), false);
+});
+
+test("fastMode is always explicit, strictly boolean, and only the launch's own field sets it", () => {
+  assert.deepEqual(JSON.parse(flag(buildClaudeArgs({}), "--settings") ?? "null"), { fastMode: false });
+  // A customization that sets fastMode is dropped; the launch field wins.
+  const custom = buildClaudeArgs({ fastMode: false, settings: { fastMode: true } });
+  assert.deepEqual(JSON.parse(flag(custom, "--settings") ?? "null"), { fastMode: false });
+  // Anything but the literal true is off.
+  const loose = buildClaudeArgs({ fastMode: "true" as unknown as boolean });
+  assert.deepEqual(JSON.parse(flag(loose, "--settings") ?? "null"), { fastMode: false });
 });

@@ -16,6 +16,7 @@
 //! | `model_catalogue` | blocking | [`ModelCatalogueArgs`] → [`ModelCatalogue`] |
 //! | `tool_stop` | async | [`ToolStopArgs`] → [`ToolStopResult`] |
 //! | `chat_compact` | maintenance | [`ChatIdArgs`] → `null` |
+//! | `attention_get` | blocking | `{}` → [`AttentionSummary`] |
 //!
 //! Argument parsing is strict (an unknown field is `bad_args`). Ops that touch a running chat go
 //! through the [`ChatRuntime`] service.
@@ -45,7 +46,24 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("chat_set_model", OpClass::Maintenance, chat_set_model)
         .blocking("model_catalogue", OpClass::Blocking, model_catalogue)
         .async_op("tool_stop", tool_stop)
-        .blocking("chat_compact", OpClass::Maintenance, chat_compact);
+        .blocking("chat_compact", OpClass::Maintenance, chat_compact)
+        .blocking("attention_get", OpClass::Blocking, attention_get);
+    crate::manage::register(reg);
+}
+
+/// `attention_get`: the summary as it stands. Without a runtime (tests) it is
+/// computed from the database alone.
+fn attention_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    parse_args::<EmptyArgs>(args)?;
+    if let Some(rt) = ctx.services.get::<ChatRuntime>() {
+        return to_value(&rt.attention().map_err(sql)?);
+    }
+    let db = ctx.services.need::<Database>()?;
+    let rev = ctx.services.need::<Clock>()?.current();
+    to_value(
+        &db.snapshot(|tx| crate::attention::compute(tx, &Default::default(), rev))
+            .map_err(sql)?,
+    )
 }
 
 /// `{}` or `null`.
@@ -69,7 +87,28 @@ fn runtime(ctx: &OpCtx) -> Result<ChatRuntime, ApiError> {
 
 fn chat_send(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatSendArgs = parse_args(args)?;
-    to_value(&submit::chat_send(&runtime(ctx)?, a)?)
+    let db = ctx.services.need::<Database>()?;
+    let archived_project = db
+        .snapshot(|tx| {
+            let p: Option<String> = rusqlite::OptionalExtension::optional(tx.query_row(
+                "SELECT project_id FROM chats WHERE id = ?1",
+                [&a.chat_id],
+                |r| r.get(0),
+            ))?;
+            match p {
+                Some(p) => crate::manage::project_archived(ctx, tx, &p),
+                None => Ok(false),
+            }
+        })
+        .map_err(sql)?;
+    if archived_project {
+        return Err(ApiError::new(
+            "refused",
+            "This chat's project is archived; your message is kept in the draft.",
+        ));
+    }
+    let builder = ctx.services.get::<crate::seams::SendContext>();
+    to_value(&submit::chat_send(&runtime(ctx)?, a, builder.as_deref())?)
 }
 
 async fn chat_stop(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -200,6 +239,10 @@ fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let clock = ctx.services.need::<Clock>()?;
     let id = db
         .write(|tx| {
+            let project = store::upsert_folder_project(tx, cwd, helm_core::now_ms())?;
+            if crate::manage::project_archived(ctx, tx, &project)? {
+                return Ok(None);
+            }
             store::create_chat(
                 tx,
                 cwd,
@@ -207,8 +250,15 @@ fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 Some(&effort),
                 helm_core::now_ms(),
             )
+            .map(Some)
         })
-        .map_err(sql)?;
+        .map_err(sql)?
+        .ok_or_else(|| {
+            ApiError::new(
+                "refused",
+                "This folder's project is archived; restore it to start new chats.",
+            )
+        })?;
     let rev = clock.next();
     let chat = db
         .snapshot(|tx| store::get_chat(tx, &id, rev))
@@ -346,19 +396,25 @@ pub(crate) mod tests {
         pub api: Dispatcher,
         pub sink: Arc<RecordingSink>,
         pub work: std::path::PathBuf,
+        pub db: Arc<Database>,
     }
 
     pub fn harness() -> Harness {
+        harness_with(|_| {})
+    }
+
+    pub fn harness_with(extra: impl FnOnce(&mut Services)) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let profile = Profile::open(&dir.path().join("prof")).unwrap();
         let reg = crate::schema::tests::registry();
-        let db = Database::open(&profile.db_path(), &reg).unwrap();
+        let db = Arc::new(Database::open(&profile.db_path(), &reg).unwrap());
         let work = dir.path().join("work");
         std::fs::create_dir_all(&work).unwrap();
         let mut s = Services::new();
         s.insert(Arc::new(profile));
-        s.insert(Arc::new(db));
+        s.insert(db.clone());
         s.insert(Arc::new(Clock::new(0)));
+        extra(&mut s);
         let sink = Arc::new(RecordingSink::default());
         let mut ops = OpRegistry::new();
         register_ops(&mut ops);
@@ -371,6 +427,7 @@ pub(crate) mod tests {
             api: Dispatcher::new(ops, ctx, false),
             sink,
             work,
+            db,
         }
     }
 
@@ -400,6 +457,16 @@ pub(crate) mod tests {
             ("model_catalogue", OpClass::Blocking),
             ("tool_stop", OpClass::Async),
             ("chat_compact", OpClass::Maintenance),
+            ("attention_get", OpClass::Blocking),
+            ("chat_archive", OpClass::Maintenance),
+            ("chat_restore", OpClass::Maintenance),
+            ("chat_delete", OpClass::Maintenance),
+            ("unread_mark", OpClass::Maintenance),
+            ("unread_clear", OpClass::Maintenance),
+            ("completion_ack", OpClass::Maintenance),
+            ("chat_mute", OpClass::Maintenance),
+            ("attention_address", OpClass::Maintenance),
+            ("attention_snooze", OpClass::Maintenance),
         ];
         for (name, class) in expected {
             assert_eq!(reg.class_of(name), Some(class), "{name}");

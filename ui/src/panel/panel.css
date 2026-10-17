@@ -1,0 +1,631 @@
+/* Side panel. Colours come only from the app's design tokens (styles.css);
+   the --sp-* names are local aliases so the whole panel can be re-pointed in one place. */
+
+.side-panel,
+.sp-notice-region,
+.fv-modal-backdrop {
+  --sp-bg: var(--bg);
+  --sp-text: var(--text);
+  --sp-surface: var(--surface);
+  --sp-surface-alt: var(--surface-alt);
+  --sp-hover: var(--hover);
+  --sp-line: var(--line);
+  --sp-line-strong: var(--line-strong);
+  --sp-secondary: var(--secondary);
+  --sp-muted: var(--muted);
+  --sp-accent: var(--accent);
+  --sp-shadow: var(--shadow);
+  --sp-u: var(--u, 1px);
+}
+
+.side-panel {
+  position: relative;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-width: 280px;
+  min-height: 0;
+  height: 100%;
+  background: var(--sp-bg);
+  color: var(--sp-text);
+  border-left: 1px solid var(--sp-line);
+  animation: sp-arrive 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.side-panel.maximized {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-left: none;
+}
+
+/* Maximised, the panel takes the main area; the sidebar stays. */
+html[data-panel-maximized] .shell-main {
+  display: none;
+}
+
+@keyframes sp-arrive {
+  from {
+    transform: translateX(24px);
+    opacity: 0.4;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .side-panel {
+    animation: none;
+  }
+}
+
+.sp-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 5;
+}
+
+.sp-resizer:hover {
+  background: var(--chrome-accent);
+}
+
+/* Header: tabs container, then the controls. */
+.sp-header {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  min-height: calc(40 * var(--sp-u));
+  padding: 0 6px 0 4px;
+  border-bottom: 1px solid var(--sp-line);
+  flex: none;
+}
+
+.sp-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.sp-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.sp-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 72px;
+  max-width: 200px;
+  height: calc(34 * var(--sp-u));
+  border-radius: 6px 6px 0 0;
+  color: var(--sp-muted);
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+}
+
+.sp-tab.sp-slot {
+  flex: none;
+  min-width: max-content;
+}
+
+.sp-tab.sp-doc {
+  flex: 0 1 auto;
+}
+
+.sp-tab:hover {
+  color: var(--sp-text);
+  background: var(--sp-hover);
+}
+
+.sp-tab[aria-selected='true'] {
+  color: var(--sp-text);
+  box-shadow: inset 0 -2px 0 var(--sp-accent);
+}
+
+.sp-tab:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--sp-accent);
+}
+
+.sp-tab.program .sp-tab-title {
+  font-style: italic;
+}
+
+.sp-tab-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 0 6px 0 9px;
+  font-size: calc(12 * var(--sp-u));
+}
+
+.sp-tab-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.sp-tab-close {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 4px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  visibility: hidden;
+}
+
+.sp-tab:hover .sp-tab-close,
+.sp-tab:focus-within .sp-tab-close,
+.sp-tab[aria-selected='true'] .sp-tab-close {
+  visibility: visible;
+}
+
+.sp-tab-close:hover {
+  background: var(--sp-hover);
+  border: none;
+}
+
+.sp-divider {
+  align-self: center;
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: var(--sp-line);
+  flex: none;
+}
+
+.sp-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.sp-icon-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sp-secondary);
+}
+
+.sp-icon-button:hover {
+  background: var(--sp-hover);
+  color: var(--sp-text);
+  border: none;
+}
+
+.sp-icon-button[aria-pressed='true'] {
+  color: var(--chrome-accent);
+}
+
+.sp-plus {
+  position: relative;
+}
+
+.sp-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--sp-surface);
+  border: 1px solid var(--sp-line);
+  border-radius: 9px;
+  box-shadow: var(--sp-shadow);
+}
+
+.sp-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--sp-text);
+  font-size: calc(12 * var(--sp-u));
+  text-align: left;
+}
+
+.sp-menu-item:hover,
+.sp-menu-item:focus-visible {
+  background: var(--sp-hover);
+  border: none;
+  outline: none;
+}
+
+/* The kind's header actions row: right-aligned, wraps. */
+.sp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--sp-line);
+  flex: none;
+}
+
+/* Every panel body is its own scroll container, bounded to the panel. */
+.sp-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sp-tab-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.sp-tab-body[hidden] {
+  display: none;
+}
+
+/* Empty state. */
+.sp-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 11px;
+  padding: 75px 10px;
+  text-align: center;
+  font-size: calc(11 * var(--sp-u));
+  color: var(--sp-muted);
+}
+
+.sp-empty-heading {
+  color: var(--sp-secondary);
+  font-weight: 500;
+}
+
+.sp-icon {
+  flex: none;
+}
+
+/* The link gate's refusal notice: top centre, clear of the bottom-right toast stack. */
+.sp-notice-region {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1200;
+  pointer-events: none;
+}
+
+.sp-notice {
+  max-width: min(520px, 80vw);
+  padding: 8px 14px;
+  border: 1px solid var(--sp-line-strong);
+  border-radius: 8px;
+  background: var(--sp-surface);
+  color: var(--sp-text);
+  box-shadow: var(--sp-shadow);
+  font-size: calc(12 * var(--sp-u));
+}
+
+/* ---- File viewer ---- */
+
+.fv-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.fv-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  flex: none;
+  flex-wrap: wrap;
+  font-size: calc(12 * var(--sp-u));
+  color: var(--sp-secondary);
+}
+
+.fv-label,
+.fv-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.fv-button,
+.fv-segmented button,
+.fv-nav-button,
+.fv-crumb {
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--sp-secondary);
+  font-size: calc(12 * var(--sp-u));
+}
+
+.fv-button:hover:not(:disabled),
+.fv-nav-button:hover:not(:disabled),
+.fv-crumb:hover {
+  background: var(--sp-hover);
+  color: var(--sp-text);
+  border-color: transparent;
+}
+
+.fv-button:disabled,
+.fv-nav-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.fv-button[aria-pressed='true'] {
+  color: var(--sp-text);
+  background: var(--sp-hover);
+}
+
+.fv-segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--sp-line);
+  border-radius: 6px;
+}
+
+.fv-segmented button {
+  padding: 5px 10px;
+  border-radius: 4px;
+}
+
+.fv-segmented button[aria-pressed='true'] {
+  color: var(--sp-text);
+  background: var(--sp-hover);
+  box-shadow: inset 0 0 0 1px var(--sp-line-strong);
+}
+
+.fv-open-app {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-color: var(--sp-line);
+}
+
+.fv-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 12px 6px;
+  flex: none;
+  min-width: 0;
+}
+
+.fv-nav-button {
+  width: 24px;
+  padding: 2px 0;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.fv-crumbs {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono, Consolas, monospace);
+  font-size: calc(11 * var(--sp-u));
+}
+
+.fv-crumb-wrap {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.fv-crumb {
+  padding: 5px 4px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: inherit;
+  white-space: nowrap;
+}
+
+.fv-crumb[aria-current='page'] {
+  color: var(--sp-text);
+}
+
+.fv-crumb-sep {
+  color: var(--sp-muted);
+  padding: 0 1px;
+}
+
+.fv-line {
+  margin-left: auto;
+  flex: none;
+  font-size: calc(11 * var(--sp-u));
+  color: var(--sp-muted);
+}
+
+.fv-notice {
+  padding: 7px 16px;
+  font-size: calc(10 * var(--sp-u));
+  color: var(--sp-muted);
+  background: var(--sp-surface-alt);
+  border-top: 1px solid var(--sp-line);
+  border-bottom: 1px solid var(--sp-line);
+  flex: none;
+}
+
+/* Each body is its own scroller, bounded to the panel. */
+.fv-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  border-top: 1px solid var(--sp-line);
+}
+
+.cv-host {
+  height: 100%;
+}
+
+.fv-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 48px 16px;
+  text-align: center;
+  font-size: calc(12 * var(--sp-u));
+  color: var(--sp-secondary);
+}
+
+.fv-folder {
+  padding: 22px 24px;
+}
+
+.fv-folder-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: var(--sp-secondary);
+}
+
+.fv-folder-name {
+  font-size: calc(16 * var(--sp-u));
+  color: var(--sp-text);
+}
+
+.fv-folder-count {
+  font-size: calc(12 * var(--sp-u));
+  color: var(--sp-muted);
+}
+
+.fv-entry {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 10px 8px;
+  border: none;
+  border-bottom: 1px solid var(--sp-line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--sp-text);
+  font-size: calc(12 * var(--sp-u));
+  text-align: left;
+}
+
+.fv-entry:hover {
+  background: var(--sp-hover);
+  border-color: var(--sp-line);
+}
+
+.fv-entry-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fv-entry-kind {
+  flex: none;
+  color: var(--sp-muted);
+}
+
+.fv-image {
+  padding: 20px;
+  text-align: center;
+}
+
+.fv-image img {
+  max-width: 100%;
+  height: auto;
+}
+
+.fv-html {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: var(--sp-surface);
+}
+
+.fv-markdown {
+  padding: 12px 28px 28px;
+}
+
+/* The modal viewer: the fallback when a file cannot open as a tab. */
+.fv-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+  background: color-mix(in srgb, var(--sp-bg) 60%, transparent);
+}
+
+.fv-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(1280px, 100%);
+  height: min(820px, calc(100dvh - 64px));
+  background: var(--sp-bg);
+  color: var(--sp-text);
+  border: 1px solid var(--sp-line-strong);
+  border-radius: 12px;
+  box-shadow: var(--sp-shadow);
+  overflow: hidden;
+}
+
+.fv-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px 6px 14px;
+  border-bottom: 1px solid var(--sp-line);
+}
+
+.fv-modal-title {
+  font-size: calc(13 * var(--sp-u));
+}
+
+@media (max-width: 600px), (max-height: 500px) {
+  .fv-modal-backdrop {
+    padding: 12px;
+  }
+  .fv-modal {
+    height: 100%;
+  }
+}

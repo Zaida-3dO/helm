@@ -14,16 +14,28 @@
 //! | [`runtime`] | the runtime service, the worker spawner seam, quit drain |
 //! | `actor` | one task per chat: worker, streaming, tools, interactions, Stop, timers |
 //! | [`submit`] | sends, queue actions, model changes, restart continuation |
+//! | [`archive`] | archive and restore inside a caller's transaction |
+//! | [`attention`] | the attention summary behind the badge, tray and row marks |
+//! | [`delete`] | hard delete and its batched, retried file cleanup |
+//! | [`manage`] | archive, restore, delete, unread marks and completion acks |
+//! | [`seams`] | traits other crates implement (panel context, project gate) |
+//! | [`search_source`] | the searchable message text the search crate indexes |
 
 mod actor;
+pub mod archive;
+pub mod attention;
 pub mod bindings;
 pub mod catalogue;
 pub mod clock;
+pub mod delete;
+pub mod manage;
 pub mod ops;
 pub mod runtime;
 #[cfg(test)]
 mod runtime_tests;
 pub mod schema;
+pub mod seams;
+pub mod search_source;
 pub mod send_behavior;
 pub mod session_log;
 pub mod store;
@@ -54,6 +66,11 @@ pub fn reconcile_all(
             rows.collect::<rusqlite::Result<Vec<String>>>()
         })
         .unwrap_or_default();
+    // Files a hard delete could not remove last time.
+    let n = delete::run_cleanup(db, &profile.path(""));
+    if n > 0 {
+        log::info!("file cleanup: {n} leftover paths settled");
+    }
     for id in ids {
         if !session_log::log_path(&sessions, &id).exists() {
             continue;

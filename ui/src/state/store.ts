@@ -114,9 +114,10 @@ export class ChatStore {
     this.update(chat.id, (v) => applyChat(v, chat));
     const i = this.chats.findIndex((c) => c.id === chat.id);
     if (i >= 0 && this.chats[i]!.revision < chat.revision) {
-      this.chats = this.chats.map((c) => (c.id === chat.id ? chat : c));
+      // Archived chats and unpromoted side chats leave the list, as chat_list leaves them out.
+      this.chats = chat.archived || chat.sideSourceId ? this.chats.filter((c) => c.id !== chat.id) : this.chats.map((c) => (c.id === chat.id ? chat : c));
       this.emit();
-    } else if (i < 0) {
+    } else if (i < 0 && !chat.archived && !chat.sideSourceId) {
       this.chats = [chat, ...this.chats];
       this.emit();
     }
@@ -134,6 +135,14 @@ export class ChatStore {
     this.update(chatId, (v) => applyQueue(v, pending, revision));
   }
 
+  /** The chat is gone (`chat_removed`): forget it. */
+  deleted(chatId: string): void {
+    this.views.delete(chatId);
+    this.empties.delete(chatId);
+    this.chats = this.chats.filter((c) => c.id !== chatId);
+    this.emit();
+  }
+
   refresh(chatId: string): void {
     this.update(chatId, (v) => ({ ...v, refreshes: v.refreshes + 1 }));
   }
@@ -146,6 +155,7 @@ export class ChatStore {
       bus.on('message', (e) => this.rows(e.chatId as string, e.rows as MessageRow[])),
       bus.on('queue', (e) => this.queue(e.chatId as string, e.pending as Submission[], Number(e.revision ?? 0))),
       bus.on('refresh', (e) => this.refresh(e.chatId as string)),
+      bus.on('chat_removed', (e) => this.deleted(e.chatId as string)),
     ];
     return () => offs.forEach((o) => o());
   }

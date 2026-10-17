@@ -42,3 +42,17 @@ test('unwatched threads are evicted past MAX_THREADS; watched ones stay', () => 
   assert.equal(store.view(`c${MAX_THREADS + 2}`).rows.length, 1);
   unwatch();
 });
+
+test('archived chats leave the list and a deleted chat is forgotten', () => {
+  const s = new ChatStore();
+  const bus = new EventBus();
+  s.connect(bus);
+  bus.dispatch({ kind: 'chat', chat: chat({ id: 'a', revision: 1 }) });
+  bus.dispatch({ kind: 'chat', chat: chat({ id: 'b', revision: 1 }) });
+  assert.deepEqual(s.chatList().map((c) => c.id), ['b', 'a']);
+  bus.dispatch({ kind: 'chat', chat: chat({ id: 'a', revision: 2, archived: true }) });
+  assert.deepEqual(s.chatList().map((c) => c.id), ['b']);
+  bus.dispatch({ kind: 'chat_removed', chatId: 'b' });
+  assert.deepEqual(s.chatList(), []);
+  assert.equal(s.view('b').chat, null);
+});

@@ -240,6 +240,23 @@ describe("submissions", () => {
     }
   });
 
+  test("a context block rides as its own text block after the message", async () => {
+    const s = startWithFixture("streaming");
+    try {
+      await s.host.ready();
+      const r = await prompt(s.host, "look", { context: "Looking at: src/a.rs" });
+      assert.equal(r.success, true);
+      const user = await waitReceived(s, isUser);
+      const content = (user.message as { content: { type: string; text: string }[] }).content;
+      assert.deepEqual(content, [
+        { type: "text", text: "look" },
+        { type: "text", text: "Looking at: src/a.rs" },
+      ]);
+    } finally {
+      await s.done();
+    }
+  });
+
   test("text over 2 MB is refused; exactly 2 MB is not", async () => {
     const s = startWithFixture("no-ack", { limits: { promptAckMs: 200 } });
     try {
@@ -637,7 +654,7 @@ test("every fake claude fixture is used by a worker test or a fake test", async 
     .join("\n");
   for (const f of fs.readdirSync(FIXTURES).filter((n: string) => n.endsWith(".json"))) {
     const name = path.basename(f, ".json");
-    const used = src.includes(`startWithFixture("${name}"`) || src.includes(`new Fake("${name}"`);
+    const used = src.includes(`startWithFixture("${name}"`) || src.includes(`new Fake("${name}"`) || src.includes(`fixtures/${name}.json`);
     assert.ok(used, `fixture ${name} has no test`);
   }
 });

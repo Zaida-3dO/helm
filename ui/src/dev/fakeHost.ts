@@ -16,8 +16,40 @@ import type {
   TranscriptPage,
 } from '../api/types.ts';
 import { HOME_SEND_BEHAVIOR } from '../api/types.ts';
+import { leafFakeOps } from './fake-leaf.ts';
+import { projectsFakeOps } from './fake-projects.ts';
+import { panelFakeOps } from './fake-panel.ts';
 
 type Emit = (payload: unknown) => void;
+
+/** What another area's fake ops get from the fake host. */
+export interface FakeOpContext {
+  emit: Emit;
+  /** The fake host's own ops, to call through (for example `chat_list`). */
+  call: (op: string, args?: Record<string, unknown>) => unknown;
+}
+
+export type FakeOpHandler = (op: string, args: Record<string, unknown>, ctx: FakeOpContext) => unknown;
+
+const extraOps: { prefixes: string[]; handler: FakeOpHandler }[] = [];
+
+/**
+ * Each area's `ui/src/dev/fake-<area>.ts` implements its own ops and registers
+ * them here with one line, e.g. `registerFakeOps(['project_', 'sidebar_'], handler)`. An op is
+ * routed to the first registration with a matching prefix (an exact name counts as a prefix);
+ * the fake host's own ops win over registrations.
+ */
+export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): void {
+  extraOps.push({ prefixes, handler });
+}
+
+{ const leaf = leafFakeOps(); registerFakeOps(leaf.prefixes, leaf.handler); }
+{ const sb = projectsFakeOps(); registerFakeOps(sb.prefixes, sb.handler); }
+{ const panel = panelFakeOps(); registerFakeOps(panel.prefixes, panel.handler); }
+
+export function fakeOpFor(op: string): FakeOpHandler | undefined {
+  return extraOps.find((r) => r.prefixes.some((p) => op.startsWith(p)))?.handler;
+}
 
 interface FakeChat {
   chat: ChatRecord;
@@ -28,6 +60,9 @@ interface FakeChat {
 }
 
 const PAGE = 100;
+
+/** The last part of a folder path, either slash. */
+const folderName = (p: string) => p.split(/[\\/]/).pop() ?? '';
 
 export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: number } = {}): Invoke {
   const step = opts.stepMs ?? 80;
@@ -57,10 +92,29 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     emit({ kind: 'queue', chatId: c.chat.id, revision: rev(), pending: c.pending });
   }
   function setStatus(c: FakeChat, status: ChatRecord['status']) {
-    c.chat = { ...c.chat, status };
+    const dropCompletion = status !== 'idle' && status !== 'interrupted';
+    c.chat = { ...c.chat, status, unread: dropCompletion ? { ...c.chat.unread, completionId: null } : c.chat.unread };
     c.thread = { ...c.thread, status };
     emitChat(c);
     emitThread(c);
+    emitAttention();
+  }
+
+  function emitAttention() {
+    emit({ kind: 'attention', summary: { ...attention(), revision: rev() } });
+  }
+
+  /** A clean finish leaves one unread completion. */
+  function complete(c: FakeChat) {
+    const last = [...c.rows].reverse().find((r) => r.role === 'assistant');
+    const id = uid();
+    c.chat = { ...c.chat, unread: { ...c.chat.unread, completionId: id } };
+    emit({
+      kind: 'completion',
+      completion: { id, chatId: c.chat.id, title: c.chat.title, project: folderName(c.chat.cwd), preview: (last?.text ?? '').slice(0, 240), completedAt: now(), read: false, dismissed: false },
+    });
+    emitChat(c);
+    emitAttention();
   }
 
   function addRow(c: FakeChat, p: Partial<MessageRow> & Pick<MessageRow, 'role'>): MessageRow {
@@ -112,6 +166,15 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         createdAt: t,
         updatedAt: t,
         revision: rev(),
+        pinned: false,
+        archived: false,
+        parentChatId: null,
+        sideSourceId: null,
+        titleState: 'fallback',
+        unread: { markToken: null, completionId: null },
+        muted: false,
+        lastActivityAt: t,
+        stalled: false,
       },
       thread: {
         chatId: id,
@@ -268,6 +331,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       }
       await streamText(c, 'All done: the folder has a README, a package file and a src folder, and **main.ts** now exports two constants.', cancelled);
       setStatus(c, 'idle');
+      complete(c);
       startNext(c);
     } catch {
       setStatus(c, 'stopped');
@@ -288,6 +352,28 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     emitQueue(c);
     addRow(c, { role: 'user', text: next.text, sourceKey: next.id, details: { submissionId: next.id } });
     void runTurn(c, next.text);
+  }
+
+  /** A first cut of the host's attention summary: running chats and pending interactions. */
+  function attention() {
+    const all = [...chats.values()].filter((c) => !c.chat.archived && !c.chat.sideSourceId);
+    const list = all.filter((c) => !c.chat.muted);
+    const row = (c: FakeChat, kind: string) => ({ chatId: c.chat.id, title: c.chat.title || 'Untitled', project: folderName(c.chat.cwd), kind, reason: kind });
+    const busy = list.filter((c) => ['starting', 'running', 'stopping'].includes(c.chat.status));
+    const needs = list.filter((c) => c.thread.interactions.some((i) => i.attention));
+    const unread = list.filter((c) => c.chat.unread.markToken || (c.chat.unread.completionId && c.chat.status === 'idle' && !c.chat.error));
+    return {
+      badge: new Set([...needs, ...unread]).size,
+      busy: all.filter((c) => ['starting', 'running', 'stopping'].includes(c.chat.status)).length,
+      needsYou: needs.slice(0, 8).map((c) => {
+        const a = c.thread.interactions.find((i) => i.attention)?.attention;
+        return row(c, a === 'trust' ? 'approval' : String(a));
+      }),
+      running: busy.slice(0, 8).map((c) => row(c, 'running')),
+      unread: unread.slice(0, 8).map((c) => row(c, 'unread')),
+      stalled: [],
+      revision,
+    };
   }
 
   function find(chatId: unknown): FakeChat {
@@ -323,7 +409,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     app_info: () => ({ name: 'Helm', edition: 'desktop', version: 'dev', schemaVersion: 1, profileDir: '(fake host)' }),
     quit_request: () => null,
     chat_create: (a) => newChat(String(a.cwd)).chat,
-    chat_list: () => [...chats.values()].map((c) => c.chat).sort((x, y) => y.createdAt - x.createdAt),
+    chat_list: () => [...chats.values()].map((c) => c.chat).filter((c) => !c.archived && !c.sideSourceId).sort((x, y) => y.createdAt - x.createdAt),
     chat_get: (a) => {
       const c = find(a.chatId);
       return { chat: c.chat, thread: c.thread };
@@ -342,7 +428,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         text,
         mode: 'prompt',
         state: 'accepted',
-        origin: 'user',
+        origin: a.origin === 'action' || a.origin === 'notification' ? a.origin : 'typed',
         position: null,
         createdAt: now(),
       };
@@ -369,7 +455,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         c.turn?.cancel();
         setTimeout(() => startNext(c), step * 3);
       }
-      c.chat = { ...c.chat, draft: '' };
+      // Only the composer's sends clear the draft.
+      if ((a.origin ?? 'composer') === 'composer') c.chat = { ...c.chat, draft: '' };
       emitChat(c);
       return { submission: s, chat: c.chat };
     },
@@ -452,6 +539,60 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       source: 'fallback',
     }),
     tool_stop: () => ({ stopped: true }),
+    attention_get: () => attention(),
+    chat_archive: (a) => {
+      const c = find(a.chatId);
+      if (['starting', 'running', 'stopping'].includes(c.chat.status)) throw { code: 'refused', message: 'This chat is working; stop the task first, then archive it.' };
+      c.chat = { ...c.chat, archived: true };
+      emitChat(c);
+      emitAttention();
+      return c.chat;
+    },
+    chat_restore: (a) => {
+      const c = find(a.chatId);
+      c.chat = { ...c.chat, archived: false };
+      emitChat(c);
+      emitAttention();
+      return c.chat;
+    },
+    chat_delete: (a) => {
+      const c = find(a.chatId);
+      if (!c.chat.archived) throw { code: 'refused', message: 'Only archived chats can be deleted; archive it first.' };
+      chats.delete(c.chat.id);
+      emit({ kind: 'chat_removed', chatId: c.chat.id });
+      emitAttention();
+      return null;
+    },
+    chat_mute: (a) => {
+      const c = find(a.chatId);
+      c.chat = { ...c.chat, muted: Boolean(a.muted) };
+      emitChat(c);
+      emitAttention();
+      return c.chat;
+    },
+    attention_address: () => null,
+    attention_snooze: () => null,
+    unread_mark: (a) => {
+      const c = find(a.chatId);
+      c.chat = { ...c.chat, unread: { ...c.chat.unread, markToken: uid() } };
+      emitChat(c);
+      emitAttention();
+      return c.chat;
+    },
+    unread_clear: (a) => {
+      const c = find(a.chatId);
+      if (c.chat.unread.markToken === a.token) c.chat = { ...c.chat, unread: { ...c.chat.unread, markToken: null } };
+      emitChat(c);
+      emitAttention();
+      return c.chat;
+    },
+    completion_ack: (a) => {
+      const c = find(a.chatId);
+      if (c.chat.unread.completionId === a.completionId) c.chat = { ...c.chat, unread: { ...c.chat.unread, completionId: null } };
+      emitChat(c);
+      emitAttention();
+      return c.chat;
+    },
     chat_compact: () => null,
     preference_get: (a) => (a.key === 'sendBehavior' ? sendBehavior : (prefs.get(String(a.key)) ?? null)),
     preference: (a) => {
@@ -468,9 +609,12 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   return async (command, payload) => {
     if (command !== 'api') throw { code: 'refused', message: `Unknown command ${command}` };
     const op = String(payload.op);
+    const args = (payload.args as Record<string, unknown>) ?? {};
     const f = ops[op];
-    if (!f) throw { code: 'not_implemented', message: `The fake host has no op ${op}.` };
     await new Promise((r) => setTimeout(r, 5));
-    return f((payload.args as Record<string, unknown>) ?? {});
+    if (f) return f(args);
+    const extra = fakeOpFor(op);
+    if (extra) return extra(op, args, { emit, call: (o, a = {}) => ops[o]?.(a) });
+    throw { code: 'not_implemented', message: `The fake host has no op ${op}.` };
   };
 }

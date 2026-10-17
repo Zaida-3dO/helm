@@ -1,14 +1,306 @@
-:root {
+/*
+ * Design tokens for the default theme.
+ *
+ * Every other stylesheet reads these variables; none redefines them.
+ * The shell writes `data-theme` (light | dark), `data-skin` (default) and `data-effects` (full) on
+ * <html> before first paint (ui/src/shell/theme.ts). Without the attribute the OS colour scheme
+ * decides, so a plain browser tab and the first frame both get a sensible palette.
+ *
+ * Values are the derived defaults with no custom colours. A later theme engine (themes milestone)
+ * computes them at runtime from text, background and tint and writes the same names.
+ */
+
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  /* Input palette. */
+  --palette-text: #262826;
+  --palette-bg: #fbfbfa;
+  --palette-tint: #737c88;
+
+  /* Derived. */
+  --bg: #fbfbfa;
+  --text: #262826;
+  --sidebar: #f1f1f0;
+  --surface: #fefefe;
+  --surface-alt: #f5f5f5;
+  --hover: #e8e8e7;
+  --selected: #dededd;
+  --secondary: #6a6c6a;
+  --muted: #8c8d8c;
+  --line: #e3e3e2;
+  --line-strong: #d0d0d0;
+  --accent: #737c88;
+  --chrome-accent: #737c88;
+  --accent-bg: #ebecec;
+  --accent-fill: #626974;
+  --on-accent-fill: #ffffff;
+  --on-selected: #000000;
+  --chat-selected-accent: 10%;
+  --chat-selected-fill: #c3c4c4;
+  --accent-mark: #606770;
+  --chat-selected-quiet: 30%;
+
+  /* Static. */
+  --error: #b54a44;
+  --warning: #b99159;
+  --setup-warning: #875000;
+  --interrupted: #be9562;
+  --git-modified: #ac9256;
+  --link-tint: #4d77a0;
+  --link-color: color-mix(in srgb, var(--text) 30%, var(--link-tint));
+  --link-hover-color: color-mix(in srgb, var(--link-color) 72%, var(--text));
+  --shadow: 0 12px 48px #1c21171a, 0 1px 4px #1c211712;
+  --delivery-pending: #926111;
+  --delivery-steer: #6b4fbb;
+  --tone-edit: #608cab;
+  --tone-test: #64885f;
+  --tone-running: #ac8a4c;
+
+  /* Diff. */
+  --diff-add-text: #216b35;
+  --diff-add-bg: #25a34414;
+  --diff-add-edge: #25a3446b;
+  --diff-del-text: #b0263e;
+  --diff-del-bg: #dc354b12;
+  --diff-del-edge: #dc354b60;
+  --diff-hunk-text: #346b9f;
+  --diff-hunk-bg: #3793df0b;
+
+  /* Syntax. */
+  --syn-comment: #606877;
+  --syn-keyword: #a51b70;
+  --syn-string: #18723b;
+  --syn-number: #a45208;
+  --syn-function: #7140be;
+  --syn-type: #89520a;
+  --syn-property: #086c9e;
+  --syn-operator: #995074;
+  --syn-punctuation: #596374;
+
+  /* Effects. */
+  --fx-accent: #737c88;
+  --fx-sheen: #b9bec4;
+  --fx-light: #e0e2e5;
+  --fx-deep: #565d66;
+  --fx-core: #ffffff;
+
+  /* Elevation. */
+  --elev-1: 0 2px 8px #242c1510;
+  --elev-2: 0 4px 16px #00000020;
+  --elev-3: 0 6px 20px #0003;
+  --backdrop: #14181038;
+}
+
+:root[data-theme='dark'] {
   color-scheme: dark;
-  --bg: #16181d;
-  --panel: #1e2128;
-  --border: #2c3039;
-  --text: #e6e8ec;
-  --muted: #9aa1ad;
-  --accent: #c9a24d;
-  --error: #f08a7e;
-  font-family: 'Segoe UI', system-ui, sans-serif;
-  font-size: 14px;
+
+  --palette-text: #ffffff;
+  --palette-bg: #121212;
+  --palette-tint: #cbd0d6;
+
+  --bg: #121212;
+  --text: #ffffff;
+  --sidebar: #0e0e0e;
+  --surface: #1b1b1b;
+  --surface-alt: #171717;
+  --hover: #242424;
+  --selected: #2d2d2d;
+  --secondary: #cbcbcb;
+  --muted: #a0a0a0;
+  --line: #292929;
+  --line-strong: #3a3a3a;
+  --accent: #cbd0d6;
+  --chrome-accent: #cbd0d6;
+  --accent-bg: #28292a;
+  --accent-fill: #adb1b6;
+  --on-accent-fill: #000000;
+  --on-selected: #ffffff;
+  --chat-selected-fill: #505051;
+  --accent-mark: #cbd0d6;
+
+  --error: #f0908c;
+  --setup-warning: var(--text);
+  --link-tint: #96b9e5;
+  --shadow: 0 14px 48px #0007, 0 1px 4px #0004, inset 0 1px #ffffff07;
+  --delivery-pending: #dcb96f;
+  --delivery-steer: #b7a3f0;
+  --tone-edit: #92b7d0;
+  --tone-test: #a2bc8b;
+  --tone-running: #c9ad74;
+
+  --diff-add-text: #7ae4a2;
+  --diff-add-bg: #3bd87816;
+  --diff-add-edge: #3bd87869;
+  --diff-del-text: #ff8fa3;
+  --diff-del-bg: #ff63781a;
+  --diff-del-edge: #ff637866;
+  --diff-hunk-text: #80c7ff;
+  --diff-hunk-bg: #58aeff0d;
+
+  --syn-comment: #999999;
+  --syn-keyword: #f67576;
+  --syn-string: #85df7b;
+  --syn-number: #6dcbf4;
+  --syn-function: #b06dff;
+  --syn-type: #b06dff;
+  --syn-property: #fa994c;
+  --syn-operator: #6dcbf4;
+  --syn-punctuation: #999999;
+
+  --fx-accent: #cbd0d6;
+  --fx-sheen: #e5e8eb;
+  --fx-light: #f4f5f6;
+  --fx-deep: #989ca1;
+  --fx-core: #ffffff;
+
+  --elev-1: inset 0 1px #ffffff06, 0 4px 16px #0003;
+}
+
+/* No attribute yet (a plain browser tab, or the first frame): follow the OS. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --bg: #121212;
+    --text: #ffffff;
+    --sidebar: #0e0e0e;
+    --surface: #1b1b1b;
+    --surface-alt: #171717;
+    --hover: #242424;
+    --selected: #2d2d2d;
+    --secondary: #cbcbcb;
+    --muted: #a0a0a0;
+    --line: #292929;
+    --line-strong: #3a3a3a;
+    --accent: #cbd0d6;
+    --chrome-accent: #cbd0d6;
+    --error: #f0908c;
+    --shadow: 0 14px 48px #0007, 0 1px 4px #0004, inset 0 1px #ffffff07;
+  }
+}
+
+:root[data-effects='quiet'] {
+  --shadow: 0 12px 36px #0003, 0 1px 3px #0002;
+}
+
+:root {
+  /* Type. */
+  /* Windows-first stacks: the variable Segoe face, then Segoe UI; code in Consolas. */
+  --font-ui: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'Cascadia Mono', Consolas, 'Liberation Mono', monospace;
+  --interface-font-size: 13px;
+  /* The interface unit: interface size / 13. Write chrome sizes as calc(N * var(--ui-unit)). */
+  --ui-unit: calc(var(--interface-font-size) / 13);
+  --response-font-size: 14px;
+  --review-font-size: 10px;
+  --review-line-height: 21px;
+
+  /* Project colours. */
+  --project-red: #d96767;
+  --project-orange: #d78a45;
+  --project-yellow: #c5a536;
+  --project-green: #61ad56;
+  --project-teal: #3daea7;
+  --project-blue: #559be0;
+  --project-purple: #a378da;
+  --project-pink: #d568a7;
+
+  /* Spacing set: the working steps, in interface units. */
+  --space-1: calc(2 * var(--ui-unit));
+  --space-2: calc(4 * var(--ui-unit));
+  --space-3: calc(6 * var(--ui-unit));
+  --space-4: calc(8 * var(--ui-unit));
+  --space-5: calc(10 * var(--ui-unit));
+  --space-6: calc(12 * var(--ui-unit));
+  --space-7: calc(16 * var(--ui-unit));
+  --space-8: calc(20 * var(--ui-unit));
+  --space-9: calc(24 * var(--ui-unit));
+
+  /* Cursors: always these variables, never raw keywords, so themed cursors can swap. */
+  --cursor-default: default;
+  --cursor-pointer: pointer;
+  --cursor-text: text;
+
+  /* Radii. */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-row-action: 5px;
+  --radius: 6px;
+  --radius-button: 7px;
+  --radius-code: 8px;
+  --radius-menu: 9px;
+  --radius-toast: 10px;
+  --radius-anchored: 11px;
+  --radius-dialog: 15px;
+  --radius-pill: 999px;
+
+  /* The one z-index ladder. Use these names, never a bare number. */
+  --z-row-wash: -1;
+  --z-sticky: 2;
+  --z-terminal: 3;
+  --z-resizer: 4;
+  --z-terminal-max: 6;
+  --z-find: 8;
+  --z-inspector-overlay: 9;
+  --z-inspector-resizer: 10;
+  --z-timeline-card: 14;
+  --z-hover-preview: 15;
+  --z-notice: 19;
+  --z-menu-dismiss: 20;
+  --z-menu: 21;
+  --z-beacon: 22;
+  --z-backdrop: 30;
+  --z-dialog-popover: 40;
+  --z-toast: 50;
+  --z-picker: 80;
+  --z-selection-toolbar: 90;
+  --z-draft-notice: 150;
+  --z-overlay-app: 1000;
+  --z-tooltip: 1200;
+  --z-modal-viewer: 1300;
+  --z-intro: 10000;
+  --z-zoom: 10002;
+  --z-frame-stats: 10003;
+
+  /* Motion. Each finite animation reads its own duration variable with the
+     literal as fallback, so one animation can be switched off by setting its variable to 0s. */
+  --ease-spring: cubic-bezier(0.18, 0.85, 0.28, 1.28);
+  --ease-spring-settle: cubic-bezier(0.37, 0, 0.63, 1);
+  --ease-out-soft: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --motion-button-colour: 110ms;
+  --motion-button-scale: 180ms;
+  --motion-appear: 90ms;
+  --motion-toast: 100ms;
+  --motion-panel-in: 240ms;
+  --motion-menu-in: 340ms;
+  --motion-dialog-in: 440ms;
+  --motion-reorder: 150ms;
+  --elev-4p: 0 12px 36px #0003, 0 2px 5px #0001, inset 0 1px color-mix(in srgb, var(--fx-core) 30%, transparent);
+
+  /* Layout anchors. */
+  --sidebar-width: 480px;
+  --sidebar-min: 200px;
+  --main-min: 320px;
+  --inspector-width: 370px;
+  --inspector-min: 280px;
+  --topbar-height: 49px;
+
+  /* Older names, kept as aliases so existing stylesheets keep working. New code uses the names above. */
+  --panel: var(--surface);
+  --border: var(--line);
+  --fg: var(--text);
+  --fg-muted: var(--muted);
+  --warn: var(--warning);
+  --ok: var(--tone-test);
+  --user: var(--surface-alt);
+
+  font-family: var(--font-ui);
+  font-size: var(--interface-font-size);
+  cursor: var(--cursor-default);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
   background: var(--bg);
   color: var(--text);
 }
@@ -24,61 +316,301 @@ body,
   margin: 0;
 }
 
+::selection {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+/* Scrollbars. */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 36%, transparent);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Focus: keyboard focus only. */
+:focus {
+  outline: none;
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Buttons. The bare element is the secondary button. */
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(7 * var(--ui-unit));
+  padding: calc(8 * var(--ui-unit)) calc(12 * var(--ui-unit));
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-button);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  font-size: calc(12 * var(--ui-unit));
+  cursor: var(--cursor-pointer);
+  transition:
+    background-color 110ms ease,
+    color 110ms ease;
+}
+button:hover:not(:disabled) {
+  background: var(--surface-alt);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: var(--cursor-default);
+}
+button.primary {
+  background: var(--text);
+  color: var(--surface);
+  border-color: transparent;
+}
+button.primary:hover:not(:disabled) {
+  background: var(--text);
+  opacity: 0.86;
+}
+button.text {
+  border: 0;
+  background: none;
+  padding: 4px 0;
+  gap: 5px;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+button.text:hover:not(:disabled) {
+  background: none;
+  color: var(--text);
+}
+button.icon {
+  width: calc(28 * var(--ui-unit));
+  height: calc(28 * var(--ui-unit));
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--secondary);
+}
+button.icon:hover:not(:disabled),
+button.icon[aria-pressed='true'] {
+  background: var(--hover);
+  color: var(--text);
+}
+:root[data-theme='dark'] button.icon[aria-pressed='true'] {
+  color: var(--chrome-accent);
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+input[type='text'],
+input[type='search'],
+input[type='password'],
+input:not([type]),
+textarea {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 9px 11px;
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+}
+input[type='checkbox'],
+input[type='radio'],
+input[type='range'] {
+  accent-color: var(--accent);
+}
+select {
+  background: var(--surface-alt);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: calc(7 * var(--ui-unit)) calc(9 * var(--ui-unit));
+  font-size: calc(12 * var(--ui-unit));
+  min-width: 110px;
+}
+
+a {
+  color: var(--link-color);
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+  text-underline-offset: 3px;
+}
+a:hover,
+a:focus-visible {
+  color: var(--link-hover-color);
+  text-decoration-color: currentColor;
+}
+
+kbd {
+  font-family: var(--font-ui);
+  font-size: calc(10 * var(--ui-unit));
+  color: var(--muted);
+}
+
+/* Counters and times use tabular figures. */
+.tabular,
+time,
+kbd {
+  font-variant-numeric: tabular-nums;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.secondary {
+  color: var(--secondary);
+}
+
+.error {
+  color: var(--error);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Kill switches: Reduce Motion removes every animation and transition; the Zen
+   delight level (data-dopamine="zen") does the same for decoration and chrome motion. Status marks
+   stay as static shapes. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-button-colour: 0s;
+    --motion-button-scale: 0s;
+    --motion-appear: 0s;
+    --motion-toast: 0s;
+    --motion-panel-in: 0s;
+    --motion-menu-in: 0s;
+    --motion-dialog-in: 0s;
+    --motion-reorder: 0s;
+  }
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+:root[data-dopamine='zen'] {
+  --motion-button-scale: 0s;
+  --motion-panel-in: 0s;
+  --motion-menu-in: 0s;
+  --motion-dialog-in: 0s;
+  --motion-reorder: 0s;
+}
+:root[data-dopamine='zen'] .ui-btn,
+:root[data-dopamine='zen'] button {
+  scale: none !important;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * The app frame: sidebar | main (top bar, chat, terminal dock) | side panel.
+ * ------------------------------------------------------------------------------------------- */
+
 .shell {
   display: flex;
   height: 100%;
+  overflow: hidden;
 }
 
-.sidebar {
-  width: 260px;
+.shell-sidebar {
   flex: none;
-  background: var(--panel);
-  border-right: 1px solid var(--border);
-  padding: 16px;
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-min);
+  max-width: calc(100vw - 321px);
+  background: var(--sidebar);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  user-select: none;
 }
 
-.brand {
-  font-weight: 600;
-  font-size: 18px;
-  color: var(--accent);
-  margin-bottom: 12px;
-}
-
-.main {
+.shell-main {
   flex: 1;
-  min-width: 0;
-  padding: 16px 24px;
+  min-width: var(--main-min);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+  position: relative;
 }
 
-.topbar {
+.shell-chat {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.shell-panel {
+  flex: none;
+  min-width: var(--inspector-min);
+  border-left: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.shell-panel:empty {
+  display: none;
+}
+
+@media (max-width: 1000px) {
+  .shell-panel {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    max-width: calc(100vw - 48px);
+    z-index: var(--z-inspector-overlay);
+    box-shadow: -10px 0 40px #0001;
+  }
+}
+
+.empty-main {
+  flex: 1;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 16px;
+  justify-content: center;
+  color: var(--secondary);
+  font-size: calc(13 * var(--ui-unit));
 }
 
-.topbar h1 {
-  font-size: 16px;
-  margin: 0;
-}
-
-button {
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 14px;
-  font: inherit;
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: var(--accent);
+/* The older chat list's wrapper inside the sidebar slot, until <Sidebar/> mounts. */
+.brand {
+  font-weight: 600;
+  font-size: calc(20 * var(--ui-unit));
+  letter-spacing: -0.3px;
+  padding: calc(14 * var(--ui-unit)) calc(16 * var(--ui-unit)) calc(8 * var(--ui-unit));
 }
 
 .card {
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-radius: 8px;
   padding: 16px;
   max-width: 720px;
@@ -100,15 +632,217 @@ dd {
   overflow-wrap: anywhere;
 }
 
-.mono {
-  font-family: 'Cascadia Mono', Consolas, monospace;
-  font-size: 12px;
+.legacy-sidebar {
+  padding: 16px;
+  height: 100%;
 }
 
-.muted {
+/* Top bar. */
+.topbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: var(--topbar-height);
+  padding: 0 17px 0 22px;
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+  position: relative;
+  min-width: 0;
+}
+:root[data-theme='dark'] .topbar::after {
+  content: '';
+  position: absolute;
+  left: 22px;
+  bottom: -1px;
+  height: 1px;
+  width: min(210px, 45%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--accent) 17%, transparent) 24%,
+    color-mix(in srgb, var(--accent) 4%, transparent) 70%,
+    transparent
+  );
+}
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  font-size: calc(12 * var(--ui-unit));
+}
+.crumb-project {
+  color: var(--secondary);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crumb-chevron {
   color: var(--muted);
+  flex: none;
+}
+.crumb-title {
+  color: var(--text);
+  font-weight: 480;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+@media (max-width: 760px) {
+  .crumb-project {
+    max-width: 70px;
+  }
 }
 
-.error {
-  color: var(--error);
+/* Dialogs. */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-backdrop);
+  background: var(--backdrop);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: max(70px, 10vh) 22px 35px;
+  animation: appear 90ms ease;
+}
+.dialog {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-dialog);
+  box-shadow: var(--shadow);
+  width: 430px;
+  max-width: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.dialog.wide {
+  width: 620px;
+}
+.dialog-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(16 * var(--ui-unit)) calc(20 * var(--ui-unit)) calc(12 * var(--ui-unit));
+}
+.dialog-head h2 {
+  margin: 0;
+  font-size: calc(14 * var(--ui-unit));
+  font-weight: 570;
+  letter-spacing: -0.1px;
+}
+.dialog-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.dialog-foot {
+  flex: none;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line);
+  font-size: calc(11 * var(--ui-unit));
+}
+@keyframes appear {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Settings frame. */
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 18px;
+  padding: 2px 23px 0;
+  border-bottom: 1px solid var(--line);
+}
+.settings-tab {
+  border: 0;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+  background: none;
+  padding: 9px 0;
+  font-size: calc(12 * var(--ui-unit));
+  color: var(--muted);
+  flex: none;
+}
+.settings-tab:hover:not(:disabled) {
+  background: none;
+  color: var(--text);
+}
+.settings-tab[aria-selected='true'] {
+  color: var(--text);
+  border-bottom-color: var(--text);
+}
+.settings-search {
+  margin-left: auto;
+  flex: 0 1 220px;
+  min-width: 160px;
+  height: 28px;
+  padding: 0 10px !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 8px !important;
+  background: var(--surface-alt) !important;
+  font-size: calc(12 * var(--ui-unit));
+  margin-bottom: 6px;
+}
+.settings-search:focus {
+  border-color: var(--line-strong) !important;
+}
+.settings-body {
+  padding: 10px 24px 24px;
+}
+.settings-body h3 {
+  font-size: calc(12 * var(--ui-unit));
+  font-weight: 540;
+}
+.settings-body p {
+  font-size: calc(11 * var(--ui-unit));
+  line-height: 1.75;
+  color: var(--secondary);
+}
+.settings-pane-label {
+  font-size: calc(11 * var(--ui-unit));
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 18px 0 4px;
+}
+/* The setting row pattern panes use. */
+.setting-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+.setting-row .setting-title {
+  font-size: calc(12 * var(--ui-unit));
+}
+.setting-row .setting-desc {
+  font-size: calc(11 * var(--ui-unit));
+  line-height: 1.75;
+  color: var(--secondary);
 }

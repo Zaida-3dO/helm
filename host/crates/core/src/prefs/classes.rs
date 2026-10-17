@@ -91,6 +91,10 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     // Layout keys the generic writer validates but agents are not offered yet.
     ("sidebarView", Later),
     ("terminalHeight", Later),
+    // Minutes without output before a running chat is stalled.
+    ("stallMinutes", Later),
+    // The open chat and project, restored at launch.
+    ("selection", Internal),
     // User-only.
     (
         "agentSettingsAll",

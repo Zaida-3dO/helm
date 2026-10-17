@@ -5,6 +5,7 @@
 import { memo, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
 import { Markdown, type LinkTarget } from './Markdown.tsx';
+import { messageActionsFor, rowFootersFor, type SlotContext } from './slots.ts';
 import { ToolCard } from './ToolCard.tsx';
 import { usePacedText, useThinkingPreview } from './usePaced.ts';
 import { formatElapsed } from './workBlocks.ts';
@@ -13,6 +14,41 @@ export interface RowContext {
   canStopTool: (row: MessageRow) => boolean;
   onStopTool: (toolCallId: string) => void;
   onLink: (target: LinkTarget) => void;
+  /** For the transcript slots (slots.ts). */
+  chatId: string;
+  latestAssistantId: number | null;
+  running: boolean;
+  interactionOpen: boolean;
+}
+
+function slotContext(row: MessageRow, ctx: RowContext): SlotContext {
+  return { chatId: ctx.chatId, isLatestAssistant: row.id === ctx.latestAssistantId, running: ctx.running, interactionOpen: ctx.interactionOpen };
+}
+
+/** Registered message actions (hover buttons) and footers for one row. */
+function Slots({ row, ctx }: { row: MessageRow; ctx: RowContext }) {
+  const sctx = slotContext(row, ctx);
+  const actions = messageActionsFor(row);
+  const footers = rowFootersFor(row, sctx);
+  if (!actions.length && !footers.length) return null;
+  return (
+    <>
+      {actions.length > 0 && (
+        <div className="row-actions" data-testid="message-actions">
+          {actions.map((a) => (
+            <button key={a.id} type="button" className="small link" data-action={a.id} onClick={() => a.run(row, sctx)}>
+              {a.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {footers.map((f) => (
+        <div key={f.id} className="row-footer" data-footer={f.id}>
+          {f.render(row, sctx)}
+        </div>
+      ))}
+    </>
+  );
 }
 
 const RETRY_TEXT: Record<string, string> = {
@@ -67,6 +103,7 @@ export const Row = memo(function Row({ row, ctx }: { row: MessageRow; ctx: RowCo
           <Markdown text={row.text} onLink={ctx.onLink} />
         </div>
         {row.status !== 'complete' && <div className="row-meta muted">{row.status}</div>}
+        <Slots row={row} ctx={ctx} />
       </div>
     );
   }
@@ -106,6 +143,7 @@ export const Row = memo(function Row({ row, ctx }: { row: MessageRow; ctx: RowCo
           {usage.inputTokens + usage.cacheReadTokens} in · {usage.outputTokens} out
         </div>
       )}
+      <Slots row={row} ctx={ctx} />
     </div>
   );
 });

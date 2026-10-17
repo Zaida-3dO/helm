@@ -14,6 +14,7 @@ use crate::send_behavior;
 use crate::types::*;
 use helm_core::db::Database;
 use helm_ipc::{ApiError, EventSink};
+use helm_workers::contrib::{self, LaunchContributors, LaunchCtx};
 use helm_workers::launch::{claude_launch, test_claude, ClaudeRuntime, Launch, LaunchSendBehavior};
 use helm_workers::node::{resolve_node, NodeLookup};
 use helm_workers::{stage, SpawnSpec, WorkerOutput, MAX_RECORD_BYTES};
@@ -40,6 +41,10 @@ pub struct Limits {
     pub wait_retry: Duration,
     pub max_active: usize,
     pub max_idle_workers: usize,
+    /// The maintenance tick: stall checks and snooze expiry.
+    pub tick: Duration,
+    /// One unit of the `stallMinutes` setting (a minute; tests shorten it).
+    pub stall_unit: Duration,
 }
 
 impl Default for Limits {
@@ -52,6 +57,8 @@ impl Default for Limits {
             wait_retry: Duration::from_secs(1),
             max_active: 100,
             max_idle_workers: 20,
+            tick: Duration::from_secs(30),
+            stall_unit: Duration::from_secs(60),
         }
     }
 }
@@ -114,6 +121,7 @@ pub struct ProcessSpawner {
     debug: bool,
     worker_source: Option<PathBuf>,
     staged: Mutex<Option<PathBuf>>,
+    contributors: LaunchContributors,
 }
 
 impl ProcessSpawner {
@@ -129,7 +137,14 @@ impl ProcessSpawner {
             debug,
             worker_source,
             staged: Mutex::new(None),
+            contributors: LaunchContributors::new(),
         }
+    }
+
+    /// The launch contributors every worker launch consults.
+    pub fn with_contributors(mut self, contributors: LaunchContributors) -> Self {
+        self.contributors = contributors;
+        self
     }
 
     fn staged_main(&self) -> Result<PathBuf, String> {
@@ -151,7 +166,12 @@ impl ProcessSpawner {
 impl Spawner for ProcessSpawner {
     fn spawn(&self, req: &SpawnRequest) -> Result<Spawned, String> {
         let main = self.staged_main()?;
-        let env = helm_workers::env::worker_environment(&req.chat_id, &self.data_root);
+        let mut env = helm_workers::env::worker_environment(&req.chat_id, &self.data_root);
+        let extras = self.contributors.collect(&LaunchCtx {
+            chat_id: &req.chat_id,
+            cwd: &req.cwd,
+        });
+        contrib::apply_env(&mut env, &extras);
         let node = resolve_node(&NodeLookup::for_worker(&env)).map_err(|e| e.to_string())?;
         let (runtime, problem) = ClaudeRuntime::load(&self.profile_dir);
         if let Some(p) = problem {
@@ -161,17 +181,19 @@ impl Spawner for ProcessSpawner {
             self.debug,
             std::env::var("HELM_TEST_CLAUDE").ok().as_deref(),
         );
+        let mut claude = claude_launch(
+            &runtime,
+            test.as_ref(),
+            req.model.clone(),
+            req.effort.clone(),
+            req.resume_session_id.clone(),
+        );
+        claude.append_system_prompt = contrib::system_prompt(&extras);
         let launch = Launch {
             chat_id: req.chat_id.clone(),
             harness: "claude",
             cwd: req.cwd.clone(),
-            claude: claude_launch(
-                &runtime,
-                test.as_ref(),
-                req.model.clone(),
-                req.effort.clone(),
-                req.resume_session_id.clone(),
-            ),
+            claude,
             send_behavior: LaunchSendBehavior {
                 long_commands: serde_json::to_value(req.send_behavior.long_commands)
                     .ok()
@@ -205,6 +227,10 @@ pub(crate) struct Live {
     pub thread: ThreadState,
     pub has_worker: bool,
     pub last_used: Instant,
+    /// Running with no worker output for the stall limit.
+    pub stalled: bool,
+    /// The panel-context generation: bumped on each worker launch and compaction.
+    pub context_gen: u64,
 }
 
 #[derive(Clone)]
@@ -222,6 +248,8 @@ pub(crate) struct Shared {
     pub handle: tokio::runtime::Handle,
     pub actors: Mutex<HashMap<String, ActorHandle>>,
     pub shutting_down: AtomicBool,
+    /// The last published attention summary ([`crate::attention::publish`]).
+    pub attention: Mutex<Option<AttentionSummary>>,
 }
 
 /// The runtime service.
@@ -239,7 +267,7 @@ impl ChatRuntime {
         cfg: RuntimeConfig,
         handle: tokio::runtime::Handle,
     ) -> Self {
-        Self {
+        let rt = Self {
             sh: Arc::new(Shared {
                 db,
                 clock,
@@ -249,8 +277,41 @@ impl ChatRuntime {
                 handle,
                 actors: Mutex::new(HashMap::new()),
                 shutting_down: AtomicBool::new(false),
+                attention: Mutex::new(None),
             }),
-        }
+        };
+        rt.start_tick();
+        rt
+    }
+
+    /// The maintenance tick (every `limits.tick`): ask busy actors to check for a stall, and
+    /// republish attention so expired snoozes show again. It stops when the runtime is dropped.
+    fn start_tick(&self) {
+        let weak = Arc::downgrade(&self.sh);
+        let every = self.sh.cfg.limits.tick;
+        self.sh.handle.spawn(async move {
+            loop {
+                tokio::time::sleep(every).await;
+                let Some(sh) = weak.upgrade() else { break };
+                let minutes = sh
+                    .db
+                    .snapshot(|tx| Ok::<_, rusqlite::Error>(stall_minutes(tx)))
+                    .unwrap_or(DEFAULT_STALL_MINUTES);
+                let after = sh.cfg.limits.stall_unit * minutes;
+                let busy: Vec<ActorHandle> = sh
+                    .actors
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .filter(|h| h.live.lock().unwrap().thread.status.is_busy())
+                    .cloned()
+                    .collect();
+                for h in busy {
+                    let _ = h.tx.try_send(Cmd::StallCheck { after });
+                }
+                crate::attention::publish(&sh);
+            }
+        });
     }
 
     pub fn db(&self) -> &Arc<Database> {
@@ -293,6 +354,34 @@ impl ChatRuntime {
                 "Helm is busy with this chat; your message is saved, send it again in a moment.",
             )
         })
+    }
+
+    /// The chat's panel-context generation (0 before its first worker launch).
+    pub fn context_gen(&self, chat_id: &str) -> crate::seams::ContextGen {
+        let map = self.sh.actors.lock().unwrap();
+        crate::seams::ContextGen(
+            map.get(chat_id)
+                .map(|h| h.live.lock().unwrap().context_gen)
+                .unwrap_or(0),
+        )
+    }
+
+    /// Retire the chat's worker if it has an actor (archive, delete). Never starts an actor.
+    pub fn retire(&self, chat_id: &str) {
+        let h = self.sh.actors.lock().unwrap().get(chat_id).cloned();
+        if let Some(h) = h {
+            let _ = h.tx.try_send(Cmd::Retire);
+        }
+    }
+
+    /// Recompute the attention summary and emit it if it changed.
+    pub fn publish_attention(&self) {
+        crate::attention::publish(&self.sh);
+    }
+
+    /// The current attention summary (`attention_get`).
+    pub fn attention(&self) -> rusqlite::Result<AttentionSummary> {
+        crate::attention::current(&self.sh)
     }
 
     /// The live thread state, if the chat has an actor.
@@ -419,6 +508,17 @@ impl ChatRuntime {
             let _ = h.tx.try_send(Cmd::Terminate);
         }
     }
+}
+
+pub const DEFAULT_STALL_MINUTES: u32 = 5;
+
+/// The `stallMinutes` setting: 1 to 1440, else the default 5.
+pub fn stall_minutes(tx: &rusqlite::Transaction<'_>) -> u32 {
+    helm_core::prefs::read(tx, "stallMinutes")
+        .and_then(|v| v.as_u64())
+        .filter(|n| (1..=1440).contains(n))
+        .map(|n| n as u32)
+        .unwrap_or(DEFAULT_STALL_MINUTES)
 }
 
 /// The quit sequence's view of the runtime.

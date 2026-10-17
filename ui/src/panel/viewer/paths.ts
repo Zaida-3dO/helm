@@ -1,0 +1,55 @@
+// Windows path helpers for the viewer: pure string work, no filesystem.
+
+/** Backslashes, an uppercase drive letter, no trailing separator except on a drive root. */
+export function displayPath(p: string): string {
+  let s = p.replace(/\//g, '\\');
+  if (/^[a-z]:/.test(s)) s = s.charAt(0).toUpperCase() + s.slice(1);
+  if (s.length > 3) s = s.replace(/\\+$/, '');
+  return s;
+}
+
+/** The tab key for a path: Windows paths compare case-insensitively. */
+export function pathKey(p: string): string {
+  return displayPath(p).toLowerCase();
+}
+
+export function dirname(p: string): string | null {
+  const s = displayPath(p);
+  if (/^[A-Za-z]:\\?$/.test(s)) return null;
+  const at = s.lastIndexOf('\\');
+  if (at < 0) return null;
+  if (at === 2 && s.charAt(1) === ':') return s.slice(0, 3);
+  return s.slice(0, at);
+}
+
+export function basename(p: string): string {
+  const s = displayPath(p);
+  const at = s.lastIndexOf('\\');
+  return at < 0 ? s : s.slice(at + 1) || s;
+}
+
+/** Joins a relative path onto a folder, resolving `.` and `..` lexically (never above the drive). */
+export function joinPath(base: string, rel: string): string {
+  const parts = displayPath(base).split('\\');
+  const drive = parts.shift() as string;
+  for (const seg of rel.replace(/\//g, '\\').split('\\')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') parts.pop();
+    else parts.push(seg);
+  }
+  const tail = parts.filter(Boolean).join('\\');
+  return tail ? `${drive}\\${tail}` : `${drive}\\`;
+}
+
+/** Breadcrumb segments from the drive down, each with the path it opens. */
+export function splitSegments(p: string): Array<{ name: string; path: string }> {
+  const s = displayPath(p);
+  const parts = s.split('\\').filter(Boolean);
+  const out: Array<{ name: string; path: string }> = [];
+  let acc = '';
+  parts.forEach((part, i) => {
+    acc = i === 0 ? `${part}\\` : acc.endsWith('\\') ? `${acc}${part}` : `${acc}\\${part}`;
+    out.push({ name: part, path: acc });
+  });
+  return out;
+}

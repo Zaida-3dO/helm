@@ -15,6 +15,9 @@ export interface ClaudeLaunch {
   resumeSessionId?: string;
   appendSystemPrompt?: string;
   settings?: Json;
+  /** Claude Code's fast mode, sent on every launch as `--settings {"fastMode":…}`. Only this field
+   * sets it: a `fastMode` inside `settings` is dropped. Anything but `true` is off. */
+  fastMode?: boolean;
   settingSources?: string[];
   extraArgs?: string[];
 }

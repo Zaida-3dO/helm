@@ -146,6 +146,9 @@ pub fn limits() -> Limits {
         wait_retry: Duration::from_millis(50),
         max_active: 100,
         max_idle_workers: 20,
+        // Slow by default; the stall test speeds it up.
+        tick: Duration::from_secs(5),
+        stall_unit: Duration::from_millis(100),
     }
 }
 
@@ -932,7 +935,11 @@ async fn a_restart_continuation_is_sent_once_with_the_native_session() {
         "once"
     );
     let origin = h.col("SELECT origin FROM submission_meta");
-    assert_eq!(origin, ["harness"]);
+    assert_eq!(
+        origin,
+        ["app"],
+        "the restart continuation is the app's own send"
+    );
 }
 
 /// The drain records a continuation for the running chat and sends shutdown.
@@ -952,4 +959,426 @@ async fn the_quit_drain_records_continuations_and_shuts_workers_down() {
         .unwrap()
         .unwrap();
     assert_eq!(h.col("SELECT chat_id FROM restart_continuations"), [chat]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Seams
+// ---------------------------------------------------------------------------------------------
+
+/// A send from a button or a notification leaves the draft alone; a composer send clears it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_action_send_leaves_the_draft_untouched() {
+    let h = harness();
+    let chat = h.create().await;
+    h.call(
+        "draft_save",
+        json!({"chatId": chat, "text": "half typed", "revision": 100}),
+    )
+    .await
+    .unwrap();
+    let send = |origin: &'static str| {
+        let chat = chat.clone();
+        let h = &h;
+        async move {
+            h.call(
+                "chat_send",
+                json!({"chatId": chat, "submissionId": uuid::Uuid::new_v4().to_string(),
+                       "text": "Update", "action": "default", "draftRevision": 100, "origin": origin}),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let r = send("action").await;
+    assert_eq!(
+        r["chat"]["draft"], "half typed",
+        "an action send never touches the draft"
+    );
+    let r = send("notification").await;
+    assert_eq!(r["chat"]["draft"], "half typed");
+    let r = send("composer").await;
+    assert_eq!(
+        r["chat"]["draft"], "",
+        "a composer send clears the draft it sent"
+    );
+    let bad = h
+        .call(
+            "chat_send",
+            json!({"chatId": chat, "submissionId": uuid::Uuid::new_v4().to_string(),
+                   "text": "x", "action": "default", "draftRevision": 0, "origin": "robot"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(bad.code, "bad_args");
+}
+
+struct Ctx(Mutex<Vec<(String, u64)>>);
+impl crate::seams::SendContextBuilder for Ctx {
+    fn build(
+        &self,
+        _tx: &rusqlite::Transaction<'_>,
+        chat_id: &str,
+        payload: &Value,
+        gen: crate::seams::ContextGen,
+    ) -> Result<crate::seams::ContextBlock, crate::archive::Refusal> {
+        self.0.lock().unwrap().push((chat_id.to_owned(), gen.0));
+        if payload["refuse"] == true {
+            return Err(crate::archive::Refusal::new(
+                "refused",
+                "no context for you",
+            ));
+        }
+        Ok(crate::seams::ContextBlock {
+            text: format!("Looking at: {}", payload["path"].as_str().unwrap_or("")),
+        })
+    }
+}
+
+fn send_args(
+    chat: &str,
+    origin: crate::types::SendOrigin,
+    ctx: Value,
+) -> crate::types::ChatSendArgs {
+    crate::types::ChatSendArgs {
+        chat_id: chat.into(),
+        submission_id: uuid::Uuid::new_v4().to_string(),
+        text: "look".into(),
+        action: crate::types::SendAction::Default,
+        draft_revision: 0,
+        origin: Some(origin),
+        attachments: None,
+        context: Some(ctx),
+    }
+}
+
+/// The context builder runs for composer sends only; its block rides the prompt as
+/// `context`; a refusal refuses the send; the generation counts worker launches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn composer_sends_carry_the_built_context_block() {
+    use crate::types::SendOrigin;
+    let mut h = harness();
+    let chat = h.create().await;
+    let ctx = Arc::new(Ctx(Mutex::new(vec![])));
+    let builder = crate::seams::SendContext(ctx.clone());
+    let rt = h.rt.clone();
+    let c2 = chat.clone();
+    let b2 = builder.clone();
+    let refused = tokio::task::spawn_blocking(move || {
+        crate::submit::chat_send(
+            &rt,
+            send_args(&c2, SendOrigin::Composer, json!({"refuse": true})),
+            Some(&b2),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(refused.message, "no context for you");
+    assert!(
+        h.col("SELECT id FROM submissions").is_empty(),
+        "a refused send saves nothing"
+    );
+    let rt = h.rt.clone();
+    let c2 = chat.clone();
+    let b2 = builder.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::submit::chat_send(
+            &rt,
+            send_args(&c2, SendOrigin::Composer, json!({"path": "src/a.rs"})),
+            Some(&b2),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert_eq!(p["text"], "look");
+    assert_eq!(p["context"], "Looking at: src/a.rs");
+    assert_eq!(h.rt.context_gen(&chat).0, 1, "one worker launch so far");
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    let rt = h.rt.clone();
+    let c2 = chat.clone();
+    let b2 = builder.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::submit::chat_send(
+            &rt,
+            send_args(&c2, SendOrigin::Action, json!({"path": "x"})),
+            Some(&b2),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let p = w.expect("prompt").await;
+    assert!(
+        p.get("context").is_none(),
+        "only the composer's sends carry context"
+    );
+    let calls = ctx.0.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        2,
+        "the builder is not called for an action send"
+    );
+    assert_eq!(calls[1].1, 0, "before the first launch the generation is 0");
+}
+
+/// An approval puts the chat in Needs you and on the badge; answering it takes it off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attention_follows_the_waiting_tracker() {
+    let mut h = harness();
+    let (chat, _, w) = running_turn(&mut h).await;
+    let a = h.call("attention_get", json!({})).await.unwrap();
+    assert_eq!(
+        (a["busy"].as_u64(), a["badge"].as_u64()),
+        (Some(1), Some(0))
+    );
+    assert_eq!(a["running"][0]["chatId"], chat.as_str());
+    w.emit(json!({"type": "extension_ui_request", "id": "ui-1", "method": "select", "attention": "approval",
+                  "title": "Run ls?", "options": ["Allow once", "Deny"]}))
+        .await;
+    h.until("needs you published", |h| {
+        h.events("attention")
+            .last()
+            .is_some_and(|e| e["summary"]["badge"] == 1)
+    })
+    .await;
+    let a = h.call("attention_get", json!({})).await.unwrap();
+    assert_eq!(a["needsYou"][0]["kind"], "approval");
+    let rev = a["revision"].as_i64().unwrap();
+    let again = h.call("attention_get", json!({})).await.unwrap();
+    assert_eq!(
+        again["revision"].as_i64().unwrap(),
+        rev,
+        "no change, same revision"
+    );
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    // The approval leaves Needs you; the clean finish leaves an unread completion instead.
+    h.until("needs you cleared", |h| {
+        h.events("attention").last().is_some_and(|e| {
+            e["summary"]["busy"] == 0
+                && e["summary"]["needsYou"]
+                    .as_array()
+                    .is_some_and(|v| v.is_empty())
+                && e["summary"]["unread"][0]["reason"] == "Finished; not read yet"
+        })
+    })
+    .await;
+}
+
+/// A clean finish writes one completion, announced once, counted as unread; the next turn
+/// drops it; acknowledging it clears the badge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_clean_turn_leaves_one_unread_completion() {
+    let mut h = harness();
+    let (chat, _, mut w) = running_turn(&mut h).await;
+    reply(&h, &w, "m1", "All done: the tests pass.").await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("completion announced", |h| {
+        !h.events("completion").is_empty()
+    })
+    .await;
+    let ev = h.events("completion");
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0]["completion"]["preview"], "All done: the tests pass.");
+    let k = ev[0]["completion"]["id"].as_str().unwrap().to_owned();
+    let a = h.call("attention_get", json!({})).await.unwrap();
+    assert_eq!(a["badge"], 1);
+    assert_eq!(a["unread"][0]["chatId"], chat.as_str());
+    // A new turn drops the completion.
+    h.send(&chat, "again", "default").await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    h.until("dropped", |h| {
+        h.col("SELECT id FROM chat_completions").is_empty()
+    })
+    .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+        .await;
+    h.until("stopped", |h| h.status(&chat) == "stopped").await;
+    assert!(
+        h.col("SELECT id FROM chat_completions").is_empty(),
+        "a stopped turn leaves none"
+    );
+    let _ = k;
+}
+
+/// Acknowledging the completion takes the chat off the badge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acknowledging_the_completion_clears_the_badge() {
+    let mut h = harness();
+    let (chat, _, w) = running_turn(&mut h).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("completion", |h| !h.events("completion").is_empty())
+        .await;
+    let k = h.events("completion")[0]["completion"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    h.call("completion_ack", json!({"chatId": chat, "completionId": k}))
+        .await
+        .unwrap();
+    h.until("badge 0", |h| {
+        h.events("attention")
+            .last()
+            .is_some_and(|e| e["summary"]["badge"] == 0)
+    })
+    .await;
+}
+
+/// Archive retires the idle worker; archiving a running chat is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_is_refused_while_busy_and_retires_the_idle_worker() {
+    let mut h = harness();
+    let (chat, _, mut w) = running_turn(&mut h).await;
+    let busy = h
+        .call("chat_archive", json!({"chatId": chat}))
+        .await
+        .unwrap_err();
+    assert_eq!(busy.message, crate::archive::BUSY_MESSAGE);
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    h.call("chat_archive", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    w.expect("shutdown").await;
+}
+
+/// A running chat with no output for the stall limit is flagged and counted; the
+/// next output clears it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_running_chat_shows_as_stalled_until_output() {
+    let mut h = harness_with(Limits {
+        tick: Duration::from_millis(50),
+        ..limits()
+    });
+    // One minute is 100 ms in the test limits.
+    h.db.write(|tx| helm_core::prefs::set_generic(tx, "stallMinutes", &json!(6)))
+        .unwrap();
+    let (chat, _, w) = running_turn(&mut h).await;
+    let flag = |h: &H| {
+        h.col(&format!(
+            "SELECT stalled FROM chat_activity WHERE chat_id = '{chat}'"
+        ))
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_ne!(flag(&h), ["1"], "not before the limit");
+    h.until("stalled", |h| flag(h) == ["1"]).await;
+    let a = h.call("attention_get", json!({})).await.unwrap();
+    assert_eq!(a["stalled"][0]["chatId"], chat.as_str());
+    assert_eq!(a["badge"], 1);
+    let got = h.call("chat_get", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(got["chat"]["stalled"], true);
+    w.emit(json!({"type": "message_start", "message": {"id": "m9", "role": "assistant", "content": []}}))
+        .await;
+    h.until("unstalled", |h| flag(h) == ["0"]).await;
+}
+
+/// A muted chat leaves the badge and every group, but keep-awake still counts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_muted_chat_is_out_of_the_badge_but_still_busy() {
+    let mut h = harness();
+    let (chat, _, w) = running_turn(&mut h).await;
+    w.emit(json!({"type": "extension_ui_request", "id": "ui-1", "method": "select", "attention": "approval",
+                  "title": "Run ls?", "options": ["Allow once", "Deny"]}))
+        .await;
+    h.until("needs you", |h| {
+        h.events("attention")
+            .last()
+            .is_some_and(|e| e["summary"]["badge"] == 1)
+    })
+    .await;
+    let m = h
+        .call("chat_mute", json!({"chatId": chat, "muted": true}))
+        .await
+        .unwrap();
+    assert_eq!(m["muted"], true);
+    let a = h.call("attention_get", json!({})).await.unwrap();
+    assert_eq!(
+        (a["badge"].as_u64(), a["busy"].as_u64()),
+        (Some(0), Some(1))
+    );
+    assert!(a["needsYou"].as_array().unwrap().is_empty());
+    assert!(
+        a["running"].as_array().unwrap().is_empty(),
+        "the tray leaves it out"
+    );
+    h.call("chat_mute", json!({"chatId": chat, "muted": false}))
+        .await
+        .unwrap();
+    let a = h.call("attention_get", json!({})).await.unwrap();
+    assert_eq!(a["badge"], 1);
+}
+
+async fn badge_of(h: &H) -> Value {
+    h.call("attention_get", json!({})).await.unwrap()["badge"].clone()
+}
+
+/// Addressing or snoozing takes a chat out of the groups until new activity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn addressed_and_snoozed_chats_leave_the_groups() {
+    let h = harness();
+    let chat = h.create().await;
+    h.call("unread_mark", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    assert_eq!(badge_of(&h).await, 1);
+    let soon = helm_core::now_ms() + 60_000;
+    h.call("attention_snooze", json!({"chatId": chat, "until": soon}))
+        .await
+        .unwrap();
+    assert_eq!(badge_of(&h).await, 0, "snoozed");
+    let bad = h
+        .call("attention_snooze", json!({"chatId": chat, "until": 5}))
+        .await
+        .unwrap_err();
+    assert_eq!(bad.code, "bad_args");
+    h.call("attention_snooze", json!({"chatId": chat, "until": null}))
+        .await
+        .unwrap();
+    assert_eq!(badge_of(&h).await, 1, "unsnoozed");
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    h.call("attention_address", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    assert_eq!(badge_of(&h).await, 0, "addressed");
+    // New activity (a draft saved is a chat change) brings it back.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    h.call(
+        "draft_save",
+        json!({"chatId": chat, "text": "x", "revision": helm_core::now_ms() + 10}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(badge_of(&h).await, 1, "activity resurfaces it");
+}
+
+/// Archiving, or changing the model, drops a pending restart continuation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_changed_chat_loses_its_pending_continuation() {
+    let h = harness();
+    let a = h.create().await;
+    let b = h.create().await;
+    h.db.write(|tx| {
+        crate::schema::record_continuation(tx, &a, 1)?;
+        crate::schema::record_continuation(tx, &b, 1)
+    })
+    .unwrap();
+    h.call("chat_archive", json!({"chatId": a})).await.unwrap();
+    h.call("chat_set_model", json!({"chatId": b, "effort": "low"}))
+        .await
+        .unwrap();
+    assert!(h
+        .col("SELECT chat_id FROM restart_continuations")
+        .is_empty());
 }

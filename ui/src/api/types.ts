@@ -5,11 +5,15 @@
 import type { SendBehavior } from './generated/index.ts';
 
 export type {
+  AttentionKind,
+  AttentionRow,
+  AttentionSummary,
   BackgroundTask,
   Capabilities,
   ChatEvent,
   ChatRecord,
   ChatStatus,
+  Completion,
   ContextKind,
   Interaction,
   LiveTool,
@@ -23,11 +27,14 @@ export type {
   SendAction,
   SendBehavior,
   SendMode,
+  SendOrigin,
   Submission,
   SubmissionActionKind as SubmissionAction,
   SubmissionState,
   ThreadState,
+  TitleState,
   TranscriptPage,
+  UnreadState,
 } from './generated/index.ts';
 
 /**

@@ -13,6 +13,7 @@ import { resolveKey, sendTooltip, stopTooltip, type KeyContext, type SendShortcu
 import { ModelPicker } from './ModelPicker.tsx';
 import { PermissionChip } from './PermissionChip.tsx';
 import { orderPending, itemState } from './queue.ts';
+import { accessoriesAt, collectSendContributions, mountComposer, type AccessoryContext } from './slots.ts';
 
 export interface ComposerProps {
   chat: ChatRecord;
@@ -70,15 +71,18 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   }, [chat.draft, chat.draftRevision, saver]);
 
   useEffect(() => {
-    registerSetText((text) => {
+    const insert = (text: string) => {
       const current = editor.current?.getText() ?? '';
       const next = current.trim() ? `${current}\n\n${text}` : text;
       editor.current?.setText(next);
       saver.edit(next);
       setEmpty(!next);
       editor.current?.focus();
-    });
-  }, [registerSetText, saver]);
+    };
+    registerSetText(insert);
+    // composerApi(chatId).insert(...) reaches this composer (slots.ts).
+    return mountComposer(chat.id, { insert, focus: () => editor.current?.focus() });
+  }, [registerSetText, saver, chat.id]);
 
   const newestQueued = () => orderPending(pending).filter((s) => itemState(s) === 'queued').at(-1);
 
@@ -95,7 +99,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       }
       const token = saver.beginSend();
       try {
-        await ops.send(chat.id, uid(), text, action, saver.revision);
+        const extra = collectSendContributions(chat.id);
+        await ops.send(chat.id, uid(), text, action, saver.revision, { origin: 'composer', context: extra.context });
         if (saver.sent(token, (editor.current?.getText() ?? '') === text)) {
           editor.current?.setText('');
           setEmpty(true);
@@ -154,8 +159,21 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
     [saver],
   );
 
+  const actx: AccessoryContext = { chat, thread, busy, draftEmpty: empty };
+  const above = accessoriesAt('above');
+  const toolbar = accessoriesAt('toolbar');
+
   return (
     <div className="composer">
+      {above.length > 0 && (
+        <div className="composer-above">
+          {above.map((a) => (
+            <div key={a.id} className="composer-accessory" data-accessory={a.id}>
+              {a.render(actx)}
+            </div>
+          ))}
+        </div>
+      )}
       {error && (
         <div className="composer-error error" data-testid="composer-error">
           {error}
@@ -172,6 +190,11 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       <div className="composer-bar">
         <ModelPicker chat={chat} ops={ops} />
         <PermissionChip mode={thread?.permissionMode ?? null} />
+        {toolbar.map((a) => (
+          <span key={a.id} className="composer-accessory" data-accessory={a.id}>
+            {a.render(actx)}
+          </span>
+        ))}
         <span className="dock-spacer" />
         {busy && (
           <button

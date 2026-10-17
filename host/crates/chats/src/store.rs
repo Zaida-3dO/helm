@@ -10,7 +10,16 @@ pub const MAX_SUBMISSION_BYTES: usize = 2 * 1024 * 1024;
 pub const DEFAULT_TITLE: &str = "New chat";
 
 const CHAT_COLUMNS: &str = "c.id, c.project_id, COALESCE(p.path, ''), c.title, c.status, c.error, \
-     c.model, c.thinking, c.draft, c.draft_revision, c.created_at, c.updated_at";
+     c.model, c.thinking, c.draft, c.draft_revision, c.created_at, c.updated_at, c.pinned, \
+     c.archived, c.parent_chat_id, c.side_source_id, COALESCE(t.state, 'fallback'), u.token, \
+     (SELECT k.id FROM chat_completions k WHERE k.chat_id = c.id AND k.read = 0), \
+     EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id), \
+     MAX(c.updated_at, COALESCE(a.last_activity_at, 0)), COALESCE(a.stalled, 0)";
+
+/// The joins [`CHAT_COLUMNS`] needs, after `FROM chats c`.
+pub(crate) const CHAT_JOINS: &str = "JOIN projects p ON p.id = c.project_id \
+     LEFT JOIN chat_titles t ON t.chat_id = c.id LEFT JOIN unread_marks u ON u.chat_id = c.id \
+     LEFT JOIN chat_activity a ON a.chat_id = c.id";
 
 fn chat_from_row(r: &Row<'_>, revision: i64) -> rusqlite::Result<ChatRecord> {
     Ok(ChatRecord {
@@ -28,6 +37,18 @@ fn chat_from_row(r: &Row<'_>, revision: i64) -> rusqlite::Result<ChatRecord> {
         created_at: r.get(10)?,
         updated_at: r.get(11)?,
         revision,
+        pinned: r.get(12)?,
+        archived: r.get(13)?,
+        parent_chat_id: r.get(14)?,
+        side_source_id: r.get(15)?,
+        title_state: TitleState::parse(&r.get::<_, String>(16)?),
+        unread: UnreadState {
+            mark_token: r.get(17)?,
+            completion_id: r.get(18)?,
+        },
+        muted: r.get(19)?,
+        last_activity_at: r.get(20)?,
+        stalled: r.get(21)?,
     })
 }
 
@@ -37,9 +58,7 @@ pub fn get_chat(
     revision: i64,
 ) -> rusqlite::Result<Option<ChatRecord>> {
     tx.query_row(
-        &format!(
-            "SELECT {CHAT_COLUMNS} FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1"
-        ),
+        &format!("SELECT {CHAT_COLUMNS} FROM chats c {CHAT_JOINS} WHERE c.id = ?1"),
         [chat_id],
         |r| chat_from_row(r, revision),
     )
@@ -48,8 +67,9 @@ pub fn get_chat(
 
 pub fn list_chats(tx: &Transaction<'_>, revision: i64) -> rusqlite::Result<Vec<ChatRecord>> {
     let mut st = tx.prepare(&format!(
-        "SELECT {CHAT_COLUMNS} FROM chats c JOIN projects p ON p.id = c.project_id
-         WHERE c.archived = 0 ORDER BY c.created_at DESC, c.id LIMIT ?1"
+        "SELECT {CHAT_COLUMNS} FROM chats c {CHAT_JOINS}
+         WHERE c.archived = 0 AND c.side_source_id IS NULL
+         ORDER BY c.created_at DESC, c.id LIMIT ?1"
     ))?;
     let rows = st.query_map([MAX_LISTED_CHATS], |r| chat_from_row(r, revision))?;
     rows.collect()
@@ -432,7 +452,7 @@ fn parse_mode(s: &str) -> SubmissionMode {
 }
 
 const SUBMISSION_SELECT: &str = "SELECT s.id, s.chat_id, s.text, s.mode, s.state, \
-     COALESCE(m.origin, 'user'), q.position, s.created_at, m.priority \
+     COALESCE(m.origin, 'typed'), q.position, s.created_at, m.priority \
      FROM submissions s LEFT JOIN submission_meta m ON m.submission_id = s.id \
      LEFT JOIN queued_submissions q ON q.submission_id = s.id";
 
@@ -443,11 +463,7 @@ fn submission_from_row(r: &Row<'_>) -> rusqlite::Result<Submission> {
         text: r.get(2)?,
         mode: parse_mode(&r.get::<_, String>(3)?),
         state: parse_state(&r.get::<_, String>(4)?),
-        origin: if r.get::<_, String>(5)? == "harness" {
-            SubmissionOrigin::Harness
-        } else {
-            SubmissionOrigin::User
-        },
+        origin: SubmissionOrigin::parse(&r.get::<_, String>(5)?),
         position: r.get(6)?,
         created_at: r.get(7)?,
     })

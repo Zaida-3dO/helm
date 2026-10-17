@@ -73,6 +73,21 @@ Then add `my_crate::register_migrations(reg);` to `registrations::migrations`.
 - A recovery step runs inside the one recovery transaction: finish or roll back your
   feature's half-done intent rows there. If it fails, the whole recovery rolls back.
 
+### Adding a shared service
+
+A crate whose ops need state of their own (a client, a cache, a background task) exposes
+`pub fn register_services(services: &mut helm_ipc::Services, events: &Arc<dyn helm_ipc::EventSink>)`
+and adds one line to `registrations::services`. It runs once at startup after the app's own services
+are in place, so it may read the database or profile from `services`.
+
+### Generated TypeScript bindings (one folder per crate)
+
+A crate that exports ts-rs types writes them to `ui/src/api/generated/<crate>/` (for example
+`generated/projects/`), never to the root of `generated/`, which stays `helm-chats`' own. Each such
+crate has its own `bindings_are_current` test copied from `helm-chats`' pattern, and
+`HELM_UPDATE_BINDINGS=1 cargo test -p <crate> bindings_are_current` regenerates only its folder.
+Only a crate's own generator writes its folder.
+
 ### Adding a preference
 
 Add one line to `CLASSIFIED` in `crates/core/src/prefs/classes.rs`, then declare the key in your crate

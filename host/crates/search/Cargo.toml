@@ -1,0 +1,19 @@
+[package]
+name = "helm-search"
+description = "Chat search: full-text over the searchable message text plus title matches, behind Mod+K."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-chats.workspace = true
+helm-ipc.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
+
+[dev-dependencies]
+tempfile.workspace = true

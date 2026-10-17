@@ -1,0 +1,21 @@
+[package]
+name = "helm-projects"
+description = "Projects and the sidebar: folder and board projects in one tree, local nesting, chat grouping and order, and the read-only Agent Standup mirror."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+helm-chats.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+log.workspace = true
+ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
+
+[dev-dependencies]
+tempfile.workspace = true

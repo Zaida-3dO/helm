@@ -38,6 +38,17 @@ breaks those checks, so change them only together with the checks. Everything el
 | `model-picker` / `effort-picker` | Model and effort selects | |
 | `permission-chip` | Permission-mode indicator | `data-mode` = the live mode, empty when none reported |
 | `jump-latest` | "Jump to latest" button | |
+| `side-panel` / `panel-tab` / `panel-slot` / `panel-tab-body` / `link-notice` | Side panel: the panel, a document tab, an Inspector slot (Changes, Files), a tab's body, the link gate's refusal notice | `panel-tab`: `data-kind`, `data-intent` (`user` `program`), `aria-selected`; `panel-slot`: `data-slot`; `panel-tab-body`: `data-kind` |
+| `file-viewer` / `code-view` / `folder-view` / `folder-entry` / `file-error` / `open-in-app` / `files-slot` / `file-modal` | File viewer: the viewer body, its CodeMirror source view, a folder listing and one entry, a read error, the Open in <App> header action, the Inspector's Files slot, the modal fallback | `file-viewer`: `data-path` (the path shown now); `folder-entry`: `data-kind` (`dir` `file` `link`) |
+| `message-actions` | A row's registered message actions (transcript slots) | each button has `data-action` = the action id; footers are `.row-footer[data-footer]`, composer accessories `.composer-accessory[data-accessory]` |
+| `shell` / `topbar` / `topbar-title` / `panel-toggle` | App frame and top bar | `panel-toggle`: `aria-pressed` |
+| `settings` / `settings-pane` / `appearance` | Settings dialog, a pane, the General pane's colour-mode control | `settings-pane`: `data-pane` = pane id; tabs are `.settings-tab[data-tab]`; `appearance` segments are `[data-value]` (`system` `light` `dark`) |
+| `toast-slot` / `notice` | The generic toast slot (top-centre) and its toast | `notice`: `data-kind` (`error` `info` `restored` `undo` `reorganize`) |
+| `action-row` / `action-button` / `action-overflow` / `action-menu` | One-click buttons in the top bar: the row, a top-bar button, the "..." trigger, its menu | `action-button`: `data-action` = the seed id (`update` `needs-me` `ship-it` `close-session` `new-session`) or the button id; menu entries are `[role=menuitem][data-item]` with the seed id (`git-sync`) |
+| `quick-replies` / `quick-reply` | Continue, Yes and No chips above the composer | `quick-reply`: `data-reply` = `continue` `yes` `no` |
+| `option-buttons` / `option-button` / `option-amend` | Inline Option 1, Option A, ... under the latest reply, and the pencil that drafts the answer | `option-button`: `data-option` = the label |
+| `explain-plainly` | The Explain plainly message action | |
+| `search-dialog` / `search-input` / `search-status` / `search-results` / `search-group` / `search-hit` | Mod+K search: dialog, query box, live status line, result list, a group, a row | `search-group`, `search-hit`: `data-group` = `chats` `files`; `search-status`: `data-state` |
 
 Keys (Windows): Send `Ctrl+Enter` (or `Enter` with the Enter send shortcut), Steer `Ctrl+Shift+Enter`,
 Queue `Alt+Enter`, Send now `Ctrl+Alt+Enter`, Stop that continues the queue `Esc`.

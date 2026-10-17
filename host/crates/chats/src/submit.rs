@@ -40,33 +40,62 @@ fn chat_status(
     .optional()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn insert_submission(
+/// How a send is admitted. Run-slot gating is not built yet, so every
+/// caller is `Exempt` today; the class is still a required argument of the one internal send path
+/// so a future gated caller has to say so (the caller table is checked by a test).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmissionClass {
+    /// Starts at once (the user's own sends, the restart continuation).
+    Exempt,
+    /// Waits for a run slot (automated sends); carries no attachments.
+    Gated,
+    /// A gated send being re-admitted.
+    Readmit,
+}
+
+/// One new submission for [`insert_submission`]: every field is required, the admission class
+/// included.
+pub(crate) struct NewSubmission<'a> {
+    pub id: &'a str,
+    pub chat_id: &'a str,
+    pub text: &'a str,
+    pub mode: SubmissionMode,
+    pub state: SubmissionState,
+    pub origin: SubmissionOrigin,
+    pub priority: Option<&'a str>,
+    pub admission: AdmissionClass,
+    pub attachments: &'a [String],
+    pub now: i64,
+}
+
+/// The one internal send path: every submission is written here.
+pub(crate) fn insert_submission(
     tx: &Transaction<'_>,
-    id: &str,
-    chat_id: &str,
-    text: &str,
-    mode: SubmissionMode,
-    state: SubmissionState,
-    origin: SubmissionOrigin,
-    priority: Option<&str>,
-    now: i64,
+    s: &NewSubmission<'_>,
 ) -> rusqlite::Result<()> {
+    if s.admission == AdmissionClass::Gated && !s.attachments.is_empty() {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "a gated send carries no attachments".into(),
+        ));
+    }
+    let NewSubmission {
+        id,
+        chat_id,
+        text,
+        mode,
+        state,
+        origin,
+        priority,
+        now,
+        ..
+    } = *s;
     tx.execute(
         "INSERT INTO submissions(id, chat_id, text, mode, state, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![id, chat_id, text, store::mode_str(mode), store::state_str(state), now],
     )?;
     tx.execute(
         "INSERT INTO submission_meta(submission_id, origin, priority) VALUES (?1, ?2, ?3)",
-        params![
-            id,
-            if origin == SubmissionOrigin::Harness {
-                "harness"
-            } else {
-                "user"
-            },
-            priority
-        ],
+        params![id, origin.as_str(), priority],
     )?;
     if state == SubmissionState::Queued {
         let pos: i64 = tx.query_row(
@@ -134,8 +163,14 @@ pub(crate) fn emit_queue(rt: &ChatRuntime, chat_id: &str) {
     }
 }
 
-/// `chat_send`.
-pub fn chat_send(rt: &ChatRuntime, a: ChatSendArgs) -> Result<ChatSendResult, ApiError> {
+/// `chat_send`. `context` is the registered panel-context builder,
+/// called only for a composer send that carries a `context` payload.
+pub fn chat_send(
+    rt: &ChatRuntime,
+    a: ChatSendArgs,
+    context: Option<&crate::seams::SendContext>,
+) -> Result<ChatSendResult, ApiError> {
+    let origin = a.origin.unwrap_or_default();
     if a.text.trim().is_empty() {
         return Err(ApiError::bad_args("There is nothing to send."));
     }
@@ -158,6 +193,14 @@ pub fn chat_send(rt: &ChatRuntime, a: ChatSendArgs) -> Result<ChatSendResult, Ap
         })
         .map_err(sql)?;
     let now = helm_core::now_ms();
+    let gen = rt.context_gen(&a.chat_id);
+    let payload = a
+        .context
+        .as_ref()
+        .filter(|_| origin == SendOrigin::Composer);
+    if payload.is_some() && context.is_none() {
+        log::warn!("chat {}: a context payload arrived but no context builder is registered; sent without it", a.chat_id);
+    }
     enum Out {
         Repeat(Submission),
         New(Submission, bool),
@@ -212,13 +255,43 @@ pub fn chat_send(rt: &ChatRuntime, a: ChatSendArgs) -> Result<ChatSendResult, Ap
                     _ => (SubmissionMode::Steer, SubmissionState::Saved, None),
                 }
             };
-            insert_submission(tx, &sid, &a.chat_id, &a.text, mode, state, SubmissionOrigin::User, priority, now)?;
-            // Clear the draft unless the composer has saved a newer one meanwhile.
-            tx.execute(
-                "UPDATE chats SET draft = '', draft_revision = max(?1, draft_revision + 1), updated_at = ?1
-                 WHERE id = ?2 AND draft_revision <= ?3",
-                params![now, a.chat_id, a.draft_revision],
+            let block = match (payload, context) {
+                (Some(p), Some(b)) => match b.0.build(tx, &a.chat_id, p, gen) {
+                    Ok(block) => Some(block),
+                    Err(r) => return Ok(Err(ApiError::from(r))),
+                },
+                _ => None,
+            };
+            insert_submission(
+                tx,
+                &NewSubmission {
+                    id: &sid,
+                    chat_id: &a.chat_id,
+                    text: &a.text,
+                    mode,
+                    state,
+                    origin: origin.into(),
+                    priority,
+                    admission: AdmissionClass::Exempt,
+                    attachments: a.attachments.as_deref().unwrap_or(&[]),
+                    now,
+                },
             )?;
+            if let Some(block) = block {
+                tx.execute(
+                    "INSERT INTO submission_context(submission_id, text) VALUES (?1, ?2)",
+                    params![sid, block.text],
+                )?;
+            }
+            // Clear the draft unless the composer has saved a newer one meanwhile. A send from a
+            // button, a notification or a quick reply never touches the draft.
+            if origin == SendOrigin::Composer {
+                tx.execute(
+                    "UPDATE chats SET draft = '', draft_revision = max(?1, draft_revision + 1), updated_at = ?1
+                     WHERE id = ?2 AND draft_revision <= ?3",
+                    params![now, a.chat_id, a.draft_revision],
+                )?;
+            }
             tx.execute("DELETE FROM chat_queue_holds WHERE chat_id = ?1", [&a.chat_id])?;
             if mode != SubmissionMode::Prompt || priority.is_some() {
                 // A busy send: the user row appears when the harness echoes it.
@@ -273,7 +346,21 @@ pub fn continuation(rt: &ChatRuntime, chat_id: &str) -> Result<(), ApiError> {
             let busy = status.is_busy();
             let state = if busy { SubmissionState::Queued } else { SubmissionState::Saved };
             let mode = if busy { SubmissionMode::FollowUp } else { SubmissionMode::Prompt };
-            insert_submission(tx, &sid, chat_id, CONTINUATION_TEXT, mode, state, SubmissionOrigin::Harness, None, now)?;
+            insert_submission(
+                tx,
+                &NewSubmission {
+                    id: &sid,
+                    chat_id,
+                    text: CONTINUATION_TEXT,
+                    mode,
+                    state,
+                    origin: SubmissionOrigin::App,
+                    priority: None,
+                    admission: AdmissionClass::Exempt,
+                    attachments: &[],
+                    now,
+                },
+            )?;
             let artifacts = rt.sh.cfg.artifacts();
             let row = RowWrite {
                 source_key: format!("c:restart:{sid}"),
@@ -542,4 +629,73 @@ pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecor
         .to_app_event(),
     );
     emit_chat(rt, &a.chat_id).ok_or_else(crate::ops::not_found)
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    /// The caller table: every call of the one internal send path, and the class it passes. A new
+    /// caller fails this test until it is added here with its class.
+    const CALLERS: &[(&str, &str)] = &[
+        ("chat_send", "AdmissionClass::Exempt"),
+        ("continuation", "AdmissionClass::Exempt"),
+    ];
+
+    #[test]
+    fn every_caller_of_the_send_path_states_its_admission_class() {
+        let src = include_str!("submit.rs");
+        let body = src.split("mod admission_tests").next().unwrap();
+        // Every `insert_submission(` that is not its own definition.
+        let calls: Vec<&str> = body
+            .match_indices("insert_submission(")
+            .filter(|(i, _)| !body[..*i].ends_with("fn "))
+            .map(|(i, _)| &body[i..])
+            .collect();
+        assert_eq!(
+            calls.len(),
+            CALLERS.len(),
+            "a caller is missing from the table"
+        );
+        for (call, (name, class)) in calls.iter().zip(CALLERS) {
+            let args = call.split(")?;").next().unwrap();
+            assert!(
+                args.contains(&format!("admission: {class}")),
+                "{name} must pass {class}"
+            );
+        }
+        for (name, _) in CALLERS {
+            assert!(
+                body.contains(&format!("pub fn {name}(")),
+                "{name} is a send path caller"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gated_send_refuses_attachments() {
+        let (_d, db) = crate::schema::tests::temp_db();
+        let chat = db
+            .write(|tx| store::create_chat(tx, "C:/w", None, None, 1))
+            .unwrap();
+        let att = vec!["a1".to_owned()];
+        let r = db.write(|tx| {
+            insert_submission(
+                tx,
+                &NewSubmission {
+                    id: "00000000-0000-4000-8000-000000000001",
+                    chat_id: &chat,
+                    text: "x",
+                    mode: SubmissionMode::Prompt,
+                    state: SubmissionState::Saved,
+                    origin: SubmissionOrigin::Schedule,
+                    priority: None,
+                    admission: AdmissionClass::Gated,
+                    attachments: &att,
+                    now: 1,
+                },
+            )
+        });
+        assert!(r.is_err());
+    }
 }

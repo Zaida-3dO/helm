@@ -164,6 +164,7 @@ fn run_app(
             services.insert(Arc::new(runtime.clone()));
             services.insert(Arc::new(Shell(shell.clone())));
             services.insert(Arc::new(platform.clone()));
+            registrations::services(&mut services, &events);
             let ctx = OpCtx {
                 services: Arc::new(services),
                 events,

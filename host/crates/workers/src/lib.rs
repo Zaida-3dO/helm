@@ -3,6 +3,7 @@
 //! | Module | Holds |
 //! |---|---|
 //! | [`job`] | One kill-on-close Job Object per worker tree (a process group on Linux) |
+//! | [`contrib`] | Launch contributors: `PATH` prefixes, variables and system-prompt fragments from other crates |
 //! | [`env`] | The worker environment: registry variables plus identity variables |
 //! | [`node`] | Finding Node (`HELM_NODE_PATH`, then `PATH`), refusing shims and old versions |
 //! | [`stage`] | Staging `worker/src` once per content hash |
@@ -11,6 +12,7 @@
 //!
 //! This crate knows nothing about chats; `helm-chats` drives it.
 
+pub mod contrib;
 pub mod env;
 pub mod job;
 pub mod launch;

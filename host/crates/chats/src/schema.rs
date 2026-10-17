@@ -5,6 +5,16 @@
 //! | `submission_meta` | per submission: origin (`user`/`harness`), send priority (`now` or null), the run it was dispatched in |
 //! | `restart_continuations` | chats owed one restart-continuation prompt (at most 100 rows) |
 //! | `chat_queue_holds` | chats whose queue waits for Send or `queue_resume` after a restart |
+//! | `chat_titles` | per chat: where the title came from (`fallback`/`generated`/`manual`) |
+//! | `unread_marks` | manual unread marks with their token |
+//! | `chat_completions` | the current completion per chat |
+//! | `chat_mutes` | muted chats (user-only) |
+//! | `chat_activity` | per chat: the last worker output time and the stalled flag |
+//! | `chat_attention` | per chat: when its attention was marked addressed, and a snooze |
+//! | trigger `restart_cancel_changed_chat` | drops a pending continuation on archive or a project, harness, model or effort change |
+//! | `chat_file_cleanup` | files a hard delete left behind, removed after commit and retried at startup ([`crate::delete`]) |
+//! | `submission_context` | the panel-context block a composer send carried |
+//! | view `chat_search_source` | the searchable message text the search crate indexes ([`crate::search_source`]) |
 //!
 //! Recovery, inside the one startup transaction:
 //! - **capture** (before core recovery rewrites statuses): every chat still `starting` or
@@ -40,7 +50,65 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              chat_id  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
              held_at  INTEGER NOT NULL
          );
-         CREATE INDEX IF NOT EXISTS messages_chat_order ON messages(chat_id, active, timestamp, id);",
+         CREATE INDEX IF NOT EXISTS messages_chat_order ON messages(chat_id, active, timestamp, id);
+         CREATE TABLE IF NOT EXISTS chat_titles (
+             chat_id  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             state    TEXT NOT NULL CHECK (state IN ('fallback', 'generated', 'manual')),
+             job      TEXT,
+             updated_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS unread_marks (
+             chat_id    TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             token      TEXT NOT NULL,
+             marked_at  INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS chat_completions (
+             chat_id       TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             id            TEXT NOT NULL UNIQUE,
+             preview       TEXT NOT NULL DEFAULT '',
+             completed_at  INTEGER NOT NULL,
+             read          INTEGER NOT NULL DEFAULT 0,
+             dismissed     INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE IF NOT EXISTS chat_mutes (
+             chat_id   TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             muted_at  INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS chat_activity (
+             chat_id           TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             last_activity_at  INTEGER NOT NULL,
+             stalled           INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE IF NOT EXISTS chat_attention (
+             chat_id        TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             addressed_at   INTEGER,
+             snoozed_until  INTEGER,
+             snoozed_at     INTEGER
+         );
+         -- A pending restart continuation goes when its chat is archived or its project,
+         -- harness, provider, model or effort changes; deletion cascades.
+         CREATE TRIGGER IF NOT EXISTS restart_cancel_changed_chat
+         AFTER UPDATE OF archived, project_id, harness, provider, model, thinking ON chats
+         WHEN new.archived != old.archived OR new.project_id IS NOT old.project_id
+           OR new.harness IS NOT old.harness OR new.provider IS NOT old.provider
+           OR new.model IS NOT old.model OR new.thinking IS NOT old.thinking
+         BEGIN
+             DELETE FROM restart_continuations WHERE chat_id = new.id;
+         END;
+         CREATE TABLE IF NOT EXISTS chat_file_cleanup (
+             rel        TEXT PRIMARY KEY,
+             queued_at  INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS submission_context (
+             submission_id  TEXT PRIMARY KEY REFERENCES submissions(id) ON DELETE CASCADE,
+             text           TEXT NOT NULL
+         );
+         CREATE VIEW IF NOT EXISTS chat_search_source AS
+             SELECT m.id AS message_id, m.chat_id AS chat_id, m.role AS role, m.text AS text,
+                    m.timestamp AS timestamp, c.archived AS archived
+             FROM messages m JOIN chats c ON c.id = m.chat_id
+             WHERE m.active = 1 AND m.role IN ('user', 'assistant') AND m.text != ''
+               AND c.side_source_id IS NULL;",
     )
 }
 

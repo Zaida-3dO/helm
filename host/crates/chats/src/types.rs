@@ -81,6 +81,114 @@ pub struct ChatRecord {
     pub updated_at: i64,
     #[ts(type = "number")]
     pub revision: i64,
+    pub pinned: bool,
+    pub archived: bool,
+    /// The chat this one is nested under, or null.
+    pub parent_chat_id: Option<String>,
+    /// Non-null for an unpromoted side chat: the chat it was opened from. Side chats are
+    /// hidden from `chat_list` until promoted.
+    pub side_source_id: Option<String>,
+    pub title_state: TitleState,
+    pub unread: UnreadState,
+    /// Muted chats stay out of the badge, needs-you, toasts and the tray.
+    pub muted: bool,
+    /// The last worker output or chat change, Unix ms.
+    #[ts(type = "number")]
+    pub last_activity_at: i64,
+    /// A running chat with no worker output for `stallMinutes` (default 5). Stop still works; the
+    /// flag clears on the next output or when the turn ends.
+    pub stalled: bool,
+}
+
+/// Where the chat's title came from. A manual rename always wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum TitleState {
+    Fallback,
+    Generated,
+    Manual,
+}
+
+impl TitleState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fallback => "fallback",
+            Self::Generated => "generated",
+            Self::Manual => "manual",
+        }
+    }
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "generated" => Self::Generated,
+            "manual" => Self::Manual,
+            _ => Self::Fallback,
+        }
+    }
+}
+
+/// The chat's unread marks: a manual mark's token, and the id of an unread
+/// completion. `unread_clear` and `completion_ack` take these back, so a stale read never clears
+/// a newer mark.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UnreadState {
+    pub mark_token: Option<String>,
+    pub completion_id: Option<String>,
+}
+
+/// A finished turn, not yet seen. At most one per chat.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Completion {
+    pub id: String,
+    pub chat_id: String,
+    pub title: String,
+    pub project: String,
+    /// The reply's opening, at most 240 characters.
+    pub preview: String,
+    #[ts(type = "number")]
+    pub completed_at: i64,
+    pub read: bool,
+    pub dismissed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum AttentionKind {
+    Approval,
+    Question,
+    Plan,
+    Running,
+    Unread,
+    Stalled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AttentionRow {
+    pub chat_id: String,
+    pub title: String,
+    pub project: String,
+    pub kind: AttentionKind,
+    /// Why the chat is listed, in plain words.
+    pub reason: String,
+}
+
+/// The one attention summary: the badge count (each chat once), the
+/// busy count, and at most 8 rows per group. Published as an `attention` event on every
+/// change and read by `attention_get`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AttentionSummary {
+    pub badge: u32,
+    pub busy: u32,
+    pub needs_you: Vec<AttentionRow>,
+    pub running: Vec<AttentionRow>,
+    pub unread: Vec<AttentionRow>,
+    /// Running chats with no output for the stall limit; they count in the badge.
+    pub stalled: Vec<AttentionRow>,
+    #[ts(type = "number")]
+    pub revision: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -420,11 +528,70 @@ pub enum SubmissionState {
     Superseded,
 }
 
+/// Who a submission came from. Only `typed` is the user
+/// typing in the composer. Button and notification sends are still the user's own sends (they
+/// follow `sendBehavior`), but they never count as typed consent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum SubmissionOrigin {
-    User,
-    Harness,
+    Typed,
+    Action,
+    Notification,
+    /// An answer to a question card, sent as a message.
+    Answer,
+    /// The app itself (the restart continuation).
+    App,
+    OtherChat,
+    Schedule,
+    Telegram,
+}
+
+impl SubmissionOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Typed => "typed",
+            Self::Action => "action",
+            Self::Notification => "notification",
+            Self::Answer => "answer",
+            Self::App => "app",
+            Self::OtherChat => "other_chat",
+            Self::Schedule => "schedule",
+            Self::Telegram => "telegram",
+        }
+    }
+
+    /// The stored text. Older rows say `user` (typed) or `harness` (the app). Anything unknown
+    /// reads as `app`, which is never treated as the user's.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "typed" | "user" => Self::Typed,
+            "action" => Self::Action,
+            "notification" => Self::Notification,
+            "answer" => Self::Answer,
+            "other_chat" => Self::OtherChat,
+            "schedule" => Self::Schedule,
+            "telegram" => Self::Telegram,
+            _ => Self::App,
+        }
+    }
+
+    /// The user's own send from this window: it follows the send mode and the wait limit.
+    pub fn is_users_own(self) -> bool {
+        matches!(
+            self,
+            Self::Typed | Self::Action | Self::Notification | Self::Answer
+        )
+    }
+}
+
+impl From<SendOrigin> for SubmissionOrigin {
+    fn from(o: SendOrigin) -> Self {
+        match o {
+            SendOrigin::Composer => Self::Typed,
+            SendOrigin::Action => Self::Action,
+            SendOrigin::Notification => Self::Notification,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -568,9 +735,33 @@ pub struct ChatSendArgs {
     pub submission_id: String,
     pub text: String,
     pub action: SendAction,
-    /// The draft revision the composer held when it sent; a newer stored draft is kept.
+    /// The draft revision the composer held when it sent; a newer stored draft is kept. Ignored
+    /// for a send whose origin is not the composer.
     #[ts(type = "number")]
     pub draft_revision: i64,
+    /// Who pressed send. Only `composer` (the default) touches the draft.
+    #[serde(default)]
+    #[ts(optional)]
+    pub origin: Option<SendOrigin>,
+    /// Ids from `attachment_put`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub attachments: Option<Vec<String>>,
+    /// The panel-context payload, handed to the registered context builder (composer sends only).
+    #[serde(default)]
+    #[ts(optional, type = "unknown")]
+    pub context: Option<Value>,
+}
+
+/// Where a user's send came from. Every origin is still the user's own send
+/// and follows `sendBehavior`; only the composer's clears the draft.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum SendOrigin {
+    #[default]
+    Composer,
+    Action,
+    Notification,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -692,6 +883,40 @@ pub struct ToolStopResult {
     pub stopped: bool,
 }
 
+/// `unread_clear`: the token the UI saw; a newer mark has another token and stays.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UnreadClearArgs {
+    pub chat_id: String,
+    pub token: String,
+}
+
+/// `chat_mute`: mute or unmute (user-only: no agent tool reads or writes it).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatMuteArgs {
+    pub chat_id: String,
+    pub muted: bool,
+}
+
+/// `attention_snooze`: leave the chat out of the attention groups until `until` (Unix ms, at most
+/// 367 days ahead); `null` unsnoozes. New activity ends a snooze early.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttentionSnoozeArgs {
+    pub chat_id: String,
+    #[ts(type = "number | null")]
+    pub until: Option<i64>,
+}
+
+/// `completion_ack`: the completion the UI saw; a newer one stays unread.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompletionAckArgs {
+    pub chat_id: String,
+    pub completion_id: String,
+}
+
 // ---------------------------------------------------------------------------------------------
 // Events, on the one `app-event` channel, tagged by `kind`.
 //
@@ -732,6 +957,14 @@ pub enum ChatEvent {
     Refresh { chat_id: String },
     /// The model catalogue was refreshed. Always applies.
     Catalogue { harness: Harness },
+    /// The attention summary changed. The newest `summary.revision` wins.
+    Attention { summary: AttentionSummary },
+    /// A turn finished and its completion was announced, once per completion id.
+    Completion { completion: Completion },
+    /// The chat is gone (a hard delete, a discarded side chat, a chat dropped after a failed
+    /// first send). Drop everything held for it, including its sidebar row.
+    #[serde(rename = "chat_removed")]
+    ChatRemoved { chat_id: String },
 }
 
 impl ChatEvent {

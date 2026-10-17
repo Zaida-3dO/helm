@@ -40,6 +40,14 @@ pub const COMPACT_SIDEBAR: PrefKey = PrefKey::classified("compactSidebar");
 /// Send behaviour. Stored as the keys that differ from the defaults, which
 /// live in `helm-chats` (`send_behavior::HOME_DEFAULTS`); validated here by shape.
 pub const SEND_BEHAVIOR: PrefKey = PrefKey::classified("sendBehavior");
+/// The selected chat and project (`{chatId, projectId}`, each a string or null).
+pub const SELECTION: PrefKey = PrefKey::classified("selection");
+/// Colour mode: "system", "light" or "dark".
+pub const APPEARANCE: PrefKey = PrefKey::classified("appearance");
+/// The user's key map: command id → chord, or null for a cleared binding.
+pub const KEYBINDINGS: PrefKey = PrefKey::classified("keybindings");
+/// Minutes without worker output before a running chat shows as stalled (1 to 1440, default 5).
+pub const STALL_MINUTES: PrefKey = PrefKey::classified("stallMinutes");
 
 /// Keys the generic `preference` op accepts. Every other key has its own feature operation.
 /// The list starts with the layout keys and grows it
@@ -54,6 +62,10 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     THEME,
     COMPACT_SIDEBAR,
     SEND_BEHAVIOR,
+    SELECTION,
+    APPEARANCE,
+    KEYBINDINGS,
+    STALL_MINUTES,
 ];
 
 /// The stored value, or `None` when the row is missing or its JSON does not parse.
@@ -103,9 +115,62 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
         "sidebarWidth" => int_in(200, 4096, "must be 200 to 4096"),
         "inspectorWidth" => int_in(280, 4096, "must be 280 to 4096"),
         "terminalHeight" => int_in(80, 4096, "must be 80 to 4096"),
+        "stallMinutes" => int_in(1, 1440, "must be 1 to 1440"),
         "sendBehavior" => validate_send_behavior(value),
+        "selection" => validate_selection(value),
+        "appearance" => match value.as_str() {
+            Some("system" | "light" | "dark") => Ok(()),
+            _ => Err(PrefError::Invalid {
+                key: k,
+                why: "must be system, light or dark",
+            }),
+        },
+        "keybindings" => validate_keybindings(value),
         _ => Ok(()),
     }
+}
+
+/// `keybindings`: at most 500 entries, ids and chords of at most 100 bytes; a null chord is a
+/// cleared binding. Chord grammar and conflicts are checked by the UI's registry.
+fn validate_keybindings(value: &Value) -> Result<(), PrefError> {
+    let bad = |why: &'static str| PrefError::Invalid {
+        key: "keybindings",
+        why,
+    };
+    let Some(map) = value.as_object() else {
+        return Err(bad("must be an object"));
+    };
+    if map.len() > 500 {
+        return Err(bad("has more than 500 entries"));
+    }
+    for (k, v) in map {
+        let ok_chord = v.is_null() || v.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 100);
+        if k.is_empty() || k.len() > 100 || !ok_chord {
+            return Err(bad("entries must map an id to a chord or null"));
+        }
+    }
+    Ok(())
+}
+
+/// `selection` is `{chatId, projectId}`; each is null or an id of at most 200 bytes.
+fn validate_selection(value: &Value) -> Result<(), PrefError> {
+    let bad = |why: &'static str| PrefError::Invalid {
+        key: "selection",
+        why,
+    };
+    let Some(map) = value.as_object() else {
+        return Err(bad("must be an object"));
+    };
+    for (k, v) in map {
+        if !matches!(k.as_str(), "chatId" | "projectId") {
+            return Err(bad("has an unknown key"));
+        }
+        let ok = v.is_null() || v.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 200);
+        if !ok {
+            return Err(bad("ids must be null or 1 to 200 bytes"));
+        }
+    }
+    Ok(())
 }
 
 /// `sendBehavior` holds a subset of its six keys; unknown keys are refused.
@@ -220,6 +285,44 @@ mod tests {
         assert!(db
             .write(|tx| set_generic(tx, "sidebarView", &json!("activity")))
             .is_ok());
+    }
+
+    #[test]
+    fn appearance_and_keybindings_are_generic_and_validated() {
+        let (_d, db) = temp_db(&MigrationRegistry::new());
+        assert!(db
+            .write(|tx| set_generic(tx, "appearance", &json!("dark")))
+            .is_ok());
+        let r = db.write(|tx| set_generic(tx, "appearance", &json!("sepia")));
+        assert!(matches!(r, Err(PrefError::Invalid { .. })));
+        let ok = json!({"settings.toggle": "Ctrl+,", "panel.toggle": null});
+        assert!(db.write(|tx| set_generic(tx, "keybindings", &ok)).is_ok());
+        for bad in [
+            json!([]),
+            json!({"a": 5}),
+            json!({"a": ""}),
+            json!({"": "Ctrl+K"}),
+        ] {
+            let r = db.write(|tx| set_generic(tx, "keybindings", &bad));
+            assert!(matches!(r, Err(PrefError::Invalid { .. })), "{bad}");
+        }
+    }
+
+    #[test]
+    fn selection_is_generic_and_validated() {
+        let (_d, db) = temp_db(&MigrationRegistry::new());
+        let ok = json!({"chatId": "c1", "projectId": null});
+        assert!(db.write(|tx| set_generic(tx, "selection", &ok)).is_ok());
+        for bad in [
+            json!("c1"),
+            json!({"chatId": 5}),
+            json!({"chatId": ""}),
+            json!({"chatId": "x".repeat(201)}),
+            json!({"other": "x"}),
+        ] {
+            let r = db.write(|tx| set_generic(tx, "selection", &bad));
+            assert!(matches!(r, Err(PrefError::Invalid { .. })), "{bad}");
+        }
     }
 
     #[test]

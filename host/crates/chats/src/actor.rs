@@ -67,6 +67,8 @@ pub(crate) enum Cmd {
     Terminate,
     /// Idle over the cap: shut the worker down.
     Retire,
+    /// The maintenance tick: mark the chat stalled if it has had no output for `after`.
+    StallCheck { after: std::time::Duration },
 }
 
 pub(crate) const STOP_TIMEOUT_ERROR: &str =
@@ -148,6 +150,10 @@ struct Actor {
     shutdown_replies: Vec<oneshot::Sender<()>>,
     retiring: bool,
     finished: bool,
+    /// The last worker output (or turn start).
+    last_output: Instant,
+    /// When `chat_activity.last_activity_at` was last written (writes are at most every 15 s).
+    activity_written: Option<Instant>,
 }
 
 pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
@@ -184,6 +190,8 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         thread,
         has_worker: false,
         last_used: Instant::now(),
+        stalled: false,
+        context_gen: 0,
     }));
     let actor = Actor {
         sh: sh.clone(),
@@ -208,6 +216,8 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         shutdown_replies: Vec::new(),
         retiring: false,
         finished: false,
+        last_output: Instant::now(),
+        activity_written: None,
     };
     sh.handle.spawn(actor.run(rx));
     ActorHandle { tx, live }
@@ -248,6 +258,8 @@ impl Actor {
             }
         }
         self.sh.actors.lock().unwrap().remove(&self.chat_id);
+        // Its blocking requests (if any) leave the waiting tracker with it.
+        crate::attention::publish(&self.sh);
     }
 
     // ------------------------------------------------------------------ plumbing
@@ -317,6 +329,8 @@ impl Actor {
             chat_id: self.chat_id.clone(),
             thread,
         });
+        // Interactions feed the waiting tracker.
+        crate::attention::publish(&self.sh);
     }
 
     fn emit_rows(&self, keys: &[String]) {
@@ -346,9 +360,21 @@ impl Actor {
 
     fn set_status(&self, status: ChatStatus, error: Option<&str>) {
         let id = self.chat_id.clone();
-        self.write(|t| store::set_status(t, &id, status, error, now()));
+        self.write(|t| {
+            store::set_status(t, &id, status, error, now())?;
+            // Entering an active or stopped state drops the completion.
+            if status.is_busy() || status == ChatStatus::Stopped {
+                crate::manage::drop_completion(t, &id)?;
+            }
+            Ok(())
+        });
         self.live.lock().unwrap().thread.status = status;
+        if !status.is_busy() && self.live.lock().unwrap().stalled {
+            // A turn that ends is no longer stalled.
+            self.set_stalled(false);
+        }
         self.emit_chat();
+        crate::attention::publish(&self.sh);
     }
 
     fn status(&self) -> ChatStatus {
@@ -499,7 +525,11 @@ impl Actor {
                 self.out = Some(out);
                 self.ready = false;
                 self.worker_error = None;
-                self.live.lock().unwrap().has_worker = true;
+                {
+                    let mut live = self.live.lock().unwrap();
+                    live.has_worker = true;
+                    live.context_gen += 1;
+                }
                 // get_state goes out first, ahead of anything deferred.
                 let id = self.new_id();
                 self.pending.insert(id.clone(), Pending::Ready);
@@ -583,8 +613,8 @@ impl Actor {
             } else {
                 self.worker_error.clone().unwrap_or(reason)
             };
-            self.end_run(ChatStatus::Interrupted, Some(&error), "interrupted");
-            // In-flight submissions are now unknowable (never replayed).
+            // In-flight submissions are now unknowable (never replayed). Written before the status,
+            // so no reader sees `interrupted` while they still look in flight.
             let id = self.chat_id.clone();
             self.write(|t| {
                 t.execute(
@@ -592,6 +622,7 @@ impl Actor {
                     [&id],
                 )
             });
+            self.end_run(ChatStatus::Interrupted, Some(&error), "interrupted");
             self.emit_queue();
             // A crash holds the queue; a quit does not (startup recovery decides that).
             // Done after the submission update so the extra write does not widen the window in
@@ -644,6 +675,7 @@ impl Actor {
         if self.run_id.is_some() {
             return;
         }
+        self.last_output = Instant::now();
         let run = uuid::Uuid::new_v4().to_string();
         let id = self.chat_id.clone();
         let chat = self.chat();
@@ -710,6 +742,55 @@ impl Actor {
         self.set_status(status, error);
         self.save_binding();
         self.emit_thread();
+    }
+
+    /// Worker output arrived: note the activity (written at most every 15 s) and end a stall.
+    fn note_output(&mut self) {
+        self.last_output = Instant::now();
+        if self.live.lock().unwrap().stalled {
+            self.set_stalled(false);
+        }
+        let due = self
+            .activity_written
+            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(15));
+        if due {
+            self.activity_written = Some(Instant::now());
+            let id = self.chat_id.clone();
+            self.write(|t| {
+                t.execute(
+                    "INSERT INTO chat_activity(chat_id, last_activity_at) VALUES (?1, ?2)
+                     ON CONFLICT(chat_id) DO UPDATE SET last_activity_at = excluded.last_activity_at",
+                    rusqlite::params![id, now()],
+                )
+            });
+        }
+    }
+
+    fn set_stalled(&self, on: bool) {
+        self.live.lock().unwrap().stalled = on;
+        let id = self.chat_id.clone();
+        self.write(|t| {
+            t.execute(
+                "INSERT INTO chat_activity(chat_id, last_activity_at, stalled) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(chat_id) DO UPDATE SET stalled = excluded.stalled",
+                rusqlite::params![id, now(), on],
+            )
+        });
+        self.emit_chat();
+        crate::attention::publish(&self.sh);
+    }
+
+    /// A clean finish: write the completion, announce it once, refresh the chat and attention.
+    fn complete_turn(&mut self) {
+        let id = self.chat_id.clone();
+        let done = self
+            .write(|t| crate::manage::record_completion(t, &id, now()))
+            .flatten();
+        if let Some(c) = done {
+            self.emit(ChatEvent::Completion { completion: c });
+        }
+        self.emit_chat();
+        crate::attention::publish(&self.sh);
     }
 
     fn save_binding(&mut self) {
@@ -896,8 +977,17 @@ impl Actor {
                     l.terminate();
                 }
             }
+            Cmd::StallCheck { after } => {
+                let stalled = self.live.lock().unwrap().stalled;
+                if self.status().is_busy() && !stalled && self.last_output.elapsed() >= after {
+                    self.set_stalled(true);
+                }
+            }
             Cmd::Retire => {
-                if self.link.is_some() && !self.status().is_busy() {
+                if self.link.is_none() {
+                    // No worker to shut down: the actor itself goes (archive, delete).
+                    self.finished = true;
+                } else if !self.status().is_busy() {
                     self.retiring = true;
                     if let Some(l) = &self.link {
                         l.send(&json!({"type": "shutdown"}));
@@ -964,6 +1054,24 @@ impl Actor {
             )
         });
         let mut cmd = json!({"type": "prompt", "submissionId": sid, "text": sub.text});
+        let context: Option<String> = self
+            .sh
+            .db
+            .snapshot(|t| {
+                use rusqlite::OptionalExtension;
+                t.query_row(
+                    "SELECT text FROM submission_context WHERE submission_id = ?1",
+                    [sid],
+                    |r| r.get(0),
+                )
+                .optional()
+            })
+            .ok()
+            .flatten();
+        if let Some(c) = context {
+            // A separate content block after the text.
+            cmd["context"] = json!(c);
+        }
         if busy && sub.mode == SubmissionMode::Steer {
             cmd["streamingBehavior"] = json!("steer");
         }
@@ -1110,7 +1218,10 @@ impl Actor {
                     "The worker sent a broken record ({f}), so Helm stopped it."
                 ));
             }
-            Some(WorkerOutput::Record(r)) => self.on_record(r),
+            Some(WorkerOutput::Record(r)) => {
+                self.note_output();
+                self.on_record(r)
+            }
         }
     }
 
@@ -1325,7 +1436,11 @@ impl Actor {
                 self.emit_thread();
             }
             "compaction_end" => {
-                self.live.lock().unwrap().thread.compacting = None;
+                {
+                    let mut live = self.live.lock().unwrap();
+                    live.thread.compacting = None;
+                    live.context_gen += 1;
+                }
                 self.emit_thread();
                 self.context_row(ContextKind::Compaction, "Context compacted");
             }
@@ -1622,7 +1737,7 @@ impl Actor {
         let Some(sub) = self.submission(sid) else {
             return;
         };
-        if sub.mode != SubmissionMode::Steer || sub.origin != SubmissionOrigin::User {
+        if sub.mode != SubmissionMode::Steer || !sub.origin.is_users_own() {
             return;
         }
         let Some(secs) = self
@@ -1751,6 +1866,7 @@ impl Actor {
                 }
                 self.emit_queue();
                 if status == ChatStatus::Idle {
+                    self.complete_turn();
                     self.advance_queue();
                 }
             }

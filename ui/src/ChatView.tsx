@@ -61,6 +61,30 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
 
   const chat = view.chat;
   const thread = view.thread;
+
+  // Opening a chat reads it: the mark it shows is cleared with its own
+  // token, and a finished turn's completion is acknowledged once the chat is not running. A mark
+  // made while the chat is open stays; a completion arriving while the window is in
+  // front is read at once.
+  const cleared = useRef<string | null>(null);
+  const unreadToken = chat?.unread.markToken ?? null;
+  const completionId = chat?.unread.completionId ?? null;
+  useEffect(() => {
+    if (!unreadToken || cleared.current !== null) return;
+    cleared.current = unreadToken;
+    void ops.clearUnread(chatId, unreadToken).catch(() => undefined);
+  }, [unreadToken, ops, chatId]);
+  const loaded = chat !== null;
+  useEffect(() => {
+    // Loaded without a mark: any mark made from now on is one the user made while here.
+    if (loaded && unreadToken === null && cleared.current === null) cleared.current = '';
+  }, [loaded, unreadToken]);
+  const status = chat?.status;
+  useEffect(() => {
+    if (!completionId || !status || isBusy(status)) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    void ops.ackCompletion(chatId, completionId).catch(() => undefined);
+  }, [completionId, status, ops, chatId]);
   const behavior = thread?.sendBehavior ?? HOME_SEND_BEHAVIOR;
   const busy = chat ? isBusy(chat.status) : false;
 
@@ -70,15 +94,21 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
     },
     [ops, chatId],
   );
+  const latestAssistantId = useMemo(() => [...view.rows].reverse().find((r) => r.role === 'assistant')?.id ?? null, [view.rows]);
+  const interactionOpen = (thread?.interactions.length ?? 0) > 0;
   const ctx: RowContext = useMemo(
     () => ({
+      chatId,
+      latestAssistantId,
+      running: busy,
+      interactionOpen,
       canStopTool: (row: MessageRow) =>
         behavior.toolStop && Boolean(thread?.capabilities.stopTool) && Boolean(row.details?.stoppable) && row.status === 'streaming',
       onStopTool: stopTool,
       onLink: (t: LinkTarget) =>
         setNotice(t.kind === 'url' ? `Links open in a later version: ${t.href ?? ''}` : `Vault links open in a later version: ${t.note ?? ''}`),
     }),
-    [behavior.toolStop, thread?.capabilities.stopTool, stopTool],
+    [behavior.toolStop, thread?.capabilities.stopTool, stopTool, chatId, latestAssistantId, busy, interactionOpen],
   );
 
   // Esc anywhere in the chat stops the turn and lets the queue continue.

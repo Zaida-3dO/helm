@@ -4,6 +4,10 @@
 //! them all, into `ui/src/api/generated/`. The `bindings_are_current` test regenerates them into a
 //! temporary folder and fails if anything differs from the committed files.
 //!
+//! The root of `generated/` is this crate's alone. Other crates write their own subfolders
+//! (`generated/<crate>/`), so everything here looks at the root's files only and
+//! never reads, compares or deletes a subfolder.
+//!
 //! To regenerate after changing a type:
 //!
 //! ```text
@@ -55,10 +59,17 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         ChatSetModelArgs,
         ModelCatalogueArgs,
         ToolStopArgs,
+        AttentionSummary,
+        Completion,
+        UnreadClearArgs,
+        CompletionAckArgs,
+        ChatMuteArgs,
+        AttentionSnoozeArgs,
     );
     let mut files: Vec<String> = std::fs::read_dir(dir)
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.ends_with(".ts") && n != "index.ts")
         .collect();
@@ -82,10 +93,12 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
 
+    /// The root's files (subfolders belong to other crates and are skipped).
     fn read_all(dir: &Path) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = std::fs::read_dir(dir)
             .map(|rd| {
                 rd.filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
                     .map(|e| {
                         let name = e.file_name().to_string_lossy().into_owned();
                         let text = std::fs::read_to_string(e.path())
@@ -106,7 +119,9 @@ mod tests {
         if std::env::var_os("HELM_UPDATE_BINDINGS").is_some() {
             if committed.exists() {
                 for e in std::fs::read_dir(&committed).unwrap().flatten() {
-                    std::fs::remove_file(e.path()).unwrap();
+                    if e.file_type().is_ok_and(|t| t.is_file()) {
+                        std::fs::remove_file(e.path()).unwrap();
+                    }
                 }
             }
             export(&committed).unwrap();
@@ -127,6 +142,29 @@ mod tests {
                 "{name} is out of date: regenerate ui/src/api/generated (see bindings.rs)"
             );
         }
+    }
+
+    /// Another crate's `generated/<crate>/` folder is neither compared nor deleted.
+    #[test]
+    fn subfolders_are_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        export(tmp.path()).unwrap();
+        let before = read_all(tmp.path());
+        let sub = tmp.path().join("projects");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("ProjectNode.ts"),
+            "export type ProjectNode = {};
+",
+        )
+        .unwrap();
+        assert_eq!(read_all(tmp.path()), before);
+        let again = export(tmp.path()).unwrap();
+        assert!(!again.iter().any(|n| n == "projects"));
+        assert!(!std::fs::read_to_string(tmp.path().join("index.ts"))
+            .unwrap()
+            .contains("projects"));
+        assert!(sub.join("ProjectNode.ts").is_file());
     }
 
     #[test]

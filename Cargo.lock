@@ -1399,14 +1399,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "helm-actions"
+version = "0.1.0"
+dependencies = [
+ "helm-core",
+ "helm-ipc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ts-rs",
+]
+
+[[package]]
 name = "helm-app"
 version = "0.1.0"
 dependencies = [
  "env_logger",
+ "helm-actions",
  "helm-chats",
  "helm-core",
  "helm-ipc",
+ "helm-panel",
  "helm-platform",
+ "helm-projects",
+ "helm-search",
  "helm-workers",
  "log",
  "serde_json",
@@ -1468,6 +1485,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "helm-panel"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "helm-core",
+ "helm-ipc",
+ "helm-platform",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "helm-platform"
 version = "0.1.0"
 dependencies = [
@@ -1478,6 +1511,36 @@ dependencies = [
  "tokio",
  "uuid",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "helm-projects"
+version = "0.1.0"
+dependencies = [
+ "helm-chats",
+ "helm-core",
+ "helm-ipc",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ts-rs",
+ "uuid",
+]
+
+[[package]]
+name = "helm-search"
+version = "0.1.0"
+dependencies = [
+ "helm-chats",
+ "helm-core",
+ "helm-ipc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ts-rs",
 ]
 
 [[package]]

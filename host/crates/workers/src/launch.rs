@@ -22,6 +22,11 @@ pub struct ClaudeLaunch {
     pub skip_permissions: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_session_id: Option<String>,
+    /// Launch contributors' system-prompt fragments ([`crate::contrib`]); absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub append_system_prompt: Option<String>,
+    /// Claude Code's fast mode from `claude-runtime.json`; always sent (`--settings`).
+    pub fast_mode: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -65,7 +70,8 @@ pub struct ClaudeRuntime {
     pub executable: String,
     #[serde(default = "yes")]
     pub skip_permissions: bool,
-    #[serde(default = "yes")]
+    /// Claude Code's fast mode. Off by default.
+    #[serde(default)]
     pub fast_mode: bool,
 }
 
@@ -78,7 +84,7 @@ impl Default for ClaudeRuntime {
         Self {
             executable: String::new(),
             skip_permissions: true,
-            fast_mode: true,
+            fast_mode: false,
         }
     }
 }
@@ -143,6 +149,8 @@ pub fn claude_launch(
         effort,
         skip_permissions: runtime.skip_permissions,
         resume_session_id,
+        append_system_prompt: None,
+        fast_mode: runtime.fast_mode,
     };
     if let Some(t) = test {
         c.command = Some(t.command.clone());
@@ -209,6 +217,14 @@ mod tests {
         assert_eq!(v["claude"]["commandArgs"][0], "fake.ts");
         assert_eq!(v["claude"]["skipPermissions"], true);
         assert_eq!(v["sendBehavior"]["longCommands"], "redirect");
+        assert_eq!(
+            v["claude"]["fastMode"], false,
+            "fast mode is explicit and off by default"
+        );
         assert!(!v.to_string().contains("apiKeyMode"));
+        assert!(
+            !v.to_string().contains("appendSystemPrompt"),
+            "absent unless a contributor adds a fragment"
+        );
     }
 }

@@ -5,6 +5,7 @@ import { createApi, type Api } from './api/client.ts';
 import { EventBus } from './api/events.ts';
 import { Flushers, installQuitHandling } from './shell/quit.ts';
 import './styles.css';
+import './ui/ui.css';
 import './chat.css';
 
 async function boot(): Promise<{ api: Api; bus: EventBus }> {

@@ -3,6 +3,8 @@
 // The renderer never navigates. Every anchor it produces carries its target in `data-md-*`
 // attributes, and the component turns a click into an `onLink(target)` call (index.ts contract).
 
+import { driveForm, isRemoteOrDevicePath } from './paths.ts';
+
 export interface LinkTarget {
   kind: 'url' | 'vault';
   /** `url` only: the href as written (http, https, mailto, file, or a plain path). */
@@ -12,6 +14,8 @@ export interface LinkTarget {
   heading?: string;
   block?: string;
   alias?: string;
+  /** `vault` only: the vault an `obsidian://open?vault=` link names. Absent means "resolve it". */
+  vault?: string;
 }
 
 const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|svg|webp|bmp|avif)$/i;
@@ -50,6 +54,8 @@ export function parseWikilink(inner: string): LinkTarget | null {
   const alias = bar < 0 ? '' : text.slice(bar + 1).trim();
   const parts = splitNoteAndFragment(targetPart);
   if (!parts.note && !parts.heading && !parts.block) return null;
+  // A wikilink naming a network share or a device path stays text: never a link or an embed.
+  if (parts.note && isRemoteOrDevicePath(parts.note)) return null;
   const target: LinkTarget = { kind: 'vault', ...parts };
   if (alias) target.alias = alias;
   return target;
@@ -65,7 +71,8 @@ function safeDecode(value: string): string {
 
 /**
  * Classifies a Markdown link destination. Returns null when it must not become a link
- * (javascript:, data:, vbscript:, protocol-relative, anything outside the allowlist).
+ * (javascript:, data:, vbscript:, protocol-relative, UNC and device paths, the drive-relative
+ * `C:x` form, anything outside the allowlist). The panel's link gate re-checks every target.
  */
 export function classifyHref(rawHref: string): LinkTarget | null {
   // Control characters inside the scheme are how `java\tscript:` gets past naive filters.
@@ -73,14 +80,18 @@ export function classifyHref(rawHref: string): LinkTarget | null {
   const href = rawHref.replace(/[\u0000-\u001f\u007f]/g, '').trim();
   if (!href) return null;
   if (href.startsWith('//')) return null;
+  if (isRemoteOrDevicePath(href)) return null;
 
   if (href.startsWith('#')) {
     return { kind: 'vault', ...splitNoteAndFragment(safeDecode(href)) };
   }
 
-  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(href);
-  // A single letter is a Windows drive ("C:\notes\x.md"), not a scheme.
-  if (scheme && (scheme[1] as string).length > 1) {
+  // A single letter is a Windows drive only when a slash follows ("C:\notes\x.md"). "C:x" is
+  // drive-relative, and treating any one-letter scheme as a drive let "C:javascript:..." through.
+  const drive = driveForm(href);
+  if (drive === 'relative') return null;
+  const scheme = drive ? null : /^([a-z][a-z0-9+.-]*):/i.exec(href);
+  if (scheme) {
     const name = (scheme[1] as string).toLowerCase();
     if (name === 'http' || name === 'https' || name === 'mailto' || name === 'file') {
       return { kind: 'url', href };
@@ -110,8 +121,11 @@ function classifyObsidianUri(href: string): LinkTarget | null {
   }
   if (url.hostname !== 'open') return null;
   const file = url.searchParams.get('file');
-  if (!file) return null;
-  return { kind: 'vault', ...splitNoteAndFragment(file.replace(/\.md$/i, '')) };
+  if (!file || isRemoteOrDevicePath(file)) return null;
+  const target: LinkTarget = { kind: 'vault', ...splitNoteAndFragment(file.replace(/\.md$/i, '')) };
+  const vault = url.searchParams.get('vault');
+  if (vault) target.vault = vault;
+  return target;
 }
 
 /** The `data-md-*` attributes that carry a target through the HTML string. */
@@ -122,6 +136,7 @@ export function targetAttrs(target: LinkTarget): Array<[string, string]> {
   if (target.heading) attrs.push(['data-md-heading', target.heading]);
   if (target.block) attrs.push(['data-md-block', target.block]);
   if (target.alias) attrs.push(['data-md-alias', target.alias]);
+  if (target.vault) attrs.push(['data-md-vault', target.vault]);
   return attrs;
 }
 
@@ -135,10 +150,12 @@ export function targetFromAttrs(get: (name: string) => string | null): LinkTarge
   const heading = get('data-md-heading');
   const block = get('data-md-block');
   const alias = get('data-md-alias');
+  const vault = get('data-md-vault');
   if (href !== null) target.href = href;
   if (note !== null) target.note = note;
   if (heading !== null) target.heading = heading;
   if (block !== null) target.block = block;
   if (alias !== null) target.alias = alias;
+  if (vault !== null) target.vault = vault;
   return target;
 }

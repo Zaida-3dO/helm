@@ -45,7 +45,10 @@ export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[
   if (c.resumeSessionId) args.push("--resume", c.resumeSessionId);
   const append = [c.appendSystemPrompt, opts.promptRule].filter((x): x is string => typeof x === "string" && x.length > 0).join("\n\n");
   if (append) args.push("--append-system-prompt", append);
-  if (c.settings && Object.keys(c.settings).length > 0) args.push("--settings", JSON.stringify(c.settings));
+  // fastMode is always explicit: the launch's own field is its only owner.
+  const { fastMode: _dropped, ...custom } = c.settings ?? {};
+  void _dropped;
+  args.push("--settings", JSON.stringify({ ...custom, fastMode: c.fastMode === true }));
   if (c.extraArgs) args.push(...c.extraArgs);
   return args;
 }

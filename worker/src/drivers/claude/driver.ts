@@ -594,6 +594,8 @@ export class ClaudeDriver implements Driver {
 
     const content: Json[] = [];
     if (text) content.push({ type: "text", text });
+    // The panel-context block: its own content block after the text.
+    if (typeof cmd.context === "string" && cmd.context.length > 0) content.push({ type: "text", text: cmd.context });
     for (const img of Array.isArray(cmd.images) ? (cmd.images as Json[]) : []) {
       if (typeof img.data === "string") {
         content.push({ type: "image", source: { type: "base64", media_type: String(img.mimeType ?? "image/png"), data: img.data } });

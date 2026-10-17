@@ -46,7 +46,7 @@ test('classifyHref treats a Windows drive path as a path, not a scheme', () => {
 test('classifyHref maps in-page anchors and md paths to vault targets', () => {
   assert.deepEqual(classifyHref('#My%20Heading'), { kind: 'vault', note: '', heading: 'My Heading' });
   assert.deepEqual(classifyHref('../x/Note.md#^blk'), { kind: 'vault', note: '../x/Note', block: 'blk' });
-  assert.deepEqual(classifyHref('obsidian://open?vault=V&file=A%2FB.md'), { kind: 'vault', note: 'A/B' });
+  assert.deepEqual(classifyHref('obsidian://open?vault=V&file=A%2FB.md'), { kind: 'vault', note: 'A/B', vault: 'V' });
   assert.equal(classifyHref('obsidian://other?x=1'), null);
   assert.equal(classifyHref('obsidian://open?vault=V'), null);
 });
@@ -70,4 +70,60 @@ test('isImageName recognises image extensions only', () => {
   assert.equal(isImageName('dir/a.webp'), true);
   assert.equal(isImageName('note'), false);
   assert.equal(isImageName('a.png.md'), false);
+});
+
+// ---- The link gate's first layer (network shares and device paths) ----
+
+const r = String.raw;
+
+test('classifyHref refuses the "C:javascript:" family and drive-relative paths', () => {
+  for (const bad of ['C:javascript:alert(1)', 'c:javascript:alert(1)', 'C:x', 'C:x.md', 'Z:vbscript:x']) {
+    assert.equal(classifyHref(bad), null, JSON.stringify(bad));
+  }
+});
+
+test('classifyHref accepts a drive letter followed by either slash', () => {
+  assert.deepEqual(classifyHref('c:/x.md'), { kind: 'vault', note: 'c:/x' });
+  assert.deepEqual(classifyHref(r`C:\x.md`), { kind: 'vault', note: r`C:\x` });
+  assert.deepEqual(classifyHref('C:/src/a.ts'), { kind: 'url', href: 'C:/src/a.ts' });
+});
+
+test('classifyHref refuses UNC and device paths before anything can touch them', () => {
+  for (const bad of [
+    r`\\host\share\x.png`,
+    r`\\host\share\note.md`,
+    '//host/share/x',
+    r`/\host\share`,
+    r`\/host/share`,
+    r`\\?\C:\x.txt`,
+    r`\\.\pipe\x`,
+    r`\??\C:\x`,
+    'file://host/share/x.txt',
+    'FILE://Host/share',
+    'file:////host/share/x',
+    'file://///host/share/x',
+    'file:///%5C%5Chost/share',
+    '%5C%5Chost%5Cshare%5Cx',
+    'obsidian://open?vault=V&file=%5C%5Chost%5Cshare%5Cx',
+  ]) {
+    assert.equal(classifyHref(bad), null, JSON.stringify(bad));
+  }
+});
+
+test('classifyHref keeps local file URLs', () => {
+  assert.deepEqual(classifyHref('file:///C:/x/a.txt'), { kind: 'url', href: 'file:///C:/x/a.txt' });
+  assert.deepEqual(classifyHref('file://localhost/C:/a.txt'), { kind: 'url', href: 'file://localhost/C:/a.txt' });
+});
+
+test('wikilinks naming a share or device path stay text', () => {
+  assert.equal(parseWikilink(r`\\host\share\x`), null);
+  assert.equal(parseWikilink('//host/share/x.png'), null);
+  assert.equal(parseWikilink(r`\\?\C:\x`), null);
+});
+
+test('an obsidian:// link keeps the vault it names, through the data attributes too', () => {
+  const t = classifyHref('obsidian://open?vault=My%20Vault&file=A%2FB.md');
+  assert.deepEqual(t, { kind: 'vault', note: 'A/B', vault: 'My Vault' });
+  const attrs = new Map(targetAttrs(t!));
+  assert.deepEqual(targetFromAttrs((n) => attrs.get(n) ?? null), t);
 });
