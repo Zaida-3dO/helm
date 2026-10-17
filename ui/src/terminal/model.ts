@@ -21,6 +21,8 @@ export interface DockTab {
   cwd: string;
   state: TabState;
   exitCode?: number;
+  /** Opened by this dock (not reattached after a reload). */
+  fresh?: boolean;
 }
 
 /**
@@ -117,3 +119,12 @@ export const PALETTE = {
     bright: ['#5f5f5f', '#ffb0ab', '#b8e6a2', '#f2d89a', '#aecdf3', '#ddc0ec', '#a3e3db', '#ffffff'],
   },
 } as const;
+
+/**
+ * Remove terminal queries (device status, cursor position, device attributes) from replayed
+ * output, so a reattached view does not answer them a second time.
+ */
+export function stripQueries(text: string): string {
+  const ESC = String.fromCharCode(27);
+  return text.replace(new RegExp(`${ESC}\\[(?:[56]n|\\?6n|[>=]?c|0?c)`, 'g'), '');
+}

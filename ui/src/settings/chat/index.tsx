@@ -10,14 +10,33 @@ import { ELEMENTS, isShown, parseChatElements, type ChatElements } from './eleme
 function ChatPane() {
   const shell = useShell();
   const [els, setEls] = useState<ChatElements>({});
+  const [ac, setAc] = useState(false);
   useEffect(() => {
     void shell
       .api<unknown>('preference_get', { key: 'chatElements' })
       .then((v) => setEls(parseChatElements(v)))
       .catch(() => undefined);
+    void shell
+      .api<unknown>('preference_get', { key: 'autocomplete' })
+      .then((v) => setAc(Boolean(v && typeof v === 'object' && (v as { enabled?: unknown }).enabled === true)))
+      .catch(() => undefined);
   }, [shell]);
   return (
     <div data-testid="settings-chat">
+      <SettingRow title="Autocomplete" description="Suggest the rest of the word you are typing; Tab accepts. Uses Claude Code's small model, at most 10 requests a minute.">
+        <Checkbox
+          checked={ac}
+          onChange={(on) => {
+            setAc(on);
+            shell.bus.dispatch({ kind: 'preferences', changed: { autocomplete: { enabled: on } } });
+            void shell.api('preference', { key: 'autocomplete', value: { enabled: on } }).catch((err: unknown) => {
+              setAc(!on);
+              shell.bus.dispatch({ kind: 'preferences', changed: { autocomplete: { enabled: !on } } });
+              toast.show({ kind: 'error', text: `Could not save: ${String((err as Error).message ?? err)}` });
+            });
+          }}
+        />
+      </SettingRow>
       {ELEMENTS.map((e) => (
         <SettingRow key={e.id} title={e.title} description={e.description}>
           <Checkbox

@@ -496,6 +496,7 @@ mod tests {
             title: "T".into(),
             project: "P".into(),
             kind: k,
+            reason: String::new(),
         };
         AttentionSummary {
             badge,
@@ -509,6 +510,7 @@ mod tests {
                 .iter()
                 .map(|c| row(c, AttentionKind::Unread))
                 .collect(),
+            stalled: vec![],
             revision: 1,
         }
     }

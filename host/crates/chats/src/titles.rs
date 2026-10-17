@@ -210,7 +210,8 @@ pub fn run_helper(
     script: &std::path::Path,
     env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     job: &Value,
-) -> Result<String, String> {
+    timeout: Duration,
+) -> Result<Value, String> {
     use std::io::{Read, Write};
     let mut cmd = std::process::Command::new(node);
     cmd.arg(script)
@@ -227,7 +228,7 @@ pub fn run_helper(
     }
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("the titles helper did not start: {e}"))?;
+        .map_err(|e| format!("the helper did not start: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(job.to_string().as_bytes());
     }
@@ -238,7 +239,7 @@ pub fn run_helper(
         let _ = stdout.read_to_string(&mut s);
         let _ = tx.send(s);
     });
-    let out = match rx.recv_timeout(HOST_TIMEOUT) {
+    let out = match rx.recv_timeout(timeout) {
         Ok(s) => s,
         Err(_) => {
             let _ = child.kill();
@@ -246,16 +247,7 @@ pub fn run_helper(
         }
     };
     let _ = child.wait();
-    let v: Value = serde_json::from_str(out.trim())
-        .map_err(|_| "the helper's answer was not JSON".to_owned())?;
-    match (
-        v.get("title").and_then(Value::as_str),
-        v.get("error").and_then(Value::as_str),
-    ) {
-        (Some(t), _) => Ok(t.to_owned()),
-        (_, Some(e)) => Err(e.to_owned()),
-        _ => Err("the helper gave no title".into()),
-    }
+    serde_json::from_str(out.trim()).map_err(|_| "the helper's answer was not JSON".to_owned())
 }
 
 /// Whether this send should start a title job: the chat's first submission while it is still

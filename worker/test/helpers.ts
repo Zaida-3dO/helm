@@ -27,6 +27,8 @@ export interface StartOpts {
   limits?: Json;
   env?: Record<string, string | undefined>;
   sendBehavior?: Json;
+  /** Extra top-level launch fields (hostTools, chatToolsDirectory, ...). */
+  launch?: Json;
 }
 
 export function readJsonl(p: string): Json[] {
@@ -49,6 +51,7 @@ export function startWithFixture(name: string, opts: StartOpts = {}): Started {
     claude: { command: process.execPath, commandArgs: [FAKE_CLAUDE, fixturePath], ...(opts.claude ?? {}) },
     limits,
     ...(opts.sendBehavior ? { sendBehavior: opts.sendBehavior } : {}),
+    ...(opts.launch ?? {}),
   };
   const host = new FakeHost({
     launcher: WORKER,

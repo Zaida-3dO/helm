@@ -37,6 +37,8 @@ async fn the_staged_worker_answers_get_state_through_the_fake_claude() {
             opt_in: false,
         },
         limits: None,
+        host_tools: None,
+        chat_tools_directory: None,
     };
     let launch_path = launch
         .write(&profile.path().join("workers").join("chat-1"))

@@ -14,6 +14,7 @@ import type { SendShortcut } from './composer/keymap.ts';
 import { SETTINGS_DIALOG, SettingsDialog } from './settings/index.ts';
 import './settings/general.tsx';
 import './settings/shell/ShellPane.tsx';
+import './settings/mcp/index.tsx';
 import { GLOBAL_HOTKEY_BINDING, shellOps } from './api/shell.ts';
 import { ShellController, ShellProvider, useSelection, useShell } from './shell/context.ts';
 import type { Flushers } from './shell/quit.ts';

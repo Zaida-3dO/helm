@@ -1111,3 +1111,71 @@ html[data-panel-maximized] .shell-main {
   font-size: calc(12 * var(--ui-unit));
   color: var(--text);
 }
+
+/* ---- Turn change card ---- */
+
+.tc-card {
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: calc(12 * var(--ui-unit));
+  color: var(--text);
+  max-width: 640px;
+}
+
+.tc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: var(--secondary);
+}
+
+.tc-repo {
+  padding: 8px 0 5px;
+  font-size: calc(10 * var(--ui-unit));
+  font-weight: 500;
+  color: var(--secondary);
+}
+
+.tc-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+
+.tc-file:hover {
+  background: var(--hover);
+}
+
+.tc-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.tc-unavailable {
+  color: var(--secondary);
+}
+
+.tc-more {
+  margin-top: 4px;
+  padding: 2px 6px;
+  border: none;
+  background: transparent;
+  color: var(--link-color);
+  font: inherit;
+}

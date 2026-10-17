@@ -2,6 +2,7 @@
 // native turn at a time.
 
 import type { ContentBlock, Json, RetryEndState, SettleOutcome } from "../../protocol/types.ts";
+import { toolSource } from "../../hosttools/source.ts";
 
 interface LiveMessage {
   id: string;
@@ -222,7 +223,7 @@ export class StreamTranslator {
       if (b.type !== "toolCall" || !b.id || this.openTools.has(b.id)) continue;
       this.openTools.add(b.id);
       this.toolNames.set(b.id, b.name);
-      this.h.emit({ type: "tool_execution_start", toolCallId: b.id, toolName: b.name, args: b.arguments });
+      this.h.emit({ type: "tool_execution_start", toolCallId: b.id, toolName: b.name, args: b.arguments, toolSource: toolSource(b.name, b.arguments) });
     }
   }
 

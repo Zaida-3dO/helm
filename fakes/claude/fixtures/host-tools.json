@@ -1,0 +1,13 @@
+{
+  "description": "Claude Code talks to Helm's in-process helm MCP server: initialize, tools/list, then two tools/call requests, the first by the agent and the second by a subagent, each preceded by its PreToolUse hook.",
+  "steps": [
+    { "await": { "type": "user" }, "as": "p" },
+    { "init": {} },
+    { "mcp": { "message": { "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2025-11-25", "capabilities": {} } } }, "as": "mcpinit" },
+    { "mcp": { "message": { "jsonrpc": "2.0", "method": "notifications/initialized" } }, "as": "note" },
+    { "mcp": { "message": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" } }, "as": "list" },
+    { "mcp": { "hook": { "toolUseId": "tu_root" }, "message": { "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "app_list_chats", "arguments": { "query": "x" } } } }, "as": "root" },
+    { "mcp": { "hook": { "toolUseId": "tu_child", "agent": "sub-1" }, "message": { "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "app_list_chats", "arguments": {} } } }, "as": "child" },
+    { "result": "done" }
+  ]
+}

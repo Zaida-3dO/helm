@@ -985,6 +985,45 @@ pub struct SkillInfo {
     pub description: String,
 }
 
+/// `autocomplete_suggest`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutocompleteArgs {
+    pub chat_id: String,
+    /// A fresh UUID per request.
+    pub request_id: String,
+    pub draft: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AutocompleteResult {
+    /// The rest of the word being typed; empty when there is nothing to show.
+    pub completion: String,
+    /// Set when the request was not run (budget, busy, cooldown): ask again after this long.
+    #[ts(type = "number | null")]
+    pub retry_after_ms: Option<i64>,
+}
+
+/// `side_chat_resolve`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum SideChatAction {
+    Promote,
+    Discard,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SideChatResolveArgs {
+    pub chat_id: String,
+    pub action: SideChatAction,
+    /// Discarding a side chat that has sent anything needs this.
+    #[serde(default)]
+    #[ts(optional)]
+    pub confirmed: Option<bool>,
+}
+
 /// `chat_mute`: mute or unmute (user-only: no agent tool reads or writes it).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

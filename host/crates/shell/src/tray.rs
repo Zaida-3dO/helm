@@ -156,6 +156,7 @@ mod tests {
             title: title.into(),
             project: "proj".into(),
             kind,
+            reason: String::new(),
         }
     }
 
@@ -187,6 +188,7 @@ mod tests {
                 .map(|i| row(&format!("r{i}"), "R", AttentionKind::Running))
                 .collect(),
             unread: vec![],
+            stalled: vec![],
             revision: 1,
         };
         let m = menu_model(Some(&s), &[], &ShellSettings::default());

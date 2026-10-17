@@ -33,12 +33,14 @@ process.stdin.on("end", () => {
   return { command: process.execPath, commandArgs: [script], calls: () => Number(fs.readFileSync(state, "utf8")) };
 }
 
-test("titles are cleaned and must be 1-7 words within 50 characters", () => {
+test("titles are cleaned and must be 3-7 words within 50 characters", () => {
   assert.equal(cleanTitle('"Fix the flaky build."'), "Fix the flaky build");
   assert.equal(cleanTitle("Title: **Port the sidebar**\nmore"), "Port the sidebar");
   assert.equal(cleanTitle("one two three four five six seven eight"), null);
   assert.equal(cleanTitle("x".repeat(51)), null);
   assert.equal(cleanTitle("   "), null);
+  assert.equal(cleanTitle("done"), null, "too short to name a chat");
+  assert.equal(cleanTitle("Fix it"), null);
 });
 
 test("the prompt treats the chat as data and the retry asks for the bare title", () => {

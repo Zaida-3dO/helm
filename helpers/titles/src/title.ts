@@ -3,7 +3,7 @@
 // - The prompt asks for one short, specific title in sentence case, in the user's language, with
 //   the conversation treated as data. A retry uses a stricter prompt asking for the bare title.
 // - The answer is cleaned (quotes and Markdown stripped, one line, no trailing full stop) and
-//   accepted only at 1–7 words and at most 50 characters.
+//   accepted only at 3–7 words and at most 50 characters.
 // - Claude is the unmodified `claude` binary under the user's own login, in print mode with a
 //   small model, with the credential variables stripped. The helper reads no
 //   credentials and passes no settings.
@@ -29,6 +29,7 @@ export interface TitleJob {
 }
 
 export const MAX_TITLE_CHARS = 50;
+export const MIN_TITLE_WORDS = 3;
 export const MAX_TITLE_WORDS = 7;
 export const FIRST_REQUEST_CHARS = 4_000;
 export const MODEL = "haiku";
@@ -70,7 +71,7 @@ export function cleanTitle(raw: string): string | null {
   t = t.replace(/\.+$/, "").trim();
   if (!t || t.length > MAX_TITLE_CHARS) return null;
   const words = t.split(/\s+/).filter(Boolean).length;
-  if (words < 1 || words > MAX_TITLE_WORDS) return null;
+  if (words < MIN_TITLE_WORDS || words > MAX_TITLE_WORDS) return null;
   return t;
 }
 

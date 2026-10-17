@@ -1735,8 +1735,11 @@ dependencies = [
  "env_logger",
  "helm-actions",
  "helm-chats",
+ "helm-consent",
  "helm-core",
+ "helm-hosttools",
  "helm-ipc",
+ "helm-mcp",
  "helm-panel",
  "helm-platform",
  "helm-projects",
@@ -1759,6 +1762,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "helm-core",
+ "helm-hosttools",
  "helm-ipc",
  "helm-platform",
  "helm-workers",
@@ -1769,6 +1773,22 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "ts-rs",
+ "uuid",
+]
+
+[[package]]
+name = "helm-consent"
+version = "0.1.0"
+dependencies = [
+ "helm-core",
+ "helm-ipc",
+ "hex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
  "ts-rs",
  "uuid",
 ]
@@ -1795,6 +1815,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "helm-hosttools"
+version = "0.1.0"
+dependencies = [
+ "helm-ipc",
+ "helm-workers",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "helm-ipc"
 version = "0.1.0"
 dependencies = [
@@ -1804,6 +1836,24 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "helm-mcp"
+version = "0.1.0"
+dependencies = [
+ "helm-core",
+ "helm-hosttools",
+ "helm-ipc",
+ "helm-platform",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ts-rs",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -4694,7 +4744,6 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
- "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -5936,7 +5985,6 @@ dependencies = [
  "serde_repr",
  "sha1",
  "static_assertions",
- "tokio",
  "tracing",
  "uds_windows",
  "windows-sys 0.52.0",

@@ -14,6 +14,9 @@ import { Interactions } from "./interactions.ts";
 import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE } from "./longcmd.ts";
 import { assertNotShim, resolveClaude, type Resolved } from "./resolve.ts";
 import { StreamTranslator } from "./translate.ts";
+import { Attribution } from "../../hosttools/attribution.ts";
+import { RequestChannel } from "../../hosttools/channel.ts";
+import { HostToolServer, SERVER_NAME, sdkMcpConfig, toolPrefix } from "../../hosttools/server.ts";
 
 /** The largest prompt text the worker will submit. */
 export const MAX_SUBMISSION_TEXT_BYTES = 2 * 1024 * 1024;
@@ -33,6 +36,8 @@ const STOP_TOOL_MAX_AGE_MS = 5_000;
 const DEFAULT_MIN_RUN_MS = 10_000;
 /** The callback id the worker registers for its PreToolUse hook (long-command rule). */
 export const LONG_COMMAND_HOOK_ID = "helm-long-commands";
+/** PreToolUse hook on Helm's own tools: attributes each call to the agent or a subagent. */
+export const HOST_TOOL_HOOK_ID = "helm-host-tools";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -121,6 +126,9 @@ export class ClaudeDriver implements Driver {
   /** A send-now interrupt is in flight: the turn ends superseded, not stopped by the user. */
   private superseding = false;
   private compacting: { boundary: boolean } | undefined;
+  /** Helm's in-process MCP server, when the launch lists host tools. */
+  private readonly hostTools: HostToolServer | undefined;
+  private readonly attribution = new Attribution(toolPrefix);
 
   constructor(launch: Launch, channel: HostChannel, deps: DriverDeps) {
     this.launch = launch;
@@ -139,6 +147,16 @@ export class ClaudeDriver implements Driver {
       onStopTurn: () => this.markStopping(),
       skipPermissions: c.skipPermissions === true,
     });
+    if (Array.isArray(launch.hostTools) && typeof launch.chatToolsDirectory === "string" && launch.chatToolsDirectory) {
+      this.hostTools = new HostToolServer({
+        hostTools: launch.hostTools,
+        channel: new RequestChannel({ dir: launch.chatToolsDirectory, emit: (rec) => this.ch.emit(rec) }),
+        // A successful self-archive ends the turn.
+        onEndTurn: () => {
+          if (this.turnOpen) this.control({ subtype: "interrupt" }, this.limits.controlTimeoutMs).catch((e: Error) => this.deps.diag(`self-archive interrupt failed: ${e.message}`));
+        },
+      });
+    }
   }
 
   // ---- lifecycle -------------------------------------------------------------------------
@@ -158,7 +176,10 @@ export class ClaudeDriver implements Driver {
       this.resolved = resolveClaude({ env: this.deps.env });
       command = this.resolved.path;
     }
-    const args = [...(c.commandArgs ?? []), ...buildClaudeArgs(c, { promptRule: this.longCommands.enabled ? PROMPT_RULE : undefined })];
+    const args = [
+      ...(c.commandArgs ?? []),
+      ...buildClaudeArgs(c, { promptRule: this.longCommands.enabled ? PROMPT_RULE : undefined, mcpConfig: this.hostTools ? sdkMcpConfig() : undefined }),
+    ];
     const env = buildClaudeEnv(this.deps.env, { apiKeyMode: c.apiKeyMode === true, chatId: this.launch.chatId });
     const child = spawn(command, args, {
       cwd: this.launch.cwd ?? process.cwd(),
@@ -192,7 +213,13 @@ export class ClaudeDriver implements Driver {
     child.stdin?.on("error", (e) => this.deps.diag(`claude stdin: ${e.message}`));
 
     const initRequest: Json = { subtype: "initialize" };
-    if (this.longCommands.enabled) initRequest.hooks = { PreToolUse: [{ matcher: "Bash", hookCallbackIds: [LONG_COMMAND_HOOK_ID] }] };
+    const preToolUse: Json[] = [];
+    if (this.longCommands.enabled) preToolUse.push({ matcher: "Bash", hookCallbackIds: [LONG_COMMAND_HOOK_ID] });
+    if (this.hostTools) {
+      preToolUse.push({ matcher: `${toolPrefix}.*`, hookCallbackIds: [HOST_TOOL_HOOK_ID] });
+      initRequest.sdkMcpServers = [SERVER_NAME];
+    }
+    if (preToolUse.length > 0) initRequest.hooks = { PreToolUse: preToolUse };
     const init = await this.control(initRequest, this.limits.controlTimeoutMs);
     const models = Array.isArray(init.models)
       ? (init.models as Json[]).map((m) => ({ id: m.value ?? m.id, name: m.displayName ?? m.value, description: m.description }))
@@ -395,7 +422,13 @@ export class ClaudeDriver implements Driver {
     switch (req.subtype) {
       case "can_use_tool":
         if (this.stopping) return this.controlReply(requestId, { behavior: "deny", message: "The turn is stopping." });
+        // Helm's own tools are pre-approved; their gates run in the host.
+        if (this.hostTools && typeof req.tool_name === "string" && req.tool_name.startsWith(toolPrefix)) {
+          return this.controlReply(requestId, { behavior: "allow", updatedInput: obj(req.input) });
+        }
         return this.interactions.onCanUseTool(requestId, req);
+      case "mcp_message":
+        return this.onMcpMessage(requestId, req);
       case "hook_callback":
         return this.onHook(requestId, req);
       case "elicitation":
@@ -527,8 +560,29 @@ export class ClaudeDriver implements Driver {
   }
 
   /** PreToolUse hook: the long-command rule. Anything else is allowed. */
+  /** A JSON-RPC message for an SDK MCP server; only `helm` is ours. */
+  private onMcpMessage(requestId: string, req: Json): void {
+    const server = this.hostTools;
+    if (!server || req.server_name !== SERVER_NAME) return this.controlError(requestId, `unknown MCP server: ${String(req.server_name)}`);
+    const msg = obj(req.message);
+    const reply = (r: Json | null) => this.controlReply(requestId, { mcp_response: r ?? { jsonrpc: "2.0", result: {} } });
+    const work = async () => {
+      const params = obj(msg.params);
+      const caller = msg.method === "tools/call" ? await this.attribution.take(String(params.name ?? ""), params.arguments ?? {}) : { child: false };
+      return server.handle(msg, caller);
+    };
+    work().then(reply, (e: Error) => {
+      this.deps.diag(`helm MCP server: ${e.message}`);
+      reply({ jsonrpc: "2.0", id: (msg.id as string | number | null) ?? null, error: { code: -32603, message: "Helm's tool server failed." } });
+    });
+  }
+
   private onHook(requestId: string, req: Json): void {
     const input = obj(req.input);
+    if (req.callback_id === HOST_TOOL_HOOK_ID) {
+      this.attribution.noteHook({ ...input, tool_use_id: req.tool_use_id ?? input.tool_use_id });
+      return this.controlReply(requestId, {});
+    }
     const toolUseId = String(req.tool_use_id ?? input.tool_use_id ?? "");
     const isRootBash = req.callback_id === LONG_COMMAND_HOOK_ID && input.tool_name === "Bash" && !input.agent_id && !this.subagentTools.has(toolUseId);
     if (!isRootBash) return this.controlReply(requestId, {});
@@ -563,6 +617,7 @@ export class ClaudeDriver implements Driver {
     this.stopping = false;
     this.interactions.dismissAll();
     this.longCommands.endTurn();
+    this.attribution.clear();
     if (this.compacting) {
       if (!this.compacting.boundary) this.ch.emit({ type: "compaction_end", trigger: "manual", ok: false });
       this.compacting = undefined;

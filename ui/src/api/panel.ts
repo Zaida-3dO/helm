@@ -111,6 +111,21 @@ export type ContextItem =
   | { kind: 'diff'; repoTop: string; path: string; side: DiffSide; startLine: number; endLine: number; rows: Array<{ sign: '+' | '-' | ' '; text: string }> }
   | { kind: 'reviewComment'; id: string; path: string; side: 'left' | 'right'; startLine: number; endLine: number; quote: string; body: string };
 
+export interface TurnFile {
+  path: string;
+  repositoryRoot: string | null;
+  repositoryPath: string;
+  added: number | null;
+  removed: number | null;
+  completeCounts: boolean;
+}
+
+export interface TurnChanges {
+  messageId: number;
+  files: TurnFile[];
+  truncated: boolean;
+}
+
 export function panelOps(api: Api) {
   return {
     fileRead: (path: string, chatId?: string | null) =>
@@ -135,6 +150,7 @@ export function panelOps(api: Api) {
     commentList: (chatId: string) => api<ReviewComment[]>('review_comment_list', { chatId }),
     commentRemove: (chatId: string, id: string) => api<ReviewComment[]>('review_comment_remove', { chatId, id }),
     commentClear: (chatId: string) => api<ReviewComment[]>('review_comment_clear', { chatId }),
+    reviewTurns: (chatId: string, messageIds: number[]) => api<TurnChanges[]>('review_turns', { chatId, messageIds }),
     tabsGet: () => api<unknown>('panel_tabs_get', {}),
     tabsSave: (value: unknown) => api<null>('panel_tabs_save', { value }),
   };

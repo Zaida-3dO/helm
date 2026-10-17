@@ -50,7 +50,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("attention_get", OpClass::Blocking, attention_get)
         .blocking("chat_rename", OpClass::Maintenance, chat_rename)
         .async_op("title_suggest", title_suggest)
-        .blocking("skills_list", OpClass::Blocking, skills_list);
+        .blocking("skills_list", OpClass::Blocking, skills_list)
+        .async_op("autocomplete_suggest", autocomplete_suggest);
     crate::manage::register(reg);
 }
 
@@ -58,6 +59,12 @@ pub fn register_ops(reg: &mut OpRegistry) {
 fn skills_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatIdArgs = parse_args(args)?;
     to_value(&runtime(ctx)?.skills(&a.chat_id))
+}
+
+async fn autocomplete_suggest(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: AutocompleteArgs = parse_args(args)?;
+    let rt = runtime(&ctx)?;
+    to_value(&crate::autocomplete::suggest(&rt, a).await?)
 }
 
 fn chat_rename(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -405,8 +412,14 @@ fn draft_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 }
 
 fn model_catalogue(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let _a: ModelCatalogueArgs = parse_args(args)?;
+    let a: ModelCatalogueArgs = parse_args(args)?;
     let profile = ctx.services.need::<Profile>()?;
+    if a.refresh == Some(true) {
+        // Re-read from a live worker's get_state when one runs.
+        if let Some(rt) = ctx.services.get::<ChatRuntime>() {
+            rt.handle().block_on(rt.refresh_catalogue());
+        }
+    }
     to_value(&catalogue::load(&profile.path("")))
 }
 
@@ -487,6 +500,7 @@ pub(crate) mod tests {
             ("chat_rename", OpClass::Maintenance),
             ("title_suggest", OpClass::Async),
             ("skills_list", OpClass::Blocking),
+            ("autocomplete_suggest", OpClass::Async),
             ("chat_archive", OpClass::Maintenance),
             ("chat_restore", OpClass::Maintenance),
             ("chat_delete", OpClass::Maintenance),
@@ -497,6 +511,7 @@ pub(crate) mod tests {
             ("message_edit_open", OpClass::Blocking),
             ("message_resend", OpClass::Maintenance),
             ("attachment_put", OpClass::Maintenance),
+            ("side_chat_resolve", OpClass::Maintenance),
             ("chat_mute", OpClass::Maintenance),
             ("attention_address", OpClass::Maintenance),
             ("attention_snooze", OpClass::Maintenance),

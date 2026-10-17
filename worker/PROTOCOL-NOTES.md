@@ -56,15 +56,16 @@ suppressed in `HostChannel` and logged to stderr.
 | `extension_ui_request` | `id, method: select \| confirm \| input \| editor \| dismiss, attention?, title?, header?, message?, context?, options?, optionDescriptions?, allowOther?, secret?, step?, steps?, answer?, prefill?`; `step` is **0-based**; a dismissal carries `remaining`. |
 | `permission_mode` | `mode` (from the CLI's init/status records) |
 | `native_session` | `sessionId`, emitted whenever the CLI's session id is first seen or changes (the host needs it to resume) |
-| `compaction_end` | `trigger` |
+| `compaction_end` | `trigger`; after a `compact` command it also carries `ok` (`false` when the turn ended without a compaction boundary) |
 | `notice` | `text` |
 | `worker_error` | `error` |
 
 Content blocks: `{type:"text",text}`, `{type:"thinking",thinking}`,
 `{type:"toolCall",id,name,arguments}`, `{type:"image",mimeType?}`.
 
-User rows: when Claude acknowledges a submission the worker emits `message_start` and
-`message_end` for it (role `user`, id = submission id).
+User rows: when Claude reads a submission (delivery: lifecycle `started`, or the echo) the worker
+emits `message_start` and `message_end` for it (role `user`, id = submission id); see "Delivery,
+steering and tool control" for why it is delivery and not the acknowledgement.
 
 ## Claude Code driver
 
@@ -95,8 +96,9 @@ User rows: when Claude acknowledges a submission the worker emits `message_start
   another retry ends the earlier one `retried`; an error result ends it `failed`; a stop ends it
   `cancelled`. A failed request shows up as a synthetic assistant message, projected as an
   `error` row.
-- **Other CLI control requests:** `hook_callback` answered empty (no hooks registered yet),
-  `elicitation` declined, anything else answered with an error.
+- **Other CLI control requests:** `hook_callback` goes to the long-command guard when its
+  callback id is the one registered in `initialize` (see "Delivery, steering and tool control"),
+  and is answered empty otherwise; `elicitation` declined; anything else answered with an error.
 
 ## Interactions
 

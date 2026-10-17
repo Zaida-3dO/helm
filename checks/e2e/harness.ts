@@ -181,14 +181,21 @@ export async function dispose(app: App | undefined): Promise<void> {
 export const tid = (id: string, extra = "") => `[data-testid="${id}"]${extra}`;
 
 export async function newChat(page: Page, folder: string): Promise<string> {
-  const before = await page.locator(tid("chat-item")).count();
+  // Wait for the chat that opens, not for the row count to grow: the sidebar is virtualised, so
+  // past a screenful the count stops growing (it scrolls the open chat into view instead).
+  const before = await page.getAttribute(tid("chat-view"), "data-chat-id", { timeout: 1_000 }).catch(() => null);
   await page.fill(tid("folder-input"), folder);
   await page.click(tid("new-chat"));
-  await page.waitForFunction((n) => document.querySelectorAll('[data-testid="chat-item"]').length > n, before, { timeout: 15_000 });
-  const view = page.locator(tid("chat-view"));
-  await view.waitFor({ timeout: 15_000 });
-  const id = await view.getAttribute("data-chat-id");
-  if (!id) throw new Error("chat view has no chat id");
+  const h = await page.waitForFunction(
+    (prev) => {
+      const id = document.querySelector('[data-testid="chat-view"]')?.getAttribute("data-chat-id");
+      return id && id !== prev ? id : false;
+    },
+    before,
+    { timeout: 15_000 },
+  );
+  const id = String(await h.jsonValue());
+  await page.waitForSelector(tid("chat-item", `[data-chat-id="${id}"]`), { timeout: 15_000 });
   return id;
 }
 

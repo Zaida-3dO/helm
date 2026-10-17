@@ -20,7 +20,6 @@ import './panel.css';
 export const PANEL_MIN_WIDTH = 280;
 /** The panel never leaves less than this for the rest of the window. */
 export const PANEL_WINDOW_RESERVE = 321;
-const NOTICE_MS = 5000;
 const DRAG_THRESHOLD_PX = 4;
 
 const SLOT_LABEL: Record<SlotId, string> = { changes: 'Changes', files: 'Files' };
@@ -128,7 +127,6 @@ export function SidePanel({ api, chatId }: SidePanelProps) {
   if (!visible) {
     return (
       <>
-        <LinkNotice />
         <ViewerModal />
         <QuickOpen chatId={chatId} />
       </>
@@ -198,7 +196,6 @@ export function SidePanel({ api, chatId }: SidePanelProps) {
           )}
         </div>
       </aside>
-      <LinkNotice />
       <ViewerModal />
       <QuickOpen chatId={chatId} />
     </>
@@ -491,25 +488,5 @@ function Resizer() {
         start.current = null;
       }}
     />
-  );
-}
-
-/** The link gate's refusal notice. Always mounted, so it shows even while the panel is hidden. */
-function LinkNotice() {
-  const notice = panelStore.notice;
-  useEffect(() => {
-    if (!notice) return;
-    const id = notice.id;
-    const timer = setTimeout(() => panelStore.clearNotice(id), NOTICE_MS);
-    return () => clearTimeout(timer);
-  }, [notice]);
-  return (
-    <div className="sp-notice-region" role="status" aria-live="polite">
-      {notice ? (
-        <div className="sp-notice" data-testid="link-notice" key={notice.id}>
-          {notice.text}
-        </div>
-      ) : null}
-    </div>
   );
 }

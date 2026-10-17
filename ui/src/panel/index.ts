@@ -4,6 +4,7 @@ import './viewer/kinds.tsx';
 import './changes/register.tsx';
 import './vault/kind.tsx';
 import './context/register.tsx';
+import './turns/register.tsx';
 import '../settings/vaults/index.tsx';
 export { SidePanel } from './SidePanel.tsx';
 export type { SidePanelProps } from './SidePanel.tsx';

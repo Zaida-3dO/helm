@@ -51,6 +51,8 @@ pub const STALL_MINUTES: PrefKey = PrefKey::classified("stallMinutes");
 /// Transcript element toggles: `{tokens, turnTime, fileChanges, timeline}` each
 /// `shown` or `hidden`; strict on write, a missing key reads as shown.
 pub const CHAT_ELEMENTS: PrefKey = PrefKey::classified("chatElements");
+/// Composer autocomplete: `{enabled}`, off when missing.
+pub const AUTOCOMPLETE: PrefKey = PrefKey::classified("autocomplete");
 
 /// Keys the generic `preference` op accepts. Every other key has its own feature operation.
 /// The list starts with the layout keys and grows it
@@ -70,6 +72,7 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     KEYBINDINGS,
     STALL_MINUTES,
     CHAT_ELEMENTS,
+    AUTOCOMPLETE,
 ];
 
 /// The stored value, or `None` when the row is missing or its JSON does not parse.
@@ -120,6 +123,13 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
         "inspectorWidth" => int_in(280, 4096, "must be 280 to 4096"),
         "terminalHeight" => int_in(80, 4096, "must be 80 to 4096"),
         "stallMinutes" => int_in(1, 1440, "must be 1 to 1440"),
+        "autocomplete" => match value.as_object() {
+            Some(m) if m.len() == 1 && m.get("enabled").is_some_and(Value::is_boolean) => Ok(()),
+            _ => Err(PrefError::Invalid {
+                key: k,
+                why: "is {enabled: true or false}",
+            }),
+        },
         "chatElements" => match value.as_object() {
             Some(m)
                 if m.iter().all(|(k, v)| {

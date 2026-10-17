@@ -30,6 +30,13 @@ pub struct ClaudeLaunch {
     /// Resume `resumeSessionId` as a new session (`--fork-session`); absent unless set.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub fork_session: bool,
+    /// Native Claude Code MCP servers off (`--strict-mcp-config`): only Helm's own server loads.
+    /// Absent unless the user turned native MCP off.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub strict_mcp_config: bool,
+    /// Native MCP servers the CLI must not use (their tools are disallowed); absent when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub disabled_mcp_servers: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -51,6 +58,14 @@ pub struct Launch {
     /// Test-only worker limits; production launches omit them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limits: Option<Value>,
+    /// The host tools this launch lists (`helm_hosttools::CatalogueEntry`); the
+    /// worker serves them through its in-process `helm` MCP server. Absent when host tools are
+    /// not wired (tests), so such a launch is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_tools: Option<Value>,
+    /// The folder the worker makes one private request folder in per host-tool call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_tools_directory: Option<String>,
 }
 
 impl Launch {
@@ -155,6 +170,8 @@ pub fn claude_launch(
         append_system_prompt: None,
         fast_mode: runtime.fast_mode,
         fork_session: false,
+        strict_mcp_config: false,
+        disabled_mcp_servers: Vec::new(),
     };
     if let Some(t) = test {
         c.command = Some(t.command.clone());
@@ -215,6 +232,8 @@ mod tests {
                 opt_in: false,
             },
             limits: None,
+            host_tools: None,
+            chat_tools_directory: None,
         };
         let v = serde_json::to_value(&launch).unwrap();
         assert_eq!(v["claude"]["command"], "node.exe");

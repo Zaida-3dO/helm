@@ -71,6 +71,13 @@ pub(crate) enum Cmd {
     StallCheck { after: std::time::Duration },
     /// Apply the staged edit once the worker has closed, then send its submission.
     ApplyEdit,
+    /// The send behaviour changed: a different long-command setting relaunches
+    /// the worker, at once when idle and at the next idle point when busy.
+    SendBehavior(SendBehavior),
+    /// Re-read the model catalogue from the live worker's `get_state`; answers whether it did.
+    RefreshCatalogue { reply: oneshot::Sender<bool> },
+    /// A line for the worker from another crate (`WorkerBroadcast`); held until it is ready.
+    WorkerLine(Value),
 }
 
 pub(crate) const STOP_TIMEOUT_ERROR: &str =
@@ -99,6 +106,9 @@ enum Pending {
     },
     Compact {
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    Catalogue {
+        reply: oneshot::Sender<bool>,
     },
 }
 
@@ -150,6 +160,8 @@ struct Actor {
     last_error_row: Option<String>,
     native_session: Option<String>,
     shutdown_replies: Vec<oneshot::Sender<()>>,
+    /// Host-tool calls still running, by request id (`chat_cancel` aborts them).
+    host_calls: HashMap<String, tokio::task::AbortHandle>,
     retiring: bool,
     finished: bool,
     /// The last worker output (or turn start).
@@ -158,6 +170,10 @@ struct Actor {
     activity_written: Option<Instant>,
     /// An edit waits for the worker to close.
     edit_waiting: bool,
+    /// The long-command setting the running worker was launched with.
+    launched_long: Option<LongCommands>,
+    /// That setting changed while a turn ran: relaunch at the next idle point.
+    relaunch_on_idle: bool,
 }
 
 pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
@@ -219,11 +235,14 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         last_error_row: None,
         native_session: None,
         shutdown_replies: Vec::new(),
+        host_calls: HashMap::new(),
         retiring: false,
         finished: false,
         last_output: Instant::now(),
         activity_written: None,
         edit_waiting: false,
+        launched_long: None,
+        relaunch_on_idle: false,
     };
     sh.handle.spawn(actor.run(rx));
     ActorHandle { tx, live }
@@ -523,6 +542,8 @@ impl Actor {
         let fork_session = fork_of.is_some();
         let resume = own.or(fork_of);
         let sb = self.live.lock().unwrap().thread.send_behavior;
+        self.launched_long = Some(sb.long_commands);
+        self.relaunch_on_idle = false;
         let req = SpawnRequest {
             chat_id: self.chat_id.clone(),
             cwd: chat.cwd.clone(),
@@ -531,6 +552,7 @@ impl Actor {
             resume_session_id: resume,
             fork_session,
             send_behavior: sb,
+            host: crate::hostcalls::launch(&self.sh, &self.chat_id, &chat.cwd),
         };
         match self.sh.spawner.spawn(&req) {
             Ok((link, out)) => {
@@ -591,7 +613,9 @@ impl Actor {
             }
         }
         self.ready = true;
-        for cmd in std::mem::take(&mut self.deferred) {
+        // Registered start lines (for example `mcp_config`) go ahead of anything deferred.
+        let start = crate::hostcalls::start_lines(&self.sh, &self.chat_id);
+        for cmd in start.into_iter().chain(std::mem::take(&mut self.deferred)) {
             if let Some(l) = &self.link {
                 l.send(&cmd);
             }
@@ -766,6 +790,14 @@ impl Actor {
         self.set_status(status, error);
         self.save_binding();
         self.emit_thread();
+    }
+
+    /// Close the idle worker so the next send starts one with the current settings.
+    fn relaunch_worker(&mut self) {
+        self.relaunch_on_idle = false;
+        if let Some(l) = &self.link {
+            l.send(&json!({"type": "shutdown"}));
+        }
     }
 
     /// Phase two of an edit, then send the edited message.
@@ -1035,6 +1067,42 @@ impl Actor {
             Cmd::Terminate => {
                 if let Some(l) = &self.link {
                     l.terminate();
+                }
+            }
+            Cmd::SendBehavior(sb) => {
+                let changed = {
+                    let mut live = self.live.lock().unwrap();
+                    let changed = live.thread.send_behavior != sb;
+                    live.thread.send_behavior = sb;
+                    changed
+                };
+                if changed {
+                    self.emit_thread();
+                }
+                if self.link.is_some() && self.launched_long.is_some_and(|l| l != sb.long_commands)
+                {
+                    if self.status().is_busy() {
+                        self.relaunch_on_idle = true;
+                    } else {
+                        self.relaunch_worker();
+                    }
+                }
+            }
+            Cmd::WorkerLine(line) => {
+                // No worker: nothing to tell (the next one gets the start lines afresh).
+                if let Some(l) = &self.link {
+                    if self.ready {
+                        l.send(&line);
+                    } else {
+                        self.deferred.push(line);
+                    }
+                }
+            }
+            Cmd::RefreshCatalogue { reply } => {
+                if self.link.is_some() && self.ready {
+                    self.request(json!({"type": "get_state"}), Pending::Catalogue { reply });
+                } else {
+                    let _ = reply.send(false);
                 }
             }
             Cmd::ApplyEdit => {
@@ -1386,7 +1454,14 @@ impl Actor {
                     tool_call_id: Some(id.clone()),
                     status: "streaming",
                     timestamp: started,
-                    details: json!({"toolArgs": session_log::cut(&args, 4096), "stoppable": stoppable}),
+                    details: {
+                        let mut d = json!({"toolArgs": session_log::cut(&args, 4096), "stoppable": stoppable});
+                        // Which server the tool came from.
+                        if let Some(src) = v.get("toolSource").filter(|s| s.is_object()) {
+                            d["toolSource"] = src.clone();
+                        }
+                        d
+                    },
                     entry_id: None,
                     parent_id: None,
                 };
@@ -1556,7 +1631,11 @@ impl Actor {
             "worker_error" => {
                 self.worker_error = str_of(&v, "error");
             }
-            _ => {}
+            "chat_request" => {
+                crate::hostcalls::on_request(&self.sh, &self.chat_id, &mut self.host_calls, &v)
+            }
+            "chat_cancel" => crate::hostcalls::on_cancel(&mut self.host_calls, &v),
+            _ => crate::hostcalls::other_line(&self.sh, &self.chat_id, &v),
         }
     }
 
@@ -1746,6 +1825,18 @@ impl Actor {
         let data = r.get("data").cloned().unwrap_or(Value::Null);
         match p {
             Pending::Ready => self.on_ready(&r),
+            Pending::Catalogue { reply } => {
+                let mut stored = false;
+                if let Some(models) = crate::catalogue::from_get_state(&data) {
+                    if crate::catalogue::store(&self.sh.cfg.profile_dir, models).is_ok() {
+                        stored = true;
+                        self.emit(ChatEvent::Catalogue {
+                            harness: Harness::Claude,
+                        });
+                    }
+                }
+                let _ = reply.send(stored && ok);
+            }
             Pending::Prompt { submission_id } => {
                 self.clear_timer(|t| *t == Timer::Ack(id.clone()));
                 let state = if ok {
@@ -1973,6 +2064,9 @@ impl Actor {
             }
         }
         if !self.status().is_busy() {
+            if self.relaunch_on_idle {
+                self.relaunch_worker();
+            }
             crate::runtime::ChatRuntime {
                 sh: self.sh.clone(),
             }

@@ -119,6 +119,11 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         "agentSettingsAll",
         UserOnly("Lets chats change every setting, so only you can turn it on."),
     ),
+    // "Use my Claude Code MCP servers", default on.
+    (
+        "nativeMcp",
+        UserOnly("Which of your own MCP servers chats load is yours to choose."),
+    ),
     // An internal setting that only the user sets.
     (
         "sendBehavior",

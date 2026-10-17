@@ -23,6 +23,11 @@ import { useLayer } from './ui/index.ts';
 import { accessoriesAt } from './composer/slots.ts';
 import { recallPrompts } from './composer/recall.ts';
 import { SelectionToolbar } from './transcript/SelectionToolbar.tsx';
+import { registerSelectionAction } from './transcript/slots.ts';
+import { handleLink } from './panel/links.ts';
+import { openInPanel } from './panel/registry.ts';
+import { SIDE_CHAT_KIND, setSideChatOps } from './sidechat/index.tsx';
+import { sideChatAnchor } from './sidechat/anchor.ts';
 // Settings → Chat registers itself.
 import './settings/chat/index.tsx';
 import { parseChatElements, type ChatElements } from './settings/chat/elements.ts';
@@ -148,8 +153,9 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       canStopTool: (row: MessageRow) =>
         behavior.toolStop && Boolean(thread?.capabilities.stopTool) && Boolean(row.details?.stoppable) && row.status === 'streaming',
       onStopTool: stopTool,
-      onLink: (t: LinkTarget) =>
-        setNotice(t.kind === 'url' ? `Links open in a later version: ${t.href ?? ''}` : `Vault links open in a later version: ${t.note ?? ''}`),
+      // Every link click goes through the panel's gate, which validates it before acting and
+      // shows any refusal in the shell's toast slot itself.
+      onLink: (t: LinkTarget) => void handleLink(t, { chatId }),
     }),
     [behavior.toolStop, thread?.capabilities.stopTool, stopTool, chatId, latestAssistantId, busy, interactionOpen, editing, ops, elements],
   );
@@ -166,6 +172,43 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   );
 
   const transcriptBox = useRef<HTMLDivElement>(null);
+  const [autocompleteOn, setAutocompleteOn] = useState(false);
+  useEffect(() => {
+    void shell
+      .api<unknown>('preference_get', { key: 'autocomplete' })
+      .then((v) => setAutocompleteOn(Boolean(v && typeof v === 'object' && (v as { enabled?: unknown }).enabled === true)))
+      .catch(() => undefined);
+    return shell.bus.on('preferences', (e) => {
+      const c = (e.changed ?? {}) as Record<string, unknown>;
+      if ('autocomplete' in c) setAutocompleteOn(Boolean((c.autocomplete as { enabled?: unknown } | null)?.enabled === true));
+    });
+  }, [shell]);
+
+  // Side chats: the selection toolbar's "Side chat" forks a hidden chat at the reply
+  // and opens it in the side panel. Not offered inside a side chat.
+  const rowsRef = useRef(view.rows);
+  rowsRef.current = view.rows;
+  useEffect(() => setSideChatOps(ops), [ops]);
+  useEffect(() => {
+    if (view.chat?.sideSourceId) return;
+    return registerSelectionAction({
+      id: 'side-chat',
+      label: 'Side chat',
+      appliesTo: (sel) => sel.chatId === chatId && sideChatAnchor(rowsRef.current, sel.rowIds) !== null,
+      run: (sel) => {
+        const anchor = sideChatAnchor(rowsRef.current, sel.rowIds);
+        if (anchor === null) return;
+        ops
+          .fork(chatId, { messageId: anchor, side: true, excerpt: sel.text })
+          .then((c) => {
+            if (!openInPanel(SIDE_CHAT_KIND, chatId, { chatId: c.id, sourceId: chatId }, { intent: 'user', chatId })) {
+              setNotice('The side panel has no room for the side chat.');
+            }
+          })
+          .catch((e: unknown) => setNotice(`Could not open a side chat: ${e instanceof Error ? e.message : String(e)}`));
+      },
+    });
+  }, [ops, chatId, view.chat?.sideSourceId]);
 
   const onMove = useCallback(
     (delta: -1 | 1) => {
@@ -246,6 +289,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       </div>
       <Composer
         recall={recallPrompts(view.rows)}
+        autocomplete={autocompleteOn}
         chat={chat}
         thread={thread}
         pending={view.pending}

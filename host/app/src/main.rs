@@ -141,12 +141,15 @@ fn run_app(
                 debug,
                 app.path().resource_dir().ok().as_deref(),
             );
-            let spawner = Arc::new(helm_chats::ProcessSpawner::new(
-                profile.path(""),
-                profile.display_dir(),
-                debug,
-                worker_source,
-            ));
+            let spawner = Arc::new(
+                helm_chats::ProcessSpawner::new(
+                    profile.path(""),
+                    profile.display_dir(),
+                    debug,
+                    worker_source,
+                )
+                .with_contributors(registrations::launch_contributors(&db)),
+            );
             let tauri::async_runtime::RuntimeHandle::Tokio(tokio_handle) =
                 tauri::async_runtime::handle();
             let runtime = helm_chats::ChatRuntime::new(
@@ -187,6 +190,7 @@ fn run_app(
                 events,
             };
             let dispatcher = Arc::new(Dispatcher::new(ops.clone(), ctx, debug));
+            registrations::attach_host_tools(&runtime, dispatcher.ctx(), dispatcher.maintenance());
             app.manage(dispatcher);
 
             shell::build_main_window(app, &profile, debug)?;

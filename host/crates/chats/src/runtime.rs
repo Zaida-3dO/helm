@@ -90,6 +90,18 @@ pub struct SpawnRequest {
     /// Resume `resume_session_id` as a new session (`--fork-session`): a fork's first launch.
     pub fork_session: bool,
     pub send_behavior: SendBehavior,
+    /// Host tools for this launch; `None` when the host-tool seam is not attached (tests).
+    pub host: Option<HostLaunch>,
+}
+
+/// The host-tool and MCP part of one launch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HostLaunch {
+    /// `launch.json` `hostTools[]`.
+    pub tools: Value,
+    /// Native MCP servers off: `--strict-mcp-config`.
+    pub strict_mcp: bool,
+    pub disabled_mcp_servers: Vec<String>,
 }
 
 /// The host's end of one worker.
@@ -106,6 +118,11 @@ pub trait Spawner: Send + Sync {
     /// Run the titles helper on one job and answer the title (blocking; [`crate::titles`]).
     fn run_title(&self, _job: &Value) -> Result<String, String> {
         Err("titles are not available".into())
+    }
+
+    /// Run the autocomplete helper on one job and answer the completion ([`crate::autocomplete`]).
+    fn run_autocomplete(&self, _job: &Value) -> Result<String, String> {
+        Err("autocomplete is not available".into())
     }
 }
 
@@ -203,6 +220,23 @@ impl Spawner for ProcessSpawner {
         );
         claude.append_system_prompt = contrib::system_prompt(&extras);
         claude.fork_session = req.fork_session;
+        let worker_dir = PathBuf::from(&self.data_root)
+            .join("workers")
+            .join(&req.chat_id);
+        let (host_tools, chat_tools_directory) = match &req.host {
+            Some(h) => {
+                claude.strict_mcp_config = h.strict_mcp;
+                claude.disabled_mcp_servers = h.disabled_mcp_servers.clone();
+                let dir = worker_dir.join("tools");
+                helm_core::privfs::create_private_dir_all(&dir)
+                    .map_err(|e| format!("Helm could not make the host-tool folder: {e}"))?;
+                (
+                    Some(h.tools.clone()),
+                    Some(dir.to_string_lossy().into_owned()),
+                )
+            }
+            None => (None, None),
+        };
         let launch = Launch {
             chat_id: req.chat_id.clone(),
             harness: "claude",
@@ -216,10 +250,9 @@ impl Spawner for ProcessSpawner {
                 opt_in: send_behavior::opt_in(&req.send_behavior),
             },
             limits: None,
+            host_tools,
+            chat_tools_directory,
         };
-        let worker_dir = PathBuf::from(&self.data_root)
-            .join("workers")
-            .join(&req.chat_id);
         let launch_path = launch
             .write(&worker_dir)
             .map_err(|e| format!("Helm could not write the launch file: {e}"))?;
@@ -236,17 +269,44 @@ impl Spawner for ProcessSpawner {
     }
 
     fn run_title(&self, job: &Value) -> Result<String, String> {
-        // helpers/titles beside the worker's source (`<repo>/worker/src` → `<repo>/helpers`).
+        let out = self.run_helper("titles", job, crate::titles::HOST_TIMEOUT)?;
+        match (
+            out.get("title").and_then(Value::as_str),
+            out.get("error").and_then(Value::as_str),
+        ) {
+            (Some(t), _) => Ok(t.to_owned()),
+            (_, Some(e)) => Err(e.to_owned()),
+            _ => Err("the helper gave no title".into()),
+        }
+    }
+
+    fn run_autocomplete(&self, job: &Value) -> Result<String, String> {
+        let out = self.run_helper("autocomplete", job, crate::autocomplete::DEADLINE)?;
+        match (
+            out.get("completion").and_then(Value::as_str),
+            out.get("error").and_then(Value::as_str),
+        ) {
+            (Some(c), _) => Ok(c.to_owned()),
+            (_, Some(e)) => Err(e.to_owned()),
+            _ => Err("the helper gave no completion".into()),
+        }
+    }
+}
+
+impl ProcessSpawner {
+    /// Run `helpers/<name>/src/main.ts` (beside the worker's source: `<repo>/worker/src` →
+    /// `<repo>/helpers`) on one job and answer its JSON line.
+    fn run_helper(&self, name: &str, job: &Value, timeout: Duration) -> Result<Value, String> {
         let script = self
             .worker_source
             .as_ref()
             .and_then(|w| {
                 w.parent()?
                     .parent()
-                    .map(|r| r.join("helpers/titles/src/main.ts"))
+                    .map(|r| r.join(format!("helpers/{name}/src/main.ts")))
             })
             .filter(|p| p.is_file())
-            .ok_or("Helm could not find its titles helper.")?;
+            .ok_or_else(|| format!("Helm could not find its {name} helper."))?;
         let env = helm_workers::env::base_environment();
         let node = resolve_node(&NodeLookup::for_worker(&env)).map_err(|e| e.to_string())?;
         let mut job = job.clone();
@@ -260,7 +320,7 @@ impl Spawner for ProcessSpawner {
         } else if !runtime.executable.is_empty() {
             job["command"] = Value::String(runtime.executable);
         }
-        crate::titles::run_helper(&node.path, &script, env.into_pairs(), &job)
+        crate::titles::run_helper(&node.path, &script, env.into_pairs(), &job, timeout)
     }
 }
 
@@ -295,6 +355,9 @@ pub(crate) struct Shared {
     /// The last published attention summary ([`crate::attention::publish`]).
     pub attention: Mutex<Option<AttentionSummary>>,
     pub titles: TitleQueue,
+    pub autocomplete: Mutex<crate::autocomplete::AutocompleteGate>,
+    /// Host tools and the worker-message registry, attached once the app's services exist.
+    pub host: std::sync::OnceLock<crate::hostcalls::HostSeam>,
 }
 
 /// The runtime service.
@@ -327,10 +390,20 @@ impl ChatRuntime {
                     slots: tokio::sync::Semaphore::new(crate::titles::MAX_CONCURRENT),
                     jobs: std::sync::atomic::AtomicUsize::new(0),
                 },
+                autocomplete: Mutex::new(Default::default()),
+                host: std::sync::OnceLock::new(),
             }),
         };
         rt.start_tick();
         rt
+    }
+
+    /// Attach host tools and the worker-message registry (once, after the app's services are
+    /// built). Workers launched afterwards list the host tools.
+    pub fn attach_host(&self, seam: crate::hostcalls::HostSeam) {
+        if self.sh.host.set(seam).is_err() {
+            log::warn!("host tools attached twice; keeping the first");
+        }
     }
 
     /// The maintenance tick (every `limits.tick`): ask busy actors to check for a stall, and
@@ -359,8 +432,49 @@ impl ChatRuntime {
                     let _ = h.tx.try_send(Cmd::StallCheck { after });
                 }
                 crate::attention::publish(&sh);
+                ChatRuntime { sh: sh.clone() }.apply_send_behavior();
             }
         });
+    }
+
+    /// Hand every chat the stored send behaviour. An actor whose worker was
+    /// launched with another long-command setting relaunches it (idle now, busy at the next idle
+    /// point). The maintenance tick calls this, so a change applies within one tick.
+    pub fn apply_send_behavior(&self) {
+        let sb = self
+            .sh
+            .db
+            .snapshot(|tx| {
+                Ok::<_, rusqlite::Error>(send_behavior::resolve(
+                    helm_core::prefs::read(tx, "sendBehavior").as_ref(),
+                ))
+            })
+            .unwrap_or(send_behavior::HOME_DEFAULTS);
+        let handles: Vec<ActorHandle> = self.sh.actors.lock().unwrap().values().cloned().collect();
+        for h in handles {
+            let _ = h.tx.try_send(Cmd::SendBehavior(sb));
+        }
+    }
+
+    /// `model_catalogue {refresh: true}`: ask a chat with a live worker to re-read `get_state`.
+    /// Answers false when no worker is running (the cached catalogue stands).
+    pub async fn refresh_catalogue(&self) -> bool {
+        let live: Option<String> = self
+            .sh
+            .actors
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, h)| h.live.lock().unwrap().has_worker)
+            .map(|(id, _)| id.clone());
+        let Some(chat) = live else { return false };
+        self.ask(
+            &chat,
+            |reply| Cmd::RefreshCatalogue { reply },
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap_or(false)
     }
 
     pub fn db(&self) -> &Arc<Database> {

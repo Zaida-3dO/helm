@@ -20,6 +20,7 @@
 //! | `panel_context_get` / `panel_context_set` | blocking / maintenance | `{chatId}` → `{on}` / `{chatId, on}` → `{on}` (user-only) |
 //! | `review_comment_add` | maintenance | `{chatId, id, path, diffSide, side, startLine, endLine, body, fingerprint}` → comment |
 //! | `review_comment_list` / `_remove` / `_clear` | blocking / maintenance / maintenance | `{chatId}` / `{chatId, id}` / `{chatId}` |
+//! | `review_turns` | heavy | `{chatId, messageIds[≤600]}` → `TurnChanges[]` (completed turns only) |
 //! | `panel_tabs_get` / `panel_tabs_save` | blocking / maintenance | `{}` → `panelTabs` v1 / `{value}` → `null` |
 //!
 //! Arguments are parsed strictly. Refusals come back as `{code: "refused", message}`; the message
@@ -28,7 +29,7 @@
 use crate::handler::{self, Decision};
 use crate::private::PrivateRoots;
 use crate::viewer::{self, ReadError};
-use crate::{changes, comments, context, git, pathgate, quick, resolve, tabs, vault};
+use crate::{changes, comments, context, git, pathgate, quick, resolve, tabs, turns, vault};
 use helm_core::db::Database;
 use helm_core::profile::Profile;
 use helm_ipc::{ApiError, OpClass, OpCtx, OpRegistry};
@@ -63,6 +64,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
             comment_remove,
         )
         .blocking("review_comment_clear", OpClass::Maintenance, comment_clear)
+        .blocking("review_turns", OpClass::Heavy, review_turns_op)
         .blocking("changes", OpClass::Heavy, changes_op)
         .blocking("diff", OpClass::Heavy, diff_op)
         // Staging takes its own process-wide try-lock, never the maintenance lock or a read permit.
@@ -653,4 +655,33 @@ fn comment_clear(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     db.write(|tx| comments::clear(tx, &a.chat_id))
         .map_err(db_err)?;
     Ok(json!([]))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct TurnsArgs {
+    chat_id: String,
+    message_ids: Vec<i64>,
+}
+
+fn review_turns_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: TurnsArgs = parse(args)?;
+    if a.message_ids.len() > turns::MAX_IDS {
+        return Err(ApiError::bad_args("At most 600 message ids per request."));
+    }
+    let db = ctx.services.need::<Database>()?;
+    let out = db
+        .snapshot(|tx| {
+            let status: Option<String> = tx
+                .query_row(
+                    "SELECT status FROM chats WHERE id = ?1",
+                    [&a.chat_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let running = matches!(status.as_deref(), Some("starting" | "running" | "stopping"));
+            turns::review_turns(tx, &a.chat_id, &a.message_ids, running)
+        })
+        .map_err(db_err)?;
+    serde_json::to_value(out).map_err(|e| ApiError::internal(e.to_string()))
 }

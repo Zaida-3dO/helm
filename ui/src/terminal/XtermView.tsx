@@ -12,7 +12,7 @@ import '@xterm/xterm/css/xterm.css';
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import type { EventBus } from '../api/events.ts';
 import type { TerminalOps } from '../api/terminal.ts';
-import { AckBatcher, PALETTE, routeKey, SeqFilter } from './model.ts';
+import { AckBatcher, PALETTE, routeKey, SeqFilter, stripQueries } from './model.ts';
 
 export interface XtermHandle {
   find(q: string, back?: boolean): boolean;
@@ -44,6 +44,8 @@ function themeFor(): ITheme {
 
 export interface XtermViewProps {
   id: string;
+  /** True when this dock opened the session (its replay's queries are still unanswered). */
+  fresh?: boolean;
   ops: TerminalOps;
   bus: EventBus;
   visible: boolean;
@@ -53,14 +55,14 @@ export interface XtermViewProps {
   openLink: (url: string) => void;
 }
 
-export const XtermView = forwardRef<XtermHandle, XtermViewProps>(function XtermView({ id, ops, bus, visible, onOutput, onExit, onCommand, openLink }, ref) {
+export const XtermView = forwardRef<XtermHandle, XtermViewProps>(function XtermView({ id, fresh, ops, bus, visible, onOutput, onExit, onCommand, openLink }, ref) {
   const host = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | null>(null);
   const fit = useRef<FitAddon | null>(null);
   const search = useRef<SearchAddon | null>(null);
   const exited = useRef(false);
-  const cb = useRef({ onOutput, onExit, onCommand, openLink });
-  cb.current = { onOutput, onExit, onCommand, openLink };
+  const cb = useRef({ onOutput, onExit, onCommand, openLink, fresh });
+  cb.current = { onOutput, onExit, onCommand, openLink, fresh };
 
   useImperativeHandle(ref, () => ({
     find: (q, back) => (q ? (back ? search.current?.findPrevious(q) : search.current?.findNext(q)) ?? false : false),
@@ -133,10 +135,11 @@ export const XtermView = forwardRef<XtermHandle, XtermViewProps>(function XtermV
     const acks = new AckBatcher((units) => void ops.ack(id, units).catch(() => undefined));
     const seq = new SeqFilter();
     let raf = 0;
-    const offOut = bus.on('terminal', (ev) => {
-      if (ev.id !== id || typeof ev.data !== 'string' || typeof ev.seq !== 'number') return;
-      if (!seq.accept(ev.seq)) return;
-      const data = ev.data;
+    // Live chunks that arrive before the reattach answers are held, then only those newer than
+    // the replay are written: nothing shows twice, and terminal queries are answered once.
+    let attached = false;
+    const held: { seq: number; data: string }[] = [];
+    const writeLive = (data: string) => {
       t.write(data, () => {
         acks.wrote(data.length);
         cancelAnimationFrame(raf);
@@ -145,6 +148,15 @@ export const XtermView = forwardRef<XtermHandle, XtermViewProps>(function XtermV
           publishTail();
         });
       });
+    };
+    const offOut = bus.on('terminal', (ev) => {
+      if (ev.id !== id || typeof ev.data !== 'string' || typeof ev.seq !== 'number') return;
+      if (!attached) {
+        held.push({ seq: ev.seq, data: ev.data });
+        return;
+      }
+      if (!seq.accept(ev.seq)) return;
+      writeLive(ev.data);
       cb.current.onOutput();
     });
     const offExit = bus.on('terminal_exit', (ev) => {
@@ -167,10 +179,19 @@ export const XtermView = forwardRef<XtermHandle, XtermViewProps>(function XtermV
       .attach(id)
       .then((r) => {
         seq.reset(r.seq);
-        if (r.replay) t.write(r.replay);
+        // A session this view just opened has had its startup queries (ConPTY asks for the
+        // cursor position before the shell draws) only in the replay: answer them once here. A
+        // reattached session's queries were answered by an earlier view; answering them again
+        // would type stray keys into the shell, so they are stripped.
+        if (r.replay) t.write(cb.current.fresh ? r.replay : stripQueries(r.replay));
         if (!r.session.running) exited.current = true;
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        attached = true;
+        for (const h of held.splice(0)) if (seq.accept(h.seq)) writeLive(h.data);
+        publishTail();
+      });
     const ro = new ResizeObserver(() => {
       if (el.offsetWidth > 0 && el.offsetHeight > 0) {
         try {

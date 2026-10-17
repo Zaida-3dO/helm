@@ -45,7 +45,7 @@ export function TerminalDock() {
     }
     try {
       const s = await ops.open({ cwd: from?.cwd ?? chat?.cwd ?? undefined, cols: 100, rows: 24 });
-      setTabs((t) => [...t, { id: s.id, title: s.title, cwd: s.cwd, state: 'idle' }]);
+      setTabs((t) => [...t, { id: s.id, title: s.title, cwd: s.cwd, state: 'idle', fresh: true }]);
       setActive(s.id);
     } catch (e) {
       toast.show({ kind: 'error', text: String((e as Error).message ?? e) });
@@ -213,6 +213,7 @@ export function TerminalDock() {
           <XtermView
             key={t.id}
             id={t.id}
+            fresh={t.fresh}
             ops={ops}
             bus={shell.bus}
             visible={open && t.id === active}

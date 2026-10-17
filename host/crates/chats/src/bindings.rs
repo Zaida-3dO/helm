@@ -74,6 +74,9 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         AttachmentPutArgs,
         AttachmentPutResult,
         SkillInfo,
+        AutocompleteArgs,
+        AutocompleteResult,
+        SideChatResolveArgs,
     );
     let mut files: Vec<String> = std::fs::read_dir(dir)
         .map_err(|e| e.to_string())?

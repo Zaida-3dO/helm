@@ -244,6 +244,12 @@ describe("core scenarios end to end with the fake claude", { timeout: 15 * 60_00
 
   test("CSP: the Markdown worker parses a long reply, and data: and blob: images load", async () => {
     await failShot("CSP-worker-images", async () => {
+      // The resource-timing buffer holds 250 entries by default, and the app frame loads more
+      // than that before this test: make room so the worker's fetch is recorded.
+      await page().evaluate(() => {
+        performance.setResourceTimingBufferSize(10_000);
+        performance.clearResourceTimings();
+      });
       await newChat(page(), folder());
       await send(page(), "[MDLONG] a long reply");
       await waitText(page(), "End of long text", 60_000);

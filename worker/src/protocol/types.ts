@@ -22,6 +22,10 @@ export interface ClaudeLaunch {
   forkSession?: boolean;
   settingSources?: string[];
   extraArgs?: string[];
+  /** Native MCP servers off: `--strict-mcp-config`, only Helm's server loads. */
+  strictMcpConfig?: boolean;
+  /** Native MCP servers whose tools are disallowed (held repository servers). */
+  disabledMcpServers?: string[];
 }
 
 export interface LaunchLimits {
@@ -46,6 +50,10 @@ export interface Launch {
   sendBehavior?: SendBehaviorLaunch;
   /** Test-only overrides; production launches omit this. */
   limits?: LaunchLimits;
+  /** Host tools to serve through the in-process `helm` MCP server. */
+  hostTools?: import("../hosttools/server.ts").HostTool[];
+  /** Where the worker makes one private folder per host-tool request. */
+  chatToolsDirectory?: string;
 }
 
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;

@@ -32,27 +32,32 @@ impl EventSink for TauriEvents {
 
 pub struct TauriShell {
     app: AppHandle,
+    shown: std::sync::atomic::AtomicBool,
 }
 
 impl TauriShell {
     pub fn new(app: AppHandle) -> Self {
-        Self { app }
+        Self {
+            app,
+            shown: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 }
 
 impl TauriShell {
-    /// Show the main window only if it has never been shown (the start-up fallback).
+    /// Show the main window only if it has never been shown (the start-up fallback), so a
+    /// window the user already closed to the tray stays hidden.
     pub fn show_if_hidden(&self) {
-        if let Some(w) = self.app.get_webview_window(MAIN_WINDOW) {
-            if !w.is_visible().unwrap_or(true) {
-                let _ = w.show();
-            }
+        if self.shown.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
         }
+        self.show_main();
     }
 }
 
 impl AppControl for TauriShell {
     fn show_main(&self) {
+        self.shown.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(w) = self.app.get_webview_window(MAIN_WINDOW) {
             let _ = w.show();
             let _ = w.unminimize();

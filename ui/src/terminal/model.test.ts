@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AckBatcher, ACK_EVERY, clampHeight, nextTabState, routeKey, SeqFilter } from './model.ts';
+import { AckBatcher, ACK_EVERY, clampHeight, nextTabState, routeKey, SeqFilter, stripQueries } from './model.ts';
 
 const k = (code: string, mods: { ctrl?: boolean; shift?: boolean; alt?: boolean } = {}, key = '') => ({
   key,
@@ -58,3 +58,9 @@ test('tab dots: background output marks unseen, seeing clears it, exit sticks', 
   assert.equal(nextTabState('exited', 'output', false), 'exited');
 });
 
+
+test('replayed terminal queries are stripped so a reattached view never answers twice', () => {
+  const E = String.fromCharCode(27);
+  assert.equal(stripQueries(`a${E}[6nb${E}[cc${E}[>cd${E}[5ne`), 'abcde');
+  assert.equal(stripQueries(`${E}[31mred${E}[0m`), `${E}[31mred${E}[0m`, 'colours stay');
+});

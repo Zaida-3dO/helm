@@ -1427,7 +1427,11 @@ async fn first_turn(h: &mut H, chat: &str) -> FakeWorker {
     ack(&w, &p).await;
     echo(&w, p["submissionId"].as_str().unwrap()).await;
     w.emit(json!({"type": "agent_start"})).await;
-    reply(h, &w, "m1", "answer one").await;
+    // Direct records (no global streaming poll), so several chats can each run a first turn.
+    w.emit(json!({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}}))
+        .await;
+    w.emit(json!({"type": "message_end", "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "answer one"}], "status": "complete"}}))
+        .await;
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
         .await;
     h.until("idle", |h| h.status(chat) == "idle").await;
@@ -1804,7 +1808,7 @@ fn title_of(h: &H, chat: &str) -> (String, String) {
 async fn a_fresh_chat_gets_its_fallback_then_an_automatic_title() {
     let h = harness();
     *h.spawner.title.lock().unwrap() = Ok("Fix the login redirect".into());
-    *h.spawner.title_delay.lock().unwrap() = Duration::from_millis(150);
+    *h.spawner.title_delay.lock().unwrap() = Duration::from_millis(600);
     let chat = h.create().await;
     h.send(
         &chat,
@@ -1954,4 +1958,178 @@ async fn skills_come_from_the_workers_get_state() {
         s,
         json!([{"name": "review", "description": "Review the diff"}])
     );
+}
+
+async fn side_fork(h: &H, a: &str, mid: i64) -> String {
+    h.call(
+        "chat_fork",
+        json!({"chatId": a, "forkId": uuid::Uuid::new_v4().to_string(), "messageId": mid, "side": true, "excerpt": "answer one"}),
+    )
+    .await
+    .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// A side chat is promoted into the list, or discarded (confirm needed once it sent).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn side_chats_are_promoted_or_discarded() {
+    let mut h = harness();
+    let a = h.create().await;
+    let _w = first_turn(&mut h, &a).await;
+    let mid: i64 = h.col(&format!(
+        "SELECT id FROM messages WHERE chat_id = '{a}' AND role = 'assistant'"
+    ))[0]
+        .parse()
+        .unwrap();
+    let s1 = side_fork(&h, &a, mid).await;
+    let p = h
+        .call(
+            "side_chat_resolve",
+            json!({"chatId": s1, "action": "promote"}),
+        )
+        .await
+        .unwrap();
+    assert!(p["sideSourceId"].is_null());
+    let list = h.call("chat_list", json!({})).await.unwrap();
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == s1.as_str()),
+        "promoted chats are listed"
+    );
+    let again = h
+        .call(
+            "side_chat_resolve",
+            json!({"chatId": s1, "action": "discard"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(again.code, "refused", "a promoted chat is not discarded");
+    let s2 = side_fork(&h, &a, mid).await;
+    h.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('x1', ?1, 't', 'complete', 1)",
+            [&s2],
+        )
+    })
+    .unwrap();
+    let need = h
+        .call(
+            "side_chat_resolve",
+            json!({"chatId": s2, "action": "discard"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(need.code, "confirm");
+    h.call(
+        "side_chat_resolve",
+        json!({"chatId": s2, "action": "discard", "confirmed": true}),
+    )
+    .await
+    .unwrap();
+    assert!(h
+        .col(&format!("SELECT id FROM chats WHERE id = '{s2}'"))
+        .is_empty());
+    assert!(h
+        .events("chat_removed")
+        .iter()
+        .any(|e| e["chatId"] == s2.as_str()));
+}
+
+/// A new long-command setting relaunches an idle worker at once and a
+/// running one at its next idle point.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_long_command_change_relaunches_workers_when_idle() {
+    let mut h = harness();
+    let (chat, _, mut w) = running_turn(&mut h).await;
+    h.db.write(|tx| {
+        helm_core::prefs::set_generic(tx, "sendBehavior", &json!({"longCommands": "off"}))
+    })
+    .unwrap();
+    h.rt.apply_send_behavior();
+    assert!(
+        w.no_command_for(Duration::from_millis(200)).await.is_none(),
+        "a running worker is not interrupted"
+    );
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    w.expect("shutdown").await;
+    w.exit().await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    // The next send launches with the new setting.
+    h.send(&chat, "again", "default").await;
+    let w2 = h.worker().await;
+    assert_eq!(
+        w2.req.send_behavior.long_commands,
+        crate::types::LongCommands::Off
+    );
+    // An idle worker relaunches at once.
+    let mut w2 = w2;
+    w2.ready().await;
+    let p = w2.expect("prompt").await;
+    ack(&w2, &p).await;
+    w2.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle again", |h| h.status(&chat) == "idle").await;
+    h.db.write(|tx| {
+        helm_core::prefs::set_generic(tx, "sendBehavior", &json!({"longCommands": "warn"}))
+    })
+    .unwrap();
+    h.rt.apply_send_behavior();
+    w2.expect("shutdown").await;
+}
+
+/// Past the idle-worker cap the least recently used idle worker is retired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_least_recently_used_idle_worker_is_retired_past_the_cap() {
+    let mut h = harness_with(Limits {
+        max_idle_workers: 1,
+        ..limits()
+    });
+    let a = h.create().await;
+    let mut wa = first_turn(&mut h, &a).await;
+    let b = h.create().await;
+    let wb = first_turn(&mut h, &b).await;
+    // Two idle workers, cap one: the older (a) goes; b stays.
+    wa.expect("shutdown").await;
+    let mut wb = wb;
+    assert!(
+        wb.no_command_for(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "the newer stays"
+    );
+}
+
+/// Model_catalogue {refresh: true} re-reads the catalogue from a live worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_catalogue_refresh_reads_a_live_get_state() {
+    let mut h = harness();
+    let chat = h.create().await;
+    let mut w = first_turn(&mut h, &chat).await;
+    let api = h.api.clone();
+    let call = tokio::spawn(async move {
+        api.call(
+            &main(),
+            "model_catalogue",
+            json!({"harness": "claude", "refresh": true}),
+        )
+        .await
+        .unwrap()
+    });
+    let g = w.expect("get_state").await;
+    w.respond(
+        &g,
+        json!({"models": [{"id": "fresh-model", "name": "Fresh"}]}),
+    )
+    .await;
+    let c = call.await.unwrap();
+    assert!(c["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["id"] == "fresh-model"));
 }

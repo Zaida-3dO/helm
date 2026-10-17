@@ -346,17 +346,35 @@ impl ShellHost for TauriShellHost {
 
     fn register_hotkey(&self, chord: Option<&str>) -> Result<(), String> {
         let gs = self.app.global_shortcut();
-        if let Some(old) = self.hotkey.lock().unwrap().take() {
-            let _ = gs.unregister(old);
-        }
-        let Some(chord) = chord else { return Ok(()) };
+        let mut held = self.hotkey.lock().unwrap();
+        let Some(chord) = chord else {
+            if let Some(old) = held.take() {
+                let _ = gs.unregister(old);
+            }
+            return Ok(());
+        };
         let sc: Shortcut = chord
             .parse()
             .map_err(|e| format!("{chord} is not a shortcut Windows accepts: {e}"))?;
-        gs.register(sc).map_err(|e| {
-            format!("{chord} could not be registered (another app may own it): {e}")
-        })?;
-        *self.hotkey.lock().unwrap() = Some(sc);
+        if *held == Some(sc) {
+            return Ok(());
+        }
+        let old = held.take();
+        if let Some(o) = old {
+            let _ = gs.unregister(o);
+        }
+        if let Err(e) = gs.register(sc) {
+            // Keep the previous chord working rather than leaving no hotkey at all.
+            if let Some(o) = old {
+                if gs.register(o).is_ok() {
+                    *held = Some(o);
+                }
+            }
+            return Err(format!(
+                "{chord} could not be registered (another app may own it): {e}"
+            ));
+        }
+        *held = Some(sc);
         Ok(())
     }
 }

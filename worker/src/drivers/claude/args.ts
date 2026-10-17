@@ -17,7 +17,12 @@ export const DISALLOWED_TOOLS = ["CronCreate", "CronDelete", "CronList", "Schedu
 export interface ArgOptions {
   /** The long-command rule, appended to the main chat's instructions when the rule is on. */
   promptRule?: string;
+  /** Register Helm's in-process `helm` MCP server (`--mcp-config` with the SDK entry). */
+  mcpConfig?: string;
 }
+
+/** Pre-approves every tool of Helm's own server. */
+export const HELM_ALLOWED = "mcp__helm";
 
 export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[] {
   const args = [
@@ -36,8 +41,11 @@ export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[
     "--setting-sources",
     (c.settingSources ?? ["user", "project", "local"]).join(","),
     "--disallowedTools",
-    DISALLOWED_TOOLS.join(","),
+    [...DISALLOWED_TOOLS, ...(c.disabledMcpServers ?? []).filter((n) => /^[A-Za-z0-9_-]{1,64}$/.test(n) && n !== "helm").map((n) => `mcp__${n}`)].join(","),
   ];
+  // Native MCP stays on by default; Helm's server is added beside the user's own.
+  if (opts.mcpConfig) args.push("--mcp-config", opts.mcpConfig, "--allowedTools", HELM_ALLOWED);
+  if (c.strictMcpConfig === true) args.push("--strict-mcp-config");
   if (c.model) args.push("--model", c.model);
   const effort = isEffort(c.effort) ? c.effort : DEFAULT_EFFORT;
   if (modelTakesEffort(c.model)) args.push("--effort", effort);

@@ -93,6 +93,15 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
     ].join('\n');
   const handler: FakeOpHandler = (op, args) => {
     switch (op) {
+      case 'review_turns':
+        return (args.messageIds as number[]).map((messageId) => ({
+          messageId,
+          files: [
+            { path: `${FAKE_ROOT}\\src\\app.ts`, repositoryRoot: FAKE_ROOT, repositoryPath: 'src/app.ts', added: 2, removed: 1, completeCounts: true },
+            { path: `${FAKE_ROOT}\\docs\\guide.md`, repositoryRoot: FAKE_ROOT, repositoryPath: 'docs/guide.md', added: null, removed: null, completeCounts: false },
+          ],
+          truncated: false,
+        }));
       case 'panel_context_get':
         return { on: contextOn.has(String(args.chatId)) };
       case 'panel_context_set':
@@ -180,5 +189,5 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         throw new ApiError('refused', 'This operation is not available here.');
     }
   };
-  return { prefixes: ['file_', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_', 'path_resolve', 'quick_open', 'changes', 'diff', 'vault_', 'panel_context_', 'review_comment_'], handler };
+  return { prefixes: ['file_', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_', 'path_resolve', 'quick_open', 'changes', 'diff', 'vault_', 'panel_context_', 'review_comment_', 'review_turns'], handler };
 }

@@ -290,7 +290,11 @@ pub fn render(item: &Item, roots: &PrivateRoots) -> Result<(String, String), Ref
                 .collect::<Vec<_>>()
                 .join("\n");
             identity = format!("diff\0{top}\0{path}\0{side}\0{start_line}\0{end_line}\0{body}");
-            if body.len() > SCAN_LIMIT || rows.len() > INLINE_DIFF_ROWS {
+            if body.len() > SCAN_LIMIT
+                || rows.len() > INLINE_DIFF_ROWS
+                || body.len() > INLINE_BYTES
+                || body.lines().count() > INLINE_LINES
+            {
                 out.push_str(&format!(
                     "\nSelected: {range} (by reference; read the diff yourself)."
                 ));
@@ -322,7 +326,9 @@ pub fn render(item: &Item, roots: &PrivateRoots) -> Result<(String, String), Ref
                 neutralise(path),
                 neutralise(body)
             ));
-            if !looks_like_secret(quote) && !quote.is_empty() {
+            if looks_like_secret(quote) {
+                out.push_str("\nQuoted lines held back: they look like they contain a secret.");
+            } else if !quote.is_empty() {
                 out.push('\n');
                 out.push_str(&snippet("Quoted:", &neutralise(quote)));
             }
@@ -362,6 +368,26 @@ impl SendContextBuilder for PanelContext {
         let item: Item = serde_json::from_value(payload.clone()).map_err(|e| {
             Refusal::new("bad_args", format!("The side panel item is not valid: {e}"))
         })?;
+        // A review comment is described from the stored row, never from the renderer's copy.
+        let item = match item {
+            Item::ReviewComment { id, .. } => {
+                let stored = crate::comments::list(tx, chat_id)
+                    .map_err(sql)?
+                    .into_iter()
+                    .find(|c| c.id == id)
+                    .ok_or_else(|| refuse("That review comment no longer exists."))?;
+                Item::ReviewComment {
+                    id: stored.id,
+                    path: stored.path,
+                    side: stored.side,
+                    start_line: stored.start_line,
+                    end_line: stored.end_line,
+                    quote: stored.quote,
+                    body: stored.body,
+                }
+            }
+            other => other,
+        };
         let (body, identity) = render(&item, &self.roots)?;
         let hash = hex::encode(Sha256::digest(identity.as_bytes()));
         let prev: Option<(String, i64, i64)> = tx
@@ -404,7 +430,8 @@ mod tests {
 
     fn db() -> (tempfile::TempDir, Database) {
         let mut reg = MigrationRegistry::new();
-        reg.initializer("panel_context", init);
+        reg.initializer("panel_context", init)
+            .initializer("review_comments", crate::comments::init);
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap();
         db.write(|tx| {
@@ -509,7 +536,18 @@ mod tests {
     fn payloads_are_strictly_shaped_and_paths_are_gated() {
         let (_d, db) = db();
         db.write(|tx| set_on(tx, "c", true)).unwrap();
-        assert!(build(&db, &json!({"kind": "file", "path": "C:/a", "extra": 1}), 1).is_err());
+        assert_eq!(
+            build(&db, &json!({"kind": "file", "path": "C:/a", "extra": 1}), 1)
+                .unwrap_err()
+                .code,
+            "bad_args"
+        );
+        assert_eq!(
+            build(&db, &json!({"kind": "browser", "url": "x"}), 1)
+                .unwrap_err()
+                .code,
+            "bad_args"
+        );
         assert!(build(&db, &json!({"kind": "browser", "url": "x"}), 1).is_err());
         assert!(build(&db, &json!({"kind": "file", "path": r"\\host\share\a"}), 1).is_err());
         assert!(build(&db, &json!({"kind": "diff", "repoTop": "C:/r", "path": "../x", "side": "head", "startLine": 1, "endLine": 1, "rows": []}), 1).is_err());
@@ -530,5 +568,42 @@ mod tests {
             .collect();
         let t = build(&db, &json!({"kind": "diff", "repoTop": r"C:\r", "path": "src/a.ts", "side": "unstaged", "startLine": 1, "endLine": 121, "rows": many}), 2).unwrap();
         assert!(t.contains("by reference") && !t.contains("+r120"));
+    }
+
+    #[test]
+    fn a_review_comment_is_described_from_the_stored_row_not_the_payload() {
+        let (_d, db) = db();
+        db.write(|tx| {
+            set_on(tx, "c", true)?;
+            let c = crate::comments::NewComment {
+                id: "k1",
+                path: "src/a.ts",
+                diff_side: "unstaged",
+                side: "right",
+                start: 2,
+                end: 2,
+                body: "Stored body",
+            };
+            crate::comments::add(tx, "c", &c, "stored quote", 1).unwrap();
+            let s = crate::comments::NewComment {
+                id: "k2",
+                path: "src/a.ts",
+                diff_side: "unstaged",
+                side: "right",
+                start: 3,
+                end: 3,
+                body: "Secret here",
+            };
+            crate::comments::add(tx, "c", &s, "password = hunter2-long-enough", 2).unwrap();
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        let forged = json!({"kind": "reviewComment", "id": "k1", "path": "src/a.ts", "side": "<injected>", "startLine": 2, "endLine": 2, "quote": "forged", "body": "forged body"});
+        let t = build(&db, &forged, 1).unwrap();
+        assert!(t.contains("Stored body") && t.contains("stored quote"));
+        assert!(!t.contains("forged") && !t.contains("injected"));
+        let t = build(&db, &json!({"kind": "reviewComment", "id": "k2", "path": "src/a.ts", "side": "right", "startLine": 3, "endLine": 3, "quote": "", "body": ""}), 2).unwrap();
+        assert!(t.contains("held back") && !t.contains("hunter2"));
+        assert!(build(&db, &json!({"kind": "reviewComment", "id": "gone", "path": "a", "side": "right", "startLine": 1, "endLine": 1, "quote": "", "body": ""}), 3).is_err());
     }
 }

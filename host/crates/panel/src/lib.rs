@@ -12,6 +12,8 @@
 //! | [`changes`] | the Changes view, diffs and staging |
 //! | [`context`] | the side panel context block (the eye toggle) |
 //! | [`comments`] | review comments on working-tree diffs |
+//! | [`netchange`] | the net change of a file over a turn |
+//! | [`turns`] | turn change sets for the card under a completed turn |
 //! | [`tabs`] | saved panel tabs in a per-chat side table |
 //! | [`vault`] | Obsidian vaults, note resolution, confined reads, Open in Obsidian, the agent link instructions |
 //! | [`ops`] | the `api` ops |
@@ -21,12 +23,14 @@ pub mod comments;
 pub mod context;
 pub mod git;
 pub mod handler;
+pub mod netchange;
 pub mod ops;
 pub mod pathgate;
 pub mod private;
 pub mod quick;
 pub mod resolve;
 pub mod tabs;
+pub mod turns;
 pub mod vault;
 pub mod viewer;
 

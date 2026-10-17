@@ -44,6 +44,8 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("chat_activity", Data),
     ("chat_forks", Data),
     ("fork_carry", Data),
+    ("pending_edits", Data),
+    ("chat_attachments", Data),
     ("chat_attention", Data),
     (
         "chat_mutes",
@@ -81,6 +83,10 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
         "action_sets",
         UserOnly("Your own one-click buttons; only you edit them in Settings."),
     ),
+    // Consent.
+    ("consent_requests", Data),
+    ("consent_asks", Data),
+    ("consent_records", Data),
 ];
 
 /// The class of a table, or None when it is unclassified.

@@ -9,6 +9,7 @@
 //! | `message_edit_open` | blocking | [`MessageEditOpenArgs`] → [`MessageEditOpenResult`] |
 //! | `message_resend` | maintenance | [`MessageResendArgs`] → [`ChatSendResult`] (two-phase; see [`crate::edit`]) |
 //! | `attachment_put` | maintenance | [`AttachmentPutArgs`] → [`AttachmentPutResult`] (see [`crate::attachments`]) |
+//! | `side_chat_resolve` | maintenance | [`SideChatResolveArgs`] → `ChatRecord` (promote) / `null` (discard) |
 //! | `chat_mute` | maintenance | [`ChatMuteArgs`] → [`ChatRecord`] (user-only) |
 //! | `attention_address` | maintenance | [`ChatIdArgs`] → `null` (out of the attention groups until new activity) |
 //! | `attention_snooze` | maintenance | [`AttentionSnoozeArgs`] → `null` (out until the time, or new activity) |
@@ -44,6 +45,7 @@ pub fn register(reg: &mut OpRegistry) {
         .blocking("message_edit_open", OpClass::Blocking, message_edit_open)
         .blocking("message_resend", OpClass::Maintenance, message_resend)
         .blocking("attachment_put", OpClass::Maintenance, attachment_put)
+        .blocking("side_chat_resolve", OpClass::Maintenance, side_chat_resolve)
         .blocking("chat_mute", OpClass::Maintenance, chat_mute)
         .blocking("attention_address", OpClass::Maintenance, attention_address)
         .blocking("attention_snooze", OpClass::Maintenance, attention_snooze);
@@ -307,6 +309,55 @@ fn attachment_put(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     to_value(&AttachmentPutResult {
         attachment_id: r.id,
     })
+}
+
+/// Promote a side chat into an ordinary chat, or discard it (hard delete, no archive needed).
+/// Discard is refused once promoted, while busy, and without `confirmed` when it sent anything.
+fn side_chat_resolve(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: SideChatResolveArgs = parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let row: Option<(Option<String>, i64)> = db
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT side_source_id, (SELECT count(*) FROM submissions s WHERE s.chat_id = c.id)
+                 FROM chats c WHERE c.id = ?1",
+                [&a.chat_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+        })
+        .map_err(sql)?;
+    let Some((side, subs)) = row else {
+        return Err(not_found());
+    };
+    if side.is_none() {
+        return Err(ApiError::new(
+            "refused",
+            "This chat is no longer a side chat.",
+        ));
+    }
+    match a.action {
+        SideChatAction::Promote => {
+            db.write(|tx| {
+                tx.execute(
+                    "UPDATE chats SET side_source_id = NULL, updated_at = ?1 WHERE id = ?2",
+                    params![helm_core::now_ms(), a.chat_id],
+                )
+            })
+            .map_err(sql)?;
+            to_value(&changed(ctx, &a.chat_id)?)
+        }
+        SideChatAction::Discard => {
+            if subs > 0 && a.confirmed != Some(true) {
+                return Err(ApiError::new(
+                    "confirm",
+                    "This side chat has messages; confirm to discard it for good.",
+                ));
+            }
+            delete_chat(ctx, &a.chat_id, DeleteRule::SideChat)?;
+            Ok(Value::Null)
+        }
+    }
 }
 
 fn chat_mute(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {

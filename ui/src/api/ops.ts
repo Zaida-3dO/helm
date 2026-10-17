@@ -87,6 +87,16 @@ export function chatOps(api: Api) {
         submissionId: globalThis.crypto.randomUUID(),
         text,
       }),
+    /** Promote a side chat into an ordinary chat, or discard it. */
+    resolveSideChat: (chatId: string, action: 'promote' | 'discard', confirmed?: boolean) =>
+      api<ChatRecord | null>('side_chat_resolve', { chatId, action, ...(confirmed ? { confirmed } : {}) }),
+    /** The rest of the word being typed; empty when there is nothing to show. */
+    autocomplete: (chatId: string, draft: string) =>
+      api<{ completion: string; retryAfterMs: number | null }>('autocomplete_suggest', {
+        chatId,
+        requestId: globalThis.crypto.randomUUID(),
+        draft,
+      }),
     /** The CLI's commands and skills for this chat; empty until it has run. */
     skills: (chatId: string) => api<{ name: string; description: string }[]>('skills_list', { chatId }),
     /** Store one image for the next send; `bytes` is base64. */

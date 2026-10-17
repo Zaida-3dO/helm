@@ -31,6 +31,8 @@ export interface ComposerProps {
   registerSetText: (f: (text: string) => void) => void;
   /** This chat's earlier prompts, newest first, for Up/Down recall. */
   recall?: string[];
+  /** The user turned autocomplete on (off by default). */
+  autocomplete?: boolean;
 }
 
 const uid = () => globalThis.crypto.randomUUID();
@@ -39,7 +41,7 @@ export function isBusy(status: ChatRecord['status']): boolean {
   return status === 'running' || status === 'starting' || status === 'stopping';
 }
 
-export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, onMove, registerSetText, recall = [] }: ComposerProps) {
+export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, onMove, registerSetText, recall = [], autocomplete = false }: ComposerProps) {
   const editor = useRef<EditorHandle>(null);
   const [error, setError] = useState<string | null>(null);
   const [empty, setEmpty] = useState(!chat.draft);
@@ -186,6 +188,28 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       .catch(() => undefined);
   }, [skillPrefix, skills.length, ops, chat.id]);
   const skillMatches = skillPrefix === null ? [] : rankSkills(skills, skillPrefix);
+
+  // Autocomplete: 350 ms after typing pauses, only with the window in front and no
+  // skill menu open; the host owns the 10-per-minute budget. Tab accepts while the draft is
+  // unchanged; Escape or any edit drops the suggestion.
+  const [ghost, setGhost] = useState<{ base: string; completion: string } | null>(null);
+  const asked = useRef<string>('');
+  useEffect(() => {
+    setGhost((g) => (g && g.base === draftText ? g : null));
+    if (!autocomplete || skillPrefix !== null || draftText.trim().length < 4 || asked.current === draftText) return;
+    const t = setTimeout(() => {
+      if (document.visibilityState !== 'visible' || !document.hasFocus()) return;
+      asked.current = draftText;
+      const base = draftText;
+      void ops
+        .autocomplete(chat.id, base)
+        .then((r) => {
+          if (r.completion && (editor.current?.getText() ?? '') === base) setGhost({ base, completion: r.completion });
+        })
+        .catch(() => undefined);
+    }, 350);
+    return () => clearTimeout(t);
+  }, [autocomplete, draftText, skillPrefix, ops, chat.id]);
   const showText = (t: string) => {
     editor.current?.setText(t);
     saver.edit(t);
@@ -200,6 +224,18 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
         return true;
       }
       const plain = !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.isComposing;
+      if (ghost && plain && e.key === 'Tab') {
+        const current = editor.current?.getText() ?? '';
+        if (current === ghost.base) {
+          showText(ghost.base + ghost.completion);
+          setGhost(null);
+          return true;
+        }
+      }
+      if (ghost && e.key === 'Escape') {
+        setGhost(null);
+        return true;
+      }
       if (plain && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && attachedRef.current.length === 0) {
         const current = editor.current?.getText() ?? '';
         const next = e.key === 'ArrowUp' ? recaller.current.up(recall, current) : recaller.current.down(current);
@@ -221,7 +257,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       return false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [ctx, send, stop, busy, onMove, recall],
+    [ctx, send, stop, busy, onMove, recall, ghost],
   );
 
   const onChange = useCallback(
@@ -301,6 +337,11 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
         onKey={onKey}
         handle={editor}
       />
+      {ghost && (
+        <div className="ghost-hint muted" data-testid="autocomplete-ghost">
+          …{ghost.completion} <kbd>Tab</kbd>
+        </div>
+      )}
       <div className="composer-bar">
         <ModelPicker chat={chat} ops={ops} />
         <PermissionChip mode={thread?.permissionMode ?? null} />

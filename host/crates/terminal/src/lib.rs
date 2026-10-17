@@ -243,13 +243,17 @@ impl TerminalManager {
 
     pub fn attach(&self, id: &str) -> Result<TerminalAttachResult, String> {
         let s = self.get(id)?;
-        let replay = s.replay.lock().unwrap().text();
+        // Read the replay and its sequence number under one lock (the reader updates both there).
+        let (replay, seq) = {
+            let r = s.replay.lock().unwrap();
+            (r.text(), s.seq.load(Ordering::SeqCst))
+        };
         // A reattached renderer starts with nothing unacknowledged.
         s.flow.ack(u64::MAX);
         Ok(TerminalAttachResult {
             session: s.snapshot(),
             replay,
-            seq: s.seq.load(Ordering::SeqCst),
+            seq,
         })
     }
 
@@ -341,8 +345,11 @@ fn spawn_reader(
                 continue;
             }
             for piece in split_chunks(&text, CHUNK_MAX) {
-                let seq = s.seq.fetch_add(1, Ordering::SeqCst) + 1;
-                s.replay.lock().unwrap().push(piece);
+                let seq = {
+                    let mut replay = s.replay.lock().unwrap();
+                    replay.push(piece);
+                    s.seq.fetch_add(1, Ordering::SeqCst) + 1
+                };
                 s.flow.sent(utf16_units(piece));
                 events.emit(
                     AppEvent::new("terminal")

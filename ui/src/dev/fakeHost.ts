@@ -20,6 +20,7 @@ import { leafFakeOps } from './fake-leaf.ts';
 import { projectsFakeOps } from './fake-projects.ts';
 import { panelFakeOps } from './fake-panel.ts';
 import { shellFakeOps } from './fake-shell.ts';
+import { mcpFakeOps } from './fake-mcp.ts';
 
 type Emit = (payload: unknown) => void;
 
@@ -48,6 +49,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const sb = projectsFakeOps(); registerFakeOps(sb.prefixes, sb.handler); }
 { const panel = panelFakeOps(); registerFakeOps(panel.prefixes, panel.handler); }
 { const sh = shellFakeOps(); registerFakeOps(sh.prefixes, sh.handler); }
+{ const mcp = mcpFakeOps(); registerFakeOps(mcp.prefixes, mcp.handler); }
 
 export function fakeOpFor(op: string): FakeOpHandler | undefined {
   return extraOps.find((r) => r.prefixes.some((p) => op.startsWith(p)))?.handler;
@@ -573,6 +575,23 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       return c.chat;
     },
     attention_address: () => null,
+    autocomplete_suggest: (a) => {
+      const words = ['component', 'composer', 'completion', 'transcript', 'thinking'];
+      const last = String(a.draft ?? '').split(/\s/).pop() ?? '';
+      const hit = last.length >= 2 ? words.find((w) => w.startsWith(last) && w !== last) : undefined;
+      return { completion: hit ? hit.slice(last.length) : '', retryAfterMs: null };
+    },
+    side_chat_resolve: (a) => {
+      const c = find(a.chatId);
+      if (a.action === 'discard') {
+        chats.delete(c.chat.id);
+        emit({ kind: 'chat_removed', chatId: c.chat.id });
+        return null;
+      }
+      c.chat = { ...c.chat, sideSourceId: null };
+      emitChat(c);
+      return c.chat;
+    },
     attachment_put: () => ({ attachmentId: uid() }),
     skills_list: () => [
       { name: 'review', description: 'Review the current changes' },

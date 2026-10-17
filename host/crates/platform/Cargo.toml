@@ -36,7 +36,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
+keyring = { version = "3", features = ["async-secret-service", "async-io", "crypto-rust"] }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -15,6 +15,7 @@
 //! | `actor` | one task per chat: worker, streaming, tools, interactions, Stop, timers |
 //! | [`submit`] | sends, queue actions, model changes, restart continuation |
 //! | [`titles`] | automatic titles through `helpers/titles`, renames, suggestions |
+//! | [`autocomplete`] | composer autocomplete through `helpers/autocomplete` |
 //! | [`attachments`] | image attachments and their limits |
 //! | [`archive`] | archive and restore inside a caller's transaction |
 //! | [`attention`] | the attention summary behind the badge, tray and row marks |
@@ -29,12 +30,14 @@ mod actor;
 pub mod archive;
 pub mod attachments;
 pub mod attention;
+pub mod autocomplete;
 pub mod bindings;
 pub mod catalogue;
 pub mod clock;
 pub mod delete;
 pub mod edit;
 pub mod fork;
+pub mod hostcalls;
 pub mod manage;
 pub mod ops;
 pub mod runtime;
@@ -50,6 +53,7 @@ pub mod submit;
 pub mod titles;
 pub mod types;
 
+pub use hostcalls::HostSeam;
 pub use ops::register_ops;
 pub use runtime::{ChatRuntime, ProcessSpawner, RuntimeConfig, RuntimeDrain};
 

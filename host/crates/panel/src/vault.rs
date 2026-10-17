@@ -485,6 +485,8 @@ mod tests {
     fn obsidian_registry_parsing_keeps_only_local_absolute_folders() {
         let text = r#"{"vaults":{"a":{"path":"C:\\Notes\\Main","ts":1},"b":{"path":"\\\\host\\share\\V"},"c":{"path":"relative"},"d":{}}}"#;
         let v = parse_obsidian_config(text);
+        #[cfg(not(windows))]
+        let _ = &v;
         #[cfg(windows)]
         assert_eq!(v, vec![PathBuf::from(r"C:\Notes\Main")]);
         assert!(parse_obsidian_config("not json").is_empty());

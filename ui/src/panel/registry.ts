@@ -7,6 +7,7 @@
 
 import type { ReactNode } from 'react';
 import type { Api } from '../api/client.ts';
+import { toast } from '../ui/toasts.ts';
 import { PanelModel } from './model.ts';
 import type { CloseReason, Intent, KindRules, PanelTab, SlotId } from './model.ts';
 
@@ -120,8 +121,10 @@ class PanelStore {
     this.changed();
   }
 
+  /** A one-line notice (a refused link, a failed open), shown in the app's toast slot. */
   showNotice(text: string): void {
     this.notice = { id: ++this.noticeSeq, text };
+    toast.show({ kind: 'error', text });
     this.changed();
   }
 

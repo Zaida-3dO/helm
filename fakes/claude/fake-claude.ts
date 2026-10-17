@@ -43,6 +43,11 @@
 //        initialize; the client's answer is saved under "as". No registration: nothing is sent and
 //        "as" is saved as {"none": true}.
 //   { "result": s, "isError"?: bool, "subtype"?: s }          end the turn
+//   { "mcp": { "server"?: s, "message": <JSON-RPC>, "hook"?: { "toolUseId", "agent"? } }, "as"?: name }
+//        an `mcp_message` control request to an SDK MCP server (default "helm"); with "hook", a
+//        PreToolUse hook_callback for the tool (`mcp__<server>__<params.name>`) goes first, to the
+//        callback the client registered for that matcher (with agent_id when "agent" is set).
+//        The client's control_response is saved under "as" (default "mcp").
 
 import fs from "node:fs";
 
@@ -355,10 +360,11 @@ function shorthand(step: Step): boolean {
   return false;
 }
 
-function hookCallbackId(): string | undefined {
+function hookCallbackId(tool?: string): string | undefined {
   const hooks = (saved.init?.hooks ?? {}) as Json;
   const pre = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as Json[]) : [];
   for (const m of pre) {
+    if (tool !== undefined && !(typeof m.matcher === "string" && new RegExp(`^(?:${m.matcher})$`).test(tool))) continue;
     const ids = m.hookCallbackIds;
     if (Array.isArray(ids) && typeof ids[0] === "string") return ids[0];
   }
@@ -410,6 +416,27 @@ async function run(steps: Step[]): Promise<boolean> {
       const req = saved[step.reply];
       if (!req) throw new Error(`fake-claude: reply names "${step.reply}", which was never saved`);
       out({ type: "control_response", response: { subtype: "success", request_id: req?.request_id, response: fill(step.response ?? {}) } });
+    } else if (step.mcp) {
+      const m = fill(step.mcp) as Json;
+      const server = typeof m.server === "string" ? m.server : "helm";
+      const message = (m.message ?? {}) as Json;
+      const params = (message.params ?? {}) as Json;
+      const as = typeof step.as === "string" ? step.as : "mcp";
+      const hk = m.hook as Json | undefined;
+      if (hk) {
+        const tool = `mcp__${server}__${String(params.name ?? "")}`;
+        const cb = hookCallbackId(tool);
+        if (cb) {
+          const request_id = `fake-hook-${++hookSeq}`;
+          const input: Json = { session_id: SESSION, hook_event_name: "PreToolUse", tool_name: tool, tool_input: params.arguments ?? {}, tool_use_id: hk.toolUseId, permission_mode: "default" };
+          if (typeof hk.agent === "string") input.agent_id = hk.agent;
+          out({ type: "control_request", request_id, request: { subtype: "hook_callback", callback_id: cb, input, tool_use_id: hk.toolUseId } });
+          await awaitRecord({ type: "control_response", response: { request_id } }, Number(step.timeoutMs ?? 10_000));
+        }
+      }
+      const request_id = `fake-mcp-${++hookSeq}`;
+      out({ type: "control_request", request_id, request: { subtype: "mcp_message", server_name: server, message } });
+      saved[as] = await awaitRecord({ type: "control_response", response: { request_id } }, Number(step.timeoutMs ?? 30_000));
     } else if (step.hook) {
       const h = fill(step.hook) as Json;
       const as = typeof step.as === "string" ? step.as : "hook";
