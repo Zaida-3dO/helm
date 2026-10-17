@@ -14,6 +14,8 @@ export interface Driver {
   setModel(cmd: Json): Promise<ResponseBody>;
   setThinkingLevel(cmd: Json): Promise<ResponseBody>;
   uiResponse(resp: UiResponse): void;
+  /** Called once a prompt's response has been written, so later events can follow it. */
+  promptAnswered?(submissionId: unknown): void;
   deliverNow(cmd: Json): Promise<ResponseBody>;
   withdraw(cmd: Json): Promise<ResponseBody>;
   stopTool(cmd: Json): Promise<ResponseBody>;
@@ -92,7 +94,13 @@ export function serve(opts: ServeOptions): void {
           return;
         }
         const c = type === "steer" ? { ...cmd, streamingBehavior: "steer" } : cmd;
-        answer(id, type, driver.prompt(c));
+        driver.prompt(c).then(
+          (body) => {
+            channel.respond(id, type, body);
+            driver.promptAnswered?.(c.submissionId);
+          },
+          (e: unknown) => channel.respond(id, type, { success: false, error: String((e as Error)?.message ?? e) }),
+        );
         return;
       }
       case "abort":

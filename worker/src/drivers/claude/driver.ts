@@ -47,6 +47,10 @@ interface Submission {
   delivered: boolean;
   /** Withdrawn by the user, or dropped by the CLI on an interrupt. */
   dropped: boolean;
+  /** The prompt's response has been written to the host. */
+  answered: boolean;
+  /** Read before the response went out: `submission_delivered` waits for the response. */
+  deliveryHeld: boolean;
 }
 
 /** A root tool call that is running. */
@@ -438,7 +442,20 @@ export class ClaudeDriver implements Driver {
     this.openTurnIfNeeded();
     this.ch.emit({ type: "message_start", message: { id: sub.id, role: "user", content: [] } });
     this.ch.emit({ type: "message_end", message: { id: sub.id, role: "user", content: [{ type: "text", text: sub.text }], status: "complete", submissionId: sub.id } });
-    this.ch.emit({ type: "submission_delivered", submissionId: sub.id });
+    // The host only moves an accepted submission to delivered, so the acknowledgement must reach
+    // it first; for a turn-opening prompt the read can land in the same tick as the ack.
+    if (sub.answered) this.ch.emit({ type: "submission_delivered", submissionId: sub.id });
+    else sub.deliveryHeld = true;
+  }
+
+  promptAnswered(submissionId: unknown): void {
+    const sub = typeof submissionId === "string" ? this.subs.get(submissionId) : undefined;
+    if (!sub || sub.answered) return;
+    sub.answered = true;
+    if (sub.deliveryHeld) {
+      sub.deliveryHeld = false;
+      this.ch.emit({ type: "submission_delivered", submissionId: sub.id });
+    }
   }
 
   /** task_started / task_updated / background_tasks_changed (worker/PROTOCOL-NOTES.md, "Observed CLI behaviour"). */
@@ -586,7 +603,7 @@ export class ClaudeDriver implements Driver {
 
     let settle!: (b: ResponseBody) => void;
     const result = new Promise<ResponseBody>((r) => (settle = r));
-    const sub: Submission = { id: sid, state: "dispatching", result, settle, text, delivered: false, dropped: false };
+    const sub: Submission = { id: sid, state: "dispatching", result, settle, text, delivered: false, dropped: false, answered: false, deliveryHeld: false };
     this.subs.set(sid, sub);
 
     if (!this.turnOpen) await this.applyPendingSettings();

@@ -1,0 +1,15 @@
+{
+  "description": "A steer is read at a tool boundary, then an abort's interrupt reply wrongly lists that already-read steer as cancelled; the worker must not report it as dropped.",
+  "autoInterrupt": false,
+  "steps": [
+    { "await": { "type": "user" }, "as": "p1" },
+    { "init": { "tools": [] } },
+    { "tool": { "id": "t1", "name": "Bash", "input": { "command": "echo hi" } } },
+    { "await": { "type": "user" }, "as": "p2", "timeoutMs": 20000 },
+    { "read": true },
+    { "await": { "type": "control_request", "request": { "subtype": "interrupt" } }, "as": "i", "timeoutMs": 20000 },
+    { "reply": "i", "response": { "still_queued": [], "cancelled": ["{{p2.uuid}}"] } },
+    { "toolResult": { "id": "t1", "text": "interrupted", "isError": true } },
+    { "result": "", "isError": true }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@helm/checks",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Helm checks: the end-to-end check drives the debug app over WebView2's DevTools protocol with Playwright. It is not part of `npm test`; run it with `npm run e2e -w checks`.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "e2e": "node --test --test-concurrency=1 \"e2e/*.e2e.ts\"",
+    "live": "node --test --test-concurrency=1 \"e2e/*.live.ts\""
+  },
+  "devDependencies": {
+    "playwright-core": "^1.64.1"
+  }
+}

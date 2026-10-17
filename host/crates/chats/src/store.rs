@@ -462,12 +462,13 @@ pub fn get_submission(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option
     .optional()
 }
 
-/// Submissions not yet delivered (including `uncertain` ones awaiting recovery), queue order
-/// first, then creation time; at most 100.
+/// Submissions not yet delivered, queue order first, then creation time; at most 100. This
+/// includes `uncertain` ones awaiting recovery and `rejected` ones ("saved but could not start"),
+/// so the queue UI can offer Recover; both leave the list once recovered.
 pub fn pending(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Vec<Submission>> {
     let mut st = tx.prepare(&format!(
         "{SUBMISSION_SELECT} WHERE s.chat_id = ?1
-           AND s.state IN ('saved', 'queued', 'dispatching', 'accepted', 'uncertain')
+           AND s.state IN ('saved', 'queued', 'dispatching', 'accepted', 'uncertain', 'rejected')
          ORDER BY q.position IS NULL, q.position, s.created_at, s.id LIMIT 100"
     ))?;
     let rows = st.query_map([chat_id], submission_from_row)?;

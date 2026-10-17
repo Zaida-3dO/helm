@@ -88,8 +88,13 @@ let unread: Json[] = [];
 let readThisTurn: string[] = [];
 let msgSeq = 0;
 
+/** While set, records are collected and written together (one chunk, as the real CLI often does). */
+let batch: string[] | undefined;
+
 function out(rec: Json): void {
-  process.stdout.write(JSON.stringify(rec) + "\n");
+  const line = JSON.stringify(rec) + "\n";
+  if (batch) batch.push(line);
+  else process.stdout.write(line);
 }
 
 function life(uuid: string, state: string): void {
@@ -133,7 +138,7 @@ function fill(v: unknown): unknown {
     if (rep) return rep[1].repeat(Number(rep[2]));
     const whole = /^\{\{([\w.]+)\}\}$/.exec(v);
     if (whole) return lookup(whole[1]);
-    return v.replace(/\{\{([\w.]+)\}\}/g, (_m, p: string) => String(lookup(p) ?? ""));
+    return v.replace(/\{\{([\w.]+)\}\}/g, (_m, p: string) => { const v = lookup(p); return v !== null && typeof v === "object" ? JSON.stringify(v) : String(v ?? ""); });
   }
   if (Array.isArray(v)) return v.map(fill);
   if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, fill(x)]));
@@ -141,6 +146,17 @@ function fill(v: unknown): unknown {
 }
 
 function onUser(rec: Json): void {
+  batch = [];
+  try {
+    onUserRecords(rec);
+  } finally {
+    const lines = batch;
+    batch = undefined;
+    if (lines.length) process.stdout.write(lines.join(""));
+  }
+}
+
+function onUserRecords(rec: Json): void {
   if (!replay) return;
   const uuid = typeof rec.uuid === "string" ? rec.uuid : undefined;
   if (uuid && seenUuids.has(uuid)) return;

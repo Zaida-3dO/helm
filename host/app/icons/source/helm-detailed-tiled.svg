@@ -1,0 +1,203 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Helm - detailed (64 px and up)</title>
+  <!--
+    An eight-spoke wooden ship's wheel with a domed bronze hub, on an ocean-blue tile.
+    Geometry is drawn once, pointing up from the centre (512, 512), and repeated by rotation in
+    45-degree steps. Rivets are counter-rotated so their highlight stays top-left.
+  -->
+  <defs>
+    <!-- Tile -->
+    <linearGradient id="tile" x1="0" y1="56" x2="0" y2="968" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3d9fdc"/>
+      <stop offset="0.42" stop-color="#1d65aa"/>
+      <stop offset="0.8" stop-color="#0f3466"/>
+      <stop offset="1" stop-color="#091d3e"/>
+    </linearGradient>
+    <radialGradient id="tileGlow" cx="512" cy="470" r="470" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#a8dcff" stop-opacity="0.30"/>
+      <stop offset="0.6" stop-color="#a8dcff" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#a8dcff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="tileEdge" x1="0" y1="56" x2="0" y2="968" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.45"/>
+      <stop offset="0.35" stop-color="#ffffff" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.30"/>
+    </linearGradient>
+
+    <!-- Wood: a turned cylinder across the spoke's width -->
+    <linearGradient id="woodCyl" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4a2207"/>
+      <stop offset="0.16" stop-color="#8e4c14"/>
+      <stop offset="0.40" stop-color="#d4882f"/>
+      <stop offset="0.52" stop-color="#f6c070"/>
+      <stop offset="0.66" stop-color="#cf812c"/>
+      <stop offset="0.86" stop-color="#884411"/>
+      <stop offset="1" stop-color="#4a2207"/>
+    </linearGradient>
+    <!-- Wood: the rim's torus section, radius 236 to 302 -->
+    <radialGradient id="woodRim" cx="512" cy="512" r="302" gradientUnits="userSpaceOnUse">
+      <stop offset="0.781" stop-color="#4a2207"/>
+      <stop offset="0.805" stop-color="#8e4c14"/>
+      <stop offset="0.85" stop-color="#cc842f"/>
+      <stop offset="0.89" stop-color="#f6c070"/>
+      <stop offset="0.93" stop-color="#cb7f2b"/>
+      <stop offset="0.97" stop-color="#854310"/>
+      <stop offset="1" stop-color="#4a2207"/>
+    </radialGradient>
+    <!-- Wood: the hub collar, radius 0 to 122 -->
+    <radialGradient id="woodHub" cx="512" cy="512" r="122" gradientUnits="userSpaceOnUse">
+      <stop offset="0.6" stop-color="#a65d1c"/>
+      <stop offset="0.8" stop-color="#d68c34"/>
+      <stop offset="0.9" stop-color="#f3bb68"/>
+      <stop offset="0.96" stop-color="#985214"/>
+      <stop offset="1" stop-color="#4a2207"/>
+    </radialGradient>
+
+    <!-- Metal -->
+    <radialGradient id="bronzeDome" cx="0.5" cy="0.5" r="0.5" fx="0.36" fy="0.3">
+      <stop offset="0" stop-color="#fff0c4"/>
+      <stop offset="0.22" stop-color="#eebd6c"/>
+      <stop offset="0.55" stop-color="#bb7c34"/>
+      <stop offset="0.85" stop-color="#7a4818"/>
+      <stop offset="1" stop-color="#4c2b0c"/>
+    </radialGradient>
+    <linearGradient id="brassRing" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#fff2b8"/>
+      <stop offset="0.35" stop-color="#e3b450"/>
+      <stop offset="0.7" stop-color="#a87420"/>
+      <stop offset="1" stop-color="#5e3d0c"/>
+    </linearGradient>
+    <radialGradient id="brassRivet" cx="0.5" cy="0.5" r="0.5" fx="0.34" fy="0.3">
+      <stop offset="0" stop-color="#fffbe2"/>
+      <stop offset="0.3" stop-color="#f2cd66"/>
+      <stop offset="0.7" stop-color="#b98524"/>
+      <stop offset="1" stop-color="#5e3d0c"/>
+    </radialGradient>
+
+    <!-- Light falling from the top left across the whole wheel -->
+    <radialGradient id="keyLight" cx="330" cy="290" r="760" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffe9bf" stop-opacity="0.16"/>
+      <stop offset="0.38" stop-color="#ffe9bf" stop-opacity="0"/>
+      <stop offset="0.62" stop-color="#1a0c02" stop-opacity="0"/>
+      <stop offset="1" stop-color="#1a0c02" stop-opacity="0.38"/>
+    </radialGradient>
+
+    <filter id="lift" x="-15%" y="-15%" width="130%" height="135%" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="13"/>
+      <feOffset dy="18" result="blur"/>
+      <feFlood flood-color="#020a1c" flood-opacity="0.55"/>
+      <feComposite in2="blur" operator="in" result="shadow"/>
+      <feMerge>
+        <feMergeNode in="shadow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+
+    <!-- One spoke shaft, centre to just past the rim; the rim covers its middle -->
+    <path id="shaft" d="M489 430 L496 205 L528 205 L535 430 Z"
+          fill="url(#woodCyl)" stroke="#3b1c07" stroke-width="3" stroke-linejoin="round"/>
+
+    <!-- One carved handle outside the rim: a turned bead, a neck, a swelling grip, a knob -->
+    <g id="handle" stroke="#3b1c07" stroke-width="3" stroke-linejoin="round">
+      <path d="M500 194 L500 178 C500 170 486 167 486 154 C486 139 499 128 501 116
+               L523 116 C525 128 538 139 538 154 C538 167 524 170 524 178 L524 194 Z"
+            fill="url(#woodCyl)"/>
+      <circle cx="512" cy="106" r="16" fill="url(#woodCyl)"/>
+      <rect x="489" y="188" width="46" height="22" rx="10" fill="url(#woodCyl)"/>
+      <!-- carved rings on the grip -->
+      <path d="M489 162 Q512 168 535 162" fill="none" stroke="#5a2d0e" stroke-width="2.5" stroke-opacity="0.7"/>
+      <path d="M488 146 Q512 152 536 146" fill="none" stroke="#5a2d0e" stroke-width="2.5" stroke-opacity="0.7"/>
+    </g>
+
+    <circle id="rivet" cx="0" cy="0" r="11" fill="url(#brassRivet)" stroke="#3d2606" stroke-width="2"/>
+    <circle id="rivetSmall" cx="0" cy="0" r="7.5" fill="url(#brassRivet)" stroke="#3d2606" stroke-width="1.6"/>
+
+    <g id="wheel">
+      <!-- Spokes, behind the rim -->
+      <use href="#shaft"/>
+      <use href="#shaft" transform="rotate(45 512 512)"/>
+      <use href="#shaft" transform="rotate(90 512 512)"/>
+      <use href="#shaft" transform="rotate(135 512 512)"/>
+      <use href="#shaft" transform="rotate(180 512 512)"/>
+      <use href="#shaft" transform="rotate(225 512 512)"/>
+      <use href="#shaft" transform="rotate(270 512 512)"/>
+      <use href="#shaft" transform="rotate(315 512 512)"/>
+
+      <!-- Turned rim, radius 236 to 302 -->
+      <circle cx="512" cy="512" r="269" fill="none" stroke="url(#woodRim)" stroke-width="66"/>
+      <!-- grain streaks -->
+      <g fill="none" stroke="#5a2d0e" stroke-linecap="round">
+        <circle cx="512" cy="512" r="259" stroke-width="1.6" stroke-opacity="0.22" stroke-dasharray="70 26 140 34 52 40 110 30"/>
+        <circle cx="512" cy="512" r="274" stroke-width="1.4" stroke-opacity="0.18" stroke-dasharray="120 44 60 22 160 36"/>
+        <circle cx="512" cy="512" r="284" stroke-width="1.4" stroke-opacity="0.20" stroke-dasharray="44 30 96 28 130 52"/>
+      </g>
+      <!-- incised turning grooves, each with a lit lower lip -->
+      <circle cx="512" cy="512" r="248" fill="none" stroke="#4a2409" stroke-width="2.6" stroke-opacity="0.75"/>
+      <circle cx="512" cy="512" r="250.5" fill="none" stroke="#ffdca6" stroke-width="1.4" stroke-opacity="0.35"/>
+      <circle cx="512" cy="512" r="291" fill="none" stroke="#4a2409" stroke-width="2.6" stroke-opacity="0.75"/>
+      <circle cx="512" cy="512" r="288.5" fill="none" stroke="#ffdca6" stroke-width="1.4" stroke-opacity="0.35"/>
+      <circle cx="512" cy="512" r="302" fill="none" stroke="#3b1c07" stroke-width="3.5"/>
+      <circle cx="512" cy="512" r="236" fill="none" stroke="#3b1c07" stroke-width="3.5"/>
+
+      <!-- Handles -->
+      <use href="#handle"/>
+      <use href="#handle" transform="rotate(45 512 512)"/>
+      <use href="#handle" transform="rotate(90 512 512)"/>
+      <use href="#handle" transform="rotate(135 512 512)"/>
+      <use href="#handle" transform="rotate(180 512 512)"/>
+      <use href="#handle" transform="rotate(225 512 512)"/>
+      <use href="#handle" transform="rotate(270 512 512)"/>
+      <use href="#handle" transform="rotate(315 512 512)"/>
+
+      <!-- Brass rivets: one where each spoke passes through the rim, a smaller one between -->
+      <use href="#rivet" transform="rotate(0 512 512) translate(512 243) rotate(0)"/>
+      <use href="#rivet" transform="rotate(45 512 512) translate(512 243) rotate(-45)"/>
+      <use href="#rivet" transform="rotate(90 512 512) translate(512 243) rotate(-90)"/>
+      <use href="#rivet" transform="rotate(135 512 512) translate(512 243) rotate(-135)"/>
+      <use href="#rivet" transform="rotate(180 512 512) translate(512 243) rotate(-180)"/>
+      <use href="#rivet" transform="rotate(225 512 512) translate(512 243) rotate(-225)"/>
+      <use href="#rivet" transform="rotate(270 512 512) translate(512 243) rotate(-270)"/>
+      <use href="#rivet" transform="rotate(315 512 512) translate(512 243) rotate(-315)"/>
+      <use href="#rivetSmall" transform="rotate(22.5 512 512) translate(512 243) rotate(-22.5)"/>
+      <use href="#rivetSmall" transform="rotate(67.5 512 512) translate(512 243) rotate(-67.5)"/>
+      <use href="#rivetSmall" transform="rotate(112.5 512 512) translate(512 243) rotate(-112.5)"/>
+      <use href="#rivetSmall" transform="rotate(157.5 512 512) translate(512 243) rotate(-157.5)"/>
+      <use href="#rivetSmall" transform="rotate(202.5 512 512) translate(512 243) rotate(-202.5)"/>
+      <use href="#rivetSmall" transform="rotate(247.5 512 512) translate(512 243) rotate(-247.5)"/>
+      <use href="#rivetSmall" transform="rotate(292.5 512 512) translate(512 243) rotate(-292.5)"/>
+      <use href="#rivetSmall" transform="rotate(337.5 512 512) translate(512 243) rotate(-337.5)"/>
+
+      <!-- Hub: a turned wooden collar, a brass ring, a domed bronze cap -->
+      <circle cx="512" cy="512" r="122" fill="url(#woodHub)" stroke="#3b1c07" stroke-width="3.5"/>
+      <circle cx="512" cy="512" r="104" fill="none" stroke="#4a2409" stroke-width="2.4" stroke-opacity="0.6"/>
+      <circle cx="512" cy="512" r="92" fill="url(#brassRing)" stroke="#3d2606" stroke-width="3"/>
+      <circle cx="512" cy="512" r="76" fill="url(#bronzeDome)" stroke="#3d2606" stroke-width="2.5"/>
+      <circle cx="512" cy="512" r="16" fill="none" stroke="#5a3510" stroke-width="2.5" stroke-opacity="0.45"/>
+      <ellipse cx="486" cy="481" rx="30" ry="17" transform="rotate(-35 486 481)"
+               fill="#ffffff" fill-opacity="0.55" filter="url(#soft)"/>
+    </g>
+
+    <clipPath id="tileClip">
+      <rect x="56" y="56" width="912" height="912" rx="204"/>
+    </clipPath>
+    <mask id="wheelMask" mask-type="alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <use href="#wheel"/>
+    </mask>
+  </defs>
+
+  <!-- Tile: a rounded square with a 56 px transparent margin -->
+  <rect x="56" y="56" width="912" height="912" rx="204" fill="url(#tile)"/>
+  <rect x="56" y="56" width="912" height="912" rx="204" fill="url(#tileGlow)"/>
+  <rect x="59" y="59" width="906" height="906" rx="201" fill="none" stroke="url(#tileEdge)" stroke-width="6"/>
+
+  <!-- The wheel and its shadow stay inside the tile -->
+  <g clip-path="url(#tileClip)">
+    <g filter="url(#lift)">
+      <use href="#wheel"/>
+      <rect x="0" y="0" width="1024" height="1024" fill="url(#keyLight)" mask="url(#wheelMask)"/>
+    </g>
+  </g>
+</svg>

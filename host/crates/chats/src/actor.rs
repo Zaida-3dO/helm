@@ -71,6 +71,8 @@ pub(crate) enum Cmd {
 
 pub(crate) const STOP_TIMEOUT_ERROR: &str =
     "The task did not stop within 60 seconds, so Helm closed it.";
+pub(crate) const ACK_TIMEOUT_ERROR: &str =
+    "Claude Code did not confirm the message in time. It was not sent again; recover it from the queue if it is missing.";
 pub(crate) const MODEL_ACK_ERROR: &str =
     "Claude Code did not confirm the model or effort change within 10 seconds.";
 
@@ -591,6 +593,16 @@ impl Actor {
                 )
             });
             self.emit_queue();
+            // A crash holds the queue; a quit does not (startup recovery decides that).
+            // Done after the submission update so the extra write does not widen the window in
+            // which a reader sees `interrupted` before the in-flight submissions turn uncertain.
+            if !self
+                .sh
+                .shutting_down
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                self.hold_queue();
+            }
             if let Some(s) = self.stopping.take() {
                 for r in s.replies {
                     let _ = r.send(ChatStatus::Interrupted);
@@ -731,6 +743,19 @@ impl Actor {
                 )
             })
             .unwrap_or(false)
+    }
+
+    /// Holds the queue (shown with Resume) until the user sends or resumes it.
+    fn hold_queue(&mut self) {
+        let id = self.chat_id.clone();
+        self.write(|t| {
+            t.execute(
+                "INSERT OR IGNORE INTO chat_queue_holds(chat_id, held_at) VALUES (?1, ?2)",
+                rusqlite::params![id, now()],
+            )
+        });
+        self.live.lock().unwrap().thread.queue_held = true;
+        self.emit_thread();
     }
 
     /// Start the next queued follow-up, if the queue may advance.
@@ -1021,6 +1046,14 @@ impl Actor {
                     if let Some(Pending::Prompt { submission_id }) = self.pending.remove(&id) {
                         // No answer at all: the outcome is unknown, so never resend.
                         self.set_submission(&submission_id, SubmissionState::Uncertain);
+                        if self.status() == ChatStatus::Starting {
+                            // The turn never began: end it rather than wait on a Stop.
+                            self.end_run(
+                                ChatStatus::Interrupted,
+                                Some(ACK_TIMEOUT_ERROR),
+                                "failed",
+                            );
+                        }
                         self.emit_queue();
                     }
                 }
@@ -1710,8 +1743,14 @@ impl Actor {
                     ),
                 };
                 self.end_run(status, err.as_deref(), outcome);
+                if status == ChatStatus::Interrupted {
+                    // An abnormal end (error or crash, not a user Stop) holds the queue until the
+                    // user sends or presses Resume, so a failing turn cannot run through every
+                    // queued message.
+                    self.hold_queue();
+                }
                 self.emit_queue();
-                if status == ChatStatus::Idle || status == ChatStatus::Interrupted {
+                if status == ChatStatus::Idle {
                     self.advance_queue();
                 }
             }

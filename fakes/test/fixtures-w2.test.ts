@@ -328,3 +328,33 @@ describe("fake claude lifecycle fixtures", () => {
     }
   });
 });
+
+describe("e2e fixture", () => {
+  test("branches on the prompt's tag, echoes an untagged prompt, and loops over turns", async () => {
+    const f = new Fake("e2e");
+    try {
+      f.init();
+      f.user("[E1] hello");
+      await f.waitFor(isResult);
+      assert.match(textOf(f), /Hello from the fake Claude/);
+      f.user("plain words");
+      await f.waitFor((l) => l.type === "assistant" && JSON.stringify(l).includes("You said: plain words"));
+      f.user("[MD] render");
+      await f.waitFor((l) => l.type === "assistant" && JSON.stringify(l).includes("mermaid"));
+    } finally {
+      await f.end();
+    }
+  });
+
+  test("a process started with --resume answers an untagged prompt as the continuation", async () => {
+    const f = new Fake("e2e", ["--replay-user-messages", "--resume", "fake-session"]);
+    try {
+      f.init();
+      f.user("The app restarted; continue.");
+      await f.waitFor(isResult);
+      assert.match(textOf(f), /Continued after restart/);
+    } finally {
+      await f.end();
+    }
+  });
+});

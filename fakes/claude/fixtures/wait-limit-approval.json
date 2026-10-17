@@ -1,0 +1,82 @@
+{
+  "description": "A foreground Bash task is running while an approval for a second call is open, so the wait limit must hold off.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "init": {
+        "tools": []
+      }
+    },
+    {
+      "tool": {
+        "id": "tu_1",
+        "name": "Bash",
+        "input": {
+          "command": "node server.js"
+        }
+      }
+    },
+    {
+      "taskStarted": {
+        "taskId": "bt_1",
+        "toolUseId": "tu_1",
+        "description": "node server.js"
+      }
+    },
+    {
+      "tool": {
+        "id": "tu_2",
+        "name": "Write",
+        "input": {
+          "file_path": "a.txt",
+          "content": "x"
+        }
+      }
+    },
+    {
+      "emit": {
+        "type": "control_request",
+        "request_id": "perm-1",
+        "request": {
+          "subtype": "can_use_tool",
+          "tool_name": "Write",
+          "input": {
+            "file_path": "a.txt",
+            "content": "x"
+          },
+          "tool_use_id": "tu_2"
+        }
+      }
+    },
+    {
+      "await": {
+        "type": "control_response",
+        "response": {
+          "request_id": "perm-1"
+        }
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "toolResult": {
+        "id": "tu_2",
+        "text": "denied",
+        "isError": true
+      }
+    },
+    {
+      "toolResult": {
+        "id": "tu_1",
+        "text": "server stopped"
+      }
+    },
+    {
+      "result": "done"
+    }
+  ]
+}

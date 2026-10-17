@@ -1,0 +1,16 @@
+{
+  "description": "Turn one denies a long command and ends with no further root Bash call; turn two repeats the exact command, which must be denied again because the escape does not carry across turns.",
+  "steps": [
+    { "await": { "type": "user" }, "as": "p1" },
+    { "init": { "tools": [] } },
+    { "tool": { "id": "e1", "name": "Bash", "input": { "command": "npm test" } } },
+    { "hook": { "toolUseId": "e1", "input": { "command": "npm test" } }, "as": "h1" },
+    { "toolResult": { "id": "e1", "text": "denied", "isError": true } },
+    { "result": "done" },
+    { "await": { "type": "user" }, "as": "p2" },
+    { "tool": { "id": "e2", "name": "Bash", "input": { "command": "npm test" } } },
+    { "hook": { "toolUseId": "e2", "input": { "command": "npm test" } }, "as": "h2" },
+    { "toolResult": { "id": "e2", "text": "denied", "isError": true } },
+    { "result": "done" }
+  ]
+}

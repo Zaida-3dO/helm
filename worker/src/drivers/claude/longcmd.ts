@@ -226,6 +226,33 @@ function splitCommands(toks: Tok[], subs: string[]): SimpleCommand[] {
 
 const TEXT_TOOLS = new Set(["grep", "rg", "egrep", "fgrep", "echo", "printf", "git", "sed", "awk", "cat", "less", "head", "tail", "find", "ls", "select-string", "write-host", "write-output"]);
 const WRAPPERS = new Set(["sudo", "env", "time", "command", "exec", "nice", "call", "&", "."]);
+/** Shell keywords that may precede a command in the same simple command (`do npm test`). */
+const KEYWORDS = new Set(["do", "then", "else", "elif", "if", "while", "until", "!", "time"]);
+/** Flags that take a separate value, per command, so the value is not mistaken for a script name. */
+const VALUE_FLAGS: Record<string, Set<string>> = {
+  npm: new Set(["--prefix", "-w", "--workspace", "-C", "--cwd"]),
+  pnpm: new Set(["--prefix", "-w", "--workspace", "-C", "--dir", "--filter", "-F"]),
+  yarn: new Set(["--cwd", "--prefix"]),
+  bun: new Set(["--cwd", "--prefix"]),
+  sudo: new Set(["-u", "-g", "-h", "-p", "-C"]),
+  timeout: new Set(["-s", "--signal", "-k", "--kill-after"]),
+  nice: new Set(["-n"]),
+};
+
+/** Positional words after a command, with its known flag values skipped. */
+function positionals(cmd: string, args: string[]): string[] {
+  const takes = VALUE_FLAGS[cmd];
+  const out: string[] = [];
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k];
+    if (a.startsWith("-")) {
+      if (takes?.has(a)) k++;
+      continue;
+    }
+    out.push(a);
+  }
+  return out;
+}
 const SHELLS_WITH_C = new Set(["bash", "sh", "zsh", "dash", "cmd", "powershell", "pwsh"]);
 const SCRIPT_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun"]);
 const BUILD_SCRIPT = /^(build|test|tests|typecheck|type-check|check|lint)([:\-_.].*)?$/i;
@@ -264,10 +291,19 @@ function classifyWords(words: string[], depth: number): Classification | undefin
       i++;
       continue;
     }
-    if (WRAPPERS.has(baseName(w)) || w === "&") {
+    if (KEYWORDS.has(w)) {
       i++;
-      // `env -i` style flags
-      while (i < words.length && words[i].startsWith("-") && baseName(words[i - 1]) === "env") i++;
+      continue;
+    }
+    if (w === "for" || w === "case" || w === "select" || w === "function") return undefined; // the loop header itself runs nothing
+    if (WRAPPERS.has(baseName(w)) || w === "&") {
+      const wrapper = baseName(w);
+      i++;
+      // Wrapper flags (`env -i`, `sudo -u x`, `nice -n 5`).
+      while (i < words.length && words[i].startsWith("-")) {
+        if (VALUE_FLAGS[wrapper]?.has(words[i])) i++;
+        i++;
+      }
       continue;
     }
     break;
@@ -292,7 +328,7 @@ function classifyWords(words: string[], depth: number): Classification | undefin
       const secs = Number(args[t + 1]);
       return secs >= LONG_SLEEP_S ? { reason: `sleep of ${secs} s` } : undefined;
     }
-    const rest = args.filter((a) => !a.startsWith("-"));
+    const rest = positionals("timeout", args);
     return parseSleepSeconds(rest[0]) !== undefined && rest.length > 1 ? classifyWords(rest.slice(1), depth) : undefined;
   }
 
@@ -320,7 +356,7 @@ function classifyWords(words: string[], depth: number): Classification | undefin
 
   // Package scripts.
   if (SCRIPT_RUNNERS.has(cmd) || cmd === "npx" || cmd === "pnpx" || cmd === "bunx") {
-    let rest = args.filter((a) => !a.startsWith("-"));
+    let rest = positionals(cmd, args);
     if (cmd === "npx" || cmd === "pnpx" || cmd === "bunx" || rest[0] === "exec" || rest[0] === "dlx" || rest[0] === "x") {
       if (rest[0] === "exec" || rest[0] === "dlx" || rest[0] === "x") rest = rest.slice(1);
       return rest.length ? classifyWords(rest, depth) : undefined;

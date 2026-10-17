@@ -134,6 +134,7 @@ pub struct H {
     pub profile: Profile,
     pub workers: mpsc::UnboundedReceiver<FakeWorker>,
     pub work: std::path::PathBuf,
+    pub spawner: Arc<FakeSpawner>,
 }
 
 pub fn limits() -> Limits {
@@ -166,7 +167,7 @@ pub fn harness_with(limits: Limits) -> H {
         db.clone(),
         clock.clone(),
         sink.clone(),
-        spawner,
+        spawner.clone(),
         RuntimeConfig {
             profile_dir: profile.path(""),
             limits,
@@ -197,6 +198,7 @@ pub fn harness_with(limits: Limits) -> H {
         profile,
         workers,
         work,
+        spawner,
     }
 }
 
@@ -405,6 +407,10 @@ async fn an_unanswered_prompt_becomes_uncertain_and_is_not_resent() {
     let p = w.expect("prompt").await;
     assert_eq!(p["submissionId"], sid.as_str());
     h.until("uncertain", |h| h.state(&sid) == "uncertain").await;
+    h.until("the turn that never began is ended", |h| {
+        h.status(&chat) == "interrupted"
+    })
+    .await;
     let again = h
         .call(
             "chat_send",
@@ -535,6 +541,42 @@ async fn esc_lets_the_queue_continue() {
     .await;
     w.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
         .await;
+    let p = w.expect("prompt").await;
+    assert_eq!(p["submissionId"], queued.as_str());
+}
+
+/// A turn that ends abnormally (an error, not a user
+/// Stop) holds the queue, shown with Resume, instead of advancing into the next queued message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_abnormal_end_holds_the_queue_until_resume() {
+    let mut h = harness();
+    let (chat, _, mut w) = running_turn(&mut h).await;
+    let (queued, _) = h.send(&chat, "next", "queue").await;
+    w.emit(json!({"type": "agent_settled", "outcome": "error", "error": "API error"}))
+        .await;
+    h.until("interrupted", |h| h.status(&chat) == "interrupted")
+        .await;
+    assert!(
+        w.no_command_for(Duration::from_millis(200)).await.is_none(),
+        "the queued message is not sent"
+    );
+    assert_eq!(h.state(&queued), "queued");
+    assert_eq!(
+        h.col(&format!(
+            "SELECT chat_id FROM chat_queue_holds WHERE chat_id = '{chat}'"
+        )),
+        std::slice::from_ref(&chat)
+    );
+    let got = h
+        .api
+        .call(&main(), "chat_get", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    assert_eq!(got["thread"]["queueHeld"], true);
+    h.api
+        .call(&main(), "queue_resume", json!({"chatId": chat}))
+        .await
+        .unwrap();
     let p = w.expect("prompt").await;
     assert_eq!(p["submissionId"], queued.as_str());
 }
@@ -811,6 +853,35 @@ async fn a_withdrawn_steer_returns_as_a_newer_draft() {
         .unwrap();
     assert_eq!(draft, "take me back");
     assert!(rev > before);
+}
+
+/// A send whose worker cannot start is `rejected` and stays in `pending` so the user can recover it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_that_could_not_start_stays_recoverable() {
+    let h = harness();
+    let chat = h.create().await;
+    // The fake spawner fails every start.
+    *h.spawner.fail.lock().unwrap() = Some("Node.js was not found.".into());
+    let (sid, _) = h.send(&chat, "lost?", "default").await;
+    h.until("rejected", |h| h.state(&sid) == "rejected").await;
+    let page = h
+        .call("transcript_page", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    assert_eq!(page["pending"][0]["id"], sid.as_str());
+    assert_eq!(page["pending"][0]["state"], "rejected");
+    let r = h
+        .call(
+            "submission_action",
+            json!({"submissionId": sid, "action": "recover"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r["submission"]["state"], "withdrawn");
+    assert_eq!(
+        h.col(&format!("SELECT draft FROM chats WHERE id = '{chat}'")),
+        ["lost?"]
+    );
 }
 
 /// The worker dying mid-turn interrupts the run and makes in-flight submissions uncertain.

@@ -1,0 +1,990 @@
+{
+  "description": "End-to-end script (checks/e2e): every chat runs the same fake, so each turn branches on a tag in its prompt ([E1] ... [E8-stop], [MD], [MDLONG], [ERR]); an untagged prompt is echoed, or answered 'Continued after restart.' when the process was started with --resume.",
+  "autoBackground": true,
+  "steps": [
+    {
+      "repeat": [
+        {
+          "await": {
+            "type": "user"
+          },
+          "as": "p",
+          "timeoutMs": 3600000
+        },
+        {
+          "init": {}
+        },
+        {
+          "if": {
+            "saved": "p",
+            "contains": "[ERR]"
+          },
+          "then": [
+            {
+              "tool": {
+                "id": "tu_err_{{p.uuid}}",
+                "name": "Bash",
+                "input": {
+                  "command": "ls"
+                }
+              }
+            },
+            {
+              "sleep": 2500
+            },
+            {
+              "toolResult": {
+                "id": "tu_err_{{p.uuid}}",
+                "text": "a.txt"
+              }
+            },
+            {
+              "result": "API Error: overloaded",
+              "isError": true
+            }
+          ],
+          "else": [
+            {
+              "if": {
+                "saved": "p",
+                "contains": "[MDLONG]"
+              },
+              "then": [
+                {
+                  "text": "# Long reply\n\n![dot](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==)\n\nLine 0: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 1: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 2: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 3: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 4: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 5: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 6: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 7: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 8: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 9: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 10: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 11: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 12: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 13: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 14: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 15: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 16: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 17: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 18: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 19: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 20: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 21: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 22: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 23: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 24: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 25: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 26: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 27: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 28: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 29: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 30: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 31: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 32: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 33: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 34: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 35: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 36: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 37: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 38: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 39: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 40: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 41: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 42: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 43: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 44: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 45: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 46: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 47: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 48: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 49: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 50: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 51: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 52: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 53: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 54: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 55: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 56: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 57: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 58: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 59: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 60: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 61: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 62: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 63: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 64: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 65: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 66: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 67: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 68: the long reply is parsed in the Markdown worker, not on the main thread.\nLine 69: the long reply is parsed in the Markdown worker, not on the main thread.\n\n## End of long text\n"
+                },
+                {
+                  "result": "done"
+                }
+              ],
+              "else": [
+                {
+                  "if": {
+                    "saved": "p",
+                    "contains": "[E1]"
+                  },
+                  "then": [
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "message_start",
+                          "message": {
+                            "id": "msg_e1",
+                            "model": "claude-fake",
+                            "content": []
+                          }
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "content_block_start",
+                          "index": 0,
+                          "content_block": {
+                            "type": "text",
+                            "text": ""
+                          }
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "sleep": 250
+                    },
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "content_block_delta",
+                          "index": 0,
+                          "delta": {
+                            "type": "text_delta",
+                            "text": "Hello "
+                          }
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "sleep": 250
+                    },
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "content_block_delta",
+                          "index": 0,
+                          "delta": {
+                            "type": "text_delta",
+                            "text": "from "
+                          }
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "sleep": 250
+                    },
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "content_block_delta",
+                          "index": 0,
+                          "delta": {
+                            "type": "text_delta",
+                            "text": "the "
+                          }
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "sleep": 250
+                    },
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "content_block_delta",
+                          "index": 0,
+                          "delta": {
+                            "type": "text_delta",
+                            "text": "fake "
+                          }
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "sleep": 250
+                    },
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "content_block_delta",
+                          "index": 0,
+                          "delta": {
+                            "type": "text_delta",
+                            "text": "Claude. "
+                          }
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "sleep": 250
+                    },
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "content_block_delta",
+                          "index": 0,
+                          "delta": {
+                            "type": "text_delta",
+                            "text": "This "
+                          }
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "sleep": 250
+                    },
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "content_block_delta",
+                          "index": 0,
+                          "delta": {
+                            "type": "text_delta",
+                            "text": "reply "
+                          }
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "sleep": 250
+                    },
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "content_block_delta",
+                          "index": 0,
+                          "delta": {
+                            "type": "text_delta",
+                            "text": "streams "
+                          }
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "sleep": 250
+                    },
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "content_block_delta",
+                          "index": 0,
+                          "delta": {
+                            "type": "text_delta",
+                            "text": "in "
+                          }
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "sleep": 250
+                    },
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "content_block_delta",
+                          "index": 0,
+                          "delta": {
+                            "type": "text_delta",
+                            "text": "pieces."
+                          }
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "content_block_stop",
+                          "index": 0
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "emit": {
+                        "type": "stream_event",
+                        "event": {
+                          "type": "message_stop"
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "emit": {
+                        "type": "assistant",
+                        "message": {
+                          "id": "msg_e1",
+                          "model": "claude-fake",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "Hello from the fake Claude. This reply streams in pieces."
+                            }
+                          ]
+                        },
+                        "parent_tool_use_id": null,
+                        "session_id": "fake-session"
+                      }
+                    },
+                    {
+                      "result": "done"
+                    }
+                  ],
+                  "else": [
+                    {
+                      "if": {
+                        "saved": "p",
+                        "contains": "[E2]"
+                      },
+                      "then": [
+                        {
+                          "tool": {
+                            "id": "tu_e2a_{{p.uuid}}",
+                            "name": "Bash",
+                            "input": {
+                              "command": "ls",
+                              "description": "List files"
+                            }
+                          }
+                        },
+                        {
+                          "emit": {
+                            "type": "control_request",
+                            "request_id": "perm-a",
+                            "request": {
+                              "subtype": "can_use_tool",
+                              "tool_name": "Bash",
+                              "input": {
+                                "command": "ls",
+                                "description": "List files"
+                              },
+                              "tool_use_id": "tu_e2a_{{p.uuid}}"
+                            }
+                          }
+                        },
+                        {
+                          "await": {
+                            "type": "control_response",
+                            "response": {
+                              "request_id": "perm-a"
+                            }
+                          },
+                          "as": "perm-a",
+                          "timeoutMs": 600000
+                        },
+                        {
+                          "if": {
+                            "saved": "perm-a",
+                            "match": {
+                              "response": {
+                                "response": {
+                                  "behavior": "allow"
+                                }
+                              }
+                            }
+                          },
+                          "then": [
+                            {
+                              "toolResult": {
+                                "id": "tu_e2a_{{p.uuid}}",
+                                "text": "a.txt\nb.txt"
+                              }
+                            }
+                          ],
+                          "else": [
+                            {
+                              "toolResult": {
+                                "id": "tu_e2a_{{p.uuid}}",
+                                "text": "The user denied this.",
+                                "isError": true
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "tool": {
+                            "id": "tu_e2b_{{p.uuid}}",
+                            "name": "Bash",
+                            "input": {
+                              "command": "rm b.txt",
+                              "description": "Remove a file"
+                            }
+                          }
+                        },
+                        {
+                          "emit": {
+                            "type": "control_request",
+                            "request_id": "perm-b",
+                            "request": {
+                              "subtype": "can_use_tool",
+                              "tool_name": "Bash",
+                              "input": {
+                                "command": "rm b.txt",
+                                "description": "Remove a file"
+                              },
+                              "tool_use_id": "tu_e2b_{{p.uuid}}"
+                            }
+                          }
+                        },
+                        {
+                          "await": {
+                            "type": "control_response",
+                            "response": {
+                              "request_id": "perm-b"
+                            }
+                          },
+                          "as": "perm-b",
+                          "timeoutMs": 600000
+                        },
+                        {
+                          "if": {
+                            "saved": "perm-b",
+                            "match": {
+                              "response": {
+                                "response": {
+                                  "behavior": "allow"
+                                }
+                              }
+                            }
+                          },
+                          "then": [
+                            {
+                              "toolResult": {
+                                "id": "tu_e2b_{{p.uuid}}",
+                                "text": "removed"
+                              }
+                            },
+                            {
+                              "text": "Removed b.txt."
+                            }
+                          ],
+                          "else": [
+                            {
+                              "toolResult": {
+                                "id": "tu_e2b_{{p.uuid}}",
+                                "text": "The user denied this.",
+                                "isError": true
+                              }
+                            },
+                            {
+                              "text": "Approval E2 result: second call denied."
+                            }
+                          ]
+                        },
+                        {
+                          "result": "done"
+                        }
+                      ],
+                      "else": [
+                        {
+                          "if": {
+                            "saved": "p",
+                            "contains": "[E3]"
+                          },
+                          "then": [
+                            {
+                              "emit": {
+                                "type": "control_request",
+                                "request_id": "qe3",
+                                "request": {
+                                  "subtype": "can_use_tool",
+                                  "tool_name": "AskUserQuestion",
+                                  "input": {
+                                    "questions": [
+                                      {
+                                        "question": "Which colour?",
+                                        "header": "Colour",
+                                        "options": [
+                                          {
+                                            "label": "Red",
+                                            "description": "warm"
+                                          },
+                                          {
+                                            "label": "Blue",
+                                            "description": "cool"
+                                          }
+                                        ],
+                                        "multiSelect": false
+                                      },
+                                      {
+                                        "question": "Which size?",
+                                        "header": "Size",
+                                        "options": [
+                                          {
+                                            "label": "Small"
+                                          },
+                                          {
+                                            "label": "Large"
+                                          }
+                                        ],
+                                        "multiSelect": false
+                                      }
+                                    ]
+                                  },
+                                  "tool_use_id": "tu_e3q_{{p.uuid}}"
+                                }
+                              }
+                            },
+                            {
+                              "await": {
+                                "type": "control_response",
+                                "response": {
+                                  "request_id": "qe3"
+                                }
+                              },
+                              "as": "qe3",
+                              "timeoutMs": 600000
+                            },
+                            {
+                              "text": "Answers: {{qe3.response.response.updatedInput.answers}}"
+                            },
+                            {
+                              "emit": {
+                                "type": "control_request",
+                                "request_id": "plan-e3",
+                                "request": {
+                                  "subtype": "can_use_tool",
+                                  "tool_name": "ExitPlanMode",
+                                  "input": {
+                                    "plan": "# Plan\n1. Read the code\n2. Fix it"
+                                  },
+                                  "tool_use_id": "tu_e3p_{{p.uuid}}"
+                                }
+                              }
+                            },
+                            {
+                              "await": {
+                                "type": "control_response",
+                                "response": {
+                                  "request_id": "plan-e3"
+                                }
+                              },
+                              "as": "plan-e3",
+                              "timeoutMs": 600000
+                            },
+                            {
+                              "if": {
+                                "saved": "plan-e3",
+                                "match": {
+                                  "response": {
+                                    "response": {
+                                      "behavior": "allow"
+                                    }
+                                  }
+                                }
+                              },
+                              "then": [
+                                {
+                                  "text": "Plan approved; starting."
+                                }
+                              ],
+                              "else": [
+                                {
+                                  "text": "Still planning."
+                                }
+                              ]
+                            },
+                            {
+                              "result": "done"
+                            }
+                          ],
+                          "else": [
+                            {
+                              "if": {
+                                "saved": "p",
+                                "contains": "[E4]"
+                              },
+                              "then": [
+                                {
+                                  "tool": {
+                                    "id": "tu_e4_{{p.uuid}}",
+                                    "name": "Bash",
+                                    "input": {
+                                      "command": "ls -R"
+                                    }
+                                  }
+                                },
+                                {
+                                  "hook": {
+                                    "toolUseId": "tu_e4_{{p.uuid}}",
+                                    "input": {
+                                      "command": "ls -R"
+                                    }
+                                  },
+                                  "as": "h4"
+                                },
+                                {
+                                  "await": {
+                                    "type": "user"
+                                  },
+                                  "as": "s",
+                                  "timeoutMs": 600000
+                                },
+                                {
+                                  "sleep": 2500
+                                },
+                                {
+                                  "toolResult": {
+                                    "id": "tu_e4_{{p.uuid}}",
+                                    "text": "src\nREADME.md"
+                                  }
+                                },
+                                {
+                                  "read": true
+                                },
+                                {
+                                  "text": "E4 reply after reading: {{s.message.content.0.text}}"
+                                },
+                                {
+                                  "result": "done"
+                                }
+                              ],
+                              "else": [
+                                {
+                                  "if": {
+                                    "saved": "p",
+                                    "contains": "[E5]"
+                                  },
+                                  "then": [
+                                    {
+                                      "tool": {
+                                        "id": "tu_e5a_{{p.uuid}}",
+                                        "name": "Bash",
+                                        "input": {
+                                          "command": "npm test"
+                                        }
+                                      }
+                                    },
+                                    {
+                                      "hook": {
+                                        "toolUseId": "tu_e5a_{{p.uuid}}",
+                                        "input": {
+                                          "command": "npm test"
+                                        }
+                                      },
+                                      "as": "h5"
+                                    },
+                                    {
+                                      "if": {
+                                        "saved": "h5",
+                                        "match": {
+                                          "response": {
+                                            "response": {
+                                              "hookSpecificOutput": {
+                                                "permissionDecision": "deny"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "then": [
+                                        {
+                                          "toolResult": {
+                                            "id": "tu_e5a_{{p.uuid}}",
+                                            "text": "PreToolUse:Bash hook error: denied",
+                                            "isError": true
+                                          }
+                                        },
+                                        {
+                                          "tool": {
+                                            "id": "tu_e5b_{{p.uuid}}",
+                                            "name": "Bash",
+                                            "input": {
+                                              "command": "npm test",
+                                              "run_in_background": true
+                                            }
+                                          }
+                                        },
+                                        {
+                                          "hook": {
+                                            "toolUseId": "tu_e5b_{{p.uuid}}",
+                                            "input": {
+                                              "command": "npm test",
+                                              "run_in_background": true
+                                            }
+                                          },
+                                          "as": "h5b"
+                                        },
+                                        {
+                                          "taskStarted": {
+                                            "taskId": "bg_e5_{{p.uuid}}",
+                                            "toolUseId": "tu_e5b_{{p.uuid}}",
+                                            "background": true,
+                                            "description": "npm test"
+                                          }
+                                        },
+                                        {
+                                          "backgroundTasks": [
+                                            {
+                                              "taskId": "bg_e5_{{p.uuid}}",
+                                              "description": "npm test"
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "toolResult": {
+                                            "id": "tu_e5b_{{p.uuid}}",
+                                            "text": "Command running in background with ID: bg_e5"
+                                          }
+                                        },
+                                        {
+                                          "text": "E5: the tests are running in the background."
+                                        }
+                                      ],
+                                      "else": [
+                                        {
+                                          "toolResult": {
+                                            "id": "tu_e5a_{{p.uuid}}",
+                                            "text": "tests passed"
+                                          }
+                                        },
+                                        {
+                                          "text": "E5: ran in the foreground (not redirected)."
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "result": "done"
+                                    }
+                                  ],
+                                  "else": [
+                                    {
+                                      "if": {
+                                        "saved": "p",
+                                        "contains": "[E6]"
+                                      },
+                                      "then": [
+                                        {
+                                          "tool": {
+                                            "id": "tu_e6_{{p.uuid}}",
+                                            "name": "Bash",
+                                            "input": {
+                                              "command": "node server.js"
+                                            }
+                                          }
+                                        },
+                                        {
+                                          "hook": {
+                                            "toolUseId": "tu_e6_{{p.uuid}}",
+                                            "input": {
+                                              "command": "node server.js"
+                                            }
+                                          },
+                                          "as": "h6"
+                                        },
+                                        {
+                                          "sleep": 500
+                                        },
+                                        {
+                                          "taskStarted": {
+                                            "taskId": "bt_e6_{{p.uuid}}",
+                                            "toolUseId": "tu_e6_{{p.uuid}}",
+                                            "description": "node server.js"
+                                          }
+                                        },
+                                        {
+                                          "await": {
+                                            "type": "user"
+                                          },
+                                          "as": "s6",
+                                          "timeoutMs": 600000
+                                        },
+                                        {
+                                          "await": {
+                                            "type": "control_request",
+                                            "request": {
+                                              "subtype": "background_tasks"
+                                            }
+                                          },
+                                          "as": "bg6",
+                                          "timeoutMs": 600000
+                                        },
+                                        {
+                                          "backgroundTasks": [
+                                            {
+                                              "taskId": "bt_e6_{{p.uuid}}",
+                                              "description": "node server.js"
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "toolResult": {
+                                            "id": "tu_e6_{{p.uuid}}",
+                                            "text": "Command was manually backgrounded by user with ID: bt_e6."
+                                          }
+                                        },
+                                        {
+                                          "read": true
+                                        },
+                                        {
+                                          "text": "E6 reply: the server keeps running in the background; noted: {{s6.message.content.0.text}}"
+                                        },
+                                        {
+                                          "result": "done"
+                                        }
+                                      ],
+                                      "else": [
+                                        {
+                                          "if": {
+                                            "saved": "p",
+                                            "contains": "[E7]"
+                                          },
+                                          "then": [
+                                            {
+                                              "tool": {
+                                                "id": "tu_e7_{{p.uuid}}",
+                                                "name": "Bash",
+                                                "input": {
+                                                  "command": "node -e \"setTimeout(()=>{},600000)\""
+                                                }
+                                              }
+                                            },
+                                            {
+                                              "sleep": 300
+                                            },
+                                            {
+                                              "taskStarted": {
+                                                "taskId": "bt_e7_{{p.uuid}}",
+                                                "toolUseId": "tu_e7_{{p.uuid}}",
+                                                "description": "long wait"
+                                              }
+                                            },
+                                            {
+                                              "await": {
+                                                "type": "control_request",
+                                                "request": {
+                                                  "subtype": "interrupt"
+                                                }
+                                              },
+                                              "timeoutMs": 3600000
+                                            },
+                                            {
+                                              "toolResult": {
+                                                "id": "tu_e7_{{p.uuid}}",
+                                                "text": "Command was manually backgrounded by user with ID: bt_e7."
+                                              }
+                                            },
+                                            {
+                                              "result": "",
+                                              "isError": true
+                                            }
+                                          ],
+                                          "else": [
+                                            {
+                                              "if": {
+                                                "saved": "p",
+                                                "contains": "[E8-run]"
+                                              },
+                                              "then": [
+                                                {
+                                                  "tool": {
+                                                    "id": "tu_e8_{{p.uuid}}",
+                                                    "name": "Bash",
+                                                    "input": {
+                                                      "command": "node -e \"setTimeout(()=>{},600000)\""
+                                                    }
+                                                  }
+                                                },
+                                                {
+                                                  "await": {
+                                                    "type": "never-sent"
+                                                  },
+                                                  "timeoutMs": 3600000
+                                                }
+                                              ],
+                                              "else": [
+                                                {
+                                                  "if": {
+                                                    "saved": "p",
+                                                    "contains": "[E8-stop]"
+                                                  },
+                                                  "then": [
+                                                    {
+                                                      "tool": {
+                                                        "id": "tu_e7_{{p.uuid}}",
+                                                        "name": "Bash",
+                                                        "input": {
+                                                          "command": "node -e \"setTimeout(()=>{},600000)\""
+                                                        }
+                                                      }
+                                                    },
+                                                    {
+                                                      "sleep": 300
+                                                    },
+                                                    {
+                                                      "taskStarted": {
+                                                        "taskId": "bt_e7_{{p.uuid}}",
+                                                        "toolUseId": "tu_e7_{{p.uuid}}",
+                                                        "description": "long wait"
+                                                      }
+                                                    },
+                                                    {
+                                                      "await": {
+                                                        "type": "control_request",
+                                                        "request": {
+                                                          "subtype": "interrupt"
+                                                        }
+                                                      },
+                                                      "timeoutMs": 3600000
+                                                    },
+                                                    {
+                                                      "toolResult": {
+                                                        "id": "tu_e7_{{p.uuid}}",
+                                                        "text": "Command was manually backgrounded by user with ID: bt_e7."
+                                                      }
+                                                    },
+                                                    {
+                                                      "result": "",
+                                                      "isError": true
+                                                    }
+                                                  ],
+                                                  "else": [
+                                                    {
+                                                      "if": {
+                                                        "saved": "p",
+                                                        "contains": "[MD]"
+                                                      },
+                                                      "then": [
+                                                        {
+                                                          "text": "Markdown check.\n\n> [!note] Heads up\n> A callout body.\n\n```mermaid\ngraph TD\n  A[Start] --> B[Done]\n```\n\nEnd."
+                                                        },
+                                                        {
+                                                          "result": "done"
+                                                        }
+                                                      ],
+                                                      "else": [
+                                                        {
+                                                          "if": {
+                                                            "flag": "--resume"
+                                                          },
+                                                          "then": [
+                                                            {
+                                                              "text": "Continued after restart."
+                                                            },
+                                                            {
+                                                              "result": "done"
+                                                            }
+                                                          ],
+                                                          "else": [
+                                                            {
+                                                              "text": "You said: {{p.message.content.0.text}}"
+                                                            },
+                                                            {
+                                                              "result": "done"
+                                                            }
+                                                          ]
+                                                        }
+                                                      ]
+                                                    }
+                                                  ]
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

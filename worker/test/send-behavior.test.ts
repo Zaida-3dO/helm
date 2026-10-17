@@ -35,6 +35,10 @@ describe("asap steers", () => {
       const first = uuid();
       await prompt(s.host, "list the files", {}, first);
       await s.host.waitFor((e) => e.type === "submission_delivered" && e.submissionId === first, 5000, 0);
+      // The host moves only an accepted submission to delivered: the response must come first.
+      const respAt = s.host.events.findIndex((e) => e.type === "response" && (e.data as Json | undefined)?.submissionId === first);
+      const delAt = s.host.events.findIndex((e) => e.type === "submission_delivered" && e.submissionId === first);
+      assert.ok(respAt !== -1 && respAt < delAt, `response (${respAt}) before submission_delivered (${delAt})`);
       const sid = await steerDuringTool(s);
       assert.equal(s.host.ofType("tool_execution_end").length, 0, "accepted before the tool boundary, not at it");
       const at = (pred: (e: Json) => boolean) => s.host.events.findIndex(pred);
@@ -101,6 +105,27 @@ describe("wait limit", () => {
       const r = await s.host.request({ type: "deliver_now", submissionId: sid, reason: "wait_limit", minRunMs: 0 });
       assert.deepEqual(r.data, { result: "waiting" });
       s.host.send({ type: "extension_ui_response", id: (s.host.ofType("extension_ui_request")[0].id as string), value: "Deny" });
+      await s.host.waitForType("agent_settled", 5000, 0);
+    } finally {
+      await s.done();
+    }
+  });
+});
+
+describe("wait limit holds off while the user is being asked", () => {
+  test("wait-limit-approval: an eligible foreground task is not moved while an approval is open", async () => {
+    const s = startWithFixture("wait-limit-approval");
+    try {
+      await s.host.ready();
+      await prompt(s.host, "start the server and write a file");
+      await s.host.waitFor((e) => e.type === "tool_execution_update" && e.stoppable === true, 5000, 0);
+      const ask = await s.host.waitForType("extension_ui_request", 5000, 0);
+      const sid = uuid();
+      await prompt(s.host, "steer", { streamingBehavior: "steer" }, sid);
+      const r = await s.host.request({ type: "deliver_now", submissionId: sid, reason: "wait_limit", minRunMs: 0 });
+      assert.deepEqual(r.data, { result: "waiting" });
+      assert.equal(s.received().some(ctl("background_tasks")), false, "nothing moved while the approval is open");
+      s.host.send({ type: "extension_ui_response", id: ask.id as string, value: "Deny" });
       await s.host.waitForType("agent_settled", 5000, 0);
     } finally {
       await s.done();
