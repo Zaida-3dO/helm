@@ -1782,6 +1782,7 @@ name = "helm-consent"
 version = "0.1.0"
 dependencies = [
  "helm-core",
+ "helm-hosttools",
  "helm-ipc",
  "hex",
  "rusqlite",
@@ -1789,6 +1790,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tokio",
  "ts-rs",
  "uuid",
 ]
@@ -1818,8 +1820,10 @@ dependencies = [
 name = "helm-hosttools"
 version = "0.1.0"
 dependencies = [
+ "helm-core",
  "helm-ipc",
  "helm-workers",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

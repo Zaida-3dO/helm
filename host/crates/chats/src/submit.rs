@@ -350,6 +350,110 @@ pub fn chat_send(
     Ok(ChatSendResult { submission, chat })
 }
 
+/// How a host send lands on a busy chat (cross-chat messages).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostSendMode {
+    /// At the next supported boundary of the running turn (never cancels running tools).
+    Steer,
+    /// As a follow-up after the running turn.
+    Queue,
+}
+
+/// A send made by the host for something other than the user's own typing: a cross-chat message
+/// (origin `other_chat`, admission Gated) or an app note (origin `app`). Never counts as consent
+/// and never follows the user's send behaviour. Idempotent per `submission_id`.
+pub struct HostSend<'a> {
+    pub chat_id: &'a str,
+    pub submission_id: &'a str,
+    pub text: &'a str,
+    pub mode: HostSendMode,
+    pub origin: SubmissionOrigin,
+    /// Gated (waits for a run slot, no attachments) for automated sends such as cross-chat
+    /// messages; otherwise Exempt (app notes the agent is owed).
+    pub gated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostSent {
+    /// Saved, and handed to the chat now (idle: a prompt; busy and steer: a steer).
+    pub delivered: bool,
+    /// Saved as a follow-up behind the running turn.
+    pub queued: bool,
+}
+
+pub fn host_send(rt: &ChatRuntime, s: HostSend<'_>) -> Result<HostSent, ApiError> {
+    if s.text.trim().is_empty() {
+        return Err(ApiError::bad_args("The message is empty."));
+    }
+    if s.text.len() > store::MAX_SUBMISSION_BYTES {
+        return Err(ApiError::new("too_large", "The message is too large."));
+    }
+    let now = helm_core::now_ms();
+    let limits = rt.limits().clone();
+    let out = rt
+        .db()
+        .write(|tx| {
+            if let Some(existing) = store::get_submission(tx, s.submission_id)? {
+                return Ok(Ok((existing.state != SubmissionState::Queued, false)));
+            }
+            let Some((status, archived)) = chat_status(tx, s.chat_id)? else {
+                return Ok(Err(crate::ops::not_found()));
+            };
+            if archived {
+                return Ok(Err(ApiError::new("refused", "That chat is archived.")));
+            }
+            if status == ChatStatus::Stopping {
+                return Ok(Err(ApiError::new("busy", "That chat is stopping; try again in a moment.")));
+            }
+            let busy = status.is_busy();
+            if !busy {
+                let active: i64 = tx.query_row(
+                    "SELECT count(*) FROM chats WHERE status IN ('starting', 'running', 'stopping')",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if active as usize >= limits.max_active {
+                    return Ok(Err(ApiError::new("capacity", "Too many chats are already working.")));
+                }
+            }
+            let (mode, state) = match (busy, s.mode) {
+                (false, _) => (SubmissionMode::Prompt, SubmissionState::Saved),
+                (true, HostSendMode::Steer) => (SubmissionMode::Steer, SubmissionState::Saved),
+                (true, HostSendMode::Queue) => (SubmissionMode::FollowUp, SubmissionState::Queued),
+            };
+            insert_submission(
+                tx,
+                &NewSubmission {
+                    id: s.submission_id,
+                    chat_id: s.chat_id,
+                    text: s.text,
+                    mode,
+                    state,
+                    origin: s.origin,
+                    priority: None,
+                    admission: if s.gated { AdmissionClass::Gated } else { AdmissionClass::Exempt },
+                    attachments: &[],
+                    now,
+                },
+            )?;
+            tx.execute("UPDATE chats SET updated_at = ?1 WHERE id = ?2", params![now, s.chat_id])?;
+            Ok(Ok((state != SubmissionState::Queued, true)))
+        })
+        .map_err(sql)??;
+    let (dispatch, fresh) = out;
+    if fresh && dispatch {
+        rt.command(s.chat_id, Cmd::Dispatch(s.submission_id.to_owned()))?;
+    }
+    if fresh {
+        emit_queue(rt, s.chat_id);
+        emit_chat(rt, s.chat_id);
+    }
+    Ok(HostSent {
+        delivered: dispatch,
+        queued: !dispatch,
+    })
+}
+
 /// Send the restart continuation (origin `harness`, a plain prompt: it never interrupts and never
 /// follows the user's send mode) and drop the row, so it is sent once.
 pub fn continuation(rt: &ChatRuntime, chat_id: &str) -> Result<(), ApiError> {
@@ -661,6 +765,10 @@ mod admission_tests {
     /// caller fails this test until it is added here with its class.
     const CALLERS: &[(&str, &str)] = &[
         ("chat_send", "AdmissionClass::Exempt"),
+        (
+            "host_send",
+            "if s.gated { AdmissionClass::Gated } else { AdmissionClass::Exempt }",
+        ),
         ("continuation", "AdmissionClass::Exempt"),
     ];
 

@@ -681,7 +681,9 @@ pub fn upkeep(db: &Database, kinds: &AllowKinds, now: i64) -> Result<Upkeep, Api
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .map(|v| Delivery {
-                submission_id: format!("consent-decision:{}", v.id),
+                // The request id is the submission id: a UUID, fixed per request, so a
+                // retried delivery is the same submission and is held at most once.
+                submission_id: v.id.clone(),
                 text: decision_text(&v),
                 request_id: v.id,
                 chat_id: v.chat_id,

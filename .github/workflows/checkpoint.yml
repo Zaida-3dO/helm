@@ -61,3 +61,24 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build -w ui
       - run: cargo check --workspace --all-targets
+
+  # hub/ is its own Cargo workspace (not in --workspace), so it gets its own job. Linux,
+  # because the hub image runs on Linux and Linux minutes bill single.
+  hub:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'checkpoint')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: hub
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hub
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test

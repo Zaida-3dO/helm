@@ -21,6 +21,7 @@ import { projectsFakeOps } from './fake-projects.ts';
 import { panelFakeOps } from './fake-panel.ts';
 import { shellFakeOps } from './fake-shell.ts';
 import { mcpFakeOps } from './fake-mcp.ts';
+import { hosttoolsFakeOps } from './fake-hosttools.ts';
 
 type Emit = (payload: unknown) => void;
 
@@ -50,6 +51,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const panel = panelFakeOps(); registerFakeOps(panel.prefixes, panel.handler); }
 { const sh = shellFakeOps(); registerFakeOps(sh.prefixes, sh.handler); }
 { const mcp = mcpFakeOps(); registerFakeOps(mcp.prefixes, mcp.handler); }
+{ const ht = hosttoolsFakeOps(); registerFakeOps(ht.prefixes, ht.handler); }
 
 export function fakeOpFor(op: string): FakeOpHandler | undefined {
   return extraOps.find((r) => r.prefixes.some((p) => op.startsWith(p)))?.handler;

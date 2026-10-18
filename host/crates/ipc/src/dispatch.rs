@@ -67,6 +67,17 @@ impl Dispatcher {
             log::warn!("api refused for window '{}'", caller.window_label);
             return Err(ApiError::refused());
         }
+        self.run(op, args).await
+    }
+
+    /// Run `op` for the host itself (host tools acting for an agent), past the window check but
+    /// with the op's own class and locks. Never reachable from a window. A caller that already
+    /// holds the maintenance lock must not call a maintenance op this way (it is not reentrant).
+    pub async fn call_host(&self, op: &str, args: Value) -> OpResult {
+        self.run(op, args).await
+    }
+
+    async fn run(&self, op: &str, args: Value) -> OpResult {
         let Some(entry) = self.registry.ops.get(op).cloned() else {
             return Err(ApiError::refused());
         };

@@ -433,10 +433,7 @@ fn upkeep_expires_and_lists_deliveries_once() {
     let u = store::upkeep(&e.db, &e.kinds, T0 + MINUTE).unwrap();
     assert!(u.changed_chats.is_empty());
     assert_eq!(u.deliveries.len(), 1);
-    assert_eq!(
-        u.deliveries[0].submission_id,
-        format!("consent-decision:{}", g.id)
-    );
+    assert_eq!(u.deliveries[0].submission_id, g.id);
     assert!(u.deliveries[0].text.starts_with("[Helm] The user allowed"));
     store::mark_delivered(&e.db, &g.id, T0 + MINUTE).unwrap();
     assert!(store::upkeep(&e.db, &e.kinds, T0 + 2 * MINUTE)
@@ -507,4 +504,53 @@ fn ops_decide_and_signal() {
 
 pub(crate) fn now() -> i64 {
     helm_core::now_ms()
+}
+
+#[test]
+fn app_request_allow_files_a_pending_request_and_signals() {
+    let e = env();
+    let mut services = Services::new();
+    services.insert(e.db.clone());
+    services.insert(Arc::new(e.kinds.clone()));
+    let sink = Arc::new(RecordingSink::default());
+    let ctx = helm_hosttools::ToolCtx {
+        caller_chat_id: "c0".into(),
+        is_child: false,
+        tool_call_id: Some("tu1".into()),
+        origin: helm_hosttools::CallOrigin::Agent,
+        services: Arc::new(services),
+        events: sink.clone(),
+        ops: None,
+    };
+    let mut reg = helm_hosttools::HostToolRegistry::new();
+    crate::register_host_tools(&mut reg);
+    let helm_hosttools::ToolHandler::Blocking(f) =
+        reg.get("app_request_allow").unwrap().handler.clone()
+    else {
+        panic!("blocking tool")
+    };
+    let r = f(
+        &ctx,
+        json!({"action": "test_action", "target": {"name": "alpha"}, "reason": "The user asked."}),
+    )
+    .unwrap();
+    assert_eq!(r["state"], "pending");
+    assert_eq!(r["summary"], "Run the test action alpha");
+    assert_eq!(sink.kinds(), ["consent"]);
+    // The same tool use files once.
+    let again = f(
+        &ctx,
+        json!({"action": "test_action", "target": {"name": "alpha"}, "reason": "Again."}),
+    )
+    .unwrap();
+    assert_eq!(again["requestId"], r["requestId"]);
+    let bad = f(&ctx, json!({"action": "land", "target": {}, "reason": "x"})).unwrap_err();
+    assert!(
+        bad.public
+            .starts_with("[Helm] Your Allow request was refused:"),
+        "{}",
+        bad.public
+    );
+    // Nothing an agent does mints a grant: the request is still only pending.
+    assert!(spend(&e, "c0", &t("alpha"), crate::tests::now()).is_err());
 }

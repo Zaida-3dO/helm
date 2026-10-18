@@ -17,6 +17,7 @@ import { StreamTranslator } from "./translate.ts";
 import { Attribution } from "../../hosttools/attribution.ts";
 import { RequestChannel } from "../../hosttools/channel.ts";
 import { HostToolServer, SERVER_NAME, sdkMcpConfig, toolPrefix } from "../../hosttools/server.ts";
+import { applyConfigLine, asHostToolBridge, createMcpBridge, nativeFromInit, type McpBridge } from "../../mcp/index.ts";
 
 /** The largest prompt text the worker will submit. */
 export const MAX_SUBMISSION_TEXT_BYTES = 2 * 1024 * 1024;
@@ -128,6 +129,8 @@ export class ClaudeDriver implements Driver {
   private compacting: { boundary: boolean } | undefined;
   /** Helm's in-process MCP server, when the launch lists host tools. */
   private readonly hostTools: HostToolServer | undefined;
+  /** Helm's own MCP client (the bridge), reached through the helm server's tools. */
+  private readonly mcp: McpBridge | undefined;
   private readonly attribution = new Attribution(toolPrefix);
 
   constructor(launch: Launch, channel: HostChannel, deps: DriverDeps) {
@@ -148,7 +151,9 @@ export class ClaudeDriver implements Driver {
       skipPermissions: c.skipPermissions === true,
     });
     if (Array.isArray(launch.hostTools) && typeof launch.chatToolsDirectory === "string" && launch.chatToolsDirectory) {
+      this.mcp = createMcpBridge((l) => this.ch.emit(l), { cwd: launch.cwd });
       this.hostTools = new HostToolServer({
+        bridge: asHostToolBridge(this.mcp),
         hostTools: launch.hostTools,
         channel: new RequestChannel({ dir: launch.chatToolsDirectory, emit: (rec) => this.ch.emit(rec) }),
         // A successful self-archive ends the turn.
@@ -279,9 +284,15 @@ export class ClaudeDriver implements Driver {
     this.ch.emit(e);
   }
 
+  /** `mcp_config` from the host. */
+  hostLine(cmd: Json): boolean {
+    return this.mcp ? applyConfigLine(this.mcp, cmd) : false;
+  }
+
   async shutdown(reason: string): Promise<void> {
     if (this.shuttingDown) return this.exited;
     this.shuttingDown = true;
+    this.mcp?.close();
     this.deps.diag(`claude driver shutting down: ${reason}`);
     clearTimeout(this.stopTimer);
     for (const s of this.subs.values()) {
@@ -394,6 +405,8 @@ export class ClaudeDriver implements Driver {
         return this.onLifecycle(rec);
       case "system":
         if (rec.subtype === "init" && typeof rec.model === "string") this.model = rec.model;
+        // Servers Claude Code loads natively are skipped by Helm's own client.
+        if (rec.subtype === "init") this.mcp?.noteNative(nativeFromInit(rec));
         this.onTaskRecord(rec);
         this.translator.handle(rec);
         return;

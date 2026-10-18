@@ -20,23 +20,47 @@
 
 pub mod addendum;
 pub mod dispatch;
+pub mod feedback;
 pub mod lines;
 pub mod registry;
 pub mod reserved;
+pub mod sections;
+pub mod settings;
+pub mod settings_allow;
+pub mod shells;
 pub mod spec;
+pub mod tools;
 
 pub use addendum::{Addendum, AddendumSection, StaticSection};
 pub use dispatch::{Caller, CallerBinding, ChatRequest, HostTools};
 pub use lines::{Broadcaster, WorkerBroadcast, WorkerLineCtx, WorkerLines};
 pub use registry::{
-    CallOrigin, Changed, HostToolRegistry, RegisteredTool, ToolCtx, ToolError, ToolFuture,
-    ToolHandler, ToolResult,
+    CallOrigin, Changed, HostToolRegistry, OpInvoker, RegisteredTool, ToolCtx, ToolError,
+    ToolFuture, ToolHandler, ToolResult,
 };
 pub use spec::{
     Availability, CatalogueEntry, Condition, LaunchKeys, McpLaunch, McpLaunchGate, McpLaunchSource,
     RequestLimit, ToolSpec, DEFAULT_TIMEOUT_MS, MAX_DESCRIPTION,
 };
 
-/// This crate's own tools. None yet: the chat, project, settings and feedback tools arrive with
-/// the request channel.
-pub fn register_host_tools(_r: &mut HostToolRegistry) {}
+/// This crate's own tools: projects and repositories ([`tools`]). The chat tools register from
+/// the chats crate.
+pub fn register_host_tools(r: &mut HostToolRegistry) {
+    tools::register_host_tools(r);
+    settings::register_host_tools(r);
+    shells::register_host_tools(r);
+    // Registered last among the built-ins.
+    feedback::register_host_tools(r);
+}
+
+/// The settings change ring (`settings_changes`).
+pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
+    reg.initializer("hosttools-settings-changes", settings::init);
+    reg.initializer("hosttools-agent-feedback", feedback::init);
+}
+
+/// `settings_changes_list` and `settings_undo`.
+pub fn register_ops(reg: &mut helm_ipc::OpRegistry) {
+    settings::register_ops(reg);
+    feedback::register_ops(reg);
+}

@@ -24,6 +24,8 @@ import { ChatStore } from './state/store.ts';
 import { TopBar } from './topbar/TopBar.tsx';
 import { TerminalDock } from './terminal/TerminalDock.tsx';
 import { Notifications } from './notifications/Notifications.tsx';
+import { SettingsToast } from './hosttools/SettingsToast.tsx';
+import './hosttools/index.ts'; // the Allow cards
 
 export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers: Flushers }) {
   const ops = useMemo(() => chatOps(api), [api]);
@@ -125,6 +127,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
       </main>
       <SidePanel api={shell.api} chatId={chatId} /> {/* side panel */}
       <ToastSlotView />
+      <SettingsToast api={shell.api} bus={shell.bus} onOpenChat={(id) => shell.select(id)} /> {/* settings-change toast */}
       <Notifications />
       <SettingsDialog />
       <SearchDialog /> {/* Mod+K search */}

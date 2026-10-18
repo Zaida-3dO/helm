@@ -3,6 +3,7 @@ import type { ContextKind } from "./ContextKind";
 import type { RetryInfo } from "./RetryInfo";
 import type { SubmissionMode } from "./SubmissionMode";
 import type { ToolCallSummary } from "./ToolCallSummary";
+import type { ToolSource } from "./ToolSource";
 import type { Usage } from "./Usage";
 
 /**
@@ -12,4 +13,8 @@ export type MessageDetails = { usage?: Usage, stopReason?: string, errorMessage?
 /**
  * For a `toolResult` row: the call's arguments, bounded like [`ToolCallSummary::args`].
  */
-toolArgs?: string, isError?: boolean, submissionId?: string, mode?: SubmissionMode, retry?: RetryInfo, contextKind?: ContextKind, textTruncated?: boolean, stoppable?: boolean, };
+toolArgs?: string, isError?: boolean, submissionId?: string, mode?: SubmissionMode, retry?: RetryInfo, contextKind?: ContextKind, textTruncated?: boolean, stoppable?: boolean, 
+/**
+ * For a tool row: which server the tool came from.
+ */
+toolSource?: ToolSource, };

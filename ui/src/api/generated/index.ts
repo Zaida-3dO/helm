@@ -71,6 +71,7 @@ export type { ThreadState } from './ThreadState.ts';
 export type { TitleState } from './TitleState.ts';
 export type { TitleSuggestResult } from './TitleSuggestResult.ts';
 export type { ToolCallSummary } from './ToolCallSummary.ts';
+export type { ToolSource } from './ToolSource.ts';
 export type { ToolStopArgs } from './ToolStopArgs.ts';
 export type { ToolStopResult } from './ToolStopResult.ts';
 export type { TranscriptPage } from './TranscriptPage.ts';

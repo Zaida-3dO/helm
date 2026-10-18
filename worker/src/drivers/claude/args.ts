@@ -57,7 +57,10 @@ export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[
   // fastMode is always explicit: the launch's own field is its only owner.
   const { fastMode: _dropped, ...custom } = c.settings ?? {};
   void _dropped;
-  args.push("--settings", JSON.stringify({ ...custom, fastMode: c.fastMode === true }));
+  // Held repository servers are also switched off for the CLI's .mcp.json loader.
+  const held = (c.disabledMcpServers ?? []).filter((n) => /^[A-Za-z0-9_-]{1,64}$/.test(n) && n !== "helm");
+  const extra = held.length > 0 ? { disabledMcpjsonServers: held } : {};
+  args.push("--settings", JSON.stringify({ ...custom, ...extra, fastMode: c.fastMode === true }));
   if (c.extraArgs) args.push(...c.extraArgs);
   return args;
 }

@@ -480,6 +480,20 @@ pub struct MessageDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub stoppable: Option<bool>,
+    /// For a tool row: which server the tool came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tool_source: Option<ToolSource>,
+}
+
+/// Which server a tool came from: Helm's own host tools, an MCP server, or Claude Code itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolSource {
+    /// `host`, `mcp` or `native`.
+    pub kind: String,
+    pub server: String,
+    pub tool: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

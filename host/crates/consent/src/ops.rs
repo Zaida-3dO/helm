@@ -52,5 +52,9 @@ pub(crate) fn consent_decide(ctx: &OpCtx, args: Value) -> Result<Value, ApiError
     // A signal only: the card is rebuilt from consent_list, never from an event payload.
     ctx.events
         .emit(AppEvent::new("consent").with("chatId", v.chat_id.clone()));
+    // The decision is owed to the agent: wake the delivery loop.
+    if let Some(w) = ctx.services.get::<crate::ConsentWake>() {
+        w.0.notify_one();
+    }
     to_value(&v)
 }

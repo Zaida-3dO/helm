@@ -78,6 +78,9 @@ pub struct ToolSpec {
     /// Changes state: runs under the maintenance lock, and its guidance carries the
     /// explicit-request rule and "never retry after a lost reply".
     pub mutating: bool,
+    /// The handler calls `api` ops that take their own lock ([`crate::OpInvoker`]), so the
+    /// dispatcher must not hold the maintenance lock around it (it is not reentrant).
+    pub self_locking: bool,
 }
 
 impl ToolSpec {
@@ -92,6 +95,7 @@ impl ToolSpec {
             timeout_ms: DEFAULT_TIMEOUT_MS,
             availability: Availability::ROOT,
             mutating: false,
+            self_locking: false,
         }
     }
 
@@ -120,6 +124,12 @@ impl ToolSpec {
 
     pub fn when(mut self, c: Condition) -> Self {
         self.availability.when = c;
+        self
+    }
+
+    /// The handler delegates to `api` ops, which lock for themselves.
+    pub fn self_locking(mut self) -> Self {
+        self.self_locking = true;
         self
     }
 

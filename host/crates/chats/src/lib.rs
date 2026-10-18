@@ -51,11 +51,13 @@ pub mod session_log;
 pub mod store;
 pub mod submit;
 pub mod titles;
+pub mod tools;
 pub mod types;
 
 pub use hostcalls::HostSeam;
 pub use ops::register_ops;
 pub use runtime::{ChatRuntime, ProcessSpawner, RuntimeConfig, RuntimeDrain};
+pub use tools::register_host_tools;
 
 pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
     schema::register(reg);

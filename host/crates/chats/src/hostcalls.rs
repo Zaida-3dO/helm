@@ -69,11 +69,14 @@ pub(crate) fn on_request(
                 Err(ToolError::refused("Helm's host tools are not ready yet.")),
             ),
         };
-        if let Err(e) = write_response(&dir, &req.id, &body) {
-            log::warn!(
-                "host tool {}: could not write the answer: {e}",
-                req.operation
-            );
+        match write_response(&dir, &req.id, &body) {
+            Ok(true) => {}
+            Ok(false) => log::warn!(
+                "host tool {}: no request folder for {} (the worker gave up, or the folders differ)",
+                req.operation,
+                req.id
+            ),
+            Err(e) => log::warn!("host tool {}: could not write the answer: {e}", req.operation),
         }
     });
     calls.insert(id, task.abort_handle());

@@ -22,6 +22,8 @@ export interface Driver {
   compact(cmd: Json): Promise<ResponseBody>;
   /** Ends the harness. Resolves when the child is gone. */
   shutdown(reason: string): Promise<void>;
+  /** A host line for a worker-side service (`mcp_config`); false when nothing took it. */
+  hostLine?(cmd: Json): boolean;
 }
 
 /** Commands that are answered only once the harness is ready (as `prompt` is). */
@@ -121,6 +123,10 @@ export function serve(opts: ServeOptions): void {
         return;
       case "shutdown":
         void finish(0, "shutdown requested");
+        return;
+      case "mcp_config":
+        // The MCP client's configuration; no response is expected.
+        if (!driver.hostLine?.(cmd)) diag("mcp_config ignored: no MCP client in this worker");
         return;
       case "deliver_now":
       case "withdraw":

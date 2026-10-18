@@ -24,7 +24,8 @@ export interface AccessoryContext {
 export interface ComposerAccessory {
   id: string;
   /** `dock`: the composer dock's stack above the box (the review tray). */
-  placement: 'above' | 'toolbar' | 'dock';
+  /** `consent`: the Allow cards, first in the dock. */
+  placement: 'above' | 'toolbar' | 'dock' | 'consent';
   render: (ctx: AccessoryContext) => ReactNode;
 }
 

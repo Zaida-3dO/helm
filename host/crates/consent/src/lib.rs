@@ -26,12 +26,14 @@ pub mod bindings;
 pub mod kinds;
 mod ops;
 pub mod store;
+pub mod tool;
 pub mod types;
 pub mod words;
 
 pub use kinds::{AllowKind, AllowKinds, Canonical};
 pub use ops::register_ops;
 pub use store::{ConsentRecord, Delivery, NewRequest, Refusal, Upkeep};
+pub use tool::{register_host_tools, ConsentWake};
 pub use types::{
     ConsentDecideArgs, ConsentList, ConsentListArgs, ConsentRequest, Decision, RequestState,
 };

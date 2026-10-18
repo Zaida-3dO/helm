@@ -45,11 +45,11 @@ pub enum PrefClass {
 use PrefClass::*;
 use Tier::*;
 
-/// Every fixed preference key and its class. Seeded with the 36-key Base tier,
+/// Every fixed preference key and its class. Seeded with the 35-key Base tier,
 /// the All-tier `keybindings`, the generic-validated layout keys, and the all-settings
 /// switch. Later features add their keys here.
 pub const CLASSIFIED: &[(&str, PrefClass)] = &[
-    // Base tier (36).
+    // Base tier (35; responseVerbosity is user-only).
     ("theme", Registry(Base)),
     ("interfaceTheme", Registry(Base)),
     ("appearance", Registry(Base)),
@@ -80,7 +80,6 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     ("defaultHarness", Registry(Base)),
     ("newChat", Registry(Base)),
     ("autocomplete", Registry(Base)),
-    ("responseVerbosity", Registry(Base)),
     ("taskTriage", Registry(Base)),
     ("chatElements", Registry(Base)),
     ("desktopPet", Registry(Base)),
@@ -115,6 +114,11 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         UserOnly("The shell your terminal runs is yours to choose."),
     ),
     // User-only.
+    // Reply length is the user's call (default low).
+    (
+        "responseVerbosity",
+        UserOnly("How long the agent's replies are is yours to choose."),
+    ),
     (
         "agentSettingsAll",
         UserOnly("Lets chats change every setting, so only you can turn it on."),
@@ -214,12 +218,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_tier_has_36_keys() {
+    fn base_tier_has_35_keys() {
         let base = CLASSIFIED
             .iter()
             .filter(|(_, c)| *c == Registry(Base))
             .count();
-        assert_eq!(base, 36);
+        assert_eq!(base, 35);
     }
 
     #[test]

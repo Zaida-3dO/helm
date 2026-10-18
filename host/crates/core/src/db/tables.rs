@@ -87,6 +87,9 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("consent_requests", Data),
     ("consent_asks", Data),
     ("consent_records", Data),
+    // Host tools: the "Changed by chats" ring with Undo.
+    ("settings_changes", Data),
+    ("agent_feedback", Data),
 ];
 
 /// The class of a table, or None when it is unclassified.

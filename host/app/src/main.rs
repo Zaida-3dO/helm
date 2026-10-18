@@ -190,7 +190,7 @@ fn run_app(
                 events,
             };
             let dispatcher = Arc::new(Dispatcher::new(ops.clone(), ctx, debug));
-            registrations::attach_host_tools(&runtime, dispatcher.ctx(), dispatcher.maintenance());
+            registrations::attach_host_tools(&runtime, &dispatcher);
             app.manage(dispatcher);
 
             shell::build_main_window(app, &profile, debug)?;

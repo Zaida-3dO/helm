@@ -1,0 +1,128 @@
+{
+  "description": "w4-hosttools e2e: a [HT-TOOLS] prompt calls Helm's host tools through the helm MCP server (list chats, update a setting, request an Allow); any other prompt (the decision note) is answered 'noted'.",
+  "steps": [
+    {
+      "repeat": [
+        {
+          "await": {
+            "type": "user"
+          },
+          "as": "p",
+          "timeoutMs": 3600000
+        },
+        {
+          "init": {}
+        },
+        {
+          "if": {
+            "saved": "p",
+            "contains": "[HT-TOOLS]"
+          },
+          "then": [
+            {
+              "mcp": {
+                "message": {
+                  "jsonrpc": "2.0",
+                  "id": 0,
+                  "method": "initialize",
+                  "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {}
+                  }
+                }
+              },
+              "as": "mcpinit"
+            },
+            {
+              "mcp": {
+                "message": {
+                  "jsonrpc": "2.0",
+                  "id": 1,
+                  "method": "tools/list"
+                }
+              },
+              "as": "list"
+            },
+            {
+              "mcp": {
+                "hook": {
+                  "toolUseId": "tu_list"
+                },
+                "message": {
+                  "jsonrpc": "2.0",
+                  "id": 2,
+                  "method": "tools/call",
+                  "params": {
+                    "name": "app_list_chats",
+                    "arguments": {
+                      "includeCurrent": true
+                    }
+                  }
+                }
+              },
+              "as": "tu_list"
+            },
+            {
+              "mcp": {
+                "hook": {
+                  "toolUseId": "tu_set"
+                },
+                "message": {
+                  "jsonrpc": "2.0",
+                  "id": 3,
+                  "method": "tools/call",
+                  "params": {
+                    "name": "app_update_settings",
+                    "arguments": {
+                      "changes": {
+                        "compactSidebar": true
+                      }
+                    }
+                  }
+                }
+              },
+              "as": "tu_set"
+            },
+            {
+              "mcp": {
+                "hook": {
+                  "toolUseId": "tu_allow"
+                },
+                "message": {
+                  "jsonrpc": "2.0",
+                  "id": 4,
+                  "method": "tools/call",
+                  "params": {
+                    "name": "app_request_allow",
+                    "arguments": {
+                      "action": "test_action",
+                      "target": {
+                        "name": "e2e"
+                      },
+                      "reason": "The e2e check asks for this."
+                    }
+                  }
+                }
+              },
+              "as": "tu_allow"
+            },
+            {
+              "text": "tools done"
+            },
+            {
+              "result": "tools done"
+            }
+          ],
+          "else": [
+            {
+              "text": "noted"
+            },
+            {
+              "result": "noted"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

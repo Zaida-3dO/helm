@@ -76,6 +76,7 @@ mod tests {
             origin: CallOrigin::Agent,
             services: Arc::new(services),
             events: Arc::new(NullSink),
+            ops: None,
         };
         let ToolHandler::Blocking(list) = &r.get(admin::LIST).unwrap().handler else {
             panic!("blocking")

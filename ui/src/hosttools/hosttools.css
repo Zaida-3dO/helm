@@ -1,0 +1,56 @@
+/* The settings-change toast's own slot, just below the main toast slot. */
+.ui-toast-slot.ui-toast-slot-settings {
+  top: calc(var(--topbar-height) + 64px);
+}
+
+/* Allow cards in the composer dock. */
+.allow-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  outline: none;
+}
+.allow-card {
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.4));
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.allow-title {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.allow-agent-text {
+  margin-top: 6px;
+}
+.allow-agent-label {
+  font-size: 0.85em;
+  opacity: 0.75;
+}
+.allow-agent-line {
+  unicode-bidi: isolate;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.allow-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.allow-controls input[type='number'] {
+  width: 4.5em;
+  margin: 0 4px;
+}
+.allow-note {
+  flex: 1;
+  min-width: 12em;
+}
+.allow-slot {
+  display: inline-block;
+}
+.allow-error {
+  color: var(--danger, #c33);
+}

@@ -64,6 +64,7 @@ pub struct HostTools {
     inflight: Mutex<HashMap<String, usize>>,
     maintenance: Arc<tokio::sync::Mutex<()>>,
     inspections: Arc<Semaphore>,
+    ops: Option<Arc<dyn crate::registry::OpInvoker>>,
 }
 
 struct Slot<'a> {
@@ -90,7 +91,14 @@ impl HostTools {
             inflight: Mutex::new(HashMap::new()),
             maintenance: Arc::new(tokio::sync::Mutex::new(())),
             inspections: Arc::new(Semaphore::new(INSPECTION_PERMITS)),
+            ops: None,
         }
+    }
+
+    /// The `api` ops tools may act through ([`ToolCtx::op`]).
+    pub fn with_ops(mut self, ops: Arc<dyn crate::registry::OpInvoker>) -> Self {
+        self.ops = Some(ops);
+        self
     }
 
     /// Share the app-wide maintenance lock with the op dispatcher, so mutating tools never overlap
@@ -98,6 +106,11 @@ impl HostTools {
     pub fn with_maintenance(mut self, lock: Arc<tokio::sync::Mutex<()>>) -> Self {
         self.maintenance = lock;
         self
+    }
+
+    /// Whether tools that act through `api` ops can run.
+    pub fn has_ops(&self) -> bool {
+        self.ops.is_some()
     }
 
     pub fn registry(&self) -> &Arc<HostToolRegistry> {
@@ -195,6 +208,7 @@ impl HostTools {
             },
             services,
             events,
+            ops: self.ops.clone(),
         };
         let args = if req.args.is_null() {
             json!({})
@@ -202,6 +216,7 @@ impl HostTools {
             req.args.clone()
         };
         let mutating = tool.spec.mutating;
+        let self_locking = tool.spec.self_locking;
         let timeout = Duration::from_millis(tool.spec.timeout_ms);
         let handler = tool.handler.clone();
         let fut = async move {
@@ -216,7 +231,9 @@ impl HostTools {
         // after the worker has given up on it.
         let (maintenance, inspections) = (self.maintenance.clone(), self.inspections.clone());
         let result = tokio::time::timeout(timeout, async move {
-            if mutating {
+            if self_locking {
+                fut.await
+            } else if mutating {
                 let _g = maintenance.lock_owned().await;
                 fut.await
             } else {

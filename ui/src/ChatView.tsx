@@ -280,6 +280,11 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
           )}
         </div>
       )}
+      {accessoriesAt('consent').map((a) => (
+        <div key={a.id} className="composer-accessory" data-accessory={a.id}>
+          {a.render({ chat, thread, busy, draftEmpty: !chat.draft })}
+        </div>
+      ))}
       {accessoriesAt('dock').map((a) => (
         <div key={a.id} className="composer-accessory" data-accessory={a.id}>
           {a.render({ chat, thread, busy, draftEmpty: !chat.draft })}

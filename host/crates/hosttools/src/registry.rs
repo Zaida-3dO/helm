@@ -32,6 +32,42 @@ pub struct ToolCtx {
     pub origin: CallOrigin,
     pub services: Arc<Services>,
     pub events: Arc<dyn EventSink>,
+    /// The app's `api` ops, for tools that act through them; `None` in tests without them.
+    pub ops: Option<Arc<dyn OpInvoker>>,
+}
+
+impl ToolCtx {
+    /// Run an `api` op for this tool. An op refusal becomes a "nothing changed" refusal.
+    pub async fn op(&self, op: &str, args: Value) -> Result<Value, ToolError> {
+        let Some(ops) = &self.ops else {
+            return Err(ToolError::refused("This tool is not available here."));
+        };
+        ops.invoke(op, args)
+            .await
+            .map_err(|e| match e.code.as_str() {
+                "internal" => ToolError::maybe(e.message),
+                _ => ToolError::refused(e.message),
+            })
+    }
+}
+
+/// Runs `api` ops for host tools (the op dispatcher, past its window check).
+pub trait OpInvoker: Send + Sync {
+    fn invoke<'a>(
+        &'a self,
+        op: &'a str,
+        args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, helm_ipc::ApiError>> + Send + 'a>>;
+}
+
+impl OpInvoker for helm_ipc::Dispatcher {
+    fn invoke<'a>(
+        &'a self,
+        op: &'a str,
+        args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, helm_ipc::ApiError>> + Send + 'a>> {
+        Box::pin(self.call_host(op, args))
+    }
 }
 
 /// Whether a failed call may still have changed something.

@@ -26,6 +26,9 @@ test("Claude Code reaches host tools through the helm MCP server, attributed per
       }
     };
     const served = serve();
+    // The host's mcp_config line reaches Helm's MCP client: with a server configured, the helm
+    // server lists app_mcp_tools.
+    s.host.send({ type: "mcp_config", revision: "r1", servers: [{ id: "s1", name: "notes", transport: "stdio", allowPrivateHttp: false, error: "not resolved in this test" }] });
     const resp = await prompt(s.host, "use the tools");
     assert.equal(resp.success, true);
     await served;
@@ -49,7 +52,7 @@ test("Claude Code reaches host tools through the helm MCP server, attributed per
     };
     assert.equal(((mcp(0).result as Json).serverInfo as Json).name, "helm");
     const names = (((mcp(1).result as Json).tools as Json[]) ?? []).map((t) => t.name);
-    assert.deepEqual(names, ["app_list_chats", "app_list_tools", "app_mcp_call"]);
+    assert.deepEqual(names, ["app_list_chats", "app_list_tools", "app_mcp_call", "app_mcp_tools"]);
     assert.deepEqual((mcp(2).result as Json).structuredContent, { chats: [{ id: "c1" }] });
     assert.equal((mcp(3).result as Json).isError, true);
 
@@ -90,6 +93,8 @@ test("native MCP off adds --strict-mcp-config; held servers are disallowed", asy
     const dis = argv[argv.indexOf("--disallowedTools") + 1].split(",");
     assert.ok(dis.includes("mcp__notes"));
     assert.ok(!dis.some((d) => d.includes("bad name") || d === "mcp__helm"), "only safe names, never Helm's own server");
+    const settings = JSON.parse(argv[argv.indexOf("--settings") + 1]);
+    assert.deepEqual(settings.disabledMcpjsonServers, ["notes"], "held repository servers are off for the .mcp.json loader too");
   } finally {
     await s.done();
     fs.rmSync(dir, { recursive: true, force: true });
