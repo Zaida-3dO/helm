@@ -102,3 +102,116 @@ export function changeLines(row: MessageRow, max = 400): { lines: { sign: ' ' | 
   const cut = out.length > max || Boolean(row.details?.textTruncated);
   return { lines: out.slice(0, max), cut };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Tool identity and the flat row's wording.
+
+export interface ToolIdentity {
+  source: 'host' | 'mcp' | 'native';
+  /** The MCP server name, or "Helm" for the app's own host tools. */
+  server: string;
+  /** The tool's own name, without the `mcp__<server>__` prefix. */
+  tool: string;
+}
+
+/**
+ * Where a tool came from. The worker sets `details.toolSource`; for rows without it (older rows,
+ * or a worker that predates it) the `mcp__<server>__<tool>` name is read instead, and
+ * `mcp__helm__` means a host tool.
+ */
+export function toolIdentity(row: MessageRow): ToolIdentity {
+  const src = row.details?.toolSource;
+  if (src && (src.kind === 'host' || src.kind === 'mcp' || src.kind === 'native')) {
+    return { source: src.kind, server: src.server, tool: src.tool };
+  }
+  const m = /^mcp__(.+?)__(.+)$/.exec(row.toolName ?? '');
+  if (!m) return { source: 'native', server: '', tool: row.toolName ?? '' };
+  return m[1] === 'helm' ? { source: 'host', server: 'Helm', tool: m[2]! } : { source: 'mcp', server: m[1]!, tool: m[2]! };
+}
+
+/** "app_settings_get" or "list-files" to "Settings get" or "List files". */
+export function readable(name: string): string {
+  const s = name.replace(/^app_/, '').replace(/[_-]+/g, ' ').trim();
+  return s ? s[0]!.toUpperCase() + s.slice(1) : name;
+}
+
+/** The kind icon a host tool carries, from the first word of its name. */
+export function hostIconFor(tool: string): 'settings' | 'chat' | 'project' | 'bell' | 'bookmark' | 'clock' | 'cable' | 'reload' | 'wrench' {
+  const w = tool.replace(/^app_/, '').split('_')[0] ?? '';
+  switch (w) {
+    case 'settings':
+      return 'settings';
+    case 'chat':
+    case 'chats':
+      return 'chat';
+    case 'project':
+    case 'projects':
+      return 'project';
+    case 'attention':
+    case 'notify':
+      return 'bell';
+    case 'saved':
+      return 'bookmark';
+    case 'schedule':
+    case 'schedules':
+      return 'clock';
+    case 'mcp':
+      return 'cable';
+    case 'reload':
+    case 'restart':
+      return 'reload';
+    default:
+      return 'wrench';
+  }
+}
+
+// [running, done]
+const VERBS: Record<string, [string, string]> = {
+  Bash: ['Running', 'Ran'],
+  PowerShell: ['Running', 'Ran'],
+  BashOutput: ['Reading output of', 'Read output of'],
+  KillShell: ['Stopping task', 'Stopped task'],
+  KillBash: ['Stopping task', 'Stopped task'],
+  TaskStop: ['Stopping task', 'Stopped task'],
+  Read: ['Reading', 'Read'],
+  Write: ['Writing', 'Wrote'],
+  Edit: ['Editing', 'Edited'],
+  MultiEdit: ['Editing', 'Edited'],
+  NotebookEdit: ['Editing', 'Edited'],
+  Grep: ['Searching', 'Searched'],
+  Glob: ['Searching', 'Searched'],
+  LS: ['Listing', 'Listed'],
+  WebFetch: ['Fetching', 'Fetched'],
+  WebSearch: ['Searching web', 'Searched web'],
+  AskUserQuestion: ['Asking', 'Asked'],
+  EnterPlanMode: ['Entering plan mode', 'Entered plan mode'],
+  ExitPlanMode: ['Proposing plan', 'Proposed plan'],
+  TodoWrite: ['Updating plan', 'Updated plan'],
+  Task: ['Delegating', 'Delegated'],
+  Agent: ['Delegating', 'Delegated'],
+  Skill: ['Using skill', 'Used skill'],
+  SendMessage: ['Messaging', 'Messaged'],
+};
+
+/** The verb that opens a collapsed row: live while running, past tense when done, "Failed" or "Stopped". */
+export function toolVerb(row: MessageRow, status: ToolStatus = toolStatus(row)): string {
+  if (status === 'failed') return 'Failed';
+  if (status === 'interrupted') return 'Stopped';
+  const id = toolIdentity(row);
+  if (id.source !== 'native') return readable(id.tool);
+  const v = row.toolName ? VERBS[row.toolName] : undefined;
+  if (v) return status === 'running' ? v[0] : v[1];
+  const name = readable(row.toolName ?? 'tool');
+  return status === 'running' ? `Running ${name}` : name;
+}
+
+/** A path as filename and directory, for file tools. Both separators are read. */
+export function splitPath(p: string): { name: string; dir: string } {
+  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf(String.fromCharCode(92)));
+  return i < 0 ? { name: p, dir: '' } : { name: p.slice(i + 1), dir: p.slice(0, i + 1) };
+}
+
+/** True for a tool whose target is a file path (shown as name then directory). */
+export function isFileTool(kind: ToolKind): boolean {
+  return kind === 'read' || kind === 'edit';
+}

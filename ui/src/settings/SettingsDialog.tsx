@@ -2,10 +2,10 @@
 // field at the end of the tab row (the first Escape clears it), and the selected pane's body.
 // Panes come from the registry; each pane decides whether it saves per control or with a Save.
 
-import { useState, useSyncExternalStore } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { useDialog } from '../shell/context.ts';
 import { Dialog, useLayer } from '../ui/index.ts';
-import { filterPanes, settingsPanes, subscribeSettingsPanes } from './registry.ts';
+import { filterPanes, settingsPanes, subscribeSettingsPanes, peekRequestedPane, clearRequestedPane } from './registry.ts';
 
 export const SETTINGS_DIALOG = 'settings';
 
@@ -17,7 +17,8 @@ export function SettingsDialog() {
 
 function SettingsBody({ close }: { close: () => void }) {
   const panes = useSyncExternalStore(subscribeSettingsPanes, settingsPanes);
-  const [tab, setTab] = useState<string | null>(null);
+  const [tab, setTab] = useState<string | null>(peekRequestedPane);
+  useEffect(() => clearRequestedPane, []);
   const [query, setQuery] = useState('');
   useLayer('search', true, () => setQuery(''), () => query.length > 0);
   const searching = query.trim().length > 0;

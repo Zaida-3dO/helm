@@ -8,6 +8,6 @@
     "node": ">=22.19"
   },
   "scripts": {
-    "test": "node --test \"titles/**/*.test.ts\" \"autocomplete/**/*.test.ts\""
+    "test": "node --test \"titles/**/*.test.ts\" \"autocomplete/**/*.test.ts\" \"usage/**/*.test.ts\""
   }
 }

@@ -11,6 +11,7 @@ import { useState, useSyncExternalStore, type ReactNode } from 'react';
 import { panelStore, togglePanel } from '../panel/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, TextInput, toast } from '../ui/index.ts';
+import { UsageMeter } from '../usage/UsageMeter.tsx';
 import { CaptionButtons, dragHandlers } from './caption.tsx';
 import { folderLabel } from './label.ts';
 
@@ -130,6 +131,7 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
           )}
         </nav>
         <div className="topbar-actions">
+          <UsageMeter />
           {updatePill}
           {swarm}
           {chat && (

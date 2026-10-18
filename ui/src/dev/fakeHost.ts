@@ -22,6 +22,8 @@ import { panelFakeOps } from './fake-panel.ts';
 import { shellFakeOps } from './fake-shell.ts';
 import { mcpFakeOps } from './fake-mcp.ts';
 import { hosttoolsFakeOps } from './fake-hosttools.ts';
+import { usageFakeOps } from './fake-usage.ts';
+import { itemLinksFakeOps } from './fake-itemlinks.ts';
 
 type Emit = (payload: unknown) => void;
 
@@ -52,6 +54,8 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const sh = shellFakeOps(); registerFakeOps(sh.prefixes, sh.handler); }
 { const mcp = mcpFakeOps(); registerFakeOps(mcp.prefixes, mcp.handler); }
 { const ht = hosttoolsFakeOps(); registerFakeOps(ht.prefixes, ht.handler); }
+{ const us = usageFakeOps(); registerFakeOps(us.prefixes, us.handler); }
+{ const il = itemLinksFakeOps(); registerFakeOps(il.prefixes, il.handler); }
 
 export function fakeOpFor(op: string): FakeOpHandler | undefined {
   return extraOps.find((r) => r.prefixes.some((p) => op.startsWith(p)))?.handler;

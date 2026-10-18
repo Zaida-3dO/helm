@@ -47,12 +47,20 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
       render={(k) => {
         const item = byKey.get(k);
         if (!item) return null;
-        if (item.kind === 'row') return <Row row={item.row} ctx={ctx} />;
+        if (item.kind === 'row') return <Row row={item.row} ctx={ctx} final={item.final} afterTool={item.afterTool} indent={item.indent} />;
         return (
           <FoldRow
             count={item.rows.length}
             elapsedMs={item.elapsedMs}
-            onOpen={() => setExpanded((s) => new Set([...s, item.turnKey]))}
+            failed={item.failed}
+            open={item.open}
+            onToggle={() =>
+              setExpanded((s) => {
+                const next = new Set(s);
+                if (!next.delete(item.turnKey)) next.add(item.turnKey);
+                return next;
+              })
+            }
           />
         );
       }}

@@ -34,7 +34,8 @@ test('an earlier turn folds while the latest is live; expanding unfolds it', () 
     row({ id: 7, role: 'toolResult', timestamp: 71_000 }),
   ];
   assert.deepEqual(shape(layout(rows, true)), [1, 'fold[2,3]', 4, 5, 6, 7]);
-  assert.deepEqual(shape(layout(rows, true, new Set(['k1']))), [1, 2, 3, 4, 5, 6, 7]);
+  // Opened: the "Worked for" row stays (so it can be closed again) and the work follows in order.
+  assert.deepEqual(shape(layout(rows, true, new Set(['k1']))), [1, 'fold[2,3]', 2, 3, 4, 5, 6, 7]);
 });
 
 test('context, retry and interrupted rows stay visible', () => {
@@ -65,4 +66,34 @@ test('a steer read mid-turn stays in the turn and is never folded', () => {
   ];
   assert.deepEqual(shape(layout(rows, true)), [1, 2, 3, 4, 5]);
   assert.deepEqual(shape(layout(rows, false)), [1, 'fold[2,4]', 3, 5]);
+});
+
+test('the fold counts failed tool calls and flags the final answer', () => {
+  const rows = [
+    row({ id: 1, role: 'user' }),
+    row({ id: 2, role: 'toolResult', toolName: 'Bash', details: { isError: true } }),
+    row({ id: 3, role: 'toolResult', toolName: 'Read' }),
+    row({ id: 4, role: 'toolResult', toolName: 'Bash', details: { isError: true } }),
+    row({ id: 5, role: 'assistant', text: 'done' }),
+  ];
+  const items = layout(rows, false);
+  const fold = items.find((i) => i.kind === 'fold');
+  assert.equal(fold?.kind === 'fold' && fold.failed, 2);
+  const reply = items.find((i) => i.kind === 'row' && i.row.id === 5);
+  assert.equal(reply?.kind === 'row' && reply.final, true);
+  assert.equal(reply?.kind === 'row' && reply.afterTool, true);
+  // A plain answer with no tool work has no hairline.
+  const plain = layout([row({ id: 1, role: 'user' }), row({ id: 2, role: 'assistant', text: 'hi' })], false);
+  const hi = plain.find((i) => i.kind === 'row' && i.row.id === 2);
+  assert.equal(hi?.kind === 'row' && hi.final, false);
+});
+
+test('opened work is indented, the shown rows are not', () => {
+  const items = layout(turn(), false, new Set(['k1']));
+  const ind = (id: number) => {
+    const it = items.find((i) => i.kind === 'row' && i.row.id === id);
+    return it?.kind === 'row' && it.indent;
+  };
+  assert.equal(ind(2), true);
+  assert.equal(ind(5), false);
 });

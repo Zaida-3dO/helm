@@ -1,0 +1,9 @@
+{
+  "description": "A claude binary that refuses the plan-usage control request (an older or different build).",
+  "usage": { "error": "Unknown request subtype: get_usage" },
+  "steps": [
+    { "await": { "type": "user" }, "as": "p" },
+    { "init": {} },
+    { "result": "done" }
+  ]
+}

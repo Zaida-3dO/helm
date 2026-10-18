@@ -1,0 +1,127 @@
+/* Item links in the sidebar and the item picker. Design-system tokens only. */
+
+.sb-item-chip {
+  flex: none;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--accent-bg);
+  color: var(--secondary);
+  font-size: 10px;
+  line-height: 14px;
+  cursor: pointer;
+}
+
+.sb-item-chip:hover {
+  color: var(--text);
+}
+
+.sb-item-folder {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 100%;
+  border-radius: 6px;
+}
+
+.sb-item-folder:hover {
+  background: var(--hover);
+}
+
+.sb-item-folder-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 9px 0 22px;
+  border-radius: 6px;
+  color: var(--secondary);
+  font-size: 12px;
+  text-align: left;
+}
+
+.sb-item-caret {
+  width: 10px;
+  text-align: center;
+}
+
+.sb-item-folder-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-item-count {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.sb-item-open {
+  flex: none;
+  margin-right: 4px;
+}
+
+.item-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 12px 16px;
+  list-style: none;
+}
+
+.item-picker-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.item-picker-list li .ui-btn {
+  flex: none;
+}
+
+.item-picker-row {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+}
+
+.item-picker-row:hover {
+  background: var(--hover);
+}
+
+.item-picker-row[data-main='true'] {
+  border-color: var(--line-strong);
+}
+
+.item-picker-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-picker-tag {
+  font-size: 10px;
+  color: var(--secondary);
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--accent-bg);
+}

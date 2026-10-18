@@ -7,9 +7,10 @@ import type { MessageRow } from '../api/types.ts';
 import { EditMessage, type EditState } from './EditMessage.tsx';
 import { Markdown, type LinkTarget } from './Markdown.tsx';
 import { messageActionsFor, rowFootersFor, type SlotContext } from './slots.ts';
+import { Glyph } from './icons.tsx';
 import { ToolCard } from './ToolCard.tsx';
 import { usePacedText, useThinkingPreview } from './usePaced.ts';
-import { formatElapsed } from './workBlocks.ts';
+import { formatElapsed, type RowFlags } from './workBlocks.ts';
 
 export interface RowContext {
   canStopTool: (row: MessageRow) => boolean;
@@ -78,16 +79,22 @@ const CONTEXT_LABEL: Record<string, string> = {
   edit: 'Edited',
 };
 
-function Thinking({ text, streaming }: { text: string; streaming: boolean }) {
+function Thinking({ text, streaming, onLink }: { text: string; streaming: boolean; onLink: RowContext['onLink'] }) {
   const preview = useThinkingPreview(text);
   const [open, setOpen] = useState(false);
   if (!text) return null;
   return (
-    <div className="thinking">
-      <button type="button" className="link" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        {streaming ? 'Thinking' : 'Thought'}
+    <div className={`thinking${open ? ' open' : ''}`} data-testid="thinking">
+      <button type="button" className="thinking-toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <Glyph name="chevron" size={12} className="thinking-chevron" />
+        <span className={`thinking-label${streaming ? ' live' : ''}`}>{streaming ? 'Thinking' : 'Thought process'}</span>
+        {!open && preview && <span className="thinking-preview">· {preview}</span>}
       </button>
-      {open ? <pre className="thinking-full">{text}</pre> : <span className="thinking-preview muted"> {preview}</span>}
+      {open && (
+        <div className="thinking-body">
+          <Markdown text={text} onLink={onLink} />
+        </div>
+      )}
     </div>
   );
 }
@@ -97,15 +104,16 @@ function AssistantBody({ row, ctx }: { row: MessageRow; ctx: RowContext }) {
   const text = usePacedText(row.text, streaming);
   return (
     <>
-      <Thinking text={row.thinking} streaming={streaming} />
+      <Thinking text={row.thinking} streaming={streaming} onLink={ctx.onLink} />
       {text && <Markdown text={text} streaming={streaming} interactive onLink={ctx.onLink} />}
     </>
   );
 }
 
-export const Row = memo(function Row({ row, ctx }: { row: MessageRow; ctx: RowContext }) {
+export const Row = memo(function Row({ row, ctx, final, afterTool, indent }: { row: MessageRow; ctx: RowContext } & RowFlags) {
   const retry = row.details?.retry;
   const common = { 'data-testid': 'transcript-row', 'data-status': row.status, 'data-role': row.role, 'data-row-id': row.id };
+  const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}`;
   if (row.role === 'user') {
     return (
       <div className={`row row-user status-${row.status}`} {...common} title={new Date(row.timestamp).toLocaleString()}>
@@ -128,7 +136,7 @@ export const Row = memo(function Row({ row, ctx }: { row: MessageRow; ctx: RowCo
   }
   if (row.role === 'toolResult') {
     return (
-      <div className="row row-tool" {...common}>
+      <div className={`row row-tool${place}`} {...common}>
         <ToolCard row={row} canStop={ctx.canStopTool(row)} onStop={ctx.onStopTool} />
       </div>
     );
@@ -136,7 +144,7 @@ export const Row = memo(function Row({ row, ctx }: { row: MessageRow; ctx: RowCo
   if (row.role === 'context') {
     const label = CONTEXT_LABEL[row.details?.contextKind ?? 'notice'] ?? 'Notice';
     return (
-      <div className="row row-context" {...common}>
+      <div className={`row row-context${place}`} {...common}>
         <span className="context-label">{label}</span>
         {row.text && <span className="muted"> · {row.text}</span>}
       </div>
@@ -144,7 +152,7 @@ export const Row = memo(function Row({ row, ctx }: { row: MessageRow; ctx: RowCo
   }
   const usage = row.details?.usage;
   return (
-    <div className={`row row-assistant status-${row.status}`} {...common}>
+    <div className={`row row-assistant status-${row.status}${place}`} {...common} data-final={final ? 'true' : undefined}>
       <AssistantBody row={row} ctx={ctx} />
       {row.status === 'error' && (
         <div className="error-row" data-testid="error-row">
@@ -167,12 +175,30 @@ export const Row = memo(function Row({ row, ctx }: { row: MessageRow; ctx: RowCo
   );
 });
 
-export function FoldRow({ count, elapsedMs, onOpen }: { count: number; elapsedMs: number; onOpen: () => void }) {
+export function FoldRow({ count, elapsedMs, failed, open, onToggle }: { count: number; elapsedMs: number; failed: number; open: boolean; onToggle: () => void }) {
   return (
-    <div className="row row-fold">
-      <button type="button" className="link" onClick={onOpen} data-testid="work-fold">
-        Worked for {formatElapsed(elapsedMs)} · {count} {count === 1 ? 'step' : 'steps'}
+    <div className={`row row-fold${open ? ' open' : ''}`}>
+      <button
+        type="button"
+        className="fold-toggle"
+        // The closed variant keeps the original hook the e2e harness clicks to unfold; the open one is separate so that a loop clicking "the first fold" cannot close it again.
+        data-testid={open ? 'work-fold-open' : 'work-fold'}
+        aria-expanded={open}
+        title={open ? 'Hide thinking and tool activity' : 'Show thinking and tool activity'}
+        onClick={onToggle}
+      >
+        <Glyph name="chevron" size={14} className="fold-chevron" />
+        <span>Worked for {formatElapsed(elapsedMs)}</span>
+        <span className="visually-hidden">
+          {' '}
+          · {count} {count === 1 ? 'step' : 'steps'}
+        </span>
       </button>
+      {failed > 0 && (
+        <span className="fold-failed" data-testid="work-failed">
+          {failed} failed
+        </span>
+      )}
     </div>
   );
 }

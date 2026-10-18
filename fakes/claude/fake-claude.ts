@@ -196,6 +196,16 @@ function autoAnswer(rec: Json): void {
           { value: "haiku", displayName: "Haiku", description: "fake haiku" },
         ],
       });
+    case "get_usage": {
+      // The plan-usage meter's control request: answered from the fixture's top-level
+      // "usage" (a response body, or {"error": text}); with none, nothing is answered.
+      const u = (fixture as { usage?: unknown }).usage;
+      if (u === undefined) return;
+      if (u && typeof u === "object" && "error" in u) {
+        return out({ type: "control_response", response: { subtype: "error", request_id: rec.request_id, error: String((u as { error: unknown }).error) } });
+      }
+      return ok(u as Json);
+    }
     case "get_binary_version":
       return ok({ version: "0.0.0-fake" });
     case "set_model":

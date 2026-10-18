@@ -22,6 +22,11 @@ breaks those checks, so change them only together with the checks. Everything el
 | `work-fold` | "Worked for …" row of a settled turn; click to unfold | |
 | `tool-card` | One tool card | `data-tool` (tool name), `data-status` (`running` `complete` `failed` `interrupted`) |
 | `tool-stop` | Stop on a running tool card (only when supported) | |
+| `work-fold-open` | The "Worked for …" row of a turn the reader has opened (click to fold again); the closed row keeps `work-fold` | |
+| `work-failed` | The "N failed" count on a "Worked for" row | |
+| `tool-status` / `tool-box` / `result-grid` | A tool row's trailing status, its opened output or diff box, and the key/value grid for host and MCP results | `tool-card` also carries `data-source` (`host` `mcp` `native`) |
+| `thinking` | The Thinking disclosure of a reply | |
+| `queue-grip` | Drag handle of a queued message (Alt+Up/Down moves it one place) | `queue-item` also carries `data-tone` (`amber` `steer` `muted` `error`) |
 | `interaction-card` | An approval, question or plan card | `data-attention` (`approval` `question` `plan`) |
 | `approval-button` | One approval option | `data-option` = the option text (`Allow once`, `Allow for this session`, `Deny`, `Stop turn`) |
 | `question-button` | One question option, or the free-text Answer button | `data-option` = the option text, or `(other)` |

@@ -17,6 +17,7 @@ import { StreamTranslator } from "./translate.ts";
 import { Attribution } from "../../hosttools/attribution.ts";
 import { RequestChannel } from "../../hosttools/channel.ts";
 import { HostToolServer, SERVER_NAME, sdkMcpConfig, toolPrefix } from "../../hosttools/server.ts";
+import { planUsageFromRateLimit } from "../../usage/rateLimit.ts";
 import { applyConfigLine, asHostToolBridge, createMcpBridge, nativeFromInit, type McpBridge } from "../../mcp/index.ts";
 
 /** The largest prompt text the worker will submit. */
@@ -399,6 +400,12 @@ export class ClaudeDriver implements Driver {
         this.openTurnIfNeeded();
         this.translator.handle(rec);
         return;
+      case "rate_limit_event": {
+        // Plan usage: forwarded to the host, which keeps the newest per window.
+        const usage = planUsageFromRateLimit(rec, Date.now());
+        if (usage) this.ch.emit(usage);
+        return;
+      }
       case "result":
         return this.onResult(rec);
       case "command_lifecycle":

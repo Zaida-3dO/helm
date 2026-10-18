@@ -32,6 +32,8 @@ helm-terminal = { path = "../crates/terminal" }
 helm-hosttools = { path = "../crates/hosttools" }
 helm-mcp = { path = "../crates/mcp" }
 helm-consent = { path = "../crates/consent" }
+helm-usage = { path = "../crates/usage" }
+helm-itemlinks = { path = "../crates/itemlinks" }
 serde_json.workspace = true
 tokio.workspace = true
 log.workspace = true

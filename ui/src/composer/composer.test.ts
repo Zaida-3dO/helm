@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveKey, sendTooltip, stopTooltip, type KeyContext, type KeyShape } from './keymap.ts';
 import { DRAFT_DEBOUNCE_MS, DraftSaver, nextRevision, type Timers } from './drafts.ts';
-import { movePosition, queueView } from './queue.ts';
+import { dropPosition, movePosition, queueView } from './queue.ts';
 import { submission } from '../dev/fixtures.ts';
 import { wrapMarker } from './markup.ts';
 import { permissionLabel } from './permission.ts';
@@ -159,4 +159,25 @@ test('the permission chip shows bypass until a live mode is reported', () => {
   assert.equal(permissionLabel(null), 'Bypass permissions');
   assert.equal(permissionLabel('default'), 'Asks permission');
   assert.equal(permissionLabel('plan'), 'Plan mode');
+});
+
+test('queue pills: tone follows the state, and a steer in queue mode reads Queued · Steer', () => {
+  const pending = [
+    submission({ id: 's1', mode: 'steer', state: 'accepted', createdAt: 5 }),
+    submission({ id: 'q1', position: 1, createdAt: 2 }),
+    submission({ id: 'r1', state: 'rejected', position: 2, createdAt: 3 }),
+  ];
+  const caps = { withdraw: true, deliverNow: true, stopTool: false, compact: false };
+  const asap = queueView(pending, { running: true, showChoices: true, capabilities: caps, sendMode: 'asap' });
+  assert.deepEqual(asap.map((i) => [i.submission.id, i.label, i.tone]), [['s1', 'Pending', 'muted'], ['q1', 'Queued', 'amber'], ['r1', 'Not delivered', 'error']]);
+  const queued = queueView(pending, { running: true, showChoices: true, capabilities: caps, sendMode: 'queue' });
+  assert.deepEqual([queued[0]!.label, queued[0]!.tone], ['Queued · Steer', 'steer']);
+});
+
+test('queue: dropping on another queued message lands on that message position', () => {
+  const pending = [submission({ id: 'q1', position: 1 }), submission({ id: 'q2', position: 2 }), submission({ id: 'q3', position: 3 })];
+  assert.equal(dropPosition(pending, 'q1', 'q3'), 3);
+  assert.equal(dropPosition(pending, 'q3', 'q1'), 1);
+  assert.equal(dropPosition(pending, 'q2', 'q2'), null);
+  assert.equal(dropPosition(pending, 'q2', 'nope'), null);
 });

@@ -10,8 +10,12 @@ export interface QueueItemView {
   /** The stable data-state hook value and the label's basis. */
   state: QueueItemState;
   label: string;
+  /** The pill's colour family: amber waits, steer is purple, muted is a plain pending steer, error failed. */
+  tone: QueueTone;
   actions: QueueActionName[];
 }
+
+export type QueueTone = 'amber' | 'steer' | 'muted' | 'error';
 
 export type QueueActionName = 'withdraw' | 'steerNow' | 'sendNow' | 'recover' | 'move_up' | 'move_down';
 
@@ -19,6 +23,8 @@ export interface QueueContext {
   running: boolean;
   capabilities: Capabilities;
   showChoices: boolean;
+  /** The send mode; a steer shows "Queued · Steer" in queue mode. */
+  sendMode?: string;
 }
 
 /** In-flight steers first (in creation order), then queued follow-ups in queue order. */
@@ -44,8 +50,13 @@ const LABELS: Record<QueueItemState, string> = {
   queued: 'Queued',
   sending: 'Sending',
   uncertain: 'Not sent',
-  failed: 'Saved but could not start',
+  failed: 'Not delivered',
 };
+
+function toneOf(state: QueueItemState, steerQueued: boolean): QueueTone {
+  if (state === 'pending') return steerQueued ? 'steer' : 'muted';
+  return state === 'failed' ? 'error' : 'amber';
+}
 
 export function queueView(pending: Submission[], ctx: QueueContext): QueueItemView[] {
   const ordered = orderPending(pending);
@@ -61,7 +72,8 @@ export function queueView(pending: Submission[], ctx: QueueContext): QueueItemVi
       if (ctx.running && i >= 0 && i < queuedIds.length - 1) actions.push('move_down');
     }
     if (state === 'uncertain' || state === 'failed') actions.push('recover');
-    return { submission: s, state, label: LABELS[state], actions };
+    const steerQueued = state === 'pending' && ctx.sendMode === 'queue';
+    return { submission: s, state, label: steerQueued ? 'Queued · Steer' : LABELS[state], tone: toneOf(state, steerQueued), actions };
   });
 }
 
@@ -72,4 +84,13 @@ export function movePosition(pending: Submission[], id: string, delta: -1 | 1): 
   const j = i + delta;
   if (i < 0 || j < 0 || j >= queued.length) return null;
   return queued[j]!.position ?? j;
+}
+
+/** The queue position a drop on another queued item lands on: that item's own position. */
+export function dropPosition(pending: Submission[], id: string, overId: string): number | null {
+  const queued = orderPending(pending).filter((s) => itemState(s) === 'queued');
+  const from = queued.findIndex((s) => s.id === id);
+  const to = queued.findIndex((s) => s.id === overId);
+  if (from < 0 || to < 0 || from === to) return null;
+  return queued[to]!.position ?? to;
 }

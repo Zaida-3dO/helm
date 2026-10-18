@@ -18,6 +18,7 @@ import { SidebarData, errorText } from './data.ts';
 import { dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
 import { chatMenuItems, projectMenuItems } from './menus.ts';
 import { buildList, chatAncestors, type ListItem } from './model.ts';
+import { ItemChip, ItemFolderRow, ItemPickerHost, useItemRefs } from '../itemlinks/ItemUi.tsx'; // item links
 import { ATTENTION_LABEL, age, trailingIndicator } from './status.ts';
 import { startSyncTriggers, syncDisplay, type SyncHost } from './sync.ts';
 import { sidebarUndo } from './undo.ts';
@@ -73,6 +74,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const [folder, setFolder] = useState(() => localStorage.getItem(LAST_FOLDER_KEY) ?? '');
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [collapsedItems, setCollapsedItems] = useState<Set<string>>(() => new Set());
   const [compact, setCompact] = useState(false);
   const [menu, setMenu] = useState<Menu | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
@@ -130,9 +132,17 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     if (up.some((id) => !expanded.has(id))) setExpanded((s) => new Set([...s, ...up]));
   }, [selected, snap.rows, expanded]);
 
+  const itemRefs = useItemRefs(useMemo(() => snap.rows.map((r) => r.chatId), [snap.rows]));
   const items = useMemo(
-    () => buildList(snap.projects, snap.rows, { view, compact, expandedChats: expanded, selectedChatId: selected }),
-    [snap.projects, snap.rows, view, compact, expanded, selected],
+    () =>
+      buildList(snap.projects, snap.rows, {
+        view,
+        compact,
+        expandedChats: expanded,
+        selectedChatId: selected,
+        itemLinks: view === 'activity' ? undefined : { refs: itemRefs, collapsed: collapsedItems },
+      }),
+    [snap.projects, snap.rows, view, compact, expanded, selected, itemRefs, collapsedItems],
   );
   const projectsById = useMemo(() => new Map(snap.projects.map((p) => [p.id, p])), [snap.projects]);
   const groupDepth = useMemo(() => {
@@ -530,6 +540,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       </div>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} label={menu.label} onClose={() => setMenu(null)} testId="sidebar-menu" />}
       {prompt && <PromptDialog prompt={prompt} onClose={() => setPrompt(null)} />}
+      <ItemPickerHost />
       {preview && !menu && !drag && (
         <PreviewCard
           preview={preview}
@@ -554,6 +565,24 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
 
   function renderItem(it: ListItem) {
     if (it.kind === 'pinBreak') return <div className="sb-pin-break" aria-hidden="true" />;
+    if (it.kind === 'itemFolder') {
+      return (
+        <ItemFolderRow
+          itemId={it.itemId}
+          title={it.title}
+          members={it.members}
+          collapsed={it.collapsed}
+          indent={(groupDepth.get(it.key.slice(2, it.key.indexOf(':', 2))) ?? 0) * 16 + it.depth * 16}
+          onToggle={() =>
+            setCollapsedItems((s) => {
+              const n = new Set(s);
+              if (!n.delete(it.itemId)) n.add(it.itemId);
+              return n;
+            })
+          }
+        />
+      );
+    }
     if (it.kind === 'header') {
       const p = it.project;
       return (
@@ -862,6 +891,7 @@ function ChatRow({
           </span>
         )}
         {!item.expanded && item.children > 0 && <span className="sb-agg">{item.children}</span>}
+        {item.itemChip && <ItemChip item={item.itemChip} />}
         <span className="sb-age">{age(r.updatedAt, now)}</span>
       </button>
       <span className="sb-row-actions">

@@ -4,6 +4,7 @@
 // the anchor stays put. A "Jump to latest" button shows whenever the reader is away from the end.
 
 import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { Glyph } from './icons.tsx';
 import { anchorAt, Geometry, restoreAnchor } from './virtual.ts';
 
 export interface VirtualListProps {
@@ -139,7 +140,8 @@ export function VirtualList({ keys, render, hasOlder, onLoadOlder, onJumpLatest,
       </div>
       {showJump && (
         <button type="button" className="jump-latest" onClick={jumpLatest} data-testid="jump-latest">
-          Jump to latest
+          <Glyph name="arrow-down" size={13} />
+          Latest
         </button>
       )}
     </div>

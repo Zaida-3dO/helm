@@ -50,3 +50,20 @@ export function filterPanes(list: SettingsPane[], query: string): SettingsPane[]
   if (!q) return list;
   return list.filter((p) => p.title.toLowerCase().includes(q));
 }
+
+// A pane to show when the dialog next opens ("Open Settings → Usage" from the top-bar meter).
+let requested: string | null = null;
+
+/** Ask for a pane to be selected the next time the settings dialog opens. */
+export function requestPane(id: string): void {
+  requested = id;
+}
+
+/** The requested pane id, if any (read twice by StrictMode's double render, so it does not clear). */
+export function peekRequestedPane(): string | null {
+  return requested;
+}
+
+export function clearRequestedPane(): void {
+  requested = null;
+}

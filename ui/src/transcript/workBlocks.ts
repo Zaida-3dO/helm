@@ -5,10 +5,31 @@
 // rows are always shown, and so is the turn's final reply.
 
 import type { MessageRow } from '../api/types.ts';
+import { toolStatus } from './toolKinds.ts';
+
+/** How a row sits in its turn, for spacing and the final-answer hairline. */
+export interface RowFlags {
+  /** The turn's final answer, after work (tool calls) in the same turn. */
+  final?: boolean;
+  /** The row directly after a tool row. */
+  afterTool?: boolean;
+  /** An opened turn's folded work, drawn behind a left rule. */
+  indent?: boolean;
+}
 
 export type Item =
-  | { kind: 'row'; row: MessageRow }
-  | { kind: 'fold'; key: string; turnKey: string; rows: MessageRow[]; elapsedMs: number };
+  | ({ kind: 'row'; row: MessageRow } & RowFlags)
+  | {
+      kind: 'fold';
+      key: string;
+      turnKey: string;
+      rows: MessageRow[];
+      elapsedMs: number;
+      /** How many of the folded tool calls failed. */
+      failed: number;
+      /** The reader has opened this turn, so its work is listed after the row. */
+      open: boolean;
+    };
 
 /** A steer read mid-turn belongs to the running turn; only other user rows open a new turn. */
 function opensTurn(r: MessageRow): boolean {
@@ -39,10 +60,7 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
     while (i < rows.length && !opensTurn(rows[i]!)) work.push(rows[i++]!);
     const isLast = i >= rows.length;
     const turnKey = user.sourceKey;
-    if ((isLast && live) || work.length === 0 || expanded.has(turnKey)) {
-      for (const r of work) items.push({ kind: 'row', row: r });
-      continue;
-    }
+    const isOpen = expanded.has(turnKey);
     // The final reply: the last assistant row with text.
     let reply = -1;
     for (let j = work.length - 1; j >= 0; j--) {
@@ -51,20 +69,43 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
         break;
       }
     }
-    const folded: MessageRow[] = [];
-    const shown: MessageRow[] = [];
-    work.forEach((r, j) => (j === reply || alwaysShown(r) ? shown : folded).push(r));
-    if (folded.length > 0) {
+    const settled = !(isLast && live);
+    const hadTools = work.some((r) => r.role === 'toolResult');
+    const push = (r: MessageRow, j: number, indent: boolean) => {
+      const prev = j > 0 ? work[j - 1] : user;
+      items.push({
+        kind: 'row',
+        row: r,
+        final: settled && j === reply && hadTools,
+        afterTool: prev?.role === 'toolResult',
+        indent,
+      });
+    };
+    if (!settled || work.length === 0) {
+      work.forEach((r, j) => push(r, j, false));
+      continue;
+    }
+    const foldedIdx: number[] = [];
+    const shownIdx: number[] = [];
+    work.forEach((r, j) => (j === reply || alwaysShown(r) ? shownIdx : foldedIdx).push(j));
+    if (foldedIdx.length > 0) {
       const last = work[work.length - 1]!;
       items.push({
         kind: 'fold',
         key: `fold:${turnKey}`,
         turnKey,
-        rows: folded,
+        rows: foldedIdx.map((j) => work[j]!),
         elapsedMs: Math.max(0, last.timestamp - user.timestamp),
+        failed: foldedIdx.filter((j) => toolStatus(work[j]!) === 'failed' && work[j]!.role === 'toolResult').length,
+        open: isOpen,
       });
     }
-    for (const r of shown) items.push({ kind: 'row', row: r });
+    if (isOpen) {
+      const folded = new Set(foldedIdx);
+      work.forEach((r, j) => push(r, j, folded.has(j)));
+    } else {
+      shownIdx.forEach((j) => push(work[j]!, j, false));
+    }
   }
   return items;
 }

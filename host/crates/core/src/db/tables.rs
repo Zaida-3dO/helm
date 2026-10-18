@@ -90,6 +90,10 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     // Host tools: the "Changed by chats" ring with Undo.
     ("settings_changes", Data),
     ("agent_feedback", Data),
+    // Usage: the last plan-usage reading.
+    ("plan_usage", Data),
+    // Item links: which chats work on which board item. Stored only in Helm.
+    ("item_chat_links", Data),
 ];
 
 /// The class of a table, or None when it is unclassified.

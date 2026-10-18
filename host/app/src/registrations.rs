@@ -20,6 +20,8 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_mcp::register_ops(reg);
     helm_consent::register_ops(reg);
     helm_hosttools::register_ops(reg);
+    helm_usage::register_ops(reg);
+    helm_itemlinks::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -31,6 +33,8 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_search::register_migrations(reg);
     helm_consent::register_migrations(reg);
     helm_hosttools::register_migrations(reg);
+    helm_usage::register_migrations(reg);
+    helm_itemlinks::register_migrations(reg);
 }
 
 /// Shared services a crate adds for op handlers (`ctx.services.need::<T>()`), called once at
@@ -43,6 +47,7 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_terminal::register_services(services, events);
     helm_panel::register_services(services, events);
     helm_mcp::register_services(services, events);
+    helm_usage::register_services(services, events);
     services.insert(Arc::new(host_tools()));
     services.insert(Arc::new(worker_lines()));
     // Other crates reach running workers through the chat runtime (helm_hosttools::lines).
@@ -103,6 +108,7 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_hosttools::register_host_tools(&mut reg);
     helm_consent::register_host_tools(&mut reg);
     helm_mcp::register_host_tools(&mut reg);
+    helm_itemlinks::register_host_tools(&mut reg);
     reg
 }
 
@@ -112,6 +118,7 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
 pub fn worker_lines() -> helm_hosttools::WorkerLines {
     let mut l = helm_hosttools::WorkerLines::new();
     helm_mcp::register_worker_lines(&mut l);
+    helm_usage::register_worker_lines(&mut l);
     l
 }
 
@@ -252,7 +259,8 @@ pub fn launch_contributors(
     }))
     .register_section(Arc::new(helm_hosttools::sections::GuidelinesSection {
         registry: Arc::new(host_tools()),
-    }));
+    }))
+    .register_section(Arc::new(helm_itemlinks::ItemLinksSection));
     let mut c = helm_workers::contrib::LaunchContributors::new();
     c.add(Arc::new(a));
     c
@@ -306,6 +314,7 @@ mod host_tool_tests {
             "app_edit_mcp_server",
             "app_update_mcp_server",
             "app_remove_mcp_server",
+            "app_link_item",
         ];
         assert_eq!(names(Default::default()), base);
         let delta = |k: helm_hosttools::LaunchKeys| -> Vec<String> {

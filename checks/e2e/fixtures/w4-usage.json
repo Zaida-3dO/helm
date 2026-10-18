@@ -1,0 +1,21 @@
+{
+  "description": "Answers the plan-usage control request with scripted numbers, and per chat the agent links its chat to one item and files one piece of feedback through the helm MCP server.",
+  "usage": {
+    "subscription_type": "max",
+    "rate_limits_available": true,
+    "rate_limits": {
+      "five_hour": { "utilization": 5, "resets_at": "2099-01-01T04:00:00+00:00" },
+      "seven_day": { "utilization": 56, "resets_at": "2099-01-03T12:00:00+00:00" },
+      "model_scoped": [{ "display_name": "Fable", "utilization": 3, "resets_at": "2099-01-03T12:00:00+00:00" }]
+    }
+  },
+  "steps": [
+    { "await": { "type": "user" }, "as": "p" },
+    { "init": {} },
+    { "mcp": { "message": { "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2025-11-25", "capabilities": {} } } }, "as": "mcpinit" },
+    { "mcp": { "message": { "jsonrpc": "2.0", "method": "notifications/initialized" } }, "as": "note" },
+    { "mcp": { "hook": { "toolUseId": "tu_link" }, "message": { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "app_link_item", "arguments": { "itemId": "0badcafe-1234-4abc-8def-0123456789ab" } } } }, "as": "link" },
+    { "mcp": { "hook": { "toolUseId": "tu_fb" }, "message": { "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "app_feedback", "arguments": { "feature": "Item links", "score": 2, "kind": "existing", "note": "<b>plain</b> text only" } } } }, "as": "fb" },
+    { "result": "done" }
+  ]
+}

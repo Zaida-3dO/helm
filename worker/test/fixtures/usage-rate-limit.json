@@ -1,0 +1,12 @@
+{
+  "description": "One turn that prints three rate_limit_event lines (a threshold line with a number, a reset-only line, an ignored overage line), then the result.",
+  "steps": [
+    { "await": { "type": "user" }, "as": "p" },
+    { "init": {} },
+    { "emit": { "type": "rate_limit_event", "rate_limit_info": { "status": "allowed_warning", "rateLimitType": "five_hour", "utilization": 0.82, "resetsAt": 1792296000 }, "session_id": "fake-session" } },
+    { "emit": { "type": "rate_limit_event", "rate_limit_info": { "status": "allowed", "rateLimitType": "seven_day", "resetsAt": 1792497600 }, "session_id": "fake-session" } },
+    { "emit": { "type": "rate_limit_event", "rate_limit_info": { "status": "allowed", "rateLimitType": "overage" }, "session_id": "fake-session" } },
+    { "text": "done" },
+    { "result": "done" }
+  ]
+}

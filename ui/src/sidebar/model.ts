@@ -10,6 +10,7 @@
 // one (or are themselves archived).
 
 import type { ProjectNode, SidebarRow, SidebarView } from '../api/projects.ts';
+import { arrange, type ItemRef } from '../itemlinks/folders.ts';
 
 export const MAX_DEPTH = 2;
 
@@ -31,7 +32,10 @@ export type ListItem =
       children: number;
       expanded: boolean;
       twoLine: boolean;
+      /** The task-board item this chat is linked to, shown as a small chip. */
+      itemChip?: ItemRef;
     }
+  | { kind: 'itemFolder'; key: string; itemId: string; title: string; members: number; depth: number; height: number; collapsed: boolean }
   | { kind: 'pinBreak'; key: string; height: number };
 
 export interface BuildOptions {
@@ -41,6 +45,8 @@ export interface BuildOptions {
   expandedChats: ReadonlySet<string>;
   /** The open chat: its group and ancestors stay visible. */
   selectedChatId: string | null;
+  /** Item links: the item each chat shows, and the item folders the user collapsed. */
+  itemLinks?: { refs: ReadonlyMap<string, ItemRef>; collapsed: ReadonlySet<string> };
 }
 
 /** Per-row drawn depth and the children each row holds, for one group's held rows. */
@@ -171,7 +177,12 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     for (const k of kids.get(p.id) ?? []) emitGroup(k, depth + 1, next);
     const { order, childCount } = nestRows(byGroup.get(p.id) ?? []);
     const hidden = new Set<string>();
-    for (const { row, depth: d } of order) {
+    for (const e of arrange(order, o.itemLinks?.refs, o.itemLinks?.collapsed, MAX_DEPTH, o.selectedChatId)) {
+      if (e.type === 'folder') {
+        out.push({ kind: 'itemFolder', key: `i:${p.id}:${e.itemId}`, itemId: e.itemId, title: e.title, members: e.members, depth: e.depth, height: h.chat, collapsed: e.collapsed });
+        continue;
+      }
+      const { row, depth: d } = e;
       if (row.parentChatId && hidden.has(row.parentChatId)) {
         hidden.add(row.chatId);
         continue;
@@ -188,6 +199,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
         children: n,
         expanded,
         twoLine: false,
+        ...(e.chip ? { itemChip: e.chip } : {}),
       });
     }
   };

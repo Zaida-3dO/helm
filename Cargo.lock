@@ -1739,6 +1739,7 @@ dependencies = [
  "helm-core",
  "helm-hosttools",
  "helm-ipc",
+ "helm-itemlinks",
  "helm-mcp",
  "helm-panel",
  "helm-platform",
@@ -1746,6 +1747,7 @@ dependencies = [
  "helm-search",
  "helm-shell",
  "helm-terminal",
+ "helm-usage",
  "helm-workers",
  "log",
  "serde_json",
@@ -1840,6 +1842,21 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "helm-itemlinks"
+version = "0.1.0"
+dependencies = [
+ "helm-core",
+ "helm-hosttools",
+ "helm-ipc",
+ "helm-workers",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ts-rs",
 ]
 
 [[package]]
@@ -1968,6 +1985,22 @@ dependencies = [
  "ts-rs",
  "uuid",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "helm-usage"
+version = "0.1.0"
+dependencies = [
+ "helm-core",
+ "helm-hosttools",
+ "helm-ipc",
+ "helm-workers",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ts-rs",
 ]
 
 [[package]]
