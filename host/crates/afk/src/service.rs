@@ -529,6 +529,11 @@ mod tests {
 
     const MIN: i64 = 60_000;
 
+    fn v_span(db: &Database) -> String {
+        db.snapshot(|tx| tx.query_row("SELECT id FROM afk_spans", [], |r| r.get::<_, String>(0)))
+            .unwrap()
+    }
+
     #[test]
     fn switch_refused_until_enabled() {
         let (_d, _db, _s, _a, svc) = setup();
@@ -552,7 +557,7 @@ mod tests {
         let chats: Vec<&str> = calls.iter().map(|c| c.0.as_str()).collect();
         assert_eq!(chats, ["c1", "c2"], "newest first, c3 did not work");
         assert!(calls[0].2.starts_with("[Helm · Back from AFK · span "));
-        assert!(calls[0].1.ends_with("-c1-1"));
+        assert_eq!(calls[0].1, digest::submission_id(&v_span(&db), "c1", 1));
         // Delivered now: still pending until the submission says it arrived.
         sub_state(&db, &calls[0].1, "c1", "delivered");
         sub_state(&db, &calls[1].1, "c2", "withdrawn");

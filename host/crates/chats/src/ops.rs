@@ -51,8 +51,46 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("chat_rename", OpClass::Maintenance, chat_rename)
         .async_op("title_suggest", title_suggest)
         .blocking("skills_list", OpClass::Blocking, skills_list)
-        .async_op("autocomplete_suggest", autocomplete_suggest);
+        .async_op("autocomplete_suggest", autocomplete_suggest)
+        // The run-slot queue, main window only like every chats op.
+        .blocking("resource_queue_snapshot", OpClass::Blocking, |ctx, _| {
+            to_value(&crate::runslots::view(&runtime(ctx)?)?)
+        })
+        .blocking(
+            "resource_queue_start_now",
+            OpClass::Maintenance,
+            |ctx, args| {
+                let (chat, sid) = (
+                    str_field(&args, "chatId")?,
+                    str_field(&args, "submissionId")?,
+                );
+                crate::runslots::start_now(&runtime(ctx)?, &chat, &sid)?;
+                to_value(&crate::runslots::view(&runtime(ctx)?)?)
+            },
+        )
+        .blocking(
+            "resource_queue_cancel",
+            OpClass::Maintenance,
+            |ctx, args| {
+                crate::runslots::cancel(&runtime(ctx)?, &str_field(&args, "submissionId")?)?;
+                to_value(&crate::runslots::view(&runtime(ctx)?)?)
+            },
+        )
+        .blocking("run_slots_settings", OpClass::Maintenance, |ctx, args| {
+            let rt = runtime(ctx)?;
+            match args.get("settings") {
+                Some(v) => to_value(&crate::runslots::save_settings(&rt, v)?),
+                None => to_value(&crate::runslots::view(&rt)?),
+            }
+        });
     crate::manage::register(reg);
+}
+
+fn str_field(args: &Value, k: &str) -> Result<String, ApiError> {
+    args.get(k)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| ApiError::bad_args(format!("{k} is required.")))
 }
 
 /// `skills_list`: what the chat's worker reported; empty until it has run once.
@@ -501,6 +539,10 @@ pub(crate) mod tests {
             ("title_suggest", OpClass::Async),
             ("skills_list", OpClass::Blocking),
             ("autocomplete_suggest", OpClass::Async),
+            ("resource_queue_snapshot", OpClass::Blocking),
+            ("resource_queue_start_now", OpClass::Maintenance),
+            ("resource_queue_cancel", OpClass::Maintenance),
+            ("run_slots_settings", OpClass::Maintenance),
             ("chat_archive", OpClass::Maintenance),
             ("chat_restore", OpClass::Maintenance),
             ("chat_delete", OpClass::Maintenance),

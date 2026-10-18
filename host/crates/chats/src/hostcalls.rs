@@ -167,7 +167,7 @@ impl helm_hosttools::WorkerBroadcast for crate::ChatRuntime {
     fn broadcast_to_workers(&self, line: &Value) {
         let handles: Vec<_> = self.sh.actors.lock().unwrap().values().cloned().collect();
         for h in handles {
-            let _ = h.tx.try_send(crate::actor::Cmd::WorkerLine(line.clone()));
+            let _ = crate::runtime::enqueue(&h.tx, crate::actor::Cmd::WorkerLine(line.clone()));
         }
     }
 
@@ -175,8 +175,7 @@ impl helm_hosttools::WorkerBroadcast for crate::ChatRuntime {
         let h = self.sh.actors.lock().unwrap().get(chat_id).cloned();
         match h {
             Some(h) if h.live.lock().unwrap().has_worker => {
-                h.tx.try_send(crate::actor::Cmd::WorkerLine(line.clone()))
-                    .is_ok()
+                crate::runtime::enqueue(&h.tx, crate::actor::Cmd::WorkerLine(line.clone())).is_ok()
             }
             _ => false,
         }

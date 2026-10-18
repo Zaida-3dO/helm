@@ -1,0 +1,22 @@
+{
+  "description": "Schedules: every chat runs the same fake. Each prompt is answered with its own text; a prompt containing [HOLD] keeps the turn open for 40 seconds first, so the chat stays busy while a schedule comes due.",
+  "steps": [
+    {
+      "repeat": [
+        {
+          "await": { "type": "user" },
+          "as": "p",
+          "timeoutMs": 3600000
+        },
+        { "init": {} },
+        {
+          "if": { "saved": "p", "contains": "[HOLD]" },
+          "then": [{ "sleep": 40000 }],
+          "else": []
+        },
+        { "text": "You said: {{p.message.content.0.text}}" },
+        { "result": "done" }
+      ]
+    }
+  ]
+}

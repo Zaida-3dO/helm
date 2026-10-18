@@ -707,7 +707,8 @@ impl Actor {
         let id = self.chat_id.clone();
         self.write(|t| {
             t.execute(
-                "UPDATE submissions SET state = 'rejected' WHERE chat_id = ?1 AND state = 'saved'",
+                "UPDATE submissions SET state = 'rejected' WHERE chat_id = ?1 AND state = 'saved'
+                 AND id NOT IN (SELECT submission_id FROM slot_waits)",
                 [&id],
             )
         });

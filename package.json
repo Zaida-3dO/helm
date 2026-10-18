@@ -17,6 +17,7 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build:debug": "tauri build --debug --no-bundle",
+    "build:installer": "tauri build --bundles nsis",
     "test": "npm test --workspaces --if-present"
   },
   "devDependencies": {

@@ -16,7 +16,7 @@ const CHAT_COLUMNS: &str = "c.id, c.project_id, COALESCE(p.path, ''), c.title, c
      c.archived, c.parent_chat_id, c.side_source_id, COALESCE(t.state, 'fallback'), u.token, \
      (SELECT k.id FROM chat_completions k WHERE k.chat_id = c.id AND k.read = 0), \
      EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id), \
-     MAX(c.updated_at, COALESCE(a.last_activity_at, 0)), COALESCE(a.stalled, 0)";
+     MAX(c.updated_at, COALESCE(a.last_activity_at, 0)),      CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN COALESCE(a.stalled, 0) ELSE 0 END";
 
 /// The joins [`CHAT_COLUMNS`] needs, after `FROM chats c`.
 pub(crate) const CHAT_JOINS: &str = "JOIN projects p ON p.id = c.project_id \

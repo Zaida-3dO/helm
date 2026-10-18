@@ -42,9 +42,26 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "resources": {
-      "../../worker/src/": "worker/src/"
+      "../../worker/package.json": "worker/package.json",
+      "../../worker/src/": "worker/src/",
+      "../../helpers/package.json": "helpers/package.json",
+      "../../helpers/usage/src/": "helpers/usage/src/",
+      "../../helpers/titles/src/": "helpers/titles/src/",
+      "../../helpers/autocomplete/src/": "helpers/autocomplete/src/"
+    },
+    "targets": [
+      "nsis"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Helm: a desktop workspace for running and supervising AI coding agents.",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "installerHooks": "./windows/installer-hooks.nsh"
+      }
     },
     "icon": [
       "icons/icon.png",

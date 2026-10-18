@@ -113,6 +113,50 @@ fn fatal(platform: &Platform, message: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// The UI content process can die: probe the main window's page and reload it, with a
+/// diagnostic line, once it stops answering while shown (`helm_shell::uiwatch`).
+fn start_ui_watchdog(app: tauri::AppHandle, diagnostics: std::path::PathBuf) {
+    use helm_shell::uiwatch::{self, Action, UiWatchdog};
+    use std::sync::Mutex;
+    let dog = Arc::new(Mutex::new(UiWatchdog::new()));
+    std::thread::spawn(move || loop {
+        std::thread::sleep(uiwatch::PROBE_EVERY);
+        let Some(w) = app.get_webview_window(helm_ipc::MAIN_WINDOW) else {
+            continue;
+        };
+        let shown = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
+        let action = dog
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .tick(std::time::Instant::now(), shown);
+        match action {
+            Action::Nothing => {}
+            Action::Probe => {
+                let dog = dog.clone();
+                let _ = w.eval_with_callback(uiwatch::PROBE_SCRIPT, move |answer| {
+                    dog.lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .answered(&answer);
+                });
+            }
+            Action::Reload { silent_for } => {
+                log::error!(
+                    "the main window's page did not answer for {} s; reloading it",
+                    silent_for.as_secs()
+                );
+                if let Err(e) =
+                    uiwatch::write_diagnostic(&diagnostics, helm_core::now_ms(), silent_for)
+                {
+                    log::warn!("ui diagnostic not written: {e}");
+                }
+                if let Err(e) = w.reload() {
+                    log::error!("reloading the main window failed: {e}");
+                }
+            }
+        }
+    });
+}
+
 fn run_app(
     profile: Profile,
     db: Arc<Database>,
@@ -200,6 +244,7 @@ fn run_app(
                 std::thread::sleep(Duration::from_secs(4));
                 late.show_if_hidden();
             });
+            start_ui_watchdog(handle.clone(), profile.path("diagnostics"));
             // The tray, hotkey, badge and keep-awake start from the launch attention summary.
             if let Some(svc) = shell_svc {
                 let host = tray::TauriShellHost::new(handle.clone());

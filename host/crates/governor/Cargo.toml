@@ -16,6 +16,8 @@ serde_json.workspace = true
 rusqlite.workspace = true
 tokio.workspace = true
 log.workspace = true
+uuid = { workspace = true, features = ["v8"] }
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

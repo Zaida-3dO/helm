@@ -2,7 +2,9 @@
 //!
 //! One mutex-guarded writer connection, plus read-only snapshot connections that see a consistent
 //! WAL snapshot without waiting for the writer. WAL journal, `synchronous=FULL`, foreign keys on,
-//! 3 s busy timeout. Opening runs the core migrations, refuses a newer schema, then runs every
+//! 3 s busy timeout on the writer and 100 ms on snapshot readers: a reader
+//! still locked out after that falls back to reading on the writer, which waits its 3 s and then
+//! fails with an error. Nothing retries in a loop. Opening runs the core migrations, refuses a newer schema, then runs every
 //! registered feature initializer and pending one-time migration.
 
 pub mod registry;
@@ -17,6 +19,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(3);
+/// A snapshot reader's busy timeout, before it falls back to waiting on the writer.
+pub const READER_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -36,6 +40,9 @@ pub enum DbError {
 pub struct Database {
     path: PathBuf,
     writer: Mutex<Connection>,
+    /// Tests: make the next snapshot reader find the database busy.
+    #[cfg(test)]
+    reader_busy: std::sync::atomic::AtomicBool,
 }
 
 impl Database {
@@ -60,6 +67,8 @@ impl Database {
         Ok(Self {
             path: path.to_owned(),
             writer: Mutex::new(conn),
+            #[cfg(test)]
+            reader_busy: Default::default(),
         })
     }
 
@@ -84,16 +93,68 @@ impl Database {
     where
         E: From<rusqlite::Error>,
     {
-        let mut conn = Connection::open_with_flags(
+        let mut conn = self.open_reader()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        // The first read pins the snapshot for the rest of the transaction.
+        match self.pin(&tx) {
+            Ok(()) => f(&tx),
+            Err(e) if is_busy(&e) => {
+                drop(tx);
+                self.read_on_writer(f)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn open_reader(&self) -> rusqlite::Result<Connection> {
+        let conn = Connection::open_with_flags(
             &self.path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        conn.busy_timeout(BUSY_TIMEOUT)?;
+        conn.busy_timeout(READER_BUSY_TIMEOUT)?;
         conn.pragma_update(None, "query_only", true)?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        // The first read pins the snapshot for the rest of the transaction.
-        tx.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
-        f(&tx)
+        Ok(conn)
+    }
+
+    fn pin(&self, tx: &Transaction<'_>) -> rusqlite::Result<()> {
+        #[cfg(test)]
+        if self
+            .reader_busy
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(busy_error());
+        }
+        tx.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+    }
+
+    /// A snapshot that could not start in time: read inside a read-only transaction on the writer,
+    /// waiting on its lock and its busy timeout.
+    fn read_on_writer<T, E>(&self, f: impl FnOnce(&Transaction<'_>) -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<rusqlite::Error>,
+    {
+        // Bounded, so a snapshot taken inside a write on this thread fails instead of deadlocking.
+        let deadline = std::time::Instant::now() + BUSY_TIMEOUT;
+        let mut conn = loop {
+            match self.writer.try_lock() {
+                Ok(c) => break c,
+                Err(std::sync::TryLockError::Poisoned(p)) => break p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(E::from(busy_error()));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        };
+        conn.pragma_update(None, "query_only", true)?;
+        let out = (|| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            tx.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
+            f(&tx)
+        })();
+        conn.pragma_update(None, "query_only", false)?;
+        out
     }
 
     /// Fold the WAL back into the main file (the last quit step).
@@ -107,6 +168,17 @@ impl Database {
         let conn = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
     }
+}
+
+fn busy_error() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY), None)
+}
+
+fn is_busy(e: &rusqlite::Error) -> bool {
+    matches!(
+        e.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
 }
 
 fn configure_writer(conn: &Connection) -> Result<(), DbError> {
@@ -335,5 +407,86 @@ pub(crate) mod tests {
         assert!(std::fs::metadata(&wal).unwrap().len() > 0);
         db.checkpoint().unwrap();
         assert_eq!(std::fs::metadata(&wal).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_busy_writer_fails_with_an_error_after_its_timeout_and_does_not_loop() {
+        let (_d, db) = temp_db(&MigrationRegistry::new());
+        let other = Connection::open(db.path()).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let started = std::time::Instant::now();
+        let r = db.write(|tx| tx.execute("INSERT INTO counters(key, value) VALUES ('a', 1)", []));
+        let took = started.elapsed();
+        assert!(
+            matches!(&r, Err(e) if is_busy(e)),
+            "a busy error comes back: {r:?}"
+        );
+        assert!(
+            took >= BUSY_TIMEOUT - Duration::from_millis(200) && took < BUSY_TIMEOUT * 2,
+            "waited its busy timeout once: {took:?}"
+        );
+        other.execute_batch("COMMIT;").unwrap();
+        db.write(|tx| tx.execute("INSERT INTO counters(key, value) VALUES ('a', 1)", []))
+            .unwrap();
+    }
+
+    #[test]
+    fn snapshot_readers_wait_100_ms_the_writer_3_s() {
+        let (_d, db) = temp_db(&MigrationRegistry::new());
+        let reader: i64 = db
+            .open_reader()
+            .unwrap()
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .unwrap();
+        assert_eq!(reader, 100);
+        let writer: i64 = db
+            .writer
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .unwrap();
+        assert_eq!(writer, 3000);
+    }
+
+    #[test]
+    fn a_busy_reader_falls_back_to_reading_on_the_writer() {
+        let (_d, db) = temp_db(&MigrationRegistry::new());
+        db.write(|tx| tx.execute("INSERT INTO counters(key, value) VALUES ('a', 1)", []))
+            .unwrap();
+        db.reader_busy
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let n: i64 = db
+            .snapshot(|tx| tx.query_row("SELECT count(*) FROM counters", [], |r| r.get(0)))
+            .expect("read on the writer instead of failing");
+        assert_eq!(n, 1);
+        assert!(
+            !db.reader_busy.load(std::sync::atomic::Ordering::SeqCst),
+            "the reader was tried first"
+        );
+        // The fallback is read-only, and the writer writes again afterwards.
+        db.reader_busy
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let r: Result<usize, rusqlite::Error> =
+            db.snapshot(|tx| tx.execute("INSERT INTO counters(key, value) VALUES ('b', 1)", []));
+        assert!(r.is_err(), "no write through a snapshot");
+        db.write(|tx| tx.execute("INSERT INTO counters(key, value) VALUES ('c', 1)", []))
+            .unwrap();
+        let keys: i64 = db
+            .snapshot(|tx| tx.query_row("SELECT count(*) FROM counters", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(keys, 2);
+    }
+
+    #[test]
+    fn a_busy_reader_inside_a_write_fails_instead_of_deadlocking() {
+        let (_d, db) = temp_db(&MigrationRegistry::new());
+        let started = std::time::Instant::now();
+        let r: Result<i64, rusqlite::Error> = db.write(|_| {
+            db.reader_busy
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            db.snapshot(|tx| tx.query_row("SELECT count(*) FROM counters", [], |r| r.get(0)))
+        });
+        assert!(matches!(&r, Err(e) if is_busy(e)), "{r:?}");
+        assert!(started.elapsed() < BUSY_TIMEOUT * 2);
     }
 }

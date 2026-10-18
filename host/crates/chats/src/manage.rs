@@ -595,6 +595,37 @@ mod tests {
         assert_eq!(gone.code, "not_found");
     }
 
+    /// A muted chat's completion is kept as its read state but never announced.
+    #[tokio::test]
+    async fn a_muted_chats_completion_is_recorded_but_not_announced() {
+        let h = harness();
+        let id = create(&h).await;
+        h.api
+            .call(&main(), "chat_mute", json!({"chatId": id, "muted": true}))
+            .await
+            .unwrap();
+        let k = h.db.write(|tx| record_completion(tx, &id, 5)).unwrap();
+        assert!(k.is_none(), "no announcement for a muted chat");
+        let got = h
+            .api
+            .call(&main(), "chat_get", json!({"chatId": id}))
+            .await
+            .unwrap();
+        assert!(
+            got["chat"]["unread"]["completionId"].is_string(),
+            "the completion is still the chat's read state"
+        );
+        h.api
+            .call(&main(), "chat_mute", json!({"chatId": id, "muted": false}))
+            .await
+            .unwrap();
+        assert!(h
+            .db
+            .write(|tx| record_completion(tx, &id, 6))
+            .unwrap()
+            .is_some());
+    }
+
     #[tokio::test]
     async fn completion_ack_needs_the_matching_id() {
         let h = harness();

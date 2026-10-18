@@ -172,9 +172,14 @@ pub fn backoff_ms(attempts: u32) -> i64 {
 }
 
 /// A deterministic submission id per (span, chat, attempt), so a retry of the same attempt is
-/// idempotent and a resend never reuses a dead submission.
+/// idempotent and a resend never reuses a dead submission. Workers take only UUIDs, so it is a
+/// name-based UUID (version 8, from a SHA-256 of the key).
 pub fn submission_id(span_id: &str, chat_id: &str, attempt: u32) -> String {
-    format!("afk-digest-{span_id}-{chat_id}-{attempt}")
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(format!("helm-afk-digest/{span_id}/{chat_id}/{attempt}"));
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&h[..16]);
+    uuid::Uuid::new_v8(b).to_string()
 }
 
 #[cfg(test)]
@@ -246,6 +251,15 @@ mod tests {
             Step::Mark("failed", Some("Gave up after 5 tries."))
         );
         assert_eq!(step("pending", 4, None, None, 0), Step::Send { attempt: 5 });
+    }
+
+    #[test]
+    fn submission_ids_are_stable_uuids() {
+        let a = submission_id("s", "c", 1);
+        assert!(uuid::Uuid::parse_str(&a).is_ok(), "{a}");
+        assert_eq!(a, submission_id("s", "c", 1));
+        assert_ne!(a, submission_id("s", "c", 2));
+        assert_ne!(a, submission_id("s", "d", 1));
     }
 
     #[test]

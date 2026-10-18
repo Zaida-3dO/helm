@@ -40,6 +40,7 @@ pub mod fork;
 pub mod hostcalls;
 pub mod manage;
 pub mod ops;
+pub mod runslots;
 pub mod runtime;
 #[cfg(test)]
 mod runtime_tests;

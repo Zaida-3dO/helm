@@ -26,6 +26,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_workflow::register_ops(reg);
     helm_afk::register_ops(reg);
     helm_governor::register_ops(reg);
+    helm_relay::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -57,9 +58,11 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_mcp::register_services(services, events);
     helm_usage::register_services(services, events);
     helm_schedules::register_services(services, events);
+
     // After usage, which the governor reads.
     helm_afk::register_services(services, events);
     helm_governor::register_services(services, events);
+    helm_relay::register_services(services, events);
     services.insert(Arc::new(host_tools()));
     services.insert(Arc::new(worker_lines()));
     // Other crates reach running workers through the chat runtime (helm_hosttools::lines).
@@ -142,9 +145,20 @@ pub fn attach_host_tools(
 ) {
     runtime.attach_host(host_seam(dispatcher));
     start_consent_upkeep(runtime, dispatcher.ctx());
+    // Send the workflow's Agent Standup stage records every minute.
+    helm_workflow::start_standup_upkeep(runtime.handle(), dispatcher.ctx());
+    // The land step (merges and draft lands of handed-off changes).
+    helm_workflow::land::start_driver(runtime.handle(), dispatcher.ctx());
     // Auto-AFK signals and the 30 s AFK tick.
     helm_afk::start(runtime, &dispatcher.ctx().services);
     helm_governor::start(runtime, dispatcher);
+    // The outbound line to the hub (off until a connection is saved).
+    helm_relay::start(
+        runtime.handle(),
+        dispatcher.ctx(),
+        host_seam(dispatcher).tools,
+    );
+    helm_relay::attach_ops(dispatcher); // Telegram into chats
 }
 
 /// The consent upkeep: every minute, and at once after a decision,
@@ -253,6 +267,7 @@ pub fn host_seam(dispatcher: &Arc<helm_ipc::Dispatcher>) -> helm_chats::HostSeam
 pub fn allow_kinds() -> helm_consent::AllowKinds {
     let mut k = helm_consent::AllowKinds::new();
     helm_consent::register_allow_kinds(&mut k);
+    helm_workflow::register_allow_kinds(&mut k);
     k
 }
 
@@ -333,6 +348,8 @@ mod host_tool_tests {
             "app_remove_mcp_server",
             "app_link_item",
             "app_orchestrator_on",
+            "app_workflow",
+            "app_workflow_report",
         ];
         assert_eq!(names(Default::default()), base);
         let delta = |k: helm_hosttools::LaunchKeys| -> Vec<String> {

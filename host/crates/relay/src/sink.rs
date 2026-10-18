@@ -1,0 +1,590 @@
+//! Telegram into chats, and the mirror back out.
+//!
+//! **In.** [`ChatSink`] takes each message the hub forwards and puts it into the active Telegram
+//! chat ([`crate::telegram::active_chat`]), starting `Telegram <bot> <date>` when there is none:
+//!
+//! - It is stored through the chats crate's host send with origin `telegram`, so it never counts
+//!   as consent and never trips the user's wait limit (that limit turns a waiting steer into an
+//!   interrupt, and applies only to sends typed in Helm's own window).
+//! - It follows the user's send behaviour, without ever aborting: "queue" queues it behind the
+//!   running turn; "asap" and "interrupt" steer it in at the next tool boundary.
+//! - Its submission id is fixed per hub message id, so a message delivered twice is stored once.
+//! - It is acknowledged to the hub only once it is stored. A chat that is stopping or full is
+//!   retried here for a short while first, because the hub resends an unacknowledged message
+//!   only on the next line.
+//! - While the chat has a question waiting (an agent's multiple-choice or free-text question),
+//!   the reply answers it: a number picks that option. Approvals, plans and trust prompts are
+//!   never answered from Telegram.
+//! - `/stop` stops the tagged chat's turn.
+//!
+//! **Out.** While a Telegram turn runs, a mirror task watches the chat (its stored status, the
+//! live tools and the transcript) and sends ONE status line up the line, only when it changes and
+//! at most every [`STATUS_GAP_MS`]; the hub edits a single Telegram message in place. When the
+//! turn ends, the final answer goes up as a new message (the hub then deletes the status). A
+//! question goes up as a new message with numbered options. The mirror is harness-level: the
+//! agent never has to remember to reply.
+
+use crate::client::{BoxFut, LineHandle, TelegramMessage, TelegramSink};
+use crate::exec::AppExecutor;
+use crate::telegram::{self, ChatFacts, ChatPort, TagPolicy, TELEGRAM_ORIGIN};
+use helm_chats::submit::{host_send, HostSend, HostSendMode};
+use helm_chats::types::{ChatStatus, InteractionAttention, InteractionMethod, SendMode};
+use helm_chats::ChatRuntime;
+use helm_core::db::Database;
+use helm_hosttools::OpInvoker;
+use rusqlite::OptionalExtension;
+use serde_json::json;
+use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+/// The fewest milliseconds between two status updates sent up the line.
+pub const STATUS_GAP_MS: i64 = 2_500;
+/// How often the mirror looks at the chat.
+const POLL: Duration = Duration::from_millis(500);
+/// A message that has not started a turn by now gets a final note instead of silence.
+pub const START_WAIT_MS: i64 = 120_000;
+/// How long a delivery retries a chat that is stopping or full before leaving it to the hub.
+const BUSY_RETRY: Duration = Duration::from_secs(20);
+
+/// Where the status and final answer go: the line in the app, a recorder in tests.
+pub trait Upstream: Send + Sync {
+    fn status(&self, text: &str);
+    fn final_answer(&self, text: &str);
+}
+
+impl Upstream for LineHandle {
+    fn status(&self, text: &str) {
+        self.telegram_status(text)
+    }
+    fn final_answer(&self, text: &str) {
+        self.telegram_final(text)
+    }
+}
+
+/// What the mirror sees of the chat at one moment.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Snap {
+    /// A turn is starting, running or stopping.
+    pub busy: bool,
+    /// Tools running now, by name.
+    pub running: Vec<String>,
+    /// The last few tools of this turn, oldest first.
+    pub recent: Vec<String>,
+    /// A question waiting for the user: its request id and the rendered message.
+    pub question: Option<(String, String)>,
+    /// The last assistant text since the turn's baseline.
+    pub final_text: Option<String>,
+    /// The highest transcript row id now.
+    pub max_id: i64,
+    /// Another Telegram message is queued behind this turn.
+    pub queued: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Up {
+    Status(String),
+    Final(String),
+}
+
+/// The mirror's state machine, driven by [`Snap`]s (so it is tested without a runtime).
+#[derive(Debug)]
+pub struct Mirror {
+    pub baseline: i64,
+    began: i64,
+    started: bool,
+    idle_seen: u32,
+    last_status: Option<String>,
+    last_at: Option<i64>,
+    asked: HashSet<String>,
+    pub done: bool,
+}
+
+impl Mirror {
+    pub fn new(baseline: i64, now: i64) -> Self {
+        Mirror {
+            baseline,
+            began: now,
+            started: false,
+            idle_seen: 0,
+            last_status: None,
+            last_at: None,
+            asked: HashSet::new(),
+            done: false,
+        }
+    }
+
+    pub fn step(&mut self, s: &Snap, now: i64) -> Vec<Up> {
+        let mut out = vec![];
+        if self.done {
+            return out;
+        }
+        if s.busy {
+            self.started = true;
+            self.idle_seen = 0;
+            if let Some((id, text)) = &s.question {
+                if self.asked.insert(id.clone()) {
+                    // A new message, so the phone notifies; the hub removes the status.
+                    out.push(Up::Final(text.clone()));
+                    self.last_status = None;
+                    self.last_at = Some(now);
+                }
+                return out;
+            }
+            let st = telegram::render_status(&s.running, &s.recent);
+            let due = self.last_at.is_none_or(|t| now - t >= STATUS_GAP_MS);
+            if self.last_status.as_ref() != Some(&st) && due {
+                out.push(Up::Status(st.clone()));
+                self.last_status = Some(st);
+                self.last_at = Some(now);
+            }
+        } else if self.started || s.final_text.is_some() {
+            // Settled: seen idle twice in a row, so the last streamed row is flushed.
+            self.idle_seen += 1;
+            if self.idle_seen >= 2 {
+                out.push(Up::Final(telegram::render_final(s.final_text.as_deref())));
+                if s.queued {
+                    // The next Telegram message runs as its own turn: mirror that one too.
+                    self.baseline = s.max_id;
+                    self.began = now;
+                    self.started = false;
+                    self.idle_seen = 0;
+                    self.last_status = None;
+                } else {
+                    self.done = true;
+                }
+            }
+        } else if !s.queued && now - self.began >= START_WAIT_MS {
+            out.push(Up::Final(
+                "Helm has not started a turn for that message yet; it is saved in the Telegram chat."
+                    .into(),
+            ));
+            self.done = true;
+        }
+        out
+    }
+}
+
+/// The real chat port: facts from the database, creation through the `chat_create` op.
+struct RealPort<'a> {
+    db: &'a Database,
+    rt: &'a ChatRuntime,
+    ops: &'a dyn OpInvoker,
+    handle: &'a tokio::runtime::Handle,
+    folder: &'a str,
+}
+
+impl ChatPort for RealPort<'_> {
+    fn facts(&self, chat_id: &str) -> Option<ChatFacts> {
+        self.db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT c.archived,
+                            (SELECT COALESCE(SUM(
+                                 COALESCE(json_extract(m.details, '$.usage.inputTokens'), 0)
+                               + COALESCE(json_extract(m.details, '$.usage.outputTokens'), 0)), 0)
+                             FROM messages m WHERE m.chat_id = c.id AND m.details IS NOT NULL
+                               AND json_valid(m.details))
+                     FROM chats c WHERE c.id = ?1",
+                    [chat_id],
+                    |r| {
+                        Ok(ChatFacts {
+                            archived: r.get(0)?,
+                            tokens: r.get::<_, i64>(1)?.max(0) as u64,
+                        })
+                    },
+                )
+                .optional()
+            })
+            .ok()
+            .flatten()
+    }
+
+    fn create(&self, title: &str) -> Result<String, String> {
+        std::fs::create_dir_all(self.folder)
+            .map_err(|_| "The Telegram chats' folder could not be made.".to_owned())?;
+        let chat = self
+            .handle
+            .block_on(
+                self.ops
+                    .invoke("chat_create", json!({ "cwd": self.folder })),
+            )
+            .map_err(|e| e.message)?;
+        let id = chat["id"]
+            .as_str()
+            .ok_or("chat_create answered no id")?
+            .to_owned();
+        helm_chats::titles::rename(self.rt, &id, title).map_err(|e| e.message)?;
+        Ok(id)
+    }
+}
+
+/// What a delivery did.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Placed {
+    /// Stored as a Telegram-origin submission.
+    Sent { chat: String, baseline: i64 },
+    /// Answered the chat's waiting question.
+    Answered { chat: String, baseline: i64 },
+}
+
+/// How a Telegram message lands on a busy chat: the user's send mode, never an abort.
+pub fn host_mode(mode: SendMode) -> HostSendMode {
+    match mode {
+        SendMode::Queue => HostSendMode::Queue,
+        SendMode::Asap | SendMode::Interrupt => HostSendMode::Steer,
+    }
+}
+
+/// The question a chat is waiting on that Telegram may answer: a multiple-choice or free-text
+/// question. Approvals, plans and trust prompts are never offered.
+pub fn answerable(rt: &ChatRuntime, chat: &str) -> Option<helm_chats::types::Interaction> {
+    rt.live_thread(chat)?.interactions.into_iter().find(|i| {
+        i.attention == Some(InteractionAttention::Question)
+            && matches!(
+                i.method,
+                InteractionMethod::Select | InteractionMethod::Input
+            )
+    })
+}
+
+fn max_row(db: &Database, chat: &str) -> i64 {
+    db.snapshot(|tx| {
+        tx.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?1",
+            [chat],
+            |r| r.get(0),
+        )
+    })
+    .unwrap_or(0)
+}
+
+/// Everything a delivery needs, cloned into the blocking pool.
+#[derive(Clone)]
+pub struct Ctx {
+    pub rt: ChatRuntime,
+    pub db: Arc<Database>,
+    pub ops: Arc<dyn OpInvoker>,
+    pub handle: tokio::runtime::Handle,
+    pub tag_path: PathBuf,
+    /// The folder new Telegram chats start in.
+    pub folder: String,
+    pub policy: TagPolicy,
+    /// Hub ids that answered a question, so a resend does not answer twice.
+    pub answered: Arc<Mutex<VecDeque<String>>>,
+}
+
+/// Put one message into its chat (blocking). `Err` leaves it unacknowledged at the hub.
+pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String> {
+    let port = RealPort {
+        db: &c.db,
+        rt: &c.rt,
+        ops: &*c.ops,
+        handle: &c.handle,
+        folder: &c.folder,
+    };
+    let (chat, _created) =
+        telegram::active_chat(&c.tag_path, &port, &c.policy, msg.bot.as_deref(), now)?;
+    let baseline = max_row(&c.db, &chat);
+    if let Some(q) = answerable(&c.rt, &chat) {
+        let seen = {
+            let a = c.answered.lock().unwrap_or_else(|p| p.into_inner());
+            a.contains(&msg.id)
+        };
+        if !seen {
+            let value = match q.method {
+                InteractionMethod::Select => {
+                    telegram::question_answer(q.options.as_deref().unwrap_or(&[]), &msg.text)
+                }
+                _ => msg.text.trim().to_owned(),
+            };
+            c.handle
+                .block_on(c.ops.invoke(
+                    "interaction_answer",
+                    json!({ "chatId": chat, "requestId": q.id, "value": value }),
+                ))
+                .map_err(|e| e.message)?;
+            let mut a = c.answered.lock().unwrap_or_else(|p| p.into_inner());
+            a.push_back(msg.id.clone());
+            while a.len() > 256 {
+                a.pop_front();
+            }
+        }
+        return Ok(Placed::Answered { chat, baseline });
+    }
+    let mode =
+        c.db.snapshot(|t| {
+            Ok::<_, rusqlite::Error>(helm_chats::send_behavior::resolve(
+                helm_core::prefs::read(t, "sendBehavior").as_ref(),
+            ))
+        })
+        .map(|sb| sb.mode)
+        .unwrap_or(SendMode::Asap);
+    let text = telegram::delivered_text(&msg.text, msg.age_minutes);
+    let sid = telegram::submission_id(&msg.id);
+    let started = std::time::Instant::now();
+    loop {
+        let r = host_send(
+            &c.rt,
+            HostSend {
+                chat_id: &chat,
+                submission_id: &sid,
+                text: &text,
+                mode: host_mode(mode),
+                origin: TELEGRAM_ORIGIN,
+                // The user's own message, typed on the phone: it never waits for a run slot.
+                gated: false,
+            },
+        );
+        match r {
+            Ok(_) => return Ok(Placed::Sent { chat, baseline }),
+            Err(e)
+                if matches!(e.code.as_str(), "busy" | "capacity")
+                    && started.elapsed() < BUSY_RETRY =>
+            {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            Err(e) => return Err(e.message),
+        }
+    }
+}
+
+/// The chat as the mirror sees it (blocking).
+pub fn snapshot(rt: &ChatRuntime, db: &Database, chat: &str, baseline: i64) -> Snap {
+    let row = db
+        .snapshot(|tx| {
+            let status: Option<String> = tx
+                .query_row("SELECT status FROM chats WHERE id = ?1", [chat], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            let mut st = tx.prepare(
+                "SELECT tool_name FROM messages WHERE chat_id = ?1 AND id > ?2
+                 AND tool_name IS NOT NULL ORDER BY id DESC LIMIT 3",
+            )?;
+            let mut recent: Vec<String> = st
+                .query_map(rusqlite::params![chat, baseline], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            recent.reverse();
+            let final_text: Option<String> = tx
+                .query_row(
+                    "SELECT text FROM messages WHERE chat_id = ?1 AND id > ?2 AND role = 'assistant'
+                     AND active = 1 AND text != '' ORDER BY id DESC LIMIT 1",
+                    rusqlite::params![chat, baseline],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let max_id: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?1",
+                [chat],
+                |r| r.get(0),
+            )?;
+            let queued: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM queued_submissions q
+                   JOIN submission_meta m ON m.submission_id = q.submission_id
+                   WHERE q.chat_id = ?1 AND m.origin = ?2)",
+                rusqlite::params![chat, TELEGRAM_ORIGIN.as_str()],
+                |r| r.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((status, recent, final_text, max_id, queued))
+        })
+        .unwrap_or_default();
+    let (status, recent, final_text, max_id, queued) = row;
+    let busy = status
+        .map(|s| {
+            matches!(
+                ChatStatus::parse(&s),
+                ChatStatus::Starting | ChatStatus::Running | ChatStatus::Stopping
+            )
+        })
+        .unwrap_or(false);
+    let live = rt.live_thread(chat);
+    let running = live
+        .as_ref()
+        .map(|t| t.live_tools.iter().map(|l| l.name.clone()).collect())
+        .unwrap_or_default();
+    let question = answerable(rt, chat).map(|q| {
+        let text = match q.method {
+            InteractionMethod::Select => telegram::render_question(
+                q.title.as_deref(),
+                q.message.as_deref(),
+                q.options.as_deref().unwrap_or(&[]),
+            ),
+            _ => telegram::render_question(q.title.as_deref(), q.message.as_deref(), &[]),
+        };
+        (q.id, text)
+    });
+    Snap {
+        busy,
+        running,
+        recent,
+        question,
+        final_text,
+        max_id,
+        queued,
+    }
+}
+
+/// Watch a chat until its Telegram turn (and any queued behind it) has ended.
+pub async fn mirror(
+    rt: ChatRuntime,
+    db: Arc<Database>,
+    up: Arc<dyn Upstream>,
+    chat: String,
+    baseline: i64,
+) {
+    let mut m = Mirror::new(baseline, helm_core::now_ms());
+    while !m.done {
+        tokio::time::sleep(POLL).await;
+        let (rt2, db2, chat2, base) = (rt.clone(), db.clone(), chat.clone(), m.baseline);
+        let Ok(s) = tokio::task::spawn_blocking(move || snapshot(&rt2, &db2, &chat2, base)).await
+        else {
+            return;
+        };
+        for out in m.step(&s, helm_core::now_ms()) {
+            match out {
+                Up::Status(t) => up.status(&t),
+                Up::Final(t) => up.final_answer(&t),
+            }
+        }
+    }
+}
+
+/// The app's Telegram sink. The executor's wiring gives it the chat runtime and database; the
+/// op dispatcher ([`ChatSink::attach_ops`]) and the line ([`ChatSink::attach_line`]) arrive at
+/// start.
+pub struct ChatSink {
+    exec: Arc<AppExecutor>,
+    ops: OnceLock<Arc<dyn OpInvoker>>,
+    up: OnceLock<Arc<dyn Upstream>>,
+    profile_dir: PathBuf,
+    policy: TagPolicy,
+    serial: tokio::sync::Mutex<()>,
+    answered: Arc<Mutex<VecDeque<String>>>,
+    watching: Mutex<Option<(String, tokio::task::JoinHandle<()>)>>,
+}
+
+/// A path the worker can be started in: without Windows' verbatim prefix.
+fn plain_path(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy().into_owned();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => rest.to_owned(),
+        _ => s,
+    }
+}
+
+impl ChatSink {
+    pub fn new(exec: Arc<AppExecutor>, profile_dir: PathBuf) -> Self {
+        ChatSink {
+            exec,
+            ops: OnceLock::new(),
+            up: OnceLock::new(),
+            profile_dir,
+            policy: TagPolicy::default(),
+            serial: tokio::sync::Mutex::new(()),
+            answered: Arc::new(Mutex::new(VecDeque::new())),
+            watching: Mutex::new(None),
+        }
+    }
+
+    pub fn attach_ops(&self, ops: Arc<dyn OpInvoker>) {
+        let _ = self.ops.set(ops);
+    }
+
+    pub fn attach_line(&self, up: Arc<dyn Upstream>) {
+        let _ = self.up.set(up);
+    }
+
+    fn ctx(&self) -> Result<Ctx, String> {
+        let w = self
+            .exec
+            .wiring()
+            .ok_or("Helm is still starting; the message stays queued.")?;
+        let ops = self
+            .ops
+            .get()
+            .cloned()
+            .ok_or("Helm is still starting; the message stays queued.")?;
+        let rt = w
+            .services
+            .get::<ChatRuntime>()
+            .ok_or("Helm's chats are not available.")?;
+        let db = w
+            .services
+            .get::<Database>()
+            .ok_or("Helm's database is not available.")?;
+        Ok(Ctx {
+            rt: (*rt).clone(),
+            db,
+            ops,
+            handle: tokio::runtime::Handle::current(),
+            tag_path: telegram::tag_path(&self.profile_dir),
+            folder: plain_path(&self.profile_dir.join("telegram")),
+            policy: self.policy,
+            answered: self.answered.clone(),
+        })
+    }
+
+    /// Watch `chat` unless it is already being watched.
+    fn watch(&self, c: &Ctx, chat: &str, baseline: i64) {
+        let Some(up) = self.up.get().cloned() else {
+            return;
+        };
+        let mut w = self.watching.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((id, h)) = w.as_ref() {
+            if id == chat && !h.is_finished() {
+                return;
+            }
+            h.abort();
+        }
+        let task = c.handle.spawn(mirror(
+            c.rt.clone(),
+            c.db.clone(),
+            up,
+            chat.to_owned(),
+            baseline,
+        ));
+        *w = Some((chat.to_owned(), task));
+    }
+}
+
+impl TelegramSink for ChatSink {
+    fn deliver<'a>(&'a self, msg: TelegramMessage) -> BoxFut<'a, Result<(), String>> {
+        Box::pin(async move {
+            // One at a time: two messages with no tag must not start two chats.
+            let _turn = self.serial.lock().await;
+            let c = self.ctx()?;
+            let c2 = c.clone();
+            let placed = tokio::task::spawn_blocking(move || place(&c2, &msg, helm_core::now_ms()))
+                .await
+                .map_err(|_| "The delivery did not finish.".to_owned())??;
+            let (Placed::Sent { chat, baseline } | Placed::Answered { chat, baseline }) = placed;
+            self.watch(&c, &chat, baseline);
+            Ok(())
+        })
+    }
+
+    fn stop<'a>(&'a self) -> BoxFut<'a, ()> {
+        Box::pin(async move {
+            let Ok(c) = self.ctx() else { return };
+            let Some(tag) = telegram::load_tag(&c.tag_path) else {
+                return;
+            };
+            if let Err(e) = c
+                .ops
+                .invoke(
+                    "chat_stop",
+                    json!({ "chatId": tag.chat_id, "continueQueue": false }),
+                )
+                .await
+            {
+                log::warn!("relay: /stop from Telegram failed: {}", e.message);
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+#[path = "sink_tests.rs"]
+mod tests;

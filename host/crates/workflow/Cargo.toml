@@ -12,6 +12,14 @@ helm-ipc.workspace = true
 helm-chats.workspace = true
 helm-workers.workspace = true
 helm-hosttools = { path = "../hosttools" }
+helm-consent = { path = "../consent" }
+helm-standup = { path = "../standup" }
+helm-platform.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+tokio.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true

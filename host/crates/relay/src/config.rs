@@ -80,22 +80,23 @@ pub struct RelaySaveArgs {
 /// Shortest relay token accepted; the hub refuses anything shorter too.
 pub const MIN_TOKEN: usize = 24;
 
-/// A hub address as the line uses it: `ws://<host>:<port>/relay`. Accepts `ws://`, `wss://`,
-/// `http://` and `https://` (mapped to ws/wss), with or without the `/relay` path. Plain `ws` is
-/// allowed only for a loopback, RFC 1918, Tailscale (100.64.0.0/10) or IPv6 unique-local
-/// address literal; anything else needs `wss`.
+/// A hub address as the line uses it: `ws://<host>:<port>/relay`. Accepts `ws://` or `http://`,
+/// with or without the `/relay` path, for a loopback, RFC 1918, Tailscale (100.64.0.0/10) or IPv6
+/// unique-local address literal only (the hub is LAN and Tailscale only, like its MCP endpoint).
+/// `wss://` is refused: the line carries no TLS stack, so it could never connect.
 pub fn normalize_url(raw: &str) -> Result<String, String> {
     let raw = raw.trim();
-    let (secure, rest) = if let Some(r) = raw.strip_prefix("wss://") {
-        (true, r)
-    } else if let Some(r) = raw.strip_prefix("https://") {
-        (true, r)
-    } else if let Some(r) = raw.strip_prefix("ws://") {
-        (false, r)
+    if raw.starts_with("wss://") || raw.starts_with("https://") {
+        return Err(
+            "The hub line has no TLS: use the hub's ws:// address on the LAN or Tailscale.".into(),
+        );
+    }
+    let rest = if let Some(r) = raw.strip_prefix("ws://") {
+        r
     } else if let Some(r) = raw.strip_prefix("http://") {
-        (false, r)
+        r
     } else {
-        return Err("The hub address must start with ws://, wss://, http:// or https://.".into());
+        return Err("The hub address must start with ws:// or http://.".into());
     };
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
@@ -108,18 +109,13 @@ pub fn normalize_url(raw: &str) -> Result<String, String> {
     if authority.is_empty() || authority.contains('@') || authority.contains(char::is_whitespace) {
         return Err("The hub address needs a host (and no user name).".into());
     }
-    let host = host_of(authority);
-    if !secure && !private_literal(host) {
+    if !private_literal(host_of(authority)) {
         return Err(
-            "Plain ws:// is allowed only for a LAN, Tailscale or loopback address; use wss:// \
-             for anything else."
+            "The hub address must be a LAN, Tailscale or loopback IP address (it is never public)."
                 .into(),
         );
     }
-    Ok(format!(
-        "{}://{authority}/relay",
-        if secure { "wss" } else { "ws" }
-    ))
+    Ok(format!("ws://{authority}/relay"))
 }
 
 fn host_of(authority: &str) -> &str {
@@ -382,17 +378,21 @@ mod tests {
             normalize_url("ws://[fd00::1]:9").unwrap(),
             "ws://[fd00::1]:9/relay"
         );
-        assert_eq!(
-            normalize_url("https://hub.example:443").unwrap(),
-            "wss://hub.example:443/relay"
+        assert!(
+            normalize_url("https://hub.example:443").is_err(),
+            "no TLS on the line"
+        );
+        assert!(
+            normalize_url("wss://10.0.0.1:9").is_err(),
+            "no TLS on the line"
         );
         assert!(
             normalize_url("ws://hub.example:9").is_err(),
-            "a DNS name needs wss"
+            "a DNS name is refused"
         );
         assert!(
             normalize_url("ws://8.8.8.8:9").is_err(),
-            "a public address needs wss"
+            "a public address is refused"
         );
         assert!(
             normalize_url("ws://100.128.0.1:9").is_err(),

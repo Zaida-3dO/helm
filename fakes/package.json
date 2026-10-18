@@ -8,6 +8,6 @@
     "node": ">=22.19"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.ts\" \"board/**/*.test.ts\" \"git-remote/**/*.test.ts\""
+    "test": "node --test \"test/*.test.ts\" \"board/**/*.test.ts\" \"git-remote/**/*.test.ts\" \"telegram/**/*.test.ts\" \"standup-writes/**/*.test.ts\""
   }
 }

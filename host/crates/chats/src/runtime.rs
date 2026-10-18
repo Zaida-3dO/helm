@@ -3,8 +3,10 @@
 //!
 //! - [`ChatRuntime`] is registered as a service; ops reach it through `ctx.services`.
 //! - Each chat with work gets one actor task ([`crate::actor`]) owning its worker, its streaming
-//!   state and its timers. Commands reach it over a 64-slot channel; a full channel
-//!   refuses the send with the draft kept.
+//!   state and its timers. Commands reach it over a 64-slot channel: best-effort
+//!   sends never wait and are dropped when it is full; a "send soon" (a saved message handed to the
+//!   chat) retries for up to [`Limits::send_soon`]; the last slot is kept for interrupts (Stop,
+//!   tool stop, terminate), which never wait. Other commands are refused with the draft kept.
 //! - [`Spawner`] starts a worker. [`ProcessSpawner`] is the real one (stage, resolve Node, write
 //!   `launch.json`, spawn inside a Job Object); tests use an in-process fake.
 
@@ -45,6 +47,8 @@ pub struct Limits {
     pub tick: Duration,
     /// One unit of the `stallMinutes` setting (a minute; tests shorten it).
     pub stall_unit: Duration,
+    /// How long a "send soon" keeps retrying a full actor channel (60 s).
+    pub send_soon: Duration,
 }
 
 impl Default for Limits {
@@ -59,6 +63,7 @@ impl Default for Limits {
             max_idle_workers: 20,
             tick: Duration::from_secs(30),
             stall_unit: Duration::from_secs(60),
+            send_soon: Duration::from_secs(60),
         }
     }
 }
@@ -358,6 +363,8 @@ pub(crate) struct Shared {
     pub autocomplete: Mutex<crate::autocomplete::AutocompleteGate>,
     /// Host tools and the worker-message registry, attached once the app's services exist.
     pub host: std::sync::OnceLock<crate::hostcalls::HostSeam>,
+    /// The run-slot queue's hold and pump wake ([`crate::runslots`]).
+    pub run_slots: crate::runslots::Slots,
 }
 
 /// The runtime service.
@@ -392,9 +399,11 @@ impl ChatRuntime {
                 },
                 autocomplete: Mutex::new(Default::default()),
                 host: std::sync::OnceLock::new(),
+                run_slots: Default::default(),
             }),
         };
         rt.start_tick();
+        crate::runslots::start(&rt);
         rt
     }
 
@@ -429,7 +438,7 @@ impl ChatRuntime {
                     .cloned()
                     .collect();
                 for h in busy {
-                    let _ = h.tx.try_send(Cmd::StallCheck { after });
+                    let _ = enqueue(&h.tx, Cmd::StallCheck { after });
                 }
                 crate::attention::publish(&sh);
                 ChatRuntime { sh: sh.clone() }.apply_send_behavior();
@@ -452,7 +461,7 @@ impl ChatRuntime {
             .unwrap_or(send_behavior::HOME_DEFAULTS);
         let handles: Vec<ActorHandle> = self.sh.actors.lock().unwrap().values().cloned().collect();
         for h in handles {
-            let _ = h.tx.try_send(Cmd::SendBehavior(sb));
+            let _ = enqueue(&h.tx, Cmd::SendBehavior(sb));
         }
     }
 
@@ -503,20 +512,45 @@ impl ChatRuntime {
         h
     }
 
-    /// Hand a command to the chat's actor. A full channel is a refusal ("your message is saved").
+    /// Hand a command to the chat's actor. On a full channel a "send soon" is retried
+    /// for up to [`Limits::send_soon`] and logged if it never fits; anything else is a refusal
+    /// ("your message is saved"). Use [`Self::command_soon`] to act when a send soon gives up.
     pub(crate) fn command(&self, chat_id: &str, cmd: Cmd) -> Result<(), ApiError> {
+        self.command_soon(chat_id, cmd, |_| {})
+    }
+
+    /// [`Self::command`], calling `gave_up` with the command if a send soon never fits.
+    pub(crate) fn command_soon(
+        &self,
+        chat_id: &str,
+        cmd: Cmd,
+        gave_up: impl FnOnce(Cmd) + Send + 'static,
+    ) -> Result<(), ApiError> {
         if self.sh.shutting_down.load(Ordering::SeqCst) {
             return Err(ApiError::new(
                 "refused",
                 "Helm is shutting down; your message is saved.",
             ));
         }
-        self.actor(chat_id).tx.try_send(cmd).map_err(|_| {
-            ApiError::new(
+        let tx = self.actor(chat_id).tx;
+        match enqueue(&tx, cmd) {
+            Ok(()) => Ok(()),
+            Err(cmd) if lane(&cmd) == Lane::Soon => {
+                let chat = chat_id.to_owned();
+                let within = self.sh.cfg.limits.send_soon;
+                self.sh.handle.spawn(async move {
+                    if let Err(cmd) = send_soon(&tx, cmd, within).await {
+                        log::warn!("chat {chat}: its command channel stayed full; giving up");
+                        gave_up(cmd);
+                    }
+                });
+                Ok(())
+            }
+            Err(_) => Err(ApiError::new(
                 "busy",
                 "Helm is busy with this chat; your message is saved, send it again in a moment.",
-            )
-        })
+            )),
+        }
     }
 
     /// The skills the chat's worker reported; empty before its first launch.
@@ -541,7 +575,7 @@ impl ChatRuntime {
     pub fn retire(&self, chat_id: &str) {
         let h = self.sh.actors.lock().unwrap().get(chat_id).cloned();
         if let Some(h) = h {
-            let _ = h.tx.try_send(Cmd::Retire);
+            let _ = enqueue(&h.tx, Cmd::Retire);
         }
     }
 
@@ -597,7 +631,7 @@ impl ChatRuntime {
         idle.sort_by_key(|(t, _)| *t);
         let excess = idle.len() - cap;
         for (_, h) in idle.into_iter().take(excess) {
-            let _ = h.tx.try_send(Cmd::Retire);
+            let _ = enqueue(&h.tx, Cmd::Retire);
         }
     }
 
@@ -676,10 +710,63 @@ impl ChatRuntime {
     pub fn terminate_all(&self) {
         let handles: Vec<ActorHandle> = self.sh.actors.lock().unwrap().values().cloned().collect();
         for h in handles {
-            let _ = h.tx.try_send(Cmd::Terminate);
+            let _ = enqueue(&h.tx, Cmd::Terminate);
         }
     }
 }
+
+/// How a command uses the actor's 64-slot channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lane {
+    /// May take the last slot, which every other lane leaves free; never waits.
+    Interrupt,
+    /// A saved message handed to the chat: retried while the channel is full.
+    Soon,
+    /// Everything else: never waits; dropped (best effort) or refused when full.
+    Other,
+}
+
+pub(crate) fn lane(cmd: &Cmd) -> Lane {
+    match cmd {
+        Cmd::Stop { .. } | Cmd::ToolStop { .. } | Cmd::Terminate => Lane::Interrupt,
+        Cmd::Dispatch(_) | Cmd::Kick | Cmd::ApplyEdit => Lane::Soon,
+        _ => Lane::Other,
+    }
+}
+
+/// Put `cmd` on the channel without waiting, keeping the last slot for interrupts. Hands the
+/// command back when it does not fit.
+pub(crate) fn enqueue(tx: &mpsc::Sender<Cmd>, cmd: Cmd) -> Result<(), Cmd> {
+    let Ok(permit) = tx.try_reserve() else {
+        return Err(cmd);
+    };
+    if lane(&cmd) != Lane::Interrupt && tx.capacity() == 0 {
+        // That was the reserved slot: give it back.
+        drop(permit);
+        return Err(cmd);
+    }
+    permit.send(cmd);
+    Ok(())
+}
+
+/// Retry [`enqueue`] until it fits or `within` has passed (then the command comes back).
+pub(crate) async fn send_soon(
+    tx: &mpsc::Sender<Cmd>,
+    mut cmd: Cmd,
+    within: Duration,
+) -> Result<(), Cmd> {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        match enqueue(tx, cmd) {
+            Ok(()) => return Ok(()),
+            Err(c) if tx.is_closed() || tokio::time::Instant::now() >= deadline => return Err(c),
+            Err(c) => cmd = c,
+        }
+        tokio::time::sleep(SEND_SOON_POLL).await;
+    }
+}
+
+const SEND_SOON_POLL: Duration = Duration::from_millis(25);
 
 pub const DEFAULT_STALL_MINUTES: u32 = 5;
 

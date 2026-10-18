@@ -1746,6 +1746,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "uuid",
@@ -1770,6 +1771,7 @@ dependencies = [
  "helm-panel",
  "helm-platform",
  "helm-projects",
+ "helm-relay",
  "helm-schedules",
  "helm-search",
  "helm-shell",
@@ -1858,8 +1860,10 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1989,6 +1993,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -2111,16 +2116,24 @@ name = "helm-workflow"
 version = "0.1.0"
 dependencies = [
  "helm-chats",
+ "helm-consent",
  "helm-core",
  "helm-hosttools",
  "helm-ipc",
+ "helm-platform",
+ "helm-standup",
  "helm-workers",
+ "hex",
  "log",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "tokio",
  "ts-rs",
+ "ureq",
+ "uuid",
 ]
 
 [[package]]

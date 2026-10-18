@@ -5,7 +5,10 @@
 //! no question, quote, code fence, newline or doubt-shaped word, exactly one of its segments is
 //! the step's fixed form, and every other segment is a plain acknowledgement. Refs, paths, URLs,
 //! `#N`, shas and backticked spans are read as opaque tokens first, so none of them can supply or
-//! hide a word.
+//! hide a word. Prose is compared without case; tokens (the fixed form's names, paths, file
+//! names, refs and backticked spans) must match exactly, so `Config.json` never stands in for
+//! `config.json`. A kind whose plain-word target must match exactly renders it
+//! in backticks in its fixed form.
 
 /// Longest message that can count, in bytes.
 pub const MAX_MESSAGE_BYTES: usize = 200;
@@ -170,6 +173,39 @@ fn restore(seg: &str, tokens: &[String]) -> String {
     out
 }
 
+/// The segment restored with whitespace collapsed and a closing `.`/`!` trimmed, keeping case,
+/// plus the byte range of every token in it.
+fn cased(scan: &str, tokens: &[String]) -> (String, Vec<std::ops::Range<usize>>) {
+    let collapsed = scan.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapsed.trim_end_matches(['.', '!']);
+    let mut out = String::new();
+    let mut spans = Vec::new();
+    let mut it = collapsed.split(TOKEN_OPEN);
+    out.push_str(it.next().unwrap_or(""));
+    for part in it {
+        if let Some((n, tail)) = part.split_once(TOKEN_CLOSE) {
+            if let Some(t) = n.parse::<usize>().ok().and_then(|i| tokens.get(i)) {
+                let start = out.len();
+                out.push_str(t);
+                spans.push(start..out.len());
+            }
+            out.push_str(tail);
+        }
+    }
+    (out, spans)
+}
+
+/// Two segments already equal without case: every token span, on either side, is byte-identical.
+fn tokens_match(
+    msg: &(String, Vec<std::ops::Range<usize>>),
+    form: &(String, Vec<std::ops::Range<usize>>),
+) -> bool {
+    msg.0.len() == form.0.len()
+        && form.1.iter().chain(msg.1.iter()).all(|r| {
+            msg.0.get(r.clone()).is_some() && msg.0.get(r.clone()) == form.0.get(r.clone())
+        })
+}
+
 fn normalise(s: &str) -> String {
     s.split_whitespace()
         .collect::<Vec<_>>()
@@ -204,7 +240,10 @@ pub fn check(message: &str, fixed_form: &str) -> Result<String, &'static str> {
         return Err("the message asks a question");
     }
     let (scan, tokens) = tokenize(message);
-    let want = normalise(fixed_form);
+    // The form read the same way as the message: a backticked name in it is a token, not text.
+    let (fscan, ftokens) = tokenize(fixed_form);
+    let want = normalise(&restore(fscan.trim(), &ftokens));
+    let form = cased(fscan.trim(), &ftokens);
     let mut matched: Option<String> = None;
     for seg in scan.split(['.', '!', ',', '。']) {
         let seg = seg.trim();
@@ -213,6 +252,9 @@ pub fn check(message: &str, fixed_form: &str) -> Result<String, &'static str> {
         }
         let restored = restore(seg, &tokens);
         if normalise(&restored) == want {
+            if !tokens_match(&cased(seg, &tokens), &form) {
+                return Err("the message does not match the step's names exactly");
+            }
             if matched.is_some() {
                 return Err("the message names the step more than once");
             }
@@ -253,6 +295,28 @@ mod tests {
         )
         .is_ok());
         assert!(check("ok. Approve the MCP server notes from .mcp.json", FORM).is_ok());
+    }
+
+    #[test]
+    fn names_and_tokens_must_match_case_exactly() {
+        // A case-twin of a token never stands in for it.
+        assert_eq!(
+            check("Approve the MCP server notes from .MCP.json.", FORM),
+            Err("the message does not match the step's names exactly")
+        );
+        let form = "Run the test action `Config.json`.";
+        assert!(check("Run the test action Config.json.", form).is_ok());
+        assert!(check("run the test action `Config.json`", form).is_ok());
+        assert!(check("Run the test action config.json.", form).is_err());
+        assert!(check("Run the test action `config.json`.", form).is_err());
+        // A backticked name in the form is exact even when it is a plain word.
+        let form = "Approve the MCP server `Notes`.";
+        assert!(check("Approve the MCP server Notes.", form).is_ok());
+        assert!(check("Approve the MCP server `Notes`.", form).is_ok());
+        assert!(check("Approve the MCP server notes.", form).is_err());
+        assert!(check("Approve the MCP server `notes`.", form).is_err());
+        // Prose stays case-insensitive.
+        assert!(check("APPROVE THE mcp SERVER notes FROM .mcp.json", FORM).is_ok());
     }
 
     #[test]

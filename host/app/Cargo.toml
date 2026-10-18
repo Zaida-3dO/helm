@@ -38,6 +38,7 @@ helm-schedules = { path = "../crates/schedules" }
 helm-workflow = { path = "../crates/workflow" }
 helm-afk = { path = "../crates/afk" }
 helm-governor = { path = "../crates/governor" }
+helm-relay = { path = "../crates/relay" }
 serde_json.workspace = true
 tokio.workspace = true
 log.workspace = true

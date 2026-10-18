@@ -36,6 +36,9 @@ process.stdin.on("end", () => {
 test("titles are cleaned and must be 3-7 words within 50 characters", () => {
   assert.equal(cleanTitle('"Fix the flaky build."'), "Fix the flaky build");
   assert.equal(cleanTitle("Title: **Port the sidebar**\nmore"), "Port the sidebar");
+  assert.equal(cleanTitle("**Title:** Keyboard focus rings in desktop apps"), "Keyboard focus rings in desktop apps");
+  assert.equal(cleanTitle('"Title: Keyboard focus rings in desktop apps"'), "Keyboard focus rings in desktop apps");
+  assert.equal(cleanTitle("TITLE:Fix the flaky build"), "Fix the flaky build");
   assert.equal(cleanTitle("one two three four five six seven eight"), null);
   assert.equal(cleanTitle("x".repeat(51)), null);
   assert.equal(cleanTitle("   "), null);

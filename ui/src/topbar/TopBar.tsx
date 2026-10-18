@@ -7,13 +7,13 @@
 // The bar is a window drag region: a left press that is not on a control starts a native drag, and
 // a double-click toggles maximise.
 
-import { useState, useSyncExternalStore, type ReactNode } from 'react';
+import { useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { panelStore, togglePanel } from '../panel/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, TextInput, toast } from '../ui/index.ts';
 import { UsageMeter } from '../usage/UsageMeter.tsx';
 import { CaptionButtons, dragHandlers } from './caption.tsx';
-import { folderLabel } from './label.ts';
+import { folderLabel, RenameEdit } from './label.ts';
 
 export interface TopBarProps {
   /** The <ActionRow chatId/> (ui/src/actions). */
@@ -82,6 +82,11 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
     if (!chat || !t || t === chat.title) return;
     shell.api('chat_rename', { chatId: chat.id, title: t }).catch(err);
   };
+  const edit = useRef<RenameEdit | null>(null);
+  const startRename = (title: string) => {
+    edit.current = new RenameEdit(rename);
+    setRenaming(title);
+  };
   return (
     <>
       <header className="topbar" data-testid="topbar" {...dragHandlers()}>
@@ -103,11 +108,12 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
               aria-label="Chat title"
               value={renaming}
               onChange={(e) => setRenaming(e.target.value)}
-              onBlur={() => rename(renaming)}
+              onBlur={() => edit.current?.commit(renaming)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') rename(renaming);
+                if (e.key === 'Enter') edit.current?.commit(renaming);
                 if (e.key === 'Escape') {
                   e.stopPropagation();
+                  edit.current?.cancel();
                   setRenaming(null);
                 }
               }}
@@ -118,11 +124,11 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
               className="crumb-title"
               data-testid="topbar-title"
               title={chat ? 'Double-click to rename' : undefined}
-              onDoubleClick={() => chat && setRenaming(chat.title)}
+              onDoubleClick={() => chat && startRename(chat.title)}
               onKeyDown={(e) => {
                 if (chat && (e.key === 'Enter' || e.key === ' ')) {
                   e.preventDefault();
-                  setRenaming(chat.title);
+                  startRename(chat.title);
                 }
               }}
             >

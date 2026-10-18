@@ -10,8 +10,9 @@
 //! | [`service`] | the 30 s loop and what each band does |
 //! | `ops` | `governor_state`, `governor_settings` (UI-only) and the `governor` event |
 //!
-//! Not built: the selective band's effect on automated sends (the run-slot hook waits on the
-//! chats forward) and proposing backlog items in surplus.
+//! The run-slot hook: [`start`] installs a hold on the chat runtime, so automated starts
+//! wait while the band is wind-down or stop ([`service::holds`]). Not built: proposing backlog
+//! items in surplus.
 
 pub mod bands;
 pub mod service;
@@ -129,6 +130,12 @@ pub fn start(runtime: &ChatRuntime, dispatcher: &Arc<helm_ipc::Dispatcher>) {
     gov.attach(Arc::new(RuntimeControl {
         rt: runtime.clone(),
         dispatcher: dispatcher.clone(),
+    }));
+    // The run-slot hook: near the limit, nothing new starts on its own.
+    let hold = gov.clone();
+    runtime.set_slot_hold(Arc::new(move |now| {
+        service::holds(hold.band(now))
+            .then(|| "Plan usage is near its limit, so automated starts wait.".to_owned())
     }));
     runtime.handle().spawn(async move {
         let mut every = tokio::time::interval(std::time::Duration::from_secs(30));

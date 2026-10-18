@@ -5,6 +5,9 @@
 //! - **Deny by default.** A message whose sender is not on the allow-list is
 //!   dropped: nothing is forwarded to Helm and nothing is sent back, so the bot
 //!   does not even confirm it exists.
+//! - **Private chats only.** A message in a group is dropped too, even from an
+//!   allowed user: replies and live status go to the chat the user last wrote
+//!   in, and in a group other members would read them.
 //! - **Forwarding.** An allowed message goes down the relay line as a
 //!   `telegram` frame and is held until Helm acknowledges it. Line down: the
 //!   message is queued in order and the sender is told at once. A queued
@@ -260,6 +263,9 @@ impl Bridge {
         let Some(chat) = msg.pointer("/chat/id").and_then(Value::as_i64) else {
             return Handled::Ignored;
         };
+        if msg.pointer("/chat/type").and_then(Value::as_str) != Some("private") {
+            return Handled::Ignored;
+        }
         self.st().reply_chat = Some(chat);
         let Some(text) = msg.get("text").and_then(Value::as_str) else {
             self.reply(chat, TEXT_ONLY).await;

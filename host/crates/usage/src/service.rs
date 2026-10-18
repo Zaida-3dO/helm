@@ -4,6 +4,10 @@
 //! - A read starts on launch, every 10 minutes while the window is visible, and on Refresh. The UI
 //!   asks (`usage_refresh`); the host enforces the floor: **never more often than once per 60 s**,
 //!   and never two at once.
+//! - A cold first read can come back `no_limits` and then succeed seconds later (Claude Code
+//!   2.1.289), so a `no_limits` answer is re-read after 15 s and again after 60 s
+//!   ([`NO_LIMITS_RETRIES`]) instead of waiting for the UI's next 10-minute poll. These re-reads
+//!   are the host's own and do not move the floor's clock.
 //! - A read runs in a short-lived helper (`helpers/usage`) on a thread of its own; the op answers
 //!   at once and the result arrives as the `plan_usage` event.
 //! - Whatever the helper cannot read is a readiness state with a reason, never an error toast.
@@ -17,6 +21,11 @@ use std::sync::{Arc, Mutex};
 
 /// The floor between two reads.
 pub const MIN_GAP_MS: i64 = 60_000;
+/// The re-reads after a `no_limits` answer, each counted from the answer before it.
+pub const NO_LIMITS_RETRIES: [std::time::Duration; 2] = [
+    std::time::Duration::from_secs(15),
+    std::time::Duration::from_secs(60),
+];
 
 /// What the control reader answered, as the helper prints it.
 #[derive(Clone, Debug, PartialEq)]
@@ -99,6 +108,8 @@ struct State {
     last_attempt: Option<i64>,
     /// The last control read's failure, cleared by the next success.
     failure: Option<(String, String)>,
+    /// `no_limits` re-reads used since the last reading.
+    no_limits_retries: usize,
     version: Option<String>,
 }
 
@@ -107,6 +118,7 @@ pub struct UsageService {
     events: Arc<dyn EventSink>,
     reader: Arc<dyn PlanReader>,
     state: Mutex<State>,
+    retry_delays: Vec<std::time::Duration>,
 }
 
 impl UsageService {
@@ -120,7 +132,14 @@ impl UsageService {
                 stored,
                 ..State::default()
             }),
+            retry_delays: NO_LIMITS_RETRIES.to_vec(),
         }
+    }
+
+    #[cfg(test)]
+    fn with_retry_delays(mut self, d: Vec<std::time::Duration>) -> Self {
+        self.retry_delays = d;
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -155,7 +174,8 @@ impl UsageService {
         self.emit(&snap);
     }
 
-    fn finish_control(&self, answer: ControlAnswer, now: i64) {
+    fn finish_control(self: &Arc<Self>, answer: ControlAnswer, now: i64) {
+        let mut retry = None;
         let snap = {
             let mut st = self.lock();
             st.running = false;
@@ -168,6 +188,7 @@ impl UsageService {
                     version,
                 } => {
                     st.failure = None;
+                    st.no_limits_retries = 0;
                     if version.is_some() {
                         st.version = version;
                     }
@@ -182,25 +203,46 @@ impl UsageService {
                     if version.is_some() {
                         st.version = version;
                     }
+                    if reason == "no_limits" {
+                        retry = self.retry_delays.get(st.no_limits_retries).copied();
+                        st.no_limits_retries += 1;
+                    }
                     st.failure = Some((reason, message));
                 }
             }
             snapshot_of(&st, now)
         };
         self.emit(&snap);
+        if let Some(delay) = retry {
+            let me = self.clone();
+            let _ = std::thread::Builder::new()
+                .name("plan-usage-retry".into())
+                .spawn(move || {
+                    std::thread::sleep(delay);
+                    me.start_read(helm_core::now_ms(), false);
+                });
+        }
     }
 
     /// Start a read when the floor allows and none is running. Always answers with the current
     /// snapshot; the result of a started read arrives as the `plan_usage` event.
     pub fn refresh(self: &Arc<Self>, now: i64) -> UsageSnapshot {
+        self.start_read(now, true);
+        self.snapshot(now)
+    }
+
+    /// Start a read unless one is running (and, for `floor`, unless the 60 s floor forbids it).
+    fn start_read(self: &Arc<Self>, now: i64, floor: bool) {
         let start = {
             let mut st = self.lock();
-            let due = st.last_attempt.is_none_or(|t| now - t >= MIN_GAP_MS);
+            let due = !floor || st.last_attempt.is_none_or(|t| now - t >= MIN_GAP_MS);
             if st.running || !due {
                 false
             } else {
                 st.running = true;
-                st.last_attempt = Some(now);
+                if floor {
+                    st.last_attempt = Some(now);
+                }
                 true
             }
         };
@@ -223,7 +265,6 @@ impl UsageService {
                 );
             }
         }
-        self.snapshot(now)
     }
 }
 
@@ -372,6 +413,61 @@ mod tests {
         panic!("timed out");
     }
 
+    fn wait_for(f: impl Fn() -> bool) {
+        for _ in 0..200 {
+            if f() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("timed out");
+    }
+
+    fn no_limits() -> ControlAnswer {
+        ControlAnswer::Failed {
+            reason: "no_limits".into(),
+            message: "The binary reports no plan limits for this sign-in".into(),
+            version: None,
+        }
+    }
+
+    fn quick(svc: Arc<UsageService>) -> Arc<UsageService> {
+        let d = std::time::Duration::from_millis(30);
+        let svc = Arc::into_inner(svc).unwrap().with_retry_delays(vec![d, d]);
+        Arc::new(svc)
+    }
+
+    /// A cold `no_limits` first read is re-read soon, not at the next 10-minute poll;
+    /// the re-reads stop after their schedule and do not move the floor.
+    #[test]
+    fn a_no_limits_answer_is_read_again_soon() {
+        let (svc, reader, _sink, _d) = service(vec![no_limits(), no_limits(), reading(7.0)]);
+        let svc = quick(svc);
+        let t0 = 1_000_000;
+        svc.refresh(t0);
+        let got = wait_until(&svc, |s| s.reading.is_some());
+        assert_eq!(got.readiness.state, ReadinessState::Ready);
+        assert_eq!(reader.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            svc.refresh(t0 + 1).next_refresh_at,
+            Some(t0 + MIN_GAP_MS),
+            "the floor still counts from the refresh that was asked for"
+        );
+
+        // With the schedule spent, a lasting `no_limits` stops re-reading.
+        let (svc, reader, _sink, _d) =
+            service(vec![no_limits(), no_limits(), no_limits(), reading(1.0)]);
+        let svc = quick(svc);
+        svc.refresh(t0);
+        wait_for(|| reader.calls.load(Ordering::SeqCst) == 3);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            reader.calls.load(Ordering::SeqCst),
+            3,
+            "no fourth read on its own"
+        );
+    }
+
     #[test]
     fn a_refresh_reads_once_then_the_floor_holds_for_sixty_seconds() {
         let (svc, reader, sink, _d) = service(vec![reading(7.0), reading(9.0)]);
@@ -393,6 +489,8 @@ mod tests {
             Some(7.0)
         );
         assert_eq!(done.readiness.state, ReadinessState::Ready);
+        // The reading is stored before the event is emitted (outside the lock): wait for it.
+        wait_for(|| !sink.kinds().is_empty());
         assert_eq!(sink.kinds(), ["plan_usage"]);
         // Inside the floor: no second read, whatever asks.
         let again = svc.refresh(t0 + MIN_GAP_MS - 1);

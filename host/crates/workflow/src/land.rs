@@ -1,0 +1,617 @@
+//! The land step. The app's own
+//! code lands handed-off changes; agents never do.
+//!
+//! - **Mode** is recomputed from the host's settings at every pass, never read from a worker.
+//! - **Merge rule**: re-read the PR; it must be open, its head the approved tip, its base the
+//!   approved base and a protected branch. A conflict is final. While GitHub is still computing
+//!   mergeability the change waits (every 10 s for 2 min, then every minute up to 15 min, then
+//!   "Awaiting your Merge"). A draft is marked ready first. The merge is pinned with
+//!   `--match-head-commit`, and it counts only when the PR then reads back MERGED into a
+//!   protected branch.
+//! - **Draft rule**: the PR must be open at the approved tip; draft labels are added (a label
+//!   the repository lacks is skipped); a PR already ready for review is left alone.
+//! - **One land per change at a time** (the flight set), and a merge in flight when Helm quit is
+//!   a failed land at the next start, never retried silently.
+//! - Nothing runs while the master switch is off.
+
+use crate::engine;
+use crate::gh::{gh_repo, pr_number, Gh, GhError};
+use crate::store::{self, Change, Event, Run};
+use crate::types::*;
+use helm_core::db::Database;
+use rusqlite::{params, OptionalExtension, Transaction};
+use serde_json::Value;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
+
+pub const FAST_WAIT_MS: i64 = 10_000;
+pub const FAST_PHASE_MS: i64 = 2 * 60_000;
+pub const SLOW_WAIT_MS: i64 = 60_000;
+pub const BUDGET_MS: i64 = 15 * 60_000;
+
+pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workflow_land_waits (
+             run_id     TEXT NOT NULL,
+             repo       TEXT NOT NULL,
+             branch     TEXT NOT NULL,
+             started_at INTEGER NOT NULL,
+             next_at    INTEGER NOT NULL,
+             PRIMARY KEY (run_id, repo, branch)
+         );",
+    )
+}
+
+/// The changes a land driver is acting on right now.
+#[derive(Default)]
+pub struct Flight(Mutex<HashSet<String>>);
+
+impl Flight {
+    fn take(&self, key: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.to_owned())
+    }
+    fn give(&self, key: &str) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
+}
+
+static KICK: OnceLock<Arc<tokio::sync::Notify>> = OnceLock::new();
+
+/// Wake the land driver now (after a hand-off or a user action).
+pub fn kick() {
+    if let Some(k) = KICK.get() {
+        k.notify_one();
+    }
+}
+
+/// What one pass decided for a change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Step {
+    Landed(String),
+    HandedOff(Option<String>),
+    Wait(&'static str),
+    Failed { mode: &'static str, why: String },
+    Awaiting(String),
+}
+
+fn key(c: &Change) -> String {
+    format!("{}|{}|{}", c.run_id, c.repo, c.branch)
+}
+
+fn s(v: &Value, k: &str) -> String {
+    v.get(k).and_then(Value::as_str).unwrap_or("").to_owned()
+}
+
+fn view(gh: &dyn Gh, repo: &str, n: &str) -> Result<Value, Step> {
+    let args: Vec<String> = [
+        "pr",
+        "view",
+        n,
+        "--repo",
+        repo,
+        "--json",
+        "state,isDraft,headRefOid,baseRefName,mergeable,mergeStateStatus,mergeCommit",
+    ]
+    .iter()
+    .map(|x| x.to_string())
+    .collect();
+    match gh.run(&args) {
+        Ok(o) if o.ok => {
+            serde_json::from_str(&o.stdout).map_err(|_| Step::Wait("gh gave an unreadable answer"))
+        }
+        Ok(_) => Err(Step::Wait("gh could not read the PR")),
+        Err(GhError::Timeout) => Err(Step::Wait("gh timed out")),
+        Err(GhError::Missing(m)) => Err(Step::Failed {
+            mode: "merge",
+            why: format!("gh could not be started: {m}"),
+        }),
+    }
+}
+
+fn protected(s: &WorkflowSettings, base: &str) -> bool {
+    s.landing.protected_branches.iter().any(|b| b == base)
+}
+
+/// One merge-rule pass over a change in `landing`.
+pub fn merge_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Step {
+    let fail = |why: String| Step::Failed { mode: "merge", why };
+    let (Some(pr), Some(tip)) = (c.pr.as_deref(), c.approved_tip.as_deref()) else {
+        return fail("the change has no PR or approved commit recorded".into());
+    };
+    let (Some(repo), Some(n)) = (gh_repo(&c.repo), pr_number(pr)) else {
+        return fail("only github.com pull requests are landed".into());
+    };
+    if !pr
+        .to_ascii_lowercase()
+        .contains(&format!("github.com/{}/pull/", repo.to_ascii_lowercase()))
+    {
+        return fail(format!(
+            "the recorded PR is not a pull request of {}",
+            c.repo
+        ));
+    }
+    let base_ok = |b: &str| protected(st, b) && c.approved_base.as_deref().is_none_or(|ab| ab == b);
+    let v = match view(gh, &repo, &n) {
+        Ok(v) => v,
+        Err(step) => return step,
+    };
+    let base = s(&v, "baseRefName");
+    let merged_sha = v
+        .get("mergeCommit")
+        .map(|m| s(m, "oid"))
+        .unwrap_or_default();
+    match s(&v, "state").as_str() {
+        "MERGED" if base_ok(&base) && s(&v, "headRefOid") == tip => {
+            return Step::Landed(merged_sha)
+        }
+        "MERGED" => {
+            return fail("the PR was merged with other code or into an unprotected branch".into())
+        }
+        "OPEN" => {}
+        other => return fail(format!("the PR is {}", other.to_lowercase())),
+    }
+    if s(&v, "headRefOid") != tip {
+        return fail("the PR's head moved since the approval; it needs a new review".into());
+    }
+    if let Some(ab) = &c.approved_base {
+        if &base != ab {
+            return fail(format!("the PR's base is {base}, not the approved {ab}"));
+        }
+    }
+    if !protected(st, &base) {
+        return fail(format!(
+            "{base} is not a protected branch, so Helm does not merge into it"
+        ));
+    }
+    match (
+        s(&v, "mergeable").as_str(),
+        s(&v, "mergeStateStatus").as_str(),
+    ) {
+        ("CONFLICTING", _) | (_, "DIRTY") => {
+            return fail("the PR conflicts with its base: fix it and Retry, or Drop change".into())
+        }
+        ("UNKNOWN", _) | (_, "UNKNOWN") => {
+            return Step::Wait("GitHub is still checking mergeability")
+        }
+        (_, "BLOCKED") => {
+            return Step::Awaiting("required checks or reviews are not satisfied".into())
+        }
+        _ => {}
+    }
+    let a = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    if v.get("isDraft").and_then(Value::as_bool).unwrap_or(false) {
+        match gh.run(&a(&["pr", "ready", &n, "--repo", &repo])) {
+            Ok(o) if o.ok => {}
+            _ => return Step::Wait("marking the draft ready did not go through yet"),
+        }
+    }
+    let (_, method) = crate::settings::land_mode(st, &c.repo);
+    let flag = match method {
+        MergeMethod::Merge => "--merge",
+        MergeMethod::Squash => "--squash",
+        MergeMethod::Rebase => "--rebase",
+    };
+    let merged = gh.run(&a(&[
+        "pr",
+        "merge",
+        &n,
+        "--repo",
+        &repo,
+        flag,
+        "--match-head-commit",
+        tip,
+    ]));
+    let transient = match &merged {
+        Ok(o) if o.ok => false,
+        Ok(o) => {
+            let e = o.stderr.to_lowercase();
+            e.contains("not mergeable at the moment") || e.contains("base branch was modified")
+        }
+        Err(GhError::Timeout) => true,
+        Err(_) => false,
+    };
+    // A merge counts only when the readback says MERGED (into a protected branch, at our head).
+    match view(gh, &repo, &n) {
+        Ok(after)
+            if s(&after, "state") == "MERGED"
+                && base_ok(&s(&after, "baseRefName"))
+                && s(&after, "headRefOid") == tip =>
+        {
+            Step::Landed(
+                after
+                    .get("mergeCommit")
+                    .map(|m| s(m, "oid"))
+                    .unwrap_or_default(),
+            )
+        }
+        Ok(after) if s(&after, "state") == "MERGED" => {
+            fail("the PR read back merged with other code or into another branch".into())
+        }
+        _ if transient => Step::Wait("GitHub refused the merge for now"),
+        Ok(_) if matches!(&merged, Ok(o) if o.ok && o.stdout.to_lowercase().contains("queue")) => {
+            Step::Wait("queued for merge")
+        }
+        Ok(_) if matches!(&merged, Ok(o) if o.ok) => {
+            Step::Wait("gh accepted the merge; waiting for GitHub to show it merged")
+        }
+        Ok(_) => fail(match merged {
+            Ok(o) => format!(
+                "gh pr merge failed: {}",
+                o.stderr.trim().chars().take(300).collect::<String>()
+            ),
+            Err(e) => format!("gh pr merge failed: {e:?}"),
+        }),
+        Err(step) => step,
+    }
+}
+
+/// One draft-rule pass over a change in `landing_draft`.
+pub fn draft_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Step {
+    let fail = |why: String| Step::Failed { mode: "draft", why };
+    let Some(pr) = c.pr.as_deref() else {
+        return fail(
+            "no PR is recorded: open a draft PR and record it with app_workflow update {pr}".into(),
+        );
+    };
+    let (Some(repo), Some(n)) = (gh_repo(&c.repo), pr_number(pr)) else {
+        return fail("only github.com pull requests are landed".into());
+    };
+    let v = match view(gh, &repo, &n) {
+        Ok(v) => v,
+        Err(Step::Failed { why, .. }) => return fail(why),
+        Err(step) => return step,
+    };
+    if s(&v, "state") != "OPEN" {
+        return fail(format!("the PR is {}", s(&v, "state").to_lowercase()));
+    }
+    if Some(s(&v, "headRefOid").as_str()) != c.approved_tip.as_deref() {
+        return fail("the PR's head is not the approved commit".into());
+    }
+    if !v.get("isDraft").and_then(Value::as_bool).unwrap_or(false) {
+        return Step::HandedOff(Some(
+            "the PR was already ready for review, so Helm left it as it is".into(),
+        ));
+    }
+    let mut skipped = Vec::new();
+    for label in &st.landing.draft_labels {
+        let args: Vec<String> = ["pr", "edit", &n, "--repo", &repo, "--add-label", label]
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
+        if !matches!(gh.run(&args), Ok(o) if o.ok) {
+            skipped.push(label.clone());
+        }
+    }
+    Step::HandedOff((!skipped.is_empty()).then(|| {
+        format!(
+            "labels not added (the repository may lack them): {}",
+            skipped.join(", ")
+        )
+    }))
+}
+
+fn wait_row(tx: &Transaction<'_>, c: &Change) -> rusqlite::Result<Option<(i64, i64)>> {
+    tx.query_row(
+        "SELECT started_at, next_at FROM workflow_land_waits WHERE run_id = ?1 AND repo = ?2 AND branch = ?3",
+        params![c.run_id, c.repo, c.branch],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+}
+
+fn clear_wait(tx: &Transaction<'_>, c: &Change) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM workflow_land_waits WHERE run_id = ?1 AND repo = ?2 AND branch = ?3",
+        params![c.run_id, c.repo, c.branch],
+    )?;
+    Ok(())
+}
+
+fn result_event(
+    tx: &Transaction<'_>,
+    run: &Run,
+    c: &Change,
+    verdict: &str,
+    tip: Option<&str>,
+    body: Option<&str>,
+    now: i64,
+) -> rusqlite::Result<()> {
+    store::event(
+        tx,
+        &run.chat_id,
+        Some(run),
+        &Event {
+            kind: "land_result",
+            repo: Some(&c.repo),
+            branch: Some(&c.branch),
+            verdict: Some(verdict),
+            tip,
+            body,
+            ..Default::default()
+        },
+        now,
+    )?;
+    Ok(())
+}
+
+/// Write a step's outcome for a change, re-reading it first so a user's action in between wins.
+pub fn apply(tx: &Transaction<'_>, before: &Change, step: &Step, now: i64) -> rusqlite::Result<()> {
+    let Some(mut c) = store::change(tx, &before.run_id, &before.repo, &before.branch)? else {
+        return Ok(());
+    };
+    if c.state != before.state || c.approved_tip != before.approved_tip {
+        return Ok(());
+    }
+    let Some(run) = store::run(tx, &c.run_id)? else {
+        return Ok(());
+    };
+    match step {
+        Step::Landed(sha) => {
+            c.landed_sha = Some(sha.clone()).filter(|s| !s.is_empty());
+            c.error = None;
+            if engine::move_change(tx, &run, &mut c, "landed", false, now)?.is_ok() {
+                clear_wait(tx, &c)?;
+                result_event(
+                    tx,
+                    &run,
+                    &c,
+                    "landed",
+                    c.landed_sha.clone().as_deref(),
+                    None,
+                    now,
+                )?;
+            }
+        }
+        Step::HandedOff(note) => {
+            c.error = note.clone();
+            if engine::move_change(tx, &run, &mut c, "handed_off", false, now)?.is_ok() {
+                result_event(
+                    tx,
+                    &run,
+                    &c,
+                    "handed_off",
+                    c.approved_tip.clone().as_deref(),
+                    note.as_deref(),
+                    now,
+                )?;
+            }
+        }
+        Step::Failed { mode, why } => {
+            c.error = Some(why.clone());
+            c.failed_mode = Some((*mode).to_owned());
+            if engine::move_change(tx, &run, &mut c, "land_failed", false, now)?.is_ok() {
+                clear_wait(tx, &c)?;
+                result_event(tx, &run, &c, "failed", None, Some(why), now)?;
+            }
+        }
+        Step::Awaiting(why) => {
+            c.error = Some(why.clone());
+            if engine::move_change(tx, &run, &mut c, "awaiting_merge", false, now)?.is_ok() {
+                clear_wait(tx, &c)?;
+                store::event(
+                    tx,
+                    &run.chat_id,
+                    Some(&run),
+                    &Event {
+                        kind: "awaiting_merge",
+                        repo: Some(&c.repo),
+                        branch: Some(&c.branch),
+                        body: Some(why),
+                        ..Default::default()
+                    },
+                    now,
+                )?;
+            }
+        }
+        Step::Wait(why) => {
+            let started = wait_row(tx, &c)?.map(|w| w.0).unwrap_or(now);
+            let spent = now - started;
+            if spent >= BUDGET_MS && c.state == "landing_draft" {
+                return apply(
+                    tx,
+                    &c,
+                    &Step::Failed {
+                        mode: "draft",
+                        why: format!("the draft land could not finish within 15 minutes ({why})"),
+                    },
+                    now,
+                );
+            }
+            if spent >= BUDGET_MS {
+                return apply(
+                    tx,
+                    &c,
+                    &Step::Awaiting(format!("still not mergeable after 15 minutes ({why})")),
+                    now,
+                );
+            }
+            let next = now
+                + if spent < FAST_PHASE_MS {
+                    FAST_WAIT_MS
+                } else {
+                    SLOW_WAIT_MS
+                };
+            tx.execute(
+                "INSERT INTO workflow_land_waits(run_id, repo, branch, started_at, next_at) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(run_id, repo, branch) DO UPDATE SET next_at = excluded.next_at",
+                params![c.run_id, c.repo, c.branch, started, next],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// At start: a merge that was in flight when Helm quit becomes a failed land.
+pub fn recover(db: &Database, now: i64) -> rusqlite::Result<usize> {
+    db.write(|tx| {
+        let stuck = store::changes_in(tx, &["landing"])?;
+        for c in &stuck {
+            apply(tx, c, &Step::Failed { mode: "merge", why: "a merge was in flight when Helm last quit; check the PR, then Retry or Drop change".into() }, now)?;
+        }
+        tx.execute("DELETE FROM workflow_land_waits", [])?;
+        Ok(stuck.len())
+    })
+}
+
+/// One pass of the land driver over every change that is due. Network calls happen outside any
+/// transaction; each outcome is written in its own.
+pub fn pass(db: &Database, gh: &dyn Gh, flight: &Flight, now: i64) -> rusqlite::Result<usize> {
+    let (st, due) = db.snapshot(|tx| {
+        let st = crate::settings::load(tx)?;
+        let mut due = Vec::new();
+        for c in store::changes_in(tx, &["pending_land", "landing", "landing_draft"])? {
+            let ready =
+                c.state == "pending_land" || wait_row(tx, &c)?.is_none_or(|(_, next)| next <= now);
+            if ready {
+                due.push(c);
+            }
+        }
+        Ok::<_, rusqlite::Error>((st, due))
+    })?;
+    if !st.enabled {
+        return Ok(0);
+    }
+    let mut done = 0;
+    for mut c in due {
+        let k = key(&c);
+        if !flight.take(&k) {
+            continue;
+        }
+        let (mode, _) = crate::settings::land_mode(&st, &c.repo);
+        let step = match (c.state.as_str(), mode) {
+            ("pending_land", LandMode::Draft) => Step::Failed {
+                mode: "draft",
+                why: "the repository's rule is now draft; Retry runs the draft land".into(),
+            },
+            ("pending_land", LandMode::Merge) => {
+                // Route: pending_land → landing, then the first merge pass.
+                let routed = db.write(|tx| {
+                    let Some(run) = store::run(tx, &c.run_id)? else {
+                        return Ok(false);
+                    };
+                    Ok::<_, rusqlite::Error>(
+                        engine::move_change(tx, &run, &mut c, "landing", false, now)?.is_ok(),
+                    )
+                })?;
+                if !routed {
+                    flight.give(&k);
+                    continue;
+                }
+                merge_pass(gh, &st, &c)
+            }
+            ("landing", LandMode::Draft) => Step::Failed {
+                mode: "draft",
+                why: "the repository's rule is now draft; Retry runs the draft land".into(),
+            },
+            ("landing", LandMode::Merge) => merge_pass(gh, &st, &c),
+            _ => draft_pass(gh, &st, &c),
+        };
+        db.write(|tx| apply(tx, &c, &step, now))?;
+        flight.give(&k);
+        done += 1;
+    }
+    Ok(done)
+}
+
+/// Start the land driver: recover, then a pass every 10 s or whenever [`kick`] is called.
+pub fn start_driver(handle: &tokio::runtime::Handle, ctx: &helm_ipc::OpCtx) {
+    let Some(db) = ctx.services.get::<Database>() else {
+        return;
+    };
+    let notify = KICK
+        .get_or_init(|| Arc::new(tokio::sync::Notify::new()))
+        .clone();
+    let events = ctx.events.clone();
+    handle.spawn(async move {
+        let d = db.clone();
+        let _ = tokio::task::spawn_blocking(move || recover(&d, helm_core::now_ms())).await;
+        let flight = Arc::new(Flight::default());
+        loop {
+            let (d, f) = (db.clone(), flight.clone());
+            let n = tokio::task::spawn_blocking(move || {
+                pass(&d, &crate::gh::GhCli, &f, helm_core::now_ms())
+            })
+            .await
+            .ok()
+            .and_then(|r| r.map_err(|e| log::warn!("land step: {e}")).ok())
+            .unwrap_or(0);
+            if n > 0 {
+                events.emit(helm_ipc::AppEvent::new("workflow"));
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(FAST_WAIT_MS as u64)) => {}
+                _ = notify.notified() => {}
+            }
+        }
+    });
+}
+
+/// The user's actions on a handed-off change (the main window's task row):
+/// `merge` an awaiting change, `retry` a failed land, `drop` it, or `decline` the merge (the
+/// task parks). The land step re-verifies everything before any merge.
+pub fn user_action(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    repo: &str,
+    branch: &str,
+    action: &str,
+    now: i64,
+) -> rusqlite::Result<Result<String, String>> {
+    let Some(mut run) = store::run(tx, run_id)? else {
+        return Ok(Err("No such task.".into()));
+    };
+    let Some(mut c) = store::change(tx, run_id, repo, branch)? else {
+        return Ok(Err("That task has no such change.".into()));
+    };
+    let (to, with_handoff) = match (action, c.state.as_str()) {
+        ("merge", "awaiting_merge") => ("landing", false),
+        ("retry", "land_failed") if c.failed_mode.as_deref() == Some("draft") => {
+            ("landing_draft", true)
+        }
+        ("retry", "land_failed") => ("landing", false),
+        ("drop", "landing" | "pending_land") => {
+            return Ok(Err(
+                "That change is being merged right now; wait until its land finishes or fails."
+                    .into(),
+            ))
+        }
+        ("drop", s) if !engine::is_terminal(s) => ("dropped", false),
+        ("decline", "awaiting_merge") => ("declined", false),
+        (a, s) if matches!(a, "merge" | "retry" | "drop" | "decline") => {
+            return Ok(Err(format!("{a} does not apply to a change that is {s}.")))
+        }
+        _ => return Ok(Err("action must be merge, retry, drop or decline.".into())),
+    };
+    c.error = None;
+    if let Err(e) = engine::move_change(tx, &run, &mut c, to, with_handoff, now)? {
+        return Ok(Err(e));
+    }
+    clear_wait(tx, &c)?;
+    let kind = match action {
+        "drop" => "change_dropped",
+        "decline" => "merge_declined",
+        _ => "land_result",
+    };
+    store::event(
+        tx,
+        &run.chat_id,
+        Some(&run),
+        &Event {
+            kind,
+            repo: Some(repo),
+            branch: Some(branch),
+            verdict: Some(action),
+            ..Default::default()
+        },
+        now,
+    )?;
+    if action == "decline" {
+        run.status = "parked".into();
+        run.park_reason = Some(format!("You declined the merge of {branch}."));
+        store::save_run(tx, &run, None, now)?;
+    }
+    Ok(Ok(c.state))
+}

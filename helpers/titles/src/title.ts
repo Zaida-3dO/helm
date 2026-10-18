@@ -64,8 +64,10 @@ export function buildPrompt(job: TitleJob, strict: boolean): string {
 /** Clean a model answer into a title, or null when it is not one. */
 export function cleanTitle(raw: string): string | null {
   let t = raw.trim().split(/\r?\n/).find((l) => l.trim() !== "") ?? "";
-  t = t.replace(/^(title\s*:\s*)/i, "");
   t = t.replace(/[*_`#>]/g, "");
+  // A "Title:" label, also when it came wrapped in markdown or quotes ("**Title:** ...").
+  t = t.trim().replace(/^["'“”‘’]+|["'“”‘’]+$/g, "");
+  t = t.replace(/^title\s*:\s*/i, "");
   t = t.trim().replace(/^["'“”‘’]+|["'“”‘’]+$/g, "");
   t = t.replace(/[\u0000-\u001f\u007f]/g, "");
   t = t.replace(/\.+$/, "").trim();

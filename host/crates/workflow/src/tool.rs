@@ -75,6 +75,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
             Ok(json!({"on": true, "appliesFrom": "next turn", "row": c.row}))
         },
     );
+    crate::wftools::register_host_tools(r);
 }
 
 /// The `workflow` prompt section (order 90, after every other section). Pins the chat's state at

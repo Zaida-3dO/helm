@@ -530,12 +530,13 @@ pub fn verify_words(
              the user in this chat.",
         ));
     };
-    // The first two typed messages after the refusal, within the episode. Only `typed` (or the
-    // early `user` spelling) is the user typing; every app-originated origin never counts.
+    // The first two typed messages after the refusal, within the episode. Only `typed` is the user
+    // typing: the early `user` spelling is rewritten to `typed` once at open (chats schema), so
+    // a row that took the column's `user` default, or any app-originated origin, never counts.
     let mut st = tx.prepare(
         "SELECT s.id, s.text, EXISTS (SELECT 1 FROM consent_records r WHERE r.submission_id = s.id)
          FROM submissions s JOIN submission_meta m ON m.submission_id = s.id
-         WHERE s.chat_id = ?1 AND m.origin IN ('typed', 'user')
+         WHERE s.chat_id = ?1 AND m.origin = 'typed'
            AND s.created_at > ?2 AND s.created_at <= ?3
          ORDER BY s.created_at, s.id LIMIT ?4",
     )?;

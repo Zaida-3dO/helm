@@ -353,6 +353,40 @@ fn words_count_only_typed_messages_in_the_episode_once() {
     assert!(again.contains("already used"), "{again}");
 }
 
+/// A submission whose origin was never written (the column default) is not the user's
+/// typed words, even when it says exactly the step.
+#[test]
+fn a_row_without_an_origin_never_counts_as_typed() {
+    let e = env();
+    let a = t("alpha");
+    record_ask(&e, "c0", "test_action", &a, T0);
+    e.db.write::<_, rusqlite::Error>(|tx| {
+        tx.execute(
+            "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('s9', 'c0', 'Run the test action alpha.', 'complete', ?1)",
+            params![T0 + 1],
+        )?;
+        tx.execute("INSERT INTO submission_meta(submission_id) VALUES ('s9')", [])?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(words(&e, "c0", "test_action", &a, T0 + 2).is_err());
+    typed(
+        &e,
+        "c0",
+        "s10",
+        "Run the test action alpha.",
+        "typed",
+        T0 + 3,
+    );
+    assert_eq!(
+        words(&e, "c0", "test_action", &a, T0 + 4)
+            .unwrap()
+            .submission_id
+            .as_deref(),
+        Some("s10")
+    );
+}
+
 #[test]
 fn only_the_first_two_typed_messages_and_two_hours_count() {
     let e = env();

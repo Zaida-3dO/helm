@@ -137,6 +137,14 @@ impl ShellService {
     /// A new attention summary (also the launch summary, with `initial`).
     pub fn on_summary(&self, s: AttentionSummary, initial: bool) {
         let mut st = self.state.lock().unwrap();
+        // Publishers emit outside their lock, so an older summary can arrive after a newer one.
+        if st
+            .summary
+            .as_ref()
+            .is_some_and(|old| s.revision < old.revision)
+        {
+            return;
+        }
         let flash = st.flash.observe(&s) && !initial;
         let withdrawn = st.announcer.withdrawals(&s);
         let label = badge_label(s.badge);
@@ -322,6 +330,20 @@ impl ShellService {
     /// The tray's Microphone pick: None is Automatic. The name comes from the device list, so a
     /// uid that is not connected is refused (and the OS default is never written as a choice).
     pub fn pick_mic(&self, id: Option<&str>) -> Result<(), String> {
+        let r = self.pick_mic_inner(id);
+        self.retick_on_error(r)
+    }
+
+    /// The tray's check items tick themselves when clicked; after a failed change, redraw the
+    /// menu so the ticks show what is really applied.
+    fn retick_on_error(&self, r: Result<(), String>) -> Result<(), String> {
+        if r.is_err() {
+            self.publish_tray();
+        }
+        r
+    }
+
+    fn pick_mic_inner(&self, id: Option<&str>) -> Result<(), String> {
         let mut next = self.state.lock().unwrap().settings.clone();
         next.dictation_mic = match id {
             None => None,
@@ -350,13 +372,15 @@ impl ShellService {
     pub fn set_keep_awake_setting(&self, on: bool) -> Result<(), String> {
         let mut next = self.state.lock().unwrap().settings.clone();
         next.keep_awake = on;
-        self.save(next).map(|_| ())
+        let r = self.save(next).map(|_| ());
+        self.retick_on_error(r)
     }
 
     pub fn set_notification_mode(&self, mode: NotificationMode) -> Result<(), String> {
         let mut next = self.state.lock().unwrap().settings.clone();
         next.notifications = mode;
-        self.save(next).map(|_| ())
+        let r = self.save(next).map(|_| ());
+        self.retick_on_error(r)
     }
 
     /// The capture devices for the picker, plus the stored choice when its device is gone.
@@ -565,6 +589,36 @@ mod tests {
         let v = r.svc.save(s).unwrap();
         assert!(!v.hotkey_registered);
         assert_eq!(v.hotkey_error.as_deref(), Some("taken"));
+    }
+
+    #[test]
+    fn an_older_summary_arriving_late_is_dropped() {
+        let r = rig();
+        r.host.take();
+        let mut newer = summary(3, 0, &["a", "b", "c"], &[]);
+        newer.revision = 5;
+        let mut older = summary(0, 0, &[], &[]);
+        older.revision = 4;
+        r.svc.observe(&event("attention", "summary", newer));
+        r.svc.observe(&event("attention", "summary", older));
+        let badges: Vec<_> = r
+            .host
+            .take()
+            .into_iter()
+            .filter(|l| l.starts_with("badge"))
+            .collect();
+        assert_eq!(badges, ["badge 3"], "the stale summary changed nothing");
+    }
+
+    #[test]
+    fn a_failed_tray_change_redraws_the_menu() {
+        let r = rig();
+        r.host.take();
+        assert!(r.svc.pick_mic(Some("gone")).is_err());
+        assert!(
+            r.host.take().iter().any(|l| l.starts_with("tray ")),
+            "the menu is republished so its ticks show the applied state"
+        );
     }
 
     #[test]

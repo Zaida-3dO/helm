@@ -24,7 +24,8 @@
 //! - **capture** (before core recovery rewrites statuses): every chat still `starting` or
 //!   `running` gets a continuation row. `stopping` chats are excluded: the user asked them to stop.
 //! - **after**: a chat with queued follow-ups but no continuation gets its queue held; retry
-//!   states left `retrying` or `waiting` on a message become `cancelled`.
+//!   states left `retrying` or `waiting` on a message become `cancelled`; every
+//!   persisted stalled flag is cleared, since no turn survives a restart.
 
 use helm_core::db::MigrationRegistry;
 use rusqlite::Transaction;
@@ -33,9 +34,12 @@ pub const MAX_CONTINUATIONS: i64 = 100;
 
 pub fn register(reg: &mut MigrationRegistry) {
     reg.initializer("chats-side-tables", init)
+        .initializer("chats-run-slots", crate::runslots::init)
+        .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-queue-holds", hold_queues)
-        .recovery_step("chats-retry-leftovers", cancel_retry_leftovers);
+        .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)
+        .recovery_step("chats-stall-reset", reset_stalls);
 }
 
 fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
@@ -148,6 +152,17 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     )
 }
 
+/// Early rows spelled the user's own messages `user`; they are `typed` now. Rewritten once, so the
+/// column's `user` default (a row written without an origin) can never pass for typed words in
+/// the consent verifier.
+fn origin_user_is_typed(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE submission_meta SET origin = 'typed' WHERE origin = 'user'",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Record a continuation for `chat_id`, keeping at most [`MAX_CONTINUATIONS`] (newest kept).
 pub fn record_continuation(tx: &Transaction<'_>, chat_id: &str, now: i64) -> rusqlite::Result<()> {
     tx.execute(
@@ -186,6 +201,16 @@ fn hold_queues(tx: &Transaction<'_>) -> rusqlite::Result<()> {
          WHERE s.state = 'queued'
            AND q.chat_id NOT IN (SELECT chat_id FROM restart_continuations)",
         [helm_core::now_ms()],
+    )?;
+    Ok(())
+}
+
+/// A stalled flag belongs to the turn that went quiet; after a restart no turn is running, and the
+/// actor's in-memory flag starts clear, so a stored one would never be cleared.
+fn reset_stalls(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE chat_activity SET stalled = 0 WHERE stalled <> 0",
+        [],
     )?;
     Ok(())
 }
@@ -260,6 +285,29 @@ pub(crate) mod tests {
                 "SELECT source_key || '=' || json_extract(details, '$.retry.state') FROM messages ORDER BY source_key"
             ),
             ["m1=cancelled", "m2=failed"]
+        );
+    }
+
+    #[test]
+    fn the_wave_2_user_origin_is_rewritten_to_typed() {
+        let (_d, db) = temp_db();
+        db.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 0);
+                 INSERT INTO chats(id, project_id, created_at, updated_at) VALUES ('c', 'p', 0, 0);
+                 INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES
+                   ('old', 'c', 't', 'complete', 0), ('app', 'c', 't', 'complete', 0);
+                 INSERT INTO submission_meta(submission_id, origin) VALUES ('old', 'user'), ('app', 'harness');",
+            )?;
+            origin_user_is_typed(tx)
+        })
+        .unwrap();
+        assert_eq!(
+            col(
+                &db,
+                "SELECT submission_id || '=' || origin FROM submission_meta ORDER BY submission_id"
+            ),
+            ["app=harness", "old=typed"]
         );
     }
 

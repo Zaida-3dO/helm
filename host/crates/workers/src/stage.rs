@@ -120,7 +120,22 @@ pub fn default_source(debug: bool, resource_dir: Option<&Path>) -> Option<PathBu
         }
         return Some(repo_worker_src());
     }
-    resource_dir.map(|r| r.join("worker").join("src"))
+    resource_dir.map(|r| plain_path(r).join("worker").join("src"))
+}
+
+/// Tauri reports the app's resource folder as a Windows verbatim path (`\\?\C:\...`). Node cannot
+/// run a script given that way (it fails with `EISDIR` on `C:`), so every helper started from the
+/// resource folder needs the plain drive path. Anything else (a UNC path, a relative path, a path
+/// on another platform) is returned unchanged.
+pub fn plain_path(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        let b = rest.as_bytes();
+        if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' {
+            return PathBuf::from(rest);
+        }
+    }
+    p.to_path_buf()
 }
 
 /// The repository's `worker/src`, as seen from this crate at build time.
@@ -174,6 +189,27 @@ mod tests {
         std::fs::write(half.join("main.ts"), "TRUNCATED").unwrap();
         let main = stage_worker(src.path(), rt.path()).unwrap();
         assert_eq!(std::fs::read_to_string(main).unwrap(), "main");
+    }
+
+    #[test]
+    fn a_verbatim_resource_folder_becomes_a_plain_drive_path() {
+        assert_eq!(
+            plain_path(Path::new(r"\\?\C:\data\x\AppData\Local\Programs\Helm")),
+            Path::new(r"C:\data\x\AppData\Local\Programs\Helm")
+        );
+        // Not a drive path: left alone, as is an ordinary path.
+        for same in [
+            r"\\?\UNC\server\share\Helm",
+            r"\\?\Volume{1}\Helm",
+            r"C:\Helm",
+            "rel/Helm",
+            "/opt/helm",
+        ] {
+            assert_eq!(plain_path(Path::new(same)), Path::new(same));
+        }
+        // The release worker source is built from the plain path.
+        let src = default_source(false, Some(Path::new(r"\\?\C:\Helm"))).unwrap();
+        assert_eq!(src, Path::new(r"C:\Helm").join("worker").join("src"));
     }
 
     #[test]

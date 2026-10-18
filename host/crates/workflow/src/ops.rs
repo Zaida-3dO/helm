@@ -6,6 +6,7 @@
 //! | `workflow_settings_save` | maintenance | `{settings}` to [`WorkflowSettings`]; emits `workflow_settings {}` |
 //! | `workflow_chat_mode_get` | blocking | [`ChatModeArgs`] to [`ChatModeView`] |
 //! | `workflow_chat_mode_set` | maintenance | [`ChatModeSetArgs`] to [`ChatModeSetResult`]; emits `workflow_chat_mode {chatId}` |
+//! | `workflow_change_action` | maintenance | `{runId, repo, branch, action}` with action merge, retry, drop or decline (the user's, main window only) to `{state}`; emits `workflow {chatId}` |
 
 use crate::types::*;
 use crate::{mode, settings};
@@ -48,6 +49,11 @@ pub fn register_ops(reg: &mut OpRegistry) {
             "workflow_chat_mode_set",
             OpClass::Maintenance,
             chat_mode_set,
+        )
+        .blocking(
+            "workflow_change_action",
+            OpClass::Maintenance,
+            change_action,
         );
 }
 
@@ -111,6 +117,9 @@ fn chat_mode_set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 Ok(c) => c,
                 Err(e) => return Ok(Err(ApiError::conflict(e))),
             };
+            if changed.as_ref().is_some_and(|c| c.to != ChatMode::On) {
+                crate::engine::park_for_off(tx, &a.chat_id, now)?;
+            }
             let view = mode::view(tx, &a.chat_id, &s)?.expect("the chat exists");
             Ok::<_, rusqlite::Error>(Ok((view, changed, s)))
         })
@@ -128,6 +137,51 @@ fn chat_mode_set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         view,
         row: changed.map(|c| c.row),
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChangeAction {
+    run_id: String,
+    repo: String,
+    branch: String,
+    action: String,
+}
+
+/// The user's Merge, Retry, Drop change or Decline on a task row. The land step does the rest.
+fn change_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChangeAction = parse(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let (r, chat) = db
+        .write(|tx| {
+            let s = settings::load(tx)?;
+            if !s.enabled && matches!(a.action.as_str(), "merge" | "retry") {
+                return Ok((
+                    Err(ApiError::conflict(
+                        "Orchestrator is off in Settings, so Helm lands nothing.",
+                    )),
+                    None,
+                ));
+            }
+            let chat = crate::store::run(tx, &a.run_id)?.map(|r| r.chat_id);
+            let r = crate::land::user_action(
+                tx,
+                &a.run_id,
+                &a.repo,
+                &a.branch,
+                &a.action,
+                helm_core::now_ms(),
+            )?;
+            Ok::<_, rusqlite::Error>((r.map_err(ApiError::conflict), chat))
+        })
+        .map_err(sql)?;
+    let state = r?;
+    if let Some(chat) = chat {
+        ctx.events
+            .emit(AppEvent::new("workflow").with("chatId", json!(chat)));
+    }
+    crate::land::kick();
+    Ok(json!({ "state": state }))
 }
 
 #[cfg(test)]

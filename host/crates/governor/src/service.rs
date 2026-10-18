@@ -1,11 +1,17 @@
 //! The governor's loop: every 30 s it reads plan usage through the usage service, works out
 //! the band, and acts on the chats that are running.
 //!
-//! - **Wind down** (and **stop** when `atStop` is `wrapUp`): each running chat is told once per band
-//!   entry to finish what it is doing, commit, and stop starting new work. The note is an app
+//! - **Wind down** (and **stop** when `atStop` is `wrapUp`): each running chat is told once per
+//!   episode to finish what it is doing, commit, and stop starting new work. The note is an app
 //!   message steered into the running turn (origin App, never gated, never consent).
-//! - **Stop**: each running chat is stopped once per band entry. A chat the user starts again
+//! - **Stop**: each running chat is stopped once per episode. A chat the user starts again
 //!   afterwards is left alone: that is the user's own call.
+//! - An **episode** starts when usage rises into wind-down or stop from below, and ends only when
+//!   it falls below wind-down again; moving between wind-down and stop, or through a stale
+//!   reading, stays in the same episode.
+//! - **Automated starts** (the run-slot queue's gated sends: schedules, cross-chat messages, an
+//!   agent's new chat) wait while the band is wind-down or stop: nothing new starts
+//!   ([`crate::start`] installs the hold).
 //! - **Unknown** (no reading, a stale one, or expired windows): nothing happens. While enabled and
 //!   without a usable reading, it asks the meter for a fresh read at most every 10 minutes.
 
@@ -56,6 +62,8 @@ pub trait ChatControl: Send + Sync {
 struct State {
     band: Option<Band>,
     entered_at: i64,
+    /// When usage last rose into wind-down or stop from below; names this episode's notes.
+    episode_at: i64,
     told: HashSet<String>,
     stopped: HashSet<String>,
     last_refresh: Option<i64>,
@@ -69,7 +77,7 @@ pub struct GovernorView {
     pub band: Band,
     pub used_pct: Option<f64>,
     pub since: Option<i64>,
-    /// Chats told to wrap up, and chats stopped, in this band entry.
+    /// Chats told to wrap up, and chats stopped, in this episode.
     pub told: usize,
     pub stopped: usize,
 }
@@ -80,6 +88,25 @@ pub struct Governor {
     usage: Arc<dyn UsageRead>,
     chats: Mutex<Option<Arc<dyn ChatControl>>>,
     state: Mutex<State>,
+}
+
+/// The wrap-up note's submission id: one per (episode, chat), and a UUID as workers require
+/// (version 8, from a SHA-256 of the key), so a retry never sends it twice.
+pub fn wrap_up_id(episode: i64, chat_id: &str) -> String {
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(format!("helm-governor-wrapup/{episode}/{chat_id}"));
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&h[..16]);
+    uuid::Uuid::new_v8(b).to_string()
+}
+
+/// Whether automated starts wait in this band (the run-slot hold): wind-down and stop.
+pub fn holds(b: Band) -> bool {
+    near_limit(b)
+}
+
+fn near_limit(b: Band) -> bool {
+    matches!(b, Band::WindDown | Band::Stop)
 }
 
 fn sql(e: rusqlite::Error) -> ApiError {
@@ -180,12 +207,21 @@ impl Governor {
                 self.usage.refresh(now);
                 st = self.st();
             }
-            if st.band != Some(band) {
+            // A pass through Unknown (a stale or missing reading) is not a band change: the last
+            // known band and what was already done in it stand. Who was told or stopped is only
+            // forgotten once usage falls below wind-down, so a reading flapping around a threshold
+            // never stops a chat the user restarted, or repeats a note.
+            if band != Band::Unknown && st.band != Some(band) {
                 log::info!("usage governor: {} ({used:?}%)", band.as_str());
+                let was_near = st.band.is_some_and(near_limit);
                 st.band = Some(band);
                 st.entered_at = now;
-                st.told.clear();
-                st.stopped.clear();
+                if !near_limit(band) {
+                    st.told.clear();
+                    st.stopped.clear();
+                } else if !was_near {
+                    st.episode_at = now;
+                }
                 true
             } else {
                 false
@@ -210,13 +246,13 @@ impl Governor {
         };
         let running = chats.running();
         let mut acted = false;
-        let entry = self.st().entered_at;
+        let entry = self.st().episode_at;
         for chat in running {
             if wrap {
                 if self.st().told.contains(&chat) {
                     continue;
                 }
-                let id = format!("governor-wrapup-{entry}-{chat}");
+                let id = wrap_up_id(entry, &chat);
                 match chats.wrap_up(&chat, &id, WRAP_UP_TEXT) {
                     Ok(()) => {
                         self.st().told.insert(chat);
@@ -324,7 +360,7 @@ mod tests {
         chats.running.lock().unwrap().push("c".into());
         g.tick(61_000);
         assert_eq!(chats.wrapped.lock().unwrap().len(), 3);
-        // Leave and re-enter: told again, under a new id.
+        // Leave to below wind-down and come back: told again, under a new id.
         *usage.pct.lock().unwrap() = Some(50.0);
         g.tick(91_000);
         *usage.pct.lock().unwrap() = Some(90.0);
@@ -332,6 +368,7 @@ mod tests {
         let w = chats.wrapped.lock().unwrap().clone();
         assert_eq!(w.len(), 6);
         assert_ne!(w[0].1, w[3].1);
+        assert!(w.iter().all(|(_, id)| uuid::Uuid::parse_str(id).is_ok()));
         assert!(chats.stopped.lock().unwrap().is_empty());
     }
 
@@ -388,5 +425,94 @@ mod tests {
         assert_eq!(g.tick(31_000), Band::Surplus);
         assert!(chats.stopped.lock().unwrap().is_empty());
         assert!(chats.wrapped.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stale_reading_does_not_restart_the_episode() {
+        let (_d, usage, chats, g) = setup();
+        g.save(&json!({"enabled": true}), 0).unwrap();
+        *chats.running.lock().unwrap() = vec!["a".into()];
+        *usage.pct.lock().unwrap() = Some(96.0);
+        g.tick(1_000);
+        assert_eq!(*chats.stopped.lock().unwrap(), ["a"]);
+        // The user restarts it; the reading goes stale, then comes back still at the limit.
+        *usage.pct.lock().unwrap() = None;
+        assert_eq!(g.tick(31_000), Band::Unknown);
+        *usage.pct.lock().unwrap() = Some(96.0);
+        assert_eq!(g.tick(61_000), Band::Stop);
+        assert_eq!(
+            chats.stopped.lock().unwrap().len(),
+            1,
+            "never stopped twice"
+        );
+    }
+
+    #[test]
+    fn flapping_between_wind_down_and_stop_repeats_nothing() {
+        let (_d, usage, chats, g) = setup();
+        g.save(&json!({"enabled": true}), 0).unwrap();
+        *chats.running.lock().unwrap() = vec!["a".into()];
+        *usage.pct.lock().unwrap() = Some(90.0);
+        g.tick(1_000);
+        *usage.pct.lock().unwrap() = Some(95.0);
+        g.tick(31_000);
+        *usage.pct.lock().unwrap() = Some(94.0);
+        g.tick(61_000);
+        *usage.pct.lock().unwrap() = Some(95.5);
+        g.tick(91_000);
+        assert_eq!(
+            chats.wrapped.lock().unwrap().len(),
+            1,
+            "one note per episode"
+        );
+        assert_eq!(
+            chats.stopped.lock().unwrap().len(),
+            1,
+            "one stop per episode"
+        );
+    }
+
+    /// The path folded in from the governor-afk review: a chat is stopped, the user restarts
+    /// it, usage dips to wind-down within the same episode: exactly one wrap-up note, no second
+    /// stop, and nothing more on later passes.
+    #[test]
+    fn a_restarted_chat_gets_one_wrap_up_on_the_dip_and_no_second_stop() {
+        let (_d, usage, chats, g) = setup();
+        g.save(&json!({"enabled": true}), 0).unwrap();
+        *chats.running.lock().unwrap() = vec!["a".into()];
+        *usage.pct.lock().unwrap() = Some(96.0);
+        assert_eq!(g.tick(1_000), Band::Stop);
+        assert_eq!(*chats.stopped.lock().unwrap(), ["a"]);
+        assert!(chats.wrapped.lock().unwrap().is_empty());
+        // The user starts it again (still running), and usage dips to wind-down.
+        *usage.pct.lock().unwrap() = Some(88.0);
+        assert_eq!(g.tick(31_000), Band::WindDown);
+        g.tick(61_000);
+        g.tick(91_000);
+        let w = chats.wrapped.lock().unwrap().clone();
+        assert_eq!(w.len(), 1, "exactly one wrap-up note: {w:?}");
+        assert_eq!(w[0].0, "a");
+        assert_eq!(chats.stopped.lock().unwrap().len(), 1, "no second stop");
+        // Back up to stop within the same episode: still never stopped twice.
+        *usage.pct.lock().unwrap() = Some(97.0);
+        g.tick(121_000);
+        assert_eq!(
+            chats.stopped.lock().unwrap().len(),
+            1,
+            "same episode, one stop"
+        );
+        assert_eq!(chats.wrapped.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn automated_starts_are_held_at_wind_down_and_stop_only() {
+        let (_d, usage, _chats, g) = setup();
+        g.save(&json!({"enabled": true}), 0).unwrap();
+        for (pct, held) in [(10.0, false), (70.0, false), (86.0, true), (99.0, true)] {
+            *usage.pct.lock().unwrap() = Some(pct);
+            assert_eq!(holds(g.band(0)), held, "{pct}%");
+        }
+        *usage.pct.lock().unwrap() = None;
+        assert!(!holds(g.band(0)), "no reading holds nothing");
     }
 }

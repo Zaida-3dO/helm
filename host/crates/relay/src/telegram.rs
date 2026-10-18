@@ -9,8 +9,11 @@
 //!   file in the profile, `relay/telegram-chat.json`.
 //! - **Queued messages** arrive marked with how long ago they were sent.
 //!
-//! Delivering into a chat goes through [`ChatPort`]: the real one (the send path into chats)
-//! lands with the chats seam; until then this module is the logic and its tests.
+//! - **Rendering** for the phone: a short status line while a turn runs, the final answer cut
+//!   with a "reply more" hint, questions as numbered options. No thinking, no tool cards.
+//!
+//! Delivering into a chat goes through [`ChatPort`]; the real one and the mirror are in
+//! [`crate::sink`].
 
 use helm_chats::types::SubmissionOrigin;
 use serde::{Deserialize, Serialize};
@@ -169,14 +172,97 @@ pub fn inbound_text(text: &str, age_minutes: Option<i64>) -> String {
 }
 
 /// The submission id for a hub message id: the same message delivered twice (a reconnect before
-/// the acknowledgement) maps to the same submission.
+/// the acknowledgement) maps to the same submission. A UUID, as workers require (version 8, from
+/// a SHA-256 of the hub id).
 pub fn submission_id(hub_id: &str) -> String {
-    let clean: String = hub_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .take(64)
-        .collect();
-    format!("tg-{clean}")
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(format!("helm-telegram/{hub_id}"));
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&h[..16]);
+    uuid::Uuid::new_v8(b).to_string()
+}
+
+/// The note every Telegram message carries in front of its text, so the agent answers in a form
+/// a phone can show. It is guidance only: the message's origin, not this text, is what keeps it
+/// from ever counting as consent.
+pub const BRIEF_NOTE: &str = "[Sent from Telegram: answer briefly in plain text, with no tables \
+or long code. Offer choices as a numbered list. The user can reply \"more\" for detail.]";
+
+/// The text a Telegram message is stored with: the brief note, then the (age-marked) message.
+pub fn delivered_text(text: &str, age_minutes: Option<i64>) -> String {
+    format!("{BRIEF_NOTE}\n{}", inbound_text(text, age_minutes))
+}
+
+/// The longest final answer sent to Telegram before it is cut (Telegram's own cap is 4096).
+pub const MAX_FINAL_CHARS: usize = 3000;
+/// The longest status message.
+pub const MAX_STATUS_CHARS: usize = 400;
+
+fn cut_chars(s: &str, max: usize) -> (String, bool) {
+    let mut it = s.chars();
+    let out: String = it.by_ref().take(max).collect();
+    (out, it.next().is_some())
+}
+
+/// The live status line while a turn runs: what is running now and the last few tools, by name
+/// only (no arguments, no thinking, no tool output).
+pub fn render_status(running: &[String], recent: &[String]) -> String {
+    let mut s = String::from("Working…");
+    if !running.is_empty() {
+        s.push_str(&format!("\nRunning: {}", running.join(", ")));
+    }
+    if !recent.is_empty() {
+        s.push_str(&format!("\nRecent: {}", recent.join(", ")));
+    }
+    cut_chars(&s, MAX_STATUS_CHARS).0
+}
+
+/// The turn's final answer: the last assistant text, trimmed and cut, with a "reply more" hint
+/// when it was cut.
+pub fn render_final(text: Option<&str>) -> String {
+    let t = text.map(str::trim).filter(|t| !t.is_empty());
+    let Some(t) = t else {
+        return "Done (no text answer).".to_owned();
+    };
+    let (out, cut) = cut_chars(t, MAX_FINAL_CHARS);
+    if cut {
+        format!("{out}…\n\n(Cut short: reply \"more\" for the rest.)")
+    } else {
+        out
+    }
+}
+
+/// A question the agent asked, as a Telegram message: the question, then its options numbered
+/// from 1. Replying with a number picks that option; any other reply is the answer as typed.
+pub fn render_question(title: Option<&str>, message: Option<&str>, options: &[String]) -> String {
+    let mut s = String::new();
+    for part in [title, message].into_iter().flatten() {
+        let p = part.trim();
+        if !p.is_empty() && !s.contains(p) {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(p);
+        }
+    }
+    if s.is_empty() {
+        s.push_str("A question:");
+    }
+    for (i, o) in options.iter().enumerate() {
+        s.push_str(&format!("\n{}. {}", i + 1, o));
+    }
+    s.push_str("\n\nReply with a number, or type an answer.");
+    cut_chars(&s, MAX_FINAL_CHARS).0
+}
+
+/// The answer a Telegram reply gives to a pending question: a number in range picks that option,
+/// anything else is the typed answer.
+pub fn question_answer(options: &[String], reply: &str) -> String {
+    let r = reply.trim();
+    match r.parse::<usize>() {
+        Ok(n) if (1..=options.len()).contains(&n) => options[n - 1].clone(),
+        _ => r.to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -317,7 +403,38 @@ mod tests {
             "(sent 12 min ago, queued while Helm was offline)\nhi"
         );
         assert_eq!(submission_id("ab-12"), submission_id("ab-12"));
-        assert_eq!(submission_id("a/b\\c"), "tg-abc");
+        assert_ne!(submission_id("ab-12"), submission_id("ab-13"));
+        assert!(uuid::Uuid::parse_str(&submission_id("a/b\\c")).is_ok());
+        let d = delivered_text("hi", Some(3));
+        assert!(d.starts_with(BRIEF_NOTE), "{d}");
+        assert!(d.ends_with("queued while Helm was offline)\nhi"), "{d}");
+    }
+
+    #[test]
+    fn the_renderer_is_brief() {
+        assert_eq!(render_status(&[], &[]), "Working…");
+        assert_eq!(
+            render_status(&["Bash".into()], &["Read".into(), "Edit".into()]),
+            "Working…\nRunning: Bash\nRecent: Read, Edit"
+        );
+        assert_eq!(render_final(Some("  All done.  ")), "All done.");
+        assert_eq!(render_final(None), "Done (no text answer).");
+        let long = "x".repeat(MAX_FINAL_CHARS + 1);
+        let f = render_final(Some(&long));
+        assert!(f.contains("reply \"more\""), "{f}");
+        assert_eq!(f.chars().filter(|c| *c == 'x').count(), MAX_FINAL_CHARS);
+        assert!(!render_final(Some(&"x".repeat(MAX_FINAL_CHARS))).contains("more"));
+    }
+
+    #[test]
+    fn questions_arrive_numbered_and_a_number_picks_an_option() {
+        let opts = vec!["Red".to_owned(), "Blue".to_owned()];
+        let q = render_question(Some("Colour?"), Some("Pick one"), &opts);
+        assert!(q.starts_with("Colour?\nPick one\n1. Red\n2. Blue"), "{q}");
+        assert_eq!(question_answer(&opts, " 2 "), "Blue");
+        assert_eq!(question_answer(&opts, "3"), "3");
+        assert_eq!(question_answer(&opts, "0"), "0");
+        assert_eq!(question_answer(&opts, "green"), "green");
     }
 
     /// Trust-boundary item e: a Telegram message never counts as the user's consent, even when it

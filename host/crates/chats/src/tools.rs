@@ -403,13 +403,19 @@ fn send_message(ctx: &ToolCtx, a: Value, limits: &SendLimits) -> ToolResult {
     limits.admit(&ctx.caller_chat_id, Some(&to), Instant::now())?;
     let sent = send_framed(ctx, &to, &body, mode)?;
     let (title, _) = cut_bytes(target["title"].as_str().unwrap_or(""), 512);
-    Ok(json!({
+    let mut out = json!({
         "delivered": sent.delivered,
         "queued": sent.queued,
         "mode": a["mode"],
         "chatId": to,
         "title": title,
-    }))
+    });
+    // Waiting for a run slot: the agent is told not to poll or re-send.
+    if let Some(p) = sent.waiting {
+        out["waitingForSlot"] = json!(true);
+        out["position"] = json!(p);
+    }
+    Ok(out)
 }
 
 /// How deep `id` already is: 0 for a top-level chat.
@@ -509,13 +515,21 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
         ctx.op("chat_rename", json!({"chatId": id, "title": t}))
             .await?;
     }
-    if let Err(e) = send_framed(&ctx, &id, &body, HostSendMode::Queue) {
-        // The first message failed: discard the untouched chat.
-        let _ = ctx.op("chat_archive", json!({"chatId": id})).await;
-        let _ = ctx.op("chat_delete", json!({"chatId": id})).await;
-        return Err(e);
+    let sent = match send_framed(&ctx, &id, &body, HostSendMode::Queue) {
+        Ok(s) => s,
+        Err(e) => {
+            // The first message failed: discard the untouched chat.
+            let _ = ctx.op("chat_archive", json!({"chatId": id})).await;
+            let _ = ctx.op("chat_delete", json!({"chatId": id})).await;
+            return Err(e);
+        }
+    };
+    let mut out = meta(&ctx, &id)?;
+    if let Some(p) = sent.waiting {
+        out["waitingForSlot"] = json!(true);
+        out["position"] = json!(p);
     }
-    meta(&ctx, &id)
+    Ok(out)
 }
 
 async fn fork_chat(ctx: ToolCtx, a: Value) -> ToolResult {
@@ -715,7 +729,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::write(
             "app_send_message",
-            format!("Send a message to another Helm chat. Helm adds a header naming this chat and a note that the user did not write it. mode is required: steer delivers it into the chat's running turn at the next safe point, queue waits for that turn to end; an idle chat starts at once either way. delivered means Helm accepted it, not that the other agent acted; do not poll for a reply.{EXPLICIT}"),
+            format!("Send a message to another Helm chat. Helm adds a header naming this chat and a note that the user did not write it. mode is required: steer delivers it into the chat's running turn at the next safe point, queue waits for that turn to end; an idle chat starts at once either way, unless too many chats are running: then waitingForSlot is true with a position, and it starts by itself when a slot frees, so do not re-send it; end your turn or carry on with other work. delivered means Helm accepted it, not that the other agent acted; do not poll for a reply.{EXPLICIT}"),
             obj(
                 json!({
                     "chatId": id,
@@ -731,7 +745,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::write(
             "app_create_chat",
-            format!("Start a new chat in a project and send it a first message (framed like app_send_message, queued). Pass parentChatId to nest it under a chat (at most two levels). Omitted model and effort use the new-chat defaults.{EXPLICIT}"),
+            format!("Start a new chat in a project and send it a first message (framed like app_send_message, queued). Pass parentChatId to nest it under a chat (at most two levels). Omitted model and effort use the new-chat defaults. waitingForSlot with a position means the first message waits for a run slot and starts by itself: do not poll or re-send.{EXPLICIT}"),
             obj(
                 json!({
                     "projectId": {"type": "string"},

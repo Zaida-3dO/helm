@@ -18,6 +18,7 @@ pub mod service;
 pub mod settings;
 pub mod tray;
 pub mod types;
+pub mod uiwatch;
 
 pub use service::{ShellHost, ShellService};
 pub use types::*;

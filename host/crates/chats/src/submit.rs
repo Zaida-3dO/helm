@@ -40,9 +40,9 @@ fn chat_status(
     .optional()
 }
 
-/// How a send is admitted. Run-slot gating is not built yet, so every
-/// caller is `Exempt` today; the class is still a required argument of the one internal send path
-/// so a future gated caller has to say so (the caller table is checked by a test).
+/// How a send is admitted. A `Gated` send to an idle chat may wait for a
+/// run slot ([`crate::runslots`]); the class is a required argument of the one internal send path
+/// so every caller has to say so (the caller table is checked by a test).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdmissionClass {
     /// Starts at once (the user's own sends, the restart continuation).
@@ -326,16 +326,32 @@ pub fn chat_send(
                 live.live.lock().unwrap().thread.queue_held = false;
             }
             if dispatch {
-                if let Err(e) = rt.command(&a.chat_id, Cmd::Dispatch(s.id.clone())) {
-                    // Could not hand it over: undo, keep the text for the user.
-                    let _ = rt.db().write(|tx| {
-                        tx.execute(
-                            "UPDATE submissions SET state = 'rejected' WHERE id = ?1",
-                            [&s.id],
-                        )?;
-                        text_to_draft(tx, &a.chat_id, &s.text)
-                    });
-                    emit_chat(rt, &a.chat_id);
+                // Could not hand it over (refused now, or a send soon that never fit): undo,
+                // keep the text for the user.
+                let undo = {
+                    let (rt, chat, id, text) =
+                        (rt.clone(), a.chat_id.clone(), s.id.clone(), s.text.clone());
+                    move || {
+                        let _ = rt.db().write(|tx| {
+                            // Only while it is still waiting: never undo a message the chat took.
+                            let n = tx.execute(
+                                "UPDATE submissions SET state = 'rejected' WHERE id = ?1                                  AND state = 'saved'",
+                                [&id],
+                            )?;
+                            if n == 1 {
+                                text_to_draft(tx, &chat, &text)?;
+                            }
+                            Ok::<_, rusqlite::Error>(())
+                        });
+                        emit_chat(&rt, &chat);
+                        emit_queue(&rt, &chat);
+                    }
+                };
+                let later = undo.clone();
+                if let Err(e) =
+                    rt.command_soon(&a.chat_id, Cmd::Dispatch(s.id.clone()), move |_| later())
+                {
+                    undo();
                     return Err(e);
                 }
             }
@@ -379,6 +395,8 @@ pub struct HostSent {
     pub delivered: bool,
     /// Saved as a follow-up behind the running turn.
     pub queued: bool,
+    /// Saved, waiting for a run slot: its 1-based place in the queue ([`crate::runslots`]).
+    pub waiting: Option<usize>,
 }
 
 pub fn host_send(rt: &ChatRuntime, s: HostSend<'_>) -> Result<HostSent, ApiError> {
@@ -390,11 +408,23 @@ pub fn host_send(rt: &ChatRuntime, s: HostSend<'_>) -> Result<HostSent, ApiError
     }
     let now = helm_core::now_ms();
     let limits = rt.limits().clone();
+    // Only a gated send asks the hold (the usage governor): nothing else can wait.
+    let held = s.gated && rt.slot_hold(now).is_some();
+    let reserved = if s.gated {
+        rt.sh.run_slots.reserved()
+    } else {
+        vec![]
+    };
     let out = rt
         .db()
         .write(|tx| {
             if let Some(existing) = store::get_submission(tx, s.submission_id)? {
-                return Ok(Ok((existing.state != SubmissionState::Queued, false)));
+                let waiting = crate::runslots::position(tx, s.submission_id)?;
+                return Ok(Ok((
+                    existing.state != SubmissionState::Queued && waiting.is_none(),
+                    false,
+                    waiting,
+                )));
             }
             let Some((status, archived)) = chat_status(tx, s.chat_id)? else {
                 return Ok(Err(crate::ops::not_found()));
@@ -406,7 +436,15 @@ pub fn host_send(rt: &ChatRuntime, s: HostSend<'_>) -> Result<HostSent, ApiError
                 return Ok(Err(ApiError::new("busy", "That chat is stopping; try again in a moment.")));
             }
             let busy = status.is_busy();
-            if !busy {
+            // A gated start of an idle chat may wait for a run slot (a running chat's message
+            // joins its turn as before).
+            let wait_head = if s.gated && !busy {
+                let head = crate::runslots::is_head(tx, s.chat_id, s.text)?;
+                crate::runslots::must_wait(tx, s.chat_id, head, held, &reserved)?.then_some(head)
+            } else {
+                None
+            };
+            if !busy && wait_head.is_none() {
                 let active: i64 = tx.query_row(
                     "SELECT count(*) FROM chats WHERE status IN ('starting', 'running', 'stopping')",
                     [],
@@ -437,20 +475,29 @@ pub fn host_send(rt: &ChatRuntime, s: HostSend<'_>) -> Result<HostSent, ApiError
                 },
             )?;
             tx.execute("UPDATE chats SET updated_at = ?1 WHERE id = ?2", params![now, s.chat_id])?;
-            Ok(Ok((state != SubmissionState::Queued, true)))
+            if let Some(head) = wait_head {
+                crate::runslots::insert_wait(tx, s.submission_id, s.chat_id, now, head)?;
+                let pos = crate::runslots::position(tx, s.submission_id)?;
+                return Ok(Ok((false, true, pos)));
+            }
+            Ok(Ok((state != SubmissionState::Queued, true, None)))
         })
         .map_err(sql)??;
-    let (dispatch, fresh) = out;
+    let (dispatch, fresh, waiting) = out;
     if fresh && dispatch {
         rt.command(s.chat_id, Cmd::Dispatch(s.submission_id.to_owned()))?;
     }
     if fresh {
         emit_queue(rt, s.chat_id);
         emit_chat(rt, s.chat_id);
+        if waiting.is_some() {
+            rt.wake_slots();
+        }
     }
     Ok(HostSent {
         delivered: dispatch,
-        queued: !dispatch,
+        queued: !dispatch && waiting.is_none(),
+        waiting,
     })
 }
 

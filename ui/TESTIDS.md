@@ -68,3 +68,16 @@ breaks those checks, so change them only together with the checks. Everything el
 
 Keys (Windows): Send `Ctrl+Enter` (or `Enter` with the Enter send shortcut), Steer `Ctrl+Shift+Enter`,
 Queue `Alt+Enter`, Send now `Ctrl+Alt+Enter`, Stop that continues the queue `Esc`.
+
+## Orchestrator
+
+| Hook | Element | Attributes |
+|---|---|---|
+| `orchestrator-switch` | The Orchestrator switch in the composer toolbar (Claude Code chats, while Settings → Orchestrator is on). Inert states use `aria-disabled`, never `disabled` | `data-look` (`off` `auto` `on-user` `on-agent` `unavailable`), `data-mode` (`on` `off` `auto`), `aria-pressed`, `title` = the tooltip |
+| `orchestrator-error` | The red line after the switch when the host refused a click | text = the host's sentence |
+| `orchestrator-pane` | Settings → Orchestrator (`settings-pane` with `data-pane="orchestrator"`) | |
+| `orch-enabled` / `orch-movefast` | The master switch and Move fast checkboxes | |
+| `orch-newchats` | The Always / Never / Auto group for new chats | segments carry `data-value` (`always` `never` `auto`) |
+| `orch-use-<stage>` | One stage's Required / Auto / Off group, stage = `plan` `planReview` `review` `cleanup` `smoketest` | segments carry `data-value` |
+| `orch-edits` / `orch-signoff` / `orch-landdefault` / `orch-method` | The other segmented settings | segments carry `data-value` |
+| `orch-save` / `orch-revert` / `orch-saved` / `orch-error` | Save, Revert, the "Saved" word, a refused save's message | |

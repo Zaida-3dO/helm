@@ -1,0 +1,48 @@
+/* The Orchestrator switch and workflow views. Design-system tokens only. */
+
+.orch-divider {
+  display: inline-block;
+  width: 1px;
+  height: 11px;
+  background: var(--line);
+  vertical-align: middle;
+}
+
+.orch-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--secondary);
+  cursor: pointer;
+}
+
+.orch-switch:hover {
+  color: var(--text);
+  background: var(--surface-alt);
+}
+
+.orch-switch[data-look='on-user'],
+.orch-switch[data-look='on-agent'] {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.orch-switch[aria-disabled='true'] {
+  cursor: default;
+}
+
+.orch-error {
+  display: inline-block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  font-size: 11px;
+  color: var(--error);
+}

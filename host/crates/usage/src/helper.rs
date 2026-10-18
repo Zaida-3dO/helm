@@ -33,8 +33,26 @@ impl ProcessReader {
 /// Where the helper lives. Debug builds read the repository (the way titles do); a release
 /// build looks beside the staged worker tree in the app's resources.
 pub fn helper_script(debug: bool) -> Option<PathBuf> {
-    let src = helm_workers::stage::default_source(debug, None)?;
-    let script = src.parent()?.parent()?.join("helpers/usage/src/main.ts");
+    // The installer puts the resources beside the executable: that folder is the resource folder.
+    let beside_exe = if debug {
+        None
+    } else {
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(Path::to_path_buf))
+    };
+    script_beside(&helm_workers::stage::default_source(
+        debug,
+        beside_exe.as_deref(),
+    )?)
+}
+
+/// `<resources>/helpers/usage/src/main.ts` for a worker source at `<resources>/worker/src`.
+fn script_beside(worker_src: &Path) -> Option<PathBuf> {
+    let script = worker_src
+        .parent()?
+        .parent()?
+        .join("helpers/usage/src/main.ts");
     script.is_file().then_some(script)
 }
 
@@ -123,4 +141,24 @@ fn run_helper(
     let _ = child.wait();
     serde_json::from_str(out.trim())
         .map_err(|_| "the usage helper's answer was not JSON".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_helper_is_found_beside_the_bundled_worker_source() {
+        let res = tempfile::tempdir().unwrap();
+        let src = res.path().join("worker").join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        assert_eq!(script_beside(&src), None, "no helper bundled yet");
+        let main = res.path().join("helpers/usage/src/main.ts");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        std::fs::write(&main, "//").unwrap();
+        assert_eq!(script_beside(&src), Some(main));
+        // The folder the app reports is found through the same path.
+        let found = helm_workers::stage::default_source(false, Some(res.path())).unwrap();
+        assert!(script_beside(&found).is_some());
+    }
 }

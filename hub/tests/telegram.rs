@@ -137,6 +137,10 @@ async fn a_sender_not_on_the_allow_list_gets_no_forward_and_no_reply() {
     let mut group = update(STRANGER, "hi", T0 / 1000);
     group["message"]["chat"] = json!({ "id": -500, "type": "group" });
     assert_eq!(e.bridge.on_update(&group, T0).await, Handled::Ignored);
+    // Nor the allowed user writing in a group: other members would read the replies.
+    let mut own_group = update(OWNER, "hi", T0 / 1000);
+    own_group["message"]["chat"] = json!({ "id": -500, "type": "group" });
+    assert_eq!(e.bridge.on_update(&own_group, T0).await, Handled::Ignored);
     // A message with no sender at all.
     let mut anon = update(OWNER, "hi", T0 / 1000);
     anon["message"].as_object_mut().unwrap().remove("from");

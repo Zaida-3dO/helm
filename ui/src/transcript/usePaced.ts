@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Pacer } from './pacer.ts';
+import { prefersReducedMotion, shouldPace } from './motion.ts';
 import { PREVIEW_MS, thinkingPreview } from './thinking.ts';
 
 /** The visible part of a streaming text. Rows that are not streaming show their text at once. */
@@ -10,7 +11,9 @@ export function usePacedText(text: string, streaming: boolean): string {
   const [shown, setShown] = useState(streaming ? '' : text);
 
   useEffect(() => {
-    if (!streaming && !pacer.current) {
+    // Reduce Motion: no word-by-word reveal, the text shows at once.
+    if (!shouldPace(streaming, pacer.current !== null, prefersReducedMotion())) {
+      pacer.current = null;
       setShown(text);
       return;
     }

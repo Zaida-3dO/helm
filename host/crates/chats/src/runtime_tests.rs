@@ -148,7 +148,9 @@ pub struct H {
 
 pub fn limits() -> Limits {
     Limits {
-        ack: Duration::from_millis(400),
+        // Generous: a test that needs the ack to time out sets its own (see ACK_TIMEOUT_TEST).
+        // At 400 ms the prompt ack raced the fake worker's answer under full-suite load.
+        ack: Duration::from_secs(3),
         stop: Duration::from_millis(400),
         model_ack: Duration::from_millis(300),
         flush: Duration::from_millis(20),
@@ -158,6 +160,7 @@ pub fn limits() -> Limits {
         // Slow by default; the stall test speeds it up.
         tick: Duration::from_secs(5),
         stall_unit: Duration::from_millis(100),
+        send_soon: Duration::from_secs(5),
     }
 }
 
@@ -216,6 +219,9 @@ pub fn harness_with(limits: Limits) -> H {
         spawner,
     }
 }
+
+/// The ack limit for the test that waits for it to expire.
+const ACK_TIMEOUT_TEST: Duration = Duration::from_millis(400);
 
 pub fn harness() -> H {
     harness_with(limits())
@@ -414,7 +420,10 @@ async fn a_turn_streams_and_settles() {
 /// of the same submission id sends nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unanswered_prompt_becomes_uncertain_and_is_not_resent() {
-    let mut h = harness();
+    let mut h = harness_with(Limits {
+        ack: ACK_TIMEOUT_TEST,
+        ..limits()
+    });
     let chat = h.create().await;
     let (sid, _) = h.send(&chat, "hi", "default").await;
     let mut w = h.worker().await;
@@ -2132,4 +2141,193 @@ async fn a_catalogue_refresh_reads_a_live_get_state() {
         .unwrap()
         .iter()
         .any(|m| m["id"] == "fresh-model"));
+}
+
+// ---- Failure modes ----
+
+/// A full worker channel: with every slot but one taken, ordinary commands do not fit and
+/// an interrupt still does, without waiting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_full_channel_keeps_its_last_slot_for_interrupts() {
+    use crate::runtime::enqueue;
+    let (tx, mut rx) = mpsc::channel::<crate::actor::Cmd>(3);
+    assert!(enqueue(&tx, crate::actor::Cmd::Retire).is_ok());
+    assert!(enqueue(&tx, crate::actor::Cmd::Retire).is_ok());
+    assert!(
+        enqueue(&tx, crate::actor::Cmd::Retire).is_err(),
+        "a best-effort command never takes the reserved slot"
+    );
+    assert!(
+        enqueue(&tx, crate::actor::Cmd::Kick).is_err(),
+        "nor does a send soon"
+    );
+    assert!(
+        enqueue(&tx, crate::actor::Cmd::Terminate).is_ok(),
+        "an interrupt takes it"
+    );
+    assert!(enqueue(&tx, crate::actor::Cmd::Terminate).is_err());
+    for _ in 0..3 {
+        rx.recv().await.unwrap();
+    }
+    assert!(rx.try_recv().is_err(), "nothing extra was queued");
+}
+
+/// A "send soon" retries a full channel until a slot frees, and gives the command back
+/// once its window has passed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_soon_waits_for_a_slot_then_gives_up_after_its_window() {
+    use crate::runtime::{enqueue, send_soon};
+    let (tx, mut rx) = mpsc::channel::<crate::actor::Cmd>(2);
+    assert!(enqueue(&tx, crate::actor::Cmd::Retire).is_ok());
+    let sender = tx.clone();
+    let waiting = tokio::spawn(async move {
+        send_soon(&sender, crate::actor::Cmd::Kick, Duration::from_secs(5))
+            .await
+            .is_ok()
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(!waiting.is_finished(), "it waits while the channel is full");
+    assert!(matches!(rx.recv().await, Some(crate::actor::Cmd::Retire)));
+    assert!(waiting.await.unwrap(), "delivered once a slot freed");
+    assert!(matches!(rx.recv().await, Some(crate::actor::Cmd::Kick)));
+
+    assert!(enqueue(&tx, crate::actor::Cmd::Retire).is_ok());
+    let started = std::time::Instant::now();
+    let r = send_soon(&tx, crate::actor::Cmd::Kick, Duration::from_millis(200)).await;
+    assert!(
+        matches!(r, Err(crate::actor::Cmd::Kick)),
+        "given back after the window"
+    );
+    assert!(started.elapsed() >= Duration::from_millis(200));
+}
+
+/// A worker exiting unexpectedly: after a crash the next send relaunches the worker, and
+/// the uncertain submission is not replayed into it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_worker_crash_the_next_send_relaunches_without_replaying() {
+    let mut h = harness();
+    let (chat, lost, w) = running_turn(&mut h).await;
+    w.exit().await;
+    h.until("interrupted", |h| h.status(&chat) == "interrupted")
+        .await;
+    assert_eq!(h.state(&lost), "uncertain");
+    let (next, _) = h.send(&chat, "again", "default").await;
+    let mut w2 = h.worker().await;
+    w2.ready().await;
+    let p = w2.expect("prompt").await;
+    assert_eq!(
+        p["submissionId"],
+        next.as_str(),
+        "only the new message is sent"
+    );
+    assert_eq!(p["text"], "again");
+    ack(&w2, &p).await;
+    assert!(
+        w2.no_command_for(Duration::from_millis(300))
+            .await
+            .filter(|c| c["type"] == "prompt")
+            .is_none(),
+        "the uncertain submission is never resent"
+    );
+    assert_eq!(h.state(&lost), "uncertain");
+}
+
+/// An undelivered consent decision: the upkeep redelivers under the same submission id,
+/// and a repeat of that id never reaches the agent a second time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_send_repeated_under_one_submission_id_is_delivered_once() {
+    use crate::submit::{host_send, HostSend, HostSendMode};
+    let mut h = harness();
+    let chat = h.create().await;
+    let send = |h: &H| {
+        host_send(
+            &h.rt,
+            HostSend {
+                chat_id: &chat,
+                submission_id: "decision-1",
+                text: "[Helm] The user allowed it.",
+                mode: HostSendMode::Queue,
+                origin: crate::types::SubmissionOrigin::App,
+                gated: false,
+            },
+        )
+    };
+    send(&h).unwrap();
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert_eq!(p["submissionId"], "decision-1");
+    ack(&w, &p).await;
+    send(&h).unwrap();
+    send(&h).unwrap();
+    assert!(
+        w.no_command_for(Duration::from_millis(300))
+            .await
+            .filter(|c| c["type"] == "prompt")
+            .is_none(),
+        "a retry under the same id is not sent again"
+    );
+    assert_eq!(
+        h.col("SELECT count(*) FROM submissions WHERE id = 'decision-1'"),
+        ["1"]
+    );
+}
+
+// ---- Unattended reliability ----
+
+/// A stalled flag the host died with is cleared by startup recovery, so the next turn's
+/// output leaves it clear; an idle chat never reads as stalled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_flag_left_by_a_crash_is_cleared_and_never_shows_on_an_idle_chat() {
+    let mut h = harness();
+    let chat = h.create().await;
+    let seed = |h: &H| {
+        h.db.write(|tx| {
+            tx.execute(
+                "INSERT INTO chat_activity(chat_id, last_activity_at, stalled) VALUES (?1, 0, 1)
+                 ON CONFLICT(chat_id) DO UPDATE SET stalled = 1",
+                [&chat],
+            )
+        })
+        .unwrap();
+    };
+    seed(&h);
+    let got = h.call("chat_get", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(
+        got["chat"]["stalled"], false,
+        "an idle chat never reads stalled"
+    );
+    let a = h.call("attention_get", json!({})).await.unwrap();
+    assert_eq!(a["stalled"], json!([]));
+
+    // "Restart": startup recovery runs before any actor exists.
+    helm_core::recovery::run(&h.db, &crate::schema::tests::registry()).unwrap();
+    let flag = |h: &H| {
+        h.col(&format!(
+            "SELECT stalled FROM chat_activity WHERE chat_id = '{chat}'"
+        ))
+    };
+    assert_eq!(flag(&h), ["0"]);
+
+    h.send(&chat, "go", "default").await;
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    h.until("running", |h| h.status(&chat) == "running").await;
+    w.emit(json!({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}}))
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_ne!(
+        flag(&h),
+        ["1"],
+        "output during the next turn leaves it clear"
+    );
+    let a = h.call("attention_get", json!({})).await.unwrap();
+    assert_eq!(
+        a["stalled"],
+        json!([]),
+        "not counted as stalled from the start"
+    );
 }

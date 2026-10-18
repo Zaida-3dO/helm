@@ -104,6 +104,31 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ),
     // An Auto chat's own root agent may turn that chat on (app_orchestrator_on); nothing else.
     ("chat_workflow_modes", Tool),
+    // Tasks, changes and their record: written through app_workflow / app_workflow_report.
+    ("workflow_runs", Tool),
+    ("workflow_changes", Tool),
+    ("workflow_events", Data),
+    // Stage records queued for Agent Standup (the app writes them; agents never do).
+    ("workflow_standup_outbox", Data),
+    // The land step's readiness waits.
+    ("workflow_land_waits", Data),
+    // AFK and the usage governor.
+    (
+        "afk_settings",
+        UserOnly("AFK decides when Helm answers for you, so only you set it."),
+    ),
+    ("afk_spans", Data),
+    ("afk_digests", Data),
+    (
+        "governor_settings",
+        UserOnly("The usage governor can stop your chats, so only you set it."),
+    ),
+    // The run-slot queue.
+    ("slot_waits", Data),
+    (
+        "run_slot_settings",
+        UserOnly("Run slots decide when automated messages start, so only you set them."),
+    ),
 ];
 
 /// The class of a table, or None when it is unclassified.
