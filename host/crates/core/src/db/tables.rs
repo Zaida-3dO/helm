@@ -94,6 +94,16 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("plan_usage", Data),
     // Item links: which chats work on which board item. Stored only in Helm.
     ("item_chat_links", Data),
+    // Schedules: saved prompts and their run receipts.
+    ("schedules", Tool),
+    ("schedule_runs", Data),
+    // Workflow: Settings > Orchestrator and the per-chat Orchestrator state.
+    (
+        "workflow_settings",
+        UserOnly("Settings > Orchestrator is yours alone; no agent tool reads or changes it."),
+    ),
+    // An Auto chat's own root agent may turn that chat on (app_orchestrator_on); nothing else.
+    ("chat_workflow_modes", Tool),
 ];
 
 /// The class of a table, or None when it is unclassified.

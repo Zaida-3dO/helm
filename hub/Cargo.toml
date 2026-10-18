@@ -5,26 +5,30 @@ edition = "2021"
 license = "UNLICENSED"
 publish = false
 rust-version = "1.89"
-description = "Helm hub: the always-on memory service (SQLite FTS5 + vectors over MCP)"
+description = "Helm hub: shared memory over MCP, the relay line to Helm, and Helm's Telegram bot"
 
 # The hub is its own workspace: it builds into a container on the NAS from
 # hub/ alone, and it shares no crates with the desktop host.
 [workspace]
 
 [dependencies]
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
-tokio = { version = "1", features = ["rt", "macros", "net", "signal"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "signal", "sync", "time"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
+# The Telegram Bot API client (rustls on ring, the same stack the desktop host uses).
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [profile.release]
 opt-level = "s"

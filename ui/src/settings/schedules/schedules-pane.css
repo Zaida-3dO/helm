@@ -1,0 +1,156 @@
+/* Settings → Schedules. Design-system tokens only. */
+
+.sched-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.sched-pane h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sched-intro {
+  margin: 0;
+  font-size: 12px;
+  color: var(--secondary);
+  line-height: 1.5;
+}
+
+.sched-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.sched-templates {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.sched-template {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.sched-template-title,
+.sched-row-title {
+  font-weight: 600;
+}
+
+.sched-template-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.sched-empty {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.sched-rows,
+.sched-runs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sched-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.sched-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.sched-row[data-state='paused'],
+.sched-row[data-state='completed'],
+.sched-row[data-state='cancelled'] {
+  opacity: 0.7;
+}
+
+.sched-row-main {
+  min-width: 0;
+  flex: 1 1 240px;
+}
+
+.sched-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.sched-runs {
+  flex: 1 1 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.sched-run {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sched-run[data-status='failed'],
+.sched-run[data-status='blocked'] {
+  color: var(--error);
+}
+
+/* The editor dialog */
+
+.sched-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sched-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.sched-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}

@@ -279,6 +279,8 @@ button.ui-chip-main:hover {
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
+  /* Focusing a control scrolls it in; leave room for its ring beside the edge. */
+  scroll-padding: 8px;
 }
 .ui-dialog-foot {
   flex: none;

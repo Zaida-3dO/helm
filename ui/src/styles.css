@@ -27,12 +27,14 @@
   --surface-alt: #f5f5f5;
   --hover: #e8e8e7;
   --selected: #dededd;
-  --secondary: #6a6c6a;
-  --muted: #8c8d8c;
+  --secondary: #5c5e5c;
+  /* The base tones are #8c8d8c (muted), #6a6c6a (secondary), #737c88 (accent) and #ac9256 (git-modified);
+     darkened so text in those colours reaches 4.5:1 on the page and its surfaces. */
+  --muted: #666766;
   --line: #e3e3e2;
   --line-strong: #d0d0d0;
-  --accent: #737c88;
-  --chrome-accent: #737c88;
+  --accent: #646c77;
+  --chrome-accent: #646c77;
   --accent-bg: #ebecec;
   --accent-fill: #626974;
   --on-accent-fill: #ffffff;
@@ -40,14 +42,16 @@
   --chat-selected-accent: 10%;
   --chat-selected-fill: #c3c4c4;
   --accent-mark: #606770;
-  --chat-selected-quiet: 30%;
+  --chat-selected-quiet: 55%;
 
   /* Static. */
   --error: #b54a44;
   --warning: #b99159;
   --setup-warning: #875000;
+  /* Warning colour for text (--warning is for marks; it is 2.8:1 on the page). */
+  --warning-text: #875000;
   --interrupted: #be9562;
-  --git-modified: #ac9256;
+  --git-modified: #80691f;
   --link-tint: #4d77a0;
   --link-color: color-mix(in srgb, var(--text) 30%, var(--link-tint));
   --link-hover-color: color-mix(in srgb, var(--link-color) 72%, var(--text));
@@ -119,9 +123,12 @@
   --on-selected: #ffffff;
   --chat-selected-fill: #505051;
   --accent-mark: #cbd0d6;
+  --chat-selected-quiet: 50%;
 
   --error: #f0908c;
+  --git-modified: #ac9256;
   --setup-warning: var(--text);
+  --warning-text: var(--warning);
   --link-tint: #96b9e5;
   --shadow: 0 14px 48px #0007, 0 1px 4px #0004, inset 0 1px #ffffff07;
   --delivery-pending: #dcb96f;
@@ -156,6 +163,39 @@
   --fx-core: #ffffff;
 
   --elev-1: inset 0 1px #ffffff06, 0 4px 16px #0003;
+}
+
+/* Increased contrast (prefers-contrast: more): body and metadata text reach 7:1 on every surface,
+   and borders and the accent reach 3:1 against the page. Same names, higher values. */
+@media (prefers-contrast: more) {
+  :root,
+  :root[data-theme='light'] {
+    --text: #000000;
+    --secondary: #3a3c3a;
+    --muted: #494b49;
+    --line: #767776;
+    --line-strong: #5c5d5c;
+    --accent: #4f5762;
+    --chrome-accent: #4f5762;
+    --accent-mark: #3f464f;
+    --error: #8f2f2a;
+    --link-tint: #1f4f80;
+    --diff-add-text: #0f4d22;
+    --diff-del-text: #8a1530;
+    --git-modified: #5f4d12;
+  }
+  :root[data-theme='dark'] {
+    --text: #ffffff;
+    --secondary: #ececec;
+    --muted: #dcdcdc;
+    --line: #8a8a8a;
+    --line-strong: #adadad;
+    --accent: #e4e7eb;
+    --chrome-accent: #e4e7eb;
+    --accent-mark: #e4e7eb;
+    --error: #ffb3b0;
+    --link-tint: #b8d4f5;
+  }
 }
 
 /* No attribute yet (a plain browser tab, or the first frame): follow the OS. */
@@ -344,6 +384,12 @@ body,
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+/* A control that fills the edge of a clipping box (the window, a scroller, a tab strip) draws its
+   ring inside, where nothing can cut it off. */
+.caption-btn:focus-visible,
+.settings-tab:focus-visible {
+  outline-offset: -2px;
+}
 
 /* Buttons. The bare element is the secondary button. */
 button {
@@ -491,6 +537,16 @@ kbd {
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
+}
+
+/* Forced colours (Windows contrast themes): the system picks every colour, borders and outlines
+   stay, shadows and tints go. A selected tab therefore needs a shape that is not a tint or a shadow. */
+@media (forced-colors: active) {
+  .settings-tab[aria-selected='true'] {
+    border-bottom: 2px solid Highlight;
+    padding-bottom: 8px;
+    font-weight: 600;
+  }
 }
 
 /* Kill switches: Reduce Motion removes every animation and transition; the Zen

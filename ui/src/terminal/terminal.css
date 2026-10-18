@@ -68,6 +68,9 @@
   font-size: calc(11.5 * var(--ui-unit));
   cursor: var(--cursor-pointer);
 }
+.term-tab:focus-visible {
+  outline-offset: -2px;
+}
 .term-tab:hover {
   color: var(--secondary);
   background: color-mix(in srgb, var(--text) 5%, transparent);

@@ -132,8 +132,18 @@ html[data-panel-maximized] .shell-main {
   box-shadow: inset 0 -2px 0 var(--sp-accent);
 }
 
+@media (forced-colors: active) {
+  .sp-tab[aria-selected='true'] {
+    border-bottom: 2px solid Highlight;
+    box-sizing: border-box;
+  }
+}
+
 .sp-tab:focus-visible {
   box-shadow: inset 0 0 0 2px var(--sp-accent);
+  /* The shadow is dropped in forced colours; the outline stays. */
+  outline: 2px solid var(--sp-accent);
+  outline-offset: -2px;
 }
 
 .sp-tab.program .sp-tab-title {
@@ -813,6 +823,11 @@ html[data-panel-maximized] .shell-main {
 .ch-file-row:focus-visible,
 .ch-file-row.open {
   color: var(--text);
+}
+
+.ch-file-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .ch-file-row:hover {

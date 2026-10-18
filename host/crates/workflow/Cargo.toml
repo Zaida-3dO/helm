@@ -1,0 +1,22 @@
+[package]
+name = "helm-workflow"
+description = "The orchestrator workflow: Settings > Orchestrator, the per-chat Orchestrator state, tasks and changes, stage gates, commit-bound approval, Move fast, Agent Standup stage records and the land step."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+helm-chats.workspace = true
+helm-workers.workspace = true
+helm-hosttools = { path = "../hosttools" }
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+log.workspace = true
+ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
+
+[dev-dependencies]
+tempfile.workspace = true

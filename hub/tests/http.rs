@@ -20,6 +20,7 @@ fn app(allow_mutate: bool) -> axum::Router {
         store: Mutex::new(Store::open_in_memory().unwrap()),
         tokens,
         options: Options { allow_mutate },
+        line: Arc::new(helm_hub::relay::Line::new().0),
     }))
 }
 

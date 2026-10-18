@@ -1,9 +1,13 @@
-//! HTTP routes: `/health` (open) and `/mcp` (bearer token).
+//! HTTP routes: `/health` (open), `/mcp` (bearer token) and `/relay` (Helm's line, a
+//! `relay`-scope token).
 
-use crate::auth::Tokens;
+use crate::apptools;
+use crate::auth::{Client, Scope, Tokens};
 use crate::mcp::{self, Options};
+use crate::relay::{Line, MAX_FRAME};
 use crate::store::Store;
 use axum::body::Bytes;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -11,13 +15,17 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub struct AppState {
     pub store: Mutex<Store>,
     pub tokens: Tokens,
     pub options: Options,
+    pub line: Arc<Line>,
 }
+
+/// The hub pings the line this often; a line silent for three intervals is dropped.
+pub const PING_EVERY: Duration = Duration::from_secs(30);
 
 /// Request bodies above this are refused (a memory body is capped at 1 MB).
 pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
@@ -26,6 +34,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/mcp", get(no_stream).post(post_mcp).delete(no_stream))
+        .route("/relay", get(relay))
         .layer(DefaultBodyLimit::max(MAX_REQUEST))
         .with_state(state)
 }
@@ -71,6 +80,14 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
     let Some(client) = state.tokens.check(auth).cloned() else {
         return unauthorized();
     };
+    if client.scope == Scope::Relay {
+        // Least privilege: Helm's line token opens the line and nothing else.
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "a relay token cannot call the MCP surface" })),
+        )
+            .into_response();
+    }
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => {
@@ -82,21 +99,23 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
     let started = Instant::now();
     let is_init = msg.get("method").and_then(Value::as_str) == Some("initialize");
     let label = describe(&msg);
-    let reply = {
-        let Ok(mut store) = state.store.lock() else {
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        };
-        match &msg {
-            // Older clients may batch; answer each message in order.
-            Value::Array(batch) => {
-                let replies: Vec<Value> = batch
-                    .iter()
-                    .filter_map(|m| mcp::handle(&mut store, &client, &state.options, m))
-                    .collect();
-                (!replies.is_empty()).then_some(Value::Array(replies))
+    let reply = match &msg {
+        // Older clients may batch; answer each message in order.
+        Value::Array(batch) => {
+            let mut replies = vec![];
+            for m in batch {
+                match answer(&state, &client, m).await {
+                    Ok(Some(r)) => replies.push(r),
+                    Ok(None) => {}
+                    Err(code) => return code.into_response(),
+                }
             }
-            m => mcp::handle(&mut store, &client, &state.options, m),
+            (!replies.is_empty()).then_some(Value::Array(replies))
         }
+        m => match answer(&state, &client, m).await {
+            Ok(r) => r,
+            Err(code) => return code.into_response(),
+        },
     };
     eprintln!(
         "{} {} {}ms",
@@ -114,6 +133,112 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
         }
     }
     resp
+}
+
+/// One JSON-RPC message: forwarded Helm tools go down the line, without holding the
+/// store; everything else is the memory surface.
+async fn answer(state: &AppState, client: &Client, m: &Value) -> Result<Option<Value>, StatusCode> {
+    let method = m.get("method").and_then(Value::as_str);
+    let tool = m.pointer("/params/name").and_then(Value::as_str);
+    if client.app && method == Some("tools/call") {
+        if let (Some(name), Some(id)) = (tool, m.get("id")) {
+            if apptools::is_forwarded(name) {
+                let args = m
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let result = apptools::call(&state.line, &client.name, name, &args).await;
+                return Ok(Some(
+                    json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+                ));
+            }
+        }
+    }
+    let reply = {
+        let Ok(mut store) = state.store.lock() else {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        };
+        mcp::handle(&mut store, client, &state.options, m)
+    };
+    let mut reply = reply;
+    if client.app && method == Some("tools/list") {
+        if let Some(tools) = reply
+            .as_mut()
+            .and_then(|r| r.pointer_mut("/result/tools"))
+            .and_then(Value::as_array_mut)
+        {
+            tools.extend(apptools::tool_list());
+        }
+    }
+    Ok(reply)
+}
+
+/// `/relay`: Helm's one outbound line. Upgraded only for a `relay`-scope token.
+async fn relay(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let Some(client) = state.tokens.check(auth).cloned() else {
+        return unauthorized();
+    };
+    if client.scope != Scope::Relay {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "only a relay token may open the line" })),
+        )
+            .into_response();
+    }
+    let line = state.line.clone();
+    ws.max_message_size(MAX_FRAME)
+        .max_frame_size(MAX_FRAME)
+        .on_upgrade(move |socket| run_line(socket, line, client.name))
+}
+
+async fn run_line(mut socket: WebSocket, line: Arc<Line>, client: String) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let generation = line.attach(tx);
+    eprintln!("relay: line up ({client})");
+    let mut ping = tokio::time::interval(PING_EVERY);
+    ping.tick().await;
+    let mut last_heard = Instant::now();
+    loop {
+        tokio::select! {
+            out = rx.recv() => match out {
+                Some(frame) => {
+                    if socket.send(Message::Text(frame.into())).await.is_err() {
+                        break;
+                    }
+                }
+                // A newer line replaced this one.
+                None => break,
+            },
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Text(t))) => {
+                    last_heard = Instant::now();
+                    if !line.receive(generation, t.as_str()) {
+                        eprintln!("relay: dropped a malformed frame");
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => last_heard = Instant::now(),
+            },
+            _ = ping.tick() => {
+                if last_heard.elapsed() > PING_EVERY * 3 {
+                    eprintln!("relay: line silent, dropping it");
+                    break;
+                }
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    line.detach(generation);
+    eprintln!("relay: line down ({client})");
 }
 
 /// A log label: the method, plus the tool name for tool calls. Never arguments.

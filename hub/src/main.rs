@@ -1,13 +1,15 @@
 use helm_hub::auth::Tokens;
 use helm_hub::import::import_dir;
 use helm_hub::mcp::Options;
+use helm_hub::relay::Line;
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
+use helm_hub::telegram::{Bridge, HttpApi, TelegramConfig};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
-const USAGE: &str = "helm-hub: the Helm hub memory service
+const USAGE: &str = "helm-hub: the Helm hub (memory, relay line, Telegram bot)
 
 USAGE:
   helm-hub serve                       run the MCP server
@@ -17,8 +19,13 @@ USAGE:
 ENVIRONMENT:
   HUB_DB            SQLite file (default /data/hub.db)
   HUB_BIND          listen address for serve (default 0.0.0.0:8000)
-  HUB_TOKENS        client:token[:ro|rw],... (required for serve)
-  HUB_ALLOW_MUTATE  1 to offer memory_update and memory_delete";
+  HUB_TOKENS        client:token[:ro|rw|ro+app|rw+app|relay],... (required for serve)
+  HUB_ALLOW_MUTATE  1 to offer memory_update and memory_delete
+  HUB_TELEGRAM_BOT_TOKEN      the bot's token; without it the bot stays off
+  HUB_TELEGRAM_ALLOWED_USERS  numeric Telegram user ids; empty denies everyone
+  HUB_TELEGRAM_API            Bot API base (default the public API; a fake in tests)
+  HUB_TELEGRAM_QUEUE_MINUTES  how long an offline message waits (default 120)
+  HUB_TELEGRAM_QUEUE_MAX      how many offline messages wait (default 50)";
 
 fn db_path() -> PathBuf {
     std::env::var_os("HUB_DB")
@@ -128,13 +135,23 @@ fn serve() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let telegram = match TelegramConfig::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}; refusing to start");
+            return ExitCode::FAILURE;
+        }
+    };
     let allow_mutate = std::env::var("HUB_ALLOW_MUTATE").is_ok_and(|v| v == "1" || v == "true");
     let bind = std::env::var("HUB_BIND").unwrap_or_else(|_| "0.0.0.0:8000".into());
     let clients: Vec<String> = tokens.clients().map(|c| c.name.clone()).collect();
+    let (line, upstream) = Line::new();
+    let line = Arc::new(line);
     let state = Arc::new(AppState {
         store: Mutex::new(store),
         tokens,
         options: Options { allow_mutate },
+        line: line.clone(),
     });
 
     // One thread is plenty for a personal memory store and keeps RSS small.
@@ -156,6 +173,16 @@ fn serve() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+        match telegram.disabled_reason() {
+            Some(why) => eprintln!("telegram: off ({why})"),
+            None => {
+                let token = telegram.token.clone().unwrap_or_default();
+                let api = Arc::new(HttpApi::new(&telegram.api_base, &token));
+                let bridge = Arc::new(Bridge::new(api, line.clone(), &telegram));
+                eprintln!("telegram: on, {} allowed user(s)", telegram.allowed.len());
+                tokio::spawn(bridge.run(upstream));
+            }
+        }
         eprintln!(
             "helm-hub {} listening on {bind}; clients: {}; update/delete {}",
             env!("CARGO_PKG_VERSION"),

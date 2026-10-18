@@ -164,7 +164,7 @@ fn call_tool(
     args: &Value,
 ) -> Value {
     let writes = !READ_TOOLS.contains(&name);
-    if writes && client.scope == Scope::ReadOnly {
+    if writes && client.scope != Scope::ReadWrite {
         return tool_error(format!("{name} needs a read-write token"));
     }
     let r = match name {

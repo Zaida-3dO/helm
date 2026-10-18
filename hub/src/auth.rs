@@ -1,10 +1,17 @@
 //! Per-client bearer tokens.
 //!
 //! Configured as `HUB_TOKENS=client:token[:scope],client:token[:scope]`, where
-//! scope is `rw` (the default) or `ro`. Only SHA-256 digests of the tokens are
-//! kept in memory, and a presented token is compared against every digest in
-//! constant time, so neither a timing difference nor a memory dump gives a
-//! token away.
+//! scope is `rw` (the default), `ro` or `relay`, and `rw` or `ro` may add
+//! `+app` (for example `ro+app`).
+//!
+//! - `ro` and `rw` reach the memory tools over `/mcp`.
+//! - `+app` also lists the Helm tools the hub forwards down the relay line.
+//! - `relay` is Helm's own line (`/relay`) and nothing else: a relay token
+//!   cannot call `/mcp`, and an `/mcp` token cannot open the line.
+//!
+//! Only SHA-256 digests of the tokens are kept in memory, and a presented
+//! token is compared against every digest in constant time, so neither a
+//! timing difference nor a memory dump gives a token away.
 
 use sha2::{Digest, Sha256};
 
@@ -12,12 +19,16 @@ use sha2::{Digest, Sha256};
 pub enum Scope {
     ReadOnly,
     ReadWrite,
+    /// Helm's outbound line to the hub; never the MCP surface.
+    Relay,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Client {
     pub name: String,
     pub scope: Scope,
+    /// Sees and may call the Helm tools forwarded down the relay line.
+    pub app: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -41,12 +52,15 @@ impl Tokens {
             let (Some(name), Some(token)) = (fields.next(), fields.next()) else {
                 return Err(format!("token entry {} is not client:token[:scope]", i + 1));
             };
-            let scope = match fields.next() {
-                None | Some("rw") => Scope::ReadWrite,
-                Some("ro") => Scope::ReadOnly,
+            let (scope, app) = match fields.next() {
+                None | Some("rw") => (Scope::ReadWrite, false),
+                Some("ro") => (Scope::ReadOnly, false),
+                Some("rw+app") => (Scope::ReadWrite, true),
+                Some("ro+app") => (Scope::ReadOnly, true),
+                Some("relay") => (Scope::Relay, false),
                 Some(_) => {
                     return Err(format!(
-                        "token entry {} has a scope other than rw or ro",
+                        "token entry {} has a scope other than rw, ro, rw+app, ro+app or relay",
                         i + 1
                     ))
                 }
@@ -75,6 +89,7 @@ impl Tokens {
                 Client {
                     name: name.to_owned(),
                     scope,
+                    app,
                 },
             ));
         }
@@ -138,6 +153,40 @@ mod tests {
         assert!(t.check(Some(&format!("Bearer {B}"))).is_none());
         assert!(t.check(Some(&format!("Bearer {}", &A[1..]))).is_none());
         assert!(t.check(Some("Bearer ")).is_none());
+    }
+
+    #[test]
+    fn relay_and_app_scopes_parse() {
+        let t = Tokens::parse(&format!("line:{A}:relay, remote:{B}:ro+app")).unwrap();
+        let c = t.check(Some(&format!("Bearer {A}"))).unwrap();
+        assert_eq!((c.scope, c.app), (Scope::Relay, false));
+        let c = t.check(Some(&format!("Bearer {B}"))).unwrap();
+        assert_eq!((c.scope, c.app), (Scope::ReadOnly, true));
+        assert!(Tokens::parse(&format!("line:{A}:relay+app")).is_err());
+    }
+
+    #[test]
+    fn only_digests_are_held() {
+        // Trust boundary (b): the configured token never stays in memory as text.
+        let t = Tokens::parse(&format!("line:{A}:relay")).unwrap();
+        let dump = format!("{t:?}");
+        assert!(!dump.contains(A), "{dump}");
+        assert!(!dump.contains("aaaa"), "{dump}");
+        assert_eq!(t.entries[0].0, digest(A));
+    }
+
+    #[test]
+    fn ct_eq_compares_every_byte() {
+        // A digest differing only in its first or its last byte is refused. Timing cannot be
+        // asserted in a unit test; ct_eq folds every byte with no early return.
+        let a = digest(A);
+        let mut b = a;
+        b[31] ^= 1;
+        assert!(!ct_eq(&a, &b));
+        let mut c = a;
+        c[0] ^= 1;
+        assert!(!ct_eq(&a, &c));
+        assert!(ct_eq(&a, &a));
     }
 
     #[test]

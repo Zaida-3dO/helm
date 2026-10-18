@@ -1,8 +1,14 @@
 # Helm hub
 
-The always-on service that runs on a home server, beside the PC that runs Helm. This
-first part is **shared memory**: SQLite with an FTS5 index and optional vectors, served as MCP over
-streamable HTTP. The relay and the Telegram bridge come later.
+The always-on service that runs on a home server, beside the PC that runs Helm. It serves three
+things:
+
+- **Shared memory**: SQLite with an FTS5 index and optional vectors, as MCP over streamable
+  HTTP.
+- **The relay line**: Helm on the PC keeps one outbound WebSocket open to `/relay`. Helm
+  tools the hub offers over MCP travel down it, so the PC needs no inbound port.
+- **Helm's Telegram bot**: messages from the allowed user go down the same line; the live
+  status and the answers come back up it.
 
 It is its own Cargo workspace and builds from `hub/` alone, so the container build needs nothing
 else from the repo.
@@ -22,10 +28,51 @@ that do not (another assistant, or anyone while the PC is asleep) get keyword se
 
 ## Auth
 
-`HUB_TOKENS=client:token[:scope],...`, scope `rw` (default) or `ro`. Tokens are at least 24
-characters, unique per client, held only as SHA-256 digests and compared in constant time. A
-read-only client sees and may call only the three read tools. `GET /health` is the one open route
-and reports only status and version. The server refuses to start with no tokens configured.
+`HUB_TOKENS=client:token[:scope],...`. Tokens are at least 24 characters, unique per client, held
+only as SHA-256 digests and compared in constant time.
+
+| Scope | Reaches |
+|---|---|
+| `rw` (default) | the memory tools |
+| `ro` | the three memory read tools |
+| `rw+app`, `ro+app` | the above, plus the Helm tools forwarded down the line (below) |
+| `relay` | `/relay` only: Helm's own line. It cannot call `/mcp`, and no other token can open the line |
+
+`GET /health` is the one open route and reports only status and version. The server refuses to
+start with no tokens configured.
+
+## Relay line and Helm tools
+
+Helm connects to `ws://<hub>/relay` with its `relay` token; a newer line replaces an older one. The
+frames are listed in `src/relay.rs`. A client with `+app` sees six Helm tools: `app_list_chats`,
+`app_read_chat`, `app_list_projects`, `app_list_attention`, `app_send_message` and
+`app_stop_chat`. The hub never forwards any other name, and Helm checks every call again on the PC
+(its outside-caller deny-list and argument refusals, `host/crates/relay/src/gate.rs`). A message
+sent this way reaches the chat framed as sent by another agent, never as the user and never as
+approval.
+
+- **Line down:** the call answers "Helm offline, nothing sent or changed." and nothing is sent.
+- **Line drops mid-call, or no answer in 60 s:** "may or may not have run; check the current state
+  before trying again".
+
+## Telegram bot
+
+| Variable | |
+|---|---|
+| `HUB_TELEGRAM_BOT_TOKEN` | The bot's token from BotFather. Without it the bot is off |
+| `HUB_TELEGRAM_ALLOWED_USERS` | Comma-separated numeric Telegram user ids. Empty: the bot is off (it denies everyone) |
+| `HUB_TELEGRAM_API` | Bot API base, default the public API (tests point it at `fakes/telegram`) |
+| `HUB_TELEGRAM_QUEUE_MINUTES` | How long a message waits while Helm is offline (default 120) |
+| `HUB_TELEGRAM_QUEUE_MAX` | How many messages wait (default 50) |
+
+- A sender not on the allow-list gets nothing: no forward and no reply.
+- While Helm is offline a message is queued in order and the sender is told at once. On reconnect
+  the queue is delivered, each message carrying its age so Helm marks it "sent N min ago". An
+  expired message is dropped and the user is told how many. `/cancel` drops the queue; `/stop`
+  stops Helm's running turn. Each message is held until Helm acknowledges it, so a drop between
+  the two resends it. The queue is in memory: a container restart drops it.
+- While a turn runs, ONE status message is edited in place, at most every 3 s. The answer arrives
+  as a new message (so the phone notifies) and the status message is deleted.
 
 ## Commands
 
@@ -52,7 +99,9 @@ cargo clippy --all-targets -- -D warnings
 docker build -t helm-hub:latest .
 ```
 
-`compose.snippet.yml` is the service block for the server's compose group. Run the import inside
+`compose.snippet.yml` is the service block for the server's compose group. The bot's
+long poll, the line and the memory store share the one-thread runtime; Bot API calls run on the
+blocking pool. Run the import inside
 the container: `docker exec helm-hub helm-hub import /mnt/memory`.
 
 ## Budget

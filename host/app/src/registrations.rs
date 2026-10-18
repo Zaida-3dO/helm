@@ -22,6 +22,10 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_hosttools::register_ops(reg);
     helm_usage::register_ops(reg);
     helm_itemlinks::register_ops(reg);
+    helm_schedules::register_ops(reg);
+    helm_workflow::register_ops(reg);
+    helm_afk::register_ops(reg);
+    helm_governor::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -35,6 +39,10 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_hosttools::register_migrations(reg);
     helm_usage::register_migrations(reg);
     helm_itemlinks::register_migrations(reg);
+    helm_schedules::register_migrations(reg);
+    helm_workflow::register_migrations(reg);
+    helm_afk::register_migrations(reg);
+    helm_governor::register_migrations(reg);
 }
 
 /// Shared services a crate adds for op handlers (`ctx.services.need::<T>()`), called once at
@@ -48,6 +56,10 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_panel::register_services(services, events);
     helm_mcp::register_services(services, events);
     helm_usage::register_services(services, events);
+    helm_schedules::register_services(services, events);
+    // After usage, which the governor reads.
+    helm_afk::register_services(services, events);
+    helm_governor::register_services(services, events);
     services.insert(Arc::new(host_tools()));
     services.insert(Arc::new(worker_lines()));
     // Other crates reach running workers through the chat runtime (helm_hosttools::lines).
@@ -109,6 +121,7 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_consent::register_host_tools(&mut reg);
     helm_mcp::register_host_tools(&mut reg);
     helm_itemlinks::register_host_tools(&mut reg);
+    helm_workflow::register_host_tools(&mut reg);
     reg
 }
 
@@ -129,6 +142,9 @@ pub fn attach_host_tools(
 ) {
     runtime.attach_host(host_seam(dispatcher));
     start_consent_upkeep(runtime, dispatcher.ctx());
+    // Auto-AFK signals and the 30 s AFK tick.
+    helm_afk::start(runtime, &dispatcher.ctx().services);
+    helm_governor::start(runtime, dispatcher);
 }
 
 /// The consent upkeep: every minute, and at once after a decision,
@@ -260,7 +276,8 @@ pub fn launch_contributors(
     .register_section(Arc::new(helm_hosttools::sections::GuidelinesSection {
         registry: Arc::new(host_tools()),
     }))
-    .register_section(Arc::new(helm_itemlinks::ItemLinksSection));
+    .register_section(Arc::new(helm_itemlinks::ItemLinksSection))
+    .register_section(Arc::new(helm_workflow::WorkflowSection { db: db.clone() }));
     let mut c = helm_workers::contrib::LaunchContributors::new();
     c.add(Arc::new(a));
     c
@@ -315,6 +332,7 @@ mod host_tool_tests {
             "app_update_mcp_server",
             "app_remove_mcp_server",
             "app_link_item",
+            "app_orchestrator_on",
         ];
         assert_eq!(names(Default::default()), base);
         let delta = |k: helm_hosttools::LaunchKeys| -> Vec<String> {

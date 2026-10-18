@@ -1,0 +1,21 @@
+[package]
+name = "helm-governor"
+description = "The usage governor. Bands plan usage (read through helm-usage's service) against local thresholds, and winds agents down or stops them near the limit."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+helm-chats.workspace = true
+helm-usage = { path = "../usage" }
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

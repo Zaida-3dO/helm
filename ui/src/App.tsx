@@ -16,6 +16,8 @@ import './settings/general.tsx';
 import './settings/shell/ShellPane.tsx';
 import './settings/mcp/index.tsx';
 import './settings/usage/index.tsx';
+import './settings/schedules/index.tsx';
+import { AfkPresence } from './afk/index.tsx'; // Settings → AFK and presence
 import { GLOBAL_HOTKEY_BINDING, shellOps } from './api/shell.ts';
 import { ShellController, ShellProvider, useSelection, useShell } from './shell/context.ts';
 import type { Flushers } from './shell/quit.ts';
@@ -133,6 +135,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
       <SettingsDialog />
       <SearchDialog /> {/* Mod+K search */}
       <LeafSlots /> {/* registers the action slots */}
+      <AfkPresence /> {/* AFK presence */}
       {null /* <SavedDialog /> */}
     </div>
   );

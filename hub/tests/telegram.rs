@@ -1,0 +1,377 @@
+//! The Telegram bridge against a recording fake Bot API: the allow-list (trust-boundary item
+//! a), the offline queue (f), and the live status message.
+
+use helm_hub::relay::{Line, Upstream, OFFLINE};
+use helm_hub::telegram::{
+    parse_allowed, ApiError, ApiFuture, Bridge, Handled, TelegramApi, TelegramConfig, QUEUED,
+};
+use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::mpsc;
+
+const OWNER: i64 = 1001;
+const STRANGER: i64 = 2002;
+const T0: i64 = 1_800_000_000_000;
+const MIN: i64 = 60_000;
+
+#[derive(Default)]
+struct FakeApi {
+    calls: Mutex<Vec<(String, Value)>>,
+    next_id: Mutex<i64>,
+    fail_edits: Mutex<bool>,
+}
+
+impl FakeApi {
+    fn calls(&self) -> Vec<(String, Value)> {
+        self.calls.lock().unwrap().clone()
+    }
+    fn sent_texts(&self) -> Vec<String> {
+        self.calls()
+            .into_iter()
+            .filter(|(m, _)| m == "sendMessage")
+            .map(|(_, b)| b["text"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    fn clear(&self) {
+        self.calls.lock().unwrap().clear();
+    }
+}
+
+impl TelegramApi for FakeApi {
+    fn call<'a>(&'a self, method: &'a str, body: Value) -> ApiFuture<'a> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((method.to_owned(), body.clone()));
+        let result = match method {
+            "sendMessage" => {
+                let mut id = self.next_id.lock().unwrap();
+                *id += 1;
+                Ok(json!({ "message_id": *id }))
+            }
+            "editMessageText" if *self.fail_edits.lock().unwrap() => Err(ApiError {
+                code: Some(429),
+                description: "Too Many Requests".into(),
+            }),
+            "getMe" => Ok(json!({ "username": "helm_test_bot" })),
+            _ => Ok(json!(true)),
+        };
+        Box::pin(async move { result })
+    }
+}
+
+fn cfg() -> TelegramConfig {
+    TelegramConfig {
+        token: Some("t".into()),
+        allowed: vec![OWNER],
+        api_base: "http://fake".into(),
+        queue_lifetime: Duration::from_secs(30 * 60),
+        queue_max: 3,
+    }
+}
+
+struct Env {
+    api: Arc<FakeApi>,
+    line: Arc<Line>,
+    bridge: Bridge,
+}
+
+fn env() -> Env {
+    let api = Arc::new(FakeApi::default());
+    let (line, _up) = Line::new();
+    let line = Arc::new(line);
+    let bridge = Bridge::new(api.clone(), line.clone(), &cfg());
+    Env { api, line, bridge }
+}
+
+fn update(from: i64, text: &str, date_s: i64) -> Value {
+    json!({ "update_id": 1, "message": {
+        "message_id": 9, "date": date_s, "text": text,
+        "from": { "id": from, "is_bot": false, "first_name": "x" },
+        "chat": { "id": from, "type": "private" } } })
+}
+
+fn line_up(e: &Env) -> mpsc::UnboundedReceiver<String> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    e.line.attach(tx);
+    rx
+}
+
+fn frames(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<Value> {
+    let mut out: Vec<Value> = vec![];
+    while let Ok(f) = rx.try_recv() {
+        out.push(serde_json::from_str(&f).unwrap());
+    }
+    out.into_iter().filter(|f| f["type"] != "welcome").collect()
+}
+
+#[test]
+fn the_bot_is_off_without_a_token_or_an_allow_list() {
+    let mut c = cfg();
+    assert_eq!(c.disabled_reason(), None);
+    c.allowed.clear();
+    assert!(c.disabled_reason().unwrap().contains("denies everyone"));
+    c = cfg();
+    c.token = None;
+    assert!(c.disabled_reason().unwrap().contains("no bot token"));
+    assert_eq!(parse_allowed(" 12, 34 ").unwrap(), vec![12, 34]);
+    assert!(parse_allowed("@owner").is_err());
+    assert!(parse_allowed("-5").is_err());
+    assert!(parse_allowed("").unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_sender_not_on_the_allow_list_gets_no_forward_and_no_reply() {
+    let e = env();
+    let mut rx = line_up(&e);
+    for text in ["hello", "/stop", "/cancel", "/start"] {
+        assert_eq!(
+            e.bridge
+                .on_update(&update(STRANGER, text, T0 / 1000), T0)
+                .await,
+            Handled::Ignored
+        );
+    }
+    // Not even when the stranger writes in a chat the allowed user is in.
+    let mut group = update(STRANGER, "hi", T0 / 1000);
+    group["message"]["chat"] = json!({ "id": -500, "type": "group" });
+    assert_eq!(e.bridge.on_update(&group, T0).await, Handled::Ignored);
+    // A message with no sender at all.
+    let mut anon = update(OWNER, "hi", T0 / 1000);
+    anon["message"].as_object_mut().unwrap().remove("from");
+    assert_eq!(e.bridge.on_update(&anon, T0).await, Handled::Ignored);
+    assert!(
+        e.api.calls().is_empty(),
+        "nothing was sent back: {:?}",
+        e.api.calls()
+    );
+    assert!(frames(&mut rx).is_empty(), "nothing went down the line");
+    assert_eq!(e.bridge.queued_len(), 0);
+}
+
+#[tokio::test]
+async fn the_allowed_user_is_forwarded_and_held_until_acknowledged() {
+    let e = env();
+    let mut rx = line_up(&e);
+    assert_eq!(
+        e.bridge
+            .on_update(&update(OWNER, "status?", T0 / 1000), T0)
+            .await,
+        Handled::Forwarded
+    );
+    let f = frames(&mut rx);
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0]["type"], "telegram");
+    assert_eq!(f[0]["text"], "status?");
+    assert_eq!(f[0]["ageMinutes"], Value::Null);
+    assert!(
+        e.api.sent_texts().is_empty(),
+        "no offline reply while the line is up"
+    );
+    assert_eq!(e.bridge.queued_len(), 1, "held until Helm acknowledges");
+    e.bridge.on_ack(f[0]["id"].as_str().unwrap());
+    assert_eq!(e.bridge.queued_len(), 0);
+}
+
+#[tokio::test]
+async fn offline_messages_queue_in_order_and_arrive_marked_with_their_age() {
+    let e = env();
+    assert_eq!(
+        e.bridge
+            .on_update(&update(OWNER, "one", T0 / 1000), T0)
+            .await,
+        Handled::Queued
+    );
+    assert_eq!(
+        e.bridge
+            .on_update(&update(OWNER, "two", (T0 + MIN) / 1000), T0 + MIN)
+            .await,
+        Handled::Queued
+    );
+    assert_eq!(
+        e.api.sent_texts(),
+        vec![QUEUED, QUEUED],
+        "told at once, each time"
+    );
+    let mut rx = line_up(&e);
+    assert_eq!(e.bridge.flush(T0 + 12 * MIN).await, 2);
+    let f = frames(&mut rx);
+    assert_eq!(
+        f.iter()
+            .map(|f| f["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["one", "two"]
+    );
+    assert_eq!(f[0]["ageMinutes"], 12);
+    assert_eq!(f[1]["ageMinutes"], 11);
+    assert_eq!(
+        f[0]["bot"],
+        Value::Null,
+        "getMe was not called in this test"
+    );
+}
+
+#[tokio::test]
+async fn unacknowledged_messages_are_resent_on_the_next_line() {
+    let e = env();
+    let mut rx = line_up(&e);
+    e.bridge
+        .on_update(&update(OWNER, "one", T0 / 1000), T0)
+        .await;
+    let first = frames(&mut rx);
+    assert_eq!(first.len(), 1);
+    // The PC reconnects before acknowledging: the same message (same id) goes again.
+    let mut rx2 = line_up(&e);
+    assert_eq!(e.bridge.flush(T0 + 1000).await, 1);
+    let again = frames(&mut rx2);
+    assert_eq!(again[0]["id"], first[0]["id"]);
+}
+
+#[tokio::test]
+async fn expired_messages_are_dropped_and_the_user_is_told() {
+    let e = env();
+    e.bridge
+        .on_update(&update(OWNER, "old", T0 / 1000), T0)
+        .await;
+    e.bridge
+        .on_update(&update(OWNER, "new", (T0 + 25 * MIN) / 1000), T0 + 25 * MIN)
+        .await;
+    e.api.clear();
+    let mut rx = line_up(&e);
+    assert_eq!(e.bridge.flush(T0 + 40 * MIN).await, 1);
+    assert_eq!(frames(&mut rx)[0]["text"], "new");
+    assert_eq!(
+        e.api.sent_texts(),
+        vec!["1 queued message expired before Helm reconnected and was dropped."]
+    );
+}
+
+#[tokio::test]
+async fn cancel_clears_the_queue_and_a_full_queue_refuses() {
+    let e = env();
+    for i in 0..3 {
+        e.bridge
+            .on_update(&update(OWNER, &format!("m{i}"), T0 / 1000), T0)
+            .await;
+    }
+    e.api.clear();
+    e.bridge
+        .on_update(&update(OWNER, "m3", T0 / 1000), T0)
+        .await;
+    assert!(e.api.sent_texts()[0].contains("queue is full"));
+    assert_eq!(e.bridge.queued_len(), 3);
+    e.api.clear();
+    assert_eq!(
+        e.bridge
+            .on_update(&update(OWNER, "/cancel", T0 / 1000), T0)
+            .await,
+        Handled::Command
+    );
+    assert_eq!(e.api.sent_texts(), vec!["Dropped 3 queued messages."]);
+    let mut rx = line_up(&e);
+    assert_eq!(e.bridge.flush(T0).await, 0);
+    assert!(frames(&mut rx).is_empty(), "nothing cancelled is delivered");
+}
+
+#[tokio::test]
+async fn stop_goes_down_the_line_or_answers_offline() {
+    let e = env();
+    e.bridge
+        .on_update(&update(OWNER, "/stop", T0 / 1000), T0)
+        .await;
+    assert_eq!(e.api.sent_texts(), vec![OFFLINE]);
+    let mut rx = line_up(&e);
+    e.bridge
+        .on_update(&update(OWNER, "/stop@helm_test_bot", T0 / 1000), T0)
+        .await;
+    assert_eq!(frames(&mut rx)[0]["type"], "telegram_stop");
+}
+
+#[tokio::test]
+async fn one_status_message_is_edited_in_place_then_replaced_by_the_answer() {
+    let e = env();
+    e.bridge
+        .on_update(&update(OWNER, "/start", T0 / 1000), T0)
+        .await; // learns the chat
+    e.api.clear();
+    e.bridge
+        .on_upstream(Upstream::TelegramStatus("Reading files".into()))
+        .await;
+    e.bridge.flush_status(T0).await;
+    // Debounced: a second status inside the interval is held, not sent.
+    e.bridge.on_status("Running tests");
+    e.bridge.on_status("Running tests (2 of 5)");
+    e.bridge.flush_status(T0 + 1000).await;
+    e.bridge.flush_status(T0 + 2000).await;
+    e.bridge.flush_status(T0 + 3500).await;
+    let calls = e.api.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0].0, "sendMessage");
+    assert_eq!(calls[0].1["disable_notification"], true);
+    assert_eq!(calls[1].0, "editMessageText");
+    assert_eq!(
+        calls[1].1["text"], "Running tests (2 of 5)",
+        "only the latest text is sent"
+    );
+    let status_id = calls[1].1["message_id"].clone();
+    e.api.clear();
+    e.bridge.on_final("All 5 passed.").await;
+    let calls = e.api.calls();
+    assert_eq!(calls[0].0, "sendMessage", "the answer is a NEW message");
+    assert_eq!(calls[0].1["text"], "All 5 passed.");
+    assert_eq!(
+        calls[0].1["disable_notification"], false,
+        "so the phone notifies"
+    );
+    assert_eq!(calls[1].0, "deleteMessage");
+    assert_eq!(calls[1].1["message_id"], status_id);
+    assert_eq!(calls.len(), 2);
+    // A pending status from before the answer is discarded with it.
+    e.api.clear();
+    e.bridge.flush_status(T0 + 99_000).await;
+    assert!(e.api.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_rate_limited_edit_is_retried_after_the_interval() {
+    let e = env();
+    e.bridge.on_status("a");
+    e.bridge.flush_status(T0).await;
+    *e.api.fail_edits.lock().unwrap() = true;
+    e.bridge.on_status("b");
+    e.bridge.flush_status(T0 + 3000).await;
+    *e.api.fail_edits.lock().unwrap() = false;
+    e.bridge.flush_status(T0 + 4000).await; // inside the interval after the failure
+    e.bridge.flush_status(T0 + 6000).await;
+    let edits: Vec<_> = e
+        .api
+        .calls()
+        .into_iter()
+        .filter(|(m, _)| m == "editMessageText")
+        .collect();
+    assert_eq!(edits.len(), 2);
+    assert_eq!(edits[1].1["text"], "b");
+}
+
+#[tokio::test]
+async fn a_long_answer_is_split_on_character_boundaries() {
+    let e = env();
+    let long = "é".repeat(4500);
+    e.bridge.on_final(&long).await;
+    let texts = e.api.sent_texts();
+    assert_eq!(texts.len(), 2);
+    assert_eq!(texts[0].chars().count(), 4000);
+    assert_eq!(texts[1].chars().count(), 500);
+}
+
+#[tokio::test]
+async fn get_me_names_the_bot_for_helm() {
+    let e = env();
+    e.bridge.identify().await.unwrap();
+    let mut rx = line_up(&e);
+    e.bridge
+        .on_update(&update(OWNER, "hi", T0 / 1000), T0)
+        .await;
+    assert_eq!(frames(&mut rx)[0]["bot"], "helm_test_bot");
+}
