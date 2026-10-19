@@ -14,7 +14,7 @@
 //! fixed submission id per change) carrying the Workflow rules; the next launch carries the state
 //! through the prompt addendum.
 //!
-//! ## Contract (built top down; the rest follow in order)
+//! ## Contract
 //!
 //! | Surface | What |
 //! |---|---|
@@ -43,6 +43,7 @@ pub mod engine;
 mod flow_tests;
 pub mod gh;
 pub mod git;
+pub mod guard;
 pub mod handoff;
 pub mod kinds;
 pub mod land;
@@ -51,6 +52,7 @@ mod land_tests;
 pub mod mode;
 pub mod notes;
 mod ops;
+pub mod overrides;
 pub mod reports;
 pub mod rules;
 pub mod sa_outbox;
@@ -58,6 +60,7 @@ pub mod sa_outbox;
 mod sa_tests;
 pub mod sa_writer;
 pub mod settings;
+pub mod shell;
 pub mod store;
 pub mod tool;
 pub mod types;

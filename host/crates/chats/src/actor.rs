@@ -174,6 +174,8 @@ struct Actor {
     launched_long: Option<LongCommands>,
     /// That setting changed while a turn ran: relaunch at the next idle point.
     relaunch_on_idle: bool,
+    /// The turn-opening send being timed, until its first output ([`crate::timeline`]).
+    timeline: Option<crate::timeline::SendTimeline>,
 }
 
 pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
@@ -243,6 +245,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         edit_waiting: false,
         launched_long: None,
         relaunch_on_idle: false,
+        timeline: None,
     };
     sh.handle.spawn(actor.run(rx));
     ActorHandle { tx, live }
@@ -554,8 +557,12 @@ impl Actor {
             send_behavior: sb,
             host: crate::hostcalls::launch(&self.sh, &self.chat_id, &chat.cwd),
         };
+        let asked = now();
         match self.sh.spawner.spawn(&req) {
             Ok((link, out)) => {
+                if let Some(t) = self.timeline.as_mut() {
+                    t.spawn = Some((asked, now()));
+                }
                 self.link = Some(link);
                 self.out = Some(out);
                 self.ready = false;
@@ -590,6 +597,10 @@ impl Actor {
                 l.terminate();
             }
             return;
+        }
+        if let Some(t) = self.timeline.as_mut() {
+            t.ready = Some(now());
+            t.launch = resp.get("timing").cloned();
         }
         let data = resp.get("data").cloned().unwrap_or(Value::Null);
         let caps: Capabilities = data
@@ -746,6 +757,12 @@ impl Actor {
 
     /// Close the run, finish any live rows and tools, clear interactions, set the chat status.
     fn end_run(&mut self, status: ChatStatus, error: Option<&str>, run_status: &str) {
+        crate::timeline::finish(
+            &mut self.timeline,
+            &self.sh.cfg.profile_dir,
+            &self.chat_id,
+            None,
+        );
         self.flush();
         let keys: Vec<String> = self.stream.keys().cloned().collect();
         for key in &keys {
@@ -1179,6 +1196,12 @@ impl Actor {
             self.upsert_row(&row);
             self.emit_rows(std::slice::from_ref(&row.source_key));
         }
+        if !busy {
+            let mut t = crate::timeline::SendTimeline::new(sid, sub.created_at, now());
+            t.warm = self.ready;
+            t.warming = self.link.is_some() && !self.ready;
+            self.timeline = Some(t);
+        }
         if !self.ensure_worker() {
             return;
         }
@@ -1398,6 +1421,14 @@ impl Actor {
     fn on_record(&mut self, r: Map<String, Value>) {
         let v = Value::Object(r.clone());
         let kind = r.get("type").and_then(Value::as_str).unwrap_or_default();
+        if matches!(kind, "message_update" | "tool_execution_start") {
+            crate::timeline::finish(
+                &mut self.timeline,
+                &self.sh.cfg.profile_dir,
+                &self.chat_id,
+                Some(now()),
+            );
+        }
         match kind {
             "response" => self.on_response(r),
             "agent_start" => {
@@ -1840,6 +1871,12 @@ impl Actor {
             }
             Pending::Prompt { submission_id } => {
                 self.clear_timer(|t| *t == Timer::Ack(id.clone()));
+                if let Some(t) = self.timeline.as_mut() {
+                    if t.submission_id == submission_id {
+                        t.acked = Some(now());
+                        t.prompt = r.get("timing").cloned();
+                    }
+                }
                 let state = if ok {
                     SubmissionState::Accepted
                 } else if r.get("uncertain") == Some(&json!(true)) {

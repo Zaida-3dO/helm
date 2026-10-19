@@ -33,13 +33,15 @@ test('an old reading, and a window whose reset has passed, are greyed', () => {
 });
 
 test('a reset time with no number reads "?", and no reading gives no bars and a reason', () => {
-  assert.equal(bars(snap({ weekly: win(undefined, NOW + 5000) }), NOW)[1]?.text, '?');
+  assert.equal(bars(snap({ weekly: win(undefined, NOW + 5000) }), NOW)[1]?.text, '—');
   assert.deepEqual(bars(null, NOW), []);
   const none: UsageSnapshot = { readiness: { state: 'inactive', reason: 'No plan usage has been read yet. Try Refresh' }, refreshing: false };
   assert.deepEqual(bars(none, NOW), []);
   assert.equal(emptyTitle(none), 'No plan usage has been read yet. Try Refresh');
   assert.equal(emptyTitle(null), 'Reading plan usage…');
   assert.equal(percentText(55.6), '56%');
+  assert.equal(percentText(null), '—');
+  assert.equal(percentText(undefined), '—');
 });
 
 test('relative times and ranges', () => {

@@ -16,6 +16,69 @@ interface LiveMessage {
 export interface TranslatorHooks {
   emit: (e: Json) => void;
   diag: (msg: string) => void;
+  /** Clock for subagent timing and step pacing (tests replace it). */
+  now?: () => number;
+  /** The shortest gap between two step events of one subagent; default 500 ms (at most 2/s). */
+  subagentStepMs?: number;
+}
+
+/** The native tool that starts a subagent: `Agent` in Claude Code 2.1.x, `Task` before it. */
+export function isSubagentTool(name: string): boolean {
+  return name === "Agent" || name === "Task";
+}
+
+/** Longest report carried by `subagent_end`; the host cuts it further for the live thread. */
+export const SUBAGENT_REPORT_MAX = 64 * 1024;
+const ASSIGNMENT_LINES = 3;
+const ASSIGNMENT_MAX = 400;
+const STEP_TEXT_MAX = 200;
+
+/** One native subagent, keyed by the parent's Agent tool call id. */
+interface LiveSubagent {
+  toolCallId: string;
+  startedAt: number;
+  /** The CLI task id (system/task_started), which `stop_task` takes. */
+  taskId?: string;
+  /** The Agent call returned at once and the agent runs on (the 2.1.289 default). */
+  background: boolean;
+  tool?: string;
+  text?: string;
+  tokens?: number;
+  toolUses?: number;
+  /** The newest text-bearing assistant message of the subagent: its report when it finishes. */
+  lastText?: { messageId: string; text: string };
+  lastStepAt: number;
+  stepDirty: boolean;
+  stepTimer?: NodeJS.Timeout;
+}
+
+/** The first few non-empty lines of an assignment prompt, bounded. */
+export function assignmentPreview(prompt: string): string {
+  const lines = prompt
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .slice(0, ASSIGNMENT_LINES);
+  const joined = lines.join("\n");
+  return joined.length > ASSIGNMENT_MAX ? `${joined.slice(0, ASSIGNMENT_MAX - 1)}…` : joined;
+}
+
+function firstLine(text: string): string {
+  const line = text.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0) ?? "";
+  return line.length > STEP_TEXT_MAX ? `${line.slice(0, STEP_TEXT_MAX - 1)}…` : line;
+}
+
+/** What a subagent's tool call is about, for its card's "latest step" line. */
+function stepTarget(input: Json): string {
+  for (const k of ["command", "file_path", "path", "pattern", "url", "query", "description", "prompt"]) {
+    const v = input[k];
+    if (typeof v === "string" && v.trim()) return firstLine(v);
+  }
+  return "";
+}
+
+function num(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
 function obj(v: unknown): Json {
@@ -71,20 +134,38 @@ export class StreamTranslator {
   private retry: { attempt: number } | undefined;
   private permissionMode: string | undefined;
   private readonly h: TranslatorHooks;
+  private readonly subagents = new Map<string, LiveSubagent>();
+  private readonly now: () => number;
+  private readonly stepMs: number;
 
   constructor(hooks: TranslatorHooks) {
     this.h = hooks;
+    this.now = hooks.now ?? Date.now;
+    this.stepMs = hooks.subagentStepMs ?? 500;
   }
 
   get hasOpenRetry(): boolean {
     return this.retry !== undefined;
   }
 
+  /** The CLI task id of a running subagent, by its Agent tool call id (what `stop_task` takes). */
+  subagentTaskId(toolCallId: string): string | undefined {
+    return this.subagents.get(toolCallId)?.taskId;
+  }
+
+  /** Subagents that have started and not ended. */
+  get runningSubagents(): number {
+    return this.subagents.size;
+  }
+
   /** Returns true if the record was something the translator understands. */
   handle(rec: Json): boolean {
-    // Subagent traffic (parent_tool_use_id set) is not part of the parent transcript.
-    // Subagent UI comes later.
-    if (rec.parent_tool_use_id) return true;
+    // Subagent traffic (parent_tool_use_id set) is not part of the parent transcript;
+    // it feeds the subagent events instead.
+    if (rec.parent_tool_use_id) {
+      this.onSubagentRecord(String(rec.parent_tool_use_id), rec);
+      return true;
+    }
     switch (rec.type) {
       case "stream_event":
         this.onStreamEvent(obj(rec.event));
@@ -224,6 +305,7 @@ export class StreamTranslator {
       this.openTools.add(b.id);
       this.toolNames.set(b.id, b.name);
       this.h.emit({ type: "tool_execution_start", toolCallId: b.id, toolName: b.name, args: b.arguments, toolSource: toolSource(b.name, b.arguments) });
+      if (isSubagentTool(b.name)) this.startSubagent(b.id, obj(b.arguments));
     }
   }
 
@@ -235,13 +317,156 @@ export class StreamTranslator {
       if (b.type !== "tool_result") continue;
       const toolCallId = String(b.tool_use_id ?? "");
       this.openTools.delete(toolCallId);
+      const text = resultText(b.content);
       this.h.emit({
         type: "tool_execution_end",
         toolCallId,
         toolName: this.toolNames.get(toolCallId) ?? "",
-        result: { text: resultText(b.content), content: Array.isArray(b.content) ? convertContent(b.content) : undefined },
+        result: { text, content: Array.isArray(b.content) ? convertContent(b.content) : undefined },
         isError: b.is_error === true,
       });
+      this.onSubagentToolResult(toolCallId, text, b.is_error === true);
+    }
+  }
+
+  // ---- subagents --------------------------------------------------------------------------
+
+  private startSubagent(toolCallId: string, args: Json): void {
+    if (this.subagents.has(toolCallId)) return;
+    const now = this.now();
+    this.subagents.set(toolCallId, { toolCallId, startedAt: now, background: false, lastStepAt: 0, stepDirty: false });
+    const description = typeof args.description === "string" ? args.description.trim() : "";
+    const agentType = typeof args.subagent_type === "string" && args.subagent_type.trim() ? args.subagent_type.trim() : "general-purpose";
+    const name = typeof args.name === "string" && args.name.trim() ? args.name.trim() : description || agentType;
+    this.h.emit({
+      type: "subagent_start",
+      toolCallId,
+      agentType,
+      name,
+      description,
+      assignment: assignmentPreview(typeof args.prompt === "string" ? args.prompt : ""),
+      startedAt: now,
+    });
+  }
+
+  /** A record from inside a subagent: its latest tool call or narration becomes its step. */
+  private onSubagentRecord(parent: string, rec: Json): void {
+    const sa = this.subagents.get(parent);
+    if (!sa || rec.type !== "assistant") return; // nested agents' own records and tool results
+    const m = obj(rec.message);
+    const messageId = String(m.id ?? rec.uuid ?? "");
+    let step: { tool?: string; text: string } | undefined;
+    for (const b of convertContent(m.content)) {
+      if (b.type === "toolCall") step = { tool: b.name, text: stepTarget(obj(b.arguments)) };
+      else if (b.type === "text" && b.text.trim()) {
+        const prev = sa.lastText && sa.lastText.messageId === messageId ? `${sa.lastText.text}\n\n` : "";
+        sa.lastText = { messageId, text: prev + b.text };
+        step = { text: firstLine(b.text) };
+      }
+    }
+    if (!step) return;
+    sa.tool = step.tool;
+    sa.text = step.text;
+    this.queueStep(sa);
+  }
+
+  /** At most one step event per subagent per `stepMs`; the latest state wins (trailing edge). */
+  private queueStep(sa: LiveSubagent): void {
+    sa.stepDirty = true;
+    if (sa.stepTimer) return;
+    const wait = sa.lastStepAt + this.stepMs - this.now();
+    if (wait <= 0) return this.flushStep(sa);
+    sa.stepTimer = setTimeout(() => {
+      sa.stepTimer = undefined;
+      if (this.subagents.get(sa.toolCallId) === sa) this.flushStep(sa);
+    }, wait);
+    sa.stepTimer.unref?.();
+  }
+
+  private flushStep(sa: LiveSubagent): void {
+    if (!sa.stepDirty) return;
+    sa.stepDirty = false;
+    sa.lastStepAt = this.now();
+    const e: Json = { type: "subagent_step", toolCallId: sa.toolCallId, text: sa.text ?? "" };
+    if (sa.tool) e.tool = sa.tool;
+    if (sa.tokens !== undefined) e.tokens = sa.tokens;
+    if (sa.toolUses !== undefined) e.toolUses = sa.toolUses;
+    this.h.emit(e);
+  }
+
+  private endSubagent(sa: LiveSubagent, status: "completed" | "failed" | "stopped", opts: { report?: string; error?: string; durationMs?: number } = {}): void {
+    if (this.subagents.get(sa.toolCallId) !== sa) return;
+    this.subagents.delete(sa.toolCallId);
+    clearTimeout(sa.stepTimer);
+    sa.stepTimer = undefined;
+    const e: Json = { type: "subagent_end", toolCallId: sa.toolCallId, status, durationMs: opts.durationMs ?? Math.max(0, this.now() - sa.startedAt) };
+    const report = opts.report?.trim();
+    if (report) e.report = report.length > SUBAGENT_REPORT_MAX ? report.slice(0, SUBAGENT_REPORT_MAX) : report;
+    if (opts.error) e.error = opts.error;
+    if (sa.tokens !== undefined) e.tokens = sa.tokens;
+    if (sa.toolUses !== undefined) e.toolUses = sa.toolUses;
+    this.h.emit(e);
+  }
+
+  /**
+   * The Agent call's own result. A foreground agent ends here and the result is its report; a
+   * background agent's call returns at once ("Async agent launched…") and it ends with its
+   * task notification instead.
+   */
+  private onSubagentToolResult(toolCallId: string, text: string, isError: boolean): void {
+    const sa = this.subagents.get(toolCallId);
+    if (!sa) return;
+    if (!isError && (sa.background || /^Async agent launched/i.test(text.trimStart()))) {
+      sa.background = true;
+      return;
+    }
+    if (isError) this.endSubagent(sa, "failed", { error: firstLine(text) || "The agent failed.", report: sa.lastText?.text });
+    else this.endSubagent(sa, "completed", { report: text || sa.lastText?.text });
+  }
+
+  /** task_started / task_progress / task_updated / task_notification for local agents. */
+  private onTaskRecord(rec: Json): boolean {
+    const byTool = this.subagents.get(String(rec.tool_use_id ?? ""));
+    const taskId = String(rec.task_id ?? "");
+    const sa = byTool ?? [...this.subagents.values()].find((s) => taskId !== "" && s.taskId === taskId);
+    if (!sa) return true; // shells, nested agents, or agents of an earlier worker
+    switch (rec.subtype) {
+      case "task_started":
+        if (rec.task_type !== undefined && rec.task_type !== "local_agent") return true;
+        if (taskId) sa.taskId = taskId;
+        if (rec.is_backgrounded === true) sa.background = true;
+        return true;
+      case "task_updated":
+        if (obj(rec.patch).is_backgrounded === true) sa.background = true;
+        return true;
+      case "task_progress": {
+        const u = obj(rec.usage);
+        sa.tokens = num(u.total_tokens) ?? sa.tokens;
+        sa.toolUses = num(u.tool_uses) ?? sa.toolUses;
+        if (sa.text === undefined && typeof rec.description === "string") sa.text = firstLine(rec.description);
+        this.queueStep(sa);
+        return true;
+      }
+      case "task_notification": {
+        const u = obj(rec.usage);
+        sa.tokens = num(u.total_tokens) ?? sa.tokens;
+        sa.toolUses = num(u.tool_uses) ?? sa.toolUses;
+        const summary = typeof rec.summary === "string" ? rec.summary : "";
+        const durationMs = num(u.duration_ms);
+        if (rec.status === "completed") this.endSubagent(sa, "completed", { report: sa.lastText?.text || summary, durationMs });
+        else if (rec.status === "failed") this.endSubagent(sa, "failed", { report: sa.lastText?.text, error: summary || "The agent failed.", durationMs });
+        else this.endSubagent(sa, "stopped", { report: sa.lastText?.text, durationMs });
+        return true;
+      }
+      default:
+        return true;
+    }
+  }
+
+  /** The turn ended: agents that were blocking it cannot outlive it; background agents run on. */
+  private endForegroundSubagents(status: "failed" | "stopped", reason: string): void {
+    for (const sa of [...this.subagents.values()]) {
+      if (!sa.background) this.endSubagent(sa, status, { error: reason, report: sa.lastText?.text });
     }
   }
 
@@ -281,6 +506,11 @@ export class StreamTranslator {
       case "compact_boundary":
         this.h.emit({ type: "compaction_end", trigger: obj(rec.compact_metadata).trigger ?? null });
         return true;
+      case "task_started":
+      case "task_progress":
+      case "task_updated":
+      case "task_notification":
+        return this.onTaskRecord(rec);
       default:
         return false;
     }
@@ -299,6 +529,7 @@ export class StreamTranslator {
     this.closeLive(stopping ? "interrupted" : isError ? "error" : "complete");
     if (stopping) this.resolveRetry("cancelled");
     else this.resolveRetry(isError ? "failed" : "recovered");
+    this.endForegroundSubagents(stopping ? "stopped" : "failed", stopping ? "Stopped by the user." : "The turn ended before this agent finished.");
     this.closeOpenTools(stopping ? "Stopped by the user." : "The turn ended before this tool finished.");
     const u = obj(rec.usage);
     this.h.emit({
@@ -327,6 +558,8 @@ export class StreamTranslator {
   abandon(reason: string): void {
     this.closeLive("interrupted", reason);
     this.resolveRetry("cancelled");
+    // Without the CLI no agent runs on, background ones included.
+    for (const sa of [...this.subagents.values()]) this.endSubagent(sa, "failed", { error: reason, report: sa.lastText?.text });
     this.closeOpenTools(reason);
   }
 }

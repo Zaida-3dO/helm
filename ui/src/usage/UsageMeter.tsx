@@ -52,7 +52,14 @@ export function UsageMeter() {
       onClick={open}
     >
       {list.map((b) => (
-        <span className="usage-item" key={b.id} data-testid={`usage-bar-${b.id}`} data-stale={b.stale ? 'true' : undefined} data-pct={b.pct ?? ''}>
+        <span
+          className="usage-item"
+          key={b.id}
+          data-testid={`usage-bar-${b.id}`}
+          data-stale={b.stale ? 'true' : undefined}
+          data-unknown={b.pct === null ? 'true' : undefined}
+          data-pct={b.pct ?? ''}
+        >
           <span className="usage-label">{b.short}</span>
           <span className="usage-track" aria-hidden="true">
             <span className="usage-fill" data-level={level(b.pct)} style={{ width: `${Math.max(0, Math.min(100, b.pct ?? 0))}%` }} />

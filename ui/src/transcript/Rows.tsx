@@ -6,7 +6,8 @@ import { memo, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
 import { EditMessage, type EditState } from './EditMessage.tsx';
 import { Markdown, type LinkTarget } from './Markdown.tsx';
-import { messageActionsFor, rowFootersFor, type SlotContext } from './slots.ts';
+import { ReplyActions, UserActions } from './MessageActions.tsx';
+import { rowFootersFor, type SlotContext } from './slots.ts';
 import { Glyph } from './icons.tsx';
 import { ToolCard } from './ToolCard.tsx';
 import { usePacedText, useThinkingPreview } from './usePaced.ts';
@@ -34,23 +35,13 @@ function slotContext(row: MessageRow, ctx: RowContext): SlotContext {
   return { chatId: ctx.chatId, isLatestAssistant: row.id === ctx.latestAssistantId, running: ctx.running, interactionOpen: ctx.interactionOpen };
 }
 
-/** Registered message actions (hover buttons) and footers for one row. */
-function Slots({ row, ctx }: { row: MessageRow; ctx: RowContext }) {
+/** Registered footers for one row (the reply's change card, option buttons). */
+function Footers({ row, ctx }: { row: MessageRow; ctx: RowContext }) {
   const sctx = slotContext(row, ctx);
-  const actions = messageActionsFor(row);
   const footers = rowFootersFor(row, sctx);
-  if (!actions.length && !footers.length) return null;
+  if (!footers.length) return null;
   return (
     <>
-      {actions.length > 0 && (
-        <div className="row-actions" data-testid="message-actions">
-          {actions.map((a) => (
-            <button key={a.id} type="button" className="row-action" data-action={a.id} onClick={() => a.run(row, sctx)}>
-              {a.label}
-            </button>
-          ))}
-        </div>
-      )}
       {footers.map((f) => (
         <div key={f.id} className="row-footer" data-footer={f.id}>
           {f.render(row, sctx)}
@@ -110,10 +101,10 @@ function AssistantBody({ row, ctx }: { row: MessageRow; ctx: RowContext }) {
   );
 }
 
-export const Row = memo(function Row({ row, ctx, final, afterTool, indent }: { row: MessageRow; ctx: RowContext } & RowFlags) {
+export const Row = memo(function Row({ row, ctx, final, afterTool, indent, afterFold, turnMs }: { row: MessageRow; ctx: RowContext; turnMs?: number } & RowFlags) {
   const retry = row.details?.retry;
   const common = { 'data-testid': 'transcript-row', 'data-status': row.status, 'data-role': row.role, 'data-row-id': row.id };
-  const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}`;
+  const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}${afterFold ? ' after-fold' : ''}`;
   if (row.role === 'user') {
     return (
       <div className={`row row-user status-${row.status}`} {...common} title={new Date(row.timestamp).toLocaleString()}>
@@ -125,12 +116,14 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent }: { r
           </div>
         )}
         {row.status !== 'complete' && <div className="row-meta muted">{row.status}</div>}
-        {row.status === 'complete' && !ctx.running && ctx.onEdit && ctx.editing?.rowId !== row.id && (
-          <button type="button" className="row-edit" data-testid="edit-message-button" title="Edit and resend" onClick={() => ctx.onEdit?.(row)}>
-            Edit
-          </button>
+        {ctx.editing?.rowId !== row.id && (
+          <UserActions
+            row={row}
+            sctx={slotContext(row, ctx)}
+            onEdit={row.status === 'complete' && !ctx.running && ctx.onEdit ? () => ctx.onEdit?.(row) : undefined}
+          />
         )}
-        <Slots row={row} ctx={ctx} />
+        <Footers row={row} ctx={ctx} />
       </div>
     );
   }
@@ -150,7 +143,6 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent }: { r
       </div>
     );
   }
-  const usage = row.details?.usage;
   return (
     <div className={`row row-assistant status-${row.status}${place}`} {...common} data-final={final ? 'true' : undefined}>
       <AssistantBody row={row} ctx={ctx} />
@@ -165,12 +157,14 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent }: { r
           {RETRY_TEXT[retry.state]} {retry.attempt > 1 ? `(attempt ${retry.attempt})` : ''}
         </div>
       )}
-      {usage && row.status === 'complete' && ctx.elements?.tokens !== 'hidden' && (
-        <div className="row-meta muted">
-          {usage.inputTokens + usage.cacheReadTokens} in · {usage.outputTokens} out
-        </div>
-      )}
-      <Slots row={row} ctx={ctx} />
+      <ReplyActions
+        row={row}
+        sctx={slotContext(row, ctx)}
+        turnMs={turnMs}
+        showTurnTime={ctx.elements?.turnTime !== 'hidden'}
+        showTokens={ctx.elements?.tokens !== 'hidden'}
+      />
+      <Footers row={row} ctx={ctx} />
     </div>
   );
 });

@@ -117,6 +117,33 @@ function hydrateDiagrams(root: HTMLElement, isCancelled: () => boolean): void {
   });
 }
 
+/**
+ * A Copy button in each code block's label bar. The HTML is a string, so the buttons are
+ * added to the live DOM after each render; one click handler on the root serves them all.
+ */
+function hydrateCopyButtons(root: HTMLElement): void {
+  root.querySelectorAll<HTMLElement>('pre.md-code').forEach((pre) => {
+    if (pre.closest('.md-mermaid') || pre.querySelector(':scope > .md-code-copy')) return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'md-code-copy';
+    button.dataset.mdCopy = '';
+    button.title = 'Copy code';
+    button.textContent = 'Copy';
+    pre.appendChild(button);
+  });
+}
+
+function copyCode(button: HTMLElement): void {
+  const code = button.parentElement?.querySelector('code')?.textContent ?? '';
+  void navigator.clipboard?.writeText(code).then(() => {
+    button.textContent = 'Copied';
+    window.setTimeout(() => {
+      button.textContent = 'Copy';
+    }, 1500);
+  });
+}
+
 export function Markdown({
   text,
   streaming = false,
@@ -135,6 +162,7 @@ export function Markdown({
     const isCancelled = () => cancelled;
     if (resolveEmbed) hydrateEmbeds(root, resolveEmbed, isCancelled);
     if (interactive) hydrateDiagrams(root, isCancelled);
+    if (interactive) hydrateCopyButtons(root);
     return () => {
       cancelled = true;
     };
@@ -153,6 +181,11 @@ export function Markdown({
       ref={ref}
       className={className ? `md-root ${className}` : 'md-root'}
       onClick={(event) => {
+        const copy = (event.target as Element).closest<HTMLElement>('[data-md-copy]');
+        if (copy && event.currentTarget.contains(copy)) {
+          copyCode(copy);
+          return;
+        }
         const target = linkFor(event);
         if (target) onLink?.(target);
       }}

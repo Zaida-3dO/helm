@@ -9,6 +9,8 @@ import { ContextMenu, toast, type MenuItem } from '../ui/index.ts';
 import { SidebarActions } from './actions.ts';
 import { SidebarData } from './data.ts';
 import { chatMenuItems } from './menus.ts';
+import { withChatIcons } from './menuIcons.tsx';
+import { IconMore } from '../ui/icons.tsx';
 import { PromptDialog, type Prompt } from './Sidebar.tsx';
 import { sidebarUndo } from './undo.ts';
 
@@ -33,7 +35,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
       const row: SidebarRow | undefined = rows[0];
       if (!row) return;
       const siblings = (await pops.page(row.archived ? 'archived' : 'projects', undefined, row.groupProjectId)).rows;
-      const items = chatMenuItems(
+      const items = withChatIcons(chatMenuItems(
         {
           row,
           projects: projects as ProjectNode[],
@@ -57,7 +59,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
           restore: () => void act.restore(row),
           remove: () => void act.remove(row),
         },
-      ).filter((i) => i.id !== 'children');
+      ).filter((i) => i.id !== 'children'));
       setMenu({ x, y, items });
     } catch (e) {
       showError(String((e as Error)?.message ?? e));
@@ -78,7 +80,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
           void open(r.right, r.bottom);
         }}
       >
-        …
+        <IconMore size={16} />
       </button>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} label="Chat options" onClose={() => setMenu(null)} testId="chat-menu-list" />}
       {prompt && <PromptDialog prompt={prompt} onClose={() => setPrompt(null)} />}

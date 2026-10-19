@@ -56,3 +56,19 @@ test('archived chats leave the list and a deleted chat is forgotten', () => {
   assert.deepEqual(s.chatList(), []);
   assert.equal(s.view('b').chat, null);
 });
+
+test('a new user row and the first reply text feed the send timeline', async () => {
+  const { perf } = await import('../perf/perf.ts');
+  const store = new ChatStore();
+  const before = perf.sends.length;
+  store.rows('t1', [row({ id: 900, role: 'user', chatId: 't1' })]);
+  // A later revision of the same user row is not a new send.
+  store.rows('t1', [row({ id: 900, role: 'user', chatId: 't1', revision: 9 })]);
+  store.rows('t1', [row({ id: 901, role: 'assistant', chatId: 't1', text: '' })]);
+  const tl = perf.sends.at(-1)!;
+  assert.equal(perf.sends.length, before + 1);
+  assert.equal(tl.chatId, 't1');
+  assert.equal(tl.tokenArrived, null, 'an empty assistant row is not the first token');
+  store.rows('t1', [row({ id: 901, role: 'assistant', chatId: 't1', text: 'Hi', revision: 2 })]);
+  assert.notEqual(tl.tokenArrived, null);
+});

@@ -32,6 +32,8 @@ import { Notifications } from './notifications/Notifications.tsx';
 import { SettingsToast } from './hosttools/SettingsToast.tsx';
 import { followSendShortcut } from './hosttools/sendShortcut.ts';
 import './hosttools/index.ts'; // the Allow cards
+import { NewChatHost } from './newchat/index.ts';
+import { FrameStats } from './perf/index.ts'; // the frame-stats overlay (Mod+Shift+P)
 
 export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers: Flushers }) {
   const ops = useMemo(() => chatOps(api), [api]);
@@ -121,6 +123,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
           ) : (
             <div className="empty-main">Pick a chat, or enter a folder and press New chat.</div>
           )}
+          <NewChatHost flushers={flushers} sendShortcut={sendShortcut} /> {/* the new-chat page */}
         </div>
         <TerminalDock />
       </main>
@@ -132,7 +135,8 @@ function Frame({ flushers }: { flushers: Flushers }) {
       <SearchDialog /> {/* Mod+K search */}
       <LeafSlots /> {/* registers the action slots */}
       <AfkPresence /> {/* AFK presence */}
-      {null /* <SavedDialog /> */}
+      <FrameStats /> {/* frame-stats overlay */}
+      {null /* the saved-items dialog mounts here */}
     </div>
   );
 }

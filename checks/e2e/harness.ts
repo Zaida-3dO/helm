@@ -183,9 +183,12 @@ export const tid = (id: string, extra = "") => `[data-testid="${id}"]${extra}`;
 export async function newChat(page: Page, folder: string): Promise<string> {
   // Wait for the chat that opens, not for the row count to grow: the sidebar is virtualised, so
   // past a screenful the count stops growing (it scrolls the open chat into view instead).
+  // The sidebar has no path box: the new-chat page creates a chat only on its first send, so checks
+  // that need an empty chat make it through the host, then open its row.
   const before = await page.getAttribute(tid("chat-view"), "data-chat-id", { timeout: 1_000 }).catch(() => null);
-  await page.fill(tid("folder-input"), folder);
-  await page.click(tid("new-chat"));
+  const made = (await api(page, "chat_create", { cwd: folder })) as { id: string };
+  await page.waitForSelector(tid("chat-item", `[data-chat-id="${made.id}"]`), { timeout: 15_000 });
+  await page.click(tid("chat-item", `[data-chat-id="${made.id}"]`));
   const h = await page.waitForFunction(
     (prev) => {
       const id = document.querySelector('[data-testid="chat-view"]')?.getAttribute("data-chat-id");

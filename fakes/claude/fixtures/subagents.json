@@ -1,0 +1,36 @@
+{
+  "description": "Two native subagents from one turn, shaped like claude 2.1.289: 'alpha' runs in the background (its Agent call returns at once and it ends with a task notification); 'review' runs in the foreground (its Agent call's result is its report).",
+  "steps": [
+    { "await": { "type": "user" }, "as": "p" },
+    { "init": { "tools": ["Agent", "Bash", "Read"] } },
+    {
+      "tool": {
+        "id": "sa_1",
+        "name": "Agent",
+        "input": { "description": "Echo alpha", "prompt": "Run `echo alpha`.\n\nReport the output in one line.\nNothing else.\nIgnored fourth line.", "subagent_type": "general-purpose" }
+      }
+    },
+    { "taskStarted": { "taskId": "ag_1", "toolUseId": "sa_1", "type": "local_agent", "background": true, "description": "Echo alpha", "subagentType": "general-purpose", "prompt": "Run `echo alpha`." } },
+    { "toolResult": { "id": "sa_1", "text": "Async agent launched successfully.\nagentId: ag_1 (internal ID)" } },
+    {
+      "tool": {
+        "id": "sa_2",
+        "name": "Agent",
+        "input": { "description": "Review the diff", "prompt": "Review the diff on this branch. List defects only.", "subagent_type": "reviewer" }
+      }
+    },
+    { "taskStarted": { "taskId": "ag_2", "toolUseId": "sa_2", "type": "local_agent", "background": false, "description": "Review the diff", "subagentType": "reviewer" } },
+    { "tool": { "id": "sub_1", "name": "Bash", "input": { "command": "echo alpha", "description": "Print alpha" }, "parent": "sa_1" } },
+    { "taskProgress": { "taskId": "ag_1", "toolUseId": "sa_1", "description": "Running Print alpha", "lastTool": "Bash", "tokens": 1200, "toolUses": 1, "durationMs": 300 } },
+    { "toolResult": { "id": "sub_1", "text": "alpha", "parent": "sa_1" } },
+    { "tool": { "id": "sub_2", "name": "Read", "input": { "file_path": "src/App.tsx" }, "parent": "sa_2" } },
+    { "toolResult": { "id": "sub_2", "text": "export function App() {}", "parent": "sa_2" } },
+    { "sleep": 700 },
+    { "text": "The output is alpha.", "parent": "sa_1" },
+    { "taskNotification": { "taskId": "ag_1", "toolUseId": "sa_1", "status": "completed", "summary": "The output is alpha.", "tokens": 1500, "toolUses": 1, "durationMs": 900 } },
+    { "text": "No defects found.", "parent": "sa_2" },
+    { "toolResult": { "id": "sa_2", "text": "No defects found." } },
+    { "text": "Both agents reported back." },
+    { "result": "done" }
+  ]
+}

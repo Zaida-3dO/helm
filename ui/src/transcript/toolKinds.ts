@@ -2,6 +2,7 @@
 // Tool names differ per harness; these are the Claude Code tool names, and anything unknown falls back to the generic card.
 
 import type { MessageRow } from '../api/types.ts';
+import { parseTodos, todoSummary } from './todos.ts';
 
 export type ToolKind = 'shell' | 'read' | 'edit' | 'web' | 'mcp' | 'generic';
 
@@ -57,6 +58,8 @@ export function toolArgs(row: MessageRow): Record<string, unknown> {
 
 /** The one-line target: command, path, URL or query. */
 export function toolTarget(row: MessageRow): string | null {
+  const todos = parseTodos(row);
+  if (todos) return todoSummary(todos);
   const a = toolArgs(row);
   return (
     str(a.command) ??

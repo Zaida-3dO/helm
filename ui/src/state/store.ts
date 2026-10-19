@@ -5,6 +5,7 @@
 
 import type { EventBus } from '../api/events.ts';
 import type { ChatRecord, MessageRow, Submission, ThreadState, TranscriptPage } from '../api/types.ts';
+import { perf } from '../perf/perf.ts';
 import {
   applyChat,
   applyPage,
@@ -25,6 +26,14 @@ function viewBytes(v: ThreadView): number {
   let n = 0;
   for (const r of v.rows) n += (r.text.length + r.thinking.length) * 2;
   return n;
+}
+
+/** Feeds the send timeline (perf/marks.ts): a new user row, then the turn's first text. */
+function timeRows(chatId: string, rows: MessageRow[], before: ThreadView | undefined): void {
+  for (const r of rows) {
+    if (r.role === 'user' && r.details?.mode !== 'steer' && !before?.rows.some((h) => h.id === r.id)) perf.userRow(chatId);
+    else if (r.role === 'assistant' && r.text) perf.tokenArrived(chatId);
+  }
 }
 
 export class ChatStore {
@@ -128,7 +137,9 @@ export class ChatStore {
   }
 
   rows(chatId: string, rows: MessageRow[]): void {
+    const before = this.views.get(chatId);
     this.update(chatId, (v) => applyRows(v, rows, this.keep.get(chatId) ?? 'newest'));
+    timeRows(chatId, rows, before);
   }
 
   queue(chatId: string, pending: Submission[], revision: number): void {

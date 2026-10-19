@@ -9,8 +9,9 @@
 // - registerSelectionAction: a button in the selected-text toolbar (Side
 //   chat and Quote; Save and Remind me).
 
-import type { ReactNode } from 'react';
+import type { ComponentType, ReactNode } from 'react';
 import type { MessageRow } from '../api/types.ts';
+import type { IconProps } from '../ui/iconBase.ts';
 
 /** What a slot sees of the transcript around a row. */
 export interface SlotContext {
@@ -25,7 +26,12 @@ export interface SlotContext {
 
 export interface MessageAction {
   id: string;
+  /** The button's tooltip and accessible name; also its text when there is no icon. */
   label: string;
+  /** A kit icon (ui/icons.tsx) drawn at 13 px in a 24 × 23 button. Without one the label shows. */
+  icon?: ComponentType<IconProps>;
+  /** Place in the row after Copy, lowest first; default 100. Fork 10, Save 20, Remind 30. */
+  order?: number;
   appliesTo: (row: MessageRow) => boolean;
   run: (row: MessageRow, ctx: SlotContext) => void;
 }

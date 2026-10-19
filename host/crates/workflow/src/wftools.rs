@@ -94,6 +94,16 @@ pub fn workflow_call(
         ));
     }
     let action = args.get("action").and_then(Value::as_str).unwrap_or("");
+    // Read nothing for a chat the workflow is off in (the plan file read below included).
+    let on = db
+        .snapshot(|tx| {
+            let s = settings::load(tx)?;
+            mode::in_effect(tx, chat, &s)
+        })
+        .map_err(|e| ToolError::maybe(e.to_string()))?;
+    if !on {
+        return Err(ToolError::refused(OFF));
+    }
     let plan_text = if action == "plan" {
         match (
             args.get("text").and_then(Value::as_str),

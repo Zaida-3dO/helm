@@ -25,6 +25,7 @@
 //! | [`manage`] | archive, restore, delete, unread marks and completion acks |
 //! | [`seams`] | traits other crates implement (panel context, project gate) |
 //! | [`search_source`] | the searchable message text the search crate indexes |
+//! | `timeline` | v0.2: one log line per turn-opening send, from saved to first output |
 
 mod actor;
 pub mod archive;
@@ -38,6 +39,8 @@ pub mod delete;
 pub mod edit;
 pub mod fork;
 pub mod hostcalls;
+#[cfg(test)]
+mod latency_tests;
 pub mod manage;
 pub mod ops;
 pub mod runslots;
@@ -51,6 +54,7 @@ pub mod send_behavior;
 pub mod session_log;
 pub mod store;
 pub mod submit;
+mod timeline;
 pub mod titles;
 pub mod tools;
 pub mod types;

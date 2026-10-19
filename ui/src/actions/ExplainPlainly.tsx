@@ -5,8 +5,12 @@ import { useState } from 'react';
 import type { Api } from '../api/client.ts';
 import type { MessageRow } from '../api/types.ts';
 import { Button } from '../ui/index.ts';
+import { IconExplain } from '../ui/icons.tsx';
 import { EXPLAIN_PLAINLY_TEXT, sendActionText } from './send.ts';
 import './actions.css';
+
+/** The action's icon. A message-action registration with an icon field passes this. */
+export const ExplainPlainlyIcon = IconExplain;
 
 /** Which rows get the action: a finished assistant reply with text. */
 export function explainAppliesTo(row: Pick<MessageRow, 'role' | 'status' | 'text'>): boolean {
@@ -27,6 +31,7 @@ export function ExplainPlainly({ api, chatId }: { api: Api; chatId: string }) {
           sendActionText(api, chatId, EXPLAIN_PLAINLY_TEXT).catch((e: unknown) => setError(String((e as Error).message ?? e)));
         }}
       >
+        <IconExplain />
         Explain plainly
       </Button>
       {error && (

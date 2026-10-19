@@ -95,6 +95,17 @@
   --elev-2: 0 4px 16px #00000020;
   --elev-3: 0 6px 20px #0003;
   --backdrop: #14181038;
+
+  /* Dark-chrome accents: light mode leaves them plain. Read through these names, never
+     a theme check, so a later theme can restyle them. Helpers using them: ui/status/status.css. */
+  --chrome-composer-shadow: 0 2px 8px #242c1510;
+  --chrome-composer-focus-border: color-mix(in srgb, var(--accent) 47%, var(--line-strong));
+  --chrome-send-fill: var(--text);
+  --chrome-send-shadow: none;
+  --chrome-icon-active-shadow: none;
+  --chrome-code-shadow: none;
+  --chrome-tile-shadow: var(--elev-1);
+  --wordmark-fill: none;
 }
 
 :root[data-theme='dark'] {
@@ -163,6 +174,15 @@
   --fx-core: #ffffff;
 
   --elev-1: inset 0 1px #ffffff06, 0 4px 16px #0003;
+
+  --chrome-composer-shadow: inset 0 1px #ffffff06, 0 4px 16px #0003;
+  --chrome-composer-focus-border: color-mix(in srgb, var(--chrome-accent) 66%, var(--line-strong));
+  --chrome-send-fill: linear-gradient(145deg, var(--text), color-mix(in srgb, var(--text) 85%, var(--surface)));
+  --chrome-send-shadow: inset 0 1px #fff9, 0 1px 5px #0003;
+  --chrome-icon-active-shadow: inset 0 1px #ffffff0b;
+  --chrome-code-shadow: inset 0 1px #ffffff06;
+  --chrome-tile-shadow: inset 0 1px #ffffff0d, 0 3px 9px #0003;
+  --wordmark-fill: linear-gradient(to bottom, #eff0f3 0.29em, #c8ccd3 1em);
 }
 
 /* Increased contrast (prefers-contrast: more): body and metadata text reach 7:1 on every surface,

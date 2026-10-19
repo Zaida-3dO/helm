@@ -1,0 +1,241 @@
+/* The app's own drawn marks and the dark-chrome helpers. Still shapes only: no
+   animation lives here. Tokens come from styles.css. */
+
+/* The wordmark face: Source Sans 3 SemiBold, SIL Open Font License (fonts/OFL.txt). Only
+   the latin subset is bundled; the wordmark is one word. */
+@font-face {
+  font-family: 'Helm Wordmark';
+  src: url('./fonts/source-sans-3-latin-600.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+}
+
+.ui-wordmark {
+  font-family: 'Helm Wordmark', var(--font-ui);
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  color: var(--text);
+  white-space: nowrap;
+}
+:root[data-theme='dark'] .ui-wordmark {
+  background: var(--wordmark-fill);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ---- Dark-chrome helpers. Each is a no-op in light mode. ---- */
+
+/* The 1 px highlight along a box's top edge (the composer). Rises while the box holds focus. */
+.ui-chrome-topline {
+  position: relative;
+}
+:root[data-theme='dark'] .ui-chrome-topline::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: 24px;
+  width: min(170px, 50%);
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--accent) 58%, transparent) 30%,
+    color-mix(in srgb, var(--accent) 16%, transparent) 72%,
+    transparent
+  );
+  opacity: 0.35;
+}
+:root[data-theme='dark'] .ui-chrome-topline:focus-within::before {
+  opacity: 0.8;
+}
+/* The 1 px line under a header (the top bar draws its own; this is for any other header). */
+.ui-chrome-underline {
+  position: relative;
+}
+:root[data-theme='dark'] .ui-chrome-underline::after {
+  content: '';
+  position: absolute;
+  left: 22px;
+  bottom: -1px;
+  width: min(210px, 45%);
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--accent) 17%, transparent) 24%,
+    color-mix(in srgb, var(--accent) 4%, transparent) 70%,
+    transparent
+  );
+}
+/* A raised tile (the welcome mark tile). */
+.ui-chrome-tile {
+  box-shadow: var(--chrome-tile-shadow);
+}
+
+/* ---- The working face, still. ---- */
+
+.ui-face {
+  --face-glow: #14a8de;
+  --face-glow-opacity: 0.5;
+  --face-vol-hi: 0.26;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  color: color-mix(in srgb, var(--text) 90%, transparent);
+}
+:root[data-theme='dark'] .ui-face {
+  --face-glow: #3fd3ff;
+  --face-glow-opacity: 0.22;
+  --face-vol-hi: 0.1;
+}
+.ui-face-large {
+  width: 72px;
+  height: 48px;
+}
+.ui-face-large .ui-face-svg {
+  width: 72px;
+  height: 34px;
+}
+.ui-face-compact {
+  width: 26px;
+  height: 26px;
+}
+.ui-face-compact .ui-face-svg {
+  width: 23.4px;
+  height: 18px;
+}
+.ui-face-svg {
+  overflow: visible;
+}
+.ui-face-head {
+  fill: currentColor;
+}
+.ui-face-glow {
+  fill: var(--face-glow);
+  stroke: var(--face-glow);
+  opacity: var(--face-glow-opacity);
+}
+.ui-face-facet-dark {
+  display: none;
+  fill: #000;
+  opacity: 0.3;
+}
+.ui-face-facet-light {
+  fill: #fff;
+  opacity: 0.24;
+}
+:root[data-theme='dark'] .ui-face-facet-dark {
+  display: inline;
+}
+:root[data-theme='dark'] .ui-face-facet-light {
+  display: none;
+}
+.ui-face-vol-hi {
+  stop-color: #fff;
+  stop-opacity: var(--face-vol-hi);
+}
+.ui-face-ball {
+  fill: var(--fx-deep);
+}
+:root[data-theme='dark'] .ui-face-ball {
+  fill: var(--fx-light);
+}
+.ui-face-stopping {
+  opacity: 0.55;
+}
+.ui-face-calm {
+  opacity: 0.6;
+}
+
+/* ---- The completion star, the still variant. ---- */
+
+.ui-star {
+  /* Light mode. The face is tinted with ice so it holds on a light page; a near-white face
+     assumes the moving aura behind it, which the still variant dims. */
+  --star-ice: color-mix(in srgb, #207cae 82%, var(--accent));
+  --star-violet: color-mix(in srgb, #7c53bf 82%, var(--accent));
+  --star-face: color-mix(in srgb, var(--star-ice) 38%, #f4fcff);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+:root[data-theme='dark'] .ui-star {
+  --star-ice: color-mix(in srgb, #81ddff 78%, var(--fx-accent));
+  --star-violet: color-mix(in srgb, #baa0ff 80%, var(--accent));
+  --star-face: #f4fcff;
+}
+.ui-star-ice {
+  stop-color: var(--star-ice);
+}
+.ui-star-violet {
+  stop-color: var(--star-violet);
+}
+.ui-star-aura {
+  opacity: 0.3;
+  transform: scale(0.8);
+  transform-box: view-box;
+  transform-origin: 13px 13px;
+}
+.ui-star-rays {
+  fill: none;
+  stroke: var(--star-violet);
+  stroke-width: 0.6;
+  stroke-linecap: round;
+  opacity: 0.8;
+}
+.ui-star-face {
+  fill: var(--star-face);
+  stroke: var(--star-ice);
+  stroke-width: 0.45;
+  stroke-linejoin: round;
+}
+.ui-star-facets {
+  fill: none;
+  stroke: var(--star-ice);
+  stroke-width: 0.35;
+  opacity: 0.9;
+}
+.ui-star-core {
+  fill: #fff;
+}
+
+/* ---- The wheel mark. ---- */
+
+.ui-wheel {
+  display: inline-flex;
+  flex: none;
+}
+
+/* Forced colours: one system colour, no glow, facets or shading. The theme prefix
+   outranks the dark-mode rules above. */
+@media (forced-colors: active) {
+  :root .ui-face,
+  :root[data-theme] .ui-face {
+    color: ButtonText;
+  }
+  :root .ui-face-glow,
+  :root[data-theme] .ui-face-glow,
+  :root .ui-face-facet-dark,
+  :root[data-theme] .ui-face-facet-dark,
+  :root .ui-face-facet-light,
+  :root[data-theme] .ui-face-facet-light,
+  :root .ui-face-vol,
+  :root[data-theme] .ui-face-vol {
+    display: none;
+  }
+  :root .ui-face-ball,
+  :root[data-theme] .ui-face-ball {
+    fill: ButtonText;
+  }
+  :root .ui-wordmark,
+  :root[data-theme] .ui-wordmark {
+    background: none;
+    color: CanvasText;
+  }
+}

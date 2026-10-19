@@ -1,0 +1,127 @@
+/* The new-chat page. Tokens from styles.css. */
+
+/* While the page is open it replaces whatever else the chat area shows (the empty state). */
+.shell-chat:has(> .nc-page) > :not(.nc-page) {
+  display: none;
+}
+
+.nc-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.nc-center {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0 25px 40px;
+}
+
+/* Reserved space above the title; empty in the default theme. */
+.nc-perch {
+  width: 260px;
+  height: 64px;
+  flex: none;
+}
+
+.nc-title {
+  margin: 0 0 18px;
+  font-size: 27px;
+  font-weight: 480;
+  letter-spacing: -0.8px;
+  color: var(--text);
+  text-align: center;
+}
+
+.nc-card {
+  width: min(440px, 100%);
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-alt);
+}
+
+.nc-project .ui-picker-trigger {
+  width: 100%;
+  max-width: none;
+  justify-content: space-between;
+  text-align: left;
+  border-color: transparent;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 500;
+}
+.nc-project .ui-picker-trigger:hover {
+  background: var(--hover);
+}
+
+.nc-place {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 5px 8px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.nc-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 1px 3px;
+  margin-left: -3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: var(--cursor-pointer, pointer);
+}
+.nc-folder:hover,
+.nc-folder[aria-expanded='true'] {
+  background: var(--hover);
+  color: var(--text);
+}
+.nc-folder-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nc-chevron {
+  flex: none;
+  font-size: 11px;
+}
+
+.nc-hint {
+  flex: none;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.nc-menu-folder {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.nc-menu-path {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--secondary);
+}
+
+.nc-dock {
+  flex: none;
+}

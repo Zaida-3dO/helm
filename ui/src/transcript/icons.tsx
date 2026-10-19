@@ -23,7 +23,10 @@ export type GlyphName =
   | 'list'
   | 'grip'
   | 'wrench'
-  | 'arrow-down';
+  | 'arrow-down'
+  | 'circle'
+  | 'circle-dot'
+  | 'circle-check';
 
 const PATHS: Record<GlyphName, ReactNode> = {
   chevron: <path d="m9 18 6-6-6-6" />,
@@ -93,6 +96,19 @@ const PATHS: Record<GlyphName, ReactNode> = {
   grip: <path d="M9 5h.01M9 12h.01M9 19h.01M15 5h.01M15 12h.01M15 19h.01" strokeWidth="3" />,
   'arrow-down': <path d="M12 5v14M19 12l-7 7-7-7" />,
   wrench: <path d="M14.7 6.3a4 4 0 0 0 5 5L21 17l-4 4-5.7-1.3a4 4 0 0 0-5-5L3 7l4-4z" />,
+  circle: <circle cx="12" cy="12" r="10" />,
+  'circle-dot': (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <circle cx="12" cy="12" r="3" fill="currentColor" />
+    </>
+  ),
+  'circle-check': (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <path d="m9 12 2 2 4-4" />
+    </>
+  ),
 };
 
 export function Glyph({ name, size = 14, className }: { name: GlyphName; size?: number; className?: string }) {

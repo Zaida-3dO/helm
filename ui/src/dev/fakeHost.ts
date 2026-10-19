@@ -25,6 +25,7 @@ import { hosttoolsFakeOps } from './fake-hosttools.ts';
 import { usageFakeOps } from './fake-usage.ts';
 import { itemLinksFakeOps } from './fake-itemlinks.ts';
 import { orchestratorFakeOps } from './fake-orchestrator.ts';
+import { newChatFakeOps } from '../newchat/fake.ts';
 
 type Emit = (payload: unknown) => void;
 
@@ -58,6 +59,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const us = usageFakeOps(); registerFakeOps(us.prefixes, us.handler); }
 { const il = itemLinksFakeOps(); registerFakeOps(il.prefixes, il.handler); }
 { const oc = orchestratorFakeOps(); registerFakeOps(oc.prefixes, oc.handler); }
+{ const nc = newChatFakeOps(); registerFakeOps(nc.prefixes, nc.handler); }
 
 export function fakeOpFor(op: string): FakeOpHandler | undefined {
   return extraOps.find((r) => r.prefixes.some((p) => op.startsWith(p)))?.handler;

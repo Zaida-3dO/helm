@@ -20,7 +20,46 @@ test('a settled turn folds its work, keeping errors and the final reply', () => 
   const items = layout(turn(), false);
   assert.deepEqual(shape(items), [1, 'fold[2,3]', 4, 5]);
   const fold = items.find((i) => i.kind === 'fold');
-  assert.equal(fold?.kind === 'fold' && fold.elapsedMs, 65_000);
+  // Timed from the run's first output (1 s), not from the prompt (0 s).
+  assert.equal(fold?.kind === 'fold' && fold.elapsedMs, 64_000);
+});
+
+test('a turn with no tool call and no thinking does not fold, however long it took to start', () => {
+  const rows = [
+    row({ id: 1, role: 'user', text: 'Hello', timestamp: 0 }),
+    row({ id: 2, role: 'assistant', text: '', timestamp: 30_000 }),
+    row({ id: 3, role: 'assistant', text: 'Hi! What are we building?', timestamp: 31_000 }),
+  ];
+  assert.deepEqual(shape(layout(rows, false)), [1, 2, 3]);
+});
+
+test('thinking alone is work: the turn folds, timed from its first output', () => {
+  const rows = [
+    row({ id: 1, role: 'user', timestamp: 0 }),
+    row({ id: 2, role: 'assistant', thinking: 'weighing it up', timestamp: 30_000 }),
+    row({ id: 3, role: 'assistant', text: 'answer', timestamp: 42_000 }),
+  ];
+  const items = layout(rows, false);
+  assert.deepEqual(shape(items), [1, 'fold[2]', 3]);
+  const fold = items.find((i) => i.kind === 'fold');
+  assert.equal(fold?.kind === 'fold' && fold.elapsedMs, 12_000);
+});
+
+test('the row right after a closed fold is marked, so it draws no second rule', () => {
+  const items = layout(turn(), false);
+  const flag = (id: number) => {
+    const it = items.find((i) => i.kind === 'row' && i.row.id === id);
+    return it?.kind === 'row' && it.afterFold;
+  };
+  assert.equal(flag(4), true);
+  assert.equal(flag(5), false);
+  const plain = layout([row({ id: 1, role: 'user' }), row({ id: 2, role: 'toolResult' }), row({ id: 3, role: 'assistant', text: 'done' })], false);
+  const done = plain.find((i) => i.kind === 'row' && i.row.id === 3);
+  assert.equal(done?.kind === 'row' && done.final && done.afterFold, true);
+  // Opened, the work sits between the fold and the reply, so the reply keeps its hairline.
+  const open = layout(turn(), false, new Set(['k1']));
+  const reply = open.find((i) => i.kind === 'row' && i.row.id === 5);
+  assert.equal(reply?.kind === 'row' && reply.afterFold, false);
 });
 
 test('a live turn never folds', () => {

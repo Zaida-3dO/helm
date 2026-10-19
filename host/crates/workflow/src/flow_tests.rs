@@ -33,6 +33,10 @@ fn setup(f: impl FnOnce(&mut WorkflowSettings)) -> T {
     };
     f(&mut s);
     db.write::<_, rusqlite::Error>(|tx| {
+        // The chats crate's submission origins (the words verifier reads them).
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS submission_meta (submission_id TEXT PRIMARY KEY, origin TEXT NOT NULL DEFAULT 'user', priority TEXT, run_id TEXT);",
+        )?;
         tx.execute("INSERT INTO projects(id, name, path, created_at) VALUES ('p', 'P', 'C:/w', 1)", [])?;
         tx.execute(
             "INSERT INTO chats(id, project_id, title, created_at, updated_at) VALUES ('c', 'p', 'T', 1, 1)",
@@ -267,4 +271,83 @@ fn reports_refuse_unknown_fields_and_short_shas_as_correctable() {
     assert!(e.starts_with("Correctable") && e.contains("tree"), "{e}");
     let e = t.rep(json!({"kind": "code_review", "repo": REPO, "branch": "b", "tip": A, "base": "main", "verdict": "approve", "summary": "s"})).unwrap_err();
     assert!(e.contains("verdict must be"), "{e}");
+}
+
+impl T {
+    /// The user types `text` in the chat at time `at`.
+    fn user_says(&self, id: &str, text: &str, at: i64) {
+        self.db
+            .write::<_, rusqlite::Error>(|tx| {
+                tx.execute(
+                    "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES (?1, 'c', ?2, 'done', ?3)",
+                    params![id, text, at],
+                )?;
+                tx.execute("INSERT INTO submission_meta(submission_id, origin) VALUES (?1, 'typed')", [id])?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    fn wf_at(&self, args: Value, now: i64) -> Result<Value, String> {
+        workflow_call(&self.db, &self.kinds, "c", false, &args, now).map_err(|e| e.text())
+    }
+}
+
+#[test]
+fn the_users_own_words_let_a_consented_step_through_once() {
+    let t = setup(|_| {});
+    t.wf_at(json!({"action": "start", "title": "One"}), 100)
+        .unwrap();
+    let skip = json!({"action": "skip", "stage": "review", "reason": "docs only", "userQuote": "Skip the review stage."});
+    // Ask first: the step without a proof records the refusal.
+    t.wf_at(
+        json!({"action": "skip", "stage": "review", "reason": "docs only"}),
+        200,
+    )
+    .unwrap_err();
+    t.user_says("s1", "Skip the review stage.", 300);
+    let out = t.wf_at(skip.clone(), 400).unwrap();
+    assert_eq!(out["withConsent"], true);
+    assert_eq!(t.events("consent"), 1);
+    let records: i64 =
+        t.db.snapshot(|tx| tx.query_row("SELECT count(*) FROM consent_records", [], |r| r.get(0)))
+            .unwrap();
+    assert_eq!(
+        records, 1,
+        "the words were spent on the step's own transaction"
+    );
+}
+
+#[test]
+fn dropping_a_handed_off_change_needs_consent_bound_to_its_own_task() {
+    let t = setup(|s| s.stages.cleanup.use_ = StageUse::Off);
+    t.trees.set(A, "t1");
+    t.approved_plan();
+    t.build(A).unwrap();
+    t.review(A, "lgtm").unwrap();
+    t.wf(json!({"action": "hand_off", "changes": [{"repo": REPO, "branch": "feat-x"}]}))
+        .unwrap();
+    assert_eq!(t.state(), "landing_draft");
+    let e = t
+        .wf_at(
+            json!({"action": "drop", "repo": REPO, "branch": "feat-x", "reason": "obsolete"}),
+            200,
+        )
+        .unwrap_err();
+    assert!(e.contains("Drop change #7."), "{e}");
+    t.user_says("s1", "Drop change #7.", 300);
+    let out = t.wf_at(json!({"action": "drop", "repo": REPO, "branch": "feat-x", "reason": "obsolete", "userQuote": "Drop change #7."}), 400).unwrap();
+    assert_eq!(out["dropped"], true);
+    assert_eq!(t.state(), "dropped");
+    // The consent row is on the task that held the change.
+    let on_task: i64 = t
+        .db
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT count(*) FROM workflow_events e JOIN workflow_changes c ON c.run_id = e.run_id WHERE e.kind = 'consent' AND e.verdict = 'drop'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(on_task, 1);
 }

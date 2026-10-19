@@ -36,7 +36,12 @@
 //   { "text": s, "id"?: s }                 a streamed assistant text message
 //   { "tool": { "id", "name", "input", "parent"? } }          an assistant tool_use message
 //   { "toolResult": { "id", "text", "isError"?, "parent"? } }  the tool's result
-//   { "taskStarted": { "taskId", "toolUseId", "background"?, "type"? } }
+//   { "taskStarted": { "taskId", "toolUseId", "background"?, "type"?, "prompt"?, "subagentType"? } }
+//   { "taskProgress": { "taskId", "toolUseId", "description"?, "lastTool"?, "tokens"?, "toolUses"?, "durationMs"? } }
+//   { "taskNotification": { "taskId", "toolUseId", "status", "summary"?, "tokens"?, "toolUses"?, "durationMs"? } }
+//        a native subagent's task records, shaped like claude 2.1.289's (worker/PROTOCOL-NOTES.md, "Native subagents")
+//   { "text": s, "parent": toolUseId }      a subagent's text message: one assistant record with
+//                                           parent_tool_use_id and no partial stream, as the CLI sends
 //   { "backgroundTasks": [ { "taskId", "description", "type"? } ] }
 //   { "hook": { "toolUseId", "tool"?, "input" }, "as"?: name }
 //        a PreToolUse hook_callback for the first PreToolUse callback the client registered in
@@ -314,6 +319,10 @@ function shorthand(step: Step): boolean {
   if (typeof step.text === "string") {
     const id = typeof step.id === "string" ? step.id : `msg_fake_${++msgSeq}`;
     const text = fill(step.text) as string;
+    if (typeof step.parent === "string") {
+      out({ type: "assistant", message: { id, model: "claude-fake", content: [{ type: "text", text }] }, parent_tool_use_id: step.parent, session_id: SESSION });
+      return true;
+    }
     out(se({ type: "message_start", message: { id, model: "claude-fake", content: [] } }));
     out(se({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }));
     out(se({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }));
@@ -344,7 +353,21 @@ function shorthand(step: Step): boolean {
   }
   if (step.taskStarted) {
     const t = fill(step.taskStarted) as Json;
-    out({ type: "system", subtype: "task_started", task_id: t.taskId, tool_use_id: t.toolUseId, description: t.description ?? "task", is_backgrounded: t.background === true, task_type: t.type ?? "local_bash", session_id: SESSION });
+    const rec: Json = { type: "system", subtype: "task_started", task_id: t.taskId, tool_use_id: t.toolUseId, description: t.description ?? "task", is_backgrounded: t.background === true, task_type: t.type ?? "local_bash", session_id: SESSION };
+    if (t.prompt !== undefined) rec.prompt = t.prompt;
+    if (t.subagentType !== undefined) rec.subagent_type = t.subagentType;
+    out(rec);
+    return true;
+  }
+  if (step.taskProgress || step.taskNotification) {
+    const t = fill(step.taskProgress ?? step.taskNotification) as Json;
+    const usage = { total_tokens: t.tokens ?? 0, tool_uses: t.toolUses ?? 0, duration_ms: t.durationMs ?? 0 };
+    if (step.taskProgress) {
+      out({ type: "system", subtype: "task_progress", task_id: t.taskId, tool_use_id: t.toolUseId, description: t.description ?? "", usage, last_tool_name: t.lastTool, session_id: SESSION });
+    } else {
+      out({ type: "system", subtype: "task_updated", task_id: t.taskId, patch: { status: t.status === "stopped" ? "killed" : t.status }, session_id: SESSION });
+      out({ type: "system", subtype: "task_notification", task_id: t.taskId, tool_use_id: t.toolUseId, status: t.status, summary: t.summary ?? "", usage, session_id: SESSION });
+    }
     return true;
   }
   if (Array.isArray(step.backgroundTasks)) {

@@ -3,15 +3,20 @@
 
 .action-row {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
+  flex: none;
 }
 
+/* The buttons are the kit's ghost variant (quiet: no border, --secondary, --hover on hover); the
+   icon keeps the label's colour. */
 .action-row .action-button {
-  border-radius: var(--radius-pill, 999px);
-  padding-block: 2px;
   font-size: calc(12 * var(--ui-unit, 1px));
+}
+.action-row .action-fold .ui-icon:last-child {
+  margin-left: -1px;
+  color: var(--muted);
 }
 
 .action-row-notice {

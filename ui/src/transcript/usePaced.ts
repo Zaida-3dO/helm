@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Pacer } from './pacer.ts';
 import { prefersReducedMotion, shouldPace } from './motion.ts';
 import { PREVIEW_MS, thinkingPreview } from './thinking.ts';
+import { perf } from '../perf/perf.ts';
 
 /** The visible part of a streaming text. Rows that are not streaming show their text at once. */
 export function usePacedText(text: string, streaming: boolean): string {
@@ -30,6 +31,14 @@ export function usePacedText(text: string, streaming: boolean): string {
     frame = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(frame);
   }, [text, streaming]);
+
+  // The send timeline's "first words shown" (perf/marks.ts).
+  const shownOnce = useRef(false);
+  useEffect(() => {
+    if (!streaming || !shown || shownOnce.current) return;
+    shownOnce.current = true;
+    perf.tokenShown();
+  }, [streaming, shown]);
 
   return shown;
 }

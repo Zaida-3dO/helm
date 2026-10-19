@@ -29,6 +29,24 @@
 }
 .md-code code { background: none; padding: 0; }
 
+/* The code block's Copy button, added to replies only; it sits in the label bar. */
+.md-code { position: relative; }
+.md-code-copy {
+  position: absolute;
+  top: 2px;
+  right: 6px;
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  user-select: none;
+}
+.md-code-copy:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+
 .md-raw-html { color: var(--md-muted); }
 .md-plain { white-space: pre-wrap; }
 

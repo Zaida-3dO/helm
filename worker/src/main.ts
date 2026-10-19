@@ -5,6 +5,7 @@ import fs from "node:fs";
 import { HostChannel } from "./protocol/channel.ts";
 import { MAX_RECORD_BYTES } from "./protocol/lines.ts";
 import { serve } from "./protocol/server.ts";
+import { markLaunch } from "./protocol/timing.ts";
 import type { Launch } from "./protocol/types.ts";
 import { ClaudeDriver } from "./drivers/claude/driver.ts";
 
@@ -30,6 +31,7 @@ function readLaunch(file: string | undefined): Launch {
 }
 
 function main(): void {
+  markLaunch("mainStart");
   let launch: Launch;
   const early = new HostChannel(process.stdout, diag);
   try {

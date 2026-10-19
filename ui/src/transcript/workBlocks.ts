@@ -1,8 +1,9 @@
 // Turn work blocks. A turn starts at a user row (a steer read mid-turn does not
 // start one, and is always shown); the agent activity after it (tool
 // results, intermediate notes, thinking) is its work. Once the turn has settled, the work folds
-// behind one "worked for …" row. A live turn never folds. Errors, interruptions, retries and context
-// rows are always shown, and so is the turn's final reply.
+// behind one "worked for …" row, but only when the turn did real work (a tool call or thinking): a
+// plain reply to "Hello" shows as it is. A live turn never folds. Errors, interruptions, retries and
+// context rows are always shown, and so is the turn's final reply.
 
 import type { MessageRow } from '../api/types.ts';
 import { toolStatus } from './toolKinds.ts';
@@ -15,6 +16,8 @@ export interface RowFlags {
   afterTool?: boolean;
   /** An opened turn's folded work, drawn behind a left rule. */
   indent?: boolean;
+  /** The row directly after a closed "worked for" row, whose rule already separates it. */
+  afterFold?: boolean;
 }
 
 export type Item =
@@ -71,17 +74,21 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
     }
     const settled = !(isLast && live);
     const hadTools = work.some((r) => r.role === 'toolResult');
+    const hadThinking = work.some((r) => r.role === 'assistant' && r.thinking.trim() !== '');
     const push = (r: MessageRow, j: number, indent: boolean) => {
       const prev = j > 0 ? work[j - 1] : user;
+      const last = items[items.length - 1];
       items.push({
         kind: 'row',
         row: r,
         final: settled && j === reply && hadTools,
         afterTool: prev?.role === 'toolResult',
         indent,
+        afterFold: last?.kind === 'fold' && !last.open,
       });
     };
-    if (!settled || work.length === 0) {
+    // Nothing to fold away: the turn is live, empty, or did no work beyond replying.
+    if (!settled || work.length === 0 || (!hadTools && !hadThinking)) {
       work.forEach((r, j) => push(r, j, false));
       continue;
     }
@@ -89,13 +96,16 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
     const shownIdx: number[] = [];
     work.forEach((r, j) => (j === reply || alwaysShown(r) ? shownIdx : foldedIdx).push(j));
     if (foldedIdx.length > 0) {
+      // Timed from the run's first output, not the prompt: starting the worker, Claude Code and its
+      // session hooks is not work the agent did on this turn.
+      const first = work[0]!;
       const last = work[work.length - 1]!;
       items.push({
         kind: 'fold',
         key: `fold:${turnKey}`,
         turnKey,
         rows: foldedIdx.map((j) => work[j]!),
-        elapsedMs: Math.max(0, last.timestamp - user.timestamp),
+        elapsedMs: Math.max(0, last.timestamp - first.timestamp),
         failed: foldedIdx.filter((j) => toolStatus(work[j]!) === 'failed' && work[j]!.role === 'toolResult').length,
         open: isOpen,
       });

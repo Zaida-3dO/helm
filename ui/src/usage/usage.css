@@ -3,19 +3,19 @@
 .usage-meter {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  height: 24px;
+  gap: 13px;
+  height: calc(28 * var(--ui-unit));
   padding: 0 8px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--secondary);
-  font-size: 11px;
+  font-size: calc(10 * var(--ui-unit));
   font-variant-numeric: tabular-nums;
-  cursor: pointer;
+  cursor: var(--cursor-pointer);
 }
 
-.usage-meter:hover {
+.usage-meter:hover:not(:disabled) {
   background: var(--hover);
   color: var(--text);
 }
@@ -56,8 +56,19 @@
 }
 
 .usage-pct {
-  min-width: 24px;
+  min-width: 3.4ch;
   text-align: right;
+  color: var(--text);
+}
+.usage-label {
+  color: var(--muted);
+}
+/* A window with no reading: a muted, empty track and a dash. */
+.usage-item[data-unknown='true'] .usage-track {
+  background: var(--line);
+}
+.usage-item[data-unknown='true'] .usage-pct {
+  color: var(--muted);
 }
 
 /* Settings → Usage */

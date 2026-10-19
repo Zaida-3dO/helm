@@ -73,6 +73,17 @@ fn change_target(
     let repo =
         crate::settings::normalize_repo(s(t, "repo")?).ok_or("repo must be host/owner/name")?;
     let branch = s(t, "branch")?;
+    // A step that already knows its task names it, so the consent binds to exactly that task.
+    if let Some(id) = t.get("runId").and_then(Value::as_str) {
+        let run = store::run(tx, id)
+            .map_err(|e| e.to_string())?
+            .filter(|r| r.chat_id == chat)
+            .ok_or("That task is not one of this chat's.")?;
+        let c = store::change(tx, &run.id, &repo, branch)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("That task has no change {repo} {branch}."))?;
+        return Ok((run, c));
+    }
     for run in store::open_runs(tx, chat).map_err(|e| e.to_string())? {
         if let Some(c) = store::change(tx, &run.id, &repo, branch).map_err(|e| e.to_string())? {
             return Ok((run, c));
@@ -112,7 +123,9 @@ fn ready(tx: &Transaction<'_>, chat: &str, t: &Value) -> Result<Canonical, Strin
 }
 
 fn drop(tx: &Transaction<'_>, chat: &str, t: &Value) -> Result<Canonical, String> {
-    change_canonical(tx, chat, t, "Drop", |l| format!("Drop {l}."))
+    // "Drop change #N." rather than "Drop #N.": a one-digit PR would be under the verifier's
+    // 8-character minimum.
+    change_canonical(tx, chat, t, "Drop", |l| format!("Drop change {l}."))
 }
 
 fn skip(tx: &Transaction<'_>, chat: &str, t: &Value) -> Result<Canonical, String> {

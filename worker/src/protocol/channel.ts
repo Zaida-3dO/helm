@@ -10,6 +10,8 @@ export interface ResponseBody {
   data?: unknown;
   error?: string;
   uncertain?: boolean;
+  /** Send-timeline marks (timing.ts): epoch milliseconds, on `get_state` and prompt answers. */
+  timing?: Record<string, number>;
 }
 
 export type Diagnostic = (msg: string) => void;
@@ -55,6 +57,7 @@ export class HostChannel {
     if (body.data !== undefined) rec.data = body.data;
     if (body.error !== undefined) rec.error = body.error;
     if (body.uncertain) rec.uncertain = true;
+    if (body.timing) rec.timing = body.timing;
     this.emit(rec);
     return true;
   }

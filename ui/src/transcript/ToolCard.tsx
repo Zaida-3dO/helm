@@ -6,6 +6,8 @@ import { useEffect, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
 import { Glyph, Spinner } from './icons.tsx';
 import { parseResult, type Cell, type GridRow } from './resultGrid.ts';
+import { TodoList } from './TodoList.tsx';
+import { parseTodos } from './todos.ts';
 import {
   changeLines,
   hostIconFor,
@@ -47,7 +49,8 @@ export function ToolCard({ row, canStop, onStop }: ToolCardProps) {
   const id = toolIdentity(row);
   const target = toolTarget(row);
   const elapsed = useElapsed(row.timestamp, status === 'running');
-  const [open, setOpen] = useState(false);
+  // A to-do update shows its checklist without a click.
+  const [open, setOpen] = useState(() => row.toolName === 'TodoWrite');
   const rawName = row.toolName ?? '';
 
   const label = (() => {
@@ -139,6 +142,8 @@ export function ToolCard({ row, canStop, onStop }: ToolCardProps) {
 
 function ToolBody({ row, kind, status, source, rawName }: { row: MessageRow; kind: ToolKind; status: ToolStatus; source: 'host' | 'mcp' | 'native'; rawName: string }) {
   if (kind === 'edit' && source === 'native') return <ChangeView row={row} />;
+  const todos = source === 'native' ? parseTodos(row) : null;
+  if (todos) return <TodoList todos={todos} />;
   const output = row.text;
   const grid = source !== 'native' && output ? parseResult(output) : null;
   const header = status === 'failed' ? 'Error' : source !== 'native' ? 'Result' : rawName === 'Read' ? 'File contents' : 'Output';

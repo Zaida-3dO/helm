@@ -847,6 +847,8 @@ html[data-panel-maximized] .shell-main {
 .ch-path {
   flex: 1 1 auto;
   min-width: 0;
+  /* Left-aligned: the bare button rule centres flex content. */
+  justify-content: flex-start;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

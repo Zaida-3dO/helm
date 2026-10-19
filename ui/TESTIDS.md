@@ -6,8 +6,9 @@ breaks those checks, so change them only together with the checks. Everything el
 
 | Hook | Element | Attributes |
 |---|---|---|
-| `new-chat` | "New chat" button in the sidebar | |
-| `folder-input` | Folder path input beside it (the last value is remembered) | |
+| `new-chat` | "New chat" button in the sidebar; opens the new-chat page | |
+| `newchat-page` | The new-chat page: shown while a draft is open; nothing exists on the host until the first send | |
+| `newchat-card`, `newchat-project`, `newchat-folder`, `newchat-folder-menu` | Its card, the project picker trigger, the folder (place line) button and the folder menu | |
 | `chat-item` | One chat row in the sidebar | `data-chat-id`, `data-status`, `data-depth` (chat nesting 0–2), `data-group` (the project it is shown under) |
 | `sidebar-group` | One project header in the sidebar | `data-project-id`, `data-kind` (`folder` `board`), `data-depth` (project nesting 0–2) |
 | `sidebar-empty-toggle` | "Show N empty projects" / "Hide N empty projects" row at the end of the projects view | `aria-pressed` (empty projects shown) |

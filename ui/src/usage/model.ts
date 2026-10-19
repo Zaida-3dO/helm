@@ -44,8 +44,9 @@ function clock(ms: number): string {
   return new Date(ms).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' });
 }
 
+/** "56%", or an em dash for a window with no reading (not "?", which reads as an error). */
 export function percentText(pct: number | null | undefined): string {
-  if (pct === null || pct === undefined) return '?';
+  if (pct === null || pct === undefined) return '—';
   return `${Math.round(pct)}%`;
 }
 

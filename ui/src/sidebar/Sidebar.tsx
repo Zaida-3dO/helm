@@ -1,7 +1,7 @@
 // The sidebar: one grouped tree of
 // folder and board projects with their chats, virtualised, with the Projects / Activity / Archived
-// views, menus, drag and drop, hover preview and undo. The first chat list's test ids stay: `folder-input`,
-// `new-chat`, `chat-item`.
+// views, menus, drag and drop, hover preview and undo. Its test ids stay stable: `new-chat`,
+// `chat-item`.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from 'react';
 import type { Api } from '../api/client.ts';
@@ -19,13 +19,32 @@ import { dropAction, passedThreshold, type DragSource, type DropTarget } from '.
 import { chatMenuItems, projectMenuItems } from './menus.ts';
 import { buildList, chatAncestors, type ListItem } from './model.ts';
 import { ItemChip, ItemFolderRow, ItemPickerHost, useItemRefs } from '../itemlinks/ItemUi.tsx'; // item links
+import {
+  IconArchive,
+  IconBoard,
+  IconChevronDown,
+  IconChevronRight,
+  IconFlag,
+  IconFolder,
+  IconGrip,
+  IconMore,
+  IconMute,
+  IconPin,
+  IconPlus,
+  IconQuit,
+  IconRename,
+  IconRestore,
+  IconSettings,
+  IconX,
+} from '../ui/icons.tsx';
+import { withChatIcons, withProjectIcons } from './menuIcons.tsx';
+import { openNewChat } from '../newchat/index.ts';
 import { ATTENTION_LABEL, age, trailingIndicator } from './status.ts';
 import { startSyncTriggers, syncDisplay, type SyncHost } from './sync.ts';
 import { sidebarUndo } from './undo.ts';
 import { layout, visibleRange } from './virtual.ts';
 import './sidebar.css';
 
-export const LAST_FOLDER_KEY = 'helm.lastFolder';
 /** Whether projects with no chats are shown; remembered on this machine. */
 export const SHOW_EMPTY_KEY = 'helm.sidebar.showEmptyProjects';
 export const PREVIEW_DELAY_MS = 300;
@@ -73,7 +92,6 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const data = useMemo(() => new SidebarData(pops), [pops]);
   const snap = useSyncExternalStore(data.subscribe, data.getSnapshot);
   const [view, setView] = useState<SidebarView>('projects');
-  const [folder, setFolder] = useState(() => localStorage.getItem(LAST_FOLDER_KEY) ?? '');
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [collapsedItems, setCollapsedItems] = useState<Set<string>>(() => new Set());
@@ -160,43 +178,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     return m;
   }, [items]);
 
-  const createIn = useCallback(
-    async (cwd: string, group?: ProjectNode) => {
-      setError(null);
-      try {
-        const chat = await ops.create(cwd);
-        store.chat(chat);
-        if (group && group.id !== chat.projectId) {
-          await pops.organize({ chatId: chat.id, groupProjectId: group.id });
-        }
-        await data.refetch([chat.id]);
-        onSelect(chat.id);
-      } catch (e) {
-        setError(errorText(e));
-      }
-    },
-    [ops, store, pops, data, onSelect],
-  );
-
-  const create = async () => {
-    const cwd = folder.trim();
-    if (!cwd) {
-      setError('Enter a folder for the chat to work in.');
-      return;
-    }
-    localStorage.setItem(LAST_FOLDER_KEY, cwd);
-    await createIn(cwd);
-  };
-
-  const newChatIn = (p: ProjectNode) => {
-    const primary = p.primaryFolderProjectId ? projectsById.get(p.primaryFolderProjectId) : undefined;
-    const cwd = p.path ?? primary?.path ?? folder.trim();
-    if (!cwd) {
-      setError(`Set a primary folder for ${p.name}, or enter a folder above.`);
-      return;
-    }
-    void createIn(cwd, p);
-  };
+  // a project's "+" and New chat open the new-chat page in that project; nothing is
+  // created until the first send.
+  const newChatIn = (p: ProjectNode) => openNewChat({ projectId: p.id });
 
   const toggleChat = (id: string) =>
     setExpanded((s) => {
@@ -230,7 +214,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       const kids = siblings.filter((r) => r.parentChatId === id);
       return kids.length === 0 ? 0 : 1 + Math.max(...kids.map((k) => heightOf(k.chatId)));
     };
-    return chatMenuItems(
+    return withChatIcons(chatMenuItems(
       { row, projects: snap.projects, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view },
       {
         fork: () => void act.fork(row),
@@ -250,10 +234,10 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         restore: () => void act.restore(row),
         remove: () => void act.remove(row),
       },
-    );
+    ));
   };
   const projectMenu = (p: ProjectNode): MenuItem[] =>
-    projectMenuItems(p, snap.projects, {
+    withProjectIcons(projectMenuItems(p, snap.projects, {
       newChat: () => newChatIn(p),
       pin: (pinned) => void act.updateProject(p, { pinned }),
       rename: () => setPrompt({ title: 'Rename project', label: 'Name', value: p.name, onSave: (name) => void act.updateProject(p, { name }) }),
@@ -269,7 +253,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       archive: () => void act.archiveProject(p),
       restore: () => void act.restoreProject(p),
       colour: (c) => void act.updateProject(p, { colour: c }),
-    });
+    }), p);
   const openMenu = (x: number, y: number, items: MenuItem[], label: string) => {
     setPreview(null);
     setMenu({ x, y, items, label });
@@ -448,30 +432,16 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       }}
     >
       <div className="sb-brand">Helm</div>
-      <form
-        className="sb-new-chat"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void create();
-        }}
-      >
-        <input
-          data-testid="folder-input"
-          aria-label="Folder"
-          placeholder="C:\path\to\folder"
-          value={folder}
-          onChange={(e) => setFolder(e.target.value)}
-          spellCheck={false}
-        />
-        <button type="submit" data-testid="new-chat" className="sb-nav">
+      <div className="sb-new-chat">
+        <button type="button" data-testid="new-chat" className="sb-nav" onClick={() => openNewChat()}>
           New chat
         </button>
-      </form>
+      </div>
       {(error ?? snap.error) && (
         <p className="sb-error" role="alert">
           {error ?? snap.error}
           <button type="button" className="sb-error-x" aria-label="Dismiss" onClick={() => setError(null)}>
-            ×
+            <IconX size={12} />
           </button>
         </p>
       )}
@@ -536,15 +506,18 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           aria-pressed={view === 'archived'}
           onClick={() => switchView(view === 'archived' ? 'projects' : 'archived')}
         >
-          {view === 'archived' ? 'Back to projects' : 'Archived chats'}
+          <IconArchive />
+          <span>{view === 'archived' ? 'Back to projects' : 'Archived chats'}</span>
         </button>
         {openSettings && (
           <button type="button" className="sb-foot" onClick={openSettings}>
-            Settings
+            <IconSettings />
+            <span>Settings</span>
           </button>
         )}
         <button type="button" className="sb-foot" onClick={() => void api('quit_request')}>
-          Quit
+          <IconQuit />
+          <span>Quit</span>
         </button>
       </div>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} label={menu.label} onClose={() => setMenu(null)} testId="sidebar-menu" />}
@@ -565,7 +538,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       )}
       {drag?.active && (
         <div className="sb-ghost" style={{ left: drag.x + 8, top: drag.y - 2 }} aria-hidden="true">
-          <span className="sb-ghost-grip">⠿</span>
+          <IconGrip size={12} className="sb-ghost-grip" />
           {drag.title.slice(0, 180)}
         </div>
       )}
@@ -732,21 +705,21 @@ function GroupHeader({
           aria-expanded={!item.collapsed}
           onClick={onToggle}
         >
-          <span aria-hidden="true">{item.collapsed ? '›' : '⌄'}</span>
+          {item.collapsed ? <IconChevronRight size={11} strokeWidth={2.4} /> : <IconChevronDown size={11} strokeWidth={2.4} />}
         </button>
         <button type="button" className="sb-name" onClick={onToggle} onPointerDown={onPointerDown} aria-expanded={!item.collapsed}>
           <span className="sb-icon" aria-hidden="true">
-            {p.icon && !p.icon.startsWith('lib:') ? p.icon : p.kind === 'board' ? '◆' : '▢'}
+            {p.icon && !p.icon.startsWith('lib:') ? p.icon : p.kind === 'board' ? <IconBoard size={16} strokeWidth={1.8} /> : <IconFolder size={16} strokeWidth={1.8} />}
           </span>
           <span className="sb-title">{p.name}</span>
           {p.archived && (
-            <span className="sb-mark" aria-label="Archived project" title="Archived project">
-              ▣
+            <span className="sb-mark" role="img" aria-label="Archived project" title="Archived project">
+              <IconArchive size={12} />
             </span>
           )}
           {p.board?.editedLocally && (
-            <span className="sb-edited" title="Edited in Helm" aria-label="Edited in Helm">
-              ✎
+            <span className="sb-edited" role="img" title="Edited in Helm" aria-label="Edited in Helm">
+              <IconRename size={11} />
             </span>
           )}
           <span className="sb-count" title={`${p.chatCount} non-archived chats`}>
@@ -754,6 +727,18 @@ function GroupHeader({
           </span>
         </button>
         <span className="sb-actions">
+          {!p.archived && (
+            <button
+              type="button"
+              className="sb-act sb-pin"
+              aria-label={`${p.pinned ? 'Unpin' : 'Pin'} project ${p.name}`}
+              aria-pressed={p.pinned}
+              title={p.pinned ? 'Unpin project' : 'Pin project'}
+              onClick={onPin}
+            >
+              <IconPin filled={p.pinned} />
+            </button>
+          )}
           <button
             type="button"
             className="sb-act"
@@ -764,27 +749,15 @@ function GroupHeader({
               onMenu(r.right, r.bottom);
             }}
           >
-            …
+            <IconMore />
           </button>
           {p.archived ? (
             <button type="button" className="sb-act" aria-label={`Restore project ${p.name}`} title="Restore project and its chats" onClick={onRestore}>
-              ↺
+              <IconRestore />
             </button>
           ) : (
             <button type="button" className="sb-act" aria-label={`New chat in ${p.name}`} title="New chat" onClick={onNew}>
-              +
-            </button>
-          )}
-          {!p.archived && (
-            <button
-              type="button"
-              className="sb-act sb-pin"
-              aria-label={`${p.pinned ? 'Unpin' : 'Pin'} project ${p.name}`}
-              aria-pressed={p.pinned}
-              title={p.pinned ? 'Unpin project' : 'Pin project'}
-              onClick={onPin}
-            >
-              {p.pinned ? '●' : '○'}
+              <IconPlus />
             </button>
           )}
         </span>
@@ -811,7 +784,7 @@ function Indicator({ row }: { row: SidebarRow }) {
       aria-label={label}
       title={label}
     >
-      {a === 'pinned' ? '⚲' : null}
+      {a === 'pinned' ? <IconPin size={11} /> : null}
     </span>
   );
 }
@@ -882,7 +855,7 @@ function ChatRow({
           aria-label={`${item.expanded ? 'Collapse' : 'Expand'} ${item.children} started chats under ${r.title}`}
           onClick={onToggle}
         >
-          {item.expanded ? '⌄' : '›'}
+          {item.expanded ? <IconChevronDown size={12} strokeWidth={2.4} /> : <IconChevronRight size={12} strokeWidth={2.4} />}
         </button>
       )}
       <button
@@ -906,12 +879,12 @@ function ChatRow({
         </span>
         {needsYou && (
           <span className="sb-flag" role="img" aria-label="Needs you" title="Needs you">
-            ⚑
+            <IconFlag size={12} filled />
           </span>
         )}
         {r.muted && (
           <span className="sb-muted" role="img" aria-label="Muted: no notifications or needs-you flags" title="Muted">
-            🔕︎
+            <IconMute size={11} />
           </span>
         )}
         {!item.expanded && item.children > 0 && <span className="sb-agg">{item.children}</span>}
@@ -929,7 +902,7 @@ function ChatRow({
             onMenu(b.right, b.bottom);
           }}
         >
-          …
+          <IconMore />
         </button>
         <button
           type="button"
@@ -939,7 +912,7 @@ function ChatRow({
           disabled={!r.archived && busy}
           onClick={onArchive}
         >
-          {r.archived ? '↺' : '▣'}
+          {r.archived ? <IconRestore /> : <IconArchive />}
         </button>
       </span>
     </div>

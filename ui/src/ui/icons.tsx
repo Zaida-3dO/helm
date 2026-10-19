@@ -13,6 +13,8 @@
 import {
   AlarmClock,
   Archive,
+  Bell,
+  BellOff,
   ArchiveRestore,
   ArrowDown,
   ArrowUp,
@@ -29,6 +31,8 @@ import {
   Clock,
   Copy,
   CornerDownLeft,
+  CornerDownRight,
+  CornerLeftUp,
   Ellipsis,
   ExternalLink,
   Eye,
@@ -36,8 +40,10 @@ import {
   FileDiff,
   FilePlus,
   FileText,
+  FoldVertical,
   Flag,
   Folder,
+  FolderKanban,
   FolderOpen,
   FolderPlus,
   FolderTree,
@@ -56,6 +62,7 @@ import {
   LogOut,
   Maximize2,
   MessageSquare,
+  MessageSquareDot,
   Mic,
   Minimize2,
   Monitor,
@@ -63,6 +70,7 @@ import {
   NotebookPen,
   Palette,
   PanelLeft,
+  PanelLeftClose,
   PanelRight,
   Paperclip,
   Pause,
@@ -211,6 +219,21 @@ export const IconMaximize = kitIcon(Maximize2, 'maximize-2');
 export const IconMinimize = kitIcon(Minimize2, 'minimize-2');
 export const IconBrowser = kitIcon(Globe, 'globe');
 export const IconShell = kitIcon(SquareTerminal, 'square-terminal');
+
+// Sidebar rows and menus.
+/** The muted mark (bell-off 11) and "Mute chat". */
+export const IconMute = kitIcon(BellOff, 'bell-off');
+export const IconUnmute = kitIcon(Bell, 'bell');
+export const IconUnread = kitIcon(MessageSquareDot, 'message-square-dot');
+/** "Nest under…" and "Move to top level". */
+export const IconNest = kitIcon(CornerDownRight, 'corner-down-right');
+export const IconUnnest = kitIcon(CornerLeftUp, 'corner-left-up');
+/** A board project's default icon. */
+export const IconBoard = kitIcon(FolderKanban, 'folder-kanban');
+/** "Hide sidebar" in the sidebar's title strip (panel-close 16). */
+export const IconSidebarClose = kitIcon(PanelLeftClose, 'panel-left-close');
+/** "Compact context" in the chat menu. */
+export const IconCompact = kitIcon(FoldVertical, 'fold-vertical');
 
 // Sidebar footer and Settings.
 export const IconSettings = kitIcon(Settings, 'settings');

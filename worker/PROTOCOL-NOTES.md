@@ -90,8 +90,8 @@ steering and tool control" for why it is delivery and not the acknowledgement.
 - **Crash:** the CLI closing unexpectedly ends any open message as `interrupted`, ends open tool
   calls with an error, settles a running turn as `interrupted`, answers any unacknowledged prompt
   as uncertain, emits `worker_error` and exits 1.
-- **Subagent traffic** (records with `parent_tool_use_id`) is dropped from the parent transcript
-  for now; the subagent UI comes later.
+- **Subagent traffic** (records with `parent_tool_use_id`) never reaches the parent transcript; it
+  feeds the subagent events instead (see "Native subagents").
 - **Retry:** `system/api_retry` records start a retry. A later message start ends it `recovered`;
   another retry ends the earlier one `retried`; an error result ends it `failed`; a stop ends it
   `cancelled`. A failed request shows up as a synthetic assistant message, projected as an
@@ -256,3 +256,54 @@ shorthand records).
   the message text. The host uses it for the panel-context block and a fork's carried history.
 - **`claude.fastMode`** (boolean): always sent as `--settings {"fastMode": …}`; a `fastMode` key
   inside `claude.settings` is dropped, and anything but `true` is off.
+
+## Native subagents
+
+Observed on claude.exe 2.1.289 (haiku, a neutral temp folder, two subagents in parallel), and
+implemented in `worker/src/drivers/claude/translate.ts`.
+
+- **Agent calls run in the background by default.** The parent's `Agent` tool call (older CLIs:
+  `Task`) gets `system/task_started {task_id, tool_use_id, task_type:"local_agent",
+  is_backgrounded:true, description, subagent_type, prompt}` and its tool result at once ("Async
+  agent launched successfully…"). The parent's turn can settle while its agents keep working; when
+  one finishes the CLI starts a new turn on its own to tell the parent.
+- **Inside a subagent** the CLI writes whole `assistant` and `user` records carrying
+  `parent_tool_use_id` (the Agent call's id) plus `subagent_type` and `task_description`. No partial
+  stream events were seen for subagents. A subagent that spawns its own agent uses that inner call's
+  id, which the parent transcript never saw.
+- **Progress:** `system/task_progress {task_id, tool_use_id, description, last_tool_name,
+  usage:{total_tokens, tool_uses, duration_ms}}` after each subagent tool call.
+- **End:** `system/task_updated {task_id, patch:{status}}`, then `system/task_notification {task_id,
+  tool_use_id, status: completed | failed | stopped, summary, usage?}`. For a completed agent the
+  summary was its final message; for a stopped one it was the description.
+- **`stop_task {task_id}` stops one subagent:** answered with success, then `task_updated
+  {status:"killed"}`, `task_notification {status:"stopped"}` and an "[Request interrupted by
+  user]" user record inside the subagent. The other agents and the parent carry on. The worker's
+  `stop_tool` does not route to it yet (it stops foreground shells only); the translator exposes
+  `subagentTaskId(toolCallId)` for that.
+
+**Events** (keyed by the parent's Agent tool call id; the Agent call is still an ordinary tool row):
+
+| Event | Fields |
+|---|---|
+| `subagent_start` | `toolCallId, agentType, name, description, assignment, startedAt` |
+| `subagent_step` | `toolCallId, text, tool?, tokens?, toolUses?` |
+| `subagent_end` | `toolCallId, status: completed \| failed \| stopped, durationMs, report?, error?, tokens?, toolUses?` |
+
+Choices made here:
+- `agentType` is the call's `subagent_type` (`general-purpose` when absent); `name` is the call's
+  `name` argument when it has one, else its `description`. `assignment` is the prompt's first three
+  non-empty lines, at most 400 characters.
+- A step is the subagent's newest tool call (`tool` plus its command, path, pattern, URL or
+  description, first line, at most 200 characters) or the first line of its newest narration.
+  `task_progress` supplies the token and tool-use counts. Steps are paced to at most two a second
+  per subagent; within a window the newest state wins and goes out at the window's end. A pending
+  step is dropped when the agent ends.
+- The report is the subagent's last text message (a message split over several records is joined),
+  else the task notification's summary; for a foreground agent, the Agent call's result. At most
+  64 KiB.
+- A foreground agent (no background flag and a result that is not the launch receipt) ends with its
+  call: an error result fails it. When the turn settles, foreground agents still open end `stopped`
+  (after a Stop) or `failed`; background agents run on. When the worker loses the CLI every open
+  agent ends `failed`.
+- Records for an unknown parent (nested agents, or agents of an earlier worker) are ignored.

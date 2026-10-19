@@ -6,12 +6,14 @@
 //! | `shell_settings_save` | maintenance | [`ShellSettings`] → [`ShellSettingsView`] (validated; applied at once) |
 //! | `audio_inputs` | blocking | → [`AudioInput`]`[]` (active capture devices, plus a gone stored choice) |
 //! | `open_external` | maintenance | `{url}`: http, https and mailto only, re-checked here |
+//! | `folder_pick` | blocking | the native folder dialog; see [`folder`] |
 //!
 //! The app registers a [`ShellService`] (`register_services`) and taps every event through
 //! [`ShellService::observe`]. The tray, hotkey, badge and toasts are drawn by the app
 //! (`host/app/src/tray.rs`) through [`ShellHost`].
 
 pub mod bindings;
+pub mod folder;
 pub mod notify;
 pub mod probe;
 pub mod service;
@@ -33,7 +35,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
     reg.blocking("shell_settings_get", OpClass::Blocking, settings_get)
         .blocking("shell_settings_save", OpClass::Maintenance, settings_save)
         .blocking("audio_inputs", OpClass::Blocking, audio_inputs)
-        .blocking("open_external", OpClass::Maintenance, open_external);
+        .blocking("open_external", OpClass::Maintenance, open_external)
+        .blocking("folder_pick", OpClass::Blocking, folder::folder_pick);
 }
 
 /// Adds the [`ShellService`]. Needs the database and platform already registered.

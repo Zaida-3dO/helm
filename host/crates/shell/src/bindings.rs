@@ -19,6 +19,8 @@ pub fn export(dir: &Path) -> Result<(), String> {
     ShellSettingsView::export_all_to(dir).map_err(|e| e.to_string())?;
     AudioInput::export_all_to(dir).map_err(|e| e.to_string())?;
     OpenExternalArgs::export_all_to(dir).map_err(|e| e.to_string())?;
+    crate::folder::FolderPickArgs::export_all_to(dir).map_err(|e| e.to_string())?;
+    crate::folder::FolderPickResult::export_all_to(dir).map_err(|e| e.to_string())?;
     let mut files: Vec<String> = std::fs::read_dir(dir)
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok())

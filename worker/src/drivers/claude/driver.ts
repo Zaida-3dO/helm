@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import type { HostChannel, ResponseBody } from "../../protocol/channel.ts";
 import { describeFault, LineReader, MAX_RECORD_BYTES } from "../../protocol/lines.ts";
 import type { Driver } from "../../protocol/server.ts";
+import { markLaunch, markPrompt } from "../../protocol/timing.ts";
 import { DEFAULT_EFFORT, isEffort, type Json, type Launch, type UiResponse } from "../../protocol/types.ts";
 import { isAlive, treeKill } from "../../process/kill.ts";
 import { buildClaudeArgs, modelTakesEffort } from "./args.ts";
@@ -195,6 +196,7 @@ export class ClaudeDriver implements Driver {
       detached: process.platform !== "win32", // own process group on POSIX for tree kill
     });
     this.child = child;
+    markLaunch("claudeSpawned");
     this.exited = new Promise((resolve) => child.once("exit", () => resolve()));
     child.once("error", (e) => this.fatal(`could not start claude (${command}): ${e.message}`));
     // "close" (not "exit"): fires after stdout has drained, so a torn last line is reported as
@@ -227,6 +229,7 @@ export class ClaudeDriver implements Driver {
     }
     if (preToolUse.length > 0) initRequest.hooks = { PreToolUse: preToolUse };
     const init = await this.control(initRequest, this.limits.controlTimeoutMs);
+    markLaunch("initialized");
     const models = Array.isArray(init.models)
       ? (init.models as Json[]).map((m) => ({ id: m.value ?? m.id, name: m.displayName ?? m.value, description: m.description }))
       : [];
@@ -237,6 +240,7 @@ export class ClaudeDriver implements Driver {
     } catch {
       // An older CLI without the request: the version stays unknown.
     }
+    markLaunch("versioned");
     return {
       harness: "claude",
       executable: this.resolved.path,
@@ -703,6 +707,7 @@ export class ClaudeDriver implements Driver {
     if (now) msg.priority = "now";
     try {
       this.write(msg);
+      markPrompt(sid, "written");
       // The CLI's priority alone did not interrupt a running tool (observed live): a plain interrupt
       // ends the turn and this message, still queued, opens the next one.
       if (now && this.turnOpen && !this.stopping) this.sendNowInterrupt();

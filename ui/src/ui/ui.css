@@ -68,6 +68,7 @@
 }
 :root[data-theme='dark'] .ui-btn-icon[aria-pressed='true'] {
   color: var(--chrome-accent);
+  box-shadow: var(--chrome-icon-active-shadow);
 }
 .ui-btn-row-action {
   width: calc(24 * var(--ui-unit));
@@ -111,7 +112,6 @@
   color: var(--surface);
 }
 .ui-btn-send:hover:not(:disabled) {
-  background: var(--text);
   opacity: 0.85;
   scale: 1.075;
 }
@@ -120,12 +120,11 @@
   background: var(--hover);
   color: var(--muted);
 }
-/* Dark: the brushed-metal send. */
-:root[data-theme='dark'] .ui-btn-send:not(:disabled) {
-  background: linear-gradient(145deg, var(--text), color-mix(in srgb, var(--text) 85%, var(--surface)));
-  box-shadow:
-    inset 0 1px #fff9,
-    0 1px 5px #0003;
+/* Dark: the brushed-metal send (through the --chrome-send-* tokens). */
+.ui-btn-send:not(:disabled),
+.ui-btn-send:hover:not(:disabled) {
+  background: var(--chrome-send-fill);
+  box-shadow: var(--chrome-send-shadow);
 }
 .ui-btn-stop {
   width: 27px;

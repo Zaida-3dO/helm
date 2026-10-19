@@ -20,6 +20,7 @@ import { forkAction } from './transcript/forkAction.ts';
 import { registerMessageAction } from './transcript/slots.ts';
 import { useShell } from './shell/context.ts';
 import { useLayer } from './ui/index.ts';
+import { IconFork } from './ui/icons.tsx';
 import { accessoriesAt } from './composer/slots.ts';
 import { recallPrompts } from './composer/recall.ts';
 import { SelectionToolbar } from './transcript/SelectionToolbar.tsx';
@@ -62,7 +63,12 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
     });
   }, [shell]);
   useEffect(
-    () => registerMessageAction(forkAction(ops, (id) => shell.select(id), (m) => setNotice(`Could not fork: ${m}`))),
+    () =>
+      registerMessageAction({
+        ...forkAction(ops, (id) => shell.select(id), (m) => setNotice(`Could not fork: ${m}`)),
+        icon: IconFork,
+        order: 10,
+      }),
     [ops, shell],
   );
 

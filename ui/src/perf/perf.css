@@ -1,0 +1,72 @@
+/* The frame-stats overlay. Click-through
+   and unselectable. */
+
+.frame-stats {
+  position: fixed;
+  top: calc(var(--topbar-height, 49px) + 12px);
+  right: 12px;
+  z-index: var(--z-frame-stats, 10003);
+  box-sizing: border-box;
+  width: 214px;
+  max-width: calc(100vw - 24px);
+  padding: 12px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 4px 16px #00000020;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  user-select: none;
+}
+
+.frame-stats-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.frame-stats-fps {
+  font-size: 25px;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.frame-stats-label {
+  color: var(--secondary);
+}
+
+.frame-stats-key {
+  margin-left: auto;
+  padding: 0 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--secondary);
+  font-family: inherit;
+  font-size: 10px;
+}
+
+.frame-stats-grid {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 3px 12px;
+  margin: 8px 0 0;
+}
+
+.frame-stats-grid dt {
+  color: var(--secondary);
+}
+
+.frame-stats-grid dd {
+  margin: 0;
+  text-align: right;
+}
+
+.frame-stats-foot {
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 9px;
+}

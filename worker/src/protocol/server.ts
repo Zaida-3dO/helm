@@ -4,6 +4,7 @@
 import type { Readable } from "node:stream";
 import { HostChannel, type ResponseBody } from "./channel.ts";
 import { describeFault, LineReader, MAX_RECORD_BYTES } from "./lines.ts";
+import { launchMarks, markLaunch, markPrompt, promptMarks } from "./timing.ts";
 import type { Json, UiResponse } from "./types.ts";
 
 export interface Driver {
@@ -84,7 +85,8 @@ export function serve(opts: ServeOptions): void {
           type,
           driver.ready().then((data) => {
             readyAnswered = true;
-            return { success: true, data };
+            markLaunch("ready");
+            return { success: true, data, timing: launchMarks() };
           }),
         );
         return;
@@ -96,9 +98,10 @@ export function serve(opts: ServeOptions): void {
           return;
         }
         const c = type === "steer" ? { ...cmd, streamingBehavior: "steer" } : cmd;
+        markPrompt(c.submissionId, "received");
         driver.prompt(c).then(
           (body) => {
-            channel.respond(id, type, body);
+            channel.respond(id, type, { ...body, timing: promptMarks(c.submissionId) });
             driver.promptAnswered?.(c.submissionId);
           },
           (e: unknown) => channel.respond(id, type, { success: false, error: String((e as Error)?.message ?? e) }),

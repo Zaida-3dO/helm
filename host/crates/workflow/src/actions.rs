@@ -477,7 +477,7 @@ pub fn drop(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
         _ => {}
     }
     if handed_now {
-        let t = json!({"repo": repo, "branch": branch});
+        let t = json!({"runId": run.id, "repo": repo, "branch": branch});
         let why = "That change was handed off in this attempt.";
         if let Err(e) = kinds::consent(
             tx,

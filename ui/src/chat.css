@@ -110,6 +110,10 @@ button.danger {
   margin-top: 2px;
 }
 
+.row-user {
+  position: relative;
+}
+
 /* The reply's action row: a quiet flex row that appears on hover or keyboard focus. */
 .row-actions {
   display: flex;
@@ -127,11 +131,13 @@ button.danger {
   opacity: 1;
 }
 
-.row-action,
-.row-edit {
+.row-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
   height: 23px;
-  min-width: 24px;
-  padding: 0 6px;
+  padding: 0;
   border: none;
   border-radius: 5px;
   background: none;
@@ -139,21 +145,43 @@ button.danger {
   font-size: 11px;
 }
 
-.row-action:hover:not(:disabled),
-.row-edit:hover:not(:disabled) {
+/* An action registered without an icon keeps its words. */
+.row-action.row-action-text {
+  width: auto;
+  padding: 0 6px;
+}
+
+.row-action:hover:not(:disabled) {
   background: var(--hover);
   color: var(--text);
 }
 
-/* The user message's edit control: hover or focus only, at the row's bottom right. */
-.row-edit {
-  align-self: flex-end;
+.row-action.is-done {
+  color: var(--accent);
+}
+
+.row-turn-time,
+.row-token-chip {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: default;
+}
+
+/* The user message's Copy and Edit: hover or focus only, at the row's bottom right. */
+.row-user-actions {
+  position: absolute;
+  right: 0;
+  bottom: 4px;
+  display: flex;
+  gap: 2px;
+  color: var(--muted);
   opacity: 0;
   transition: opacity 120ms var(--ease-out-soft);
 }
 
-.row-user:hover .row-edit,
-.row-edit:focus-visible {
+.row-user:hover .row-user-actions,
+.row-user-actions:focus-within {
   opacity: 1;
 }
 
@@ -560,6 +588,44 @@ button.danger {
   background: var(--diff-del-bg);
   color: var(--diff-del-text);
   box-shadow: inset 2px 0 var(--diff-del-edge);
+}
+
+/* A to-do update as a plan checklist. */
+.todo-list {
+  list-style: none;
+  margin: 0;
+  padding: 10px 14px 12px;
+  display: grid;
+  gap: 7px;
+  font-size: 12px;
+  line-height: 1.45;
+  user-select: text;
+}
+
+.todo {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--text);
+}
+
+.todo-icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--muted);
+}
+
+.todo-in_progress .todo-icon,
+.todo-completed .todo-icon {
+  color: var(--accent);
+}
+
+.todo-in_progress .todo-text {
+  font-weight: 550;
+}
+
+.todo-completed .todo-text {
+  color: var(--secondary);
 }
 
 /* Host and MCP results as a key/value grid. */
@@ -1158,6 +1224,17 @@ button.danger {
   right: 0;
   height: 1px;
   background: linear-gradient(90deg, var(--line-strong), var(--line) 65%, transparent);
+}
+
+/* Straight after a closed "Worked for" row, whose own rule already separates the answer: one rule,
+   not two, and the fold row's 18 px bottom margin is the gap. */
+.row-assistant.final-answer.after-fold,
+.row-assistant.after-tool.after-fold {
+  padding-top: 0;
+}
+
+.row-assistant.final-answer.after-fold::before {
+  content: none;
 }
 
 /* Markdown typography in replies. */

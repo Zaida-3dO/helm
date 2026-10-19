@@ -17,5 +17,9 @@ serde_json.workspace = true
 log.workspace = true
 ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
 
+# The native folder dialog (`folder_pick`). Windows only: elsewhere the op says so.
+[target.'cfg(windows)'.dependencies]
+rfd = "0.17"
+
 [dev-dependencies]
 tempfile.workspace = true

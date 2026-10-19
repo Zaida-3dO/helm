@@ -25,10 +25,19 @@ describe("top-bar buttons, chips and search", { timeout: 10 * 60_000 }, () => {
       await newChat(page(), scratchDir("helm-e2e-chat-"));
 
       // The four visible top-bar buttons; the launcher is hidden and Git sync sits in the menu.
-      const top = await page().$$eval(tid("action-button"), (els) => els.map((e) => e.getAttribute("data-action")));
-      assert.deepEqual(top, ["update", "needs-me", "ship-it", "close-session"]);
-      await page().click(tid("action-overflow"));
-      assert.equal(await page().locator(tid("action-menu")).locator('[role="menuitem"][data-item="git-sync"]').count(), 1, "Git sync is in the menu");
+      // A bar too narrow for them (the default window is) folds them all into one
+      // "Actions" menu, so read them from whichever form is showing.
+      const folded = (await page().locator(tid("action-row", '[data-folded="true"]')).count()) > 0;
+      if (folded) {
+        await page().click(tid("action-overflow"));
+        const items = await page().locator(tid("action-menu")).locator('[role="menuitem"]').evaluateAll((els) => els.map((e) => e.getAttribute("data-item")));
+        assert.deepEqual(items, ["update", "needs-me", "ship-it", "close-session", "git-sync"]);
+      } else {
+        const top = await page().$$eval(tid("action-button"), (els) => els.map((e) => e.getAttribute("data-action")));
+        assert.deepEqual(top, ["update", "needs-me", "ship-it", "close-session"]);
+        await page().click(tid("action-overflow"));
+        assert.equal(await page().locator(tid("action-menu")).locator('[role="menuitem"][data-item="git-sync"]').count(), 1, "Git sync is in the menu");
+      }
       await page().keyboard.press("Escape");
 
       // A reply that ends in a question offers Yes and No (Continue only follows a stopped turn).
@@ -44,7 +53,12 @@ describe("top-bar buttons, chips and search", { timeout: 10 * 60_000 }, () => {
       await waitRowText(page(), "yes");
       await waitStatus(page(), "idle");
       assert.match(await page().locator(tid("composer")).innerText(), /keep this draft/);
-      await page().click(tid("action-button", '[data-action="update"]'));
+      if (folded) {
+        await page().click(tid("action-overflow"));
+        await page().click(`${tid("action-menu")} [role="menuitem"][data-item="update"]`);
+      } else {
+        await page().click(tid("action-button", '[data-action="update"]'));
+      }
       await waitRowText(page(), "brief plain-language status");
       await waitStatus(page(), "idle");
       assert.match(await page().locator(tid("composer")).innerText(), /keep this draft/);
