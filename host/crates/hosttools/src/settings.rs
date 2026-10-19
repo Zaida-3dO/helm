@@ -10,6 +10,7 @@
 
 use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::settings_allow::{agent_keys, refusal};
+use crate::settings_options;
 use crate::spec::ToolSpec;
 use helm_core::db::Database;
 use helm_core::prefs::{self, PrefKey};
@@ -63,18 +64,23 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
             None => visible.iter().map(|k| k.to_string()).collect(),
         };
         let mut settings = Map::new();
+        let mut options = Map::new();
         let mut unavailable = Map::new();
         for k in &wanted {
             if let Some(why) = refusal(k, all) {
                 unavailable.insert(k.clone(), json!(why));
             } else {
                 settings.insert(k.clone(), prefs::read(tx, k).unwrap_or(Value::Null));
+                if let Some(o) = settings_options::describe(k) {
+                    options.insert(k.clone(), o);
+                }
             }
         }
         Ok::<_, rusqlite::Error>(json!({
             "settings": settings,
+            "options": options,
             "unavailable": unavailable,
-            "note": "null means the default is in use.",
+            "note": "null means the default is in use: options.<key>.default says what that is, and sending null in app_update_settings restores it. options.<key> gives the type and the allowed values or limits.",
         }))
     })
     .map_err(sql)
@@ -105,6 +111,9 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
             }
             if serde_json::to_vec(v).map(|b| b.len()).unwrap_or(usize::MAX) > MAX_VALUE_BYTES {
                 return Ok(Err(format!("The value for {k} is too large.")));
+            }
+            if let Err(why) = settings_options::check(k, v) {
+                return Ok(Err(why));
             }
             let key = agent_keys(true)
                 .into_iter()
@@ -286,7 +295,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_get_settings",
-            "Read the Helm settings a chat may change, with their current values (null means the default). keys narrows the list; a key chats cannot change is listed under unavailable with where the user changes it.",
+            "Read the Helm settings a chat may change, with their current values (null means the default in use). options gives each key's type, allowed values or limits, default and what it does. keys narrows the list; a key chats cannot change is listed under unavailable with where the user changes it.",
             json!({"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "string"}, "maxItems": 64}}, "additionalProperties": false}),
         ),
         get_settings,
@@ -294,7 +303,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .blocking(
         ToolSpec::write(
             "app_update_settings",
-            "Change 1-16 Helm settings live: changes is {key: value}. Keys are applied alphabetically and the call stops at the first failure; the answer has each applied key's before and after. The user sees a notice with Undo. Read app_get_settings first for the keys and current shapes. Act only when the user explicitly asked for this change, and report what changed. If the reply is lost, check the current values before trying again and never retry automatically.",
+            "Change 1-16 Helm settings live: changes is {key: value}. Keys are applied alphabetically and the call stops at the first failure; the answer has each applied key's before and after. The user sees a notice with Undo. Read app_get_settings first: its options say what each key accepts, and a value outside them is refused with the allowed values. A key's value replaces the stored one whole; null restores the default. Act only when the user explicitly asked for this change, and report what changed. If the reply is lost, check the current values before trying again and never retry automatically.",
             json!({"type": "object", "properties": {"changes": {"type": "object", "minProperties": 1, "maxProperties": 16}}, "required": ["changes"], "additionalProperties": false}),
         )
         .large(),
@@ -390,6 +399,44 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Settings > Chat"));
+    }
+
+    #[test]
+    fn get_reports_each_keys_options_and_default() {
+        let e = env();
+        let g = get_settings(&ctx(&e), json!({"keys": ["sendShortcut", "zoomLevel"]})).unwrap();
+        assert_eq!(g["settings"]["sendShortcut"], Value::Null);
+        let o = &g["options"]["sendShortcut"];
+        assert_eq!(o["allowed"], json!(["enter", "mod-enter"]));
+        assert_eq!(o["default"], "mod-enter");
+        assert_eq!(g["options"]["zoomLevel"]["max"], 200);
+        // Without keys, every visible key carries its options.
+        let all = get_settings(&ctx(&e), json!({})).unwrap();
+        assert_eq!(
+            all["options"].as_object().unwrap().len(),
+            all["settings"].as_object().unwrap().len()
+        );
+    }
+
+    #[test]
+    fn a_value_outside_a_keys_options_is_refused_and_not_stored() {
+        let e = env();
+        let r = update_settings(&ctx(&e), json!({"changes": {"sendShortcut": "ctrl-enter"}}));
+        let why = r.unwrap_err().public;
+        assert!(why.contains("\"enter\" or \"mod-enter\""), "{why}");
+        let stored =
+            e.db.snapshot(|tx| Ok::<_, rusqlite::Error>(prefs::read(tx, "sendShortcut")))
+                .unwrap();
+        assert_eq!(stored, None);
+        assert!(
+            e.sink.kinds().is_empty(),
+            "a refused change announces nothing"
+        );
+        // A valid value applies, and null restores the default.
+        let r = update_settings(&ctx(&e), json!({"changes": {"sendShortcut": "enter"}})).unwrap();
+        assert_eq!(r["applied"]["sendShortcut"]["after"], "enter");
+        let r = update_settings(&ctx(&e), json!({"changes": {"sendShortcut": null}})).unwrap();
+        assert_eq!(r["applied"]["sendShortcut"]["after"], Value::Null);
     }
 
     #[test]

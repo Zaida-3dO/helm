@@ -30,6 +30,7 @@ import { TopBar } from './topbar/TopBar.tsx';
 import { TerminalDock } from './terminal/TerminalDock.tsx';
 import { Notifications } from './notifications/Notifications.tsx';
 import { SettingsToast } from './hosttools/SettingsToast.tsx';
+import { followSendShortcut } from './hosttools/sendShortcut.ts';
 import './hosttools/index.ts'; // the Allow cards
 
 export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers: Flushers }) {
@@ -104,15 +105,8 @@ function Frame({ flushers }: { flushers: Flushers }) {
   const shell = useShell();
   const { chatId } = useSelection();
   const [sendShortcut, setSendShortcut] = useState<SendShortcut>('mod-enter');
-  useEffect(() => {
-    // The send shortcut setting; missing or unreadable means the default.
-    shell
-      .api<unknown>('preference_get', { key: 'sendShortcut' })
-      .then((v) => {
-        if (v === 'enter' || v === 'mod-enter') setSendShortcut(v);
-      })
-      .catch(() => undefined);
-  }, [shell]);
+  // The send shortcut setting, read once and followed live (a chat can change it).
+  useEffect(() => followSendShortcut(shell.api, shell.bus, setSendShortcut), [shell]);
 
   return (
     <div className="shell" data-testid="shell">

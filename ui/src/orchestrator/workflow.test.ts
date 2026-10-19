@@ -4,7 +4,7 @@ import { EventBus } from '../api/events.ts';
 import { defaultSettings, fakeRun } from '../dev/fake-orchestrator.ts';
 import { changeLabel, isWorkflowConsent, needsYou, prNumber, stageChips } from './progress.ts';
 import { parseRun } from './run.ts';
-import { RunStore } from './runstore.ts';
+import { isUnknownOp, RunStore, UNKNOWN_OP_MESSAGE } from './runstore.ts';
 
 const settings = defaultSettings(true);
 const states = (kind: string, s = settings) => stageChips(parseRun(fakeRun(kind)), s)?.map((c) => `${c.id}:${c.state}`).join(' ');
@@ -65,21 +65,23 @@ test('agent text is made inert and a missing field does not throw', () => {
 test('the run store reads the run, counts only workflow Allow requests, and goes quiet when the host has no op', async () => {
   const bus = new EventBus();
   let run: unknown = fakeRun('review');
-  let refuse = false;
+  let answer: unknown = null;
   const calls: string[] = [];
   const api = (async (op: string) => {
     calls.push(op);
     if (op === 'workflow_run_get') {
-      if (refuse) throw { code: 'refused', message: 'This operation is not available here.' };
+      if (answer) throw answer;
       return run;
     }
     if (op === 'consent_list') return { pending: [{ kind: 'land' }, { kind: 'test_action' }, { kind: 'allowMore' }], decided: [] };
     if (op === 'item_links_for_chats') return { links: [{ itemId: 'abc12345def', chatId: 'c1', isMain: true, linkedBy: 'user', linkedAt: 1, itemTitle: 'Login' }] };
     throw new Error(op);
   }) as never;
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  const asks = () => calls.filter((c) => c === 'workflow_run_get').length;
   const store = new RunStore(api, bus);
   store.ensure('c1');
-  await new Promise((r) => setTimeout(r, 0));
+  await tick();
   const e = store.entry('c1');
   assert.equal(e?.view.task?.title, 'Add the login page');
   assert.equal(e?.allowRequests, 2, 'test_action is not a workflow kind');
@@ -87,15 +89,73 @@ test('the run store reads the run, counts only workflow Allow requests, and goes
   // The event re-reads.
   run = fakeRun('landing');
   bus.dispatch({ kind: 'workflow_run', chatId: 'c1' });
-  await new Promise((r) => setTimeout(r, 0));
+  await tick();
   assert.equal(store.entry('c1')?.view.changes[0]?.state, 'awaiting_merge');
-  // An older host has no op: the entry goes and the store stops asking.
-  refuse = true;
-  bus.dispatch({ kind: 'workflow_run', chatId: 'c1' });
-  await new Promise((r) => setTimeout(r, 0));
+  // An older host has no op: the entry goes and the store stops asking on its own.
+  answer = { code: 'refused', message: UNKNOWN_OP_MESSAGE };
+  store.ensure('c1');
+  await tick();
   assert.equal(store.entry('c1'), undefined);
-  const n = calls.filter((c) => c === 'workflow_run_get').length;
+  let n = asks();
+  store.ensure('c1');
+  bus.dispatch({ kind: 'workflow_chat_mode', chatId: 'c1' });
+  await tick();
+  assert.equal(asks(), n, 'no more asks on its own after the host said it has no such op');
+  // A run event means the host has the op after all: it asks again, and an answer re-enables.
+  answer = null;
   bus.dispatch({ kind: 'workflow_run', chatId: 'c1' });
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(calls.filter((c) => c === 'workflow_run_get').length, n, 'no more asks after the host said it has no such op');
+  await tick();
+  assert.equal(asks(), n + 1);
+  assert.equal(store.entry('c1')?.view.changes[0]?.state, 'awaiting_merge');
+  n = asks();
+  store.ensure('c1');
+  await tick();
+  assert.equal(asks(), n + 1, 'asking on its own again');
+});
+
+test('a refusal from the op itself is scoped to that call', async () => {
+  const bus = new EventBus();
+  let answer: unknown = null;
+  let asks = 0;
+  const api = (async (op: string) => {
+    if (op === 'workflow_run_get') {
+      asks++;
+      if (answer) throw answer;
+      return fakeRun('review');
+    }
+    if (op === 'consent_list') return { pending: [], decided: [] };
+    if (op === 'item_links_for_chats') return { links: [] };
+    throw new Error(op);
+  }) as never;
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  const store = new RunStore(api, bus);
+  store.ensure('c1');
+  await tick();
+  for (const refusal of [
+    { code: 'refused', message: 'Orchestrator is off for this chat.' },
+    { code: 'conflict', message: 'busy' },
+    { code: 'internal', message: 'database is locked' },
+  ]) {
+    answer = refusal;
+    store.ensure('c1');
+    await tick();
+    assert.equal(store.entry('c1')?.view.task?.title, 'Add the login page', `${refusal.code} keeps what is shown`);
+  }
+  answer = null;
+  const before = asks;
+  store.ensure('c1');
+  await tick();
+  assert.equal(asks, before + 1, 'the next call still asks');
+  // The chat is gone: its entry goes, and other chats still ask.
+  answer = { code: 'not_found', message: 'No such chat.' };
+  store.ensure('c1');
+  await tick();
+  assert.equal(store.entry('c1'), undefined);
+  answer = null;
+  store.ensure('c2');
+  await tick();
+  assert.ok(store.entry('c2'));
+  assert.ok(isUnknownOp({ code: 'refused', message: UNKNOWN_OP_MESSAGE }));
+  assert.ok(!isUnknownOp({ code: 'refused', message: 'Something else.' }));
+  assert.ok(!isUnknownOp({ code: 'bad_args', message: UNKNOWN_OP_MESSAGE }));
 });

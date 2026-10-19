@@ -286,7 +286,7 @@ const AUDIT_FORCED = () => {
     if (!visible(el) || el.classList.contains("xterm-helper-textarea")) continue;
     const cs = getComputedStyle(el);
     if (!border(cs) && cs.outlineStyle === "none") {
-      const box = el.closest(".editor, .ui-field, label") as HTMLElement | null;
+      const box = el.closest(".composer-box, .ui-field, label") as HTMLElement | null;
       if (box && border(getComputedStyle(box))) continue;
       out.push(`field ${label(el)} has no border`);
     }

@@ -31,12 +31,12 @@ describe("top-bar buttons, chips and search", { timeout: 10 * 60_000 }, () => {
       assert.equal(await page().locator(tid("action-menu")).locator('[role="menuitem"][data-item="git-sync"]').count(), 1, "Git sync is in the menu");
       await page().keyboard.press("Escape");
 
-      // A reply that ends in a question offers Continue, Yes and No.
+      // A reply that ends in a question offers Yes and No (Continue only follows a stopped turn).
       await send(page(), "[LEAF] shall we carry on?");
       await waitStatus(page(), "idle");
       await page().waitForSelector(tid("quick-reply"), { timeout: 20_000 });
       const chips = await page().$$eval(tid("quick-reply"), (els) => els.map((e) => e.getAttribute("data-reply")));
-      assert.deepEqual(chips, ["continue", "yes", "no"]);
+      assert.deepEqual(chips, ["yes", "no"]);
 
       // A chip and a top-bar button each send their text and leave the typed draft alone.
       await typeMessage(page(), "keep this draft");

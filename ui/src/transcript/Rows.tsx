@@ -45,7 +45,7 @@ function Slots({ row, ctx }: { row: MessageRow; ctx: RowContext }) {
       {actions.length > 0 && (
         <div className="row-actions" data-testid="message-actions">
           {actions.map((a) => (
-            <button key={a.id} type="button" className="small link" data-action={a.id} onClick={() => a.run(row, sctx)}>
+            <button key={a.id} type="button" className="row-action" data-action={a.id} onClick={() => a.run(row, sctx)}>
               {a.label}
             </button>
           ))}
@@ -126,7 +126,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent }: { r
         )}
         {row.status !== 'complete' && <div className="row-meta muted">{row.status}</div>}
         {row.status === 'complete' && !ctx.running && ctx.onEdit && ctx.editing?.rowId !== row.id && (
-          <button type="button" className="small link row-edit" data-testid="edit-message-button" title="Edit and resend" onClick={() => ctx.onEdit?.(row)}>
+          <button type="button" className="row-edit" data-testid="edit-message-button" title="Edit and resend" onClick={() => ctx.onEdit?.(row)}>
             Edit
           </button>
         )}

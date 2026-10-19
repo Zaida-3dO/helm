@@ -26,6 +26,8 @@ export interface ComposerAccessory {
   /** `dock`: the composer dock's stack above the box (the review tray). */
   /** `consent`: the Allow cards, first in the dock. */
   placement: 'above' | 'toolbar' | 'dock' | 'consent';
+  /** For `toolbar`: the left group (model, chips; the default) or the right one (actions). */
+  side?: 'start' | 'end';
   render: (ctx: AccessoryContext) => ReactNode;
 }
 
@@ -52,6 +54,12 @@ export function registerComposerAccessory(a: ComposerAccessory): () => void {
 
 export function accessoriesAt(placement: ComposerAccessory['placement']): ComposerAccessory[] {
   return accessories.filter((a) => a.placement === placement);
+}
+
+/** Which toolbar group an accessory joins: the panel-context eye sits with the
+ *  actions on the right until its own registration says so. */
+export function accessorySide(a: Pick<ComposerAccessory, 'id' | 'side'>): 'start' | 'end' {
+  return a.side ?? (a.id === 'panel-context' ? 'end' : 'start');
 }
 
 export function registerSendContributor(f: SendContributor): () => void {

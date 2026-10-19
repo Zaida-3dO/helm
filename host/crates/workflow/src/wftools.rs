@@ -10,7 +10,6 @@ use crate::{handoff, mode, reports, settings};
 use helm_consent::AllowKinds;
 use helm_core::db::Database;
 use helm_hosttools::{HostToolRegistry, ToolCtx, ToolError, ToolSpec};
-use helm_ipc::AppEvent;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -174,9 +173,9 @@ fn kinds_of(ctx: &ToolCtx) -> Arc<AllowKinds> {
     })
 }
 
+/// After a tool call, tell the UI which chats' runs it wrote (a refusal can write a row too).
 fn emit(ctx: &ToolCtx) {
-    ctx.events
-        .emit(AppEvent::new("workflow").with("chatId", json!(ctx.caller_chat_id)));
+    crate::store::emit_touched(&*ctx.events);
 }
 
 pub fn register_host_tools(r: &mut HostToolRegistry) {
@@ -194,8 +193,9 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 ctx.is_child,
                 &args,
                 helm_core::now_ms(),
-            )?;
+            );
             emit(ctx);
+            let out = out?;
             crate::land::kick();
             Ok(out)
         },
@@ -218,9 +218,9 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 child,
                 args,
                 helm_core::now_ms(),
-            )?;
+            );
             emit(ctx);
-            Ok(out)
+            out
         },
     );
 }

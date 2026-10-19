@@ -1,17 +1,6 @@
 /* The chat view: transcript, dock, interaction cards, queue and composer. Colours come from
    the design tokens (styles.css), light and dark. */
 
-.sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  overflow: hidden;
-}
-
-.sidebar .quit {
-  margin-top: auto;
-}
-
 .main {
   display: flex;
   flex-direction: column;
@@ -24,63 +13,6 @@
   margin: auto;
 }
 
-.chat-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-height: 0;
-  flex: 1;
-}
-
-.chat-list ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  overflow-y: auto;
-}
-
-.new-chat {
-  display: flex;
-  gap: 6px;
-}
-
-input,
-select {
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 6px 8px;
-  font: inherit;
-  min-width: 0;
-}
-
-.new-chat input {
-  flex: 1;
-}
-
-.chat-item {
-  width: 100%;
-  text-align: left;
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  border-color: transparent;
-  background: transparent;
-  padding: 6px 8px;
-}
-
-.chat-item.selected {
-  background: var(--bg);
-  border-color: var(--line);
-}
-
-.chat-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .small-text {
   font-size: 12px;
 }
@@ -90,27 +22,8 @@ button.small {
   font-size: 12px;
 }
 
-button.primary {
-  background: var(--accent-fill);
-  color: var(--on-accent-fill);
-  border-color: var(--accent-fill);
-}
-
-button.primary:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
 button.danger {
   border-color: var(--error);
-}
-
-button.link {
-  background: none;
-  border: none;
-  padding: 0;
-  color: var(--muted);
-  text-decoration: underline dotted;
 }
 
 .chat-view {
@@ -118,48 +31,6 @@ button.link {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-}
-
-.chat-head {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding: 12px 24px 8px;
-  border-bottom: 1px solid var(--line);
-  min-width: 0;
-}
-
-.chat-head h1 {
-  font-size: 15px;
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chat-head .mono {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-}
-
-.status-pill {
-  font-size: 12px;
-  padding: 1px 8px;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-}
-
-.s-running,
-.s-starting {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.s-interrupted {
-  border-color: var(--error);
-  color: var(--error);
 }
 
 .transcript-wrap {
@@ -237,6 +108,53 @@ button.link {
 .row-meta {
   font-size: 12px;
   margin-top: 2px;
+}
+
+/* The reply's action row: a quiet flex row that appears on hover or keyboard focus. */
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 22px;
+  margin-top: 5px;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity 120ms var(--ease-out-soft);
+}
+
+.row:hover .row-actions,
+.row-actions:focus-within {
+  opacity: 1;
+}
+
+.row-action,
+.row-edit {
+  height: 23px;
+  min-width: 24px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.row-action:hover:not(:disabled),
+.row-edit:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* The user message's edit control: hover or focus only, at the row's bottom right. */
+.row-edit {
+  align-self: flex-end;
+  opacity: 0;
+  transition: opacity 120ms var(--ease-out-soft);
+}
+
+.row-user:hover .row-edit,
+.row-edit:focus-visible {
+  opacity: 1;
 }
 
 .md-plain {
@@ -371,6 +289,8 @@ button.link {
   color: inherit;
   font: inherit;
   text-align: left;
+  /* The bare button rule centres its content; a tool row reads from the left. */
+  justify-content: flex-start;
   cursor: var(--cursor-pointer);
   border-radius: 5px;
 }
@@ -1085,15 +1005,6 @@ button.link {
     flex-direction: column;
   }
 
-  .sidebar {
-    width: 100%;
-    max-height: 30vh;
-    border-right: none;
-    border-bottom: 1px solid var(--line);
-    padding: 8px 12px;
-  }
-
-  .chat-head,
   .composer,
   .dock {
     padding-left: 12px;
@@ -1135,9 +1046,6 @@ button.link {
   display: flex;
   justify-content: flex-end;
   gap: 6px;
-}
-.row-edit {
-  align-self: flex-end;
 }
 
 .composer-attachments {

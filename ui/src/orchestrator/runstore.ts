@@ -1,7 +1,8 @@
 // The workflow run of each chat the panel is open for, plus how many workflow Allow requests wait.
 // The host's `workflow_run {chatId}` event is a signal: this store re-reads through
-// `workflow_run_get`. When the host has no such op (an older build), the store remembers it and
-// the panel stays hidden; nothing else in the UI depends on it.
+// `workflow_run_get`. A refusal is scoped to the call that got it. Only the host's generic
+// unknown-op answer makes the store stop asking on its own (an older build), and even then the
+// next `workflow_run` event asks again, since a host that sends it has the op.
 
 import type { Api } from '../api/client.ts';
 import type { AppEvent, EventBus } from '../api/events.ts';
@@ -57,7 +58,9 @@ export class RunStore {
     const again = (e: AppEvent) => {
       if (typeof e.chatId === 'string' && this.asked.has(e.chatId)) void this.refresh(e.chatId);
     };
-    this.bus.on('workflow_run', again);
+    this.bus.on('workflow_run', (e) => {
+      if (typeof e.chatId === 'string' && this.asked.has(e.chatId)) void this.refresh(e.chatId, { retry: true });
+    });
     this.bus.on('workflow_chat_mode', again);
     this.bus.on('consent', again);
     this.bus.on('item_links', () => {
@@ -72,21 +75,25 @@ export class RunStore {
     void this.refresh(chatId);
   }
 
-  async refresh(chatId: string): Promise<void> {
-    if (this.unsupported) return;
+  /** Re-read one chat. `retry` (a `workflow_run` event) asks even after an unknown-op answer. */
+  async refresh(chatId: string, opts: { retry?: boolean } = {}): Promise<void> {
+    if (this.unsupported && !opts.retry) return;
     let run: RunView;
     try {
       run = parseRun(await this.api('workflow_run_get', { chatId }));
     } catch (e) {
-      const code = (e as { code?: unknown })?.code;
-      if (code === 'refused' || code === 'not_found') {
-        // The host refuses an op it does not have ("not available here"), or the chat is gone:
-        // nothing to show.
-        if (code === 'refused') this.unsupported = true;
+      if (isUnknownOp(e)) {
+        // An older host without the op: nothing to show, and stop asking until a run event.
+        this.unsupported = true;
+        if (this.entries.delete(chatId)) this.bump();
+      } else if ((e as { code?: unknown })?.code === 'not_found') {
+        // The chat is gone.
         if (this.entries.delete(chatId)) this.bump();
       }
+      // Any other refusal or failure is this call's alone: keep what is shown and ask next time.
       return;
     }
+    this.unsupported = false;
     let allowRequests = 0;
     try {
       const l = await consentOps(this.api).list(chatId);
@@ -108,6 +115,15 @@ export class RunStore {
     this.entries.set(chatId, next);
     this.bump();
   }
+}
+
+/** The host's generic answer for an op it does not serve (host/crates/ipc, `ApiError::refused`). */
+export const UNKNOWN_OP_MESSAGE = 'This operation is not available here.';
+
+/** Only the exact unknown-op answer counts; a refusal with its own words is an answer from the op. */
+export function isUnknownOp(e: unknown): boolean {
+  const x = e as { code?: unknown; message?: unknown } | null;
+  return x?.code === 'refused' && x?.message === UNKNOWN_OP_MESSAGE;
 }
 
 const stores = new WeakMap<object, RunStore>();

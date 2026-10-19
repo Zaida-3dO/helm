@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { endsWithQuestion, quickReplies, type QuickReplyContext } from './quickReplies.ts';
+import { endsWithQuestion, quickReplies, stoppedEarly, type QuickReplyContext } from './quickReplies.ts';
 
 const row = (role: string, text: string, status = 'complete') => ({ role, text, status }) as QuickReplyContext['rows'][number];
 const ctx = (over: Partial<QuickReplyContext> = {}): QuickReplyContext => ({
@@ -11,39 +11,62 @@ const ctx = (over: Partial<QuickReplyContext> = {}): QuickReplyContext => ({
 });
 const ids = (c: QuickReplyContext) => quickReplies(c).map((q) => q.id);
 
-test('an idle chat whose last row is a finished reply offers Continue', () => {
-  assert.deepEqual(ids(ctx()), ['continue']);
+test('a normal finished reply shows no chip: there is nothing to continue', () => {
+  assert.deepEqual(ids(ctx()), []);
+  assert.deepEqual(ids(ctx({ rows: [] })), [], 'no rows');
 });
 
-test('a reply ending in a question also offers Yes and No', () => {
-  assert.deepEqual(ids(ctx({ rows: [row('assistant', 'Shall I go ahead?')] })), ['continue', 'yes', 'no']);
+test('a reply ending in a question offers Yes and No, and not Continue', () => {
+  assert.deepEqual(ids(ctx({ rows: [row('assistant', 'Shall I go ahead?')] })), ['yes', 'no']);
 });
 
 test('the chips send fixed lowercase words', () => {
-  const sent = quickReplies(ctx({ rows: [row('assistant', 'Ready?')] })).map((q) => q.text);
+  const sent = quickReplies(ctx({ status: 'stopped', rows: [row('assistant', 'Ready?')] })).map((q) => q.text);
   assert.deepEqual(sent, ['continue', 'yes', 'no']);
 });
 
-test('nothing shows while a turn is running, starting or stopping', () => {
-  for (const status of ['running', 'starting', 'stopping'] as const) assert.deepEqual(ids(ctx({ status })), [], status);
+test('each chip says what it does in its tooltip text, starting with its visible label', () => {
+  const all = quickReplies(ctx({ status: 'stopped', rows: [row('assistant', 'Ready?')] }));
+  for (const q of all) assert.ok(q.hint.startsWith(q.label), q.id);
+  assert.match(all[0]?.hint ?? '', /picks up where it stopped/);
 });
 
-test('stopped and interrupted chats can still be continued', () => {
+test('nothing shows while a turn is running, starting or stopping', () => {
+  for (const status of ['running', 'starting', 'stopping'] as const) {
+    assert.deepEqual(ids(ctx({ status, rows: [row('assistant', 'Cut off?', 'interrupted')] })), [], status);
+  }
+});
+
+test('a stopped or interrupted chat offers Continue', () => {
   assert.deepEqual(ids(ctx({ status: 'stopped' })), ['continue']);
   assert.deepEqual(ids(ctx({ status: 'interrupted' })), ['continue']);
+  assert.deepEqual(ids(ctx({ status: 'stopped', rows: [row('assistant', 'Ok?')] })), ['continue', 'yes', 'no']);
+});
+
+test('an interrupted or errored last row offers Continue even when the chat reads idle', () => {
+  assert.deepEqual(ids(ctx({ rows: [row('user', 'go'), row('assistant', 'Partial', 'interrupted')] })), ['continue']);
+  assert.deepEqual(ids(ctx({ rows: [row('user', 'go'), row('assistant', 'Ok?', 'error')] })), ['continue'], 'errored: no Yes or No');
+  assert.deepEqual(ids(ctx({ rows: [row('assistant', '', 'error')] })), ['continue'], 'an error with no text');
+  assert.deepEqual(ids(ctx({ rows: [row('toolResult', 'out', 'interrupted')] })), ['continue']);
+});
+
+test('an earlier interrupted row does not count once a later row has finished', () => {
+  assert.deepEqual(ids(ctx({ rows: [row('assistant', 'Cut off', 'interrupted'), row('user', 'continue'), row('assistant', 'Done.')] })), []);
+});
+
+test('a failed message of the user is not something to continue', () => {
+  assert.deepEqual(ids(ctx({ rows: [row('assistant', 'Done.'), row('user', 'next', 'error')] })), []);
 });
 
 test('nothing shows while an interaction card is open', () => {
-  assert.deepEqual(ids(ctx({ interactionOpen: true, rows: [row('assistant', 'Ok?')] })), []);
+  assert.deepEqual(ids(ctx({ interactionOpen: true, status: 'stopped', rows: [row('assistant', 'Ok?')] })), []);
 });
 
-test('nothing shows unless the last row is a complete assistant reply', () => {
+test('Yes and No need a complete assistant reply as the last row', () => {
   assert.deepEqual(ids(ctx({ rows: [row('assistant', 'Ok?'), row('user', 'yes')] })), [], 'last row is the user');
   assert.deepEqual(ids(ctx({ rows: [row('assistant', 'Ok?', 'streaming')] })), [], 'still streaming');
-  assert.deepEqual(ids(ctx({ rows: [row('assistant', 'Ok?', 'error')] })), [], 'errored');
   assert.deepEqual(ids(ctx({ rows: [row('assistant', 'Ok?'), row('toolResult', 'out')] })), [], 'a tool result is last');
   assert.deepEqual(ids(ctx({ rows: [row('assistant', '   ')] })), [], 'empty reply');
-  assert.deepEqual(ids(ctx({ rows: [] })), [], 'no rows');
 });
 
 test('endsWithQuestion ignores trailing markdown, quotes and brackets', () => {

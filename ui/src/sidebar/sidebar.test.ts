@@ -57,7 +57,9 @@ function row(chatId: string, group: string, over: Partial<SidebarRow> = {}): Sid
 
 const opts = { view: 'projects' as const, compact: false, expandedChats: new Set<string>(), selectedChatId: null };
 const shape = (items: ListItem[]) =>
-  items.map((i) => (i.kind === 'header' ? `H${i.depth}:${i.project.id}` : i.kind === 'chat' ? `C${i.depth}:${i.row.chatId}` : '--'));
+  items.map((i) =>
+    i.kind === 'header' ? `H${i.depth}:${i.project.id}` : i.kind === 'chat' ? `C${i.depth}:${i.row.chatId}` : i.kind === 'emptyToggle' ? `E${i.count}${i.shown ? '+' : '-'}` : '--',
+  );
 
 test('status priority: running > unread > lingering > interrupted > pinned', () => {
   const base = { status: 'idle' as const, unread: false, lingering: false, pinned: false };
@@ -90,15 +92,58 @@ test('a three-level project tree renders depths 0/1/2 with child projects before
 });
 
 test('a missing parent draws at the top level and a collapsed group hides its contents', () => {
-  const projects = [project('a', { parentId: 'gone' }), project('b', { collapsed: true }), project('c', { parentId: 'b' })];
+  const projects = [project('a', { parentId: 'gone', chatCount: 1 }), project('b', { collapsed: true }), project('c', { parentId: 'b', chatCount: 1 })];
   const rows = [row('x', 'b')];
   assert.deepEqual(shape(buildList(projects, rows, opts)), ['H0:a', 'H0:b']);
   // The open chat's group stays expanded.
   assert.deepEqual(shape(buildList(projects, rows, { ...opts, selectedChatId: 'x' })), ['H0:a', 'H0:b', 'H1:c', 'C0:x']);
 });
 
+test('empty projects hide by default, with a "Show N empty projects" row that brings them back', () => {
+  const projects = [
+    project('full', { kind: 'board', path: null, chatCount: 2 }), // counted by the host, no rows held yet
+    project('held'), // count still 0, but a held row stands in
+    project('bare', { kind: 'board', path: null }),
+    project('parent'), // empty itself, but its child has chats
+    project('kid', { parentId: 'parent', chatCount: 1 }),
+    project('shell'), // empty, with an empty child: two hidden
+    project('shellKid', { parentId: 'shell' }),
+    project('pinned', { pinned: true }),
+    project('open'),
+    project('gone', { kind: 'board', path: null, board: { stale: true } as ProjectNode['board'] }),
+    project('arch', { archived: true }),
+  ];
+  const rows = [row('h1', 'held'), row('o1', 'open', { archived: true })];
+  const hidden = buildList(projects, rows, opts);
+  assert.deepEqual(shape(hidden), ['H0:pinned', '--', 'H0:full', 'H0:held', 'C0:h1', 'H0:parent', 'H1:kid', 'E4-']);
+  // The open chat's group shows even when it holds nothing else (here its chat is archived).
+  const open = buildList(projects, rows, { ...opts, selectedChatId: 'o1' });
+  assert.ok(shape(open).includes('H0:open'));
+  assert.deepEqual(shape(open).slice(-1), ['E3-']);
+  // Shown: every empty group draws, in host order; stale and archived groups stay hidden.
+  const shown = buildList(projects, rows, { ...opts, showEmpty: true });
+  assert.deepEqual(shape(shown), [
+    'H0:pinned',
+    '--',
+    'H0:full',
+    'H0:held',
+    'C0:h1',
+    'H0:bare',
+    'H0:parent',
+    'H1:kid',
+    'H0:shell',
+    'H1:shellKid',
+    'H0:open',
+    'E4+',
+  ]);
+  // No toggle row when nothing is empty, nor in the activity or archived views.
+  assert.deepEqual(shape(buildList([project('full', { chatCount: 1 })], [], opts)), ['H0:full']);
+  assert.ok(!shape(buildList(projects, rows, { ...opts, view: 'archived' })).some((s) => s.startsWith('E')));
+  assert.ok(!shape(buildList(projects, rows, { ...opts, view: 'activity' })).some((s) => s.startsWith('E')));
+});
+
 test('a pin break separates pinned and unpinned top-level groups', () => {
-  const items = buildList([project('p', { pinned: true }), project('q')], [], opts);
+  const items = buildList([project('p', { pinned: true }), project('q', { chatCount: 3 })], [], opts);
   assert.deepEqual(shape(items), ['H0:p', '--', 'H0:q']);
   assert.equal(items[1]!.height, HEIGHTS.normal.pinBreak);
 });

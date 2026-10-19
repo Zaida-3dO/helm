@@ -36,7 +36,9 @@ export type ListItem =
       itemChip?: ItemRef;
     }
   | { kind: 'itemFolder'; key: string; itemId: string; title: string; members: number; depth: number; height: number; collapsed: boolean }
-  | { kind: 'pinBreak'; key: string; height: number };
+  | { kind: 'pinBreak'; key: string; height: number }
+  /** "Show N empty projects" / "Hide N empty projects" at the end of the projects view. */
+  | { kind: 'emptyToggle'; key: string; height: number; count: number; shown: boolean };
 
 export interface BuildOptions {
   view: SidebarView;
@@ -47,6 +49,8 @@ export interface BuildOptions {
   selectedChatId: string | null;
   /** Item links: the item each chat shows, and the item folders the user collapsed. */
   itemLinks?: { refs: ReadonlyMap<string, ItemRef>; collapsed: ReadonlySet<string> };
+  /** Show projects that hold no chats (hidden by default; extended to every kind). */
+  showEmpty?: boolean;
 }
 
 /** Per-row drawn depth and the children each row holds, for one group's held rows. */
@@ -140,23 +144,29 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
   const byId = new Map(projects.map((p) => [p.id, p]));
 
   // Which groups to draw: in the archived view only those holding an archived chat (or archived
-  // themselves, or with such a descendant). A stale board group with no chats is dropped.
+  // themselves, or with such a descendant). A stale board group with no chats is dropped. In the
+  // projects view a group with no chats (its host count and the rows held both zero) and no shown
+  // child is hidden unless it is pinned or holds the open chat; "Show N empty projects" brings
+  // those back.
   const memo = new Map<string, boolean>();
-  const visible = (p: ProjectNode, guard: Set<string> = new Set()): boolean => {
+  const base = (p: ProjectNode, guard: Set<string> = new Set()): boolean => {
     const known = memo.get(p.id);
     if (known !== undefined) return known;
     if (guard.has(p.id)) return false;
     guard.add(p.id);
     const own = (byGroup.get(p.id)?.length ?? 0) > 0;
-    const child = (kids.get(p.id) ?? []).some((k) => visible(k, guard));
+    const child = (kids.get(p.id) ?? []).some((k) => base(k, guard));
     let v: boolean;
     if (archivedView) v = own || child || p.archived;
     else if (p.archived) v = false;
     else if (p.board?.stale) v = own || child || p.id === selectedGroup;
-    else v = true;
+    else v = own || child || p.chatCount > 0 || p.pinned || p.id === selectedGroup;
     memo.set(p.id, v);
     return v;
   };
+  /** Hidden only for being empty: shown when the user asks for empty projects. */
+  const emptyOnly = (p: ProjectNode) => !archivedView && !p.archived && !p.board?.stale && !base(p);
+  const visible = (p: ProjectNode): boolean => base(p) || (o.showEmpty === true && emptyOnly(p));
 
   const out: ListItem[] = [];
   const emitGroup = (p: ProjectNode, depth: number, path: Set<string>) => {
@@ -217,6 +227,20 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     for (const row of orphans) {
       out.push({ kind: 'chat', key: row.chatId, row, depth: 0, height: h.chat, children: 0, expanded: false, twoLine: false });
     }
+  }
+
+  // Count the groups hidden only for being empty, walking the tree as it would draw with them shown
+  // (a group under an archived or stale parent never draws, so it is not counted).
+  if (!archivedView) {
+    let count = 0;
+    const walk = (p: ProjectNode, path: Set<string>) => {
+      if (path.has(p.id) || !(base(p) || emptyOnly(p))) return;
+      if (!base(p)) count += 1;
+      const next = new Set(path).add(p.id);
+      for (const k of kids.get(p.id) ?? []) walk(k, next);
+    };
+    for (const p of roots) walk(p, new Set());
+    if (count > 0) out.push({ kind: 'emptyToggle', key: 'empty-toggle', height: h.chat, count, shown: o.showEmpty === true });
   }
   return out;
 }

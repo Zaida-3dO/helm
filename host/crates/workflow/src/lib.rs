@@ -31,8 +31,10 @@
 //! | table `workflow_standup_outbox` | stage records written to Agent Standup, with an "outcome unknown" read-back before any resend |
 //! | land step | `gh` merge pinned to the approved head, readback must say MERGED; draft land |
 //!
-//! Events: `workflow_settings {}`, `workflow_chat_mode {chatId}` and `workflow {chatId}` tell the UI
-//! to re-read.
+//! Events: `workflow_settings {}`, `workflow_chat_mode {chatId}` and `workflow_run {chatId}` tell the
+//! UI to re-read. `workflow_run` follows every write of a task, change or event row, whoever made it
+//! (an op, a tool or the land step): the store marks the chat and the caller emits after its
+//! transaction ([`store::emit_touched`]). The UI reads the run with `workflow_run_get {chatId}`.
 
 pub mod actions;
 pub mod bindings;

@@ -527,20 +527,27 @@ pub fn start_driver(handle: &tokio::runtime::Handle, ctx: &helm_ipc::OpCtx) {
     let events = ctx.events.clone();
     handle.spawn(async move {
         let d = db.clone();
-        let _ = tokio::task::spawn_blocking(move || recover(&d, helm_core::now_ms())).await;
+        // The chats each pass wrote run rows for are read on the pass's own thread.
+        if let Ok(chats) = tokio::task::spawn_blocking(move || {
+            let _ = recover(&d, helm_core::now_ms());
+            store::take_touched()
+        })
+        .await
+        {
+            store::emit_chats(&*events, chats);
+        }
         let flight = Arc::new(Flight::default());
         loop {
             let (d, f) = (db.clone(), flight.clone());
-            let n = tokio::task::spawn_blocking(move || {
-                pass(&d, &crate::gh::GhCli, &f, helm_core::now_ms())
+            let chats = tokio::task::spawn_blocking(move || {
+                if let Err(e) = pass(&d, &crate::gh::GhCli, &f, helm_core::now_ms()) {
+                    log::warn!("land step: {e}");
+                }
+                store::take_touched()
             })
             .await
-            .ok()
-            .and_then(|r| r.map_err(|e| log::warn!("land step: {e}")).ok())
-            .unwrap_or(0);
-            if n > 0 {
-                events.emit(helm_ipc::AppEvent::new("workflow"));
-            }
+            .unwrap_or_default();
+            store::emit_chats(&*events, chats);
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(FAST_WAIT_MS as u64)) => {}
                 _ = notify.notified() => {}

@@ -36,6 +36,14 @@ function probes(kind?: string): Probe[] {
     .filter((p) => !kind || p.probe === kind);
 }
 
+/** Empty projects hide by default; the fixture's board projects hold no
+ *  chats, so reveal them before counting groups. The choice is remembered for the session. */
+async function showEmptyProjects(p = page()): Promise<void> {
+  const t = p.locator(tid("sidebar-empty-toggle"));
+  await t.waitFor({ timeout: 20_000 });
+  if ((await t.getAttribute("aria-pressed")) !== "true") await t.click();
+}
+
 async function step(name: string, fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
@@ -148,6 +156,7 @@ describe("visual check and the host probes", { timeout: 15 * 60_000 }, () => {
     if (!board) return t.skip("the fake board (fakes/board) is not available");
     await step("V1", async () => {
       await page().waitForSelector(tid("board-sync", '[data-state="ok"]'), { timeout: 30_000 });
+      await showEmptyProjects();
       const groups = await page().$$eval(tid("sidebar-group", '[data-kind="board"]'), (els) =>
         els.map((e) => ({ id: e.getAttribute("data-project-id"), depth: e.getAttribute("data-depth"), h: e.getBoundingClientRect().height, text: e.textContent ?? "" })),
       );

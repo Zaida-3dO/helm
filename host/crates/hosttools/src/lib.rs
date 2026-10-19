@@ -27,6 +27,7 @@ pub mod reserved;
 pub mod sections;
 pub mod settings;
 pub mod settings_allow;
+pub mod settings_options;
 pub mod shells;
 pub mod spec;
 pub mod tools;

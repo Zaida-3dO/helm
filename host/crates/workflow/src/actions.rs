@@ -171,21 +171,15 @@ pub fn plan(tx: &Transaction<'_>, x: &Act<'_>, a: &Value, plan_text: &str) -> Ou
 
 fn change_json(
     tx: &Transaction<'_>,
-    x: &Act<'_>,
+    s: &WorkflowSettings,
     run: &Run,
     c: &Change,
     all: &[Change],
 ) -> rusqlite::Result<Value> {
-    let cap = engine::cap(tx, x.s, run, CapStage::Review, Some((&c.repo, &c.branch)))?;
-    let smoke_cap = engine::cap(
-        tx,
-        x.s,
-        run,
-        CapStage::Smoketest,
-        Some((&c.repo, &c.branch)),
-    )?;
+    let cap = engine::cap(tx, s, run, CapStage::Review, Some((&c.repo, &c.branch)))?;
+    let smoke_cap = engine::cap(tx, s, run, CapStage::Smoketest, Some((&c.repo, &c.branch)))?;
     let missing = if c.state == "open" {
-        engine::missing(x.s, run, c, all)
+        engine::missing(s, run, c, all)
     } else {
         vec![]
     };
@@ -197,32 +191,72 @@ fn change_json(
     }))
 }
 
-/// `status`: the active task, plus the chat's other open tasks (≤ 8).
-pub fn status(tx: &Transaction<'_>, x: &Act<'_>) -> Out {
-    let open = store::open_runs(tx, x.chat_id)?;
+/// One task with its plan and changes, plus the other open tasks listed (≤ 8): the `status`
+/// shape, shared by the orchestrator's `status` and the UI's `workflow_run_get`.
+fn run_json(
+    tx: &Transaction<'_>,
+    s: &WorkflowSettings,
+    run: Option<&Run>,
+    open: &[Run],
+) -> rusqlite::Result<Value> {
     let others: Vec<Value> = open
         .iter()
-        .filter(|r| r.status != "active")
+        .filter(|r| Some(&r.id) != run.map(|x| &x.id))
         .take(8)
         .map(|r| json!({"runId": r.id, "title": r.title, "status": r.status, "parkReason": r.park_reason}))
         .collect();
-    let Some(run) = store::active_run(tx, x.chat_id)? else {
-        return Ok(Ok(json!({"task": null, "otherTasks": others})));
+    let Some(run) = run else {
+        return Ok(json!({"task": null, "otherTasks": others}));
     };
     let all = store::changes(tx, &run.id)?;
     let changes = all
         .iter()
-        .map(|c| change_json(tx, x, &run, c, &all))
+        .map(|c| change_json(tx, s, run, c, &all))
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let plan_cap = engine::cap(tx, x.s, &run, CapStage::PlanReview, None)?;
-    Ok(Ok(json!({
+    let plan_cap = engine::cap(tx, s, run, CapStage::PlanReview, None)?;
+    Ok(json!({
         "task": {"runId": run.id, "title": run.title, "status": run.status, "attempt": run.attempt,
                  "visual": run.visual, "itemId": run.item_id, "skipped": run.skipped},
         "plan": {"id": run.plan_id, "approved": run.plan_approved, "signedOff": run.plan_signed_off,
-                 "rounds": run.plan_rounds, "cap": plan_cap, "missing": engine::plan_missing(x.s, &run)},
+                 "rounds": run.plan_rounds, "cap": plan_cap, "missing": engine::plan_missing(s, run)},
         "changes": changes,
         "otherTasks": others,
-    })))
+    }))
+}
+
+/// `status`: the active task, plus the chat's other open tasks (≤ 8).
+pub fn status(tx: &Transaction<'_>, x: &Act<'_>) -> Out {
+    let open = store::open_runs(tx, x.chat_id)?;
+    let run = store::active_run(tx, x.chat_id)?;
+    Ok(Ok(run_json(tx, x.s, run.as_ref(), &open)?))
+}
+
+/// The UI's view of a chat's workflow (`workflow_run_get`): the `status` shape around the chat's
+/// current task, which is the active task, else the newest open task with a change waiting on the
+/// user (Awaiting your Merge, Land failed, or a draft for review), else the newest open task. So a
+/// handed-off or parked task keeps its panel after the orchestrator moves on.
+pub fn chat_view(
+    tx: &Transaction<'_>,
+    s: &WorkflowSettings,
+    chat_id: &str,
+) -> rusqlite::Result<Value> {
+    let open = store::open_runs(tx, chat_id)?;
+    let mut current = open.iter().find(|r| r.status == "active");
+    if current.is_none() {
+        for r in &open {
+            if store::changes(tx, &r.id)?.iter().any(|c| {
+                matches!(
+                    c.state.as_str(),
+                    "awaiting_merge" | "land_failed" | "handed_off"
+                )
+            }) {
+                current = Some(r);
+                break;
+            }
+        }
+    }
+    let current = current.or(open.first());
+    run_json(tx, s, current, &open)
 }
 
 /// `update {repo, branch, pr?, base?, visual?}`: open or annotate a change; mark the task visual.

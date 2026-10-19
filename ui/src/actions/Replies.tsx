@@ -22,7 +22,7 @@ interface Props {
   chatId: string;
 }
 
-/** Continue, Yes and No above the composer. */
+/** Continue (only after a stopped or errored turn), and Yes and No (only after a question). */
 export function QuickReplies({ chatId }: Props) {
   const { api, store } = useShell();
   const ctx = useReplyContext(store, chatId);
@@ -37,6 +37,7 @@ export function QuickReplies({ chatId }: Props) {
           className="quick-reply"
           data-testid="quick-reply"
           data-reply={q.id}
+          label={q.hint}
           onClick={() => {
             setError(null);
             sendActionText(api, chatId, q.text).catch((e: unknown) => setError(String((e as Error).message ?? e)));

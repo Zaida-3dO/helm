@@ -1,8 +1,14 @@
 // Basic controls. Styles in ui.css; tokens in styles.css.
 
 import { forwardRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type TextareaHTMLAttributes } from 'react';
+import { IconAlert, IconCheck, IconChevronDown, IconChevronRight, IconInfo, IconSearch, IconSend, IconStop, IconX } from './icons.tsx';
 
-export type ButtonVariant = 'primary' | 'secondary' | 'text' | 'icon' | 'row-action';
+/**
+ * `ghost` is a quiet text button with an optional leading icon: no border, `--secondary`
+ * text, `--hover` on hover (the top bar's action row). `send` and `stop` are the composer's square
+ * buttons; with no children they draw their own glyph.
+ */
+export type ButtonVariant = 'primary' | 'secondary' | 'text' | 'icon' | 'row-action' | 'ghost' | 'send' | 'stop';
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
@@ -28,10 +34,16 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       aria-pressed={pressed}
       {...rest}
     >
-      {children}
+      {children ?? defaultGlyph(variant)}
     </button>
   );
 });
+
+function defaultGlyph(variant: ButtonVariant): ReactNode {
+  if (variant === 'send') return <IconSend size={15} strokeWidth={2.2} />;
+  if (variant === 'stop') return <IconStop size={12} filled />;
+  return null;
+}
 
 export interface TextInputProps extends InputHTMLAttributes<HTMLInputElement> {
   invalid?: string | null;
@@ -182,35 +194,18 @@ export function SettingRow({ title, description, children, testId }: { title: Re
   );
 }
 
-/** Lucide-style line icons the kit itself needs. */
-export function Icon({ name, size = 14 }: { name: 'x' | 'check' | 'chevron-down' | 'chevron-right' | 'alert' | 'info' | 'search'; size?: number }) {
-  const d: Record<string, ReactNode> = {
-    x: <path d="M18 6 6 18M6 6l12 12" />,
-    check: <path d="M20 6 9 17l-5-5" />,
-    'chevron-down': <path d="m6 9 6 6 6-6" />,
-    'chevron-right': <path d="m9 18 6-6-6-6" />,
-    alert: (
-      <>
-        <circle cx="12" cy="12" r="10" />
-        <path d="M12 8v4M12 16h.01" />
-      </>
-    ),
-    info: (
-      <>
-        <circle cx="12" cy="12" r="10" />
-        <path d="M12 16v-4M12 8h.01" />
-      </>
-    ),
-    search: (
-      <>
-        <circle cx="11" cy="11" r="8" />
-        <path d="m21 21-4.3-4.3" />
-      </>
-    ),
-  };
-  return (
-    <svg className="ui-icon" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      {d[name]}
-    </svg>
-  );
+const KIT_ICONS = {
+  x: IconX,
+  check: IconCheck,
+  'chevron-down': IconChevronDown,
+  'chevron-right': IconChevronRight,
+  alert: IconAlert,
+  info: IconInfo,
+  search: IconSearch,
+} as const;
+
+/** The kit's own few glyphs, by name (kept for existing callers). New code imports from icons.tsx. */
+export function Icon({ name, size = 14 }: { name: keyof typeof KIT_ICONS; size?: number }) {
+  const Glyph = KIT_ICONS[name];
+  return <Glyph size={size} />;
 }

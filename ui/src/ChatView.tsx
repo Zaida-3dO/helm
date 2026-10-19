@@ -227,13 +227,11 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
 
   return (
     <div className="chat-view" data-testid="chat-view" data-chat-id={chat.id} data-chat-status={chat.status}>
-      <header className="chat-head">
-        <h1>{chat.title}</h1>
-        <span className="mono muted">{chat.cwd}</span>
-        <span className={`status-pill s-${chat.status}`} data-testid="chat-status">
-          {chat.status}
-        </span>
-      </header>
+      {/* The title and folder live in the top bar and tags row, so the chat draws no
+          header of its own. The status stays as text for assistive tech and the e2e hook. */}
+      <span className="visually-hidden" data-testid="chat-status">
+        {chat.status}
+      </span>
       {notice && (
         <div className="notice" role="status">
           {notice}

@@ -386,3 +386,32 @@ fn an_accepted_merge_that_has_not_shown_yet_waits_and_a_foreign_pr_url_fails() {
     assert_eq!(t.change().state, "land_failed");
     assert!(gh.calls().is_empty());
 }
+
+#[test]
+fn a_pass_that_writes_marks_its_chat_and_a_waiting_pass_does_not() {
+    let t = setup(true, LandMode::Merge, "landing");
+    let _ = store::take_touched();
+    let gh = Script::default();
+    // GitHub still computing mergeability: only the wait row is written, so no event.
+    gh.say(
+        "pr view",
+        true,
+        &pr_json("OPEN", TIP, "main", "UNKNOWN", false),
+    );
+    t.pass(&gh, 10);
+    assert_eq!(t.change().state, "landing");
+    assert!(
+        store::take_touched().is_empty(),
+        "a wait is not a run write"
+    );
+    // A head that moved fails the land: a change write, so the chat is marked.
+    let gh = Script::default();
+    gh.say(
+        "pr view",
+        true,
+        &pr_json("OPEN", SHA, "main", "MERGEABLE", false),
+    );
+    t.pass(&gh, 10 + land::FAST_WAIT_MS);
+    assert_eq!(t.change().state, "land_failed");
+    assert_eq!(store::take_touched(), ["c"]);
+}

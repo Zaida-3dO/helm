@@ -6,6 +6,43 @@
 //! - `workflow_events`: the append-only record; kinds come from [`EVENT_KINDS`].
 
 use rusqlite::{params, OptionalExtension, Row, Transaction};
+use std::cell::RefCell;
+use std::collections::BTreeSet;
+
+thread_local! {
+    /// The chats whose task, change or event rows this thread wrote since the last
+    /// [`take_touched`]. Every write below marks its chat, so the `workflow_run {chatId}` event
+    /// follows every run write without each caller having to remember it.
+    static TOUCHED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+}
+
+fn touch(chat_id: &str) {
+    TOUCHED.with(|t| {
+        t.borrow_mut().insert(chat_id.to_owned());
+    });
+}
+
+/// Drain the chats this thread wrote run rows for. A rolled-back write may be in the list; the
+/// event it leads to only makes the UI re-read.
+pub fn take_touched() -> Vec<String> {
+    TOUCHED.with(|t| std::mem::take(&mut *t.borrow_mut()).into_iter().collect())
+}
+
+/// Emit `workflow_run {chatId}` for every chat this thread wrote run rows for, and clear the list.
+/// Call it on the thread that did the writes, after the transaction.
+pub fn emit_touched(events: &dyn helm_ipc::EventSink) {
+    emit_chats(events, take_touched());
+}
+
+/// Emit `workflow_run {chatId}` for each chat (the UI re-reads through `workflow_run_get`).
+pub fn emit_chats(events: &dyn helm_ipc::EventSink, chats: Vec<String>) {
+    for chat in chats {
+        events.emit(helm_ipc::AppEvent::new(RUN_EVENT).with("chatId", serde_json::json!(chat)));
+    }
+}
+
+/// The event that tells the UI a chat's workflow run changed.
+pub const RUN_EVENT: &str = "workflow_run";
 
 /// The event kinds, append-only. New kinds go last.
 pub const EVENT_KINDS: &[&str] = &[
@@ -221,6 +258,7 @@ pub fn insert_run(
          VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5)",
         params![id, chat_id, title, item_id, now],
     )?;
+    touch(chat_id);
     Ok(())
 }
 
@@ -257,6 +295,7 @@ pub fn save_run(
             now
         ],
     )?;
+    touch(&r.chat_id);
     Ok(())
 }
 
@@ -401,6 +440,16 @@ pub fn upsert_change(tx: &Transaction<'_>, c: &Change, now: i64) -> rusqlite::Re
             now
         ],
     )?;
+    if let Some(chat) = tx
+        .query_row(
+            "SELECT chat_id FROM workflow_runs WHERE id = ?1",
+            [&c.run_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        touch(&chat);
+    }
     Ok(())
 }
 
@@ -458,6 +507,7 @@ pub fn event(
         ],
     )?;
     let id = tx.last_insert_rowid();
+    touch(chat_id);
     // The board record this event maps to, for tasks linked to an item (Agent Standup).
     crate::sa_outbox::on_event(tx, run, e, id, now)?;
     Ok(id)
@@ -484,6 +534,40 @@ pub fn count_events(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn every_run_write_marks_its_chat() {
+        let (_d, db) = crate::mode::tests::db(&[("a", "claude"), ("b", "claude")]);
+        let _ = take_touched();
+        let w = |f: &dyn Fn(&Transaction<'_>) -> rusqlite::Result<()>| {
+            db.write(|tx| f(tx)).unwrap();
+            take_touched()
+        };
+        assert_eq!(w(&|tx| insert_run(tx, "r", "a", "T", None, 1)), ["a"]);
+        let run = db.snapshot(|tx| super::run(tx, "r")).unwrap().unwrap();
+        assert_eq!(w(&|tx| save_run(tx, &run, None, 2)), ["a"]);
+        let c = Change {
+            run_id: "r".into(),
+            repo: "github.com/o/r".into(),
+            branch: "x".into(),
+            state: "open".into(),
+            ..Default::default()
+        };
+        assert_eq!(w(&|tx| upsert_change(tx, &c, 3)), ["a"]);
+        let e = Event {
+            kind: "parked",
+            ..Default::default()
+        };
+        assert_eq!(w(&|tx| event(tx, "b", None, &e, 4).map(|_| ())), ["b"]);
+        assert!(w(&|_| Ok(())).is_empty(), "a read marks nothing");
+        // Draining clears the list.
+        db.write(|tx| insert_run(tx, "r2", "b", "T", None, 5))
+            .unwrap();
+        assert_eq!(take_touched(), ["b"]);
+        assert!(take_touched().is_empty());
+    }
+
     #[test]
     fn event_kinds_are_unique_and_44() {
         let mut k = super::EVENT_KINDS.to_vec();

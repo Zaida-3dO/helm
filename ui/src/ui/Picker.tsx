@@ -26,6 +26,16 @@ export interface PickerProps<T extends string> {
   searchable?: boolean;
   /** Larger trigger for settings rows (34u instead of 29u). */
   settings?: boolean;
+  /**
+   * The composer toolbar's trigger: gap 7, max width 230 (180 at 1000 px and below,
+   * 150 at 760 px and below), ellipsis. Pair it with `display` for a unified "Model · Effort" label.
+ */
+  compact?: boolean;
+  /** What the trigger shows instead of the chosen option's title. */
+  display?: ReactNode;
+  /** The trigger's tooltip. */
+  title?: string;
+  disabled?: boolean;
   placeholder?: string;
   testId?: string;
 }
@@ -37,7 +47,21 @@ export function filterOptions<T extends string>(options: PickerOption<T>[], q: s
   return options.filter((o) => (o.text ?? (typeof o.title === 'string' ? o.title : o.value)).toLowerCase().includes(s));
 }
 
-export function Picker<T extends string>({ value, options, onChange, label, heading, searchable, settings, placeholder, testId }: PickerProps<T>) {
+export function Picker<T extends string>({
+  value,
+  options,
+  onChange,
+  label,
+  heading,
+  searchable,
+  settings,
+  compact,
+  display,
+  title,
+  disabled,
+  placeholder,
+  testId,
+}: PickerProps<T>) {
   const trigger = useRef<HTMLButtonElement>(null);
   const pop = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
@@ -71,20 +95,22 @@ export function Picker<T extends string>({ value, options, onChange, label, head
       <button
         ref={trigger}
         type="button"
-        className={`ui-picker-trigger${settings ? ' settings' : ''}`}
+        className={`ui-picker-trigger${settings ? ' settings' : ''}${compact ? ' compact' : ''}`}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={label}
+        title={title}
+        disabled={disabled}
         data-testid={testId}
         onClick={() => setOpen((o) => !o)}
         onKeyDown={(e) => {
-          if (e.key === 'ArrowDown' && !open) {
+          if (e.key === 'ArrowDown' && !open && !disabled) {
             e.preventDefault();
             setOpen(true);
           }
         }}
       >
-        <span className="ui-picker-value">{current?.title ?? placeholder ?? 'Choose…'}</span>
+        <span className="ui-picker-value">{display ?? current?.title ?? placeholder ?? 'Choose…'}</span>
         <span className={`ui-picker-chevron${open ? ' open' : ''}`}>
           <Icon name="chevron-down" size={12} />
         </span>

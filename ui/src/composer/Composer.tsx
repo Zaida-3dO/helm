@@ -16,7 +16,8 @@ import { orderPending, itemState } from './queue.ts';
 import { refusal, toBase64, type Attached } from './attachments.ts';
 import { Recall } from './recall.ts';
 import { rankSkills, skillQuery, type Skill } from './skills.ts';
-import { accessoriesAt, collectSendContributions, mountComposer, type AccessoryContext } from './slots.ts';
+import { accessoriesAt, accessorySide, collectSendContributions, mountComposer, type AccessoryContext } from './slots.ts';
+import './composer.css';
 
 export interface ComposerProps {
   chat: ChatRecord;
@@ -272,6 +273,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   const actx: AccessoryContext = { chat, thread, busy, draftEmpty: empty };
   const above = accessoriesAt('above');
   const toolbar = accessoriesAt('toolbar');
+  const toolbarStart = toolbar.filter((a) => accessorySide(a) === 'start');
+  const toolbarEnd = toolbar.filter((a) => accessorySide(a) === 'end');
 
   return (
     <div
@@ -308,18 +311,6 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
           {error}
         </div>
       )}
-      {attached.length > 0 && (
-        <div className="composer-attachments" data-testid="composer-attachments">
-          {attached.map((a) => (
-            <span key={a.id} className="attachment-thumb" title={a.name}>
-              <img src={a.url} alt={a.name} />
-              <button type="button" className="small link" aria-label={`Remove ${a.name}`} onClick={() => removeAttached(a.id)}>
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
       {skillMatches.length > 0 && (
         <div className="skill-menu" role="listbox" aria-label="Skills" data-testid="skill-menu">
           {skillMatches.map((s) => (
@@ -329,42 +320,64 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
           ))}
         </div>
       )}
-      <Editor
-        key={chat.id}
-        initialText={chat.draft}
-        placeholder={busy ? 'Steer the running task…' : 'Message Claude…'}
-        onChange={onChange}
-        onKey={onKey}
-        handle={editor}
-      />
-      {ghost && (
-        <div className="ghost-hint muted" data-testid="autocomplete-ghost">
-          …{ghost.completion} <kbd>Tab</kbd>
-        </div>
-      )}
-      <div className="composer-bar">
-        <ModelPicker chat={chat} ops={ops} />
-        <PermissionChip mode={thread?.permissionMode ?? null} />
-        {toolbar.map((a) => (
-          <span key={a.id} className="composer-accessory" data-accessory={a.id}>
-            {a.render(actx)}
-          </span>
-        ))}
-        <span className="dock-spacer" />
-        {busy && (
-          <button
-            type="button"
-            className="danger"
-            data-testid="stop"
-            title={stopTooltip(behavior.stopSendsWaiting, behavior.showChoices)}
-            onClick={() => void stop(false)}
-          >
-            Stop
-          </button>
+      <div className="composer-box" data-testid="composer-box">
+        {attached.length > 0 && (
+          <div className="composer-attachments" data-testid="composer-attachments">
+            {attached.map((a) => (
+              <span key={a.id} className="attachment-thumb" title={a.name}>
+                <img src={a.url} alt={a.name} />
+                <button type="button" className="small link" aria-label={`Remove ${a.name}`} onClick={() => removeAttached(a.id)}>
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
         )}
-        <button type="button" className="primary" data-testid="send" disabled={empty && attached.length === 0} title={sendTooltip(ctx, busy)} onClick={() => void send('default')}>
-          {busy ? (behavior.mode === 'asap' ? 'Steer' : behavior.mode === 'queue' ? 'Queue' : 'Interrupt') : 'Send'}
-        </button>
+        <Editor
+          key={chat.id}
+          initialText={chat.draft}
+          placeholder={busy ? 'Steer the running task…' : 'Message Claude…'}
+          onChange={onChange}
+          onKey={onKey}
+          handle={editor}
+        />
+        {ghost && (
+          <div className="ghost-hint muted" data-testid="autocomplete-ghost">
+            …{ghost.completion} <kbd>Tab</kbd>
+          </div>
+        )}
+        <div className="composer-bar">
+          <div className="composer-selects">
+            <ModelPicker chat={chat} ops={ops} />
+            <PermissionChip mode={thread?.permissionMode ?? null} />
+            {toolbarStart.map((a) => (
+              <span key={a.id} className="composer-accessory" data-accessory={a.id}>
+                {a.render(actx)}
+              </span>
+            ))}
+          </div>
+          <div className="composer-actions">
+            {toolbarEnd.map((a) => (
+              <span key={a.id} className="composer-accessory" data-accessory={a.id}>
+                {a.render(actx)}
+              </span>
+            ))}
+            {busy && (
+              <button
+                type="button"
+                className="danger"
+                data-testid="stop"
+                title={stopTooltip(behavior.stopSendsWaiting, behavior.showChoices)}
+                onClick={() => void stop(false)}
+              >
+                Stop
+              </button>
+            )}
+            <button type="button" className="primary" data-testid="send" disabled={empty && attached.length === 0} title={sendTooltip(ctx, busy)} onClick={() => void send('default')}>
+              {busy ? (behavior.mode === 'asap' ? 'Steer' : behavior.mode === 'queue' ? 'Queue' : 'Interrupt') : 'Send'}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

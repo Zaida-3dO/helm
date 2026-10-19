@@ -1,0 +1,165 @@
+/* The composer dock and box.
+ *
+ * Every rule is scoped under `.composer-dock` so it outranks the older `.composer`, `.editor` and
+ * `.composer-bar` rules in chat.css whatever order the two sheets load in (this one is imported by
+ * Composer.tsx, which loads before chat.css). Once those rules are gone the extra class costs
+ * nothing.
+ */
+
+/* The dock: the same 820 px column as the transcript, 33 px gutters, 13 px below the box. */
+.composer-dock {
+  width: 100%;
+  max-width: calc(820px + 2 * 33px);
+  margin: 0 auto;
+  padding: 0 33px 13px;
+  gap: 8px;
+}
+
+.composer-dock .composer {
+  padding: 0;
+  border-top: 0;
+}
+
+/* Items stacked above the box share its width. */
+.composer-dock .queue {
+  max-width: none;
+  padding: 0;
+}
+
+/* One box: attachments, the editor and the toolbar. */
+.composer-dock .composer-box {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 15px;
+  box-shadow: var(--elev-1);
+  padding: 4px 5px 5px;
+  transition: border-color 110ms ease;
+}
+
+/* Focus is the border colour only; no ring around the box. */
+.composer-dock .composer-box:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 47%, var(--line));
+}
+
+:root[data-theme='dark'] .composer-dock .composer-box:focus-within {
+  border-color: color-mix(in srgb, var(--chrome-accent) 66%, var(--line-strong));
+}
+
+/* Dark chrome accent: a short lit line along the top edge, brighter while focused. */
+:root[data-theme='dark'] .composer-dock .composer-box::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: 24px;
+  width: min(170px, 50%);
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--accent) 58%, transparent) 30%,
+    color-mix(in srgb, var(--accent) 16%, transparent) 72%,
+    transparent
+  );
+  opacity: 0.35;
+  transition: opacity 160ms ease;
+}
+
+:root[data-theme='dark'] .composer-dock .composer-box:focus-within::before {
+  opacity: 0.8;
+}
+
+/* Forced colours drop the border tint, so keep a visible ring there. */
+@media (forced-colors: active) {
+  .composer-dock .composer-box:focus-within {
+    outline: 2px solid CanvasText;
+    outline-offset: 1px;
+  }
+}
+
+/* The editor is transparent inside the box: 14 px / 1.6, 66–220 px tall, then it scrolls. */
+.composer-dock .editor {
+  position: relative;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.composer-dock .editor:focus-within {
+  outline: none;
+  border: 0;
+}
+
+.composer-dock .editor-input {
+  min-height: 66px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 13px 13px 6px;
+  font-size: 14px;
+  line-height: 1.6;
+  caret-color: var(--text);
+  outline: none;
+}
+
+.composer-dock .editor-placeholder {
+  top: 13px;
+  left: 13px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+/* Toolbar inside the box: model, effort and chips on the left; actions on the right. */
+.composer-dock .composer-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 33px;
+  margin: 0;
+  padding: 0 5px 0 8px;
+  flex-wrap: nowrap;
+  user-select: none;
+}
+
+.composer-dock .composer-selects {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.composer-dock .composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+/* Attachments sit inside the box, above the text. */
+.composer-dock .composer-attachments {
+  padding: 9px 10px;
+  gap: 10px;
+  max-height: 208px;
+  overflow-y: auto;
+}
+
+.composer-dock .ghost-hint {
+  padding: 0 13px 4px;
+}
+
+.composer-dock .composer-error {
+  font-size: 11px;
+  padding: 0 4px 6px;
+  margin: 0;
+}
+
+@media (max-width: 1000px) {
+  .composer-dock {
+    max-width: calc(820px + 2 * 20px);
+    padding: 0 20px 13px;
+  }
+}

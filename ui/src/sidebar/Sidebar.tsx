@@ -26,6 +26,8 @@ import { layout, visibleRange } from './virtual.ts';
 import './sidebar.css';
 
 export const LAST_FOLDER_KEY = 'helm.lastFolder';
+/** Whether projects with no chats are shown; remembered on this machine. */
+export const SHOW_EMPTY_KEY = 'helm.sidebar.showEmptyProjects';
 export const PREVIEW_DELAY_MS = 300;
 
 export interface SidebarProps {
@@ -76,6 +78,12 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [collapsedItems, setCollapsedItems] = useState<Set<string>>(() => new Set());
   const [compact, setCompact] = useState(false);
+  const [showEmpty, setShowEmpty] = useState(() => localStorage.getItem(SHOW_EMPTY_KEY) === 'true');
+  const toggleEmpty = () =>
+    setShowEmpty((v) => {
+      localStorage.setItem(SHOW_EMPTY_KEY, String(!v));
+      return !v;
+    });
   const [menu, setMenu] = useState<Menu | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -141,8 +149,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         expandedChats: expanded,
         selectedChatId: selected,
         itemLinks: view === 'activity' ? undefined : { refs: itemRefs, collapsed: collapsedItems },
+        showEmpty,
       }),
-    [snap.projects, snap.rows, view, compact, expanded, selected, itemRefs, collapsedItems],
+    [snap.projects, snap.rows, view, compact, expanded, selected, itemRefs, collapsedItems, showEmpty],
   );
   const projectsById = useMemo(() => new Map(snap.projects.map((p) => [p.id, p])), [snap.projects]);
   const groupDepth = useMemo(() => {
@@ -565,6 +574,21 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
 
   function renderItem(it: ListItem) {
     if (it.kind === 'pinBreak') return <div className="sb-pin-break" aria-hidden="true" />;
+    if (it.kind === 'emptyToggle') {
+      const n = `${it.count} empty project${it.count === 1 ? '' : 's'}`;
+      return (
+        <button
+          type="button"
+          className="sb-empty-toggle"
+          data-testid="sidebar-empty-toggle"
+          aria-pressed={it.shown}
+          title={it.shown ? 'Hide projects that have no chats' : 'Projects with no chats are hidden'}
+          onClick={toggleEmpty}
+        >
+          {it.shown ? `Hide ${n}` : `Show ${n}`}
+        </button>
+      );
+    }
     if (it.kind === 'itemFolder') {
       return (
         <ItemFolderRow

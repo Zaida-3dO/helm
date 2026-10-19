@@ -59,3 +59,11 @@ test('chatElements reads leniently and a missing key is shown', async () => {
   assert.equal(isShown(e, 'turnTime'), true);
   assert.deepEqual(parseChatElements(null), {});
 });
+
+test('toolbar accessories join the left group unless they ask for the right; the eye goes right', async () => {
+  const { accessorySide } = await import('./slots.ts');
+  assert.equal(accessorySide({ id: 'orchestrator' }), 'start');
+  assert.equal(accessorySide({ id: 'panel-context' }), 'end', 'the side-panel eye sits with the actions');
+  assert.equal(accessorySide({ id: 'panel-context', side: 'start' }), 'start', 'an explicit side wins');
+  assert.equal(accessorySide({ id: 'x', side: 'end' }), 'end');
+});

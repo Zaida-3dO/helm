@@ -10,6 +10,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `folder-input` | Folder path input beside it (the last value is remembered) | |
 | `chat-item` | One chat row in the sidebar | `data-chat-id`, `data-status`, `data-depth` (chat nesting 0–2), `data-group` (the project it is shown under) |
 | `sidebar-group` | One project header in the sidebar | `data-project-id`, `data-kind` (`folder` `board`), `data-depth` (project nesting 0–2) |
+| `sidebar-empty-toggle` | "Show N empty projects" / "Hide N empty projects" row at the end of the projects view | `aria-pressed` (empty projects shown) |
 | `board-sync` | The Agent Standup sync line under the view switch | `data-state` (`never` `unconfigured` `syncing` `ok` `error`) |
 | `board-url`, `board-token`, `board-token-state`, `board-test`, `board-last-sync` | Settings → Projects connection fields: address, write-only token, "set"/"not set", Test connection, last sync | |
 | `chat-view` | The open chat | `data-chat-id`, `data-chat-status` |

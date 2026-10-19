@@ -82,6 +82,72 @@
   background: var(--hover);
   scale: 1.075;
 }
+/* Ghost (top-bar action row): a quiet text button, optionally with a leading icon. No border or
+   fill until hovered; the icon keeps the label's colour. */
+.ui-btn-ghost {
+  height: calc(28 * var(--ui-unit));
+  padding: 0 calc(8 * var(--ui-unit));
+  gap: calc(5 * var(--ui-unit));
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--secondary);
+}
+.ui-btn-ghost:hover:not(:disabled),
+.ui-btn-ghost[aria-pressed='true'],
+.ui-btn-ghost[aria-expanded='true'] {
+  background: var(--hover);
+  color: var(--text);
+}
+/* Send and Stop: the composer's square icon buttons. */
+.ui-btn-send {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  flex: none;
+  border: 0;
+  border-radius: 9px;
+  background: var(--text);
+  color: var(--surface);
+}
+.ui-btn-send:hover:not(:disabled) {
+  background: var(--text);
+  opacity: 0.85;
+  scale: 1.075;
+}
+.ui-btn-send:disabled {
+  opacity: 1;
+  background: var(--hover);
+  color: var(--muted);
+}
+/* Dark: the brushed-metal send. */
+:root[data-theme='dark'] .ui-btn-send:not(:disabled) {
+  background: linear-gradient(145deg, var(--text), color-mix(in srgb, var(--text) 85%, var(--surface)));
+  box-shadow:
+    inset 0 1px #fff9,
+    0 1px 5px #0003;
+}
+.ui-btn-stop {
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  flex: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: none;
+  color: var(--secondary);
+}
+.ui-btn-stop:hover:not(:disabled) {
+  background: var(--hover);
+}
+/* Row buttons: the bare `button` rule centres its content, which is right for a button and
+   wrong for a button that is a row (tool rows, file rows, nav entries, menu-like lists). Add this
+   class to such a button to start its content at the left edge. */
+.ui-row-btn {
+  justify-content: flex-start;
+  text-align: left;
+}
+
 .ui-danger,
 .ui-danger .ui-icon {
   color: var(--error) !important;
@@ -406,7 +472,26 @@ button.ui-chip-main:hover {
   border-color: var(--line-strong);
   background: var(--surface-alt);
 }
-.ui-picker-trigger:hover,
+.ui-picker-trigger.compact {
+  gap: 7px;
+  max-width: 230px;
+  min-width: 0;
+}
+@media (max-width: 1000px) {
+  .ui-picker-trigger.compact {
+    max-width: 180px;
+  }
+}
+@media (max-width: 760px) {
+  .ui-picker-trigger.compact {
+    max-width: 150px;
+  }
+}
+.ui-picker-trigger:disabled {
+  color: var(--muted);
+  cursor: var(--cursor-default);
+}
+.ui-picker-trigger:hover:not(:disabled),
 .ui-picker-trigger[aria-expanded='true'] {
   background: var(--surface-alt);
   border-color: var(--line);
@@ -423,10 +508,16 @@ button.ui-chip-main:hover {
 }
 .ui-picker-chevron {
   display: inline-flex;
-  transition: rotate 160ms var(--ease-out-soft);
+  flex: none;
+  transition:
+    rotate 160ms var(--ease-out-soft),
+    scale 120ms ease;
 }
 .ui-picker-chevron.open {
   rotate: 180deg;
+}
+.ui-picker-trigger:active:not(:disabled) .ui-picker-chevron {
+  scale: 0.8;
 }
 .ui-picker-pop {
   position: fixed;

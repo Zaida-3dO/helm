@@ -1,0 +1,165 @@
+/* Settings → Actions. Design-system tokens only; the controls come from ui/src/ui unchanged. */
+
+.actions-pane .ap-list {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.actions-pane .ap-item + .ap-item {
+  border-top: 1px solid var(--line);
+}
+
+.actions-pane .ap-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 6px;
+}
+
+.actions-pane .ap-summary {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 14px minmax(70px, 150px) auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: var(--cursor-pointer);
+}
+
+.actions-pane .ap-summary:hover {
+  background: var(--hover);
+}
+
+/* The list clips its rows, so the focus ring sits inside them. */
+.actions-pane .ap-summary:focus-visible {
+  outline-offset: -2px;
+}
+
+.actions-pane .ap-item.is-hidden .ap-summary {
+  opacity: 0.6;
+}
+
+.actions-pane .ap-label {
+  font-size: calc(12 * var(--ui-unit, 1px));
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions-pane .ap-tag {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: calc(11 * var(--ui-unit, 1px));
+  color: var(--secondary);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.actions-pane .ap-preview {
+  font-size: calc(11 * var(--ui-unit, 1px));
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions-pane .ap-tools {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+.actions-pane .ap-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: 8px;
+  font-size: calc(11 * var(--ui-unit, 1px));
+  color: var(--secondary);
+}
+
+.actions-pane .ap-editor {
+  display: grid;
+  gap: 14px;
+  padding: 6px 14px 14px 34px;
+}
+
+.actions-pane .ap-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  align-items: flex-start;
+}
+
+.actions-pane .ap-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.actions-pane .ap-field-label {
+  margin: 0;
+  font-size: calc(11 * var(--ui-unit, 1px));
+  color: var(--secondary);
+}
+
+.actions-pane .ap-editor .ui-input,
+.actions-pane .ap-editor select {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.actions-pane .ap-editor .ui-textarea {
+  min-height: 150px;
+}
+
+.actions-pane .ap-problem {
+  padding: 0 14px 10px 34px;
+}
+
+.actions-pane .ap-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.actions-pane .ap-empty {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  font-size: calc(12 * var(--ui-unit, 1px));
+  color: var(--secondary);
+}
+
+/* While a delete is being confirmed the row has no room for the tags and the preview. */
+.actions-pane .ap-item.is-confirming .ap-tag,
+.actions-pane .ap-item.is-confirming .ap-preview {
+  display: none;
+}
+
+/* A narrow window drops the message preview rather than crushing the label. */
+@media (max-width: 640px) {
+  .actions-pane .ap-summary {
+    grid-template-columns: 14px minmax(70px, 1fr) auto auto;
+  }
+  .actions-pane .ap-preview {
+    display: none;
+  }
+}
