@@ -1,13 +1,14 @@
 // The find-in-chat bar: Ctrl+F opens it at the transcript's top right,
 // Enter / Ctrl+G step to the older match, Shift+Enter / Ctrl+Shift+G to the newer one, Escape
 // closes it and gives focus back. Matches are highlighted with the CSS Custom Highlight API, so the
-// rendered Markdown is never rewritten. Helm searches the rows loaded in the chat view.
+// rendered Markdown is never rewritten. The loaded rows are matched locally at once; the host then
+// searches the chat's whole stored history, and a match in an older row loads it when stepped to.
 
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import type { MessageRow } from '../api/types.ts';
 import { useBinding, useLayer } from '../ui/index.ts';
 import { IconChevronDown, IconChevronUp, IconSearch, IconX } from '../ui/icons.tsx';
-import { FIND_MAX_QUERY, countLabel, findMatches, step, type FindMatch } from './find.ts';
+import { FIND_CAP, FIND_MAX_QUERY, countLabel, findMatches, mergeHostMatches, step, type FindMatch, type HostFound } from './find.ts';
 
 const ACTIVITY_KEY = 'helm.find.includeActivity';
 const ALL = 'helm-find';
@@ -68,6 +69,8 @@ function paint(root: HTMLElement, query: string, current: FindMatch | null): Ran
 
 export interface FindBarProps {
   rows: readonly MessageRow[];
+  /** One step of the host's whole-history search; absent where there is no host (tests). */
+  hostFind?: (query: string, includeActivity: boolean, after?: string) => Promise<{ rows: HostFound[]; nextCursor: string | null }>;
   /** The transcript box: its rows are searched for highlights and it hosts the bar. */
   container: RefObject<HTMLElement | null>;
   /** Bring a row into view (opening a folded turn if needed). */
@@ -76,7 +79,7 @@ export interface FindBarProps {
   onClose?: () => void;
 }
 
-export function FindBar({ rows, container, onJump, onClose }: FindBarProps) {
+export function FindBar({ rows, hostFind, container, onJump, onClose }: FindBarProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
@@ -97,7 +100,40 @@ export function FindBar({ rows, container, onJump, onClose }: FindBarProps) {
     const t = window.setTimeout(() => setDebounced(query), 180);
     return () => window.clearTimeout(t);
   }, [query]);
-  const { matches, capped } = useMemo(() => (open ? findMatches(rows, debounced, activity) : { matches: [], capped: false }), [open, rows, debounced, activity]);
+  // The host's matches over the whole stored history, for this query. Null while it is working.
+  const [hostRows, setHostRows] = useState<HostFound[] | null>(null);
+  useEffect(() => {
+    setHostRows(null);
+    if (!open || !hostFind || !debounced.trim()) return;
+    let stale = false;
+    void (async () => {
+      const found: HostFound[] = [];
+      let total = 0;
+      let after: string | undefined;
+      try {
+        for (;;) {
+          const r = await hostFind(debounced, activity, after);
+          if (stale) return;
+          found.push(...r.rows);
+          total += r.rows.reduce((n, x) => n + x.count, 0);
+          if (!r.nextCursor || total >= FIND_CAP) break;
+          after = r.nextCursor;
+        }
+        setHostRows(found);
+      } catch {
+        // The loaded rows still answer.
+      }
+    })();
+    return () => {
+      stale = true;
+    };
+  }, [open, hostFind, debounced, activity]);
+  const { matches, capped } = useMemo(() => {
+    if (!open) return { matches: [], capped: false };
+    const local = findMatches(rows, debounced, activity);
+    if (!hostRows) return local;
+    return mergeHostMatches(hostRows, local.matches, new Set(rows.map((r) => r.id)));
+  }, [open, rows, debounced, activity, hostRows]);
   // A new query starts at the newest match; new rows keep the reader's place when they can.
   useEffect(() => setTarget(matches.at(-1) ?? null), [debounced, activity]); // eslint-disable-line react-hooks/exhaustive-deps
   const found = target ? matches.findIndex((m) => m.rowId === target.rowId && m.occurrence === target.occurrence) : -1;

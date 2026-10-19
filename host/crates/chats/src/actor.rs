@@ -182,6 +182,9 @@ struct Actor {
     launched_long: Option<LongCommands>,
     /// That setting changed while a turn ran: relaunch at the next idle point.
     relaunch_on_idle: bool,
+    /// Running subagents pushed off the live list by a 31st: kept so their end still reaches
+    /// their tool row.
+    evicted: Vec<Subagent>,
     /// The turn-opening send being timed, until its first output ([`crate::timeline`]).
     timeline: Option<crate::timeline::SendTimeline>,
     /// The last worker start that failed: pre-warm waits [`PREWARM_RETRY`] before trying again.
@@ -261,6 +264,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         edit_waiting: false,
         launched_long: None,
         relaunch_on_idle: false,
+        evicted: Vec::new(),
         timeline: None,
         spawn_failed_at: None,
     };
@@ -336,6 +340,8 @@ impl Actor {
         &self,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<T>,
     ) -> Option<T> {
+        #[cfg(test)]
+        write_counts::bump(&self.chat_id);
         match self.sh.db.write(f) {
             Ok(v) => Some(v),
             Err(e) => {
@@ -437,14 +443,27 @@ impl Actor {
 
     fn set_status(&self, status: ChatStatus, error: Option<&str>) {
         let id = self.chat_id.clone();
-        self.write(|t| {
-            store::set_status(t, &id, status, error, now())?;
-            // Entering an active or stopped state drops the completion.
-            if status.is_busy() || status == ChatStatus::Stopped {
-                crate::manage::drop_completion(t, &id)?;
-            }
-            Ok(())
-        });
+        self.write(|t| Self::set_status_in(t, &id, status, error));
+        self.after_status(status);
+    }
+
+    /// The database half of a status change, so a caller can fold it into a bigger transaction.
+    fn set_status_in(
+        t: &rusqlite::Transaction<'_>,
+        id: &str,
+        status: ChatStatus,
+        error: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        store::set_status(t, id, status, error, now())?;
+        // Entering an active or stopped state drops the completion.
+        if status.is_busy() || status == ChatStatus::Stopped {
+            crate::manage::drop_completion(t, id)?;
+        }
+        Ok(())
+    }
+
+    /// The in-memory and event half of a status change, run after the write has committed.
+    fn after_status(&self, status: ChatStatus) {
         self.live.lock().unwrap().thread.status = status;
         if !status.is_busy() && self.live.lock().unwrap().stalled {
             // A turn that ends is no longer stalled.
@@ -829,24 +848,38 @@ impl Actor {
         if self.run_id.is_some() {
             return;
         }
-        self.last_output = Instant::now();
-        let run = uuid::Uuid::new_v4().to_string();
+        let run = self.new_run_id();
         let id = self.chat_id.clone();
         let chat = self.chat();
-        self.write(|t| {
-            t.execute(
-                "INSERT INTO runs(id, chat_id, cwd, model, thinking, status, started_at) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
-                rusqlite::params![
-                    run,
-                    id,
-                    chat.as_ref().map(|c| c.cwd.clone()),
-                    chat.as_ref().and_then(|c| c.model.clone()),
-                    chat.as_ref().and_then(|c| c.effort.clone()),
-                    now()
-                ],
-            )
-        });
-        self.run_id = Some(run);
+        self.write(|t| Self::insert_run(t, &run, &id, chat.as_ref()));
+    }
+
+    /// Start a run in memory: the caller writes the row (see `insert_run`).
+    fn new_run_id(&mut self) -> String {
+        self.last_output = Instant::now();
+        let run = uuid::Uuid::new_v4().to_string();
+        self.run_id = Some(run.clone());
+        run
+    }
+
+    fn insert_run(
+        t: &rusqlite::Transaction<'_>,
+        run: &str,
+        chat_id: &str,
+        chat: Option<&ChatRecord>,
+    ) -> rusqlite::Result<()> {
+        t.execute(
+            "INSERT INTO runs(id, chat_id, cwd, model, thinking, status, started_at) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
+            rusqlite::params![
+                run,
+                chat_id,
+                chat.map(|c| c.cwd.clone()),
+                chat.and_then(|c| c.model.clone()),
+                chat.and_then(|c| c.effort.clone()),
+                now()
+            ],
+        )
+        .map(|_| ())
     }
 
     /// Close the run, finish any live rows and tools, clear interactions, set the chat status.
@@ -1078,7 +1111,11 @@ impl Actor {
     // ------------------------------------------------------------------ commands
 
     fn on_cmd(&mut self, c: Cmd) {
-        self.touch();
+        // The runtime's own housekeeping is not use: a tick or a retirement must not make this
+        // worker look newer than another's, or the idle cap retires the wrong one.
+        if !matches!(c, Cmd::Retire | Cmd::StallCheck { .. }) {
+            self.touch();
+        }
         match c {
             Cmd::Dispatch(sid) => self.dispatch(&sid, false),
             Cmd::Kick => self.advance_queue(),
@@ -1266,6 +1303,16 @@ impl Actor {
     }
 
     fn dispatch(&mut self, sid: &str, from_queue: bool) {
+        #[cfg(test)]
+        let before = write_counts::get(&self.chat_id);
+        self.dispatch_inner(sid, from_queue);
+        // The actor is one thread and the only user of `write` for its chat, so the difference is
+        // exactly this dispatch's own transactions.
+        #[cfg(test)]
+        write_counts::set_last_dispatch(&self.chat_id, write_counts::get(&self.chat_id) - before);
+    }
+
+    fn dispatch_inner(&mut self, sid: &str, from_queue: bool) {
         let Some(sub) = self.submission(sid) else {
             return;
         };
@@ -1295,17 +1342,27 @@ impl Actor {
             if !self.ensure_worker() {
                 return;
             }
-            self.set_status(ChatStatus::Starting, None);
-            self.open_run();
         }
-        if from_queue || !busy {
+        if !self.ensure_worker() {
+            return;
+        }
+        // The turn's opening writes go in one transaction (one fsync, not four): the status, the
+        // run, the user row and the submission's 'dispatching' state. The submission is saved as
+        // 'dispatching' before the prompt line is written (never resend).
+        let opens_run = !busy && self.run_id.is_none();
+        let mut new_run: Option<(String, Option<ChatRecord>)> = None;
+        if opens_run {
+            let run = self.new_run_id();
+            new_run = Some((run, self.chat()));
+        }
+        let row = if from_queue || !busy {
             // A prompt that opens a turn: its user row shows at once, as saved.
             let mut details = json!({"submissionId": sid, "mode": sub.mode});
             let images = crate::message_images::for_submission(&self.sh.db, sid);
             if !images.is_empty() {
                 details["images"] = json!(images);
             }
-            let row = RowWrite {
+            Some(RowWrite {
                 source_key: format!("u:{sid}"),
                 role: "user",
                 text: sub.text.clone(),
@@ -1317,24 +1374,52 @@ impl Actor {
                 details,
                 entry_id: None,
                 parent_id: None,
-            };
-            self.upsert_row(&row);
+            })
+        } else {
+            None
+        };
+        let run = self.run_id.clone();
+        let id = self.chat_id.clone();
+        let rev = self.sh.clock.next();
+        let artifacts = self.sh.cfg.artifacts();
+        let carry: Option<String> = self
+            .write(|t| {
+                if !busy {
+                    Self::set_status_in(t, &id, ChatStatus::Starting, None)?;
+                }
+                if let Some((r, chat)) = &new_run {
+                    Self::insert_run(t, r, &id, chat.as_ref())?;
+                }
+                if let Some(row) = &row {
+                    session_log::upsert_row(t, &artifacts, &id, row, rev)?;
+                }
+                t.execute(
+                    "UPDATE submissions SET state = 'dispatching' WHERE id = ?1",
+                    [sid],
+                )?;
+                t.execute(
+                    "UPDATE submission_meta SET run_id = ?1 WHERE submission_id = ?2",
+                    rusqlite::params![run, sid],
+                )?;
+                // A message fork's carried history goes once, with its first prompt.
+                use rusqlite::OptionalExtension;
+                let c: Option<String> = t
+                    .query_row(
+                        "SELECT text FROM fork_carry WHERE chat_id = ?1",
+                        [&id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                t.execute("DELETE FROM fork_carry WHERE chat_id = ?1", [&id])?;
+                Ok(c)
+            })
+            .flatten();
+        if !busy {
+            self.after_status(ChatStatus::Starting);
+        }
+        if let Some(row) = &row {
             self.emit_rows(std::slice::from_ref(&row.source_key));
         }
-        if !self.ensure_worker() {
-            return;
-        }
-        let run = self.run_id.clone();
-        self.write(|t| {
-            t.execute(
-                "UPDATE submissions SET state = 'dispatching' WHERE id = ?1",
-                [sid],
-            )?;
-            t.execute(
-                "UPDATE submission_meta SET run_id = ?1 WHERE submission_id = ?2",
-                rusqlite::params![run, sid],
-            )
-        });
         let mut cmd = json!({"type": "prompt", "submissionId": sid, "text": sub.text});
         let context: Option<String> = self
             .sh
@@ -1361,21 +1446,6 @@ impl Actor {
         if !images.is_empty() {
             cmd["images"] = json!(images);
         }
-        // A message fork's carried history goes once, with its first prompt.
-        let carry: Option<String> = self
-            .write(|t| {
-                use rusqlite::OptionalExtension;
-                let c: Option<String> = t
-                    .query_row(
-                        "SELECT text FROM fork_carry WHERE chat_id = ?1",
-                        [&self.chat_id],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                t.execute("DELETE FROM fork_carry WHERE chat_id = ?1", [&self.chat_id])?;
-                Ok(c)
-            })
-            .flatten();
         let context = match (carry, context) {
             (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
             (a, b) => a.or(b),
@@ -1839,6 +1909,7 @@ impl Actor {
                     report: None,
                     report_truncated: false,
                 };
+                self.evicted.retain(|x| x.tool_call_id != id);
                 {
                     let mut live = self.live.lock().unwrap();
                     let list = &mut live.thread.subagents;
@@ -1850,7 +1921,10 @@ impl Actor {
                             .iter()
                             .position(|x| x.status != SubagentStatus::Running)
                             .unwrap_or(0);
-                        list.remove(i);
+                        let gone = list.remove(i);
+                        if gone.status == SubagentStatus::Running {
+                            self.evicted.push(gone);
+                        }
                     }
                     recount(&mut live.thread);
                 }
@@ -1908,6 +1982,19 @@ impl Actor {
                     recount(&mut live.thread);
                     ended
                 };
+                // One pushed off the list while it ran still gets its end onto its tool row.
+                let ended = ended.or_else(|| {
+                    let i = self.evicted.iter().position(|x| x.tool_call_id == id)?;
+                    let mut s = self.evicted.remove(i);
+                    let t = now();
+                    s.status = status;
+                    s.ended_at = Some(t);
+                    s.duration_ms = int("durationMs").or(Some(t - s.started_at));
+                    s.tokens = int("tokens").or(s.tokens);
+                    s.tool_uses = int("toolUses").or(s.tool_uses);
+                    s.error = str_of(v, "error").filter(|e| !e.is_empty());
+                    Some(s)
+                });
                 if let Some(mut full) = ended {
                     set_report(&mut full, report.as_deref(), ROW_REPORT_BYTES);
                     self.persist_subagent(&full);
@@ -1977,6 +2064,14 @@ impl Actor {
             recount(&mut live.thread);
             ended
         };
+        let mut ended = ended;
+        for mut s in std::mem::take(&mut self.evicted) {
+            s.status = SubagentStatus::Stopped;
+            s.ended_at = Some(now());
+            s.duration_ms = Some(now() - s.started_at);
+            s.error = Some(reason.to_owned());
+            ended.push(s);
+        }
         for s in &ended {
             self.persist_subagent(s);
         }
@@ -2512,6 +2607,48 @@ mod subagent_tests {
             .await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_running_subagent_pushed_off_the_roster_still_settles_onto_its_row() {
+        let mut h = harness();
+        let (chat, w) = running(&mut h).await;
+        launch(&w, "sa_0").await;
+        // The rest only need their roster entry: no tool rows to write.
+        for i in 1..31 {
+            w.emit(json!({"type": "subagent_start", "toolCallId": format!("sa_{i}"), "name": format!("agent {i}")}))
+                .await;
+        }
+        patiently(&h, "31 launched", |h| {
+            h.rt.live_thread(&chat)
+                .is_some_and(|t| t.subagents.iter().any(|s| s.tool_call_id == "sa_30"))
+        })
+        .await;
+        let t = h.rt.live_thread(&chat).unwrap();
+        assert_eq!(t.subagents.len(), 30);
+        assert!(
+            t.subagents.iter().all(|s| s.tool_call_id != "sa_0"),
+            "the oldest was pushed off"
+        );
+        w.emit(json!({"type": "subagent_end", "toolCallId": "sa_0", "status": "completed", "report": "done early", "durationMs": 10}))
+            .await;
+        patiently(&h, "the evicted agent settled on its row", |h| {
+            subagent_col(h, "sa_0", ".status") == ["completed"]
+        })
+        .await;
+        assert_eq!(subagent_col(&h, "sa_0", ".report"), ["done early"]);
+        assert_eq!(subagent_col(&h, "sa_0", ".name"), ["Echo alpha"]);
+    }
+
+    /// `H::until` allows two seconds; this test sends 30 events and is run under heavy load too.
+    async fn patiently(h: &H, what: &str, f: impl Fn(&H) -> bool) {
+        for _ in 0..1000 {
+            if f(h) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for: {what}");
+    }
+
     fn subagent_col(h: &H, id: &str, path: &str) -> Vec<String> {
         h.col(&format!(
             "SELECT json_extract(details, '$.subagent{path}') FROM messages WHERE source_key = 't:{id}'"
@@ -2638,5 +2775,38 @@ mod subagent_tests {
             ["The worker stopped before this agent finished."]
         );
         assert_eq!(h.rt.live_thread(&chat).unwrap().subagents_running, 0);
+    }
+}
+
+/// Test-only count of the actor's write transactions per chat (the opening-writes test).
+#[cfg(test)]
+pub(crate) mod write_counts {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    static COUNTS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
+
+    pub(crate) fn bump(chat: &str) {
+        *COUNTS.lock().unwrap().entry(chat.to_owned()).or_default() += 1;
+    }
+
+    pub(crate) fn get(chat: &str) -> usize {
+        COUNTS.lock().unwrap().get(chat).copied().unwrap_or(0)
+    }
+
+    static LAST_DISPATCH: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
+
+    pub(crate) fn set_last_dispatch(chat: &str, n: usize) {
+        LAST_DISPATCH.lock().unwrap().insert(chat.to_owned(), n);
+    }
+
+    /// Write transactions the chat's most recent `dispatch` made.
+    pub(crate) fn last_dispatch(chat: &str) -> usize {
+        LAST_DISPATCH
+            .lock()
+            .unwrap()
+            .get(chat)
+            .copied()
+            .unwrap_or(0)
     }
 }

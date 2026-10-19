@@ -8,6 +8,7 @@
 //! | `open_external` | maintenance | `{url}`: http, https and mailto only, re-checked here |
 //! | `folder_pick` | blocking | the native folder dialog; see [`folder`] |
 //! | `files_pick` | blocking | the native multi-file dialog; see [`files`] |
+//! | `window_zoom` | maintenance | `{level}` 50-200 in steps of 10: zoom the web view itself |
 //!
 //! The app registers a [`ShellService`] (`register_services`) and taps every event through
 //! [`ShellService::observe`]. The tray, hotkey, badge and toasts are drawn by the app
@@ -39,7 +40,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("audio_inputs", OpClass::Blocking, audio_inputs)
         .blocking("open_external", OpClass::Maintenance, open_external)
         .blocking("folder_pick", OpClass::Blocking, folder::folder_pick)
-        .blocking("files_pick", OpClass::Blocking, files::files_pick);
+        .blocking("files_pick", OpClass::Blocking, files::files_pick)
+        .blocking("window_zoom", OpClass::Maintenance, window_zoom);
 }
 
 /// Adds the [`ShellService`]. Needs the database and platform already registered.
@@ -69,6 +71,20 @@ fn settings_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let svc = ctx.services.need::<ShellService>()?;
     let view = svc.save(s).map_err(ApiError::bad_args)?;
     to_value(&view)
+}
+
+fn window_zoom(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct A {
+        level: i64,
+    }
+    let a: A = serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    ctx.services
+        .need::<ShellService>()?
+        .set_zoom(a.level)
+        .map_err(ApiError::bad_args)?;
+    Ok(Value::Null)
 }
 
 fn audio_inputs(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {

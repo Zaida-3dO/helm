@@ -190,3 +190,22 @@ test('a window drag starts only on bare bar surface, left button, no Ctrl', () =
   assert.equal(startsDrag(bare, 0, true), false, 'Ctrl held');
   assert.equal(startsDrag(null, 0, false), false);
 });
+
+test('keys: a later holder of an id is undone without losing the earlier one', () => {
+  const reg = new KeyRegistry();
+  const ran: string[] = [];
+  const offMain = reg.register({ id: 'chat.find', title: 'Find', defaultKeys: 'Ctrl+F', run: () => ran.push('main') });
+  const offSide = reg.register({ id: 'chat.find', title: 'Find', defaultKeys: 'Ctrl+F', run: () => ran.push('side') });
+  reg.dispatch(key('f', { ctrl: true }));
+  offSide();
+  reg.dispatch(key('f', { ctrl: true }));
+  assert.deepEqual(ran, ['side', 'main']);
+  // out-of-order: main goes first while side is live, side still holds, then nothing remains
+  const offSide2 = reg.register({ id: 'chat.find', title: 'Find', defaultKeys: 'Ctrl+F', run: () => ran.push('side2') });
+  offMain();
+  reg.dispatch(key('f', { ctrl: true }));
+  assert.equal(ran[2], 'side2');
+  offSide2();
+  assert.equal(reg.dispatch(key('f', { ctrl: true })), false);
+  assert.equal(reg.list().length, 0);
+});

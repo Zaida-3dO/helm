@@ -408,6 +408,121 @@ fn exists_beyond(
     )
 }
 
+/// Rows scanned per `chat_find` step.
+pub const FIND_STEP: i64 = 2000;
+/// The longest query searched, as in the find bar.
+pub const FIND_MAX_QUERY: usize = 256;
+const FIND_MAX_PER_ROW: i64 = 10_000;
+
+fn count_in(hay: &str, needle: &str) -> i64 {
+    let mut n = 0;
+    let mut from = 0;
+    while n < FIND_MAX_PER_ROW {
+        match hay[from..].find(needle) {
+            Some(i) => {
+                n += 1;
+                from += i + needle.len();
+            }
+            None => break,
+        }
+    }
+    n
+}
+
+/// Find in chat over the whole stored history (active branch): the rows of one scan step whose
+/// text contains `query`, case-insensitively, with the same notion of searchable text as the find
+/// bar (`ui/src/transcript/find.ts`). Returns the cursor to continue from while rows remain.
+pub fn find_step(
+    tx: &Transaction<'_>,
+    args: &ChatFindArgs,
+) -> rusqlite::Result<Option<ChatFindResult>> {
+    let chat = &args.chat_id;
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1)",
+        [chat],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    let q: String = args
+        .query
+        .chars()
+        .take(FIND_MAX_QUERY)
+        .collect::<String>()
+        .to_lowercase();
+    if q.trim().is_empty() {
+        return Ok(Some(ChatFindResult {
+            rows: Vec::new(),
+            next_cursor: None,
+        }));
+    }
+    let activity = args.include_activity.unwrap_or(false);
+    let from = match args.after.as_deref() {
+        Some(c) => match parse_cursor(tx, chat, c)? {
+            Some(f) => Some(f),
+            None => {
+                return Ok(Some(ChatFindResult {
+                    rows: Vec::new(),
+                    next_cursor: None,
+                }))
+            }
+        },
+        None => None,
+    };
+    let where_from = if from.is_some() {
+        "AND (timestamp, id) > (?2, ?3)"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT id, role, text, thinking, tool_name,
+                CASE WHEN json_valid(details) AND json_type(details, '$.toolArgs') = 'text'
+                     THEN json_extract(details, '$.toolArgs') END
+         FROM messages WHERE chat_id = ?1 AND active = 1 {where_from}
+         ORDER BY timestamp, id LIMIT ?4"
+    );
+    let (t, i) = from.unwrap_or((0, 0));
+    let mut st = tx.prepare(&sql)?;
+    let mut rows = st.query(params![chat, t, i, FIND_STEP])?;
+    let mut found = Vec::new();
+    let mut scanned = 0;
+    let mut last = 0;
+    while let Some(r) = rows.next()? {
+        scanned += 1;
+        last = r.get::<_, i64>(0)?;
+        let role: String = r.get(1)?;
+        let text: String = r.get(2)?;
+        let thinking: String = r.get(3)?;
+        let hay = match role.as_str() {
+            "user" => text,
+            "assistant" if activity && !thinking.is_empty() => format!(
+                "{thinking}
+{text}"
+            ),
+            "assistant" => text,
+            _ if !activity => continue,
+            "toolResult" => {
+                let name: Option<String> = r.get(4)?;
+                let args: Option<String> = r.get(5)?;
+                [name.unwrap_or_default(), args.unwrap_or_default(), text].join(
+                    "
+",
+                )
+            }
+            _ => text,
+        };
+        let count = count_in(&hay.to_lowercase(), &q);
+        if count > 0 {
+            found.push(FoundRow { id: last, count });
+        }
+    }
+    Ok(Some(ChatFindResult {
+        rows: found,
+        next_cursor: (scanned == FIND_STEP).then(|| last.to_string()),
+    }))
+}
+
 /// One transcript page: the latest 100 by default, or 100 before/after a
 /// cursor, or 100 around a message id.
 pub fn transcript_page(

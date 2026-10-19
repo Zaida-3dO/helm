@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FONT_DEFAULTS, fontVars, parseFontSizes, parseZoom } from './theme.ts';
+import { FONT_DEFAULTS, applyZoom, fontVars, parseFontSizes, parseZoom } from './theme.ts';
 import { sizeOptions, zoomOptions } from '../settings/generalOptions.ts';
 
 test('stored text sizes are kept only when whole and in range; the rest fall back to the defaults', () => {
@@ -40,4 +40,16 @@ test('the General pane offers every size in range and every zoom step, defaults 
   const z = zoomOptions();
   assert.equal(z.length, 16);
   assert.equal(z.find((o) => o.value === '100')?.title, '100% (default)');
+});
+
+test('zoom goes to the host web view and leaves no CSS zoom on the page', () => {
+  const calls: unknown[] = [];
+  const api = (op: string, args?: unknown) => {
+    calls.push([op, args]);
+    return Promise.resolve(null as never);
+  };
+  const root = { style: { zoom: '1.2' } } as unknown as HTMLElement;
+  applyZoom(api, root, 120);
+  assert.deepEqual(calls, [['window_zoom', { level: 120 }]]);
+  assert.equal(root.style.zoom, '');
 });

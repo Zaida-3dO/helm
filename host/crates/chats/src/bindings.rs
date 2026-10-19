@@ -51,6 +51,8 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         ChatCreateArgs,
         ChatIdArgs,
         TranscriptPageArgs,
+        ChatFindArgs,
+        ChatFindResult,
         ChatSendArgs,
         ChatStopArgs,
         SubmissionActionArgs,

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { countLabel, findMatches, step } from './find.ts';
+import { countLabel, findMatches, mergeHostMatches, step } from './find.ts';
 import { row } from '../dev/fixtures.ts';
 
 const rows = [
@@ -40,4 +40,20 @@ test('stepping starts at the newest match and wraps both ways', () => {
   assert.equal(countLabel(2, 120, false), '3 / 120');
   assert.equal(countLabel(0, 10_000, true), '1 / 10000+');
   assert.equal(countLabel(-1, 0, false), 'No matches');
+});
+
+test('host matches fill in the rows that are not loaded; loaded rows are matched locally', () => {
+  const local = findMatches(rows.slice(2), 'sidebar', false).matches; // rows 3-4 loaded
+  const host = [
+    { id: 1, count: 2 },
+    { id: 4, count: 5 }, // loaded: the host's count is ignored for it
+  ];
+  const { matches, capped } = mergeHostMatches(host, local, new Set([3, 4]));
+  assert.deepEqual(matches, [
+    { rowId: 1, occurrence: 0 },
+    { rowId: 1, occurrence: 1 },
+    { rowId: 4, occurrence: 0 },
+  ]);
+  assert.equal(capped, false);
+  assert.equal(mergeHostMatches(host, [], new Set(), 3).capped, true);
 });

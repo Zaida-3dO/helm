@@ -84,7 +84,10 @@ export interface Conflict {
 type Listener = () => void;
 
 export class KeyRegistry {
+  /** The binding in force per id: the top of that id's stack. */
   private readonly bindings = new Map<string, Binding>();
+  /** Every live registration per id, oldest first, so an unmount restores the previous holder. */
+  private readonly stacks = new Map<string, Binding[]>();
   /** id → chord (null = cleared by the user). */
   private user: Record<string, string | null> = {};
   private readonly listeners = new Set<Listener>();
@@ -105,13 +108,24 @@ export class KeyRegistry {
   }
 
   register(b: Binding): () => void {
+    // Two mounted views (main chat + side chat) may register one id: the latest wins, and when it
+    // unregisters the earlier holder is back in force rather than the id vanishing.
+    const stack = [...(this.stacks.get(b.id) ?? []), b];
+    this.stacks.set(b.id, stack);
     this.bindings.set(b.id, b);
     this.changed();
     return () => {
-      if (this.bindings.get(b.id) === b) {
+      const cur = this.stacks.get(b.id) ?? [];
+      if (!cur.includes(b)) return;
+      const next = cur.filter((x) => x !== b);
+      if (next.length === 0) {
+        this.stacks.delete(b.id);
         this.bindings.delete(b.id);
-        this.changed();
+      } else {
+        this.stacks.set(b.id, next);
+        this.bindings.set(b.id, next[next.length - 1]!);
       }
+      this.changed();
     };
   }
 

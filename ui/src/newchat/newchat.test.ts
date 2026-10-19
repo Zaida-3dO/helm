@@ -112,6 +112,8 @@ interface Harness {
   failSends: { n: number };
   /** While set, sends wait for it. */
   gate: { wait: Promise<void> | null };
+  /** The Runtime default model the host answers with (null: Claude Code's default). */
+  runtime: { model: string | null };
 }
 
 function chatRecord(id: string, cwd: string, projectId: string): ChatRecord {
@@ -141,7 +143,9 @@ function harness(opts: { open?: { id: string; cwd: string; projectId: string } }
       return { submission: { id: submissionId }, chat: chatRecord(chatId, '', '') };
     },
   } as unknown as ChatOps;
+  const runtime = { model: null as string | null };
   const api = (async (op: string, args?: unknown) => {
+    if (op === 'runtime_settings_get') return { model: runtime.model };
     calls.push({ op, args: [args] });
     const a = (args ?? {}) as { cwd?: string; projectId?: string };
     // The host's folder project is the named one, else "fp:<cwd>".
@@ -179,6 +183,7 @@ function harness(opts: { open?: { id: string; cwd: string; projectId: string } }
     storage,
     failSends,
     gate,
+    runtime,
     fireSelection: () => {
       for (const l of [...listeners]) l();
     },
@@ -442,7 +447,7 @@ test('the menu item opens the Primary folder dialog for its project and is off f
   assert.equal(primaryFolderMenuItem(PROJECTS.find((p) => p.id === 'old')!).disabled, true);
 });
 
-test('opening the chat a refused first send made does not discard it; a running send keeps its chat', async () => {
+test('opening the chat a refused first send made does not discard it; a running send keeps its chat until it is refused', async () => {
   const h = harness();
   h.ctl.show({ projectId: 'helm' });
   const ops = draftOps(h.env.ops, h.ctl);
@@ -466,6 +471,45 @@ test('opening the chat a refused first send made does not discard it; a running 
   while (!h2.calls.some((c) => c.op === 'send')) await new Promise((r) => setImmediate(r));
   h2.ctl.leave();
   release();
+  assert.ok(!h2.calls.some((c) => c.op === 'chat_discard_untouched'), 'kept while the send runs');
   await assert.rejects(sending);
-  assert.ok(!h2.calls.some((c) => c.op === 'chat_discard_untouched'));
+  // ...and once that send is refused with the page already left, the empty chat is discarded.
+  assert.ok(h2.calls.some((c) => c.op === 'chat_discard_untouched'));
+});
+
+test('a new draft shows the Runtime default model, and a model the user picked first is kept', async () => {
+  const h = harness();
+  h.runtime.model = 'claude-test-model';
+  h.ctl.show();
+  assert.equal(h.ctl.draft!.model, null);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(h.ctl.draft!.model, 'claude-test-model');
+  assert.equal(h.ctl.record()!.model, 'claude-test-model');
+
+  const g = harness();
+  g.runtime.model = 'claude-test-model';
+  g.ctl.show();
+  g.ctl.setModel('picked');
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(g.ctl.draft!.model, 'picked');
+});
+
+test('typed text survives a restart, and a sent or emptied draft leaves none behind', async () => {
+  const h = harness();
+  h.ctl.show({ projectId: 'helm' });
+  await draftOps(h.env.ops, h.ctl).saveDraft('x', 'half a thought', 3);
+  // A fresh controller on the same storage (an app restart) opens with the text.
+  const again = new NewChatController();
+  again.setProjects(PROJECTS);
+  again.attach(h.env);
+  again.show({ projectId: 'helm' });
+  assert.equal(again.draft!.text, 'half a thought');
+  assert.equal(again.record()!.draft, 'half a thought');
+  assert.equal(again.untouched(), false);
+
+  await draftOps(h.env.ops, h.ctl).send('x', 's1', 'half a thought', 'default', 4);
+  const third = new NewChatController();
+  third.attach(h.env);
+  third.show();
+  assert.equal(third.draft!.text, '');
 });

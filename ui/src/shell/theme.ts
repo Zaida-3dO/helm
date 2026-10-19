@@ -70,11 +70,13 @@ export function applyFontSizes(root: HTMLElement, s: FontSizes): void {
 }
 
 /**
- * Zoom the whole window. Helm applies it as CSS zoom on <html>: the host has no web-view zoom
- * operation yet, and the Tauri zoom call needs a capability the app does not grant.
+ * Zoom the whole window: the host sets the web view's own zoom (`window_zoom`), so the page keeps
+ * plain CSS pixels and popups, resizers and the pointer need no compensation. Any CSS zoom left on
+ * <html> by an earlier build is cleared.
  */
-export function applyZoom(root: HTMLElement, level: number): void {
-  root.style.zoom = level === ZOOM_DEFAULT ? '' : String(level / 100);
+export function applyZoom(api: ApiFn, root: HTMLElement, level: number): void {
+  root.style.zoom = '';
+  api('window_zoom', { level }).catch(() => undefined);
 }
 
 type Bus = { on: (kind: string, h: (e: Record<string, unknown>) => void) => () => void };
@@ -97,13 +99,13 @@ export function connectAppearance(api: ApiFn, bus: Bus, root: HTMLElement): () =
     .then((v) => applyFontSizes(root, parseFontSizes(v)))
     .catch(() => undefined);
   api<unknown>('preference_get', { key: 'zoomLevel' })
-    .then((v) => applyZoom(root, parseZoom(v)))
+    .then((v) => applyZoom(api, root, parseZoom(v)))
     .catch(() => undefined);
   const off = bus.on('preferences', (e) => {
     const changed = (e.changed ?? {}) as Record<string, unknown>;
     if ('appearance' in changed) set(changed.appearance);
     if ('fontSizes' in changed) applyFontSizes(root, parseFontSizes(changed.fontSizes));
-    if ('zoomLevel' in changed) applyZoom(root, parseZoom(changed.zoomLevel));
+    if ('zoomLevel' in changed) applyZoom(api, root, parseZoom(changed.zoomLevel));
   });
   return () => {
     off();

@@ -371,7 +371,7 @@ mod tests {
         // compactSidebar, then fastMode fails: sidebarWidth and zoomLevel are not tried.
         assert_eq!(r["applied"].as_object().unwrap().len(), 1);
         assert_eq!(r["applied"]["compactSidebar"]["after"], true);
-        assert!(r["error"].as_str().unwrap().contains("Settings > Chat"));
+        assert!(r["error"].as_str().unwrap().contains("Settings > Runtime"));
         let w =
             e.db.snapshot(|tx| Ok::<_, rusqlite::Error>(prefs::read(tx, "sidebarWidth")))
                 .unwrap();
@@ -398,7 +398,7 @@ mod tests {
         assert!(g["unavailable"]["fastMode"]
             .as_str()
             .unwrap()
-            .contains("Settings > Chat"));
+            .contains("Settings > Runtime"));
     }
 
     #[test]

@@ -17,19 +17,18 @@ export interface Placed {
 const MARGIN = 8;
 
 /**
- * Viewport-space measurements (getBoundingClientRect, clientX, innerWidth) in the CSS pixels a
- * fixed element's left and top are written in. They differ while the window is zoomed with CSS
- * zoom on <html> (Settings → General → Zoom): every placement divides by the zoom first.
+ * Viewport-space measurements (getBoundingClientRect, clientX, innerWidth) are in the CSS pixels a
+ * fixed element's left and top are written in: Settings → General → Zoom zooms the web view itself
+ * (`window_zoom`), not the page, so no compensation is needed. `unzoom` and `pageZoom` stay as
+ * identity shims for their callers, to be deleted with them.
  */
-export function unzoom(r: Rect, zoom: number): Rect {
-  if (zoom === 1) return r;
-  return { left: r.left / zoom, top: r.top / zoom, width: r.width / zoom, height: r.height / zoom };
+export function unzoom(r: Rect, _zoom: number): Rect {
+  return r;
 }
 
-/** The CSS zoom on <html> (1 when none). Reads the DOM, so callers pass it to the pure helpers. */
+/** Always 1: see [`unzoom`]. */
 export function pageZoom(): number {
-  const z = parseFloat(getComputedStyle(document.documentElement).zoom);
-  return Number.isFinite(z) && z > 0 ? z : 1;
+  return 1;
 }
 
 /**
@@ -41,9 +40,9 @@ export function layoutSize(el: HTMLElement): { width: number; height: number } {
   return { width: el.offsetWidth, height: el.offsetHeight };
 }
 
-/** The window in CSS pixels at the current zoom. */
-export function viewportAt(zoom: number): { width: number; height: number } {
-  return { width: innerWidth / zoom, height: innerHeight / zoom };
+/** The window in CSS pixels. */
+export function viewportAt(_zoom = 1): { width: number; height: number } {
+  return { width: innerWidth, height: innerHeight };
 }
 
 /**

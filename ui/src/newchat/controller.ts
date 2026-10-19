@@ -61,6 +61,8 @@ export interface NewChatEnv {
 
 export const DRAFT_PREFIX = 'draft:';
 export const LAST_PROJECT_KEY = 'helm.newchat.lastProject';
+/** The typed text of the open draft, so it survives a restart (images and the place do not). */
+export const DRAFT_TEXT_KEY = 'helm.newchat.draftText';
 
 /** The dialogs the new-chat area draws (Add project, Primary folder…). */
 export type NewChatDialog = { kind: 'add-project' } | { kind: 'primary-folder'; projectId: string };
@@ -269,6 +271,11 @@ export class NewChatController {
     const wasUntouched = this.untouched();
     d.text = text;
     d.revision = revision;
+    try {
+      this.env?.storage.setItem(DRAFT_TEXT_KEY, text);
+    } catch {
+      // Storage full or off: the draft still lives in memory.
+    }
     // Re-render only when the page's "untouched" state flips (nothing on screen shows the text).
     if (wasUntouched !== this.untouched()) this.changed();
   }
@@ -305,7 +312,11 @@ export class NewChatController {
     const clear = () => {
       if (this.sending === run) this.sending = null;
     };
-    run.then(clear, clear);
+    run.then(clear, () => {
+      clear();
+      // Refused after the page was left: nothing else will ever come back for the chat it made.
+      if (!this.open) this.dropMade();
+    });
     return run;
   }
 
@@ -359,6 +370,11 @@ export class NewChatController {
     this.draft = null;
     this.made = null;
     this.open = false;
+    try {
+      env.storage.setItem(DRAFT_TEXT_KEY, '');
+    } catch {
+      // As above.
+    }
     this.lastSelected = chat.id;
     env.select(chat.id);
     this.changed();
@@ -394,7 +410,30 @@ export class NewChatController {
   // ---- helpers -----------------------------------------------------------------------------------
 
   private newDraft(env: NewChatEnv, projectId: string | null): Draft {
-    return { id: `${DRAFT_PREFIX}${env.uid()}`, projectId, folder: null, text: '', revision: 0, model: null, effort: null, images: new Map(), createdAt: env.now() };
+    const d = this.makeDraft(env, projectId);
+    // The chat is made on Settings > Runtime's default model, so the chip should read it too.
+    void env
+      .api<{ model?: string | null } | null>('runtime_settings_get', {})
+      .then((r) => {
+        if (r?.model && this.draft === d && d.model === null) {
+          d.model = r.model;
+          this.changed();
+        }
+      })
+      .catch(() => undefined);
+    return d;
+  }
+
+  private makeDraft(env: NewChatEnv, projectId: string | null): Draft {
+    return { id: `${DRAFT_PREFIX}${env.uid()}`, projectId, folder: null, text: this.savedText(env), revision: 0, model: null, effort: null, images: new Map(), createdAt: env.now() };
+  }
+
+  private savedText(env: NewChatEnv): string {
+    try {
+      return env.storage.getItem(DRAFT_TEXT_KEY) ?? '';
+    } catch {
+      return '';
+    }
   }
 
   private lastProject(env: NewChatEnv): string | null {

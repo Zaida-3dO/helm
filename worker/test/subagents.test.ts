@@ -238,6 +238,11 @@ describe("stopping one subagent", () => {
       assert.equal(((ready.data as Json).capabilities as Json).stopSubagent, true);
       await prompt(s.host, "survey");
       await s.host.waitFor((e) => e.type === "subagent_start" && e.toolCallId === "sa_1", 5000, 0);
+      // The task id that stop_task needs arrives with system/task_started, after the Agent call
+      // that starts the card. The fixture sends the call's result after task_started, and the
+      // worker reads lines in order, so the call's end means the id is known (a slow CI runner
+      // sent stop_tool between the two and got stopped: false).
+      await s.host.waitFor((e) => e.type === "tool_execution_end" && e.toolCallId === "sa_1", 5000, 0);
       const r = await s.host.request({ type: "stop_tool", toolCallId: "sa_1", sentAtMs: Date.now() });
       assert.deepEqual(r.data, { stopped: true });
       const st = await waitReceived(s, (x) => x.type === "control_request" && (x.request as Json)?.subtype === "stop_task");

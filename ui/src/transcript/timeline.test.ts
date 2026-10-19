@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { hasWork, railMarkers, timelineEvents } from './timeline.ts';
+import { hasWork, railMarkers, timelineEvents, visibleSpan } from './timeline.ts';
 import { row } from '../dev/fixtures.ts';
 
 const tool = (id: number, toolName: string, args: object, extra: Partial<Parameters<typeof row>[0]> = {}) =>
@@ -39,7 +39,7 @@ test('the rail shows only once there is work beyond prompts', () => {
 });
 
 test('more events than slots cluster, keeping the most telling event of each group', () => {
-  const events = Array.from({ length: 20 }, (_, i) => ({ rowId: i, kind: 'command' as const, title: 'Ran command', detail: '' }));
+  const events = Array.from({ length: 20 }, (_, i) => ({ rowId: i, kind: 'command' as const, title: 'Ran command', detail: '', body: '', diff: [], output: '' }));
   events[5] = { ...events[5]!, kind: 'failed' as never, title: 'Command failed' };
   const markers = railMarkers(events, 8 * 22);
   assert.equal(markers.length, 8);
@@ -47,4 +47,28 @@ test('more events than slots cluster, keeping the most telling event of each gro
   assert.ok(markers.some((m) => m.event.rowId === 5 && m.size > 1));
   // Fewer events than slots: one marker each.
   assert.equal(railMarkers(events.slice(0, 5), 600).every((m) => m.size === 1), true);
+});
+
+test('events carry what the preview card shows: a prompt body, an edit diff, a command output', () => {
+  const events = timelineEvents([
+    row({ id: 1, role: 'user', text: 'Fix  the\nbuild' }),
+    tool(2, 'Edit', { file_path: 'a.ts', old_string: 'x', new_string: 'y' }),
+    tool(3, 'Bash', { command: 'ls' }, { text: 'a.ts\nb.ts' }),
+  ]);
+  assert.equal(events[0]!.body, 'Fix  the\nbuild');
+  assert.deepEqual(events[1]!.diff, [
+    { sign: '-', text: 'x' },
+    { sign: '+', text: 'y' },
+  ]);
+  assert.equal(events[1]!.output, '');
+  assert.equal(events[2]!.output, 'a.ts\nb.ts');
+  assert.deepEqual(events[2]!.diff, []);
+});
+
+test('the visible band spans the first to last marker whose rows are on screen', () => {
+  const events = Array.from({ length: 6 }, (_, i) => ({ rowId: (i + 1) * 10, kind: 'command' as const, title: '', detail: '', body: '', diff: [], output: '' }));
+  const markers = railMarkers(events, 600);
+  assert.deepEqual(visibleSpan(markers, 20, 40), { first: 1, last: 3 });
+  assert.deepEqual(visibleSpan(markers, 25, 25), null);
+  assert.deepEqual(visibleSpan(markers, 0, 1000), { first: 0, last: 5 });
 });

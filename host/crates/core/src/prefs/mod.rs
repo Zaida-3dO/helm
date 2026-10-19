@@ -37,6 +37,13 @@ pub const SIDEBAR_VIEW: PrefKey = PrefKey::classified("sidebarView");
 pub const TERMINAL_HEIGHT: PrefKey = PrefKey::classified("terminalHeight");
 pub const THEME: PrefKey = PrefKey::classified("theme");
 pub const COMPACT_SIDEBAR: PrefKey = PrefKey::classified("compactSidebar");
+/// Settings > General text sizes (`{interface, response, review}`) and zoom (50 to 200, steps of 10).
+pub const FONT_SIZES: PrefKey = PrefKey::classified("fontSizes");
+pub const ZOOM_LEVEL: PrefKey = PrefKey::classified("zoomLevel");
+/// Settings > Chat: how the composer sends ("mod-enter" or "enter").
+pub const SEND_SHORTCUT: PrefKey = PrefKey::classified("sendShortcut");
+/// Settings > MCP: whether chats load the user's own Claude Code MCP servers.
+pub const NATIVE_MCP: PrefKey = PrefKey::classified("nativeMcp");
 /// Send behaviour. Stored as the keys that differ from the defaults, which
 /// live in `helm-chats` (`send_behavior::HOME_DEFAULTS`); validated here by shape.
 pub const SEND_BEHAVIOR: PrefKey = PrefKey::classified("sendBehavior");
@@ -66,6 +73,10 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     TERMINAL_HEIGHT,
     THEME,
     COMPACT_SIDEBAR,
+    FONT_SIZES,
+    ZOOM_LEVEL,
+    SEND_SHORTCUT,
+    NATIVE_MCP,
     SEND_BEHAVIOR,
     SELECTION,
     APPEARANCE,
@@ -119,6 +130,46 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
                 })
             }
         }
+        "nativeMcp" => {
+            if value.is_boolean() {
+                Ok(())
+            } else {
+                Err(PrefError::Invalid {
+                    key: k,
+                    why: "must be true or false",
+                })
+            }
+        }
+        "zoomLevel" => match value.as_i64() {
+            Some(n) if (50..=200).contains(&n) && n % 10 == 0 => Ok(()),
+            _ => Err(PrefError::Invalid {
+                key: k,
+                why: "must be 50 to 200 in steps of 10",
+            }),
+        },
+        "sendShortcut" => match value.as_str() {
+            Some("enter" | "mod-enter") => Ok(()),
+            _ => Err(PrefError::Invalid {
+                key: k,
+                why: "must be enter or mod-enter",
+            }),
+        },
+        "fontSizes" => match value.as_object() {
+            Some(m)
+                if m.iter().all(|(name, v)| match (name.as_str(), v.as_i64()) {
+                    ("interface", Some(n)) => (11..=20).contains(&n),
+                    ("response", Some(n)) => (11..=24).contains(&n),
+                    ("review", Some(n)) => (9..=20).contains(&n),
+                    _ => false,
+                }) =>
+            {
+                Ok(())
+            }
+            _ => Err(PrefError::Invalid {
+                key: k,
+                why: "maps interface (11-20), response (11-24) and review (9-20) to whole sizes",
+            }),
+        },
         "sidebarWidth" => int_in(200, 4096, "must be 200 to 4096"),
         "inspectorWidth" => int_in(280, 4096, "must be 280 to 4096"),
         "terminalHeight" => int_in(80, 4096, "must be 80 to 4096"),
@@ -315,6 +366,29 @@ mod tests {
         assert!(db
             .write(|tx| set_generic(tx, "sidebarView", &json!("activity")))
             .is_ok());
+    }
+
+    #[test]
+    fn settings_general_chat_and_mcp_keys_save_through_the_generic_writer() {
+        let (_d, db) = temp_db(&MigrationRegistry::new());
+        for (key, ok, bad) in [
+            ("zoomLevel", json!(130), json!(125)),
+            ("sendShortcut", json!("enter"), json!("ctrl-enter")),
+            ("nativeMcp", json!(false), json!("no")),
+            (
+                "fontSizes",
+                json!({"interface": 14, "response": 16}),
+                json!({"interface": 40}),
+            ),
+        ] {
+            assert!(db.write(|tx| set_generic(tx, key, &ok)).is_ok(), "{key}");
+            let r = db.write(|tx| set_generic(tx, key, &bad));
+            assert!(matches!(r, Err(PrefError::Invalid { .. })), "{key}");
+        }
+        let z = db
+            .snapshot(|tx| Ok::<_, rusqlite::Error>(read(tx, "zoomLevel")))
+            .unwrap();
+        assert_eq!(z, Some(json!(130)));
     }
 
     #[test]

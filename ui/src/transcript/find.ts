@@ -60,3 +60,24 @@ export function countLabel(index: number, count: number, capped: boolean): strin
   if (count === 0) return 'No matches';
   return `${index + 1} / ${count}${capped ? '+' : ''}`;
 }
+
+/** A row of the host's whole-history search: the row and how many times it matches. */
+export interface HostFound {
+  id: number;
+  count: number;
+}
+
+/**
+ * The matches over the whole history: the host's rows that are not loaded here, plus the loaded
+ * rows matched locally (the loaded copy is the newest, e.g. a streaming row). Ordered by row id,
+ * stopping at `cap`.
+ */
+export function mergeHostMatches(host: readonly HostFound[], local: readonly FindMatch[], loaded: ReadonlySet<number>, cap = FIND_CAP): { matches: FindMatch[]; capped: boolean } {
+  const all: FindMatch[] = [...local];
+  for (const f of host) {
+    if (loaded.has(f.id)) continue;
+    for (let k = 0; k < f.count; k++) all.push({ rowId: f.id, occurrence: k });
+  }
+  all.sort((a, b) => a.rowId - b.rowId || a.occurrence - b.occurrence);
+  return all.length > cap ? { matches: all.slice(0, cap), capped: true } : { matches: all, capped: false };
+}

@@ -168,10 +168,18 @@ pub fn folder_name(raw: &str) -> Result<String, Refusal> {
         .unwrap_or("")
         .trim_end()
         .to_ascii_lowercase();
-    let reserved = matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
-        || ((stem.starts_with("com") || stem.starts_with("lpt"))
-            && stem.len() == 4
-            && stem.as_bytes()[3].is_ascii_digit());
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix).is_some_and(|rest| {
+            let mut it = rest.chars();
+            matches!(it.next(), Some(c) if c.is_ascii_digit() || matches!(c, '\u{b9}' | '\u{b2}' | '\u{b3}'))
+                && it.next().is_none()
+        })
+    };
+    let reserved = matches!(
+        stem.as_str(),
+        "con" | "prn" | "aux" | "nul" | "conin$" | "conout$"
+    ) || numbered("com")
+        || numbered("lpt");
     if reserved {
         return Err(bad("That name is reserved by Windows; choose another."));
     }
@@ -323,6 +331,10 @@ mod newchat_tests {
             "aux.txt",
             "com1",
             "LPT9.md",
+            "CONIN$",
+            "conout$.txt",
+            "com\u{b9}",
+            "LPT\u{b3}.md",
         ] {
             assert!(folder_name(bad).is_err(), "{bad:?}");
         }

@@ -567,3 +567,37 @@ async fn a_relaunch_waits_for_running_agents() {
         .await;
     w.expect("shutdown").await;
 }
+
+/// A turn's opening writes (status, run, user row, 'dispatching', fork carry) are one transaction:
+/// between the send and the prompt line reaching a warm worker the actor makes exactly one.
+/// (The count is the actor's own `dispatch`, so unrelated timers cannot disturb it.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turns_opening_writes_are_one_transaction() {
+    let mut h = harness();
+    let mut w = running(&mut h).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    let chat = the_chat(&h);
+    h.until("chat idle", |h| h.status(&chat) == "idle").await;
+    let (sid, _) = h.send(&chat, "again", "default").await;
+    let _p = w.expect("prompt").await;
+    assert_eq!(crate::actor::write_counts::last_dispatch(&chat), 1);
+    // All the effects are there.
+    assert_eq!(h.status(&chat), "starting");
+    assert_eq!(
+        h.col("SELECT text FROM messages WHERE role = 'user' ORDER BY id"),
+        ["hello", "again"]
+    );
+    assert_eq!(
+        h.col("SELECT status FROM runs ORDER BY started_at"),
+        ["complete", "running"]
+    );
+    let state: String =
+        h.db.snapshot(|t| {
+            t.query_row("SELECT state FROM submissions WHERE id = ?1", [&sid], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(state, "dispatching");
+}

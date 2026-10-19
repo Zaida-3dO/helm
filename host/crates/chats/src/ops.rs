@@ -6,6 +6,7 @@
 //! | `chat_list` | blocking | `{}` → `ChatRecord[]` |
 //! | `chat_get` | blocking | [`ChatIdArgs`] → [`ChatGetResult`] |
 //! | `transcript_page` | heavy | [`TranscriptPageArgs`] → [`TranscriptPage`] |
+//! | `chat_find` | heavy | [`ChatFindArgs`] → [`ChatFindResult`] (find in chat over the whole history, one step) |
 //! | `chat_send` | maintenance | [`ChatSendArgs`] → [`ChatSendResult`] |
 //! | `chat_stop` | async | [`ChatStopArgs`] → [`ChatStopResult`] |
 //! | `queue_resume` | maintenance | [`ChatIdArgs`] → `null` |
@@ -37,6 +38,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("chat_list", OpClass::Blocking, chat_list)
         .blocking("chat_get", OpClass::Blocking, chat_get)
         .blocking("transcript_page", OpClass::Heavy, transcript_page)
+        .blocking("chat_find", OpClass::Heavy, chat_find)
         .blocking("chat_send", OpClass::Maintenance, chat_send)
         .async_op("chat_stop", chat_stop)
         .blocking("queue_resume", OpClass::Maintenance, queue_resume)
@@ -456,6 +458,16 @@ fn transcript_page(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     to_value(&page)
 }
 
+fn chat_find(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatFindArgs = parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let out = db
+        .snapshot(|tx| store::find_step(tx, &a))
+        .map_err(sql)?
+        .ok_or_else(not_found)?;
+    to_value(&out)
+}
+
 fn draft_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: DraftSaveArgs = parse_args(args)?;
     if a.text.len() > store::MAX_SUBMISSION_BYTES {
@@ -576,6 +588,7 @@ pub(crate) mod tests {
             ("chat_list", OpClass::Blocking),
             ("chat_get", OpClass::Blocking),
             ("transcript_page", OpClass::Heavy),
+            ("chat_find", OpClass::Heavy),
             ("chat_send", OpClass::Maintenance),
             ("chat_stop", OpClass::Async),
             ("queue_resume", OpClass::Maintenance),

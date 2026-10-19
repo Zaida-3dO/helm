@@ -2188,12 +2188,8 @@ async fn the_least_recently_used_idle_worker_is_retired_past_the_cap() {
     // Two idle workers, cap one: the older (a) goes; b stays.
     wa.expect("shutdown").await;
     let mut wb = wb;
-    assert!(
-        wb.no_command_for(Duration::from_millis(200))
-            .await
-            .is_none(),
-        "the newer stays"
-    );
+    let got = wb.no_command_for(Duration::from_millis(200)).await;
+    assert!(got.is_none(), "the newer stays; it got {got:?}");
 }
 
 /// Model_catalogue {refresh: true} re-reads the catalogue from a live worker.
@@ -2615,4 +2611,70 @@ async fn a_fresh_chat_borrows_its_folders_skills() {
     let cached =
         crate::catalogue::cached_skills(&h.rt.sh.cfg.profile_dir, &h.work.to_string_lossy());
     assert_eq!(serde_json::to_value(cached).unwrap(), want);
+}
+
+/// Find in chat over the whole stored history: counts per row, the same searchable text as the
+/// find bar, the active branch only, and paging across scan steps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_find_searches_the_whole_history_in_steps() {
+    let h = harness();
+    let chat = h.create().await;
+    h.db.write(|tx| {
+        let ins = "INSERT INTO messages(chat_id, source_key, role, text, thinking, tool_name, timestamp, active, details)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
+        tx.execute(ins, rusqlite::params![chat, "a", "user", "Needle and NEEDLE", "", None::<String>, 1, 1, None::<String>])?;
+        tx.execute(ins, rusqlite::params![chat, "b", "user", "needle on an abandoned branch", "", None::<String>, 2, 0, None::<String>])?;
+        tx.execute(ins, rusqlite::params![chat, "c", "assistant", "plain", "needle in thought", None::<String>, 3, 1, None::<String>])?;
+        tx.execute(ins, rusqlite::params![chat, "d", "toolResult", "output", "", "Needler", 4, 1, r#"{"toolArgs":"x"}"#])?;
+        // Past one scan step, so the match at the end needs a second step.
+        for i in 0..crate::store::FIND_STEP {
+            tx.execute(ins, rusqlite::params![chat, format!("f{i}"), "assistant", "filler", "", None::<String>, 10 + i, 1, None::<String>])?;
+        }
+        tx.execute(ins, rusqlite::params![chat, "z", "assistant", "a needle at the end", "", None::<String>, 100_000, 1, None::<String>])?;
+        Ok::<_, rusqlite::Error>(())
+    })
+    .unwrap();
+    let find = |activity: bool, after: Option<String>| {
+        let h = &h;
+        let chat = chat.clone();
+        async move {
+            let r = h
+                .call("chat_find", json!({"chatId": chat, "query": "needle", "includeActivity": activity, "after": after}))
+                .await
+                .unwrap();
+            let rows: Vec<(i64, i64)> = r["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| (x["id"].as_i64().unwrap(), x["count"].as_i64().unwrap()))
+                .collect();
+            (rows, r["nextCursor"].as_str().map(str::to_owned))
+        }
+    };
+    let ids = |sel: &str| -> Vec<i64> {
+        h.col(&format!(
+            "SELECT id FROM messages WHERE source_key {sel} ORDER BY id"
+        ))
+        .iter()
+        .map(|s| s.parse().unwrap())
+        .collect()
+    };
+    let a = ids("= 'a'")[0];
+    let z = ids("= 'z'")[0];
+    // Messages only: step one holds the first row (both occurrences), step two the last.
+    let (r1, next) = find(false, None).await;
+    assert_eq!(r1, [(a, 2)]);
+    let (r2, next2) = find(false, next).await;
+    assert_eq!(r2, [(z, 1)]);
+    assert!(next2.is_none(), "the history is scanned");
+    // With activity: thinking and tool names count too.
+    let (r1, _) = find(true, None).await;
+    let c = ids("= 'c'")[0];
+    let d = ids("= 'd'")[0];
+    assert_eq!(r1, [(a, 2), (c, 1), (d, 1)]);
+    // An unknown chat is not found.
+    assert!(h
+        .call("chat_find", json!({"chatId": "nope", "query": "x"}))
+        .await
+        .is_err());
 }

@@ -1,6 +1,7 @@
 // Typed wrappers over the chat ops. Every call still goes through api(op, args).
 
 import type { Api } from './client.ts';
+import type { ChatFindResult } from './generated/index.ts';
 import type {
   AttentionSummary,
   ChatRecord,
@@ -43,6 +44,9 @@ export function chatOps(api: Api) {
     list: () => api<ChatRecord[]>('chat_list', {}),
     get: (chatId: string) => api<{ chat: ChatRecord; thread: ThreadState }>('chat_get', { chatId }),
     page: (chatId: string, q: PageQuery = {}) => api<TranscriptPage>('transcript_page', { chatId, ...q }),
+    /** Find in chat over the whole stored history, one scan step (`after` = the previous `nextCursor`). */
+    find: (chatId: string, query: string, includeActivity: boolean, after?: string) =>
+      api<ChatFindResult>('chat_find', { chatId, query, includeActivity, ...(after ? { after } : {}) }),
     send: (chatId: string, submissionId: string, text: string, action: SendAction, draftRevision: number, extras: SendExtras = {}) =>
       api<{ submission: Submission; chat: ChatRecord }>('chat_send', {
         chatId,

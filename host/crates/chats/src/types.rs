@@ -243,9 +243,10 @@ pub struct Capabilities {
 }
 
 /// A native subagent's state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum SubagentStatus {
+    #[default]
     Running,
     Completed,
     Failed,
@@ -255,8 +256,8 @@ pub enum SubagentStatus {
 /// One subagent, keyed by the parent's Agent tool call. The live list is on [`ThreadState`] and
 /// is never written per step; the final state is kept on the call's tool row
 /// ([`MessageDetails::subagent`]), so it survives a restart.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", default)]
 pub struct Subagent {
     pub tool_call_id: String,
     /// The agent definition it runs as (`general-purpose`, `reviewer`, ...).
@@ -813,6 +814,41 @@ pub struct TranscriptPageArgs {
     #[serde(default)]
     #[ts(optional)]
     pub inclusive: Option<bool>,
+}
+
+/// Find in chat over the whole stored history (`chat_find`): one scan step of the active branch.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatFindArgs {
+    pub chat_id: String,
+    pub query: String,
+    /// Also search tool calls, thinking and context rows.
+    #[serde(default)]
+    #[ts(optional)]
+    pub include_activity: Option<bool>,
+    /// The `nextCursor` of the previous step; absent for the first.
+    #[serde(default)]
+    #[ts(optional)]
+    pub after: Option<String>,
+}
+
+/// A row that matches, and how many times (counted per row, capped).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundRow {
+    #[ts(type = "number")]
+    pub id: i64,
+    #[ts(type = "number")]
+    pub count: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatFindResult {
+    /// Matching rows of this step, oldest first.
+    pub rows: Vec<FoundRow>,
+    /// Where the next step continues; absent when the whole history has been scanned.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

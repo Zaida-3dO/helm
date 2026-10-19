@@ -11,7 +11,7 @@ use helm_core::prefs::classes::{classify, PrefClass, Tier, CLASSIFIED};
 
 /// The user-only floor: (setting, the Settings page where the user changes it).
 pub const USER_ONLY: &[(&str, &str)] = &[
-    ("fastMode", "Settings > Chat"),
+    ("fastMode", "Settings > Runtime"),
     ("notifications", "Settings > Notifications"),
     ("runSlots", "Settings > Chat (resource limits)"),
     ("loadGate", "Settings > Chat (resource limits)"),
@@ -115,7 +115,7 @@ mod tests {
         assert!(r.contains("Settings > Chat"), "{r}");
         assert!(refusal("fastMode", true)
             .unwrap()
-            .contains("Settings > Chat"));
+            .contains("Settings > Runtime"));
         assert!(refusal("selection", true)
             .unwrap()
             .contains("not a setting"));

@@ -290,6 +290,14 @@ impl ShellHost for TauriShellHost {
         }
     }
 
+    fn set_zoom(&self, factor: f64) {
+        if let Some(w) = self.window() {
+            if let Err(e) = w.set_zoom(factor) {
+                log::warn!("web view zoom: {e}");
+            }
+        }
+    }
+
     fn flash(&self) {
         if let Some(w) = self.window() {
             let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));

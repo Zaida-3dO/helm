@@ -1396,3 +1396,119 @@ button.danger {
   color: var(--muted);
   cursor: default;
 }
+
+/* The rail's visible-range band and preview card. */
+.tl-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 0;
+  border-left: 2px solid var(--secondary);
+  background: color-mix(in srgb, var(--secondary) 8%, transparent);
+  pointer-events: none;
+}
+
+.tl-marker {
+  z-index: 1;
+}
+
+.timeline-rail {
+  --tl-card-w: 300px;
+}
+
+.tl-card {
+  position: absolute;
+  right: 34px;
+  z-index: 6;
+  width: var(--tl-card-w);
+  max-height: 340px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+}
+
+.tl-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.tl-card-pos {
+  margin-left: auto;
+  font-weight: 400;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.tl-card-path {
+  margin-top: 4px;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.tl-card-body {
+  margin-top: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tl-card-diff,
+.tl-card-output pre {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--hover);
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 140px;
+  overflow: auto;
+}
+
+.tl-line-add {
+  color: #64885f;
+}
+
+.tl-line-del {
+  color: var(--error);
+}
+
+.tl-card-output summary,
+.tl-card-near {
+  margin-top: 6px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.tl-card-foot {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.tl-card-foot button {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: none;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.tl-card-foot button:disabled {
+  opacity: 0.4;
+}
+
+.tl-card-show {
+  margin-left: auto;
+}

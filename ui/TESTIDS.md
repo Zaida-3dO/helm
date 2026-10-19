@@ -20,7 +20,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `board-sync` | The Agent Standup sync line under the view switch | `data-state` (`never` `unconfigured` `syncing` `ok` `error`) |
 | `board-url`, `board-token`, `board-token-state`, `board-test`, `board-last-sync` | Settings → Projects connection fields: address, write-only token, "set"/"not set", Test connection, last sync | |
 | `chat-view` | The open chat | `data-chat-id`, `data-chat-status` |
-| `chat-status` | The chat's status pill | text = the status |
+| `chat-status` | The chat's status, a visually hidden span (screen readers and tests; not a visible pill) | text = the status |
 | `composer` | The editable message box (Lexical `contenteditable`) | |
 | `send` | Send button (reads Send, Steer, Queue or Interrupt) | `disabled` while the draft is empty |
 | `stop` | Stop button, shown only while a turn runs (Stop that pauses the queue) | |
@@ -70,7 +70,12 @@ breaks those checks, so change them only together with the checks. Everything el
 | `turn-changes` / `turn-change-file` | The turn change card under a completed turn's last reply and one file in it | `turn-changes`: `data-files` |
 | `quick-open` / `quick-open-row` | Ctrl+P "Go to file" and one result | `quick-open-row`: `data-kind` (`file` `dir` `link`) |
 | `vault-doc` / `vault-candidates` / `vault-error` / `open-in-obsidian` / `settings-vaults` / `vault-row` | Vault notes: a note tab's body, the list shown for an ambiguous name, a read error, the header action, Settings → Vaults and one vault in it | `vault-doc`: `data-vault`, `data-path` |
-| `message-actions` | A row's registered message actions (transcript slots) | each button has `data-action` = the action id; footers are `.row-footer[data-footer]`, composer accessories `.composer-accessory[data-accessory]` |
+| `message-actions` | A row's registered message actions (transcript slots) | each button has `data-action` = the action id (`copy` is the built-in Copy); footers are `.row-footer[data-footer]`, composer accessories `.composer-accessory[data-accessory]` |
+| `token-chip` | A row footer's new-token chip (transcript) with its usage tooltip |  |
+| `turn-changes-review` | The Review button on a turn's change card (`turn-changes`); opens the Changes slot |  |
+| `todo-list` | The TodoWrite checklist card in the transcript |  |
+| `find-bar` / `find-input` / `find-count` | Find in chat (Ctrl+F): the bar, its text field, and the "n of m" count (an `aria-live` region) |  |
+| `timeline-rail` / `timeline-band` / `timeline-card` | The work-timeline rail in the transcript's right gutter, its visible-range band, and the marker preview card (hover or click a marker); markers are `.tl-marker[data-row-id]` |  |
 | `shell` / `topbar` / `topbar-title` / `panel-toggle` | App frame and top bar | `panel-toggle`: `aria-pressed` |
 | `settings` / `settings-pane` / `appearance` | Settings dialog, a pane, the General pane's colour-mode control | `settings-pane`: `data-pane` = pane id; tabs are `.settings-tab[data-tab]`; `appearance` segments are `[data-value]` (`system` `light` `dark`) |
 | `toast-slot` / `notice` | The generic toast slot (top-centre) and its toast | `notice`: `data-kind` (`error` `info` `restored` `undo` `reorganize`) |

@@ -31,6 +31,8 @@ pub trait ShellHost: Send + Sync {
     fn withdraw_toast(&self, chat_id: &str);
     /// Register the global hotkey (None unregisters). Err names why it failed.
     fn register_hotkey(&self, chord: Option<&str>) -> Result<(), String>;
+    /// Zoom the main web view itself (1.0 is 100%), not the page's CSS.
+    fn set_zoom(&self, factor: f64);
 }
 
 #[derive(Default)]
@@ -416,6 +418,17 @@ impl ShellService {
         self.apply_keep_awake();
     }
 
+    /// Settings → General → Zoom: a level of 50-200 in steps of 10, applied to the web view.
+    pub fn set_zoom(&self, level: i64) -> Result<(), String> {
+        if !(50..=200).contains(&level) || level % 10 != 0 {
+            return Err("Zoom is 50 to 200 percent in steps of 10.".into());
+        }
+        if let Some(h) = self.host() {
+            h.set_zoom(level as f64 / 100.0);
+        }
+        Ok(())
+    }
+
     pub fn settings(&self) -> ShellSettings {
         self.state.lock().unwrap().settings.clone()
     }
@@ -463,6 +476,9 @@ mod tests {
         }
         fn withdraw_toast(&self, chat: &str) {
             self.log.lock().unwrap().push(format!("withdraw {chat}"));
+        }
+        fn set_zoom(&self, factor: f64) {
+            self.log.lock().unwrap().push(format!("zoom {factor}"));
         }
         fn register_hotkey(&self, chord: Option<&str>) -> Result<(), String> {
             if self.refuse_hotkey.load(Ordering::SeqCst) {
@@ -811,5 +827,18 @@ mod tests {
             name: "X".into(),
         });
         assert!(svc.save(other).is_err());
+    }
+
+    #[test]
+    fn zoom_reaches_the_web_view_and_only_in_range() {
+        let r = rig();
+        r.host.take();
+        r.svc.set_zoom(120).unwrap();
+        r.svc.set_zoom(50).unwrap();
+        assert_eq!(r.host.take(), ["zoom 1.2", "zoom 0.5"]);
+        for bad in [40, 210, 125, 0] {
+            assert!(r.svc.set_zoom(bad).is_err(), "{bad}");
+        }
+        assert!(r.host.take().is_empty(), "a refused level changes nothing");
     }
 }

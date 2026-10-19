@@ -1,5 +1,6 @@
 // One chat: transcript, activity dock, interaction cards, queue and composer.
 
+import { flushSync } from 'react-dom';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ChatOps } from './api/ops.ts';
 import type { MessageRow } from './api/types.ts';
@@ -180,6 +181,26 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   );
 
   const transcriptBox = useRef<HTMLDivElement>(null);
+  // Find in chat: the host searches the whole history; a match in a row that is not
+  // loaded loads the page around it first.
+  const hostFind = useCallback((q: string, activity: boolean, after?: string) => ops.find(chatId, q, activity, after), [ops, chatId]);
+  const loadedIds = useRef(new Set<number>());
+  loadedIds.current = new Set(view.rows.map((r) => r.id));
+  const jumpToFound = useCallback(
+    (rowId: number) => {
+      if (loadedIds.current.has(rowId)) setJumpTo(rowId);
+      else void jumpAround(rowId).catch(() => undefined);
+    },
+    [jumpAround],
+  );
+  // The jump is an effect on the target, so the same target twice does nothing; clear it first.
+  const jumpFromRail = useCallback(
+    (rowId: number) => {
+      flushSync(() => setJumpTo(null));
+      setJumpTo(rowId);
+    },
+    [],
+  );
   const [autocompleteOn, setAutocompleteOn] = useState(false);
   useEffect(() => {
     void shell
@@ -250,8 +271,8 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       )}
       <div className="transcript-box" ref={transcriptBox}>
       <SelectionToolbar chatId={chatId} container={transcriptBox} blocked={interactionOpen} />
-      <FindBar rows={view.rows} container={transcriptBox} onJump={setJumpTo} onClose={() => setJumpTo(null)} />
-      {elements.timeline !== 'hidden' && <TimelineRail rows={view.rows} onJump={setJumpTo} />}
+      <FindBar rows={view.rows} hostFind={hostFind} container={transcriptBox} onJump={jumpToFound} onClose={() => setJumpTo(null)} />
+      {elements.timeline !== 'hidden' && <TimelineRail rows={view.rows} onJump={jumpFromRail} container={transcriptBox} />}
       <Transcript
         rows={view.rows}
         live={busy}

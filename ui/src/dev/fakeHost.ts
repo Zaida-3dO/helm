@@ -1,6 +1,6 @@
 // A fake host for checking the UI in a plain browser. It implements the host's ops and
 // events with a scripted turn: streamed text, a tool card, and an approval, question or plan
-// card when the prompt asks for one ("approve", "question", "plan"). "long" in a prompt adds a
+// card when the prompt asks for one ("approve", "question", "plan"). "todo" adds a TodoWrite checklist and "code" streams a fenced code block. "long" in a prompt adds a
 // background task. A steer sent mid-turn shows as Pending and is read about 1.5 s later.
 //
 // Dev builds only: main.tsx imports it behind `import.meta.env.DEV`, so production drops it.
@@ -342,6 +342,15 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       }
       await tool(c, 'Read', { file_path: 'src/main.ts' }, 'export {}\n', cancelled);
       await tool(c, 'Edit', { file_path: 'src/main.ts', old_string: 'export {}', new_string: 'export const x = 1;\nexport const y = 2;' }, 'ok', cancelled);
+      if (/todo/i.test(text)) {
+        const todos = [
+          { content: 'Read the code', status: 'completed', activeForm: 'Reading the code' },
+          { content: 'Change it', status: 'in_progress', activeForm: 'Changing it' },
+          { content: 'Test it', status: 'pending', activeForm: 'Testing it' },
+        ];
+        await tool(c, 'TodoWrite', { todos }, 'Todos updated', cancelled);
+      }
+      if (/code/i.test(text)) await streamText(c, 'Here is the change:\n\n```ts\nexport const x = 1;\nexport const y = 2;\n```\n\n', cancelled);
       if (/subagent/i.test(text)) runFakeSubagents(c, { addRow, updateRow, emitThread, uid });
       if (/question/i.test(text)) {
         const questions = ['Which colour?', 'Which size?'];
@@ -422,6 +431,10 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   function page(c: FakeChat, a: Record<string, unknown>): TranscriptPage {
     let end = c.rows.length;
     if (typeof a.before === 'string') end = Math.max(0, c.rows.findIndex((r) => String(r.id) === a.before));
+    if (typeof a.around === 'number') {
+      const at = c.rows.findIndex((r) => r.id === a.around);
+      if (at >= 0) end = Math.min(c.rows.length, at + 1 + Math.floor(PAGE / 2));
+    }
     const start = Math.max(0, end - PAGE);
     return {
       chatId: c.chat.id,
@@ -452,6 +465,18 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       return { chat: c.chat, thread: c.thread };
     },
     transcript_page: (a) => page(find(a.chatId), a),
+    chat_find: (a) => {
+      const q = String(a.query ?? '').toLowerCase();
+      const rows = q.trim()
+        ? find(a.chatId).rows.flatMap((r) => {
+            const text = (r.role === 'user' || r.role === 'assistant' || a.includeActivity ? r.text : '').toLowerCase();
+            let count = 0;
+            for (let i = text.indexOf(q); i >= 0; i = text.indexOf(q, i + q.length)) count++;
+            return count ? [{ id: r.id, count }] : [];
+          })
+        : [];
+      return { rows, nextCursor: null };
+    },
     chat_send: (a) => {
       const c = find(a.chatId);
       const text = String(a.text ?? '');

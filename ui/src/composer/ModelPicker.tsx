@@ -14,7 +14,7 @@ import type { ChatOps } from '../api/ops.ts';
 import type { ChatRecord, ModelCatalogue } from '../api/types.ts';
 import { useBinding, useLayer } from '../ui/hooks.ts';
 import { IconCheck, IconChevronDown } from '../ui/icons.tsx';
-import { nextIndex, placeBelow } from '../ui/place.ts';
+import { layoutSize, nextIndex, pageZoom, placeBelow, unzoom, viewportAt } from '../ui/place.ts';
 import { commitPatch, effortLabel, FALLBACK_EFFORTS, filterRows, modelRows, stepEffort, triggerLabel } from './modelEffort.ts';
 
 let cached: Promise<ModelCatalogue> | null = null;
@@ -66,8 +66,8 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
   useLayoutEffect(() => {
     if (!open) return;
     const a = trigger.current?.getBoundingClientRect();
-    const r = pop.current?.getBoundingClientRect();
-    if (a && r) setPos(placeBelow(a, { width: r.width, height: r.height }, { width: innerWidth, height: innerHeight }, 6));
+    const z = pageZoom();
+    if (a && pop.current) setPos(placeBelow(unzoom(a, z), layoutSize(pop.current), viewportAt(z), 6));
     setActive(Math.max(0, shown.findIndex((o) => o.id === model)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);

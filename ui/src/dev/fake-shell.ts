@@ -69,11 +69,14 @@ export function shellFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         return { settings, hotkeyRegistered: settings.globalHotkey !== null, hotkeyError: null, keepAwakeError: null };
       case 'audio_inputs':
         return mics;
+      case 'window_zoom':
+        // The browser preview has no web view to zoom.
+        return null;
       case 'open_external':
         return null;
       default:
         throw new Error(`fake shell: unknown op ${op}`);
     }
   };
-  return { prefixes: ['shell_settings_', 'audio_inputs', 'open_external', 'terminal_'], handler };
+  return { prefixes: ['shell_settings_', 'audio_inputs', 'window_zoom', 'open_external', 'terminal_'], handler };
 }
