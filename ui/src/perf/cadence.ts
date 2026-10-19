@@ -5,8 +5,9 @@
 // Reduce Motion: no paced reveal, no animations or transitions (perf.css), still spinners.
 //
 // The cadence is sampled for about a second shortly after start, and again whenever the window
-// comes back into view (a Remote Desktop session may have connected or left in between). Frames
-// slower than 100 ms are a throttled or busy window, not a display, and are ignored.
+// comes back into view (a Remote Desktop session may have connected or left in between). A slow
+// sample must be confirmed by the next one. Frames slower than 100 ms are a throttled or busy
+// window, not a display, and are ignored.
 
 export const LOW_CADENCE_MS = 25;
 export const SAMPLE_MS = 1000;
@@ -22,6 +23,34 @@ export function classifyCadence(intervals: readonly number[]): Cadence | null {
   const mid = xs.length >> 1;
   const median = xs.length % 2 ? xs[mid]! : (xs[mid - 1]! + xs[mid]!) / 2;
   return median >= LOW_CADENCE_MS ? 'low' : 'normal';
+}
+
+/** A second sample confirms a slow one this long after it. */
+export const CONFIRM_MS = 3000;
+
+/**
+ * Turns samples into decisions. A fast sample decides at once; a slow one only counts once the
+ * next sample agrees, so one busy second (a heavy start-up) cannot switch a fast display to
+ * reduced motion.
+ */
+export class CadenceGate {
+  private slow = false;
+
+  /** 'confirm' asks for another sample soon; null means the sample said nothing. */
+  push(c: Cadence | null): Cadence | 'confirm' | null {
+    if (c === null) return null;
+    if (c === 'normal') {
+      this.slow = false;
+      return 'normal';
+    }
+    if (this.slow) return 'low';
+    this.slow = true;
+    return 'confirm';
+  }
+
+  reset(): void {
+    this.slow = false;
+  }
 }
 
 /** What the cadence says about motion, with a manual override for checks and debugging. */
@@ -82,6 +111,7 @@ export function watchCadence(doc: Document, policy: MotionPolicy = motion, start
   let raf = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let tries = 0;
+  const gate = new CadenceGate();
   const sample = () => {
     if (doc.hidden) return;
     const intervals: number[] = [];
@@ -95,8 +125,9 @@ export function watchCadence(doc: Document, policy: MotionPolicy = motion, start
         raf = requestAnimationFrame(step);
         return;
       }
-      const c = classifyCadence(intervals);
-      if (c) policy.setCadence(c);
+      const next = gate.push(classifyCadence(intervals));
+      if (next === 'low' || next === 'normal') policy.setCadence(next);
+      else if (next === 'confirm') timer = setTimeout(sample, CONFIRM_MS);
       else if (++tries < 3) timer = setTimeout(sample, 5000);
     };
     raf = requestAnimationFrame(step);
@@ -106,6 +137,7 @@ export function watchCadence(doc: Document, policy: MotionPolicy = motion, start
     cancelAnimationFrame(raf);
     clearTimeout(timer);
     tries = 0;
+    gate.reset();
     timer = setTimeout(sample, 500);
   };
   timer = setTimeout(sample, startDelayMs);

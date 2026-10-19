@@ -79,7 +79,13 @@ describe("core scenarios end to end with the fake claude", { timeout: 15 * 60_00
       await card.waitFor({ timeout: 20_000 });
       assert.ok((await page().locator(tid("tool-card")).count()) >= 1, "tool card shown");
       await page().click(tid("approval-button", '[data-option="Allow once"]'));
-      await page().waitForFunction(() => document.querySelectorAll('[data-testid="tool-card"]').length >= 2, null, { timeout: 20_000 });
+      // The second call's card is shown. (A live turn folds its earlier work as it goes, so the first
+      // call may already be behind "Worked for": wait for the second by its command, not a count.)
+      await page().waitForFunction(
+        () => [...document.querySelectorAll('[data-testid="tool-card"]')].some((c) => (c.textContent ?? "").includes("rm b.txt")),
+        null,
+        { timeout: 20_000 },
+      );
       await card.waitFor({ timeout: 20_000 });
       await page().click(tid("approval-button", '[data-option="Deny"]'));
       await waitText(page(), "second call denied");
@@ -250,9 +256,19 @@ describe("core scenarios end to end with the fake claude", { timeout: 15 * 60_00
         performance.setResourceTimingBufferSize(10_000);
         performance.clearResourceTimings();
       });
-      await newChat(page(), folder());
+      const longChat = await newChat(page(), folder());
       await send(page(), "[MDLONG] a long reply");
       await waitText(page(), "End of long text", 60_000);
+      // A reply that arrives streaming renders block by block on the main thread; a
+      // long reply read from history goes through the worker. Leave the chat and come back.
+      await waitStatus(page(), "idle");
+      await newChat(page(), folder());
+      await openChat(page(), longChat);
+      await page().waitForFunction(
+        () => [...document.querySelectorAll('[data-testid="transcript-row"] h2')].some((h) => (h.textContent ?? "").includes("End of long text")),
+        null,
+        { timeout: 20_000 },
+      );
       const dom = await page().evaluate(async () => {
         const img = document.querySelector('[data-testid="transcript-row"] img[src^="data:image/png"]') as HTMLImageElement | null;
         if (img && !img.complete) await new Promise((r) => img.addEventListener("load", r, { once: true }) ?? setTimeout(r, 2000));

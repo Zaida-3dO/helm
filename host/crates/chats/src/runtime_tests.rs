@@ -1290,6 +1290,11 @@ async fn a_silent_running_chat_shows_as_stalled_until_output() {
     // One minute is 100 ms in the test limits.
     h.db.write(|tx| helm_core::prefs::set_generic(tx, "stallMinutes", &json!(10)))
         .unwrap();
+    // The limit (10 x 100 ms) counts from the chat's last output, which `running_turn` produces
+    // after `t0`. Under a heavily loaded full run the harness can itself take longer than the
+    // limit to get past `running_turn`, and then the flag is rightly set already, so "not yet" is
+    // claimed only while less than the limit has passed since `t0`.
+    let t0 = std::time::Instant::now();
     let (chat, _, w) = running_turn(&mut h).await;
     let flag = |h: &H| {
         h.col(&format!(
@@ -1297,7 +1302,10 @@ async fn a_silent_running_chat_shows_as_stalled_until_output() {
         ))
     };
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_ne!(flag(&h), ["1"], "not before the limit");
+    let early = flag(&h);
+    if t0.elapsed() < Duration::from_millis(1000) {
+        assert_ne!(early, ["1"], "not before the limit");
+    }
     h.until("stalled", |h| flag(h) == ["1"]).await;
     let a = h.call("attention_get", json!({})).await.unwrap();
     assert_eq!(a["stalled"][0]["chatId"], chat.as_str());

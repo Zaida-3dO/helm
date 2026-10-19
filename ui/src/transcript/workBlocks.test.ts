@@ -63,8 +63,64 @@ test('the row right after a closed fold is marked, so it draws no second rule', 
   assert.equal(reply?.kind === 'row' && reply.afterFold, false);
 });
 
-test('a live turn never folds', () => {
-  assert.deepEqual(shape(layout(turn(), true)), [1, 2, 3, 4, 5]);
+test('a live turn folds as it goes, so settling changes nothing', () => {
+  const live = layout(turn(), true);
+  const settled = layout(turn(), false);
+  assert.deepEqual(shape(live), [1, 'fold[2,3]', 4, 5]);
+  assert.deepEqual(shape(live), shape(settled));
+  // The reply being written after the last tool already has its final look.
+  const flags = (items: Item[]) => items.map((i) => (i.kind === 'row' ? [i.final, i.afterFold, i.afterTool] : 'fold'));
+  assert.deepEqual(flags(live), flags(settled));
+});
+
+test('while a tool is the newest row, it is the open part and the work before it folds', () => {
+  const rows = [
+    row({ id: 1, role: 'user', timestamp: 0 }),
+    row({ id: 2, role: 'assistant', text: 'let me look', timestamp: 1000 }),
+    row({ id: 3, role: 'toolResult', toolName: 'Read', timestamp: 2000 }),
+    row({ id: 4, role: 'assistant', text: 'now the tests', timestamp: 3000 }),
+    row({ id: 5, role: 'toolResult', toolName: 'Bash', status: 'streaming', timestamp: 4000 }),
+  ];
+  assert.deepEqual(shape(layout(rows, true)), [1, 'fold[2,3,4]', 5]);
+  // Text written after it opens instead, and the tool folds.
+  const more = [...rows.slice(0, 4), { ...rows[4]!, status: 'complete' as const }, row({ id: 6, role: 'assistant', text: 'All', timestamp: 5000 })];
+  assert.deepEqual(shape(layout(more, true)), [1, 'fold[2,3,4,5]', 6]);
+});
+
+test('live, nothing folds until there is visible work to fold (no "Worked for 0s" over the first tool)', () => {
+  const rows = [
+    row({ id: 1, role: 'user', timestamp: 0 }),
+    // The empty message the host saves a tool call under.
+    row({ id: 2, role: 'assistant', text: '', timestamp: 1000 }),
+    row({ id: 3, role: 'toolResult', toolName: 'Bash', status: 'streaming', timestamp: 1000 }),
+  ];
+  assert.deepEqual(shape(layout(rows, true)), [1, 2, 3]);
+  const second = [...rows, row({ id: 4, role: 'assistant', text: '', timestamp: 2000 }), row({ id: 5, role: 'toolResult', toolName: 'Bash', status: 'streaming', timestamp: 2000 })];
+  assert.deepEqual(shape(layout(second, true)), [1, 'fold[2,3,4]', 5]);
+});
+
+test('a live turn that only thought folds its thinking behind the newest row', () => {
+  const rows = [
+    row({ id: 1, role: 'user', timestamp: 0 }),
+    row({ id: 2, role: 'assistant', text: '', thinking: 'hmm', timestamp: 1000 }),
+    row({ id: 3, role: 'assistant', text: 'Here', timestamp: 2000 }),
+  ];
+  assert.deepEqual(shape(layout(rows, true)), [1, 'fold[2]', 3]);
+  assert.deepEqual(shape(layout(rows, false)), [1, 'fold[2]', 3]);
+});
+
+test('an Agent call whose subagent still runs stays after the fold, and folds once it finishes', () => {
+  const rows = [
+    row({ id: 1, role: 'user', timestamp: 0 }),
+    row({ id: 2, role: 'toolResult', toolName: 'Agent', toolCallId: 'a1', timestamp: 1000 }),
+    row({ id: 3, role: 'toolResult', toolName: 'Read', timestamp: 2000 }),
+    row({ id: 4, role: 'assistant', text: 'Started a reviewer.', timestamp: 3000 }),
+  ];
+  assert.deepEqual(shape(layout(rows, false, new Set(), new Set(['a1']))), [1, 'fold[3]', 2, 4]);
+  assert.deepEqual(shape(layout(rows, false, new Set(), new Set())), [1, 'fold[2,3]', 4]);
+  // Only Agent rows are held open by a running id.
+  const read = rows.map((r) => (r.id === 3 ? { ...r, toolCallId: 'a1' } : r));
+  assert.deepEqual(shape(layout(read, false, new Set(), new Set(['zz']))), [1, 'fold[2,3]', 4]);
 });
 
 test('an earlier turn folds while the latest is live; expanding unfolds it', () => {
@@ -96,7 +152,7 @@ test('formatElapsed', () => {
   assert.equal(formatElapsed(3_720_000), '1h 2m');
 });
 
-test('a steer read mid-turn stays in the turn and is never folded', () => {
+test('a steer read mid-turn stays in the turn and is never folded, live or settled', () => {
   const rows = [
     row({ id: 1, role: 'user' }),
     row({ id: 2, role: 'toolResult' }),
@@ -104,7 +160,7 @@ test('a steer read mid-turn stays in the turn and is never folded', () => {
     row({ id: 4, role: 'toolResult' }),
     row({ id: 5, role: 'assistant', text: 'reply' }),
   ];
-  assert.deepEqual(shape(layout(rows, true)), [1, 2, 3, 4, 5]);
+  assert.deepEqual(shape(layout(rows, true)), [1, 'fold[2,4]', 3, 5]);
   assert.deepEqual(shape(layout(rows, false)), [1, 'fold[2,4]', 3, 5]);
 });
 

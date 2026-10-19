@@ -1,11 +1,16 @@
 // Turn work blocks. A turn starts at a user row (a steer read mid-turn does not
-// start one, and is always shown); the agent activity after it (tool
-// results, intermediate notes, thinking) is its work. Once the turn has settled, the work folds
-// behind one "worked for …" row, but only when the turn did real work (a tool call or thinking): a
-// plain reply to "Hello" shows as it is. A live turn never folds. Errors, interruptions, retries and
-// context rows are always shown, and so is the turn's final reply.
+// start one, and is always shown); the agent activity after it (tool results, intermediate notes,
+// thinking) is its work, and it folds behind one "worked for …" row, but only when the turn did
+// real work (a tool call or thinking): a plain reply to "Hello" shows as it is. Errors,
+// interruptions, retries and context rows are always shown, and so is the turn's final reply.
+//
+// A live turn folds as it goes: only its newest activity stays open, either the running tool or the text written since
+// the last tool, so at settle nothing but that last piece folds and the transcript does not
+// jump. An Agent call whose subagent is still running stays open after the fold, even once the
+// turn has settled, and folds when the subagent finishes.
 
 import type { MessageRow } from '../api/types.ts';
+import { isAgentRow } from './subagents/model.ts';
 import { toolStatus } from './toolKinds.ts';
 import { ESTIMATE, estimateHeight, type EstimateInput } from './virtual.ts';
 
@@ -40,6 +45,11 @@ function opensTurn(r: MessageRow): boolean {
   return r.role === 'user' && r.details?.mode !== 'steer';
 }
 
+/** An assistant row with nothing to show (the host saves each tool call's message as one). */
+function isBlank(r: MessageRow): boolean {
+  return r.role === 'assistant' && !r.text.trim() && !r.thinking.trim();
+}
+
 function alwaysShown(r: MessageRow): boolean {
   if (r.role === 'user') return true;
   if (r.status === 'error' || r.status === 'interrupted') return true;
@@ -50,9 +60,10 @@ function alwaysShown(r: MessageRow): boolean {
 
 /**
  * Lay out rows as items. `live` says whether the newest turn is still running; `expanded` lists the
- * turn keys the reader has opened.
+ * turn keys the reader has opened; `runningAgents` holds the tool call ids of Agent calls whose
+ * subagent is still running.
  */
-export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<string> = new Set()): Item[] {
+export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<string> = new Set(), runningAgents: ReadonlySet<string> = new Set()): Item[] {
   const items: Item[] = [];
   let i = 0;
   // Rows before the first user row (a page that starts mid-turn) are shown as they are.
@@ -76,26 +87,49 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
     const settled = !(isLast && live);
     const hadTools = work.some((r) => r.role === 'toolResult');
     const hadThinking = work.some((r) => r.role === 'assistant' && r.thinking.trim() !== '');
+    // While live, the open part is the newest activity: the running tool if a tool is the newest
+    // row, else everything written since the last tool. Settled, it is the final reply.
+    let openFrom = work.length;
+    if (!settled) {
+      let lastTool = -1;
+      for (let j = work.length - 1; j >= 0; j--) {
+        if (work[j]!.role === 'toolResult') {
+          lastTool = j;
+          break;
+        }
+      }
+      openFrom = lastTool < 0 ? work.length - 1 : lastTool === work.length - 1 ? lastTool : lastTool + 1;
+    }
+    const open = (j: number) => (settled ? j === reply : j >= openFrom);
     const push = (r: MessageRow, j: number, indent: boolean) => {
       const prev = j > 0 ? work[j - 1] : user;
       const last = items[items.length - 1];
       items.push({
         kind: 'row',
         row: r,
-        final: settled && j === reply && hadTools,
+        // Live, the reply being written after the last tool already wears its final look, so
+        // settling changes nothing about it.
+        final: j === reply && hadTools && open(j),
         afterTool: prev?.role === 'toolResult',
         indent,
         afterFold: last?.kind === 'fold' && !last.open,
       });
     };
-    // Nothing to fold away: the turn is live, empty, or did no work beyond replying.
-    if (!settled || work.length === 0 || (!hadTools && !hadThinking)) {
+    // Nothing to fold away: the turn is empty, or did no work beyond replying.
+    if (work.length === 0 || (!hadTools && !hadThinking)) {
       work.forEach((r, j) => push(r, j, false));
       continue;
     }
+    const keep = (r: MessageRow) => alwaysShown(r) || (isAgentRow(r) && r.toolCallId !== null && runningAgents.has(r.toolCallId));
     const foldedIdx: number[] = [];
     const shownIdx: number[] = [];
-    work.forEach((r, j) => (j === reply || alwaysShown(r) ? shownIdx : foldedIdx).push(j));
+    work.forEach((r, j) => (open(j) || keep(r) ? shownIdx : foldedIdx).push(j));
+    // Live, a fold of nothing visible (the empty message a tool call is saved under) would only
+    // put "Worked for 0s" above the first tool: wait for real work to fold.
+    if (!settled && foldedIdx.every((j) => isBlank(work[j]!))) {
+      work.forEach((r, j) => push(r, j, false));
+      continue;
+    }
     if (foldedIdx.length > 0) {
       // Timed from the run's first output, not the prompt: starting the worker, Claude Code and its
       // session hooks is not work the agent did on this turn.

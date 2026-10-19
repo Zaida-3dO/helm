@@ -51,7 +51,8 @@ export class StreamBlocks {
       this.links = {};
     }
     if (this.prefix === '' && FRONTMATTER.test(text)) return { reset, added: [], tail: renderToHtml(text, done ? final : options) };
-    const tokens = lexBlocks(text.slice(this.prefix.length), this.links);
+    const slice = text.slice(this.prefix.length);
+    const tokens = lexBlocks(slice, this.links);
     if (!tokens) return { reset, added: [], tail: '' };
     // Everything before the last non-blank block is finished. Until that block's first line is
     // complete it may still turn out to continue the one before (a "2" that becomes "2. second"
@@ -60,6 +61,16 @@ export class StreamBlocks {
     for (let i = 0; i < tokens.length; i++) if (tokens[i]!.type !== 'space') blocks.push(i);
     let cut = blocks.length ? blocks[blocks.length - 1]! : 0;
     if (cut > 0 && !tokens[cut]!.raw.includes('\n')) cut = blocks.length > 1 ? blocks[blocks.length - 2]! : 0;
+    // marked drops a repeated definition's token but not its text, so the tokens no longer cover
+    // the text from there on. Only blocks whose text is accounted for, in order, can finish.
+    let covered = 0;
+    for (let i = 0; i < cut; i++) {
+      if (!slice.startsWith(tokens[i]!.raw, covered)) {
+        cut = i;
+        break;
+      }
+      covered += tokens[i]!.raw.length;
+    }
     const added: string[] = [];
     let consumed = 0;
     for (let i = 0; i < cut; i++) {

@@ -16,6 +16,8 @@ const CORPUS = [
   'Windows line endings\r\n\r\n- a\r\n- b\r\n\r\nend',
   // A definition in an early block, used in later blocks that finish on their own.
   '[r]: https://example.com/r\n\nUse [r] here.\n\nAnd [r] there.\n\nA last line.',
+  // A label defined twice: marked keeps the first and drops the second, text and all.
+  '[1]: https://a.example\n\nSee [1].\n\n[1]: https://b.example\n\nAgain [1].\n\nEnd.\n\nAfter the end.',
 ];
 
 function streamOut(text: string, cuts: number[], options: RenderOptions = {}): string {

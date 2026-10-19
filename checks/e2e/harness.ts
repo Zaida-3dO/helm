@@ -291,16 +291,31 @@ export async function measure(page: Page, selector: string): Promise<Measure> {
     if (!el) throw new Error(`no element for ${sel}`);
     const r = el.getBoundingClientRect();
     const cs = getComputedStyle(el);
-    // The effective background: walk up until a non-transparent one.
-    let bg = "rgba(0, 0, 0, 0)";
+    // Colours as rgba numbers through a canvas, so any CSS form parses (`color(srgb ...)`,
+    // `color-mix()` results, alpha); a plain-regex parse read `color(srgb 0.96 ...)` as near black.
+    const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true })!;
+    const rgba = (c: string): [number, number, number, number] => {
+      probe.clearRect(0, 0, 1, 1);
+      probe.fillStyle = "#000";
+      probe.fillStyle = c;
+      probe.fillRect(0, 0, 1, 1);
+      const d = probe.getImageData(0, 0, 1, 1).data;
+      return [d[0]!, d[1]!, d[2]!, d[3]! / 255];
+    };
+    // The effective background: every translucent layer from the element up, over the first
+    // opaque one (white if none is), composited the way they paint.
+    const layers: [number, number, number, number][] = [];
     for (let n: HTMLElement | null = el; n; n = n.parentElement) {
-      const b = getComputedStyle(n).backgroundColor;
-      if (b && b !== "rgba(0, 0, 0, 0)" && b !== "transparent") {
-        bg = b;
-        break;
-      }
+      const b = rgba(getComputedStyle(n).backgroundColor);
+      if (b[3] > 0) layers.push(b);
+      if (b[3] >= 0.999) break;
     }
-    return { w: r.width, h: r.height, x: r.x, y: r.y, vw: innerWidth, vh: innerHeight, color: cs.color, bg, display: cs.display, visibility: cs.visibility };
+    let base: [number, number, number] = [255, 255, 255];
+    for (const [lr, lg, lb, la] of layers.reverse()) base = [lr * la + base[0] * (1 - la), lg * la + base[1] * (1 - la), lb * la + base[2] * (1 - la)];
+    const fg = rgba(cs.color);
+    const color = `rgb(${[fg[0] * fg[3] + base[0] * (1 - fg[3]), fg[1] * fg[3] + base[1] * (1 - fg[3]), fg[2] * fg[3] + base[2] * (1 - fg[3])].map(Math.round).join(", ")})`;
+    const bg = `rgb(${base.map(Math.round).join(", ")})`;
+    return { w: r.width, h: r.height, x: r.x, y: r.y, vw: innerWidth, vh: innerHeight, color, bg, display: cs.display, visibility: cs.visibility };
   }, selector);
 }
 

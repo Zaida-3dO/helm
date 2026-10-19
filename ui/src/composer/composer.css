@@ -292,6 +292,21 @@
     transition: none;
   }
 }
+/* Forced colours paint every bar the same: keep the bars, light the chosen ones with Highlight and
+   ring the selected stop, so the effort reads without colour (a forced-colours rule). */
+@media (forced-colors: active) {
+  .model-picker-stop > span {
+    forced-color-adjust: none;
+    background: GrayText;
+  }
+  .model-picker-stop.lit > span {
+    background: Highlight;
+  }
+  .model-picker-stop.on {
+    outline: 1px solid CanvasText;
+    outline-offset: 1px;
+  }
+}
 
 /* Attach buttons: 28 x 28, radius 7, glyph 16 --muted. */
 .composer-dock .composer-attach {

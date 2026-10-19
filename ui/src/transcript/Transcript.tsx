@@ -6,7 +6,8 @@ import type { MessageRow } from '../api/types.ts';
 import { FoldRow, Row, type RowContext } from './Rows.tsx';
 import { VirtualList } from './VirtualList.tsx';
 import { turnTimes } from './rowMeta.ts';
-import { layout, type Item } from './workBlocks.ts';
+import { estimateItem, layout, type Item } from './workBlocks.ts';
+import { useRunningAgents } from '../state/runningAgents.ts';
 
 export interface TranscriptProps {
   rows: MessageRow[];
@@ -25,7 +26,9 @@ function itemKey(i: Item): string {
 
 export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLatest, onFollowChange, jumpToRowId }: TranscriptProps) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  const items = useMemo(() => layout(rows, live, expanded), [rows, live, expanded]);
+  // Agent calls whose subagent still runs stay out of the fold (workBlocks.ts).
+  const runningAgents = useRunningAgents(ctx.chatId);
+  const items = useMemo(() => layout(rows, live, expanded, runningAgents), [rows, live, expanded, runningAgents]);
   const byKey = useMemo(() => new Map(items.map((i) => [itemKey(i), i])), [items]);
   const keys = useMemo(() => items.map(itemKey), [items]);
   const times = useMemo(() => turnTimes(items), [items]);
@@ -70,6 +73,7 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
       onJumpLatest={onJumpLatest}
       onFollowChange={onFollowChange}
       jumpTo={jumpKey}
+      estimate={(k) => estimateItem(byKey.get(k))} // height guesses for unmeasured rows
       render={(k) => {
         const item = byKey.get(k);
         if (!item) return null;

@@ -9,7 +9,8 @@
   },
   "scripts": {
     "e2e": "node --test --test-concurrency=1 \"e2e/*.e2e.ts\"",
-    "live": "node --test --test-concurrency=1 \"e2e/*.live.ts\""
+    "live": "node --test --test-concurrency=1 \"e2e/*.live.ts\"",
+    "perf": "node perf/bench.ts"
   },
   "devDependencies": {
     "playwright-core": "^1.64.1"

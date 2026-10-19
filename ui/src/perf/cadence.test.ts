@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyCadence, MotionPolicy } from './cadence.ts';
+import { CadenceGate, classifyCadence, MotionPolicy } from './cadence.ts';
 
 const run = (ms: number, n = 30) => Array<number>(n).fill(ms);
 
@@ -36,4 +36,18 @@ test('the policy follows the measured cadence, a forced one wins, and listeners 
   p.force('auto');
   assert.equal(p.low, true);
   assert.equal(heard, 3);
+});
+
+test('a slow sample needs a second one to agree; a fast one decides at once', () => {
+  const g = new CadenceGate();
+  assert.equal(g.push('low'), 'confirm');
+  assert.equal(g.push('low'), 'low');
+  assert.equal(g.push('normal'), 'normal');
+  // One busy second after a fast verdict does not flip it.
+  assert.equal(g.push('low'), 'confirm');
+  assert.equal(g.push('normal'), 'normal');
+  assert.equal(g.push(null), null);
+  g.push('low');
+  g.reset();
+  assert.equal(g.push('low'), 'confirm', 'a reset forgets the unconfirmed slow sample');
 });

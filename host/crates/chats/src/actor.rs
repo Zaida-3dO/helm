@@ -2580,7 +2580,18 @@ mod subagent_tests {
             "the live thread carries a preview"
         );
         assert!(s.report_truncated);
-        // The row event carries the settled subagent to the UI.
+        // The row event carries the settled subagent to the UI. `persist_subagent` emits it after
+        // the write it reads back, so the database can show the row before the event is out: wait
+        // for the event itself rather than reading the sink the moment the row lands.
+        h.until("a message event carries details.subagent", |h| {
+            h.events("message").iter().any(|e| {
+                e["rows"].as_array().is_some_and(|rows| {
+                    rows.iter()
+                        .any(|r| r["details"]["subagent"]["status"] == "completed")
+                })
+            })
+        })
+        .await;
         let rows: Vec<Value> = h
             .events("message")
             .iter()
