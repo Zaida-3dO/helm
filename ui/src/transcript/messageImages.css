@@ -1,0 +1,58 @@
+/* Images in the user's bubble. Design-system tokens only. */
+
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.msg-images:last-child {
+  margin-bottom: 0;
+}
+
+.msg-image {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  color: var(--secondary);
+  font-size: calc(11 * var(--ui-unit, 1px));
+}
+
+button.msg-image {
+  cursor: var(--cursor-pointer);
+}
+
+button.msg-image:hover {
+  border-color: var(--line-strong);
+}
+
+.msg-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.msg-image-loading {
+  opacity: 0.6;
+}
+
+.msg-image-failed {
+  text-align: center;
+  padding: 4px;
+}
+
+.msg-image-full {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  margin: 0 auto;
+  object-fit: contain;
+}

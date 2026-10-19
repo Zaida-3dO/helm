@@ -32,8 +32,9 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
 
   if (rows.length === 0) {
     return (
-      <div className="transcript-empty muted" data-testid="transcript">
-        No messages yet. Write below to start.
+      <div className="transcript-empty" data-testid="transcript">
+        {/* An empty chat: the same heading as the new-chat page, vertically centred. */}
+        <h1 className="transcript-empty-title">What are we building?</h1>
       </div>
     );
   }

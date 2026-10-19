@@ -1,14 +1,20 @@
-// The workflow panel in the composer dock: the active
+// The workflow panel in the composer dock: the current
 // task's six stages, what it needs from you, its changes with their gates, and a link to the Agent
-// Standup item when the chat is linked. Read-only: the Allow cards for workflow kinds (land, ready,
-// drop, skip, allowMore, reopen) are the existing consent cards in the consent slot above.
+// Standup item when the chat is linked. The buttons are the user's own steps:
+// Sign off plan; Merge, Decline, Drop change, Retry land and Ready for review on a change; and the
+// task's ⋯ menu (Skip a stage, Allow more rounds, Park, Reopen, Mark visual / Not visual, Drop
+// change, End task). Each is a main-window op the host re-checks; a refusal is shown word for word.
+// The Allow cards for workflow kinds (an agent asking) are the consent cards in the slot above.
 
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { AccessoryContext } from '../composer/slots.ts';
 import { openItem } from '../itemlinks/store.ts';
 import { useShell } from '../shell/context.ts';
-import { toast } from '../ui/index.ts';
-import { changeLabel, changeName, needsYou, prNumber, stageChips } from './progress.ts';
+import { Button, ContextMenu, toast, type MenuItem } from '../ui/index.ts';
+import { IconMore } from '../ui/icons.tsx';
+import { workflowOps, type ChangeAction, type TaskAction, type TaskActionFields } from './api.ts';
+import { changeControls, changeLabel, changeName, needsYou, prNumber, signOffPlan, stageChips, taskMenu, type TaskMenuEntry } from './progress.ts';
+import type { RunChange } from './run.ts';
 import { runStoreFor } from './runstore.ts';
 import { orchestratorStoreFor } from './store.ts';
 import './workflow-panel.css';
@@ -19,6 +25,9 @@ export function WorkflowPanel({ ctx }: { ctx: AccessoryContext }) {
   const modes = orchestratorStoreFor(shell.api, shell.bus);
   const chatId = ctx.chat.id;
   const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const moreRef = useRef<HTMLButtonElement>(null);
   // Ask again when a turn starts or ends: that is when the agent has moved the task on.
   useEffect(() => runs.ensure(chatId), [runs, chatId, ctx.busy]);
   useSyncExternalStore(runs.subscribe, () => runs.version);
@@ -43,11 +52,42 @@ export function WorkflowPanel({ ctx }: { ctx: AccessoryContext }) {
     );
   }
   const task = view.task;
+  const ops = workflowOps(shell.api);
+  /** Run one of the user's steps; the host's refusal is shown as it said it. */
+  const act = async (key: string, call: () => Promise<unknown>) => {
+    if (busy) return;
+    setBusy(key);
+    try {
+      await call();
+    } catch (e) {
+      toast.show({ kind: 'error', text: (e as { message?: string })?.message ?? String(e) });
+    } finally {
+      setBusy(null);
+      void runs.refresh(chatId);
+    }
+  };
+  const onChange = (c: RunChange, action: ChangeAction) =>
+    void act(`${action}:${c.target.repo} ${c.target.branch}`, () => ops.changeAction(task.runId, c.target.repo, c.target.branch, action));
+  const onTask = (action: TaskAction, fields?: TaskActionFields) => void act(action, () => ops.taskAction(task.runId, action, fields));
+  const signOff = signOffPlan(view, settings);
   const needs = needsYou(view, settings, allowRequests);
+  const waiting = view.changes.filter((c) => changeControls(c).length > 0);
+  const menu = taskMenu(view, settings);
+  const toItem = (m: TaskMenuEntry): MenuItem => ({
+    id: m.id,
+    label: m.label,
+    danger: m.danger,
+    disabled: busy !== null,
+    ...(m.submenu ? { submenu: m.submenu.map(toItem) } : {}),
+    onSelect: () => {
+      if (m.change) onChange(m.change, 'drop');
+      else if (m.action) onTask(m.action, m.fields);
+    },
+  });
   const itemId = item?.itemId ?? task.itemId;
   const itemTitle = item?.title ?? (task.itemId ? task.itemId.slice(0, 8) : '');
   return (
-    <div className="orch-panel" data-testid="workflow-panel" data-status={task.status} data-needs={needs.length}>
+    <div className="orch-panel" data-testid="workflow-panel" data-status={task.status} data-needs={needs.length} aria-busy={busy !== null}>
       <div className="orch-panel-head">
         <span className="orch-label">WORKFLOW</span>
         <button type="button" className="orch-panel-title" aria-expanded={open} data-testid="workflow-toggle" onClick={() => setOpen(!open)}>
@@ -76,6 +116,24 @@ export function WorkflowPanel({ ctx }: { ctx: AccessoryContext }) {
             Needs you · {needs.map((n) => n.text).join(' · ')}
           </span>
         )}
+        {menu.length > 0 && (
+          <Button
+            ref={moreRef}
+            variant="ghost"
+            className="orch-more"
+            data-testid="workflow-menu"
+            aria-haspopup="menu"
+            aria-expanded={menuAt !== null}
+            label="Task actions"
+            onClick={() => {
+              const r = moreRef.current?.getBoundingClientRect();
+              setMenuAt(menuAt ? null : { x: r ? r.right - 200 : 0, y: r ? r.bottom + 4 : 0 });
+            }}
+          >
+            <IconMore />
+          </Button>
+        )}
+        {menuAt && <ContextMenu x={menuAt.x} y={menuAt.y} label="Task actions" testId="workflow-task-menu" onClose={() => setMenuAt(null)} items={menu.map(toItem)} />}
       </div>
       <ol className="orch-stages-row" data-testid="workflow-stages" aria-label="Workflow stages">
         {chips.map((c) => (
@@ -88,6 +146,40 @@ export function WorkflowPanel({ ctx }: { ctx: AccessoryContext }) {
           </li>
         ))}
       </ol>
+      {(signOff || waiting.length > 0) && (
+        <div className="orch-panel-actions" data-testid="workflow-actions">
+          {signOff && (
+            <div className="orch-panel-action">
+              <span className="orch-line-name">Plan</span>
+              <Button variant="primary" data-testid="workflow-signoff" disabled={busy !== null} onClick={() => onTask('signOff', { planId: signOff })}>
+                Sign off plan
+              </Button>
+            </div>
+          )}
+          {waiting.map((c) => (
+            <div key={`${c.target.repo}/${c.target.branch}`} className="orch-panel-action" data-testid="workflow-waiting" data-branch={c.branch}>
+              <span className="orch-line-name">{changeName(c)}</span>
+              {prNumber(c.pr) && <span className="orch-pr">{prNumber(c.pr)}</span>}
+              <span>{changeLabel(c.state)}</span>
+              {changeControls(c).map((b) => (
+                <Button
+                  key={b.action}
+                  variant={b.primary ? 'primary' : 'secondary'}
+                  danger={b.danger}
+                  data-testid="workflow-change-action"
+                  data-action={b.action}
+                  disabled={busy !== null}
+                  title={`${b.label} ${changeName(c)}`}
+                  onClick={() => onChange(c, b.action)}
+                >
+                  {b.label}
+                </Button>
+              ))}
+              {c.error && <span className="orch-error-line">{c.error}</span>}
+            </div>
+          ))}
+        </div>
+      )}
       {open && (
         <div className="orch-panel-body" data-testid="workflow-body">
           {view.plan && (
@@ -102,7 +194,7 @@ export function WorkflowPanel({ ctx }: { ctx: AccessoryContext }) {
             </div>
           )}
           {view.changes.map((c) => (
-            <div key={`${c.repo}/${c.branch}`} className="orch-change" data-testid="workflow-change" data-state={c.state} data-branch={c.branch}>
+            <div key={`${c.target.repo}/${c.target.branch}`} className="orch-change" data-testid="workflow-change" data-state={c.state} data-branch={c.branch}>
               <div className="orch-line">
                 <span className="orch-line-name">{changeName(c)}</span>
                 <span data-testid="workflow-change-state">{changeLabel(c.state)}</span>

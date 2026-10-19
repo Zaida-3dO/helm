@@ -804,6 +804,99 @@ pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecor
     emit_chat(rt, &a.chat_id).ok_or_else(crate::ops::not_found)
 }
 
+/// Permission modes the composer's mode picker offers: the chip picks the mode for the next turn.
+pub const PERMISSION_MODES: &[&str] = &["bypassPermissions", "default", "acceptEdits", "plan"];
+
+/// A chat's pick, while Helm runs: the mode, and whether a worker has been given it yet.
+#[derive(Clone, Debug)]
+struct Pick {
+    mode: String,
+    delivered: bool,
+}
+
+/// The mode each chat's user picked. A worker that starts later (the first send, or after an idle
+/// retire) gets a start line; without a pick a worker keeps its launch mode.
+fn picks() -> &'static std::sync::Mutex<std::collections::HashMap<String, Pick>> {
+    static PICKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Pick>>> =
+        std::sync::OnceLock::new();
+    PICKS.get_or_init(Default::default)
+}
+
+/// The worker line that sets `mode`; the worker applies it before its next prompt.
+pub fn permission_mode_line(mode: &str) -> serde_json::Value {
+    json!({"type": "set_permission_mode", "mode": mode})
+}
+
+/// The start line for a chat whose user picked a mode, given the mode the chat's last worker
+/// reported. Once a worker has had the pick, that reported mode wins: it is where the chat really
+/// was (Claude Code leaves plan mode by itself, or refused the pick), so a new worker resumes there
+/// rather than re-entering the old pick.
+pub fn permission_start_line(chat_id: &str, last_live: Option<&str>) -> Option<serde_json::Value> {
+    let mut map = picks().lock().unwrap();
+    let pick = map.get_mut(chat_id)?;
+    if let Some(live) = last_live.filter(|m| PERMISSION_MODES.contains(m)) {
+        if pick.delivered {
+            pick.mode = live.to_owned();
+        }
+    }
+    pick.delivered = true;
+    Some(permission_mode_line(&pick.mode))
+}
+
+/// Registers the start line that carries a picked permission mode to every new worker.
+pub fn register_worker_lines(l: &mut helm_hosttools::WorkerLines) {
+    l.register_start_line(|chat_id, services| {
+        let last = services
+            .get::<ChatRuntime>()
+            .and_then(|rt| rt.live_thread(chat_id))
+            .and_then(|t| t.permission_mode);
+        permission_start_line(chat_id, last.as_deref())
+    });
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatSetPermissionModeArgs {
+    pub chat_id: String,
+    pub mode: String,
+}
+
+/// `chat_set_permission_mode`: remember the pick and tell a live worker, which applies it before
+/// its next prompt (Claude Code's `set_permission_mode` control request). Answers `{mode}`.
+pub fn chat_set_permission_mode(
+    rt: &ChatRuntime,
+    a: ChatSetPermissionModeArgs,
+) -> Result<serde_json::Value, ApiError> {
+    if !PERMISSION_MODES.contains(&a.mode.as_str()) {
+        return Err(ApiError::bad_args(
+            "Permission mode must be bypassPermissions, default, acceptEdits or plan.",
+        ));
+    }
+    rt.db()
+        .snapshot(|t| store::get_chat(t, &a.chat_id, 0))
+        .map_err(sql)?
+        .ok_or_else(crate::ops::not_found)?;
+    // A chat with a live worker hears it now; otherwise its next worker gets it at start.
+    let live_worker = rt
+        .sh
+        .actors
+        .lock()
+        .unwrap()
+        .get(&a.chat_id)
+        .is_some_and(|h| h.live.lock().unwrap().has_worker);
+    picks().lock().unwrap().insert(
+        a.chat_id.clone(),
+        Pick {
+            mode: a.mode.clone(),
+            delivered: live_worker,
+        },
+    );
+    if live_worker {
+        rt.command(&a.chat_id, Cmd::WorkerLine(permission_mode_line(&a.mode)))?;
+    }
+    Ok(json!({"mode": a.mode}))
+}
+
 #[cfg(test)]
 mod admission_tests {
     use super::*;

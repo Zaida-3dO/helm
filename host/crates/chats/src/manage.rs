@@ -5,6 +5,7 @@
 //! | `chat_archive` | maintenance | [`ChatIdArgs`] → [`ChatRecord`] (refused while busy; idempotent; retires the idle worker) |
 //! | `chat_restore` | maintenance | [`ChatIdArgs`] → [`ChatRecord`] (refused in an archived project) |
 //! | `chat_delete` | maintenance | [`ChatIdArgs`] → `null` (archived and idle only; emits `chat_removed`) |
+//! | `chat_discard_untouched` | maintenance | [`ChatIdArgs`] → `{discarded}` (only an untouched new chat; see [`store::untouched`]) |
 //! | `chat_fork` | maintenance | [`ChatForkArgs`] → [`ChatRecord`] (see [`crate::fork`]) |
 //! | `message_edit_open` | blocking | [`MessageEditOpenArgs`] → [`MessageEditOpenResult`] |
 //! | `message_resend` | maintenance | [`MessageResendArgs`] → [`ChatSendResult`] (two-phase; see [`crate::edit`]) |
@@ -48,7 +49,12 @@ pub fn register(reg: &mut OpRegistry) {
         .blocking("side_chat_resolve", OpClass::Maintenance, side_chat_resolve)
         .blocking("chat_mute", OpClass::Maintenance, chat_mute)
         .blocking("attention_address", OpClass::Maintenance, attention_address)
-        .blocking("attention_snooze", OpClass::Maintenance, attention_snooze);
+        .blocking("attention_snooze", OpClass::Maintenance, attention_snooze)
+        .blocking(
+            "chat_discard_untouched",
+            OpClass::Maintenance,
+            chat_discard_untouched,
+        );
 }
 
 /// Whether the chat's project is archived, through the projects crate's gate (open when none).
@@ -133,6 +139,12 @@ pub(crate) fn delete_chat(ctx: &OpCtx, chat_id: &str, rule: DeleteRule) -> Resul
         .write(|tx| delete::delete_in_tx(tx, chat_id, rule, now))
         .map_err(sql)?;
     r.map_err(ApiError::from)?;
+    after_delete(ctx, &db, chat_id);
+    Ok(())
+}
+
+/// What follows a deleted row: retire any actor, emit `chat_removed`, clean up files.
+fn after_delete(ctx: &OpCtx, db: &Database, chat_id: &str) {
     if let Some(rt) = ctx.services.get::<ChatRuntime>() {
         rt.retire(chat_id);
         rt.publish_attention();
@@ -144,9 +156,36 @@ pub(crate) fn delete_chat(ctx: &OpCtx, chat_id: &str, rule: DeleteRule) -> Resul
         .to_app_event(),
     );
     if let Some(profile) = ctx.services.get::<Profile>() {
-        delete::run_cleanup(&db, &profile.path(""));
+        delete::run_cleanup(db, &profile.path(""));
     }
-    Ok(())
+}
+
+/// Discard a chat only if it is an untouched new chat (one the new-chat page made but
+/// could not send to). Anything with content is left alone and answers `discarded: false`, so the
+/// app may ask without checking first. The row goes through the ordinary delete path (files queued,
+/// `chat_removed` emitted) inside one transaction.
+fn chat_discard_untouched(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatIdArgs = parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let now = helm_core::now_ms();
+    let discarded = db
+        .write(|tx| {
+            if store::untouched(tx, &a.chat_id)? != Some(true) {
+                return Ok(false);
+            }
+            // The delete path takes archived chats; the flag never outlives this transaction.
+            tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [&a.chat_id])?;
+            if delete::delete_in_tx(tx, &a.chat_id, DeleteRule::Archived, now)?.is_err() {
+                tx.execute("UPDATE chats SET archived = 0 WHERE id = ?1", [&a.chat_id])?;
+                return Ok(false);
+            }
+            Ok::<_, rusqlite::Error>(true)
+        })
+        .map_err(sql)?;
+    if discarded {
+        after_delete(ctx, &db, &a.chat_id);
+    }
+    Ok(serde_json::json!({ "discarded": discarded }))
 }
 
 fn chat_delete(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -715,6 +754,46 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(c.code, "refused");
+    }
+
+    /// An untouched chat goes; one with a typed draft stays; asking is never an error.
+    #[tokio::test]
+    async fn only_an_untouched_chat_is_discarded() {
+        let h = harness();
+        let bare = create(&h).await;
+        let typed = create(&h).await;
+        h.api
+            .call(
+                &main(),
+                "draft_save",
+                json!({"chatId": typed, "text": "keep me", "revision": 10}),
+            )
+            .await
+            .unwrap();
+        async fn discard(h: &crate::ops::tests::Harness, id: &str) -> Value {
+            h.api
+                .call(&main(), "chat_discard_untouched", json!({"chatId": id}))
+                .await
+                .unwrap()
+        }
+        assert_eq!(discard(&h, &typed).await, json!({"discarded": false}));
+        assert!(!h.sink.kinds().contains(&"chat_removed".to_owned()));
+        assert_eq!(discard(&h, &bare).await, json!({"discarded": true}));
+        assert!(h.sink.kinds().contains(&"chat_removed".to_owned()));
+        let gone = h
+            .api
+            .call(&main(), "chat_get", json!({"chatId": bare}))
+            .await
+            .unwrap_err();
+        assert_eq!(gone.code, "not_found");
+        assert_eq!(discard(&h, &bare).await, json!({"discarded": false}));
+        let kept = h
+            .api
+            .call(&main(), "chat_get", json!({"chatId": typed}))
+            .await
+            .unwrap();
+        assert_eq!(kept["chat"]["draft"], "keep me");
+        assert_eq!(kept["chat"]["archived"], false);
     }
 
     #[tokio::test]

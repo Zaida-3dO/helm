@@ -135,6 +135,7 @@ pub fn worker_lines() -> helm_hosttools::WorkerLines {
     let mut l = helm_hosttools::WorkerLines::new();
     helm_mcp::register_worker_lines(&mut l);
     helm_usage::register_worker_lines(&mut l);
+    helm_chats::submit::register_worker_lines(&mut l);
     l
 }
 

@@ -571,6 +571,56 @@ impl ChatRuntime {
         )
     }
 
+    /// Pre-warm: start the chat's worker before its first send, so the worker and
+    /// Claude Code start up while the user is still typing. Best effort and silent: nothing
+    /// happens while quitting, for an archived or side chat, a chat with a turn in progress or a
+    /// worker already, or when [`Limits::max_idle_workers`] idle workers already run (a
+    /// speculative start never pushes another chat's worker out).
+    pub fn prewarm(&self, chat_id: &str) {
+        use rusqlite::OptionalExtension;
+        if self.sh.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        let eligible = self
+            .sh
+            .db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT archived = 0 AND side_source_id IS NULL
+                            AND status NOT IN ('starting', 'running', 'stopping')
+                     FROM chats WHERE id = ?1",
+                    [chat_id],
+                    |r| r.get::<_, bool>(0),
+                )
+                .optional()
+            })
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+        if !eligible {
+            return;
+        }
+        let idle = {
+            let map = self.sh.actors.lock().unwrap();
+            if map
+                .get(chat_id)
+                .is_some_and(|h| h.live.lock().unwrap().has_worker)
+            {
+                return;
+            }
+            map.values()
+                .filter(|h| {
+                    let live = h.live.lock().unwrap();
+                    live.has_worker && !live.thread.status.is_busy()
+                })
+                .count()
+        };
+        if idle >= self.sh.cfg.limits.max_idle_workers {
+            return;
+        }
+        let _ = enqueue(&self.actor(chat_id).tx, Cmd::Prewarm);
+    }
+
     /// Retire the chat's worker if it has an actor (archive, delete). Never starts an actor.
     pub fn retire(&self, chat_id: &str) {
         let h = self.sh.actors.lock().unwrap().get(chat_id).cloned();

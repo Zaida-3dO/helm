@@ -78,6 +78,9 @@ pub(crate) enum Cmd {
     RefreshCatalogue { reply: oneshot::Sender<bool> },
     /// A line for the worker from another crate (`WorkerBroadcast`); held until it is ready.
     WorkerLine(Value),
+    /// Start the worker ahead of the first send ([`crate::runtime::ChatRuntime::prewarm`]):
+    /// `get_state` only, so Claude Code's start-up runs while the user types.
+    Prewarm,
 }
 
 pub(crate) const STOP_TIMEOUT_ERROR: &str =
@@ -202,6 +205,8 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
             interactions: vec![],
             live_tools: vec![],
             background_tasks: vec![],
+            subagents: vec![],
+            subagents_running: 0,
             compacting: None,
             capabilities: Capabilities::default(),
             send_behavior: crate::send_behavior::HOME_DEFAULTS,
@@ -256,6 +261,19 @@ async fn recv_out(out: &mut Option<mpsc::Receiver<WorkerOutput>>) -> Option<Work
         Some(rx) => rx.recv().await,
         None => std::future::pending().await,
     }
+}
+
+/// Subagents kept on the live thread (the roster shows at most 30).
+const MAX_SUBAGENTS: usize = 30;
+/// A settled subagent's report on the live thread: a preview, since the whole thread is sent on
+/// every change.
+const LIVE_REPORT_BYTES: usize = 2 * 1024;
+/// A settled subagent's report on its tool row.
+const ROW_REPORT_BYTES: usize = 16 * 1024;
+
+fn set_report(s: &mut Subagent, report: Option<&str>, max: usize) {
+    s.report = report.map(|r| session_log::cut(r, max).to_owned());
+    s.report_truncated = report.is_some_and(|r| r.len() > max);
 }
 
 fn str_of(v: &Value, k: &str) -> Option<String> {
@@ -333,10 +351,22 @@ impl Actor {
     }
 
     fn emit_thread(&self) {
+        self.emit_thread_with(true);
+    }
+
+    /// `publish` recomputes the attention summary too; subagent steps skip it, as they change
+    /// nothing it reads and arrive up to twice a second per agent.
+    fn emit_thread_with(&self, publish: bool) {
         let rev = self.sh.clock.next();
         let thread = {
             let mut live = self.live.lock().unwrap();
             live.thread.revision = rev;
+            live.thread.subagents_running = live
+                .thread
+                .subagents
+                .iter()
+                .filter(|s| s.status == SubagentStatus::Running)
+                .count() as u32;
             live.thread.live_tools = {
                 let mut v: Vec<LiveTool> = self
                     .tools
@@ -358,7 +388,9 @@ impl Actor {
             thread,
         });
         // Interactions feed the waiting tracker.
-        crate::attention::publish(&self.sh);
+        if publish {
+            crate::attention::publish(&self.sh);
+        }
     }
 
     fn emit_rows(&self, keys: &[String]) {
@@ -699,6 +731,7 @@ impl Actor {
         for r in self.shutdown_replies.drain(..) {
             let _ = r.send(());
         }
+        self.end_running_subagents("The worker stopped before this agent finished.");
         if std::mem::take(&mut self.edit_waiting) {
             self.apply_edit();
         }
@@ -1030,7 +1063,11 @@ impl Actor {
                 tool_call_id,
                 reply,
             } => {
-                if self.link.is_none() || !self.tools.contains_key(&tool_call_id) {
+                let subagent =
+                    self.live.lock().unwrap().thread.subagents.iter().any(|s| {
+                        s.tool_call_id == tool_call_id && s.status == SubagentStatus::Running
+                    });
+                if self.link.is_none() || !(self.tools.contains_key(&tool_call_id) || subagent) {
                     let _ = reply.send(Err("That tool call is not running.".into()));
                     return;
                 }
@@ -1134,6 +1171,15 @@ impl Actor {
                     self.apply_edit();
                 }
             }
+            Cmd::Prewarm => {
+                let quitting = self
+                    .sh
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                if self.link.is_none() && !self.status().is_busy() && !quitting {
+                    self.ensure_worker();
+                }
+            }
             Cmd::StallCheck { after } => {
                 let stalled = self.live.lock().unwrap().stalled;
                 if self.status().is_busy() && !stalled && self.last_output.elapsed() >= after {
@@ -1180,6 +1226,11 @@ impl Actor {
         }
         if from_queue || !busy {
             // A prompt that opens a turn: its user row shows at once, as saved.
+            let mut details = json!({"submissionId": sid, "mode": sub.mode});
+            let images = crate::message_images::for_submission(&self.sh.db, sid);
+            if !images.is_empty() {
+                details["images"] = json!(images);
+            }
             let row = RowWrite {
                 source_key: format!("u:{sid}"),
                 role: "user",
@@ -1189,7 +1240,7 @@ impl Actor {
                 tool_call_id: None,
                 status: "saved",
                 timestamp: now(),
-                details: json!({"submissionId": sid, "mode": sub.mode}),
+                details,
                 entry_id: None,
                 parent_id: None,
             };
@@ -1636,6 +1687,7 @@ impl Actor {
                 self.live.lock().unwrap().thread.background_tasks = tasks;
                 self.emit_thread();
             }
+            "subagent_start" | "subagent_step" | "subagent_end" => self.on_subagent(kind, &v),
             "compaction_start" => {
                 self.live.lock().unwrap().thread.compacting = Some(Compacting {
                     started_at: now(),
@@ -1668,6 +1720,155 @@ impl Actor {
             }
             "chat_cancel" => crate::hostcalls::on_cancel(&mut self.host_calls, &v),
             _ => crate::hostcalls::other_line(&self.sh, &self.chat_id, &v),
+        }
+    }
+
+    // ------------------------------------------------------------------ subagents
+
+    /// `subagent_start` / `subagent_step` / `subagent_end` (see "Native subagents" in
+    /// `worker/PROTOCOL-NOTES.md`). The live list is kept on the thread and never written per step;
+    /// the end is written to the Agent call's tool row.
+    fn on_subagent(&mut self, kind: &str, v: &Value) {
+        let Some(id) = str_of(v, "toolCallId").filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let int = |k: &str| v.get(k).and_then(Value::as_i64);
+        // Any subagent activity keeps this worker the most recently used, so the idle cap
+        // retires other workers first.
+        self.touch();
+        match kind {
+            "subagent_start" => {
+                let s = Subagent {
+                    tool_call_id: id.clone(),
+                    agent_type: str_of(v, "agentType").unwrap_or_else(|| "general-purpose".into()),
+                    name: str_of(v, "name").unwrap_or_default(),
+                    description: str_of(v, "description").unwrap_or_default(),
+                    assignment: str_of(v, "assignment").unwrap_or_default(),
+                    status: SubagentStatus::Running,
+                    step_tool: None,
+                    step: None,
+                    started_at: now(),
+                    ended_at: None,
+                    duration_ms: None,
+                    tokens: None,
+                    tool_uses: None,
+                    error: None,
+                    report: None,
+                    report_truncated: false,
+                };
+                {
+                    let mut live = self.live.lock().unwrap();
+                    let list = &mut live.thread.subagents;
+                    list.retain(|x| x.tool_call_id != id);
+                    list.push(s);
+                    while list.len() > MAX_SUBAGENTS {
+                        // Drop the oldest settled agent; with none settled, the oldest.
+                        let i = list
+                            .iter()
+                            .position(|x| x.status != SubagentStatus::Running)
+                            .unwrap_or(0);
+                        list.remove(i);
+                    }
+                }
+                self.emit_thread();
+            }
+            "subagent_step" => {
+                let changed = {
+                    let mut live = self.live.lock().unwrap();
+                    match live
+                        .thread
+                        .subagents
+                        .iter_mut()
+                        .find(|x| x.tool_call_id == id && x.status == SubagentStatus::Running)
+                    {
+                        Some(s) => {
+                            s.step_tool = str_of(v, "tool");
+                            s.step = str_of(v, "text").filter(|t| !t.is_empty());
+                            s.tokens = int("tokens").or(s.tokens);
+                            s.tool_uses = int("toolUses").or(s.tool_uses);
+                            true
+                        }
+                        None => false,
+                    }
+                };
+                if changed {
+                    self.emit_thread_with(false);
+                }
+            }
+            _ => {
+                let status = match str_of(v, "status").as_deref() {
+                    Some("completed") => SubagentStatus::Completed,
+                    Some("stopped") => SubagentStatus::Stopped,
+                    _ => SubagentStatus::Failed,
+                };
+                let report = str_of(v, "report").filter(|r| !r.is_empty());
+                let ended = {
+                    let mut live = self.live.lock().unwrap();
+                    live.thread
+                        .subagents
+                        .iter_mut()
+                        .find(|x| x.tool_call_id == id && x.status == SubagentStatus::Running)
+                        .map(|s| {
+                            let t = now();
+                            s.status = status;
+                            s.ended_at = Some(t);
+                            s.duration_ms = int("durationMs").or(Some(t - s.started_at));
+                            s.tokens = int("tokens").or(s.tokens);
+                            s.tool_uses = int("toolUses").or(s.tool_uses);
+                            s.error = str_of(v, "error").filter(|e| !e.is_empty());
+                            let full = s.clone();
+                            set_report(s, report.as_deref(), LIVE_REPORT_BYTES);
+                            full
+                        })
+                };
+                if let Some(mut full) = ended {
+                    set_report(&mut full, report.as_deref(), ROW_REPORT_BYTES);
+                    self.persist_subagent(&full);
+                    self.emit_thread();
+                }
+            }
+        }
+    }
+
+    /// Write a settled subagent onto its Agent call's tool row (`details.subagent`).
+    fn persist_subagent(&self, s: &Subagent) {
+        let key = format!("t:{}", s.tool_call_id);
+        let patch = json!({ "subagent": s }).to_string();
+        let rev = self.sh.clock.next();
+        let id = self.chat_id.clone();
+        let k = key.clone();
+        let n = self.write(|t| {
+            t.execute(
+                "UPDATE messages SET details = json_patch(COALESCE(details, '{}'), ?1), revision = ?2
+                 WHERE chat_id = ?3 AND source_key = ?4",
+                rusqlite::params![patch, rev, id, k],
+            )
+        });
+        if n.unwrap_or(0) > 0 {
+            self.emit_rows(&[key]);
+        }
+    }
+
+    /// The worker is gone: no agent of it can still be running.
+    fn end_running_subagents(&mut self, reason: &str) {
+        let ended: Vec<Subagent> = {
+            let mut live = self.live.lock().unwrap();
+            let t = now();
+            live.thread
+                .subagents
+                .iter_mut()
+                .filter(|s| s.status == SubagentStatus::Running)
+                .map(|s| {
+                    s.status = SubagentStatus::Stopped;
+                    s.ended_at = Some(t);
+                    s.duration_ms = Some(t - s.started_at);
+                    s.error = Some(reason.to_owned());
+                    s.clone()
+                })
+                .collect()
+        };
+        for s in &ended {
+            self.persist_subagent(s);
         }
     }
 
@@ -1749,6 +1950,7 @@ impl Actor {
             // The worker's echo of one of our submissions (id = submission id).
             let sid = str_of(&msg, "submissionId").unwrap_or(mid);
             let sub = self.submission(&sid);
+            let images = crate::message_images::for_submission(&self.sh.db, &sid);
             let entry = MessageEntry {
                 id: format!("u:{sid}"),
                 parent_id: None,
@@ -1767,6 +1969,7 @@ impl Actor {
                 details: MessageDetails {
                     submission_id: Some(sid.clone()),
                     mode: sub.map(|s| s.mode),
+                    images: (!images.is_empty()).then_some(images),
                     ..Default::default()
                 },
             };
@@ -2110,5 +2313,155 @@ impl Actor {
             }
             .retire_idle_over_cap();
         }
+    }
+}
+
+/// Subagents on the live thread and on their tool row, against the in-process fake worker.
+#[cfg(test)]
+mod subagent_tests {
+    use crate::runtime_tests::{harness, FakeWorker, H};
+    use serde_json::{json, Value};
+
+    async fn running(h: &mut H) -> (String, FakeWorker) {
+        let chat = h.create().await;
+        h.send(&chat, "dispatch", "default").await;
+        let mut w = h.worker().await;
+        w.ready().await;
+        let p = w.expect("prompt").await;
+        w.respond(
+            &p,
+            json!({"submissionId": p["submissionId"], "state": "accepted"}),
+        )
+        .await;
+        w.emit(json!({"type": "agent_start"})).await;
+        h.until("running", |h| h.status(&chat) == "running").await;
+        (chat, w)
+    }
+
+    /// Starts an Agent call `id` whose call returns at once (a background agent).
+    async fn launch(w: &FakeWorker, id: &str) {
+        w.emit(json!({"type": "tool_execution_start", "toolCallId": id, "toolName": "Agent", "args": {"description": "Echo alpha"}, "stoppable": false}))
+            .await;
+        w.emit(json!({"type": "subagent_start", "toolCallId": id, "agentType": "reviewer", "name": "Echo alpha", "description": "Echo alpha", "assignment": "Run echo alpha.", "startedAt": 1}))
+            .await;
+        w.emit(json!({"type": "tool_execution_end", "toolCallId": id, "toolName": "Agent", "result": {"text": "Async agent launched successfully."}, "isError": false}))
+            .await;
+    }
+
+    fn subagent_col(h: &H, id: &str, path: &str) -> Vec<String> {
+        h.col(&format!(
+            "SELECT json_extract(details, '$.subagent{path}') FROM messages WHERE source_key = 't:{id}'"
+        ))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_subagent_lives_on_the_thread_and_settles_onto_its_tool_row() {
+        let mut h = harness();
+        let (chat, w) = running(&mut h).await;
+        launch(&w, "sa_1").await;
+        h.until("tool row ended", |h| {
+            h.col("SELECT status FROM messages WHERE source_key = 't:sa_1'") == ["complete"]
+        })
+        .await;
+        let t = h.rt.live_thread(&chat).unwrap();
+        assert_eq!(t.subagents.len(), 1);
+        assert_eq!(t.subagents[0].agent_type, "reviewer");
+        assert_eq!(t.subagents[0].assignment, "Run echo alpha.");
+        assert_eq!(t.subagents_running, 1);
+
+        w.emit(json!({"type": "subagent_step", "toolCallId": "sa_1", "tool": "Bash", "text": "echo alpha", "tokens": 1200, "toolUses": 1}))
+            .await;
+        h.until("step on the thread", |h| {
+            h.rt.live_thread(&chat).is_some_and(|t| {
+                t.subagents[0].step.as_deref() == Some("echo alpha")
+                    && t.subagents[0].step_tool.as_deref() == Some("Bash")
+                    && t.subagents[0].tokens == Some(1200)
+            })
+        })
+        .await;
+        assert_eq!(
+            subagent_col(&h, "sa_1", ""),
+            ["NULL"],
+            "a step is never written to the database"
+        );
+
+        // The parent's turn ends while its agent works on: idle, with a running subagent.
+        w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+            .await;
+        h.until("idle", |h| h.status(&chat) == "idle").await;
+        assert_eq!(h.rt.live_thread(&chat).unwrap().subagents_running, 1);
+
+        let report = "r".repeat(3000);
+        w.emit(json!({"type": "subagent_end", "toolCallId": "sa_1", "status": "completed", "report": report, "durationMs": 4200, "tokens": 1500, "toolUses": 2}))
+            .await;
+        h.until("settled on the row", |h| {
+            subagent_col(h, "sa_1", ".status") == ["completed"]
+        })
+        .await;
+        assert_eq!(subagent_col(&h, "sa_1", ".report"), [report.as_str()]);
+        assert_eq!(subagent_col(&h, "sa_1", ".durationMs"), ["4200"]);
+        assert_eq!(subagent_col(&h, "sa_1", ".tokens"), ["1500"]);
+        // The tool row keeps its own details beside the subagent's.
+        assert_eq!(
+            h.col("SELECT json_extract(details, '$.toolArgs') FROM messages WHERE source_key = 't:sa_1'"),
+            [r#"{"description":"Echo alpha"}"#]
+        );
+        let t = h.rt.live_thread(&chat).unwrap();
+        assert_eq!(t.subagents_running, 0);
+        let s = &t.subagents[0];
+        assert_eq!(s.status, crate::types::SubagentStatus::Completed);
+        assert_eq!(
+            s.report.as_deref().map(str::len),
+            Some(2048),
+            "the live thread carries a preview"
+        );
+        assert!(s.report_truncated);
+        // The row event carries the settled subagent to the UI.
+        let rows: Vec<Value> = h
+            .events("message")
+            .iter()
+            .flat_map(|e| e["rows"].as_array().cloned().unwrap_or_default())
+            .filter(|r| r["details"]["subagent"]["status"] == "completed")
+            .collect();
+        assert!(!rows.is_empty(), "a message event carries details.subagent");
+        assert_eq!(rows[0]["details"]["subagent"]["reportTruncated"], false);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tool_stop_reaches_a_running_subagent_and_a_worker_exit_stops_the_rest() {
+        let mut h = harness();
+        let (chat, mut w) = running(&mut h).await;
+        launch(&w, "sa_2").await;
+        h.until("subagent on the thread", |h| {
+            h.rt.live_thread(&chat)
+                .is_some_and(|t| t.subagents_running == 1)
+        })
+        .await;
+        // Its Agent call has returned, yet Stop still goes to the worker for the agent.
+        let (r, _) = tokio::join!(
+            h.call("tool_stop", json!({"chatId": chat, "toolCallId": "sa_2"})),
+            async {
+                let c = w.expect("stop_tool").await;
+                assert_eq!(c["toolCallId"], "sa_2");
+                w.respond(&c, json!({"stopped": true})).await;
+            }
+        );
+        assert_eq!(r.unwrap()["stopped"], true);
+        // An id that is neither a live tool nor a running agent is refused without asking.
+        let refused = h
+            .call("tool_stop", json!({"chatId": chat, "toolCallId": "nope"}))
+            .await;
+        assert!(refused.is_err());
+
+        w.exit().await;
+        h.until("stopped on the row", |h| {
+            subagent_col(h, "sa_2", ".status") == ["stopped"]
+        })
+        .await;
+        assert_eq!(
+            subagent_col(&h, "sa_2", ".error"),
+            ["The worker stopped before this agent finished."]
+        );
+        assert_eq!(h.rt.live_thread(&chat).unwrap().subagents_running, 0);
     }
 }

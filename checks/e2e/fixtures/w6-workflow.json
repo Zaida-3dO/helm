@@ -1,0 +1,76 @@
+{
+  "description": "w6-workflow-panel e2e: a [WF-PLAN] prompt makes the orchestrator adopt a plan of record through Helm's app_workflow tool (helm MCP server); any other prompt is answered 'noted'.",
+  "steps": [
+    {
+      "repeat": [
+        {
+          "await": {
+            "type": "user"
+          },
+          "as": "p",
+          "timeoutMs": 3600000
+        },
+        {
+          "init": {}
+        },
+        {
+          "if": {
+            "saved": "p",
+            "contains": "[WF-PLAN]"
+          },
+          "then": [
+            {
+              "mcp": {
+                "message": {
+                  "jsonrpc": "2.0",
+                  "id": 0,
+                  "method": "initialize",
+                  "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {}
+                  }
+                }
+              },
+              "as": "mcpinit"
+            },
+            {
+              "mcp": {
+                "hook": {
+                  "toolUseId": "tu_plan"
+                },
+                "message": {
+                  "jsonrpc": "2.0",
+                  "id": 1,
+                  "method": "tools/call",
+                  "params": {
+                    "name": "app_workflow",
+                    "arguments": {
+                      "action": "plan",
+                      "title": "Add the login page",
+                      "text": "# Add the login page\n\n1. Build the form.\n2. Wire the route."
+                    }
+                  }
+                }
+              },
+              "as": "tu_plan"
+            },
+            {
+              "text": "planned"
+            },
+            {
+              "result": "planned"
+            }
+          ],
+          "else": [
+            {
+              "text": "noted"
+            },
+            {
+              "result": "noted"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

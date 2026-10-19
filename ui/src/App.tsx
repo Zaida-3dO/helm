@@ -27,6 +27,7 @@ import { connectAppearance } from './shell/theme.ts';
 import { KEYBINDINGS_PREF, keys, layers, ToastSlotView } from './ui/index.ts';
 import { ChatStore } from './state/store.ts';
 import { TopBar } from './topbar/TopBar.tsx';
+import { EmptyMain } from './shell/EmptyMain.tsx';
 import { TerminalDock } from './terminal/TerminalDock.tsx';
 import { Notifications } from './notifications/Notifications.tsx';
 import { SettingsToast } from './hosttools/SettingsToast.tsx';
@@ -121,7 +122,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
           {chatId ? (
             <ChatView key={chatId} chatId={chatId} store={shell.store} ops={shell.ops} flushers={flushers} sendShortcut={sendShortcut} />
           ) : (
-            <div className="empty-main">Pick a chat, or enter a folder and press New chat.</div>
+            <EmptyMain />
           )}
           <NewChatHost flushers={flushers} sendShortcut={sendShortcut} /> {/* the new-chat page */}
         </div>

@@ -63,6 +63,8 @@ export function thread(p: Partial<ThreadState> = {}): ThreadState {
     interactions: [],
     liveTools: [],
     backgroundTasks: [],
+    subagents: [],
+    subagentsRunning: 0,
     compacting: null,
     capabilities: { withdraw: true, deliverNow: true, stopTool: false, compact: false },
     sendBehavior: { ...HOME_SEND_BEHAVIOR },

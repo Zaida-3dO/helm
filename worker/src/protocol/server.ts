@@ -131,6 +131,10 @@ export function serve(opts: ServeOptions): void {
         // The MCP client's configuration; no response is expected.
         if (!driver.hostLine?.(cmd)) diag("mcp_config ignored: no MCP client in this worker");
         return;
+      case "set_permission_mode":
+        // The composer's permission-mode pick; applied before the next prompt, no response.
+        if (!driver.hostLine?.(cmd)) diag("set_permission_mode ignored: this worker has no permission modes");
+        return;
       case "deliver_now":
       case "withdraw":
       case "stop_tool":

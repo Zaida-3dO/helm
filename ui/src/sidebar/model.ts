@@ -266,3 +266,18 @@ export function chatAncestors(rows: SidebarRow[], chatId: string): string[] {
   }
   return out;
 }
+
+/** Chat ids in the order the list draws them. Rows in collapsed groups or under collapsed parents
+ *  are not drawn, so they are skipped (next/previous chat). */
+export function visibleChatOrder(items: readonly ListItem[]): string[] {
+  return items.flatMap((i) => (i.kind === 'chat' ? [i.row.chatId] : []));
+}
+
+/** Ctrl+Tab (1) and Ctrl+Shift+Tab (-1): the next or previous drawn chat, wrapping. From a chat
+ *  that is not drawn (or none), next is the first and previous the last. */
+export function stepChat(order: readonly string[], current: string | null, dir: 1 | -1): string | null {
+  if (order.length === 0) return null;
+  const i = current ? order.indexOf(current) : -1;
+  if (i < 0) return dir === 1 ? order[0]! : order[order.length - 1]!;
+  return order[(i + dir + order.length) % order.length]!;
+}

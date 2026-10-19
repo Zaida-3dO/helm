@@ -6,8 +6,18 @@ import type { Compacting } from "./Compacting";
 import type { Interaction } from "./Interaction";
 import type { LiveTool } from "./LiveTool";
 import type { SendBehavior } from "./SendBehavior";
+import type { Subagent } from "./Subagent";
 
-export type ThreadState = { chatId: string, status: ChatStatus, permissionMode: string | null, interactions: Array<Interaction>, liveTools: Array<LiveTool>, backgroundTasks: Array<BackgroundTask>, compacting: Compacting | null, capabilities: Capabilities, sendBehavior: SendBehavior, 
+export type ThreadState = { chatId: string, status: ChatStatus, permissionMode: string | null, interactions: Array<Interaction>, liveTools: Array<LiveTool>, backgroundTasks: Array<BackgroundTask>, 
+/**
+ * This worker's subagents, newest last, at most 30.
+ */
+subagents: Array<Subagent>, 
+/**
+ * How many of `subagents` are running: the sidebar's "working" signal for a chat that is
+ * otherwise idle.
+ */
+subagentsRunning: number, compacting: Compacting | null, capabilities: Capabilities, sendBehavior: SendBehavior, 
 /**
  * After a restart an interrupted chat's queue waits for Send or `queue_resume`.
  */

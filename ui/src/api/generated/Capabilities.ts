@@ -3,4 +3,9 @@
 /**
  * What the running worker can do. The UI hides a control whose capability is false.
  */
-export type Capabilities = { withdraw: boolean, deliverNow: boolean, stopTool: boolean, compact: boolean, };
+export type Capabilities = { withdraw: boolean, deliverNow: boolean, stopTool: boolean, compact: boolean, 
+/**
+ * `tool_stop` with a subagent's Agent call id stops that one agent. Absent
+ * until the worker reports it, so the per-agent Stop stays hidden.
+ */
+stopSubagent?: boolean, };

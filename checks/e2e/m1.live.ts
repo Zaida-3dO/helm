@@ -40,7 +40,8 @@ function workFolder(files: Record<string, string> = {}): string {
 
 async function haikuChat(files: Record<string, string> = {}): Promise<string> {
   const id = await newChat(page(), workFolder(files));
-  await page().selectOption(tid("model-picker"), { label: "Haiku" });
+  await page().click(tid("model-picker"));
+  await page().click(`${tid("model-picker-pop")} [role="option"]:has-text("Haiku")`);
   await page().waitForTimeout(500);
   return id;
 }

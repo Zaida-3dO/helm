@@ -33,6 +33,8 @@ const DEFAULTS = {
 };
 /** Short limits for the send-behaviour controls: a slow answer must not hold up the host. */
 const QUICK_CONTROL_MS = 5_000;
+/** The modes the composer's picker sends; Claude Code's `set_permission_mode` takes them. */
+const PERMISSION_MODES = ["bypassPermissions", "default", "acceptEdits", "plan"];
 const VERSION_PROBE_MS = 3_000;
 /** A stop_tool line older than this is refused. */
 const STOP_TOOL_MAX_AGE_MS = 5_000;
@@ -118,6 +120,10 @@ export class ClaudeDriver implements Driver {
   private effort: string;
   private pendingModel: string | undefined;
   private pendingEffort: string | undefined;
+  /** The composer's permission-mode pick, waiting for the turn to end. */
+  private pendingPermission: string | undefined;
+  /** The mode in force since the user's first pick (undefined: never picked, the launch mode rules). */
+  private pickedMode: string | undefined;
   private resolved: Resolved | undefined;
   private readonly longCommands: LongCommandPolicy;
   private readonly liveTools = new Map<string, LiveTool>();
@@ -146,11 +152,17 @@ export class ClaudeDriver implements Driver {
     const level = launch.sendBehavior?.longCommands;
     this.longCommands = new LongCommandPolicy(isLongCommandLevel(level) ? level : "off");
     this.translator = new StreamTranslator({ emit: (e) => this.onTranslated(e), diag: deps.diag });
+    const skip = c.skipPermissions === true;
+    const autoAllow = () => skip && (this.pickedMode === undefined || this.pickedMode === "bypassPermissions");
     this.interactions = new Interactions({
       emit: (e) => this.ch.emit(e),
       reply: (requestId, response) => this.controlReply(requestId, response),
       onStopTurn: () => this.markStopping(),
-      skipPermissions: c.skipPermissions === true,
+      // Skip permission prompts allows tool requests itself, until the user picks a mode that asks
+      // (the composer's mode picker); then the CLI's requests become approval cards.
+      get skipPermissions() {
+        return autoAllow();
+      },
     });
     if (Array.isArray(launch.hostTools) && typeof launch.chatToolsDirectory === "string" && launch.chatToolsDirectory) {
       this.mcp = createMcpBridge((l) => this.ch.emit(l), { cwd: launch.cwd });
@@ -263,6 +275,8 @@ export class ClaudeDriver implements Driver {
 
   /** Events from the translator, with the tool bookkeeping the send-behaviour controls need. */
   private onTranslated(e: Json): void {
+    // After a pick, the CLI's own mode changes (leaving plan mode) count as the mode in force.
+    if (e.type === "permission_mode" && this.pickedMode !== undefined && typeof e.mode === "string") this.pickedMode = e.mode;
     if (e.type === "tool_execution_start") {
       const id = String(e.toolCallId);
       const args = obj(e.args);
@@ -289,9 +303,35 @@ export class ClaudeDriver implements Driver {
     this.ch.emit(e);
   }
 
-  /** `mcp_config` from the host. */
+  /** `mcp_config` from the host, or the composer's `set_permission_mode` pick. */
   hostLine(cmd: Json): boolean {
+    if (cmd.type === "set_permission_mode") return this.setPermissionMode(cmd);
     return this.mcp ? applyConfigLine(this.mcp, cmd) : false;
+  }
+
+  /** Home: the composer's mode picker. Applied now when no turn is open, else before the next prompt. */
+  private setPermissionMode(cmd: Json): boolean {
+    const mode = typeof cmd.mode === "string" ? cmd.mode : "";
+    if (!PERMISSION_MODES.includes(mode)) {
+      this.deps.diag(`set_permission_mode ignored: unknown mode ${JSON.stringify(cmd.mode)}`);
+      return true;
+    }
+    this.pendingPermission = mode;
+    if (!this.turnOpen) void this.applyPermissionMode();
+    return true;
+  }
+
+  private async applyPermissionMode(): Promise<void> {
+    const mode = this.pendingPermission;
+    if (!mode) return;
+    this.pendingPermission = undefined;
+    try {
+      await this.control({ subtype: "set_permission_mode", mode }, this.limits.modelAckMs);
+      this.pickedMode = mode;
+      this.ch.emit({ type: "permission_mode", mode });
+    } catch (e) {
+      this.ch.emit({ type: "notice", text: `Could not change the permission mode to ${mode}: ${(e as Error).message}` });
+    }
   }
 
   async shutdown(reason: string): Promise<void> {
@@ -914,6 +954,7 @@ export class ClaudeDriver implements Driver {
         this.ch.emit({ type: "notice", text: `Could not switch to model ${model}: ${(e as Error).message}` });
       }
     }
+    if (this.pendingPermission) await this.applyPermissionMode();
     if (this.pendingEffort) {
       const level = this.pendingEffort;
       try {

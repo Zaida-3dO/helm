@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ProjectNode, SidebarRow } from '../api/projects.ts';
-import { buildList, chatAncestors, HEIGHTS, nestRows, type ListItem } from './model.ts';
+import { buildList, chatAncestors, HEIGHTS, nestRows, stepChat, visibleChatOrder, type ListItem } from './model.ts';
 import { loadMore, readBudget, type PageResult } from './paging.ts';
 import { age, rowAttention, trailingIndicator } from './status.ts';
 import { layout, visibleRange } from './virtual.ts';
@@ -140,6 +140,19 @@ test('empty projects hide by default, with a "Show N empty projects" row that br
   assert.deepEqual(shape(buildList([project('full', { chatCount: 1 })], [], opts)), ['H0:full']);
   assert.ok(!shape(buildList(projects, rows, { ...opts, view: 'archived' })).some((s) => s.startsWith('E')));
   assert.ok(!shape(buildList(projects, rows, { ...opts, view: 'activity' })).some((s) => s.startsWith('E')));
+});
+
+test('the drawn chat order skips collapsed groups and parents; Ctrl+Tab steps through it, wrapping', () => {
+  const projects = [project('g', { chatCount: 3 }), project('shut', { collapsed: true, chatCount: 1 })];
+  const rows = [row('a', 'g'), row('b', 'g', { parentChatId: 'a' }), row('c', 'g'), row('x', 'shut')];
+  const order = visibleChatOrder(buildList(projects, rows, opts));
+  assert.deepEqual(order, ['a', 'c']); // b sits under collapsed a; x is in a collapsed group
+  assert.equal(stepChat(order, 'a', 1), 'c');
+  assert.equal(stepChat(order, 'c', 1), 'a');
+  assert.equal(stepChat(order, 'a', -1), 'c');
+  assert.equal(stepChat(order, 'b', 1), 'a'); // not drawn: next is the first
+  assert.equal(stepChat(order, null, -1), 'c'); // previous is the last
+  assert.equal(stepChat([], 'a', 1), null);
 });
 
 test('a pin break separates pinned and unpinned top-level groups', () => {

@@ -57,6 +57,14 @@ button.danger {
   justify-content: center;
 }
 
+.transcript-empty-title {
+  margin: 0;
+  font-size: 27px;
+  font-weight: 480;
+  letter-spacing: -0.8px;
+  color: var(--text);
+}
+
 .jump-latest {
   position: absolute;
   bottom: 12px;

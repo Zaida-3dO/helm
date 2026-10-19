@@ -90,6 +90,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   const rev = () => ++revision;
   const now = () => Date.now();
   const uid = () => (globalThis.crypto?.randomUUID?.() ?? `id-${Math.random().toString(16).slice(2)}`);
+  /** Images put by the composer, kept so a sent message's thumbnail can be read back. */
+  const attachments = new Map<string, { name: string; mime: string; bytes: string }>();
 
   function emitChat(c: FakeChat) {
     c.chat = { ...c.chat, revision: rev(), updatedAt: now() };
@@ -197,6 +199,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         interactions: [],
         liveTools: [],
         backgroundTasks: [],
+        subagents: [],
+        subagentsRunning: 0,
         compacting: null,
         capabilities: { withdraw: true, deliverNow: true, stopTool: true, compact: true },
         sendBehavior,
@@ -432,7 +436,11 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     chat_send: (a) => {
       const c = find(a.chatId);
       const text = String(a.text ?? '');
-      if (!text.trim()) throw { code: 'refused', message: 'Nothing to send.' };
+      const sentImages = ((a.attachments as string[] | undefined) ?? []).flatMap((id) => {
+        const img = attachments.get(id);
+        return img ? [{ id, name: img.name, mime: img.mime, width: 160, height: 120 }] : [];
+      });
+      if (!text.trim() && sentImages.length === 0) throw { code: 'refused', message: 'Nothing to send.' };
       const busy = c.chat.status === 'running' || c.chat.status === 'starting';
       const action = String(a.action);
       const mode = action === 'default' ? sendBehavior.mode : action;
@@ -448,7 +456,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       };
       if (c.chat.title === 'New chat') c.chat = { ...c.chat, title: text.slice(0, 40) };
       if (!busy) {
-        addRow(c, { role: 'user', text, sourceKey: s.id, details: { submissionId: s.id } });
+        addRow(c, { role: 'user', text, sourceKey: s.id, details: { submissionId: s.id, ...(sentImages.length ? { images: sentImages } : {}) } });
         void runTurn(c, text);
       } else if (mode === 'asap' || mode === 'steer') {
         s.mode = 'steer';
@@ -541,6 +549,13 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       addRow(c, { role: 'context', text: `Model set to ${c.chat.model} · ${c.chat.effort}`, details: { contextKind: 'modelChange' } });
       return c.chat;
     },
+    // the permission-mode pick lands as the live mode, as a worker would report it.
+    chat_set_permission_mode: (a) => {
+      const c = find(a.chatId);
+      c.thread = { ...c.thread, permissionMode: String(a.mode) };
+      emitThread(c);
+      return { mode: String(a.mode) };
+    },
     model_catalogue: () => ({
       harness: 'claude',
       models: [
@@ -602,7 +617,16 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       emitChat(c);
       return c.chat;
     },
-    attachment_put: () => ({ attachmentId: uid() }),
+    attachment_put: (a) => {
+      const attachmentId = uid();
+      attachments.set(attachmentId, { name: String(a.name), mime: String(a.mime), bytes: String(a.bytes) });
+      return { attachmentId };
+    },
+    attachment_get: (a) => {
+      const img = attachments.get(String(a.attachmentId));
+      if (!img) throw { code: 'not_found', message: 'No such image.' };
+      return { mime: img.mime, bytes: img.bytes };
+    },
     skills_list: () => [
       { name: 'review', description: 'Review the current changes' },
       { name: 'compact', description: 'Compact the conversation' },

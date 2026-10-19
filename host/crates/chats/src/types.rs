@@ -235,6 +235,55 @@ pub struct Capabilities {
     pub deliver_now: bool,
     pub stop_tool: bool,
     pub compact: bool,
+    /// `tool_stop` with a subagent's Agent call id stops that one agent. Absent
+    /// until the worker reports it, so the per-agent Stop stays hidden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stop_subagent: Option<bool>,
+}
+
+/// A native subagent's state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum SubagentStatus {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+/// One subagent, keyed by the parent's Agent tool call. The live list is on [`ThreadState`] and
+/// is never written per step; the final state is kept on the call's tool row
+/// ([`MessageDetails::subagent`]), so it survives a restart.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Subagent {
+    pub tool_call_id: String,
+    /// The agent definition it runs as (`general-purpose`, `reviewer`, ...).
+    pub agent_type: String,
+    pub name: String,
+    pub description: String,
+    /// The assignment prompt's first lines.
+    pub assignment: String,
+    pub status: SubagentStatus,
+    /// The tool of the newest step; absent when the newest step is narration.
+    pub step_tool: Option<String>,
+    /// The newest step: the tool's target, or the first line of the agent's narration.
+    pub step: Option<String>,
+    #[ts(type = "number")]
+    pub started_at: i64,
+    #[ts(type = "number | null")]
+    pub ended_at: Option<i64>,
+    #[ts(type = "number | null")]
+    pub duration_ms: Option<i64>,
+    #[ts(type = "number | null")]
+    pub tokens: Option<i64>,
+    #[ts(type = "number | null")]
+    pub tool_uses: Option<i64>,
+    pub error: Option<String>,
+    /// The final report: at most 2 KiB on the live thread, 16 KiB on the tool row.
+    pub report: Option<String>,
+    pub report_truncated: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -354,6 +403,11 @@ pub struct ThreadState {
     pub interactions: Vec<Interaction>,
     pub live_tools: Vec<LiveTool>,
     pub background_tasks: Vec<BackgroundTask>,
+    /// This worker's subagents, newest last, at most 30.
+    pub subagents: Vec<Subagent>,
+    /// How many of `subagents` are running: the sidebar's "working" signal for a chat that is
+    /// otherwise idle.
+    pub subagents_running: u32,
     pub compacting: Option<Compacting>,
     pub capabilities: Capabilities,
     pub send_behavior: SendBehavior,
@@ -484,6 +538,27 @@ pub struct MessageDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub tool_source: Option<ToolSource>,
+    /// For a user row: the images sent with the message, shown as thumbnails in the bubble. The
+    /// bytes are not in the row; `attachment_get` reads them (see `message_images`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub images: Option<Vec<MessageImage>>,
+    /// For an Agent tool row: the subagent's final state and report, written when it ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub subagent: Option<Box<Subagent>>,
+}
+
+/// One image sent with a user message: what the bubble needs to ask for it and lay it out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageImage {
+    /// The attachment id (`attachment_get` takes it).
+    pub id: String,
+    pub name: String,
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Which server a tool came from: Helm's own host tools, an MCP server, or Claude Code itself.
@@ -691,6 +766,11 @@ pub struct ModelCatalogue {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatCreateArgs {
     pub cwd: String,
+    /// The folder project to put the chat in; it must be a folder project over `cwd`. Without it
+    /// the folder's project is found or made.
+    #[serde(default)]
+    #[ts(optional)]
+    pub project_id: Option<String>,
     #[serde(default)]
     #[ts(optional)]
     pub model: Option<String>,

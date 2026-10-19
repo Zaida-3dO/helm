@@ -182,11 +182,15 @@ fn reopen(tx: &Transaction<'_>, chat: &str, t: &Value) -> Result<Canonical, Stri
     })
 }
 
-/// The proof an agent supplied for a consented step.
+/// The proof for a consented step: an agent's (the user's words or an Allow grant), or the user's
+/// own click.
 #[derive(Clone, Debug, Default)]
 pub struct Proof {
     pub user_quote: Option<String>,
     pub grant: Option<String>,
+    /// The user's own click in the main window ([`crate::user`]). Set only by [`Proof::user`],
+    /// which only a main-window op calls; never read from an agent's arguments.
+    pub user: bool,
 }
 
 impl Proof {
@@ -195,15 +199,24 @@ impl Proof {
         Self {
             user_quote: get("userQuote"),
             grant: get("grant"),
+            user: false,
+        }
+    }
+    /// The user acting from the workflow panel: the click is the consent.
+    pub fn user() -> Self {
+        Self {
+            user: true,
+            ..Default::default()
         }
     }
     pub fn any(&self) -> bool {
-        self.user_quote.is_some() || self.grant.is_some()
+        self.user || self.user_quote.is_some() || self.grant.is_some()
     }
 }
 
 /// Spend the proof for this step on the caller's transaction, or record the ask and return the
-/// refusal (with the Allow hint) that tells the agent how to get consent.
+/// refusal (with the Allow hint) that tells the agent how to get consent. The user's own click
+/// needs nothing spent: it is the consent the words and grants stand in for.
 #[allow(clippy::too_many_arguments)]
 pub fn consent(
     tx: &Transaction<'_>,
@@ -215,6 +228,14 @@ pub fn consent(
     why: &str,
     now: i64,
 ) -> rusqlite::Result<Result<ConsentRecord, String>> {
+    if proof.user {
+        return Ok(Ok(ConsentRecord {
+            id: format!("user:{kind_id}"),
+            proof: "user",
+            request_id: None,
+            submission_id: None,
+        }));
+    }
     let spent = if proof.grant.is_some() {
         helm_consent::store::spend_grant(tx, kinds, chat, kind_id, target, "app_workflow", now)
     } else if proof.user_quote.is_some() {

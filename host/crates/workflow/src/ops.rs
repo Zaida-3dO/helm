@@ -7,7 +7,11 @@
 //! | `workflow_chat_mode_get` | blocking | [`ChatModeArgs`] to [`ChatModeView`] |
 //! | `workflow_chat_mode_set` | maintenance | [`ChatModeSetArgs`] to [`ChatModeSetResult`]; emits `workflow_chat_mode {chatId}` |
 //! | `workflow_run_get` | blocking | [`ChatModeArgs`] to the chat's current task in the `app_workflow status` shape ([`crate::actions::chat_view`]); `not_found` for no such chat |
-//! | `workflow_change_action` | maintenance | `{runId, repo, branch, action}` with action merge, retry, drop or decline (the user's, main window only) to `{state}` |
+//! | `workflow_change_action` | maintenance | `{runId, repo, branch, action}` with action merge, retry, drop, decline or ready (the user's, main window only) to `{state}` |
+//! | `workflow_task_action` | maintenance | `{runId, action, planId?, stage?, n?}` with action signOff, skip, allowMore, park, reopen, visual, notVisual or end (the user's, main window only); see [`crate::user`] |
+//!
+//! The user's ops are never host tools, so no agent reaches them; agents take the consented
+//! subset through `app_workflow` with the user's words or an Allow grant.
 //!
 //! Every op, tool and land pass that writes a task, change or event row emits
 //! `workflow_run {chatId}` for each chat it wrote ([`crate::store::emit_touched`]).
@@ -59,7 +63,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
             "workflow_change_action",
             OpClass::Maintenance,
             change_action,
-        );
+        )
+        .blocking("workflow_task_action", OpClass::Maintenance, task_action);
 }
 
 /// A Claude Code chat whose turn is starting, running or stopping.
@@ -170,10 +175,22 @@ struct ChangeAction {
     action: String,
 }
 
-/// The user's Merge, Retry, Drop change or Decline on a task row. The land step does the rest.
+/// The user's Merge, Retry, Drop change, Decline or Ready for review on a task row. The land step
+/// does the rest.
 fn change_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    change_action_with(ctx, args, &crate::gh::GhCli)
+}
+
+fn change_action_with(ctx: &OpCtx, args: Value, gh: &dyn crate::gh::Gh) -> Result<Value, ApiError> {
     let a: ChangeAction = parse(args)?;
     let db = ctx.services.need::<Database>()?;
+    let now = helm_core::now_ms();
+    if a.action == "ready" {
+        let out = crate::land::ready(&db, gh, &a.run_id, &a.repo, &a.branch, now);
+        crate::store::emit_touched(&*ctx.events);
+        let state = out.map_err(sql)?.map_err(ApiError::conflict)?;
+        return Ok(json!({ "state": state }));
+    }
     let out = db.write(|tx| {
         let s = settings::load(tx)?;
         if !s.enabled && matches!(a.action.as_str(), "merge" | "retry") {
@@ -181,14 +198,17 @@ fn change_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 "Orchestrator is off in Settings, so Helm lands nothing.",
             )));
         }
-        let r = crate::land::user_action(
-            tx,
-            &a.run_id,
-            &a.repo,
-            &a.branch,
-            &a.action,
-            helm_core::now_ms(),
-        )?;
+        // While the chat is off, its changes already handed off keep landing (Merge, Decline, a
+        // merge Retry), but Drop change and a draft Retry wait for it to be on.
+        if let Some(run) = crate::store::run(tx, &a.run_id)? {
+            let draft_retry = a.action == "retry"
+                && crate::store::change(tx, &a.run_id, &a.repo, &a.branch)?
+                    .is_some_and(|c| c.failed_mode.as_deref() == Some("draft"));
+            if (a.action == "drop" || draft_retry) && !mode::in_effect(tx, &run.chat_id, &s)? {
+                return Ok(Err(ApiError::conflict(crate::user::CHAT_OFF)));
+            }
+        }
+        let r = crate::land::user_action(tx, &a.run_id, &a.repo, &a.branch, &a.action, now)?;
         Ok::<_, rusqlite::Error>(r.map_err(ApiError::conflict))
     });
     // A refused move still writes its conflict row, so emit before looking at the outcome.
@@ -196,6 +216,44 @@ fn change_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let state = out.map_err(sql)??;
     crate::land::kick();
     Ok(json!({ "state": state }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TaskAction {
+    run_id: String,
+    action: String,
+    #[serde(default)]
+    plan_id: Option<String>,
+    #[serde(default)]
+    stage: Option<String>,
+    #[serde(default)]
+    n: Option<i64>,
+}
+
+/// The user's Sign off plan and task menu actions ([`crate::user`]).
+fn task_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: TaskAction = parse(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let kinds = ctx
+        .services
+        .get::<helm_consent::AllowKinds>()
+        .unwrap_or_else(|| {
+            let mut k = helm_consent::AllowKinds::new();
+            crate::kinds::register_allow_kinds(&mut k);
+            std::sync::Arc::new(k)
+        });
+    let fields = json!({"action": a.action, "planId": a.plan_id, "stage": a.stage, "n": a.n});
+    let fields = match fields {
+        Value::Object(m) => Value::Object(m.into_iter().filter(|(_, v)| !v.is_null()).collect()),
+        v => v,
+    };
+    let out = db
+        .write(|tx| crate::user::task_action(tx, &kinds, &a.run_id, &fields, helm_core::now_ms()));
+    crate::store::emit_touched(&*ctx.events);
+    let r = out.map_err(sql)?.map_err(ApiError::conflict)?;
+    crate::land::kick();
+    Ok(r)
 }
 
 #[cfg(test)]
@@ -387,6 +445,70 @@ mod tests {
         let v = view(&db);
         assert_eq!(v["task"]["runId"], "active");
         assert_eq!(v["otherTasks"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_user_ops_act_announce_and_refuse_unknown_fields() {
+        let (_d, db) = crate::mode::tests::db(&[("a", "claude")]);
+        let sink = Arc::new(RecordingSink::default());
+        let c = ctx(db, sink.clone());
+        settings_save(&c, json!({"settings": {"enabled": true}})).unwrap();
+        start_task(&c, "a", "T");
+        let db = c.services.need::<Database>().unwrap();
+        let run_id: String = db
+            .snapshot(|tx| tx.query_row("SELECT id FROM workflow_runs", [], |r| r.get(0)))
+            .unwrap();
+        sink.events.lock().unwrap().clear();
+        let r = task_action(&c, json!({"runId": run_id, "action": "visual"})).unwrap();
+        assert_eq!(r, json!({"visual": true, "changed": true}));
+        assert_eq!(run_events(&sink), ["a"]);
+        assert_eq!(
+            task_action(&c, json!({"runId": run_id, "action": "visual", "bogus": 1}))
+                .unwrap_err()
+                .code,
+            "bad_args"
+        );
+        let e = task_action(&c, json!({"runId": run_id, "action": "reopen"})).unwrap_err();
+        assert_eq!(e.code, "conflict");
+        // Ready goes through GitHub first; with no PR recorded it is refused and says why.
+        db.write::<_, rusqlite::Error>(|tx| {
+            let ch = crate::store::Change {
+                run_id: run_id.clone(),
+                repo: "github.com/o/r".into(),
+                branch: "b".into(),
+                state: "handed_off".into(),
+                ..Default::default()
+            };
+            crate::store::upsert_change(tx, &ch, 6)
+        })
+        .unwrap();
+        struct NoGh;
+        impl crate::gh::Gh for NoGh {
+            fn run(&self, _: &[String]) -> Result<crate::gh::Out, crate::gh::GhError> {
+                panic!("no PR is recorded, so GitHub is never asked")
+            }
+        }
+        sink.events.lock().unwrap().clear();
+        let e = change_action_with(
+            &c,
+            json!({"runId": run_id, "repo": "github.com/o/r", "branch": "b", "action": "ready"}),
+            &NoGh,
+        )
+        .unwrap_err();
+        assert!(e.message.contains("no PR"), "{}", e.message);
+        assert_eq!(
+            run_events(&sink),
+            ["a"],
+            "the failed check is recorded on the change"
+        );
+        // With the chat off, Drop change waits for it to be on.
+        chat_mode_set(&c, json!({"chatId": "a", "mode": "off"})).unwrap();
+        let e = change_action(
+            &c,
+            json!({"runId": run_id, "repo": "github.com/o/r", "branch": "b", "action": "drop"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.message, crate::user::CHAT_OFF);
     }
 
     #[test]

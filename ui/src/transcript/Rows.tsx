@@ -6,6 +6,7 @@ import { memo, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
 import { EditMessage, type EditState } from './EditMessage.tsx';
 import { Markdown, type LinkTarget } from './Markdown.tsx';
+import { MessageImages } from './MessageImages.tsx';
 import { ReplyActions, UserActions } from './MessageActions.tsx';
 import { rowFootersFor, type SlotContext } from './slots.ts';
 import { Glyph } from './icons.tsx';
@@ -112,6 +113,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
           <EditMessage edit={ctx.editing} onResend={ctx.onResend} onCancel={ctx.onCancelEdit} />
         ) : (
           <div className="bubble">
+            <MessageImages chatId={ctx.chatId} images={row.details?.images} />
             <Markdown text={row.text} onLink={ctx.onLink} />
           </div>
         )}

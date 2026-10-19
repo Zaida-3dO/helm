@@ -10,6 +10,7 @@ import { ApiError, type Api } from '../api/client.ts';
 import type { ChatOps, SendExtras } from '../api/ops.ts';
 import type { ProjectNode } from '../api/projects.ts';
 import type { ChatRecord, SendAction, Submission } from '../api/types.ts';
+import { discardUntouched } from './api.ts';
 import { folderProjectFor, pushRecent, readRecents, resolveFolder, type ResolvedFolder } from './places.ts';
 
 export interface NewChatOptions {
@@ -72,8 +73,12 @@ export class NewChatController {
   private offSelection: (() => void) | null = null;
   private lastSelected: string | null = null;
   private sending: Promise<{ submission: Submission; chat: ChatRecord }> | null = null;
-  /** A chat the first send created but could not send to; the next try reuses it. */
-  private created: ChatRecord | null = null;
+  /**
+   * A chat the first send created but could not send to, with the place it was made for and the
+   * images already uploaded to it. The next try in the same place reuses it; any other outcome
+   * asks the host to discard it, which it does only while the chat is still untouched.
+   */
+  private made: { chat: ChatRecord; key: string; uploads: Map<string, string> } | null = null;
 
   open = false;
   draft: Draft | null = null;
@@ -150,14 +155,17 @@ export class NewChatController {
     this.announce();
   }
 
-  /** Close the page. An untouched draft is discarded; a typed one waits for the next New chat. */
+  /**
+   * Close the page. An untouched draft is discarded; a typed one waits for the next New chat. Pasted
+   * images go either way (the composer forgets them when it closes), and so does a chat made by a
+   * refused first send, if it is still empty.
+   */
   leave(): void {
     if (!this.open) return;
     this.open = false;
-    if (this.untouched()) {
-      this.draft = null;
-      this.created = null;
-    }
+    this.draft?.images.clear();
+    this.dropMade();
+    if (this.untouched()) this.draft = null;
     this.changed();
   }
 
@@ -167,12 +175,25 @@ export class NewChatController {
     return !d || (d.text.trim() === '' && d.images.size === 0);
   }
 
+  /** Forget the chat a refused send made, asking the host to discard it if it is still untouched. */
+  private dropMade(): void {
+    const m = this.made;
+    if (!m) return;
+    this.made = null;
+    if (this.env) void discardUntouched(this.env.api, m.chat.id).catch(() => undefined);
+  }
+
+  /** Where the draft would be created: the chosen project and the resolved folder. */
+  private placeKey(): string {
+    return JSON.stringify([this.draft?.projectId ?? null, this.place().folder]);
+  }
+
   /** Change the draft's project; the folder follows the new project unless `folder` is given. */
   move(projectId: string | null, folder: string | null = null, notify = true): void {
     if (!this.draft) return;
     this.draft.projectId = projectId;
     this.draft.folder = folder;
-    if (this.created && !this.matchesCreated()) this.created = null;
+    if (this.made && this.made.key !== this.placeKey()) this.dropMade();
     if (notify) {
       this.changed();
       this.announce();
@@ -182,7 +203,7 @@ export class NewChatController {
   setFolder(folder: string): void {
     if (!this.draft) return;
     this.draft.folder = folder;
-    if (this.created && !this.matchesCreated()) this.created = null;
+    if (this.made && this.made.key !== this.placeKey()) this.dropMade();
     this.changed();
     this.announce();
   }
@@ -277,10 +298,21 @@ export class NewChatController {
     if (!env || !d) throw new ApiError('not_found', 'The new chat was closed.');
     const { folder } = this.place();
     if (!folder) throw new ApiError('needs_folder', 'Choose a folder for this chat first.');
-    let chat = this.created;
-    if (!chat) {
-      chat = await env.ops.create(folder, d.model ?? undefined, d.effort ?? undefined);
-      this.created = chat;
+    const key = this.placeKey();
+    if (this.made && this.made.key !== key) this.dropMade();
+    let made = this.made;
+    if (!made) {
+      // The exact project when the chosen one is a folder project over this folder (several
+      // projects may share a folder); otherwise the host finds or makes the folder's own.
+      const projectId = folderProjectFor(d.projectId, folder, this.projects);
+      const chat = await env.api<ChatRecord>('chat_create', {
+        cwd: folder,
+        ...(projectId ? { projectId } : {}),
+        ...(d.model ? { model: d.model } : {}),
+        ...(d.effort ? { effort: d.effort } : {}),
+      });
+      made = { chat, key, uploads: new Map() };
+      this.made = made;
       env.storeChat(chat);
       // Shown under the chosen project when that is not the folder's own project.
       const group = d.projectId;
@@ -288,6 +320,7 @@ export class NewChatController {
         await env.api('chat_organize', { chatId: chat.id, groupProjectId: group, parentChatId: null }).catch(() => undefined);
       }
     }
+    const chat = made.chat;
     const ids: string[] = [];
     for (const id of extras.attachments ?? []) {
       const img = d.images.get(id);
@@ -295,15 +328,19 @@ export class NewChatController {
         ids.push(id);
         continue;
       }
-      const r = await env.ops.attach(chat.id, img.name, img.mime, img.bytes);
-      d.images.delete(id);
-      ids.push(r.attachmentId);
+      // Uploaded once per made chat: a retry after a refused send sends the same images again.
+      let up = made.uploads.get(id);
+      if (!up) {
+        up = (await env.ops.attach(chat.id, img.name, img.mime, img.bytes)).attachmentId;
+        made.uploads.set(id, up);
+      }
+      ids.push(up);
     }
     const result = await env.ops.send(chat.id, submissionId, text, action, 0, { ...extras, attachments: ids });
     env.storage.setItem(LAST_PROJECT_KEY, d.projectId ?? chat.projectId);
     pushRecent(env.storage, folder);
     this.draft = null;
-    this.created = null;
+    this.made = null;
     this.open = false;
     this.lastSelected = chat.id;
     env.select(chat.id);
@@ -354,11 +391,6 @@ export class NewChatController {
     return this.projects.find((p) => folderProjectFor(p.id, folder, this.projects) !== null)?.id ?? null;
   }
 
-  private matchesCreated(): boolean {
-    const c = this.created;
-    const folder = this.place().folder;
-    return !!c && !!folder && folder === c.cwd;
-  }
 }
 
 /** The app's one controller. */

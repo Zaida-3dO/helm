@@ -667,13 +667,37 @@ kbd {
   }
 }
 
+/* No chat open: a centred column, heading, tagline, one primary button. */
 .empty-main {
   flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: var(--secondary);
-  font-size: calc(13 * var(--ui-unit));
+  padding: 0 25px 100px;
+  text-align: center;
+  color: var(--text);
+}
+.empty-main-heading {
+  margin: 0;
+  font-size: 29px;
+  font-weight: 510;
+  letter-spacing: -0.9px;
+  line-height: 1.2;
+}
+.empty-main-tagline {
+  margin: 10px 0 26px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.empty-main .empty-main-open {
+  padding: 10px 15px;
+  gap: 12px;
+}
+@media (max-width: 760px) {
+  .empty-main-heading {
+    font-size: 24px;
+  }
 }
 
 /* The older chat list's wrapper inside the sidebar slot, until <Sidebar/> mounts. */
@@ -984,4 +1008,8 @@ dd {
   min-height: 34px;
   padding: 0 22px;
   border-bottom: 1px solid var(--line);
+}
+/* No chat, no tags: no empty band under the bar. */
+.tags-strip:empty {
+  display: none;
 }

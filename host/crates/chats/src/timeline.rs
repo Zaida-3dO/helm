@@ -139,7 +139,8 @@ fn append(dir: &Path, saved: i64, line: &str) -> std::io::Result<()> {
         .create(true)
         .append(true)
         .open(&path)?;
-    writeln!(f, "{saved} {line}")
+    // One write per line, so lines from two chats never interleave.
+    f.write_all(format!("{saved} {line}\n").as_bytes())
 }
 
 #[cfg(test)]
@@ -176,8 +177,7 @@ mod tests {
             std::fs::read_to_string(dir.path().join("diagnostics/send-timeline.log")).unwrap();
         assert_eq!(
             text,
-            "7 chat c1: send abcdef01 timeline (ms after saved): dispatched +2, first output +13; cold
-"
+            "7 chat c1: send abcdef01 timeline (ms after saved): dispatched +2, first output +13; cold\n"
         );
     }
 
@@ -187,11 +187,7 @@ mod tests {
         let path = dir.path().join("send-timeline.log");
         std::fs::write(&path, vec![b'x'; FILE_CAP as usize + 1]).unwrap();
         append(dir.path(), 1, "new").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "1 new
-"
-        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "1 new\n");
         assert!(dir.path().join("send-timeline.old.log").is_file());
     }
 

@@ -11,13 +11,17 @@ import { projectOps, type BoardSyncState, type ProjectNode, type SidebarRow, typ
 import type { AttentionSummary } from '../api/types.ts';
 import type { ChatStore } from '../state/store.ts';
 import { SETTINGS_DIALOG } from '../settings/index.ts';
+import { SEARCH_DIALOG } from '../search/index.ts';
+import { AttentionInbox, inboxRows, nextAttention } from '../attention/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, ContextMenu, Dialog, TextInput, useBinding, type MenuItem } from '../ui/index.ts';
 import { SidebarActions } from './actions.ts';
 import { SidebarData, errorText } from './data.ts';
 import { dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
 import { chatMenuItems, projectMenuItems } from './menus.ts';
-import { buildList, chatAncestors, type ListItem } from './model.ts';
+import { buildList, chatAncestors, visibleChatOrder, type ListItem } from './model.ts';
+import { setVisibleOrder } from './rowOrder.ts';
+import { SidebarTop } from './SidebarTop.tsx';
 import { ItemChip, ItemFolderRow, ItemPickerHost, useItemRefs } from '../itemlinks/ItemUi.tsx'; // item links
 import {
   IconArchive,
@@ -57,6 +61,7 @@ export interface SidebarProps {
   selected: string | null;
   onSelect: (chatId: string) => void;
   openSettings?: () => void;
+  openSearch?: () => void;
 }
 
 /** The frame's mount: everything comes from the shell context. */
@@ -72,6 +77,7 @@ export function Sidebar() {
       selected={chatId}
       onSelect={(id) => shell.select(id)}
       openSettings={() => shell.openDialog(SETTINGS_DIALOG)}
+      openSearch={() => shell.openDialog(SEARCH_DIALOG)}
     />
   );
 }
@@ -87,7 +93,7 @@ export type Prompt = { title: string; label: string; value: string; onSave: (v: 
 type Preview = { row: SidebarRow; top: number; left: number };
 type Drag = { src: DragSource; x0: number; y0: number; active: boolean; title: string; target: DropTarget | null; x: number; y: number };
 
-export function SidebarView({ api, bus, store, ops, selected, onSelect, openSettings }: SidebarProps) {
+export function SidebarView({ api, bus, store, ops, selected, onSelect, openSettings, openSearch }: SidebarProps) {
   const pops = useMemo(() => projectOps(api), [api]);
   const data = useMemo(() => new SidebarData(pops), [pops]);
   const snap = useSyncExternalStore(data.subscribe, data.getSnapshot);
@@ -106,6 +112,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
+  const [inboxOpen, setInboxOpen] = useState(false);
   const undo = sidebarUndo;
   const act = useMemo(() => new SidebarActions({ api, pops, ops, data, undo, onError: setError }), [api, pops, ops, data, undo]);
   const now = useNow();
@@ -171,6 +178,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       }),
     [snap.projects, snap.rows, view, compact, expanded, selected, itemRefs, collapsedItems, showEmpty],
   );
+  useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
   const projectsById = useMemo(() => new Map(snap.projects.map((p) => [p.id, p])), [snap.projects]);
   const groupDepth = useMemo(() => {
     const m = new Map<string, number>();
@@ -181,6 +189,12 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   // a project's "+" and New chat open the new-chat page in that project; nothing is
   // created until the first send.
   const newChatIn = (p: ProjectNode) => openNewChat({ projectId: p.id });
+
+  // The nav's New chat: the new-chat page, in the open chat's project when one is open.
+  const navNewChat = () => {
+    const projectId = selectedRow?.groupProjectId;
+    openNewChat(projectId ? { projectId } : {});
+  };
 
   const toggleChat = (id: string) =>
     setExpanded((s) => {
@@ -265,6 +279,15 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   useBinding({ id: 'sidebar.redo', title: 'Redo archive or move', defaultKeys: 'Mod+Shift+Z', inInputs: false, run: () => void act.redo() });
   useBinding({ id: 'chat.pin', title: 'Pin or unpin chat', defaultKeys: 'Mod+Alt+P', enabled: () => !!selectedRow, run: () => selectedRow && void act.pin(selectedRow, !selectedRow.pinned) });
   useBinding({ id: 'chat.markUnread', title: 'Mark chat as unread', defaultKeys: 'Mod+Shift+U', enabled: () => !!selectedRow, run: () => selectedRow && void act.markUnread(selectedRow) });
+  useBinding({
+    id: 'attention.next',
+    title: 'Next chat needing attention',
+    defaultKeys: 'Ctrl+Alt+A',
+    run: () => {
+      const id = nextAttention(inboxRows(data.snapshot.attention), selected);
+      if (id) onSelect(id);
+    },
+  });
   useBinding({ id: 'chat.archive', title: 'Archive chat', defaultKeys: 'Mod+Shift+Backspace', enabled: () => !!selectedRow && !selectedRow.archived, run: () => selectedRow && void act.archive(selectedRow) });
 
   // ---- hover preview (300 ms) ----
@@ -431,12 +454,13 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         if (!(e.target as HTMLElement).closest('input, textarea')) e.preventDefault();
       }}
     >
-      <div className="sb-brand">Helm</div>
-      <div className="sb-new-chat">
-        <button type="button" data-testid="new-chat" className="sb-nav" onClick={() => openNewChat()}>
-          New chat
-        </button>
-      </div>
+      <SidebarTop
+        attention={snap.attention}
+        onNewChat={navNewChat}
+        onSearch={openSearch}
+        onAttention={() => setInboxOpen(true)}
+        onOpenChat={onSelect}
+      />
       {(error ?? snap.error) && (
         <p className="sb-error" role="alert">
           {error ?? snap.error}
@@ -522,6 +546,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       </div>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} label={menu.label} onClose={() => setMenu(null)} testId="sidebar-menu" />}
       {prompt && <PromptDialog prompt={prompt} onClose={() => setPrompt(null)} />}
+      {inboxOpen && <AttentionInbox summary={snap.attention} ops={ops} onOpen={onSelect} onClose={() => setInboxOpen(false)} />}
       <ItemPickerHost />
       {preview && !menu && !drag && (
         <PreviewCard

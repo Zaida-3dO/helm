@@ -113,13 +113,114 @@ pub fn create_chat(
     now: i64,
 ) -> rusqlite::Result<String> {
     let project = upsert_folder_project(tx, cwd, now)?;
+    create_chat_in(tx, &project, model, effort, now)
+}
+
+/// A new chat in `project_id`, a folder project the caller has checked (the
+/// new-chat page names the exact project, since several projects may share one folder).
+pub fn create_chat_in(
+    tx: &Transaction<'_>,
+    project_id: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+    now: i64,
+) -> rusqlite::Result<String> {
     let id = uuid::Uuid::new_v4().to_string();
     tx.execute(
         "INSERT INTO chats(id, project_id, title, status, harness, model, thinking, created_at, updated_at)
          VALUES (?1, ?2, ?3, 'idle', 'claude', ?4, ?5, ?6, ?6)",
-        params![id, project, DEFAULT_TITLE, model, effort, now],
+        params![id, project_id, DEFAULT_TITLE, model, effort, now],
     )?;
     Ok(id)
+}
+
+/// Whether `project_id` can take a new chat working in `cwd`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProjectFit {
+    Fits,
+    NotFound,
+    /// A board project or a group with no folder of its own.
+    NoFolder,
+    /// A folder project over another folder.
+    OtherFolder,
+}
+
+/// Paths compare with either slash and without a trailing one; case-insensitively on Windows.
+pub fn same_path(a: &str, b: &str) -> bool {
+    let norm = |p: &str| {
+        let p = p.trim().replace('\\', "/");
+        let p = p.trim_end_matches('/').to_owned();
+        if cfg!(windows) {
+            p.to_lowercase()
+        } else {
+            p
+        }
+    };
+    norm(a) == norm(b)
+}
+
+pub fn project_fit(
+    tx: &Transaction<'_>,
+    project_id: &str,
+    cwd: &str,
+) -> rusqlite::Result<ProjectFit> {
+    let row: Option<(String, Option<String>)> = tx
+        .query_row(
+            "SELECT kind, path FROM projects WHERE id = ?1",
+            [project_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        None => ProjectFit::NotFound,
+        Some((kind, path)) => match path {
+            Some(p) if kind == "folder" && !p.is_empty() => {
+                if same_path(&p, cwd) {
+                    ProjectFit::Fits
+                } else {
+                    ProjectFit::OtherFolder
+                }
+            }
+            _ => ProjectFit::NoFolder,
+        },
+    })
+}
+
+/// An untouched new chat ("an untouched draft is discarded"): idle, nothing sent,
+/// typed, attached, run or titled, no child, fork or side chat, not pinned, archived or a side chat
+/// itself. `None` when the chat does not exist. Only such a chat may be discarded without asking.
+pub fn untouched(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Option<bool>> {
+    let row: Option<(String, String, String, bool, bool, Option<String>)> = tx
+        .query_row(
+            "SELECT status, draft, title, pinned, archived, side_source_id FROM chats WHERE id = ?1",
+            [chat_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )
+        .optional()?;
+    let Some((status, draft, title, pinned, archived, side)) = row else {
+        return Ok(None);
+    };
+    if status != ChatStatus::Idle.as_str()
+        || !draft.trim().is_empty()
+        || title != DEFAULT_TITLE
+        || pinned
+        || archived
+        || side.is_some()
+    {
+        return Ok(Some(false));
+    }
+    let any: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ?1)
+             OR EXISTS(SELECT 1 FROM submissions WHERE chat_id = ?1)
+             OR EXISTS(SELECT 1 FROM runs WHERE chat_id = ?1)
+             OR EXISTS(SELECT 1 FROM chat_attachments WHERE chat_id = ?1)
+             OR EXISTS(SELECT 1 FROM chat_titles WHERE chat_id = ?1 AND state != 'fallback')
+             OR EXISTS(SELECT 1 FROM chats WHERE parent_chat_id = ?1 OR side_source_id = ?1)
+             OR EXISTS(SELECT 1 FROM chat_forks WHERE chat_id = ?1 OR source_chat_id = ?1)",
+        [chat_id],
+        |r| r.get(0),
+    )?;
+    Ok(Some(!any))
 }
 
 pub fn set_status(
@@ -528,6 +629,78 @@ mod tests {
         assert_eq!(ca.model.as_deref(), Some("opus"));
         let list = db.snapshot(|tx| list_chats(tx, 1)).unwrap();
         assert_eq!(list[0].id, b, "newest first");
+    }
+
+    #[test]
+    fn paths_match_with_either_slash_and_no_trailing_one() {
+        assert!(same_path("C:/work/repo", "C:\\work\\repo\\"));
+        assert!(!same_path("C:/work/repo", "C:/work/repo2"));
+        assert_eq!(same_path("C:/Work", "c:/work"), cfg!(windows));
+    }
+
+    #[test]
+    fn a_project_fits_only_as_a_folder_project_over_that_folder() {
+        let (_d, db) = temp_db();
+        let c = chat(&db);
+        let fit = |p: &str, cwd: &str| db.write(|tx| project_fit(tx, p, cwd)).unwrap();
+        let project = db
+            .snapshot(|tx| get_chat(tx, &c, 1))
+            .unwrap()
+            .unwrap()
+            .project_id;
+        db.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO projects(id, kind, name, path, created_at) VALUES
+                   ('group', 'folder', 'Group', NULL, 1),
+                   ('board', 'board', 'Board', NULL, 1)",
+            )
+        })
+        .unwrap();
+        assert_eq!(fit(&project, "C:/work/repo/"), ProjectFit::Fits);
+        assert_eq!(fit(&project, "C:/work/other"), ProjectFit::OtherFolder);
+        assert_eq!(fit("group", "C:/work/repo"), ProjectFit::NoFolder);
+        assert_eq!(fit("board", "C:/work/repo"), ProjectFit::NoFolder);
+        assert_eq!(fit("nope", "C:/work/repo"), ProjectFit::NotFound);
+    }
+
+    /// Each kind of content makes a chat "touched"; only a bare new chat is not.
+    #[test]
+    fn only_a_bare_new_chat_is_untouched() {
+        let (_d, db) = temp_db();
+        let is = |id: &str| db.write(|tx| untouched(tx, id)).unwrap();
+        assert_eq!(is("missing"), None);
+        let bare = chat(&db);
+        assert_eq!(is(&bare), Some(true));
+        let touched: [&str; 12] = [
+            "UPDATE chats SET draft = 'typed' WHERE id = ?1",
+            "UPDATE chats SET title = 'Renamed' WHERE id = ?1",
+            "UPDATE chats SET pinned = 1 WHERE id = ?1",
+            "UPDATE chats SET archived = 1 WHERE id = ?1",
+            "UPDATE chats SET status = 'running' WHERE id = ?1",
+            "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('s-' || ?1, ?1, 't', 'saved', 1)",
+            "INSERT INTO messages(chat_id, source_key, role, timestamp) VALUES (?1, 'k', 'user', 1)",
+            "INSERT INTO runs(id, chat_id, status, started_at) VALUES ('r-' || ?1, ?1, 'done', 1)",
+            "INSERT INTO chat_attachments(id, chat_id, name, mime, bytes, width, height, created_at) VALUES ('a-' || ?1, ?1, 'i', 'image/png', 1, 1, 1, 1)",
+            "INSERT INTO chat_titles(chat_id, state, updated_at) VALUES (?1, 'generated', 1)",
+            "INSERT INTO chats(id, project_id, title, created_at, updated_at, parent_chat_id) SELECT 'child-' || id, project_id, 'x', 1, 1, id FROM chats WHERE id = ?1",
+            "INSERT INTO chat_forks(fork_id, source_chat_id, chat_id, created_at) VALUES ('f-' || ?1, ?1, ?1, 1)",
+        ];
+        for sql in touched {
+            let c = chat(&db);
+            db.write(|tx| tx.execute(sql, [&c])).unwrap();
+            assert_eq!(is(&c), Some(false), "{sql}");
+        }
+        // A whitespace-only draft and the fallback title state still count as untouched.
+        let c = chat(&db);
+        db.write(|tx| {
+            tx.execute("UPDATE chats SET draft = '  ' WHERE id = ?1", [&c])?;
+            tx.execute(
+                "INSERT INTO chat_titles(chat_id, state, updated_at) VALUES (?1, 'fallback', 1)",
+                [&c],
+            )
+        })
+        .unwrap();
+        assert_eq!(is(&c), Some(true));
     }
 
     /// A proposed revision must be greater than the stored one; a refusal changes nothing.

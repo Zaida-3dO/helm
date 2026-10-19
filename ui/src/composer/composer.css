@@ -163,3 +163,132 @@
     padding: 0 20px 13px;
   }
 }
+
+/* The toolbar's left group may shrink: the model trigger ellipsises before anything spills. */
+.composer-dock .composer-selects > * {
+  min-width: 0;
+}
+.composer-dock .model-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.composer-dock .model-picker-error,
+.composer-dock .permission-chip-error {
+  color: var(--error);
+  font-size: 11px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The permission chip: icon 11 + label, 11 px --secondary, max 180. */
+.composer-dock .permission-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.composer-dock .permission-chip .ui-picker-trigger {
+  max-width: 180px;
+  min-width: 0;
+}
+.permission-chip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.composer-dock .permission-chip.open .permission-chip-label .ui-icon {
+  color: var(--warning-text);
+}
+.composer-dock .permission-chip.pending .ui-picker-trigger {
+  border-style: dashed;
+  border-color: var(--line);
+}
+
+/* The unified picker's popover, on the kit's ui-picker-* styles. */
+.model-picker-heading {
+  justify-content: space-between;
+}
+.model-picker-heading kbd,
+.model-picker-caption kbd {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.model-picker-effort {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 14px;
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+}
+.model-picker-caption {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.model-picker-stops {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+}
+.model-picker-stop {
+  flex: 1;
+  height: 18px;
+  min-width: 10px;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: none;
+}
+.model-picker-stop > span {
+  display: block;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  transition:
+    background-color 130ms ease,
+    scale 160ms cubic-bezier(0.18, 0.85, 0.28, 1.28);
+}
+.model-picker-stop:hover:not(:disabled) {
+  background: none;
+}
+.model-picker-stop.lit > span {
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.model-picker-stop.on > span {
+  background: var(--accent);
+  scale: 1 1.5;
+}
+.model-picker-effort-value {
+  min-width: 64px;
+  text-align: right;
+  font-weight: 590;
+}
+.model-picker-hints {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  border-top: 1px solid var(--line);
+  font-size: 10px;
+  color: var(--muted);
+}
+@media (prefers-reduced-motion: reduce) {
+  .model-picker-stop > span {
+    transition: none;
+  }
+}

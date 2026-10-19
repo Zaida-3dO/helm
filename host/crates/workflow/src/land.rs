@@ -557,8 +557,9 @@ pub fn start_driver(handle: &tokio::runtime::Handle, ctx: &helm_ipc::OpCtx) {
 }
 
 /// The user's actions on a handed-off change (the main window's task row):
-/// `merge` an awaiting change, `retry` a failed land, `drop` it, or `decline` the merge (the
-/// task parks). The land step re-verifies everything before any merge.
+/// `merge` an awaiting change, `retry` a failed land, `drop` it, or `decline` the merge (a
+/// handed-off task parks). The land step re-verifies everything before any merge. Ready for
+/// review is [`ready`], since it calls GitHub before it writes.
 pub fn user_action(
     tx: &Transaction<'_>,
     run_id: &str,
@@ -573,6 +574,7 @@ pub fn user_action(
     let Some(mut c) = store::change(tx, run_id, repo, branch)? else {
         return Ok(Err("That task has no such change.".into()));
     };
+    let was = c.state.clone();
     let (to, with_handoff) = match (action, c.state.as_str()) {
         ("merge", "awaiting_merge") => ("landing", false),
         ("retry", "land_failed") if c.failed_mode.as_deref() == Some("draft") => {
@@ -615,10 +617,149 @@ pub fn user_action(
         },
         now,
     )?;
-    if action == "decline" {
+    // Decline, or Drop change on an awaiting change, parks a handed-off task; an active task goes
+    // on.
+    let release = action == "decline" || (action == "drop" && was == "awaiting_merge");
+    if release && run.status == "handed_off" {
         run.status = "parked".into();
-        run.park_reason = Some(format!("You declined the merge of {branch}."));
+        run.park_reason = Some(if action == "decline" {
+            format!("You declined the merge of {branch}.")
+        } else {
+            format!("You dropped the change {branch}.")
+        });
         store::save_run(tx, &run, None, now)?;
     }
     Ok(Ok(c.state))
+}
+
+/// One Ready-for-review pass over a handed-off change: the PR must be open at the
+/// approved commit; a draft is marked ready and the flip label removed. `Ok` carries a note for
+/// the change (a label that could not be removed), `Err` why it was not flipped.
+pub fn flip_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Result<Option<String>, String> {
+    let (Some(pr), Some(tip)) = (c.pr.as_deref(), c.approved_tip.as_deref()) else {
+        return Err("the change has no PR or approved commit recorded".into());
+    };
+    let (Some(repo), Some(n)) = (gh_repo(&c.repo), pr_number(pr)) else {
+        return Err("only github.com pull requests are handled".into());
+    };
+    let v = match view(gh, &repo, &n) {
+        Ok(v) => v,
+        Err(Step::Failed { why, .. }) => return Err(why),
+        Err(Step::Wait(w)) => return Err(format!("GitHub could not be read ({w}); try again")),
+        Err(_) => return Err("GitHub could not be read; try again".into()),
+    };
+    if s(&v, "state") != "OPEN" {
+        return Err(format!("the PR is {}", s(&v, "state").to_lowercase()));
+    }
+    if s(&v, "headRefOid") != tip {
+        return Err("the PR's head is not the approved commit".into());
+    }
+    let run = |args: &[&str]| {
+        let a: Vec<String> = args.iter().map(|x| x.to_string()).collect();
+        matches!(gh.run(&a), Ok(o) if o.ok)
+    };
+    if v.get("isDraft").and_then(Value::as_bool).unwrap_or(false)
+        && !run(&["pr", "ready", &n, "--repo", &repo])
+    {
+        return Err("marking the PR ready for review did not go through; try again".into());
+    }
+    if let Some(label) = st.landing.flip_label.as_deref() {
+        if !run(&["pr", "edit", &n, "--repo", &repo, "--remove-label", label]) {
+            return Ok(Some(format!("the label {label} could not be removed")));
+        }
+    }
+    Ok(None)
+}
+
+/// The user's Ready for review on a handed-off change: [`flip_pass`] outside any transaction,
+/// then the write, which re-reads the change so an action in between wins. A failed check leaves
+/// the change handed off with the reason on it and a `flip_verify_failed` row.
+pub fn ready(
+    db: &Database,
+    gh: &dyn Gh,
+    run_id: &str,
+    repo: &str,
+    branch: &str,
+    now: i64,
+) -> rusqlite::Result<Result<String, String>> {
+    let (st, run, c) = db.snapshot(|tx| {
+        Ok::<_, rusqlite::Error>((
+            crate::settings::load(tx)?,
+            store::run(tx, run_id)?,
+            store::change(tx, run_id, repo, branch)?,
+        ))
+    })?;
+    if run.is_none() {
+        return Ok(Err("No such task.".into()));
+    }
+    let Some(c) = c else {
+        return Ok(Err("That task has no such change.".into()));
+    };
+    if !st.enabled {
+        return Ok(Err(
+            "Orchestrator is off in Settings, so Helm marks nothing ready.".into(),
+        ));
+    }
+    if c.state != "handed_off" {
+        return Ok(Err(format!(
+            "ready does not apply to a change that is {}.",
+            c.state
+        )));
+    }
+    let outcome = flip_pass(gh, &st, &c);
+    db.write(|tx| {
+        let (Some(mut now_c), Some(run)) = (
+            store::change(tx, run_id, repo, branch)?,
+            store::run(tx, run_id)?,
+        ) else {
+            return Ok(Err("That task has no such change.".into()));
+        };
+        if now_c.state != "handed_off" || now_c.approved_tip != c.approved_tip {
+            return Ok(Err(format!(
+                "{branch} changed while Helm was checking it; it is {} now.",
+                now_c.state
+            )));
+        }
+        match outcome {
+            Ok(note) => {
+                now_c.error = note.clone();
+                if let Err(e) = engine::move_change(tx, &run, &mut now_c, "flipped", false, now)? {
+                    return Ok(Err(e));
+                }
+                store::event(
+                    tx,
+                    &run.chat_id,
+                    Some(&run),
+                    &Event {
+                        kind: "flipped",
+                        repo: Some(repo),
+                        branch: Some(branch),
+                        tip: now_c.approved_tip.as_deref(),
+                        body: note.as_deref(),
+                        ..Default::default()
+                    },
+                    now,
+                )?;
+                Ok(Ok(now_c.state))
+            }
+            Err(why) => {
+                now_c.error = Some(format!("Not marked ready: {why}."));
+                store::upsert_change(tx, &now_c, now)?;
+                store::event(
+                    tx,
+                    &run.chat_id,
+                    Some(&run),
+                    &Event {
+                        kind: "flip_verify_failed",
+                        repo: Some(repo),
+                        branch: Some(branch),
+                        body: Some(&why),
+                        ..Default::default()
+                    },
+                    now,
+                )?;
+                Ok(Err(format!("{branch} was not marked ready: {why}.")))
+            }
+        }
+    })
 }

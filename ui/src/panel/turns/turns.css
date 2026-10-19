@@ -1,0 +1,260 @@
+/* The "Edited N files" card. Its own `ec-` classes, so the older `tc-` rules in
+   panel.css no longer apply to it. */
+
+.ec-card {
+  margin: 6px 0 16px;
+  max-width: 640px;
+  border: 1px solid var(--line-strong);
+  border-radius: 13px;
+  background: var(--surface);
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text);
+}
+
+.ec-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 6px;
+  background: var(--surface-alt);
+}
+
+.ec-card:not(.is-collapsed) .ec-head {
+  border-bottom: 1px solid var(--line);
+}
+
+/* The icon tile, with two tilted paper sheets behind it that straighten while the card is open. */
+.ec-tile {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--secondary);
+  isolation: isolate;
+}
+
+.ec-tile::before,
+.ec-tile::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 2px;
+  width: 19px;
+  height: 23px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  z-index: -1;
+  transition: transform 240ms cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+
+.ec-tile::before {
+  transform: rotate(9deg);
+}
+
+.ec-tile::after {
+  transform: rotate(-7deg);
+}
+
+.ec-card:not(.is-collapsed) .ec-tile::before {
+  transform: rotate(3deg);
+}
+
+.ec-card:not(.is-collapsed) .ec-tile::after {
+  transform: rotate(-2deg);
+}
+
+.ec-title {
+  font-size: 11.5px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.ec-counts {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ec-add {
+  color: var(--diff-add-text);
+}
+
+.ec-del {
+  color: var(--diff-del-text);
+}
+
+.ec-unavailable {
+  color: var(--secondary);
+  white-space: nowrap;
+}
+
+.ec-spacer {
+  flex: 1;
+}
+
+.ec-review {
+  min-height: 26px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  font-size: 10.5px;
+}
+
+.ec-min {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+}
+
+.ec-min:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.ec-repo {
+  padding: 8px 10px 3px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--secondary);
+}
+
+/* A file row: name then directory, counts at the right; hover draws a short bar at the left. */
+.ec-file {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-height: 26px;
+  padding: 4px 10px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+
+.ec-file::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  width: 2px;
+  height: 14px;
+  margin-top: -7px;
+  border-radius: 1px;
+  background: var(--secondary);
+  opacity: 0;
+  transform: scaleY(0.4);
+  transition:
+    transform 160ms var(--ease-out-soft),
+    opacity 120ms ease;
+}
+
+.ec-file:hover:not(:disabled),
+.ec-file:focus-visible {
+  background: var(--surface-alt);
+}
+
+.ec-file:hover::before,
+.ec-file:focus-visible::before {
+  opacity: 1;
+  transform: scaleY(1);
+}
+
+.ec-file:focus-visible {
+  outline-offset: -2px;
+}
+
+.ec-path {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  transition: transform 160ms var(--ease-out-soft);
+}
+
+.ec-file:hover .ec-path,
+.ec-file:focus-visible .ec-path {
+  transform: translateX(2px);
+}
+
+.ec-name {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: -0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.ec-dir {
+  font-size: 9.5px;
+  color: color-mix(in srgb, var(--secondary) 72%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.ec-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-alt);
+  font-size: 10px;
+}
+
+.ec-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  color: var(--secondary);
+  font-size: 10px;
+}
+
+.ec-more:hover:not(:disabled) {
+  background: none;
+  color: var(--text);
+}
+
+.ec-more-chevron {
+  transition: transform 160ms var(--ease-out-soft);
+}
+
+.ec-more.is-open .ec-more-chevron {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ec-tile::before,
+  .ec-tile::after,
+  .ec-file::before,
+  .ec-path,
+  .ec-more-chevron {
+    transition: none;
+  }
+}

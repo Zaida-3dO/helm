@@ -42,6 +42,7 @@ pub mod hostcalls;
 #[cfg(test)]
 mod latency_tests;
 pub mod manage;
+pub mod message_images;
 pub mod ops;
 pub mod runslots;
 pub mod runtime;

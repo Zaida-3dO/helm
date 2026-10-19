@@ -1926,6 +1926,39 @@ async fn attached_images_ride_the_prompt() {
     let p = w.expect("prompt").await;
     assert_eq!(p["images"][0]["mimeType"], "image/png");
     assert_eq!(p["images"][0]["data"], b64.as_str());
+    // The user's row carries the image for the bubble, and attachment_get serves it back to its
+    // own chat only.
+    let row = h.col("SELECT details FROM messages WHERE role = 'user'");
+    let d: serde_json::Value = serde_json::from_str(&row[0]).unwrap();
+    assert_eq!(d["images"][0]["id"], id.as_str());
+    assert_eq!(d["images"][0]["name"], "shot.png");
+    assert_eq!(d["images"][0]["width"], 10);
+    let got = h
+        .call(
+            "attachment_get",
+            json!({"chatId": chat, "attachmentId": id}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(got["mime"], "image/png");
+    assert_eq!(got["bytes"], b64.as_str());
+    let foreign = h
+        .call(
+            "attachment_get",
+            json!({"chatId": "another-chat", "attachmentId": id}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(foreign.code, "not_found");
+    // The worker's echo rewrites the row as complete; the image stays on it.
+    echo(&w, p["submissionId"].as_str().unwrap()).await;
+    h.until("the echoed row", |h| {
+        h.col("SELECT status FROM messages WHERE role = 'user'") == ["complete"]
+    })
+    .await;
+    let row = h.col("SELECT details FROM messages WHERE role = 'user'");
+    let d: serde_json::Value = serde_json::from_str(&row[0]).unwrap();
+    assert_eq!(d["images"][0]["id"], id.as_str());
     // A second send with the same attachment is refused and saves nothing.
     let again = h
         .call(
@@ -1937,6 +1970,46 @@ async fn attached_images_ride_the_prompt() {
         .unwrap_err();
     assert_eq!(again.code, "bad_args");
     assert_eq!(h.col("SELECT count(*) FROM submissions"), ["1"]);
+}
+
+/// A message sent while a turn runs has no row until the worker echoes it: the echo carries the
+/// image for the bubble.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_steer_with_an_image_gets_it_from_the_echo() {
+    use base64::Engine as _;
+    let mut h = harness();
+    let (chat, _, mut w) = running_turn(&mut h).await;
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend(12u32.to_be_bytes());
+    png.extend(7u32.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0]);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+    let put = h
+        .call(
+            "attachment_put",
+            json!({"chatId": chat, "name": "late.png", "mime": "image/png", "bytes": b64}),
+        )
+        .await
+        .unwrap();
+    let id = put["attachmentId"].as_str().unwrap().to_owned();
+    let sid = uuid::Uuid::new_v4().to_string();
+    h.call(
+        "chat_send",
+        json!({"chatId": chat, "submissionId": sid, "text": "look", "action": "default",
+               "draftRevision": 0, "attachments": [id]}),
+    )
+    .await
+    .unwrap();
+    let p = w.expect("prompt").await;
+    assert_eq!(p["streamingBehavior"], "steer");
+    let rows = "SELECT details FROM messages WHERE role = 'user' AND text = 'look'";
+    assert!(h.col(rows).is_empty(), "no row until the echo");
+    ack(&w, &p).await;
+    echo(&w, &sid).await;
+    h.until("the echoed row", |h| !h.col(rows).is_empty()).await;
+    let d: serde_json::Value = serde_json::from_str(&h.col(rows)[0]).unwrap();
+    assert_eq!(d["images"][0]["id"], id.as_str());
+    assert_eq!(d["images"][0]["height"], 7);
 }
 
 /// The skills a worker reports at get_state are what skills_list answers.
@@ -2330,4 +2403,57 @@ async fn a_stalled_flag_left_by_a_crash_is_cleared_and_never_shows_on_an_idle_ch
         json!([]),
         "not counted as stalled from the start"
     );
+}
+
+/// The composer's permission-mode pick reaches the live worker as a
+/// `set_permission_mode` line; a later worker starts in the mode the last one reported (so leaving
+/// plan mode, or a refused pick, is not undone), while a pick made with no worker is what the next
+/// one gets. An unknown mode is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_picked_permission_mode_reaches_the_worker_and_its_successors() {
+    use crate::submit::permission_start_line as start;
+    let line = |m: &str| Some(json!({"type": "set_permission_mode", "mode": m}));
+    let mut h = harness();
+    let (chat, _, mut w) = running_turn(&mut h).await;
+    let r = h
+        .call(
+            "chat_set_permission_mode",
+            json!({"chatId": chat, "mode": "plan"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r["mode"], "plan");
+    let sent = w.expect("set_permission_mode").await;
+    assert_eq!(sent["mode"], "plan");
+    assert_eq!(start(&chat, Some("plan")), line("plan"));
+    assert_eq!(
+        start(&chat, Some("default")),
+        line("default"),
+        "the CLI left plan mode: the next worker resumes there"
+    );
+    // No worker yet: the pick wins over a stale reported mode, once; then the reported one does.
+    let other = h.create().await;
+    assert_eq!(start(&other, Some("bypassPermissions")), None, "no pick");
+    h.call(
+        "chat_set_permission_mode",
+        json!({"chatId": other, "mode": "acceptEdits"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        start(&other, Some("bypassPermissions")),
+        line("acceptEdits")
+    );
+    assert_eq!(
+        start(&other, Some("bypassPermissions")),
+        line("bypassPermissions")
+    );
+    let err = h
+        .call(
+            "chat_set_permission_mode",
+            json!({"chatId": chat, "mode": "yolo"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "bad_args");
 }

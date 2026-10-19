@@ -18,12 +18,14 @@ import {
   ArchiveRestore,
   ArrowDown,
   ArrowUp,
+  ArrowUpRight,
   Bookmark,
   Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  ClipboardList,
   CircleAlert,
   CircleArrowUp,
   CircleCheck,
@@ -87,6 +89,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  ShieldOff,
   SlidersHorizontal,
   Sparkles,
   Square,
@@ -125,6 +128,7 @@ export const IconWarning = kitIcon(TriangleAlert, 'triangle-alert');
 export const IconSuccess = kitIcon(CircleCheck, 'circle-check');
 export const IconHelp = kitIcon(CircleHelp, 'circle-help');
 export const IconExternalLink = kitIcon(ExternalLink, 'external-link');
+export const IconArrowUpRight = kitIcon(ArrowUpRight, 'arrow-up-right');
 export const IconLink = kitIcon(Link, 'link');
 export const IconTrash = kitIcon(Trash, 'trash');
 export const IconGrip = kitIcon(GripVertical, 'grip-vertical');
@@ -191,6 +195,9 @@ export const IconMoon = kitIcon(Moon, 'moon');
 export const IconWorkflow = kitIcon(Workflow, 'workflow');
 /** The permission chip. */
 export const IconShield = kitIcon(ShieldCheck, 'shield-check');
+/** The composer's permission chip: bypass (no prompts) and plan mode. */
+export const IconShieldOff = kitIcon(ShieldOff, 'shield-off');
+export const IconPlan = kitIcon(ClipboardList, 'clipboard-list');
 export const IconMic = kitIcon(Mic, 'mic');
 export const IconImage = kitIcon(Image, 'image');
 export const IconEnter = kitIcon(CornerDownLeft, 'corner-down-left');

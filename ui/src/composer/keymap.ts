@@ -93,3 +93,9 @@ export function stopTooltip(stopSendsWaiting: boolean, showChoices: boolean): st
   const base = stopSendsWaiting ? 'Stop task and send waiting messages' : 'Stop task and pause queue';
   return showChoices ? `${base} · Esc interrupts and continues the queue` : base;
 }
+
+/** What Send does now, for its accessible name (the button is an icon). */
+export function sendLabel(busy: boolean, mode: string): string {
+  if (!busy) return 'Send';
+  return mode === 'asap' ? 'Steer' : mode === 'queue' ? 'Queue' : 'Interrupt';
+}

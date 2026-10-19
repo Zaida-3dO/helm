@@ -6,12 +6,15 @@ breaks those checks, so change them only together with the checks. Everything el
 
 | Hook | Element | Attributes |
 |---|---|---|
-| `new-chat` | "New chat" button in the sidebar; opens the new-chat page | |
+| `new-chat` | "New chat" nav entry in the sidebar; opens the new-chat page (in the open chat's project) | |
 | `newchat-page` | The new-chat page: shown while a draft is open; nothing exists on the host until the first send | |
 | `newchat-card`, `newchat-project`, `newchat-folder`, `newchat-folder-menu` | Its card, the project picker trigger, the folder (place line) button and the folder menu | |
 | `chat-item` | One chat row in the sidebar | `data-chat-id`, `data-status`, `data-depth` (chat nesting 0–2), `data-group` (the project it is shown under) |
 | `sidebar-group` | One project header in the sidebar | `data-project-id`, `data-kind` (`folder` `board`), `data-depth` (project nesting 0–2) |
 | `sidebar-empty-toggle` | "Show N empty projects" / "Hide N empty projects" row at the end of the projects view | `aria-pressed` (empty projects shown) |
+| `sidebar-titlestrip`, `sidebar-beacon`, `workspace-status` | The sidebar's 48 px title strip, the beacon (mark, wordmark, chevron) and its Workspace status popover | beacon: `aria-expanded` |
+| `nav-search`, `nav-attention` | The sidebar's Search chats and Needs attention nav entries | |
+| `attention-inbox`, `attention-card`, `attention-snooze-menu` | The Needs attention dialog, one card in it, and a card's Snooze menu | card: `data-chat-id`, `data-group` (`needsYou` `stalled` `unread`) |
 | `board-sync` | The Agent Standup sync line under the view switch | `data-state` (`never` `unconfigured` `syncing` `ok` `error`) |
 | `board-url`, `board-token`, `board-token-state`, `board-test`, `board-last-sync` | Settings → Projects connection fields: address, write-only token, "set"/"not set", Test connection, last sync | |
 | `chat-view` | The open chat | `data-chat-id`, `data-chat-status` |
@@ -21,6 +24,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `stop` | Stop button, shown only while a turn runs (Stop that pauses the queue) | |
 | `transcript` | The transcript scroller | |
 | `transcript-row` | One message row | `data-status` (`saved` `streaming` `complete` `error` `interrupted`), `data-role` (`user` `assistant` `toolResult` `context`), `data-row-id` |
+| `message-images` / `message-image` | The thumbnails in a user bubble, and one of them (`message-image-viewer` is the full-size dialog) | `message-image`: `data-state` (`loading` `ready` `failed`); a `ready` one is a button |
 | `work-fold` | "Worked for …" row of a settled turn; click to unfold | |
 | `tool-card` | One tool card | `data-tool` (tool name), `data-status` (`running` `complete` `failed` `interrupted`) |
 | `tool-stop` | Stop on a running tool card (only when supported) | |
@@ -45,8 +49,10 @@ breaks those checks, so change them only together with the checks. Everything el
 | `dock-tool-stop` | Stop beside the latest tool line in the dock | |
 | `interrupted-banner` / `recover-draft` | Banner on an interrupted chat / its Recover draft button | |
 | `composer-error` | A refused send's message (the draft is kept) | |
-| `model-picker` / `effort-picker` | Model and effort selects | |
-| `permission-chip` | Permission-mode indicator | `data-mode` = the live mode, empty when none reported |
+| `model-picker` | The unified "Model · Effort" picker trigger (Ctrl+Shift+M opens it) | |
+| `model-picker-pop` | Its popover: model rows are `[role="option"]` with `data-value` = the model id | |
+| `effort-picker` | The effort row in that popover's footer: `[role="radio"]` stops | |
+| `permission-chip` | Permission-mode chip (wraps `permission-picker`, the picker trigger) | `data-mode` = the live mode, empty when none reported; `data-picked` = a pick not yet live |
 | `jump-latest` | "Jump to latest" button | |
 | `side-panel` / `panel-tab` / `panel-slot` / `panel-tab-body` | Side panel: the panel, a document tab, an Inspector slot (Changes, Files), a tab's body. The link gate's refusals show in the shared `toast-slot` | `panel-tab`: `data-kind`, `data-intent` (`user` `program`), `aria-selected`; `panel-slot`: `data-slot`; `panel-tab-body`: `data-kind` |
 | `file-viewer` / `code-view` / `folder-view` / `folder-entry` / `file-error` / `open-in-app` / `files-slot` / `file-modal` | File viewer: the viewer body, its CodeMirror source view, a folder listing and one entry, a read error, the Open in <App> header action, the Inspector's Files slot, the modal fallback | `file-viewer`: `data-path` (the path shown now); `folder-entry`: `data-kind` (`dir` `file` `link`) |
@@ -83,3 +89,10 @@ Queue `Alt+Enter`, Send now `Ctrl+Alt+Enter`, Stop that continues the queue `Esc
 | `orch-use-<stage>` | One stage's Required / Auto / Off group, stage = `plan` `planReview` `review` `cleanup` `smoketest` | segments carry `data-value` |
 | `orch-edits` / `orch-signoff` / `orch-landdefault` / `orch-method` | The other segmented settings | segments carry `data-value` |
 | `orch-save` / `orch-revert` / `orch-saved` / `orch-error` | Save, Revert, the "Saved" word, a refused save's message | |
+| `workflow-panel` | The workflow panel in the composer dock (a Claude Code chat with a task, master switch on) | `data-status` (the task's status, or `none`), `data-needs` (how many Needs-you items), `aria-busy` while one of your steps runs |
+| `workflow-needs` / `workflow-stages` / `workflow-stage` | The Needs-you line, the stage row, one stage | `workflow-stage`: `data-stage`, `data-state` (`done` `current` `pending` `off`) |
+| `workflow-signoff` | Sign off plan (only while the plan waits for your sign-off) | |
+| `workflow-waiting` | One change waiting on you, with its buttons | `data-branch` |
+| `workflow-change-action` | A button on that change | `data-action` (`merge` `decline` `drop` `retry` `ready`) |
+| `workflow-menu` / `workflow-task-menu` | The task's ⋯ button and its menu | menu items carry `data-item` (`skip`, `skip:<stage>`, `allowMore`, `allowMore:<stage>`, `park`, `reopen`, `visual`, `notVisual`, `drop`, `drop:<repo> <branch>`, `end`) |
+| `workflow-toggle` / `workflow-body` / `workflow-change` | The title that opens the detail, the detail, one change in it | `workflow-change`: `data-state`, `data-branch` |

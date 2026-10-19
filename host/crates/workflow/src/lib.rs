@@ -30,6 +30,8 @@
 //! | guard evaluator | landing-guard classifier and the override marker, pure, not wired yet |
 //! | table `workflow_standup_outbox` | stage records written to Agent Standup, with an "outcome unknown" read-back before any resend |
 //! | land step | `gh` merge pinned to the approved head, readback must say MERGED; draft land |
+//! | op `workflow_run_get`, event `workflow_run` | the workflow panel's live read |
+//! | ops `workflow_change_action`, `workflow_task_action` | the user's buttons and task menu ([`user`]) |
 //!
 //! Events: `workflow_settings {}`, `workflow_chat_mode {chatId}` and `workflow_run {chatId}` tell the
 //! UI to re-read. `workflow_run` follows every write of a task, change or event row, whoever made it
@@ -64,6 +66,9 @@ pub mod shell;
 pub mod store;
 pub mod tool;
 pub mod types;
+pub mod user;
+#[cfg(test)]
+mod user_tests;
 pub mod wftools;
 
 pub use kinds::register_allow_kinds;

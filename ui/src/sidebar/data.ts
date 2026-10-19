@@ -23,6 +23,9 @@ export interface SidebarSnapshot {
   sync: BoardSyncState | null;
   error: string | null;
   needsYou: ReadonlySet<string>;
+  /** The whole attention summary (null until the first read), for the nav count, the Workspace
+   *  status popover and the Needs attention inbox. */
+  attention: AttentionSummary | null;
 }
 
 const freshPaging = (): ViewPaging => ({ cursor: null, complete: false, loading: false, error: null, started: false });
@@ -38,6 +41,7 @@ export class SidebarData {
   };
   private sync: BoardSyncState | null = null;
   private needsYou: ReadonlySet<string> = new Set();
+  private summary: AttentionSummary | null = null;
   private error: string | null = null;
   private listeners = new Set<() => void>();
   snapshot: SidebarSnapshot = this.make();
@@ -63,6 +67,7 @@ export class SidebarData {
       sync: this.sync,
       error: this.error,
       needsYou: this.needsYou,
+      attention: this.summary,
     };
   }
 
@@ -136,6 +141,7 @@ export class SidebarData {
   /** Chats waiting on the user, from the attention summary. */
   attention(summary: AttentionSummary): void {
     this.needsYou = new Set(summary.needsYou.map((r) => r.chatId));
+    this.summary = summary;
     this.emit();
   }
 

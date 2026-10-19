@@ -343,6 +343,11 @@ pub fn update(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
 
 /// `skip {stage, reason}`: auto stages freely (recorded); required stages only with consent.
 pub fn skip(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
+    skip_with(tx, x, a, Proof::from_args(a))
+}
+
+/// [`skip`] with the proof given: the agent's from its arguments, or the user's click.
+pub fn skip_with(tx: &Transaction<'_>, x: &Act<'_>, a: &Value, proof: Proof) -> Out {
     let mut run = match active(tx, x.chat_id)? {
         Ok(r) => r,
         Err(e) => return Ok(Err(e)),
@@ -382,7 +387,6 @@ pub fn skip(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
     let mut verified = false;
     if use_ == StageUse::Required {
         let t = json!({"stage": stage});
-        let proof = Proof::from_args(a);
         let why = format!("The {stage} stage is required, so only the user can skip it.");
         if let Err(e) = kinds::consent(tx, x.kinds, x.chat_id, "skip", &t, &proof, &why, x.now)? {
             return Ok(Err(e));
@@ -525,6 +529,11 @@ pub fn drop(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
 /// `allowMore {stage, repo?, branch?, reason}` (one self-grant per target, stage and attempt, only
 /// at the cap), or with `userQuote` / `grant` and `n` the user's own task-wide Allow more.
 pub fn allow_more(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
+    allow_more_with(tx, x, a, Proof::from_args(a))
+}
+
+/// [`allow_more`] with the proof given: the agent's from its arguments, or the user's click.
+pub fn allow_more_with(tx: &Transaction<'_>, x: &Act<'_>, a: &Value, proof: Proof) -> Out {
     let mut run = match active(tx, x.chat_id)? {
         Ok(r) => r,
         Err(e) => return Ok(Err(e)),
@@ -544,7 +553,6 @@ pub fn allow_more(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
     if use_ == StageUse::Off && !(stage == CapStage::Smoketest && run.visual) {
         return Ok(Err(format!("The {} stage is off.", stage.name())));
     }
-    let proof = Proof::from_args(a);
     if proof.any() {
         if a.get("repo").is_some() || a.get("branch").is_some() {
             return Ok(Err(

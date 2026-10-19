@@ -173,3 +173,35 @@ span.orch-panel-title {
 .orch-other {
   opacity: 0.75;
 }
+
+/* The user's buttons: Sign off plan and each change waiting on the user. */
+.orch-panel-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.orch-panel-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  color: var(--secondary);
+}
+
+.orch-panel-action .orch-error-line {
+  flex-basis: 100%;
+}
+
+.orch-more {
+  margin-left: auto;
+  height: 22px;
+  padding: 0 4px;
+}
+
+/* Compact buttons inside the panel (the kit's sizes are for toolbars and dialogs). */
+.orch-panel-action .ui-btn {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+}

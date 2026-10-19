@@ -122,10 +122,6 @@ function harness(opts: { open?: { id: string; cwd: string; projectId: string } }
   const failSends = { n: 0 };
   let n = 0;
   const ops = {
-    create: async (cwd: string, model?: string, effort?: string) => {
-      calls.push({ op: 'create', args: [cwd, model, effort] });
-      return chatRecord(`chat-${++n}`, cwd, `fp:${cwd}`);
-    },
     attach: async (chatId: string, name: string) => {
       calls.push({ op: 'attach', args: [chatId, name] });
       return { attachmentId: `att-${name}` };
@@ -141,6 +137,10 @@ function harness(opts: { open?: { id: string; cwd: string; projectId: string } }
   } as unknown as ChatOps;
   const api = (async (op: string, args?: unknown) => {
     calls.push({ op, args: [args] });
+    const a = (args ?? {}) as { cwd?: string; projectId?: string };
+    // The host's folder project is the named one, else "fp:<cwd>".
+    if (op === 'chat_create') return chatRecord(`chat-${++n}`, a.cwd!, a.projectId ?? `fp:${a.cwd}`);
+    if (op === 'chat_discard_untouched') return { discarded: true };
     return null;
   }) as Api;
   const env: NewChatEnv = {
@@ -198,7 +198,7 @@ test('an untouched draft is discarded on leaving; a typed one is kept and reused
   h.ctl.show();
   assert.equal(draft()?.id, second);
   assert.equal(h.ctl.record()?.draft, 'fix the build');
-  assert.ok(!h.calls.some((c) => c.op === 'create'), 'nothing was created on the host');
+  assert.ok(!h.calls.some((c) => c.op === 'chat_create'), 'nothing was created on the host');
 });
 
 test('opening any chat leaves the page', () => {
@@ -244,8 +244,9 @@ test('the first send creates the chat, files it under the chosen project, moves 
   const r = await ops.send(h.ctl.draft!.id, 'sub-1', 'hello', 'default', 3, { attachments: [img.attachmentId] });
   assert.equal(r.submission.id, 'sub-1');
   const seen = h.calls.map((c) => c.op);
-  assert.deepEqual(seen, ['create', 'storeChat', 'chat_organize', 'attach', 'send', 'select']);
-  assert.deepEqual(h.calls[0]!.args, ['C:/code/site', 'opus', 'high']);
+  assert.deepEqual(seen, ['chat_create', 'storeChat', 'chat_organize', 'attach', 'send', 'select']);
+  // A group is not a folder project, so the host is not told a project: it uses the folder's own.
+  assert.deepEqual(h.calls[0]!.args[0], { cwd: 'C:/code/site', model: 'opus', effort: 'high' });
   const chatId = (h.calls[1]!.args[0] as string);
   assert.deepEqual(h.calls[2]!.args[0], { chatId, groupProjectId: 'group', parentChatId: null });
   assert.deepEqual(h.calls[4]!.args, [chatId, 'sub-1', 'hello', ['att-shot.png']]);
@@ -256,13 +257,11 @@ test('the first send creates the chat, files it under the chosen project, moves 
   assert.deepEqual(readRecents(h.storage), ['C:/code/site']);
 });
 
-test('the chat is not re-filed when the project is the folder’s own', async () => {
+test('a folder project over the folder is named to the host, and the chat is not re-filed', async () => {
   const h = harness();
   h.ctl.show({ projectId: 'helm' });
-  // The fake host names the folder project "fp:<cwd>", so a group that is not it would be filed.
-  h.ctl.setProjects([...PROJECTS, node('fp:C:/code/helm', { path: 'C:/code/helm' })]);
-  h.ctl.move('fp:C:/code/helm');
   await draftOps(h.env.ops, h.ctl).send('x', 's', 'hi', 'default', 1);
+  assert.deepEqual(h.calls[0]!.args[0], { cwd: 'C:/code/helm', projectId: 'helm' });
   assert.ok(!h.calls.some((c) => c.op === 'chat_organize'));
 });
 
@@ -272,7 +271,7 @@ test('a second press while the first send runs makes no second chat', async () =
   const ops = draftOps(h.env.ops, h.ctl);
   const [a, b] = await Promise.all([ops.send('x', 's1', 'hi', 'default', 1), ops.send('x', 's2', 'hi', 'default', 1)]);
   assert.equal(a, b);
-  assert.equal(h.calls.filter((c) => c.op === 'create').length, 1);
+  assert.equal(h.calls.filter((c) => c.op === 'chat_create').length, 1);
 });
 
 test('a refused send keeps the draft open, and the retry sends to the chat already made', async () => {
@@ -284,7 +283,7 @@ test('a refused send keeps the draft open, and the retry sends to the chat alrea
   assert.equal(h.ctl.open, true);
   assert.ok(h.ctl.draft);
   await ops.send('x', 's2', 'hi', 'default', 1);
-  assert.equal(h.calls.filter((c) => c.op === 'create').length, 1);
+  assert.equal(h.calls.filter((c) => c.op === 'chat_create').length, 1);
   const sends = h.calls.filter((c) => c.op === 'send');
   assert.equal(sends.length, 2);
   assert.equal(sends[0]!.args[0], sends[1]!.args[0]);
@@ -295,7 +294,55 @@ test('without any folder the send is refused and nothing is created', async () =
   h.ctl.setProjects([node('bare')]);
   h.ctl.show({ projectId: 'bare' });
   await assert.rejects(draftOps(h.env.ops, h.ctl).send('x', 's', 'hi', 'default', 1), (e: unknown) => e instanceof ApiError && e.code === 'needs_folder');
-  assert.ok(!h.calls.some((c) => c.op === 'create'));
+  assert.ok(!h.calls.some((c) => c.op === 'chat_create'));
+});
+
+test('a refused send then a retry uploads each pasted image once', async () => {
+  const h = harness();
+  h.ctl.show({ projectId: 'helm' });
+  const ops = draftOps(h.env.ops, h.ctl);
+  const img = await ops.attach('x', 'shot.png', 'image/png', 'AAAA');
+  h.failSends.n = 1;
+  await assert.rejects(ops.send('x', 's1', 'hi', 'default', 1, { attachments: [img.attachmentId] }));
+  await ops.send('x', 's2', 'hi', 'default', 1, { attachments: [img.attachmentId] });
+  assert.equal(h.calls.filter((c) => c.op === 'attach').length, 1);
+  const sends = h.calls.filter((c) => c.op === 'send');
+  assert.deepEqual(sends[1]!.args[3], ['att-shot.png']);
+});
+
+test('the chat a refused send made is discarded when the page is left or moved elsewhere', async () => {
+  const h = harness();
+  h.ctl.show({ projectId: 'helm' });
+  const ops = draftOps(h.env.ops, h.ctl);
+  await ops.saveDraft('x', 'typed', 5);
+  h.failSends.n = 1;
+  await assert.rejects(ops.send('x', 's1', 'typed', 'default', 1));
+  const made = h.calls.find((c) => c.op === 'storeChat')!.args[0];
+  h.ctl.leave();
+  assert.deepEqual(
+    h.calls.filter((c) => c.op === 'chat_discard_untouched').map((c) => c.args[0]),
+    [{ chatId: made }],
+  );
+  assert.equal(h.ctl.draft?.text, 'typed', 'the typed draft stays');
+
+  // Moving to another project drops the made chat too, and the next send makes a new one there.
+  h.ctl.show();
+  h.failSends.n = 1;
+  await assert.rejects(ops.send('x', 's2', 'typed', 'default', 1));
+  h.ctl.move('site');
+  assert.equal(h.calls.filter((c) => c.op === 'chat_discard_untouched').length, 2);
+  await ops.send('x', 's3', 'typed', 'default', 1);
+  const creates = h.calls.filter((c) => c.op === 'chat_create').map((c) => (c.args[0] as { cwd: string }).cwd);
+  assert.deepEqual(creates, ['C:/code/helm', 'C:/code/helm', 'C:/code/site']);
+});
+
+test('leaving forgets pasted images, so a draft with only an image is discarded', async () => {
+  const h = harness();
+  h.ctl.show();
+  await draftOps(h.env.ops, h.ctl).attach('x', 'shot.png', 'image/png', 'AAAA');
+  assert.equal(h.ctl.untouched(), false);
+  h.ctl.leave();
+  assert.equal(h.ctl.draft, null);
 });
 
 test('draft text saves only forward; a model change alone leaves the draft untouched', async () => {

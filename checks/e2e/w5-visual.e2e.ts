@@ -507,12 +507,12 @@ describe("visual sweep", { timeout: 20 * 60_000 }, () => {
     await send(page(), "queued two");
     await page().waitForSelector(tid("queue-item"), { timeout: 20_000 });
     await audit("queue", { focus: true });
-    // A chat row's menu, then the model picker and the effort picker.
+    // A chat row's menu, then the model and effort picker and the permission-mode picker.
     await page().click(`${tid("chat-item")}`, { button: "right" });
     await page().waitForSelector('[role="menu"]', { timeout: 5_000 });
     await audit("chat-menu", { textOnly: true });
     await page().keyboard.press("Escape");
-    for (const picker of ["model-picker", "effort-picker"]) {
+    for (const picker of ["model-picker", "permission-picker"]) {
       await page().click(tid(picker));
       await page().waitForTimeout(300);
       await audit(picker, { textOnly: true });

@@ -144,3 +144,105 @@ export function prNumber(pr: string | null): string | null {
   const m = pr ? /\/pull\/(\d{1,9})\/?$/.exec(pr) : null;
   return m ? `#${m[1]}` : null;
 }
+
+/** A button on one change: the host op `workflow_change_action`. */
+export interface ChangeControl {
+  action: 'merge' | 'decline' | 'drop' | 'retry' | 'ready';
+  label: string;
+  primary?: boolean;
+  danger?: boolean;
+}
+
+/** The buttons a change shows for what awaits the user. The host re-checks each. */
+export function changeControls(c: RunChange): ChangeControl[] {
+  switch (c.state) {
+    case 'awaiting_merge':
+      return [
+        { action: 'merge', label: 'Merge', primary: true },
+        { action: 'decline', label: 'Decline' },
+        { action: 'drop', label: 'Drop change', danger: true },
+      ];
+    case 'land_failed':
+      return [
+        { action: 'retry', label: 'Retry land', primary: true },
+        { action: 'drop', label: 'Drop change', danger: true },
+      ];
+    case 'handed_off':
+      return [{ action: 'ready', label: 'Ready for review', primary: true }];
+    default:
+      return [];
+  }
+}
+
+/** The plan id to sign off, when the user's Sign off plan is what the task waits for. */
+export function signOffPlan(view: RunView, s: WorkflowSettings): string | null {
+  const plan = view.plan;
+  if (!view.task || view.task.status !== 'active' || !plan?.id || s.planSignOff !== 'me' || plan.signedOff) return null;
+  const reviewNeeded = s.stages.planReview.use === 'required' || (s.stages.planReview.use === 'auto' && !view.task.skipped.includes('planReview'));
+  return plan.approved || !reviewNeeded ? plan.id : null;
+}
+
+/** One entry of the task's ⋯ menu; `fields` ride the host op `workflow_task_action`. */
+export interface TaskMenuEntry {
+  id: string;
+  label: string;
+  action?: 'skip' | 'allowMore' | 'park' | 'reopen' | 'visual' | 'notVisual' | 'end';
+  fields?: { stage?: string; n?: number };
+  /** A Drop change entry: the change it drops. */
+  change?: RunChange;
+  danger?: boolean;
+  submenu?: TaskMenuEntry[];
+}
+
+const SKIPPABLE: { id: Skippable | 'smoketest'; label: string }[] = [
+  { id: 'plan', label: 'Plan' },
+  { id: 'planReview', label: 'Plan review' },
+  { id: 'review', label: 'Review' },
+  { id: 'cleanup', label: 'Clean-up' },
+  { id: 'smoketest', label: 'Smoketest' },
+];
+
+const ROUNDS: { id: 'planReview' | 'review' | 'smoketest'; label: string }[] = [
+  { id: 'planReview', label: 'plan review' },
+  { id: 'review', label: 'review' },
+  { id: 'smoketest', label: 'smoketest' },
+];
+
+/** The task row's ⋯ menu: what the user may do to the task in its current status. */
+export function taskMenu(view: RunView, s: WorkflowSettings): TaskMenuEntry[] {
+  const task = view.task;
+  if (!task) return [];
+  const out: TaskMenuEntry[] = [];
+  if (task.status === 'active') {
+    const skips = SKIPPABLE.filter((st) => s.stages[st.id].use !== 'off' && !task.skipped.includes(st.id)).map((st) => ({
+      id: `skip:${st.id}`,
+      label: st.label,
+      action: 'skip' as const,
+      fields: { stage: st.id },
+    }));
+    if (skips.length) out.push({ id: 'skip', label: 'Skip a stage', submenu: skips });
+    const more = ROUNDS.filter((st) => s.stages[st.id].use !== 'off').map((st) => ({
+      id: `allowMore:${st.id}`,
+      label: `Allow 2 more ${st.label} rounds`,
+      action: 'allowMore' as const,
+      fields: { stage: st.id, n: 2 },
+    }));
+    if (more.length) out.push({ id: 'allowMore', label: 'Allow more rounds', submenu: more });
+    out.push({ id: 'park', label: 'Park', action: 'park' });
+  }
+  if (task.status === 'parked' || task.status === 'handed_off') out.push({ id: 'reopen', label: 'Reopen', action: 'reopen' });
+  if (task.status === 'active' || task.status === 'parked') {
+    out.push(task.visual ? { id: 'notVisual', label: 'Not visual', action: 'notVisual' } : { id: 'visual', label: 'Mark visual', action: 'visual' });
+  }
+  const droppable = view.changes.filter((c) => ['open', 'handed_off', 'awaiting_merge', 'land_failed'].includes(c.state));
+  if (droppable.length) {
+    out.push({
+      id: 'drop',
+      label: 'Drop change',
+      danger: true,
+      submenu: droppable.map((c) => ({ id: `drop:${c.target.repo} ${c.target.branch}`, label: changeName(c), change: c, danger: true })),
+    });
+  }
+  out.push({ id: 'end', label: 'End task', action: 'end', danger: true });
+  return out;
+}

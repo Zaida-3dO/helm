@@ -1,7 +1,7 @@
 // The workflow run as the UI reads it: the shape of `app_workflow status` (host/crates/workflow
-// actions.rs), served to the UI by `workflow_run_get {chatId}` with a `workflow_run {chatId}`
-// event when a run or change row changes. Hand-written until the workflow crate exports a binding;
-// every field is read defensively because the op is newer than this file.
+// actions.rs), served to the UI by `workflow_run_get {chatId}` around the chat's current task,
+// with a `workflow_run {chatId}` event after every run write. Hand-written (no binding yet);
+// every field is read defensively.
 
 import { inertLines } from '../hosttools/inert.ts';
 
@@ -28,8 +28,11 @@ export interface RunPlan {
 }
 
 export interface RunChange {
+  /** For display: agent text made inert. */
   repo: string;
   branch: string;
+  /** The host's own repo and branch, sent back unchanged when the user acts on the change. Never rendered. */
+  target: { repo: string; branch: string };
   pr: string | null;
   /** `open` | `landing_draft` | `pending_land` | `landing` | `awaiting_merge` | `land_failed` | `handed_off` | `landed` | `flipped` | `dropped` | `declined`. */
   state: string;
@@ -99,6 +102,7 @@ export function parseRun(raw: unknown): RunView {
       return {
         repo: inert(o.repo) ?? '',
         branch: inert(o.branch) ?? '',
+        target: { repo: str(o.repo) ?? '', branch: str(o.branch) ?? '' },
         pr: inert(o.pr),
         state: str(o.state) ?? 'open',
         failedMode: str(o.failedMode),

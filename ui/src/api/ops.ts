@@ -64,6 +64,8 @@ export function chatOps(api: Api) {
       api<{ revision: number }>('draft_save', { chatId, text, revision }),
     setModel: (chatId: string, model?: string, effort?: string) =>
       api<ChatRecord>('chat_set_model', { chatId, model, effort }),
+    /** The composer's permission-mode pick; applies from the next turn. */
+    setPermissionMode: (chatId: string, mode: string) => api<{ mode: string }>('chat_set_permission_mode', { chatId, mode }),
     catalogue: (refresh = false) => api<ModelCatalogue>('model_catalogue', { harness: 'claude', refresh }),
     stopTool: (chatId: string, toolCallId: string) => api<{ stopped: boolean }>('tool_stop', { chatId, toolCallId }),
     compact: (chatId: string) => api<null>('chat_compact', { chatId }),

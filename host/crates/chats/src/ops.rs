@@ -2,7 +2,7 @@
 //!
 //! | op | class | args → result |
 //! |---|---|---|
-//! | `chat_create` | maintenance | [`ChatCreateArgs`] → [`ChatRecord`] |
+//! | `chat_create` | maintenance | [`ChatCreateArgs`] → [`ChatRecord`] (optional `projectId`: that exact folder project) |
 //! | `chat_list` | blocking | `{}` → `ChatRecord[]` |
 //! | `chat_get` | blocking | [`ChatIdArgs`] → [`ChatGetResult`] |
 //! | `transcript_page` | heavy | [`TranscriptPageArgs`] → [`TranscriptPage`] |
@@ -44,6 +44,17 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .async_op("interaction_answer", interaction_answer)
         .blocking("draft_save", OpClass::Blocking, draft_save)
         .blocking("chat_set_model", OpClass::Maintenance, chat_set_model)
+        // The composer's permission-mode picker.
+        .blocking(
+            "chat_set_permission_mode",
+            OpClass::Maintenance,
+            |ctx, args| {
+                to_value(&submit::chat_set_permission_mode(
+                    &runtime(ctx)?,
+                    parse_args(args)?,
+                )?)
+            },
+        )
         .blocking("model_catalogue", OpClass::Blocking, model_catalogue)
         .async_op("tool_stop", tool_stop)
         .blocking("chat_compact", OpClass::Maintenance, chat_compact)
@@ -84,6 +95,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
             }
         });
     crate::manage::register(reg);
+    crate::message_images::register(reg);
 }
 
 fn str_field(args: &Value, k: &str) -> Result<String, ApiError> {
@@ -288,6 +300,13 @@ pub(crate) fn not_found() -> ApiError {
     ApiError::new("not_found", "That chat does not exist.")
 }
 
+/// Why `chat_create` made nothing.
+enum CreateRefusal {
+    Archived,
+    NoProject,
+    OtherFolder,
+}
+
 fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatCreateArgs = parse_args(args)?;
     let cwd = a.cwd.trim();
@@ -310,25 +329,33 @@ fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let clock = ctx.services.need::<Clock>()?;
     let id = db
         .write(|tx| {
-            let project = store::upsert_folder_project(tx, cwd, helm_core::now_ms())?;
+            let now = helm_core::now_ms();
+            let project = match a.project_id.as_deref() {
+                // The exact project the new-chat page chose.
+                Some(p) => match store::project_fit(tx, p, cwd)? {
+                    store::ProjectFit::Fits => p.to_owned(),
+                    store::ProjectFit::NotFound => return Ok(Err(CreateRefusal::NoProject)),
+                    store::ProjectFit::NoFolder | store::ProjectFit::OtherFolder => {
+                        return Ok(Err(CreateRefusal::OtherFolder))
+                    }
+                },
+                None => store::upsert_folder_project(tx, cwd, now)?,
+            };
             if crate::manage::project_archived(ctx, tx, &project)? {
-                return Ok(None);
+                return Ok(Err(CreateRefusal::Archived));
             }
-            store::create_chat(
-                tx,
-                cwd,
-                a.model.as_deref(),
-                Some(&effort),
-                helm_core::now_ms(),
-            )
-            .map(Some)
+            store::create_chat_in(tx, &project, a.model.as_deref(), Some(&effort), now).map(Ok)
         })
         .map_err(sql)?
-        .ok_or_else(|| {
-            ApiError::new(
+        .map_err(|r| match r {
+            CreateRefusal::Archived => ApiError::new(
                 "refused",
                 "This folder's project is archived; restore it to start new chats.",
-            )
+            ),
+            CreateRefusal::NoProject => ApiError::new("not_found", "That project does not exist."),
+            CreateRefusal::OtherFolder => {
+                ApiError::bad_args("That project is not a folder project over this folder.")
+            }
         })?;
     let rev = clock.next();
     let chat = db
@@ -366,6 +393,8 @@ pub fn stored_thread(
         interactions: Vec::new(),
         live_tools: Vec::new(),
         background_tasks: Vec::new(),
+        subagents: Vec::new(),
+        subagents_running: 0,
         compacting: None,
         capabilities: Capabilities::default(),
         send_behavior: sb,
@@ -432,6 +461,13 @@ fn draft_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .map_err(sql)?;
     match outcome {
         store::DraftOutcome::Saved(revision) => {
+            if let Some(rt) = ctx
+                .services
+                .get::<ChatRuntime>()
+                .filter(|_| !a.text.trim().is_empty())
+            {
+                rt.prewarm(&a.chat_id); // typing starts the worker
+            }
             let rev = clock.next();
             if let Some(chat) = db
                 .snapshot(|tx| store::get_chat(tx, &a.chat_id, rev))
@@ -531,6 +567,7 @@ pub(crate) mod tests {
             ("interaction_answer", OpClass::Async),
             ("draft_save", OpClass::Blocking),
             ("chat_set_model", OpClass::Maintenance),
+            ("chat_set_permission_mode", OpClass::Maintenance),
             ("model_catalogue", OpClass::Blocking),
             ("tool_stop", OpClass::Async),
             ("chat_compact", OpClass::Maintenance),
@@ -553,15 +590,89 @@ pub(crate) mod tests {
             ("message_edit_open", OpClass::Blocking),
             ("message_resend", OpClass::Maintenance),
             ("attachment_put", OpClass::Maintenance),
+            ("attachment_get", OpClass::Blocking),
             ("side_chat_resolve", OpClass::Maintenance),
             ("chat_mute", OpClass::Maintenance),
             ("attention_address", OpClass::Maintenance),
             ("attention_snooze", OpClass::Maintenance),
+            ("chat_discard_untouched", OpClass::Maintenance),
         ];
         for (name, class) in expected {
             assert_eq!(reg.class_of(name), Some(class), "{name}");
         }
         assert_eq!(reg.names().count(), expected.len());
+    }
+
+    /// With `projectId` the chat lands in that exact project, even when another
+    /// project shares the folder; a project over another folder, or none, is refused.
+    #[tokio::test]
+    async fn create_in_a_named_project() {
+        let h = harness();
+        let cwd = h.work.to_string_lossy().into_owned();
+        let first: ChatRecord = serde_json::from_value(
+            h.api
+                .call(&main(), "chat_create", json!({"cwd": cwd}))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        h.db.write(|tx| {
+            tx.execute(
+                "INSERT INTO projects(id, kind, name, path, created_at) VALUES ('second', 'folder', 'Second', ?1, 2)",
+                [&cwd],
+            )
+        })
+        .unwrap();
+        let named: ChatRecord = serde_json::from_value(
+            h.api
+                .call(
+                    &main(),
+                    "chat_create",
+                    json!({"cwd": cwd, "projectId": "second", "model": "opus"}),
+                )
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(named.project_id, "second");
+        assert_eq!(named.model.as_deref(), Some("opus"));
+        let plain: ChatRecord = serde_json::from_value(
+            h.api
+                .call(&main(), "chat_create", json!({"cwd": cwd}))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            plain.project_id, first.project_id,
+            "no projectId: the folder's own"
+        );
+        let other = h.work.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let e = h
+            .api
+            .call(
+                &main(),
+                "chat_create",
+                json!({"cwd": other.to_string_lossy(), "projectId": "second"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "bad_args");
+        let e = h
+            .api
+            .call(
+                &main(),
+                "chat_create",
+                json!({"cwd": cwd, "projectId": "nope"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "not_found");
+        let n: i64 =
+            h.db.snapshot(|tx| tx.query_row("SELECT count(*) FROM chats", [], |r| r.get(0)))
+                .unwrap();
+        assert_eq!(n, 3, "refusals make nothing");
     }
 
     #[tokio::test]

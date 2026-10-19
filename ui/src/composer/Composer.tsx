@@ -9,7 +9,8 @@ import { HOME_SEND_BEHAVIOR } from '../api/types.ts';
 import type { Flushers } from '../shell/quit.ts';
 import { DraftSaver } from './drafts.ts';
 import { Editor, type EditorHandle } from './Editor.tsx';
-import { resolveKey, sendTooltip, stopTooltip, type KeyContext, type SendShortcut } from './keymap.ts';
+import { resolveKey, sendLabel, sendTooltip, stopTooltip, type KeyContext, type SendShortcut } from './keymap.ts';
+import { Button } from '../ui/controls.tsx';
 import { ModelPicker } from './ModelPicker.tsx';
 import { PermissionChip } from './PermissionChip.tsx';
 import { orderPending, itemState } from './queue.ts';
@@ -349,7 +350,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
         <div className="composer-bar">
           <div className="composer-selects">
             <ModelPicker chat={chat} ops={ops} />
-            <PermissionChip mode={thread?.permissionMode ?? null} />
+            <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} ops={ops} />
             {toolbarStart.map((a) => (
               <span key={a.id} className="composer-accessory" data-accessory={a.id}>
                 {a.render(actx)}
@@ -363,19 +364,22 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
               </span>
             ))}
             {busy && (
-              <button
-                type="button"
-                className="danger"
+              <Button
+                variant="stop"
+                label="Stop"
                 data-testid="stop"
                 title={stopTooltip(behavior.stopSendsWaiting, behavior.showChoices)}
                 onClick={() => void stop(false)}
-              >
-                Stop
-              </button>
+              />
             )}
-            <button type="button" className="primary" data-testid="send" disabled={empty && attached.length === 0} title={sendTooltip(ctx, busy)} onClick={() => void send('default')}>
-              {busy ? (behavior.mode === 'asap' ? 'Steer' : behavior.mode === 'queue' ? 'Queue' : 'Interrupt') : 'Send'}
-            </button>
+            <Button
+              variant="send"
+              label={sendLabel(busy, behavior.mode)}
+              data-testid="send"
+              disabled={empty && attached.length === 0}
+              title={sendTooltip(ctx, busy)}
+              onClick={() => void send('default')}
+            />
           </div>
         </div>
       </div>
