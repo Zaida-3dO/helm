@@ -141,7 +141,7 @@ export function OrchestratorPane() {
 
       <SettingRow
         title="Orchestrator for new chats"
-        description="The state a chat starts with. Always: on. Never: off. Auto: off until the chat's agent turns it on for a task. Chats already used keep the state they had."
+        description="The state a chat starts with. Auto (the default): off until the chat's agent turns it on for a task. Always: on. Never: off. Chats already used keep the state they had."
         testId="orch-newchats-row"
       >
         <Segmented<NewChats>

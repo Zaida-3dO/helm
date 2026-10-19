@@ -347,7 +347,7 @@ pub fn fork(
                     ended_at: now,
                 })
             } else {
-                Entry::Message(MessageEntry {
+                Entry::message(MessageEntry {
                     id: format!("m:fork-partial-{}", uuid::Uuid::new_v4()),
                     parent_id: None,
                     timestamp: ts,
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn carried_history_keeps_the_newest_steps_within_budget() {
         let msg = |id: &str, text: String| {
-            serde_json::to_value(Entry::Message(MessageEntry {
+            serde_json::to_value(Entry::message(MessageEntry {
                 id: id.into(),
                 parent_id: None,
                 timestamp: 1,

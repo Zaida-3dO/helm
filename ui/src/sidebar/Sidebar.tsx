@@ -46,6 +46,7 @@ import { withChatIcons, withProjectIcons } from './menuIcons.tsx';
 import { StarMark, WorkingFace } from '../ui/status/index.ts';
 import { openNewChat } from '../newchat/index.ts';
 import { ATTENTION_LABEL, age, trailingIndicator } from './status.ts';
+import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
 import { startSyncTriggers, syncDisplay, type SyncHost } from './sync.ts';
 import { sidebarUndo } from './undo.ts';
 import { layout, visibleRange } from './virtual.ts';
@@ -854,7 +855,9 @@ function ChatRow({
   onLeave: () => void;
   onPointerDown: (e: ReactPointerEvent) => void;
 }) {
-  const r = item.row;
+  // A chat whose own turn ended but whose subagents still run shows the working face.
+  const subagents = useSubagentsRunning(item.row.chatId);
+  const r = subagents > 0 && item.row.attention !== 'running' ? { ...item.row, attention: 'running' as const } : item.row;
   const colour = colourCss(project?.colour);
   const trailing = trailingIndicator(r.attention);
   const busy = r.status === 'starting' || r.status === 'running' || r.status === 'stopping';

@@ -1,7 +1,7 @@
 // The app frame: sidebar | main pane (top bar, chat, terminal
 // dock) | side panel, plus the toast overlay and the dialogs.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import type { Api } from './api/client.ts';
 import type { EventBus } from './api/events.ts';
 import { ActionRow, LeafSlots } from './actions/index.ts';
@@ -25,11 +25,13 @@ import { GLOBAL_HOTKEY_BINDING, shellOps } from './api/shell.ts';
 import { ShellController, ShellProvider, useSelection, useShell } from './shell/context.ts';
 import type { Flushers } from './shell/quit.ts';
 import { connectAppearance } from './shell/theme.ts';
-import { KEYBINDINGS_PREF, keys, layers, ToastSlotView } from './ui/index.ts';
+import { KEYBINDINGS_PREF, keys, layers, toast, ToastSlotView } from './ui/index.ts';
 import { ChatStore } from './state/store.ts';
 import { TopBar } from './topbar/TopBar.tsx';
 import { EmptyMain } from './shell/EmptyMain.tsx';
 import { ShellShortcuts } from './shell/Shortcuts.tsx';
+import { SidebarResizer } from './shell/SidebarResizer.tsx';
+import { SIDEBAR_VISIBLE_PREF, SIDEBAR_WIDTH_PREF, sidebarLayout } from './shell/layout.ts';
 import { TerminalDock } from './terminal/TerminalDock.tsx';
 import { Notifications } from './notifications/Notifications.tsx';
 import { SettingsToast } from './hosttools/SettingsToast.tsx';
@@ -112,11 +114,22 @@ function Frame({ flushers }: { flushers: Flushers }) {
   const [sendShortcut, setSendShortcut] = useState<SendShortcut>('mod-enter');
   // The send shortcut setting, read once and followed live (a chat can change it).
   useEffect(() => followSendShortcut(shell.api, shell.bus, setSendShortcut), [shell]);
+  // The sidebar's width and visibility, read once and saved on change.
+  const layout = useSyncExternalStore(sidebarLayout.subscribe, sidebarLayout.get);
+  useEffect(() => {
+    sidebarLayout.connect((key, value) => {
+      shell.api('preference', { key, value }).catch((e: unknown) => toast.show({ kind: 'error', text: `Could not save the sidebar layout: ${String((e as Error).message ?? e)}` }));
+    });
+    const read = (key: string) => shell.api<unknown>('preference_get', { key }).catch(() => undefined);
+    void Promise.all([read(SIDEBAR_WIDTH_PREF), read(SIDEBAR_VISIBLE_PREF)]).then(([w, v]) => sidebarLayout.load(w, v));
+    return () => sidebarLayout.connect(() => undefined);
+  }, [shell]);
 
   return (
     <div className="shell" data-testid="shell">
-      <aside className="shell-sidebar" aria-label="Sidebar">
+      <aside className="shell-sidebar" aria-label="Sidebar" hidden={!layout.visible} style={{ '--sidebar-width': `${layout.width}px` } as CSSProperties}>
         <Sidebar /> {/* chat and project tree */}
+        <SidebarResizer />
       </aside>
       <main className="shell-main">
         <TopBar actionRow={<ActionRow chatId={chatId} />} chatMenu={<ChatMenu chatId={chatId} />} tags={<ProjectTags chatId={chatId} />} />

@@ -34,7 +34,11 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
   // fold it again; the list scrolls once the row exists.
   const revealed = useRef<number | null>(null);
   useEffect(() => {
-    if (jumpToRowId == null || revealed.current === jumpToRowId) return;
+    if (jumpToRowId == null) {
+      revealed.current = null;
+      return;
+    }
+    if (revealed.current === jumpToRowId) return;
     revealed.current = jumpToRowId;
     if (byKey.has(`r:${jumpToRowId}`)) return;
     const at = rows.findIndex((r) => r.id === jumpToRowId);

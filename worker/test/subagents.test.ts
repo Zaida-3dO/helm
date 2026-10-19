@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { StreamTranslator, assignmentPreview } from "../src/drivers/claude/translate.ts";
 import type { Json } from "../src/protocol/types.ts";
-import { prompt, startWithFixture } from "./helpers.ts";
+import { prompt, startWithFixture, waitReceived } from "./helpers.ts";
 
 function make(stepMs = 100) {
   const events: Json[] = [];
@@ -224,6 +224,28 @@ describe("subagents through the worker (fake claude)", () => {
         .flatMap((e) => ((e.message as Json).content as Json[]).filter((b) => b.type === "text").map((b) => b.text));
       assert.ok(texts.includes("Both agents reported back."));
       assert.ok(!texts.includes("The output is alpha.") && !texts.includes("No defects found."), JSON.stringify(texts));
+    } finally {
+      await s.done();
+    }
+  });
+});
+
+describe("stopping one subagent", () => {
+  test("stop_tool with an Agent call id sends stop_task for that agent's task; get_state reports the capability", async () => {
+    const s = startWithFixture("subagent-stop");
+    try {
+      const ready = await s.host.ready();
+      assert.equal(((ready.data as Json).capabilities as Json).stopSubagent, true);
+      await prompt(s.host, "survey");
+      await s.host.waitFor((e) => e.type === "subagent_start" && e.toolCallId === "sa_1", 5000, 0);
+      const r = await s.host.request({ type: "stop_tool", toolCallId: "sa_1", sentAtMs: Date.now() });
+      assert.deepEqual(r.data, { stopped: true });
+      const st = await waitReceived(s, (x) => x.type === "control_request" && (x.request as Json)?.subtype === "stop_task");
+      assert.equal((st.request as Json).task_id, "ag_1");
+      const end = await s.host.waitFor((e) => e.type === "subagent_end" && e.toolCallId === "sa_1", 5000, 0);
+      assert.equal(end.status, "stopped");
+      const settled = await s.host.waitForType("agent_settled", 5000, 0);
+      assert.equal(settled.outcome, "complete", "the parent turn carries on");
     } finally {
       await s.done();
     }

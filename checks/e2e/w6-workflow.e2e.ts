@@ -45,7 +45,7 @@ describe("Settings > Orchestrator and the per-chat Orchestrator state", { timeou
   test("W1: the workflow is off by default and the settings refuse unknown keys", async () => {
     const s = (await api(page(), "workflow_settings_get", {})) as Json;
     assert.equal(s.enabled, false);
-    assert.equal(s.newChats, "always");
+    assert.equal(s.newChats, "auto", "Auto is the default for new chats");
     assert.equal(s.moveFast, false);
     assert.equal(((s.stages as Json).review as Json).maxRounds, 3);
     const e = await rejects("workflow_settings_save", { settings: { enabled: true, landing: { fromBoxes: true } } });

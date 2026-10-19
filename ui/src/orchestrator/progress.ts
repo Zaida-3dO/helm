@@ -114,9 +114,9 @@ export const changeName = (c: RunChange): string => `${c.repo.split('/').pop() ?
 export function needsYou(view: RunView, s: WorkflowSettings, allowRequests: number): NeedsYou[] {
   const out: NeedsYou[] = [];
   const plan = view.plan;
-  if (view.task && plan?.id && s.planSignOff === 'me' && plan.approved && !plan.signedOff) {
-    out.push({ id: 'signoff', text: 'plan sign-off' });
-  }
+  // The same test as the Sign off plan button: with plan review off (or skipped) the plan waits
+  // only for the user, approved or not.
+  if (signOffPlan(view, s)) out.push({ id: 'signoff', text: 'plan sign-off' });
   if (view.task && plan?.id && plan.cap > 0 && plan.rounds >= plan.cap && !plan.approved) {
     out.push({ id: 'cap-planReview', text: 'plan review cap' });
   }

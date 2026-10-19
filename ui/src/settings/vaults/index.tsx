@@ -68,4 +68,4 @@ function VaultsPane() {
   );
 }
 
-registerSettingsPane({ id: 'vaults', title: 'Vaults', order: 40, render: () => <VaultsPane /> });
+registerSettingsPane({ id: 'vaults', title: 'Vaults', order: 45, render: () => <VaultsPane /> });

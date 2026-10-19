@@ -43,6 +43,9 @@ pub struct Limits {
     /// still sends the UI the row; the database gets it at most this often, and when the message
     /// starts, ends or its run ends.
     pub stream_db: Duration,
+    /// How long a title job waits for the chat's turn to settle before it runs anyway (a
+    /// title never competes with a chat's cold start).
+    pub title_wait: Duration,
     /// Wait-limit retry when the worker answers `waiting`.
     pub wait_retry: Duration,
     pub max_active: usize,
@@ -63,6 +66,7 @@ impl Default for Limits {
             model_ack: Duration::from_secs(10),
             flush: Duration::from_millis(80),
             stream_db: Duration::from_secs(1),
+            title_wait: Duration::from_secs(60),
             wait_retry: Duration::from_secs(1),
             max_active: 100,
             max_idle_workers: 20,
@@ -671,7 +675,8 @@ impl ChatRuntime {
         }
     }
 
-    /// Retire least-recently-used idle workers beyond the cap.
+    /// Retire least-recently-used idle workers beyond the cap. A worker whose
+    /// background agents are still running is not idle: retiring it would end them.
     pub(crate) fn retire_idle_over_cap(&self) {
         let cap = self.sh.cfg.limits.max_idle_workers;
         let mut idle: Vec<(Instant, ActorHandle)> = {
@@ -679,7 +684,9 @@ impl ChatRuntime {
             map.values()
                 .filter_map(|h| {
                     let live = h.live.lock().unwrap();
-                    (live.has_worker && !live.thread.status.is_busy())
+                    (live.has_worker
+                        && !live.thread.status.is_busy()
+                        && live.thread.subagents_running == 0)
                         .then(|| (live.last_used, h.clone()))
                 })
                 .collect()
@@ -716,19 +723,46 @@ impl ChatRuntime {
         }
     }
 
-    /// Chats with a turn in progress, for the quit confirmation.
+    /// Chats with a turn in progress or background agents still running, for the quit
+    /// confirmation.
     pub fn running_titles(&self) -> Vec<String> {
+        let agents: Vec<String> = self
+            .sh
+            .actors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, h)| h.live.lock().unwrap().thread.subagents_running > 0)
+            .map(|(id, _)| id.clone())
+            .collect();
         self.sh
             .db
             .snapshot(|tx| {
                 let mut st = tx.prepare(
-                    "SELECT c.title, COALESCE(p.path, '') FROM chats c JOIN projects p ON p.id = c.project_id
-                     WHERE c.status IN ('starting', 'running', 'stopping') ORDER BY c.updated_at DESC",
+                    "SELECT c.id, c.title, COALESCE(p.path, '') FROM chats c JOIN projects p ON p.id = c.project_id
+                     ORDER BY c.updated_at DESC",
                 )?;
                 let rows = st.query_map([], |r| {
-                    Ok(format!("{} ({})", r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        format!("{} ({})", r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+                    ))
                 })?;
-                rows.collect::<rusqlite::Result<Vec<String>>>()
+                let busy: std::collections::HashSet<String> = {
+                    let mut st = tx.prepare(
+                        "SELECT id FROM chats WHERE status IN ('starting', 'running', 'stopping')",
+                    )?;
+                    let ids = st.query_map([], |r| r.get::<_, String>(0))?;
+                    ids.collect::<rusqlite::Result<_>>()?
+                };
+                let mut out = Vec::new();
+                for row in rows {
+                    let (id, title) = row?;
+                    if busy.contains(&id) || agents.contains(&id) {
+                        out.push(title);
+                    }
+                }
+                Ok::<_, rusqlite::Error>(out)
             })
             .unwrap_or_default()
     }

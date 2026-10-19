@@ -276,6 +276,19 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     updateRow(c, r, { status: 'complete', details: { usage: { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.01 } } });
   }
 
+  // "[stream]" in a prompt adds a long Markdown reply (about 9 KB) streamed the way the
+  // host sends it, one snapshot every step, for checking streaming cost (checks/perf).
+  async function streamLong(c: FakeChat, cancelled: () => boolean, chunks = 400) {
+    let r = addRow(c, { role: 'assistant', status: 'streaming', thinking: '' });
+    let text = '';
+    for (let i = 0; i < chunks; ) {
+      for (let k = 0; k < 3 && i < chunks; k++, i++) text += i % 12 === 11 ? '\n\n' : i % 40 === 20 ? '\n\n```js\nconst x = 1;\n```\n\n' : `word${i} **bold** and \`c${i}\` `;
+      await sleep(step, cancelled);
+      r = updateRow(c, r, { text });
+    }
+    updateRow(c, r, { status: 'complete' });
+  }
+
   async function tool(c: FakeChat, name: string, args: Record<string, unknown>, output: string, cancelled: () => boolean, ms = 900) {
     const toolCallId = uid();
     let r = addRow(c, { role: 'toolResult', toolName: name, toolCallId, status: 'streaming', details: { toolArgs: JSON.stringify(args), stoppable: true } });
@@ -349,7 +362,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         const a = await ask(c, { method: 'confirm', attention: 'plan', title: 'Approve plan?', message: '1. Read the code\n2. Change it\n3. Test it', options: ['Approve plan', 'Keep planning'] });
         await streamText(c, a.confirmed || a.value === 'Approve plan' ? 'Plan approved, starting. ' : 'Keeping on planning. ', cancelled);
       }
-      await streamText(c, 'All done: the folder has a README, a package file and a src folder, and **main.ts** now exports two constants.', cancelled);
+      if (/\[stream\]/i.test(text)) await streamLong(c, cancelled); // the long reply is the final one
+      else await streamText(c, 'All done: the folder has a README, a package file and a src folder, and **main.ts** now exports two constants.', cancelled);
       setStatus(c, 'idle');
       complete(c);
       startNext(c);
@@ -619,6 +633,14 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       emitChat(c);
       return c.chat;
     },
+    // references and the native file dialog, faked.
+    attachment_ref: (a) => {
+      const target = String(a.target);
+      if (a.kind === 'chat') return { attachmentId: uid(), kind: 'chat', name: find(String(target)).chat.title };
+      const name = target.split(/[\\/]/).filter(Boolean).pop() ?? target;
+      return { attachmentId: uid(), kind: /\.[a-z0-9]+$/i.test(name) ? 'file' : 'folder', name };
+    },
+    files_pick: () => ({ paths: ['C:\\Users\\me\\Documents\\notes.md', 'C:\\Users\\me\\Pictures\\shot.png'] }),
     attachment_put: (a) => {
       const attachmentId = uid();
       attachments.set(attachmentId, { name: String(a.name), mime: String(a.mime), bytes: String(a.bytes) });

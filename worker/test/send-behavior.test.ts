@@ -30,7 +30,7 @@ describe("asap steers", () => {
     const s = startWithFixture("steer-read");
     try {
       const ready = await s.host.ready();
-      assert.deepEqual((ready.data as Json).capabilities, { withdraw: true, deliverNow: true, stopTool: true, compact: true });
+      assert.deepEqual((ready.data as Json).capabilities, { withdraw: true, deliverNow: true, stopTool: true, compact: true, stopSubagent: true });
       assert.equal((ready.data as Json).cliVersion, "0.0.0-fake");
       const first = uuid();
       await prompt(s.host, "list the files", {}, first);

@@ -36,7 +36,7 @@ export function LeafSlots(): null {
           sendActionText(api, ctx.chatId, EXPLAIN_PLAINLY_TEXT).catch((e: unknown) => console.error('Explain plainly failed', e));
         },
       }),
-      registerSettingsPane({ id: 'actions', title: 'Actions', order: 60, render: () => <ActionsPane api={api} /> }),
+      registerSettingsPane({ id: 'actions', title: 'Actions', order: 62, render: () => <ActionsPane api={api} /> }),
     ];
     return () => offs.forEach((off) => off());
   }, [shell]);

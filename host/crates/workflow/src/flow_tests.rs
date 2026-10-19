@@ -27,8 +27,10 @@ fn setup(f: impl FnOnce(&mut WorkflowSettings)) -> T {
     crate::register_migrations(&mut reg);
     let d = tempfile::tempdir().unwrap();
     let db = Database::open(&d.path().join("t.sqlite3"), &reg).unwrap();
+    // Chats start on (the default is Auto).
     let mut s = WorkflowSettings {
         enabled: true,
+        new_chats: NewChats::Always,
         ..Default::default()
     };
     f(&mut s);

@@ -7,6 +7,7 @@ import type { ChatRecord, ThreadState } from '../api/types.ts';
 import { toolLabel } from './toolKinds.ts';
 import { formatElapsed } from './workBlocks.ts';
 import { SubagentRosterChip } from './subagents/SubagentRoster.tsx';
+import { backgroundShells, dockShown } from './dockModel.ts';
 
 function useNow(live: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -36,10 +37,10 @@ function phase(chat: ChatRecord, thread: ThreadState): string {
 
 export function ActivityDock({ chat, thread, turnStartedAt, onStopTool }: DockProps) {
   const live = chat.status === 'running' || chat.status === 'starting' || chat.status === 'stopping';
-  const bg = thread.backgroundTasks;
+  const bg = backgroundShells(thread);
   const now = useNow(live || bg.length > 0);
   const [open, setOpen] = useState(false);
-  if (!live && bg.length === 0) return null;
+  if (!dockShown(live, thread)) return null;
   const latest = thread.liveTools.at(-1);
   const canStop = Boolean(latest && thread.sendBehavior.toolStop && thread.capabilities.stopTool && latest.stoppable);
 

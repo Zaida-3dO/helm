@@ -81,7 +81,7 @@ fn setup(enabled: bool, mode: LandMode, state: &str) -> T {
     db.write::<_, rusqlite::Error>(|tx| {
         tx.execute("INSERT INTO projects(id, name, path, created_at) VALUES ('p', 'P', 'C:/w', 1)", [])?;
         tx.execute("INSERT INTO chats(id, project_id, title, created_at, updated_at) VALUES ('c', 'p', 'T', 1, 1)", [])?;
-        let mut s = WorkflowSettings { enabled, ..Default::default() };
+        let mut s = WorkflowSettings { enabled, new_chats: NewChats::Always, ..Default::default() };
         s.landing.repos.push(RepoRule { repo: "github.com/o/r".into(), mode, method: (mode == LandMode::Merge).then_some(MergeMethod::Squash) });
         s.landing.draft_labels = vec!["needs-review".into()];
         crate::settings::store(tx, &s, 1)?;

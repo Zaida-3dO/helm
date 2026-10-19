@@ -10,8 +10,9 @@
 import { useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { panelStore, togglePanel } from '../panel/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
-import { Button, TextInput, toast, useBinding, useHint } from '../ui/index.ts';
-import { IconArchive, IconChevronRight, IconFork, IconPanelRight, IconPin, IconRestore } from '../ui/icons.tsx';
+import { Button, layers, TextInput, toast, useBinding, useHint } from '../ui/index.ts';
+import { IconArchive, IconChevronRight, IconFork, IconPanelLeft, IconPanelRight, IconPin, IconRestore } from '../ui/icons.tsx';
+import { sidebarLayout } from '../shell/layout.ts';
 import { UsageMeter } from '../usage/UsageMeter.tsx';
 import { CaptionButtons, dragHandlers } from './caption.tsx';
 import { folderLabel, RenameEdit } from './label.ts';
@@ -58,15 +59,24 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
   const fork = () => {
     if (chat) shell.ops.fork(chat.id).then((c) => shell.select(c.id)).catch(err);
   };
-  // The chat shortcuts the bar advertises. Hints read the live chord.
-  useBinding({ id: 'chat.fork', title: 'Fork chat', defaultKeys: 'Ctrl+Shift+F', enabled: () => !!chat, run: fork });
-  useBinding({ id: 'chat.rename', title: 'Rename chat', defaultKeys: 'Ctrl+Alt+R', enabled: () => !!chat, run: () => chat && startRename(chat.title) });
+  // The chat shortcuts the bar advertises. Hints read the live chord. Forking or
+  // renaming behind an open dialog would surprise, so the shortcuts wait for it to close.
+  const chatShortcutsOn = () => !!chat && !layers.has('dialog');
+  useBinding({ id: 'chat.fork', title: 'Fork chat', defaultKeys: 'Ctrl+Shift+F', enabled: chatShortcutsOn, run: fork });
+  useBinding({ id: 'chat.rename', title: 'Rename chat', defaultKeys: 'Ctrl+Alt+R', enabled: chatShortcutsOn, run: () => chat && startRename(chat.title) });
   const forkHint = useHint('Fork chat', 'chat.fork');
   const renameHint = useHint('Double-click to rename', 'chat.rename');
   const panelHint = useHint('Toggle inspector', 'panel.toggle');
+  const showSidebarHint = useHint('Show sidebar', 'sidebar.toggle');
+  const sidebarVisible = useSyncExternalStore(sidebarLayout.subscribe, () => sidebarLayout.get().visible);
   return (
     <>
       <header className="topbar" data-testid="topbar" {...dragHandlers()}>
+        {!sidebarVisible && (
+          <Button variant="icon" label={showSidebarHint} data-testid="show-sidebar" onClick={() => sidebarLayout.setVisible(true)}>
+            <IconPanelLeft size={16} />
+          </Button>
+        )}
         <nav className="crumbs" aria-label="Breadcrumb">
           {project && (
             <>

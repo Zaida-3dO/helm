@@ -35,6 +35,7 @@ pub const MAX_CONTINUATIONS: i64 = 100;
 pub fn register(reg: &mut MigrationRegistry) {
     reg.initializer("chats-side-tables", init)
         .initializer("chats-run-slots", crate::runslots::init)
+        .initializer("chats-attachment-refs", crate::attachments::init)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-queue-holds", hold_queues)

@@ -96,6 +96,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         });
     crate::manage::register(reg);
     crate::message_images::register(reg);
+    crate::attachments::register(reg); // attachment_ref
 }
 
 fn str_field(args: &Value, k: &str) -> Result<String, ApiError> {
@@ -591,6 +592,7 @@ pub(crate) mod tests {
             ("message_resend", OpClass::Maintenance),
             ("attachment_put", OpClass::Maintenance),
             ("attachment_get", OpClass::Blocking),
+            ("attachment_ref", OpClass::Maintenance),
             ("side_chat_resolve", OpClass::Maintenance),
             ("chat_mute", OpClass::Maintenance),
             ("attention_address", OpClass::Maintenance),

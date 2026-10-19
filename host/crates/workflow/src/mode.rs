@@ -1,6 +1,8 @@
 //! The per-chat Orchestrator state, table `chat_workflow_modes`.
 //!
-//! - A chat with no row follows `newChats`: Always → on, Never → off, Auto → auto.
+//! - A chat with no row follows `newChats`: Always → on, Never → off, Auto → auto. The
+//!   default is Auto, so a new chat starts off until its agent
+//!   turns it on for a task or the user does.
 //! - Rows are written only by the user's `workflow_chat_mode_set` op, by [`pin`] at a chat's first
 //!   launch while the master switch is on (so changing `newChats` later leaves used chats alone),
 //!   and by an Auto chat's own root agent turning it **on** ([`agent_on`]). Nothing else.
@@ -344,9 +346,11 @@ pub(crate) mod tests {
         (dir, db)
     }
 
+    /// The master switch on, and new chats on (Always; the default is Auto).
     fn on() -> WorkflowSettings {
         WorkflowSettings {
             enabled: true,
+            new_chats: NewChats::Always,
             ..Default::default()
         }
     }
@@ -398,7 +402,7 @@ pub(crate) mod tests {
     fn off_is_refused_mid_turn_and_matching_requests_write_nothing() {
         let (_d, db) = db(&[("a", "claude")]);
         let s = on();
-        // Default on: asking for on changes nothing.
+        // Always for new chats: asking for on changes nothing.
         assert_eq!(
             w(&db, |tx| user_set(tx, "a", ChatMode::On, &s, 1)),
             Ok(None)

@@ -129,6 +129,7 @@ mod tests {
         db.write::<_, rusqlite::Error>(|tx| {
             let mut s = WorkflowSettings {
                 enabled: true,
+                new_chats: NewChats::Always,
                 ..Default::default()
             };
             f(&mut s);

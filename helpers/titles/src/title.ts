@@ -7,8 +7,13 @@
 // - Claude is the unmodified `claude` binary under the user's own login, in print mode with a
 //   small model, with the credential variables stripped. The helper reads no
 //   credentials and passes no settings.
+// - v0.2 latency: it runs in a fresh empty folder with `--setting-sources ""`, so no project or
+//   user settings load and no hooks fire (they cost seconds and could act on a project).
 
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { buildClaudeEnv } from "../../../worker/src/drivers/claude/env.ts";
 import { resolveClaude } from "../../../worker/src/drivers/claude/resolve.ts";
 
@@ -90,6 +95,8 @@ export function askClaude(job: TitleJob, prompt: string): Promise<string> {
     "--model",
     MODEL,
     "--no-session-persistence",
+    "--setting-sources",
+    "",
   ];
   return new Promise((resolve, reject) => {
     let command = job.command;
@@ -101,7 +108,15 @@ export function askClaude(job: TitleJob, prompt: string): Promise<string> {
         return;
       }
     }
+    let cwd: string;
+    try {
+      cwd = fs.mkdtempSync(path.join(os.tmpdir(), "helm-title-"));
+    } catch (e) {
+      reject(e);
+      return;
+    }
     const child = spawn(command, args, {
+      cwd,
       env: buildClaudeEnv(process.env, {}),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -113,6 +128,11 @@ export function askClaude(job: TitleJob, prompt: string): Promise<string> {
       done = true;
       clearTimeout(timer);
       child.kill();
+      // Best effort: the folder is empty unless claude left something; never fail the title on it.
+      // Removed once the child has gone, whether that already happened or is still to come.
+      const removeCwd = () => fs.rm(cwd, { recursive: true, force: true }, () => {});
+      if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) removeCwd();
+      else child.once("close", removeCwd);
       f();
     };
     const timer = setTimeout(() => finish(() => reject(new Error("timed out"))), job.timeoutMs ?? 45_000);

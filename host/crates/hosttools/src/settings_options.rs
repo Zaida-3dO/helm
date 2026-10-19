@@ -469,7 +469,7 @@ impl Kind {
                 let names: Vec<&str> = f.iter().map(|(k, _)| *k).collect();
                 format!("an object with only these fields: {}", names.join(", "))
             }
-            Kind::Map { keys, .. } if keys.is_empty() => "an object".into(),
+            Kind::Map { keys: [], .. } => "an object".into(),
             Kind::Map { keys, .. } => format!("an object keyed by {}", quoted(keys)),
             Kind::AnyObject => "an object".into(),
             Kind::Either(k) => k

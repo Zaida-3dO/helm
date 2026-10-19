@@ -40,7 +40,7 @@ const BOTTOM_SLACK = 24;
 const PAGE_TRIGGER = 300;
 const MAX_ANCHORS = 8;
 const GESTURE_MS = 200;
-const NAV_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']);
+const NAV_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Tab']);
 
 /** Without an estimator: folds are one short line, everything else the flat estimate. */
 const defaultEstimate = (key: string) => (key.startsWith('fold:') ? 45 : ESTIMATE);
@@ -99,8 +99,12 @@ export function VirtualList({ keys, render, hasOlder, onLoadOlder, onJumpLatest,
         const k = r.keyOf.get(e.target);
         if (k !== undefined && g.measure(k, (e.target as HTMLElement).offsetHeight)) changed = true;
       }
-      // Re-lay out and re-anchor in this frame, before it is painted.
-      if (changed) flushSync(() => setTick((t) => t + 1));
+      if (!changed) return;
+      // Only mounted rows are observed and the spacers only cover rows that are not mounted, so a
+      // resize needs no new render unless the mounted window moves: just re-pin or re-anchor.
+      // Otherwise re-render now, so the new layout is in this frame, before it is painted.
+      if (settleRef.current()) return;
+      flushSync(() => setTick((t) => t + 1));
     });
     return r.observer;
   };
@@ -132,7 +136,6 @@ export function VirtualList({ keys, render, hasOlder, onLoadOlder, onJumpLatest,
           r.keyOf.delete(old);
         }
         r.nodeOf.delete(k);
-        r.refs.delete(k);
       };
       r.refs.set(k, f);
     }
@@ -158,13 +161,23 @@ export function VirtualList({ keys, render, hasOlder, onLoadOlder, onJumpLatest,
     return [...whole, ...partial];
   };
 
-  // After every render: keep following, or put the first anchor still on screen back where it was.
-  useLayoutEffect(() => {
+  /**
+   * Keep following, or put the first anchor still on screen back where it was, then note where the
+   * rows in view are now. Returns false when the mounted window no longer fits the view (the
+   * caller must re-render instead).
+   */
+  const settle = (fromObserver: boolean): boolean => {
     const el = scroller.current;
-    if (!el) return;
+    if (!el) return true;
+    if (fromObserver) {
+      const o = g.offsets(keys);
+      const t = following.current ? Math.max(0, o[keys.length]! - el.clientHeight) : el.scrollTop;
+      const w = g.window(o, t, el.clientHeight);
+      if (w.start !== windowRef.current.start || w.end !== windowRef.current.end) return false;
+    }
     if (following.current) {
       if (el.scrollHeight - el.clientHeight - el.scrollTop > 0.5) el.scrollTop = el.scrollHeight;
-      return;
+      return true;
     }
     if (anchors.current.length) {
       const top = el.getBoundingClientRect().top;
@@ -178,11 +191,24 @@ export function VirtualList({ keys, render, hasOlder, onLoadOlder, onJumpLatest,
         break;
       }
       if (!fixed) {
-        const t = restoreAnchors(keys, offsets, anchors.current);
+        const t = restoreAnchors(keys, g.offsets(keys), anchors.current);
         if (t !== null) el.scrollTop = t;
       }
     }
     anchors.current = captureAnchors(el);
+    return true;
+  };
+  const settleRef = useRef<() => boolean>(() => true);
+  settleRef.current = () => settle(true);
+
+  useLayoutEffect(() => {
+    settle(false);
+    // Forget ref callbacks of rows that left the window.
+    const r = rows.current;
+    if (r.refs.size > end - start + 32) {
+      const live = new Set(keys.slice(start, end));
+      for (const k of r.refs.keys()) if (!live.has(k)) r.refs.delete(k);
+    }
   });
 
   useLayoutEffect(() => {
@@ -277,10 +303,15 @@ export function VirtualList({ keys, render, hasOlder, onLoadOlder, onJumpLatest,
         onPointerDown={() => {
           gesture();
           dragging.current = true;
-        }}
-        onPointerUp={() => {
-          gesture();
-          dragging.current = false;
+          // The release may land outside the scroller.
+          window.addEventListener(
+            'pointerup',
+            () => {
+              gesture();
+              dragging.current = false;
+            },
+            { once: true, capture: true },
+          );
         }}
         onPointerCancel={() => {
           dragging.current = false;

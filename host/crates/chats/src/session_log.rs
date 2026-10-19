@@ -84,12 +84,17 @@ pub struct ContextEntry {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Entry {
-    Message(MessageEntry),
+    /// Boxed: a message entry is several times the size of the others.
+    Message(Box<MessageEntry>),
     Tool(ToolEntry),
     Context(ContextEntry),
 }
 
 impl Entry {
+    pub fn message(m: MessageEntry) -> Self {
+        Entry::Message(Box::new(m))
+    }
+
     pub fn id(&self) -> &str {
         match self {
             Entry::Message(e) => &e.id,
@@ -758,7 +763,7 @@ mod tests {
     }
 
     fn msg(id: &str, text: &str) -> Entry {
-        Entry::Message(MessageEntry {
+        Entry::message(MessageEntry {
             id: id.into(),
             parent_id: None,
             timestamp: 10,

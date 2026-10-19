@@ -1,17 +1,28 @@
-// Settings → General: appearance (System / Light / Dark) and compact sidebar. Each
-// control saves at once through the generic `preference` op. Font sizes come later (follow-up).
+// Settings → General: appearance (System / Light / Dark), text sizes and zoom, and compact sidebar. Each control saves
+// at once through the generic `preference` op and applies at once.
 
 import { useEffect, useState } from 'react';
 import { useShell } from '../shell/context.ts';
-import { parseAppearance, type Appearance } from '../shell/theme.ts';
-import { Checkbox, Segmented, SettingRow, toast } from '../ui/index.ts';
+import { FONT_DEFAULTS, parseAppearance, parseFontSizes, parseZoom, ZOOM_DEFAULT, type Appearance, type FontSizes } from '../shell/theme.ts';
+import { Checkbox, Picker, Segmented, SettingRow, toast } from '../ui/index.ts';
+import { sizeOptions, zoomOptions } from './generalOptions.ts';
 import { registerSettingsPane } from './registry.ts';
 
 function GeneralPane() {
   const shell = useShell();
   const [appearance, setAppearance] = useState<Appearance>('system');
   const [compact, setCompact] = useState(false);
+  const [sizes, setSizes] = useState<FontSizes>(FONT_DEFAULTS);
+  const [zoom, setZoom] = useState(ZOOM_DEFAULT);
   useEffect(() => {
+    shell
+      .api<unknown>('preference_get', { key: 'fontSizes' })
+      .then((v) => setSizes(parseFontSizes(v)))
+      .catch(() => undefined);
+    shell
+      .api<unknown>('preference_get', { key: 'zoomLevel' })
+      .then((v) => setZoom(parseZoom(v)))
+      .catch(() => undefined);
     shell
       .api<unknown>('preference_get', { key: 'appearance' })
       .then((v) => setAppearance(parseAppearance(v)))
@@ -26,6 +37,18 @@ function GeneralPane() {
       undo();
       toast.show({ kind: 'error', text: `Could not save: ${String((e as Error).message ?? e)}` });
     });
+  // Apply at once through the same event the host sends after a save; undo on a failed save.
+  const apply = (key: string, value: unknown) => shell.bus.dispatch({ kind: 'preferences', changed: { [key]: value } });
+  const setSize = (k: keyof FontSizes, n: number) => {
+    const before = sizes;
+    const next = { ...sizes, [k]: n };
+    setSizes(next);
+    apply('fontSizes', next);
+    void save('fontSizes', next, () => {
+      setSizes(before);
+      apply('fontSizes', before);
+    });
+  };
   return (
     <div>
       <SettingRow title="Appearance" description="Follow Windows, or always use the light or dark colours." testId="setting-appearance">
@@ -46,6 +69,45 @@ function GeneralPane() {
             void save('appearance', v, () => {
               setAppearance(before);
               shell.bus.dispatch({ kind: 'preferences', changed: { appearance: before } });
+            });
+          }}
+        />
+      </SettingRow>
+      <SettingRow title="Interface text size" description="Menus, the sidebar and every control. The whole interface scales with it." testId="setting-interface-size">
+        <Picker<string>
+          settings
+          label="Interface text size"
+          testId="interface-size"
+          value={String(sizes.interface)}
+          options={sizeOptions('interface')}
+          onChange={(v) => setSize('interface', Number(v))}
+        />
+      </SettingRow>
+      <SettingRow title="Reply text size" description="The text of Claude's replies in the chat." testId="setting-response-size">
+        <Picker<string>
+          settings
+          label="Reply text size"
+          testId="response-size"
+          value={String(sizes.response)}
+          options={sizeOptions('response')}
+          onChange={(v) => setSize('response', Number(v))}
+        />
+      </SettingRow>
+      <SettingRow title="Zoom" description="Make everything in the window larger or smaller." testId="setting-zoom">
+        <Picker<string>
+          settings
+          label="Zoom"
+          testId="zoom"
+          value={String(zoom)}
+          options={zoomOptions()}
+          onChange={(v) => {
+            const before = zoom;
+            const next = Number(v);
+            setZoom(next);
+            apply('zoomLevel', next);
+            void save('zoomLevel', next, () => {
+              setZoom(before);
+              apply('zoomLevel', before);
             });
           }}
         />

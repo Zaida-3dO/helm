@@ -117,3 +117,8 @@ test('project nest targets keep three levels and refuse cycles', () => {
   const colours = projectMenuItems(all[1]!, all, projActs).find((i) => i.id === 'colour')!.submenu!;
   assert.equal(colours.length, 9, 'no colour plus the eight named colours');
 });
+
+test('the project menu places Primary folder… right after Rename', () => {
+  const ids = projectMenuItems(project('a'), [project('a')], projActs).map((i) => i.id);
+  assert.equal(ids[ids.indexOf('rename') + 1], 'primary-folder');
+});

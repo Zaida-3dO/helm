@@ -94,3 +94,19 @@ test('a pick the CLI never reports is dropped at the turn end it should have app
   assert.deepEqual(afterTurn(first.pick, 'bypassPermissions'), { pick: null, refused: true });
   assert.deepEqual(afterTurn(null, 'plan'), { pick: null, refused: false });
 });
+
+test('references: twenty attachments in all, one chip per target, drops hit-tested in CSS pixels', async () => {
+  const { addRef, dropLandsIn, parseFileDrop, roomLeft } = await import('./refs.ts');
+  assert.equal(roomLeft(0, 0), 20);
+  assert.equal(roomLeft(12, 8), 0);
+  assert.equal(roomLeft(15, 9), 0, 'never negative');
+  const a = { id: 'a', kind: 'file' as const, name: 'n.md', target: 'C:/n.md' };
+  assert.equal(addRef([a], { ...a }).length, 1, 'the host answered with an id already shown');
+  assert.equal(addRef([a], { ...a, id: 'b' }).length, 2);
+  const box = { left: 100, top: 500, right: 920, bottom: 610 };
+  assert.equal(dropLandsIn(box, 300, 1100, 2), true, 'physical 300,1100 at ratio 2 is CSS 150,550');
+  assert.equal(dropLandsIn(box, 300, 1100, 1), false, 'the same point at ratio 1 is below the box');
+  assert.equal(dropLandsIn(null, 300, 1100, 2), false);
+  assert.deepEqual(parseFileDrop({ phase: 'drop', paths: ['C:/a', 3], x: 1, y: 2 }), { phase: 'drop', paths: ['C:/a'], x: 1, y: 2 });
+  assert.equal(parseFileDrop({ phase: 'hover' }), null);
+});

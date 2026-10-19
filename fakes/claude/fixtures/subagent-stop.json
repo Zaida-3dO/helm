@@ -1,0 +1,35 @@
+{
+  "description": "One background subagent is stopped on its own: stop_tool with its Agent call id becomes stop_task for its task, which ends it stopped while the turn carries on.",
+  "steps": [
+    { "await": { "type": "user" }, "as": "p" },
+    { "init": { "tools": ["Agent", "Bash"] } },
+    {
+      "tool": {
+        "id": "sa_1",
+        "name": "Agent",
+        "input": { "description": "Long survey", "prompt": "Survey the repository.", "subagent_type": "general-purpose" }
+      }
+    },
+    {
+      "taskStarted": {
+        "taskId": "ag_1",
+        "toolUseId": "sa_1",
+        "type": "local_agent",
+        "background": true,
+        "description": "Long survey",
+        "subagentType": "general-purpose",
+        "prompt": "Survey the repository."
+      }
+    },
+    { "toolResult": { "id": "sa_1", "text": "Async agent launched successfully.\nagentId: ag_1 (internal ID)" } },
+    {
+      "await": { "type": "control_request", "request": { "subtype": "stop_task", "task_id": "ag_1" } },
+      "as": "st",
+      "timeoutMs": 20000
+    },
+    { "reply": "st", "response": {} },
+    { "taskNotification": { "taskId": "ag_1", "toolUseId": "sa_1", "status": "stopped", "summary": "Long survey" } },
+    { "text": "The survey was stopped." },
+    { "result": "done" }
+  ]
+}

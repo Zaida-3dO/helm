@@ -211,7 +211,7 @@ registers the PreToolUse hook in `initialize`.
 | `abort` | Before the interrupt, any foreground tasks are moved to the background (otherwise the interrupt waits for the shell). The interrupt is sent with `cancel_queued:true`; `data` adds `cancelledSubmissionIds`: our submissions the CLI dropped, which the host returns to the front of its queue. |
 | `withdraw` | `{id, submissionId}` → `data {withdrawn}`; `false` when Claude has already read it (or it is unknown). Uses `cancel_async_message`. |
 | `deliver_now` | `{id, submissionId, reason:"wait_limit"\|"send_now", minRunMs}` → `data {result, moved?}`. `stopped`: no turn is running. `nothing_waiting`: that submission is no longer unread. `waiting`: an approval, question or plan is open, or no foreground Bash or subagent call has run for `minRunMs` yet. `unblocked` with `moved:[toolCallId...]`: those calls were moved to the background. It never ends the turn. With `reason:"send_now"` and nothing to move, a plain interrupt is sent instead and the answer is `delivering`. |
-| `stop_tool` | `{id, toolCallId, sentAtMs}` → `data {stopped}`. A missing or more than 5 s old `sentAtMs` is refused (`success:false`). A call that is not a stoppable foreground Bash task answers `stopped:false`. Uses `stop_task`. |
+| `stop_tool` | `{id, toolCallId, sentAtMs}` → `data {stopped}`. A missing or more than 5 s old `sentAtMs` is refused (`success:false`). A call that is not a stoppable foreground Bash task or a running subagent's Agent call answers `stopped:false`. Uses `stop_task`. |
 | `compact` | `{id}`; refused while a turn runs. Sends an internal `/compact` user message and answers `data {state:"compacting"}`; emits `compaction_start {}` then `compaction_end {trigger, ok}` (`ok:false` when the turn ends without a compaction boundary). The compaction runs as a CLI turn, so the host also sees `agent_start` / `agent_settled` for it. |
 
 **Events.**
@@ -279,8 +279,9 @@ implemented in `worker/src/drivers/claude/translate.ts`.
 - **`stop_task {task_id}` stops one subagent:** answered with success, then `task_updated
   {status:"killed"}`, `task_notification {status:"stopped"}` and an "[Request interrupted by
   user]" user record inside the subagent. The other agents and the parent carry on. The worker's
-  `stop_tool` does not route to it yet (it stops foreground shells only); the translator exposes
-  `subagentTaskId(toolCallId)` for that.
+  `stop_tool` with the Agent call's id routes to it: the driver looks the task up
+  with the translator's `subagentTaskId(toolCallId)` and sends `stop_task`; `get_state`'s
+  capabilities carry `stopSubagent: true`, which shows the per-agent Stop.
 
 **Events** (keyed by the parent's Agent tool call id; the Agent call is still an ordinary tool row):
 
@@ -307,3 +308,14 @@ Choices made here:
   (after a Stop) or `failed`; background agents run on. When the worker loses the CLI every open
   agent ends `failed`.
 - Records for an unknown parent (nested agents, or agents of an earlier worker) are ignored.
+
+## The composer's permission-mode pick
+
+| Line | Direction | Fields and behaviour |
+|---|---|---|
+| `set_permission_mode` | host → worker, no id, no response | `mode`: `bypassPermissions`, `default`, `acceptEdits` or `plan` (anything else is logged and dropped). Sent to a live worker when the user picks, and as a start line to the chat's next worker. The driver sends Claude Code's `set_permission_mode` control request at once when no turn is open, else before the next prompt (with model and effort). |
+| `permission_mode` | worker → host | Unchanged meaning; now also sent by the driver when a pick is accepted, and read first-hand from the CLI's `system` init/status records (the translator's duplicate is dropped). |
+| `permission_mode_kept` | worker → host | `mode` or `null`. After a pick: the mode the chat is really in, so the next worker starts there. Sent when a pick is accepted, when Claude Code moves to another mode by itself (leaving plan mode), and on a refused pick (the last mode that took, or `null` to drop the pick). |
+
+Skip permission prompts (the launch flag) auto-allows tool requests only until a pick that asks;
+after `default`, `acceptEdits` or `plan` the CLI's requests become approval cards.

@@ -292,3 +292,106 @@
     transition: none;
   }
 }
+
+/* Attach buttons: 28 x 28, radius 7, glyph 16 --muted. */
+.composer-dock .composer-attach {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  color: var(--muted);
+}
+.composer-dock .composer-attach:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* File, folder and chat chips. */
+.composer-dock .composer-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 9px 10px 4px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+.composer-dock .composer-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 4px 4px 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 11px;
+}
+.composer-dock .composer-ref .ui-icon {
+  flex: none;
+  color: var(--muted);
+}
+.composer-dock .composer-ref-name {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-dock .composer-ref-chat {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line-strong));
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  box-shadow: 2px 2px 0 -1px color-mix(in srgb, var(--accent) 22%, var(--surface));
+  font-weight: 600;
+}
+.composer-dock .composer-ref-chat .ui-icon {
+  color: var(--accent);
+}
+.composer-dock .composer-ref-x {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+}
+.composer-dock .composer-ref-x:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* Drop targets. */
+.composer-dock .composer-box[data-drop] {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  outline-offset: 3px;
+}
+.composer-dock .composer-drop {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.composer-dock .composer-drop-chat {
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 9px 10px;
+}
+.composer-drop-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px dashed var(--accent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+}

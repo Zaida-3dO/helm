@@ -614,6 +614,7 @@ kbd {
 }
 
 .shell-sidebar {
+  position: relative;
   flex: none;
   width: var(--sidebar-width);
   min-width: var(--sidebar-min);
@@ -624,6 +625,47 @@ kbd {
   flex-direction: column;
   min-height: 0;
   user-select: none;
+}
+
+/* Hidden with Ctrl+B or the title strip's button: gone, with its resizer, and
+   no animation. The class's display would otherwise beat the hidden attribute. */
+.shell-sidebar[hidden] {
+  display: none;
+}
+/* The sidebar's resizer: a 1 px line (the sidebar's own border) under a 7 px hit
+   area, 3 px left and 4 px right of it. */
+.shell-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -4px;
+  width: 7px;
+  z-index: var(--z-resizer);
+  cursor: col-resize;
+  touch-action: none;
+}
+.shell-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background-color 110ms ease;
+}
+.shell-resizer:hover::after,
+.is-col-resizing .shell-resizer::after {
+  background: var(--accent);
+}
+:root[data-theme='dark'] .shell-resizer:hover::after,
+:root[data-theme='dark'].is-col-resizing .shell-resizer::after {
+  background: #b3c9dd;
+}
+:root.is-col-resizing,
+:root.is-col-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .shell-main {

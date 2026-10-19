@@ -4,7 +4,7 @@
 // reduced to inert, escaped markers; link destinations pass an allowlist; images are never
 // emitted with a remote `src`. Callers can therefore assign the result to `innerHTML` as is.
 import { Marked, Renderer } from 'marked';
-import type { Tokens, TokenizerAndRendererExtension } from 'marked';
+import type { Token, Tokens, TokensList, TokenizerAndRendererExtension } from 'marked';
 import { canonicalCalloutType, defaultCalloutTitle, parseCalloutHead } from './callouts.ts';
 import { escapeAttr, escapeHtml } from './escape.ts';
 import { splitFrontmatter } from './frontmatter.ts';
@@ -262,6 +262,40 @@ export function renderToHtml(text: string, options: RenderOptions = {}): string 
     return head + (md.parse(body) as string);
   } catch {
     return renderPlain(text);
+  } finally {
+    ctx = previous;
+  }
+}
+
+// Block-level pieces for incremental streaming (blocks.ts): the same lexer and renderer as
+// renderToHtml, split so that finished top-level blocks are rendered once and only the last,
+// unfinished block is rendered again as the text grows.
+
+/** Link reference definitions collected by the lexer (`[x]: url`). */
+export type LinkDefs = TokensList['links'];
+
+/** The top-level tokens of already normalised Markdown (no frontmatter handling). Never throws. */
+export function lexBlocks(text: string): TokensList | null {
+  try {
+    return md.lexer(text);
+  } catch {
+    return null;
+  }
+}
+
+/** Renders a run of top-level tokens, resolving reference links against `links`. Never throws. */
+export function renderTokens(tokens: Token[], links: LinkDefs, options: RenderOptions = {}): string {
+  const previous = ctx;
+  ctx = {
+    streaming: options.streaming ?? false,
+    interactive: options.interactive ?? false,
+    nested: options.nested ?? false,
+  };
+  try {
+    const list = Object.assign([...tokens], { links }) as TokensList;
+    return md.parser(list) as string;
+  } catch {
+    return renderPlain(tokens.map((t) => t.raw).join(''));
   } finally {
     ctx = previous;
   }

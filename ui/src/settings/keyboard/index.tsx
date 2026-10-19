@@ -4,7 +4,7 @@
 
 import { useState, useSyncExternalStore } from 'react';
 import { useShell } from '../../shell/context.ts';
-import { Button, chordOf, isAssignable, keys, KEYBINDINGS_PREF, TextInput, toast } from '../../ui/index.ts';
+import { Button, chordOf, isAssignable, keys, KEYBINDINGS_PREF, TextInput, toast, useLayer } from '../../ui/index.ts';
 import { IconSearch, IconWarning } from '../../ui/icons.tsx';
 import { registerSettingsPane } from '../registry.ts';
 import { conflictedIds, keyboardRows } from './model.ts';
@@ -16,6 +16,9 @@ function KeyboardPane() {
   const [query, setQuery] = useState('');
   const [capturing, setCapturing] = useState<string | null>(null);
   const [problem, setProblem] = useState<{ id: string; text: string } | null>(null);
+  // Escape while listening cancels the capture, not the Settings dialog (the Escape router runs
+  // before the field sees the key, so the capture holds a layer above the dialog's).
+  useLayer('popover', capturing !== null, () => setCapturing(null));
   const rows = keyboardRows(keys.list(), query);
   const clashing = conflictedIds(keys.conflicts());
 
@@ -65,7 +68,6 @@ function KeyboardPane() {
                   // This field owns every key while it listens: nothing else may act on it.
                   e.preventDefault();
                   e.stopPropagation();
-                  if (e.key === 'Escape') return setCapturing(null);
                   const chord = chordOf(e);
                   if (!chord) return;
                   if (!isAssignable(chord)) {

@@ -58,6 +58,10 @@ breaks those checks, so change them only together with the checks. Everything el
 | `model-picker-pop` | Its popover: model rows are `[role="option"]` with `data-value` = the model id | |
 | `effort-picker` | The effort row in that popover's footer: `[role="radio"]` stops | |
 | `permission-chip` | Permission-mode chip (wraps `permission-picker`, the picker trigger) | `data-mode` = the live mode, empty when none reported; `data-picked` = a pick not yet live |
+| `attach-files` / `attach-folder` | The composer's Attach files (native multi-file dialog) and Attach a folder buttons | disabled at 20 attachments |
+| `composer-refs` | The tray of file, folder and chat chips in the composer box; each chip is `.composer-ref` | `data-kind` = `file`, `folder` or `chat` |
+| `composer-drop` | The drop target shown over the composer box while files (from Explorer) or a sidebar chat row are dragged over it | the box carries `data-drop` = `files` or `chat` |
+| `settings-send-key` | Settings → Chat: the Send message with picker (Ctrl+Enter or Enter) | |
 | `jump-latest` | "Jump to latest" button | |
 | `side-panel` / `panel-tab` / `panel-slot` / `panel-tab-body` | Side panel: the panel, a document tab, an Inspector slot (Changes, Files), a tab's body. The link gate's refusals show in the shared `toast-slot` | `panel-tab`: `data-kind`, `data-intent` (`user` `program`), `aria-selected`; `panel-slot`: `data-slot`; `panel-tab-body`: `data-kind` |
 | `file-viewer` / `code-view` / `folder-view` / `folder-entry` / `file-error` / `open-in-app` / `files-slot` / `file-modal` | File viewer: the viewer body, its CodeMirror source view, a folder listing and one entry, a read error, the Open in <App> header action, the Inspector's Files slot, the modal fallback | `file-viewer`: `data-path` (the path shown now); `folder-entry`: `data-kind` (`dir` `file` `link`) |

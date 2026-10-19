@@ -47,6 +47,7 @@ const PROJECT: Record<string, (label: string, p: ProjectNode) => ReactNode> = {
   new: () => <IconNewChat />,
   pin: (l) => (l.startsWith('Unpin') ? <IconUnpin /> : <IconPin />),
   rename: () => <IconRename />,
+  'primary-folder': () => <IconFolder />,
   // "Change icon…" shows the project's own icon.
   icon: (_l, p) => (p.icon && !p.icon.startsWith('lib:') ? <span className="sb-menu-emoji">{p.icon}</span> : <IconSparkles />),
   nest: () => <IconFolderTree />,

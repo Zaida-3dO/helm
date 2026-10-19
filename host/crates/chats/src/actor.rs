@@ -1197,7 +1197,8 @@ impl Actor {
                 }
                 if self.link.is_some() && self.launched_long.is_some_and(|l| l != sb.long_commands)
                 {
-                    if self.status().is_busy() {
+                    // Running background agents live in the worker too: wait for them.
+                    if self.status().is_busy() || self.agents_running() {
                         self.relaunch_on_idle = true;
                     } else {
                         self.relaunch_worker();
@@ -1579,13 +1580,15 @@ impl Actor {
                 let key = self.msg_key(&str_of(&v, "messageId").unwrap_or_default());
                 let delta = v.get("delta").cloned().unwrap_or_default();
                 if let Some(m) = self.stream.get_mut(&key) {
-                    let first = m.text.is_empty() && m.thinking.is_empty();
+                    let was_empty = m.text.is_empty() && m.thinking.is_empty();
                     let text = str_of(&delta, "text").unwrap_or_default();
                     match str_of(&delta, "type").as_deref() {
                         Some("text_delta") => m.text.push_str(&text),
                         Some("thinking_delta") => m.thinking.push_str(&text),
                         _ => {}
                     }
+                    // Only the delta that gives the row its first words (not tool-input chunks).
+                    let first = was_empty && !(m.text.is_empty() && m.thinking.is_empty());
                     self.dirty.insert(key);
                     if first {
                         // The message's first words go out now, not on the next tick.
@@ -1759,7 +1762,12 @@ impl Actor {
                 self.live.lock().unwrap().thread.background_tasks = tasks;
                 self.emit_thread();
             }
-            "subagent_start" | "subagent_step" | "subagent_end" => self.on_subagent(kind, &v),
+            "subagent_start" | "subagent_step" | "subagent_end" => {
+                self.on_subagent(kind, &v);
+                if kind == "subagent_end" && !self.agents_running() {
+                    self.on_quiet();
+                }
+            }
             "compaction_start" => {
                 self.live.lock().unwrap().thread.compacting = Some(Compacting {
                     started_at: now(),
@@ -1926,6 +1934,26 @@ impl Actor {
     }
 
     /// The worker is gone: no agent of it can still be running.
+    /// Background agents of this chat still running (they keep the worker busy, 17cb06ce).
+    fn agents_running(&self) -> bool {
+        self.live.lock().unwrap().thread.subagents_running > 0
+    }
+
+    /// The turn has settled or the last background agent ended: a relaunch held for this point
+    /// runs once nothing is left running, and the idle-worker cap is applied.
+    fn on_quiet(&mut self) {
+        if self.status().is_busy() {
+            return;
+        }
+        if self.relaunch_on_idle && !self.agents_running() {
+            self.relaunch_worker();
+        }
+        crate::runtime::ChatRuntime {
+            sh: self.sh.clone(),
+        }
+        .retire_idle_over_cap();
+    }
+
     fn end_running_subagents(&mut self, reason: &str) {
         let ended: Vec<Subagent> = {
             let mut live = self.live.lock().unwrap();
@@ -2052,7 +2080,7 @@ impl Actor {
                     ..Default::default()
                 },
             };
-            self.record(Entry::Message(entry));
+            self.record(Entry::message(entry));
             return;
         }
         let key = self.msg_key(&mid);
@@ -2094,7 +2122,7 @@ impl Actor {
         if status == MessageStatus::Error {
             self.last_error_row = Some(key);
         }
-        self.record(Entry::Message(entry));
+        self.record(Entry::message(entry));
     }
 
     fn flush(&mut self) {
@@ -2444,13 +2472,7 @@ impl Actor {
             }
         }
         if !self.status().is_busy() {
-            if self.relaunch_on_idle {
-                self.relaunch_worker();
-            }
-            crate::runtime::ChatRuntime {
-                sh: self.sh.clone(),
-            }
-            .retire_idle_over_cap();
+            self.on_quiet();
         }
     }
 }

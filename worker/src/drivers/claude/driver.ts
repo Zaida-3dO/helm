@@ -270,8 +270,9 @@ export class ClaudeDriver implements Driver {
             .slice(0, 500)
             .map((c) => ({ name: String(c.name), description: typeof c.description === "string" ? c.description.slice(0, 500) : "" }))
         : [],
-      // All four were observed working on claude 2.1.289 (worker/PROTOCOL-NOTES.md).
-      capabilities: { withdraw: true, deliverNow: true, stopTool: true, compact: true },
+      // All four were observed working on claude 2.1.289 (worker/PROTOCOL-NOTES.md, "Observed CLI
+      // behaviour"); stop_task on one subagent too ("Native subagents").
+      capabilities: { withdraw: true, deliverNow: true, stopTool: true, compact: true, stopSubagent: true },
     };
   }
 
@@ -336,6 +337,8 @@ export class ClaudeDriver implements Driver {
       this.pickedMode = mode;
       this.reportedMode = mode;
       this.ch.emit({ type: "permission_mode", mode });
+      // The host's kept mode follows too: a report from earlier in the turn may have moved it.
+      this.ch.emit({ type: "permission_mode_kept", mode });
     } catch (e) {
       this.ch.emit({ type: "notice", text: `Could not change the permission mode to ${mode}: ${(e as Error).message}` });
       // The host forgets the refused pick (or goes back to the last one that took), so the chat's
@@ -881,10 +884,14 @@ export class ClaudeDriver implements Driver {
   async stopTool(cmd: Json): Promise<ResponseBody> {
     const sentAt = typeof cmd.sentAtMs === "number" ? cmd.sentAtMs : NaN;
     if (!(Date.now() - sentAt <= STOP_TOOL_MAX_AGE_MS)) return { success: false, error: "stop_tool line is missing sentAtMs or is more than 5 s old" };
-    const t = this.liveTools.get(typeof cmd.toolCallId === "string" ? cmd.toolCallId : "");
-    if (!t || !t.taskId || t.background || t.taskKind !== "shell" || this.dead) return { success: true, data: { stopped: false } };
+    const id = typeof cmd.toolCallId === "string" ? cmd.toolCallId : "";
+    // A running subagent, by its Agent call id: stop that one agent.
+    const agentTask = this.dead ? undefined : this.translator.subagentTaskId(id);
+    const t = this.liveTools.get(id);
+    const taskId = agentTask ?? (t && t.taskId && !t.background && t.taskKind === "shell" && !this.dead ? t.taskId : undefined);
+    if (!taskId) return { success: true, data: { stopped: false } };
     try {
-      await this.control({ subtype: "stop_task", task_id: t.taskId }, QUICK_CONTROL_MS);
+      await this.control({ subtype: "stop_task", task_id: taskId }, QUICK_CONTROL_MS);
       return { success: true, data: { stopped: true } };
     } catch (e) {
       return { success: false, error: (e as Error).message };

@@ -5,6 +5,7 @@
 import type { MenuItem } from '../ui/index.ts';
 import type { ProjectNode, SidebarRow } from '../api/projects.ts';
 import { MAX_DEPTH } from './model.ts';
+import { primaryFolderMenuItem } from '../newchat/menu.ts';
 
 export const PROJECT_COLOURS = ['red', 'orange', 'yellow', 'green', 'teal', 'blue', 'purple', 'pink'] as const;
 
@@ -172,6 +173,7 @@ export function projectMenuItems(p: ProjectNode, all: ProjectNode[], a: ProjectM
     { id: 'new', label: 'New chat', disabled: p.archived, onSelect: a.newChat },
     { id: 'pin', label: p.pinned ? 'Unpin project' : 'Pin project', disabled: p.archived, onSelect: () => a.pin(!p.pinned) },
     { id: 'rename', label: 'Rename project…', onSelect: a.rename },
+    primaryFolderMenuItem(p),
     { id: 'icon', label: 'Change icon…', onSelect: a.changeIcon },
     {
       id: 'nest',

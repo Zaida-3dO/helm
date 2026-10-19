@@ -23,6 +23,6 @@ homeRepos: Array<string>, landing: Landing,
  */
 moveFast: boolean, 
 /**
- * Defaults to `always`.
+ * Defaults to `auto`.
  */
 newChats: NewChats, };

@@ -25,7 +25,7 @@ export function defaultSettings(enabled: boolean): WorkflowSettings {
     homeRepos: [],
     landing: { default: 'draft', method: 'merge', repos: [], draftLabels: [], flipLabel: null, protectedBranches: ['main', 'master'] },
     moveFast: false,
-    newChats: 'always',
+    newChats: 'auto',
   };
 }
 

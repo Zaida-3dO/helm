@@ -1,6 +1,6 @@
 // The Project / Workspace tags under the top bar.
 // Project: the group the open chat is shown under; picking another writes `chat_groups` through
-// `chat_organize` ("None" puts it back under its folder project). Workspace: the folder it runs in,
+// `chat_organize` (the first option, named for the folder project, puts it back there). Workspace: the folder it runs in,
 // which grouping never changes. Both read the cached project list; nothing waits on the board.
 
 import { useEffect, useMemo, useState } from 'react';

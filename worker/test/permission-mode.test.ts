@@ -20,6 +20,8 @@ describe("permission mode", () => {
       assert.equal((req.request as Record<string, unknown>).mode, "plan");
       const ev = await s.host.waitFor((e) => e.type === "permission_mode" && e.mode === "plan", 5000, 0);
       assert.equal(ev.mode, "plan");
+      const kept = await s.host.waitFor((e) => e.type === "permission_mode_kept", 5000, 0);
+      assert.equal(kept.mode, "plan", "an accepted pick is what the host keeps");
     } finally {
       await s.done();
     }
@@ -98,8 +100,10 @@ describe("permission mode", () => {
       s.host.send({ type: "set_permission_mode", mode: "plan" });
       await s.host.waitFor((e) => e.type === "permission_mode" && e.mode === "plan", 5000, 0);
       await prompt(s.host, "list files");
-      const kept = await s.host.waitFor((e) => e.type === "permission_mode_kept", 5000, 0);
+      const kept = await s.host.waitFor((e) => e.type === "permission_mode_kept" && e.mode !== "plan", 5000, 0);
       assert.equal(kept.mode, "default");
+      // The two lines are written back to back; wait for the second before counting.
+      await s.host.waitFor((e) => e.type === "permission_mode" && e.mode === "default", 5000, 0);
       const live = s.host.ofType("permission_mode").map((e) => e.mode);
       assert.deepEqual(live, ["plan", "default"], "each change reaches the host once");
       const req = await s.host.waitFor((e) => e.type === "extension_ui_request", 5000, 0);

@@ -11,6 +11,9 @@ import { DraftSaver } from './drafts.ts';
 import { Editor, type EditorHandle } from './Editor.tsx';
 import { resolveKey, sendLabel, sendTooltip, stopTooltip, type KeyContext, type SendShortcut } from './keymap.ts';
 import { Button } from '../ui/controls.tsx';
+import { IconAttach, IconChat, IconFileText as IconFile, IconFolder, IconFolderPlus, IconX } from '../ui/icons.tsx';
+import { useShell } from '../shell/context.ts';
+import { addRef, dropLandsIn, parseFileDrop, roomLeft, type AttachedRef } from './refs.ts';
 import { ModelPicker } from './ModelPicker.tsx';
 import { PermissionChip } from './PermissionChip.tsx';
 import { orderPending, itemState } from './queue.ts';
@@ -103,6 +106,10 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   const addFiles = useCallback(
     async (files: File[]) => {
       for (const f of files) {
+        if (roomLeft(attachedRef.current.length, refsRef.current.length) === 0) {
+          setError('A message can carry at most 20 attachments.');
+          return;
+        }
         const why = refusal(attachedRef.current, f);
         if (why) {
           setError(why);
@@ -120,6 +127,101 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
     },
     [ops, chat.id],
   );
+  // Files, folders and chats by reference.
+  const [refs, setRefs] = useState<AttachedRef[]>([]);
+  const refsRef = useRef<AttachedRef[]>([]);
+  refsRef.current = refs;
+  const addRefs = useCallback(
+    async (kind: 'path' | 'chat', targets: string[]) => {
+      for (const t of targets) {
+        if (roomLeft(attachedRef.current.length, refsRef.current.length) === 0) {
+          setError('A message can carry at most 20 attachments.');
+          return;
+        }
+        try {
+          const r = await ops.attachRef(chat.id, kind, t);
+          refsRef.current = addRef(refsRef.current, { id: r.attachmentId, kind: r.kind, name: r.name, target: t });
+          setRefs(refsRef.current);
+        } catch (e) {
+          setError(e instanceof ApiError ? e.message : String(e));
+        }
+      }
+    },
+    [ops, chat.id],
+  );
+  const pickFiles = async () => {
+    setError(null);
+    try {
+      const r = await ops.pickFiles();
+      await addRefs('path', r.paths);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    }
+  };
+  const pickFolder = async () => {
+    setError(null);
+    try {
+      const r = await ops.pickFolder();
+      if (r.path) await addRefs('path', [r.path]);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    }
+  };
+  const full = roomLeft(attached.length, refs.length) === 0;
+
+  // Drops: files from Explorer arrive as the host's `file_drop` event
+  // with paths; a chat row dragged from the sidebar is read from the sidebar's drag markers.
+  const box = useRef<HTMLDivElement>(null);
+  const [dropHint, setDropHint] = useState<{ kind: 'files' } | { kind: 'chat'; title: string } | null>(null);
+  const shell = useShell();
+  const boxRect = () => box.current?.getBoundingClientRect() ?? null;
+  useEffect(
+    () =>
+      shell.bus.on('file_drop', (e) => {
+        const d = parseFileDrop(e as Record<string, unknown>);
+        if (!d) return;
+        const inside = dropLandsIn(boxRect(), d.x, d.y, window.devicePixelRatio || 1);
+        if (d.phase === 'leave') setDropHint(null);
+        else if (d.phase === 'drop') {
+          setDropHint(null);
+          if (inside && d.paths.length) {
+            setError(null);
+            void addRefs('path', d.paths);
+          }
+        } else setDropHint(inside ? { kind: 'files' } : null);
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shell, addRefs],
+  );
+  useEffect(() => {
+    const dragged = () => document.querySelector<HTMLElement>('.sb-root[data-dragging="true"] .sb-chat-wrap[data-drag-source="true"]');
+    const over = (e: PointerEvent) => dropLandsIn(boxRect(), e.clientX, e.clientY, 1);
+    const move = (e: PointerEvent) => {
+      const row = dragged();
+      setDropHint((h) => {
+        if (row && over(e)) return { kind: 'chat', title: document.querySelector('.sb-ghost')?.textContent?.trim() || 'this chat' };
+        return h?.kind === 'chat' ? null : h;
+      });
+    };
+    // Capture: this runs before the sidebar's own pointerup clears its drag markers.
+    const up = (e: PointerEvent) => {
+      const row = dragged();
+      const id = row?.dataset.chatId;
+      setDropHint((h) => (h?.kind === 'chat' ? null : h));
+      if (id && over(e) && id !== chat.id) {
+        setError(null);
+        void addRefs('chat', [id]);
+      }
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up, true);
+    return () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up, true);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addRefs, chat.id]);
+
   const removeAttached = (id: string) =>
     setAttached((list) => {
       list.filter((a) => a.id === id).forEach((a) => URL.revokeObjectURL(a.url));
@@ -130,8 +232,9 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
     async (action: SendAction) => {
       const text = editor.current?.getText() ?? '';
       const images = attachedRef.current;
+      const sentRefs = refsRef.current;
       setError(null);
-      if (!text.trim() && images.length === 0) {
+      if (!text.trim() && images.length === 0 && sentRefs.length === 0) {
         // Empty-composer shortcuts: steer or send now the newest queued message.
         const q = newestQueued();
         if (q && action === 'steer') await ops.submissionAction(q.id, 'steerNow').catch(() => undefined);
@@ -144,10 +247,12 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
         await ops.send(chat.id, uid(), text, action, saver.revision, {
           origin: 'composer',
           context: extra.context,
-          attachments: images.map((a) => a.id),
+          attachments: [...images.map((a) => a.id), ...sentRefs.map((r) => r.id)],
         });
         images.forEach((a) => URL.revokeObjectURL(a.url));
         setAttached((list) => list.filter((a) => !images.includes(a)));
+        refsRef.current = refsRef.current.filter((r) => !sentRefs.includes(r));
+        setRefs(refsRef.current);
         if (saver.sent(token, (editor.current?.getText() ?? '') === text)) {
           editor.current?.setText('');
           setEmpty(true);
@@ -321,7 +426,39 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
           ))}
         </div>
       )}
-      <div className="composer-box" data-testid="composer-box">
+      <div className="composer-box" data-testid="composer-box" ref={box} data-drop={dropHint ? dropHint.kind : undefined}>
+        {dropHint && (
+          <div className={`composer-drop composer-drop-${dropHint.kind}`} data-testid="composer-drop" aria-hidden="true">
+            {dropHint.kind === 'files' ? (
+              'Drop files to attach'
+            ) : (
+              <span className="composer-drop-card">
+                <IconChat size={13} /> Drop to reference <strong>{dropHint.title}</strong>
+              </span>
+            )}
+          </div>
+        )}
+        {refs.length > 0 && (
+          <div className="composer-refs" data-testid="composer-refs">
+            {refs.map((r) => (
+              <span key={r.id} className={`composer-ref composer-ref-${r.kind}`} title={r.kind === 'chat' ? r.name : r.target} data-kind={r.kind}>
+                {r.kind === 'chat' ? <IconChat size={13} /> : r.kind === 'folder' ? <IconFolder size={13} /> : <IconFile size={13} />}
+                <span className="composer-ref-name">{r.name}</span>
+                <button
+                  type="button"
+                  className="composer-ref-x"
+                  aria-label={`Remove ${r.name}`}
+                  onClick={() => {
+                    refsRef.current = refsRef.current.filter((x) => x.id !== r.id);
+                    setRefs(refsRef.current);
+                  }}
+                >
+                  <IconX size={11} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         {attached.length > 0 && (
           <div className="composer-attachments" data-testid="composer-attachments">
             {attached.map((a) => (
@@ -363,6 +500,12 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
                 {a.render(actx)}
               </span>
             ))}
+            <Button variant="icon" className="composer-attach" label="Attach files" title={full ? 'A message can carry at most 20 attachments' : 'Attach files · up to 20, including images'} disabled={full} data-testid="attach-files" onClick={() => void pickFiles()}>
+              <IconAttach size={16} />
+            </Button>
+            <Button variant="icon" className="composer-attach" label="Attach a folder" title={full ? 'A message can carry at most 20 attachments' : 'Attach a folder'} disabled={full} data-testid="attach-folder" onClick={() => void pickFolder()}>
+              <IconFolderPlus size={16} />
+            </Button>
             {busy && (
               <Button
                 variant="stop"
@@ -376,7 +519,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
               variant="send"
               label={sendLabel(busy, behavior.mode)}
               data-testid="send"
-              disabled={empty && attached.length === 0}
+              disabled={empty && attached.length === 0 && refs.length === 0}
               title={sendTooltip(ctx, busy)}
               onClick={() => void send('default')}
             />

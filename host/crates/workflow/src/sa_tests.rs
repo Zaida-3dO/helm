@@ -110,7 +110,7 @@ fn setup() -> T {
     db.write::<_, rusqlite::Error>(|tx| {
         tx.execute("INSERT INTO projects(id, name, path, created_at) VALUES ('p', 'P', 'C:/w', 1)", [])?;
         tx.execute("INSERT INTO chats(id, project_id, title, created_at, updated_at) VALUES ('c', 'p', 'T', 1, 1)", [])?;
-        crate::settings::store(tx, &WorkflowSettings { enabled: true, ..Default::default() }, 1)
+        crate::settings::store(tx, &WorkflowSettings { enabled: true, new_chats: NewChats::Always, ..Default::default() }, 1)
     })
     .unwrap();
     let mut kinds = AllowKinds::new();

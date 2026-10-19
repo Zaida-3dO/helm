@@ -104,6 +104,13 @@ export function chatOps(api: Api) {
     /** Store one image for the next send; `bytes` is base64. */
     attach: (chatId: string, name: string, mime: string, bytes: string) =>
       api<{ attachmentId: string }>('attachment_put', { chatId, name, mime, bytes }),
+    /** A file or folder (`path`, absolute) or another chat (`chat`, its id) by reference. */
+    attachRef: (chatId: string, kind: 'path' | 'chat', target: string) =>
+      api<{ attachmentId: string; kind: 'file' | 'folder' | 'chat'; name: string }>('attachment_ref', { chatId, kind, target }),
+    /** The native multi-file dialog (helm-shell `files_pick`); empty when cancelled. */
+    pickFiles: () => api<{ paths: string[] }>('files_pick', { title: 'Attach files' }),
+    /** The native folder dialog (helm-shell `folder_pick`); null when cancelled. */
+    pickFolder: () => api<{ path: string | null }>('folder_pick', { title: 'Attach a folder' }),
     /** Fork a chat (whole, or at an assistant reply); a side chat quotes `excerpt`. */
     fork: (chatId: string, opts: { messageId?: number; side?: boolean; excerpt?: string } = {}) =>
       api<ChatRecord>('chat_fork', { chatId, forkId: globalThis.crypto.randomUUID(), ...opts }),

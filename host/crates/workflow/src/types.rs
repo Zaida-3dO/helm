@@ -138,7 +138,7 @@ pub struct WorkflowSettings {
     pub landing: Landing,
     /// Move fast: user-only, default off.
     pub move_fast: bool,
-    /// Defaults to `always`.
+    /// Defaults to `auto`.
     pub new_chats: NewChats,
 }
 

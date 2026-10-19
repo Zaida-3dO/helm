@@ -7,6 +7,10 @@
 //!   45 s timeout and one stricter retry; the host also gives up after [`HOST_TIMEOUT`].
 //! - Success writes the title as `generated` unless the user renamed the chat meanwhile: a manual
 //!   rename always wins. Failure marks the job `failed`; the fallback stays.
+//! - the job waits until the chat's turn has settled (at most
+//!   [`crate::runtime::Limits::title_wait`]), so the helper's claude never competes with the
+//!   chat's own cold start. A greeting ("Hello", "hi there") is never titled: the job is parked as
+//!   `greeting` and the chat's next send starts a fresh one from that message.
 //! - `chat_rename {chatId, title}` (1–512 bytes) sets the title and marks it manual.
 //!   `title_suggest {chatId}` runs the helper and answers a suggestion without writing it.
 
@@ -43,18 +47,117 @@ fn set_job(rt: &ChatRuntime, chat_id: &str, job: Option<&str>) {
     });
 }
 
-/// Start a title job for `chat_id` in the background.
+/// Words a message made only of is a greeting or a check-in, not something to name a chat after.
+const GREETING_WORDS: &[&str] = &[
+    "hi",
+    "how's",
+    "hows",
+    "hello",
+    "hey",
+    "heya",
+    "hiya",
+    "howdy",
+    "yo",
+    "sup",
+    "hola",
+    "greetings",
+    "morning",
+    "afternoon",
+    "evening",
+    "good",
+    "gm",
+    "there",
+    "all",
+    "everyone",
+    "claude",
+    "thanks",
+    "thank",
+    "you",
+    "ty",
+    "ok",
+    "okay",
+    "test",
+    "testing",
+    "ping",
+    "again",
+    "how",
+    "are",
+    "is",
+    "it",
+    "going",
+    "what's",
+    "whats",
+    "up",
+    "u",
+    "ya",
+    "doing",
+];
+
+/// A message that is only a greeting or a check-in (at most six such words, or no words at all).
+pub fn is_greeting(text: &str) -> bool {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'')
+                .to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.len() <= 6 && words.iter().all(|w| GREETING_WORDS.contains(&w.as_str()))
+}
+
+/// Wait until the chat has no turn in flight: nothing saved, being sent, accepted or delivered,
+/// and a settled status. Gives up after `limit` (the job then runs anyway).
+async fn wait_for_turn(rt: &ChatRuntime, chat_id: &str, limit: Duration) {
+    let deadline = tokio::time::Instant::now() + limit;
+    while tokio::time::Instant::now() < deadline {
+        let settled = rt
+            .db()
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT status NOT IN ('starting', 'running', 'stopping')
+                            AND NOT EXISTS(SELECT 1 FROM submissions s WHERE s.chat_id = c.id
+                                AND s.state IN ('saved', 'dispatching', 'accepted', 'delivered'))
+                     FROM chats c WHERE c.id = ?1",
+                    [chat_id],
+                    |r| r.get::<_, bool>(0),
+                )
+                .optional()
+            })
+            .ok()
+            .flatten()
+            .unwrap_or(true);
+        if settled {
+            return;
+        }
+        tokio::time::sleep(TURN_POLL).await;
+    }
+}
+
+const TURN_POLL: Duration = Duration::from_millis(200);
+
+/// Start a title job for `chat_id` in the background (after its turn settles; a greeting is
+/// parked instead, see the module notes).
 pub fn start(rt: &ChatRuntime, chat_id: &str, job_body: Value) {
-    let q = &rt.sh.titles;
-    if q.jobs.fetch_add(1, Ordering::SeqCst) >= MAX_JOBS {
-        q.jobs.fetch_sub(1, Ordering::SeqCst);
-        set_job(rt, chat_id, Some("failed"));
+    let first = job_body["firstRequest"].as_str().unwrap_or_default();
+    if job_body.get("latest").is_none() && is_greeting(first) {
+        set_job(rt, chat_id, Some("greeting"));
         return;
     }
     set_job(rt, chat_id, Some("generating"));
     let rt = rt.clone();
     let chat = chat_id.to_owned();
     rt.handle().clone().spawn(async move {
+        let wait = rt.limits().title_wait;
+        wait_for_turn(&rt, &chat, wait).await;
+        // A job takes one of the MAX_JOBS places only once it is ready to run, so jobs waiting
+        // for their turn never crowd out another chat's title.
+        let q = &rt.sh.titles;
+        if q.jobs.fetch_add(1, Ordering::SeqCst) >= MAX_JOBS {
+            q.jobs.fetch_sub(1, Ordering::SeqCst);
+            set_job(&rt, &chat, Some("failed"));
+            return;
+        }
         let permit = rt.sh.titles.slots.acquire().await;
         let spawner = rt.sh.spawner.clone();
         let out = tokio::time::timeout(
@@ -251,23 +354,41 @@ pub fn run_helper(
 }
 
 /// Whether this send should start a title job: the chat's first submission while it is still
-/// "New chat" with no messages, or a fork's first submission. Called inside the send's
-/// transaction, before the submission is written.
+/// "New chat" with no messages, a fork's first submission, or the first send after a greeting
+/// (a parked `greeting` job). Called inside the send's transaction, before the submission is
+/// written.
 pub(crate) fn wants_job(
     tx: &rusqlite::Transaction<'_>,
     chat_id: &str,
 ) -> rusqlite::Result<Option<bool>> {
-    let (title, subs, users, forked, manual): (String, i64, i64, bool, bool) = tx.query_row(
+    let (title, subs, users, forked, manual, greeting): (String, i64, i64, bool, bool, bool) = tx
+        .query_row(
         "SELECT c.title,
                 (SELECT count(*) FROM submissions s WHERE s.chat_id = c.id),
                 (SELECT count(*) FROM messages m WHERE m.chat_id = c.id AND m.role != 'context'),
                 EXISTS(SELECT 1 FROM chat_forks f WHERE f.chat_id = c.id),
-                EXISTS(SELECT 1 FROM chat_titles t WHERE t.chat_id = c.id AND t.state = 'manual')
+                EXISTS(SELECT 1 FROM chat_titles t WHERE t.chat_id = c.id AND t.state = 'manual'),
+                EXISTS(SELECT 1 FROM chat_titles t WHERE t.chat_id = c.id AND t.job = 'greeting')
          FROM chats c WHERE c.id = ?1",
         [chat_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        },
     )?;
-    if manual || subs > 0 {
+    if manual {
+        return Ok(None);
+    }
+    if greeting {
+        return Ok(Some(forked));
+    }
+    if subs > 0 {
         return Ok(None);
     }
     if forked {

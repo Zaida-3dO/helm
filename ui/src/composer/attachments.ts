@@ -23,7 +23,7 @@ export interface Candidate {
 
 /** Why a file cannot be added to `current`, or null when it can. */
 export function refusal(current: readonly Attached[], f: Candidate): string | null {
-  if (!IMAGE_TYPES.includes(f.type)) return `${f.name}: only PNG, JPEG, GIF and WebP images can be attached.`;
+  if (!IMAGE_TYPES.includes(f.type)) return `${f.name}: only PNG, JPEG, GIF and WebP images can be pasted. Attach other files with the paperclip, or drop them from Explorer.`;
   if (current.length >= MAX_PER_MESSAGE) return 'A message can carry at most 20 attachments.';
   if (f.size > MAX_IMAGE_BYTES) return `${f.name} is larger than 25 MB.`;
   const total = current.reduce((n, a) => n + a.size, 0) + f.size;

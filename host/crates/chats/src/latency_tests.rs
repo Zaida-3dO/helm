@@ -402,3 +402,168 @@ async fn a_messages_first_words_go_out_without_waiting_for_the_tick() {
     })
     .await;
 }
+
+fn title_state(h: &H, chat: &str) -> (String, String) {
+    let t = h
+        .col(&format!("SELECT title FROM chats WHERE id = '{chat}'"))
+        .pop()
+        .unwrap();
+    let s = h
+        .col(&format!(
+            "SELECT state || '/' || COALESCE(job, '') FROM chat_titles WHERE chat_id = '{chat}'"
+        ))
+        .pop()
+        .unwrap_or_default();
+    (t, s)
+}
+
+/// A title job waits for the first turn to settle, so its claude never competes with the chat's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_title_job_waits_for_the_first_turn_to_settle() {
+    let mut h = harness_with(Limits {
+        title_wait: Duration::from_secs(5),
+        ..limits()
+    });
+    *h.spawner.title.lock().unwrap() = Ok("Fix the login redirect".into());
+    let chat = h.create().await;
+    let (sid, _) = h
+        .send(
+            &chat,
+            "the login page redirects twice, please fix",
+            "default",
+        )
+        .await;
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    w.respond(&p, json!({"submissionId": sid, "state": "accepted"}))
+        .await;
+    w.emit(json!({"type": "agent_start"})).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        h.spawner.title_jobs.lock().unwrap().is_empty(),
+        "no title job while the first turn runs"
+    );
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("the generated title", |h| {
+        title_state(h, &chat) == ("Fix the login redirect".into(), "generated/".into())
+    })
+    .await;
+}
+
+/// "Hello" is never titled; the next, substantive message is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_greeting_is_not_titled_and_the_next_message_is() {
+    let h = harness();
+    *h.spawner.title.lock().unwrap() = Ok("Refactor the config parser".into());
+    let chat = h.create().await;
+    h.send(&chat, "Hello!", "default").await;
+    h.until("the greeting is parked", |h| {
+        title_state(h, &chat) == ("Hello!".into(), "fallback/greeting".into())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(h.spawner.title_jobs.lock().unwrap().is_empty());
+    h.send(&chat, "please refactor the config parser", "queue")
+        .await;
+    h.until("the generated title", |h| {
+        title_state(h, &chat) == ("Refactor the config parser".into(), "generated/".into())
+    })
+    .await;
+    let jobs = h.spawner.title_jobs.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["firstRequest"], "please refactor the config parser");
+}
+
+#[test]
+fn greetings_and_check_ins_are_told_from_requests() {
+    use crate::titles::is_greeting;
+    for g in [
+        "Hello",
+        "hi there!",
+        "Hey Claude",
+        "good morning",
+        "thanks!",
+        "ok",
+        "  ",
+        "👋",
+        "how's it going?",
+    ] {
+        assert!(is_greeting(g), "{g:?} is a greeting");
+    }
+    for r in [
+        "Hello, fix the build",
+        "hi can you review PR 12",
+        "refactor the parser",
+        "test the login flow please",
+    ] {
+        assert!(!is_greeting(r), "{r:?} is a request");
+    }
+}
+
+/// Starts a background Agent call `id` on a running turn (its call returns at once).
+async fn launch_agent(w: &FakeWorker, id: &str) {
+    w.emit(json!({"type": "tool_execution_start", "toolCallId": id, "toolName": "Agent", "args": {"description": "Echo"}, "stoppable": false}))
+        .await;
+    w.emit(json!({"type": "subagent_start", "toolCallId": id, "agentType": "reviewer", "name": "Echo", "description": "Echo", "assignment": "Run echo.", "startedAt": 1}))
+        .await;
+    w.emit(json!({"type": "tool_execution_end", "toolCallId": id, "toolName": "Agent", "result": {"text": "Async agent launched successfully."}, "isError": false}))
+        .await;
+}
+
+fn the_chat(h: &H) -> String {
+    h.col("SELECT id FROM chats").pop().unwrap()
+}
+
+/// A settled chat whose background agents still run is not idle. The idle-worker cap
+/// leaves its worker alone and quit lists it; once the last agent ends, the cap applies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn running_agents_keep_their_worker_from_the_idle_cap_and_show_at_quit() {
+    let mut h = harness_with(Limits {
+        max_idle_workers: 0,
+        ..limits()
+    });
+    let mut w = running(&mut h).await;
+    let chat = the_chat(&h);
+    launch_agent(&w, "sa_1").await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("chat idle", |h| h.status(&chat) == "idle").await;
+    assert_eq!(
+        w.no_command_for(Duration::from_millis(300)).await,
+        None,
+        "not retired while its agent runs"
+    );
+    assert_eq!(h.rt.running_titles().len(), 1, "quit warns about the agent");
+    w.emit(json!({"type": "subagent_end", "toolCallId": "sa_1", "status": "completed", "report": "done", "durationMs": 10}))
+        .await;
+    w.expect("shutdown").await;
+    assert!(h.rt.running_titles().is_empty());
+}
+
+/// A send-behaviour relaunch waits for running agents, then happens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relaunch_waits_for_running_agents() {
+    let mut h = harness();
+    let mut w = running(&mut h).await;
+    let chat = the_chat(&h);
+    launch_agent(&w, "sa_1").await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("chat idle", |h| h.status(&chat) == "idle").await;
+    let sb = crate::types::SendBehavior {
+        long_commands: crate::types::LongCommands::Off,
+        ..crate::send_behavior::HOME_DEFAULTS
+    };
+    assert_ne!(sb, crate::send_behavior::HOME_DEFAULTS);
+    let _ = crate::runtime::enqueue(&h.rt.actor(&chat).tx, crate::actor::Cmd::SendBehavior(sb));
+    assert_eq!(
+        w.no_command_for(Duration::from_millis(300)).await,
+        None,
+        "no relaunch while the agent runs"
+    );
+    w.emit(json!({"type": "subagent_end", "toolCallId": "sa_1", "status": "completed", "report": "done", "durationMs": 10}))
+        .await;
+    w.expect("shutdown").await;
+}

@@ -5,8 +5,10 @@
 //! - A stored value that no longer validates falls back to the defaults, never to something looser
 //!   (and the defaults have the master switch off).
 //! - The stored form leaves out what is at its quiet default: `moveFast` only while true,
-//!   `newChats` only when not `always`, `landing.method` only when not `merge`, so a value saved
-//!   without those fields is byte-identical.
+//!   `newChats` only when not `auto` (the default), `landing.method` only when
+//!   not `merge`, so a value saved without those fields is byte-identical. A stored `always` is
+//!   written out and read back as `always`. A value stored before the default changed, with no
+//!   `newChats`, reads as the new default; chats already used keep their pinned state either way.
 //! - The save carries no revision: last writer wins.
 
 use crate::types::*;
@@ -68,7 +70,8 @@ impl Default for WorkflowSettings {
                 protected_branches: vec!["main".into(), "master".into()],
             },
             move_fast: false,
-            new_chats: NewChats::Always,
+            // Auto by default.
+            new_chats: NewChats::Auto,
         }
     }
 }
@@ -563,7 +566,7 @@ pub fn stored_form(s: &WorkflowSettings) -> Value {
     if !s.move_fast {
         o.remove("moveFast");
     }
-    if s.new_chats == NewChats::Always {
+    if s.new_chats == NewChats::Auto {
         o.remove("newChats");
     }
     if s.landing.method == MergeMethod::Merge {
@@ -621,13 +624,13 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn defaults_are_off_with_caps_of_three_and_always_for_new_chats() {
+    fn defaults_are_off_with_caps_of_three_and_auto_for_new_chats() {
         let d = WorkflowSettings::default();
         assert!(!d.enabled);
         assert_eq!(d.stages.review.max_rounds, 3);
         assert_eq!(d.stages.plan_review.max_rounds, 3);
         assert_eq!(d.stages.smoketest.use_, StageUse::Auto);
-        assert_eq!(d.new_chats, NewChats::Always);
+        assert_eq!(d.new_chats, NewChats::Auto);
         assert!(!d.move_fast);
         assert_eq!(validate(json!({})).unwrap(), d);
         // The quiet defaults are left out of the stored form.
@@ -643,7 +646,7 @@ mod tests {
         let mut s = WorkflowSettings::default();
         s.enabled = true;
         s.move_fast = true;
-        s.new_chats = NewChats::Auto;
+        s.new_chats = NewChats::Never;
         s.landing.method = MergeMethod::Squash;
         s.landing.repos.push(RepoRule {
             repo: "github.com/o/r".into(),
@@ -652,8 +655,33 @@ mod tests {
         });
         let stored = stored_form(&s);
         assert_eq!(stored["moveFast"], true);
-        assert_eq!(stored["newChats"], "auto");
+        assert_eq!(stored["newChats"], "never");
         assert_eq!(validate(stored).unwrap(), s);
+    }
+
+    #[test]
+    fn a_stored_always_is_written_out_and_read_back() {
+        let mut s = WorkflowSettings::default();
+        s.new_chats = NewChats::Always;
+        let stored = stored_form(&s);
+        assert_eq!(
+            stored["newChats"], "always",
+            "Always is no longer the quiet default"
+        );
+        assert_eq!(validate(stored).unwrap().new_chats, NewChats::Always);
+        assert_eq!(
+            validate(json!({"newChats": "always"})).unwrap().new_chats,
+            NewChats::Always
+        );
+        // Through the table, as Settings > Orchestrator saves it.
+        let (_d, db) = crate::mode::tests::db(&[]);
+        db.write(|tx| store(tx, &s, 1)).unwrap();
+        assert_eq!(db.snapshot(load).unwrap().new_chats, NewChats::Always);
+        // Left out, it is the default.
+        let auto = WorkflowSettings::default();
+        assert!(stored_form(&auto).get("newChats").is_none());
+        db.write(|tx| store(tx, &auto, 2)).unwrap();
+        assert_eq!(db.snapshot(load).unwrap().new_chats, NewChats::Auto);
     }
 
     #[test]

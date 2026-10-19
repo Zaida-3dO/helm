@@ -182,6 +182,8 @@ test('Sign off plan is offered only for an approved plan the user still owes, wi
   assert.equal(signOffPlan(unreviewed, me), null, 'plan review has not approved it');
   const noReview = { ...me, stages: { ...me.stages, planReview: { ...me.stages.planReview, use: 'off' as const } } };
   assert.equal(signOffPlan(unreviewed, noReview), 'q', 'with plan review off the plan waits only for you');
+  assert.deepEqual(needsYou(unreviewed, noReview, 0).map((n) => n.text), ['plan sign-off'], 'and Needs you says so');
+  assert.deepEqual(needsYou(unreviewed, me, 0), [], 'not while plan review still has to approve it');
   const parked = parseRun({ ...fakeRun('signoff'), task: { ...(fakeRun('signoff').task as object), status: 'parked' } });
   assert.equal(signOffPlan(parked, me), null);
 });

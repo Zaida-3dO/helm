@@ -344,7 +344,11 @@ mod tests {
                 .code,
             "bad_args"
         );
-        settings_save(&c, json!({"settings": {"enabled": true}})).unwrap();
+        settings_save(
+            &c,
+            json!({"settings": {"enabled": true, "newChats": "always"}}),
+        )
+        .unwrap();
         start_task(&c, "a", "Add login");
         let v = run_get(&c, json!({"chatId": "a"})).unwrap();
         assert_eq!(v["task"]["title"], "Add login");
@@ -370,7 +374,11 @@ mod tests {
         let (_d, db) = crate::mode::tests::db(&[("a", "claude")]);
         let sink = Arc::new(RecordingSink::default());
         let c = ctx(db, sink.clone());
-        settings_save(&c, json!({"settings": {"enabled": true}})).unwrap();
+        settings_save(
+            &c,
+            json!({"settings": {"enabled": true, "newChats": "always"}}),
+        )
+        .unwrap();
         start_task(&c, "a", "T");
         let db = c.services.need::<Database>().unwrap();
         let run_id: String = db
@@ -452,7 +460,11 @@ mod tests {
         let (_d, db) = crate::mode::tests::db(&[("a", "claude")]);
         let sink = Arc::new(RecordingSink::default());
         let c = ctx(db, sink.clone());
-        settings_save(&c, json!({"settings": {"enabled": true}})).unwrap();
+        settings_save(
+            &c,
+            json!({"settings": {"enabled": true, "newChats": "always"}}),
+        )
+        .unwrap();
         start_task(&c, "a", "T");
         let db = c.services.need::<Database>().unwrap();
         let run_id: String = db
@@ -517,7 +529,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let c = ctx(db, sink.clone());
         let v = chat_mode_get(&c, json!({"chatId": "a"})).unwrap();
-        assert_eq!(v["mode"], "on");
+        assert_eq!(v["mode"], "auto", "new chats start in Auto by default");
         assert_eq!(v["inEffect"], false, "the master switch is off by default");
         assert!(v["unavailable"].as_str().unwrap().contains("Settings"));
         assert!(chat_mode_set(&c, json!({"chatId": "a", "mode": "off"})).is_err());

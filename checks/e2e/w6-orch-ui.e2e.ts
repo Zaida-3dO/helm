@@ -72,9 +72,11 @@ describe("the Orchestrator switch and Settings → Orchestrator", { timeout: 10 
   test("O2: turning the workflow on in the pane (Save) shows the switch, on, for a new chat", async () => {
     try {
       await openPane();
-      assert.equal(await page().getAttribute(`${tid("orch-newchats")} [data-value="always"]`, "aria-checked"), "true", "Always is the default for new chats");
+      assert.equal(await page().getAttribute(`${tid("orch-newchats")} [data-value="auto"]`, "aria-checked"), "true", "Auto is the default for new chats");
       assert.equal(await page().locator(`${tid("orch-save")}:disabled`).count(), 1, "nothing to save yet");
       await page().check(`${tid("orch-enabled")}`);
+      // Always, chosen by the user, is stored and kept (it is no longer the quiet default).
+      await page().click(`${tid("orch-newchats")} [data-value="always"]`);
       await page().locator(`${tid("orch-save")}:enabled`).waitFor();
       await save();
       const s = (await api(page(), "workflow_settings_get", {})) as { enabled: boolean; newChats: string };

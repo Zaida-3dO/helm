@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent } from 'react';
 import { LONG_TEXT_CHARS, renderShort, sharedOffloader } from './engine.ts';
 import { targetFromAttrs } from './links.ts';
 import type { LinkTarget } from './links.ts';
 import { renderDiagram } from './mermaid.ts';
+import { StreamBlocks } from './blocks.ts';
 import { renderPlain, renderToHtml } from './render.ts';
 import type { RenderOptions } from './render.ts';
 import './markdown.css';
@@ -60,7 +61,7 @@ function useRenderedHtml(text: string, options: RenderOptions): string {
 const INLINE_IMAGE = /^(?:data:image\/(?:png|jpe?g|gif|webp|avif|bmp|svg\+xml);|blob:)/i;
 
 function hydrateEmbeds(
-  root: HTMLElement,
+  root: ParentNode,
   resolveEmbed: (target: LinkTarget) => Promise<string | null>,
   isCancelled: () => boolean,
 ): void {
@@ -97,7 +98,7 @@ function hydrateEmbeds(
   });
 }
 
-function hydrateDiagrams(root: HTMLElement, isCancelled: () => boolean): void {
+function hydrateDiagrams(root: ParentNode, isCancelled: () => boolean): void {
   root.querySelectorAll<HTMLElement>('.md-mermaid[data-md-mermaid]').forEach((el) => {
     const source = el.querySelector('code')?.textContent ?? '';
     renderDiagram(source)
@@ -121,7 +122,7 @@ function hydrateDiagrams(root: HTMLElement, isCancelled: () => boolean): void {
  * A Copy button in each code block's label bar. The HTML is a string, so the buttons are
  * added to the live DOM after each render; one click handler on the root serves them all.
  */
-function hydrateCopyButtons(root: HTMLElement): void {
+function hydrateCopyButtons(root: ParentNode): void {
   root.querySelectorAll<HTMLElement>('pre.md-code').forEach((pre) => {
     if (pre.closest('.md-mermaid') || pre.querySelector(':scope > .md-code-copy')) return;
     const button = document.createElement('button');
@@ -144,6 +145,74 @@ function copyCode(button: HTMLElement): void {
   });
 }
 
+/** Parses `html` into nodes without touching the live DOM. */
+function fragment(html: string): DocumentFragment {
+  const t = document.createElement('template');
+  t.innerHTML = html;
+  return t.content;
+}
+
+/**
+ * Streaming text, rendered block by block (blocks.ts). Finished blocks are
+ * appended once, hydrated once and never touched again; only the last block's nodes are replaced
+ * as the text grows. Runs in a layout effect so each commit's text is in the DOM before it paints.
+ */
+function useIncremental(
+  incremental: boolean,
+  ref: { current: HTMLDivElement | null },
+  text: string,
+  streaming: boolean,
+  interactive: boolean,
+  resolveEmbed: MarkdownProps['resolveEmbed'],
+): void {
+  const state = useRef<{ blocks: StreamBlocks; tail: ChildNode[]; tailHtml: string; tailHydrated: boolean; cancelled: boolean } | null>(null);
+  const embeds = useRef(resolveEmbed);
+  embeds.current = resolveEmbed;
+
+  useLayoutEffect(() => {
+    const root = ref.current;
+    if (!incremental || !root) return;
+    const st = (state.current ??= { blocks: new StreamBlocks(), tail: [], tailHtml: '', tailHydrated: false, cancelled: false });
+    const u = st.blocks.update(text, { streaming: true, interactive }, !streaming);
+    if (u.reset) {
+      root.replaceChildren();
+      st.tail = [];
+      st.tailHtml = '';
+    }
+    // The last block is only hydrated (Copy buttons, diagrams, embeds) once the stream has ended.
+    const hydrateTail = !streaming;
+    if (u.added.length === 0 && u.tail === st.tailHtml && st.tailHydrated === hydrateTail) return;
+    const isCancelled = () => st.cancelled;
+    const hydrate = (f: DocumentFragment) => {
+      const resolve = embeds.current;
+      if (resolve) hydrateEmbeds(f, resolve, isCancelled);
+      if (interactive) {
+        hydrateDiagrams(f, isCancelled);
+        hydrateCopyButtons(f);
+      }
+    };
+    for (const n of st.tail) n.remove();
+    for (const html of u.added) {
+      const f = fragment(html);
+      hydrate(f);
+      root.append(f);
+    }
+    const tail = fragment(u.tail);
+    if (hydrateTail) hydrate(tail);
+    st.tail = [...tail.childNodes];
+    st.tailHtml = u.tail;
+    st.tailHydrated = hydrateTail;
+    root.append(tail);
+  }, [incremental, ref, text, streaming, interactive]);
+
+  useEffect(
+    () => () => {
+      if (state.current) state.current.cancelled = true;
+    },
+    [],
+  );
+}
+
 export function Markdown({
   text,
   streaming = false,
@@ -152,12 +221,16 @@ export function Markdown({
   resolveEmbed,
   className,
 }: MarkdownProps) {
-  const html = useRenderedHtml(text, { streaming, interactive });
+  // A text that is streaming when it mounts is rendered incrementally for the life of this
+  // instance; everything else renders whole, through the shared cache (and the worker when long).
+  const [incremental] = useState(streaming);
+  const html = useRenderedHtml(incremental ? '' : text, { streaming, interactive });
   const ref = useRef<HTMLDivElement>(null);
+  useIncremental(incremental, ref, text, streaming, interactive, resolveEmbed);
 
   useEffect(() => {
     const root = ref.current;
-    if (!root) return;
+    if (!root || incremental) return;
     let cancelled = false;
     const isCancelled = () => cancelled;
     if (resolveEmbed) hydrateEmbeds(root, resolveEmbed, isCancelled);
@@ -166,7 +239,7 @@ export function Markdown({
     return () => {
       cancelled = true;
     };
-  }, [html, interactive, resolveEmbed]);
+  }, [html, interactive, resolveEmbed, incremental]);
 
   const linkFor = (event: MouseEvent<HTMLElement>): LinkTarget | null => {
     const anchor = (event.target as Element).closest<HTMLElement>('a[data-md-kind]');
@@ -192,7 +265,7 @@ export function Markdown({
       onAuxClick={(event) => {
         linkFor(event);
       }}
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={incremental ? undefined : { __html: html }}
     />
   );
 }

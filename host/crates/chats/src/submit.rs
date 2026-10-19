@@ -286,10 +286,24 @@ pub fn chat_send(
                     return Ok(Err(ApiError::from(r)));
                 }
             }
-            if let Some(block) = block {
+            // The panel-context block, then the section naming the files, folders and
+            // chats attached by reference; both ride the prompt as context, not as the user's text.
+            let refs = if attachments.is_empty() {
+                Vec::new()
+            } else {
+                crate::attachments::refs_for(tx, &sid)?
+            };
+            let context_text: Vec<String> = [
+                block.map(|b| b.text),
+                crate::attachments::refs_section(&refs),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !context_text.is_empty() {
                 tx.execute(
                     "INSERT INTO submission_context(submission_id, text) VALUES (?1, ?2)",
-                    params![sid, block.text],
+                    params![sid, context_text.join("\n\n")],
                 )?;
             }
             // The fallback title: the first non-blank line, at most 72
