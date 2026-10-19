@@ -128,6 +128,9 @@ struct LiveMsg {
     text: String,
     thinking: String,
     timestamp: i64,
+    /// The row as last written to the database, and when (streaming writes are throttled).
+    row: Option<MessageRow>,
+    written: Option<Instant>,
 }
 
 struct LiveToolRec {
@@ -157,6 +160,8 @@ struct Actor {
     stopping: Option<StopState>,
     stream: HashMap<String, LiveMsg>,
     dirty: BTreeSet<String>,
+    /// Streaming rows whose database copy is behind what the UI was sent.
+    db_behind: BTreeSet<String>,
     tools: HashMap<String, LiveToolRec>,
     log: Option<SessionLog>,
     worker_error: Option<String>,
@@ -179,7 +184,12 @@ struct Actor {
     relaunch_on_idle: bool,
     /// The turn-opening send being timed, until its first output ([`crate::timeline`]).
     timeline: Option<crate::timeline::SendTimeline>,
+    /// The last worker start that failed: pre-warm waits [`PREWARM_RETRY`] before trying again.
+    spawn_failed_at: Option<Instant>,
 }
+
+/// After a failed worker start, typing does not start another for this long (sends still do).
+const PREWARM_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
     let (tx, rx) = mpsc::channel(64);
@@ -236,6 +246,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         stopping: None,
         stream: HashMap::new(),
         dirty: BTreeSet::new(),
+        db_behind: BTreeSet::new(),
         tools: HashMap::new(),
         log: None,
         worker_error: None,
@@ -251,6 +262,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         launched_long: None,
         relaunch_on_idle: false,
         timeline: None,
+        spawn_failed_at: None,
     };
     sh.handle.spawn(actor.run(rx));
     ActorHandle { tx, live }
@@ -270,6 +282,16 @@ const MAX_SUBAGENTS: usize = 30;
 const LIVE_REPORT_BYTES: usize = 2 * 1024;
 /// A settled subagent's report on its tool row.
 const ROW_REPORT_BYTES: usize = 16 * 1024;
+
+/// `subagents_running` follows every status change in the same lock, so no reader sees the two
+/// disagree.
+fn recount(t: &mut ThreadState) {
+    t.subagents_running = t
+        .subagents
+        .iter()
+        .filter(|s| s.status == SubagentStatus::Running)
+        .count() as u32;
+}
 
 fn set_report(s: &mut Subagent, report: Option<&str>, max: usize) {
     s.report = report.map(|r| session_log::cut(r, max).to_owned());
@@ -297,7 +319,7 @@ impl Actor {
                 },
                 out = recv_out(&mut self.out) => self.on_output(out),
                 _ = async { match next { Some(t) => tokio::time::sleep_until(t).await, None => std::future::pending().await } } => self.on_timers(),
-                _ = flush.tick(), if !self.dirty.is_empty() => self.flush(),
+                _ = flush.tick(), if !self.dirty.is_empty() || !self.db_behind.is_empty() => self.flush(),
             }
             if self.finished {
                 break;
@@ -361,12 +383,7 @@ impl Actor {
         let thread = {
             let mut live = self.live.lock().unwrap();
             live.thread.revision = rev;
-            live.thread.subagents_running = live
-                .thread
-                .subagents
-                .iter()
-                .filter(|s| s.status == SubagentStatus::Running)
-                .count() as u32;
+            recount(&mut live.thread);
             live.thread.live_tools = {
                 let mut v: Vec<LiveTool> = self
                     .tools
@@ -589,35 +606,78 @@ impl Actor {
             send_behavior: sb,
             host: crate::hostcalls::launch(&self.sh, &self.chat_id, &chat.cwd),
         };
-        let asked = now();
-        match self.sh.spawner.spawn(&req) {
-            Ok((link, out)) => {
-                if let Some(t) = self.timeline.as_mut() {
-                    t.spawn = Some((asked, now()));
+        if let Some(t) = self.timeline.as_mut() {
+            t.spawn = Some(now());
+        }
+        // The start itself runs on the blocking pool; a failure comes back as `SpawnFailed`.
+        let (link, out) = crate::spawning::spawn_off_actor(&self.sh, req);
+        self.link = Some(link);
+        self.out = Some(out);
+        self.ready = false;
+        self.worker_error = None;
+        {
+            let mut live = self.live.lock().unwrap();
+            live.has_worker = true;
+            live.context_gen += 1;
+        }
+        // get_state goes out first, ahead of anything deferred.
+        let id = self.new_id();
+        self.pending.insert(id.clone(), Pending::Ready);
+        if let Some(l) = &self.link {
+            l.send(&json!({"type": "get_state", "id": id}));
+        }
+        true
+    }
+
+    /// The worker never started: nothing reached it, so its prompts are refused (not uncertain)
+    /// and the run fails with the reason, as a start that failed on the spot always did.
+    fn on_spawn_failed(&mut self, error: String) {
+        log::error!("chat {}: {error}", self.chat_id);
+        self.spawn_failed_at = Some(Instant::now());
+        self.link = None;
+        self.out = None;
+        self.ready = false;
+        self.deferred.clear();
+        self.live.lock().unwrap().has_worker = false;
+        for (_, p) in std::mem::take(&mut self.pending) {
+            match p {
+                Pending::Prompt { submission_id } => {
+                    self.set_submission(&submission_id, SubmissionState::Rejected)
                 }
-                self.link = Some(link);
-                self.out = Some(out);
-                self.ready = false;
-                self.worker_error = None;
-                {
-                    let mut live = self.live.lock().unwrap();
-                    live.has_worker = true;
-                    live.context_gen += 1;
+                Pending::Withdraw { reply, .. } | Pending::ToolStop { reply } => {
+                    let _ = reply.send(Err(error.clone()));
                 }
-                // get_state goes out first, ahead of anything deferred.
-                let id = self.new_id();
-                self.pending.insert(id.clone(), Pending::Ready);
-                if let Some(l) = &self.link {
-                    l.send(&json!({"type": "get_state", "id": id}));
+                Pending::Compact { reply } => {
+                    let _ = reply.send(Err(error.clone()));
                 }
-                true
-            }
-            Err(e) => {
-                log::error!("chat {}: {e}", self.chat_id);
-                self.fail_run(&e);
-                false
+                Pending::Catalogue { reply } => {
+                    let _ = reply.send(false);
+                }
+                _ => {}
             }
         }
+        self.clear_timer(|t| matches!(t, Timer::Ack(_) | Timer::ModelAck(_)));
+        self.fail_run(&error);
+        if let Some(s) = self.stopping.take() {
+            let status = self.status();
+            for r in s.replies {
+                let _ = r.send(status);
+            }
+        }
+        for r in self.shutdown_replies.drain(..) {
+            let _ = r.send(());
+        }
+        let quitting = self
+            .sh
+            .shutting_down
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if self.retiring || quitting {
+            self.finished = true;
+        }
+        if std::mem::take(&mut self.edit_waiting) {
+            self.apply_edit();
+        }
+        self.emit_thread();
     }
 
     fn on_ready(&mut self, resp: &Map<String, Value>) {
@@ -728,10 +788,11 @@ impl Actor {
                 }
             }
         }
+        // Before the quit sequence hears the worker is gone, so the app cannot exit first.
+        self.end_running_subagents("The worker stopped before this agent finished.");
         for r in self.shutdown_replies.drain(..) {
             let _ = r.send(());
         }
-        self.end_running_subagents("The worker stopped before this agent finished.");
         if std::mem::take(&mut self.edit_waiting) {
             self.apply_edit();
         }
@@ -796,7 +857,7 @@ impl Actor {
             &self.chat_id,
             None,
         );
-        self.flush();
+        self.flush_rows(true);
         let keys: Vec<String> = self.stream.keys().cloned().collect();
         for key in &keys {
             let id = self.chat_id.clone();
@@ -1114,7 +1175,7 @@ impl Actor {
                     return;
                 }
                 self.shutdown_replies.push(reply);
-                self.flush();
+                self.flush_rows(true);
                 if let Some(l) = &self.link {
                     l.send(&json!({"type": "shutdown"}));
                 }
@@ -1176,7 +1237,10 @@ impl Actor {
                     .sh
                     .shutting_down
                     .load(std::sync::atomic::Ordering::SeqCst);
-                if self.link.is_none() && !self.status().is_busy() && !quitting {
+                let backing_off = self
+                    .spawn_failed_at
+                    .is_some_and(|t| t.elapsed() < PREWARM_RETRY);
+                if self.link.is_none() && !self.status().is_busy() && !quitting && !backing_off {
                     self.ensure_worker();
                 }
             }
@@ -1457,6 +1521,7 @@ impl Actor {
                 };
                 self.on_exit(reason)
             }
+            Some(WorkerOutput::SpawnFailed(e)) => self.on_spawn_failed(e),
             Some(WorkerOutput::Fault(f)) => {
                 self.worker_error = Some(format!(
                     "The worker sent a broken record ({f}), so Helm stopped it."
@@ -1502,6 +1567,8 @@ impl Actor {
                             text: String::new(),
                             thinking: String::new(),
                             timestamp: now(),
+                            row: None,
+                            written: None,
                         },
                     );
                     self.dirty.insert(key);
@@ -1512,6 +1579,7 @@ impl Actor {
                 let key = self.msg_key(&str_of(&v, "messageId").unwrap_or_default());
                 let delta = v.get("delta").cloned().unwrap_or_default();
                 if let Some(m) = self.stream.get_mut(&key) {
+                    let first = m.text.is_empty() && m.thinking.is_empty();
                     let text = str_of(&delta, "text").unwrap_or_default();
                     match str_of(&delta, "type").as_deref() {
                         Some("text_delta") => m.text.push_str(&text),
@@ -1519,6 +1587,10 @@ impl Actor {
                         _ => {}
                     }
                     self.dirty.insert(key);
+                    if first {
+                        // The message's first words go out now, not on the next tick.
+                        self.flush();
+                    }
                 }
             }
             "message_end" => self.on_message_end(&v),
@@ -1769,6 +1841,7 @@ impl Actor {
                             .unwrap_or(0);
                         list.remove(i);
                     }
+                    recount(&mut live.thread);
                 }
                 self.emit_thread();
             }
@@ -1804,7 +1877,8 @@ impl Actor {
                 let report = str_of(v, "report").filter(|r| !r.is_empty());
                 let ended = {
                     let mut live = self.live.lock().unwrap();
-                    live.thread
+                    let ended = live
+                        .thread
                         .subagents
                         .iter_mut()
                         .find(|x| x.tool_call_id == id && x.status == SubagentStatus::Running)
@@ -1819,7 +1893,9 @@ impl Actor {
                             let full = s.clone();
                             set_report(s, report.as_deref(), LIVE_REPORT_BYTES);
                             full
-                        })
+                        });
+                    recount(&mut live.thread);
+                    ended
                 };
                 if let Some(mut full) = ended {
                     set_report(&mut full, report.as_deref(), ROW_REPORT_BYTES);
@@ -1854,7 +1930,8 @@ impl Actor {
         let ended: Vec<Subagent> = {
             let mut live = self.live.lock().unwrap();
             let t = now();
-            live.thread
+            let ended = live
+                .thread
                 .subagents
                 .iter_mut()
                 .filter(|s| s.status == SubagentStatus::Running)
@@ -1865,7 +1942,9 @@ impl Actor {
                     s.error = Some(reason.to_owned());
                     s.clone()
                 })
-                .collect()
+                .collect();
+            recount(&mut live.thread);
+            ended
         };
         for s in &ended {
             self.persist_subagent(s);
@@ -1979,6 +2058,7 @@ impl Actor {
         let key = self.msg_key(&mid);
         let live = self.stream.remove(&key);
         self.dirty.remove(&key);
+        self.db_behind.remove(&key);
         if text.is_empty() {
             if let Some(l) = &live {
                 text = l.text.clone();
@@ -2018,12 +2098,52 @@ impl Actor {
     }
 
     fn flush(&mut self) {
+        self.flush_rows(false);
+    }
+
+    /// Send the UI every dirty streaming row (one `message` event). The database copy
+    /// is written at most every [`crate::runtime::Limits::stream_db`] (not an fsync
+    /// per 80 ms tick; `synchronous=FULL` stays), when the row starts, and with `force` (the run
+    /// ends, quit); in between the row goes out from memory. The session log is written at
+    /// `message_end` as before.
+    fn flush_rows(&mut self, force: bool) {
+        let every = self.sh.cfg.limits.stream_db;
+        let due: Vec<String> = self
+            .db_behind
+            .iter()
+            .filter(|k| {
+                force
+                    || self
+                        .stream
+                        .get(*k)
+                        .and_then(|m| m.written)
+                        .is_none_or(|t| t.elapsed() >= every)
+            })
+            .cloned()
+            .collect();
+        self.dirty.extend(due);
         if self.dirty.is_empty() {
             return;
         }
         let keys: Vec<String> = std::mem::take(&mut self.dirty).into_iter().collect();
+        let mut rows = Vec::with_capacity(keys.len());
         for k in &keys {
-            if let Some(m) = self.stream.get(k) {
+            let Some(m) = self.stream.get(k) else {
+                continue;
+            };
+            // A row big enough to be cut into an artifact always takes the database path.
+            let small = m.text.len() + m.thinking.len() <= session_log::ROW_TEXT_BYTES;
+            let fresh = m.written.is_some_and(|t| t.elapsed() < every);
+            if let Some(cached) = m.row.as_ref().filter(|_| !force && small && fresh) {
+                let mut row = cached.clone();
+                row.text = m.text.clone();
+                row.thinking = m.thinking.clone();
+                row.revision = self.sh.clock.next();
+                rows.push(row);
+                self.db_behind.insert(k.clone());
+                continue;
+            }
+            {
                 let row = RowWrite {
                     source_key: k.clone(),
                     role: match m.role {
@@ -2042,9 +2162,28 @@ impl Actor {
                 };
                 self.upsert_row(&row);
             }
+            let stored = self
+                .sh
+                .db
+                .snapshot(|t| store::message_by_key(t, &self.chat_id, k))
+                .ok()
+                .flatten();
+            if let Some(m) = self.stream.get_mut(k) {
+                m.row = stored.clone();
+                m.written = Some(Instant::now());
+            }
+            self.db_behind.remove(k);
+            rows.extend(stored);
         }
-        // One `message` event per flush.
-        self.emit_rows(&keys);
+        if rows.is_empty() {
+            return;
+        }
+        let rev = self.sh.clock.next();
+        self.emit(ChatEvent::Message {
+            chat_id: self.chat_id.clone(),
+            revision: rev,
+            rows,
+        });
     }
 
     fn on_response(&mut self, r: Map<String, Value>) {

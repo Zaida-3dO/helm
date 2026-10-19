@@ -8,7 +8,9 @@ breaks those checks, so change them only together with the checks. Everything el
 |---|---|---|
 | `new-chat` | "New chat" nav entry in the sidebar; opens the new-chat page (in the open chat's project) | |
 | `newchat-page` | The new-chat page: shown while a draft is open; nothing exists on the host until the first send | |
-| `newchat-card`, `newchat-project`, `newchat-folder`, `newchat-folder-menu` | Its card, the project picker trigger, the folder (place line) button and the folder menu | |
+| `newchat-card`, `newchat-project`, `newchat-folder`, `newchat-folder-menu`, `newchat-copy-path` | Its card, the project picker trigger, the folder (place line) button, the folder menu and the copy-path button | `newchat-copy-path` carries `data-copied` for 1.3 s after a copy |
+| `add-project`, `add-project-mode`, `add-project-path`, `add-project-name`, `add-project-submit`, `add-project-error` | The Add project dialog (Ctrl+O): the Existing folder / New folder switch, its fields, submit and error line | |
+| `primary-folder`, `primary-folder-path`, `primary-folder-save`, `primary-folder-error` | The Primary folder… dialog | |
 | `chat-item` | One chat row in the sidebar | `data-chat-id`, `data-status`, `data-depth` (chat nesting 0–2), `data-group` (the project it is shown under) |
 | `sidebar-group` | One project header in the sidebar | `data-project-id`, `data-kind` (`folder` `board`), `data-depth` (project nesting 0–2) |
 | `sidebar-empty-toggle` | "Show N empty projects" / "Hide N empty projects" row at the end of the projects view | `aria-pressed` (empty projects shown) |
@@ -46,6 +48,9 @@ breaks those checks, so change them only together with the checks. Everything el
 | `queue-resume` | Resume on a held queue (after a restart) | |
 | `background-chip` | Background-tasks chip in the activity dock | `data-count` = number of tasks |
 | `activity-dock` | The live activity dock | |
+| `subagent-card` | The subagent card under an Agent/Task tool row | `data-status` (`running` `completed` `failed` `stopped`), `data-tool-call` (the Agent call id) |
+| `subagent-status`, `subagent-preview`, `subagent-detail`, `subagent-stop` | A subagent card's status mark, its preview line (step, error or result), its opened detail, and its Stop (only when the worker reports `stopSubagent`) | status: `data-status` |
+| `subagent-chip`, `subagent-roster`, `subagent-roster-row` | The dock's subagent chip, its "Across this chat" roster and one row in it | chip: `data-running` (count); row: `data-status` |
 | `dock-tool-stop` | Stop beside the latest tool line in the dock | |
 | `interrupted-banner` / `recover-draft` | Banner on an interrupted chat / its Recover draft button | |
 | `composer-error` | A refused send's message (the draft is kept) | |

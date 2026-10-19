@@ -22,16 +22,38 @@ export const PICKABLE_MODES: { value: string; title: string; detail: string }[] 
   { value: 'plan', title: 'Plan mode', detail: 'Reads and plans; changes nothing' },
 ];
 
-/** Picks made in this window, by chat, until the live mode catches up (survives a remount). */
-const picks = new Map<string, string>();
+/** A pick waiting for the CLI to report it, and how many turn ends it may wait through. */
+export interface Pick {
+  mode: string;
+  /** A pick made while idle applies before the next turn (1); mid-turn, before the one after (2). */
+  turnsLeft: number;
+}
 
-export function pickedMode(chatId: string): string | null {
+/** Picks made in this window, by chat, until the live mode catches up (survives a remount). */
+const picks = new Map<string, Pick>();
+
+export function pickedMode(chatId: string): Pick | null {
   return picks.get(chatId) ?? null;
 }
 
-export function setPickedMode(chatId: string, mode: string | null): void {
-  if (mode) picks.set(chatId, mode);
+export function setPickedMode(chatId: string, pick: Pick | null): void {
+  if (pick) picks.set(chatId, pick);
   else picks.delete(chatId);
+}
+
+/** A new pick: it waits through the current turn as well when one is running. */
+export function newPick(mode: string, busy: boolean): Pick {
+  return { mode, turnsLeft: busy ? 2 : 1 };
+}
+
+/**
+ * At a turn's end: a pick the CLI has had its chance to take but did not report was refused (it
+ * keeps its mode), so the chip stops showing it.
+ */
+export function afterTurn(pick: Pick | null, live: string | null): { pick: Pick | null; refused: boolean } {
+  if (!pick || pick.mode === live) return { pick: null, refused: false };
+  const left = pick.turnsLeft - 1;
+  return left > 0 ? { pick: { ...pick, turnsLeft: left }, refused: false } : { pick: null, refused: true };
 }
 
 /**

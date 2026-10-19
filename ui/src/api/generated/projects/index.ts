@@ -14,6 +14,7 @@ export type { ProjectListArgs } from './ProjectListArgs.ts';
 export type { ProjectNode } from './ProjectNode.ts';
 export type { ProjectUpdateArgs } from './ProjectUpdateArgs.ts';
 export type { RowAttention } from './RowAttention.ts';
+export type { RowPreview } from './RowPreview.ts';
 export type { SidebarPage } from './SidebarPage.ts';
 export type { SidebarPageArgs } from './SidebarPageArgs.ts';
 export type { SidebarRow } from './SidebarRow.ts';

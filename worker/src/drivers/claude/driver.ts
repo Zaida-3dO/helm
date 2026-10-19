@@ -124,6 +124,8 @@ export class ClaudeDriver implements Driver {
   private pendingPermission: string | undefined;
   /** The mode in force since the user's first pick (undefined: never picked, the launch mode rules). */
   private pickedMode: string | undefined;
+  /** The permission mode the host last heard from this worker. */
+  private reportedMode: string | undefined;
   private resolved: Resolved | undefined;
   private readonly longCommands: LongCommandPolicy;
   private readonly liveTools = new Map<string, LiveTool>();
@@ -275,8 +277,12 @@ export class ClaudeDriver implements Driver {
 
   /** Events from the translator, with the tool bookkeeping the send-behaviour controls need. */
   private onTranslated(e: Json): void {
-    // After a pick, the CLI's own mode changes (leaving plan mode) count as the mode in force.
-    if (e.type === "permission_mode" && this.pickedMode !== undefined && typeof e.mode === "string") this.pickedMode = e.mode;
+    // The CLI's mode reports are read first-hand in onRecord (noteCliMode); the translator's copy is
+    // a duplicate unless it says something the host has not heard.
+    if (e.type === "permission_mode") {
+      if (e.mode === this.reportedMode) return;
+      this.reportedMode = typeof e.mode === "string" ? e.mode : undefined;
+    }
     if (e.type === "tool_execution_start") {
       const id = String(e.toolCallId);
       const args = obj(e.args);
@@ -328,9 +334,28 @@ export class ClaudeDriver implements Driver {
     try {
       await this.control({ subtype: "set_permission_mode", mode }, this.limits.modelAckMs);
       this.pickedMode = mode;
+      this.reportedMode = mode;
       this.ch.emit({ type: "permission_mode", mode });
     } catch (e) {
       this.ch.emit({ type: "notice", text: `Could not change the permission mode to ${mode}: ${(e as Error).message}` });
+      // The host forgets the refused pick (or goes back to the last one that took), so the chat's
+      // next worker does not try it again.
+      this.ch.emit({ type: "permission_mode_kept", mode: this.pickedMode ?? null });
+    }
+  }
+
+  /**
+   * A mode Claude Code reported itself (system init or status). After a pick it is the mode in
+   * force, and the host keeps it for the chat's next worker (leaving plan mode is not undone).
+   */
+  private noteCliMode(mode: string): void {
+    if (this.pickedMode !== undefined && mode !== this.pickedMode) {
+      this.pickedMode = mode;
+      this.ch.emit({ type: "permission_mode_kept", mode });
+    }
+    if (mode !== this.reportedMode) {
+      this.reportedMode = mode;
+      this.ch.emit({ type: "permission_mode", mode });
     }
   }
 
@@ -458,6 +483,7 @@ export class ClaudeDriver implements Driver {
         if (rec.subtype === "init" && typeof rec.model === "string") this.model = rec.model;
         // Servers Claude Code loads natively are skipped by Helm's own client.
         if (rec.subtype === "init") this.mcp?.noteNative(nativeFromInit(rec));
+        if ((rec.subtype === "init" || rec.subtype === "status") && typeof rec.permissionMode === "string") this.noteCliMode(rec.permissionMode);
         this.onTaskRecord(rec);
         this.translator.handle(rec);
         return;

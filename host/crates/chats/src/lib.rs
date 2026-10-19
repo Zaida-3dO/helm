@@ -53,6 +53,7 @@ pub mod seams;
 pub mod search_source;
 pub mod send_behavior;
 pub mod session_log;
+mod spawning;
 pub mod store;
 pub mod submit;
 mod timeline;

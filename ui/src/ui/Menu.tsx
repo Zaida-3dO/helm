@@ -6,14 +6,17 @@ import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from './controls.tsx';
 import { useLayer } from './hooks.ts';
+import { keys } from './keys.ts';
 import { nextIndex, placeAtPoint } from './place.ts';
 
 export interface MenuItem {
   id: string;
   label: ReactNode;
   icon?: ReactNode;
-  /** A chord hint, shown right-aligned. */
+  /** A chord hint, shown right-aligned. Prefer `command`, which can never go stale. */
   shortcut?: string;
+  /** A key-registry command id: the hint shows its live chord (and nothing when it is unbound). */
+  command?: string;
   disabled?: boolean;
   danger?: boolean;
   /** A separator above this item. */
@@ -57,6 +60,7 @@ export function ContextMenu({ x, y, items, onClose, label, testId }: ContextMenu
     it.onSelect?.();
   };
   const disabled = items.map((i) => !!i.disabled);
+  const hint = (it: MenuItem) => (it.command !== undefined ? keys.chordFor(it.command) : it.shortcut);
   return createPortal(
     <>
       <div className="ui-dismiss" onMouseDown={onClose} onContextMenu={(e) => (e.preventDefault(), onClose())} />
@@ -106,7 +110,7 @@ export function ContextMenu({ x, y, items, onClose, label, testId }: ContextMenu
             >
               <span className="ui-menu-icon">{it.checked ? <Icon name="check" /> : it.icon}</span>
               <span className="ui-menu-label">{it.label}</span>
-              {it.shortcut && <kbd>{it.shortcut}</kbd>}
+              {hint(it) && <kbd>{hint(it)}</kbd>}
               {it.submenu && <Icon name="chevron-right" size={12} />}
             </button>
             {it.submenu && sub === i && (

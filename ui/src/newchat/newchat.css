@@ -102,6 +102,29 @@
   font-size: 11px;
 }
 
+.nc-copy {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--secondary);
+  cursor: var(--cursor-pointer, pointer);
+}
+.nc-copy:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.nc-copy[data-copied] {
+  color: var(--accent);
+  transition: color 160ms ease-out;
+}
+
 .nc-hint {
   flex: none;
   white-space: nowrap;
@@ -124,4 +147,43 @@
 
 .nc-dock {
   flex: none;
+}
+
+/* Add project and Primary folder… dialogs. */
+.nc-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 20px 16px;
+}
+.nc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+.nc-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.nc-row .ui-input {
+  flex: 1;
+  min-width: 0;
+}
+.nc-parent {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 13px;
+}
+.nc-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--error);
 }

@@ -8,6 +8,7 @@ import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
 import type { ChatOps } from '../api/ops.ts';
 import { projectOps, type BoardSyncState, type ProjectNode, type SidebarRow, type SidebarView } from '../api/projects.ts';
+import type { RowPreview } from '../api/generated/projects/index.ts';
 import type { AttentionSummary } from '../api/types.ts';
 import type { ChatStore } from '../state/store.ts';
 import { SETTINGS_DIALOG } from '../settings/index.ts';
@@ -15,7 +16,7 @@ import { SEARCH_DIALOG } from '../search/index.ts';
 import { AttentionInbox, inboxRows, nextAttention } from '../attention/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, ContextMenu, Dialog, TextInput, useBinding, type MenuItem } from '../ui/index.ts';
-import { SidebarActions } from './actions.ts';
+import { SidebarActions, compactChat } from './actions.ts';
 import { SidebarData, errorText } from './data.ts';
 import { dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
 import { chatMenuItems, projectMenuItems } from './menus.ts';
@@ -42,6 +43,7 @@ import {
   IconX,
 } from '../ui/icons.tsx';
 import { withChatIcons, withProjectIcons } from './menuIcons.tsx';
+import { StarMark, WorkingFace } from '../ui/status/index.ts';
 import { openNewChat } from '../newchat/index.ts';
 import { ATTENTION_LABEL, age, trailingIndicator } from './status.ts';
 import { startSyncTriggers, syncDisplay, type SyncHost } from './sync.ts';
@@ -233,6 +235,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       {
         fork: () => void act.fork(row),
         rename: () => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, onSave: (t) => void act.rename(row, t) }),
+        compact: () => void compactChat(ops, row.chatId, setError),
         moveTo: (id) => void act.moveTo(row, id),
         nestUnder: (id) => {
           userCollapsed.current.delete(id);
@@ -283,6 +286,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     id: 'attention.next',
     title: 'Next chat needing attention',
     defaultKeys: 'Ctrl+Alt+A',
+    // AltGr arrives as Ctrl+Alt on Windows: never take a typed character from a text field.
+    inInputs: false,
     run: () => {
       const id = nextAttention(inboxRows(data.snapshot.attention), selected);
       if (id) onSelect(id);
@@ -553,6 +558,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           preview={preview}
           project={projectsById.get(preview.row.groupProjectId)}
           now={now}
+          load={(id) => pops.rows([id]).then((rs) => rs[0]?.preview ?? null)}
           onEnter={() => clearTimeout(previewTimer.current)}
           onLeave={leaveRow}
           onOpen={() => {
@@ -809,7 +815,10 @@ function Indicator({ row }: { row: SidebarRow }) {
       aria-label={label}
       title={label}
     >
-      {a === 'pinned' ? <IconPin size={11} /> : null}
+      {a === 'pinned' && <IconPin size={11} />}
+      {a === 'running' && <WorkingFace size="compact" state={row.status === 'stopping' ? 'stopping' : 'working'} className="sb-ind-face" />}
+      {a === 'lingering' && <WorkingFace size="compact" state="calm" className="sb-ind-face" />}
+      {a === 'unread' && <StarMark size={26} className="sb-ind-star" />}
     </span>
   );
 }
@@ -986,6 +995,7 @@ function PreviewCard({
   preview,
   project,
   now,
+  load,
   onEnter,
   onLeave,
   onOpen,
@@ -993,13 +1003,42 @@ function PreviewCard({
   preview: Preview;
   project: ProjectNode | undefined;
   now: number;
+  /** The row's hover preview from the host (`sidebar_rows`): last reply and current step. */
+  load: (chatId: string) => Promise<RowPreview | null>;
   onEnter: () => void;
   onLeave: () => void;
   onOpen: () => void;
 }) {
   const r = preview.row;
   const live = r.status === 'starting' || r.status === 'running' || r.status === 'stopping';
-  const state = r.stalled ? 'Running, no output for a while' : live ? 'Running' : r.status === 'interrupted' ? 'Interrupted' : r.unread ? 'Finished, unread' : 'Idle';
+  const [got, setGot] = useState<{ chatId: string; preview: RowPreview | null; failed: boolean } | null>(null);
+  useEffect(() => {
+    let on = true;
+    load(r.chatId)
+      .then((p) => on && setGot({ chatId: r.chatId, preview: p, failed: false }))
+      .catch(() => on && setGot({ chatId: r.chatId, preview: null, failed: true }));
+    return () => {
+      on = false;
+    };
+    // Re-read when the row changes (a new reply or step arrives as a new row revision).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [r.chatId, r.revision, r.status, r.updatedAt]);
+  const mine = got?.chatId === r.chatId ? got : null;
+  const step = live ? mine?.preview?.step : null;
+  const state = r.stalled
+    ? 'Running, no output for a while'
+    : live
+      ? (step ?? 'Running')
+      : r.status === 'interrupted'
+        ? 'Interrupted'
+        : r.unread
+          ? 'Finished, unread'
+          : 'Finished';
+  const body = !mine
+    ? 'Loading preview…'
+    : mine.failed
+      ? 'Preview unavailable. Open the chat to view this task.'
+      : (mine.preview?.excerpt ?? (live ? 'Waiting for the first update…' : 'No messages yet.'));
   return (
     <div
       className="sb-preview"
@@ -1017,8 +1056,12 @@ function PreviewCard({
         {live && <span className="sb-preview-live">● Live</span>}
       </div>
       <div className="sb-preview-body">
-        <span>{r.folderPath}</span>
-        <span>Last activity {age(r.lastActivityAt || r.updatedAt, now)}</span>
+        <p className="sb-preview-excerpt" data-empty={mine?.preview?.excerpt ? undefined : 'true'}>
+          {body}
+        </p>
+        <span className="sb-preview-meta">
+          {r.folderPath} · Last activity {age(r.lastActivityAt || r.updatedAt, now)}
+        </span>
       </div>
       <div className="sb-preview-foot">
         <span>{state}</span>

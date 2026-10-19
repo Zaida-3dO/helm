@@ -24,6 +24,7 @@ import { IconFork } from './ui/icons.tsx';
 import { accessoriesAt } from './composer/slots.ts';
 import { recallPrompts } from './composer/recall.ts';
 import { SelectionToolbar } from './transcript/SelectionToolbar.tsx';
+import { FindBar } from './transcript/FindBar.tsx';
 import { registerSelectionAction } from './transcript/slots.ts';
 import { handleLink } from './panel/links.ts';
 import { openInPanel } from './panel/registry.ts';
@@ -248,6 +249,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       )}
       <div className="transcript-box" ref={transcriptBox}>
       <SelectionToolbar chatId={chatId} container={transcriptBox} blocked={interactionOpen} />
+      <FindBar rows={view.rows} container={transcriptBox} onJump={setJumpTo} onClose={() => setJumpTo(null)} />
       <Transcript
         rows={view.rows}
         live={busy}

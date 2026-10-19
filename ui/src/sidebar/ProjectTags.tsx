@@ -47,13 +47,18 @@ export function ProjectTags({ chatId }: { chatId: string | null }) {
 
   if (!chatId || !row) return null;
   const group = projects.find((p) => p.id === row.groupProjectId);
+  // A chat shown under its own folder project is labelled with that project's name, not
+  // "None"; picking another project moves it into that group.
+  const folderProject = projects.find((p) => p.id === row.folderProjectId);
+  const folderName = folderProject?.name ?? baseName(row.folderPath);
   const options: PickerOption<string>[] = [
-    { value: NONE, title: 'None', subtitle: 'Show it under its folder' },
+    { value: NONE, title: folderName, text: folderName, subtitle: 'Its own folder project' },
     ...projects
       .filter((p) => p.kind === 'board' || p.id !== row.folderProjectId)
       .map((p) => ({ value: p.id, title: p.name, text: p.name, subtitle: p.kind === 'board' ? 'Agent Standup' : (p.path ?? 'Local group') })),
   ];
   const value = row.groupProjectId === row.folderProjectId ? NONE : row.groupProjectId;
+  const shown = value === NONE ? folderName : (group?.name ?? folderName);
   const choose = (v: string) => {
     const groupProjectId = v === NONE ? row.folderProjectId : v;
     if (groupProjectId === row.groupProjectId) return;
@@ -64,21 +69,32 @@ export function ProjectTags({ chatId }: { chatId: string | null }) {
   };
   return (
     <div className="sb-tags" data-testid="project-tags">
-      <span className="sb-tag-label">Project</span>
       <Picker
         value={value}
         options={options}
         onChange={choose}
-        label={`Project: ${group?.name ?? 'None'}`}
+        label={`Project: ${shown}`}
+        title="Change this chat's project"
+        display={
+          <>
+            <span className="sb-tag-label">Project:</span>
+            <span className="sb-tag-value">{shown}</span>
+          </>
+        }
         heading="Show this chat under"
         searchable
-        placeholder="None"
         testId="project-tag"
       />
-      <span className="sb-tag-label">Workspace</span>
-      <span className="sb-tag-folder" data-testid="workspace-tag" title={row.folderPath}>
-        {row.folderPath}
+      <span className="sb-tag" data-testid="workspace-tag" title={row.folderPath}>
+        <span className="sb-tag-label">Workspace:</span>
+        <span className="sb-tag-value">{baseName(row.folderPath)}</span>
       </span>
     </div>
   );
+}
+
+/** The last segment of a folder path ("C:\work\app" → "app"). */
+export function baseName(path: string): string {
+  const parts = path.split(/[\\/]+/).filter(Boolean);
+  return parts[parts.length - 1] ?? path;
 }

@@ -827,30 +827,40 @@ pub fn permission_mode_line(mode: &str) -> serde_json::Value {
     json!({"type": "set_permission_mode", "mode": mode})
 }
 
-/// The start line for a chat whose user picked a mode, given the mode the chat's last worker
-/// reported. Once a worker has had the pick, that reported mode wins: it is where the chat really
-/// was (Claude Code leaves plan mode by itself, or refused the pick), so a new worker resumes there
-/// rather than re-entering the old pick.
-pub fn permission_start_line(chat_id: &str, last_live: Option<&str>) -> Option<serde_json::Value> {
+/// The start line for a chat whose user picked a mode: the mode to start its next worker in.
+pub fn permission_start_line(chat_id: &str) -> Option<serde_json::Value> {
     let mut map = picks().lock().unwrap();
     let pick = map.get_mut(chat_id)?;
-    if let Some(live) = last_live.filter(|m| PERMISSION_MODES.contains(m)) {
-        if pick.delivered {
-            pick.mode = live.to_owned();
-        }
-    }
     pick.delivered = true;
     Some(permission_mode_line(&pick.mode))
 }
 
-/// Registers the start line that carries a picked permission mode to every new worker.
+/// A worker's `permission_mode_kept` line: after a pick, the mode the chat is really in (Claude Code
+/// left plan mode, or refused the pick and stayed where it was); `None` drops a pick that never took.
+/// The next worker starts there rather than re-entering the old pick. A pick the user made since,
+/// not yet given to any worker, wins.
+pub fn note_kept_mode(chat_id: &str, mode: Option<&str>) {
+    let mut map = picks().lock().unwrap();
+    let Some(pick) = map.get_mut(chat_id) else {
+        return;
+    };
+    if !pick.delivered {
+        return;
+    }
+    match mode.filter(|m| PERMISSION_MODES.contains(m)) {
+        Some(m) => pick.mode = m.to_owned(),
+        None => {
+            map.remove(chat_id);
+        }
+    }
+}
+
+/// Registers the start line that carries a picked permission mode to every new worker, and the
+/// handler for the worker's `permission_mode_kept` line.
 pub fn register_worker_lines(l: &mut helm_hosttools::WorkerLines) {
-    l.register_start_line(|chat_id, services| {
-        let last = services
-            .get::<ChatRuntime>()
-            .and_then(|rt| rt.live_thread(chat_id))
-            .and_then(|t| t.permission_mode);
-        permission_start_line(chat_id, last.as_deref())
+    l.register_start_line(|chat_id, _| permission_start_line(chat_id));
+    l.register_worker_line("permission_mode_kept", |ctx, v| {
+        note_kept_mode(ctx.chat_id, v.get("mode").and_then(|m| m.as_str()));
     });
 }
 

@@ -14,6 +14,7 @@ import type { SendShortcut } from './composer/keymap.ts';
 import { SETTINGS_DIALOG, SettingsDialog } from './settings/index.ts';
 import './settings/general.tsx';
 import './settings/shell/ShellPane.tsx';
+import './settings/keyboard/index.tsx';
 import './settings/mcp/index.tsx';
 import './settings/usage/index.tsx';
 import './settings/schedules/index.tsx';
@@ -28,6 +29,7 @@ import { KEYBINDINGS_PREF, keys, layers, ToastSlotView } from './ui/index.ts';
 import { ChatStore } from './state/store.ts';
 import { TopBar } from './topbar/TopBar.tsx';
 import { EmptyMain } from './shell/EmptyMain.tsx';
+import { ShellShortcuts } from './shell/Shortcuts.tsx';
 import { TerminalDock } from './terminal/TerminalDock.tsx';
 import { Notifications } from './notifications/Notifications.tsx';
 import { SettingsToast } from './hosttools/SettingsToast.tsx';
@@ -130,6 +132,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
       </main>
       <SidePanel api={shell.api} chatId={chatId} /> {/* side panel */}
       <ToastSlotView />
+      <ShellShortcuts />
       <SettingsToast api={shell.api} bus={shell.bus} onOpenChat={(id) => shell.select(id)} /> {/* settings-change toast */}
       <Notifications />
       <SettingsDialog />

@@ -1,7 +1,7 @@
 // The transcript: rows laid out into turns with folded work, rendered in the
 // virtualised list.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
 import { FoldRow, Row, type RowContext } from './Rows.tsx';
 import { VirtualList } from './VirtualList.tsx';
@@ -30,6 +30,25 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
   const keys = useMemo(() => items.map(itemKey), [items]);
   const times = useMemo(() => turnTimes(items), [items]);
 
+  // A jump into folded work (find in chat) opens that turn first, once per target, so the reader can
+  // fold it again; the list scrolls once the row exists.
+  const revealed = useRef<number | null>(null);
+  useEffect(() => {
+    if (jumpToRowId == null || revealed.current === jumpToRowId) return;
+    revealed.current = jumpToRowId;
+    if (byKey.has(`r:${jumpToRowId}`)) return;
+    const at = rows.findIndex((r) => r.id === jumpToRowId);
+    for (let j = at; j >= 0; j--) {
+      const r = rows[j]!;
+      if (r.role === 'user' && r.details?.mode !== 'steer') {
+        const turn = r.sourceKey;
+        setExpanded((s) => (s.has(turn) ? s : new Set(s).add(turn)));
+        return;
+      }
+    }
+  }, [jumpToRowId, rows, byKey]);
+  const jumpKey = jumpToRowId != null && byKey.has(`r:${jumpToRowId}`) ? `r:${jumpToRowId}` : null;
+
   if (rows.length === 0) {
     return (
       <div className="transcript-empty" data-testid="transcript">
@@ -46,7 +65,7 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
       onLoadOlder={onLoadOlder}
       onJumpLatest={onJumpLatest}
       onFollowChange={onFollowChange}
-      jumpTo={jumpToRowId != null ? `r:${jumpToRowId}` : null}
+      jumpTo={jumpKey}
       render={(k) => {
         const item = byKey.get(k);
         if (!item) return null;

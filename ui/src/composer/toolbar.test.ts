@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { commitPatch, effortLabel, filterRows, modelRows, shortName, stepEffort, triggerLabel } from './modelEffort.ts';
-import { permissionTooltip, pickedMode, setPickedMode, shownMode } from './permission.ts';
+import { afterTurn, newPick, permissionTooltip, pickedMode, setPickedMode, shownMode } from './permission.ts';
 import { sendLabel } from './keymap.ts';
 import type { ModelCatalogue } from '../api/types.ts';
 
@@ -68,8 +68,8 @@ test('the permission chip shows a pick until the CLI reports it, then the live m
   assert.deepEqual(shownMode('plan', 'plan'), { mode: 'plan', pending: false });
   assert.match(permissionTooltip('plan', true), /Applies from the next turn/);
   assert.doesNotMatch(permissionTooltip('plan', false), /next turn/);
-  setPickedMode('c1', 'acceptEdits');
-  assert.equal(pickedMode('c1'), 'acceptEdits');
+  setPickedMode('c1', newPick('acceptEdits', false));
+  assert.equal(pickedMode('c1')?.mode, 'acceptEdits');
   assert.equal(pickedMode('c2'), null);
   setPickedMode('c1', null);
   assert.equal(pickedMode('c1'), null);
@@ -80,4 +80,17 @@ test('the icon Send button names what it will do', () => {
   assert.equal(sendLabel(true, 'asap'), 'Steer');
   assert.equal(sendLabel(true, 'queue'), 'Queue');
   assert.equal(sendLabel(true, 'interrupt'), 'Interrupt');
+});
+
+test('a pick the CLI never reports is dropped at the turn end it should have applied by', () => {
+  // Picked while idle: the next turn applies it, so its end is the deadline.
+  const idle = newPick('default', false);
+  assert.deepEqual(afterTurn(idle, 'default'), { pick: null, refused: false }, 'reported: nothing pending');
+  assert.deepEqual(afterTurn(idle, 'bypassPermissions'), { pick: null, refused: true });
+  // Picked mid-turn: the current turn's end is too early; the next one is the deadline.
+  const mid = newPick('plan', true);
+  const first = afterTurn(mid, 'bypassPermissions');
+  assert.deepEqual(first, { pick: { mode: 'plan', turnsLeft: 1 }, refused: false });
+  assert.deepEqual(afterTurn(first.pick, 'bypassPermissions'), { pick: null, refused: true });
+  assert.deepEqual(afterTurn(null, 'plan'), { pick: null, refused: false });
 });

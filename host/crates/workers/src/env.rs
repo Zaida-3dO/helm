@@ -18,6 +18,19 @@ use std::ffi::OsString;
 
 pub const WORKER_CHAT_ID: &str = "HELM_CHAT_ID";
 pub const WORKER_DATA_ROOT: &str = "HELM_DATA_ROOT";
+/// Node's on-disk compile cache for Helm's own scripts (it about halves the
+/// worker's start). The worker and helpers drop it before starting claude, so nothing the agent
+/// runs writes into Helm's folder.
+pub const NODE_COMPILE_CACHE: &str = "NODE_COMPILE_CACHE";
+
+/// `<data root>/runtime/node-cache`, beside the staged worker.
+pub fn compile_cache_dir(data_root: &str) -> String {
+    std::path::Path::new(data_root)
+        .join("runtime")
+        .join("node-cache")
+        .to_string_lossy()
+        .into_owned()
+}
 
 /// Variables are compared case-insensitively on Windows, so keys are kept upper-cased for lookup
 /// alongside their original spelling.
@@ -205,6 +218,7 @@ pub fn worker_environment(chat_id: &str, data_root: &str) -> EnvMap {
     let mut env = base_environment();
     env.set(WORKER_CHAT_ID, chat_id);
     env.set(WORKER_DATA_ROOT, data_root);
+    env.set(NODE_COMPILE_CACHE, compile_cache_dir(data_root));
     env
 }
 
@@ -258,5 +272,10 @@ mod tests {
         assert_eq!(env.get(WORKER_CHAT_ID), Some("chat-1"));
         assert_eq!(env.get(WORKER_DATA_ROOT), Some("C:\\data"));
         assert!(env.get("PATH").is_some());
+        let cache = env.get(NODE_COMPILE_CACHE).unwrap();
+        assert!(
+            cache.starts_with("C:\\data") && cache.ends_with("node-cache"),
+            "{cache}"
+        );
     }
 }

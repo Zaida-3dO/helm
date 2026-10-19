@@ -9,8 +9,9 @@ export const STRIPPED_UNLESS_API_KEY_MODE = [
   "CLAUDECODE",
 ] as const;
 
-/** Always removed: variables that would make the child look like part of another agent's session. */
-export const ALWAYS_STRIPPED = ["CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"] as const;
+/** Always removed: variables that would make the child look like part of another agent's session,
+ * and Helm's own Node compile cache (set for the worker and helpers only). */
+export const ALWAYS_STRIPPED = ["CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "NODE_COMPILE_CACHE"] as const;
 
 export const FORCED: Readonly<Record<string, string>> = {
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",

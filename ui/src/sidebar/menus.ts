@@ -11,6 +11,8 @@ export const PROJECT_COLOURS = ['red', 'orange', 'yellow', 'green', 'teal', 'blu
 export interface ChatMenuActions {
   fork(): void;
   rename(): void;
+  /** Compact the chat's context (the `chat_compact` op). */
+  compact(): void;
   moveTo(projectId: string): void;
   nestUnder(chatId: string): void;
   topLevel(): void;
@@ -73,6 +75,8 @@ export function chatMenuItems(i: ChatMenuInput, a: ChatMenuActions): MenuItem[] 
   const items: MenuItem[] = [
     { id: 'fork', label: 'Fork chat', shortcut: 'Ctrl+Shift+F', disabled: archivedGroup, onSelect: a.fork },
     { id: 'rename', label: 'Rename chat…', shortcut: 'Ctrl+Alt+R', onSelect: a.rename },
+    // Compacting summarises the conversation so far to free context; not while a turn runs.
+    { id: 'compact', label: 'Compact context', disabled: r.archived || busy, onSelect: a.compact },
     {
       id: 'move',
       label: 'Move to project',

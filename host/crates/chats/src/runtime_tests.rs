@@ -154,6 +154,7 @@ pub fn limits() -> Limits {
         stop: Duration::from_millis(400),
         model_ack: Duration::from_millis(300),
         flush: Duration::from_millis(20),
+        stream_db: Duration::ZERO,
         wait_retry: Duration::from_millis(50),
         max_active: 100,
         max_idle_workers: 20,
@@ -2406,12 +2407,13 @@ async fn a_stalled_flag_left_by_a_crash_is_cleared_and_never_shows_on_an_idle_ch
 }
 
 /// The composer's permission-mode pick reaches the live worker as a
-/// `set_permission_mode` line; a later worker starts in the mode the last one reported (so leaving
-/// plan mode, or a refused pick, is not undone), while a pick made with no worker is what the next
-/// one gets. An unknown mode is refused.
+/// `set_permission_mode` line and is the next worker's start line. A worker's
+/// `permission_mode_kept` line (Claude Code left plan mode, or refused the pick) moves the kept mode,
+/// and a refused first pick is dropped; a pick no worker has had yet is not overridden. An unknown
+/// mode is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_picked_permission_mode_reaches_the_worker_and_its_successors() {
-    use crate::submit::permission_start_line as start;
+    use crate::submit::{note_kept_mode as kept, permission_start_line as start};
     let line = |m: &str| Some(json!({"type": "set_permission_mode", "mode": m}));
     let mut h = harness();
     let (chat, _, mut w) = running_turn(&mut h).await;
@@ -2425,29 +2427,26 @@ async fn a_picked_permission_mode_reaches_the_worker_and_its_successors() {
     assert_eq!(r["mode"], "plan");
     let sent = w.expect("set_permission_mode").await;
     assert_eq!(sent["mode"], "plan");
-    assert_eq!(start(&chat, Some("plan")), line("plan"));
+    assert_eq!(start(&chat), line("plan"));
+    kept(&chat, Some("default"));
     assert_eq!(
-        start(&chat, Some("default")),
+        start(&chat),
         line("default"),
         "the CLI left plan mode: the next worker resumes there"
     );
-    // No worker yet: the pick wins over a stale reported mode, once; then the reported one does.
+    kept(&chat, None);
+    assert_eq!(start(&chat), None, "a refused pick is forgotten");
+    // A pick no worker has had yet is not moved by an older worker's report.
     let other = h.create().await;
-    assert_eq!(start(&other, Some("bypassPermissions")), None, "no pick");
+    assert_eq!(start(&other), None, "no pick");
     h.call(
         "chat_set_permission_mode",
         json!({"chatId": other, "mode": "acceptEdits"}),
     )
     .await
     .unwrap();
-    assert_eq!(
-        start(&other, Some("bypassPermissions")),
-        line("acceptEdits")
-    );
-    assert_eq!(
-        start(&other, Some("bypassPermissions")),
-        line("bypassPermissions")
-    );
+    kept(&other, Some("bypassPermissions"));
+    assert_eq!(start(&other), line("acceptEdits"));
     let err = h
         .call(
             "chat_set_permission_mode",
@@ -2456,4 +2455,7 @@ async fn a_picked_permission_mode_reaches_the_worker_and_its_successors() {
         .await
         .unwrap_err();
     assert_eq!(err.code, "bad_args");
+    let mut l = helm_hosttools::WorkerLines::new();
+    crate::submit::register_worker_lines(&mut l);
+    assert!(l.kinds().contains(&"permission_mode_kept"));
 }

@@ -39,6 +39,10 @@ pub struct Limits {
     pub model_ack: Duration,
     /// The streaming flush tick.
     pub flush: Duration,
+    /// How often a streaming row is written to the database. Every flush tick
+    /// still sends the UI the row; the database gets it at most this often, and when the message
+    /// starts, ends or its run ends.
+    pub stream_db: Duration,
     /// Wait-limit retry when the worker answers `waiting`.
     pub wait_retry: Duration,
     pub max_active: usize,
@@ -58,6 +62,7 @@ impl Default for Limits {
             stop: Duration::from_secs(60),
             model_ack: Duration::from_secs(10),
             flush: Duration::from_millis(80),
+            stream_db: Duration::from_secs(1),
             wait_retry: Duration::from_secs(1),
             max_active: 100,
             max_idle_workers: 20,
@@ -312,7 +317,11 @@ impl ProcessSpawner {
             })
             .filter(|p| p.is_file())
             .ok_or_else(|| format!("Helm could not find its {name} helper."))?;
-        let env = helm_workers::env::base_environment();
+        let mut env = helm_workers::env::base_environment();
+        env.set(
+            helm_workers::env::NODE_COMPILE_CACHE,
+            helm_workers::env::compile_cache_dir(&self.data_root),
+        );
         let node = resolve_node(&NodeLookup::for_worker(&env)).map_err(|e| e.to_string())?;
         let mut job = job.clone();
         let (runtime, _) = ClaudeRuntime::load(&self.profile_dir);

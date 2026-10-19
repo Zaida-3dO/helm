@@ -32,6 +32,9 @@ function readLaunch(file: string | undefined): Launch {
 
 function main(): void {
   markLaunch("mainStart");
+  // Node read its compile cache folder at start-up; nothing this worker starts (claude, MCP
+  // servers, their hooks) should write into Helm's folder.
+  delete process.env.NODE_COMPILE_CACHE;
   let launch: Launch;
   const early = new HostChannel(process.stdout, diag);
   try {

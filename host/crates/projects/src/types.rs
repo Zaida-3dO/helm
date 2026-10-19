@@ -162,6 +162,23 @@ pub struct SidebarRow {
     pub updated_at: i64,
     #[ts(type = "number")]
     pub revision: i64,
+    /// The hover preview. Filled by `sidebar_rows`, which the sidebar calls for one
+    /// row on hover; pages leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub preview: Option<RowPreview>,
+}
+
+/// What a chat's hover preview shows besides its title and state: the opening of the last reply
+/// and, while the chat works, what it is doing now.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RowPreview {
+    /// The last reply's text with whitespace folded, cut to about 280 characters.
+    pub excerpt: Option<String>,
+    /// While starting, running or stopping: "Running <tool>", "Thinking…", "Writing a reply" or
+    /// "Working". `None` when the chat is not busy.
+    pub step: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

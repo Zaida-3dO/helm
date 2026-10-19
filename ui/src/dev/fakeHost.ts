@@ -26,6 +26,7 @@ import { usageFakeOps } from './fake-usage.ts';
 import { itemLinksFakeOps } from './fake-itemlinks.ts';
 import { orchestratorFakeOps } from './fake-orchestrator.ts';
 import { newChatFakeOps } from '../newchat/fake.ts';
+import { runFakeSubagents } from '../transcript/subagents/fake.ts';
 
 type Emit = (payload: unknown) => void;
 
@@ -328,6 +329,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       }
       await tool(c, 'Read', { file_path: 'src/main.ts' }, 'export {}\n', cancelled);
       await tool(c, 'Edit', { file_path: 'src/main.ts', old_string: 'export {}', new_string: 'export const x = 1;\nexport const y = 2;' }, 'ok', cancelled);
+      if (/subagent/i.test(text)) runFakeSubagents(c, { addRow, updateRow, emitThread, uid });
       if (/question/i.test(text)) {
         const questions = ['Which colour?', 'Which size?'];
         const out: string[] = [];

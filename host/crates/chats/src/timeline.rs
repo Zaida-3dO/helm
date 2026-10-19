@@ -9,7 +9,7 @@
 //! because a release build has no console for the log.
 //!
 //! ```text
-//! chat c1: send 1b2c3d4e timeline (ms after saved): dispatched +2, spawn +3..+9, worker +210,
+//! chat c1: send 1b2c3d4e timeline (ms after saved): dispatched +2, spawn +3, worker +210,
 //! claude +260, initialized +301, ready +305, written +307, acked +312, first output +318; cold
 //! ```
 
@@ -31,8 +31,8 @@ pub(crate) struct SendTimeline {
     pub warm: bool,
     /// The worker was started ahead of the send (pre-warm) but was not ready yet.
     pub warming: bool,
-    /// Spawn requested, and the worker process started.
-    pub spawn: Option<(i64, i64)>,
+    /// The worker start was requested (the process start is the worker's `workerStart` mark).
+    pub spawn: Option<i64>,
     pub ready: Option<i64>,
     /// The worker's launch marks (`get_state` response `timing`).
     pub launch: Option<Value>,
@@ -69,8 +69,8 @@ impl SendTimeline {
     pub fn line(&self) -> String {
         let short: String = self.submission_id.chars().take(8).collect();
         let mut parts = vec![format!("dispatched {}", self.rel(self.dispatched))];
-        if let Some((a, b)) = self.spawn {
-            parts.push(format!("spawn {}..{}", self.rel(a), self.rel(b)));
+        if let Some(t) = self.spawn {
+            parts.push(format!("spawn {}", self.rel(t)));
         }
         // Launch marks before the send (a pre-warmed or reused worker) are left out: they are
         // not part of this send's wait.
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn a_cold_send_lists_every_step_relative_to_saved() {
         let mut t = SendTimeline::new("1b2c3d4e-0000", 1_000, 1_002);
-        t.spawn = Some((1_003, 1_009));
+        t.spawn = Some(1_003);
         t.launch = Some(
             json!({"workerStart": 1_210, "claudeSpawned": 1_260, "initialized": 1_301, "ready": 1_305}),
         );
@@ -161,7 +161,7 @@ mod tests {
         t.first_output = Some(1_318);
         assert_eq!(
             t.line(),
-            "send 1b2c3d4e timeline (ms after saved): dispatched +2, spawn +3..+9, worker +210, \
+            "send 1b2c3d4e timeline (ms after saved): dispatched +2, spawn +3, worker +210, \
              claude +260, initialized +301, ready +305, written +307, acked +312, first output +318; cold"
         );
     }

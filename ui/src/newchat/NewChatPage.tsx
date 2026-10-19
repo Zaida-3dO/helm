@@ -10,9 +10,11 @@ import type { SendShortcut } from '../composer/keymap.ts';
 import type { Flushers } from '../shell/quit.ts';
 import { useShell } from '../shell/context.ts';
 import { ContextMenu, Picker, toast, useBinding, type MenuItem, type PickerOption } from '../ui/index.ts';
+import { IconCheck, IconCopy } from '../ui/icons.tsx';
 import { pickFolder } from './api.ts';
 import { draftOps, newChat } from './controller.ts';
 import { folderMenu, folderName, samePath } from './places.ts';
+import { AddProjectDialog, PrimaryFolderDialog } from './ProjectDialogs.tsx';
 import './newchat.css';
 
 const NO_PROJECT = '__none__';
@@ -60,10 +62,18 @@ export function NewChatHost({ flushers, sendShortcut }: { flushers: Flushers; se
   }, [pops, shell.bus]);
 
   useBinding({ id: 'chat.new', title: 'New chat', defaultKeys: 'Ctrl+N', run: () => newChat.show() });
+  useBinding({ id: 'project.add', title: 'Add project', defaultKeys: 'Ctrl+O', run: () => newChat.openDialog({ kind: 'add-project' }) });
 
   useSyncExternalStore(newChat.subscribe, newChat.getVersion);
-  if (!newChat.open || !newChat.draft) return null;
-  return <NewChatPage flushers={flushers} sendShortcut={sendShortcut} />;
+  const d = newChat.dialog;
+  const primaryOf = d?.kind === 'primary-folder' ? newChat.projects.find((p) => p.id === d.projectId) : undefined;
+  return (
+    <>
+      {newChat.open && newChat.draft && <NewChatPage flushers={flushers} sendShortcut={sendShortcut} />}
+      {d?.kind === 'add-project' && <AddProjectDialog />}
+      {primaryOf && <PrimaryFolderDialog key={primaryOf.id} project={primaryOf} />}
+    </>
+  );
 }
 
 function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShortcut: SendShortcut }) {
@@ -120,6 +130,7 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
       }),
     );
     items.push({ id: 'browse', label: 'Choose another folder…', separator: items.length > 0, onSelect: () => void browse() });
+    items.push({ id: 'copy', label: 'Copy path', disabled: !folder, onSelect: () => folder && void copyPath(folder) });
     return items;
   };
 
@@ -162,6 +173,7 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
                 ▾
               </span>
             </button>
+            {folder && <CopyPath path={folder} />}
             {hintFor(source, folder) && <span className="nc-hint">· {hintFor(source, folder)}</span>}
           </div>
         </div>
@@ -180,6 +192,39 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
       </div>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems()} onClose={() => setMenu(null)} label="Folder" testId="newchat-folder-menu" />}
     </div>
+  );
+}
+
+async function copyPath(path: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(path);
+    return true;
+  } catch {
+    toast.show({ kind: 'error', text: 'Could not copy the path.' });
+    return false;
+  }
+}
+
+/** The place line's copy button: a check shows for 1.3 s. */
+function CopyPath({ path }: { path: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 1300);
+    return () => clearTimeout(t);
+  }, [copied]);
+  return (
+    <button
+      type="button"
+      className="nc-copy"
+      data-testid="newchat-copy-path"
+      data-copied={copied || undefined}
+      aria-label={copied ? 'Copied project path' : 'Copy project path'}
+      title="Copy path"
+      onClick={() => void copyPath(path).then((ok) => ok && setCopied(true))}
+    >
+      {copied ? <IconCheck size={11} /> : <IconCopy size={11} />}
+    </button>
   );
 }
 

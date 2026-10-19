@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatElapsed, layout, type Item } from './workBlocks.ts';
+import { estimateItem, formatElapsed, layout, type Item } from './workBlocks.ts';
+import { ESTIMATE } from './virtual.ts';
 import { row } from '../dev/fixtures.ts';
 
 function turn() {
@@ -135,4 +136,20 @@ test('opened work is indented, the shown rows are not', () => {
   };
   assert.equal(ind(2), true);
   assert.equal(ind(5), false);
+});
+
+test('estimateItem guesses by kind and length, and remembers each row', () => {
+  const short = row({ id: 1, role: 'assistant', text: 'ok' });
+  const long = row({ id: 2, role: 'assistant', text: 'word '.repeat(2000) });
+  const items: Item[] = [
+    { kind: 'row', row: short },
+    { kind: 'row', row: long },
+  ];
+  assert.ok(estimateItem(items[1]) > estimateItem(items[0]) * 5);
+  assert.equal(estimateItem(undefined), ESTIMATE);
+  // The same row object gives the same answer without re-reading its text.
+  const frozen = { ...long };
+  const first = estimateItem({ kind: 'row', row: frozen });
+  Object.defineProperty(frozen, 'text', { get: () => assert.fail('text read twice') });
+  assert.equal(estimateItem({ kind: 'row', row: frozen }), first);
 });

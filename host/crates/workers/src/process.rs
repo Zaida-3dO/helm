@@ -42,6 +42,9 @@ pub enum WorkerOutput {
         code: Option<i32>,
         stderr: String,
     },
+    /// The worker never started (the start ran off the caller's task); nothing reached it. The
+    /// text is for the user.
+    SpawnFailed(String),
 }
 
 /// The tail of stderr, bounded.

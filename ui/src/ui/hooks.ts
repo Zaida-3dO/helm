@@ -1,7 +1,7 @@
 // React glue for the layer stack and the key registry.
 
 import { useEffect, useRef, useSyncExternalStore } from 'react';
-import { keys, type Binding } from './keys.ts';
+import { hintLabel, keys, type Binding } from './keys.ts';
 import { layers, type LayerKind } from './layers.ts';
 
 /**
@@ -42,4 +42,9 @@ export function useBinding(b: Binding): void {
 export function useChord(id: string): string | null {
   useSyncExternalStore(keys.subscribe, keys.getVersion);
   return keys.chordFor(id);
+}
+
+/** A tooltip or label with the command's live chord: "Fork chat · Ctrl+Shift+F". */
+export function useHint(label: string, id: string): string {
+  return hintLabel(label, useChord(id));
 }

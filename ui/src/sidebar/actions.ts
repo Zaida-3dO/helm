@@ -7,6 +7,7 @@ import type { ChatOps } from '../api/ops.ts';
 import type { ChatOrganizeArgs, ProjectNode, ProjectOps, SidebarRow } from '../api/projects.ts';
 import type { SidebarData } from './data.ts';
 import { UndoStack } from './undo.ts';
+import { toast } from '../ui/toasts.ts';
 
 export interface ActionDeps {
   api: Api;
@@ -203,5 +204,15 @@ export class SidebarActions {
 
   async redo(): Promise<void> {
     await this.run(() => this.d.undo.redo());
+  }
+}
+
+/** "Compact context": ask the chat's worker to compact; confirm it, or say why it could not. */
+export async function compactChat(ops: Pick<ChatOps, 'compact'>, chatId: string, onError: (message: string) => void): Promise<void> {
+  try {
+    await ops.compact(chatId);
+    toast.show({ kind: 'info', text: 'Context compacted.' });
+  } catch (e) {
+    onError(`Could not compact this chat: ${message(e)}`);
   }
 }

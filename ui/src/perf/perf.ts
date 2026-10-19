@@ -40,7 +40,8 @@ export function watchSends(doc: Document): () => void {
   };
   const onKey = (e: Event) => {
     const k = e as KeyboardEvent;
-    if (k.key !== 'Enter' || k.isComposing) return;
+    // Shift+Enter only adds a line; Ctrl+Shift+Enter (steer) is a send.
+    if (k.key !== 'Enter' || k.isComposing || (k.shiftKey && !k.ctrlKey && !k.metaKey)) return;
     if ((k.target as Element | null)?.closest?.('[data-testid="composer"]')) perf.sendIntent();
   };
   doc.addEventListener('click', onClick, true);

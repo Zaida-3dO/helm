@@ -23,6 +23,7 @@ import {
   type ToolStatus,
 } from './toolKinds.ts';
 import { formatElapsed } from './workBlocks.ts';
+import { SubagentCard } from './subagents/SubagentCard.tsx';
 
 export interface ToolCardProps {
   row: MessageRow;
@@ -136,6 +137,7 @@ export function ToolCard({ row, canStop, onStop }: ToolCardProps) {
         )}
       </div>
       {open && <ToolBody row={row} kind={kind} status={status} source={id.source} rawName={rawName} />}
+      <SubagentCard row={row} />
     </div>
   );
 }

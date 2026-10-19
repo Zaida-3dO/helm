@@ -6,7 +6,7 @@ import { chatMenuItems, nestTargets, projectMenuItems, projectNestTargets, type 
 import { UNDO_LIMIT, UndoStack } from './undo.ts';
 
 const noop = () => undefined;
-const chatActs: ChatMenuActions = { fork: noop, rename: noop, moveTo: noop, nestUnder: noop, topLevel: noop, toggleChildren: noop, markUnread: noop, pin: noop, mute: noop, archive: noop, restore: noop, remove: noop };
+const chatActs: ChatMenuActions = { fork: noop, rename: noop, compact: noop, moveTo: noop, nestUnder: noop, topLevel: noop, toggleChildren: noop, markUnread: noop, pin: noop, mute: noop, archive: noop, restore: noop, remove: noop };
 const projActs: ProjectMenuActions = { newChat: noop, pin: noop, rename: noop, changeIcon: noop, nestUnder: noop, topLevel: noop, archive: noop, restore: noop, colour: noop };
 
 function row(chatId: string, over: Partial<SidebarRow> = {}): SidebarRow {
@@ -88,6 +88,12 @@ test('nest targets exclude itself, its descendants, its parent, other groups and
 test('the chat menu follows state: archive or restore and delete, stop first while busy', () => {
   const ids = (r: SidebarRow) => chatMenuItems({ row: r, projects: [project('g')], siblings: [r], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'projects' }, chatActs).map((i) => i.id);
   assert.ok(ids(row('a')).includes('archive'));
+  // Compact context: offered on an idle chat, not while it runs or once archived.
+  const compact = (r: SidebarRow) =>
+    chatMenuItems({ row: r, projects: [project('g')], siblings: [r], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'projects' }, chatActs).find((i) => i.id === 'compact');
+  assert.equal(compact(row('a'))?.disabled, false);
+  assert.equal(compact(row('a', { status: 'running' }))?.disabled, true);
+  assert.equal(compact(row('a', { archived: true }))?.disabled, true);
   assert.ok(!ids(row('a')).includes('delete'));
   const archived = ids(row('a', { archived: true }));
   assert.ok(archived.includes('restore') && archived.includes('delete'));

@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import type { ChatRecord, ThreadState } from '../api/types.ts';
 import { toolLabel } from './toolKinds.ts';
 import { formatElapsed } from './workBlocks.ts';
+import { SubagentRosterChip } from './subagents/SubagentRoster.tsx';
 
 function useNow(live: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -84,6 +85,7 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool }: DockPr
           )}
         </span>
       )}
+      <SubagentRosterChip thread={thread} />
       {live && turnStartedAt !== null && <span className="muted">{formatElapsed(now - turnStartedAt)}</span>}
     </div>
   );

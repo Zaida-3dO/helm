@@ -7,6 +7,7 @@
 
 import type { MessageRow } from '../api/types.ts';
 import { toolStatus } from './toolKinds.ts';
+import { ESTIMATE, estimateHeight, type EstimateInput } from './virtual.ts';
 
 /** How a row sits in its turn, for spacing and the final-answer hairline. */
 export interface RowFlags {
@@ -126,4 +127,25 @@ export function formatElapsed(ms: number): string {
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ${s % 60}s`;
   return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+const estimates = new WeakMap<MessageRow, number>();
+
+/**
+ * A height guess for an item the transcript has not measured yet (virtual.ts), by kind and text
+ * length. Remembered per row object, so a long transcript is not re-scanned on every render.
+ */
+export function estimateItem(item: Item | undefined): number {
+  if (!item) return ESTIMATE;
+  if (item.kind === 'fold') return estimateHeight({ kind: 'fold', chars: 0, lines: 0 });
+  const row = item.row;
+  let h = estimates.get(row);
+  if (h === undefined) {
+    const kind: EstimateInput['kind'] = row.role === 'user' || row.role === 'toolResult' || row.role === 'context' ? row.role : 'assistant';
+    let lines = 0;
+    for (let i = row.text.indexOf('\n'); i >= 0; i = row.text.indexOf('\n', i + 1)) lines++;
+    h = estimateHeight({ kind, chars: row.text.length, lines });
+    estimates.set(row, h);
+  }
+  return h;
 }

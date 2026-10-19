@@ -62,6 +62,9 @@ export interface NewChatEnv {
 export const DRAFT_PREFIX = 'draft:';
 export const LAST_PROJECT_KEY = 'helm.newchat.lastProject';
 
+/** The dialogs the new-chat area draws (Add project, Primary folder…). */
+export type NewChatDialog = { kind: 'add-project' } | { kind: 'primary-folder'; projectId: string };
+
 type Listener = () => void;
 export type ReadyListener = (place: { projectId: string | null; folder: string | null }) => void;
 
@@ -81,6 +84,7 @@ export class NewChatController {
   private made: { chat: ChatRecord; key: string; uploads: Map<string, string> } | null = null;
 
   open = false;
+  dialog: NewChatDialog | null = null;
   draft: Draft | null = null;
   projects: ProjectNode[] = [];
   /** The folder of the chat that was open when the page opened (folder resolution step 4). */
@@ -109,8 +113,8 @@ export class NewChatController {
       const now = env.selected();
       if (now === this.lastSelected) return;
       this.lastSelected = now;
-      // Opening any chat leaves the page.
-      if (now !== null && this.open) this.leave();
+      // Opening any chat leaves the page (the chat the first send just made is left alone).
+      if (now !== null && this.open) this.leave(now);
     });
     if (this.pendingOpen) {
       const o = this.pendingOpen;
@@ -122,6 +126,17 @@ export class NewChatController {
       this.offSelection = null;
       if (this.env === env) this.env = null;
     };
+  }
+
+  openDialog(d: NewChatDialog): void {
+    this.dialog = d;
+    this.changed();
+  }
+
+  closeDialog(): void {
+    if (!this.dialog) return;
+    this.dialog = null;
+    this.changed();
   }
 
   setProjects(list: ProjectNode[]): void {
@@ -160,10 +175,11 @@ export class NewChatController {
    * images go either way (the composer forgets them when it closes), and so does a chat made by a
    * refused first send, if it is still empty.
    */
-  leave(): void {
+  leave(opening: string | null = null): void {
     if (!this.open) return;
     this.open = false;
     this.draft?.images.clear();
+    if (this.made && this.made.chat.id === opening) this.made = null;
     this.dropMade();
     if (this.untouched()) this.draft = null;
     this.changed();
@@ -178,7 +194,8 @@ export class NewChatController {
   /** Forget the chat a refused send made, asking the host to discard it if it is still untouched. */
   private dropMade(): void {
     const m = this.made;
-    if (!m) return;
+    // A send still running owns the chat it made; it clears or keeps it when it settles.
+    if (!m || this.sending) return;
     this.made = null;
     if (this.env) void discardUntouched(this.env.api, m.chat.id).catch(() => undefined);
   }

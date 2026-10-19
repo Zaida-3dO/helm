@@ -706,8 +706,77 @@ fn row_from(r: &Row<'_>, revision: i64) -> rusqlite::Result<RawRow> {
             created_at: r.get(10)?,
             updated_at: r.get(11)?,
             revision,
+            preview: None,
         },
     })
+}
+
+/// Characters of the last reply the hover preview shows.
+pub const EXCERPT_CHARS: usize = 280;
+
+/// The last reply's opening, whitespace folded, cut at [`EXCERPT_CHARS`] with an ellipsis.
+pub fn excerpt_of(text: &str) -> String {
+    let folded = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if folded.chars().count() <= EXCERPT_CHARS {
+        return folded;
+    }
+    let cut: String = folded.chars().take(EXCERPT_CHARS).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// What a busy chat is doing, from its newest active message. A running tool is the host's
+/// streaming `toolResult` row (it carries the tool name); a finished one means the model is
+/// thinking about its output.
+fn step_of(role: &str, status: &str, tool: Option<&str>, text: &str, thinking: &str) -> String {
+    match (role, tool) {
+        ("toolResult", Some(t)) if status == "streaming" && !t.is_empty() => format!("Running {t}"),
+        ("toolResult", _) => "Thinking…".to_owned(),
+        ("assistant", _) if text.is_empty() && !thinking.is_empty() => "Thinking…".to_owned(),
+        ("assistant", _) if !text.is_empty() => "Writing a reply".to_owned(),
+        _ => "Working".to_owned(),
+    }
+}
+
+/// One chat's hover preview: the last reply and, while busy, the current step.
+pub fn row_preview(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    status: ChatStatus,
+) -> rusqlite::Result<RowPreview> {
+    let excerpt = tx
+        .prepare_cached(
+            "SELECT text FROM messages WHERE chat_id = ?1 AND role = 'assistant' AND active = 1
+             AND text != '' ORDER BY timestamp DESC, id DESC LIMIT 1",
+        )?
+        .query_row([chat_id], |r| r.get::<_, String>(0))
+        .optional()?
+        .map(|t| excerpt_of(&t));
+    let step = if status.is_busy() {
+        let last = tx
+            .prepare_cached(
+                "SELECT role, status, tool_name, text, thinking FROM messages WHERE chat_id = ?1 AND active = 1
+                 ORDER BY timestamp DESC, id DESC LIMIT 1",
+            )?
+            .query_row([chat_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .optional()?;
+        Some(match last {
+            Some((role, status, tool, text, thinking)) => {
+                step_of(&role, &status, tool.as_deref(), &text, &thinking)
+            }
+            None => "Working".to_owned(),
+        })
+    } else {
+        None
+    };
+    Ok(RowPreview { excerpt, step })
 }
 
 struct ChatLink {
@@ -778,7 +847,11 @@ fn chat_height(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<usize> {
     }
 }
 
-fn finish(tx: &Transaction<'_>, raw: Vec<RawRow>) -> rusqlite::Result<Vec<SidebarRow>> {
+fn finish(
+    tx: &Transaction<'_>,
+    raw: Vec<RawRow>,
+    with_preview: bool,
+) -> rusqlite::Result<Vec<SidebarRow>> {
     raw.into_iter()
         .map(|mut r| {
             r.row.depth = chat_ancestors(tx, &r.row.chat_id, MAX_DEPTH)?.len() as u8;
@@ -789,6 +862,9 @@ fn finish(tx: &Transaction<'_>, raw: Vec<RawRow>) -> rusqlite::Result<Vec<Sideba
                 r.row.stalled = c.stalled;
                 r.row.last_activity_at = c.last_activity_at;
                 r.row.attention = row_attention(r.row.status, r.row.unread, false, r.row.pinned);
+            }
+            if with_preview {
+                r.row.preview = Some(row_preview(tx, &r.row.chat_id, r.row.status)?);
             }
             Ok(r.row)
         })
@@ -830,7 +906,7 @@ pub fn sidebar_page(tx: &Transaction<'_>, a: &SidebarPageArgs, revision: i64) ->
     let raw: Vec<RawRow> = raw.into_iter().take(PAGE_ROWS).collect();
     let next_cursor = more.then(|| (offset + PAGE_ROWS).to_string());
     Ok(SidebarPage {
-        rows: finish(tx, raw)?,
+        rows: finish(tx, raw, false)?,
         next_cursor,
     })
 }
@@ -847,7 +923,7 @@ pub fn sidebar_rows(tx: &Transaction<'_>, ids: &[String], revision: i64) -> Res<
             raw.push(r);
         }
     }
-    Ok(finish(tx, raw)?)
+    Ok(finish(tx, raw, true)?)
 }
 
 // ---- chat organisation ----------------------------------------------------------------------

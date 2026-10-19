@@ -865,3 +865,117 @@ fn rows_carry_unread_mute_and_stall_from_the_chat_record() {
         "unread outranks interrupted"
     );
 }
+
+fn message(
+    db: &Database,
+    chat: &str,
+    key: &str,
+    role: &str,
+    text: &str,
+    tool: Option<&str>,
+    status: &str,
+) {
+    // Equal timestamps: the newest row is the one inserted last (ordered by timestamp, then id).
+    db.write(|tx| {
+        tx.execute(
+            "INSERT INTO messages (chat_id, source_key, role, text, tool_name, status, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+            params![chat, key, role, text, tool, status],
+        )
+    })
+    .unwrap();
+}
+
+fn finish_message(db: &Database, chat: &str, key: &str) {
+    db.write(|tx| {
+        tx.execute(
+            "UPDATE messages SET status = 'complete' WHERE chat_id = ?1 AND source_key = ?2",
+            [chat, key],
+        )
+    })
+    .unwrap();
+}
+
+#[test]
+fn the_hover_preview_carries_the_last_reply_and_while_busy_the_current_step() {
+    let (_d, db) = temp_db();
+    let c = chat_in(&db, "C:/w/app", 1);
+    // No reply yet, idle: an empty preview, and only the by-id read fills it.
+    assert_eq!(
+        row(&db, &c).preview,
+        Some(RowPreview {
+            excerpt: None,
+            step: None
+        })
+    );
+    let page = db
+        .snapshot(|tx| {
+            store::sidebar_page(
+                tx,
+                &SidebarPageArgs {
+                    view: SidebarView::Projects,
+                    cursor: None,
+                    group_id: None,
+                },
+                1,
+            )
+        })
+        .unwrap();
+    assert!(
+        page.rows.iter().all(|r| r.preview.is_none()),
+        "pages leave the preview out"
+    );
+
+    message(&db, &c, "u1", "user", "Fix the login", None, "complete");
+    message(
+        &db,
+        &c,
+        "a1",
+        "assistant",
+        "First   answer
+
+with  lines",
+        None,
+        "complete",
+    );
+    message(&db, &c, "a2", "assistant", "", None, "complete"); // empty text: skipped
+    assert_eq!(
+        row(&db, &c).preview.unwrap().excerpt.as_deref(),
+        Some("First answer with lines")
+    );
+
+    // Busy: the step follows the newest active message. A running tool is the host's streaming
+    // toolResult row (chats actor, tool_execution_start); once it completes the model is thinking.
+    status(&db, &c, "running");
+    message(&db, &c, "t:1", "toolResult", "", Some("Bash"), "streaming");
+    assert_eq!(
+        row(&db, &c).preview.unwrap().step.as_deref(),
+        Some("Running Bash")
+    );
+    finish_message(&db, &c, "t:1");
+    assert_eq!(
+        row(&db, &c).preview.unwrap().step.as_deref(),
+        Some("Thinking…")
+    );
+    message(&db, &c, "a4", "assistant", "Done now", None, "streaming");
+    let p = row(&db, &c).preview.unwrap();
+    assert_eq!(p.step.as_deref(), Some("Writing a reply"));
+    assert_eq!(p.excerpt.as_deref(), Some("Done now"));
+    status(&db, &c, "idle");
+    assert_eq!(row(&db, &c).preview.unwrap().step, None);
+}
+
+#[test]
+fn a_long_reply_is_cut_at_the_excerpt_limit_with_an_ellipsis() {
+    let long = "word ".repeat(200);
+    let e = store::excerpt_of(&long);
+    assert!(e.ends_with('…'));
+    assert_eq!(e.chars().count(), store::EXCERPT_CHARS); // 279 kept (trailing space trimmed) + the ellipsis
+    assert_eq!(
+        store::excerpt_of(
+            "  short 
+ reply "
+        ),
+        "short reply"
+    );
+}

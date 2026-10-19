@@ -206,3 +206,199 @@ async fn prewarm_skips_archived_side_and_busy_chats_and_respects_the_cap() {
         "a chat with a worker is not started twice"
     );
 }
+
+/// A spawner whose start blocks until the test lets it go, then fails.
+struct GatedSpawner {
+    gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl GatedSpawner {
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::runtime::Spawner for GatedSpawner {
+    fn spawn(
+        &self,
+        _req: &crate::runtime::SpawnRequest,
+    ) -> Result<crate::runtime::Spawned, String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.gate.lock().unwrap().recv();
+        Err("let go".into())
+    }
+}
+
+/// The worker start runs off the actor: while it blocks, the chat still answers its commands. A
+/// start that failed is not retried by typing for a while.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_worker_start_does_not_block_the_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = helm_core::profile::Profile::open(&dir.path().join("prof")).unwrap();
+    let db = std::sync::Arc::new(
+        helm_core::db::Database::open(&profile.db_path(), &crate::schema::tests::registry())
+            .unwrap(),
+    );
+    let (release, gate) = std::sync::mpsc::channel();
+    let spawner = std::sync::Arc::new(GatedSpawner {
+        gate: std::sync::Mutex::new(gate),
+        calls: Default::default(),
+    });
+    let rt = crate::runtime::ChatRuntime::new(
+        db.clone(),
+        std::sync::Arc::new(crate::clock::Clock::new(0)),
+        std::sync::Arc::new(helm_ipc::RecordingSink::default()),
+        spawner.clone(),
+        crate::runtime::RuntimeConfig {
+            profile_dir: profile.path(""),
+            limits: limits(),
+        },
+        tokio::runtime::Handle::current(),
+    );
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let chat = db
+        .write(|tx| {
+            crate::store::create_chat(tx, &work.to_string_lossy(), None, None, helm_core::now_ms())
+        })
+        .unwrap();
+    let has_worker = |rt: &crate::runtime::ChatRuntime| {
+        rt.sh.actors.lock().unwrap()[&chat]
+            .live
+            .lock()
+            .unwrap()
+            .has_worker
+    };
+    rt.prewarm(&chat);
+    for _ in 0..200 {
+        if spawner.calls() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(spawner.calls(), 1);
+    // The start is still blocked; the actor answers anyway.
+    let answered = tokio::time::timeout(
+        Duration::from_secs(2),
+        rt.ask(
+            &chat,
+            |reply| crate::actor::Cmd::RefreshCatalogue { reply },
+            Duration::from_secs(2),
+        ),
+    )
+    .await;
+    assert!(matches!(answered, Ok(Ok(false))), "{answered:?}");
+    release.send(()).unwrap();
+    for _ in 0..200 {
+        if !has_worker(&rt) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!has_worker(&rt), "the failed start was taken back");
+    rt.prewarm(&chat);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        spawner.calls(),
+        1,
+        "typing right after a failed start does not start another"
+    );
+}
+
+fn sent_texts(h: &H) -> Vec<String> {
+    h.events("message")
+        .iter()
+        .flat_map(|e| e["rows"].as_array().cloned().unwrap_or_default())
+        .filter(|r| r["role"] == "assistant")
+        .map(|r| {
+            format!(
+                "{}:{}",
+                r["status"].as_str().unwrap_or(""),
+                r["text"].as_str().unwrap_or("")
+            )
+        })
+        .collect()
+}
+
+fn stored(h: &H) -> Vec<String> {
+    h.col("SELECT status || ':' || text FROM messages WHERE role = 'assistant' ORDER BY id")
+}
+
+async fn running(h: &mut H) -> FakeWorker {
+    let chat = h.create().await;
+    let (sid, _) = h.send(&chat, "hello", "default").await;
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    w.respond(&p, json!({"submissionId": sid, "state": "accepted"}))
+        .await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w
+}
+
+fn delta(mid: &str, text: &str) -> serde_json::Value {
+    json!({"type": "message_update", "messageId": mid, "delta": {"type": "text_delta", "text": text}})
+}
+
+/// The UI gets every tick's text; the database gets it at most every `stream_db`, catches up
+/// when the stream goes quiet, and has the whole message at `message_end`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streaming_rows_reach_the_database_at_most_every_interval() {
+    let mut h = harness_with(Limits {
+        flush: Duration::from_millis(20),
+        stream_db: Duration::from_millis(700),
+        ..limits()
+    });
+    let w = running(&mut h).await;
+    w.emit(json!({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}}))
+        .await;
+    w.emit(delta("m1", "Hel")).await;
+    w.emit(delta("m1", "lo")).await;
+    h.until("the UI has the text", |h| {
+        sent_texts(h).contains(&"streaming:Hello".to_owned())
+    })
+    .await;
+    assert_eq!(
+        stored(&h),
+        ["streaming:"],
+        "the database is not written per tick"
+    );
+    h.until("the database catches up once the stream is quiet", |h| {
+        stored(h) == ["streaming:Hello"]
+    })
+    .await;
+    w.emit(json!({"type": "message_end", "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "Hello!"}], "status": "complete"}}))
+        .await;
+    h.until("the message is complete", |h| {
+        stored(h) == ["complete:Hello!"]
+    })
+    .await;
+}
+
+/// A message's first delta is sent at once, even right after a tick has gone by.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_messages_first_words_go_out_without_waiting_for_the_tick() {
+    let mut h = harness_with(Limits {
+        flush: Duration::from_secs(10),
+        ..limits()
+    });
+    let w = running(&mut h).await;
+    // A first message uses up the tick.
+    w.emit(json!({"type": "message_start", "message": {"id": "m0", "role": "assistant", "content": []}}))
+        .await;
+    w.emit(delta("m0", "x")).await;
+    h.until("m0 sent", |h| {
+        sent_texts(h).contains(&"streaming:x".to_owned())
+    })
+    .await;
+    w.emit(json!({"type": "message_end", "message": {"id": "m0", "role": "assistant", "content": [{"type": "text", "text": "x"}], "status": "complete"}}))
+        .await;
+    w.emit(json!({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}}))
+        .await;
+    w.emit(delta("m1", "First")).await;
+    h.until("the first words, long before the next tick", |h| {
+        sent_texts(h).contains(&"streaming:First".to_owned())
+    })
+    .await;
+}

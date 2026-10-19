@@ -1,0 +1,343 @@
+/* Subagent cards and roster. */
+
+.subagent-card {
+  position: relative;
+  margin: 4px 0 8px 22px;
+  max-width: 620px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease;
+}
+
+.subagent-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.subagent-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 12px;
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  justify-content: flex-start;
+  cursor: var(--cursor-pointer);
+}
+
+.subagent-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 27px;
+  height: 29px;
+  border-radius: 7px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.subagent-avatar.small {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+
+.subagent-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.subagent-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.subagent-name {
+  font-size: 12px;
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-type {
+  flex: none;
+  font-size: 10px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--secondary);
+}
+
+.subagent-spacer {
+  flex: 1;
+}
+
+.subagent-elapsed {
+  flex: none;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.subagent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.subagent-status.status-running,
+.subagent-status.status-completed {
+  color: var(--accent);
+}
+
+.subagent-status.status-failed {
+  color: var(--error);
+}
+
+.subagent-spinner {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--line-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: tool-spin 1.2s linear infinite;
+}
+
+.subagent-assignment {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--text) 80%, transparent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-preview {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-preview.is-error {
+  color: var(--error);
+}
+
+.subagent-chevron {
+  flex: none;
+  align-self: center;
+  opacity: 0.5;
+  transition: transform 140ms ease;
+}
+
+.subagent-card.open .subagent-chevron {
+  transform: rotate(90deg);
+}
+
+.subagent-card:has(.subagent-stop) .subagent-head {
+  padding-right: 40px;
+}
+
+.subagent-stop {
+  position: absolute;
+  top: 12px;
+  right: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--secondary);
+}
+
+.subagent-stop:hover {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 45%, transparent);
+}
+
+.subagent-stop-square {
+  width: 8px;
+  height: 8px;
+  background: currentColor;
+  border-radius: 1px;
+}
+
+.subagent-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 16px 14px 49px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.subagent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 10px;
+}
+
+.subagent-label {
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 530;
+  color: var(--secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.subagent-assignment-full,
+.subagent-now {
+  white-space: pre-wrap;
+  color: color-mix(in srgb, var(--text) 85%, transparent);
+}
+
+.subagent-error {
+  color: var(--error);
+}
+
+.subagent-report {
+  margin: 0;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font: inherit;
+  color: var(--text);
+}
+
+.subagent-note {
+  font-size: 10px;
+}
+
+/* The dock chip and roster. */
+
+.subagent-chip-wrap {
+  position: relative;
+}
+
+.subagent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1px 8px;
+  background: none;
+  color: var(--secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: var(--cursor-pointer);
+}
+
+.subagent-chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+}
+
+.subagent-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: subagent-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes subagent-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subagent-chip-dot,
+  .subagent-spinner {
+    animation: none;
+  }
+}
+
+.subagent-roster {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: min(440px, 80vw);
+  max-height: min(380px, 48vh);
+  overflow: auto;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 13px;
+  box-shadow: 0 12px 42px #0004;
+  z-index: 6;
+}
+
+.subagent-roster-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 6px 6px;
+  font-size: 11px;
+}
+
+.subagent-roster-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.subagent-roster-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 7px;
+}
+
+.subagent-roster-row:hover {
+  background: var(--surface-alt);
+}
+
+.subagent-roster-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.subagent-roster-name {
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-roster-preview {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

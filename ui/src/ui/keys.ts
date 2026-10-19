@@ -224,6 +224,23 @@ export class KeyRegistry {
   }
 }
 
+/** "Fork chat · Ctrl+Shift+F", or the bare label when the command has no chord. */
+export function hintLabel(label: string, chord: string | null | undefined): string {
+  return chord ? `${label} · ${chord}` : label;
+}
+
+/**
+ * Whether a captured chord can be a shortcut the user sets: it needs Ctrl or Alt, unless it is a
+ * function key. Shift alone would eat typed capitals; a bare key would eat typing.
+ */
+export function isAssignable(chord: string | null): boolean {
+  if (!chord) return false;
+  const parts = chord.split('+');
+  const key = parts[parts.length - 1] ?? '';
+  if (/^F([1-9]|1\d|2[0-4])$/.test(key)) return true;
+  return parts.includes('Ctrl') || parts.includes('Alt');
+}
+
 /** The app's one registry. */
 export const keys = new KeyRegistry();
 

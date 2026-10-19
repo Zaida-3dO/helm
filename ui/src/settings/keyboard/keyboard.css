@@ -1,0 +1,71 @@
+/* Settings → Keyboard. Tokens from styles.css. */
+
+.kb-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--muted);
+}
+.kb-search .ui-input {
+  flex: 1;
+  padding: 7px 10px;
+}
+.kb-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 14px;
+  min-height: 40px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: calc(12 * var(--ui-unit));
+}
+.kb-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.kb-clash {
+  display: inline-flex;
+  color: var(--warning-text);
+}
+.kb-problem {
+  flex-basis: 100%;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--error);
+}
+.kb-chord {
+  font: inherit;
+  font-size: calc(11 * var(--ui-unit));
+  font-variant-numeric: tabular-nums;
+  padding: 2px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-alt);
+  color: var(--text);
+  white-space: nowrap;
+}
+.kb-chord.unset {
+  border-style: dashed;
+  color: var(--muted);
+  background: none;
+}
+.kb-capture {
+  padding: 3px 9px;
+  font-size: calc(11 * var(--ui-unit));
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.kb-actions {
+  display: flex;
+  gap: 10px;
+  min-width: 120px;
+  justify-content: flex-end;
+}
+.kb-empty {
+  color: var(--muted);
+  font-size: calc(12 * var(--ui-unit));
+}

@@ -5,7 +5,9 @@ import { ApiError } from '../api/client.ts';
 import type { ChatOps } from '../api/ops.ts';
 import type { ProjectNode } from '../api/projects.ts';
 import type { ChatRecord } from '../api/types.ts';
-import { LAST_PROJECT_KEY, NewChatController, draftOps, type NewChatEnv } from './controller.ts';
+import { LAST_PROJECT_KEY, NewChatController, draftOps, newChat, type NewChatEnv } from './controller.ts';
+import { primaryFolderMenuItem } from './menu.ts';
+import { addExistingFolder, addNewFolder, currentFolder, setPrimaryFolder } from './projects.ts';
 import { LEGACY_LAST_FOLDER_KEY, MAX_RECENTS, RECENTS_KEY, folderMenu, folderProjectFor, pushRecent, readRecents, resolveFolder, samePath } from './places.ts';
 
 function node(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
@@ -108,6 +110,8 @@ interface Harness {
   storage: MemoryStorage;
   fireSelection: () => void;
   failSends: { n: number };
+  /** While set, sends wait for it. */
+  gate: { wait: Promise<void> | null };
 }
 
 function chatRecord(id: string, cwd: string, projectId: string): ChatRecord {
@@ -120,6 +124,7 @@ function harness(opts: { open?: { id: string; cwd: string; projectId: string } }
   const storage = new MemoryStorage();
   const listeners = new Set<() => void>();
   const failSends = { n: 0 };
+  const gate: { wait: Promise<void> | null } = { wait: null };
   let n = 0;
   const ops = {
     attach: async (chatId: string, name: string) => {
@@ -128,6 +133,7 @@ function harness(opts: { open?: { id: string; cwd: string; projectId: string } }
     },
     send: async (chatId: string, submissionId: string, text: string, _action: string, _rev: number, extras: { attachments?: string[] }) => {
       calls.push({ op: 'send', args: [chatId, submissionId, text, extras.attachments ?? []] });
+      if (gate.wait) await gate.wait;
       if (failSends.n > 0) {
         failSends.n--;
         throw new ApiError('refused', 'no');
@@ -172,6 +178,7 @@ function harness(opts: { open?: { id: string; cwd: string; projectId: string } }
     selected,
     storage,
     failSends,
+    gate,
     fireSelection: () => {
       for (const l of [...listeners]) l();
     },
@@ -371,4 +378,94 @@ test('an open before the app connects is applied on connect; the ready hook hear
   ctl.attach(h.env);
   assert.equal(ctl.open, true);
   assert.deepEqual(heard, [{ projectId: 'site', folder: 'C:/code/site' }]);
+});
+
+// ---- Add project, Primary folder…, the menu seam ---------------------------------------------
+
+function recordingApi(answers: Record<string, (args: Record<string, unknown>) => unknown> = {}) {
+  const calls: { op: string; args: Record<string, unknown> }[] = [];
+  const api = (async (op: string, args?: unknown) => {
+    const a = (args ?? {}) as Record<string, unknown>;
+    calls.push({ op, args: a });
+    return answers[op]?.(a) ?? null;
+  }) as Api;
+  return { api, calls };
+}
+
+test('Add project: an existing folder is named after it unless named; a new folder goes to the host', async () => {
+  const { api, calls } = recordingApi({ project_create: (a) => node('new', { name: String(a.name), path: String(a.path) }) });
+  await addExistingFolder(api, ' C:\\code\\site\\ ');
+  await addExistingFolder(api, 'C:/code/site', '  Website ');
+  await addNewFolder(api, ' fresh ', null);
+  await addNewFolder(api, 'fresh', 'D:/repos');
+  assert.deepEqual(calls, [
+    { op: 'project_create', args: { name: 'site', path: 'C:\\code\\site\\' } },
+    { op: 'project_create', args: { name: 'Website', path: 'C:/code/site' } },
+    { op: 'project_create_folder', args: { name: 'fresh' } },
+    { op: 'project_create_folder', args: { name: 'fresh', parent: 'D:/repos' } },
+  ]);
+});
+
+test('Primary folder: a folder project takes the path; a board project points at a folder project, reusing an open one', async () => {
+  const board = node('b', { kind: 'board', revision: 7 });
+  const helm = PROJECTS.find((p) => p.id === 'helm')!;
+  let r = recordingApi();
+  await setPrimaryFolder(r.api, { ...helm, revision: 3 }, ' D:/moved ', PROJECTS);
+  assert.deepEqual(r.calls, [{ op: 'project_update', args: { projectId: 'helm', revision: 3, path: 'D:/moved' } }]);
+
+  r = recordingApi();
+  await setPrimaryFolder(r.api, board, 'c:\\code\\SITE', PROJECTS);
+  assert.deepEqual(r.calls, [{ op: 'project_update', args: { projectId: 'b', revision: 7, primaryFolderProjectId: 'site' } }]);
+
+  r = recordingApi({ project_create: () => node('made', { path: 'E:/elsewhere' }) });
+  await setPrimaryFolder(r.api, board, 'E:/elsewhere', PROJECTS);
+  assert.deepEqual(
+    r.calls.map((c) => c.op),
+    ['project_create', 'project_update'],
+  );
+  assert.equal(r.calls[1]!.args.primaryFolderProjectId, 'made');
+  // An archived project over the folder is not reused.
+  r = recordingApi({ project_create: () => node('made2', { path: 'C:/code/old' }) });
+  await setPrimaryFolder(r.api, board, 'C:/code/old', PROJECTS);
+  assert.equal(r.calls[1]!.args.primaryFolderProjectId, 'made2');
+  assert.equal(currentFolder(PROJECTS.find((p) => p.id === 'group')!, PROJECTS), 'C:/code/site');
+});
+
+test('the menu item opens the Primary folder dialog for its project and is off for an archived one', () => {
+  const item = primaryFolderMenuItem(PROJECTS[0]!);
+  assert.equal(item.label, 'Primary folder…');
+  assert.equal(item.disabled, false);
+  item.onSelect!();
+  assert.deepEqual(newChat.dialog, { kind: 'primary-folder', projectId: 'helm' });
+  newChat.closeDialog();
+  assert.equal(newChat.dialog, null);
+  assert.equal(primaryFolderMenuItem(PROJECTS.find((p) => p.id === 'old')!).disabled, true);
+});
+
+test('opening the chat a refused first send made does not discard it; a running send keeps its chat', async () => {
+  const h = harness();
+  h.ctl.show({ projectId: 'helm' });
+  const ops = draftOps(h.env.ops, h.ctl);
+  await ops.saveDraft('x', 'typed', 5);
+  h.failSends.n = 1;
+  await assert.rejects(ops.send('x', 's1', 'typed', 'default', 1));
+  const made = h.calls.find((c) => c.op === 'storeChat')!.args[0] as string;
+  h.env.select(made);
+  assert.equal(h.ctl.open, false);
+  assert.ok(!h.calls.some((c) => c.op === 'chat_discard_untouched'), 'the opened chat is kept');
+
+  // While a first send runs (the chat is made, the send not answered yet), leaving does not
+  // discard the chat it is sending to.
+  const h2 = harness();
+  h2.ctl.show({ projectId: 'helm' });
+  const ops2 = draftOps(h2.env.ops, h2.ctl);
+  let release = () => {};
+  h2.gate.wait = new Promise<void>((r) => (release = r));
+  h2.failSends.n = 1;
+  const sending = ops2.send('x', 's1', 'hi', 'default', 1);
+  while (!h2.calls.some((c) => c.op === 'send')) await new Promise((r) => setImmediate(r));
+  h2.ctl.leave();
+  release();
+  await assert.rejects(sending);
+  assert.ok(!h2.calls.some((c) => c.op === 'chat_discard_untouched'));
 });

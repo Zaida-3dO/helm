@@ -3,10 +3,50 @@
 //! Order: `HELM_NODE_PATH`, then `node.exe` (`node` on Linux) on `PATH`. A wrapper script is
 //! refused, and so is a Node older than 22.19 (the worker runs TypeScript directly, which needs
 //! type stripping).
+//!
+//! The version check runs `node --version` once per executable: the answer is kept, keyed by the
+//! path and its modification time, so an upgraded Node is checked again (it ran
+//! on every worker start).
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::SystemTime;
+
+/// `node --version` answers by path, with the file's modification time when it was asked.
+static VERSIONS: Mutex<Option<HashMap<PathBuf, (SystemTime, String)>>> = Mutex::new(None);
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// The version for `path`, from the cache while the file is unchanged.
+fn cached_version(path: &Path) -> Result<String, NodeError> {
+    let stamp = modified(path);
+    if let Some(stamp) = stamp {
+        let cache = VERSIONS.lock().unwrap();
+        if let Some((at, v)) = cache.as_ref().and_then(|c| c.get(path)) {
+            if *at == stamp {
+                return Ok(v.clone());
+            }
+        }
+    }
+    let v = node_version(path)?;
+    if let Some(stamp) = stamp {
+        remember(path, stamp, &v);
+    }
+    Ok(v)
+}
+
+fn remember(path: &Path, stamp: SystemTime, version: &str) {
+    VERSIONS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(path.to_path_buf(), (stamp, version.to_owned()));
+}
 
 pub const MIN_NODE: (u32, u32) = (22, 19);
 
@@ -87,7 +127,7 @@ pub fn resolve_node(lookup: &NodeLookup) -> Result<Node, NodeError> {
                 .ok_or(NodeError::NotFound)?
         }
     };
-    let version = node_version(&path)?;
+    let version = cached_version(&path)?;
     if !version_ok(&version) {
         return Err(NodeError::TooOld { found: version });
     }
@@ -157,6 +197,31 @@ mod tests {
             path_var: Some(dir.path().as_os_str().to_owned()),
         });
         assert_eq!(r.unwrap_err(), NodeError::NotFound);
+    }
+
+    #[test]
+    fn the_version_is_kept_until_the_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        // Not a program: running it would fail, so a hit can only come from the cache.
+        let fake = dir.path().join(NODE_NAME);
+        std::fs::write(&fake, "not node").unwrap();
+        let lookup = NodeLookup {
+            explicit: Some(fake.clone().into_os_string()),
+            path_var: None,
+        };
+        remember(&fake, modified(&fake).unwrap(), "v24.14.0");
+        assert_eq!(resolve_node(&lookup).unwrap().version, "v24.14.0");
+        let later = modified(&fake).unwrap() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&fake)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(
+            matches!(resolve_node(&lookup), Err(NodeError::Unusable { .. })),
+            "a changed file is checked again"
+        );
     }
 
     #[test]

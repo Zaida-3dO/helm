@@ -28,6 +28,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         dir,
         ProjectNode,
         SidebarRow,
+        RowPreview,
         SidebarPage,
         BoardSyncState,
         BoardConnection,

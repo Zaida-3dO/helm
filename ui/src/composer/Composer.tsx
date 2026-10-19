@@ -350,7 +350,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
         <div className="composer-bar">
           <div className="composer-selects">
             <ModelPicker chat={chat} ops={ops} />
-            <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} ops={ops} />
+            <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} busy={busy} ops={ops} />
             {toolbarStart.map((a) => (
               <span key={a.id} className="composer-accessory" data-accessory={a.id}>
                 {a.render(actx)}

@@ -10,7 +10,7 @@
 import { useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { panelStore, togglePanel } from '../panel/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
-import { Button, TextInput, toast } from '../ui/index.ts';
+import { Button, TextInput, toast, useBinding, useHint } from '../ui/index.ts';
 import { IconArchive, IconChevronRight, IconFork, IconPanelRight, IconPin, IconRestore } from '../ui/icons.tsx';
 import { UsageMeter } from '../usage/UsageMeter.tsx';
 import { CaptionButtons, dragHandlers } from './caption.tsx';
@@ -55,6 +55,15 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
     edit.current = new RenameEdit(rename);
     setRenaming(title);
   };
+  const fork = () => {
+    if (chat) shell.ops.fork(chat.id).then((c) => shell.select(c.id)).catch(err);
+  };
+  // The chat shortcuts the bar advertises. Hints read the live chord.
+  useBinding({ id: 'chat.fork', title: 'Fork chat', defaultKeys: 'Ctrl+Shift+F', enabled: () => !!chat, run: fork });
+  useBinding({ id: 'chat.rename', title: 'Rename chat', defaultKeys: 'Ctrl+Alt+R', enabled: () => !!chat, run: () => chat && startRename(chat.title) });
+  const forkHint = useHint('Fork chat', 'chat.fork');
+  const renameHint = useHint('Double-click to rename', 'chat.rename');
+  const panelHint = useHint('Toggle inspector', 'panel.toggle');
   return (
     <>
       <header className="topbar" data-testid="topbar" {...dragHandlers()}>
@@ -89,7 +98,7 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
               type="button"
               className="crumb-title"
               data-testid="topbar-title"
-              title={chat ? 'Double-click to rename' : undefined}
+              title={chat ? renameHint : undefined}
               onDoubleClick={() => chat && startRename(chat.title)}
               onKeyDown={(e) => {
                 if (chat && (e.key === 'Enter' || e.key === ' ')) {
@@ -108,7 +117,7 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
           {swarm}
           {chat && (
             <>
-              <Button variant="icon" label="Fork chat · Ctrl+Shift+F" data-testid="topbar-fork" onClick={() => shell.ops.fork(chat.id).then((c) => shell.select(c.id)).catch(err)}>
+              <Button variant="icon" label={forkHint} data-testid="topbar-fork" onClick={fork}>
                 <IconFork size={16} />
               </Button>
               <Button
@@ -138,7 +147,7 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
           )}
           {actionRow}
           {chat && (
-            <Button variant="icon" label="Toggle inspector · Ctrl+Shift+I" pressed={panel} data-testid="panel-toggle" onClick={togglePanel}>
+            <Button variant="icon" label={panelHint} pressed={panel} data-testid="panel-toggle" onClick={togglePanel}>
               <IconPanelRight size={16} />
             </Button>
           )}

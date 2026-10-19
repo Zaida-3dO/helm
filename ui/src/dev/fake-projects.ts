@@ -141,7 +141,30 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
         return { rows: rows.slice(at, at + 500), nextCursor: at + 500 < rows.length ? String(at + 500) : null };
       }
       case 'sidebar_rows':
-        return (args.chatIds as string[]).filter((id) => chats.has(id)).map(toRow);
+        // The by-id read carries the hover preview: the last reply and, while busy, a step.
+        return (args.chatIds as string[])
+          .filter((id) => chats.has(id))
+          .map((id) => {
+            const row = toRow(id);
+            const page = ctx.call('transcript_page', { chatId: id }) as { messages: { role: string; text: string; status?: string; toolName?: string | null }[] };
+            const msgs = page?.messages ?? [];
+            const reply = [...msgs].reverse().find((m) => m.role === 'assistant' && m.text);
+            const last = msgs[msgs.length - 1];
+            const busy = row.status === 'starting' || row.status === 'running' || row.status === 'stopping';
+            // Same rules as the host (projects store.rs row_preview): a streaming tool row is running.
+            const step = !busy
+              ? null
+              : last?.role === 'toolResult'
+                ? last.status === 'streaming' && last.toolName
+                  ? `Running ${last.toolName}`
+                  : 'Thinking…'
+                : last?.role === 'assistant' && last.text
+                  ? 'Writing a reply'
+                  : 'Working';
+            const folded = reply ? reply.text.replace(/\s+/g, ' ').trim() : null;
+            const excerpt = folded && folded.length > 280 ? `${folded.slice(0, 280).trimEnd()}…` : folded;
+            return { ...row, preview: { excerpt, step } };
+          });
       case 'chat_organize': {
         const id = String(args.chatId);
         const c = chats.get(id)!;

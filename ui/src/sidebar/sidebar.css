@@ -683,25 +683,22 @@
   margin-left: 22px;
 }
 
-.sb-ind-running {
-  border: 2px solid var(--sb-accent-mark);
-  border-right-color: transparent;
-  border-radius: 50%;
-  animation: sb-turn 7.2s linear infinite;
+.sb-ind {
+  position: relative;
 }
 
-.sb-ind-lingering {
-  border: 2px dotted var(--sb-accent-mark);
-  border-radius: 50%;
-  animation: sb-turn 18s linear infinite;
+/* Still status shapes from the kit: the face and the star sit in a 26 x 26 field
+   centred on the 13 px slot. */
+.sb-ind-face,
+.sb-ind-star {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
 }
 
-.sb-ind-unread::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
+.sb-root[data-compact='true'] .sb-ind-face {
+  transform: translate(-50%, -50%) scale(0.85);
 }
 
 .sb-ind-interrupted::before {
@@ -709,20 +706,7 @@
   width: 4px;
   height: 4px;
   border-radius: 50%;
-  background: var(--interrupted, var(--sb-muted));
-}
-
-@keyframes sb-turn {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .sb-ind-running,
-  .sb-ind-lingering {
-    animation: none;
-  }
+  background: var(--interrupted, #be9562);
 }
 
 .sb-age {
@@ -977,10 +961,9 @@
   display: none;
 }
 
-.sb-ind[data-stalled='true'] {
-  border-color: var(--warning, var(--sb-muted));
-  border-right-color: transparent;
-  animation-duration: 20s;
+/* Running with no output for a while: the face dims (no glyph of its own). */
+.sb-ind[data-stalled='true'] .sb-ind-face {
+  opacity: 0.5;
 }
 
 /* A flagged busy row: the 57 px reserve moves from the title to after the flag, so the flag stays
@@ -1124,6 +1107,29 @@
   overflow-wrap: anywhere;
 }
 
+.sb-preview-excerpt {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--sb-text);
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.sb-preview-excerpt[data-empty='true'] {
+  color: var(--sb-muted);
+}
+
+.sb-preview-meta {
+  font-size: 10px;
+  color: var(--sb-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .sb-preview-foot {
   display: flex;
   justify-content: space-between;
@@ -1158,6 +1164,7 @@
 
 .sb-tags {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -1165,15 +1172,52 @@
   color: var(--secondary);
 }
 
+/* Tag pills: 1 px line, fully rounded, a muted "Name:" then the value. The project tag
+   is the kit Picker's trigger, restyled here. */
+.sb-tag,
+.sb-tags .ui-picker-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  max-width: 320px;
+  min-width: 0;
+  height: auto;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--secondary);
+}
+
+.sb-tags .ui-picker-trigger:hover:not(:disabled),
+.sb-tag:hover {
+  background: none;
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.sb-tags .ui-picker-trigger[aria-expanded='true'] {
+  background: none;
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.sb-tags .ui-picker-value {
+  display: inline-flex;
+  gap: 0.3em;
+  min-width: 0;
+}
+
 .sb-tag-label {
   flex: none;
   color: var(--muted);
 }
 
-.sb-tag-folder {
+.sb-tag-value {
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-family: var(--font-mono, monospace);
 }
