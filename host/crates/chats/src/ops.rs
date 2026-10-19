@@ -97,6 +97,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
     crate::manage::register(reg);
     crate::message_images::register(reg);
     crate::attachments::register(reg); // attachment_ref
+    crate::runtime_settings::register_ops(reg); // Settings → Runtime
 }
 
 fn str_field(args: &Value, k: &str) -> Result<String, ApiError> {
@@ -325,8 +326,13 @@ fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             ));
         }
     }
-    let effort = a.effort.unwrap_or_else(|| catalogue::DEFAULT_EFFORT.into());
     let db = ctx.services.need::<Database>()?;
+    // An unset model and effort come from Settings → Runtime's defaults.
+    let (default_model, default_effort) = db
+        .snapshot(|tx| Ok::<_, rusqlite::Error>(crate::runtime_settings::new_chat_defaults(tx)))
+        .map_err(sql)?;
+    let effort = a.effort.unwrap_or(default_effort);
+    let model = a.model.clone().or(default_model);
     let clock = ctx.services.need::<Clock>()?;
     let id = db
         .write(|tx| {
@@ -345,7 +351,7 @@ fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             if crate::manage::project_archived(ctx, tx, &project)? {
                 return Ok(Err(CreateRefusal::Archived));
             }
-            store::create_chat_in(tx, &project, a.model.as_deref(), Some(&effort), now).map(Ok)
+            store::create_chat_in(tx, &project, model.as_deref(), Some(&effort), now).map(Ok)
         })
         .map_err(sql)?
         .map_err(|r| match r {
@@ -495,7 +501,16 @@ fn model_catalogue(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             rt.handle().block_on(rt.refresh_catalogue());
         }
     }
-    to_value(&catalogue::load(&profile.path("")))
+    let mut cat = catalogue::load(&profile.path(""));
+    // The effort a new chat starts with is Settings → Runtime's default.
+    if let Some(db) = ctx.services.get::<Database>() {
+        if let Ok((_, effort)) = db
+            .snapshot(|tx| Ok::<_, rusqlite::Error>(crate::runtime_settings::new_chat_defaults(tx)))
+        {
+            cat.default_effort = effort;
+        }
+    }
+    to_value(&cat)
 }
 
 #[cfg(test)]
@@ -598,6 +613,10 @@ pub(crate) mod tests {
             ("attention_address", OpClass::Maintenance),
             ("attention_snooze", OpClass::Maintenance),
             ("chat_discard_untouched", OpClass::Maintenance),
+            // Settings → Runtime.
+            ("runtime_status", OpClass::Blocking),
+            ("runtime_settings_get", OpClass::Blocking),
+            ("runtime_settings_save", OpClass::Maintenance),
         ];
         for (name, class) in expected {
             assert_eq!(reg.class_of(name), Some(class), "{name}");

@@ -1286,6 +1286,15 @@ impl Actor {
             .flatten();
         let busy = self.status().is_busy();
         if !busy {
+            let mut t = crate::timeline::SendTimeline::new(sid, sub.created_at, now());
+            t.warm = self.ready;
+            t.warming = self.link.is_some() && !self.ready;
+            self.timeline = Some(t);
+            // Start the worker first, so it boots on the blocking pool while the
+            // turn's writes below go to disk. A chat whose record is gone stops here.
+            if !self.ensure_worker() {
+                return;
+            }
             self.set_status(ChatStatus::Starting, None);
             self.open_run();
         }
@@ -1311,12 +1320,6 @@ impl Actor {
             };
             self.upsert_row(&row);
             self.emit_rows(std::slice::from_ref(&row.source_key));
-        }
-        if !busy {
-            let mut t = crate::timeline::SendTimeline::new(sid, sub.created_at, now());
-            t.warm = self.ready;
-            t.warming = self.link.is_some() && !self.ready;
-            self.timeline = Some(t);
         }
         if !self.ensure_worker() {
             return;
@@ -1933,8 +1936,7 @@ impl Actor {
         }
     }
 
-    /// The worker is gone: no agent of it can still be running.
-    /// Background agents of this chat still running (they keep the worker busy, 17cb06ce).
+    /// Background agents of this chat still running (they keep the worker busy).
     fn agents_running(&self) -> bool {
         self.live.lock().unwrap().thread.subagents_running > 0
     }
@@ -1954,6 +1956,7 @@ impl Actor {
         .retire_idle_over_cap();
     }
 
+    /// The worker is gone: no agent of it can still be running.
     fn end_running_subagents(&mut self, reason: &str) {
         let ended: Vec<Subagent> = {
             let mut live = self.live.lock().unwrap();

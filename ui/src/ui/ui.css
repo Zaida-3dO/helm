@@ -717,3 +717,152 @@ button.ui-chip-main:hover {
   align-items: center;
   gap: 8px;
 }
+
+/* Choice tiles: an icon over a 10 px label; the chosen one in accent. */
+.ui-tiles {
+  display: inline-flex;
+  gap: 6px;
+}
+.ui-tile {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  min-width: 58px;
+  padding: 10px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-button);
+  background: none;
+  color: var(--secondary);
+  font-size: 10px;
+}
+.ui-tile:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+.ui-tile[aria-checked='true'],
+.ui-tile[aria-checked='true']:hover {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--text);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Base motion primitives. Each reads its own duration variable, so one can be
+ * switched off by setting it to 0s; Reduce Motion removes all of them (styles.css kill switch),
+ * Zen zeroes the panel durations and freezes scale, quiet effects drop the entrances.
+ * ------------------------------------------------------------------------------------------- */
+
+/* The panel spring: menus 340 ms from the top right, dialogs 440 ms from the centre
+   20% down, anchored dialogs 340 ms. */
+@keyframes ui-panel-spring {
+  0% {
+    opacity: 0;
+    translate: 0 12px;
+    scale: 0.95 0.9;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  34% {
+    opacity: 1;
+    translate: 0 -2px;
+    scale: 1.006 1.018;
+  }
+  55% {
+    translate: 0 1px;
+    scale: 0.998 0.993;
+  }
+  76% {
+    translate: 0 -0.5px;
+    scale: 1.001 1.003;
+  }
+  100% {
+    opacity: 1;
+    translate: 0 0;
+    scale: 1 1;
+  }
+}
+.ui-menu {
+  transform-origin: top right;
+  animation: ui-panel-spring var(--motion-menu-in, 340ms) var(--ease-spring-settle) both;
+}
+.ui-submenu {
+  transform-origin: top left;
+}
+.ui-dialog {
+  transform-origin: 50% 20%;
+  animation: ui-panel-spring var(--motion-dialog-in, 440ms) var(--ease-spring-settle) both;
+}
+.ui-dialog.anchored {
+  transform-origin: top left;
+  animation-duration: var(--motion-menu-in, 340ms);
+}
+/* The picker popover's open: 210 ms with a slight overshoot. */
+@keyframes ui-picker-open {
+  0% {
+    opacity: 0;
+    translate: 0 -7px;
+    scale: 0.96 0.93;
+  }
+  65% {
+    opacity: 1;
+    scale: 1.008 1.014;
+  }
+  100% {
+    opacity: 1;
+    translate: 0 0;
+    scale: 1 1;
+  }
+}
+.ui-picker-pop {
+  transform-origin: top left;
+  animation: ui-picker-open var(--motion-picker-in, 210ms) cubic-bezier(0.18, 0.85, 0.25, 1) both;
+}
+:root[data-effects='quiet'] .ui-menu,
+:root[data-effects='quiet'] .ui-dialog,
+:root[data-effects='quiet'] .ui-picker-pop {
+  animation: none;
+}
+
+/* Press feedback: on pointer-down a control's glyph (never its box) squashes in 85 ms;
+   on release it springs back over 640 ms along a damped cosine (e^-7.8t cos 23t). Compact controls
+   squash to 80% x 72%, wide ones (rows, menu items, pickers, ghost buttons) to 92% x 87%. */
+.ui-btn .ui-icon,
+.ui-menu-item .ui-icon,
+.ui-row-btn .ui-icon,
+.ui-picker-trigger .ui-icon,
+.ui-tile .ui-icon {
+  transition: scale var(--motion-press-release, 640ms)
+    linear(0, 0.336, 0.777, 1.143, 1.336, 1.352, 1.246, 1.095, 0.963, 0.889, 0.876, 0.909, 0.961, 1.008, 1.036, 1.043, 1.033, 1.016, 0.999, 0.988, 0.985, 0.988, 0.994, 1, 1);
+}
+.ui-btn-icon:active:not(:disabled) .ui-icon,
+.ui-btn-send:active:not(:disabled) .ui-icon,
+.ui-btn-stop:active:not(:disabled) .ui-icon,
+.ui-btn-row-action:active:not(:disabled) .ui-icon {
+  scale: 0.8 0.72;
+  transition: scale var(--motion-press, 85ms) cubic-bezier(0.2, 0.9, 0.25, 1);
+}
+.ui-btn-ghost:active:not(:disabled) .ui-icon,
+.ui-btn-primary:active:not(:disabled) .ui-icon,
+.ui-btn-secondary:active:not(:disabled) .ui-icon,
+.ui-menu-item:active:not(:disabled) .ui-icon,
+.ui-row-btn:active:not(:disabled) .ui-icon,
+.ui-picker-trigger:active:not(:disabled) .ui-icon,
+.ui-tile:active:not(:disabled) .ui-icon {
+  scale: 0.92 0.87;
+  transition: scale var(--motion-press, 85ms) cubic-bezier(0.2, 0.9, 0.25, 1);
+}
+:root[data-dopamine='zen'] .ui-icon,
+:root[data-effects='quiet'] .ui-icon {
+  scale: none !important;
+}
+/* Reduce Motion: nothing moves, so a pressed glyph does not squash either. */
+@media (prefers-reduced-motion: reduce) {
+  .ui-icon,
+  .ui-picker-chevron {
+    scale: none !important;
+  }
+}
+/* The picker's chevron has its own press shrink; its glyph does not squash again. */
+.ui-picker-trigger:active:not(:disabled) .ui-picker-chevron .ui-icon {
+  scale: none;
+}

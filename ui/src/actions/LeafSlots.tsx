@@ -9,7 +9,7 @@ import { registerComposerAccessory } from '../composer/slots.ts';
 import { registerSettingsPane } from '../settings/registry.ts';
 import { useShell } from '../shell/context.ts';
 import { registerMessageAction, registerRowFooter } from '../transcript/slots.ts';
-import { explainAppliesTo } from './ExplainPlainly.tsx';
+import { explainAppliesTo, ExplainPlainlyIcon } from './ExplainPlainly.tsx';
 import { OptionButtons, QuickReplies } from './Replies.tsx';
 import { EXPLAIN_PLAINLY_TEXT, sendActionText } from './send.ts';
 
@@ -31,6 +31,7 @@ export function LeafSlots(): null {
       registerMessageAction({
         id: 'leaf-explain-plainly',
         label: 'Explain plainly',
+        icon: ExplainPlainlyIcon,
         appliesTo: explainAppliesTo,
         run: (_row, ctx) => {
           sendActionText(api, ctx.chatId, EXPLAIN_PLAINLY_TEXT).catch((e: unknown) => console.error('Explain plainly failed', e));

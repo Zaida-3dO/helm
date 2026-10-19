@@ -4,9 +4,10 @@
 
 import { useRef } from 'react';
 import { dragWidth, sidebarLayout } from './layout.ts';
+import { pageZoom } from '../ui/place.ts';
 
 export function SidebarResizer() {
-  const drag = useRef<{ start: number; x: number; main: number; frame: number; next: number; off: () => void } | null>(null);
+  const drag = useRef<{ start: number; x: number; zoom: number; main: number; frame: number; next: number; off: () => void } | null>(null);
 
   const end = (commit: boolean, el?: HTMLElement, pointerId?: number) => {
     const d = drag.current;
@@ -30,7 +31,10 @@ export function SidebarResizer() {
       onPointerDown={(e) => {
         if (e.button !== 0) return;
         const el = e.currentTarget;
-        const main = el.closest('.shell')?.querySelector<HTMLElement>('.shell-main')?.getBoundingClientRect().width ?? 0;
+        // Pointer and rect measurements are in viewport pixels; the width is CSS pixels (they differ
+        // under Settings → Zoom).
+        const zoom = pageZoom();
+        const main = (el.closest('.shell')?.querySelector<HTMLElement>('.shell-main')?.getBoundingClientRect().width ?? 0) / zoom;
         const start = sidebarLayout.get().width;
         const cancel = () => end(false, el, e.pointerId);
         const onKey = (k: KeyboardEvent) => {
@@ -46,6 +50,7 @@ export function SidebarResizer() {
         drag.current = {
           start,
           x: e.clientX,
+          zoom,
           main,
           frame: 0,
           next: start,
@@ -62,7 +67,7 @@ export function SidebarResizer() {
       onPointerMove={(e) => {
         const d = drag.current;
         if (!d) return;
-        d.next = dragWidth(d.start, e.clientX - d.x, d.main);
+        d.next = dragWidth(d.start, (e.clientX - d.x) / d.zoom, d.main);
         cancelAnimationFrame(d.frame);
         d.frame = requestAnimationFrame(() => sidebarLayout.setWidth(d.next, false));
       }}

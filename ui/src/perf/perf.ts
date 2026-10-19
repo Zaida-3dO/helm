@@ -1,6 +1,7 @@
 // The app's one perf recorder and `window.__helmPerf`. Browser glue for marks.ts; the store and
 // the pacer report into it, and the frame-stats overlay reads it.
 
+import { motion, type MotionPolicy } from './cadence.ts';
 import { PerfRecorder } from './marks.ts';
 
 const hasWindow = typeof window !== 'undefined' && typeof requestAnimationFrame === 'function';
@@ -15,11 +16,13 @@ export const perf = new PerfRecorder(() => (typeof performance !== 'undefined' ?
 
 export interface HelmPerf {
   recorder: PerfRecorder;
+  /** Low-refresh motion: `motion.low`, and `motion.force('low' | 'normal' | 'auto')` for checks. */
+  motion: MotionPolicy;
   /** Shows or hides the frame-stats overlay (also Mod+Shift+P). */
   toggleOverlay: () => void;
 }
 
-const global: HelmPerf = { recorder: perf, toggleOverlay: () => undefined };
+const global: HelmPerf = { recorder: perf, motion, toggleOverlay: () => undefined };
 if (hasWindow) (window as unknown as { __helmPerf?: HelmPerf }).__helmPerf = global;
 
 export function setOverlayToggle(fn: () => void): () => void {

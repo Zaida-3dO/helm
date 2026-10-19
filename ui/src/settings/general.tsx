@@ -4,7 +4,8 @@
 import { useEffect, useState } from 'react';
 import { useShell } from '../shell/context.ts';
 import { FONT_DEFAULTS, parseAppearance, parseFontSizes, parseZoom, ZOOM_DEFAULT, type Appearance, type FontSizes } from '../shell/theme.ts';
-import { Checkbox, Picker, Segmented, SettingRow, toast } from '../ui/index.ts';
+import { Checkbox, ChoiceTiles, Picker, SettingRow, toast } from '../ui/index.ts';
+import { IconMonitor, IconMoon, IconSun } from '../ui/icons.tsx';
 import { sizeOptions, zoomOptions } from './generalOptions.ts';
 import { registerSettingsPane } from './registry.ts';
 
@@ -52,14 +53,14 @@ function GeneralPane() {
   return (
     <div>
       <SettingRow title="Appearance" description="Follow Windows, or always use the light or dark colours." testId="setting-appearance">
-        <Segmented<Appearance>
+        <ChoiceTiles<Appearance>
           label="Appearance"
           testId="appearance"
           value={appearance}
           options={[
-            { value: 'system', label: 'System' },
-            { value: 'light', label: 'Light' },
-            { value: 'dark', label: 'Dark' },
+            { value: 'system', label: 'System', icon: <IconMonitor size={17} /> },
+            { value: 'light', label: 'Light', icon: <IconSun size={17} /> },
+            { value: 'dark', label: 'Dark', icon: <IconMoon size={17} /> },
           ]}
           onChange={(v) => {
             const before = appearance;

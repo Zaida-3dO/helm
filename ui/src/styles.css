@@ -336,6 +336,9 @@
   --motion-menu-in: 340ms;
   --motion-dialog-in: 440ms;
   --motion-reorder: 150ms;
+  --motion-picker-in: 210ms;
+  --motion-press: 85ms;
+  --motion-press-release: 640ms;
   --elev-4p: 0 12px 36px #0003, 0 2px 5px #0001, inset 0 1px color-mix(in srgb, var(--fx-core) 30%, transparent);
 
   /* Layout anchors. */
@@ -425,9 +428,11 @@ button {
   font: inherit;
   font-size: calc(12 * var(--ui-unit));
   cursor: var(--cursor-pointer);
+  /* Colour in 110 ms, scale on the 180 ms spring. */
   transition:
-    background-color 110ms ease,
-    color 110ms ease;
+    background-color var(--motion-button-colour, 110ms) ease,
+    color var(--motion-button-colour, 110ms) ease,
+    scale var(--motion-button-scale, 180ms) var(--ease-spring);
 }
 button:hover:not(:disabled) {
   background: var(--surface-alt);
@@ -574,6 +579,9 @@ kbd {
    stay as static shapes. */
 @media (prefers-reduced-motion: reduce) {
   :root {
+    --motion-picker-in: 0s;
+    --motion-press: 0s;
+    --motion-press-release: 0s;
     --motion-button-colour: 0s;
     --motion-button-scale: 0s;
     --motion-appear: 0s;
@@ -592,6 +600,9 @@ kbd {
   }
 }
 :root[data-dopamine='zen'] {
+  --motion-picker-in: 0s;
+  --motion-press: 0s;
+  --motion-press-release: 0s;
   --motion-button-scale: 0s;
   --motion-panel-in: 0s;
   --motion-menu-in: 0s;
@@ -1054,4 +1065,15 @@ dd {
 /* No chat, no tags: no empty band under the bar. */
 .tags-strip:empty {
   display: none;
+}
+
+/* The settings footer: "Helm <version>" left, a muted note right; 12 x 23, 10 px. */
+.ui-dialog[data-testid='settings'] .ui-dialog-foot {
+  padding: 12px 23px;
+  font-size: 10px;
+  color: var(--secondary);
+}
+.settings-version .muted,
+.settings-foot-note {
+  color: var(--muted);
 }

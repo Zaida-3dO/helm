@@ -19,9 +19,11 @@ import { PermissionChip } from './PermissionChip.tsx';
 import { orderPending, itemState } from './queue.ts';
 import { refusal, toBase64, type Attached } from './attachments.ts';
 import { Recall } from './recall.ts';
-import { rankSkills, skillQuery, type Skill } from './skills.ts';
+import { commandWithArgs, moveActive, skillMenu, skillQuery, type Skill } from './skills.ts';
 import { accessoriesAt, accessorySide, collectSendContributions, mountComposer, type AccessoryContext } from './slots.ts';
 import './composer.css';
+// The dock items and banners above the box share the dock sheet (ChatView mounts this composer).
+import './dock.css';
 
 export interface ComposerProps {
   chat: ChatRecord;
@@ -188,7 +190,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
             setError(null);
             void addRefs('path', d.paths);
           }
-        } else setDropHint(inside ? { kind: 'files' } : null);
+        } else setDropHint((h) => (inside ? (h?.kind === 'files' ? h : { kind: 'files' }) : h?.kind === 'files' ? null : h));
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [shell, addRefs],
@@ -198,10 +200,9 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
     const over = (e: PointerEvent) => dropLandsIn(boxRect(), e.clientX, e.clientY, 1);
     const move = (e: PointerEvent) => {
       const row = dragged();
-      setDropHint((h) => {
-        if (row && over(e)) return { kind: 'chat', title: document.querySelector('.sb-ghost')?.textContent?.trim() || 'this chat' };
-        return h?.kind === 'chat' ? null : h;
-      });
+      const title = row && over(e) ? document.querySelector('.sb-ghost')?.textContent?.trim() || 'this chat' : null;
+      // Same hint, same object: React skips the render, so a drag does not re-render per move.
+      setDropHint((h) => (title ? (h?.kind === 'chat' && h.title === title ? h : { kind: 'chat', title }) : h?.kind === 'chat' ? null : h));
     };
     // Capture: this runs before the sidebar's own pointerup clears its drag markers.
     const up = (e: PointerEvent) => {
@@ -287,14 +288,25 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   const [draftText, setDraftText] = useState(chat.draft);
   const [skills, setSkills] = useState<Skill[]>([]);
   const skillPrefix = skillQuery(draftText);
+  const wantsSkills = skillPrefix !== null || commandWithArgs(draftText) !== null;
   useEffect(() => {
-    if (skillPrefix === null || skills.length > 0) return;
+    if (!wantsSkills || skills.length > 0) return;
     void ops
       .skills(chat.id)
       .then(setSkills)
       .catch(() => undefined);
-  }, [skillPrefix, skills.length, ops, chat.id]);
-  const skillMatches = skillPrefix === null ? [] : rankSkills(skills, skillPrefix);
+  }, [wantsSkills, skills.length, ops, chat.id]);
+  // The `/` menu: pick a command while its name is typed, then it stays shown,
+  // with its description, while the arguments are typed. Escape closes it until the draft changes.
+  const [menuShut, setMenuShut] = useState<string | null>(null);
+  const [active, setActive] = useState(0);
+  const menu = menuShut === draftText ? null : skillMenu(draftText, skills);
+  const menuKey = menu ? `${menu.mode}:${menu.items.map((x) => x.name).join(',')}` : '';
+  useEffect(() => setActive(0), [menuKey]);
+  const pickSkill = (name: string) => {
+    showText(`/${name} `);
+    editor.current?.focus();
+  };
 
   // Autocomplete: 350 ms after typing pauses, only with the window in front and no
   // skill menu open; the host owns the 10-per-minute budget. Tab accepts while the draft is
@@ -331,6 +343,21 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
         return true;
       }
       const plain = !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.isComposing;
+      if (menu && e.key === 'Escape') {
+        setMenuShut(editor.current?.getText() ?? '');
+        return true;
+      }
+      if (menu?.mode === 'pick' && plain) {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          setActive((a) => moveActive(a, menu.items.length, e.key === 'ArrowDown' ? 1 : -1));
+          return true;
+        }
+        if (e.key === 'Tab' || e.key === 'Enter') {
+          const s = menu.items[active] ?? menu.items[0];
+          if (s) pickSkill(s.name);
+          return true;
+        }
+      }
       if (ghost && plain && e.key === 'Tab') {
         const current = editor.current?.getText() ?? '';
         if (current === ghost.base) {
@@ -364,7 +391,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       return false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [ctx, send, stop, busy, onMove, recall, ghost],
+    [ctx, send, stop, busy, onMove, recall, ghost, menu, active],
   );
 
   const onChange = useCallback(
@@ -417,13 +444,33 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
           {error}
         </div>
       )}
-      {skillMatches.length > 0 && (
-        <div className="skill-menu" role="listbox" aria-label="Skills" data-testid="skill-menu">
-          {skillMatches.map((s) => (
-            <button key={s.name} type="button" role="option" className="small" title={s.description} onClick={() => showText(`/${s.name} `)}>
-              /{s.name}
-            </button>
-          ))}
+      {menu && (
+        <div className="skill-menu" data-testid="skill-menu" data-mode={menu.mode}>
+          <div className="skill-menu-head">
+            <span>{menu.mode === 'pick' ? 'Commands and skills' : 'Command'}</span>
+            <span className="skill-menu-keys">{menu.mode === 'pick' ? '↑ ↓ choose · ↵ insert · esc close' : 'Type its arguments, then send · esc close'}</span>
+          </div>
+          <div className="skill-menu-list" role="listbox" aria-label="Commands and skills">
+            {menu.items.map((s, n) => (
+              <button
+                key={s.name}
+                type="button"
+                role="option"
+                aria-selected={menu.mode === 'pick' && n === active}
+                className={`skill-row${menu.mode === 'pick' && n === active ? ' active' : ''}`}
+                data-skill={s.name}
+                onMouseEnter={() => menu.mode === 'pick' && setActive(n)}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => (menu.mode === 'pick' ? pickSkill(s.name) : editor.current?.focus())}
+              >
+                <span className="skill-gem" aria-hidden="true" />
+                <span className="skill-text">
+                  <span className="skill-name">/{s.name}</span>
+                  {s.description && <span className="skill-desc">{s.description}</span>}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
       <div className="composer-box" data-testid="composer-box" ref={box} data-drop={dropHint ? dropHint.kind : undefined}>

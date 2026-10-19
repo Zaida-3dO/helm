@@ -70,3 +70,24 @@
   color: var(--muted);
   font-size: 9px;
 }
+
+/* Low-refresh motion (perf/cadence.ts): on a slow display the app reduces motion exactly as the
+   system Reduce Motion setting does in styles.css. Same switches, keyed on the
+   root's data-motion="low" instead of the media query. */
+:root[data-motion='low'] {
+  --motion-button-colour: 0s;
+  --motion-button-scale: 0s;
+  --motion-appear: 0s;
+  --motion-toast: 0s;
+  --motion-panel-in: 0s;
+  --motion-menu-in: 0s;
+  --motion-dialog-in: 0s;
+  --motion-reorder: 0s;
+}
+:root[data-motion='low'] *,
+:root[data-motion='low'] *::before,
+:root[data-motion='low'] *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}

@@ -3,7 +3,7 @@
 import { useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from './controls.tsx';
-import { nextIndex } from './place.ts';
+import { nextIndex, pageZoom } from './place.ts';
 
 export interface Tab<T extends string> {
   id: T;
@@ -56,7 +56,8 @@ export function Tooltip({ text, children, delayMs = 400 }: { text: ReactNode; ch
     clearTimeout(timer.current);
     timer.current = setTimeout(() => {
       const r = host.current?.getBoundingClientRect();
-      if (r) setAt({ x: r.left + r.width / 2, y: r.top });
+      const z = pageZoom();
+      if (r) setAt({ x: (r.left + r.width / 2) / z, y: r.top / z });
     }, delayMs);
   };
   const hide = () => {

@@ -2520,6 +2520,7 @@ async fn references_ride_the_prompt_as_a_data_section() {
         ),
         ("chat", "no-such-chat".to_owned(), "not_found"),
         ("url", "https://example.com".to_owned(), "bad_args"),
+        ("chat", chat.clone(), "bad_args"),
     ] {
         let e = h
             .call("attachment_ref", put(kind, target))
@@ -2545,7 +2546,7 @@ async fn references_ride_the_prompt_as_a_data_section() {
         ctx.contains(&format!("- file `notes.md`: {}", file.to_string_lossy())),
         "{ctx}"
     );
-    assert!(ctx.contains(&format!("- folder `")), "{ctx}");
+    assert!(ctx.contains("- folder `"), "{ctx}");
     assert!(
         ctx.contains("app_read_chat") && ctx.contains(&format!("(chatId {other})")),
         "{ctx}"
@@ -2561,4 +2562,49 @@ async fn references_ride_the_prompt_as_a_data_section() {
         .await
         .unwrap_err();
     assert_eq!(e.code, "bad_args");
+}
+
+/// A fresh chat's `/` menu borrows the list another worker in the same folder
+/// reported, and keeps it after that worker is gone; a chat in another folder gets nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_chat_borrows_its_folders_skills() {
+    let mut h = harness();
+    let chat = h.create().await;
+    h.send(&chat, "hi", "default").await;
+    let mut w = h.worker().await;
+    let c = w.expect("get_state").await;
+    w.respond(
+        &c,
+        json!({"capabilities": {}, "skills": [{"name": "review", "description": "Review the diff"}]}),
+    )
+    .await;
+    h.until("skills", |h| !h.rt.skills(&chat).is_empty()).await;
+    let fresh = h.create().await;
+    let want = json!([{"name": "review", "description": "Review the diff"}]);
+    assert_eq!(
+        h.call("skills_list", json!({"chatId": fresh}))
+            .await
+            .unwrap(),
+        want,
+        "another live worker in the same folder"
+    );
+    let elsewhere = tempfile::tempdir().unwrap();
+    let other = h
+        .call(
+            "chat_create",
+            json!({"cwd": elsewhere.path().to_string_lossy()}),
+        )
+        .await
+        .unwrap();
+    let other = other["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        h.call("skills_list", json!({"chatId": other}))
+            .await
+            .unwrap(),
+        json!([])
+    );
+    // Remembered for the folder, for chats after this worker is gone (and after a restart).
+    let cached =
+        crate::catalogue::cached_skills(&h.rt.sh.cfg.profile_dir, &h.work.to_string_lossy());
+    assert_eq!(serde_json::to_value(cached).unwrap(), want);
 }

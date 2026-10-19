@@ -16,3 +16,16 @@ test('the dock stays up for a running turn, a background shell or a working suba
   assert.equal(dockShown(false, { backgroundTasks: [shell], subagentsRunning: 0 }), true);
   assert.equal(dockShown(true, { backgroundTasks: [], subagentsRunning: 0 }), true);
 });
+
+test("line 1 names what the chat is doing", async () => {
+  const { dockState } = await import('./dockModel.ts');
+  const t = { compacting: null, interactions: [], liveTools: [], subagentsRunning: 0 };
+  assert.equal(dockState('starting', t).label, 'Starting agent');
+  assert.equal(dockState('stopping', t).label, 'Stopping safely');
+  assert.equal(dockState('running', t).label, 'Working');
+  assert.equal(dockState('running', { ...t, subagentsRunning: 2 }).detail, '2 subagents working');
+  assert.equal(dockState('running', { ...t, interactions: [{} as never] }).label, 'Waiting for you');
+  assert.equal(dockState('running', { ...t, compacting: { retrying: true } as never }).label, 'Compacting conversation');
+  assert.equal(dockState('idle', { ...t, subagentsRunning: 1 }).key, 'subagents');
+  assert.equal(dockState('idle', t).key, 'background');
+});

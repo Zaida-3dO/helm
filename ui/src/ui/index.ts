@@ -5,7 +5,7 @@
 // Escape: register through `useLayer` (layers.ts), never a keydown handler.
 // Shortcuts: register through `useBinding` / `keys.register` (keys.ts), never a keydown handler.
 
-export { Button, Checkbox, Chip, Icon, Segmented, SettingRow, TextArea, TextInput } from './controls.tsx';
+export { Button, Checkbox, Chip, ChoiceTiles, Icon, Segmented, SettingRow, TextArea, TextInput } from './controls.tsx';
 export type { ButtonProps, ButtonVariant, CheckboxProps, SegmentedOption, TextInputProps } from './controls.tsx';
 export { AnchoredDialog, Dialog } from './Dialog.tsx';
 export type { AnchoredDialogProps, DialogProps } from './Dialog.tsx';

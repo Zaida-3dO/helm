@@ -3,7 +3,7 @@
 // Panes come from the registry; each pane decides whether it saves per control or with a Save.
 
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import { useDialog } from '../shell/context.ts';
+import { useDialog, useShell } from '../shell/context.ts';
 import { Dialog, useLayer } from '../ui/index.ts';
 import { filterPanes, settingsPanes, subscribeSettingsPanes, peekRequestedPane, clearRequestedPane } from './registry.ts';
 
@@ -24,8 +24,17 @@ function SettingsBody({ close }: { close: () => void }) {
   const searching = query.trim().length > 0;
   const shown = filterPanes(panes, query);
   const current = panes.find((p) => p.id === tab) ?? panes[0];
+  const version = useAppVersion();
+  const footer = (
+    <>
+      <span className="settings-version" data-testid="settings-version">
+        Helm <span className="muted">{version ?? ''}</span>
+      </span>
+      <span className="settings-foot-note">Runs Claude Code under your own login</span>
+    </>
+  );
   return (
-    <Dialog title="Settings" onClose={close} wide testId="settings">
+    <Dialog title="Settings" onClose={close} wide testId="settings" footer={footer}>
       <div className="settings-tabs" role="tablist">
         {panes.map((p) => (
           <button
@@ -71,4 +80,21 @@ function SettingsBody({ close }: { close: () => void }) {
       </div>
     </Dialog>
   );
+}
+
+/** The app's version from the host's `app_info`; null until it answers. */
+function useAppVersion(): string | null {
+  const shell = useShell();
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    shell
+      .api<{ version?: unknown }>('app_info')
+      .then((i) => live && setVersion(typeof i?.version === 'string' ? i.version : null))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [shell]);
+  return version;
 }

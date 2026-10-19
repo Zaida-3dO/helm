@@ -6,7 +6,7 @@ import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'reac
 import { createPortal } from 'react-dom';
 import { Icon } from './controls.tsx';
 import { useLayer } from './hooks.ts';
-import { nextIndex, placeBelow } from './place.ts';
+import { layoutSize, nextIndex, pageZoom, placeBelow, unzoom, viewportAt } from './place.ts';
 
 export interface PickerOption<T extends string> {
   value: T;
@@ -79,8 +79,8 @@ export function Picker<T extends string>({
   useLayoutEffect(() => {
     if (!open) return;
     const a = trigger.current?.getBoundingClientRect();
-    const r = pop.current?.getBoundingClientRect();
-    if (a && r) setPos(placeBelow(a, { width: r.width, height: r.height }, { width: innerWidth, height: innerHeight }, 4));
+    const z = pageZoom();
+    if (a && pop.current) setPos(placeBelow(unzoom(a, z), layoutSize(pop.current), viewportAt(z), 4));
     setActive(Math.max(0, shown.findIndex((o) => o.value === value)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);

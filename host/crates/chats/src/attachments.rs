@@ -262,46 +262,63 @@ pub struct Ref {
 
 type Resolved = (String, String, String);
 
+/// A file or folder reference, checked against the disk: absolute, existing, and a file or a
+/// folder (read from the disk). Runs before the database write, so a slow drive holds no lock.
+pub fn check_path(target: &str) -> Result<Resolved, Refusal> {
+    let t = target.trim();
+    if t.len() > MAX_PATH_BYTES || t.chars().any(char::is_control) {
+        return Err(Refusal::new(
+            "bad_args",
+            "That path is too long or has control characters.",
+        ));
+    }
+    let p = Path::new(t);
+    if !p.is_absolute() {
+        return Err(Refusal::new(
+            "bad_args",
+            "Only an absolute path can be attached.",
+        ));
+    }
+    let kind = if p.is_dir() {
+        "folder"
+    } else if p.is_file() {
+        "file"
+    } else {
+        return Err(Refusal::new(
+            "not_found",
+            "That file or folder does not exist.",
+        ));
+    };
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| t.to_owned());
+    let name = cut_to_bytes(&name, MAX_NAME_BYTES);
+    Ok((kind.to_owned(), t.to_owned(), name))
+}
+
+/// At most `max` bytes of `s`, cut on a character boundary.
+fn cut_to_bytes(s: &str, max: usize) -> String {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_owned()
+}
+
 /// What a reference names, checked. `kind` is `path` (a file or folder; which one is read from
-/// the disk) or `chat`.
+/// the disk) or `chat`. A path already checked by [`check_path`] comes in as `checked`.
 fn resolve_ref(
     tx: &Transaction<'_>,
     kind: &str,
     target: &str,
+    checked: Option<Resolved>,
 ) -> rusqlite::Result<Result<Resolved, Refusal>> {
     match kind {
-        "path" => {
-            let t = target.trim();
-            if t.len() > MAX_PATH_BYTES || t.chars().any(char::is_control) {
-                return Ok(Err(Refusal::new(
-                    "bad_args",
-                    "That path is too long or has control characters.",
-                )));
-            }
-            let p = Path::new(t);
-            if !p.is_absolute() {
-                return Ok(Err(Refusal::new(
-                    "bad_args",
-                    "Only an absolute path can be attached.",
-                )));
-            }
-            let kind = if p.is_dir() {
-                "folder"
-            } else if p.is_file() {
-                "file"
-            } else {
-                return Ok(Err(Refusal::new(
-                    "not_found",
-                    "That file or folder does not exist.",
-                )));
-            };
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| t.to_owned());
-            let name: String = name.chars().take(MAX_NAME_BYTES).collect();
-            Ok(Ok((kind.to_owned(), t.to_owned(), name)))
-        }
+        "path" => Ok(match checked {
+            Some(c) => Ok(c),
+            None => check_path(target),
+        }),
         "chat" => {
             let title: Option<String> = tx
                 .query_row("SELECT title FROM chats WHERE id = ?1", [target], |r| {
@@ -327,6 +344,7 @@ pub fn put_ref(
     chat_id: &str,
     kind: &str,
     target: &str,
+    checked: Option<Resolved>,
     now: i64,
 ) -> rusqlite::Result<Result<Ref, Refusal>> {
     let open: bool = tx.query_row(
@@ -340,7 +358,13 @@ pub fn put_ref(
             "That chat does not exist or is archived.",
         )));
     }
-    let (kind, target, name) = match resolve_ref(tx, kind, target)? {
+    if kind == "chat" && target == chat_id {
+        return Ok(Err(Refusal::new(
+            "bad_args",
+            "A chat cannot reference itself.",
+        )));
+    }
+    let (kind, target, name) = match resolve_ref(tx, kind, target, checked)? {
         Ok(v) => v,
         Err(r) => return Ok(Err(r)),
     };
@@ -437,8 +461,23 @@ struct AttachmentRefArgs {
 fn attachment_ref(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: AttachmentRefArgs = crate::ops::parse_args(args)?;
     let db = ctx.services.need::<Database>()?;
+    // The disk is checked before the write lock is taken.
+    let checked = if a.kind == "path" {
+        Some(check_path(&a.target).map_err(ApiError::from)?)
+    } else {
+        None
+    };
     let r = db
-        .write(|tx| put_ref(tx, &a.chat_id, &a.kind, &a.target, helm_core::now_ms()))
+        .write(|tx| {
+            put_ref(
+                tx,
+                &a.chat_id,
+                &a.kind,
+                &a.target,
+                checked.clone(),
+                helm_core::now_ms(),
+            )
+        })
         .map_err(|e| ApiError::internal(e.to_string()))?
         .map_err(ApiError::from)?;
     Ok(json!({"attachmentId": r.id, "kind": r.kind, "name": r.name}))

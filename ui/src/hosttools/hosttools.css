@@ -3,17 +3,27 @@
   top: calc(var(--topbar-height) + 64px);
 }
 
-/* Allow cards in the composer dock. */
+/* Allow cards in the composer dock, in the dock's column: padding 10 x 12, a --line-strong border, radius 8, --surface, 12 px / 1.45; the
+   agent's words on a 3 px left rule; Deny and Allow pushed right. */
 .allow-cards {
   display: flex;
   flex-direction: column;
   gap: 8px;
   outline: none;
 }
+.allow-cards:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .allow-card {
-  border: 1px solid var(--border, rgba(128, 128, 128, 0.4));
+  border: 1px solid var(--line-strong);
   border-radius: 8px;
   padding: 10px 12px;
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.45;
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 .allow-title {
   display: flex;
@@ -21,12 +31,28 @@
   align-items: baseline;
   flex-wrap: wrap;
 }
+.allow-title strong {
+  font-weight: 600;
+  color: var(--text);
+}
+.allow-title strong::before {
+  content: 'Allow request · ';
+  font-weight: 600;
+}
+.allow-title .allow-agent-line {
+  color: var(--secondary);
+}
 .allow-agent-text {
-  margin-top: 6px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--line-strong);
+  border-radius: 0 6px 6px 0;
+  background: var(--surface-alt);
 }
 .allow-agent-label {
-  font-size: 0.85em;
-  opacity: 0.75;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 2px;
 }
 .allow-agent-line {
   unicode-bidi: isolate;
@@ -37,20 +63,40 @@
   display: flex;
   gap: 8px;
   align-items: center;
-  margin-top: 8px;
+  margin-top: 10px;
   flex-wrap: wrap;
+  color: var(--secondary);
+}
+.allow-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 .allow-controls input[type='number'] {
   width: 4.5em;
-  margin: 0 4px;
+  margin: 0 2px;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
 }
 .allow-note {
   flex: 1;
   min-width: 12em;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
 }
 .allow-slot {
   display: inline-block;
 }
+.allow-slot .ui-btn {
+  padding: 5px 12px;
+}
 .allow-error {
-  color: var(--danger, #c33);
+  color: var(--error);
+  font-size: 11px;
 }

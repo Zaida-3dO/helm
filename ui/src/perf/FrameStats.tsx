@@ -5,6 +5,7 @@
 
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { keys } from '../ui/keys.ts';
+import { motion, watchCadence } from './cadence.ts';
 import { FrameSampler, type FrameSample } from './frameStats.ts';
 import { perf, setOverlayToggle, watchSends } from './perf.ts';
 import './perf.css';
@@ -18,10 +19,12 @@ export function FrameStats() {
     const offKey = keys.register({ id: PERFORMANCE_BINDING, title: 'Toggle FPS / frame stats', defaultKeys: 'Ctrl+Shift+P', run: toggle });
     const offToggle = setOverlayToggle(toggle);
     const offSends = watchSends(document);
+    const offCadence = watchCadence(document);
     return () => {
       offKey();
       offToggle();
       offSends();
+      offCadence();
     };
   }, []);
   return open ? <Overlay /> : null;
@@ -60,6 +63,7 @@ function Overlay() {
   }, [hidden]);
 
   const send = perf.last();
+  const low = useSyncExternalStore(motion.subscribe, () => motion.low);
   const footer = hidden ? 'Paused while hidden' : sample ? `${sample.frames} frames / ${(sample.elapsedMs / 1000).toFixed(2)} s` : 'Sampling…';
 
   return (
@@ -82,6 +86,8 @@ function Overlay() {
         <dd>{whole(send?.rowMs)}</dd>
         <dt>Send → first word</dt>
         <dd>{whole(send?.firstWordMs)}</dd>
+        <dt>Motion</dt>
+        <dd title={low ? 'Low refresh rate: motion is reduced' : undefined}>{low ? 'reduced' : 'full'}</dd>
       </dl>
       <div className="frame-stats-foot">
         <div>{footer}</div>

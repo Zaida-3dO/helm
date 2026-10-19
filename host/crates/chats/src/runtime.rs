@@ -566,12 +566,46 @@ impl ChatRuntime {
         }
     }
 
-    /// The skills the chat's worker reported; empty before its first launch.
+    /// The commands and skills for the chat's `/` menu. Its own worker's list when it
+    /// has one; else another live worker's in the same folder; else the last list any worker
+    /// reported for that folder (so a fresh chat has a list). A list seen here is
+    /// remembered for its folder.
     pub fn skills(&self, chat_id: &str) -> Vec<SkillInfo> {
-        let map = self.sh.actors.lock().unwrap();
-        map.get(chat_id)
-            .map(|h| h.live.lock().unwrap().skills.clone())
-            .unwrap_or_default()
+        let live: Vec<(String, Vec<SkillInfo>)> = {
+            let map = self.sh.actors.lock().unwrap();
+            map.iter()
+                .map(|(id, h)| (id.clone(), h.live.lock().unwrap().skills.clone()))
+                .filter(|(_, s)| !s.is_empty())
+                .collect()
+        };
+        let cwd_of = |id: &str| -> Option<String> {
+            self.db()
+                .snapshot(|t| crate::store::get_chat(t, id, 0))
+                .ok()
+                .flatten()
+                .map(|c| c.cwd)
+        };
+        let Some(cwd) = cwd_of(chat_id) else {
+            return Vec::new();
+        };
+        let dir = &self.sh.cfg.profile_dir;
+        let key = crate::catalogue::folder_key(&cwd);
+        let own = live.iter().find(|(id, _)| id == chat_id);
+        let found = own.or_else(|| {
+            live.iter()
+                .find(|(id, _)| cwd_of(id).is_some_and(|c| crate::catalogue::folder_key(&c) == key))
+        });
+        match found {
+            Some((_, skills)) => {
+                if let Err(e) =
+                    crate::catalogue::remember_skills(dir, &cwd, skills, helm_core::now_ms())
+                {
+                    log::warn!("skills cache not written: {e}");
+                }
+                skills.clone()
+            }
+            None => crate::catalogue::cached_skills(dir, &cwd),
+        }
     }
 
     /// The chat's panel-context generation (0 before its first worker launch).

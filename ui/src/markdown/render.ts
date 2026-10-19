@@ -3,7 +3,7 @@
 // Safety model: the HTML is built here, not passed through. Raw HTML in the source is
 // reduced to inert, escaped markers; link destinations pass an allowlist; images are never
 // emitted with a remote `src`. Callers can therefore assign the result to `innerHTML` as is.
-import { Marked, Renderer } from 'marked';
+import { Lexer, Marked, Renderer } from 'marked';
 import type { Token, Tokens, TokensList, TokenizerAndRendererExtension } from 'marked';
 import { canonicalCalloutType, defaultCalloutTitle, parseCalloutHead } from './callouts.ts';
 import { escapeAttr, escapeHtml } from './escape.ts';
@@ -275,9 +275,13 @@ export function renderToHtml(text: string, options: RenderOptions = {}): string 
 export type LinkDefs = TokensList['links'];
 
 /** The top-level tokens of already normalised Markdown (no frontmatter handling). Never throws. */
-export function lexBlocks(text: string): TokensList | null {
+export function lexBlocks(text: string, links: LinkDefs = {}): TokensList | null {
   try {
-    return md.lexer(text);
+    // marked resolves `[x]` reference links while lexing, so definitions from earlier blocks are
+    // seeded into the lexer before it reads this text.
+    const lexer = new Lexer(md.defaults);
+    Object.assign(lexer.tokens.links, links);
+    return lexer.lex(text);
   } catch {
     return null;
   }

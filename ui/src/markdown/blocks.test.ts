@@ -14,6 +14,8 @@ const CORPUS = [
   '<div>raw html block</div>\n\nInline <b>tag</b> and a<br>break.\n\n- [ ] task\n- [x] done task',
   '```mermaid\ngraph TD\nA-->B\n```\n\nText after the diagram.',
   'Windows line endings\r\n\r\n- a\r\n- b\r\n\r\nend',
+  // A definition in an early block, used in later blocks that finish on their own.
+  '[r]: https://example.com/r\n\nUse [r] here.\n\nAnd [r] there.\n\nA last line.',
 ];
 
 function streamOut(text: string, cuts: number[], options: RenderOptions = {}): string {

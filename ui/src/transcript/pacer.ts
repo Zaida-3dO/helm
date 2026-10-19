@@ -2,7 +2,9 @@
 //
 // The host sends a snapshot about every 80 ms. Revealing each snapshot at once looks jerky, so each
 // burst of new text is spread over the time we expect until the next burst:
-// - the expected gap is FIRST_GAP_MS before the second burst arrives, then STEADY_GAP_MS;
+// - the first burst shows at once: nothing is on screen yet, so there is no rhythm to keep, and
+//   holding it back only delays the first words;
+// - later bursts are spread over STEADY_GAP_MS;
 // - a burst's reveal window is that gap, never more than MAX_WINDOW_MS;
 // - once the stream is done, whatever is left is revealed over FINISH_WINDOW_MS;
 // - the unrevealed backlog never exceeds BACKLOG_CAP chars (the excess is revealed at once);
@@ -10,7 +12,6 @@
 // - the reveal always ends on a word boundary, so each word appears whole and fades in once.
 // Hidden documents skip pacing entirely. Pure: the caller supplies the clock.
 
-export const FIRST_GAP_MS = 250;
 export const STEADY_GAP_MS = 120;
 export const MAX_WINDOW_MS = 1000;
 export const FINISH_WINDOW_MS = 250;
@@ -23,7 +24,7 @@ export class Pacer {
   /** Revealed length when the current window opened, and the window itself. */
   private from = 0;
   private windowStart = 0;
-  private windowMs = FIRST_GAP_MS;
+  private windowMs = STEADY_GAP_MS;
   private bursts = 0;
   private done = false;
   private lastCommit = -Infinity;
@@ -61,8 +62,8 @@ export class Pacer {
       this.openWindow(now, FINISH_WINDOW_MS);
     } else if (grew) {
       this.bursts += 1;
-      const gap = this.bursts === 1 ? FIRST_GAP_MS : STEADY_GAP_MS;
-      this.openWindow(now, Math.min(gap, MAX_WINDOW_MS));
+      if (this.bursts === 1) this.shown = this.from = this.target.length;
+      else this.openWindow(now, Math.min(STEADY_GAP_MS, MAX_WINDOW_MS));
     }
     if (this.shown > this.target.length) this.shown = this.target.length;
   }

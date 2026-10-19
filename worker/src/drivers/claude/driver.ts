@@ -880,7 +880,7 @@ export class ClaudeDriver implements Driver {
     }
   }
 
-  /** Fails one running foreground Bash call (stop task). */
+  /** Stops one running foreground Bash call, or one running subagent by its Agent call id (stop_task). */
   async stopTool(cmd: Json): Promise<ResponseBody> {
     const sentAt = typeof cmd.sentAtMs === "number" ? cmd.sentAtMs : NaN;
     if (!(Date.now() - sentAt <= STOP_TOOL_MAX_AGE_MS)) return { success: false, error: "stop_tool line is missing sentAtMs or is more than 5 s old" };

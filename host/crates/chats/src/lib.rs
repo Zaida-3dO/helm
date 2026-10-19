@@ -25,7 +25,8 @@
 //! | [`manage`] | archive, restore, delete, unread marks and completion acks |
 //! | [`seams`] | traits other crates implement (panel context, project gate) |
 //! | [`search_source`] | the searchable message text the search crate indexes |
-//! | `timeline` | v0.2: one log line per turn-opening send, from saved to first output |
+//! | `timeline` | one log line per turn-opening send, from saved to first output |
+//! | [`runtime_settings`] | Settings → Runtime: Node/Claude status, launch options, new-chat defaults |
 
 mod actor;
 pub mod archive;
@@ -46,6 +47,7 @@ pub mod message_images;
 pub mod ops;
 pub mod runslots;
 pub mod runtime;
+pub mod runtime_settings;
 #[cfg(test)]
 mod runtime_tests;
 pub mod schema;

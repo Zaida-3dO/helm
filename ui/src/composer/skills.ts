@@ -35,3 +35,34 @@ export function rankSkills(list: readonly Skill[], query: string, limit = 8): Sk
     .slice(0, limit)
     .map((x) => x.s);
 }
+
+/** The command a draft starts with once arguments follow it ("/review the diff" → "review"). */
+export function commandWithArgs(text: string): string | null {
+  const m = /^\/([A-Za-z0-9_:-]{1,128})\s/.exec(text);
+  return m ? m[1]! : null;
+}
+
+export interface SkillMenu {
+  /** `pick`: choose a command; `args`: the chosen command stays shown while arguments are typed. */
+  mode: 'pick' | 'args';
+  items: Skill[];
+}
+
+/** What the `/` menu shows for a draft, or null when it is closed. */
+export function skillMenu(text: string, list: readonly Skill[], limit = 12): SkillMenu | null {
+  const q = skillQuery(text);
+  if (q !== null) {
+    const items = rankSkills(list, q, limit);
+    return items.length ? { mode: 'pick', items } : null;
+  }
+  const cmd = commandWithArgs(text);
+  if (cmd === null) return null;
+  const items = list.filter((s) => s.name.toLowerCase() === cmd.toLowerCase()).slice(0, 1);
+  return items.length ? { mode: 'args', items } : null;
+}
+
+/** Up/Down move the highlight through the menu, wrapping. */
+export function moveActive(active: number, count: number, dir: 1 | -1): number {
+  if (count <= 0) return -1;
+  return (((active + dir) % count) + count) % count;
+}

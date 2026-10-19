@@ -7,7 +7,7 @@
 //   - every folder under `helpers/` that has `src/main.ts` is a bundled resource at the path the
 //     host looks in (`<resources>/helpers/<name>/src/`), and so is the worker source;
 //   - every relative import a bundled file makes lands inside something that is bundled too;
-//   - the version is 1.0.0 on release/v1 (where CLAUDE.md says FAST MODE: OFF).
+//   - downgrades are allowed, so an older build installs over a newer one in place.
 //
 // Run: `npm run e2e -w checks` (cheap; reads files only).
 
@@ -20,7 +20,7 @@ import { REPO } from "./harness.ts";
 const confPath = path.join(REPO, "host", "app", "tauri.conf.json");
 const conf = JSON.parse(fs.readFileSync(confPath, "utf8")) as {
   version: string;
-  bundle: { active: boolean; targets: string[]; resources: Record<string, string>; windows?: { nsis?: { installMode?: string; installerHooks?: string } } };
+  bundle: { active: boolean; targets: string[]; resources: Record<string, string>; windows?: { allowDowngrades?: boolean; nsis?: { installMode?: string; installerHooks?: string } } };
   plugins?: Record<string, unknown>;
 };
 
@@ -43,9 +43,8 @@ describe("installer: what the NSIS bundle carries", () => {
     assert.deepEqual(conf.bundle.targets, ["nsis"], "NSIS only");
     assert.equal(conf.bundle.windows?.nsis?.installMode, "currentUser", "per-user install, no administrator prompt");
     assert.match(conf.version, /^\d+\.\d+\.\d+$/, "a plain version");
-    // The 1.0.0 bump lives on release/v1 only and is never forwarded; main keeps its own version.
-    if (/FAST MODE: OFF/.test(fs.readFileSync(path.join(REPO, "CLAUDE.md"), "utf8"))) assert.equal(conf.version, "1.0.0", "release/v1 ships 1.0.0");
-    assert.equal(conf.plugins?.updater, undefined, "no updater in v1 (M13)");
+    assert.equal(conf.bundle.windows?.allowDowngrades, true, "an older build installs over a newer one (NSIS refuses a downgrade otherwise)");
+    assert.equal(conf.plugins?.updater, undefined, "no updater");
     const hooks = conf.bundle.windows?.nsis?.installerHooks;
     assert.ok(hooks && fs.existsSync(path.resolve(path.dirname(confPath), hooks)), "the installer hooks file exists");
     assert.match(fs.readFileSync(path.resolve(path.dirname(confPath), hooks!), "utf8"), /Programs\\\$\{PRODUCTNAME\}/, "program files stay out of the profile folder");

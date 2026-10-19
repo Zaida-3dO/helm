@@ -67,3 +67,26 @@ test('toolbar accessories join the left group unless they ask for the right; the
   assert.equal(accessorySide({ id: 'panel-context', side: 'start' }), 'start', 'an explicit side wins');
   assert.equal(accessorySide({ id: 'x', side: 'end' }), 'end');
 });
+
+test('the / menu stays open with the chosen command while its arguments are typed', async () => {
+  const { commandWithArgs, moveActive, skillMenu } = await import('./skills.ts');
+  const list = [
+    { name: 'review', description: 'Review the diff' },
+    { name: 'reviewer', description: 'A reviewer' },
+    { name: 'deploy', description: 'Ship it' },
+  ];
+  assert.equal(commandWithArgs('/review the diff'), 'review');
+  assert.equal(commandWithArgs('/review'), null, 'no arguments yet');
+  assert.equal(commandWithArgs('please /review x'), null);
+  assert.deepEqual(skillMenu('/rev', list)?.items.map((s) => s.name), ['review', 'reviewer']);
+  assert.equal(skillMenu('/rev', list)?.mode, 'pick');
+  const args = skillMenu('/review the auth module', list);
+  assert.equal(args?.mode, 'args');
+  assert.deepEqual(args?.items, [{ name: 'review', description: 'Review the diff' }], 'with its description');
+  assert.equal(skillMenu('/unknown thing', list), null, 'an unknown command closes it');
+  assert.equal(skillMenu('/zzz', list), null, 'no matches closes it');
+  assert.equal(skillMenu('hello', list), null);
+  assert.equal(moveActive(0, 3, -1), 2);
+  assert.equal(moveActive(2, 3, 1), 0);
+  assert.equal(moveActive(0, 0, 1), -1);
+});

@@ -1,0 +1,27 @@
+{
+  "description": "v0.2 latency (checks/e2e/v02-latency.e2e.ts): every prompt gets one short streamed reply at once, turn after turn, so the timings measure Helm and not the script.",
+  "steps": [
+    {
+      "repeat": [
+        {
+          "await": {
+            "type": "user"
+          },
+          "as": "p",
+          "timeoutMs": 3600000
+        },
+        {
+          "init": {
+            "permissionMode": "bypassPermissions"
+          }
+        },
+        {
+          "text": "pong from the latency fixture"
+        },
+        {
+          "result": "done"
+        }
+      ]
+    }
+  ]
+}

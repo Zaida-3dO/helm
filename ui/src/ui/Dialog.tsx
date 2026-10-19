@@ -10,7 +10,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 're
 import { createPortal } from 'react-dom';
 import { Icon } from './controls.tsx';
 import { useLayer } from './hooks.ts';
-import { placeBelow, type Rect } from './place.ts';
+import { layoutSize, pageZoom, placeBelow, unzoom, viewportAt, type Rect } from './place.ts';
 
 const FOCUSABLE =
   'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
@@ -105,8 +105,8 @@ export function AnchoredDialog({ title, onClose, busy, anchor, intro, footer, te
   useLayoutEffect(() => {
     const el = panel.current;
     if (!el) return;
-    const r = el.getBoundingClientRect();
-    setPos(placeBelow(anchor, { width: r.width, height: r.height }, { width: innerWidth, height: innerHeight }));
+    const z = pageZoom();
+    setPos(placeBelow(unzoom(anchor, z), layoutSize(el), viewportAt(z)));
   }, [anchor]);
   return createPortal(
     <div

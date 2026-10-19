@@ -51,9 +51,8 @@ export class StreamBlocks {
       this.links = {};
     }
     if (this.prefix === '' && FRONTMATTER.test(text)) return { reset, added: [], tail: renderToHtml(text, done ? final : options) };
-    const tokens = lexBlocks(text.slice(this.prefix.length));
+    const tokens = lexBlocks(text.slice(this.prefix.length), this.links);
     if (!tokens) return { reset, added: [], tail: '' };
-    Object.assign(this.links, tokens.links);
     // Everything before the last non-blank block is finished. Until that block's first line is
     // complete it may still turn out to continue the one before (a "2" that becomes "2. second"
     // in a loose list), so both stay open.
@@ -67,12 +66,15 @@ export class StreamBlocks {
       const t = tokens[i]!;
       consumed += t.raw.length;
       if (t.type === 'space') continue;
-      const html = renderTokens([t], this.links, final);
+      // Only a finished definition is carried forward: one still arriving ("[r]: htt") must not
+      // win over its complete self, and marked keeps the first definition of a name.
+      if (t.type === 'def') this.links[t.tag] ??= { href: t.href, title: t.title };
+      const html = renderTokens([t], tokens.links, final);
       if (html) added.push(html);
       this.finished++;
     }
     this.prefix = text.slice(0, this.prefix.length + consumed);
     const rest = tokens.slice(cut);
-    return { reset, added, tail: rest.length ? renderTokens(rest, this.links, done ? final : options) : '' };
+    return { reset, added, tail: rest.length ? renderTokens(rest, tokens.links, done ? final : options) : '' };
   }
 }

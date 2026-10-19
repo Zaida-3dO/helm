@@ -203,7 +203,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         subagents: [],
         subagentsRunning: 0,
         compacting: null,
-        capabilities: { withdraw: true, deliverNow: true, stopTool: true, compact: true },
+        capabilities: { withdraw: true, deliverNow: true, stopTool: true, compact: true, stopSubagent: true },
         sendBehavior,
         queueHeld: false,
         revision: rev(),
@@ -410,6 +410,9 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     };
   }
 
+  // Settings → Runtime's stored settings.
+  const runtimeSettings: Record<string, unknown> = { executable: '', skipPermissions: true, fastMode: true, model: null, effort: 'xhigh', responseVerbosity: 'low', problem: null };
+
   function find(chatId: unknown): FakeChat {
     const c = chats.get(String(chatId));
     if (!c) throw { code: 'not_found', message: 'No such chat.' };
@@ -584,6 +587,17 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       source: 'fallback',
     }),
     tool_stop: () => ({ stopped: true }),
+    // Settings → Runtime.
+    runtime_status: () => ({
+      node: { path: 'C:/Program Files/nodejs/node.exe', source: 'PATH', version: 'v24.14.0', problem: null },
+      claude: { path: 'C:/Users/me/.local/bin/claude.exe', source: 'local-bin', version: '2.1.301', problem: null },
+      problems: [],
+    }),
+    runtime_settings_get: () => ({ ...runtimeSettings }),
+    runtime_settings_save: (a) => {
+      Object.assign(runtimeSettings, a, 'model' in a ? { model: a.model ? String(a.model) : null } : {});
+      return { ...runtimeSettings };
+    },
     attention_get: () => attention(),
     chat_archive: (a) => {
       const c = find(a.chatId);

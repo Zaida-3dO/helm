@@ -35,7 +35,7 @@ export interface FontSizes {
 }
 
 export const FONT_DEFAULTS: FontSizes = { interface: 13, response: 14, review: 10 };
-export const FONT_RANGES: Record<keyof FontSizes, [number, number]> = { interface: [11, 18], response: [11, 22], review: [9, 16] };
+export const FONT_RANGES: Record<keyof FontSizes, [number, number]> = { interface: [11, 20], response: [11, 24], review: [9, 20] };
 export const ZOOM_DEFAULT = 100;
 
 const inRange = (v: unknown, [lo, hi]: [number, number], dflt: number) => (typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi ? v : dflt);

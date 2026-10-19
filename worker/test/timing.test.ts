@@ -40,6 +40,26 @@ describe("send timeline marks", () => {
     }
   });
 
+  test("the v02-latency fixture answers prompt after prompt, each with its own marks", async () => {
+    const s = startWithFixture("v02-latency");
+    try {
+      await s.host.ready();
+      for (const [i, text] of ["one", "two"].entries()) {
+        const r = await prompt(s.host, text);
+        assert.equal(r.success, true);
+        assert.equal(typeof (r.timing as Record<string, number>)?.written, "number");
+        const end = Date.now() + 5000;
+        while (s.host.ofType("agent_settled").length < i + 1) {
+          assert.ok(Date.now() < end, `turn ${i + 1} settled`);
+          await new Promise((res) => setTimeout(res, 20));
+        }
+        assert.equal(s.host.ofType("agent_settled")[i]?.outcome, "complete");
+      }
+    } finally {
+      await s.done();
+    }
+  });
+
   test("prompt marks keep the first value and the table stays bounded", () => {
     markPrompt("sub-a", "received", 10);
     markPrompt("sub-a", "received", 20);

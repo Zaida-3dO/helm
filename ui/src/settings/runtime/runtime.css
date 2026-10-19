@@ -1,0 +1,107 @@
+/* Settings → Runtime. Design-system tokens only. */
+
+.rt-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  color: var(--text);
+}
+
+.rt-section h3 {
+  margin: 0 0 6px;
+  font-size: calc(12 * var(--ui-unit));
+  font-weight: 600;
+}
+
+.rt-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.rt-section-head h3 {
+  margin: 0;
+}
+
+.rt-help {
+  margin: 0 0 4px;
+  font-size: calc(11 * var(--ui-unit));
+  line-height: 1.6;
+  color: var(--secondary);
+}
+
+.rt-components {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rt-component {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.rt-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.rt-dot-ok {
+  background: var(--accent);
+}
+
+.rt-dot-bad {
+  background: var(--error);
+}
+
+.rt-component-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rt-component-name {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: calc(12 * var(--ui-unit));
+  font-weight: 600;
+}
+
+.rt-component-state {
+  font-weight: 400;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.rt-component-line {
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.rt-component-path {
+  font-family: var(--font-mono);
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
+
+.rt-problem {
+  color: var(--error);
+  font-size: calc(11 * var(--ui-unit));
+}
+
+.rt-exe {
+  width: 240px;
+}

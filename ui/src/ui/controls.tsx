@@ -141,6 +141,58 @@ export function Segmented<T extends string>({
   );
 }
 
+/**
+ * Choice tiles: an icon over a short label, one chosen. A radio group, so
+ * the arrow keys move the choice like Segmented.
+ */
+export function ChoiceTiles<T extends string>({
+  value,
+  options,
+  onChange,
+  label,
+  testId,
+}: {
+  value: T;
+  options: (SegmentedOption<T> & { icon: ReactNode })[];
+  onChange: (v: T) => void;
+  label: string;
+  testId?: string;
+}) {
+  const i = options.findIndex((o) => o.value === value);
+  return (
+    <div
+      className="ui-tiles"
+      role="radiogroup"
+      aria-label={label}
+      data-testid={testId}
+      onKeyDown={(e) => {
+        if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+        e.preventDefault();
+        const step = e.key === 'ArrowRight' ? 1 : -1;
+        const o = options[(i + step + options.length) % options.length];
+        if (o && !o.disabled) onChange(o.value);
+      }}
+    >
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          role="radio"
+          aria-checked={o.value === value}
+          tabIndex={o.value === value ? 0 : -1}
+          disabled={o.disabled}
+          className="ui-tile"
+          data-value={o.value}
+          onClick={() => onChange(o.value)}
+        >
+          {o.icon}
+          <span>{o.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** A chip: context tags, attachments, skills. */
 export function Chip({
   children,

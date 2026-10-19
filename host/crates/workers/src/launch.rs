@@ -80,7 +80,7 @@ impl Launch {
 }
 
 /// `<profile>/claude-runtime.json` (settings-schema): `{executable, skipPermissions, fastMode}`.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClaudeRuntime {
     /// Empty means "discover" (the worker's resolver).
@@ -88,8 +88,9 @@ pub struct ClaudeRuntime {
     pub executable: String,
     #[serde(default = "yes")]
     pub skip_permissions: bool,
-    /// Claude Code's fast mode. Off by default.
-    #[serde(default)]
+    /// Claude Code's fast mode. On by default: a missing key means on, an explicit
+    /// `false` turns it off.
+    #[serde(default = "yes")]
     pub fast_mode: bool,
 }
 
@@ -102,12 +103,19 @@ impl Default for ClaudeRuntime {
         Self {
             executable: String::new(),
             skip_permissions: true,
-            fast_mode: false,
+            fast_mode: true,
         }
     }
 }
 
 impl ClaudeRuntime {
+    /// Write `claude-runtime.json` (owner-only, atomic). Settings → Runtime saves it; workers read
+    /// it at their next start.
+    pub fn save(&self, profile_dir: &Path) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
+        helm_core::privfs::write_atomic(&profile_dir.join("claude-runtime.json"), &bytes)
+    }
+
     /// Read the file strictly. Missing means the defaults; an unreadable or invalid file is
     /// reported and also means the defaults (Settings → Runtime will list the problem later).
     pub fn load(profile_dir: &Path) -> (Self, Option<String>) {
@@ -199,6 +207,7 @@ mod tests {
         let (rt, err) = ClaudeRuntime::load(dir.path());
         assert_eq!((rt.clone(), err), (ClaudeRuntime::default(), None));
         assert!(rt.skip_permissions, "skip permission prompts defaults on");
+        assert!(rt.fast_mode, "fast mode defaults on");
         std::fs::write(
             dir.path().join("claude-runtime.json"),
             r#"{"skipPermissions": false}"#,
@@ -213,6 +222,21 @@ mod tests {
         let (rt, err) = ClaudeRuntime::load(dir.path());
         assert!(rt.skip_permissions, "an invalid file reads as the defaults");
         assert!(err.is_some());
+        // An explicit false turns fast mode off; a save reads back as written.
+        std::fs::write(
+            dir.path().join("claude-runtime.json"),
+            r#"{"fastMode": false}"#,
+        )
+        .unwrap();
+        let (rt, err) = ClaudeRuntime::load(dir.path());
+        assert!(!rt.fast_mode && err.is_none());
+        let mine = ClaudeRuntime {
+            executable: "C:/tools/claude.exe".into(),
+            skip_permissions: false,
+            fast_mode: false,
+        };
+        mine.save(dir.path()).unwrap();
+        assert_eq!(ClaudeRuntime::load(dir.path()), (mine, None));
     }
 
     #[test]
@@ -241,8 +265,8 @@ mod tests {
         assert_eq!(v["claude"]["skipPermissions"], true);
         assert_eq!(v["sendBehavior"]["longCommands"], "redirect");
         assert_eq!(
-            v["claude"]["fastMode"], false,
-            "fast mode is explicit and off by default"
+            v["claude"]["fastMode"], true,
+            "fast mode is explicit and on by default"
         );
         assert!(!v.to_string().contains("apiKeyMode"));
         assert!(

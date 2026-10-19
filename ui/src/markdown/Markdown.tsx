@@ -205,12 +205,13 @@ function useIncremental(
     root.append(tail);
   }, [incremental, ref, text, streaming, interactive]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // Development's StrictMode replays the mount: undo the replayed unmount's cancel.
+    if (state.current) state.current.cancelled = false;
+    return () => {
       if (state.current) state.current.cancelled = true;
-    },
-    [],
-  );
+    };
+  }, []);
 }
 
 export function Markdown({

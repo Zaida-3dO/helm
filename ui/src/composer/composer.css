@@ -395,3 +395,87 @@
   font-size: 12px;
   font-weight: 500;
 }
+
+/* The / menu, which lists the CLI's own commands and skills: above the box, at the
+   editor's left, width clamp(200, box, 450), radius 12, rows with the gem, name and description. */
+.composer-dock .composer {
+  position: relative;
+}
+.composer-dock .skill-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 1000;
+  width: clamp(200px, 100%, 450px);
+  padding: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 12px 40px #0005;
+}
+.skill-menu-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 9px 9px;
+  font-size: 11px;
+  font-weight: 590;
+}
+.skill-menu-keys {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.skill-menu-list {
+  display: flex;
+  flex-direction: column;
+  max-height: min(288px, 38vh);
+  overflow-y: auto;
+}
+.composer-dock .skill-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  text-align: left;
+}
+.composer-dock .skill-row.active,
+.composer-dock .skill-row:hover:not(:disabled) {
+  background: var(--hover);
+}
+.skill-gem {
+  flex: none;
+  width: 14px;
+  height: 16px;
+  margin-top: 1px;
+  clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
+  background: linear-gradient(135deg, #9fb7cc, #4d6a86);
+}
+.skill-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.skill-name {
+  font-size: 12px;
+  font-weight: 550;
+}
+.skill-desc {
+  font-size: 11px;
+  color: var(--secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skill-menu[data-mode='args'] .skill-desc {
+  white-space: normal;
+}
