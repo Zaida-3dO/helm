@@ -50,20 +50,6 @@
   margin-bottom: 2px;
 }
 
-.actions-pane .action-edit {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 12px;
-  margin-bottom: 10px;
-  display: grid;
-  gap: 8px;
-}
-
-.actions-pane .action-edit.is-hidden {
-  opacity: 0.8;
-}
-
 .actions-pane select {
   width: 100%;
   font: inherit;
@@ -72,11 +58,4 @@
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 6px 8px;
-}
-
-.actions-pane .action-edit-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
 }

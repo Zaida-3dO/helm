@@ -47,6 +47,14 @@ describe("top-bar buttons, chips and search", { timeout: 10 * 60_000 }, () => {
       const chips = await page().$$eval(tid("quick-reply"), (els) => els.map((e) => e.getAttribute("data-reply")));
       assert.deepEqual(chips, ["yes", "no"]);
 
+      // The tooltip and the accessible name reach the DOM, and start with the visible label.
+      for (const id of ["yes", "no"]) {
+        const chip = page().locator(tid("quick-reply", `[data-reply="${id}"]`));
+        const [label, title, name] = await chip.evaluate((el) => [el.textContent ?? "", el.getAttribute("title") ?? "", el.getAttribute("aria-label") ?? ""]);
+        assert.ok(title.startsWith(label) && title.length > label.length, `${id} has a tooltip that explains it: ${title}`);
+        assert.equal(name, title, `${id}'s accessible name is the tooltip text`);
+      }
+
       // A chip and a top-bar button each send their text and leave the typed draft alone.
       await typeMessage(page(), "keep this draft");
       await page().click(tid("quick-reply", '[data-reply="yes"]'));
@@ -74,6 +82,25 @@ describe("top-bar buttons, chips and search", { timeout: 10 * 60_000 }, () => {
       await shot(page(), OUT, "L1");
     } catch (e) {
       await shot(page(), OUT, "L1-FAILED");
+      throw new Error(`${(e as Error).message}\n--- app log tail ---\n${app?.log().slice(-3000)}`);
+    }
+  });
+
+  test("L2: after Stop the Continue chip appears with its tooltip and accessible name", async () => {
+    try {
+      await newChat(page(), scratchDir("helm-e2e-chat-"));
+      await send(page(), "[E7] wait a while");
+      await page().waitForSelector(tid("tool-card", '[data-status="running"]'), { timeout: 20_000 });
+      await page().click(tid("stop"));
+      await waitStatus(page(), "stopped", 30_000);
+      await page().waitForSelector(tid("quick-reply", '[data-reply="continue"]'), { timeout: 20_000 });
+      const chip = page().locator(tid("quick-reply", '[data-reply="continue"]'));
+      const [label, title, name] = await chip.evaluate((el) => [el.textContent ?? "", el.getAttribute("title") ?? "", el.getAttribute("aria-label") ?? ""]);
+      assert.equal(label, "Continue");
+      assert.match(title, /^Continue: sends 'continue'/);
+      assert.equal(name, title, "the accessible name is the tooltip text");
+    } catch (e) {
+      await shot(page(), OUT, "L2-FAILED");
       throw new Error(`${(e as Error).message}\n--- app log tail ---\n${app?.log().slice(-3000)}`);
     }
   });
