@@ -15,6 +15,8 @@ pub struct Simple {
     /// The bodies of command and process substitutions in this command (`$(…)`, backticks,
     /// `<(…)`, `>(…)`), which the guard judges as commands of their own.
     pub subs: Vec<String>,
+    /// The command's input is a heredoc or here-string written on the line.
+    pub stdin_text: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +43,7 @@ pub fn parse(line: &str) -> Parsed {
         i: 0,
         nesting: 0,
         heredocs: Vec::new(),
+        arith_sub: false,
     };
     match r.list(false) {
         Ok(_) if !r.heredocs.is_empty() => Parsed::Unreadable("a heredoc without its end line"),
@@ -55,6 +58,8 @@ struct Reader<'a> {
     nesting: usize,
     /// Heredocs whose text starts after the next newline.
     heredocs: Vec<Heredoc>,
+    /// The substitution about to be read is `$((…))`.
+    arith_sub: bool,
 }
 
 /// A `<<WORD` (or `<<-WORD`) waiting for its text.
@@ -263,8 +268,11 @@ impl Reader<'_> {
         let mut depth = 0usize;
         // The depths at which an arithmetic `((` opened and is still open.
         let mut arith: Vec<usize> = Vec::new();
+        // The whole of this list is the body of a `$((…))`.
+        let whole_arith = std::mem::take(&mut self.arith_sub);
         let mut prev: Option<char> = None;
         while let Some(c) = self.next() {
+            let in_arith = whole_arith || !arith.is_empty();
             if matches!(c, '<' | '>' | '|' | '&' | '.' | '(') {
                 // An operator can be split by a line continuation (`|\<newline>|`).
                 self.skip_joins();
@@ -304,7 +312,7 @@ impl Reader<'_> {
                 }
                 // bash reads `(( … ))` as one span with no comments in it, so a `#` there is
                 // text, and the line goes on after it.
-                '#' if !b.in_word && comment_may_follow(prev) && !arith.is_empty() => {
+                '#' if !b.in_word && comment_may_follow(prev) && in_arith => {
                     return Err("a # inside (( ))");
                 }
                 '#' if !b.in_word && comment_may_follow(prev) => {
@@ -319,13 +327,29 @@ impl Reader<'_> {
                         self.i += 1;
                     }
                     if c == '\n' && !self.heredocs.is_empty() {
+                        // bash reads `(( … ))` as one span, so heredoc text starts only after
+                        // the newline that follows it.
+                        if in_arith {
+                            return Err("a heredoc whose text starts inside (( ))");
+                        }
                         self.heredoc_text()?;
+                    }
+                }
+                // Inside `(( … ))`, `<`, `>`, `<<` and `>>` compare and shift numbers: they are
+                // not redirections or heredocs.
+                '<' | '>' if in_arith => {
+                    b.end_word(nested)?;
+                    while self.peek().is_some_and(|x| matches!(x, '<' | '>' | '=')) {
+                        self.i += 1;
                     }
                 }
                 '<' if self.peek() == Some('<') => {
                     b.end_word(nested)?;
                     self.i += 1;
                     self.skip_joins();
+                    // The command reads text from the line itself, which a shell or interpreter
+                    // would run.
+                    b.cur.stdin_text = true;
                     if self.peek() == Some('<') {
                         // A here-string `<<< word`: the word is read (its substitutions run)
                         // but is not an argument.
@@ -444,13 +468,21 @@ impl Reader<'_> {
             }
             Some('(') => {
                 self.i += 1;
+                // `$((…))` is arithmetic: its body is read with the `(( ))` rules.
+                let arith = self.peek() == Some('(');
+                self.arith_sub = arith;
                 let body = self.sub_body()?;
-                b.cur.subs.push(body);
+                // Kept as `((…))`, so judging it on its own reads it as arithmetic too.
+                b.cur
+                    .subs
+                    .push(if arith { format!("({body})") } else { body });
             }
             Some('{') => {
                 self.i += 1;
                 self.parameter()?;
             }
+            // The old `$[ … ]` arithmetic: its `<<` and newlines follow other rules.
+            Some('[') => return Err("a $[ ] arithmetic expansion"),
             // `$$`, `$#`, `$@`, `$1` and the like: one character, so `$$'x'` is not `$'x'`.
             Some(x)
                 if matches!(x, '$' | '#' | '?' | '!' | '-' | '@' | '*') || x.is_ascii_digit() =>
@@ -697,6 +729,9 @@ mod tests {
             "cat <<$X\nx\n$X",
             "echo $(cat <<EOF\n)\nx\nEOF",
             "(( 1 # ))",
+            "echo $((1 # 2))",
+            "echo $[1]",
+            "cat <<EOF; (( 1 +\n2 ))\nx\nEOF",
             "echo $(git push",
             "echo >",
             "echo `a \\` b`",
@@ -757,7 +792,7 @@ mod tests {
         assert_eq!(subs("echo \"$(echo ')')\""), vec!["echo ')'"]);
         assert_eq!(subs("echo $(echo \")\" # )\n)"), vec!["echo \")\" # )\n"]);
         assert_eq!(subs("echo $( (a) b )"), vec![" (a) b "]);
-        assert_eq!(subs("echo $((1+2))"), vec!["(1+2)"]);
+        assert_eq!(subs("echo $((1+2))"), vec!["((1+2))"]);
         assert_eq!(subs("cat <(git log)"), vec!["git log"]);
         assert_eq!(
             words("cat <(a)#b x\necho a |\\\n| echo b"),
