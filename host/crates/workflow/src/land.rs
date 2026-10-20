@@ -699,9 +699,10 @@ pub fn ready(
         };
         Ok::<_, rusqlite::Error>((st, run, store::change(tx, run_id, repo, branch)?, chat_on))
     })?;
-    if run.is_none() {
+    let Some(run) = run else {
         return Ok(Err("No such task.".into()));
-    }
+    };
+    let status_before = run.status;
     let Some(c) = c else {
         return Ok(Err("That task has no such change.".into()));
     };
@@ -736,6 +737,12 @@ pub fn ready(
         }
         if !crate::mode::in_effect(tx, &run.chat_id, &now_st)? {
             return Ok(Err(crate::user::CHAT_OFF.into()));
+        }
+        if run.status != status_before {
+            return Ok(Err(format!(
+                "That task changed while Helm was checking {branch}; it is {} now.",
+                run.status
+            )));
         }
         if now_c.state != "handed_off" || now_c.approved_tip != c.approved_tip {
             return Ok(Err(format!(

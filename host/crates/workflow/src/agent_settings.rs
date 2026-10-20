@@ -205,6 +205,10 @@ impl SettingsExtension for OrchestratorSettings {
         (key == KEY).then(options)
     }
 
+    fn needs_all_settings(&self, _key: &str) -> bool {
+        true
+    }
+
     fn read(&self, tx: &Transaction<'_>, _key: &str) -> Value {
         settings::load(tx)
             .map(|s| as_json(&s))
@@ -305,6 +309,11 @@ mod tests {
             .unwrap()
             .contains(&json!("stages.review.agent")));
         assert!(OrchestratorSettings.describe("theme").is_none());
+    }
+
+    #[test]
+    fn the_key_is_in_the_all_tier() {
+        assert!(OrchestratorSettings.needs_all_settings(KEY));
     }
 
     #[test]

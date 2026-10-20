@@ -22,6 +22,12 @@ pub trait SettingsExtension: Send + Sync {
     /// parts a chat may not change. `None` for a key the extension does not own.
     fn describe(&self, key: &str) -> Option<Value>;
 
+    /// True when the key is in the All tier: like the preference keys of that tier, chats may
+    /// read and change it only while "Chats can change all settings" is on.
+    fn needs_all_settings(&self, _key: &str) -> bool {
+        false
+    }
+
     /// The value in effect now (never null: a setting at its default reads as that default).
     fn read(&self, tx: &Transaction<'_>, key: &str) -> Value;
 

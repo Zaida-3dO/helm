@@ -55,6 +55,13 @@ pub fn agent_keys(all_settings: bool) -> Vec<&'static str> {
         .collect()
 }
 
+/// The refusal for a key that needs "Chats can change all settings" while that is off.
+pub fn needs_all_refusal(key: &str) -> String {
+    format!(
+        "{key} needs \"Chats can change all settings\", which only the user can turn on in Settings > General."
+    )
+}
+
 /// Why `key` cannot be changed by an agent, or `None` when it can.
 pub fn refusal(key: &str, all_settings: bool) -> Option<String> {
     if let Some(page) = user_only_page(key) {
@@ -65,9 +72,7 @@ pub fn refusal(key: &str, all_settings: bool) -> Option<String> {
     match classify(key) {
         Some(PrefClass::Registry(Tier::Base)) => None,
         Some(PrefClass::Registry(Tier::All)) if all_settings => None,
-        Some(PrefClass::Registry(Tier::All)) => Some(format!(
-            "{key} needs \"Chats can change all settings\", which only the user can turn on in Settings > General."
-        )),
+        Some(PrefClass::Registry(Tier::All)) => Some(needs_all_refusal(key)),
         Some(PrefClass::UserOnly(why)) => Some(format!("{why} Change it in Settings.")),
         _ => Some(format!("{key} is not a setting chats can change.")),
     }

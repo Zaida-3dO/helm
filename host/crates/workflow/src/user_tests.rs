@@ -460,3 +460,37 @@ fn ready_for_review_rechecks_the_chat_after_github_answers() {
     );
     assert_eq!(t.events("flipped", None), 0);
 }
+
+/// A GitHub that, while it answers, finds the task ended by the user.
+struct EndsTask<'a> {
+    t: &'a T,
+    run: String,
+    inner: Gh1,
+}
+
+impl Gh for EndsTask<'_> {
+    fn run(&self, args: &[String]) -> Result<Out, GhError> {
+        let out = self.inner.run(args);
+        self.t.set_status(&self.run, "ended");
+        out
+    }
+}
+
+#[test]
+fn ready_for_review_rechecks_the_task_after_github_answers() {
+    let t = setup(|_| {});
+    t.wf(json!({"action": "start", "title": "T"})).unwrap();
+    let run = t.run_id();
+    t.change(&run, "a", "handed_off");
+    let g = EndsTask {
+        t: &t,
+        run: run.clone(),
+        inner: gh(TIP, true, true),
+    };
+    let e = crate::land::ready(&t.db, &g, &run, REPO, "a", 16)
+        .unwrap()
+        .unwrap_err();
+    assert!(e.contains("task changed"), "{e}");
+    assert_eq!(t.state_of(&run, "a"), "handed_off");
+    assert_eq!(t.events("flipped", None), 0);
+}

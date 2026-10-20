@@ -9,7 +9,7 @@
 //!   if every value is still what the chat set.
 
 use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
-use crate::settings_allow::{agent_keys, refusal};
+use crate::settings_allow::{agent_keys, needs_all_refusal, refusal};
 use crate::settings_ext::SettingsExtensions;
 use crate::settings_options;
 use crate::spec::ToolSpec;
@@ -65,7 +65,9 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
     db.snapshot(|tx| {
         let all = all_settings(tx);
         let mut visible = agent_keys(all);
-        visible.extend(ext.keys());
+        visible.extend(ext.keys().into_iter().filter(|k| {
+            all || !ext.owner(k).is_some_and(|x| x.needs_all_settings(k))
+        }));
         let wanted: Vec<String> = match a.get("keys").and_then(Value::as_array) {
             Some(k) => k
                 .iter()
@@ -78,6 +80,10 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
         let mut unavailable = Map::new();
         for k in &wanted {
             if let Some(x) = ext.owner(k) {
+                if x.needs_all_settings(k) && !all {
+                    unavailable.insert(k.clone(), json!(needs_all_refusal(k)));
+                    continue;
+                }
                 settings.insert(k.clone(), x.read(tx, k));
                 if let Some(o) = x.describe(k) {
                     options.insert(k.clone(), o);
@@ -126,6 +132,9 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
                 return Ok(Err(format!("The value for {k} is too large.")));
             }
             let (before, after) = if let Some(x) = ext.owner(k) {
+                if x.needs_all_settings(k) && !all_settings(tx) {
+                    return Ok(Err(needs_all_refusal(k)));
+                }
                 match x.apply(tx, k, v) {
                     Ok((b, a)) => (Some(b), Some(a)),
                     Err(why) => return Ok(Err(why)),
@@ -149,6 +158,10 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
                 }
                 (before, prefs::read(tx, k))
             };
+            // Nothing changed: no ring entry, so no Undo and no notice for it.
+            if before == after {
+                return Ok(Ok((None, before, after)));
+            }
             tx.execute(
                 "INSERT INTO settings_changes(chat_id, key, before, after, at) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
@@ -165,16 +178,22 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
                      (SELECT id FROM settings_changes ORDER BY id DESC LIMIT ?1)",
                 [RING],
             )?;
-            Ok::<_, rusqlite::Error>(Ok((id, before, after)))
+            Ok::<_, rusqlite::Error>(Ok((Some(id), before, after)))
         });
         match r {
             Ok(Ok((id, before, after))) => {
-                let mut entry = json!({"before": before, "after": after, "changeId": id});
+                let mut entry = match id {
+                    Some(id) => json!({"before": before, "after": after, "changeId": id}),
+                    None => json!({"before": before, "after": after, "unchanged": true}),
+                };
                 if settings_options::is_not_read(k) {
                     entry["note"] = json!("Stored, but nothing in Helm reads this setting yet, so it has no visible effect.");
                 }
                 applied.insert(k.clone(), entry);
-                recorded.push(json!({"changeId": id, "key": k, "before": before, "after": after}));
+                if let Some(id) = id {
+                    recorded
+                        .push(json!({"changeId": id, "key": k, "before": before, "after": after}));
+                }
             }
             Ok(Err(why)) => {
                 error = Some(why);
@@ -559,8 +578,11 @@ mod tests {
     }
 
     /// A stand-in extension: one key holding `{open, level}`; chats may change only `level`.
-    struct Fake;
+    struct Fake(bool);
     impl crate::SettingsExtension for Fake {
+        fn needs_all_settings(&self, _key: &str) -> bool {
+            self.0
+        }
         fn keys(&self) -> Vec<&'static str> {
             vec!["fake"]
         }
@@ -569,7 +591,7 @@ mod tests {
                 .then(|| json!({"type": "object", "default": {"open": false, "level": 1}}))
         }
         fn read(&self, tx: &Transaction<'_>, _key: &str) -> Value {
-            prefs::read(tx, "agentSettingsAll")
+            prefs::read(tx, "desktopPet")
                 .and_then(|v| v.get("fake").cloned())
                 .unwrap_or_else(|| json!({"open": false, "level": 1}))
         }
@@ -585,12 +607,11 @@ mod tests {
             }
             let mut after = before.clone();
             after["level"] = value["level"].clone();
-            prefs::set_raw(tx, "agentSettingsAll", &json!({"fake": after})).unwrap();
+            prefs::set_raw(tx, "desktopPet", &json!({"fake": after})).unwrap();
             Ok((before, after))
         }
         fn restore(&self, tx: &Transaction<'_>, _key: &str, value: &Value) -> Result<(), String> {
-            prefs::set_raw(tx, "agentSettingsAll", &json!({"fake": value}))
-                .map_err(|e| e.to_string())
+            prefs::set_raw(tx, "desktopPet", &json!({"fake": value})).map_err(|e| e.to_string())
         }
         fn changed_event(&self, _key: &str) -> AppEvent {
             AppEvent::new("fake_changed")
@@ -602,7 +623,9 @@ mod tests {
         let e = env();
         let mut s = Services::new();
         s.insert(e.db.clone());
-        s.insert(Arc::new(crate::SettingsExtensions(vec![Arc::new(Fake)])));
+        s.insert(Arc::new(crate::SettingsExtensions(vec![Arc::new(Fake(
+            false,
+        ))])));
         let mut c = ctx(&e);
         c.services = Arc::new(s);
         let g = get_settings(&c, json!({})).unwrap();
@@ -632,6 +655,98 @@ mod tests {
             e.sink.kinds().last().map(String::as_str),
             Some("fake_changed")
         );
+    }
+
+    fn with_fake(e: &Env, all_tier: bool) -> ToolCtx {
+        let mut s = Services::new();
+        s.insert(e.db.clone());
+        s.insert(Arc::new(crate::SettingsExtensions(vec![Arc::new(Fake(
+            all_tier,
+        ))])));
+        let mut c = ctx(e);
+        c.services = Arc::new(s);
+        c
+    }
+
+    #[test]
+    fn an_all_tier_extension_key_obeys_the_all_settings_switch() {
+        let e = env();
+        let c = with_fake(&e, true);
+        // Switch off: not listed, refused to read and to change, like keybindings.
+        let g = get_settings(&c, json!({})).unwrap();
+        assert!(g["settings"].get("fake").is_none());
+        let g = get_settings(&c, json!({"keys": ["fake", "keybindings"]})).unwrap();
+        assert!(g["unavailable"]["fake"]
+            .as_str()
+            .unwrap()
+            .contains("all settings"));
+        assert_eq!(
+            g["unavailable"]["fake"],
+            g["unavailable"]["keybindings"]
+                .as_str()
+                .unwrap()
+                .replace("keybindings", "fake")
+        );
+        let r = update_settings(&c, json!({"changes": {"fake": {"level": 3}}}));
+        assert!(r.unwrap_err().public.contains("all settings"));
+        assert!(e.sink.kinds().is_empty());
+        // Switch on: listed, readable and changeable.
+        e.db.write(|tx| {
+            prefs::set_raw(tx, "agentSettingsAll", &json!(true))
+                .map_err(|_| rusqlite::Error::InvalidQuery)
+        })
+        .unwrap();
+        let g = get_settings(&c, json!({})).unwrap();
+        assert_eq!(g["settings"]["fake"]["level"], 1);
+        let r = update_settings(&c, json!({"changes": {"fake": {"level": 3}}})).unwrap();
+        assert_eq!(r["applied"]["fake"]["after"]["level"], 3);
+        // A base-tier extension key never needed the switch.
+        let e2 = env();
+        let c2 = with_fake(&e2, false);
+        assert!(update_settings(&c2, json!({"changes": {"fake": {"level": 2}}})).is_ok());
+    }
+
+    #[test]
+    fn an_update_that_changes_nothing_writes_no_ring_entry_and_no_notice() {
+        let e = env();
+        update_settings(&ctx(&e), json!({"changes": {"sidebarWidth": 300}})).unwrap();
+        e.sink.events.lock().unwrap().clear();
+        // The same value again, and null on a key with nothing stored.
+        let r = update_settings(
+            &ctx(&e),
+            json!({"changes": {"sidebarWidth": 300, "compactSidebar": null}}),
+        )
+        .unwrap();
+        assert_eq!(r["applied"]["sidebarWidth"]["unchanged"], true);
+        assert!(r["applied"]["sidebarWidth"].get("changeId").is_none());
+        assert_eq!(r["applied"]["compactSidebar"]["unchanged"], true);
+        assert!(e.sink.kinds().is_empty(), "no notice");
+        let list = changes_list(&op(&e), json!({})).unwrap();
+        assert_eq!(list["changes"].as_array().unwrap().len(), 1);
+        // A merge that sends the stored sub-values is a no-op too.
+        update_settings(
+            &ctx(&e),
+            json!({"changes": {"fontSizes": {"interface": 15}}}),
+        )
+        .unwrap();
+        let before = changes_list(&op(&e), json!({})).unwrap()["changes"]
+            .as_array()
+            .unwrap()
+            .len();
+        let r = update_settings(
+            &ctx(&e),
+            json!({"changes": {"fontSizes": {"interface": 15}}}),
+        )
+        .unwrap();
+        assert_eq!(r["applied"]["fontSizes"]["unchanged"], true);
+        let after = changes_list(&op(&e), json!({})).unwrap()["changes"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(before, after);
+        // A real change after a no-op still records.
+        let r = update_settings(&ctx(&e), json!({"changes": {"sidebarWidth": 310}})).unwrap();
+        assert!(r["applied"]["sidebarWidth"]["changeId"].is_i64());
     }
 
     #[test]
