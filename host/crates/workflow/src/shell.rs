@@ -148,6 +148,14 @@ impl Reader<'_> {
         self.s.get(self.i).copied()
     }
 
+    /// Skip backslash-newline pairs. bash deletes them before it reads the line, so one can sit
+    /// inside an operator (`<\<newline><`) or between `$` and what follows it.
+    fn skip_joins(&mut self) {
+        while self.peek() == Some('\\') && self.s.get(self.i + 1) == Some(&'\n') {
+            self.i += 2;
+        }
+    }
+
     /// Read a command list. Inside a substitution (`nested`) it ends at the `)` that closes the
     /// substitution, which it consumes.
     fn list(&mut self, nested: bool) -> Res<Vec<Simple>> {
@@ -155,6 +163,10 @@ impl Reader<'_> {
         let mut depth = 0usize;
         let mut prev: Option<char> = None;
         while let Some(c) = self.next() {
+            if matches!(c, '<' | '>' | '|' | '&' | '.') {
+                // An operator can be split by a line continuation (`|\<newline>|`).
+                self.skip_joins();
+            }
             match c {
                 '\'' => {
                     b.in_word = true;
@@ -171,7 +183,9 @@ impl Reader<'_> {
                     self.double_quoted(&mut b)?;
                 }
                 '\\' => match self.next() {
-                    Some('\n') => {}
+                    // A line continuation is gone before bash reads the line: it neither ends a
+                    // word nor counts as the character before a `#`.
+                    Some('\n') => continue,
                     Some(x) => {
                         b.in_word = true;
                         b.word.push(x);
@@ -204,15 +218,22 @@ impl Reader<'_> {
                     b.end_word(nested)?;
                     while self.peek().is_some_and(|x| matches!(x, '>' | '&' | '|')) {
                         self.i += 1;
+                        self.skip_joins();
                     }
                     while self.peek().is_some_and(|x| matches!(x, ' ' | '\t')) {
                         self.i += 1;
+                        self.skip_joins();
                     }
                     if self.peek() == Some('(') {
                         // A process substitution `<(…)` / `>(…)` runs a command.
                         self.i += 1;
                         let body = self.sub_body()?;
                         b.cur.subs.push(body);
+                        // It is also a word (a file name), so a `#` right after it is part of
+                        // that word, not a comment.
+                        b.in_word = true;
+                        b.computed_word = true;
+                        b.word.push('$');
                     } else {
                         b.target = true;
                     }
@@ -274,6 +295,7 @@ impl Reader<'_> {
 
     /// After a `$`: a substitution, a parameter, or (outside double quotes) `$'...'`.
     fn dollar(&mut self, b: &mut Build, in_double: bool) -> Res<()> {
+        self.skip_joins();
         match self.peek() {
             Some('\'') if !in_double => {
                 self.i += 1;
@@ -577,6 +599,14 @@ mod tests {
         assert_eq!(subs("echo $( (a) b )"), vec![" (a) b "]);
         assert_eq!(subs("echo $((1+2))"), vec!["(1+2)"]);
         assert_eq!(subs("cat <(git log)"), vec!["git log"]);
+        assert_eq!(
+            words("cat <(a)#b x\necho a |\\\n| echo b"),
+            vec![
+                vec!["cat", "$#b", "x"],
+                vec!["echo", "a"],
+                vec!["echo", "b"]
+            ]
+        );
         assert_eq!(
             parse("echo \"$(case x in a) b;; esac)\""),
             Parsed::Unreadable("a case statement inside a substitution")
