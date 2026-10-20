@@ -2,7 +2,7 @@
 // a plain browser). `?orch=` in the page URL picks the start: `off` (master switch off), `auto`
 // (new chats start in Auto), `on` (default). Dev builds only; fakeHost.ts imports this file.
 
-import type { ChatMode, ChatModeView, WorkflowSettings } from '../api/generated/workflow/index.ts';
+import type { ChatMode, ChatModeView, OtherTaskView, RunChangeView, RunPlanView, RunTaskView, RunView, WorkflowSettings } from '../api/generated/workflow/index.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
 
 function startOf(): string {
@@ -29,26 +29,26 @@ export function defaultSettings(enabled: boolean): WorkflowSettings {
   };
 }
 
-/** `?orchrun=` picks the task the fake chats show: plan, signoff, review, cap, landing, failed, none. */
+/** `?orchrun=` picks the task the fake chats show: plan, signoff, review, cap, landing, failed, others, none. */
 function runOf(): string {
   return typeof location === 'undefined' ? 'review' : (new URLSearchParams(location.search).get('orchrun') ?? 'review');
 }
 
 const REPO = 'github.com/example/app';
 
-function change(over: Record<string, unknown>): Record<string, unknown> {
+export function change(over: Partial<RunChangeView>): RunChangeView {
   return {
     repo: REPO, branch: 'feat/login', pr: null, state: 'open', failedMode: null, tip: 'a'.repeat(40), approved: false,
     reviewRounds: 1, reviewCap: 3, smoketestRounds: 0, smoketestCap: 3, error: null, missing: [], ...over,
   };
 }
 
-export function fakeRun(kind: string): Record<string, unknown> {
-  const task = { runId: 'run-1', title: 'Add the login page', status: 'active', attempt: 1, visual: false, itemId: null, skipped: [] };
-  const plan = (over: Record<string, unknown>) => ({ id: 'p'.repeat(64), approved: true, signedOff: false, rounds: 1, cap: 3, missing: null, ...over });
+export function fakeRun(kind: string): RunView {
+  const task: RunTaskView = { runId: 'run-1', title: 'Add the login page', status: 'active', attempt: 1, visual: false, itemId: null, skipped: [] };
+  const plan = (over: Partial<RunPlanView>): RunPlanView => ({ id: 'p'.repeat(64), approved: true, signedOff: false, rounds: 1, cap: 3, missing: null, ...over });
   switch (kind) {
     case 'none':
-      return { task: null, otherTasks: [] };
+      return { task: null, plan: null, changes: [], otherTasks: [] };
     case 'plan':
       return { task, plan: plan({ id: null, approved: false, rounds: 0, missing: 'the task has no plan of record yet; adopt one with app_workflow plan' }), changes: [], otherTasks: [] };
     case 'signoff':
@@ -58,7 +58,18 @@ export function fakeRun(kind: string): Record<string, unknown> {
     case 'landing':
       return { task, plan: plan({ signedOff: true }), changes: [change({ state: 'awaiting_merge', approved: true, pr: `https://${REPO}/pull/12` }), change({ branch: 'feat/api', state: 'landed', approved: true })], otherTasks: [] };
     case 'failed':
-      return { task, plan: plan({ signedOff: true }), changes: [change({ state: 'land_failed', approved: true, error: 'The base branch moved; the merge was refused.' })], otherTasks: [{ runId: 'run-0', title: 'Older task', status: 'parked', parkReason: 'chat turned off' }] };
+      return { task, plan: plan({ signedOff: true }), changes: [change({ state: 'land_failed', approved: true, error: 'The base branch moved; the merge was refused.' })], otherTasks: [{ runId: 'run-0', title: 'Older task', status: 'parked', parkReason: 'chat turned off', waiting: [] }] };
+    case 'others': {
+      // The current task is mid-build; an older task has a draft PR waiting on the user.
+      const older: OtherTaskView = {
+        runId: 'run-0',
+        title: 'Older task',
+        status: 'handed_off',
+        parkReason: null,
+        waiting: [change({ repo: REPO, branch: 'feat/older', state: 'awaiting_merge', approved: true, pr: `https://${REPO}/pull/9` })],
+      };
+      return { task, plan: plan({ signedOff: true }), changes: [change({})], otherTasks: [older] };
+    }
     default:
       return { task, plan: plan({ signedOff: true }), changes: [change({ missing: ['feat/login: no approving review at the latest commit'] })], otherTasks: [] };
   }

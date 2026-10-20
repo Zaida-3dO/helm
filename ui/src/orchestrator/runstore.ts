@@ -9,7 +9,8 @@ import type { AppEvent, EventBus } from '../api/events.ts';
 import { consentOps } from '../api/consent.ts';
 import { itemLinkOps } from '../api/itemlinks.ts';
 import { isWorkflowConsent } from './progress.ts';
-import { parseRun, type RunView } from './run.ts';
+import { workflowOps } from './api.ts';
+import { showRun, type RunView } from './run.ts';
 
 type Listener = () => void;
 
@@ -80,7 +81,7 @@ export class RunStore {
     if (this.unsupported && !opts.retry) return;
     let run: RunView;
     try {
-      run = parseRun(await this.api('workflow_run_get', { chatId }));
+      run = showRun(await workflowOps(this.api).runGet(chatId));
     } catch (e) {
       if (isUnknownOp(e)) {
         // An older host without the op: nothing to show, and stop asking until a run event.

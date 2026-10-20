@@ -32,7 +32,7 @@
 //! | table `workflow_standup_outbox` | stage records written to Agent Standup, with an "outcome unknown" read-back before any resend |
 //! | land step | `gh` merge pinned to the approved head, readback must say MERGED; draft land |
 //! | op `workflow_run_get`, event `workflow_run` | the workflow panel's live read |
-//! | ops `workflow_change_action`, `workflow_task_action` | the user's buttons and task menu ([`user`]) |
+//! | ops `workflow_change_action`, `workflow_change_ready`, `workflow_task_action` | the user's buttons and task menu ([`user`]); Ready for review is its own non-maintenance op because it asks GitHub |
 //!
 //! Events: `workflow_settings {}`, `workflow_chat_mode {chatId}` and `workflow_run {chatId}` tell the
 //! UI to re-read. `workflow_run` follows every write of a task, change or event row, whoever made it

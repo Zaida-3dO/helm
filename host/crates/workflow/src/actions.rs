@@ -169,13 +169,13 @@ pub fn plan(tx: &Transaction<'_>, x: &Act<'_>, a: &Value, plan_text: &str) -> Ou
         "next": "Have a fresh plan reviewer review exactly this plan and report with app_workflow_report."})))
 }
 
-fn change_json(
+fn change_view(
     tx: &Transaction<'_>,
     s: &WorkflowSettings,
     run: &Run,
     c: &Change,
     all: &[Change],
-) -> rusqlite::Result<Value> {
+) -> rusqlite::Result<RunChangeView> {
     let cap = engine::cap(tx, s, run, CapStage::Review, Some((&c.repo, &c.branch)))?;
     let smoke_cap = engine::cap(tx, s, run, CapStage::Smoketest, Some((&c.repo, &c.branch)))?;
     let missing = if c.state == "open" {
@@ -183,45 +183,104 @@ fn change_json(
     } else {
         vec![]
     };
-    Ok(json!({
-        "repo": c.repo, "branch": c.branch, "pr": c.pr, "state": c.state, "failedMode": c.failed_mode,
-        "tip": c.tip, "approved": engine::approval_holds(c), "reviewRounds": c.review_rounds,
-        "reviewCap": cap, "smoketestRounds": c.smoke_rounds, "smoketestCap": smoke_cap,
-        "error": c.error, "missing": missing,
-    }))
+    Ok(RunChangeView {
+        repo: c.repo.clone(),
+        branch: c.branch.clone(),
+        pr: c.pr.clone(),
+        state: c.state.clone(),
+        failed_mode: c.failed_mode.clone(),
+        tip: c.tip.clone(),
+        approved: engine::approval_holds(c),
+        review_rounds: c.review_rounds,
+        review_cap: cap,
+        smoketest_rounds: c.smoke_rounds,
+        smoketest_cap: smoke_cap,
+        error: c.error.clone(),
+        missing,
+    })
+}
+
+/// A change that waits on the user: Awaiting your Merge, Land failed, or a draft for review.
+fn waits_on_user(c: &Change) -> bool {
+    matches!(
+        c.state.as_str(),
+        "awaiting_merge" | "land_failed" | "handed_off"
+    )
 }
 
 /// One task with its plan and changes, plus the other open tasks listed (≤ 8): the `status`
-/// shape, shared by the orchestrator's `status` and the UI's `workflow_run_get`.
+/// shape, shared by the orchestrator's `status` and the UI's `workflow_run_get`. The other tasks
+/// that have a change waiting on the user are listed first, each with those changes.
+fn run_view(
+    tx: &Transaction<'_>,
+    s: &WorkflowSettings,
+    run: Option<&Run>,
+    open: &[Run],
+) -> rusqlite::Result<RunView> {
+    let mut others: Vec<OtherTaskView> = Vec::new();
+    for r in open.iter().filter(|r| Some(&r.id) != run.map(|x| &x.id)) {
+        let all = store::changes(tx, &r.id)?;
+        let waiting = all
+            .iter()
+            .filter(|c| waits_on_user(c))
+            .map(|c| change_view(tx, s, r, c, &all))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        others.push(OtherTaskView {
+            run_id: r.id.clone(),
+            title: r.title.clone(),
+            status: r.status.clone(),
+            park_reason: r.park_reason.clone(),
+            waiting,
+        });
+    }
+    // Stable: tasks that wait on the user come first, so the cut at 8 never hides one.
+    others.sort_by_key(|o| o.waiting.is_empty());
+    others.truncate(8);
+    let Some(run) = run else {
+        return Ok(RunView {
+            task: None,
+            plan: None,
+            changes: Vec::new(),
+            other_tasks: others,
+        });
+    };
+    let all = store::changes(tx, &run.id)?;
+    let changes = all
+        .iter()
+        .map(|c| change_view(tx, s, run, c, &all))
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let plan_cap = engine::cap(tx, s, run, CapStage::PlanReview, None)?;
+    Ok(RunView {
+        task: Some(RunTaskView {
+            run_id: run.id.clone(),
+            title: run.title.clone(),
+            status: run.status.clone(),
+            attempt: run.attempt,
+            visual: run.visual,
+            item_id: run.item_id.clone(),
+            skipped: run.skipped.clone(),
+        }),
+        plan: Some(RunPlanView {
+            id: run.plan_id.clone(),
+            approved: run.plan_approved,
+            signed_off: run.plan_signed_off,
+            rounds: run.plan_rounds,
+            cap: plan_cap,
+            missing: engine::plan_missing(s, run),
+        }),
+        changes,
+        other_tasks: others,
+    })
+}
+
 fn run_json(
     tx: &Transaction<'_>,
     s: &WorkflowSettings,
     run: Option<&Run>,
     open: &[Run],
 ) -> rusqlite::Result<Value> {
-    let others: Vec<Value> = open
-        .iter()
-        .filter(|r| Some(&r.id) != run.map(|x| &x.id))
-        .take(8)
-        .map(|r| json!({"runId": r.id, "title": r.title, "status": r.status, "parkReason": r.park_reason}))
-        .collect();
-    let Some(run) = run else {
-        return Ok(json!({"task": null, "otherTasks": others}));
-    };
-    let all = store::changes(tx, &run.id)?;
-    let changes = all
-        .iter()
-        .map(|c| change_json(tx, s, run, c, &all))
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let plan_cap = engine::cap(tx, s, run, CapStage::PlanReview, None)?;
-    Ok(json!({
-        "task": {"runId": run.id, "title": run.title, "status": run.status, "attempt": run.attempt,
-                 "visual": run.visual, "itemId": run.item_id, "skipped": run.skipped},
-        "plan": {"id": run.plan_id, "approved": run.plan_approved, "signedOff": run.plan_signed_off,
-                 "rounds": run.plan_rounds, "cap": plan_cap, "missing": engine::plan_missing(s, run)},
-        "changes": changes,
-        "otherTasks": others,
-    }))
+    let v = run_view(tx, s, run, open)?;
+    Ok(serde_json::to_value(v).expect("the run view serialises"))
 }
 
 /// `status`: the active task, plus the chat's other open tasks (≤ 8).
@@ -244,12 +303,7 @@ pub fn chat_view(
     let mut current = open.iter().find(|r| r.status == "active");
     if current.is_none() {
         for r in &open {
-            if store::changes(tx, &r.id)?.iter().any(|c| {
-                matches!(
-                    c.state.as_str(),
-                    "awaiting_merge" | "land_failed" | "handed_off"
-                )
-            }) {
+            if store::changes(tx, &r.id)?.iter().any(waits_on_user) {
                 current = Some(r);
                 break;
             }

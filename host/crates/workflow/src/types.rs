@@ -207,3 +207,86 @@ pub struct ChatModeSetResult {
     #[ts(optional)]
     pub row: Option<String>,
 }
+
+/// One chat's workflow as the panel and `app_workflow status` read it: the current task with its
+/// plan and changes, plus the chat's other open tasks (at most 8). Served by `workflow_run_get`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunView {
+    /// `None` when the chat has no open task.
+    pub task: Option<RunTaskView>,
+    /// The current task's plan; `None` without a task.
+    pub plan: Option<RunPlanView>,
+    /// The current task's changes.
+    pub changes: Vec<RunChangeView>,
+    /// The chat's other open tasks, each with the changes that wait on the user.
+    pub other_tasks: Vec<OtherTaskView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunTaskView {
+    pub run_id: String,
+    pub title: String,
+    /// `active`, `parked`, `handed_off` or another task status.
+    pub status: String,
+    #[ts(type = "number")]
+    pub attempt: i64,
+    pub visual: bool,
+    pub item_id: Option<String>,
+    /// Stages the user skipped (`plan`, `planReview`, `review`, `cleanup`, `smoketest`).
+    pub skipped: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunPlanView {
+    pub id: Option<String>,
+    pub approved: bool,
+    pub signed_off: bool,
+    #[ts(type = "number")]
+    pub rounds: i64,
+    #[ts(type = "number")]
+    pub cap: i64,
+    /// Why a build would not count yet, in the host's words; `None` when nothing is missing.
+    pub missing: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunChangeView {
+    pub repo: String,
+    pub branch: String,
+    pub pr: Option<String>,
+    /// `open`, `landing_draft`, `pending_land`, `landing`, `awaiting_merge`, `land_failed`,
+    /// `handed_off`, `landed`, `flipped`, `dropped` or `declined`.
+    pub state: String,
+    pub failed_mode: Option<String>,
+    pub tip: Option<String>,
+    /// The review's approval holds at the change's latest commit.
+    pub approved: bool,
+    #[ts(type = "number")]
+    pub review_rounds: i64,
+    #[ts(type = "number")]
+    pub review_cap: i64,
+    #[ts(type = "number")]
+    pub smoketest_rounds: i64,
+    #[ts(type = "number")]
+    pub smoketest_cap: i64,
+    pub error: Option<String>,
+    /// What the change still needs before it can be handed off, in the host's words.
+    pub missing: Vec<String>,
+}
+
+/// A task that is not the chat's current one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct OtherTaskView {
+    pub run_id: String,
+    pub title: String,
+    pub status: String,
+    pub park_reason: Option<String>,
+    /// Its changes that wait on the user (awaiting a Merge, land failed, or a draft for review),
+    /// so the panel can offer the same buttons as for the current task.
+    pub waiting: Vec<RunChangeView>,
+}

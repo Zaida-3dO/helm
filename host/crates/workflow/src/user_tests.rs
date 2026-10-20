@@ -394,3 +394,69 @@ fn ready_for_review_reverifies_the_approved_head_before_it_flips() {
         .unwrap_err();
     assert!(e.contains("flipped"), "{e}");
 }
+
+#[test]
+fn ready_for_review_needs_the_chat_on_before_it_asks_github() {
+    let t = setup(|_| {});
+    t.wf(json!({"action": "start", "title": "T"})).unwrap();
+    let run = t.run_id();
+    t.change(&run, "a", "handed_off");
+    t.db.write(|tx| {
+        let s = settings::load(tx)?;
+        crate::mode::user_set(tx, "c", ChatMode::Off, &s, 12).map(|_| ())
+    })
+    .unwrap();
+    let good = gh(TIP, true, true);
+    let e = crate::land::ready(&t.db, &good, &run, REPO, "a", 13)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(e, CHAT_OFF);
+    assert!(
+        good.calls.lock().unwrap().is_empty(),
+        "GitHub was not asked"
+    );
+    assert_eq!(t.state_of(&run, "a"), "handed_off");
+}
+
+/// A GitHub that, while it answers, turns the chat's Orchestrator off: the user did it while the
+/// check was running.
+struct SwitchesOff<'a> {
+    t: &'a T,
+    inner: Gh1,
+}
+
+impl Gh for SwitchesOff<'_> {
+    fn run(&self, args: &[String]) -> Result<Out, GhError> {
+        let out = self.inner.run(args);
+        self.t
+            .db
+            .write(|tx| {
+                let s = settings::load(tx)?;
+                crate::mode::user_set(tx, "c", ChatMode::Off, &s, 14).map(|_| ())
+            })
+            .unwrap();
+        out
+    }
+}
+
+#[test]
+fn ready_for_review_rechecks_the_chat_after_github_answers() {
+    let t = setup(|_| {});
+    t.wf(json!({"action": "start", "title": "T"})).unwrap();
+    let run = t.run_id();
+    t.change(&run, "a", "handed_off");
+    let g = SwitchesOff {
+        t: &t,
+        inner: gh(TIP, true, true),
+    };
+    let e = crate::land::ready(&t.db, &g, &run, REPO, "a", 15)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(e, CHAT_OFF);
+    assert_eq!(
+        t.state_of(&run, "a"),
+        "handed_off",
+        "the result is not applied once the chat is off"
+    );
+    assert_eq!(t.events("flipped", None), 0);
+}

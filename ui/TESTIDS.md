@@ -111,4 +111,6 @@ Queue `Alt+Enter`, Send now `Ctrl+Alt+Enter`, Stop that continues the queue `Esc
 | `workflow-waiting` | One change waiting on you, with its buttons | `data-branch` |
 | `workflow-change-action` | A button on that change | `data-action` (`merge` `decline` `drop` `retry` `ready`) |
 | `workflow-menu` / `workflow-task-menu` | The task's ⋯ button and its menu | menu items carry `data-item` (`skip`, `skip:<stage>`, `allowMore`, `allowMore:<stage>`, `park`, `reopen`, `visual`, `notVisual`, `drop`, `drop:<repo> <branch>`, `end`) |
+| `workflow-other-waiting` | A task that is not the chat's current one and has a change waiting on you; its changes appear as `workflow-waiting` rows inside it, with the same buttons | `data-run-id`, `data-status` |
+| `workflow-other-task` / `workflow-other-reopen` | A non-current task's line in the detail, and its Reopen button (parked or handed-off tasks) | `data-run-id`, `data-status` |
 | `workflow-toggle` / `workflow-body` / `workflow-change` | The title that opens the detail, the detail, one change in it | `workflow-change`: `data-state`, `data-branch` |

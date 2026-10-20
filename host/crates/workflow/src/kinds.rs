@@ -190,7 +190,7 @@ pub struct Proof {
     pub grant: Option<String>,
     /// The user's own click in the main window ([`crate::user`]). Set only by [`Proof::user`],
     /// which only a main-window op calls; never read from an agent's arguments.
-    pub user: bool,
+    pub(crate) user: bool,
 }
 
 impl Proof {

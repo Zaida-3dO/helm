@@ -2,7 +2,7 @@
 // them. The host decides every gate; this only reads what it reports.
 
 import type { WorkflowSettings } from './api.ts';
-import type { RunChange, RunView } from './run.ts';
+import type { OtherTask, RunChange, RunView } from './run.ts';
 
 export type StageId = 'plan' | 'planReview' | 'build' | 'review' | 'cleanup' | 'land';
 export type StageState = 'done' | 'current' | 'pending' | 'off';
@@ -130,6 +130,15 @@ export function needsYou(view: RunView, s: WorkflowSettings, allowRequests: numb
     if (c.state === 'awaiting_merge') out.push({ id: `merge:${name}`, text: `merge · ${name}` });
     if (c.state === 'handed_off') out.push({ id: `ready:${name}`, text: `ready for review · ${name}` });
   }
+  // Other tasks of the chat wait on the user too: their changes are listed under the current task.
+  for (const o of view.otherTasks) {
+    for (const c of o.waiting) {
+      const name = changeName(c);
+      if (c.state === 'land_failed') out.push({ id: `failed:${o.runId}:${name}`, text: `land failed · ${name}` });
+      if (c.state === 'awaiting_merge') out.push({ id: `merge:${o.runId}:${name}`, text: `merge · ${name}` });
+      if (c.state === 'handed_off') out.push({ id: `ready:${o.runId}:${name}`, text: `ready for review · ${name}` });
+    }
+  }
   if (allowRequests > 0) out.push({ id: 'allow', text: allowRequests === 1 ? 'allow request' : `${allowRequests} allow requests` });
   return out;
 }
@@ -173,6 +182,12 @@ export function changeControls(c: RunChange): ChangeControl[] {
       return [];
   }
 }
+
+/** The other tasks that have a change waiting on the user: each gets its own row with the change's buttons. */
+export const otherTasksWaiting = (view: RunView): OtherTask[] => view.otherTasks.filter((o) => o.waiting.length > 0);
+
+/** A task that is not current can be brought back by the user (the host refuses while another task is active). */
+export const canReopen = (o: OtherTask): boolean => o.status === 'parked' || o.status === 'handed_off';
 
 /** The plan id to sign off, when the user's Sign off plan is what the task waits for. */
 export function signOffPlan(view: RunView, s: WorkflowSettings): string | null {

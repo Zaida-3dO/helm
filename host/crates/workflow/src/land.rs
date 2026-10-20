@@ -671,9 +671,17 @@ pub fn flip_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Result<Optio
     Ok(None)
 }
 
-/// The user's Ready for review on a handed-off change: [`flip_pass`] outside any transaction,
-/// then the write, which re-reads the change so an action in between wins. A failed check leaves
-/// the change handed off with the reason on it and a `flip_verify_failed` row.
+/// The user's Ready for review on a handed-off change. The steps are:
+///
+/// 1. Read the change, the settings and the chat's Orchestrator state (a snapshot, no lock held).
+///    The chat must have Orchestrator on, as for Drop change and a draft Retry.
+/// 2. [`flip_pass`], which talks to GitHub, with no transaction open and no lock held.
+/// 3. The write, which re-reads the change and the chat's state first: an action or a switch-off
+///    in between wins. The caller must therefore not hold the global maintenance lock; the op is
+///    a plain blocking one.
+///
+/// A failed check leaves the change handed off with the reason on it and a `flip_verify_failed`
+/// row.
 pub fn ready(
     db: &Database,
     gh: &dyn Gh,
@@ -682,12 +690,14 @@ pub fn ready(
     branch: &str,
     now: i64,
 ) -> rusqlite::Result<Result<String, String>> {
-    let (st, run, c) = db.snapshot(|tx| {
-        Ok::<_, rusqlite::Error>((
-            crate::settings::load(tx)?,
-            store::run(tx, run_id)?,
-            store::change(tx, run_id, repo, branch)?,
-        ))
+    let (st, run, c, chat_on) = db.snapshot(|tx| {
+        let st = crate::settings::load(tx)?;
+        let run = store::run(tx, run_id)?;
+        let chat_on = match &run {
+            Some(r) => crate::mode::in_effect(tx, &r.chat_id, &st)?,
+            None => false,
+        };
+        Ok::<_, rusqlite::Error>((st, run, store::change(tx, run_id, repo, branch)?, chat_on))
     })?;
     if run.is_none() {
         return Ok(Err("No such task.".into()));
@@ -699,6 +709,9 @@ pub fn ready(
         return Ok(Err(
             "Orchestrator is off in Settings, so Helm marks nothing ready.".into(),
         ));
+    }
+    if !chat_on {
+        return Ok(Err(crate::user::CHAT_OFF.into()));
     }
     if c.state != "handed_off" {
         return Ok(Err(format!(
@@ -714,6 +727,16 @@ pub fn ready(
         ) else {
             return Ok(Err("That task has no such change.".into()));
         };
+        // The chat or the master switch may have been turned off while GitHub was asked.
+        let now_st = crate::settings::load(tx)?;
+        if !now_st.enabled {
+            return Ok(Err(
+                "Orchestrator is off in Settings, so Helm marks nothing ready.".into(),
+            ));
+        }
+        if !crate::mode::in_effect(tx, &run.chat_id, &now_st)? {
+            return Ok(Err(crate::user::CHAT_OFF.into()));
+        }
         if now_c.state != "handed_off" || now_c.approved_tip != c.approved_tip {
             return Ok(Err(format!(
                 "{branch} changed while Helm was checking it; it is {} now.",

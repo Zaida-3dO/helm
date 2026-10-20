@@ -189,6 +189,14 @@ span.orch-panel-title {
   color: var(--secondary);
 }
 
+.orch-other-task {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--line);
+}
+
 .orch-panel-action .orch-error-line {
   flex-basis: 100%;
 }

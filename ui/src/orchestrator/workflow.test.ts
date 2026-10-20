@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventBus } from '../api/events.ts';
-import { defaultSettings, fakeRun } from '../dev/fake-orchestrator.ts';
-import { changeControls, changeLabel, isWorkflowConsent, needsYou, prNumber, signOffPlan, stageChips, taskMenu } from './progress.ts';
-import { parseRun } from './run.ts';
+import type { RunView as HostRunView } from '../api/generated/workflow/index.ts';
+import { change, defaultSettings, fakeRun } from '../dev/fake-orchestrator.ts';
+import { canReopen, changeControls, changeLabel, isWorkflowConsent, needsYou, otherTasksWaiting, prNumber, signOffPlan, stageChips, taskMenu } from './progress.ts';
+import { showRun } from './run.ts';
 import { isUnknownOp, RunStore, UNKNOWN_OP_MESSAGE } from './runstore.ts';
 
 const settings = defaultSettings(true);
+/** The host's view for a fake scenario, with the parts a test changes. */
+const parseRun = (v: HostRunView) => showRun(v);
 const states = (kind: string, s = settings) => stageChips(parseRun(fakeRun(kind)), s)?.map((c) => `${c.id}:${c.state}`).join(' ');
 
 test('no task gives no stages', () => {
@@ -33,7 +36,7 @@ test('a plan sign-off the user owes holds plan review open and is a Needs you it
 test('a stage that is off in the settings, or skipped for this task, shows as off', () => {
   const off = { ...settings, stages: { ...settings.stages, cleanup: { ...settings.stages.cleanup, use: 'off' as const } } };
   assert.match(states('review', off) ?? '', /cleanup:off/);
-  const view = parseRun({ ...fakeRun('review'), task: { ...(fakeRun('review').task as object), skipped: ['review'] } });
+  const view = parseRun({ ...fakeRun('review'), task: { ...fakeRun('review').task!, skipped: ['review'] } });
   assert.equal(stageChips(view, settings)?.find((c) => c.id === 'review')?.state, 'off');
 });
 
@@ -54,12 +57,42 @@ test('land states need you where the user acts, and workflow Allow requests coun
   assert.equal(prNumber('https://example.com/x'), null);
 });
 
-test('agent text is made inert and a missing field does not throw', () => {
-  const v = parseRun({ task: { title: 'Do it‮evil', runId: 'r' }, changes: [{ branch: 'b​', missing: ['x‮y'] }] });
+test('agent text is made inert, on the current task and on the others', () => {
+  const base = fakeRun('others');
+  const v = parseRun({
+    ...base,
+    task: { ...base.task!, title: 'Do it‮evil' },
+    changes: [change({ branch: 'b​', missing: ['x‮y'] })],
+    otherTasks: [{ ...base.otherTasks[0]!, title: 'Old​', parkReason: 'r‮s', waiting: [change({ branch: 'w​', state: 'awaiting_merge' })] }],
+  });
   assert.equal(v.task?.title, 'Do it⟨U+202E⟩evil');
   assert.equal(v.changes[0]?.branch, 'b⟨U+200B⟩');
   assert.equal(v.changes[0]?.missing[0], 'x⟨U+202E⟩y');
-  assert.deepEqual(parseRun(null), { task: null, plan: null, changes: [], otherTasks: [] });
+  assert.equal(v.otherTasks[0]?.title, 'Old⟨U+200B⟩');
+  assert.equal(v.otherTasks[0]?.parkReason, 'r⟨U+202E⟩s');
+  assert.equal(v.otherTasks[0]?.waiting[0]?.branch, 'w⟨U+200B⟩');
+  assert.deepEqual(v.otherTasks[0]?.waiting[0]?.target.branch, 'w​', 'sent back as the host named it');
+  assert.deepEqual(parseRun(fakeRun('none')), { task: null, plan: null, changes: [], otherTasks: [] });
+});
+
+test('a non-current task with a change waiting on the user gets its own row and a Needs you item', () => {
+  const view = parseRun(fakeRun('others'));
+  assert.deepEqual(otherTasksWaiting(view).map((o) => o.runId), ['run-0']);
+  assert.deepEqual(changeControls(view.otherTasks[0]!.waiting[0]!).map((b) => b.action), ['merge', 'decline', 'drop']);
+  assert.deepEqual(needsYou(view, settings, 0).map((n) => n.text), ['merge · app feat/older']);
+  assert.ok(canReopen(view.otherTasks[0]!));
+  // A parked task with nothing waiting has no waiting row, but can be reopened from the detail.
+  const parked = parseRun(fakeRun('failed'));
+  assert.deepEqual(otherTasksWaiting(parked), []);
+  assert.ok(canReopen(parked.otherTasks[0]!));
+  assert.ok(!canReopen({ ...parked.otherTasks[0]!, status: 'ended' }));
+});
+
+test('with no current task the others still show their waiting changes', () => {
+  const others = fakeRun('others');
+  const view = parseRun({ ...others, task: null, plan: null, changes: [] });
+  assert.equal(stageChips(view, settings), null);
+  assert.deepEqual(needsYou(view, settings, 0).map((n) => n.text), ['merge · app feat/older']);
 });
 
 test('the run store reads the run, counts only workflow Allow requests, and goes quiet when the host has no op', async () => {
@@ -165,10 +198,10 @@ test('each change shows the buttons for what awaits the user, and acts on the na
   assert.deepEqual(ids('landing'), ['merge,decline,drop', '']);
   assert.deepEqual(ids('failed'), ['retry,drop']);
   assert.deepEqual(ids('review'), ['']);
-  const handed = parseRun({ ...fakeRun('landing'), changes: [{ repo: 'github.com/o/r', branch: 'b', state: 'handed_off' }] });
+  const handed = parseRun({ ...fakeRun('landing'), changes: [change({ repo: 'github.com/o/r', branch: 'b', state: 'handed_off' })] });
   assert.deepEqual(changeControls(handed.changes[0]!).map((b) => b.label), ['Ready for review']);
   // A branch with a hidden character is shown inert but sent back exactly as the host named it.
-  const odd = parseRun({ task: { runId: 'r' }, changes: [{ repo: 'github.com/o/r', branch: 'b​', state: 'awaiting_merge' }] });
+  const odd = parseRun({ ...fakeRun('landing'), changes: [change({ repo: 'github.com/o/r', branch: 'b​', state: 'awaiting_merge' })] });
   assert.equal(odd.changes[0]?.branch, 'b⟨U+200B⟩');
   assert.deepEqual(odd.changes[0]?.target, { repo: 'github.com/o/r', branch: 'b​' });
 });
@@ -178,18 +211,18 @@ test('Sign off plan is offered only for an approved plan the user still owes, wi
   assert.equal(signOffPlan(parseRun(fakeRun('signoff')), me), 'p'.repeat(64));
   assert.equal(signOffPlan(parseRun(fakeRun('signoff')), settings), null, 'review sign-off only');
   assert.equal(signOffPlan(parseRun(fakeRun('landing')), me), null, 'already signed off');
-  const unreviewed = parseRun({ ...fakeRun('signoff'), plan: { id: 'q', approved: false } });
+  const unreviewed = parseRun({ ...fakeRun('signoff'), plan: { ...fakeRun('signoff').plan!, id: 'q', approved: false } });
   assert.equal(signOffPlan(unreviewed, me), null, 'plan review has not approved it');
   const noReview = { ...me, stages: { ...me.stages, planReview: { ...me.stages.planReview, use: 'off' as const } } };
   assert.equal(signOffPlan(unreviewed, noReview), 'q', 'with plan review off the plan waits only for you');
   assert.deepEqual(needsYou(unreviewed, noReview, 0).map((n) => n.text), ['plan sign-off'], 'and Needs you says so');
   assert.deepEqual(needsYou(unreviewed, me, 0), [], 'not while plan review still has to approve it');
-  const parked = parseRun({ ...fakeRun('signoff'), task: { ...(fakeRun('signoff').task as object), status: 'parked' } });
+  const parked = parseRun({ ...fakeRun('signoff'), task: { ...fakeRun('signoff').task!, status: 'parked' } });
   assert.equal(signOffPlan(parked, me), null);
 });
 
 test('the task menu follows the task status and the settings', () => {
-  const ids = (v: unknown, s = settings) => taskMenu(parseRun(v), s).map((m) => m.id);
+  const ids = (v: HostRunView, s = settings) => taskMenu(parseRun(v), s).map((m) => m.id);
   assert.deepEqual(ids(fakeRun('review')), ['skip', 'allowMore', 'park', 'visual', 'drop', 'end']);
   const menu = taskMenu(parseRun(fakeRun('review')), settings);
   assert.deepEqual(menu[0]?.submenu?.map((m) => m.id), ['skip:plan', 'skip:planReview', 'skip:review', 'skip:cleanup', 'skip:smoketest']);
@@ -197,7 +230,7 @@ test('the task menu follows the task status and the settings', () => {
   assert.equal(menu[4]?.submenu?.[0]?.change?.target.branch, 'feat/login');
   const off = { ...settings, stages: { ...settings.stages, cleanup: { ...settings.stages.cleanup, use: 'off' as const } } };
   assert.ok(!taskMenu(parseRun(fakeRun('review')), off)[0]?.submenu?.some((m) => m.id === 'skip:cleanup'));
-  const task = fakeRun('review').task as Record<string, unknown>;
+  const task = fakeRun('review').task!;
   assert.deepEqual(ids({ ...fakeRun('review'), task: { ...task, status: 'parked', visual: true } }), ['reopen', 'notVisual', 'drop', 'end']);
   assert.deepEqual(ids({ ...fakeRun('landing'), task: { ...task, status: 'handed_off' } }), ['reopen', 'drop', 'end']);
   assert.deepEqual(ids(fakeRun('none')), []);

@@ -7,7 +7,8 @@
 //! | `workflow_chat_mode_get` | blocking | [`ChatModeArgs`] to [`ChatModeView`] |
 //! | `workflow_chat_mode_set` | maintenance | [`ChatModeSetArgs`] to [`ChatModeSetResult`]; emits `workflow_chat_mode {chatId}` |
 //! | `workflow_run_get` | blocking | [`ChatModeArgs`] to the chat's current task in the `app_workflow status` shape ([`crate::actions::chat_view`]); `not_found` for no such chat |
-//! | `workflow_change_action` | maintenance | `{runId, repo, branch, action}` with action merge, retry, drop, decline or ready (the user's, main window only) to `{state}` |
+//! | `workflow_change_action` | maintenance | `{runId, repo, branch, action}` with action merge, retry, drop or decline (the user's, main window only) to `{state}` |
+//! | `workflow_change_ready` | blocking | `{runId, repo, branch}`: Ready for review on a handed-off change (the user's, main window only) to `{state}`. It asks GitHub, so it holds no global lock ([`crate::land::ready`]) |
 //! | `workflow_task_action` | maintenance | `{runId, action, planId?, stage?, n?}` with action signOff, skip, allowMore, park, reopen, visual, notVisual or end (the user's, main window only); see [`crate::user`] |
 //!
 //! The user's ops are never host tools, so no agent reaches them; agents take the consented
@@ -64,6 +65,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
             OpClass::Maintenance,
             change_action,
         )
+        .blocking("workflow_change_ready", OpClass::Blocking, change_ready)
         .blocking("workflow_task_action", OpClass::Maintenance, task_action);
 }
 
@@ -175,21 +177,40 @@ struct ChangeAction {
     action: String,
 }
 
-/// The user's Merge, Retry, Drop change, Decline or Ready for review on a task row. The land step
-/// does the rest.
-fn change_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    change_action_with(ctx, args, &crate::gh::GhCli)
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReadyArgs {
+    run_id: String,
+    repo: String,
+    branch: String,
 }
 
-fn change_action_with(ctx: &OpCtx, args: Value, gh: &dyn crate::gh::Gh) -> Result<Value, ApiError> {
+/// The user's Ready for review on a handed-off change. It is not a maintenance op: it asks GitHub,
+/// which can take a minute, and the global maintenance lock must not be held meanwhile. The state
+/// is read first, GitHub is asked, and the result is applied in a write that re-reads the state.
+fn change_ready(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    change_ready_with(ctx, args, &crate::gh::GhCli)
+}
+
+fn change_ready_with(ctx: &OpCtx, args: Value, gh: &dyn crate::gh::Gh) -> Result<Value, ApiError> {
+    let a: ReadyArgs = parse(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let out = crate::land::ready(&db, gh, &a.run_id, &a.repo, &a.branch, helm_core::now_ms());
+    // A failed check still writes its row, so emit before looking at the outcome.
+    crate::store::emit_touched(&*ctx.events);
+    let state = out.map_err(sql)?.map_err(ApiError::conflict)?;
+    Ok(json!({ "state": state }))
+}
+
+/// The user's Merge, Retry, Drop change or Decline on a task row. The land step does the rest.
+fn change_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChangeAction = parse(args)?;
     let db = ctx.services.need::<Database>()?;
     let now = helm_core::now_ms();
     if a.action == "ready" {
-        let out = crate::land::ready(&db, gh, &a.run_id, &a.repo, &a.branch, now);
-        crate::store::emit_touched(&*ctx.events);
-        let state = out.map_err(sql)?.map_err(ApiError::conflict)?;
-        return Ok(json!({ "state": state }));
+        return Err(ApiError::bad_args(
+            "Ready for review has its own operation, workflow_change_ready.",
+        ));
     }
     let out = db.write(|tx| {
         let s = settings::load(tx)?;
@@ -333,7 +354,10 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let c = ctx(db, sink.clone());
         let none = run_get(&c, json!({"chatId": "a"})).unwrap();
-        assert_eq!(none, json!({"task": null, "otherTasks": []}));
+        assert_eq!(
+            none,
+            json!({"task": null, "plan": null, "changes": [], "otherTasks": []})
+        );
         assert_eq!(
             run_get(&c, json!({"chatId": "zz"})).unwrap_err().code,
             "not_found"
@@ -456,6 +480,71 @@ mod tests {
     }
 
     #[test]
+    fn ready_for_review_is_not_a_maintenance_op() {
+        let mut reg = OpRegistry::new();
+        register_ops(&mut reg);
+        assert_eq!(
+            reg.class_of("workflow_change_ready"),
+            Some(OpClass::Blocking)
+        );
+        assert_eq!(
+            reg.class_of("workflow_change_action"),
+            Some(OpClass::Maintenance)
+        );
+        let (_d, db) = crate::mode::tests::db(&[("a", "claude")]);
+        let c = ctx(db, Arc::new(RecordingSink::default()));
+        let e = change_action(
+            &c,
+            json!({"runId": "r", "repo": "github.com/o/r", "branch": "b", "action": "ready"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "bad_args");
+        assert!(e.message.contains("workflow_change_ready"), "{}", e.message);
+    }
+
+    #[test]
+    fn other_tasks_carry_the_changes_that_wait_on_the_user() {
+        let (_d, db) = crate::mode::tests::db(&[("a", "claude")]);
+        let s = WorkflowSettings::default();
+        let put = |id: &str, status: &str, at: i64, change: Option<&str>| {
+            db.write::<_, rusqlite::Error>(|tx| {
+                crate::store::insert_run(tx, id, "a", id, None, at)?;
+                let mut r = crate::store::run(tx, id)?.unwrap();
+                r.status = status.into();
+                crate::store::save_run(tx, &r, None, at)?;
+                if let Some(state) = change {
+                    let c = crate::store::Change {
+                        run_id: id.into(),
+                        repo: "github.com/o/r".into(),
+                        branch: format!("{id}-b"),
+                        state: state.into(),
+                        ..Default::default()
+                    };
+                    crate::store::upsert_change(tx, &c, 1)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        };
+        // Nine other tasks: the one waiting on a Merge is the oldest, so a cut by age would lose it.
+        put("waits", "handed_off", 2, Some("awaiting_merge"));
+        for i in 0..9 {
+            put(&format!("parked{i}"), "parked", 10 + i, Some("open"));
+        }
+        put("active", "active", 1, None);
+        let v = db
+            .snapshot(|tx| crate::actions::chat_view(tx, &s, "a"))
+            .unwrap();
+        assert_eq!(v["task"]["runId"], "active");
+        let others = v["otherTasks"].as_array().unwrap();
+        assert_eq!(others.len(), 8);
+        assert_eq!(others[0]["runId"], "waits", "waiting tasks come first");
+        assert_eq!(others[0]["waiting"][0]["state"], "awaiting_merge");
+        assert_eq!(others[0]["waiting"][0]["branch"], "waits-b");
+        assert_eq!(others[1]["waiting"], json!([]));
+    }
+
+    #[test]
     fn the_user_ops_act_announce_and_refuse_unknown_fields() {
         let (_d, db) = crate::mode::tests::db(&[("a", "claude")]);
         let sink = Arc::new(RecordingSink::default());
@@ -501,9 +590,9 @@ mod tests {
             }
         }
         sink.events.lock().unwrap().clear();
-        let e = change_action_with(
+        let e = change_ready_with(
             &c,
-            json!({"runId": run_id, "repo": "github.com/o/r", "branch": "b", "action": "ready"}),
+            json!({"runId": run_id, "repo": "github.com/o/r", "branch": "b"}),
             &NoGh,
         )
         .unwrap_err();

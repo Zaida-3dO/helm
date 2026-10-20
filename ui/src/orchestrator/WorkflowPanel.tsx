@@ -13,8 +13,8 @@ import { useShell } from '../shell/context.ts';
 import { Button, ContextMenu, toast, type MenuItem } from '../ui/index.ts';
 import { IconMore } from '../ui/icons.tsx';
 import { workflowOps, type ChangeAction, type TaskAction, type TaskActionFields } from './api.ts';
-import { changeControls, changeLabel, changeName, needsYou, prNumber, signOffPlan, stageChips, taskMenu, type TaskMenuEntry } from './progress.ts';
-import type { RunChange } from './run.ts';
+import { canReopen, changeControls, changeLabel, changeName, needsYou, otherTasksWaiting, prNumber, signOffPlan, stageChips, taskMenu, type TaskMenuEntry } from './progress.ts';
+import type { OtherTask, RunChange } from './run.ts';
 import { runStoreFor } from './runstore.ts';
 import { orchestratorStoreFor } from './store.ts';
 import './workflow-panel.css';
@@ -37,21 +37,6 @@ export function WorkflowPanel({ ctx }: { ctx: AccessoryContext }) {
   const settings = modes.settings;
   if (!entry || !settings?.enabled || ctx.chat.harness !== 'claude') return null;
   const { view, allowRequests, item } = entry;
-  const chips = stageChips(view, settings);
-  if (!chips || !view.task) {
-    if (view.otherTasks.length === 0) return null;
-    return (
-      <div className="orch-panel" data-testid="workflow-panel" data-status="none">
-        <div className="orch-panel-head">
-          <span className="orch-label">WORKFLOW</span>
-          <span className="orch-panel-title">
-            {view.otherTasks.length === 1 ? `1 task is parked: ${view.otherTasks[0]?.title}` : `${view.otherTasks.length} tasks are parked`}
-          </span>
-        </div>
-      </div>
-    );
-  }
-  const task = view.task;
   const ops = workflowOps(shell.api);
   /** Run one of the user's steps; the host's refusal is shown as it said it. */
   const act = async (key: string, call: () => Promise<unknown>) => {
@@ -66,9 +51,87 @@ export function WorkflowPanel({ ctx }: { ctx: AccessoryContext }) {
       void runs.refresh(chatId);
     }
   };
-  const onChange = (c: RunChange, action: ChangeAction) =>
-    void act(`${action}:${c.target.repo} ${c.target.branch}`, () => ops.changeAction(task.runId, c.target.repo, c.target.branch, action));
-  const onTask = (action: TaskAction, fields?: TaskActionFields) => void act(action, () => ops.taskAction(task.runId, action, fields));
+  const onChange = (runId: string, c: RunChange, action: ChangeAction) =>
+    void act(`${action}:${runId} ${c.target.repo} ${c.target.branch}`, () => ops.changeAction(runId, c.target.repo, c.target.branch, action));
+  const onTask = (runId: string, action: TaskAction, fields?: TaskActionFields) => void act(`${action}:${runId}`, () => ops.taskAction(runId, action, fields));
+  /** One change waiting on the user, with the host's buttons for it. */
+  const waitingRow = (runId: string, c: RunChange) => (
+    <div key={`${runId}/${c.target.repo}/${c.target.branch}`} className="orch-panel-action" data-testid="workflow-waiting" data-branch={c.branch}>
+      <span className="orch-line-name">{changeName(c)}</span>
+      {prNumber(c.pr) && <span className="orch-pr">{prNumber(c.pr)}</span>}
+      <span>{changeLabel(c.state)}</span>
+      {changeControls(c).map((b) => (
+        <Button
+          key={b.action}
+          variant={b.primary ? 'primary' : 'secondary'}
+          danger={b.danger}
+          data-testid="workflow-change-action"
+          data-action={b.action}
+          disabled={busy !== null}
+          title={`${b.label} ${changeName(c)}`}
+          onClick={() => onChange(runId, c, b.action)}
+        >
+          {b.label}
+        </Button>
+      ))}
+      {c.error && <span className="orch-error-line">{c.error}</span>}
+    </div>
+  );
+  /** A task that is not the current one gets a row of its own: its title, and its changes that wait on the user. */
+  const otherWaitingRows = otherTasksWaiting(view).map((o) => (
+    <div key={o.runId} className="orch-other-task" data-testid="workflow-other-waiting" data-run-id={o.runId} data-status={o.status}>
+      <div className="orch-panel-action">
+        <span className="orch-line-name">{o.title}</span>
+        <span>{o.status === 'handed_off' ? 'handed off' : o.status}</span>
+        {o.parkReason && <span className="orch-gate">{o.parkReason}</span>}
+      </div>
+      {o.waiting.map((c) => waitingRow(o.runId, c))}
+    </div>
+  ));
+  /** The line for any other task in the detail: its title and status, and Reopen when the user can bring it back. */
+  const otherTaskLine = (o: OtherTask) => (
+    <div key={o.runId} className="orch-line orch-other" data-testid="workflow-other-task" data-run-id={o.runId} data-status={o.status}>
+      <span className="orch-line-name">Other task</span>
+      <span>
+        {o.title} · {o.status}
+        {o.parkReason ? ` (${o.parkReason})` : ''}
+      </span>
+      {canReopen(o) && (
+        <Button variant="secondary" data-testid="workflow-other-reopen" disabled={busy !== null} title={`Reopen ${o.title}`} onClick={() => onTask(o.runId, 'reopen')}>
+          Reopen
+        </Button>
+      )}
+    </div>
+  );
+  const chips = stageChips(view, settings);
+  if (!chips || !view.task) {
+    if (view.otherTasks.length === 0) return null;
+    const needsOthers = needsYou(view, settings, allowRequests);
+    return (
+      <div className="orch-panel" data-testid="workflow-panel" data-status="none" data-needs={needsOthers.length} aria-busy={busy !== null}>
+        <div className="orch-panel-head">
+          <span className="orch-label">WORKFLOW</span>
+          <span className="orch-panel-title">
+            {view.otherTasks.length === 1 ? `1 task is waiting: ${view.otherTasks[0]?.title}` : `${view.otherTasks.length} tasks are waiting`}
+          </span>
+          {needsOthers.length > 0 && (
+            <span className="orch-needs" data-testid="workflow-needs">
+              Needs you · {needsOthers.map((n) => n.text).join(' · ')}
+            </span>
+          )}
+        </div>
+        {otherWaitingRows.length > 0 && (
+          <div className="orch-panel-actions" data-testid="workflow-actions">
+            {otherWaitingRows}
+          </div>
+        )}
+        <div className="orch-panel-body" data-testid="workflow-body">
+          {view.otherTasks.map(otherTaskLine)}
+        </div>
+      </div>
+    );
+  }
+  const task = view.task;
   const signOff = signOffPlan(view, settings);
   const needs = needsYou(view, settings, allowRequests);
   const waiting = view.changes.filter((c) => changeControls(c).length > 0);
@@ -80,8 +143,8 @@ export function WorkflowPanel({ ctx }: { ctx: AccessoryContext }) {
     disabled: busy !== null,
     ...(m.submenu ? { submenu: m.submenu.map(toItem) } : {}),
     onSelect: () => {
-      if (m.change) onChange(m.change, 'drop');
-      else if (m.action) onTask(m.action, m.fields);
+      if (m.change) onChange(task.runId, m.change, 'drop');
+      else if (m.action) onTask(task.runId, m.action, m.fields);
     },
   });
   const itemId = item?.itemId ?? task.itemId;
@@ -146,38 +209,18 @@ export function WorkflowPanel({ ctx }: { ctx: AccessoryContext }) {
           </li>
         ))}
       </ol>
-      {(signOff || waiting.length > 0) && (
+      {(signOff || waiting.length > 0 || otherWaitingRows.length > 0) && (
         <div className="orch-panel-actions" data-testid="workflow-actions">
           {signOff && (
             <div className="orch-panel-action">
               <span className="orch-line-name">Plan</span>
-              <Button variant="primary" data-testid="workflow-signoff" disabled={busy !== null} onClick={() => onTask('signOff', { planId: signOff })}>
+              <Button variant="primary" data-testid="workflow-signoff" disabled={busy !== null} onClick={() => onTask(task.runId, 'signOff', { planId: signOff })}>
                 Sign off plan
               </Button>
             </div>
           )}
-          {waiting.map((c) => (
-            <div key={`${c.target.repo}/${c.target.branch}`} className="orch-panel-action" data-testid="workflow-waiting" data-branch={c.branch}>
-              <span className="orch-line-name">{changeName(c)}</span>
-              {prNumber(c.pr) && <span className="orch-pr">{prNumber(c.pr)}</span>}
-              <span>{changeLabel(c.state)}</span>
-              {changeControls(c).map((b) => (
-                <Button
-                  key={b.action}
-                  variant={b.primary ? 'primary' : 'secondary'}
-                  danger={b.danger}
-                  data-testid="workflow-change-action"
-                  data-action={b.action}
-                  disabled={busy !== null}
-                  title={`${b.label} ${changeName(c)}`}
-                  onClick={() => onChange(c, b.action)}
-                >
-                  {b.label}
-                </Button>
-              ))}
-              {c.error && <span className="orch-error-line">{c.error}</span>}
-            </div>
-          ))}
+          {waiting.map((c) => waitingRow(task.runId, c))}
+          {otherWaitingRows}
         </div>
       )}
       {open && (
@@ -213,15 +256,7 @@ export function WorkflowPanel({ ctx }: { ctx: AccessoryContext }) {
               ))}
             </div>
           ))}
-          {view.otherTasks.map((o) => (
-            <div key={o.runId} className="orch-line orch-other">
-              <span className="orch-line-name">Other task</span>
-              <span>
-                {o.title} · {o.status}
-                {o.parkReason ? ` (${o.parkReason})` : ''}
-              </span>
-            </div>
-          ))}
+          {view.otherTasks.map(otherTaskLine)}
         </div>
       )}
     </div>

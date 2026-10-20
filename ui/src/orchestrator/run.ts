@@ -1,59 +1,29 @@
-// The workflow run as the UI reads it: the shape of `app_workflow status` (host/crates/workflow
-// actions.rs), served to the UI by `workflow_run_get {chatId}` around the chat's current task,
-// with a `workflow_run {chatId}` event after every run write. Hand-written (no binding yet);
-// every field is read defensively.
+// The workflow run as the UI reads it. The host's answer to `workflow_run_get {chatId}` is the
+// generated `RunView` binding (host/crates/workflow, types.rs), around the chat's current task,
+// with a `workflow_run {chatId}` event after every run write. `showRun` makes the agent's text
+// safe to show and keeps each change's own repo and branch for sending back.
 
+import type {
+  OtherTaskView,
+  RunChangeView,
+  RunPlanView,
+  RunTaskView,
+  RunView as HostRunView,
+} from '../api/generated/workflow/index.ts';
 import { inertLines } from '../hosttools/inert.ts';
 
-export interface RunTask {
-  runId: string;
-  title: string;
-  /** `active` | `parked` | .... */
-  status: string;
-  attempt: number;
-  visual: boolean;
-  itemId: string | null;
-  /** Stages the user skipped (`plan`, `planReview`, `review`, `cleanup`, `smoketest`). */
-  skipped: string[];
-}
+export type RunTask = RunTaskView;
+export type RunPlan = RunPlanView;
 
-export interface RunPlan {
-  id: string | null;
-  approved: boolean;
-  signedOff: boolean;
-  rounds: number;
-  cap: number;
-  /** Why a build would not count yet, in the host's words; null when nothing is missing. */
-  missing: string | null;
-}
-
-export interface RunChange {
-  /** For display: agent text made inert. */
-  repo: string;
-  branch: string;
+/** One change. The text fields are agent text made inert, for display. */
+export interface RunChange extends RunChangeView {
   /** The host's own repo and branch, sent back unchanged when the user acts on the change. Never rendered. */
   target: { repo: string; branch: string };
-  pr: string | null;
-  /** `open` | `landing_draft` | `pending_land` | `landing` | `awaiting_merge` | `land_failed` | `handed_off` | `landed` | `flipped` | `dropped` | `declined`. */
-  state: string;
-  failedMode: string | null;
-  tip: string | null;
-  /** The review's approval holds at the change's latest commit. */
-  approved: boolean;
-  reviewRounds: number;
-  reviewCap: number;
-  smoketestRounds: number;
-  smoketestCap: number;
-  error: string | null;
-  /** What the change still needs before it can be handed off, in the host's words. */
-  missing: string[];
 }
 
-export interface OtherTask {
-  runId: string;
-  title: string;
-  status: string;
-  parkReason: string | null;
+/** A task that is not the chat's current one, with its changes that wait on the user. */
+export interface OtherTask extends Omit<OtherTaskView, 'waiting'> {
+  waiting: RunChange[];
 }
 
 export interface RunView {
@@ -63,62 +33,33 @@ export interface RunView {
   otherTasks: OtherTask[];
 }
 
-const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
 /** Agent-supplied text (task titles, branches, gate sentences): hidden and direction-changing characters shown as tokens, on one line. */
-const inert = (v: unknown): string | null => {
-  const t = str(v);
-  return t === null ? null : inertLines(t).join(' ');
-};
-const num = (v: unknown, d = 0): number => (typeof v === 'number' && Number.isFinite(v) ? v : d);
-const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
-const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' ? (v as Record<string, unknown>) : {});
-const strings = (v: unknown): string[] => list(v).filter((x): x is string => typeof x === 'string');
+const inert = (t: string): string => inertLines(t).join(' ');
+const inertOrNull = (t: string | null): string | null => (t === null ? null : inert(t));
 
-/** Read the host's answer into a RunView, tolerating missing fields. */
-export function parseRun(raw: unknown): RunView {
-  const r = obj(raw);
-  const t = r.task === null || r.task === undefined ? null : obj(r.task);
-  const p = r.plan === null || r.plan === undefined ? null : obj(r.plan);
+function showChange(c: RunChangeView): RunChange {
   return {
-    task: t && {
-      runId: str(t.runId) ?? '',
-      title: inert(t.title) ?? 'Task',
-      status: str(t.status) ?? 'active',
-      attempt: num(t.attempt, 1),
-      visual: t.visual === true,
-      itemId: str(t.itemId),
-      skipped: strings(t.skipped),
-    },
-    plan: p && {
-      id: str(p.id),
-      approved: p.approved === true,
-      signedOff: p.signedOff === true,
-      rounds: num(p.rounds),
-      cap: num(p.cap),
-      missing: inert(p.missing),
-    },
-    changes: list(r.changes).map((c) => {
-      const o = obj(c);
-      return {
-        repo: inert(o.repo) ?? '',
-        branch: inert(o.branch) ?? '',
-        target: { repo: str(o.repo) ?? '', branch: str(o.branch) ?? '' },
-        pr: inert(o.pr),
-        state: str(o.state) ?? 'open',
-        failedMode: str(o.failedMode),
-        tip: str(o.tip),
-        approved: o.approved === true,
-        reviewRounds: num(o.reviewRounds),
-        reviewCap: num(o.reviewCap),
-        smoketestRounds: num(o.smoketestRounds),
-        smoketestCap: num(o.smoketestCap),
-        error: inert(o.error),
-        missing: strings(o.missing).map((m) => inertLines(m).join(' ')),
-      };
-    }),
-    otherTasks: list(r.otherTasks).map((o) => {
-      const x = obj(o);
-      return { runId: str(x.runId) ?? '', title: inert(x.title) ?? 'Task', status: str(x.status) ?? 'parked', parkReason: inert(x.parkReason) };
-    }),
+    ...c,
+    repo: inert(c.repo),
+    branch: inert(c.branch),
+    target: { repo: c.repo, branch: c.branch },
+    pr: inertOrNull(c.pr),
+    error: inertOrNull(c.error),
+    missing: c.missing.map(inert),
+  };
+}
+
+/** The host's run view, with agent text made inert. */
+export function showRun(host: HostRunView): RunView {
+  return {
+    task: host.task && { ...host.task, title: inert(host.task.title) },
+    plan: host.plan && { ...host.plan, missing: inertOrNull(host.plan.missing) },
+    changes: host.changes.map(showChange),
+    otherTasks: host.otherTasks.map((o) => ({
+      ...o,
+      title: inert(o.title),
+      parkReason: inertOrNull(o.parkReason),
+      waiting: o.waiting.map(showChange),
+    })),
   };
 }
