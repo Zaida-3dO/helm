@@ -2022,6 +2022,73 @@ async fn a_steer_with_an_image_gets_it_from_the_echo() {
     assert_eq!(d["images"][0]["height"], 7);
 }
 
+/// The bubble's thumbnail is a small cached copy; the full image stays available.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bubble_thumbnail_is_small_and_cached() {
+    use base64::Engine as _;
+    let h = harness();
+    let chat = h.create().await;
+    let big = {
+        let img = image::ImageBuffer::from_fn(1600, 1200, |x, y| {
+            let n = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503).rotate_left(7);
+            image::Rgb([(n >> 3) as u8, (n >> 11) as u8, (n >> 19) as u8])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    };
+    let put = h
+        .call(
+            "attachment_put",
+            json!({"chatId": chat, "name": "big.png", "mime": "image/png",
+                   "bytes": base64::engine::general_purpose::STANDARD.encode(&big)}),
+        )
+        .await
+        .unwrap();
+    let id = put["attachmentId"].as_str().unwrap().to_owned();
+    let ask = |thumb: bool| json!({"chatId": chat, "attachmentId": id, "thumb": thumb});
+    // Not sent yet: neither form is served.
+    assert_eq!(
+        h.call("attachment_get", ask(true)).await.unwrap_err().code,
+        "not_found"
+    );
+    h.call(
+        "chat_send",
+        json!({"chatId": chat, "submissionId": uuid::Uuid::new_v4().to_string(), "text": "see",
+               "action": "default", "draftRevision": 0, "attachments": [id]}),
+    )
+    .await
+    .unwrap();
+    let thumb_file = h.rt.sh.cfg.profile_dir.join("thumbs").join(&id);
+    assert!(!thumb_file.exists(), "made on the first request");
+    let small = h.call("attachment_get", ask(true)).await.unwrap();
+    assert_eq!(small["mime"], "image/jpeg");
+    let small_bytes = base64::engine::general_purpose::STANDARD
+        .decode(small["bytes"].as_str().unwrap())
+        .unwrap();
+    assert!(small_bytes.len() < big.len() / 4);
+    assert_eq!(std::fs::read(&thumb_file).unwrap(), small_bytes, "cached");
+    let again = h.call("attachment_get", ask(true)).await.unwrap();
+    assert_eq!(again, small);
+    // The full image is still the stored file.
+    let full = h.call("attachment_get", ask(false)).await.unwrap();
+    assert_eq!(full["mime"], "image/png");
+    assert_eq!(
+        full["bytes"],
+        base64::engine::general_purpose::STANDARD
+            .encode(&big)
+            .as_str()
+    );
+    // Another chat gets neither.
+    let foreign = json!({"chatId": "another-chat", "attachmentId": id, "thumb": true});
+    assert_eq!(
+        h.call("attachment_get", foreign).await.unwrap_err().code,
+        "not_found"
+    );
+}
+
 /// The skills a worker reports at get_state are what skills_list answers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn skills_come_from_the_workers_get_state() {

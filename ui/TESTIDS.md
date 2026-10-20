@@ -26,7 +26,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `stop` | Stop button, shown only while a turn runs (Stop that pauses the queue) | |
 | `transcript` | The transcript scroller | |
 | `transcript-row` | One message row | `data-status` (`saved` `streaming` `complete` `error` `interrupted`), `data-role` (`user` `assistant` `toolResult` `context`), `data-row-id` |
-| `message-images` / `message-image` | The thumbnails in a user bubble, and one of them (`message-image-viewer` is the full-size dialog) | `message-image`: `data-state` (`loading` `ready` `failed`); a `ready` one is a button |
+| `message-images` / `message-image` | The thumbnails in a user bubble, and one of them (`message-image-viewer` is the full-size dialog, `message-image-full` the image in it: `data-state` `loading` `ready` `failed`) | `message-image`: `data-state` (`loading` `ready` `failed`); a `ready` one is a button |
 | `work-fold` | "Worked for …" row of a settled turn; click to unfold | |
 | `tool-card` | One tool card | `data-tool` (tool name), `data-status` (`running` `complete` `failed` `interrupted`) |
 | `tool-stop` | Stop on a running tool card (only when supported) | |

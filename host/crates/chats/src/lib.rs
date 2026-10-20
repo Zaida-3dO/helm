@@ -17,6 +17,7 @@
 //! | [`titles`] | automatic titles through `helpers/titles`, renames, suggestions |
 //! | [`autocomplete`] | composer autocomplete through `helpers/autocomplete` |
 //! | [`attachments`] | image attachments and their limits |
+//! | [`message_images`], [`thumbs`] | the images in a user's bubble: the row references, `attachment_get`, and the cached thumbnails |
 //! | [`archive`] | archive and restore inside a caller's transaction |
 //! | [`attention`] | the attention summary behind the badge, tray and row marks |
 //! | [`delete`] | hard delete and its batched, retried file cleanup |
@@ -58,6 +59,7 @@ pub mod session_log;
 mod spawning;
 pub mod store;
 pub mod submit;
+pub mod thumbs;
 mod timeline;
 pub mod titles;
 pub mod tools;

@@ -21,6 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
 tempfile.workspace = true

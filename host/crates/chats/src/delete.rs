@@ -8,8 +8,8 @@
 //! startup ([`crate::reconcile_all`]).
 //!
 //! Cleanup only ever touches strictly patterned names inside the profile's own `sessions/`,
-//! `workers/` and `artifacts/` folders ([`allowed`]); anything else in the queue is dropped
-//! unremoved, with a log line.
+//! `workers/`, `attachments/`, `thumbs/` and `artifacts/` folders ([`allowed`]); anything else in
+//! the queue is dropped unremoved, with a log line.
 
 use crate::archive::Refusal;
 use crate::types::ChatStatus;
@@ -43,7 +43,7 @@ pub fn allowed(rel: &str) -> bool {
         "sessions" => [".jsonl", ".jsonl.torn", ".claude.json"]
             .iter()
             .any(|ext| name.strip_suffix(ext).is_some_and(is_uuid)),
-        "workers" | "attachments" if is_uuid(name) => true,
+        "workers" | "attachments" | "thumbs" if is_uuid(name) => true,
         "artifacts" => name.strip_suffix(".json").is_some_and(|h| {
             h.len() == 64
                 && h.bytes()
@@ -112,7 +112,9 @@ pub fn delete_in_tx(
         let mut st = tx.prepare("SELECT id FROM chat_attachments WHERE chat_id = ?1")?;
         let ids = st.query_map([chat_id], |r| r.get::<_, String>(0))?;
         for id in ids {
-            rels.push(format!("attachments/{}", id?));
+            let id = id?;
+            rels.push(format!("thumbs/{id}"));
+            rels.push(format!("attachments/{id}"));
         }
     }
     for rel in rels {
@@ -189,6 +191,9 @@ mod tests {
         assert!(allowed(&format!("sessions/{id}.jsonl")));
         assert!(allowed(&format!("sessions/{id}.claude.json")));
         assert!(allowed(&format!("workers/{id}")));
+        assert!(allowed(&format!("attachments/{id}")));
+        assert!(allowed(&format!("thumbs/{id}")));
+        assert!(!allowed("thumbs/not-an-id"));
         assert!(allowed(&format!("artifacts/{}.json", "a".repeat(64))));
         assert!(!allowed(&format!("sessions/{}.jsonl", id.to_uppercase())));
         assert!(!allowed(&format!("workers/{id}/../..")));
@@ -280,6 +285,36 @@ mod tests {
             "an artifact another chat references is kept"
         );
         assert_eq!(run_cleanup(&db, &root), 0, "the queue is empty");
+    }
+
+    #[test]
+    fn deleting_a_chat_removes_its_images_and_their_thumbnails() {
+        let (d, db) = temp_db();
+        let root = d.path().to_path_buf();
+        let chat = db
+            .write(|tx| store::create_chat(tx, "C:/w", None, None, 1))
+            .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO chat_attachments(id, chat_id, name, mime, bytes, width, height, created_at)
+                 VALUES (?1, ?2, 'i', 'image/png', 1, 1, 1, 1)",
+                params![id, chat],
+            )?;
+            tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [&chat])
+        })
+        .unwrap();
+        for rel in [format!("attachments/{id}"), format!("thumbs/{id}")] {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        }
+        db.write(|tx| delete_in_tx(tx, &chat, DeleteRule::Archived, 2))
+            .unwrap()
+            .unwrap();
+        run_cleanup(&db, &root);
+        assert!(!root.join(format!("attachments/{id}")).exists());
+        assert!(!root.join(format!("thumbs/{id}")).exists());
     }
 
     #[test]

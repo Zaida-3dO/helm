@@ -1,6 +1,7 @@
 // The images the user sent with a message, as thumbnails in their bubble. The row carries only each
-// image's id, name and size (details.images); the bytes come from `attachment_get` when the row is
-// on screen and are freed when it leaves. A click opens the full image in a dialog.
+// image's id, name and size (details.images). The host answers a small cached thumbnail when the row
+// is on screen (freed when it leaves); the full image is fetched only when a click opens it in a
+// dialog.
 
 import { useEffect, useState } from 'react';
 import type { MessageImage } from '../api/generated/MessageImage.ts';
@@ -11,14 +12,14 @@ import './messageImages.css';
 
 type Loaded = { state: 'loading' } | { state: 'ready'; url: string } | { state: 'failed' };
 
-function useImageUrl(chatId: string, id: string): Loaded {
+function useImageUrl(chatId: string, id: string, thumb: boolean): Loaded {
   const { api } = useShell();
   const [loaded, setLoaded] = useState<Loaded>({ state: 'loading' });
   useEffect(() => {
     let url: string | null = null;
     let cancelled = false;
     setLoaded({ state: 'loading' });
-    api<{ mime: string; bytes: string }>('attachment_get', { chatId, attachmentId: id })
+    api<{ mime: string; bytes: string }>('attachment_get', { chatId, attachmentId: id, thumb })
       .then((r) => {
         if (cancelled) return;
         url = URL.createObjectURL(new Blob([bytesFromBase64(r.bytes)], { type: r.mime }));
@@ -31,12 +32,26 @@ function useImageUrl(chatId: string, id: string): Loaded {
       cancelled = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [api, chatId, id]);
+  }, [api, chatId, id, thumb]);
   return loaded;
 }
 
+/** The full-size image in the dialog; the thumbnail stands in while it loads or if it cannot load. */
+function FullImage({ chatId, image, label, thumbUrl }: { chatId: string; image: MessageImage; label: string; thumbUrl: string }) {
+  const full = useImageUrl(chatId, image.id, false);
+  return (
+    <img
+      className={full.state === 'ready' ? 'msg-image-full' : 'msg-image-full msg-image-full-pending'}
+      src={full.state === 'ready' ? full.url : thumbUrl}
+      alt={label}
+      data-testid="message-image-full"
+      data-state={full.state}
+    />
+  );
+}
+
 function Thumb({ chatId, image, label }: { chatId: string; image: MessageImage; label: string }) {
-  const loaded = useImageUrl(chatId, image.id);
+  const loaded = useImageUrl(chatId, image.id, true);
   const [open, setOpen] = useState(false);
   const size = thumbSize(image.width, image.height);
   const box = { width: size.width, height: size.height };
@@ -57,7 +72,7 @@ function Thumb({ chatId, image, label }: { chatId: string; image: MessageImage; 
       </button>
       {open && (
         <Dialog title={image.name.trim() === '' ? 'Image' : image.name} wide onClose={() => setOpen(false)} testId="message-image-viewer">
-          <img className="msg-image-full" src={loaded.url} alt={label} />
+          <FullImage chatId={chatId} image={image} label={label} thumbUrl={loaded.url} />
         </Dialog>
       )}
     </>

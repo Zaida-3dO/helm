@@ -5,9 +5,10 @@
 //!
 //! - [`for_submission`] lists a submission's images (id, name, mime, size) for the user row's
 //!   `details.images`. The actor writes them when it writes the row, so they survive a restart.
-//! - `attachment_get {chatId, attachmentId}` answers `{mime, bytes}` (base64) for one sent image of
-//!   that chat, so the renderer can draw a thumbnail and the full image. Only images already linked
-//!   to a sent message are served, and only to the chat that owns them.
+//! - `attachment_get {chatId, attachmentId, thumb?}` answers `{mime, bytes}` (base64) for one sent
+//!   image of that chat. With `thumb: true` the bytes are a small cached copy ([`crate::thumbs`])
+//!   for the bubble; without it they are the stored file, for the full-size view. Only images
+//!   already linked to a sent message are served, and only to the chat that owns them.
 
 use crate::ops::{not_found, sql};
 use crate::types::MessageImage;
@@ -50,6 +51,22 @@ pub fn for_submission(db: &Database, submission_id: &str) -> Vec<MessageImage> {
         .unwrap_or_default()
 }
 
+/// The `(id, mime)` of a sent image of the chat; `None` when the chat has no such sent image.
+/// The id is the stored one (a UUID the attachments module generated), never the request's text.
+fn sent_image(
+    conn: &Connection,
+    chat_id: &str,
+    attachment_id: &str,
+) -> rusqlite::Result<Option<(String, String)>> {
+    conn.query_row(
+        "SELECT id, mime FROM chat_attachments
+         WHERE id = ?1 AND chat_id = ?2 AND submission_id IS NOT NULL",
+        params![attachment_id, chat_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+}
+
 /// One sent image's type and bytes, or `None` when the chat has no such sent image.
 pub fn read(
     conn: &Connection,
@@ -57,19 +74,9 @@ pub fn read(
     chat_id: &str,
     attachment_id: &str,
 ) -> rusqlite::Result<Option<(String, Vec<u8>)>> {
-    let found: Option<(String, String)> = conn
-        .query_row(
-            "SELECT id, mime FROM chat_attachments
-             WHERE id = ?1 AND chat_id = ?2 AND submission_id IS NOT NULL",
-            params![attachment_id, chat_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((id, mime)) = found else {
+    let Some((id, mime)) = sent_image(conn, chat_id, attachment_id)? else {
         return Ok(None);
     };
-    // The file name is the stored id (a UUID the attachments module generated), never the request's
-    // own text.
     match std::fs::read(dir.join(&id)) {
         Ok(bytes) => Ok(Some((mime, bytes))),
         Err(e) => {
@@ -93,10 +100,17 @@ fn attachment_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let db = ctx.services.need::<Database>()?;
     let profile = ctx.services.need::<Profile>()?;
     let dir = profile.path("attachments");
-    let found = db
-        .snapshot(|t| read(t, &dir, &chat_id, &attachment_id))
-        .map_err(sql)?;
-    let (mime, bytes) = found.ok_or_else(not_found)?;
+    let (mime, bytes) = if args.get("thumb").and_then(Value::as_bool) == Some(true) {
+        let (id, mime) = db
+            .snapshot(|t| sent_image(t, &chat_id, &attachment_id))
+            .map_err(sql)?
+            .ok_or_else(not_found)?;
+        crate::thumbs::get(&dir, &profile.path("thumbs"), &id, &mime).ok_or_else(not_found)?
+    } else {
+        db.snapshot(|t| read(t, &dir, &chat_id, &attachment_id))
+            .map_err(sql)?
+            .ok_or_else(not_found)?
+    };
     Ok(json!({
         "mime": mime,
         "bytes": base64::engine::general_purpose::STANDARD.encode(bytes),

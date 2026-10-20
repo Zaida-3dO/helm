@@ -6,9 +6,9 @@
 //! - `chat_send {attachments: [id…]}` links at most [`MAX_PER_MESSAGE`] of the chat's unsent
 //!   attachments to the submission, with at most [`MAX_IMAGE_TOTAL`] of images in all. The actor
 //!   sends them to Claude Code as stream-json image blocks with the prompt.
-//! - The renderer shows its own copy as a `blob:` URL thumbnail; the host never returns image
-//!   bytes for display.
-//! - A hard delete removes the files with the chat ([`crate::delete`]).
+//! - The composer shows its own copy of an unsent image. Once sent, the bubble gets a small cached
+//!   thumbnail and the full image from `attachment_get` ([`crate::message_images`]).
+//! - A hard delete removes the files, and their thumbnails, with the chat ([`crate::delete`]).
 //! - References: `attachment_ref {chatId, kind: path|chat, target}`
 //!   records a file or folder (an absolute local path, never its contents) or another chat, and
 //!   answers `{attachmentId, kind: file|folder|chat, name}`. They share the per-message count with

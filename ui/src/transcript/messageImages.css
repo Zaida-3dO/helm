@@ -56,3 +56,8 @@ button.msg-image:hover {
   margin: 0 auto;
   object-fit: contain;
 }
+
+/* The thumbnail stands in until the full image arrives. */
+.msg-image-full-pending {
+  opacity: 0.7;
+}
