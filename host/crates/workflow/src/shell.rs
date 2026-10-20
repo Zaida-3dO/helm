@@ -230,7 +230,9 @@ impl Reader<'_> {
                         depth -= 1;
                     }
                 }
-                c if c.is_whitespace() => b.end_word(nested)?,
+                // Only space and tab are blanks to bash; a carriage return or a non-breaking
+                // space is part of the word, so the reader keeps it there too.
+                ' ' | '\t' => b.end_word(nested)?,
                 c => {
                     b.in_word = true;
                     match c {
@@ -532,7 +534,7 @@ mod tests {
         );
         assert_eq!(
             words("echo x\r# y\ngit status"),
-            vec![vec!["echo", "x", "#", "y"], vec!["git", "status"]]
+            vec![vec!["echo", "x\r#", "y"], vec!["git", "status"]]
         );
         assert_eq!(
             words("echo x;# y\n# it's\ngit status"),
