@@ -37,7 +37,7 @@ test('a kept thumbnail URL is reused while in use or recently released, and revo
   const revoked: string[] = [];
   const cache = new UrlCache(2, (u) => revoked.push(u));
   assert.equal(cache.acquire('a'), undefined);
-  cache.put('a', 'blob:a');
+  assert.equal(cache.put('a', 'blob:a'), 'blob:a');
   cache.put('b', 'blob:b');
   cache.put('c', 'blob:c');
   assert.deepEqual(revoked, [], 'all three are in use');
@@ -62,4 +62,18 @@ test('a URL that is in use is never revoked by the limit', () => {
   cache.release('a');
   assert.deepEqual(revoked, ['blob:a']);
   assert.equal(cache.acquire('b'), 'blob:b');
+});
+
+test('two users fetching the same image share the first URL and each release counts once', () => {
+  const revoked: string[] = [];
+  const cache = new UrlCache(0, (u) => revoked.push(u));
+  assert.equal(cache.put('a', 'blob:first'), 'blob:first');
+  assert.equal(cache.put('a', 'blob:second'), 'blob:first', 'the loser is told to use the first and revoke its own');
+  assert.equal(cache.size, 1);
+  cache.release('a');
+  assert.deepEqual(revoked, [], 'the other user still shows it');
+  assert.equal(cache.peek('a'), 'blob:first');
+  cache.release('a');
+  assert.deepEqual(revoked, ['blob:first']);
+  assert.equal(cache.peek('a'), undefined);
 });

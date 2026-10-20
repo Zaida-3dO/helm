@@ -61,12 +61,26 @@ export class UrlCache {
     return e.url;
   }
 
-  /** Keep a new URL for `key`, counted as in use. A URL already kept for `key` is replaced. */
-  put(key: string, url: string): void {
-    const old = this.entries.get(key);
-    if (old && old.users === 0) this.revoke(old.url);
-    this.entries.delete(key);
+  /** The kept URL for `key` without counting a use (for a first render); undefined when none. */
+  peek(key: string): string | undefined {
+    return this.entries.get(key)?.url;
+  }
+
+  /**
+   * Keep a new URL for `key`, counted as in use, and answer the URL to show. When another user
+   * already kept one for `key`, that one is shared (and counted) and returned instead; the caller
+   * then owns `url` and revokes it.
+   */
+  put(key: string, url: string): string {
+    const e = this.entries.get(key);
+    if (e) {
+      e.users += 1;
+      this.entries.delete(key);
+      this.entries.set(key, e);
+      return e.url;
+    }
     this.entries.set(key, { url, users: 1 });
+    return url;
   }
 
   release(key: string): void {

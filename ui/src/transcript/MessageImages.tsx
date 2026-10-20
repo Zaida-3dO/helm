@@ -18,7 +18,11 @@ const thumbUrls = new UrlCache(64, (url) => URL.revokeObjectURL(url));
 function useImageUrl(chatId: string, id: string, thumb: boolean): Loaded {
   const { api } = useShell();
   const key = `${chatId}/${id}`;
-  const [loaded, setLoaded] = useState<Loaded>({ state: 'loading' });
+  // A kept thumbnail shows on the first render; the effect below takes its use.
+  const [loaded, setLoaded] = useState<Loaded>(() => {
+    const kept = thumb ? thumbUrls.peek(key) : undefined;
+    return kept ? { state: 'ready', url: kept } : { state: 'loading' };
+  });
   useEffect(() => {
     let url: string | null = null;
     let cancelled = false;
@@ -32,7 +36,12 @@ function useImageUrl(chatId: string, id: string, thumb: boolean): Loaded {
         .then((r) => {
           if (cancelled) return;
           url = URL.createObjectURL(new Blob([bytesFromBase64(r.bytes)], { type: r.mime }));
-          if (thumb) thumbUrls.put(key, url);
+          if (thumb) {
+            // Another row may have fetched the same image meanwhile: share its URL, drop ours.
+            const shared = thumbUrls.put(key, url);
+            if (shared !== url) URL.revokeObjectURL(url);
+            url = shared;
+          }
           setLoaded({ state: 'ready', url });
         })
         .catch(() => {
