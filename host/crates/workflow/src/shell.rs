@@ -15,8 +15,8 @@ pub struct Simple {
     /// The bodies of command and process substitutions in this command (`$(…)`, backticks,
     /// `<(…)`, `>(…)`), which the guard judges as commands of their own.
     pub subs: Vec<String>,
-    /// The command's input is a heredoc or here-string written on the line.
-    pub stdin_text: bool,
+    /// The command's input is a heredoc, a here-string or a pipe.
+    pub stdin_fed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,11 +86,14 @@ struct Build {
     braces: usize,
     /// The next word is a redirection's target, not an argument.
     target: bool,
+    /// Part of the word so far was quoted or escaped.
+    quoted: bool,
 }
 
 impl Build {
     fn end_word(&mut self, nested: bool) -> Res<()> {
         self.braces = 0;
+        self.quoted = false;
         if !self.in_word {
             return Ok(());
         }
@@ -126,6 +129,20 @@ impl Build {
         self.cur.computed |= computed;
         self.cur.words.push(word);
         Ok(())
+    }
+
+    /// Before a redirection: an unquoted number right before it (`2>`, `0<`) names a file
+    /// descriptor, not an argument.
+    fn drop_fd_number(&mut self) {
+        if self.in_word
+            && !self.quoted
+            && !self.computed_word
+            && !self.word.is_empty()
+            && self.word.bytes().all(|b| b.is_ascii_digit())
+        {
+            self.word.clear();
+            self.in_word = false;
+        }
     }
 
     fn push_command(&mut self) {
@@ -270,6 +287,10 @@ impl Reader<'_> {
         let mut arith: Vec<usize> = Vec::new();
         // The whole of this list is the body of a `$((…))`.
         let whole_arith = std::mem::take(&mut self.arith_sub);
+        // The depths that close the inner `(` of an open `((`. bash reads `((` as arithmetic
+        // only when that `)` is followed straight away by another; otherwise it is two
+        // subshells, which this reader would have misread, so that is unreadable.
+        let mut arith_close: Vec<usize> = if whole_arith { vec![0] } else { Vec::new() };
         let mut prev: Option<char> = None;
         while let Some(c) = self.next() {
             let in_arith = whole_arith || !arith.is_empty();
@@ -280,6 +301,7 @@ impl Reader<'_> {
             match c {
                 '\'' => {
                     b.in_word = true;
+                    b.quoted = true;
                     loop {
                         match self.next() {
                             Some('\'') => break,
@@ -290,6 +312,7 @@ impl Reader<'_> {
                 }
                 '"' => {
                     b.in_word = true;
+                    b.quoted = true;
                     self.double_quoted(&mut b)?;
                 }
                 '\\' => match self.next() {
@@ -298,6 +321,7 @@ impl Reader<'_> {
                     Some('\n') => continue,
                     Some(x) => {
                         b.in_word = true;
+                        b.quoted = true;
                         b.word.push(x);
                     }
                     None => return Err("a trailing backslash"),
@@ -325,6 +349,9 @@ impl Reader<'_> {
                     b.end_command(nested)?;
                     if matches!(c, '|' | '&') && self.peek() == Some(c) {
                         self.i += 1;
+                    } else if c == '|' {
+                        // The next command reads this one's output.
+                        b.cur.stdin_fed = true;
                     }
                     if c == '\n' && !self.heredocs.is_empty() {
                         // bash reads `(( … ))` as one span, so heredoc text starts only after
@@ -344,12 +371,13 @@ impl Reader<'_> {
                     }
                 }
                 '<' if self.peek() == Some('<') => {
+                    b.drop_fd_number();
                     b.end_word(nested)?;
                     self.i += 1;
                     self.skip_joins();
                     // The command reads text from the line itself, which a shell or interpreter
                     // would run.
-                    b.cur.stdin_text = true;
+                    b.cur.stdin_fed = true;
                     if self.peek() == Some('<') {
                         // A here-string `<<< word`: the word is read (its substitutions run)
                         // but is not an argument.
@@ -371,6 +399,7 @@ impl Reader<'_> {
                 }
                 '>' | '<' => {
                     // A redirection ends the word; its target is not an argument.
+                    b.drop_fd_number();
                     b.end_word(nested)?;
                     while self.peek().is_some_and(|x| matches!(x, '>' | '&' | '|')) {
                         self.i += 1;
@@ -400,6 +429,7 @@ impl Reader<'_> {
                         // `((` opens an arithmetic command (also in `for ((`).
                         self.i += 1;
                         arith.push(depth);
+                        arith_close.push(depth + 1);
                         depth += 1;
                     }
                     depth += 1;
@@ -410,6 +440,13 @@ impl Reader<'_> {
                         return Ok(b.cmds);
                     }
                     depth = depth.saturating_sub(1);
+                    if arith_close.last() == Some(&depth) {
+                        arith_close.pop();
+                        self.skip_joins();
+                        if self.peek() != Some(')') {
+                            return Err("a (( that bash reads as two subshells");
+                        }
+                    }
                     while arith.last().is_some_and(|&d| depth <= d) {
                         arith.pop();
                     }
@@ -463,11 +500,13 @@ impl Reader<'_> {
             Some('\'') if !in_double => {
                 self.i += 1;
                 let text = self.ansi_c()?;
+                b.quoted = true;
                 b.word.push_str(&text);
                 return Ok(());
             }
             Some('(') => {
                 self.i += 1;
+                self.skip_joins();
                 // `$((…))` is arithmetic: its body is read with the `(( ))` rules.
                 let arith = self.peek() == Some('(');
                 self.arith_sub = arith;
@@ -695,7 +734,7 @@ mod tests {
         assert_eq!(words("git status # git push"), vec![vec!["git", "status"]]);
         assert_eq!(
             words("git push origin HEAD:main>/dev/null 2>&1"),
-            vec![vec!["git", "push", "origin", "HEAD:main", "2"]]
+            vec![vec!["git", "push", "origin", "HEAD:main"]]
         );
         assert_eq!(
             words("echo x > 'a b' && git push"),

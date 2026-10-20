@@ -1122,7 +1122,7 @@ fn simple_shape(
             words: c.words[start..].to_vec(),
             computed: c.computed,
             subs: Vec::new(),
-            stdin_text: c.stdin_text,
+            stdin_fed: c.stdin_fed,
         };
         &inner
     } else {
@@ -1203,16 +1203,19 @@ fn simple_shape(
                 )
             }) {
                 Shape::Unreadable("inline interpreter code is not read")
-            } else if c.stdin_text
+            } else if c.stdin_fed
                 || c.words[1..]
                     .iter()
                     .all(|w| w.starts_with('-') && w.as_str() != "--")
-                || c.words[1..]
-                    .iter()
-                    .any(|w| matches!(w.as_str(), "-" | "-s"))
+                || c.words[1..].iter().any(|w| {
+                    matches!(
+                        w.as_str(),
+                        "-" | "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0"
+                    ) || (w.starts_with('-') && !w.starts_with("--") && w.contains('s'))
+                })
             {
-                // With no script named (or `-`, `-s`), it runs the text on its input: a
-                // heredoc, a here-string or a pipe the guard does not read.
+                // Fed by a heredoc, a here-string or a pipe, with no script named, or told to
+                // read its input (`-`, `-s`, `/dev/stdin`): it runs text the guard does not read.
                 Shape::Unreadable("a shell or interpreter running text from its input")
             } else {
                 Shape::None
@@ -2232,6 +2235,51 @@ pub(crate) mod tests {
         ] {
             assert_eq!(judge(cmd, &c, &F), Verdict::Allow, "{cmd:?}");
         }
+    }
+
+    #[test]
+    fn subshells_that_look_like_arithmetic_and_shells_fed_by_pipes_fail_closed() {
+        let c = ctx(true);
+        let on_main = Facts {
+            repo: F.repo,
+            branch: Some("main"),
+        };
+        // bash reads these `((` as two subshells, where `>` is a redirection.
+        for cmd in [
+            "((git push origin >feat-x) )",
+            "echo $((git push origin >feat-x) )",
+            "((true) ; git push origin >feat-x)",
+        ] {
+            assert_ne!(judge(cmd, &c, &on_main), Verdict::Allow, "{cmd}");
+        }
+        // `$(\<newline>(` is `$((` to bash.
+        assert_ne!(
+            judge(
+                "echo $(\\\n(1<<'2'\n$(git push origin HEAD:main)\n2\n))",
+                &c,
+                &F
+            ),
+            Verdict::Allow
+        );
+        // A shell reading a heredoc or a pipe, whatever other words it is given.
+        for cmd in [
+            "cat <<'EOF' | bash 2>&1\ngit push origin HEAD:main\nEOF",
+            "cat <<'EOF' | bash --\ngit push origin HEAD:main\nEOF",
+            "cat <<'EOF' | bash -o pipefail\ngit push origin HEAD:main\nEOF",
+            "cat <<'EOF' | bash +x\ngit push origin HEAD:main\nEOF",
+            "cat <<'EOF' | bash -es a\ngit push origin HEAD:main\nEOF",
+            "cat <<'EOF' | bash /dev/stdin\ngit push origin HEAD:main\nEOF",
+            "echo 'git push origin HEAD:main' | bash 2>&1",
+            "echo hju qvti psjhjo IFBE:nbjo | tr b-zB-Z a-yA-Y | bash -o pipefail",
+        ] {
+            assert_ne!(judge(cmd, &c, &F), Verdict::Allow, "{cmd:?}");
+        }
+        // An fd number before a redirection is not an argument; a quoted number is.
+        assert_eq!(
+            judge("git push origin feat-x 2>/dev/null", &c, &F),
+            Verdict::Allow
+        );
+        assert_ne!(judge("git push \"1\">x HEAD:main", &c, &F), Verdict::Allow);
     }
 
     #[test]
