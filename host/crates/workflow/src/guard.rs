@@ -77,14 +77,44 @@ const LANDING_WORDS: [&str; 11] = [
     "remove-label",
 ];
 
-fn mentions_landing(line: &str) -> bool {
+/// How much of a line the guard reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    /// No landing word, and nothing that could make one: allowed unread.
+    Skip,
+    /// No landing word in the text, but the line computes words at run time (`$a$b`,
+    /// `${x}sh`, `$(…)`, backticks, `{a..z}`) or feeds words to git through `xargs`, so a landing
+    /// word could still appear. It is read in full; only a computed `cd` is let through, since
+    /// with no landing word in sight the folder can't change what lands.
+    Computed,
+    /// A landing word is in the text: read in full.
+    Full,
+}
+
+fn reading(line: &str) -> Reading {
     // bash deletes every backslash-newline before it reads the line, so `git pu\<newline>sh` is
     // a push: look at the line both with and without them.
     let joined = line.replace("\\\n", "");
-    mentions_landing_in(line) || mentions_landing_in(&joined)
+    if mentions_landing(line) || mentions_landing(&joined) {
+        return Reading::Full;
+    }
+    let tool = || {
+        let text = without_expansions(&joined, false);
+        ["git", "gh", "hub", "curl"]
+            .iter()
+            .any(|t| text.contains(t))
+    };
+    if joined.contains(['$', '`'])
+        || (joined.contains('{') && joined.contains(".."))
+        || (joined.contains("xargs") && tool())
+    {
+        Reading::Computed
+    } else {
+        Reading::Skip
+    }
 }
 
-fn mentions_landing_in(line: &str) -> bool {
+fn mentions_landing(line: &str) -> bool {
     // `$'...'` and `$"..."` can spell any word with escapes (`$'\x70ush'`): read those lines in
     // full, where the reader decodes them.
     if line.contains("$'") || line.contains("$\"") {
@@ -989,6 +1019,7 @@ fn simple_shape(
     ctx: &Ctx,
     facts: &dyn RepoFacts,
     sw: &mut Switched,
+    read: Reading,
 ) -> Shape {
     for (k, _) in &c.assigns {
         if k.starts_with("GIT_CONFIG_KEY_") || k.starts_with("GIT_CONFIG_VALUE_") {
@@ -1096,7 +1127,8 @@ fn simple_shape(
         .to_ascii_lowercase();
     // git and gh judge their own computed words where they matter (the verb, a push or merge
     // target, a PR); a computed folder or curl request is unreadable outright.
-    if c.computed && matches!(name.as_str(), "cd" | "pushd" | "curl") {
+    let folder = matches!(name.as_str(), "cd" | "pushd");
+    if c.computed && (name == "curl" || (folder && read == Reading::Full)) {
         return Shape::Unreadable("it uses a computed word");
     }
     match name.as_str() {
@@ -1167,7 +1199,8 @@ pub fn judge(cmd: &str, ctx: &Ctx, facts: &dyn RepoFacts) -> Verdict {
             Verdict::Allow
         };
     }
-    if !mentions_landing(cmd) {
+    let read = reading(cmd);
+    if read == Reading::Skip {
         return Verdict::Allow;
     }
     // Brace expansion, comments and quoting are the reader's: it reports a line that uses brace
@@ -1175,14 +1208,20 @@ pub fn judge(cmd: &str, ctx: &Ctx, facts: &dyn RepoFacts) -> Verdict {
     let mut sw = Switched::default();
     if reorders(cmd) {
         // A first pass only collects the switches; judging with all of them can only deny more.
-        let _ = judge_in(cmd, ctx, facts, &mut sw);
+        let _ = judge_in(cmd, ctx, facts, &mut sw, read);
     }
-    judge_in(cmd, ctx, facts, &mut sw)
+    judge_in(cmd, ctx, facts, &mut sw, read)
 }
 
 /// [`judge`] after its size check and pre-filter. Substitutions recurse here with the same
 /// switches, since a branch switch inside `$(…)` still moves the folder's branch.
-fn judge_in(cmd: &str, ctx: &Ctx, facts: &dyn RepoFacts, sw: &mut Switched) -> Verdict {
+fn judge_in(
+    cmd: &str,
+    ctx: &Ctx,
+    facts: &dyn RepoFacts,
+    sw: &mut Switched,
+    read: Reading,
+) -> Verdict {
     let at_stake = ctx.task_active || !ctx.tracked.is_empty();
     let deny = |tier, rule, why: String| Verdict::Deny { tier, rule, why };
     let cmds = match shell::parse(cmd) {
@@ -1211,7 +1250,7 @@ fn judge_in(cmd: &str, ctx: &Ctx, facts: &dyn RepoFacts, sw: &mut Switched) -> V
                 cwd: cwd.clone(),
                 ..ctx.clone()
             };
-            match judge_in(sub, &here, facts, sw) {
+            match judge_in(sub, &here, facts, sw, read) {
                 Verdict::Allow => {}
                 v @ Verdict::Deny {
                     tier: Tier::Quote, ..
@@ -1221,7 +1260,7 @@ fn judge_in(cmd: &str, ctx: &Ctx, facts: &dyn RepoFacts, sw: &mut Switched) -> V
                 }
             }
         }
-        let shape = simple_shape(c, &mut cwd, ctx, facts, sw);
+        let shape = simple_shape(c, &mut cwd, ctx, facts, sw, read);
         let (repo, landing, what): (Option<String>, bool, String) = match shape {
             Shape::None => continue,
             Shape::Unreadable(why) => {
@@ -2046,10 +2085,101 @@ pub(crate) mod tests {
         ] {
             assert_eq!(rule(judge(cmd, &c, &F)), "task_repo", "{cmd:?}");
         }
-        // `<\<newline><` is still a heredoc.
+        // `<\<newline><` is still a heredoc, whose text is not a command.
         assert_eq!(
-            rule(judge("cat <\\\n<EOF\ngit push origin feat-x\nEOF", &c, &F)),
+            judge("cat <\\\n<'EOF'\ngit push origin HEAD:main\nEOF", &c, &F),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn hex_escapes_in_braces_decode_like_bash() {
+        let c = ctx(true);
+        for cmd in [
+            "git $'\\x{70}ush' origin HEAD:main",
+            "git $'\\x{0000070}ush' origin HEAD:main",
+            "git $'\\x{170}ush' origin HEAD:main",
+            "git $'\\x{70ush' origin HEAD:main",
+            "git push origin $'HEAD:\\x{6d}ain'",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &F)), "task_repo", "{cmd}");
+        }
+        assert_eq!(
+            rule(judge("git push origin $'HEAD:\\x{}main'", &c, &F)),
             "fail_closed"
+        );
+    }
+
+    #[test]
+    fn a_hash_inside_arithmetic_is_not_a_comment() {
+        let c = ctx(true);
+        for cmd in [
+            "(( 1 # )) || git push origin HEAD:main",
+            "if (( 1 # )); then :; else git push origin HEAD:main; fi",
+            "for (( i=0; i<1 #; i++ )); do :; done; git push origin HEAD:main",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &F)), "fail_closed", "{cmd}");
+        }
+        for cmd in [
+            "(( 16#ff > 1 )) && git push origin feat-x",
+            "( # a subshell comment\ngit push origin feat-x )",
+        ] {
+            assert_eq!(judge(cmd, &c, &F), Verdict::Allow, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn landing_words_built_at_run_time_are_read() {
+        let c = ctx(true);
+        for cmd in [
+            "a=pu; b=sh; git $a$b origin HEAD:main",
+            "x=pu; git ${x}sh origin HEAD:main",
+            "git $(printf 'p%sh' us) origin HEAD:main",
+            "echo pu | (read v; git ${v}sh origin HEAD:main)",
+            "git p{u..u}sh origin HEAD:main",
+            "echo hsup | rev | xargs -I{} git {} origin HEAD:main",
+            "$G $V origin HEAD:main",
+        ] {
+            assert_ne!(judge(cmd, &c, &F), Verdict::Allow, "{cmd}");
+        }
+        // Common commands that compute words but land nothing still pass.
+        for cmd in [
+            "echo $HOME",
+            "cd \"$(git rev-parse --show-toplevel)\" && npm test",
+            "for f in $(ls); do echo \"$f\"; done",
+            "git log --format=\"%H $x\" -n 1",
+            "git commit -m \"$(cat <<'EOF'\nfix {a,b}: it's done\n\nsecond paragraph\nEOF\n)\" && git push origin feat-x",
+        ] {
+            assert_eq!(judge(cmd, &c, &F), Verdict::Allow, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn heredoc_text_is_skipped_and_what_follows_is_read() {
+        let c = ctx(true);
+        for cmd in [
+            "cat <<'EOF'\ngit push origin HEAD:main\nEOF\ngit push origin HEAD:main",
+            "cat <<-EOF\n\tx\n\tEOF\ngit push origin HEAD:main",
+            "cat <<EOF; git push origin HEAD:main\nx\nEOF",
+            "cat <<< \"$(git push origin HEAD:main)\"",
+            "cat <<A <<B\na\nA\nb\nB\ngit push origin HEAD:main",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &F)), "task_repo", "{cmd:?}");
+        }
+        for cmd in [
+            // Unquoted text is expanded: a substitution in it runs.
+            "cat <<EOF\n$(git push origin HEAD:main)\nEOF",
+            "cat <<EOF\n`git push origin HEAD:main`\nEOF",
+            // No end line.
+            "cat <<EOF\ngit push origin HEAD:main",
+            // A delimiter that only looks like the end line.
+            "cat <<'EOF'\n EOF\ngit push origin HEAD:main",
+        ] {
+            assert_ne!(judge(cmd, &c, &F), Verdict::Allow, "{cmd:?}");
+        }
+        assert_eq!(
+            judge("cat <<'EOF'\ngit push origin HEAD:main\nEOF", &c, &F),
+            Verdict::Allow
         );
     }
 
