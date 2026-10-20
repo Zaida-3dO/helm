@@ -7,7 +7,7 @@
 //   <IconPin filled />            the pinned state
 //   <IconAlert label="Failed" />  an icon that carries meaning on its own
 //
-// The app's own drawn marks (the wheel mark, the working face, the star) are not Lucide; they live
+// The app's own drawn marks (the wheel mark and the star) are not Lucide; they live
 // in ui/status/.
 
 import {

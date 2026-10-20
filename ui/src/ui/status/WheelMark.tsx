@@ -5,11 +5,15 @@
 
 import { useId } from 'react';
 
+export type WheelState = 'working' | 'stopping' | 'calm';
+
 export interface WheelMarkProps {
   /** Box size in px (square). Default 24; the sidebar beacon uses about 34. */
   size?: number;
   label?: string;
   className?: string;
+  /** Set when the wheel marks a chat's activity: stopping dims to .55, calm (background work) to .6. */
+  state?: WheelState;
 }
 
 const SPOKES = [0, 45, 90, 135, 180, 225, 270, 315];
@@ -19,14 +23,15 @@ const polar = (deg: number, r: number) => {
   return { x: 50 + r * Math.cos(t), y: 50 + r * Math.sin(t) };
 };
 
-export function WheelMark({ size = 24, label, className }: WheelMarkProps) {
+export function WheelMark({ size = 24, label, className, state }: WheelMarkProps) {
   const id = useId().replace(/:/g, '');
   const wood = `wm-wood-${id}`;
   const brass = `wm-brass-${id}`;
   const dome = `wm-dome-${id}`;
   return (
     <span
-      className={`ui-wheel${className ? ` ${className}` : ''}`}
+      className={`ui-wheel${state ? ` ui-wheel-${state}` : ''}${className ? ` ${className}` : ''}`}
+      data-wheel-state={state}
       style={{ width: size, height: size }}
       role={label ? 'img' : undefined}
       aria-label={label}

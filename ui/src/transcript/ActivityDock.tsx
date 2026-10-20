@@ -1,5 +1,5 @@
 // The live activity dock: a rounded card in the column
-// above the composer. Left, a 64 x 48 glyph cell (the still working face while a turn runs, a check
+// above the composer. Left, a 64 x 48 glyph cell (the still ship's wheel while a turn runs, a check
 // once it settles); then two lines (the state, then the latest tool with its elapsed time and, when
 // per-tool Stop is on and the call can be stopped, Stop); right, Details › and the counts ("N live",
 // the background-shells chip with its hover list, the subagent roster, the turn's clock). Details
@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChatRecord, ThreadState } from '../api/types.ts';
 import { IconBrowser, IconCheck, IconChevronRight, IconFileText, IconSearch, IconStop, IconTerminal, IconWand } from '../ui/icons.tsx';
-import { WorkingFace } from '../ui/status/index.ts';
+import { WheelMark } from '../ui/status/index.ts';
 import { useLayer } from '../ui/hooks.ts';
 import { toolKind, toolLabel } from './toolKinds.ts';
 import { formatElapsed } from './workBlocks.ts';
@@ -79,7 +79,7 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool }: DockPr
       <div className="ad-surface">
         <span className="ad-glyph" aria-hidden="true">
           {working ? (
-            <WorkingFace size="large" state={chat.status === 'stopping' ? 'stopping' : live ? 'working' : 'calm'} />
+            <WheelMark size={40} state={chat.status === 'stopping' ? 'stopping' : live ? 'working' : 'calm'} />
           ) : (
             <IconCheck size={20} />
           )}

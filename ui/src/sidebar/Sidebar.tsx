@@ -43,7 +43,7 @@ import {
   IconX,
 } from '../ui/icons.tsx';
 import { withChatIcons, withProjectIcons } from './menuIcons.tsx';
-import { StarMark, WorkingFace } from '../ui/status/index.ts';
+import { StarMark, WheelMark } from '../ui/status/index.ts';
 import { openNewChat } from '../newchat/index.ts';
 import { ATTENTION_LABEL, age, trailingIndicator } from './status.ts';
 import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
@@ -817,8 +817,8 @@ function Indicator({ row }: { row: SidebarRow }) {
       title={label}
     >
       {a === 'pinned' && <IconPin size={11} />}
-      {a === 'running' && <WorkingFace size="compact" state={row.status === 'stopping' ? 'stopping' : 'working'} className="sb-ind-face" />}
-      {a === 'lingering' && <WorkingFace size="compact" state="calm" className="sb-ind-face" />}
+      {a === 'running' && <WheelMark size={20} state={row.status === 'stopping' ? 'stopping' : 'working'} className="sb-ind-wheel" />}
+      {a === 'lingering' && <WheelMark size={20} state="calm" className="sb-ind-wheel" />}
       {a === 'unread' && <StarMark size={26} className="sb-ind-star" />}
     </span>
   );
@@ -855,7 +855,7 @@ function ChatRow({
   onLeave: () => void;
   onPointerDown: (e: ReactPointerEvent) => void;
 }) {
-  // A chat whose own turn ended but whose subagents still run shows the working face.
+  // A chat whose own turn ended but whose subagents still run shows the wheel.
   const subagents = useSubagentsRunning(item.row.chatId);
   const r = subagents > 0 && item.row.attention !== 'running' ? { ...item.row, attention: 'running' as const } : item.row;
   const colour = colourCss(project?.colour);

@@ -48,9 +48,6 @@
   overflow: visible;
   color: color-mix(in srgb, var(--success, var(--accent)) 70%, transparent);
 }
-.ad-glyph .ui-face-large {
-  scale: 0.9;
-}
 .ad-lines {
   flex: 1;
   min-width: 0;

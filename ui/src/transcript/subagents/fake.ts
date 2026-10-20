@@ -61,7 +61,7 @@ const PLANS: Plan[] = [
       ['Grep', 'indicator'],
       [null, 'Reading the row component next.'],
       ['Read', 'ui/src/sidebar/Row.tsx'],
-      ['Grep', 'WorkingFace'],
+      ['Grep', 'WheelMark'],
     ],
     end: 'running',
   },

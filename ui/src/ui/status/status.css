@@ -76,82 +76,6 @@
   box-shadow: var(--chrome-tile-shadow);
 }
 
-/* ---- The working face, still. ---- */
-
-.ui-face {
-  --face-glow: #14a8de;
-  --face-glow-opacity: 0.5;
-  --face-vol-hi: 0.26;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  color: color-mix(in srgb, var(--text) 90%, transparent);
-}
-:root[data-theme='dark'] .ui-face {
-  --face-glow: #3fd3ff;
-  --face-glow-opacity: 0.22;
-  --face-vol-hi: 0.1;
-}
-.ui-face-large {
-  width: 72px;
-  height: 48px;
-}
-.ui-face-large .ui-face-svg {
-  width: 72px;
-  height: 34px;
-}
-.ui-face-compact {
-  width: 26px;
-  height: 26px;
-}
-.ui-face-compact .ui-face-svg {
-  width: 23.4px;
-  height: 18px;
-}
-.ui-face-svg {
-  overflow: visible;
-}
-.ui-face-head {
-  fill: currentColor;
-}
-.ui-face-glow {
-  fill: var(--face-glow);
-  stroke: var(--face-glow);
-  opacity: var(--face-glow-opacity);
-}
-.ui-face-facet-dark {
-  display: none;
-  fill: #000;
-  opacity: 0.3;
-}
-.ui-face-facet-light {
-  fill: #fff;
-  opacity: 0.24;
-}
-:root[data-theme='dark'] .ui-face-facet-dark {
-  display: inline;
-}
-:root[data-theme='dark'] .ui-face-facet-light {
-  display: none;
-}
-.ui-face-vol-hi {
-  stop-color: #fff;
-  stop-opacity: var(--face-vol-hi);
-}
-.ui-face-ball {
-  fill: var(--fx-deep);
-}
-:root[data-theme='dark'] .ui-face-ball {
-  fill: var(--fx-light);
-}
-.ui-face-stopping {
-  opacity: 0.55;
-}
-.ui-face-calm {
-  opacity: 0.6;
-}
-
 /* ---- The completion star, the still variant. ---- */
 
 .ui-star {
@@ -211,28 +135,17 @@
   display: inline-flex;
   flex: none;
 }
+/* As a chat's activity mark: stopping and background work are dimmed. */
+.ui-wheel-stopping {
+  opacity: 0.55;
+}
+.ui-wheel-calm {
+  opacity: 0.6;
+}
 
-/* Forced colours: one system colour, no glow, facets or shading. The theme prefix
+/* Forced colours: the wordmark uses one system colour. The theme prefix
    outranks the dark-mode rules above. */
 @media (forced-colors: active) {
-  :root .ui-face,
-  :root[data-theme] .ui-face {
-    color: ButtonText;
-  }
-  :root .ui-face-glow,
-  :root[data-theme] .ui-face-glow,
-  :root .ui-face-facet-dark,
-  :root[data-theme] .ui-face-facet-dark,
-  :root .ui-face-facet-light,
-  :root[data-theme] .ui-face-facet-light,
-  :root .ui-face-vol,
-  :root[data-theme] .ui-face-vol {
-    display: none;
-  }
-  :root .ui-face-ball,
-  :root[data-theme] .ui-face-ball {
-    fill: ButtonText;
-  }
   :root .ui-wordmark,
   :root[data-theme] .ui-wordmark {
     background: none;

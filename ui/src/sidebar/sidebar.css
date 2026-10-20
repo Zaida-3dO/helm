@@ -687,9 +687,9 @@
   position: relative;
 }
 
-/* Still status shapes from the kit: the face and the star sit in a 26 x 26 field
+/* Still status shapes from the kit: the wheel and the star sit in a 26 x 26 field
    centred on the 13 px slot. */
-.sb-ind-face,
+.sb-ind-wheel,
 .sb-ind-star {
   position: absolute;
   left: 50%;
@@ -697,7 +697,7 @@
   transform: translate(-50%, -50%);
 }
 
-.sb-root[data-compact='true'] .sb-ind-face {
+.sb-root[data-compact='true'] .sb-ind-wheel {
   transform: translate(-50%, -50%) scale(0.85);
 }
 
@@ -961,8 +961,8 @@
   display: none;
 }
 
-/* Running with no output for a while: the face dims (no glyph of its own). */
-.sb-ind[data-stalled='true'] .sb-ind-face {
+/* Running with no output for a while: the wheel dims (no glyph of its own). */
+.sb-ind[data-stalled='true'] .sb-ind-wheel {
   opacity: 0.5;
 }
 
