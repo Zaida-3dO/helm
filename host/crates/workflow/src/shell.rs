@@ -1,8 +1,8 @@
 //! A small, conservative shell reader for the landing guard. It splits a command line
 //! into simple commands and words the way bash does: POSIX quoting, `$'...'` escapes, comments
 //! only where bash starts one, and `$(…)` bodies that end where bash ends them. Anything it
-//! cannot read literally (a variable or substitution in a word, unbalanced quotes, a heredoc,
-//! brace expansion, `eval`, `sh -c`, inline interpreter code) is either marked **computed** or
+//! cannot read literally (a variable or substitution in a word, unbalanced quotes, heredoc text
+//! that bash would expand, a `#` inside `(( ))`, brace expansion, `eval`, `sh -c`, inline interpreter code) is either marked **computed** or
 //! reported as **unreadable**, and the guard fails closed on it where work is at stake.
 
 /// One simple command: leading `NAME=value` assignments, then its words.
@@ -40,8 +40,10 @@ pub fn parse(line: &str) -> Parsed {
         s: &chars,
         i: 0,
         nesting: 0,
+        heredocs: Vec::new(),
     };
     match r.list(false) {
+        Ok(_) if !r.heredocs.is_empty() => Parsed::Unreadable("a heredoc without its end line"),
         Ok(c) => Parsed::Commands(c),
         Err(why) => Parsed::Unreadable(why),
     }
@@ -50,6 +52,20 @@ pub fn parse(line: &str) -> Parsed {
 struct Reader<'a> {
     s: &'a [char],
     i: usize,
+    nesting: usize,
+    /// Heredocs whose text starts after the next newline.
+    heredocs: Vec<Heredoc>,
+}
+
+/// A `<<WORD` (or `<<-WORD`) waiting for its text.
+struct Heredoc {
+    delim: String,
+    /// `<<-`: leading tabs are stripped from each line, the end line included.
+    strip_tabs: bool,
+    /// The delimiter was quoted, so the text is literal; otherwise bash expands `$` and
+    /// backticks in it.
+    quoted: bool,
+    /// The substitution depth it was written at.
     nesting: usize,
 }
 
@@ -156,14 +172,100 @@ impl Reader<'_> {
         }
     }
 
+    /// After `<<` or `<<-`: the delimiter word, and whether any of it was quoted. bash expands
+    /// nothing in it, so a `$` or backtick (which it would keep as text) is refused rather than
+    /// matched.
+    fn heredoc_word(&mut self) -> Res<(String, bool)> {
+        while self.peek().is_some_and(|x| matches!(x, ' ' | '\t')) {
+            self.i += 1;
+            self.skip_joins();
+        }
+        let mut delim = String::new();
+        let mut quoted = false;
+        while let Some(c) = self.peek() {
+            if matches!(
+                c,
+                ' ' | '\t' | '\n' | ';' | '|' | '&' | '<' | '>' | '(' | ')'
+            ) {
+                break;
+            }
+            self.i += 1;
+            match c {
+                '\'' | '"' => {
+                    quoted = true;
+                    loop {
+                        match self.next() {
+                            Some(x) if x == c => break,
+                            Some('$' | '`' | '\\') if c == '"' => {
+                                return Err("a heredoc delimiter the guard can't read")
+                            }
+                            Some(x) => delim.push(x),
+                            None => return Err("an unclosed quote in a heredoc delimiter"),
+                        }
+                    }
+                }
+                '\\' => match self.next() {
+                    Some('\n') => {}
+                    Some(x) => {
+                        quoted = true;
+                        delim.push(x);
+                    }
+                    None => return Err("a trailing backslash"),
+                },
+                '$' | '`' => return Err("a heredoc delimiter the guard can't read"),
+                c => delim.push(c),
+            }
+        }
+        if delim.is_empty() {
+            return Err("a heredoc without a delimiter");
+        }
+        Ok((delim, quoted))
+    }
+
+    /// After the newline that ends a line with heredocs: skip each one's text, up to its end
+    /// line. The text is not commands. Unquoted text is expanded by bash, so a `$`, backtick or
+    /// backslash in it makes the line unreadable.
+    fn heredoc_text(&mut self) -> Res<()> {
+        for h in std::mem::take(&mut self.heredocs) {
+            if h.nesting != self.nesting {
+                return Err("a heredoc whose text starts inside a substitution");
+            }
+            loop {
+                if self.peek().is_none() {
+                    return Err("a heredoc without its end line");
+                }
+                let start = self.i;
+                while self.peek().is_some_and(|x| x != '\n') {
+                    self.i += 1;
+                }
+                let line: String = self.s[start..self.i].iter().collect();
+                self.next(); // the newline, if any
+                let cmp = if h.strip_tabs {
+                    line.trim_start_matches('\t')
+                } else {
+                    line.as_str()
+                };
+                if cmp == h.delim {
+                    break;
+                }
+                if !h.quoted && line.contains(['$', '`', '\\']) {
+                    return Err("a heredoc whose text bash expands");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Read a command list. Inside a substitution (`nested`) it ends at the `)` that closes the
     /// substitution, which it consumes.
     fn list(&mut self, nested: bool) -> Res<Vec<Simple>> {
         let mut b = Build::default();
         let mut depth = 0usize;
+        // The depths at which an arithmetic `((` opened and is still open.
+        let mut arith: Vec<usize> = Vec::new();
         let mut prev: Option<char> = None;
         while let Some(c) = self.next() {
-            if matches!(c, '<' | '>' | '|' | '&' | '.') {
+            if matches!(c, '<' | '>' | '|' | '&' | '.' | '(') {
                 // An operator can be split by a line continuation (`|\<newline>|`).
                 self.skip_joins();
             }
@@ -200,6 +302,11 @@ impl Reader<'_> {
                     b.in_word = true;
                     self.backticked(&mut b)?;
                 }
+                // bash reads `(( … ))` as one span with no comments in it, so a `#` there is
+                // text, and the line goes on after it.
+                '#' if !b.in_word && comment_may_follow(prev) && !arith.is_empty() => {
+                    return Err("a # inside (( ))");
+                }
                 '#' if !b.in_word && comment_may_follow(prev) => {
                     // A comment runs to the end of the line; the newline still ends the command.
                     while self.peek().is_some_and(|x| x != '\n') {
@@ -211,8 +318,33 @@ impl Reader<'_> {
                     if matches!(c, '|' | '&') && self.peek() == Some(c) {
                         self.i += 1;
                     }
+                    if c == '\n' && !self.heredocs.is_empty() {
+                        self.heredoc_text()?;
+                    }
                 }
-                '<' if self.peek() == Some('<') => return Err("a heredoc"),
+                '<' if self.peek() == Some('<') => {
+                    b.end_word(nested)?;
+                    self.i += 1;
+                    self.skip_joins();
+                    if self.peek() == Some('<') {
+                        // A here-string `<<< word`: the word is read (its substitutions run)
+                        // but is not an argument.
+                        self.i += 1;
+                        b.target = true;
+                    } else {
+                        let strip_tabs = self.peek() == Some('-');
+                        if strip_tabs {
+                            self.i += 1;
+                        }
+                        let (delim, quoted) = self.heredoc_word()?;
+                        self.heredocs.push(Heredoc {
+                            delim,
+                            strip_tabs,
+                            quoted,
+                            nesting: self.nesting,
+                        });
+                    }
+                }
                 '>' | '<' => {
                     // A redirection ends the word; its target is not an argument.
                     b.end_word(nested)?;
@@ -240,15 +372,22 @@ impl Reader<'_> {
                 }
                 '(' => {
                     b.end_command(nested)?;
+                    if self.peek() == Some('(') {
+                        // `((` opens an arithmetic command (also in `for ((`).
+                        self.i += 1;
+                        arith.push(depth);
+                        depth += 1;
+                    }
                     depth += 1;
                 }
                 ')' => {
                     b.end_command(nested)?;
-                    if nested {
-                        if depth == 0 {
-                            return Ok(b.cmds);
-                        }
-                        depth -= 1;
+                    if nested && depth == 0 {
+                        return Ok(b.cmds);
+                    }
+                    depth = depth.saturating_sub(1);
+                    while arith.last().is_some_and(|&d| depth <= d) {
+                        arith.pop();
                     }
                 }
                 // Only space and tab are blanks to bash; a carriage return or a non-breaking
@@ -351,6 +490,9 @@ impl Reader<'_> {
                 None => return Err("an unclosed backtick"),
             }
         }
+        if !self.heredocs.is_empty() && body.contains('\n') {
+            return Err("a heredoc whose text starts inside backticks");
+        }
         if let Parsed::Unreadable(why) = parse(&body) {
             return Err(why);
         }
@@ -430,6 +572,20 @@ impl Reader<'_> {
                         }
                     }
                     out.push((v & 0xff) as u8);
+                }
+                'x' if self.peek() == Some('{') => {
+                    // `\x{HHH…}`: any number of hex digits, kept to one byte; the `}` may be
+                    // left out. `\x{}` is a NUL.
+                    self.i += 1;
+                    let mut v: u32 = 0;
+                    while let Some(d) = self.peek().and_then(|d| d.to_digit(16)) {
+                        v = (v * 16 + d) & 0xff;
+                        self.i += 1;
+                    }
+                    if self.peek() == Some('}') {
+                        self.i += 1;
+                    }
+                    out.push(v as u8);
                 }
                 'x' | 'u' | 'U' => {
                     let max = match e {
@@ -536,7 +692,11 @@ mod tests {
     fn broken_lines_are_unreadable() {
         for line in [
             "git push 'origin",
-            "cat <<EOF\nx\nEOF",
+            "cat <<EOF\nx",
+            "cat <<EOF\n$x\nEOF",
+            "cat <<$X\nx\n$X",
+            "echo $(cat <<EOF\n)\nx\nEOF",
+            "(( 1 # ))",
             "echo $(git push",
             "echo >",
             "echo `a \\` b`",
