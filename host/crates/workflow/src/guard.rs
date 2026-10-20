@@ -98,20 +98,56 @@ fn reading(line: &str) -> Reading {
     if mentions_landing(line) || mentions_landing(&joined) {
         return Reading::Full;
     }
-    let tool = || {
-        let text = without_expansions(&joined, false);
-        ["git", "gh", "hub", "curl"]
-            .iter()
-            .any(|t| text.contains(t))
-    };
+    let words = bare(&joined);
+    let fed = joined.contains('|') || joined.contains("<<");
     if joined.contains(['$', '`'])
         || (joined.contains('{') && joined.contains(".."))
-        || (joined.contains("xargs") && tool())
+        || (names_any(&words, &["xargs", "parallel"])
+            && names_any(&words, &["git", "gh", "hub", "curl"]))
+        || (fed && names_any(&words, &INTERPRETERS))
     {
         Reading::Computed
     } else {
         Reading::Skip
     }
+}
+
+/// Shells and interpreters that run text given on their input.
+const INTERPRETERS: [&str; 12] = [
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "pwsh",
+    "powershell",
+    "cmd",
+    "python",
+    "python3",
+    "node",
+    "perl",
+    "ruby",
+];
+
+/// `s` without quoting, escapes and brace syntax.
+fn bare(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\' | '{' | '}' | ','))
+        .collect()
+}
+
+/// Whether any word of `text` (by its last path part, without `.exe`) is one of `names`, or a
+/// filename pattern that matches one.
+fn names_any(text: &str, names: &[&str]) -> bool {
+    text.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')' | '<' | '>'))
+        .map(|w| {
+            let w = w.rsplit('/').next().unwrap_or(w).to_ascii_lowercase();
+            w.strip_suffix(".exe").map(str::to_owned).unwrap_or(w)
+        })
+        .any(|w| {
+            names
+                .iter()
+                .any(|n| w == *n || (w.contains(GLOB) && glob_matches(&w, n)))
+        })
 }
 
 fn mentions_landing(line: &str) -> bool {
@@ -123,11 +159,6 @@ fn mentions_landing(line: &str) -> bool {
     // Look past quoting, escapes and brace syntax, so `git pu''sh` and `git pu{sh,}` are still
     // seen as a push; and, separately, past expansions that can be empty and glob brackets, so
     // `git pu$@sh`, `git pu$(true)sh` and `git p[u]sh` are too.
-    let bare = |s: &str| -> String {
-        s.chars()
-            .filter(|c| !matches!(c, '\'' | '"' | '\\' | '{' | '}' | ','))
-            .collect()
-    };
     let plain = bare(line);
     let unexpanded = bare(&without_expansions(line, false));
     if LANDING_WORDS
@@ -1091,6 +1122,7 @@ fn simple_shape(
             words: c.words[start..].to_vec(),
             computed: c.computed,
             subs: Vec::new(),
+            stdin_text: c.stdin_text,
         };
         &inner
     } else {
@@ -1171,6 +1203,17 @@ fn simple_shape(
                 )
             }) {
                 Shape::Unreadable("inline interpreter code is not read")
+            } else if c.stdin_text
+                || c.words[1..]
+                    .iter()
+                    .all(|w| w.starts_with('-') && w.as_str() != "--")
+                || c.words[1..]
+                    .iter()
+                    .any(|w| matches!(w.as_str(), "-" | "-s"))
+            {
+                // With no script named (or `-`, `-s`), it runs the text on its input: a
+                // heredoc, a here-string or a pipe the guard does not read.
+                Shape::Unreadable("a shell or interpreter running text from its input")
             } else {
                 Shape::None
             }
@@ -2149,6 +2192,43 @@ pub(crate) mod tests {
             "for f in $(ls); do echo \"$f\"; done",
             "git log --format=\"%H $x\" -n 1",
             "git commit -m \"$(cat <<'EOF'\nfix {a,b}: it's done\n\nsecond paragraph\nEOF\n)\" && git push origin feat-x",
+        ] {
+            assert_eq!(judge(cmd, &c, &F), Verdict::Allow, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn arithmetic_and_text_fed_to_a_shell_are_read_as_bash_reads_them() {
+        let c = ctx(true);
+        // `<<` inside arithmetic is a shift, not a heredoc: the next lines are commands.
+        for cmd in [
+            "(( 1 << 2 ))\ngit push origin HEAD:main\ntrue",
+            "for (( i=0; i<1<<2; i++ ))\ndo :; done\ngit push origin HEAD:main\ntrue",
+            "echo $((1<<2))\ngit push origin HEAD:main\ntrue",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &F)), "task_repo", "{cmd:?}");
+        }
+        for cmd in [
+            "echo $[1<<2]\ngit push origin HEAD:main\ntrue]",
+            // Heredoc text starts after the newline that follows `(( ))`.
+            "cat <<'EOF'; (( 1 +\n$(git push origin HEAD:main) ))\nx\nEOF",
+            // A shell or interpreter runs the text on its input.
+            "bash <<'EOF'\ngit push origin HEAD:main\nEOF",
+            "python3 - <<'EOF'\nimport os\nos.system('git push origin HEAD:main')\nEOF",
+            "cat <<'EOF' | bash\ngit push origin HEAD:main\nEOF",
+            "sh <<< 'git push origin HEAD:main'",
+            "echo 'git push origin HEAD:main' | bash",
+            // No landing word in the text, but words fed to git or a shell.
+            "echo otrg | tr a-y b-z | xargs -I{} g''it {} origin HEAD:main",
+            "echo otrg | tr a-y b-z | x''args -I{} git {} origin HEAD:main",
+            "echo otrg | tr a-y b-z | xargs -I{} /usr/bin/g?t {} origin HEAD:main",
+            "echo tig otrg nigiro niam:DAEH | tr a-y b-z | sh",
+        ] {
+            assert_ne!(judge(cmd, &c, &F), Verdict::Allow, "{cmd:?}");
+        }
+        for cmd in [
+            "bash scripts/check.sh | tee log && git push origin feat-x",
+            "(( n = 1 << 3 )) && git push origin feat-x",
         ] {
             assert_eq!(judge(cmd, &c, &F), Verdict::Allow, "{cmd:?}");
         }
