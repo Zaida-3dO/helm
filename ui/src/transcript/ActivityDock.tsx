@@ -1,5 +1,5 @@
 // The live activity dock: a rounded card in the column
-// above the composer. Left, a 64 x 48 glyph cell (the still ship's wheel while a turn runs, a check
+// above the composer. Left, a 64 x 48 glyph cell (the still ship's wheel, 40 px, while a turn runs; a check
 // once it settles); then two lines (the state, then the latest tool with its elapsed time and, when
 // per-tool Stop is on and the call can be stopped, Stop); right, Details › and the counts ("N live",
 // the background-shells chip with its hover list, the subagent roster, the turn's clock). Details

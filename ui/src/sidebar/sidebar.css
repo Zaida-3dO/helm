@@ -687,7 +687,7 @@
   position: relative;
 }
 
-/* Still status shapes from the kit: the wheel and the star sit in a 26 x 26 field
+/* Still status shapes from the kit: the wheel (20 px) and the star (26 px) are
    centred on the 13 px slot. */
 .sb-ind-wheel,
 .sb-ind-star {
