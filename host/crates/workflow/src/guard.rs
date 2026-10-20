@@ -78,47 +78,131 @@ const LANDING_WORDS: [&str; 11] = [
 ];
 
 fn mentions_landing(line: &str) -> bool {
+    // `$'...'` and `$"..."` can spell any word with escapes (`$'\x70ush'`): read those lines in
+    // full, where the reader decodes them.
+    if line.contains("$'") || line.contains("$\"") {
+        return true;
+    }
     // Look past quoting, escapes and brace syntax, so `git pu''sh` and `git pu{sh,}` are still
-    // seen as a push.
-    let bare: String = line
-        .chars()
-        .filter(|c| !matches!(c, '\'' | '"' | '\\' | '{' | '}' | ','))
-        .collect();
-    LANDING_WORDS.iter().any(|w| bare.contains(w))
+    // seen as a push; and, separately, past expansions that can be empty and glob brackets, so
+    // `git pu$@sh`, `git pu$(true)sh` and `git p[u]sh` are too.
+    let bare = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !matches!(c, '\'' | '"' | '\\' | '{' | '}' | ','))
+            .collect()
+    };
+    let plain = bare(line);
+    let unexpanded = bare(&without_expansions(line, false));
+    if LANDING_WORDS
+        .iter()
+        .any(|w| plain.contains(w) || unexpanded.contains(w))
+    {
+        return true;
+    }
+    // A pattern word (`pu?h`, `p*`) can become a landing word if a file of that name exists.
+    bare(&without_expansions(line, true))
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')' | '<' | '>'))
+        .filter(|t| t.contains(GLOB))
+        .any(|t| t.len() > 256 || LANDING_WORDS.iter().any(|w| glob_matches(t, w)))
 }
 
-/// Unquoted brace expansion (`{main,}`, `HEAD:{main,x}`, `{1..3}`): bash turns it into words the
-/// reader never sees, so a line that uses it is unreadable. `${...}` is a parameter, not a brace.
-fn brace_expansion(line: &str) -> bool {
-    let mut quote: Option<char> = None;
-    let mut depth = 0usize;
-    let mut prev = '\0';
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        match quote {
-            Some('\'') if c == '\'' => quote = None,
-            Some('\'') => {}
-            Some(_) if c == '\\' => {
-                chars.next();
-            }
-            Some(_) if c == '"' => quote = None,
-            Some(_) => {}
-            None => match c {
-                '\\' => {
-                    chars.next();
-                }
-                '\'' | '"' => quote = Some(c),
-                '{' if prev != '$' => depth += 1,
-                '}' if depth > 0 => depth -= 1,
-                ',' if depth > 0 => return true,
-                '.' if depth > 0 && chars.peek() == Some(&'.') => return true,
-                _ => {}
-            },
-        }
-        prev = c;
+/// Whether the filename pattern `pattern` (`*`, `?` and `[...]`, any class read as "one
+/// character") matches all of `text`.
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    enum El {
+        Star,
+        One,
+        Lit(char),
     }
-    false
+    let p: Vec<char> = pattern.chars().collect();
+    let mut els = Vec::new();
+    let mut i = 0;
+    while i < p.len() {
+        match p[i] {
+            '*' => els.push(El::Star),
+            '?' => els.push(El::One),
+            '[' => match p[i + 1..].iter().position(|&c| c == ']') {
+                Some(k) => {
+                    els.push(El::One);
+                    i += k + 1;
+                }
+                None => els.push(El::Lit('[')),
+            },
+            c => els.push(El::Lit(c)),
+        }
+        i += 1;
+    }
+    let t: Vec<char> = text.chars().collect();
+    // reach[j]: the elements read so far can match exactly the first j characters of `text`.
+    let mut reach = vec![false; t.len() + 1];
+    reach[0] = true;
+    for el in &els {
+        let mut next = vec![false; t.len() + 1];
+        for j in 0..=t.len() {
+            match el {
+                El::Star => next[j] = reach[j] || (j > 0 && next[j - 1]),
+                El::One => next[j] = j > 0 && reach[j - 1],
+                El::Lit(c) => next[j] = j > 0 && reach[j - 1] && t[j - 1] == *c,
+            }
+        }
+        reach = next;
+    }
+    reach[t.len()]
 }
+
+/// `line` with every `$` expansion and backtick substitution removed, and glob brackets either
+/// removed or kept. Only the pre-filter uses it, so it may remove too much but never too little
+/// of a landing word.
+fn without_expansions(line: &str, keep_brackets: bool) -> String {
+    let mut out = String::new();
+    let mut it = line.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '$' => match it.peek().copied() {
+                Some(open @ ('(' | '{')) => {
+                    let close = if open == '(' { ')' } else { '}' };
+                    let mut depth = 0usize;
+                    for x in it.by_ref() {
+                        if x == open {
+                            depth += 1;
+                        } else if x == close {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Some(x) if x.is_ascii_alphabetic() || x == '_' => {
+                    while it
+                        .peek()
+                        .is_some_and(|x| x.is_ascii_alphanumeric() || *x == '_')
+                    {
+                        it.next();
+                    }
+                }
+                Some(_) => {
+                    it.next();
+                }
+                None => {}
+            },
+            '`' => {
+                for x in it.by_ref() {
+                    if x == '`' {
+                        break;
+                    }
+                }
+            }
+            '[' | ']' if !keep_brackets => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The characters that make a word a filename pattern. The reader does not keep quoting, so a
+/// quoted one counts too, which can only make the guard stricter.
+const GLOB: [char; 3] = ['*', '?', '['];
 
 enum Shape {
     None,
@@ -141,10 +225,170 @@ enum Shape {
     Unreadable(&'static str),
 }
 
+/// A refspec side as a branch name. git also finds `heads/main` as `refs/heads/main`.
 fn strip_ref(r: &str) -> String {
-    r.trim_start_matches('+')
-        .trim_start_matches("refs/heads/")
-        .to_owned()
+    let r = r.trim_start_matches('+');
+    let r = r.strip_prefix("refs/").unwrap_or(r);
+    r.strip_prefix("heads/").unwrap_or(r).to_owned()
+}
+
+/// Whether a `git push` option takes a value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Takes {
+    Nothing,
+    /// `--opt value` or `--opt=value`.
+    Value,
+    /// Only `--opt=value`.
+    Glued,
+}
+
+/// The long options of `git push` (and `git send-pack`'s that matter). git accepts any unique
+/// prefix of one, and `--no-<name>` for most, so the guard resolves them the same way.
+const PUSH_LONG: [(&str, Takes); 29] = [
+    ("verbose", Takes::Nothing),
+    ("quiet", Takes::Nothing),
+    ("repo", Takes::Value),
+    ("all", Takes::Nothing),
+    ("branches", Takes::Nothing),
+    ("mirror", Takes::Nothing),
+    ("delete", Takes::Nothing),
+    ("tags", Takes::Nothing),
+    ("dry-run", Takes::Nothing),
+    ("porcelain", Takes::Nothing),
+    ("force", Takes::Nothing),
+    ("force-with-lease", Takes::Glued),
+    ("force-if-includes", Takes::Nothing),
+    ("recurse-submodules", Takes::Value),
+    ("thin", Takes::Nothing),
+    ("receive-pack", Takes::Value),
+    ("exec", Takes::Value),
+    ("set-upstream", Takes::Nothing),
+    ("progress", Takes::Nothing),
+    ("prune", Takes::Nothing),
+    ("verify", Takes::Nothing),
+    ("no-verify", Takes::Nothing),
+    ("follow-tags", Takes::Nothing),
+    ("signed", Takes::Glued),
+    ("atomic", Takes::Nothing),
+    ("push-option", Takes::Value),
+    ("ipv4", Takes::Nothing),
+    ("ipv6", Takes::Nothing),
+    ("stateless-rpc", Takes::Nothing),
+];
+
+/// A long option as git reads it: the full name, whether it was negated with `--no-`, and what
+/// it takes. `None` when git does not know it or the prefix fits more than one option (git
+/// refuses both, but the guard's list may be older than the git that runs).
+fn push_long(name: &str) -> Option<(&'static str, bool, Takes)> {
+    let mut found: Vec<(&'static str, bool, Takes)> = Vec::new();
+    for (long, takes) in PUSH_LONG {
+        if long == name {
+            return Some((long, false, takes));
+        }
+        if long.starts_with(name) {
+            found.push((long, false, takes));
+        }
+        if let Some(rest) = name.strip_prefix("no-") {
+            if long == rest {
+                return Some((long, true, Takes::Nothing));
+            }
+            if long.starts_with(rest) {
+                found.push((long, true, Takes::Nothing));
+            }
+        }
+    }
+    match found[..] {
+        [one] => Some(one),
+        _ => None,
+    }
+}
+
+/// What a `git push` or `git send-pack` command line names.
+#[derive(Debug, Default)]
+struct PushArgs {
+    /// The remote and refspecs, in order.
+    positional: Vec<String>,
+    /// `--repo=<remote>`, used when no remote is given as an operand.
+    repo: Option<String>,
+}
+
+fn push_args(args: &[&String]) -> Result<PushArgs, &'static str> {
+    const ALL: &str = "git push --all, --branches or --mirror names no single branch";
+    const UNKNOWN: &str =
+        "a git push option the guard does not know, or an abbreviation of more than one";
+    const RUNS: &str = "git push --receive-pack or --exec runs a program the guard does not read";
+    let mut out = PushArgs::default();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        i += 1;
+        if a == "--" {
+            out.positional
+                .extend(args[i..].iter().map(|s| s.to_string()));
+            break;
+        }
+        if let Some(l) = a.strip_prefix("--") {
+            let (name, glued) = match l.split_once('=') {
+                Some((n, v)) => (n, Some(v)),
+                None => (l, None),
+            };
+            let (long, negated, takes) = push_long(name).ok_or(UNKNOWN)?;
+            if negated {
+                if glued.is_some() {
+                    return Err(UNKNOWN);
+                }
+                continue;
+            }
+            let value = match (takes, glued) {
+                (Takes::Nothing, Some(_)) => return Err(UNKNOWN),
+                (Takes::Value, None) => {
+                    i += 1;
+                    Some(args.get(i - 1).ok_or(UNKNOWN)?.to_string())
+                }
+                (_, v) => v.map(str::to_owned),
+            };
+            match long {
+                "all" | "branches" | "mirror" => return Err(ALL),
+                "receive-pack" | "exec" => return Err(RUNS),
+                "repo" => out.repo = value,
+                _ => {}
+            }
+        } else if a.len() > 1 && a.starts_with('-') {
+            // A cluster of one-letter flags; `-o` takes the rest of the cluster or the next word.
+            for (k, f) in a[1..].char_indices() {
+                match f {
+                    'v' | 'q' | 'd' | 'n' | 'f' | 'u' | '4' | '6' => {}
+                    'o' => {
+                        if a[k + 2..].is_empty() {
+                            args.get(i).ok_or(UNKNOWN)?;
+                            i += 1;
+                        }
+                        break;
+                    }
+                    _ => return Err(UNKNOWN),
+                }
+            }
+        } else {
+            out.positional.push(a.to_owned());
+        }
+    }
+    Ok(out)
+}
+
+/// `git pull --ff-only` makes no new commit, unless a later option turns merging or rebasing
+/// back on. Any option that could (`--ff`, `--no-ff`, `--rebase`, `-r`, or an abbreviation of
+/// one) means the pull is judged.
+fn pull_is_ff_only(args: &[&String]) -> bool {
+    args.iter().any(|a| a.as_str() == "--ff-only")
+        && !args.iter().any(|a| {
+            let a = a.as_str();
+            a != "--ff-only"
+                && (a.starts_with("--f")
+                    || a.starts_with("--no-f")
+                    || a.starts_with("--r")
+                    || a.starts_with("--no-r")
+                    || (a.starts_with('-') && !a.starts_with("--") && a.contains('r')))
+        })
 }
 
 /// Branch switches seen so far on the line (`git checkout <b>`, `git switch -c <b>`, ...). A
@@ -323,9 +567,9 @@ fn git_shape(words: &[String], here: &Path, facts: &dyn RepoFacts, sw: &mut Swit
         let w = &words[i];
         // A computed global option (`-c "$K"`, `-C "$D"`) could point the push anywhere.
         if w.contains('$')
-            || words
-                .get(i + 1)
-                .is_some_and(|v| v.contains('$') && matches!(w.as_str(), "-c" | "-C"))
+            || words.get(i + 1).is_some_and(|v| {
+                v.contains('$') && matches!(w.as_str(), "-c" | "-C" | "--config-env")
+            })
         {
             return Shape::Unreadable("git with a computed option before its verb");
         }
@@ -337,9 +581,13 @@ fn git_shape(words: &[String], here: &Path, facts: &dyn RepoFacts, sw: &mut Swit
                 *cwd = cwd.join(d);
                 i += 2;
             }
-            "-c" => {
-                let key = words
-                    .get(i + 1)
+            s if s == "-c" || s == "--config-env" || s.starts_with("--config-env=") => {
+                // `-c <key>=<value>` and `--config-env[=]<key>=<variable>` both set config.
+                let (setting, step) = match s.strip_prefix("--config-env=") {
+                    Some(v) => (Some(v), 1),
+                    None => (words.get(i + 1).map(String::as_str), 2),
+                };
+                let key = setting
                     .map(|k| k.split('=').next().unwrap_or("").to_ascii_lowercase())
                     .unwrap_or_default();
                 if ["alias.", "remote.", "push.", "branch.", "url.", "include"]
@@ -348,7 +596,7 @@ fn git_shape(words: &[String], here: &Path, facts: &dyn RepoFacts, sw: &mut Swit
                 {
                     return Shape::Unreadable("git -c changes how pushes resolve");
                 }
-                i += 2;
+                i += step;
             }
             s if s.starts_with("--git-dir")
                 || s.starts_with("--work-tree")
@@ -366,8 +614,14 @@ fn git_shape(words: &[String], here: &Path, facts: &dyn RepoFacts, sw: &mut Swit
     if verb.contains('$') {
         return Shape::Unreadable("git with a computed verb");
     }
+    // A glob (`p[u]sh`, `HEAD:ma?n`) becomes whatever file names it matches.
+    if verb.contains(GLOB) {
+        return Shape::Unreadable("git with a pattern for its verb");
+    }
     if matches!(verb.as_str(), "push" | "send-pack" | "merge" | "pull")
-        && words[i + 1..].iter().any(|w| w.contains('$'))
+        && words[i + 1..]
+            .iter()
+            .any(|w| w.contains('$') || w.contains(['?', '[']))
     {
         return Shape::Unreadable("a push, merge or pull with a computed argument");
     }
@@ -377,19 +631,13 @@ fn git_shape(words: &[String], here: &Path, facts: &dyn RepoFacts, sw: &mut Swit
         "push" | "send-pack" => {
             // The branch this folder is on, after any switch earlier on the line.
             let current = sw.current(facts, cwd);
-            if args
-                .iter()
-                .any(|a| matches!(a.as_str(), "--all" | "--mirror"))
-            {
-                return Shape::Unreadable("git push --all or --mirror names no single branch");
-            }
-            let positional: Vec<&String> = args
-                .iter()
-                .copied()
-                .filter(|a| !a.starts_with('-'))
-                .collect();
+            let parsed = match push_args(&args) {
+                Ok(p) => p,
+                Err(why) => return Shape::Unreadable(why),
+            };
+            let positional = &parsed.positional;
             let refspecs = positional.get(1..).unwrap_or(&[]);
-            let repo = match positional.first() {
+            let repo = match positional.first().or(parsed.repo.as_ref()) {
                 Some(remote) if remote.as_str() != "origin" => facts.remote_repo(cwd, remote),
                 _ => repo,
             };
@@ -403,7 +651,15 @@ fn git_shape(words: &[String], here: &Path, facts: &dyn RepoFacts, sw: &mut Swit
             // The first refspec that lands on a protected branch decides; the caller checks each.
             let mut dsts = Vec::new();
             for r in refspecs {
+                // A pattern (`refs/heads/*:refs/heads/*`) or `:` (every matching branch) names
+                // no single branch, and an empty destination is not one git spells out.
+                if r.contains('*') || r.trim_start_matches('+') == ":" {
+                    return Shape::Unreadable("a refspec that names no single branch");
+                }
                 match r.split_once(':') {
+                    Some((_, "")) => {
+                        return Shape::Unreadable("a refspec with an empty destination");
+                    }
                     Some((_, dst)) => dsts.push(strip_ref(dst)),
                     None => {
                         let src = strip_ref(r);
@@ -430,7 +686,7 @@ fn git_shape(words: &[String], here: &Path, facts: &dyn RepoFacts, sw: &mut Swit
             }
         }
         "merge" | "pull" => {
-            if verb == "pull" && args.iter().any(|a| a.as_str() == "--ff-only") {
+            if verb == "pull" && pull_is_ff_only(&args) {
                 return Shape::None;
             }
             if verb == "merge"
@@ -484,7 +740,8 @@ fn gh_shape(
     let repo = gh_repo_flag(&args).or_else(|| facts.repo(cwd));
     let first = args.first().map(|s| s.as_str());
     let second = args.get(1).map(|s| s.as_str());
-    if first.is_some_and(|w| w.contains('$')) || second.is_some_and(|w| w.contains('$')) {
+    let computed = |w: &str| w.contains('$') || w.contains(GLOB);
+    if first.is_some_and(computed) || second.is_some_and(computed) {
         return Shape::Unreadable("gh with a computed subcommand");
     }
     let landing_sub = matches!(
@@ -664,7 +921,7 @@ fn api_shape(args: &[&String], cwd: &Path, facts: &dyn RepoFacts) -> Shape {
             Shape::None
         };
     }
-    let landing = path.contains('%')
+    let landing = path.contains(['%', '\\'])
         || ["/merge", "/merges", "/git/refs", "/contents/", "/pulls"]
             .iter()
             .any(|p| path.contains(p));
@@ -680,10 +937,18 @@ fn api_shape(args: &[&String], cwd: &Path, facts: &dyn RepoFacts) -> Shape {
 
 /// `host/owner/name` from a `repos/<owner>/<name>/...` API path. `{owner}` and `{repo}` are the
 /// folder's repository, as gh fills them in. Any other path names no repository, and neither does
-/// one the server could read differently: a `.` or `..` segment, or an owner or name holding `%`
-/// or any other character a GitHub name can't.
+/// one the server could read differently: a `.` or `..` segment, a `%` or `\` anywhere (a server
+/// may decode `%2e%2e` or `..%2f` into a segment that climbs out of the named repository), an
+/// owner or name holding any other character a GitHub name can't, or a host with a port, user or
+/// trailing dot.
 fn path_repo(host: &str, path: &str, cwd: &Path, facts: &dyn RepoFacts) -> Option<String> {
-    if path.split('/').any(|s| s == "." || s == "..") {
+    let plain_host = !host.is_empty()
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'));
+    if !plain_host || path.contains(['%', '\\']) || path.split('/').any(|s| s == "." || s == "..") {
         return None;
     }
     let mut parts = path.split('/');
@@ -797,7 +1062,7 @@ fn simple_shape(
         return Shape::None;
     };
     // A computed command name could be git or gh.
-    if cmd.contains('$') {
+    if cmd.contains('$') || (cmd.contains(GLOB) && cmd != "[" && cmd != "[[") {
         return Shape::Unreadable("the command's name is computed");
     }
     // git, gh, curl or hub as an operand of some other command (a wrapper option the skip above
@@ -898,17 +1163,8 @@ pub fn judge(cmd: &str, ctx: &Ctx, facts: &dyn RepoFacts) -> Verdict {
     if !mentions_landing(cmd) {
         return Verdict::Allow;
     }
-    if brace_expansion(cmd) {
-        return if at_stake {
-            deny(
-                Tier::Quote,
-                "fail_closed",
-                "The command uses brace expansion, which the guard does not read.".into(),
-            )
-        } else {
-            Verdict::Allow
-        };
-    }
+    // Brace expansion, comments and quoting are the reader's: it reports a line that uses brace
+    // expansion anywhere, substitutions included, as unreadable.
     let mut sw = Switched::default();
     if reorders(cmd) {
         // A first pass only collects the switches; judging with all of them can only deny more.
@@ -1634,6 +1890,256 @@ pub(crate) mod tests {
         };
         assert_eq!(
             judge("git checkout {main,} && git push", &free, &F),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn brace_expansion_inside_a_substitution_fails_closed() {
+        let c = ctx(true);
+        for cmd in [
+            "echo \"$(git push origin {HEAD:main,})\"",
+            "echo \"`git push origin {HEAD:main,}`\"",
+            "echo \"$(git pu{sh,} origin HEAD:main)\"",
+            "echo \"$(echo $(git push origin HEAD:{main,x}))\"",
+            "cat <(git push origin HEAD:ma{i..i}n)",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &F)), "fail_closed", "{cmd}");
+        }
+        // A substitution in a command with no words still runs.
+        for cmd in [
+            "<(git push origin HEAD:main)",
+            ">$(git push origin HEAD:main)",
+            "{ git push origin HEAD:main; }",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &F)), "task_repo", "{cmd}");
+        }
+        // `${x,}` is a parameter (case change), not a brace list.
+        assert_eq!(
+            judge("echo ${x,} && git push origin feat-x", &c, &F),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn comments_hide_only_what_bash_treats_as_a_comment() {
+        let c = ctx(true);
+        // A quote inside a comment does not hide the next line from the brace check.
+        assert_eq!(
+            rule(judge(
+                "git status # it's fine\ngit push origin {HEAD:main,}",
+                &c,
+                &F
+            )),
+            "fail_closed"
+        );
+        // `#` starts a comment only at the start of a word: after a brace, a carriage return or
+        // inside a word it is plain text, and the command after it still runs.
+        for cmd in [
+            "echo {#; git push origin HEAD:main",
+            "echo }#; git push origin HEAD:main",
+            "echo x\r#; git push origin HEAD:main",
+            "echo x\u{a0}#; git push origin HEAD:main",
+            // A `)` inside a comment does not close the substitution.
+            "echo \"$(echo hi # )\ngit push origin HEAD:main)\"",
+            // A `)` always ends a word.
+            "(git push origin HEAD:main)",
+            "(cd sub && git push origin HEAD:main)",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &F)), "task_repo", "{cmd:?}");
+        }
+        // A case pattern's `)` inside a substitution can't be matched up: fail closed.
+        assert_eq!(
+            rule(judge(
+                "echo \"$(case x in a) git push origin HEAD:main;; esac)\"",
+                &c,
+                &F
+            )),
+            "fail_closed"
+        );
+        // Real comments are still comments, braces and quotes in them included.
+        for cmd in [
+            "git push origin feat-x # not main",
+            "git push origin feat-x #{a,b}",
+            "git push origin feat-x # it's done",
+            "# git push origin HEAD:main\ngit push origin feat-x",
+            "echo hi;# git push origin HEAD:main",
+        ] {
+            assert_eq!(judge(cmd, &c, &F), Verdict::Allow, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn ansi_c_quoting_is_read_the_way_bash_reads_it() {
+        let c = ctx(true);
+        for cmd in [
+            // `\'` does not end the string, so the push is a command of its own.
+            "echo $'\\''; git push origin HEAD:main # '",
+            "git $'push' origin $'HEAD:main'",
+            "git $'\\x70ush' origin HEAD:main",
+            "git $'\\160ush' origin HEAD:main",
+            "git $'\\u0070ush' origin HEAD:main",
+            "git push origin $'HEAD:\\x6dain'",
+            "git push origin $'HEAD:\\U0000006Dain'",
+            "git pu$'s'h origin HEAD:main",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &F)), "task_repo", "{cmd}");
+        }
+        // Escapes the guard can't turn into plain text fail closed.
+        for cmd in [
+            "git push origin $'HEAD:ma\\x00in'",
+            "git push origin $'HEAD:\\cMmain'",
+            "git push origin $'HEAD:\\xffmain'",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &F)), "fail_closed", "{cmd}");
+        }
+        // Hidden behind expansions that are empty or that only match files.
+        for cmd in [
+            "git pu$@sh origin HEAD:main",
+            "git pu${x}sh origin HEAD:main",
+            "git pu$(true)sh origin HEAD:main",
+            "git pu`true`sh origin HEAD:main",
+            "git p[u]sh origin HEAD:main",
+            "git pu?h origin HEAD:main",
+            "/usr/bin/g[i]t push origin HEAD:main",
+            "command g?t push origin HEAD:main",
+            "gh p? merge 7",
+            "git push origin HEAD:ma[i]n",
+        ] {
+            assert_ne!(judge(cmd, &c, &F), Verdict::Allow, "{cmd}");
+        }
+        assert_eq!(
+            judge("[ -f x ] && git push origin feat-x", &c, &F),
+            Verdict::Allow
+        );
+        assert_eq!(
+            judge(
+                "git commit -m $'line one\\nline two' && git push origin feat-x",
+                &c,
+                &F
+            ),
+            Verdict::Allow
+        );
+    }
+
+    /// Facts where `upstream` is the tracked repository and `origin` is not.
+    struct TwoRemotes;
+
+    impl RepoFacts for TwoRemotes {
+        fn repo(&self, _cwd: &Path) -> Option<String> {
+            Some("github.com/o/free".into())
+        }
+        fn current_branch(&self, _cwd: &Path) -> Option<String> {
+            Some("main".into())
+        }
+        fn default_branch(&self, _cwd: &Path) -> Option<String> {
+            Some("main".into())
+        }
+        fn remote_repo(&self, _cwd: &Path, remote: &str) -> Option<String> {
+            match remote {
+                "origin" => Some("github.com/o/free".into()),
+                "upstream" => Some("github.com/o/r".into()),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn git_push_options_are_read_the_way_git_reads_them() {
+        let c = ctx(true);
+        // Every spelling of "push all branches", including unique abbreviations.
+        for cmd in [
+            "git push --branches",
+            "git push origin --branches",
+            "git push --bra origin",
+            "git push --al",
+            "git push --mirr origin",
+            "git push --mi",
+            "git push origin 'refs/heads/*:refs/heads/*'",
+            "git push origin :",
+            "git push origin +:",
+            "git push origin HEAD:",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &F)), "fail_closed", "{cmd}");
+        }
+        // Options git doesn't know, or can't tell apart, and options that run a program.
+        for cmd in [
+            "git push --frobnicate origin feat-x",
+            "git push --f origin feat-x",
+            // git itself finds this one ambiguous (--force-with-lease, --force-if-includes).
+            "git push --forc origin feat-x",
+            "git push --thin=x origin feat-x",
+            "git push -z origin feat-x",
+            "git push --exec=x origin feat-x",
+            "git push --receive-pack x origin feat-x",
+            "git --config-env=remote.origin.push=V push",
+            "git --config-env remote.origin.push=V push",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &F)), "fail_closed", "{cmd}");
+        }
+        // Options that take a value don't shift the remote and refspecs.
+        for cmd in [
+            "git push --force origin HEAD:main",
+            "git push -fu origin HEAD:main",
+            "git push -o ci.skip origin HEAD:main",
+            "git push --push-opt ci.skip origin HEAD:main",
+            "git push --recurse-submodules check origin HEAD:main",
+            "git push -- origin HEAD:main",
+            "git push origin HEAD:heads/main",
+            "git push origin heads/main",
+            "git push origin HEAD:refs/heads/main",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &F)), "task_repo", "{cmd}");
+        }
+        for cmd in [
+            "git push --force-with-lease=feat-x:abc origin feat-x",
+            "git push --no-all origin feat-x",
+            "git push --set-up origin feat-x",
+            "git push -o main origin feat-x",
+        ] {
+            assert_eq!(judge(cmd, &c, &F), Verdict::Allow, "{cmd}");
+        }
+        // `--repo` names the remote when no other does.
+        let free = ctx(false);
+        for cmd in ["git push --repo=upstream", "git push --rep upstream"] {
+            assert_eq!(rule(judge(cmd, &free, &TwoRemotes)), "containment", "{cmd}");
+        }
+        assert_eq!(judge("git push", &free, &TwoRemotes), Verdict::Allow);
+        // A later fast-forward option undoes `--ff-only`.
+        let on_main = Facts {
+            repo: F.repo,
+            branch: Some("main"),
+        };
+        for cmd in [
+            "git pull --ff-only --no-ff",
+            "git pull --ff-only --ff",
+            "git pull --ff-only --rebase",
+            "git pull --ff-only -r",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &on_main)), "task_repo", "{cmd}");
+        }
+        assert_eq!(
+            judge("git pull --ff-only origin", &c, &on_main),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn encoded_or_unusual_api_paths_name_no_repository() {
+        let c = ctx(false);
+        for cmd in [
+            "gh api -X PUT repos/o/free/%2e%2e/%2e%2e/repos/o/r/pulls/7/merge",
+            "gh api -X PUT repos/o/free/%2E%2E/%2E%2E/repos/o/r/pulls/7/merge",
+            "gh api -X PUT repos/o/free/..%2f..%2frepos/o/r/pulls/7/merge",
+            "gh api -X PUT 'repos/o/free/..\\..\\repos/o/r/pulls/7/merge'",
+            "gh api -X PUT https://api.github.com:443/repos/o/r/pulls/7/merge",
+            "gh api -X PUT https://x@api.github.com/repos/o/r/pulls/7/merge",
+            "gh api -X PUT https://api.github.com./repos/o/r/pulls/7/merge",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &ByFolder)), "fail_closed", "{cmd}");
+        }
+        assert_eq!(
+            judge("gh api -X PUT repos/o/free/pulls/7/merge", &c, &ByFolder),
             Verdict::Allow
         );
     }
