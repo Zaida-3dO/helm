@@ -78,6 +78,13 @@ const LANDING_WORDS: [&str; 11] = [
 ];
 
 fn mentions_landing(line: &str) -> bool {
+    // bash deletes every backslash-newline before it reads the line, so `git pu\<newline>sh` is
+    // a push: look at the line both with and without them.
+    let joined = line.replace("\\\n", "");
+    mentions_landing_in(line) || mentions_landing_in(&joined)
+}
+
+fn mentions_landing_in(line: &str) -> bool {
     // `$'...'` and `$"..."` can spell any word with escapes (`$'\x70ush'`): read those lines in
     // full, where the reader decodes them.
     if line.contains("$'") || line.contains("$\"") {
@@ -2019,6 +2026,30 @@ pub(crate) mod tests {
                 &F
             ),
             Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn line_continuations_and_process_substitutions_read_as_bash_reads_them() {
+        let c = ctx(true);
+        for cmd in [
+            // A process substitution is a word: a `#` right after it is not a comment.
+            "cat <(true)#; git push origin HEAD:main",
+            "cat >(true)#; git push origin HEAD:main",
+            // A line continuation is deleted before bash reads the line: the `#` after it starts
+            // a comment, so the quote in that comment hides nothing.
+            "git status \\\n#'\ngit push origin HEAD:main\n# '",
+            // A continuation inside `$'`, a word or an operator still joins it.
+            "git $\\\n'\\x70ush' origin HEAD:main",
+            "git pu\\\nsh origin HEAD:main",
+            "git push origin HEAD:main |\\\n| true",
+        ] {
+            assert_eq!(rule(judge(cmd, &c, &F)), "task_repo", "{cmd:?}");
+        }
+        // `<\<newline><` is still a heredoc.
+        assert_eq!(
+            rule(judge("cat <\\\n<EOF\ngit push origin feat-x\nEOF", &c, &F)),
+            "fail_closed"
         );
     }
 
