@@ -310,8 +310,13 @@ fn message_resend(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let db = ctx.services.need::<Database>()?;
     let profile = ctx.services.need::<Profile>()?;
     let rt = ctx.services.need::<ChatRuntime>()?;
-    let submission =
-        crate::edit::stage(&db, &profile.path("sessions"), &a).map_err(ApiError::from)?;
+    let submission = crate::edit::stage(
+        &db,
+        &profile.path("sessions"),
+        &profile.path("attachments"),
+        &a,
+    )
+    .map_err(ApiError::from)?;
     // Phase two runs in the chat's actor once its worker has closed.
     rt.command(&a.chat_id, crate::actor::Cmd::ApplyEdit)?;
     let chat = changed(ctx, &a.chat_id)?;

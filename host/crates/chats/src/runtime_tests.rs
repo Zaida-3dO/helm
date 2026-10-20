@@ -1727,6 +1727,7 @@ async fn a_crash_between_stage_and_apply_is_repaired_at_startup() {
     crate::edit::stage(
         &h.db,
         &h.profile.path("sessions"),
+        &h.profile.path("attachments"),
         &crate::types::MessageResendArgs {
             chat_id: chat.clone(),
             message_id: first,
@@ -2087,6 +2088,249 @@ async fn a_bubble_thumbnail_is_small_and_cached() {
         h.call("attachment_get", foreign).await.unwrap_err().code,
         "not_found"
     );
+}
+
+/// A first turn whose message carries one image: the worker, the image's id and its bytes.
+async fn first_turn_with_image(h: &mut H, chat: &str) -> (FakeWorker, String, Vec<u8>) {
+    use base64::Engine as _;
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend(12u32.to_be_bytes());
+    png.extend(7u32.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0]);
+    let put = h
+        .call(
+            "attachment_put",
+            json!({"chatId": chat, "name": "shot.png", "mime": "image/png",
+                   "bytes": base64::engine::general_purpose::STANDARD.encode(&png)}),
+        )
+        .await
+        .unwrap();
+    let id = put["attachmentId"].as_str().unwrap().to_owned();
+    h.call(
+        "chat_send",
+        json!({"chatId": chat, "submissionId": uuid::Uuid::new_v4().to_string(), "text": "first",
+               "action": "default", "draftRevision": 0, "attachments": [id]}),
+    )
+    .await
+    .unwrap();
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    echo(&w, p["submissionId"].as_str().unwrap()).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}}))
+        .await;
+    w.emit(json!({"type": "message_end", "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "answer one"}], "status": "complete"}}))
+        .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(chat) == "idle").await;
+    (w, id, png)
+}
+
+/// The image ids on a chat's user rows, read through the transcript op a reopened chat uses.
+async fn user_image_ids(h: &H, chat: &str) -> Vec<String> {
+    let page = h
+        .call("transcript_page", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .flat_map(|m| {
+            m["details"]["images"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|i| i["id"].as_str().unwrap().to_owned())
+        })
+        .collect()
+}
+
+async fn image_bytes(h: &H, chat: &str, id: &str) -> Result<String, String> {
+    h.call(
+        "attachment_get",
+        json!({"chatId": chat, "attachmentId": id}),
+    )
+    .await
+    .map(|v| v["bytes"].as_str().unwrap().to_owned())
+    .map_err(|e| e.code.to_string())
+}
+
+/// A chat reopened from its history still shows the images: the rows come back from the session log
+/// with the images in them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chat_rebuilt_from_its_log_still_has_its_images() {
+    use base64::Engine as _;
+    let mut h = harness();
+    let chat = h.create().await;
+    let (_w, id, png) = first_turn_with_image(&mut h, &chat).await;
+    assert_eq!(user_image_ids(&h, &chat).await, std::slice::from_ref(&id));
+    // Drop the projection and rebuild it from the log, as startup repair does.
+    h.db.write(|tx| {
+        tx.execute("DELETE FROM messages WHERE chat_id = ?1", [&chat])?;
+        tx.execute("DELETE FROM entries WHERE chat_id = ?1", [&chat])
+    })
+    .unwrap();
+    assert!(user_image_ids(&h, &chat).await.is_empty());
+    crate::session_log::reconcile(
+        &h.db,
+        &h.profile.path("sessions"),
+        &h.profile.path("artifacts"),
+        &chat,
+        99,
+    )
+    .unwrap();
+    assert_eq!(user_image_ids(&h, &chat).await, std::slice::from_ref(&id));
+    assert_eq!(
+        image_bytes(&h, &chat, &id).await.unwrap(),
+        base64::engine::general_purpose::STANDARD.encode(&png)
+    );
+}
+
+/// A fork, whole or cut at a reply, shows the images sent in its copied history, and keeps them
+/// when the source chat is deleted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forked_chats_have_their_own_copies_of_the_images() {
+    use base64::Engine as _;
+    let mut h = harness();
+    let chat = h.create().await;
+    let (_w, id, png) = first_turn_with_image(&mut h, &chat).await;
+    let want = base64::engine::general_purpose::STANDARD.encode(&png);
+    let reply: i64 = h.col(&format!(
+        "SELECT id FROM messages WHERE chat_id = '{chat}' AND role = 'assistant'"
+    ))[0]
+        .parse()
+        .unwrap();
+    let whole = h
+        .call(
+            "chat_fork",
+            json!({"chatId": chat, "forkId": uuid::Uuid::new_v4().to_string()}),
+        )
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let cut = h
+        .call(
+            "chat_fork",
+            json!({"chatId": chat, "forkId": uuid::Uuid::new_v4().to_string(), "messageId": reply}),
+        )
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut copies = Vec::new();
+    for fork in [&whole, &cut] {
+        let ids = user_image_ids(&h, fork).await;
+        assert_eq!(ids.len(), 1, "{fork} shows the image");
+        assert_ne!(ids[0], id, "it is the fork's own copy");
+        assert_eq!(image_bytes(&h, fork, &ids[0]).await.unwrap(), want);
+        // The thumbnail path serves it too.
+        let t = h
+            .call(
+                "attachment_get",
+                json!({"chatId": fork, "attachmentId": ids[0], "thumb": true}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(t["bytes"], want.as_str());
+        // A copy is the fork's alone.
+        assert_eq!(
+            image_bytes(&h, &chat, &ids[0]).await,
+            Err("not_found".into())
+        );
+        assert_eq!(image_bytes(&h, fork, &id).await, Err("not_found".into()));
+        copies.push(ids[0].clone());
+    }
+    assert_eq!(image_bytes(&h, &chat, &id).await.unwrap(), want);
+    // The fork's log names the copy, so it survives a rebuild from the log.
+    let log = std::fs::read_to_string(crate::session_log::log_path(
+        &h.profile.path("sessions"),
+        &whole,
+    ))
+    .unwrap();
+    assert!(log.contains(&copies[0]) && !log.contains(&id));
+    // Deleting the source leaves the forks' images.
+    h.call("chat_archive", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    h.call("chat_delete", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    crate::delete::run_cleanup(&h.db, &h.profile.path(""));
+    assert!(!h.profile.path("attachments").join(&id).exists());
+    for (fork, copy) in [(&whole, &copies[0]), (&cut, &copies[1])] {
+        assert_eq!(image_bytes(&h, fork, copy).await.unwrap(), want);
+    }
+    // A fork of a fork carries them on.
+    let again = h
+        .call(
+            "chat_fork",
+            json!({"chatId": whole, "forkId": uuid::Uuid::new_v4().to_string()}),
+        )
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let ids = user_image_ids(&h, &again).await;
+    assert_eq!(image_bytes(&h, &again, &ids[0]).await.unwrap(), want);
+}
+
+/// An edited message sent again keeps its images: the new bubble shows them and they ride the
+/// prompt; the old message keeps its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_edited_message_keeps_its_images() {
+    use base64::Engine as _;
+    let mut h = harness();
+    let chat = h.create().await;
+    let (mut w, id, png) = first_turn_with_image(&mut h, &chat).await;
+    let want = base64::engine::general_purpose::STANDARD.encode(&png);
+    let first = user_row(&h, &chat, "first");
+    let o = h
+        .call(
+            "message_edit_open",
+            json!({"chatId": chat, "messageId": first}),
+        )
+        .await
+        .unwrap();
+    let sid = uuid::Uuid::new_v4().to_string();
+    h.call(
+        "message_resend",
+        json!({"chatId": chat, "messageId": first, "revision": o["revision"],
+               "submissionId": sid, "text": "first, edited"}),
+    )
+    .await
+    .unwrap();
+    w.expect("shutdown").await;
+    w.exit().await;
+    let mut w2 = h.worker().await;
+    w2.ready().await;
+    let p = w2.expect("prompt").await;
+    assert_eq!(p["text"], "first, edited");
+    assert_eq!(p["images"][0]["mimeType"], "image/png");
+    assert_eq!(p["images"][0]["data"], want.as_str());
+    ack(&w2, &p).await;
+    echo(&w2, &sid).await;
+    h.until("the edited row", |h| {
+        h.col(&format!(
+            "SELECT status FROM messages WHERE chat_id = '{chat}' AND text = 'first, edited'"
+        )) == ["complete"]
+    })
+    .await;
+    let ids = user_image_ids(&h, &chat).await;
+    assert_eq!(ids.len(), 1, "one active user message with one image");
+    assert_ne!(ids[0], id, "the new message has its own copy");
+    assert_eq!(image_bytes(&h, &chat, &ids[0]).await.unwrap(), want);
+    // The first version still has its image (inactive, so out of the transcript).
+    assert_eq!(image_bytes(&h, &chat, &id).await.unwrap(), want);
 }
 
 /// The skills a worker reports at get_state are what skills_list answers.

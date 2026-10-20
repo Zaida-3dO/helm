@@ -9,6 +9,11 @@
 //!   image of that chat. With `thumb: true` the bytes are a small cached copy ([`crate::thumbs`])
 //!   for the bubble; without it they are the stored file, for the full-size view. Only images
 //!   already linked to a sent message are served, and only to the chat that owns them.
+//! - A chat that carries a message over from another one (a fork copies the history, an edit sends
+//!   the message again) gets its own copy of the message's images, made by [`copy_file`] and
+//!   [`insert_copy`]: a new attachment row owned by the new chat, and a hard link to the stored file
+//!   (a plain copy where links are not possible). So its thumbnails resolve on their own, and
+//!   deleting either chat leaves the other's images.
 
 use crate::ops::{not_found, sql};
 use crate::types::MessageImage;
@@ -53,7 +58,7 @@ pub fn for_submission(db: &Database, submission_id: &str) -> Vec<MessageImage> {
 
 /// The `(id, mime)` of a sent image of the chat; `None` when the chat has no such sent image.
 /// The id is the stored one (a UUID the attachments module generated), never the request's text.
-fn sent_image(
+pub(crate) fn sent_image(
     conn: &Connection,
     chat_id: &str,
     attachment_id: &str,
@@ -84,6 +89,48 @@ pub fn read(
             Ok(None)
         }
     }
+}
+
+/// Give the new attachment `new_id` the bytes of the stored image `old_id`: a hard link, or a copy
+/// where the file system cannot link. The ids are the host's own UUIDs, never request text.
+pub fn copy_file(dir: &Path, old_id: &str, new_id: &str) -> std::io::Result<()> {
+    helm_core::privfs::create_private_dir_all(dir)?;
+    let (from, to) = (dir.join(old_id), dir.join(new_id));
+    std::fs::hard_link(&from, &to).or_else(|_| std::fs::copy(&from, &to).map(|_| ()))
+}
+
+/// Record `new_id` as `to_chat`'s own sent image, a copy of the row of `old_id` that is a sent image
+/// of `from_chat`. `holder` fills the row's submission column: the submission the copy is sent with
+/// (an edit), or a marker naming the chat it was carried into (a fork). Returns whether the source
+/// image existed.
+pub fn insert_copy(
+    tx: &rusqlite::Transaction<'_>,
+    old_id: &str,
+    from_chat: &str,
+    new_id: &str,
+    to_chat: &str,
+    holder: &str,
+) -> rusqlite::Result<bool> {
+    let n = tx.execute(
+        "INSERT INTO chat_attachments(id, chat_id, name, mime, bytes, width, height, submission_id, created_at)
+         SELECT ?1, ?2, name, mime, bytes, width, height, ?3, created_at FROM chat_attachments
+         WHERE id = ?4 AND chat_id = ?5 AND submission_id IS NOT NULL",
+        params![new_id, to_chat, holder, old_id, from_chat],
+    )?;
+    Ok(n > 0)
+}
+
+/// The image ids a row's or entry's `details` lists.
+pub fn ids_in(details: &Value) -> Vec<String> {
+    details
+        .get("images")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|i| i.get("id").and_then(Value::as_str).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn field(args: &Value, k: &str) -> Result<String, ApiError> {

@@ -17,6 +17,9 @@
 //!   - **Recovery:** a `pending_edits` row left by a crash is applied at startup
 //!     ([`recover_all`]); its submission is left `rejected`, so the queue offers Recover rather
 //!     than sending it unseen.
+//! - **Images.** The resent message keeps the edited message's images: the new submission gets its
+//!   own copy of each (see [`crate::message_images`]), so the new bubble shows them and they ride
+//!   the prompt again. The old message keeps its own.
 //! - The draft is never touched, and project files are not rolled back.
 
 use crate::archive::Refusal;
@@ -104,8 +107,44 @@ pub fn open(db: &Database, chat_id: &str, message_id: i64) -> Result<EditOpen, R
     })
 }
 
+/// Give the new submission its own copy of the edited message's images.
+fn carry_images(
+    tx: &Transaction<'_>,
+    attachments: &Path,
+    chat_id: &str,
+    message_id: i64,
+    submission_id: &str,
+) -> rusqlite::Result<()> {
+    let details: Option<String> = tx
+        .query_row(
+            "SELECT details FROM messages WHERE chat_id = ?1 AND id = ?2",
+            params![chat_id, message_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let details: Value = details
+        .and_then(|d| serde_json::from_str(&d).ok())
+        .unwrap_or(Value::Null);
+    for old in crate::message_images::ids_in(&details) {
+        let new = uuid::Uuid::new_v4().to_string();
+        if let Err(e) = crate::message_images::copy_file(attachments, &old, &new) {
+            log::warn!("edit: image {old} could not be carried over: {e}");
+            continue;
+        }
+        if !crate::message_images::insert_copy(tx, &old, chat_id, &new, chat_id, submission_id)? {
+            let _ = std::fs::remove_file(attachments.join(&new));
+        }
+    }
+    Ok(())
+}
+
 /// Stage the edit with its submission. Returns the submission.
-pub fn stage(db: &Database, sessions: &Path, a: &MessageResendArgs) -> Result<Submission, Refusal> {
+pub fn stage(
+    db: &Database,
+    sessions: &Path,
+    attachments: &Path,
+    a: &MessageResendArgs,
+) -> Result<Submission, Refusal> {
     if a.text.trim().is_empty() {
         return Err(Refusal::new("bad_args", "There is nothing to send."));
     }
@@ -158,6 +197,7 @@ pub fn stage(db: &Database, sessions: &Path, a: &MessageResendArgs) -> Result<Su
                 now,
             },
         )?;
+        carry_images(tx, attachments, &a.chat_id, a.message_id, &sid)?;
         tx.execute(
             "INSERT INTO pending_edits(chat_id, submission_id, entry_id, log_len, marker_id, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

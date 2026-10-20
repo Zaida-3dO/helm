@@ -9,6 +9,9 @@
 //!   whole-chat fork of a running chat also gets a synthetic error result for every tool call
 //!   still running and keeps a reply still streaming as an interrupted message; either makes the
 //!   boundary say the copy is partial.
+//! - **Images.** The copied messages keep their images: the fork gets its own copy of each (a new
+//!   attachment owned by the fork, linked to the same stored file), so its bubbles show them and
+//!   deleting either chat leaves the other's.
 //! - **Claude's history.** Only through the CLI's own flags; Helm never reads Claude's files. A
 //!   whole-chat fork's binding names the source's native session, and its first launch resumes it
 //!   with `--fork-session`, which gives the fork its own session. A message fork cannot cut a
@@ -178,6 +181,51 @@ fn source_entries(sessions: &Path, source: &str) -> Result<Vec<Map<String, Value
             format!("The chat's history could not be read: {e}"),
         )
     })
+}
+
+/// Give the fork its own copy of every sent image the copied messages carry. The messages name
+/// their images by attachment id, and an attachment belongs to the chat that sent it, so without
+/// this the fork's thumbnails could not be read. Each entry's image id is rewritten to the copy's
+/// (the file is linked or copied now; the rows are inserted in the fork's transaction). An image
+/// whose file cannot be linked keeps its old id and shows as unavailable. Returns `(old, new)` ids.
+fn carry_images(
+    db: &helm_core::db::Database,
+    attachments: &Path,
+    source: &str,
+    entries: &mut [Map<String, Value>],
+) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for entry in entries.iter_mut() {
+        let Some(images) = entry
+            .get_mut("details")
+            .and_then(|d| d.get_mut("images"))
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for image in images {
+            let Some(old) = image.get("id").and_then(Value::as_str).map(str::to_owned) else {
+                continue;
+            };
+            let sent = db
+                .snapshot(|t| crate::message_images::sent_image(t, source, &old))
+                .ok()
+                .flatten()
+                .is_some();
+            if !sent {
+                continue;
+            }
+            let new = uuid::Uuid::new_v4().to_string();
+            match crate::message_images::copy_file(attachments, &old, &new) {
+                Ok(()) => {
+                    image["id"] = Value::String(new.clone());
+                    pairs.push((old, new));
+                }
+                Err(e) => log::warn!("fork: image {old} could not be carried over: {e}"),
+            }
+        }
+    }
+    pairs
 }
 
 /// Create the fork. `project_archived` is the projects crate's gate (see `crate::seams`).
@@ -385,6 +433,13 @@ pub fn fork(
     if let Ok(Value::Object(m)) = serde_json::to_value(&boundary) {
         entries.push(m);
     }
+    let attachments = profile_dir.join("attachments");
+    let carried = carry_images(db, &attachments, req.source, &mut entries);
+    let drop_carried = |carried: &[(String, String)]| {
+        for (_, new) in carried {
+            let _ = std::fs::remove_file(attachments.join(new));
+        }
+    };
     // Chain the copy linearly and write the fork's log.
     let mut prev: Option<String> = None;
     for e in entries.iter_mut() {
@@ -419,8 +474,13 @@ pub fn fork(
         f.write_all(out.as_bytes())?;
         f.sync_data()
     };
-    write_log()
-        .map_err(|e| Refusal::new("internal", format!("The fork could not be written: {e}")))?;
+    if let Err(e) = write_log() {
+        drop_carried(&carried);
+        return Err(Refusal::new(
+            "internal",
+            format!("The fork could not be written: {e}"),
+        ));
+    }
     let carry = cut_key.as_ref().and_then(|_| carry_text(&entries));
     let title = fork_title(&src.title, req.side);
     let draft = if req.side {
@@ -463,6 +523,16 @@ pub fn fork(
                 params![fork_id_chat, c],
             )?;
         }
+        for (old, new) in &carried {
+            crate::message_images::insert_copy(
+                tx,
+                old,
+                req.source,
+                new,
+                &fork_id_chat,
+                &format!("fork:{fork_id_chat}"),
+            )?;
+        }
         for e in &entries {
             session_log::project(tx, &artifacts, &fork_id_chat, e, rev)?;
         }
@@ -493,10 +563,12 @@ pub fn fork(
         Ok(Ok(m)) => m,
         Ok(Err(r)) => {
             let _ = std::fs::remove_file(&log);
+            drop_carried(&carried);
             return Err(r);
         }
         Err(e) => {
             let _ = std::fs::remove_file(&log);
+            drop_carried(&carried);
             return Err(sql(e));
         }
     };
