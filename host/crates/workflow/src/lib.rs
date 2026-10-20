@@ -19,6 +19,7 @@
 //! | Surface | What |
 //! |---|---|
 //! | op `workflow_settings_get` / `_save` | Settings → Orchestrator ([`settings`]): strict validation, unknown keys refused, invalid stored value → defaults, no revision, master toggle refused mid-turn |
+//! | `orchestrator` key of `app_get_settings` / `app_update_settings` | a chat reads all of Settings → Orchestrator and may change only `newChats` and each stage's agent ([`agent_settings`]) |
 //! | op `workflow_chat_mode_get` / `_set` | the composer switch ([`mode`]): on / off / auto, set by user / agent / default |
 //! | table `workflow_settings` | one row, the validated JSON |
 //! | table `chat_workflow_modes` | per chat: mode, set_by, reason ≤ 500, updated_at |
@@ -39,6 +40,7 @@
 //! transaction ([`store::emit_touched`]). The UI reads the run with `workflow_run_get {chatId}`.
 
 pub mod actions;
+pub mod agent_settings;
 pub mod bindings;
 pub mod engine;
 #[cfg(test)]
@@ -71,6 +73,7 @@ pub mod user;
 mod user_tests;
 pub mod wftools;
 
+pub use agent_settings::extension as settings_extension;
 pub use kinds::register_allow_kinds;
 pub use ops::register_ops;
 pub use tool::{register_host_tools, WorkflowSection};

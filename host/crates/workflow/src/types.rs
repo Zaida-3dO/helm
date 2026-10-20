@@ -123,7 +123,8 @@ pub enum NewChats {
     Auto,
 }
 
-/// Settings → Orchestrator. User-only: no agent tool reads or writes it.
+/// Settings → Orchestrator. A chat reads all of it through the settings tools and may change only
+/// `newChats` and each stage's agent; every other field is the user's.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowSettings {

@@ -64,6 +64,10 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_governor::register_services(services, events);
     helm_relay::register_services(services, events);
     services.insert(Arc::new(host_tools()));
+    // Settings that live outside the preference table but that chats read and change.
+    services.insert(Arc::new(helm_hosttools::SettingsExtensions(vec![
+        helm_workflow::settings_extension(),
+    ])));
     services.insert(Arc::new(worker_lines()));
     // Other crates reach running workers through the chat runtime (helm_hosttools::lines).
     if let Some(rt) = services.get::<helm_chats::ChatRuntime>() {

@@ -23,6 +23,11 @@ enum Kind {
     Text {
         max: usize,
     },
+    /// A skill name: a string of at most `max` bytes with no leading `$` (the `$` is how a skill
+    /// is called in a message, not part of its name).
+    SkillName {
+        max: usize,
+    },
     /// A string of at most `max` bytes or null.
     TextOrNull {
         max: usize,
@@ -49,8 +54,44 @@ enum Kind {
 
 const BOOL: Kind = Kind::Bool;
 const STR_256: Kind = Kind::Text { max: 256 };
-const ID_128: Kind = Kind::Text { max: 128 };
 const ID_200: Kind = Kind::Text { max: 200 };
+const SKILL_128: Kind = Kind::SkillName { max: 128 };
+
+/// Keys that no part of Helm reads yet: a value is stored and validated but changes nothing the
+/// user can see. `describe` says so, so an agent does not report a change that did nothing.
+const NOT_READ: &[&str] = &[
+    "theme",
+    "interfaceTheme",
+    "codeThemes",
+    "fontFamilies",
+    "dopamine",
+    "animationControls",
+    "themeEffects",
+    "cursorTrail",
+    "customCursors",
+    "pauseAnimationsOnScroll",
+    "hiddenSidebarItems",
+    "moveCompletedTasksToTop",
+    "reviewWrap",
+    "sounds",
+    "hiddenSkills",
+    "inspectorVisible",
+    "inspectorWidth",
+    "collapsedProjects",
+    "expandedChats",
+    "defaultHarness",
+    "taskTriage",
+    "desktopPet",
+    "tasks",
+];
+
+/// Object keys where an update that names some fields keeps the others, instead of replacing the
+/// whole object.
+const MERGED: &[&str] = &["fontSizes", "sounds"];
+
+/// What the tools say about an unread key.
+const NOT_READ_NOTE: &str =
+    "Nothing in Helm reads this setting yet, so changing it has no visible effect.";
 
 /// What a setting is, its default (`null` when the default is Helm's built-in behaviour rather
 /// than a stored value) and a sentence on what it does.
@@ -164,7 +205,7 @@ fn table() -> Vec<Entry> {
                 ("interface", &FONT_SIZE_INTERFACE),
             ]),
             default: || json!({"response": 14, "review": 10, "interface": 13}),
-            about: "Text sizes in pixels. Send the whole object: it replaces the stored one.",
+            about: "Text sizes in pixels. Send only the sizes to change: the others keep their values.",
         },
         Entry {
             key: "fontFamilies",
@@ -258,7 +299,7 @@ fn table() -> Vec<Entry> {
                 ("themed", &BOOL),
             ]),
             default: || json!({"enabled": true, "volume": 45, "themed": true}),
-            about: "Interface sounds. Send the whole object: it replaces the stored one.",
+            about: "Interface sounds. Send only the fields to change: the others keep their values.",
         },
         Entry {
             key: "keepAwake",
@@ -269,7 +310,7 @@ fn table() -> Vec<Entry> {
         Entry {
             key: "hiddenSkills",
             kind: Kind::List {
-                of: &ID_128,
+                of: &SKILL_128,
                 max: 512,
                 distinct: true,
             },
@@ -426,6 +467,9 @@ impl Kind {
                 o
             }
             Kind::Text { max } => json!({"type": "string", "maxLength": max}),
+            Kind::SkillName { max } => {
+                json!({"type": "string", "maxLength": max, "note": "no leading $"})
+            }
             Kind::TextOrNull { max } => json!({"type": "string or null", "maxLength": max}),
             Kind::List { of, max, distinct } => {
                 let mut o = json!({"type": "list", "items": of.describe(), "maxItems": max});
@@ -463,6 +507,9 @@ impl Kind {
             }
             Kind::Int { min, max, .. } => format!("a whole number from {min} to {max}"),
             Kind::Text { max } => format!("text of at most {max} bytes"),
+            Kind::SkillName { max } => {
+                format!("a skill name of at most {max} bytes, without a leading $")
+            }
             Kind::TextOrNull { max } => format!("text of at most {max} bytes, or null"),
             Kind::List { max, .. } => format!("a list of at most {max} items"),
             Kind::Fields(f) => {
@@ -497,6 +544,16 @@ impl Kind {
             },
             Kind::Text { max } => match v.as_str() {
                 Some(s) if s.len() <= *max && !s.chars().any(char::is_control) => Ok(()),
+                _ => bad(self),
+            },
+            Kind::SkillName { max } => match v.as_str() {
+                Some(s) if s.starts_with('$') => Err(format!(
+                    "{path} must not start with $: write the name without it, {:?} rather than {s:?}.",
+                    s.trim_start_matches('$')
+                )),
+                Some(s) if !s.is_empty() && s.len() <= *max && !s.chars().any(char::is_control) => {
+                    Ok(())
+                }
                 _ => bad(self),
             },
             Kind::TextOrNull { max } => match v {
@@ -582,8 +639,40 @@ pub fn describe(key: &str) -> Option<Value> {
     let e = entry(key)?;
     let mut o = e.kind.describe();
     o["default"] = (e.default)();
-    o["about"] = json!(e.about);
+    if NOT_READ.contains(&key) {
+        o["hasEffect"] = json!(false);
+        o["about"] = json!(format!("{NOT_READ_NOTE} {}", e.about));
+    } else {
+        o["about"] = json!(e.about);
+    }
+    if MERGED.contains(&key) {
+        o["merge"] = json!(true);
+    }
     Some(o)
+}
+
+/// True when nothing in Helm reads `key` yet.
+pub fn is_not_read(key: &str) -> bool {
+    NOT_READ.contains(&key)
+}
+
+/// The value to store for an update. A key in [`MERGED`] keeps the fields the update leaves out:
+/// they come from the stored value, or from the default while none is stored. Any other key, and
+/// `null`, are stored as sent. The update has already passed [`check`].
+pub fn to_store(key: &str, stored: Option<&Value>, update: &Value) -> Value {
+    let (true, Some(new)) = (MERGED.contains(&key), update.as_object()) else {
+        return update.clone();
+    };
+    let mut base = match stored {
+        Some(Value::Object(o)) => o.clone(),
+        _ => entry(key)
+            .and_then(|e| (e.default)().as_object().cloned())
+            .unwrap_or_default(),
+    };
+    for (k, v) in new {
+        base.insert(k.clone(), v.clone());
+    }
+    Value::Object(base)
 }
 
 /// Refuse a value of the wrong shape, naming what the key takes and its default. `null` always
@@ -669,6 +758,63 @@ mod tests {
         assert!(check("dopamine", &json!("zen")).is_ok());
         assert!(check("dopamine", &json!({"version": 1})).is_ok());
         assert!(check("dopamine", &json!("calm")).is_err());
+    }
+
+    #[test]
+    fn a_skill_name_with_a_leading_dollar_is_refused() {
+        assert!(check("hiddenSkills", &json!(["review", "deploy-check"])).is_ok());
+        let e = check("hiddenSkills", &json!(["review", "$deploy"])).unwrap_err();
+        assert!(e.contains("hiddenSkills[1] must not start with $"), "{e}");
+        assert!(e.contains("\"deploy\" rather than \"$deploy\""), "{e}");
+        assert!(check("hiddenSkills", &json!([""])).is_err());
+        assert!(check("hiddenSkills", &json!(["a", "a"])).is_err());
+    }
+
+    #[test]
+    fn font_sizes_and_sounds_merge_and_other_objects_replace() {
+        let stored = json!({"response": 16, "review": 10, "interface": 13});
+        let merged = to_store("fontSizes", Some(&stored), &json!({"interface": 15}));
+        assert_eq!(
+            merged,
+            json!({"response": 16, "review": 10, "interface": 15})
+        );
+        // Nothing stored: the default fills the fields the update leaves out.
+        let merged = to_store("sounds", None, &json!({"volume": 30}));
+        assert_eq!(
+            merged,
+            json!({"enabled": true, "volume": 30, "themed": true})
+        );
+        // Null still restores the default, and a non-merged key is replaced whole.
+        assert_eq!(to_store("sounds", Some(&stored), &Value::Null), Value::Null);
+        let tt = json!({"enabled": false, "delayMinutes": 5, "prompt": null});
+        let old = json!({"enabled": true, "delayMinutes": 15, "prompt": "x"});
+        assert_eq!(to_store("taskTriage", Some(&old), &tt), tt);
+        assert_eq!(describe("sounds").unwrap()["merge"], true);
+        assert!(describe("taskTriage").unwrap().get("merge").is_none());
+    }
+
+    #[test]
+    fn keys_nothing_reads_say_so_and_the_others_do_not() {
+        for k in NOT_READ {
+            assert!(keys().contains(k), "{k} is not an agent key");
+            let d = describe(k).unwrap();
+            assert_eq!(d["hasEffect"], false, "{k}");
+            assert!(
+                d["about"].as_str().unwrap().starts_with(NOT_READ_NOTE),
+                "{k}"
+            );
+            assert!(is_not_read(k));
+        }
+        for k in [
+            "appearance",
+            "sendShortcut",
+            "zoomLevel",
+            "keepAwake",
+            "chatElements",
+        ] {
+            assert!(describe(k).unwrap().get("hasEffect").is_none(), "{k}");
+            assert!(!is_not_read(k));
+        }
     }
 
     #[test]

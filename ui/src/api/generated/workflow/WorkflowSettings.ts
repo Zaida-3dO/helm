@@ -6,7 +6,8 @@ import type { SignOff } from "./SignOff";
 import type { Stages } from "./Stages";
 
 /**
- * Settings → Orchestrator. User-only: no agent tool reads or writes it.
+ * Settings → Orchestrator. A chat reads all of it through the settings tools and may change only
+ * `newChats` and each stage's agent; every other field is the user's.
  */
 export type WorkflowSettings = { 
 /**

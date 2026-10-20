@@ -27,6 +27,7 @@ pub mod reserved;
 pub mod sections;
 pub mod settings;
 pub mod settings_allow;
+pub mod settings_ext;
 pub mod settings_options;
 pub mod shells;
 pub mod spec;
@@ -39,6 +40,7 @@ pub use registry::{
     CallOrigin, Changed, HostToolRegistry, OpInvoker, RegisteredTool, ToolCtx, ToolError,
     ToolFuture, ToolHandler, ToolResult,
 };
+pub use settings_ext::{SettingsExtension, SettingsExtensions};
 pub use spec::{
     Availability, CatalogueEntry, Condition, LaunchKeys, McpLaunch, McpLaunchGate, McpLaunchSource,
     RequestLimit, ToolSpec, DEFAULT_TIMEOUT_MS, MAX_DESCRIPTION,

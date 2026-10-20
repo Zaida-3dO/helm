@@ -10,6 +10,7 @@
 
 use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::settings_allow::{agent_keys, refusal};
+use crate::settings_ext::SettingsExtensions;
 use crate::settings_options;
 use crate::spec::ToolSpec;
 use helm_core::db::Database;
@@ -51,11 +52,20 @@ fn db(ctx: &ToolCtx) -> Result<std::sync::Arc<Database>, ToolError> {
         .ok_or_else(|| ToolError::refused("Settings are not available here."))
 }
 
+fn extensions(services: &helm_ipc::Services) -> SettingsExtensions {
+    services
+        .get::<SettingsExtensions>()
+        .map(|e| (*e).clone())
+        .unwrap_or_default()
+}
+
 fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
     let db = db(ctx)?;
+    let ext = extensions(&ctx.services);
     db.snapshot(|tx| {
         let all = all_settings(tx);
-        let visible = agent_keys(all);
+        let mut visible = agent_keys(all);
+        visible.extend(ext.keys());
         let wanted: Vec<String> = match a.get("keys").and_then(Value::as_array) {
             Some(k) => k
                 .iter()
@@ -67,7 +77,12 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
         let mut options = Map::new();
         let mut unavailable = Map::new();
         for k in &wanted {
-            if let Some(why) = refusal(k, all) {
+            if let Some(x) = ext.owner(k) {
+                settings.insert(k.clone(), x.read(tx, k));
+                if let Some(o) = x.describe(k) {
+                    options.insert(k.clone(), o);
+                }
+            } else if let Some(why) = refusal(k, all) {
                 unavailable.insert(k.clone(), json!(why));
             } else {
                 settings.insert(k.clone(), prefs::read(tx, k).unwrap_or(Value::Null));
@@ -80,7 +95,7 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
             "settings": settings,
             "options": options,
             "unavailable": unavailable,
-            "note": "null means the default is in use: options.<key>.default says what that is, and sending null in app_update_settings restores it. options.<key> gives the type and the allowed values or limits.",
+            "note": "null means the default is in use: options.<key>.default says what that is, and sending null in app_update_settings restores it. options.<key> gives the type and the allowed values or limits. An option with hasEffect false is stored but nothing in Helm reads it yet, so changing it changes nothing.",
         }))
     })
     .map_err(sql)
@@ -97,6 +112,7 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
     let mut keys: Vec<&String> = changes.keys().collect();
     keys.sort();
     let db = db(ctx)?;
+    let ext = extensions(&ctx.services);
     let now = helm_core::now_ms();
     let chat = ctx.caller_chat_id.clone();
     // One transaction per key, alphabetically, stopping at the first failure.
@@ -106,25 +122,33 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
     for k in keys {
         let v = &changes[k];
         let r = db.write(|tx| {
-            if let Some(why) = refusal(k, all_settings(tx)) {
-                return Ok(Err(why));
-            }
             if serde_json::to_vec(v).map(|b| b.len()).unwrap_or(usize::MAX) > MAX_VALUE_BYTES {
                 return Ok(Err(format!("The value for {k} is too large.")));
             }
-            if let Err(why) = settings_options::check(k, v) {
-                return Ok(Err(why));
-            }
-            let key = agent_keys(true)
-                .into_iter()
-                .find(|x| x == k)
-                .map(PrefKey::classified)
-                .expect("refusal() passed only agent keys");
-            let before = prefs::read(tx, k);
-            if let Err(e) = prefs::set(tx, key, v) {
-                return Ok(Err(e.to_string()));
-            }
-            let after = prefs::read(tx, k);
+            let (before, after) = if let Some(x) = ext.owner(k) {
+                match x.apply(tx, k, v) {
+                    Ok((b, a)) => (Some(b), Some(a)),
+                    Err(why) => return Ok(Err(why)),
+                }
+            } else {
+                if let Some(why) = refusal(k, all_settings(tx)) {
+                    return Ok(Err(why));
+                }
+                if let Err(why) = settings_options::check(k, v) {
+                    return Ok(Err(why));
+                }
+                let key = agent_keys(true)
+                    .into_iter()
+                    .find(|x| x == k)
+                    .map(PrefKey::classified)
+                    .expect("refusal() passed only agent keys");
+                let before = prefs::read(tx, k);
+                let stored = settings_options::to_store(k, before.as_ref(), v);
+                if let Err(e) = prefs::set(tx, key, &stored) {
+                    return Ok(Err(e.to_string()));
+                }
+                (before, prefs::read(tx, k))
+            };
             tx.execute(
                 "INSERT INTO settings_changes(chat_id, key, before, after, at) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
@@ -145,10 +169,11 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
         });
         match r {
             Ok(Ok((id, before, after))) => {
-                applied.insert(
-                    k.clone(),
-                    json!({"before": before, "after": after, "changeId": id}),
-                );
+                let mut entry = json!({"before": before, "after": after, "changeId": id});
+                if settings_options::is_not_read(k) {
+                    entry["note"] = json!("Stored, but nothing in Helm reads this setting yet, so it has no visible effect.");
+                }
+                applied.insert(k.clone(), entry);
                 recorded.push(json!({"changeId": id, "key": k, "before": before, "after": after}));
             }
             Ok(Err(why)) => {
@@ -162,17 +187,21 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
         }
     }
     if !recorded.is_empty() {
+        let key_of = |c: &Value| c["key"].as_str().unwrap_or_default().to_owned();
         let changed: Map<String, Value> = recorded
             .iter()
-            .map(|c| {
-                (
-                    c["key"].as_str().unwrap_or_default().to_owned(),
-                    c["after"].clone(),
-                )
-            })
+            .filter(|c| ext.owner(&key_of(c)).is_none())
+            .map(|c| (key_of(c), c["after"].clone()))
             .collect();
-        ctx.events
-            .emit(AppEvent::new("preferences").with("changed", Value::Object(changed)));
+        if !changed.is_empty() {
+            ctx.events
+                .emit(AppEvent::new("preferences").with("changed", Value::Object(changed)));
+        }
+        for c in &recorded {
+            if let Some(x) = ext.owner(&key_of(c)) {
+                ctx.events.emit(x.changed_event(&key_of(c)));
+            }
+        }
         ctx.events.emit(
             AppEvent::new("external_settings")
                 .with("chatId", chat)
@@ -229,6 +258,7 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         return Err(ApiError::bad_args("changeIds takes 1-16 ids."));
     }
     let db = ctx.services.need::<Database>()?;
+    let ext = extensions(&ctx.services);
     let restored = db
         .write(|tx| {
             let mut plan = Vec::new();
@@ -264,8 +294,11 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 }
             }
             for (_, key, _, after) in &plan {
-                if prefs::read(tx, key) != after.as_ref().and_then(|a| serde_json::from_str(a).ok())
-                {
+                let now = match ext.owner(key) {
+                    Some(x) => Some(x.read(tx, key)),
+                    None => prefs::read(tx, key),
+                };
+                if now != after.as_ref().and_then(|a| serde_json::from_str(a).ok()) {
                     return Ok(Err(ApiError::conflict(format!(
                         "{key} has changed since; nothing was undone."
                     ))));
@@ -273,16 +306,33 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             }
             let mut changed = Map::new();
             for (id, key, before, _) in plan {
-                prefs::set_raw(tx, &key, &before)
-                    .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+                match ext.owner(&key) {
+                    Some(x) => x
+                        .restore(tx, &key, &before)
+                        .map_err(rusqlite::Error::InvalidParameterName)?,
+                    None => prefs::set_raw(tx, &key, &before)
+                        .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
+                }
                 tx.execute("UPDATE settings_changes SET undone = 1 WHERE id = ?1", [id])?;
                 changed.insert(key, before);
             }
             Ok::<_, rusqlite::Error>(Ok(changed))
         })
         .map_err(|e| ApiError::internal(e.to_string()))??;
-    ctx.events
-        .emit(AppEvent::new("preferences").with("changed", Value::Object(restored.clone())));
+    let prefs_changed: Map<String, Value> = restored
+        .iter()
+        .filter(|(k, _)| ext.owner(k).is_none())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if !prefs_changed.is_empty() {
+        ctx.events
+            .emit(AppEvent::new("preferences").with("changed", Value::Object(prefs_changed)));
+    }
+    for k in restored.keys() {
+        if let Some(x) = ext.owner(k) {
+            ctx.events.emit(x.changed_event(k));
+        }
+    }
     Ok(json!({ "restored": restored }))
 }
 
@@ -303,7 +353,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .blocking(
         ToolSpec::write(
             "app_update_settings",
-            "Change 1-16 Helm settings live: changes is {key: value}. Keys are applied alphabetically and the call stops at the first failure; the answer has each applied key's before and after. The user sees a notice with Undo. Read app_get_settings first: its options say what each key accepts, and a value outside them is refused with the allowed values. A key's value replaces the stored one whole; null restores the default. Act only when the user explicitly asked for this change, and report what changed. If the reply is lost, check the current values before trying again and never retry automatically.",
+            "Change 1-16 Helm settings live: changes is {key: value}. Keys are applied alphabetically and the call stops at the first failure; the answer has each applied key's before and after. The user sees a notice with Undo. Read app_get_settings first: its options say what each key accepts, and a value outside them is refused with the allowed values. A key's value replaces the stored one whole, except fontSizes, sounds and orchestrator, where you send only the fields to change and the others keep their values; null restores the default. An option with hasEffect false is read by nothing yet, so changing it does nothing visible. The orchestrator key is Settings > Orchestrator: options.orchestrator says which of its fields are yours to change, and the rest are the user's alone and are refused. Act only when the user explicitly asked for this change, and report what changed. If the reply is lost, check the current values before trying again and never retry automatically.",
             json!({"type": "object", "properties": {"changes": {"type": "object", "minProperties": 1, "maxProperties": 16}}, "required": ["changes"], "additionalProperties": false}),
         )
         .large(),
@@ -437,6 +487,151 @@ mod tests {
         assert_eq!(r["applied"]["sendShortcut"]["after"], "enter");
         let r = update_settings(&ctx(&e), json!({"changes": {"sendShortcut": null}})).unwrap();
         assert_eq!(r["applied"]["sendShortcut"]["after"], Value::Null);
+    }
+
+    #[test]
+    fn font_sizes_and_sounds_merge_field_by_field() {
+        let e = env();
+        let read = |k: &str| {
+            e.db.snapshot(|tx| Ok::<_, rusqlite::Error>(prefs::read(tx, k)))
+                .unwrap()
+        };
+        // Nothing stored: the default fills in what the update leaves out.
+        let r = update_settings(
+            &ctx(&e),
+            json!({"changes": {"fontSizes": {"interface": 15}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            r["applied"]["fontSizes"]["after"],
+            json!({"response": 14, "review": 10, "interface": 15})
+        );
+        update_settings(
+            &ctx(&e),
+            json!({"changes": {"fontSizes": {"response": 18}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            read("fontSizes"),
+            Some(json!({"response": 18, "review": 10, "interface": 15}))
+        );
+        update_settings(&ctx(&e), json!({"changes": {"sounds": {"volume": 30}}})).unwrap();
+        assert_eq!(
+            read("sounds"),
+            Some(json!({"enabled": true, "volume": 30, "themed": true}))
+        );
+        // A wrong field is still refused, and the stored value is untouched.
+        assert!(update_settings(&ctx(&e), json!({"changes": {"sounds": {"loud": 1}}})).is_err());
+        assert_eq!(read("sounds").unwrap()["volume"], 30);
+        // Null restores the default.
+        update_settings(&ctx(&e), json!({"changes": {"fontSizes": null}})).unwrap();
+        assert_eq!(read("fontSizes"), None);
+    }
+
+    #[test]
+    fn hidden_skills_with_a_leading_dollar_are_refused_on_write() {
+        let e = env();
+        let r = update_settings(
+            &ctx(&e),
+            json!({"changes": {"hiddenSkills": ["review", "$deploy"]}}),
+        );
+        let why = r.unwrap_err().public;
+        assert!(
+            why.contains("hiddenSkills[1] must not start with $"),
+            "{why}"
+        );
+        let stored =
+            e.db.snapshot(|tx| Ok::<_, rusqlite::Error>(prefs::read(tx, "hiddenSkills")))
+                .unwrap();
+        assert_eq!(stored, None);
+        let r =
+            update_settings(&ctx(&e), json!({"changes": {"hiddenSkills": ["review"]}})).unwrap();
+        assert_eq!(r["applied"]["hiddenSkills"]["after"], json!(["review"]));
+        // Nothing reads the key yet, and the answer says so.
+        assert!(r["applied"]["hiddenSkills"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("nothing in Helm reads"));
+        assert!(r["applied"]["hiddenSkills"]["after"].is_array());
+        let g = get_settings(&ctx(&e), json!({"keys": ["hiddenSkills", "zoomLevel"]})).unwrap();
+        assert_eq!(g["options"]["hiddenSkills"]["hasEffect"], false);
+        assert!(g["options"]["zoomLevel"].get("hasEffect").is_none());
+    }
+
+    /// A stand-in extension: one key holding `{open, level}`; chats may change only `level`.
+    struct Fake;
+    impl crate::SettingsExtension for Fake {
+        fn keys(&self) -> Vec<&'static str> {
+            vec!["fake"]
+        }
+        fn describe(&self, key: &str) -> Option<Value> {
+            (key == "fake")
+                .then(|| json!({"type": "object", "default": {"open": false, "level": 1}}))
+        }
+        fn read(&self, tx: &Transaction<'_>, _key: &str) -> Value {
+            prefs::read(tx, "agentSettingsAll")
+                .and_then(|v| v.get("fake").cloned())
+                .unwrap_or_else(|| json!({"open": false, "level": 1}))
+        }
+        fn apply(
+            &self,
+            tx: &Transaction<'_>,
+            key: &str,
+            value: &Value,
+        ) -> Result<(Value, Value), String> {
+            let before = self.read(tx, key);
+            if value.get("open").is_some() {
+                return Err("fake.open is yours to change only.".into());
+            }
+            let mut after = before.clone();
+            after["level"] = value["level"].clone();
+            prefs::set_raw(tx, "agentSettingsAll", &json!({"fake": after})).unwrap();
+            Ok((before, after))
+        }
+        fn restore(&self, tx: &Transaction<'_>, _key: &str, value: &Value) -> Result<(), String> {
+            prefs::set_raw(tx, "agentSettingsAll", &json!({"fake": value}))
+                .map_err(|e| e.to_string())
+        }
+        fn changed_event(&self, _key: &str) -> AppEvent {
+            AppEvent::new("fake_changed")
+        }
+    }
+
+    #[test]
+    fn an_extension_key_is_listed_changed_recorded_and_undone() {
+        let e = env();
+        let mut s = Services::new();
+        s.insert(e.db.clone());
+        s.insert(Arc::new(crate::SettingsExtensions(vec![Arc::new(Fake)])));
+        let mut c = ctx(&e);
+        c.services = Arc::new(s);
+        let g = get_settings(&c, json!({})).unwrap();
+        assert_eq!(g["settings"]["fake"], json!({"open": false, "level": 1}));
+        assert_eq!(g["options"]["fake"]["default"]["level"], 1);
+        assert_eq!(
+            g["options"].as_object().unwrap().len(),
+            g["settings"].as_object().unwrap().len()
+        );
+        // The extension refuses what is not the chat's; nothing is recorded or announced.
+        let r = update_settings(&c, json!({"changes": {"fake": {"open": true}}}));
+        assert!(r.unwrap_err().public.contains("yours to change only"));
+        assert!(e.sink.kinds().is_empty());
+        let r = update_settings(&c, json!({"changes": {"fake": {"level": 3}}})).unwrap();
+        assert_eq!(r["applied"]["fake"]["before"]["level"], 1);
+        assert_eq!(r["applied"]["fake"]["after"]["level"], 3);
+        // Its own event, not a preference change.
+        assert_eq!(e.sink.kinds(), ["fake_changed", "external_settings"]);
+        let id = r["applied"]["fake"]["changeId"].as_i64().unwrap();
+        let mut o = op(&e);
+        o.services = c.services.clone();
+        let u = undo(&o, json!({"changeIds": [id]})).unwrap();
+        assert_eq!(u["restored"]["fake"]["level"], 1);
+        let g = get_settings(&c, json!({"keys": ["fake"]})).unwrap();
+        assert_eq!(g["settings"]["fake"]["level"], 1);
+        assert_eq!(
+            e.sink.kinds().last().map(String::as_str),
+            Some("fake_changed")
+        );
     }
 
     #[test]
