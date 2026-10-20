@@ -2333,6 +2333,104 @@ async fn an_edited_message_keeps_its_images() {
     assert_eq!(image_bytes(&h, &chat, &id).await.unwrap(), want);
 }
 
+fn attachment_files(h: &H) -> usize {
+    std::fs::read_dir(h.profile.path("attachments"))
+        .map(|d| d.count())
+        .unwrap_or(0)
+}
+
+/// A fork whose source image vanishes after it was checked fails cleanly: no fork chat, no log, no
+/// copied file, and no log naming a copy that has no row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fork_fails_cleanly_when_a_source_image_vanishes() {
+    let mut h = harness();
+    let chat = h.create().await;
+    let (_w, _id, _png) = first_turn_with_image(&mut h, &chat).await;
+    let files = attachment_files(&h);
+    let chats = h.col("SELECT id FROM chats");
+    let fork_id = uuid::Uuid::new_v4().to_string();
+    let refused = crate::fork::fork(
+        &h.db,
+        &h.profile.path(""),
+        &crate::fork::ForkRequest {
+            source: &chat,
+            fork_id: &fork_id,
+            message_id: None,
+            side: false,
+            excerpt: None,
+        },
+        // Runs at the start of the fork's transaction: the image row goes away just before it is
+        // copied.
+        &|tx, _| {
+            tx.execute("DELETE FROM chat_attachments", [])?;
+            Ok(false)
+        },
+    )
+    .map(|f| f.chat_id)
+    .unwrap_err();
+    assert!(
+        refused.message.contains("no longer available"),
+        "{refused:?}"
+    );
+    assert_eq!(h.col("SELECT id FROM chats"), chats, "no fork chat");
+    assert!(h.col("SELECT fork_id FROM chat_forks").is_empty());
+    assert_eq!(attachment_files(&h), files, "the copied file was removed");
+    let logs = std::fs::read_dir(h.profile.path("sessions"))
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".jsonl")
+        })
+        .count();
+    assert_eq!(logs, 1, "only the source's log remains");
+}
+
+/// An edit that fails after its images were linked leaves no stray file behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_edit_leaves_no_stray_image_file() {
+    let mut h = harness();
+    let chat = h.create().await;
+    let (_w, _id, _png) = first_turn_with_image(&mut h, &chat).await;
+    let first = user_row(&h, &chat, "first");
+    let o = crate::edit::open(&h.db, &chat, first).unwrap();
+    let files = attachment_files(&h);
+    // Make the staging's last insert fail, after the images were copied.
+    h.db.write(|tx| {
+        tx.execute_batch(
+            "CREATE TRIGGER no_pending_edits BEFORE INSERT ON pending_edits
+             BEGIN SELECT RAISE(ABORT, 'refused for the test'); END;",
+        )
+    })
+    .unwrap();
+    let sid = uuid::Uuid::new_v4().to_string();
+    let err = crate::edit::stage(
+        &h.db,
+        &h.profile.path("sessions"),
+        &h.profile.path("attachments"),
+        &crate::types::MessageResendArgs {
+            chat_id: chat.clone(),
+            message_id: first,
+            revision: o.revision,
+            submission_id: sid.clone(),
+            text: "first, edited".into(),
+        },
+    )
+    .unwrap_err();
+    assert!(err.message.contains("refused for the test"), "{err:?}");
+    assert_eq!(attachment_files(&h), files, "the linked copy was removed");
+    assert!(h
+        .col(&format!("SELECT id FROM submissions WHERE id = '{sid}'"))
+        .is_empty());
+    assert_eq!(
+        h.col("SELECT count(*) FROM chat_attachments"),
+        ["1"],
+        "and no row was kept"
+    );
+}
+
 /// The skills a worker reports at get_state are what skills_list answers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn skills_come_from_the_workers_get_state() {

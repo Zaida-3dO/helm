@@ -15,3 +15,15 @@ test('registered fake ops answer by prefix; an action send keeps the draft', asy
   const att = await call('attention_get');
   assert.equal(att.busy, 1);
 });
+
+test('attachment_get answers the stored image, and for a thumbnail the same or a smaller copy', async () => {
+  const invoke = createFakeHost(() => undefined, { stepMs: 1 });
+  const call = (op: string, args: Record<string, unknown> = {}) => invoke('api', { op, args }) as Promise<Record<string, unknown>>;
+  const chat = await call('chat_create', { cwd: 'C:/w' });
+  const put = await call('attachment_put', { chatId: chat.id, name: 'a.png', mime: 'image/png', bytes: 'iVBORw0=' });
+  const args = { chatId: chat.id, attachmentId: put.attachmentId };
+  assert.deepEqual(await call('attachment_get', args), { mime: 'image/png', bytes: 'iVBORw0=' });
+  // No canvas here, so the thumbnail is the stored image; the host still accepts the flag.
+  assert.deepEqual(await call('attachment_get', { ...args, thumb: true }), { mime: 'image/png', bytes: 'iVBORw0=' });
+  await assert.rejects(call('attachment_get', { ...args, attachmentId: 'nope', thumb: true }), (e: { code: string }) => e.code === 'not_found');
+});

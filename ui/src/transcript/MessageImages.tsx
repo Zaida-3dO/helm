@@ -7,32 +7,47 @@ import { useEffect, useState } from 'react';
 import type { MessageImage } from '../api/generated/MessageImage.ts';
 import { useShell } from '../shell/context.ts';
 import { Dialog } from '../ui/index.ts';
-import { bytesFromBase64, imageLabel, thumbSize } from './messageImages.ts';
+import { UrlCache, bytesFromBase64, imageLabel, thumbSize } from './messageImages.ts';
 import './messageImages.css';
 
 type Loaded = { state: 'loading' } | { state: 'ready'; url: string } | { state: 'failed' };
 
+/** Thumbnails kept after their row scrolls away, so scrolling back does not ask the host again. */
+const thumbUrls = new UrlCache(64, (url) => URL.revokeObjectURL(url));
+
 function useImageUrl(chatId: string, id: string, thumb: boolean): Loaded {
   const { api } = useShell();
+  const key = `${chatId}/${id}`;
   const [loaded, setLoaded] = useState<Loaded>({ state: 'loading' });
   useEffect(() => {
     let url: string | null = null;
     let cancelled = false;
-    setLoaded({ state: 'loading' });
-    api<{ mime: string; bytes: string }>('attachment_get', { chatId, attachmentId: id, thumb })
-      .then((r) => {
-        if (cancelled) return;
-        url = URL.createObjectURL(new Blob([bytesFromBase64(r.bytes)], { type: r.mime }));
-        setLoaded({ state: 'ready', url });
-      })
-      .catch(() => {
-        if (!cancelled) setLoaded({ state: 'failed' });
-      });
+    // A thumbnail is shared and kept; the full image belongs to the dialog that opened it.
+    const kept = thumb ? thumbUrls.acquire(key) : undefined;
+    if (kept) {
+      setLoaded({ state: 'ready', url: kept });
+    } else {
+      setLoaded({ state: 'loading' });
+      api<{ mime: string; bytes: string }>('attachment_get', { chatId, attachmentId: id, thumb })
+        .then((r) => {
+          if (cancelled) return;
+          url = URL.createObjectURL(new Blob([bytesFromBase64(r.bytes)], { type: r.mime }));
+          if (thumb) thumbUrls.put(key, url);
+          setLoaded({ state: 'ready', url });
+        })
+        .catch(() => {
+          if (!cancelled) setLoaded({ state: 'failed' });
+        });
+    }
     return () => {
       cancelled = true;
-      if (url) URL.revokeObjectURL(url);
+      if (thumb) {
+        if (kept || url) thumbUrls.release(key);
+      } else if (url) {
+        URL.revokeObjectURL(url);
+      }
     };
-  }, [api, chatId, id, thumb]);
+  }, [api, chatId, id, key, thumb]);
   return loaded;
 }
 

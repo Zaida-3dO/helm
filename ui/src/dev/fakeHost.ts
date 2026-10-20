@@ -16,6 +16,7 @@ import type {
   TranscriptPage,
 } from '../api/types.ts';
 import { HOME_SEND_BEHAVIOR } from '../api/types.ts';
+import { fakeThumb } from './fakeThumb.ts';
 import { leafFakeOps } from './fake-leaf.ts';
 import { projectsFakeOps } from './fake-projects.ts';
 import { panelFakeOps } from './fake-panel.ts';
@@ -688,7 +689,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     attachment_get: (a) => {
       const img = attachments.get(String(a.attachmentId));
       if (!img) throw { code: 'not_found', message: 'No such image.' };
-      return { mime: img.mime, bytes: img.bytes };
+      return a.thumb === true ? fakeThumb(img.mime, img.bytes) : { mime: img.mime, bytes: img.bytes };
     },
     skills_list: () => [
       { name: 'review', description: 'Review the current changes' },

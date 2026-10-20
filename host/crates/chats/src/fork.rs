@@ -491,6 +491,7 @@ pub fn fork(
         String::new()
     };
     let rev = 0;
+    let vanished = std::cell::Cell::new(false);
     let result = db.write(|tx| {
         if project_archived(tx, &src.project)? {
             return Ok(Err(refuse("This chat's project is archived; restore it first.")));
@@ -524,14 +525,20 @@ pub fn fork(
             )?;
         }
         for (old, new) in &carried {
-            crate::message_images::insert_copy(
+            // The fork's log already names the copy, so a source image that vanished since it was
+            // checked fails the fork (the transaction rolls back and nothing is kept) rather than
+            // leaving a name with no row.
+            if !crate::message_images::insert_copy(
                 tx,
                 old,
                 req.source,
                 new,
                 &fork_id_chat,
                 &format!("fork:{fork_id_chat}"),
-            )?;
+            )? {
+                vanished.set(true);
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
         }
         for e in &entries {
             session_log::project(tx, &artifacts, &fork_id_chat, e, rev)?;
@@ -569,6 +576,11 @@ pub fn fork(
         Err(e) => {
             let _ = std::fs::remove_file(&log);
             drop_carried(&carried);
+            if vanished.get() {
+                return Err(refuse(
+                    "An image in this chat is no longer available; try forking again.",
+                ));
+            }
             return Err(sql(e));
         }
     };

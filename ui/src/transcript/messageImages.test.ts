@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { THUMB_MAX_HEIGHT, THUMB_MAX_WIDTH, THUMB_MIN_SIDE, bytesFromBase64, imageLabel, thumbSize } from './messageImages.ts';
+import { THUMB_MAX_HEIGHT, THUMB_MAX_WIDTH, THUMB_MIN_SIDE, UrlCache, bytesFromBase64, imageLabel, thumbSize } from './messageImages.ts';
 
 test('a small image is shown at its own size, never scaled up', () => {
   assert.deepEqual(thumbSize(100, 60), { width: 100, height: 60 });
@@ -31,4 +31,35 @@ test('the label names the file, and numbers a set of several', () => {
   assert.equal(imageLabel('shot.png', 0, 1), 'shot.png');
   assert.equal(imageLabel('shot.png', 1, 3), 'shot.png (image 2 of 3)');
   assert.equal(imageLabel('  ', 0, 1), 'image');
+});
+
+test('a kept thumbnail URL is reused while in use or recently released, and revoked when pushed out', () => {
+  const revoked: string[] = [];
+  const cache = new UrlCache(2, (u) => revoked.push(u));
+  assert.equal(cache.acquire('a'), undefined);
+  cache.put('a', 'blob:a');
+  cache.put('b', 'blob:b');
+  cache.put('c', 'blob:c');
+  assert.deepEqual(revoked, [], 'all three are in use');
+  cache.release('a');
+  cache.release('b');
+  assert.deepEqual(revoked, [], 'two idle entries fit');
+  cache.release('c');
+  assert.deepEqual(revoked, ['blob:a'], 'the oldest idle one goes when a third is idle');
+  assert.equal(cache.acquire('a'), undefined);
+  assert.equal(cache.acquire('b'), 'blob:b', 'a released one is found again');
+  cache.release('b');
+  cache.release('b');
+  assert.equal(cache.size, 2);
+});
+
+test('a URL that is in use is never revoked by the limit', () => {
+  const revoked: string[] = [];
+  const cache = new UrlCache(0, (u) => revoked.push(u));
+  cache.put('a', 'blob:a');
+  cache.put('b', 'blob:b');
+  assert.deepEqual(revoked, []);
+  cache.release('a');
+  assert.deepEqual(revoked, ['blob:a']);
+  assert.equal(cache.acquire('b'), 'blob:b');
 });

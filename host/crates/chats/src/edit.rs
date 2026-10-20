@@ -107,13 +107,15 @@ pub fn open(db: &Database, chat_id: &str, message_id: i64) -> Result<EditOpen, R
     })
 }
 
-/// Give the new submission its own copy of the edited message's images.
+/// Give the new submission its own copy of the edited message's images. The ids of the files made
+/// are added to `made`, so the caller can remove them if the transaction does not commit.
 fn carry_images(
     tx: &Transaction<'_>,
     attachments: &Path,
     chat_id: &str,
     message_id: i64,
     submission_id: &str,
+    made: &mut Vec<String>,
 ) -> rusqlite::Result<()> {
     let details: Option<String> = tx
         .query_row(
@@ -131,6 +133,7 @@ fn carry_images(
             log::warn!("edit: image {old} could not be carried over: {e}");
             continue;
         }
+        made.push(new.clone());
         if !crate::message_images::insert_copy(tx, &old, chat_id, &new, chat_id, submission_id)? {
             let _ = std::fs::remove_file(attachments.join(&new));
         }
@@ -161,7 +164,9 @@ pub fn stage(
         .map(|m| m.len() as i64)
         .unwrap_or(0);
     let now = helm_core::now_ms();
-    db.write(|tx| {
+    // Files linked for the images are made inside the transaction; if it rolls back they must go.
+    let made = std::cell::RefCell::new(Vec::<String>::new());
+    let staged = db.write(|tx| {
         if let Some(s) = crate::store::get_submission(tx, &sid)? {
             return Ok(Ok(s));
         }
@@ -197,15 +202,27 @@ pub fn stage(
                 now,
             },
         )?;
-        carry_images(tx, attachments, &a.chat_id, a.message_id, &sid)?;
+        carry_images(
+            tx,
+            attachments,
+            &a.chat_id,
+            a.message_id,
+            &sid,
+            &mut made.borrow_mut(),
+        )?;
         tx.execute(
             "INSERT INTO pending_edits(chat_id, submission_id, entry_id, log_len, marker_id, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![a.chat_id, sid, key, log_len, format!("c:edit:{sid}"), now],
         )?;
         Ok(Ok(crate::store::get_submission(tx, &sid)?.expect("just inserted")))
-    })
-    .map_err(|e: rusqlite::Error| Refusal::new("internal", e.to_string()))?
+    });
+    if !matches!(staged, Ok(Ok(_))) {
+        for id in made.borrow().iter() {
+            let _ = std::fs::remove_file(attachments.join(id));
+        }
+    }
+    staged.map_err(|e: rusqlite::Error| Refusal::new("internal", e.to_string()))?
 }
 
 /// Apply the chat's staged edit, if any (the worker must be closed). Returns its submission id.

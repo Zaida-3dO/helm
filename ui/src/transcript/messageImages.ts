@@ -33,3 +33,58 @@ export function imageLabel(name: string, index: number, count: number): string {
   const n = name.trim() === '' ? 'image' : name.trim();
   return count > 1 ? `${n} (image ${index + 1} of ${count})` : n;
 }
+
+/**
+ * Thumbnail object URLs kept for a while after their row scrolls out of view, so scrolling back
+ * shows the picture without asking the host again. A URL in use is never released; once nothing
+ * uses it, it stays among the `max` most recently released and is revoked when pushed out.
+ */
+export class UrlCache {
+  private readonly entries = new Map<string, { url: string; users: number }>();
+
+  private readonly max: number;
+  private readonly revoke: (url: string) => void;
+
+  constructor(max: number, revoke: (url: string) => void) {
+    this.max = max;
+    this.revoke = revoke;
+  }
+
+  /** The kept URL for `key`, counted as in use until `release`; undefined when there is none. */
+  acquire(key: string): string | undefined {
+    const e = this.entries.get(key);
+    if (!e) return undefined;
+    e.users += 1;
+    // Most recently used last, so the oldest idle entry is the first to go.
+    this.entries.delete(key);
+    this.entries.set(key, e);
+    return e.url;
+  }
+
+  /** Keep a new URL for `key`, counted as in use. A URL already kept for `key` is replaced. */
+  put(key: string, url: string): void {
+    const old = this.entries.get(key);
+    if (old && old.users === 0) this.revoke(old.url);
+    this.entries.delete(key);
+    this.entries.set(key, { url, users: 1 });
+  }
+
+  release(key: string): void {
+    const e = this.entries.get(key);
+    if (!e || e.users === 0) return;
+    e.users -= 1;
+    if (e.users === 0) this.trim();
+  }
+
+  private trim(): void {
+    const idle = [...this.entries].filter(([, e]) => e.users === 0);
+    for (const [key, e] of idle.slice(0, Math.max(0, idle.length - this.max))) {
+      this.revoke(e.url);
+      this.entries.delete(key);
+    }
+  }
+
+  get size(): number {
+    return this.entries.size;
+  }
+}
