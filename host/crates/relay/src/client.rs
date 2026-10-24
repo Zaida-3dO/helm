@@ -119,6 +119,9 @@ pub struct Client {
     sink: Arc<dyn TelegramSink>,
     handle: Arc<LineHandle>,
     up_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Value>>,
+    /// Hub ids of Telegram messages being delivered now: the hub's resend of one of them is
+    /// dropped, since the delivery under way acknowledges it.
+    delivering: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Woken when the saved connection changes, so a new address or token applies at once.
     pub reconfigured: tokio::sync::Notify,
 }
@@ -148,6 +151,7 @@ impl Client {
                 up,
             }),
             up_rx: tokio::sync::Mutex::new(up_rx),
+            delivering: Arc::default(),
             reconfigured: tokio::sync::Notify::new(),
         })
     }
@@ -291,6 +295,14 @@ impl Client {
                 let (Some(id), Some(text)) = (s("id"), s("text")) else {
                     return;
                 };
+                let delivering = self.delivering.clone();
+                if !delivering
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(id.clone())
+                {
+                    return;
+                }
                 let msg = TelegramMessage {
                     id: id.clone(),
                     text,
@@ -301,7 +313,12 @@ impl Client {
                 let sink = self.sink.clone();
                 let out = out.clone();
                 tokio::spawn(async move {
-                    match sink.deliver(msg).await {
+                    let r = sink.deliver(msg).await;
+                    delivering
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(&id);
+                    match r {
                         Ok(()) => {
                             let _ = out.send(json!({ "type": "telegram_ack", "id": id }));
                         }

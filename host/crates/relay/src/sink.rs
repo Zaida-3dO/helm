@@ -15,8 +15,10 @@
 //! - While the chat has a question waiting (an agent's multiple-choice or free-text question),
 //!   the reply answers it: a number picks that option, and the phone is told what was answered.
 //!   Approvals, plans and trust prompts are never answered from Telegram.
-//! - A reply that answered a question is remembered by its hub id in the profile, so the same
-//!   message resent after a restart is not taken as a new prompt.
+//! - A message the hub sends again (no acknowledgement reached it) is handled once: one already
+//!   stored as a prompt is not stored again or taken as an answer, and a reply that answered a
+//!   question is remembered by its hub id in the profile, so a resend after a restart is not
+//!   taken as a new prompt.
 //! - `/stop` stops the tagged chat's turn.
 //!
 //! **Out.** While a Telegram turn runs, a mirror task watches the chat (its stored status, the
@@ -298,7 +300,8 @@ pub enum Placed {
         baseline: i64,
         value: String,
     },
-    /// This hub id already answered a question (a resend): nothing more to do.
+    /// This hub id was already stored or already answered a question (a resend): nothing more
+    /// to do.
     Already,
 }
 
@@ -365,10 +368,21 @@ pub struct Ctx {
 
 /// Put one message into its chat (blocking). `Err` leaves it unacknowledged at the hub.
 pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String> {
-    if c.answered
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .contains(&msg.id)
+    let sid = telegram::submission_id(&msg.id);
+    let stored =
+        c.db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM submissions WHERE id = ?1)",
+                [&sid],
+                |r| r.get::<_, bool>(0),
+            )
+        })
+        .unwrap_or(false);
+    if stored
+        || c.answered
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&msg.id)
     {
         return Ok(Placed::Already);
     }
@@ -415,7 +429,6 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         .map(|sb| sb.mode)
         .unwrap_or(SendMode::Asap);
     let text = telegram::delivered_text(&msg.text, msg.age_minutes);
-    let sid = telegram::submission_id(&msg.id);
     let started = std::time::Instant::now();
     loop {
         let r = host_send(

@@ -1358,6 +1358,9 @@ impl Actor {
         let row = if from_queue || !busy {
             // A prompt that opens a turn: its user row shows at once, as saved.
             let mut details = json!({"submissionId": sid, "mode": sub.mode});
+            if sub.origin != SubmissionOrigin::Typed {
+                details["origin"] = json!(sub.origin);
+            }
             let images = crate::message_images::for_submission(&self.sh.db, sid);
             if !images.is_empty() {
                 details["images"] = json!(images);

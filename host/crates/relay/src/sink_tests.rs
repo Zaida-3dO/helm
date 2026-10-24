@@ -298,7 +298,11 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
     let again = place_async(&e.ctx, msg("hub-1", "hello from the phone"))
         .await
         .unwrap();
-    assert_eq!(chat_of(&again), chat);
+    assert_eq!(
+        again,
+        Placed::Already,
+        "never stored twice, nor taken as an answer"
+    );
     assert_eq!(subs(&e.db, &chat).len(), 1);
     // The next message attaches to the tagged chat.
     let next = place_async(&e.ctx, msg("hub-2", "and again"))
