@@ -132,13 +132,22 @@ impl Build {
     }
 
     /// Before a redirection: an unquoted number right before it (`2>`, `0<`) names a file
-    /// descriptor, not an argument.
+    /// descriptor, not an argument, and so does `{name}` (`{fd}>file` opens a new one).
     fn drop_fd_number(&mut self) {
+        let named = self
+            .word
+            .strip_prefix('{')
+            .and_then(|w| w.strip_suffix('}'))
+            .is_some_and(|n| {
+                !n.is_empty()
+                    && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && !n.starts_with(|c: char| c.is_ascii_digit())
+            });
         if self.in_word
             && !self.quoted
             && !self.computed_word
             && !self.word.is_empty()
-            && self.word.bytes().all(|b| b.is_ascii_digit())
+            && (named || self.word.bytes().all(|b| b.is_ascii_digit()))
         {
             self.word.clear();
             self.in_word = false;
@@ -442,7 +451,8 @@ impl Reader<'_> {
                     depth = depth.saturating_sub(1);
                     if arith_close.last() == Some(&depth) {
                         arith_close.pop();
-                        self.skip_joins();
+                        // bash looks at the very next character here, without joining a line
+                        // continuation, so `)\<newline>)` is two subshells too.
                         if self.peek() != Some(')') {
                             return Err("a (( that bash reads as two subshells");
                         }

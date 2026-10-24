@@ -1200,13 +1200,14 @@ fn simple_shape(
                 matches!(
                     w.as_str(),
                     "-c" | "-e" | "-Command" | "/c" | "-EncodedCommand"
-                )
+                ) || (matches!(name.as_str(), "sh" | "bash" | "zsh" | "dash")
+                    && w.starts_with('-')
+                    && !w.starts_with("--")
+                    && w.contains('c'))
             }) {
                 Shape::Unreadable("inline interpreter code is not read")
             } else if c.stdin_fed
-                || c.words[1..]
-                    .iter()
-                    .all(|w| w.starts_with('-') && w.as_str() != "--")
+                || script_word(&name, &c.words[1..]).is_none_or(|s| s.contains('$'))
                 || c.words[1..].iter().any(|w| {
                     matches!(
                         w.as_str(),
@@ -1214,8 +1215,9 @@ fn simple_shape(
                     ) || (w.starts_with('-') && !w.starts_with("--") && w.contains('s'))
                 })
             {
-                // Fed by a heredoc, a here-string or a pipe, with no script named, or told to
-                // read its input (`-`, `-s`, `/dev/stdin`): it runs text the guard does not read.
+                // Fed by a heredoc, a here-string or a pipe, with no script named (or one whose
+                // name is computed, such as `bash <(…)`), or told to read its input (`-`, `-s`,
+                // `/dev/stdin`): it runs text the guard does not read.
                 Shape::Unreadable("a shell or interpreter running text from its input")
             } else {
                 Shape::None
@@ -1223,6 +1225,29 @@ fn simple_shape(
         }
         _ => Shape::None,
     }
+}
+
+/// The script an interpreter is told to run: its first word that is not an option. For a shell,
+/// `+x` is an option too, and `-o`/`-O` (alone or ending a cluster such as `-eo`) take the next
+/// word as their value. `None` when no script is named, so the interpreter reads its input,
+/// which may come from a redirection on an enclosing group or loop that the guard does not track.
+fn script_word<'a>(name: &str, args: &'a [String]) -> Option<&'a str> {
+    let shell = matches!(name, "sh" | "bash" | "zsh" | "dash");
+    let mut i = 0;
+    while let Some(w) = args.get(i) {
+        if w == "--" {
+            return args.get(i + 1).map(String::as_str);
+        }
+        let option = w.len() > 1 && (w.starts_with('-') || (shell && w.starts_with('+')));
+        if !option {
+            return Some(w);
+        }
+        let takes_value = shell
+            && (matches!(w.as_str(), "--rcfile" | "--init-file")
+                || (!w.starts_with("--") && w.contains(['o', 'O'])));
+        i += if takes_value { 2 } else { 1 };
+    }
+    None
 }
 
 fn is_protected(ctx: &Ctx, facts: &dyn RepoFacts, cwd: &Path, branch: &str) -> bool {
@@ -2249,6 +2274,11 @@ pub(crate) mod tests {
             "((git push origin >feat-x) )",
             "echo $((git push origin >feat-x) )",
             "((true) ; git push origin >feat-x)",
+            "((git push origin >feat-x)\\\n)",
+            "(\\\n(git push origin >feat-x) )",
+            "echo $\\\n((git push origin >feat-x) )",
+            "( (git push origin >feat-x) )",
+            "git push origin {x}>/dev/null",
         ] {
             assert_ne!(judge(cmd, &c, &on_main), Verdict::Allow, "{cmd}");
         }
@@ -2271,6 +2301,16 @@ pub(crate) mod tests {
             "cat <<'EOF' | bash /dev/stdin\ngit push origin HEAD:main\nEOF",
             "echo 'git push origin HEAD:main' | bash 2>&1",
             "echo hju qvti psjhjo IFBE:nbjo | tr b-zB-Z a-yA-Y | bash -o pipefail",
+            "{ bash +x; } <<'EOF'\ngit push origin HEAD:main\nEOF",
+            "while read -r l; do bash +x; done <<'EOF'\nfirst\ngit push origin HEAD:main\nEOF",
+            "if true; then bash +x; fi <<'EOF'\ngit push origin HEAD:main\nEOF",
+            "( bash +x ) <<< 'git push origin HEAD:main'",
+            "echo 'git push origin HEAD:main' | (true; bash +x)",
+            "printf 'x\ngit push origin HEAD:main\n' | { read x; bash -o pipefail; }",
+            "bash +x < <(echo 'git push origin HEAD:main')",
+            "bash <(echo 'git push origin HEAD:main')",
+            "echo 'git push origin HEAD:main' |& bash +x",
+            "echo 'git push origin HEAD:main' |\nbash +x",
         ] {
             assert_ne!(judge(cmd, &c, &F), Verdict::Allow, "{cmd:?}");
         }
@@ -2279,7 +2319,15 @@ pub(crate) mod tests {
             judge("git push origin feat-x 2>/dev/null", &c, &F),
             Verdict::Allow
         );
-        assert_ne!(judge("git push \"1\">x HEAD:main", &c, &F), Verdict::Allow);
+        for cmd in [
+            "git push \"1\">x HEAD:main",
+            "git push origin \\1>x HEAD:main",
+            "git push origin ''1>x HEAD:main",
+            "git push origin $'1'>x HEAD:main",
+            "git push origin 1\"\">x HEAD:main",
+        ] {
+            assert_ne!(judge(cmd, &c, &F), Verdict::Allow, "{cmd:?}");
+        }
     }
 
     #[test]
