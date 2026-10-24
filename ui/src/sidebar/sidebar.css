@@ -448,8 +448,8 @@
   background: var(--sb-surface-alt);
 }
 
-/* "Show N empty projects": a quiet row at the end of the projects view, styled like
-   the list's other empty-state buttons (12 px muted text, text colour on hover). */
+/* "Show N empty projects" and "Show N finished projects": quiet rows at the end of the projects
+   view, styled like the list's other empty-state buttons (12 px muted text, text colour on hover). */
 .sb-root .sb-empty-toggle {
   display: flex;
   align-items: center;

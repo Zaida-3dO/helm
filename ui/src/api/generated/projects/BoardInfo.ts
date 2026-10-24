@@ -22,6 +22,11 @@ lastActivity: string | null,
  */
 stale: boolean, 
 /**
+ * The project has work under it on the board and all of that work is finished, as of the
+ * latest sync. The sidebar hides such a project by default.
+ */
+completed: boolean, 
+/**
  * A local override (name or icon) is in force.
  */
 editedLocally: boolean, };

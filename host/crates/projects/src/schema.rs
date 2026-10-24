@@ -8,7 +8,7 @@
 //! | `project_parents` | local nesting: one parent per project, `source` board or local |
 //! | `chat_groups` | the group a chat is shown under when it is not its folder project |
 //! | `project_archive_members` | exactly which chats a project archive archived, so restore brings back only those |
-//! | `board_projects` | the read-only Agent Standup mirror: one row per board project |
+//! | `board_projects` | the read-only Agent Standup mirror: one row per board project, with whether all its work is finished |
 //! | `board_sync_state` | the last sync's time and error (one row) |
 //! | `board_connection` | the Agent Standup address (one row); the token is in the credential store |
 //! | `project_top_level` | projects the user moved to the top level, so a board parent never re-nests them |
@@ -23,7 +23,8 @@ use rusqlite::Transaction;
 pub const ARCHIVED_REFUSAL: &str = "Restore this project first.";
 
 pub fn register(reg: &mut MigrationRegistry) {
-    reg.initializer("projects-side-tables", init);
+    reg.initializer("projects-side-tables", init)
+        .one_time("projects-board-completed", add_board_completed);
 }
 
 fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
@@ -67,6 +68,7 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              last_activity     TEXT,
              stale             INTEGER NOT NULL DEFAULT 0,
              synced_at         INTEGER NOT NULL,
+             completed         INTEGER NOT NULL DEFAULT 0,
              UNIQUE (board_url, board_project_id)
          );
          CREATE TABLE IF NOT EXISTS board_sync_state (
@@ -100,6 +102,22 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
          WHEN EXISTS (SELECT 1 FROM project_local WHERE project_id = NEW.project_id AND archived = 1)
          BEGIN SELECT RAISE(ABORT, '{ARCHIVED_REFUSAL}'); END;"
     ))
+}
+
+/// `board_projects.completed` arrived after the table did: a profile made before it gets the
+/// column here, unset until the next sync fills it. A new profile already has it from `init`.
+fn add_board_completed(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let present: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('board_projects') WHERE name = 'completed')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !present {
+        tx.execute_batch(
+            "ALTER TABLE board_projects ADD COLUMN completed INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

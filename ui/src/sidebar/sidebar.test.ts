@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ProjectNode, SidebarRow } from '../api/projects.ts';
-import { buildList, chatAncestors, HEIGHTS, nestRows, stepChat, visibleChatOrder, type ListItem } from './model.ts';
+import { buildList, chatAncestors, headerSubtitle, HEIGHTS, nestRows, stepChat, visibleChatOrder, type ListItem } from './model.ts';
 import { loadMore, readBudget, type PageResult } from './paging.ts';
 import { age, rowAttention, trailingIndicator } from './status.ts';
 import { layout, visibleRange } from './virtual.ts';
@@ -58,8 +58,22 @@ function row(chatId: string, group: string, over: Partial<SidebarRow> = {}): Sid
 const opts = { view: 'projects' as const, compact: false, expandedChats: new Set<string>(), selectedChatId: null };
 const shape = (items: ListItem[]) =>
   items.map((i) =>
-    i.kind === 'header' ? `H${i.depth}:${i.project.id}` : i.kind === 'chat' ? `C${i.depth}:${i.row.chatId}` : i.kind === 'emptyToggle' ? `E${i.count}${i.shown ? '+' : '-'}` : '--',
+    i.kind === 'header'
+      ? `H${i.depth}:${i.project.id}`
+      : i.kind === 'chat'
+        ? `C${i.depth}:${i.row.chatId}`
+        : i.kind === 'emptyToggle'
+          ? `E${i.count}${i.shown ? '+' : '-'}`
+          : i.kind === 'finishedToggle'
+            ? `F${i.count}${i.shown ? '+' : '-'}`
+            : '--',
   );
+
+/** A board project; `completed` marks all its work finished on the board. */
+function boardProject(id: string, completed: boolean, over: Partial<ProjectNode> = {}): ProjectNode {
+  const board = { boardProjectId: id, url: 'https://board.example', title: id, headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: false, completed, editedLocally: false };
+  return project(id, { kind: 'board', path: null, ...over, board: { ...board, ...over.board } });
+}
 
 test('status priority: running > unread > lingering > interrupted > pinned', () => {
   const base = { status: 'idle' as const, unread: false, lingering: false, pinned: false };
@@ -142,6 +156,108 @@ test('empty projects hide by default, with a "Show N empty projects" row that br
   assert.ok(!shape(buildList(projects, rows, { ...opts, view: 'activity' })).some((s) => s.startsWith('E')));
 });
 
+test('finished board projects hide by default, with a "Show N finished projects" row that brings them back', () => {
+  const projects = [
+    boardProject('live', false, { chatCount: 1 }),
+    boardProject('done', true, { chatCount: 2 }), // finished, with idle chats: still hidden
+    boardProject('doneBare', true), // finished and empty: counted as finished only
+    project('folder', { chatCount: 1, board: null }), // folder projects are never finished
+    boardProject('gone', true, { chatCount: 1, board: { stale: true } as ProjectNode['board'] }), // stale wins
+    boardProject('goneBare', true, { board: { stale: true } as ProjectNode['board'] }), // stale and empty: never offered
+  ];
+  const rows = [row('l1', 'live'), row('d1', 'done'), row('d2', 'done'), row('g1', 'gone')];
+  assert.deepEqual(shape(buildList(projects, rows, opts)), ['H0:live', 'C0:l1', 'H0:folder', 'H0:gone', 'C0:g1', 'F2-']);
+  const shown = buildList(projects, rows, { ...opts, showFinished: true });
+  assert.deepEqual(shape(shown), ['H0:live', 'C0:l1', 'H0:done', 'C0:d1', 'C0:d2', 'H0:doneBare', 'H0:folder', 'H0:gone', 'C0:g1', 'F2+']);
+  // A shown finished project says so under its name; a stale one still reads as gone.
+  const header = (id: string) => shown.find((i): i is Extract<ListItem, { kind: 'header' }> => i.kind === 'header' && i.project.id === id)!;
+  assert.equal(header('done').subtitle, 'Finished');
+  assert.equal(header('done').height, HEIGHTS.normal.headerSubtitle);
+  assert.equal(header('gone').subtitle, 'Not on the board');
+  assert.equal(header('live').subtitle, null);
+  assert.equal(headerSubtitle(project('f', { board: null }), new Map()), null);
+  // The archived view keeps its own rule: a finished project holding an archived chat shows there.
+  const archived = buildList(projects, [row('a1', 'done', { archived: true })], { ...opts, view: 'archived' });
+  assert.deepEqual(shape(archived), ['H0:done', 'C0:a1']);
+  // An older board sends no counts, so nothing is finished and no row appears.
+  assert.ok(!shape(buildList([boardProject('x', false, { chatCount: 1 })], [], opts)).some((s) => s.startsWith('F')));
+});
+
+test('a finished project stays in view while pinned, open, or holding a chat that wants the user', () => {
+  const finished = (id: string, over: Partial<ProjectNode> = {}) => boardProject(id, true, { chatCount: 1, ...over });
+  const projects = [
+    finished('pinned', { pinned: true }),
+    finished('open'),
+    finished('running'),
+    finished('unread'),
+    finished('interrupted'),
+    finished('pinnedChat'),
+    finished('idle'),
+    finished('parent', { chatCount: 0 }),
+    project('kid', { parentId: 'parent', chatCount: 1 }), // a live child keeps its finished parent drawn
+  ];
+  const rows = [
+    row('o1', 'open'),
+    row('r1', 'running', { status: 'running', attention: 'running' }),
+    row('u1', 'unread', { unread: true, attention: 'unread' }),
+    row('i1', 'interrupted', { status: 'interrupted', attention: 'interrupted' }),
+    row('p1', 'pinnedChat', { pinned: true, attention: 'pinned' }),
+    row('i2', 'idle'),
+    row('k1', 'kid'),
+  ];
+  const items = buildList(projects, rows, { ...opts, selectedChatId: 'o1' });
+  assert.deepEqual(shape(items), [
+    'H0:pinned',
+    '--',
+    'H0:open',
+    'C0:o1',
+    'H0:running',
+    'C0:r1',
+    'H0:unread',
+    'C0:u1',
+    'H0:interrupted',
+    'C0:i1',
+    'H0:pinnedChat',
+    'C0:p1',
+    'H0:parent',
+    'H1:kid',
+    'C0:k1',
+    'F1-',
+  ]);
+  // A busy status alone is enough, even before the row's mark catches up.
+  assert.ok(shape(buildList([finished('busy')], [row('b1', 'busy', { status: 'starting' })], opts)).includes('H0:busy'));
+  // With nothing open, the open chat's project hides again.
+  assert.ok(!shape(buildList(projects, rows, opts)).includes('H0:open'));
+});
+
+test('a project hidden for being finished counts under the finished row only, never also as empty', () => {
+  const projects = [
+    boardProject('doneBare', true), // finished and holds nothing
+    boardProject('doneShell', true), // finished, with an empty child under it
+    project('shellKid', { parentId: 'doneShell' }),
+    boardProject('bare', false), // live and empty
+    project('folderBare'), // a folder project with nothing in it
+    project('emptyParent'), // empty, with a finished project nested under it
+    boardProject('doneUnder', true, { parentId: 'emptyParent' }),
+  ];
+  // Each row offers only what clicking it would draw: the empty child of a hidden finished
+  // project, and the finished child of a hidden empty one, wait for their parent.
+  assert.deepEqual(shape(buildList(projects, [], opts)), ['E3-', 'F2-']);
+  assert.deepEqual(shape(buildList(projects, [], { ...opts, showEmpty: true })), ['H0:bare', 'H0:folderBare', 'H0:emptyParent', 'E3+', 'F3-']);
+  assert.deepEqual(shape(buildList(projects, [], { ...opts, showFinished: true })), ['H0:doneBare', 'H0:doneShell', 'E4-', 'F2+']);
+  assert.deepEqual(shape(buildList(projects, [], { ...opts, showEmpty: true, showFinished: true })), [
+    'H0:doneBare',
+    'H0:doneShell',
+    'H1:shellKid',
+    'H0:bare',
+    'H0:folderBare',
+    'H0:emptyParent',
+    'H1:doneUnder',
+    'E4+',
+    'F3+',
+  ]);
+});
+
 test('the drawn chat order skips collapsed groups and parents; Ctrl+Tab steps through it, wrapping', () => {
   const projects = [project('g', { chatCount: 3 }), project('shut', { collapsed: true, chatCount: 1 })];
   const rows = [row('a', 'g'), row('b', 'g', { parentChatId: 'a' }), row('c', 'g'), row('x', 'shut')];
@@ -211,7 +327,7 @@ test('row heights match the design system, normal and compact', () => {
 });
 
 test('a stale board group shows only while it still holds chats', () => {
-  const stale = project('s', { kind: 'board', path: null, board: { boardProjectId: 'x', url: 'u', title: 's', headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: true, editedLocally: false } });
+  const stale = project('s', { kind: 'board', path: null, board: { boardProjectId: 'x', url: 'u', title: 's', headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: true, completed: false, editedLocally: false } });
   assert.deepEqual(shape(buildList([stale], [], opts)), []);
   assert.deepEqual(shape(buildList([stale], [row('a', 's')], opts)), ['H0:s', 'C0:a']);
 });

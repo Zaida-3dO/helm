@@ -309,6 +309,9 @@ async fn sync(ctx: OpCtx, _args: Value) -> Result<Value, ApiError> {
 ///   at the top level (Agent Standup projects have no parents; nesting is local only).
 /// - A known one takes the board's title and fields, unless the incoming `lastActivity` is older
 ///   than the stored one (an out-of-order read), which is ignored.
+/// - Whether the project's work is all finished is written on every sync, older read or not:
+///   finishing or reopening work need not move `lastActivity` forward, and a flag held back by
+///   that rule could hide a live project (or keep showing a done one) until the next edit.
 /// - Local state (rename, icon, colour, pin, order, collapse, nesting) is never touched.
 /// - Every project of this board address missing from a complete sync is marked stale, never
 ///   deleted. A sync cut short at the page cap marks nothing stale.
@@ -337,14 +340,16 @@ pub fn apply_sync(
                 let older = matches!((&stored, &p.last_activity), (Some(s), Some(n)) if n < s);
                 if older {
                     tx.execute(
-                        "UPDATE board_projects SET stale = 0, synced_at = ?2 WHERE project_id = ?1",
-                        params![pid, now],
+                        "UPDATE board_projects SET stale = 0, synced_at = ?2, completed = ?3
+                         WHERE project_id = ?1",
+                        params![pid, now, p.completed()],
                     )?;
                     continue;
                 }
                 tx.execute(
                     "UPDATE board_projects SET title = ?2, headline = ?3, area = ?4, repo = ?5,
-                         priority = ?6, last_activity = ?7, stale = 0, synced_at = ?8
+                         priority = ?6, last_activity = ?7, stale = 0, synced_at = ?8,
+                         completed = ?9
                      WHERE project_id = ?1",
                     params![
                         pid,
@@ -354,7 +359,8 @@ pub fn apply_sync(
                         p.repo,
                         p.priority,
                         p.last_activity,
-                        now
+                        now,
+                        p.completed()
                     ],
                 )?;
                 tx.execute(
@@ -371,8 +377,8 @@ pub fn apply_sync(
                 )?;
                 tx.execute(
                     "INSERT INTO board_projects(project_id, board_url, board_project_id, title,
-                         headline, area, repo, priority, last_activity, stale, synced_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)",
+                         headline, area, repo, priority, last_activity, stale, synced_at, completed)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11)",
                     params![
                         pid,
                         url,
@@ -383,7 +389,8 @@ pub fn apply_sync(
                         p.repo,
                         p.priority,
                         p.last_activity,
-                        now
+                        now,
+                        p.completed()
                     ],
                 )?;
                 tx.execute(

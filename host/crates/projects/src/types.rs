@@ -56,6 +56,9 @@ pub struct BoardInfo {
     pub last_activity: Option<String>,
     /// Missing from the latest complete sync: kept, chats stay put, shown with a note.
     pub stale: bool,
+    /// The project has work under it on the board and all of that work is finished, as of the
+    /// latest sync. The sidebar hides such a project by default.
+    pub completed: bool,
     /// A local override (name or icon) is in force.
     pub edited_locally: bool,
 }

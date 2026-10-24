@@ -122,6 +122,53 @@ fn list_projects_pages_with_get_only_and_sends_the_bearer_token() {
 }
 
 #[test]
+fn a_project_is_completed_only_when_it_has_work_and_all_of_it_is_finished() {
+    let read = |extra: Value| -> BoardProject {
+        let mut v = serde_json::json!({"id": "p", "title": "T"});
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(v).unwrap()
+    };
+    let cases = [
+        (serde_json::json!({"total": 3, "finished": 3}), true),
+        (serde_json::json!({"total": 1, "finished": 1}), true),
+        (serde_json::json!({"total": 3, "finished": 2}), false),
+        // Childless: nothing under it, so nothing is finished.
+        (serde_json::json!({"total": 0, "finished": 0}), false),
+        // An older board sends no counts.
+        (serde_json::json!({}), false),
+        (serde_json::json!({"total": 2}), false),
+        (serde_json::json!({"finished": 2}), false),
+        (serde_json::json!({"total": null, "finished": null}), false),
+    ];
+    for (extra, want) in cases {
+        let p = read(extra.clone());
+        assert_eq!(p.completed(), want, "{extra}");
+    }
+    // The counts come through a real page read, beside the fields the sidebar already used.
+    let server = FakeServer::start(Arc::new(|_, _, _| {
+        let body = serde_json::json!({"projects": [
+            {"id": "done", "title": "Done", "total": 4, "finished": 4, "merged": 4, "childless": false},
+            {"id": "live", "title": "Live", "total": 4, "finished": 1},
+            {"id": "old", "title": "Old"},
+        ], "nextCursor": null});
+        (200, vec![], body.to_string())
+    }));
+    let (got, _) = Client::new(&server.base, token())
+        .unwrap()
+        .list_projects()
+        .unwrap();
+    assert_eq!(
+        got.iter()
+            .map(|p| (p.id.as_str(), p.completed()))
+            .collect::<Vec<_>>(),
+        [("done", true), ("live", false), ("old", false)]
+    );
+    assert_eq!((got[1].total, got[1].finished), (Some(4), Some(1)));
+}
+
+#[test]
 fn the_token_never_appears_in_errors_debug_or_logs() {
     // The board echoes the token back in a 500 body and in an unreadable 200 body.
     let server = FakeServer::start(Arc::new(|_, path, auth| {

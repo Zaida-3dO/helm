@@ -33,3 +33,20 @@ test('any non-GET is refused and recorded as a violation', async () => {
     await board.close();
   }
 });
+
+test('the fake board serves the work counts of each project, so a finished one can be staged', async () => {
+  const done = { id: 'fb-done', title: 'Shipped', headline: null, area: 'web', repo: null, priority: 'p3', lastActivity: '2026-10-12T08:00:00.000Z', total: 2, finished: 2 };
+  const board = await startFakeBoard({ projects: [...fixtureProjects(), done] });
+  try {
+    const r = await fetch(`${board.url}/api/projects?includeCompleted=true&limit=200`, { headers: auth });
+    const body = (await r.json()) as { projects: { id: string; total: number; finished: number }[] };
+    const counts = Object.fromEntries(body.projects.map((p) => [p.id, [p.total, p.finished]]));
+    assert.deepEqual(counts['fb-done'], [2, 2], 'all finished');
+    assert.deepEqual(counts['fb-desktop'], [12, 7], 'work still open');
+    assert.deepEqual(counts['fb-research'], [0, 0], 'no counts in the fixture: childless');
+    // The default fixture has no finished project, so every one of them shows in the sidebar.
+    assert.ok(fixtureProjects().every((p) => !(p.total && p.total === p.finished)));
+  } finally {
+    await board.close();
+  }
+});

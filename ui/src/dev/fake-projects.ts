@@ -1,6 +1,7 @@
 // The dev fake host's project and sidebar ops, for checking
 // the sidebar in a plain browser. fakeHost.ts registers it through `registerFakeOps`; chats come
-// from the fake host's own `chat_list`. It seeds a three-level tree of board and folder projects.
+// from the fake host's own `chat_list`. It seeds a three-level tree of board and folder projects,
+// plus one board project whose work is all finished (hidden behind "Show 1 finished project").
 //
 // Dev builds only. fakeHost.ts imports this file, so this file only imports types from it.
 
@@ -39,15 +40,19 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
     revision: 0,
     ...over,
   });
-  const board = (id: string, title: string, parentId: string | null = null): ProjectNode =>
+  const board = (id: string, title: string, completed = false): ProjectNode =>
     node(id, title, {
       kind: 'board',
-      parentId,
-      parentSource: parentId ? 'local' : null,
-      board: { boardProjectId: id, url, title, headline: null, area: 'desktop-app', repo: 'helm', priority: 'p2', lastActivity: new Date().toISOString(), stale: false, editedLocally: false },
+      board: { boardProjectId: id, url, title, headline: null, area: 'desktop-app', repo: 'helm', priority: 'p2', lastActivity: new Date().toISOString(), stale: false, completed, editedLocally: false },
     });
   if (opts.seedBoard) {
-    for (const p of [board('b-helm', 'Helm'), board('b-site', 'Client Website'), node('f-w3', 'Release 3', { parentId: 'b-helm', parentSource: 'local', colour: 'teal' }), node('f-side', 'Sidebar', { parentId: 'f-w3', parentSource: 'local' })]) {
+    for (const p of [
+      board('b-helm', 'Helm'),
+      board('b-site', 'Client Website'),
+      board('b-launch', 'Launch checklist', true),
+      node('f-w3', 'Release 3', { parentId: 'b-helm', parentSource: 'local', colour: 'teal' }),
+      node('f-side', 'Sidebar', { parentId: 'f-w3', parentSource: 'local' }),
+    ]) {
       projects.set(p.id, p);
     }
   }

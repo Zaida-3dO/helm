@@ -602,7 +602,22 @@ fn bp(id: &str, title: &str, last: &str) -> BoardProject {
         repo: None,
         priority: Some("p2".into()),
         last_activity: Some(last.into()),
+        total: None,
+        finished: None,
     }
+}
+
+/// `bp` with the board's work counts: `total` items under it, `finished` of them terminal.
+fn counted(id: &str, last: &str, total: u64, finished: u64) -> BoardProject {
+    BoardProject {
+        total: Some(total),
+        finished: Some(finished),
+        ..bp(id, id, last)
+    }
+}
+
+fn completed(db: &Database, board_id: &str) -> bool {
+    by_board_id(db, board_id).board.unwrap().completed
 }
 
 fn sync(db: &Database, projects: &[BoardProject]) {
@@ -663,6 +678,82 @@ fn an_older_last_activity_is_ignored() {
     sync(&db, &[bp("a", "New title", "2026-10-17T12:00:00Z")]);
     sync(&db, &[bp("a", "Old title", "2026-10-17T09:00:00Z")]);
     assert_eq!(by_board_id(&db, "a").name, "New title");
+}
+
+#[test]
+fn completion_is_mirrored_and_refreshed_on_every_sync() {
+    let (_d, db) = temp_db();
+    let t = "2026-10-17T10:00:00Z";
+    sync(
+        &db,
+        &[
+            counted("done", t, 3, 3),
+            counted("live", t, 3, 1),
+            counted("childless", t, 0, 0),
+            bp("uncounted", "Uncounted", t),
+        ],
+    );
+    assert!(completed(&db, "done"));
+    assert!(!completed(&db, "live"));
+    assert!(
+        !completed(&db, "childless"),
+        "nothing under it is not finished"
+    );
+    assert!(
+        !completed(&db, "uncounted"),
+        "an older board sends no counts"
+    );
+    // The same activity time: the work finishes, or is reopened, and the flag follows.
+    sync(&db, &[counted("done", t, 4, 3), counted("live", t, 3, 3)]);
+    assert!(
+        !completed(&db, "done"),
+        "reopened work shows the project again"
+    );
+    assert!(completed(&db, "live"));
+    // An out-of-order read keeps the newer title but still refreshes completion, so a flag is
+    // never held back by the activity time.
+    sync(&db, &[bp("live", "Live", "2026-10-17T12:00:00Z")]);
+    assert!(!completed(&db, "live"));
+    sync(&db, &[counted("live", "2026-10-17T09:00:00Z", 2, 2)]);
+    assert!(completed(&db, "live"));
+    assert_eq!(
+        by_board_id(&db, "live").name,
+        "Live",
+        "the older title is still ignored"
+    );
+}
+
+#[test]
+fn a_profile_made_before_completion_gains_the_column_on_open() {
+    use helm_core::db::MigrationRegistry;
+    let registry = || {
+        let mut reg = MigrationRegistry::new();
+        helm_chats::register_migrations(&mut reg);
+        crate::register_migrations(&mut reg);
+        reg
+    };
+    let (dir, db) = temp_db();
+    let path = dir.path().join("t.sqlite3");
+    sync(&db, &[bp("a", "Alpha", "2026-10-17T10:00:00Z")]);
+    // Put the profile back to how it was before the column existed.
+    db.write(|tx| {
+        tx.execute_batch(
+            "ALTER TABLE board_projects DROP COLUMN completed;
+             DELETE FROM counters WHERE key = 'migration:projects-board-completed';",
+        )
+    })
+    .unwrap();
+    drop(db);
+    let db = Database::open(&path, &registry()).unwrap();
+    let a = by_board_id(&db, "a");
+    assert!(!a.board.unwrap().completed, "unset until the next sync");
+    assert_eq!(a.name, "Alpha", "the mirrored row survives");
+    sync(&db, &[counted("a", "2026-10-17T10:00:00Z", 1, 1)]);
+    assert!(completed(&db, "a"));
+    // Opening again is a no-op: the step ran once and the column is not added twice.
+    drop(db);
+    let db = Database::open(&path, &registry()).unwrap();
+    assert!(completed(&db, "a"));
 }
 
 #[test]

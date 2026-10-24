@@ -267,6 +267,20 @@ pub struct BoardProject {
     pub priority: Option<String>,
     #[serde(default)]
     pub last_activity: Option<String>,
+    /// How many items sit under the project, and how many of those are in a terminal state. A
+    /// board that predates these counts leaves both out.
+    #[serde(default)]
+    pub total: Option<u64>,
+    #[serde(default)]
+    pub finished: Option<u64>,
+}
+
+impl BoardProject {
+    /// Every piece of work under the project is done: it has at least one item and all of them
+    /// are terminal. A project with nothing under it, or a board that sends no counts, is not.
+    pub fn completed(&self) -> bool {
+        matches!((self.total, self.finished), (Some(t), Some(f)) if t > 0 && f == t)
+    }
 }
 
 #[derive(Deserialize)]

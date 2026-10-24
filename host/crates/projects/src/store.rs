@@ -116,7 +116,7 @@ const PROJECT_SELECT: &str = "SELECT p.id, p.kind, p.name, p.path, p.color, p.cr
         l.title_override, l.primary_folder_project_id, COALESCE(l.revision, 0),
         pp.parent_id, pp.source,
         b.board_url, b.board_project_id, b.title, b.headline, b.area, b.repo, b.priority,
-        b.last_activity, b.stale
+        b.last_activity, b.stale, b.completed
      FROM projects p
      LEFT JOIN project_local l ON l.project_id = p.id
      LEFT JOIN project_parents pp ON pp.project_id = p.id
@@ -144,6 +144,7 @@ fn project_from_row(r: &Row<'_>, counts: &HashMap<String, i64>) -> rusqlite::Res
             priority: r.get(22)?,
             last_activity: r.get(23)?,
             stale: r.get::<_, i64>(24)? != 0,
+            completed: r.get::<_, i64>(25)? != 0,
             edited_locally: title_override.is_some() || icon.is_some(),
         }),
         None => None,

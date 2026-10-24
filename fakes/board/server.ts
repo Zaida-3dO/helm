@@ -23,6 +23,10 @@ export interface BoardProjectFixture {
   repo: string | null;
   priority: string;
   lastActivity: string;
+  /** Items under the project, and how many of them are in a terminal state. Left out, both are 0
+   *  (a childless project). Equal and non-zero means the project's work is all finished. */
+  total?: number;
+  finished?: number;
 }
 
 export interface LoggedRequest {
@@ -48,8 +52,10 @@ export function fixtureProjects(): BoardProjectFixture[] {
 }
 
 function rollup(p: BoardProjectFixture) {
-  // The live response carries counts and crew too; the client reads only the fields above.
-  return { ...p, total: 0, merged: 0, finished: 0, counts: {}, progress: null, childless: true, assignments: [] };
+  // The live response carries per-state counts and crew too; the client reads only the fields above.
+  const total = p.total ?? 0;
+  const finished = p.finished ?? 0;
+  return { ...p, total, merged: finished, finished, counts: {}, progress: total > 0 ? finished / total : null, childless: total === 0, assignments: [] };
 }
 
 export async function startFakeBoard(opts: { port?: number; token?: string; projects?: BoardProjectFixture[] } = {}): Promise<FakeBoard> {

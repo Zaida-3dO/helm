@@ -54,6 +54,8 @@ import './sidebar.css';
 
 /** Whether projects with no chats are shown; remembered on this machine. */
 export const SHOW_EMPTY_KEY = 'helm.sidebar.showEmptyProjects';
+/** Whether board projects whose work is all finished are shown; remembered on this machine. */
+export const SHOW_FINISHED_KEY = 'helm.sidebar.showFinishedProjects';
 export const PREVIEW_DELAY_MS = 300;
 
 export interface SidebarProps {
@@ -109,6 +111,12 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const toggleEmpty = () =>
     setShowEmpty((v) => {
       localStorage.setItem(SHOW_EMPTY_KEY, String(!v));
+      return !v;
+    });
+  const [showFinished, setShowFinished] = useState(() => localStorage.getItem(SHOW_FINISHED_KEY) === 'true');
+  const toggleFinished = () =>
+    setShowFinished((v) => {
+      localStorage.setItem(SHOW_FINISHED_KEY, String(!v));
       return !v;
     });
   const [menu, setMenu] = useState<Menu | null>(null);
@@ -178,8 +186,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         selectedChatId: selected,
         itemLinks: view === 'activity' ? undefined : { refs: itemRefs, collapsed: collapsedItems },
         showEmpty,
+        showFinished,
       }),
-    [snap.projects, snap.rows, view, compact, expanded, selected, itemRefs, collapsedItems, showEmpty],
+    [snap.projects, snap.rows, view, compact, expanded, selected, itemRefs, collapsedItems, showEmpty, showFinished],
   );
   useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
   const projectsById = useMemo(() => new Map(snap.projects.map((p) => [p.id, p])), [snap.projects]);
@@ -589,6 +598,21 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           aria-pressed={it.shown}
           title={it.shown ? 'Hide projects that have no chats' : 'Projects with no chats are hidden'}
           onClick={toggleEmpty}
+        >
+          {it.shown ? `Hide ${n}` : `Show ${n}`}
+        </button>
+      );
+    }
+    if (it.kind === 'finishedToggle') {
+      const n = `${it.count} finished project${it.count === 1 ? '' : 's'}`;
+      return (
+        <button
+          type="button"
+          className="sb-empty-toggle"
+          data-testid="sidebar-finished-toggle"
+          aria-pressed={it.shown}
+          title={it.shown ? 'Hide projects whose work is all finished' : 'Projects whose work is all finished are hidden'}
+          onClick={toggleFinished}
         >
           {it.shown ? `Hide ${n}` : `Show ${n}`}
         </button>
