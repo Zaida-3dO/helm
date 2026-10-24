@@ -2,9 +2,10 @@
 // - `asHostToolBridge`: the shape the in-process "helm" server asks for
 //   (`McpBridgeLike` in worker/src/hosttools/server.ts);
 // - `applyConfigLine`: the host's `mcp_config` stdin line;
-// - `nativeFromInit`: the servers the CLI reports loading natively in its `system/init` message.
+// - `nativeFromInit`: the servers the CLI reports loading natively in its `system/init` message;
+// - `duplicateMcpRefusal`: the PreToolUse answer for Claude Code's copy of a server Helm also has.
 
-import type { McpBridge } from "./bridge.ts";
+import { normName, type McpBridge } from "./bridge.ts";
 import { McpError, type DiscoveryResult, type Json, type NativeServer, type McpConfig, type ResolvedServer } from "./types.ts";
 
 /** The hosttools channel's call outcome (worker/src/hosttools/channel.ts `CallResult`). */
@@ -94,4 +95,14 @@ export function nativeFromInit(init: Json): NativeServer[] {
   return (init.mcp_servers as Json[])
     .filter((s) => s && typeof s.name === "string" && s.name !== "helm" && s.status !== "failed")
     .map((s) => ({ name: s.name as string }));
+}
+
+/** Why a call to Claude Code's own MCP tool `toolName` (`mcp__<server>__<tool>`) is refused: the
+ * same server is configured in Helm, and Helm's copy takes precedence. Undefined allows it. */
+export function duplicateMcpRefusal(toolName: string, bridge: Pick<McpBridge, "shadowing"> | undefined): string | undefined {
+  const m = /^mcp__(.+?)__./.exec(toolName);
+  if (!m || !bridge || normName(m[1]!) === "helm") return undefined;
+  const s = bridge.shadowing(m[1]!);
+  if (!s) return undefined;
+  return `${s.name} is also set up in Helm, and Helm's copy is the one to use: find this tool with app_mcp_tools (server "${s.id}") and call it with app_mcp_call.`;
 }

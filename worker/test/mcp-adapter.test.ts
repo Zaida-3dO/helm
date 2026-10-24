@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { applyConfigLine, asHostToolBridge, nativeFromInit } from "../src/mcp/adapter.ts";
+import { applyConfigLine, asHostToolBridge, duplicateMcpRefusal, nativeFromInit } from "../src/mcp/adapter.ts";
 import { generatedName } from "../src/mcp/index.ts";
 import { HostToolServer } from "../src/hosttools/server.ts";
 import { harness, stdioServer } from "./mcp-helpers.ts";
@@ -61,4 +61,14 @@ test("the CLI's init report becomes the native list; Helm's own and failed serve
   };
   assert.deepEqual(nativeFromInit(init), [{ name: "agent-standup" }, { name: "claude.ai Gmail" }]);
   assert.deepEqual(nativeFromInit({ type: "system", subtype: "other" }), []);
+});
+
+test("a call to Claude Code's copy of a Helm server is refused and pointed at Helm's copy", () => {
+  const bridge = { shadowing: (n: string) => (n === "agent-standup" ? { id: "agent_standup", name: "Agent Standup" } : undefined) };
+  const why = duplicateMcpRefusal("mcp__agent-standup__list_items", bridge);
+  assert.ok(why?.includes(`app_mcp_tools (server "agent_standup")`), why);
+  assert.equal(duplicateMcpRefusal("mcp__github__search", bridge), undefined, "a server only Claude Code has");
+  assert.equal(duplicateMcpRefusal("mcp__helm__app_mcp_call", { shadowing: () => ({ id: "x", name: "x" }) }), undefined, "Helm's own tools");
+  assert.equal(duplicateMcpRefusal("Bash", bridge), undefined);
+  assert.equal(duplicateMcpRefusal("mcp__agent-standup__list_items", undefined), undefined, "no MCP client");
 });

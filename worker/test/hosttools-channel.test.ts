@@ -116,7 +116,7 @@ test("initialize, ping and tools/list; notifications get no answer", async () =>
   assert.equal(await s.handle({ jsonrpc: "2.0", method: "notifications/initialized" }, root), null);
   const list = (await s.handle({ jsonrpc: "2.0", id: 3, method: "tools/list" }, root)) as Json;
   const names = ((list.result as Json).tools as Json[]).map((t) => t.name);
-  assert.deepEqual(names, ["app_list_chats", "app_set_chat_archived", "app_list_tools", "app_mcp_call"], "app_mcp_tools only with MCP enabled");
+  assert.deepEqual(names, ["app_list_chats", "app_set_chat_archived", "app_list_tools", "app_mcp_call"], "app_mcp_tools only with an MCP client");
   assert.equal(((await s.handle({ jsonrpc: "2.0", id: 4, method: "bogus" }, root)) as Json).error && true, true);
   assert.deepEqual(JSON.parse(sdkMcpConfig()), { mcpServers: { helm: { type: "sdk", name: "helm" } } });
 });
@@ -128,6 +128,15 @@ test("tools/call routes host tools through the channel with the caller binding",
   assert.deepEqual(res.structuredContent, { chats: [] });
   assert.equal(res.isError, undefined);
   assert.deepEqual(h.lines[0].caller, { child: false, toolCallId: "tu9" });
+});
+
+test("app_mcp_tools is listed before any server is configured, and says when none is", async () => {
+  // The host sends the server list only after Claude Code has read this server's tool list.
+  const bridge: McpBridgeLike = { enabled: () => false, tools: async () => ({}), has: () => false, call: async () => ({ ok: true, result: "" }) };
+  const { s } = server(() => null, bridge);
+  assert.ok(s.catalogue().some((t) => t.name === "app_mcp_tools"));
+  const r = await s.call("app_mcp_tools", {}, root);
+  assert.match((r as { error: string }).error, /No MCP server is enabled/);
 });
 
 test("children reach only MCP tools; app_mcp_call never reaches a host tool for a child", async () => {

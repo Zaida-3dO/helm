@@ -68,7 +68,7 @@ test("redirects: 307/308 to the same origin are followed; others are refused", a
   await assert.rejects(h.bridge.tools({ server: "away" }), /another site/);
 });
 
-test("a server the CLI loads natively is hidden and reported as native", async () => {
+test("a server in both Helm and Claude Code: Helm's copy is kept and shadows Claude Code's", async () => {
   const h = harness();
   open.push(h.bridge);
   h.bridge.configure({
@@ -77,20 +77,24 @@ test("a server the CLI loads natively is hidden and reported as native", async (
       stdioServer("agent_standup", {}, { name: "Agent Standup" }),
       httpServer("hub", "https://hub.example/mcp/"),
       stdioServer("ha", {}, { name: "Home Assistant" }),
+      stdioServer("broken", {}, { name: "Broken", error: "not resolved" }),
     ],
     native: [{ name: "agent-standup" }, { name: "memory", url: "https://HUB.example/mcp" }],
   });
-  assert.equal(h.last("agent_standup")?.state, "native");
-  assert.equal(h.last("hub")?.state, "native", "matched by URL");
-  assert.equal(h.last("ha")?.state, "idle");
-  assert.deepEqual(h.bridge.serverIds(), ["ha"]);
-  await assert.rejects(h.bridge.tools({ server: "agent_standup" }), /natively/);
-  // The CLI's start-up report arrives later and names Home Assistant too.
+  assert.equal(h.last("agent_standup")?.state, "idle", "never hidden behind Claude Code's copy");
+  assert.equal(h.last("hub")?.state, "idle");
+  assert.deepEqual(h.bridge.serverIds(), ["agent_standup", "hub", "ha", "broken"]);
   await h.bridge.tools({ server: "ha", query: "echo" });
+  // The CLI's start-up report arrives later and names Home Assistant too.
   h.bridge.noteNative([{ name: "home_assistant" }]);
-  assert.equal(h.last("ha")?.state, "native");
-  assert.equal(h.bridge.isLoaded(generatedName("ha", "echo")), false, "its loaded tools are dropped");
-  assert.equal(h.last("agent_standup")?.state, "idle", "no longer native once the report omits it");
+  assert.equal(h.bridge.isLoaded(generatedName("ha", "echo")), true, "its loaded tools stay");
+  assert.deepEqual(h.bridge.shadowing("Home-Assistant"), { id: "ha", name: "Home Assistant" });
+  assert.deepEqual(h.bridge.shadowing("agent-standup"), { id: "agent_standup", name: "Agent Standup" }, "by name, reported or not");
+  assert.equal(h.bridge.shadowing("memory"), undefined, "the URL tie is gone with the report that carried it");
+  h.bridge.noteNative([{ name: "memory", url: "https://hub.example/mcp" }]);
+  assert.equal(h.bridge.shadowing("memory")?.id, "hub", "tied by URL");
+  assert.equal(h.bridge.shadowing("broken"), undefined, "a Helm server that could not be resolved leaves Claude Code's copy usable");
+  assert.equal(h.bridge.shadowing("github"), undefined);
 });
 
 test("normalisation and the denied native name", () => {

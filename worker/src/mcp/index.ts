@@ -6,4 +6,4 @@ export { classifyAddress, connectRule } from "./http.ts";
 export { Redactor, REDACTED } from "./redact.ts";
 export { generatedName } from "./naming.ts";
 export * from "./types.ts";
-export { applyConfigLine, asHostToolBridge, nativeFromInit, type BridgeCallResult, type HostToolBridge } from "./adapter.ts";
+export { applyConfigLine, asHostToolBridge, duplicateMcpRefusal, nativeFromInit, type BridgeCallResult, type HostToolBridge } from "./adapter.ts";

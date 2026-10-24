@@ -19,7 +19,7 @@ import { Attribution } from "../../hosttools/attribution.ts";
 import { RequestChannel } from "../../hosttools/channel.ts";
 import { HostToolServer, SERVER_NAME, sdkMcpConfig, toolPrefix } from "../../hosttools/server.ts";
 import { planUsageFromRateLimit } from "../../usage/rateLimit.ts";
-import { applyConfigLine, asHostToolBridge, createMcpBridge, nativeFromInit, type McpBridge } from "../../mcp/index.ts";
+import { applyConfigLine, asHostToolBridge, createMcpBridge, duplicateMcpRefusal, nativeFromInit, type McpBridge } from "../../mcp/index.ts";
 
 /** The largest prompt text the worker will submit. */
 export const MAX_SUBMISSION_TEXT_BYTES = 2 * 1024 * 1024;
@@ -43,6 +43,8 @@ const DEFAULT_MIN_RUN_MS = 10_000;
 export const LONG_COMMAND_HOOK_ID = "helm-long-commands";
 /** PreToolUse hook on Helm's own tools: attributes each call to the agent or a subagent. */
 export const HOST_TOOL_HOOK_ID = "helm-host-tools";
+/** PreToolUse hook on every MCP tool: refuses Claude Code's copy of a server Helm also has. */
+export const DUPLICATE_MCP_HOOK_ID = "helm-duplicate-mcp";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -239,6 +241,7 @@ export class ClaudeDriver implements Driver {
     if (this.longCommands.enabled) preToolUse.push({ matcher: "Bash", hookCallbackIds: [LONG_COMMAND_HOOK_ID] });
     if (this.hostTools) {
       preToolUse.push({ matcher: `${toolPrefix}.*`, hookCallbackIds: [HOST_TOOL_HOOK_ID] });
+      if (this.mcp) preToolUse.push({ matcher: "mcp__.*", hookCallbackIds: [DUPLICATE_MCP_HOOK_ID] });
       initRequest.sdkMcpServers = [SERVER_NAME];
     }
     if (preToolUse.length > 0) initRequest.hooks = { PreToolUse: preToolUse };
@@ -484,7 +487,7 @@ export class ClaudeDriver implements Driver {
         return this.onLifecycle(rec);
       case "system":
         if (rec.subtype === "init" && typeof rec.model === "string") this.model = rec.model;
-        // Servers Claude Code loads natively are skipped by Helm's own client.
+        // The servers Claude Code loads itself: a URL here can tie one to a Helm server.
         if (rec.subtype === "init") this.mcp?.noteNative(nativeFromInit(rec));
         if ((rec.subtype === "init" || rec.subtype === "status") && typeof rec.permissionMode === "string") this.noteCliMode(rec.permissionMode);
         this.onTaskRecord(rec);
@@ -675,6 +678,10 @@ export class ClaudeDriver implements Driver {
     if (req.callback_id === HOST_TOOL_HOOK_ID) {
       this.attribution.noteHook({ ...input, tool_use_id: req.tool_use_id ?? input.tool_use_id });
       return this.controlReply(requestId, {});
+    }
+    if (req.callback_id === DUPLICATE_MCP_HOOK_ID) {
+      const reason = duplicateMcpRefusal(String(input.tool_name ?? ""), this.mcp);
+      return this.controlReply(requestId, reason ? { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } } : {});
     }
     const toolUseId = String(req.tool_use_id ?? input.tool_use_id ?? "");
     const isRootBash = req.callback_id === LONG_COMMAND_HOOK_ID && input.tool_name === "Bash" && !input.agent_id && !this.subagentTools.has(toolUseId);

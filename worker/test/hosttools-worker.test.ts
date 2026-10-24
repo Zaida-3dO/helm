@@ -45,6 +45,7 @@ test("Claude Code reaches host tools through the helm MCP server, attributed per
     const init = got.find((r) => r.type === "control_request" && (r.request as Json).subtype === "initialize")?.request as Json;
     assert.deepEqual(init.sdkMcpServers, ["helm"]);
     assert.ok(JSON.stringify(init.hooks).includes("mcp__helm__.*"), "a PreToolUse hook on the helm tools");
+    assert.ok(JSON.stringify(init.hooks).includes("helm-duplicate-mcp"), "a PreToolUse hook on every MCP tool, for duplicates of Helm's servers");
 
     const mcp = (id: number) => {
       const r = got.find((x) => x.type === "control_response" && ((x.response as Json).response as Json | undefined)?.mcp_response && (((x.response as Json).response as Json).mcp_response as Json).id === id);

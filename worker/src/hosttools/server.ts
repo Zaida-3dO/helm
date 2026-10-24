@@ -3,8 +3,8 @@
 // Claude Code reaches it over its control channel: each JSON-RPC message arrives as an
 // `mcp_message` control request and the answer goes back in the control response. The server
 // lists exactly the host tools from launch.json `hostTools[]`, plus the worker's own
-// compatibility tools (`app_list_tools` and `app_mcp_call` always; `app_mcp_tools` when an MCP
-// server is enabled). Host tools go to the host through the request channel; MCP tools go to the
+// compatibility tools (`app_list_tools` and `app_mcp_call` always; `app_mcp_tools` whenever there
+// is an MCP client, see names.ts). Host tools go to the host through the request channel; MCP tools go to the
 // MCP bridge (worker/src/mcp).
 
 import type { Json } from "../protocol/types.ts";
@@ -31,7 +31,7 @@ export interface HostTool {
 
 /** What the server needs from the MCP bridge. */
 export interface McpBridgeLike {
-  /** At least one MCP server is enabled (lists `app_mcp_tools`). */
+  /** At least one MCP server is enabled (otherwise `app_mcp_tools` says none is). */
   enabled(): boolean;
   /** `app_mcp_tools`: search discovered tools. */
   tools(args: Json): Promise<unknown>;
@@ -148,7 +148,7 @@ export class HostToolServer {
   catalogue(): HostTool[] {
     const compat = [LIST_TOOLS, MCP_CALL].filter((t) => (COMPAT_ALWAYS as readonly string[]).includes(t.name));
     const out = [...this.o.hostTools, ...compat];
-    if (this.o.bridge?.enabled() && (COMPAT_WITH_MCP as readonly string[]).includes(MCP_TOOLS.name)) out.push(MCP_TOOLS);
+    if (this.o.bridge && (COMPAT_WITH_MCP as readonly string[]).includes(MCP_TOOLS.name)) out.push(MCP_TOOLS);
     return out;
   }
 

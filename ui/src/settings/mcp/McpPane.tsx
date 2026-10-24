@@ -256,8 +256,8 @@ export function McpPane() {
       <section aria-labelledby="mcp-servers">
         <h3 id="mcp-servers">MCP servers</h3>
         <p className="mcp-help">
-          Servers Helm connects chats to through its own client. A server Claude Code already loads natively is left to Claude Code and shown
-          as native here.
+          Servers Helm connects chats to through its own client. When Claude Code has its own copy of a server listed here, chats use
+          Helm's copy.
         </p>
         {empty && (
           <div className="mcp-empty" data-testid="mcp-empty" data-state={empty.state}>
