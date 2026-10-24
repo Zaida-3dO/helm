@@ -304,6 +304,26 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
         "never stored twice, nor taken as an answer"
     );
     assert_eq!(subs(&e.db, &chat).len(), 1);
+    // Resent while its turn runs (Helm restarted before the ack): still stored once, and the
+    // turn is watched so the phone hears how it goes.
+    sql(
+        &e.db,
+        "UPDATE chats SET status = 'running' WHERE id = ?1",
+        &[&chat],
+    );
+    let running = place_async(&e.ctx, msg("hub-1", "hello from the phone"))
+        .await
+        .unwrap();
+    assert!(
+        matches!(&running, Placed::Sent { chat: c, .. } if *c == chat),
+        "{running:?}"
+    );
+    assert_eq!(subs(&e.db, &chat).len(), 1);
+    sql(
+        &e.db,
+        "UPDATE chats SET status = 'idle' WHERE id = ?1",
+        &[&chat],
+    );
     // The next message attaches to the tagged chat.
     let next = place_async(&e.ctx, msg("hub-2", "and again"))
         .await

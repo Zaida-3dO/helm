@@ -369,20 +369,37 @@ pub struct Ctx {
 /// Put one message into its chat (blocking). `Err` leaves it unacknowledged at the hub.
 pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String> {
     let sid = telegram::submission_id(&msg.id);
-    let stored =
+    // Already stored (a resend): its chat, whether a turn runs there now, and the row the turn
+    // starts after (its user row, or the end of the chat while it still waits in the queue).
+    let stored: Option<(String, Option<String>, Option<i64>)> =
         c.db.snapshot(|tx| {
             tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM submissions WHERE id = ?1)",
+                "SELECT s.chat_id, c.status,
+                        (SELECT MAX(m.id) FROM messages m
+                         WHERE m.chat_id = s.chat_id AND m.source_key = 'u:' || s.id)
+                 FROM submissions s LEFT JOIN chats c ON c.id = s.chat_id WHERE s.id = ?1",
                 [&sid],
-                |r| r.get::<_, bool>(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
+            .optional()
         })
-        .unwrap_or(false);
-    if stored
-        || c.answered
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .contains(&msg.id)
+        .ok()
+        .flatten();
+    if let Some((chat, status, row)) = stored {
+        // While its turn runs, watch it: after a restart between storing it and the hub's
+        // acknowledgement, nothing else would tell the phone how that turn goes.
+        let busy = status.is_some_and(|s| ChatStatus::parse(&s).is_busy());
+        return Ok(if busy {
+            let baseline = row.unwrap_or_else(|| max_row(&c.db, &chat));
+            Placed::Sent { chat, baseline }
+        } else {
+            Placed::Already
+        });
+    }
+    if c.answered
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(&msg.id)
     {
         return Ok(Placed::Already);
     }
