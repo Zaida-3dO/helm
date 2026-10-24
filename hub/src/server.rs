@@ -1,17 +1,19 @@
-//! HTTP routes: `/health` (open), `/mcp` (bearer token) and `/relay` (Helm's line, a
-//! `relay`-scope token).
+//! HTTP routes: `/health` (open), `/mcp` (bearer token), `/relay` (Helm's line, a
+//! `relay`-scope token) and `/telegram/update` (Telegram updates posted by another service
+//! that already runs the bot, a `telegram`-scope token).
 
 use crate::apptools;
 use crate::auth::{Client, Scope, Tokens};
 use crate::mcp::{self, Options};
 use crate::relay::{Line, MAX_FRAME};
 use crate::store::Store;
+use crate::telegram::{self, Bridge};
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -22,6 +24,8 @@ pub struct AppState {
     pub tokens: Tokens,
     pub options: Options,
     pub line: Arc<Line>,
+    /// The Telegram bot, or `None` when it is off.
+    pub telegram: Option<Arc<Bridge>>,
 }
 
 /// The hub pings the line this often; a line silent for three intervals is dropped.
@@ -35,6 +39,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/mcp", get(no_stream).post(post_mcp).delete(no_stream))
         .route("/relay", get(relay))
+        .route("/telegram/update", post(telegram_update))
         .layer(DefaultBodyLimit::max(MAX_REQUEST))
         .with_state(state)
 }
@@ -73,6 +78,10 @@ fn unauthorized() -> Response {
         .into_response()
 }
 
+fn refused(code: StatusCode, why: &str) -> Response {
+    (code, Json(json!({ "error": why }))).into_response()
+}
+
 async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
     let auth = headers
         .get(header::AUTHORIZATION)
@@ -80,13 +89,22 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
     let Some(client) = state.tokens.check(auth).cloned() else {
         return unauthorized();
     };
-    if client.scope == Scope::Relay {
-        // Least privilege: Helm's line token opens the line and nothing else.
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "a relay token cannot call the MCP surface" })),
-        )
-            .into_response();
+    // Least privilege: Helm's line token opens the line and nothing else, and a forwarder's
+    // token posts Telegram updates and nothing else.
+    match client.scope {
+        Scope::Relay => {
+            return refused(
+                StatusCode::FORBIDDEN,
+                "a relay token cannot call the MCP surface",
+            )
+        }
+        Scope::Telegram => {
+            return refused(
+                StatusCode::FORBIDDEN,
+                "a telegram token cannot call the MCP surface",
+            )
+        }
+        Scope::ReadOnly | Scope::ReadWrite => {}
     }
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -239,6 +257,51 @@ async fn run_line(mut socket: WebSocket, line: Arc<Line>, client: String) {
     }
     line.detach(generation);
     eprintln!("relay: line down ({client})");
+}
+
+/// `/telegram/update`: for a bot that another service already runs (only one process may
+/// consume a bot's updates), that service posts each Telegram Update it received, or an array
+/// of them. They take the same path as polled ones: allow-list, private chats, commands, and
+/// one handling per `update_id`.
+async fn telegram_update(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let Some(client) = state.tokens.check(auth) else {
+        return unauthorized();
+    };
+    if client.scope != Scope::Telegram {
+        return refused(
+            StatusCode::FORBIDDEN,
+            "only a telegram token may post updates",
+        );
+    }
+    let Some(bridge) = state.telegram.clone() else {
+        return refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the Telegram bot is off on this hub",
+        );
+    };
+    let updates = match serde_json::from_slice::<Value>(&body) {
+        Ok(Value::Array(updates)) => updates,
+        Ok(update @ Value::Object(_)) => vec![update],
+        _ => {
+            return refused(
+                StatusCode::BAD_REQUEST,
+                "the body must be a Telegram Update object or an array of them",
+            )
+        }
+    };
+    let mut handled = Vec::with_capacity(updates.len());
+    for u in &updates {
+        handled.push(bridge.on_update(u, telegram::now_ms()).await.as_str());
+    }
+    eprintln!("{} telegram/update {}", client.name, handled.join(","));
+    Json(json!({ "ok": true, "handled": handled })).into_response()
 }
 
 /// A log label: the method, plus the tool name for tool calls. Never arguments.

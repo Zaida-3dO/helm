@@ -16,6 +16,7 @@ use tokio_tungstenite::tungstenite::Message;
 const LINE: &str = "line-token-0123456789abcdefghij";
 const REMOTE: &str = "remote-token-0123456789abcdefghi";
 const MEMORY_ONLY: &str = "memory-token-0123456789abcdefgh";
+const FORWARDER: &str = "forwarder-token-0123456789abcdef";
 
 struct Hub {
     addr: String,
@@ -24,7 +25,8 @@ struct Hub {
 
 async fn start() -> Hub {
     let tokens = Tokens::parse(&format!(
-        "helm-line:{LINE}:relay, remote:{REMOTE}:ro+app, notes:{MEMORY_ONLY}:rw"
+        "helm-line:{LINE}:relay, remote:{REMOTE}:ro+app, notes:{MEMORY_ONLY}:rw, \
+         forwarder:{FORWARDER}:telegram"
     ))
     .unwrap();
     let (line, _upstream) = Line::new();
@@ -36,6 +38,7 @@ async fn start() -> Hub {
             allow_mutate: false,
         },
         line: line.clone(),
+        telegram: None,
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -124,16 +127,23 @@ async fn only_a_relay_token_opens_the_line() {
         "an MCP token cannot open it"
     );
     assert_eq!(connect(&hub, MEMORY_ONLY).await.err(), Some(403));
+    assert_eq!(
+        connect(&hub, FORWARDER).await.err(),
+        Some(403),
+        "a telegram token cannot open it"
+    );
     let mut ws = connect(&hub, LINE).await.expect("the relay token opens it");
     assert_eq!(next_json(&mut ws).await["type"], "welcome");
-    // ...and the relay token reaches nothing on the MCP surface.
-    let (status, _) = mcp(
-        &hub,
-        LINE,
-        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
-    )
-    .await;
-    assert_eq!(status, 403);
+    // ...and neither the relay token nor a telegram token reaches the MCP surface.
+    for token in [LINE, FORWARDER] {
+        let (status, _) = mcp(
+            &hub,
+            token,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        )
+        .await;
+        assert_eq!(status, 403);
+    }
 }
 
 #[tokio::test]

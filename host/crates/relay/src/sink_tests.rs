@@ -67,6 +67,15 @@ fn a_question_goes_up_once_with_numbered_options_and_no_status_meanwhile() {
     // Answered: the status comes back (the hub posts a new status message).
     s.question = None;
     assert_eq!(m.step(&s, T0 + 20_000), vec![Up::Status("Working…".into())]);
+    // An approval Telegram may not give: said once, then quiet until it is answered in Helm.
+    s.blocked = Some(("a1".into(), "Waiting for you in Helm: Allow Bash?".into()));
+    assert_eq!(
+        m.step(&s, T0 + 30_000),
+        vec![Up::Final("Waiting for you in Helm: Allow Bash?".into())]
+    );
+    assert!(m.step(&s, T0 + 40_000).is_empty(), "said once");
+    s.blocked = None;
+    assert_eq!(m.step(&s, T0 + 50_000), vec![Up::Status("Working…".into())]);
     assert!(!m.done);
 }
 
@@ -196,6 +205,7 @@ fn env() -> Env {
         folder: plain_path(&dir.path().join("prof").join("telegram")),
         policy: TagPolicy::default(),
         answered: Arc::new(Mutex::new(VecDeque::new())),
+        answered_path: telegram::answered_path(&dir.path().join("prof")),
     };
     Env { dir, db, ops, ctx }
 }
@@ -247,6 +257,7 @@ async fn settle() {
 fn chat_of(p: &Placed) -> String {
     match p {
         Placed::Sent { chat, .. } | Placed::Answered { chat, .. } => chat.clone(),
+        Placed::Already => String::new(),
     }
 }
 
@@ -304,6 +315,17 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
             .count(),
         1
     );
+    // A message that already answered a question (remembered across a restart) is resent:
+    // it is acknowledged and never becomes a prompt.
+    let path = e.ctx.answered_path.clone();
+    telegram::remember_answered(&path, &mut VecDeque::new(), "hub-3").unwrap();
+    let restarted = Ctx {
+        answered: Arc::new(Mutex::new(telegram::load_answered(&path))),
+        ..e.ctx.clone()
+    };
+    let dup = place_async(&restarted, msg("hub-3", "2")).await.unwrap();
+    assert_eq!(dup, Placed::Already);
+    assert_eq!(subs(&e.db, &chat).len(), 2);
     drop(e.dir);
 }
 

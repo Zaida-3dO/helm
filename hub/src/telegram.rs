@@ -2,6 +2,14 @@
 //!
 //! - **Off until configured.** The bot runs only when the NAS env file holds a
 //!   bot token *and* at least one allowed user id. Either missing: no polling.
+//! - **Two ways in.** By default the hub long-polls `getUpdates` itself. Only
+//!   one process may consume a bot's updates, so when another service already
+//!   runs the bot, `HUB_TELEGRAM_RECEIVE=off` stops the polling and that
+//!   service posts what it received to `/telegram/update` instead. Either way
+//!   each update goes through [`Bridge::on_update`], which handles an
+//!   `update_id` once (a forwarder's retry, or the two inputs overlapping).
+//!   `/helm <text>` is read as `<text>`, so a forwarder on a shared bot can
+//!   route Helm's messages by that one command.
 //! - **Deny by default.** A message whose sender is not on the allow-list is
 //!   dropped: nothing is forwarded to Helm and nothing is sent back, so the bot
 //!   does not even confirm it exists.
@@ -13,8 +21,11 @@
 //!   message is queued in order and the sender is told at once. A queued
 //!   message older than the queue lifetime is dropped (and the user is told how
 //!   many). On reconnect the queue is delivered in order, each carrying its age
-//!   so Helm can mark it "sent N min ago". `/cancel` drops the queue; `/stop`
-//!   asks Helm to stop the running turn.
+//!   so Helm can mark it "sent N min ago". A message Helm has not acknowledged
+//!   within [`RESEND_AFTER`] goes down the line again (Helm gives up on a busy
+//!   chat sooner than that), until it is acknowledged or outlives the queue
+//!   lifetime. `/cancel` drops the queue; `/stop` asks Helm to stop the
+//!   running turn.
 //! - **Never silent while working.** Helm sends the live status as
 //!   `telegram_status`; the bot keeps ONE status message and edits it in place,
 //!   at most once per [`EDIT_INTERVAL`]. `telegram_final` arrives as a NEW
@@ -39,6 +50,11 @@ pub const MAX_TEXT: usize = 4000;
 pub const MAX_STATUS: usize = 1000;
 /// How often the bridge flushes its queue and its pending status edit.
 pub const TICK: Duration = Duration::from_millis(500);
+/// A message sent down the line and not acknowledged this long after is sent again on the same
+/// line. Helm retries a busy chat for less than this before giving up without an ack.
+pub const RESEND_AFTER: Duration = Duration::from_secs(45);
+/// How many recent `update_id`s are remembered, so an update is handled once.
+pub const SEEN_UPDATES: usize = 256;
 
 pub const QUEUED: &str =
     "Helm is offline. Queued; it will be delivered when Helm reconnects. /cancel drops the queue.";
@@ -60,6 +76,16 @@ pub struct ApiError {
     pub description: String,
 }
 
+/// How updates reach the bot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Receive {
+    /// The hub long-polls `getUpdates` itself.
+    Poll,
+    /// Another service already runs the bot and posts its updates to `/telegram/update`; the
+    /// hub never polls, but still sends, edits and deletes messages with the bot token.
+    Off,
+}
+
 #[derive(Debug, Clone)]
 pub struct TelegramConfig {
     pub token: Option<String>,
@@ -67,15 +93,18 @@ pub struct TelegramConfig {
     pub api_base: String,
     pub queue_lifetime: Duration,
     pub queue_max: usize,
+    pub receive: Receive,
 }
 
 impl TelegramConfig {
     /// Reads `HUB_TELEGRAM_BOT_TOKEN`, `HUB_TELEGRAM_ALLOWED_USERS` (comma-separated numeric
     /// ids), `HUB_TELEGRAM_API` (default the public Bot API), `HUB_TELEGRAM_QUEUE_MINUTES`
-    /// (default 120) and `HUB_TELEGRAM_QUEUE_MAX` (default 50).
+    /// (default 120), `HUB_TELEGRAM_QUEUE_MAX` (default 50) and `HUB_TELEGRAM_RECEIVE`
+    /// (`poll`, the default, or `off`).
     pub fn from_env() -> Result<Self, String> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let allowed = parse_allowed(&var("HUB_TELEGRAM_ALLOWED_USERS").unwrap_or_default())?;
+        let receive = parse_receive(var("HUB_TELEGRAM_RECEIVE").as_deref())?;
         let minutes = match var("HUB_TELEGRAM_QUEUE_MINUTES") {
             Some(m) => m
                 .trim()
@@ -103,6 +132,7 @@ impl TelegramConfig {
                 .to_owned(),
             queue_lifetime: Duration::from_secs(minutes * 60),
             queue_max,
+            receive,
         })
     }
 
@@ -115,6 +145,14 @@ impl TelegramConfig {
         } else {
             None
         }
+    }
+}
+
+pub fn parse_receive(value: Option<&str>) -> Result<Receive, String> {
+    match value.map(str::trim) {
+        None | Some("poll") => Ok(Receive::Poll),
+        Some("off") => Ok(Receive::Off),
+        Some(_) => Err("HUB_TELEGRAM_RECEIVE must be poll or off".to_owned()),
     }
 }
 
@@ -138,6 +176,8 @@ struct Queued {
     sent_at_ms: i64,
     /// The line generation it went down, while it waits for Helm's acknowledgement.
     sent_on: Option<u64>,
+    /// When it last went down that line, for the resend timer.
+    sent_down_ms: i64,
 }
 
 #[derive(Default)]
@@ -149,6 +189,8 @@ struct State {
     pending_status: Option<String>,
     last_edit_ms: Option<i64>,
     bot_name: Option<String>,
+    /// The most recent `update_id`s handled, oldest first.
+    seen: VecDeque<i64>,
 }
 
 /// What [`Bridge::on_update`] did, for tests and the log.
@@ -159,6 +201,20 @@ pub enum Handled {
     Forwarded,
     Queued,
     Command,
+    /// An `update_id` already handled: dropped.
+    Duplicate,
+}
+
+impl Handled {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Handled::Ignored => "ignored",
+            Handled::Forwarded => "forwarded",
+            Handled::Queued => "queued",
+            Handled::Command => "command",
+            Handled::Duplicate => "duplicate",
+        }
+    }
 }
 
 pub struct Bridge {
@@ -167,16 +223,25 @@ pub struct Bridge {
     allowed: Vec<i64>,
     lifetime_ms: i64,
     queue_max: usize,
+    receive: Receive,
     state: Mutex<State>,
     /// Serialises Telegram sends, so a status edit and the final answer never interleave.
     ops: tokio::sync::Mutex<()>,
 }
 
-fn now_ms() -> i64 {
+pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// `/helm <text>` (or `/helm@<bot> <text>`) is read as `<text>`: on a bot another service
+/// shares, its forwarder can route Helm's messages by that one command. `None`: no such prefix.
+fn strip_helm(text: &str) -> Option<&str> {
+    let t = text.trim_start();
+    let (word, rest) = t.split_at(t.find(char::is_whitespace).unwrap_or(t.len()));
+    (word.split('@').next() == Some("/helm")).then(|| rest.trim_start())
 }
 
 fn cut(s: &str, max: usize) -> String {
@@ -203,6 +268,7 @@ impl Bridge {
             allowed: cfg.allowed.clone(),
             lifetime_ms: cfg.queue_lifetime.as_millis() as i64,
             queue_max: cfg.queue_max,
+            receive: cfg.receive,
             state: Mutex::new(State::default()),
             ops: tokio::sync::Mutex::new(()),
         }
@@ -250,8 +316,18 @@ impl Bridge {
         Ok(())
     }
 
-    /// One update from `getUpdates`.
+    /// One update, from `getUpdates` or posted to `/telegram/update`.
     pub async fn on_update(&self, update: &Value, now: i64) -> Handled {
+        if let Some(id) = update.get("update_id").and_then(Value::as_i64) {
+            let mut st = self.st();
+            if st.seen.contains(&id) {
+                return Handled::Duplicate;
+            }
+            if st.seen.len() >= SEEN_UPDATES {
+                st.seen.pop_front();
+            }
+            st.seen.push_back(id);
+        }
         let Some(msg) = update.get("message") else {
             return Handled::Ignored;
         };
@@ -270,6 +346,14 @@ impl Bridge {
         let Some(text) = msg.get("text").and_then(Value::as_str) else {
             self.reply(chat, TEXT_ONLY).await;
             return Handled::Command;
+        };
+        let text = match strip_helm(text) {
+            Some("") => {
+                self.reply(chat, HELLO).await;
+                return Handled::Command;
+            }
+            Some(rest) => rest,
+            None => text,
         };
         let command = text
             .split_whitespace()
@@ -323,6 +407,7 @@ impl Bridge {
                         .map(|s| s * 1000)
                         .unwrap_or(now),
                     sent_on: None,
+                    sent_down_ms: now,
                 });
                 false
             }
@@ -344,25 +429,36 @@ impl Bridge {
     }
 
     /// Expire old messages, take back unacknowledged ones from a line that went away, and send
-    /// what waits down the current line, in order. Returns how many were sent.
+    /// what waits down the current line, in order, along with any message that line has not
+    /// acknowledged within [`RESEND_AFTER`]. Returns how many were sent.
     pub async fn flush(&self, now: i64) -> usize {
         let generation = self.line.generation();
-        let (frames, expired) = {
+        let resend_ms = RESEND_AFTER.as_millis() as i64;
+        let (frames, expired, undelivered) = {
             let mut st = self.st();
             for q in st.queue.iter_mut() {
                 if q.sent_on.is_some() && q.sent_on != generation {
                     q.sent_on = None; // that line is gone; resend on the next
                 }
             }
-            let before = st.queue.len();
+            // Past the lifetime a message goes, waiting or unacknowledged alike: one Helm keeps
+            // refusing would otherwise be resent for ever.
             let lifetime = self.lifetime_ms;
-            st.queue
-                .retain(|q| q.sent_on.is_some() || now - q.sent_at_ms <= lifetime);
-            let expired = before - st.queue.len();
+            let (mut expired, mut undelivered) = (0, 0);
+            st.queue.retain(|q| {
+                let keep = now - q.sent_at_ms <= lifetime;
+                match (keep, q.sent_on) {
+                    (false, None) => expired += 1,
+                    (false, Some(_)) => undelivered += 1,
+                    _ => {}
+                }
+                keep
+            });
             let bot = st.bot_name.clone();
             let mut frames = vec![];
             if let Some(gen) = generation {
-                for q in st.queue.iter_mut().filter(|q| q.sent_on.is_none()) {
+                let due = |q: &Queued| q.sent_on.is_none() || now - q.sent_down_ms >= resend_ms;
+                for q in st.queue.iter_mut().filter(|q| due(q)) {
                     let age = (now - q.sent_at_ms) / 60_000;
                     frames.push((
                         json!({
@@ -376,9 +472,10 @@ impl Bridge {
                         q.id.clone(),
                     ));
                     q.sent_on = Some(gen);
+                    q.sent_down_ms = now;
                 }
             }
-            (frames, expired)
+            (frames, expired, undelivered)
         };
         let mut sent = 0;
         for (frame, id) in frames {
@@ -402,6 +499,18 @@ impl Bridge {
             } else {
                 format!(
                     "{expired} queued messages expired before Helm reconnected and were dropped."
+                )
+            };
+            self.reply(chat, &text).await;
+        }
+        if undelivered > 0 {
+            let chat = self.reply_chat();
+            let text = if undelivered == 1 {
+                "1 message could not be delivered to Helm in time and was dropped.".to_owned()
+            } else {
+                format!(
+                    "{undelivered} messages could not be delivered to Helm in time and were \
+                     dropped."
                 )
             };
             self.reply(chat, &text).await;
@@ -514,7 +623,8 @@ impl Bridge {
         }
     }
 
-    /// Run the bot: long-poll for updates, tick the queue and status, consume Helm's frames.
+    /// Run the bot: tick the queue and status, consume Helm's frames, and long-poll for updates
+    /// unless another service that already runs the bot posts them.
     pub async fn run(
         self: Arc<Self>,
         mut upstream: tokio::sync::mpsc::UnboundedReceiver<Upstream>,
@@ -538,6 +648,9 @@ impl Bridge {
                 up.on_upstream(u).await;
             }
         });
+        if self.receive == Receive::Off {
+            return;
+        }
         let mut offset: i64 = 0;
         let mut backoff = Duration::from_secs(1);
         loop {

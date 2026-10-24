@@ -13,16 +13,19 @@
 //!   retried here for a short while first, because the hub resends an unacknowledged message
 //!   only on the next line.
 //! - While the chat has a question waiting (an agent's multiple-choice or free-text question),
-//!   the reply answers it: a number picks that option. Approvals, plans and trust prompts are
-//!   never answered from Telegram.
+//!   the reply answers it: a number picks that option, and the phone is told what was answered.
+//!   Approvals, plans and trust prompts are never answered from Telegram.
+//! - A reply that answered a question is remembered by its hub id in the profile, so the same
+//!   message resent after a restart is not taken as a new prompt.
 //! - `/stop` stops the tagged chat's turn.
 //!
 //! **Out.** While a Telegram turn runs, a mirror task watches the chat (its stored status, the
 //! live tools and the transcript) and sends ONE status line up the line, only when it changes and
 //! at most every [`STATUS_GAP_MS`]; the hub edits a single Telegram message in place. When the
 //! turn ends, the final answer goes up as a new message (the hub then deletes the status). A
-//! question goes up as a new message with numbered options. The mirror is harness-level: the
-//! agent never has to remember to reply.
+//! question goes up as a new message with numbered options; an approval, plan or trust prompt
+//! goes up once as a note that it waits in Helm's window. The mirror is harness-level: the agent
+//! never has to remember to reply.
 
 use crate::client::{BoxFut, LineHandle, TelegramMessage, TelegramSink};
 use crate::exec::AppExecutor;
@@ -74,6 +77,9 @@ pub struct Snap {
     pub recent: Vec<String>,
     /// A question waiting for the user: its request id and the rendered message.
     pub question: Option<(String, String)>,
+    /// Something only Helm's window may answer (an approval, a plan, a trust prompt): its
+    /// request id and the note for the phone.
+    pub blocked: Option<(String, String)>,
     /// The last assistant text since the turn's baseline.
     pub final_text: Option<String>,
     /// The highest transcript row id now.
@@ -123,7 +129,7 @@ impl Mirror {
         if s.busy {
             self.started = true;
             self.idle_seen = 0;
-            if let Some((id, text)) = &s.question {
+            if let Some((id, text)) = s.question.as_ref().or(s.blocked.as_ref()) {
                 if self.asked.insert(id.clone()) {
                     // A new message, so the phone notifies; the hub removes the status.
                     out.push(Up::Final(text.clone()));
@@ -175,30 +181,91 @@ struct RealPort<'a> {
     folder: &'a str,
 }
 
-impl ChatPort for RealPort<'_> {
-    fn facts(&self, chat_id: &str) -> Option<ChatFacts> {
-        self.db
+/// Whether the chat is archived and the tokens it has used; `None` when it no longer exists.
+fn chat_facts(db: &Database, chat_id: &str) -> Option<ChatFacts> {
+    db.snapshot(|tx| {
+        tx.query_row(
+            "SELECT c.archived,
+                    (SELECT COALESCE(SUM(
+                         COALESCE(json_extract(m.details, '$.usage.inputTokens'), 0)
+                       + COALESCE(json_extract(m.details, '$.usage.outputTokens'), 0)), 0)
+                     FROM messages m WHERE m.chat_id = c.id AND m.details IS NOT NULL
+                       AND json_valid(m.details))
+             FROM chats c WHERE c.id = ?1",
+            [chat_id],
+            |r| {
+                Ok(ChatFacts {
+                    archived: r.get(0)?,
+                    tokens: r.get::<_, i64>(1)?.max(0) as u64,
+                })
+            },
+        )
+        .optional()
+    })
+    .ok()
+    .flatten()
+}
+
+/// The active Telegram chat, as Settings shows it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramChatView {
+    pub id: String,
+    pub title: String,
+    pub started_at: i64,
+    /// Tokens used since the chat was tagged (what the token limit counts).
+    pub tokens_used: u64,
+}
+
+/// Settings → Hub's Telegram section: the chat new messages go to, and the limits.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramView {
+    /// `None` when no chat holds the tag (or it has expired): the next message starts one.
+    pub chat: Option<TelegramChatView>,
+    pub max_age_hours: i64,
+    pub max_tokens: u64,
+}
+
+pub fn telegram_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> TelegramView {
+    let policy = telegram::load_policy(&telegram::policy_path(profile_dir));
+    let chat = telegram::load_tag(&telegram::tag_path(profile_dir)).and_then(|tag| {
+        let facts = chat_facts(db, &tag.chat_id);
+        if telegram::expired(&tag, facts, &policy, now).is_some() {
+            return None;
+        }
+        let title: Option<String> = db
             .snapshot(|tx| {
                 tx.query_row(
-                    "SELECT c.archived,
-                            (SELECT COALESCE(SUM(
-                                 COALESCE(json_extract(m.details, '$.usage.inputTokens'), 0)
-                               + COALESCE(json_extract(m.details, '$.usage.outputTokens'), 0)), 0)
-                             FROM messages m WHERE m.chat_id = c.id AND m.details IS NOT NULL
-                               AND json_valid(m.details))
-                     FROM chats c WHERE c.id = ?1",
-                    [chat_id],
-                    |r| {
-                        Ok(ChatFacts {
-                            archived: r.get(0)?,
-                            tokens: r.get::<_, i64>(1)?.max(0) as u64,
-                        })
-                    },
+                    "SELECT title FROM chats WHERE id = ?1",
+                    [&tag.chat_id],
+                    |r| r.get(0),
                 )
                 .optional()
             })
             .ok()
             .flatten()
+            .flatten();
+        Some(TelegramChatView {
+            title: title.unwrap_or_else(|| "Telegram".into()),
+            started_at: tag.started_at,
+            tokens_used: facts
+                .map(|f| f.tokens.saturating_sub(tag.tokens_at_start))
+                .unwrap_or(0),
+            id: tag.chat_id,
+        })
+    });
+    let p = telegram::PolicyFile::from(policy);
+    TelegramView {
+        chat,
+        max_age_hours: p.max_age_hours,
+        max_tokens: p.max_tokens,
+    }
+}
+
+impl ChatPort for RealPort<'_> {
+    fn facts(&self, chat_id: &str) -> Option<ChatFacts> {
+        chat_facts(self.db, chat_id)
     }
 
     fn create(&self, title: &str) -> Result<String, String> {
@@ -225,8 +292,14 @@ impl ChatPort for RealPort<'_> {
 pub enum Placed {
     /// Stored as a Telegram-origin submission.
     Sent { chat: String, baseline: i64 },
-    /// Answered the chat's waiting question.
-    Answered { chat: String, baseline: i64 },
+    /// Answered the chat's waiting question with `value`.
+    Answered {
+        chat: String,
+        baseline: i64,
+        value: String,
+    },
+    /// This hub id already answered a question (a resend): nothing more to do.
+    Already,
 }
 
 /// How a Telegram message lands on a busy chat: the user's send mode, never an abort.
@@ -237,16 +310,29 @@ pub fn host_mode(mode: SendMode) -> HostSendMode {
     }
 }
 
+fn is_answerable(i: &helm_chats::types::Interaction) -> bool {
+    i.attention == Some(InteractionAttention::Question)
+        && matches!(
+            i.method,
+            InteractionMethod::Select | InteractionMethod::Input
+        )
+}
+
 /// The question a chat is waiting on that Telegram may answer: a multiple-choice or free-text
 /// question. Approvals, plans and trust prompts are never offered.
 pub fn answerable(rt: &ChatRuntime, chat: &str) -> Option<helm_chats::types::Interaction> {
-    rt.live_thread(chat)?.interactions.into_iter().find(|i| {
-        i.attention == Some(InteractionAttention::Question)
-            && matches!(
-                i.method,
-                InteractionMethod::Select | InteractionMethod::Input
-            )
-    })
+    rt.live_thread(chat)?
+        .interactions
+        .into_iter()
+        .find(is_answerable)
+}
+
+/// The first waiting prompt Telegram may not answer (an approval, a plan, a trust prompt).
+fn blocking(rt: &ChatRuntime, chat: &str) -> Option<helm_chats::types::Interaction> {
+    rt.live_thread(chat)?
+        .interactions
+        .into_iter()
+        .find(|i| i.attention.is_some() && !is_answerable(i))
 }
 
 fn max_row(db: &Database, chat: &str) -> i64 {
@@ -271,12 +357,21 @@ pub struct Ctx {
     /// The folder new Telegram chats start in.
     pub folder: String,
     pub policy: TagPolicy,
-    /// Hub ids that answered a question, so a resend does not answer twice.
+    /// Hub ids that answered a question, so a resend does not answer twice (or turn into a
+    /// prompt), and the file they are kept in.
     pub answered: Arc<Mutex<VecDeque<String>>>,
+    pub answered_path: PathBuf,
 }
 
 /// Put one message into its chat (blocking). `Err` leaves it unacknowledged at the hub.
 pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String> {
+    if c.answered
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(&msg.id)
+    {
+        return Ok(Placed::Already);
+    }
     let port = RealPort {
         db: &c.db,
         rt: &c.rt,
@@ -288,30 +383,28 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         telegram::active_chat(&c.tag_path, &port, &c.policy, msg.bot.as_deref(), now)?;
     let baseline = max_row(&c.db, &chat);
     if let Some(q) = answerable(&c.rt, &chat) {
-        let seen = {
-            let a = c.answered.lock().unwrap_or_else(|p| p.into_inner());
-            a.contains(&msg.id)
-        };
-        if !seen {
-            let value = match q.method {
-                InteractionMethod::Select => {
-                    telegram::question_answer(q.options.as_deref().unwrap_or(&[]), &msg.text)
-                }
-                _ => msg.text.trim().to_owned(),
-            };
-            c.handle
-                .block_on(c.ops.invoke(
-                    "interaction_answer",
-                    json!({ "chatId": chat, "requestId": q.id, "value": value }),
-                ))
-                .map_err(|e| e.message)?;
-            let mut a = c.answered.lock().unwrap_or_else(|p| p.into_inner());
-            a.push_back(msg.id.clone());
-            while a.len() > 256 {
-                a.pop_front();
+        let value = match q.method {
+            InteractionMethod::Select => {
+                telegram::question_answer(q.options.as_deref().unwrap_or(&[]), &msg.text)
             }
+            _ => msg.text.trim().to_owned(),
+        };
+        c.handle
+            .block_on(c.ops.invoke(
+                "interaction_answer",
+                json!({ "chatId": chat, "requestId": q.id, "value": value }),
+            ))
+            .map_err(|e| e.message)?;
+        let mut a = c.answered.lock().unwrap_or_else(|p| p.into_inner());
+        if telegram::remember_answered(&c.answered_path, &mut a, &msg.id).is_err() {
+            // Answered all the same; only a resend after a restart could repeat it.
+            log::warn!("relay: the answered Telegram message could not be recorded");
         }
-        return Ok(Placed::Answered { chat, baseline });
+        return Ok(Placed::Answered {
+            chat,
+            baseline,
+            value,
+        });
     }
     let mode =
         c.db.snapshot(|t| {
@@ -415,11 +508,18 @@ pub fn snapshot(rt: &ChatRuntime, db: &Database, chat: &str, baseline: i64) -> S
         };
         (q.id, text)
     });
+    let blocked = blocking(rt, chat).map(|b| {
+        (
+            b.id,
+            telegram::render_blocked(b.title.as_deref(), b.message.as_deref()),
+        )
+    });
     Snap {
         busy,
         running,
         recent,
         question,
+        blocked,
         final_text,
         max_id,
         queued,
@@ -459,7 +559,6 @@ pub struct ChatSink {
     ops: OnceLock<Arc<dyn OpInvoker>>,
     up: OnceLock<Arc<dyn Upstream>>,
     profile_dir: PathBuf,
-    policy: TagPolicy,
     serial: tokio::sync::Mutex<()>,
     answered: Arc<Mutex<VecDeque<String>>>,
     watching: Mutex<Option<(String, tokio::task::JoinHandle<()>)>>,
@@ -476,14 +575,14 @@ fn plain_path(p: &std::path::Path) -> String {
 
 impl ChatSink {
     pub fn new(exec: Arc<AppExecutor>, profile_dir: PathBuf) -> Self {
+        let answered = telegram::load_answered(&telegram::answered_path(&profile_dir));
         ChatSink {
             exec,
             ops: OnceLock::new(),
             up: OnceLock::new(),
             profile_dir,
-            policy: TagPolicy::default(),
             serial: tokio::sync::Mutex::new(()),
-            answered: Arc::new(Mutex::new(VecDeque::new())),
+            answered: Arc::new(Mutex::new(answered)),
             watching: Mutex::new(None),
         }
     }
@@ -521,8 +620,10 @@ impl ChatSink {
             handle: tokio::runtime::Handle::current(),
             tag_path: telegram::tag_path(&self.profile_dir),
             folder: plain_path(&self.profile_dir.join("telegram")),
-            policy: self.policy,
+            // Read per delivery, so a change in Settings applies to the next message.
+            policy: telegram::load_policy(&telegram::policy_path(&self.profile_dir)),
             answered: self.answered.clone(),
+            answered_path: telegram::answered_path(&self.profile_dir),
         })
     }
 
@@ -559,7 +660,20 @@ impl TelegramSink for ChatSink {
             let placed = tokio::task::spawn_blocking(move || place(&c2, &msg, helm_core::now_ms()))
                 .await
                 .map_err(|_| "The delivery did not finish.".to_owned())??;
-            let (Placed::Sent { chat, baseline } | Placed::Answered { chat, baseline }) = placed;
+            let (chat, baseline) = match placed {
+                Placed::Already => return Ok(()),
+                Placed::Sent { chat, baseline } => (chat, baseline),
+                Placed::Answered {
+                    chat,
+                    baseline,
+                    value,
+                } => {
+                    if let Some(up) = self.up.get() {
+                        up.final_answer(&telegram::render_answered(&value));
+                    }
+                    (chat, baseline)
+                }
+            };
             self.watch(&c, &chat, baseline);
             Ok(())
         })

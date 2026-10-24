@@ -7,6 +7,8 @@ import type { MessageRow } from '../api/types.ts';
 import { EditMessage, type EditState } from './EditMessage.tsx';
 import { Markdown, type LinkTarget } from './Markdown.tsx';
 import { MessageImages } from './MessageImages.tsx';
+import { bubbleText, fromTelegram } from './origin.ts';
+import { IconPaperPlane } from '../ui/icons.tsx';
 import { ReplyActions, UserActions } from './MessageActions.tsx';
 import { rowFootersFor, type SlotContext } from './slots.ts';
 import { Glyph } from './icons.tsx';
@@ -109,12 +111,17 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
   if (row.role === 'user') {
     return (
       <div className={`row row-user status-${row.status}`} {...common} title={new Date(row.timestamp).toLocaleString()}>
+        {fromTelegram(row) && (
+          <div className="row-origin muted" data-testid="row-origin" data-origin="telegram" title="Sent from Telegram">
+            <IconPaperPlane size={12} /> Telegram
+          </div>
+        )}
         {ctx.editing?.rowId === row.id && ctx.onResend && ctx.onCancelEdit ? (
           <EditMessage edit={ctx.editing} onResend={ctx.onResend} onCancel={ctx.onCancelEdit} />
         ) : (
           <div className="bubble">
             <MessageImages chatId={ctx.chatId} images={row.details?.images} />
-            <Markdown text={row.text} onLink={ctx.onLink} />
+            <Markdown text={bubbleText(row)} onLink={ctx.onLink} />
           </div>
         )}
         {row.status !== 'complete' && <div className="row-meta muted">{row.status}</div>}

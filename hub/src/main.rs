@@ -4,7 +4,7 @@ use helm_hub::mcp::Options;
 use helm_hub::relay::Line;
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
-use helm_hub::telegram::{Bridge, HttpApi, TelegramConfig};
+use helm_hub::telegram::{Bridge, HttpApi, Receive, TelegramConfig};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -19,13 +19,16 @@ USAGE:
 ENVIRONMENT:
   HUB_DB            SQLite file (default /data/hub.db)
   HUB_BIND          listen address for serve (default 0.0.0.0:8000)
-  HUB_TOKENS        client:token[:ro|rw|ro+app|rw+app|relay],... (required for serve)
+  HUB_TOKENS        client:token[:ro|rw|ro+app|rw+app|relay|telegram],... (required for serve)
   HUB_ALLOW_MUTATE  1 to offer memory_update and memory_delete
   HUB_TELEGRAM_BOT_TOKEN      the bot's token; without it the bot stays off
   HUB_TELEGRAM_ALLOWED_USERS  numeric Telegram user ids; empty denies everyone
   HUB_TELEGRAM_API            Bot API base (default the public API; a fake in tests)
   HUB_TELEGRAM_QUEUE_MINUTES  how long an offline message waits (default 120)
-  HUB_TELEGRAM_QUEUE_MAX      how many offline messages wait (default 50)";
+  HUB_TELEGRAM_QUEUE_MAX      how many offline messages wait (default 50)
+  HUB_TELEGRAM_RECEIVE        poll (default): the hub polls the bot's updates;
+                              off: another service that already runs the bot posts
+                              them to /telegram/update with a telegram-scope token";
 
 fn db_path() -> PathBuf {
     std::env::var_os("HUB_DB")
@@ -147,11 +150,23 @@ fn serve() -> ExitCode {
     let clients: Vec<String> = tokens.clients().map(|c| c.name.clone()).collect();
     let (line, upstream) = Line::new();
     let line = Arc::new(line);
+    let bridge = match telegram.disabled_reason() {
+        Some(why) => {
+            eprintln!("telegram: off ({why})");
+            None
+        }
+        None => {
+            let token = telegram.token.clone().unwrap_or_default();
+            let api = Arc::new(HttpApi::new(&telegram.api_base, &token));
+            Some(Arc::new(Bridge::new(api, line.clone(), &telegram)))
+        }
+    };
     let state = Arc::new(AppState {
         store: Mutex::new(store),
         tokens,
         options: Options { allow_mutate },
         line: line.clone(),
+        telegram: bridge.clone(),
     });
 
     // One thread is plenty for a personal memory store and keeps RSS small.
@@ -173,15 +188,16 @@ fn serve() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        match telegram.disabled_reason() {
-            Some(why) => eprintln!("telegram: off ({why})"),
-            None => {
-                let token = telegram.token.clone().unwrap_or_default();
-                let api = Arc::new(HttpApi::new(&telegram.api_base, &token));
-                let bridge = Arc::new(Bridge::new(api, line.clone(), &telegram));
-                eprintln!("telegram: on, {} allowed user(s)", telegram.allowed.len());
-                tokio::spawn(bridge.run(upstream));
-            }
+        if let Some(bridge) = bridge {
+            eprintln!(
+                "telegram: on, {} allowed user(s), {}",
+                telegram.allowed.len(),
+                match telegram.receive {
+                    Receive::Poll => "polling for updates",
+                    Receive::Off => "not polling; updates are posted to /telegram/update",
+                }
+            );
+            tokio::spawn(bridge.run(upstream));
         }
         eprintln!(
             "helm-hub {} listening on {bind}; clients: {}; update/delete {}",

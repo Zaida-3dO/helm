@@ -2173,7 +2173,11 @@ impl Actor {
                 status: MessageStatus::Complete,
                 details: MessageDetails {
                     submission_id: Some(sid.clone()),
-                    mode: sub.map(|s| s.mode),
+                    mode: sub.as_ref().map(|s| s.mode),
+                    origin: sub
+                        .as_ref()
+                        .map(|s| s.origin)
+                        .filter(|o| *o != SubmissionOrigin::Typed),
                     images: (!images.is_empty()).then_some(images),
                     ..Default::default()
                 },

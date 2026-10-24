@@ -37,13 +37,15 @@ only as SHA-256 digests and compared in constant time.
 | `ro` | the three memory read tools |
 | `rw+app`, `ro+app` | the above, plus the Helm tools forwarded down the line (below) |
 | `relay` | `/relay` only: Helm's own line. It cannot call `/mcp`, and no other token can open the line |
+| `telegram` | `POST /telegram/update` only: for a forwarder on a bot another service already runs (below). It cannot call `/mcp` or open the line, and no other token can post updates |
 
 `GET /health` is the one open route and reports only status and version. The server refuses to
 start with no tokens configured.
 
 ## Relay line and Helm tools
 
-Helm connects to `ws://<hub>/relay` with its `relay` token; a newer line replaces an older one. The
+Helm connects to `ws://<hub>/relay` with its `relay` token (both are set in Helm's Settings →
+Hub, which also shows whether the line is up); a newer line replaces an older one. The
 frames are listed in `src/relay.rs`. A client with `+app` sees six Helm tools: `app_list_chats`,
 `app_read_chat`, `app_list_projects`, `app_list_attention`, `app_send_message` and
 `app_stop_chat`. The hub never forwards any other name, and Helm checks every call again on the PC
@@ -64,20 +66,53 @@ approval.
 | `HUB_TELEGRAM_API` | Bot API base, default the public API (tests point it at `fakes/telegram`) |
 | `HUB_TELEGRAM_QUEUE_MINUTES` | How long a message waits while Helm is offline (default 120) |
 | `HUB_TELEGRAM_QUEUE_MAX` | How many messages wait (default 50) |
+| `HUB_TELEGRAM_RECEIVE` | `poll` (default) or `off`, below. Anything else: the hub refuses to start |
 
 - A sender not on the allow-list gets nothing: no forward and no reply.
 - While Helm is offline a message is queued in order and the sender is told at once. On reconnect
   the queue is delivered, each message carrying its age so Helm marks it "sent N min ago". An
   expired message is dropped and the user is told how many. `/cancel` drops the queue; `/stop`
-  stops Helm's running turn. Each message is held until Helm acknowledges it, so a drop between
-  the two resends it. The queue is in memory: a container restart drops it.
+  stops Helm's running turn. The queue is in memory: a container restart drops it.
+- Each message is held until Helm acknowledges it. A line that drops before the acknowledgement
+  resends it on the next line, and a message the current line has not acknowledged within 45 s
+  is sent again on that line, every 45 s (Helm gives up on a busy chat sooner than that, without
+  acknowledging). A message still unacknowledged after the queue lifetime is dropped and the user
+  is told it could not be delivered. A resend carries the same id.
 - While a turn runs, ONE status message is edited in place, at most every 3 s. The answer arrives
   as a new message (so the phone notifies) and the status message is deleted.
+
+### Receiving updates: polling or a shared bot
+
+Only one process may consume a bot's updates. With `HUB_TELEGRAM_RECEIVE=poll` (the default) the
+hub is that process and long-polls `getUpdates` itself. To use a bot that another service already
+runs, set `HUB_TELEGRAM_RECEIVE=off`: the hub never calls `getUpdates`, but it still calls `getMe`
+for the bot's name and still sends, edits and deletes messages with the bot token. That service's
+forwarder then posts the updates meant for Helm:
+
+```
+POST /telegram/update
+Authorization: Bearer <a telegram-scope token>     # HUB_TOKENS=forwarder:<token>:telegram
+Content-Type: application/json
+
+<one Telegram Update object, or an array of them>
+```
+
+The answer is `200 {"ok":true,"handled":[...]}`, one entry per update: `forwarded`, `queued`,
+`command`, `ignored` (not a private message from an allowed user) or `duplicate`. No token or an
+unknown one: 401; any other scope: 403; the bot off on this hub: 503; a body that is not an
+Update or an array of them: 400. The endpoint exists in both modes.
+
+- Posted and polled updates take the same path: the allow-list, private chats only, and the
+  commands. Each `update_id` is handled once (the last 256 are remembered), so a forwarder's
+  retry, or an update that arrives both ways, is dropped as `duplicate`.
+- `/helm <text>` (also `/helm@<botname> <text>`) is read as `<text>`, including when `<text>` is
+  itself a command such as `/helm /stop`, so a forwarder can route Helm's messages by that one
+  command. `/helm` alone answers the hello text.
 
 ## Commands
 
 ```
-helm-hub serve                       # HUB_DB, HUB_BIND, HUB_TOKENS, HUB_ALLOW_MUTATE
+helm-hub serve                       # HUB_DB, HUB_BIND, HUB_TOKENS, HUB_ALLOW_MUTATE, HUB_TELEGRAM_*
 helm-hub import <dir> [--source S]   # S: the source tag the imported memories carry
 ```
 

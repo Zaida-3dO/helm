@@ -21,6 +21,7 @@ fn app(allow_mutate: bool) -> axum::Router {
         tokens,
         options: Options { allow_mutate },
         line: Arc::new(helm_hub::relay::Line::new().0),
+        telegram: None,
     }))
 }
 

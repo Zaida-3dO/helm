@@ -523,6 +523,11 @@ pub struct MessageDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub mode: Option<SubmissionMode>,
+    /// For a user row whose message was not typed in Helm's composer: where it came from (a
+    /// Telegram message, a schedule, another chat...). Absent for typed messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub origin: Option<SubmissionOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub retry: Option<RetryInfo>,

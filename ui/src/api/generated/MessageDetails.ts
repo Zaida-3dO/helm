@@ -4,6 +4,7 @@ import type { MessageImage } from "./MessageImage";
 import type { RetryInfo } from "./RetryInfo";
 import type { Subagent } from "./Subagent";
 import type { SubmissionMode } from "./SubmissionMode";
+import type { SubmissionOrigin } from "./SubmissionOrigin";
 import type { ToolCallSummary } from "./ToolCallSummary";
 import type { ToolSource } from "./ToolSource";
 import type { Usage } from "./Usage";
@@ -15,7 +16,12 @@ export type MessageDetails = { usage?: Usage, stopReason?: string, errorMessage?
 /**
  * For a `toolResult` row: the call's arguments, bounded like [`ToolCallSummary::args`].
  */
-toolArgs?: string, isError?: boolean, submissionId?: string, mode?: SubmissionMode, retry?: RetryInfo, contextKind?: ContextKind, textTruncated?: boolean, stoppable?: boolean, 
+toolArgs?: string, isError?: boolean, submissionId?: string, mode?: SubmissionMode, 
+/**
+ * For a user row whose message was not typed in Helm's composer: where it came from (a
+ * Telegram message, a schedule, another chat...). Absent for typed messages.
+ */
+origin?: SubmissionOrigin, retry?: RetryInfo, contextKind?: ContextKind, textTruncated?: boolean, stoppable?: boolean, 
 /**
  * For a tool row: which server the tool came from.
  */

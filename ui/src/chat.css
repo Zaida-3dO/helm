@@ -135,6 +135,15 @@ button.danger {
   margin-top: 2px;
 }
 
+/* Where a message came from, above its bubble (a Telegram message). */
+.row-origin {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
 .row-user {
   position: relative;
 }

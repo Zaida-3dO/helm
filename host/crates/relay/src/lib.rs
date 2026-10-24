@@ -20,7 +20,9 @@
 //!
 //! Ops: `relay_connection_get` → [`config::RelayConnectionView`] (booleans and the line state,
 //! never a value) and `relay_connection_save` ([`config::RelaySaveArgs`]: absent keeps, empty
-//! clears).
+//! clears). For Settings → Hub's Telegram section: `relay_telegram_get` →
+//! [`sink::TelegramView`], `relay_telegram_save` ([`telegram::PolicyFile`]: the limits) and
+//! `relay_telegram_reset` (drop the tag, so the next message starts a new chat).
 
 pub mod client;
 pub mod config;
@@ -110,7 +112,10 @@ pub fn register_ops(reg: &mut OpRegistry) {
             "relay_connection_save",
             OpClass::Maintenance,
             connection_save,
-        );
+        )
+        .blocking("relay_telegram_get", OpClass::Blocking, telegram_get)
+        .blocking("relay_telegram_save", OpClass::Blocking, telegram_save)
+        .blocking("relay_telegram_reset", OpClass::Blocking, telegram_reset);
 }
 
 fn to_value<T: serde::Serialize>(v: &T) -> Result<Value, ApiError> {
@@ -133,4 +138,31 @@ fn connection_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         c.reconfigured.notify_waiters();
     }
     to_value(&config::view(&saved, line_state(ctx)))
+}
+
+fn telegram_view(ctx: &OpCtx) -> Result<Value, ApiError> {
+    let profile = ctx.services.need::<Profile>()?;
+    let db = ctx.services.need::<helm_core::db::Database>()?;
+    to_value(&sink::telegram_view(&db, &profile.dir, helm_core::now_ms()))
+}
+
+fn telegram_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+    telegram_view(ctx)
+}
+
+fn telegram_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let f: telegram::PolicyFile = serde_json::from_value(args)
+        .map_err(|_| ApiError::bad_args("Expected maxAgeHours and maxTokens."))?;
+    let policy = f.check().map_err(ApiError::bad_args)?;
+    let profile = ctx.services.need::<Profile>()?;
+    telegram::save_policy(&telegram::policy_path(&profile.dir), policy)
+        .map_err(|_| ApiError::internal("The Telegram limits could not be saved."))?;
+    telegram_view(ctx)
+}
+
+fn telegram_reset(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+    let profile = ctx.services.need::<Profile>()?;
+    telegram::save_tag(&telegram::tag_path(&profile.dir), None)
+        .map_err(|_| ApiError::internal("The Telegram chat tag could not be removed."))?;
+    telegram_view(ctx)
 }

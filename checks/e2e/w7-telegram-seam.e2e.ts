@@ -6,7 +6,11 @@
 // - T2  the next message attaches to the same chat; no second Telegram chat appears;
 // - T3  while a turn runs, ONE status message is edited in place and names the running tool; a
 //       message sent meanwhile steers in without aborting the turn; /stop stops it, and the
-//       status goes once the final note arrives.
+//       status goes once the final note arrives;
+// - T4  Settings → Hub shows the line connected and the Telegram chat; "Start a new chat" drops
+//       the tag, so the next message, posted by a forwarder to the hub's inbound endpoint (a bot
+//       shared with another service), starts a new chat, and its bubble shows the Telegram badge
+//       without the note for the agent.
 //
 // Origin `telegram` and "never consent" are pinned in Rust (helm-relay sink tests) through the
 // real send path. Run: `npm run build:debug` at the root and `cargo build` in hub/, then
@@ -18,12 +22,13 @@ import net from "node:net";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { BOT_USERNAME, startFakeTelegram, type FakeTelegram } from "../../fakes/telegram/server.ts";
-import { api, dispose, launchApp, REPO, scratchDir, type App } from "./harness.ts";
+import { api, dispose, launchApp, REPO, rows, scratchDir, tid, type App } from "./harness.ts";
 
 const HUB_EXE =
   process.env.HELM_E2E_HUB_EXE ?? path.join(REPO, "hub", "target", "debug", process.platform === "win32" ? "helm-hub.exe" : "helm-hub");
 // Made-up test tokens, used only between this test's own processes.
 const LINE = "e2e-line-token-0123456789abcdefgh";
+const FORWARDER = "e2e-forwarder-token-0123456789abcd";
 const ALLOWED_USER = 4242;
 
 const profile = scratchDir("helm-e2e-profile-");
@@ -31,6 +36,7 @@ let app: App | undefined;
 let hub: ChildProcess | undefined;
 let hubLog = "";
 let tg: FakeTelegram | undefined;
+let hubUrl = "";
 type Json = Record<string, any>;
 
 async function freePort(): Promise<number> {
@@ -72,7 +78,7 @@ describe("Telegram messages into chats, and the turn mirrored back", { timeout: 
         ...process.env,
         HUB_DB: path.join(scratchDir("helm-e2e-hub-"), "hub.db"),
         HUB_BIND: `127.0.0.1:${port}`,
-        HUB_TOKENS: `helm-line:${LINE}:relay`,
+        HUB_TOKENS: `helm-line:${LINE}:relay,forwarder:${FORWARDER}:telegram`,
         HUB_TELEGRAM_BOT_TOKEN: tg.token,
         HUB_TELEGRAM_ALLOWED_USERS: String(ALLOWED_USER),
         HUB_TELEGRAM_API: tg.url,
@@ -80,6 +86,7 @@ describe("Telegram messages into chats, and the turn mirrored back", { timeout: 
       stdio: ["ignore", "pipe", "pipe"],
     });
     hub.stderr?.on("data", (d: Buffer) => (hubLog = (hubLog + d.toString()).slice(-20_000)));
+    hubUrl = `http://127.0.0.1:${port}`;
     await until("the hub to listen", async () => (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok).catch(() => false)) || undefined);
     app = await launchApp(profile, {
       env: { HELM_TEST_RELAY_URL: `ws://127.0.0.1:${port}/relay`, HELM_TEST_RELAY_TOKEN: LINE },
@@ -139,5 +146,39 @@ describe("Telegram messages into chats, and the turn mirrored back", { timeout: 
     const edits = tg!.sent.slice(mark).filter((x) => x.method === "editMessageText").length;
     const sends = tg!.sent.slice(mark).filter((x) => x.method === "sendMessage" && (x.text ?? "").startsWith("Working")).length;
     assert.ok(sends <= 1, `the status is edited in place, not re-sent (${sends} sends, ${edits} edits)`);
+  });
+
+  test("T4: Settings → Hub, a fresh chat, a forwarded message and the Telegram badge", async () => {
+    const page = app!.page;
+    await page.keyboard.press("Control+Comma");
+    await page.click('.settings-tab[data-tab="hub"]');
+    await page.waitForSelector(tid("hub-state", '[data-state="online"]'), { timeout: 15_000 });
+    await page.waitForSelector(tid("hub-telegram-reset"), { timeout: 10_000 });
+    await page.click(tid("hub-telegram-reset"));
+    await until("the tag to drop", async () => ((await api(page, "relay_telegram_get", {})) as Json).chat === null || undefined);
+    await page.keyboard.press("Escape");
+    // A forwarder on a shared bot posts the update it received; "/helm" routes it to Helm.
+    const update = {
+      update_id: 9_000_001,
+      message: { message_id: 9_001, date: Math.floor(Date.now() / 1000), text: "/helm from the shared bot", from: { id: ALLOWED_USER }, chat: { id: ALLOWED_USER, type: "private" } },
+    };
+    const post = (token: string) =>
+      fetch(`${hubUrl}/telegram/update`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(update) });
+    assert.equal((await post(LINE)).status, 403, "the line token cannot post updates");
+    assert.equal((await post(FORWARDER)).status, 200);
+    await until("the answer on the phone", () => (phone().some((t) => t.includes("You said:") && t.includes("from the shared bot")) ? true : undefined));
+    const chats = await telegramChats();
+    assert.equal(chats.length, 2, "a new Telegram chat after the reset");
+    const fresh = chats.find((c) => c.id !== chatId)!;
+    // Settings → Hub now names the new chat, and Open goes to it.
+    await page.keyboard.press("Control+Comma");
+    await page.click('.settings-tab[data-tab="hub"]');
+    await page.locator(tid("hub-telegram-chat")).getByRole("button", { name: /^Open / }).click();
+    await page.waitForSelector(tid("chat-view", `[data-chat-id="${fresh.id}"]`), { timeout: 15_000 });
+    const user = rows(page, "user").first();
+    await user.locator(tid("row-origin", '[data-origin="telegram"]')).waitFor({ timeout: 15_000 });
+    const shown = String(await user.locator(".bubble").textContent());
+    assert.match(shown, /from the shared bot/);
+    assert.doesNotMatch(shown, /Sent from Telegram|\/helm/, "the note for the agent and the routing command stay hidden");
   });
 });

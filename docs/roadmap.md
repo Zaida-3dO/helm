@@ -15,14 +15,13 @@ is **v1.0**.
 - Host tools with consent, the MCP client and the plan-usage meter.
 - Schedules, away mode, the usage governor and the run-slot queue.
 - The orchestrator's workflow panel and its per-chat switch.
-- The hub: shared memory, the relay line and a Telegram bot.
+- The hub: shared memory, the relay line and a Telegram bot (its own, or a bot another service
+  already runs), connected in Settings → Hub. Messages from Telegram carry a badge in the chat.
 - A per-user Windows installer.
 
 ## Next (0.3): finish what is half-built
 
-- **Telegram through an existing bot.** An inbound endpoint on the hub and a receive-off flag, so
-  Helm can share a bot that another service already runs instead of needing its own.
-- **The waiting bar and the Telegram badge** in the UI, and the remaining schedules work.
+- **The waiting bar** for a send waiting on a run slot, and the remaining schedules work.
 - **An updater or a dev channel**, so trying a new build does not mean running a setup file.
 - **Loose ends** in the new-chat page and the composer, and the contrast of muted labels and the
   composer's focus state.

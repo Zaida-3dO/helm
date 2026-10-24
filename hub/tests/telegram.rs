@@ -1,19 +1,32 @@
 //! The Telegram bridge against a recording fake Bot API: the allow-list (trust-boundary item
 //! a), the offline queue (f), and the live status message.
 
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
+use helm_hub::auth::Tokens;
+use helm_hub::mcp::Options;
 use helm_hub::relay::{Line, Upstream, OFFLINE};
+use helm_hub::server::{router, AppState};
+use helm_hub::store::Store;
 use helm_hub::telegram::{
-    parse_allowed, ApiError, ApiFuture, Bridge, Handled, TelegramApi, TelegramConfig, QUEUED,
+    now_ms, parse_allowed, parse_receive, ApiError, ApiFuture, Bridge, Handled, Receive,
+    TelegramApi, TelegramConfig, HELLO, QUEUED,
 };
+use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tower::ServiceExt;
 
 const OWNER: i64 = 1001;
 const STRANGER: i64 = 2002;
 const T0: i64 = 1_800_000_000_000;
 const MIN: i64 = 60_000;
+const RW: &str = "rw-token-0123456789abcdefghij";
+const LINE: &str = "line-token-0123456789abcdefghij";
+const FORWARDER: &str = "forwarder-token-0123456789abcdef";
 
 #[derive(Default)]
 struct FakeApi {
@@ -55,6 +68,8 @@ impl TelegramApi for FakeApi {
                 description: "Too Many Requests".into(),
             }),
             "getMe" => Ok(json!({ "username": "helm_test_bot" })),
+            // A long poll that never returns: enough to see whether the bot polls at all.
+            "getUpdates" => return Box::pin(std::future::pending()),
             _ => Ok(json!(true)),
         };
         Box::pin(async move { result })
@@ -68,25 +83,29 @@ fn cfg() -> TelegramConfig {
         api_base: "http://fake".into(),
         queue_lifetime: Duration::from_secs(30 * 60),
         queue_max: 3,
+        receive: Receive::Poll,
     }
 }
 
 struct Env {
     api: Arc<FakeApi>,
     line: Arc<Line>,
-    bridge: Bridge,
+    bridge: Arc<Bridge>,
 }
 
 fn env() -> Env {
     let api = Arc::new(FakeApi::default());
     let (line, _up) = Line::new();
     let line = Arc::new(line);
-    let bridge = Bridge::new(api.clone(), line.clone(), &cfg());
+    let bridge = Arc::new(Bridge::new(api.clone(), line.clone(), &cfg()));
     Env { api, line, bridge }
 }
 
+/// Every update gets its own `update_id`, as Telegram's do.
+static NEXT_UPDATE: AtomicI64 = AtomicI64::new(1);
+
 fn update(from: i64, text: &str, date_s: i64) -> Value {
-    json!({ "update_id": 1, "message": {
+    json!({ "update_id": NEXT_UPDATE.fetch_add(1, Ordering::Relaxed), "message": {
         "message_id": 9, "date": date_s, "text": text,
         "from": { "id": from, "is_bot": false, "first_name": "x" },
         "chat": { "id": from, "type": "private" } } })
@@ -104,6 +123,43 @@ fn frames(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<Value> {
         out.push(serde_json::from_str(&f).unwrap());
     }
     out.into_iter().filter(|f| f["type"] != "welcome").collect()
+}
+
+/// The hub's routes over this bridge (or with the bot off), with a memory token, Helm's line
+/// token and a forwarder's telegram token.
+fn hub(e: &Env, bot_on: bool) -> axum::Router {
+    let tokens = Tokens::parse(&format!(
+        "helm:{RW}, helm-line:{LINE}:relay, forwarder:{FORWARDER}:telegram"
+    ))
+    .unwrap();
+    router(Arc::new(AppState {
+        store: Mutex::new(Store::open_in_memory().unwrap()),
+        tokens,
+        options: Options {
+            allow_mutate: false,
+        },
+        line: e.line.clone(),
+        telegram: bot_on.then(|| e.bridge.clone()),
+    }))
+}
+
+async fn post_update(app: &axum::Router, token: Option<&str>, body: String) -> (StatusCode, Value) {
+    let mut req =
+        Request::post("/telegram/update").header(header::CONTENT_TYPE, "application/json");
+    if let Some(t) = token {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 #[test]
@@ -378,4 +434,170 @@ async fn get_me_names_the_bot_for_helm() {
         .on_update(&update(OWNER, "hi", T0 / 1000), T0)
         .await;
     assert_eq!(frames(&mut rx)[0]["bot"], "helm_test_bot");
+}
+
+#[tokio::test]
+async fn receive_off_never_polls_but_still_names_the_bot() {
+    assert_eq!(parse_receive(None), Ok(Receive::Poll));
+    assert_eq!(parse_receive(Some("poll")), Ok(Receive::Poll));
+    assert_eq!(parse_receive(Some(" off ")), Ok(Receive::Off));
+    assert!(parse_receive(Some("webhook")).is_err());
+    for (receive, polls) in [(Receive::Poll, true), (Receive::Off, false)] {
+        let api = Arc::new(FakeApi::default());
+        let (line, up) = Line::new();
+        let c = TelegramConfig { receive, ..cfg() };
+        let bridge = Arc::new(Bridge::new(api.clone(), Arc::new(line), &c));
+        let run = tokio::spawn(bridge.run(up));
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let methods: Vec<String> = api.calls().into_iter().map(|(m, _)| m).collect();
+        assert!(methods.contains(&"getMe".to_owned()), "{methods:?}");
+        assert_eq!(
+            methods.contains(&"getUpdates".to_owned()),
+            polls,
+            "{receive:?}: {methods:?}"
+        );
+        run.abort();
+    }
+}
+
+#[tokio::test]
+async fn only_a_telegram_token_may_post_updates() {
+    let e = env();
+    let (on, off) = (hub(&e, true), hub(&e, false));
+    let start = update(OWNER, "/start", now_ms() / 1000).to_string();
+    for (app, token, body, want) in [
+        (&on, None, start.as_str(), StatusCode::UNAUTHORIZED),
+        (
+            &on,
+            Some("not-a-real-token-at-all-xxxx"),
+            &start,
+            StatusCode::UNAUTHORIZED,
+        ),
+        (&on, Some(RW), &start, StatusCode::FORBIDDEN),
+        (&on, Some(LINE), &start, StatusCode::FORBIDDEN),
+        (
+            &off,
+            Some(FORWARDER),
+            &start,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (&on, Some(FORWARDER), "{not json", StatusCode::BAD_REQUEST),
+        (&on, Some(FORWARDER), "\"hello\"", StatusCode::BAD_REQUEST),
+        (&on, Some(FORWARDER), &start, StatusCode::OK),
+    ] {
+        let (status, v) = post_update(app, token, body.to_owned()).await;
+        assert_eq!(status, want, "{token:?} {body}: {v}");
+        if status == StatusCode::OK {
+            assert_eq!(v, json!({ "ok": true, "handled": ["command"] }));
+        } else {
+            assert!(v["error"].is_string(), "{v}");
+        }
+    }
+    assert_eq!(
+        e.api.sent_texts(),
+        vec![HELLO],
+        "only the accepted post was handled"
+    );
+}
+
+#[tokio::test]
+async fn a_posted_update_is_forwarded_like_a_polled_one_and_handled_once() {
+    let e = env();
+    let app = hub(&e, true);
+    let mut rx = line_up(&e);
+    let now = now_ms();
+    let posted = update(OWNER, "posted", now / 1000);
+    let (status, v) = post_update(&app, Some(FORWARDER), posted.to_string()).await;
+    assert_eq!(
+        (status, &v["handled"]),
+        (StatusCode::OK, &json!(["forwarded"]))
+    );
+    let f = frames(&mut rx);
+    assert_eq!(
+        (f.len(), &f[0]["type"], &f[0]["text"]),
+        (1, &json!("telegram"), &json!("posted"))
+    );
+    // The forwarder retries, and the same update also arrives by polling: handled once.
+    let (_, v) = post_update(&app, Some(FORWARDER), posted.to_string()).await;
+    assert_eq!(v["handled"], json!(["duplicate"]));
+    assert_eq!(e.bridge.on_update(&posted, now).await, Handled::Duplicate);
+    // An array is handled in order, each update on its own.
+    let fresh = update(OWNER, "fresh", now / 1000);
+    let (_, v) = post_update(&app, Some(FORWARDER), json!([posted, fresh]).to_string()).await;
+    assert_eq!(v["handled"], json!(["duplicate", "forwarded"]));
+    let f = frames(&mut rx);
+    assert_eq!((f.len(), &f[0]["text"]), (1, &json!("fresh")));
+    // The allow-list holds for posted updates too.
+    let stranger = update(STRANGER, "hi", now / 1000);
+    let (_, v) = post_update(&app, Some(FORWARDER), stranger.to_string()).await;
+    assert_eq!(v["handled"], json!(["ignored"]));
+    assert!(frames(&mut rx).is_empty());
+    assert!(e.api.sent_texts().is_empty(), "nothing was sent back");
+}
+
+#[tokio::test]
+async fn the_helm_prefix_is_read_as_the_text_after_it() {
+    let e = env();
+    let mut rx = line_up(&e);
+    // (typed, what goes down the line, what the bot replies)
+    for (typed, down, reply) in [
+        ("/helm status?", Some("status?"), None),
+        ("/helm@helm_test_bot  two\nlines", Some("two\nlines"), None),
+        ("/helmet on", Some("/helmet on"), None),
+        (
+            "/helm /stop",
+            Some("telegram_stop"),
+            Some("Stopping the running turn."),
+        ),
+        ("/helm", None, Some(HELLO)),
+        ("/helm@helm_test_bot", None, Some(HELLO)),
+    ] {
+        e.api.clear();
+        e.bridge
+            .on_update(&update(OWNER, typed, T0 / 1000), T0)
+            .await;
+        let got: Vec<String> = frames(&mut rx)
+            .iter()
+            .map(|f| match f["type"].as_str() {
+                Some("telegram") => f["text"].as_str().unwrap().to_owned(),
+                other => other.unwrap().to_owned(),
+            })
+            .collect();
+        assert_eq!(got, Vec::from_iter(down), "{typed:?}");
+        assert_eq!(e.api.sent_texts(), Vec::from_iter(reply), "{typed:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_unacknowledged_message_is_resent_on_the_same_line_until_it_expires() {
+    let e = env();
+    let mut rx = line_up(&e);
+    e.bridge
+        .on_update(&update(OWNER, "one", T0 / 1000), T0)
+        .await;
+    let id = frames(&mut rx)[0]["id"].clone();
+    // (seconds after the first send, how many times it goes down again)
+    for (at_s, again) in [(44, 0), (45, 1), (60, 0), (89, 0), (90, 1)] {
+        assert_eq!(e.bridge.flush(T0 + at_s * 1000).await, again, "at {at_s} s");
+        let f = frames(&mut rx);
+        assert_eq!(f.len(), again, "at {at_s} s");
+        assert!(f.iter().all(|f| f["id"] == id), "the same message, same id");
+    }
+    // Still unacknowledged past the queue lifetime (30 min here): dropped, and the user is told.
+    e.api.clear();
+    assert_eq!(e.bridge.flush(T0 + 31 * MIN).await, 0);
+    assert!(frames(&mut rx).is_empty());
+    assert_eq!(e.bridge.queued_len(), 0);
+    assert_eq!(
+        e.api.sent_texts(),
+        vec!["1 message could not be delivered to Helm in time and was dropped."]
+    );
+    // An acknowledged message is never sent again.
+    e.bridge
+        .on_update(&update(OWNER, "two", (T0 + 40 * MIN) / 1000), T0 + 40 * MIN)
+        .await;
+    e.bridge.on_ack(frames(&mut rx)[0]["id"].as_str().unwrap());
+    assert_eq!(e.bridge.flush(T0 + 42 * MIN).await, 0);
 }

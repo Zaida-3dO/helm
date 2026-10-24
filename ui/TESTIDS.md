@@ -20,6 +20,8 @@ breaks those checks, so change them only together with the checks. Everything el
 | `attention-inbox`, `attention-card`, `attention-snooze-menu` | The Needs attention dialog, one card in it, and a card's Snooze menu | card: `data-chat-id`, `data-group` (`needsYou` `stalled` `unread`) |
 | `board-sync` | The Agent Standup sync line under the view switch | `data-state` (`never` `unconfigured` `syncing` `ok` `error`) |
 | `board-url`, `board-token`, `board-token-state`, `board-test`, `board-last-sync` | Settings → Projects connection fields: address, write-only token, "set"/"not set", Test connection, last sync | |
+| `settings-hub`, `hub-state`, `hub-field-lanUrl`, `hub-field-fallbackUrl`, `hub-field-token`, `hub-save`, `hub-error` | Settings → Hub: the pane, the line state, the write-only address, fallback and token rows ("Set."/"Not set." in the description), Save and the error line | `hub-state`: `data-state` (`off` `connecting` `online` `offline`) |
+| `hub-telegram-chat`, `hub-telegram-reset`, `hub-telegram-limits` | Settings → Hub's Telegram section: the chat Telegram messages go to (with Open), Start a new chat, and the age and token limits | |
 | `chat-view` | The open chat | `data-chat-id`, `data-chat-status` |
 | `chat-status` | The chat's status, a visually hidden span (screen readers and tests; not a visible pill) | text = the status |
 | `composer` | The editable message box (Lexical `contenteditable`) | |
@@ -27,6 +29,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `stop` | Stop button, shown only while a turn runs (Stop that pauses the queue) | |
 | `transcript` | The transcript scroller | |
 | `transcript-row` | One message row | `data-status` (`saved` `streaming` `complete` `error` `interrupted`), `data-role` (`user` `assistant` `toolResult` `context`), `data-row-id` |
+| `row-origin` | Above a user bubble that did not come from the composer: "Telegram" for a message from the hub's bot (the bubble hides the note for the agent) | `data-origin` (`telegram`) |
 | `message-images` / `message-image` | The thumbnails in a user bubble, and one of them (`message-image-viewer` is the full-size dialog, `message-image-full` the image in it: `data-state` `loading` `ready` `failed`) | `message-image`: `data-state` (`loading` `ready` `failed`); a `ready` one is a button |
 | `work-fold` | "Worked for …" row of a settled turn; click to unfold | |
 | `tool-card` | One tool card | `data-tool` (tool name), `data-status` (`running` `complete` `failed` `interrupted`) |

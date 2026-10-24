@@ -1,13 +1,16 @@
 //! Per-client bearer tokens.
 //!
 //! Configured as `HUB_TOKENS=client:token[:scope],client:token[:scope]`, where
-//! scope is `rw` (the default), `ro` or `relay`, and `rw` or `ro` may add
-//! `+app` (for example `ro+app`).
+//! scope is `rw` (the default), `ro`, `relay` or `telegram`, and `rw` or `ro`
+//! may add `+app` (for example `ro+app`).
 //!
 //! - `ro` and `rw` reach the memory tools over `/mcp`.
 //! - `+app` also lists the Helm tools the hub forwards down the relay line.
 //! - `relay` is Helm's own line (`/relay`) and nothing else: a relay token
 //!   cannot call `/mcp`, and an `/mcp` token cannot open the line.
+//! - `telegram` posts Telegram updates to `/telegram/update` (for a bot that
+//!   another service already runs) and nothing else; no other token may post
+//!   there.
 //!
 //! Only SHA-256 digests of the tokens are kept in memory, and a presented
 //! token is compared against every digest in constant time, so neither a
@@ -21,6 +24,8 @@ pub enum Scope {
     ReadWrite,
     /// Helm's outbound line to the hub; never the MCP surface.
     Relay,
+    /// Posts Telegram updates to the bot; never the MCP surface or the line.
+    Telegram,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,9 +63,11 @@ impl Tokens {
                 Some("rw+app") => (Scope::ReadWrite, true),
                 Some("ro+app") => (Scope::ReadOnly, true),
                 Some("relay") => (Scope::Relay, false),
+                Some("telegram") => (Scope::Telegram, false),
                 Some(_) => {
                     return Err(format!(
-                        "token entry {} has a scope other than rw, ro, rw+app, ro+app or relay",
+                        "token entry {} has a scope other than rw, ro, rw+app, ro+app, relay \
+                         or telegram",
                         i + 1
                     ))
                 }
@@ -156,13 +163,20 @@ mod tests {
     }
 
     #[test]
-    fn relay_and_app_scopes_parse() {
-        let t = Tokens::parse(&format!("line:{A}:relay, remote:{B}:ro+app")).unwrap();
+    fn relay_app_and_telegram_scopes_parse() {
+        const C: &str = "cccccccccccccccccccccccccccc";
+        let t = Tokens::parse(&format!(
+            "line:{A}:relay, remote:{B}:ro+app, fwd:{C}:telegram"
+        ))
+        .unwrap();
         let c = t.check(Some(&format!("Bearer {A}"))).unwrap();
         assert_eq!((c.scope, c.app), (Scope::Relay, false));
         let c = t.check(Some(&format!("Bearer {B}"))).unwrap();
         assert_eq!((c.scope, c.app), (Scope::ReadOnly, true));
+        let c = t.check(Some(&format!("Bearer {C}"))).unwrap();
+        assert_eq!((c.scope, c.app), (Scope::Telegram, false));
         assert!(Tokens::parse(&format!("line:{A}:relay+app")).is_err());
+        assert!(Tokens::parse(&format!("fwd:{A}:telegram+app")).is_err());
     }
 
     #[test]

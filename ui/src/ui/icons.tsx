@@ -87,6 +87,7 @@ import {
   RotateCcw,
   RotateCw,
   Search,
+  Send,
   Settings,
   ShieldCheck,
   ShieldOff,
@@ -148,6 +149,8 @@ export const IconFolderPlus = kitIcon(FolderPlus, 'folder-plus');
 export const IconFolderTree = kitIcon(FolderTree, 'folder-tree');
 export const IconWand = kitIcon(Wand, 'wand');
 export const IconChat = kitIcon(MessageSquare, 'message-square');
+/** A message that came from Telegram (a paper plane, not Telegram's own mark). */
+export const IconPaperPlane = kitIcon(Send, 'send');
 
 // Top bar and the chat menu.
 /** Fork: the branch glyph. */

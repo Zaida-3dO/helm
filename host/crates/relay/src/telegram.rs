@@ -8,6 +8,10 @@
 //!   or deleted), Helm starts a new chat named `Telegram <bot name> <date>`. The tag is a small
 //!   file in the profile, `relay/telegram-chat.json`.
 //! - **Queued messages** arrive marked with how long ago they were sent.
+//! - **The limits** (age and tokens) are set in Settings → Hub and kept beside the tag, in
+//!   `relay/telegram-policy.json`; Settings can also drop the tag so the next message starts fresh.
+//! - **Answered questions.** The hub ids of replies that answered a question are kept in
+//!   `relay/telegram-answered.json`, so a resend after a restart is not taken as a new prompt.
 //!
 //! - **Rendering** for the phone: a short status line while a turn runs, the final answer cut
 //!   with a "reply more" hint, questions as numbered options. No thinking, no tool cards.
@@ -29,13 +33,103 @@ pub struct TagPolicy {
     pub max_tokens: u64,
 }
 
+const HOUR_MS: i64 = 60 * 60 * 1000;
+/// The limits Settings accepts: an hour to 30 days, 10k to 5M tokens.
+pub const AGE_HOURS: std::ops::RangeInclusive<i64> = 1..=720;
+pub const TOKENS: std::ops::RangeInclusive<u64> = 10_000..=5_000_000;
+
 impl Default for TagPolicy {
     fn default() -> Self {
         TagPolicy {
-            max_age_ms: 24 * 60 * 60 * 1000,
+            max_age_ms: 24 * HOUR_MS,
             max_tokens: 400_000,
         }
     }
+}
+
+/// The limits as stored and as Settings shows them.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PolicyFile {
+    pub max_age_hours: i64,
+    pub max_tokens: u64,
+}
+
+impl From<TagPolicy> for PolicyFile {
+    fn from(p: TagPolicy) -> Self {
+        PolicyFile {
+            max_age_hours: p.max_age_ms / HOUR_MS,
+            max_tokens: p.max_tokens,
+        }
+    }
+}
+
+impl PolicyFile {
+    /// Refuses a value outside the ranges Settings offers.
+    pub fn check(self) -> Result<TagPolicy, String> {
+        if !AGE_HOURS.contains(&self.max_age_hours) {
+            return Err("The age limit must be 1 to 720 hours.".into());
+        }
+        if !TOKENS.contains(&self.max_tokens) {
+            return Err("The token limit must be 10,000 to 5,000,000.".into());
+        }
+        Ok(TagPolicy {
+            max_age_ms: self.max_age_hours * HOUR_MS,
+            max_tokens: self.max_tokens,
+        })
+    }
+}
+
+pub fn policy_path(profile_dir: &Path) -> PathBuf {
+    profile_dir.join("relay").join("telegram-policy.json")
+}
+
+/// The saved limits, or the defaults when none are saved (or the file is unreadable).
+pub fn load_policy(path: &Path) -> TagPolicy {
+    helm_core::privfs::read_capped(path, 4 * 1024)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<PolicyFile>(&b).ok())
+        .and_then(|f| f.check().ok())
+        .unwrap_or_default()
+}
+
+pub fn save_policy(path: &Path, policy: TagPolicy) -> std::io::Result<()> {
+    write_private(path, &PolicyFile::from(policy))
+}
+
+fn write_private<T: Serialize>(path: &Path, v: &T) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        helm_core::privfs::create_private_dir_all(dir)?;
+    }
+    let bytes = serde_json::to_vec(v).map_err(std::io::Error::other)?;
+    helm_core::privfs::write_atomic(path, &bytes)
+}
+
+/// How many answered hub ids are remembered; a resend comes long before this many replies.
+pub const ANSWERED_KEPT: usize = 256;
+
+pub fn answered_path(profile_dir: &Path) -> PathBuf {
+    profile_dir.join("relay").join("telegram-answered.json")
+}
+
+pub fn load_answered(path: &Path) -> std::collections::VecDeque<String> {
+    helm_core::privfs::read_capped(path, 64 * 1024)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Remember one more answered hub id (the oldest go past [`ANSWERED_KEPT`]) and save the list.
+pub fn remember_answered(
+    path: &Path,
+    list: &mut std::collections::VecDeque<String>,
+    id: &str,
+) -> std::io::Result<()> {
+    list.push_back(id.to_owned());
+    while list.len() > ANSWERED_KEPT {
+        list.pop_front();
+    }
+    write_private(path, list)
 }
 
 /// The tagged chat, as stored.
@@ -79,13 +173,7 @@ pub fn save_tag(path: &Path, tag: Option<&ActiveTag>) -> std::io::Result<()> {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         },
-        Some(t) => {
-            if let Some(dir) = path.parent() {
-                helm_core::privfs::create_private_dir_all(dir)?;
-            }
-            let bytes = serde_json::to_vec(t).map_err(std::io::Error::other)?;
-            helm_core::privfs::write_atomic(path, &bytes)
-        }
+        Some(t) => write_private(path, t),
     }
 }
 
@@ -253,6 +341,31 @@ pub fn render_question(title: Option<&str>, message: Option<&str>, options: &[St
     }
     s.push_str("\n\nReply with a number, or type an answer.");
     cut_chars(&s, MAX_FINAL_CHARS).0
+}
+
+/// What the phone is told when the turn waits on something only Helm's window may answer (an
+/// approval, a plan or a trust prompt), so it is not left reading "Working…".
+pub fn render_blocked(title: Option<&str>, message: Option<&str>) -> String {
+    let what = [title, message]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|t| !t.is_empty());
+    let mut s = String::from("Waiting for you in Helm");
+    if let Some(w) = what {
+        s.push_str(": ");
+        s.push_str(w);
+    }
+    s.push_str(
+        "\n\nThis can only be answered in the app, not from Telegram. /stop stops the turn.",
+    );
+    cut_chars(&s, MAX_FINAL_CHARS).0
+}
+
+/// The reply that tells the phone its message answered the waiting question.
+pub fn render_answered(value: &str) -> String {
+    let (v, cut) = cut_chars(value.trim(), 200);
+    format!("Answered: {v}{}", if cut { "…" } else { "" })
 }
 
 /// The answer a Telegram reply gives to a pending question: a number in range picks that option,
@@ -424,6 +537,43 @@ mod tests {
         assert!(f.contains("reply \"more\""), "{f}");
         assert_eq!(f.chars().filter(|c| *c == 'x').count(), MAX_FINAL_CHARS);
         assert!(!render_final(Some(&"x".repeat(MAX_FINAL_CHARS))).contains("more"));
+        assert!(render_blocked(Some(" Allow Bash? "), None).starts_with(
+            "Waiting for you in Helm: Allow Bash?\n\nThis can only be answered in the app"
+        ));
+        assert!(render_blocked(None, Some("")).starts_with("Waiting for you in Helm\n"));
+        assert_eq!(render_answered(" Blue "), "Answered: Blue");
+        assert_eq!(
+            render_answered(&"y".repeat(201)),
+            format!("Answered: {}…", "y".repeat(200))
+        );
+    }
+
+    #[test]
+    fn limits_and_answered_ids_are_kept_in_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = policy_path(dir.path());
+        assert_eq!(load_policy(&p), TagPolicy::default());
+        let set = PolicyFile {
+            max_age_hours: 6,
+            max_tokens: 50_000,
+        };
+        save_policy(&p, set.check().unwrap()).unwrap();
+        assert_eq!(PolicyFile::from(load_policy(&p)), set);
+        for (hours, tokens) in [(0, 50_000), (721, 50_000), (6, 9_999), (6, 5_000_001)] {
+            let bad = PolicyFile {
+                max_age_hours: hours,
+                max_tokens: tokens,
+            };
+            assert!(bad.check().is_err(), "{bad:?}");
+        }
+        let a = answered_path(dir.path());
+        let mut list = load_answered(&a);
+        for i in 0..=ANSWERED_KEPT {
+            remember_answered(&a, &mut list, &format!("m{i}")).unwrap();
+        }
+        let back = load_answered(&a);
+        assert_eq!(back.len(), ANSWERED_KEPT);
+        assert!(!back.contains(&"m0".to_owned()) && back.contains(&format!("m{ANSWERED_KEPT}")));
     }
 
     #[test]

@@ -1,0 +1,43 @@
+/* Settings → Hub. Design-system tokens only. */
+
+.hub-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.hub-state {
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.hub-state-online {
+  color: var(--text);
+}
+
+.hub-state-offline {
+  color: var(--error);
+}
+
+.hub-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 0 4px;
+}
+
+.hub-heading {
+  margin: 20px 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.hub-limit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.hub-limit input {
+  width: 64px;
+}
