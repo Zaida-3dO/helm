@@ -132,7 +132,8 @@ impl Build {
     }
 
     /// Before a redirection: an unquoted number right before it (`2>`, `0<`) names a file
-    /// descriptor, not an argument, and so does `{name}` (`{fd}>file` opens a new one).
+    /// descriptor, not an argument, and so does `{name}` (`{fd}>file` opens a new one). bash
+    /// only reads a number that fits in an `int` this way; a larger one stays an argument.
     fn drop_fd_number(&mut self) {
         let named = self
             .word
@@ -147,7 +148,9 @@ impl Build {
             && !self.quoted
             && !self.computed_word
             && !self.word.is_empty()
-            && (named || self.word.bytes().all(|b| b.is_ascii_digit()))
+            && (named
+                || (self.word.bytes().all(|b| b.is_ascii_digit())
+                    && self.word.parse::<i32>().is_ok()))
         {
             self.word.clear();
             self.in_word = false;

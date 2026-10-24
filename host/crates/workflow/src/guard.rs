@@ -2325,6 +2325,8 @@ pub(crate) mod tests {
             "git push origin ''1>x HEAD:main",
             "git push origin $'1'>x HEAD:main",
             "git push origin 1\"\">x HEAD:main",
+            "git push --repo 2147483648>/dev/null origin HEAD:main",
+            "git push -o 2147483648>/dev/null origin HEAD:main",
         ] {
             assert_ne!(judge(cmd, &c, &F), Verdict::Allow, "{cmd:?}");
         }
