@@ -47,7 +47,7 @@
   padding: 0 8px 0 9px;
 }
 .term-tabs {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   display: flex;
   gap: 4px;
@@ -129,11 +129,28 @@
 .term-actions {
   display: flex;
   gap: 2px;
+  margin-left: auto;
 }
+.term-new,
 .term-actions .ui-btn-icon {
-  width: 24px;
-  height: 24px;
-  color: var(--muted);
+  width: 26px;
+  height: 26px;
+  color: var(--secondary);
+}
+.term-new {
+  flex: none;
+  margin-left: -4px;
+}
+.term-new:hover,
+.term-actions .ui-btn-icon:hover {
+  color: var(--text);
+}
+.term-x:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+.term-x:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
 }
 .term-find {
   position: absolute;

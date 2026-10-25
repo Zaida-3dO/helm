@@ -5,7 +5,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { Api } from '../api/client.ts';
 import { panelOps } from '../api/panel.ts';
-import { useBinding, useLayer } from '../ui/index.ts';
+import { ContextMenu, useBinding, useLayer } from '../ui/index.ts';
+import type { MenuItem } from '../ui/index.ts';
 import { CloseIcon, FileDiffIcon, FolderTreeIcon, MaximizeIcon, PlusIcon, QuestionIcon, RestoreIcon } from './icons.tsx';
 import { configureLinks } from './links.ts';
 import { entrySlot, SLOTS, slotEntry } from './model.ts';
@@ -249,6 +250,18 @@ function TabStrip({ chatId, displayed, active }: { chatId: string | null; displa
   const refs = useRef(new Map<string, HTMLElement>());
   const focusAfter = useRef<string | null>(null);
   const drag = useRef<Drag | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(null);
+
+  const menuItems = (id: string): MenuItem[] => {
+    const at = displayed.findIndex((t) => t.id === id);
+    const closeAround = (which: 'others' | 'right' | 'left') => panelStore.update((mm) => void mm.closeAround(id, which, chatId));
+    return [
+      { id: 'close', label: 'Close', onSelect: () => panelStore.update((mm) => mm.close(id, 'user')) },
+      { id: 'others', label: 'Close others', separator: true, disabled: displayed.length < 2, onSelect: () => closeAround('others') },
+      { id: 'right', label: 'Close to the right', disabled: at < 0 || at >= displayed.length - 1, onSelect: () => closeAround('right') },
+      { id: 'left', label: 'Close to the left', disabled: at <= 0, onSelect: () => closeAround('left') },
+    ];
+  };
 
   // Keep the selected entry in view in a crowded strip, and move focus after keyboard moves.
   useLayoutEffect(() => {
@@ -330,6 +343,7 @@ function TabStrip({ chatId, displayed, active }: { chatId: string | null; displa
   };
 
   return (
+    <>
     <div className="sp-tabs" role="tablist" aria-label="Side panel tabs" onKeyDown={onKeyDown}>
       {m.inspector &&
         SLOTS.map((slot) => {
@@ -375,6 +389,10 @@ function TabStrip({ chatId, displayed, active }: { chatId: string | null; displa
             data-kind={tab.kind}
             data-intent={tab.intent}
             onClick={() => selectEntry(tab.id)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMenu({ x: e.clientX, y: e.clientY, id: tab.id });
+            }}
             onPointerDown={(e) => onPointerDown(e, tab.id)}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
@@ -402,6 +420,8 @@ function TabStrip({ chatId, displayed, active }: { chatId: string | null; displa
         );
       })}
     </div>
+      {menu && <ContextMenu x={menu.x} y={menu.y} label="Tab actions" testId="tab-menu" items={menuItems(menu.id)} onClose={() => setMenu(null)} />}
+    </>
   );
 }
 

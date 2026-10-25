@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { basename, dirname, displayPath, joinPath, pathKey, splitSegments } from './paths.ts';
+import { basename, dirname, displayPath, joinPath, matchSegments, pathKey, splitSegments } from './paths.ts';
 
 const r = String.raw;
 const ROOT = 'C:\\';
@@ -31,4 +31,14 @@ test('splitSegments gives each breadcrumb its own path', () => {
     { name: 'a', path: r`C:\a` },
     { name: 'b', path: r`C:\a\b` },
   ]);
+});
+
+test('matchSegments marks a contiguous match, else in-order letters, else nothing', () => {
+  const marks = (text: string, q: string) => matchSegments(text, q).filter((x) => x.hit).map((x) => x.text);
+  assert.deepEqual(marks('ComposerToolbar.tsx', 'comp'), ['Comp']);
+  assert.deepEqual(marks('src/components/', 'comp'), ['comp']);
+  assert.deepEqual(marks('Composer.tsx', 'cmpsr'), ['C', 'mp', 's', 'r']);
+  assert.deepEqual(marks('Composer.tsx', 'zzz'), []);
+  assert.deepEqual(matchSegments('abc', ''), [{ text: 'abc', hit: false }]);
+  assert.equal(matchSegments('Composer.tsx', 'cmpsr').map((x) => x.text).join(''), 'Composer.tsx');
 });

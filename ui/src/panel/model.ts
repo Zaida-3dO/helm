@@ -239,6 +239,21 @@ export class PanelModel {
     return true;
   }
 
+  /**
+   * Closes the tabs around `id` in the view's strip: every other tab, or only those to its right or
+   * left. The tab itself stays, and is selected so the view does not land somewhere else. Returns the
+   * number closed.
+   */
+  closeAround(id: string, which: 'others' | 'right' | 'left', current: string | null): number {
+    const shown = this.displayed(current);
+    const at = shown.findIndex((t) => t.id === id);
+    if (at < 0) return 0;
+    const doomed = shown.filter((_, i) => (which === 'others' ? i !== at : which === 'right' ? i > at : i < at));
+    for (const t of doomed) this.close(t.id, 'user');
+    if (doomed.length > 0) this.select(id, current);
+    return doomed.length;
+  }
+
   private mostRecent(chatId: string | null): string | null {
     let best: { entry: string; used: number } | null = null;
     for (const t of this.counted(chatId)) if (!best || t.used > best.used) best = { entry: t.id, used: t.used };

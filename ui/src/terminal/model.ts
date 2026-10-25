@@ -13,6 +13,13 @@ export function clampHeight(h: number, paneHeight: number): number {
   return Math.round(Math.min(max, Math.max(HEIGHT_MIN, h)));
 }
 
+/** A tab's label: the folder it is in, then the shell ("helm pwsh"), never the whole path. */
+export function tabLabel(title: string, cwd: string): string {
+  const folder = cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? '';
+  const name = /^[a-z]:$/i.test(folder) ? `${folder}\\` : folder;
+  return name ? `${name} ${title}` : title;
+}
+
 export type TabState = 'idle' | 'unseen' | 'running' | 'exited';
 
 export interface DockTab {

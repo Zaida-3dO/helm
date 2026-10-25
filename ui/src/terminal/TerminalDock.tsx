@@ -8,7 +8,8 @@ import { shellOps } from '../api/shell.ts';
 import { terminalOps } from '../api/terminal.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, toast, useBinding, useLayer } from '../ui/index.ts';
-import { clampHeight, HEIGHT_DEFAULT, nextTabState, SESSIONS_MAX, type DockTab } from './model.ts';
+import { IconChevronDown, IconMaximize, IconMinimize, IconPlus, IconSearch, IconX } from '../ui/icons.tsx';
+import { clampHeight, HEIGHT_DEFAULT, nextTabState, SESSIONS_MAX, tabLabel, type DockTab } from './model.ts';
 import './terminal.css';
 import { XtermView, type XtermHandle } from './XtermView.tsx';
 
@@ -160,8 +161,7 @@ export function TerminalDock() {
               onAuxClick={(e) => e.button === 1 && close(t.id)}
             >
               <span className={`term-dot ${t.state}`} aria-hidden="true" />
-              <span className="term-title">{t.title}</span>
-              <span className="term-cwd">{t.cwd}</span>
+              <span className="term-title">{tabLabel(t.title, t.cwd)}</span>
               <button
                 type="button"
                 className="term-x"
@@ -172,23 +172,23 @@ export function TerminalDock() {
                   close(t.id);
                 }}
               >
-                ×
+                <IconX size={12} />
               </button>
             </div>
           ))}
         </div>
+        <Button variant="icon" className="term-new" label="New terminal (Ctrl+Shift+T)" onClick={() => void newSession(tabs.find((t) => t.id === active))}>
+          <IconPlus size={14} />
+        </Button>
         <div className="term-actions">
-          <Button variant="icon" label="New terminal (Ctrl+Shift+T)" onClick={() => void newSession(tabs.find((t) => t.id === active))}>
-            +
-          </Button>
           <Button variant="icon" label="Find (Ctrl+Shift+F)" pressed={finding} onClick={() => setFinding((f) => !f)}>
-            ⌕
+            <IconSearch size={14} />
           </Button>
           <Button variant="icon" label={max ? 'Restore' : 'Maximise'} pressed={max} onClick={() => setMax((m) => !m)}>
-            ⤢
+            {max ? <IconMinimize size={14} /> : <IconMaximize size={14} />}
           </Button>
           <Button variant="icon" label="Hide terminal (Ctrl+`)" onClick={() => setOpen(false)}>
-            ⌄
+            <IconChevronDown size={14} />
           </Button>
         </div>
       </div>

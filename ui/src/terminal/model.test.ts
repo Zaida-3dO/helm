@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AckBatcher, ACK_EVERY, clampHeight, nextTabState, routeKey, SeqFilter, stripQueries } from './model.ts';
+import { AckBatcher, ACK_EVERY, clampHeight, nextTabState, tabLabel, routeKey, SeqFilter, stripQueries } from './model.ts';
 
 const k = (code: string, mods: { ctrl?: boolean; shift?: boolean; alt?: boolean } = {}, key = '') => ({
   key,
@@ -63,4 +63,14 @@ test('replayed terminal queries are stripped so a reattached view never answers 
   const E = String.fromCharCode(27);
   assert.equal(stripQueries(`a${E}[6nb${E}[cc${E}[>cd${E}[5ne`), 'abcde');
   assert.equal(stripQueries(`${E}[31mred${E}[0m`), `${E}[31mred${E}[0m`, 'colours stay');
+});
+
+test('a tab is labelled with its folder and shell, never the whole path', () => {
+  const rows: Array<[string, string, string]> = [
+    ['pwsh', 'C:\\Users\\me\\helm', 'helm pwsh'],
+    ['zsh', '/home/me/helm/', 'helm zsh'],
+    ['pwsh', 'C:\\', 'C:\\ pwsh'],
+    ['bash', '', 'bash'],
+  ];
+  for (const [title, cwd, want] of rows) assert.equal(tabLabel(title, cwd), want);
 });

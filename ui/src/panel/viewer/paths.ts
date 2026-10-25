@@ -53,3 +53,40 @@ export function splitSegments(p: string): Array<{ name: string; path: string }> 
   });
   return out;
 }
+
+export interface Segment {
+  text: string;
+  hit: boolean;
+}
+
+/**
+ * Splits `text` into runs, marking the characters a query matched. The query is matched as one
+ * contiguous run when it occurs that way, otherwise as an in-order subsequence of letters (the way
+ * a quick-open query like "cmpsr" finds "Composer"). Case never matters. No match: one plain run.
+ */
+export function matchSegments(text: string, query: string): Segment[] {
+  const q = query.trim().toLowerCase();
+  const plain = [{ text, hit: false }];
+  if (!q || !text) return plain;
+  const lower = text.toLowerCase();
+  const marked = new Array<boolean>(text.length).fill(false);
+  const at = lower.indexOf(q);
+  if (at >= 0) {
+    for (let i = at; i < at + q.length; i++) marked[i] = true;
+  } else {
+    let from = 0;
+    for (const ch of q) {
+      const found = lower.indexOf(ch, from);
+      if (found < 0) return plain;
+      marked[found] = true;
+      from = found + 1;
+    }
+  }
+  const out: Segment[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const last = out[out.length - 1];
+    if (last && last.hit === marked[i]) last.text += text.charAt(i);
+    else out.push({ text: text.charAt(i), hit: marked[i] as boolean });
+  }
+  return out;
+}

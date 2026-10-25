@@ -17,6 +17,8 @@ import {
   BellOff,
   ArchiveRestore,
   ArrowDown,
+  ArrowLeft,
+  ArrowRight,
   ArrowUp,
   ArrowUpRight,
   Bookmark,
@@ -48,6 +50,7 @@ import {
   FolderKanban,
   FolderOpen,
   FolderPlus,
+  FolderSearch,
   FolderTree,
   GitBranch,
   GitFork,
@@ -104,6 +107,7 @@ import {
   Undo2,
   Wand,
   Workflow,
+  WrapText,
   X,
   Zap,
 } from 'lucide-react';
@@ -229,6 +233,13 @@ export const IconMaximize = kitIcon(Maximize2, 'maximize-2');
 export const IconMinimize = kitIcon(Minimize2, 'minimize-2');
 export const IconBrowser = kitIcon(Globe, 'globe');
 export const IconShell = kitIcon(SquareTerminal, 'square-terminal');
+export const IconArrowLeft = kitIcon(ArrowLeft, 'arrow-left');
+export const IconArrowRight = kitIcon(ArrowRight, 'arrow-right');
+/** "Up one folder". */
+export const IconArrowUp = kitIcon(ArrowUp, 'arrow-up');
+/** The word-wrap toggle. */
+export const IconWrap = kitIcon(WrapText, 'wrap-text');
+export const IconBrowseFolder = kitIcon(FolderSearch, 'folder-search');
 
 // Sidebar rows and menus.
 /** The muted mark (bell-off 11) and "Mute chat". */

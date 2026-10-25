@@ -384,23 +384,124 @@ html[data-panel-maximized] .shell-main {
   font-size: calc(12 * var(--sp-u));
 }
 
+.fv-button,
+.fv-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+/* Bordered text-and-icon buttons (Copy, Copy path, Open in an app). */
+.fv-button.bordered,
+.fv-open-app {
+  padding: 5px 11px;
+  border-color: var(--sp-line-strong);
+  border-radius: 6px;
+  color: var(--sp-text);
+  background: var(--sp-surface);
+}
+
+/* Icon-only buttons; a pressed one (word wrap) keeps a filled square. */
+.fv-icon-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sp-secondary);
+}
+
 .fv-button:hover:not(:disabled),
+.fv-icon-btn:hover:not(:disabled),
 .fv-nav-button:hover:not(:disabled),
 .fv-crumb:hover {
   background: var(--sp-hover);
   color: var(--sp-text);
-  border-color: transparent;
+}
+
+.fv-button:active:not(:disabled),
+.fv-icon-btn:active:not(:disabled),
+.fv-nav-button:active:not(:disabled),
+.fv-crumb:active {
+  background: var(--sp-line);
+}
+
+.fv-button:focus-visible,
+.fv-icon-btn:focus-visible,
+.fv-nav-button:focus-visible,
+.fv-crumb:focus-visible,
+.fv-entry:focus-visible,
+.fv-segmented button:focus-visible {
+  outline: 2px solid var(--sp-accent);
+  outline-offset: -2px;
 }
 
 .fv-button:disabled,
+.fv-icon-btn:disabled,
 .fv-nav-button:disabled {
   opacity: 0.35;
   cursor: default;
 }
 
-.fv-button[aria-pressed='true'] {
+.fv-button[aria-pressed='true'],
+.fv-icon-btn[aria-pressed='true'] {
   color: var(--sp-text);
   background: var(--sp-hover);
+}
+
+.fv-icon-btn.is-loading .sp-icon {
+  animation: fv-spin 900ms linear infinite;
+}
+
+@keyframes fv-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fv-icon-btn.is-loading .sp-icon {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
+.fv-label-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The Files slot: one slim row, icon-only actions. */
+.fv-toolbar.compact {
+  padding: 6px 8px 6px 12px;
+  flex-wrap: nowrap;
+}
+
+.fv-toolbar.compact .fv-label {
+  min-width: 0;
+  flex-wrap: nowrap;
+  color: var(--sp-text);
+}
+
+.fv-toolbar.compact .fv-btn-text {
+  display: none;
+}
+
+.fv-toolbar.compact .fv-button.bordered {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--sp-secondary);
+}
+
+.fv-button.browse {
+  margin-left: auto;
+  flex: none;
 }
 
 .fv-segmented {
@@ -433,17 +534,19 @@ html[data-panel-maximized] .shell-main {
 .fv-nav {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 12px 6px;
+  gap: 2px;
+  padding: 4px 12px 8px;
   flex: none;
   min-width: 0;
 }
 
 .fv-nav-button {
-  width: 24px;
-  padding: 2px 0;
-  font-size: 15px;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
 }
 
 .fv-crumbs {
@@ -474,6 +577,8 @@ html[data-panel-maximized] .shell-main {
 }
 
 .fv-crumb-sep {
+  display: inline-flex;
+  align-items: center;
   color: var(--sp-muted);
   padding: 0 1px;
 }
@@ -560,6 +665,10 @@ html[data-panel-maximized] .shell-main {
   border-color: var(--sp-line);
 }
 
+.fv-entry:active {
+  background: var(--sp-line);
+}
+
 .fv-entry-name {
   flex: 1 1 auto;
   min-width: 0;
@@ -569,6 +678,29 @@ html[data-panel-maximized] .shell-main {
 }
 
 .fv-entry-kind {
+  flex: none;
+  color: var(--sp-muted);
+}
+
+/* The Files slot's folder list: about 22 px rows, folders end in a chevron, no rules or sizes. */
+.fv-folder.compact {
+  padding: 4px 6px 12px;
+}
+
+.fv-folder.compact .fv-entry {
+  gap: 8px;
+  padding: 0 8px;
+  height: calc(24 * var(--sp-u));
+  border-bottom: none;
+  border-radius: 5px;
+  color: var(--sp-secondary);
+}
+
+.fv-folder.compact .fv-entry:hover {
+  color: var(--sp-text);
+}
+
+.fv-entry-chevron {
   flex: none;
   color: var(--sp-muted);
 }
@@ -642,11 +774,51 @@ html[data-panel-maximized] .shell-main {
 
 /* ---- Quick open ---- */
 
+.qo-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 4px 10px;
+  color: var(--secondary);
+}
+
+.qo-field .qo-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: calc(17 * var(--ui-unit));
+  letter-spacing: -0.2px;
+}
+
+.qo-field .qo-input:focus,
+.qo-field .qo-input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.qo-input::placeholder {
+  color: var(--muted);
+}
+
+.qo-esc {
+  flex: none;
+  font: inherit;
+  font-size: calc(10 * var(--ui-unit));
+  color: var(--muted);
+}
+
 .qo-status {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-height: 28px;
+  padding-bottom: 8px;
   font-size: calc(11 * var(--ui-unit));
   color: var(--secondary);
 }
@@ -655,17 +827,28 @@ html[data-panel-maximized] .shell-main {
   color: var(--error);
 }
 
-.qo-input {
-  width: 100%;
-  font-size: calc(17 * var(--ui-unit));
-  letter-spacing: -0.2px;
-}
-
 .qo-list {
-  margin-top: 8px;
-  min-height: 245px;
+  margin-top: 4px;
+  min-height: 120px;
   max-height: 470px;
   overflow: auto;
+}
+
+/* The matched letters of a name are bold and underlined; a run in a path is highlighted. */
+.qo-hit {
+  background: none;
+  color: inherit;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.qo-hit.run {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--warning, #e6c200) 45%, transparent);
+  font-weight: inherit;
+  text-decoration: none;
 }
 
 .qo-group {
@@ -688,6 +871,10 @@ html[data-panel-maximized] .shell-main {
 
 .qo-row[aria-selected='true'] {
   background: var(--surface-alt);
+}
+
+.qo-row:active {
+  background: var(--hover);
 }
 
 .qo-name {
@@ -749,11 +936,18 @@ html[data-panel-maximized] .shell-main {
 }
 
 .ch-branch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ch-branch > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ch-count {
@@ -834,9 +1028,15 @@ html[data-panel-maximized] .shell-main {
   background: var(--hover);
 }
 
+.ch-file-row:active {
+  background: var(--line);
+}
+
 .ch-chevron {
-  display: inline-block;
+  display: inline-flex;
+  flex: none;
   width: 13px;
+  color: var(--secondary);
   transition: transform 150ms;
 }
 
@@ -887,12 +1087,24 @@ html[data-panel-maximized] .shell-main {
 
 .ch-status {
   flex: none;
+  min-width: 1ch;
   font-family: var(--font-mono);
   font-size: calc(10 * var(--ui-unit));
+  font-weight: 600;
   color: var(--git-modified);
 }
 
-.ch-status.new {
+.ch-status.added,
+.ch-status.untracked {
+  color: var(--diff-add-text);
+}
+
+.ch-status.deleted,
+.ch-status.conflict {
+  color: var(--diff-del-text);
+}
+
+.ch-status.renamed {
   color: var(--accent);
 }
 

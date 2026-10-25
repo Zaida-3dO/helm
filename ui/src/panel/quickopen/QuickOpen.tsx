@@ -7,10 +7,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { QuickItem } from '../../api/panel.ts';
 import { panelOps } from '../../api/panel.ts';
-import { Dialog, TextInput, useBinding, useLayer } from '../../ui/index.ts';
-import { FileTextIcon, FolderOpenIcon } from '../icons.tsx';
+import { Dialog, useBinding, useLayer } from '../../ui/index.ts';
+import { FileTextIcon, FolderOpenIcon, ReloadIcon } from '../icons.tsx';
 import { openInPanel, panelStore } from '../registry.ts';
-import { basename, displayPath, pathKey } from '../viewer/paths.ts';
+import { basename, displayPath, matchSegments, pathKey } from '../viewer/paths.ts';
 import { addRecent, recentPaths } from './recent.ts';
 
 const MAX_ROWS = 50;
@@ -26,6 +26,23 @@ interface Row {
 
 function looksLikePath(q: string): boolean {
   return /^(~|\.|[a-z]:)/i.test(q) || /[\\/]/.test(q);
+}
+
+/** A name or path with the characters the query matched drawn as marks. */
+function Marked({ text, query, as }: { text: string; query: string; as: 'letters' | 'run' }) {
+  return (
+    <>
+      {matchSegments(text, query).map((seg, i) =>
+        seg.hit ? (
+          <mark key={i} className={as === 'letters' ? 'qo-hit' : 'qo-hit run'}>
+            {seg.text}
+          </mark>
+        ) : (
+          <span key={i}>{seg.text}</span>
+        ),
+      )}
+    </>
+  );
 }
 
 function openPath(path: string, chatId: string | null) {
@@ -129,6 +146,7 @@ function QuickOpenDialog({ chatId, onClose }: { chatId: string | null; onClose: 
     openPath(row.path, chatId);
   };
 
+  const pathMode = looksLikePath(query);
   return (
     <Dialog
       title="Go to file"
@@ -136,53 +154,60 @@ function QuickOpenDialog({ chatId, onClose }: { chatId: string | null; onClose: 
       onClose={onClose}
       testId="quick-open"
       intro={
-        <div className="qo-status">
-          {error ? (
-            <span className="qo-error">{error}</span>
-          ) : (
-            <span>
-              {rows.length} results{remote?.partial ? ' · Showing part of this project' : ''}
-            </span>
-          )}
-          {remote?.mode === 'files' && (
-            <button type="button" className="fv-button" onClick={() => setReload((n) => n + 1)}>
-              Reload
-            </button>
-          )}
-        </div>
+        <>
+          <div className="qo-field">
+            <FolderOpenIcon size={18} />
+            <input
+              ref={input}
+              autoFocus
+              data-autofocus
+              className="qo-input"
+              placeholder="Go to file… (~/, / or a folder path)"
+              aria-label="Go to file"
+              role="combobox"
+              aria-expanded
+              aria-controls="qo-list"
+              aria-activedescendant={current ? `qo-${rows.indexOf(current)}` : undefined}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  const n = rows.length;
+                  if (n) setSelected((i) => (e.key === 'ArrowDown' ? (i + 1) % n : (i - 1 + n) % n));
+                } else if (e.key === 'PageDown' || e.key === 'PageUp') {
+                  e.preventDefault();
+                  setSelected((i) => Math.max(0, Math.min(rows.length - 1, i + (e.key === 'PageDown' ? 10 : -10))));
+                } else if (e.key === 'Enter') {
+                  e.preventDefault();
+                  choose(current);
+                } else if (e.key === 'Tab' && current) {
+                  // Tab completes the path.
+                  e.preventDefault();
+                  setQuery(displayPath(current.path) + (current.kind === 'dir' ? '\\' : ''));
+                }
+              }}
+            />
+            <kbd className="qo-esc">esc</kbd>
+          </div>
+          <div className="qo-status">
+            {error ? (
+              <span className="qo-error">{error}</span>
+            ) : (
+              <span>
+                {rows.length} results{remote?.partial ? ' · Showing part of this project' : ''}
+              </span>
+            )}
+            {remote?.mode === 'files' && (
+              <button type="button" className="fv-button bordered" onClick={() => setReload((n) => n + 1)}>
+                <ReloadIcon />
+                <span>Reload</span>
+              </button>
+            )}
+          </div>
+        </>
       }
     >
-      <TextInput
-        ref={input}
-        autoFocus
-        data-autofocus
-        className="qo-input"
-        placeholder="Go to file… (~/, C:\ or a folder path)"
-        aria-label="Go to file"
-        role="combobox"
-        aria-expanded
-        aria-controls="qo-list"
-        aria-activedescendant={current ? `qo-${rows.indexOf(current)}` : undefined}
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-            e.preventDefault();
-            const n = rows.length;
-            if (n) setSelected((i) => (e.key === 'ArrowDown' ? (i + 1) % n : (i - 1 + n) % n));
-          } else if (e.key === 'PageDown' || e.key === 'PageUp') {
-            e.preventDefault();
-            setSelected((i) => Math.max(0, Math.min(rows.length - 1, i + (e.key === 'PageDown' ? 10 : -10))));
-          } else if (e.key === 'Enter') {
-            e.preventDefault();
-            choose(current);
-          } else if (e.key === 'Tab' && current) {
-            // Tab completes the path.
-            e.preventDefault();
-            setQuery(displayPath(current.path) + (current.kind === 'dir' ? '\\' : ''));
-          }
-        }}
-      />
       <div className="qo-list" id="qo-list" role="listbox" aria-label="Files">
         {rows.length === 0 ? (
           <div className="qo-empty">
@@ -206,8 +231,8 @@ function QuickOpenDialog({ chatId, onClose }: { chatId: string | null; onClose: 
                 onClick={() => choose(row)}
               >
                 {row.kind === 'dir' ? <FolderOpenIcon size={14} /> : <FileTextIcon size={14} />}
-                <span className="qo-name">{row.label}</span>
-                {row.detail && <span className="qo-detail">{row.detail}</span>}
+                <span className="qo-name">{pathMode ? row.label : <Marked text={row.label} query={query} as="letters" />}</span>
+                {row.detail && <span className="qo-detail">{pathMode ? row.detail : <Marked text={row.detail} query={query} as="run" />}</span>}
               </div>
             </div>
           ))

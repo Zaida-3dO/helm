@@ -39,6 +39,25 @@ test('reopening the same kind+key updates data; a user open selects, bumps and u
   assert.equal(m.visible('c1'), true);
 });
 
+test('closing around a tab keeps it, closes the right set and reports each close', () => {
+  const rows: Array<['others' | 'right' | 'left', string[]]> = [
+    ['others', ['m']],
+    ['right', ['a', 'b', 'm']],
+    ['left', ['m', 'y', 'z']],
+  ];
+  for (const [which, left] of rows) {
+    const { m, closes } = setup();
+    for (const k of ['a', 'b', 'm', 'y', 'z']) m.open('file', k, {}, { intent: 'user' }, 'c1');
+    const mid = m.tabs.find((t) => t.key === 'm')!;
+    const n = m.closeAround(mid.id, which, 'c1');
+    assert.deepEqual(keys(m.displayed('c1')), left, which);
+    assert.equal(n, 5 - left.length);
+    assert.equal(closes.length, n);
+    assert.ok(closes.every(([, r]) => r === 'user'));
+    assert.equal(m.activeEntry('c1'), mid.id);
+  }
+});
+
 test('chat tabs show only in their chat; app tabs in every chat', () => {
   const { m } = setup();
   m.open('file', 'a', {}, { intent: 'user' }, 'c1');

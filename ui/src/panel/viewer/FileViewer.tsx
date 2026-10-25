@@ -6,10 +6,11 @@ import { useEffect, useMemo, useState } from 'react';
 import type { FileView, PanelOps } from '../../api/panel.ts';
 import { Markdown } from '../../markdown/index.ts';
 import type { LinkTarget } from '../../markdown/index.ts';
-import { FileTextIcon, FolderOpenIcon } from '../icons.tsx';
+import { BackIcon, BrowseFolderIcon, ChevronIcon, CopyIcon, FileTextIcon, FolderOpenIcon, ForwardIcon, ReloadIcon, UpIcon, WrapIcon } from '../icons.tsx';
 import { gateTarget, handleLink } from '../links.ts';
+import { openInPanel } from '../registry.ts';
 import { CodeView } from './CodeView.tsx';
-import { dirname, displayPath, joinPath, splitSegments } from './paths.ts';
+import { dirname, displayPath, joinPath, pathKey, splitSegments } from './paths.ts';
 
 export interface Location {
   path: string;
@@ -169,11 +170,22 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
     [loc.path, chatId],
   );
 
+  const segments = splitSegments(loc.path);
+  const name = segments[segments.length - 1]?.name ?? loc.path;
+  const showWrap = view?.kind === 'text' && (!renderable || effectiveMode === 'source');
+  const canGoBack = history.index > 0;
   const toolbar = (
-    <div className="fv-toolbar">
+    <div className={compact ? 'fv-toolbar compact' : 'fv-toolbar'}>
       <span className="fv-label">
+        {compact && canGoBack && (
+          <button type="button" className="fv-icon-btn" aria-label="Back" title="Back" onClick={() => setHistory((h) => ({ ...h, index: h.index - 1 }))}>
+            <BackIcon />
+          </button>
+        )}
         {view?.kind === 'dir' ? <FolderOpenIcon size={14} /> : <FileTextIcon size={14} />}
-        <span>{view ? (view.kind === 'dir' ? 'Folder' : `${formatSize(view.size)} · ${kindLabel(view)}`) : loading ? 'Loading…' : ''}</span>
+        <span className="fv-label-text">
+          {compact ? name : view ? (view.kind === 'dir' ? 'Folder' : `${formatSize(view.size)} · ${kindLabel(view)}`) : loading ? 'Loading…' : ''}
+        </span>
       </span>
       <span className="fv-tools">
         {renderable && (
@@ -186,58 +198,72 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
             </button>
           </span>
         )}
-        {view?.kind === 'text' && (!renderable || effectiveMode === 'source') && (
-          <button type="button" className="fv-button" aria-pressed={wrap} onClick={() => setWrap((w) => !w)} title="Word wrap">
-            Wrap
+        {showWrap && (
+          <button type="button" className="fv-icon-btn" aria-pressed={wrap} aria-label="Word wrap" title="Word wrap" onClick={() => setWrap((w) => !w)}>
+            <WrapIcon />
           </button>
         )}
-        <button type="button" className="fv-button" onClick={() => setReload((n) => n + 1)} title="Reload">
-          Reload
+        <button
+          type="button"
+          className={loading ? 'fv-icon-btn is-loading' : 'fv-icon-btn'}
+          aria-label="Reload"
+          aria-busy={loading || undefined}
+          title="Reload"
+          onClick={() => setReload((n) => n + 1)}
+        >
+          <ReloadIcon />
         </button>
         {view?.text !== undefined && (
           <button
             type="button"
-            className="fv-button"
+            className="fv-button bordered"
+            title={view.truncated ? 'Copy the excerpt shown' : 'Copy the file contents'}
             onClick={() => {
               void navigator.clipboard?.writeText(view.text ?? '').then(() => setCopied(true));
               setTimeout(() => setCopied(false), 1500);
             }}
           >
-            {copied ? 'Copied' : view.truncated ? 'Copy preview' : 'Copy'}
+            <CopyIcon />
+            <span className="fv-btn-text">{copied ? 'Copied' : view.truncated ? 'Copy preview' : 'Copy'}</span>
           </button>
         )}
-        <button type="button" className="fv-button" onClick={() => void ops.reveal(loc.path).catch(() => undefined)} title="Show in File Explorer">
-          Show in Explorer
+        <button type="button" className="fv-icon-btn" aria-label="Show in File Explorer" title="Show in File Explorer" onClick={() => void ops.reveal(loc.path).catch(() => undefined)}>
+          <FolderOpenIcon />
         </button>
-        <button type="button" className="fv-button" onClick={() => void navigator.clipboard?.writeText(displayPath(loc.path))}>
-          Copy path
+        <button type="button" className="fv-button bordered" title="Copy path" onClick={() => void navigator.clipboard?.writeText(displayPath(loc.path))}>
+          <CopyIcon />
+          <span className="fv-btn-text">Copy path</span>
         </button>
       </span>
     </div>
   );
 
-  const segments = splitSegments(loc.path);
+  const openFolderTab = () => {
+    if (!parent) return;
+    if (!openInPanel('file', pathKey(parent), { path: parent }, { intent: 'user', chatId })) go({ path: parent });
+  };
   const nav = compact ? null : (
     <div className="fv-nav">
-      <button type="button" className="fv-nav-button" aria-label="Back" disabled={history.index === 0} onClick={() => setHistory((h) => ({ ...h, index: h.index - 1 }))}>
-        ‹
+      <button type="button" className="fv-nav-button" aria-label="Back" title="Back" disabled={!canGoBack} onClick={() => setHistory((h) => ({ ...h, index: h.index - 1 }))}>
+        <BackIcon />
       </button>
       <button
         type="button"
         className="fv-nav-button"
         aria-label="Forward"
+        title="Forward"
         disabled={history.index >= history.stack.length - 1}
         onClick={() => setHistory((h) => ({ ...h, index: h.index + 1 }))}
       >
-        ›
+        <ForwardIcon />
       </button>
-      <button type="button" className="fv-nav-button" aria-label="Up" disabled={atRoot || !parent} onClick={() => parent && go({ path: parent })}>
-        ˄
+      <button type="button" className="fv-nav-button" aria-label="Up" title="Up one folder" disabled={atRoot || !parent} onClick={() => parent && go({ path: parent })}>
+        <UpIcon />
       </button>
       <nav className="fv-crumbs" aria-label="Path">
         {segments.map((seg, i) => (
           <span key={seg.path} className="fv-crumb-wrap">
-            {i > 0 && <span className="fv-crumb-sep">›</span>}
+            <span className="fv-crumb-sep">{i > 0 ? <ChevronIcon size={12} /> : '/'}</span>
             <button type="button" className="fv-crumb" aria-current={i === segments.length - 1 ? 'page' : undefined} onClick={() => go({ path: seg.path })}>
               {seg.name}
             </button>
@@ -250,6 +276,12 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
           {loc.column ? `, column ${loc.column}` : ''}
         </span>
       ) : null}
+      {parent && (
+        <button type="button" className="fv-button browse" title="Open this folder in its own tab" onClick={openFolderTab}>
+          <BrowseFolderIcon />
+          <span className="fv-btn-text">Browse folder</span>
+        </button>
+      )}
     </div>
   );
 
@@ -264,19 +296,21 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
     body = <div className="fv-message">{loading ? 'Loading…' : ''}</div>;
   } else if (view.kind === 'dir') {
     body = (
-      <div className="fv-folder" data-testid="folder-view">
-        <div className="fv-folder-head">
-          <FolderOpenIcon size={32} />
-          <div>
-            <div className="fv-folder-name">{segments[segments.length - 1]?.name ?? loc.path}</div>
-            <div className="fv-folder-count">
-              {view.entries?.length ?? 0} items{view.truncated ? ' (listing limited to 1,000 entries)' : ''}
+      <div className={compact ? 'fv-folder compact' : 'fv-folder'} data-testid="folder-view">
+        {!compact && (
+          <div className="fv-folder-head">
+            <FolderOpenIcon size={32} />
+            <div>
+              <div className="fv-folder-name">{name}</div>
+              <div className="fv-folder-count">
+                {view.entries?.length ?? 0} items{view.truncated ? ' (listing limited to 1,000 entries)' : ''}
+              </div>
             </div>
           </div>
-        </div>
+        )}
         {!atRoot && parent && (
           <button type="button" className="fv-entry" onClick={() => go({ path: parent })}>
-            <FolderOpenIcon size={17} />
+            <BackIcon size={compact ? 13 : 17} />
             <span className="fv-entry-name">..</span>
           </button>
         )}
@@ -289,11 +323,16 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
             data-kind={e.kind}
             onClick={() => go({ path: joinPath(loc.path, e.name) })}
           >
-            {e.kind === 'dir' ? <FolderOpenIcon size={17} /> : <FileTextIcon size={17} />}
+            {e.kind === 'dir' ? <FolderOpenIcon size={compact ? 13 : 17} /> : <FileTextIcon size={compact ? 13 : 17} />}
             <span className="fv-entry-name">{e.name}</span>
-            <span className="fv-entry-kind">{e.kind === 'dir' ? 'Folder' : e.kind === 'link' ? 'Link' : e.size !== undefined ? formatSize(e.size) : ''}</span>
+            {compact ? (
+              e.kind === 'dir' && <ChevronIcon className="fv-entry-chevron" />
+            ) : (
+              <span className="fv-entry-kind">{e.kind === 'dir' ? 'Folder' : e.kind === 'link' ? 'Link' : e.size !== undefined ? formatSize(e.size) : ''}</span>
+            )}
           </button>
         ))}
+        {compact && view.truncated && <div className="fv-notice">Listing limited to 1,000 entries.</div>}
       </div>
     );
   } else if (view.kind === 'image') {

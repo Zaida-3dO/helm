@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FileView } from '../../api/panel.ts';
 import { panelOps } from '../../api/panel.ts';
 import { driveForm, isRemoteOrDevicePath } from '../../markdown/paths.ts';
-import { FileTextIcon, FolderOpenIcon } from '../icons.tsx';
+import { ExternalIcon, FileTextIcon, FolderOpenIcon } from '../icons.tsx';
 import { registerLinkRoute } from '../links.ts';
 import type { PanelTab } from '../model.ts';
 import { openInPanel, panelStore, registerPanelKind, registerPanelSlot } from '../registry.ts';
@@ -99,7 +99,8 @@ function OpenInApp({ path, loaded }: { path: string; loaded: boolean }) {
       title={app.state === 'refused' ? app.reason : label}
       onClick={() => void ops().openDefault(path).catch((e: unknown) => panelStore.showNotice(e instanceof Error ? e.message : String(e)))}
     >
-      {label}
+      <ExternalIcon />
+      <span>{label}</span>
     </button>
   );
 }
@@ -185,7 +186,7 @@ function FilesSlot({ chatId, visible }: { chatId: string | null; visible: boolea
   if (!start) return <div className="sp-empty">This chat has no project folder to browse.</div>;
   return (
     <div className="sp-tab-body" data-testid="files-slot">
-      <FileViewer ops={o} start={start} chatId={chatId} visible={visible} root={root ?? undefined} />
+      <FileViewer ops={o} start={start} chatId={chatId} visible={visible} root={root ?? undefined} compact />
     </div>
   );
 }

@@ -9,7 +9,7 @@ import { panelOps } from '../../api/panel.ts';
 import { useShell } from '../../shell/context.ts';
 import { Button, TextArea } from '../../ui/index.ts';
 import { focusComment, pendingComments, report, setComments } from '../context/store.ts';
-import { FileDiffIcon } from '../icons.tsx';
+import { BranchIcon, ChevronIcon, FileDiffIcon, ReloadIcon } from '../icons.tsx';
 import { openInPanel, panelStore } from '../registry.ts';
 import { joinPath, pathKey } from '../viewer/paths.ts';
 import { counts, EXPAND_STEP, fold, parseDiff } from './diffModel.ts';
@@ -18,6 +18,27 @@ import type { DiffRow, DisplayRow } from './diffModel.ts';
 const SECTION_ORDER: ChangeSection[] = ['conflicts', 'staged', 'unstaged'];
 const SECTION_TITLE: Record<ChangeSection, string> = { conflicts: 'Conflicts', staged: 'Staged', unstaged: 'Unstaged' };
 const EMPTY_TEXT: Record<ChangeSection, string> = { conflicts: '', staged: 'Nothing staged', unstaged: 'No unstaged changes' };
+
+type StatusKind = 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflict';
+const STATUS_TITLE: Record<StatusKind, string> = {
+  modified: 'Modified',
+  added: 'Added',
+  deleted: 'Deleted',
+  renamed: 'Renamed',
+  untracked: 'Untracked',
+  conflict: 'Conflict',
+};
+
+/** The kind a status code stands for, so the letter can be tinted: D beats R beats A beats M. */
+export function statusKind(status: string, section?: ChangeSection): StatusKind {
+  if (section === 'conflicts') return 'conflict';
+  if (status === 'U') return 'untracked';
+  if (status.includes('D')) return 'deleted';
+  if (status.includes('R')) return 'renamed';
+  if (status.includes('A')) return 'added';
+  if (status.includes('M')) return 'modified';
+  return 'conflict';
+}
 
 const rowKey = (r: Pick<ChangeRecord, 'path' | 'section'>) => `${r.section}:${r.path}`;
 
@@ -120,10 +141,13 @@ export function ChangesSlot({ chatId, visible }: { chatId: string | null; visibl
   return (
     <div className="ch-root" data-testid="changes-view" ref={root}>
       <div className="ch-subtitle">
-        <span className="ch-branch">⎇ {view?.branch ?? (view ? 'detached' : '')}</span>
+        <span className="ch-branch">
+          <BranchIcon />
+          <span>{view?.branch ?? (view ? 'detached' : '')}</span>
+        </span>
         <span className="ch-count">{view ? `${changed} changed` : ''}</span>
         <Button variant="icon" label="Refresh changes from disk" onClick={() => setTick((t) => t + 1)} disabled={loading}>
-          ⟳
+          <ReloadIcon />
         </Button>
       </div>
       <div className="ch-notice">Working tree · Staged: compared with HEAD · Unstaged: compared with the index</div>
@@ -221,7 +245,7 @@ function FileRow({ ops, chatId, repoTop, record: r, open, onToggle, busy, onStag
         }}
       >
         <span className="ch-chevron" aria-hidden>
-          ›
+          <ChevronIcon size={13} />
         </span>
         <FileDiffIcon size={15} />
         <button
@@ -243,7 +267,9 @@ function FileRow({ ops, chatId, repoTop, record: r, open, onToggle, busy, onStag
             <span className="ch-add">+{r.added}</span> <span className="ch-del">−{r.removed}</span>
           </span>
         )}
-        <span className={r.status === 'U' || r.status === 'A' ? 'ch-status new' : 'ch-status'}>{r.status}</span>
+        <span className={`ch-status ${statusKind(r.status, r.section)}`} title={STATUS_TITLE[statusKind(r.status, r.section)]}>
+          {r.status}
+        </span>
         {r.partial && <span className="ch-partial">partial</span>}
         {r.section !== 'conflicts' && (
           <Button
