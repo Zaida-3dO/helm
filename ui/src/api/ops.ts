@@ -59,7 +59,6 @@ export function chatOps(api: Api) {
         ...(extras.context !== undefined ? { context: extras.context } : {}),
       }),
     stop: (chatId: string, continueQueue: boolean) => api<{ status: string }>('chat_stop', { chatId, continueQueue }),
-    resumeQueue: (chatId: string) => api<null>('queue_resume', { chatId }),
     submissionAction: (submissionId: string, action: SubmissionAction, position?: number) =>
       api<{ submission: Submission }>('submission_action', { submissionId, action, position }),
     answer: (chatId: string, requestId: string, a: InteractionAnswer) =>

@@ -803,7 +803,10 @@ impl ChatRuntime {
         }
     }
 
-    /// Startup: send each chat owed a restart continuation its one fixed prompt.
+    /// Startup: send each chat owed a restart continuation its one fixed prompt, then hand over
+    /// any message an older version left waiting (nothing waits in Helm for a turn to end any
+    /// more): in a chat that just got a continuation they are read at its first tool boundary,
+    /// elsewhere the first starts a turn and the rest are read as it works. Nothing is held.
     pub fn start_continuations(&self) {
         let ids: Vec<String> = self
             .sh
@@ -817,10 +820,60 @@ impl ChatRuntime {
                 rows.collect::<rusqlite::Result<Vec<String>>>()
             })
             .unwrap_or_default();
-        for chat_id in ids {
-            match crate::submit::continuation(self, &chat_id) {
-                Ok(()) => log::info!("chat {chat_id}: restart continuation sent"),
+        let mut continued: Vec<String> = Vec::new();
+        for chat_id in &ids {
+            match crate::submit::continuation(self, chat_id) {
+                Ok(()) => {
+                    log::info!("chat {chat_id}: restart continuation sent");
+                    continued.push(chat_id.clone());
+                }
                 Err(e) => log::error!("chat {chat_id}: restart continuation not sent: {e}"),
+            }
+        }
+        self.send_left_waiting(&continued);
+    }
+
+    /// Hand over messages still in the old `queued` state, oldest queue position first, one chat's
+    /// messages in order. `continued` are chats whose continuation prompt is already on its way.
+    fn send_left_waiting(&self, continued: &[String]) {
+        let sends = self.sh.db.write(|tx| {
+            let mut st = tx.prepare(
+                "SELECT q.chat_id, s.id FROM queued_submissions q
+                 JOIN submissions s ON s.id = q.submission_id
+                 JOIN chats c ON c.id = q.chat_id
+                 WHERE s.state = 'queued' AND c.archived = 0
+                 ORDER BY q.chat_id, q.position, s.created_at",
+            )?;
+            let rows =
+                st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let rows = rows.collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+            drop(st);
+            let mut seen: Vec<&str> = Vec::new();
+            for (chat, sid) in &rows {
+                let first = !seen.contains(&chat.as_str());
+                if first {
+                    seen.push(chat);
+                }
+                let mode = if first && !continued.contains(chat) {
+                    "prompt"
+                } else {
+                    "steer"
+                };
+                tx.execute(
+                    "DELETE FROM queued_submissions WHERE submission_id = ?1",
+                    [sid],
+                )?;
+                tx.execute(
+                    "UPDATE submissions SET state = 'saved', mode = ?1 WHERE id = ?2",
+                    rusqlite::params![mode, sid],
+                )?;
+            }
+            Ok::<_, rusqlite::Error>(rows)
+        });
+        let Ok(sends) = sends else { return };
+        for (chat, sid) in sends {
+            if let Err(e) = self.command(&chat, Cmd::Dispatch(sid)) {
+                log::error!("chat {chat}: a waiting message was not sent: {e}");
             }
         }
     }
@@ -924,7 +977,7 @@ pub(crate) enum Lane {
 pub(crate) fn lane(cmd: &Cmd) -> Lane {
     match cmd {
         Cmd::Stop { .. } | Cmd::ToolStop { .. } | Cmd::Terminate => Lane::Interrupt,
-        Cmd::Dispatch(_) | Cmd::Kick | Cmd::ApplyEdit => Lane::Soon,
+        Cmd::Dispatch(_) | Cmd::ApplyEdit => Lane::Soon,
         _ => Lane::Other,
     }
 }

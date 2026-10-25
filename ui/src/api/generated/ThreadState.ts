@@ -17,8 +17,4 @@ subagents: Array<Subagent>,
  * How many of `subagents` are running: the sidebar's "working" signal for a chat that is
  * otherwise idle.
  */
-subagentsRunning: number, compacting: Compacting | null, capabilities: Capabilities, sendBehavior: SendBehavior, 
-/**
- * After a restart an interrupted chat's queue waits for Send or `queue_resume`.
- */
-queueHeld: boolean, revision: number, };
+subagentsRunning: number, compacting: Compacting | null, capabilities: Capabilities, sendBehavior: SendBehavior, revision: number, };

@@ -9,10 +9,13 @@ import { stepZoom } from './generalOptions.ts';
 test('send behaviour reads a stored difference and writes back only what differs from the defaults', () => {
   assert.deepEqual(parseSendBehavior(null), HOME_SEND_BEHAVIOR);
   assert.deepEqual(parseSendBehavior({ mode: 'sideways', waitLimitSeconds: 2, toolStop: 1 }), HOME_SEND_BEHAVIOR);
-  const custom = parseSendBehavior({ mode: 'queue', waitLimitSeconds: null, toolStop: false });
-  assert.equal(custom.mode, 'queue');
+  const custom = parseSendBehavior({ mode: 'interrupt', waitLimitSeconds: null, toolStop: false });
+  assert.equal(custom.mode, 'interrupt');
   assert.equal(custom.waitLimitSeconds, null);
-  assert.deepEqual(sendBehaviorDiff(custom), { mode: 'queue', waitLimitSeconds: null, toolStop: false });
+  assert.deepEqual(sendBehaviorDiff(custom), { mode: 'interrupt', waitLimitSeconds: null, toolStop: false });
+  // "Queue it" is gone: a stored queue choice reads as the default and is dropped on the next save.
+  const old = parseSendBehavior({ mode: 'queue', toolStop: false });
+  assert.deepEqual(sendBehaviorDiff(old), { toolStop: false });
   assert.deepEqual(sendBehaviorDiff(HOME_SEND_BEHAVIOR), {});
   assert.equal(waitLimitLabel(null), 'No limit');
   assert.equal(waitLimitLabel(30), '30 seconds (default)');

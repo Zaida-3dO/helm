@@ -103,21 +103,33 @@ mod tests {
 
     #[test]
     fn a_stored_diff_overrides_only_its_keys() {
-        let sb = resolve(Some(&json!({"mode": "queue", "waitLimitSeconds": null})));
-        assert_eq!(sb.mode, SendMode::Queue);
+        let sb = resolve(Some(
+            &json!({"mode": "interrupt", "waitLimitSeconds": null}),
+        ));
+        assert_eq!(sb.mode, SendMode::Interrupt);
         assert_eq!(sb.wait_limit_seconds, None);
         assert_eq!(sb.long_commands, LongCommands::Redirect);
         assert!(opt_in(&sb));
         assert_eq!(
             diff(&sb),
-            json!({"mode": "queue", "waitLimitSeconds": null})
+            json!({"mode": "interrupt", "waitLimitSeconds": null})
         );
+    }
+
+    /// "Queue it" is gone: a message sent mid-turn always goes straight to Claude. A profile that
+    /// stored it reads as the default (send soon) and loses the stale value on its next save.
+    #[test]
+    fn a_stored_queue_choice_reads_as_the_default() {
+        let sb = resolve(Some(&json!({"mode": "queue", "toolStop": false})));
+        assert_eq!(sb.mode, SendMode::Asap);
+        assert!(!sb.tool_stop, "the other stored keys are kept");
+        assert_eq!(diff(&sb), json!({"toolStop": false}));
     }
 
     #[test]
     fn a_stored_diff_passes_the_preference_validator_and_round_trips() {
         let sb = SendBehavior {
-            mode: SendMode::Queue,
+            mode: SendMode::Interrupt,
             show_choices: false,
             stop_sends_waiting: true,
             wait_limit_seconds: None,

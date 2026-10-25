@@ -528,7 +528,7 @@ describe("visual sweep", { timeout: 20 * 60_000 }, () => {
   });
 
   test("queued messages, menus and pickers", async () => {
-    // The chat from the Reduce Motion test is still working: what is sent now queues behind it.
+    // The chat from the Reduce Motion test is still working: what is sent now goes to Claude and shows as pending until it is read.
     await send(page(), "queued one");
     await send(page(), "queued two");
     await page().waitForSelector(tid("queue-item"), { timeout: 20_000 });

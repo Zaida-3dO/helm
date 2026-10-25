@@ -34,8 +34,6 @@ use tokio::time::Instant as TInstant;
 pub(crate) enum Cmd {
     /// Send this saved submission to the worker now.
     Dispatch(String),
-    /// Re-check the queue (after `queue_resume`).
-    Kick,
     Stop {
         continue_queue: bool,
         reply: oneshot::Sender<ChatStatus>,
@@ -227,7 +225,6 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
             compacting: None,
             capabilities: Capabilities::default(),
             send_behavior: crate::send_behavior::HOME_DEFAULTS,
-            queue_held: false,
             revision: 0,
         });
     let live = Arc::new(Mutex::new(Live {
@@ -817,17 +814,8 @@ impl Actor {
             });
             self.end_run(ChatStatus::Interrupted, Some(&error), "interrupted");
             self.emit_queue();
-            // A crash holds the queue; a quit does not (startup recovery decides that).
-            // Done after the submission update so the extra write does not widen the window in
-            // which a reader sees `interrupted` before the in-flight submissions turn uncertain.
-            if !self
-                .sh
-                .shutting_down
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
-                self.hold_queue();
-            }
             if let Some(s) = self.stopping.take() {
+                self.settle_dropped(s.continue_queue);
                 for r in s.replies {
                     let _ = r.send(ChatStatus::Interrupted);
                 }
@@ -984,7 +972,7 @@ impl Actor {
                 });
                 self.emit_queue();
                 self.emit_chat();
-                self.dispatch(&sid, false);
+                self.dispatch(&sid);
             }
             Ok(None) => {}
             Err(e) => {
@@ -1076,61 +1064,52 @@ impl Actor {
         }
     }
 
-    fn queue_held(&self) -> bool {
-        self.sh
-            .db
-            .snapshot(|t| {
-                t.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM chat_queue_holds WHERE chat_id = ?1)",
-                    [&self.chat_id],
-                    |r| r.get::<_, bool>(0),
+    /// After a Stop: the steers the CLI dropped are sent again as the next turn (the Stop asked
+    /// to continue), or become "not delivered" so their text can be taken back.
+    fn settle_dropped(&mut self, continue_queue: bool) {
+        let chat = self.chat_id.clone();
+        if !continue_queue {
+            self.write(|t| {
+                t.execute(
+                    "UPDATE submissions SET state = 'uncertain' WHERE chat_id = ?1 AND state IN ('queued', 'accepted')",
+                    [&chat],
                 )
-            })
-            .unwrap_or(false)
-    }
-
-    /// Holds the queue (shown with Resume) until the user sends or resumes it.
-    fn hold_queue(&mut self) {
-        let id = self.chat_id.clone();
-        self.write(|t| {
-            t.execute(
-                "INSERT OR IGNORE INTO chat_queue_holds(chat_id, held_at) VALUES (?1, ?2)",
-                rusqlite::params![id, now()],
-            )
-        });
-        self.live.lock().unwrap().thread.queue_held = true;
-        self.emit_thread();
-    }
-
-    /// Start the next queued follow-up, if the queue may advance.
-    fn advance_queue(&mut self) {
-        if self.status().is_busy() || self.queue_held() {
+            });
             return;
         }
-        let id = self.chat_id.clone();
-        let next: Option<String> = self
+        let quitting = self
+            .sh
+            .shutting_down
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if quitting || self.retiring {
+            return; // still saved: the next start sends them
+        }
+        let ids: Vec<String> = self
             .sh
             .db
             .snapshot(|t| {
-                use rusqlite::OptionalExtension;
-                t.query_row(
+                let mut st = t.prepare(
                     "SELECT s.id FROM queued_submissions q JOIN submissions s ON s.id = q.submission_id
-                     WHERE q.chat_id = ?1 AND s.state = 'queued' ORDER BY q.position, s.created_at LIMIT 1",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .optional()
+                     WHERE q.chat_id = ?1 AND s.state = 'queued' ORDER BY q.position, s.created_at",
+                )?;
+                let rows = st.query_map([&chat], |r| r.get(0))?;
+                rows.collect::<rusqlite::Result<_>>()
             })
-            .ok()
-            .flatten();
-        if let Some(sid) = next {
+            .unwrap_or_default();
+        for (i, sid) in ids.iter().enumerate() {
+            // The first opens the turn; the rest are read at its first boundary, in order.
+            let mode = if i == 0 { "prompt" } else { "steer" };
             self.write(|t| {
                 t.execute(
                     "DELETE FROM queued_submissions WHERE submission_id = ?1",
-                    [&sid],
+                    [sid],
+                )?;
+                t.execute(
+                    "UPDATE submissions SET state = 'saved', mode = ?1 WHERE id = ?2",
+                    rusqlite::params![mode, sid],
                 )
             });
-            self.dispatch(&sid, true);
+            self.dispatch(sid);
         }
     }
 
@@ -1143,8 +1122,7 @@ impl Actor {
             self.touch();
         }
         match c {
-            Cmd::Dispatch(sid) => self.dispatch(&sid, false),
-            Cmd::Kick => self.advance_queue(),
+            Cmd::Dispatch(sid) => self.dispatch(&sid),
             Cmd::ContextRow { kind, text } => self.context_row(kind, &text),
             Cmd::AfkSweep => {
                 let waiting: Vec<Interaction> =
@@ -1344,17 +1322,17 @@ impl Actor {
         }
     }
 
-    fn dispatch(&mut self, sid: &str, from_queue: bool) {
+    fn dispatch(&mut self, sid: &str) {
         #[cfg(test)]
         let before = write_counts::get(&self.chat_id);
-        self.dispatch_inner(sid, from_queue);
+        self.dispatch_inner(sid);
         // The actor is one thread and the only user of `write` for its chat, so the difference is
         // exactly this dispatch's own transactions.
         #[cfg(test)]
         write_counts::set_last_dispatch(&self.chat_id, write_counts::get(&self.chat_id) - before);
     }
 
-    fn dispatch_inner(&mut self, sid: &str, from_queue: bool) {
+    fn dispatch_inner(&mut self, sid: &str) {
         let Some(sub) = self.submission(sid) else {
             return;
         };
@@ -1397,7 +1375,7 @@ impl Actor {
             let run = self.new_run_id();
             new_run = Some((run, self.chat()));
         }
-        let row = if from_queue || !busy {
+        let row = if !busy {
             // A prompt that opens a turn: its user row shows at once, as saved.
             let mut details = json!({"submissionId": sid, "mode": sub.mode});
             if sub.origin != SubmissionOrigin::Typed {
@@ -2528,7 +2506,8 @@ impl Actor {
         );
     }
 
-    /// Steers the CLI dropped on an interrupt go back to the front of the queue.
+    /// Steers the CLI dropped on an interrupt wait here (state `queued`) until the stop settles:
+    /// then they are sent again or handed back, as the Stop asked.
     fn requeue_front(&mut self, ids: &[String]) {
         let chat = self.chat_id.clone();
         self.write(|t| {
@@ -2596,17 +2575,7 @@ impl Actor {
                     None
                 };
                 self.end_run(status, err.as_deref(), outcome);
-                if stop.continue_queue {
-                    self.advance_queue();
-                } else {
-                    // Stop pauses: what is still queued becomes uncertain.
-                    self.write(|t| {
-                        t.execute(
-                            "UPDATE submissions SET state = 'uncertain' WHERE chat_id = ?1 AND state IN ('queued', 'accepted')",
-                            [&chat],
-                        )
-                    });
-                }
+                self.settle_dropped(stop.continue_queue);
                 self.emit_queue();
                 let final_status = self.status();
                 for r in stop.replies {
@@ -2630,16 +2599,9 @@ impl Actor {
                     ),
                 };
                 self.end_run(status, err.as_deref(), outcome);
-                if status == ChatStatus::Interrupted {
-                    // An abnormal end (error or crash, not a user Stop) holds the queue until the
-                    // user sends or presses Resume, so a failing turn cannot run through every
-                    // queued message.
-                    self.hold_queue();
-                }
                 self.emit_queue();
                 if status == ChatStatus::Idle {
                     self.complete_turn();
-                    self.advance_queue();
                 }
             }
         }

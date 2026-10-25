@@ -25,8 +25,6 @@ export interface QueueContext {
   running: boolean;
   capabilities: Capabilities;
   showChoices: boolean;
-  /** The send mode; a steer shows "Queued · Steer" in queue mode. */
-  sendMode?: string;
   /** Messages waiting for a free run slot: submission id to the note shown beside the label. */
   waits?: ReadonlyMap<string, string>;
 }
@@ -58,8 +56,8 @@ const LABELS: Record<QueueItemState, string> = {
   failed: 'Not delivered',
 };
 
-function toneOf(state: QueueItemState, steerQueued: boolean): QueueTone {
-  if (state === 'pending') return steerQueued ? 'steer' : 'muted';
+function toneOf(state: QueueItemState): QueueTone {
+  if (state === 'pending') return 'muted';
   return state === 'failed' ? 'error' : 'amber';
 }
 
@@ -75,15 +73,13 @@ export function queueView(pending: Submission[], ctx: QueueContext): QueueItemVi
     if (state === 'queued') {
       // Edit pulls the text (and its attachments) back into the draft.
       actions.push('edit');
-      // In ASAP mode a waiting follow-up was queued on purpose, so only "send now" makes sense.
-      if (ctx.running && ctx.showChoices) actions.push(...(ctx.sendMode === 'asap' ? (['sendNow'] as const) : (['steerNow', 'sendNow'] as const)));
+      if (ctx.running && ctx.showChoices) actions.push('steerNow', 'sendNow');
       const i = queuedIds.indexOf(s.id);
       if (ctx.running && i > 0) actions.push('move_up');
       if (ctx.running && i >= 0 && i < queuedIds.length - 1) actions.push('move_down');
     }
     if (state === 'uncertain' || state === 'failed') actions.push('recover');
-    const steerQueued = state === 'pending' && ctx.sendMode === 'queue';
-    return { submission: s, state, label: steerQueued ? 'Queued · Steer' : LABELS[state], note: ctx.waits?.get(s.id), tone: toneOf(state, steerQueued), actions };
+    return { submission: s, state, label: LABELS[state], note: ctx.waits?.get(s.id), tone: toneOf(state), actions };
   });
 }
 

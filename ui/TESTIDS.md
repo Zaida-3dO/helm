@@ -51,7 +51,6 @@ breaks those checks, so change them only together with the checks. Everything el
 | `queue-pending` | The "Pending" label of an unread asap steer | |
 | `queue-withdraw` | Withdraw on a pending steer (only when the worker can withdraw) | |
 | `queue-edit` / `queue-steer-now` / `queue-send-now` / `queue-recover` | Queue item actions | |
-| `queue-resume` | Resume on a held queue (after a restart) | |
 | `background-chip` | Background-tasks chip in the activity dock | `data-count` = number of tasks |
 | `activity-dock` | The live activity dock | |
 | `subagent-card` | The subagent card under an Agent/Task tool row | `data-status` (`running` `completed` `failed` `stopped`), `data-tool-call` (the Agent call id) |

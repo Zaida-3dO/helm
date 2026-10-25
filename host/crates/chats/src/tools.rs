@@ -789,7 +789,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::write(
             "app_send_message",
-            format!("Send a message to another Helm chat. Helm adds a header naming this chat and a note that the user did not write it. mode is required: steer delivers it into the chat's running turn at the next safe point, queue waits for that turn to end; an idle chat starts at once either way, unless too many chats are running: then waitingForSlot is true with a position, and it starts by itself when a slot frees, so do not re-send it; end your turn or carry on with other work. delivered means Helm accepted it, not that the other agent acted; do not poll for a reply.{EXPLICIT}"),
+            format!("Send a message to another Helm chat. Helm adds a header naming this chat and a note that the user did not write it. mode is required: steer or queue, which both deliver it into the chat's running turn at the next safe point (queue is the older name for the same thing; nothing waits for the turn to end); an idle chat starts at once either way, unless too many chats are running: then waitingForSlot is true with a position, and it starts by itself when a slot frees, so do not re-send it; end your turn or carry on with other work. delivered means Helm accepted it, not that the other agent acted; do not poll for a reply.{EXPLICIT}"),
             obj(
                 json!({
                     "chatId": id,
@@ -805,7 +805,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::write(
             "app_create_chat",
-            format!("Start a new chat in a project and send it a first message (framed like app_send_message, queued). Pass parentChatId to nest it under a chat (at most two levels). Omitted model and effort use the new-chat defaults. waitingForSlot with a position means the first message waits for a run slot and starts by itself: do not poll or re-send.{EXPLICIT}"),
+            format!("Start a new chat in a project and send it a first message (framed like app_send_message). Pass parentChatId to nest it under a chat (at most two levels). Omitted model and effort use the new-chat defaults. waitingForSlot with a position means the first message waits for a run slot and starts by itself: do not poll or re-send.{EXPLICIT}"),
             obj(
                 json!({
                     "projectId": {"type": "string"},
@@ -866,7 +866,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .async_tool(
         ToolSpec::write(
             "app_stop_chat",
-            format!("Stop another chat's running turn, like its Stop button; its queued messages stay unsent. stopped is false when it had not settled within 10 s.{EXPLICIT}"),
+            format!("Stop another chat's running turn, like its Stop button; messages it had not read yet stay unsent. stopped is false when it had not settled within 10 s.{EXPLICIT}"),
             obj(json!({"chatId": id}), &["chatId"]),
         )
         .self_locking(),
@@ -1135,7 +1135,7 @@ mod tests {
         let c2 = c2["result"]["chatId"].as_str().unwrap().to_owned();
         let c3 = call(&h, &t, &a, "app_create_chat", mk(Some(&c2))).await;
         assert!(c3["error"].as_str().unwrap().contains("two levels"), "{c3}");
-        // The first message is framed and queued as another chat's.
+        // The first message is framed as another chat's.
         let n = h.col(&format!(
             "SELECT count(*) FROM submissions s JOIN submission_meta m ON m.submission_id = s.id
              WHERE s.chat_id = '{c1}' AND m.origin = 'other_chat'"

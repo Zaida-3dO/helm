@@ -465,7 +465,7 @@ async fn a_greeting_is_not_titled_and_the_next_message_is() {
     .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(h.spawner.title_jobs.lock().unwrap().is_empty());
-    h.send(&chat, "please refactor the config parser", "queue")
+    h.send(&chat, "please refactor the config parser", "steer")
         .await;
     h.until("the generated title", |h| {
         title_state(h, &chat) == ("Refactor the config parser".into(), "generated/".into())

@@ -16,10 +16,11 @@
 //! - **Order:** genuine replies first (`head`: the sender already holds a message framed as from
 //!   the target, so the target messaged or created it), then oldest first, then insertion order.
 //! - **The pump** runs every [`TICK`] and on a wake (settings, Start now, Cancel). Pass 1: a wait
-//!   whose chat is running now joins its turn as a follow-up; with the queue switched off every
+//!   whose chat is running now is handed to that turn as a steer (read at its next tool boundary);
+//!   with the queue switched off every
 //!   wait is released. Pass 2: fills the free slots in order. A wait row is deleted before its
 //!   dispatch and restored if the dispatch is refused, so a wait is sent at most once. When a
-//!   readmit opens a turn, that chat's other waits follow it as follow-ups.
+//!   readmit opens a turn, that chat's other waits are handed to it as steers, in order.
 //! - **Start now** readmits one wait over the limit (and past the hold). **Cancel wait** removes
 //!   the row and marks the message not sent, so it can be recovered into the draft.
 //!
@@ -378,28 +379,29 @@ fn is_busy(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<bool> {
         .unwrap_or(false))
 }
 
-/// Turn a wait into a follow-up of the chat's running (or just opened) turn.
+/// Turn a wait into a steer for the chat's running (or just opened) turn: the wait goes, and the
+/// message is read at the turn's next tool boundary instead of waiting for the turn to end.
 fn absorb(tx: &Transaction<'_>, w: &Wait) -> rusqlite::Result<()> {
     tx.execute(
         "DELETE FROM slot_waits WHERE submission_id = ?1",
         [&w.submission_id],
     )?;
-    let n = tx.execute(
-        "UPDATE submissions SET mode = 'follow_up', state = 'queued' WHERE id = ?1 AND state = 'saved'",
+    tx.execute(
+        "UPDATE submissions SET mode = 'steer' WHERE id = ?1 AND state = 'saved'",
         [&w.submission_id],
     )?;
-    if n == 1 {
-        let pos: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(position) + 1, 0) FROM queued_submissions WHERE chat_id = ?1",
-            [&w.chat_id],
-            |r| r.get(0),
-        )?;
-        tx.execute(
-            "INSERT OR IGNORE INTO queued_submissions(submission_id, chat_id, position) VALUES (?1, ?2, ?3)",
-            params![w.submission_id, w.chat_id, pos],
-        )?;
-    }
     Ok(())
+}
+
+/// Hand an absorbed message to its chat; if the chat refuses it, it goes back to waiting.
+fn hand_over(rt: &ChatRuntime, w: &Wait) -> Result<(), String> {
+    rt.command(&w.chat_id, Cmd::Dispatch(w.submission_id.clone()))
+        .map_err(|e| {
+            let _ = rt
+                .db()
+                .write(|tx| insert_wait(tx, &w.submission_id, &w.chat_id, w.since, w.head));
+            e.message
+        })
 }
 
 /// What a readmit did.
@@ -447,6 +449,12 @@ fn readmit(rt: &ChatRuntime, w: &Wait) -> Readmit {
         Ok(r) => r,
         Err(e) => return Readmit::Refused(e.to_string()),
     };
+    if r == Readmit::Joined {
+        return match hand_over(rt, w) {
+            Ok(()) => Readmit::Joined,
+            Err(e) => Readmit::Refused(e),
+        };
+    }
     if r != Readmit::Opened {
         return r;
     }
@@ -457,13 +465,25 @@ fn readmit(rt: &ChatRuntime, w: &Wait) -> Readmit {
             .write(|tx| insert_wait(tx, &w.submission_id, &w.chat_id, w.since, w.head));
         return Readmit::Refused(e.message);
     }
-    // The chat's other waits follow the turn it just opened.
-    let _ = rt.db().write(|tx| {
-        for other in waits(tx)?.iter().filter(|o| o.chat_id == w.chat_id) {
-            absorb(tx, other)?;
+    // The chat's other waits are read by the turn it just opened.
+    let others: Vec<Wait> = rt
+        .db()
+        .write(|tx| {
+            let others: Vec<Wait> = waits(tx)?
+                .into_iter()
+                .filter(|o| o.chat_id == w.chat_id)
+                .collect();
+            for other in &others {
+                absorb(tx, other)?;
+            }
+            Ok::<_, rusqlite::Error>(others)
+        })
+        .unwrap_or_default();
+    for other in &others {
+        if let Err(e) = hand_over(rt, other) {
+            log::info!("run slots: {} not handed over yet: {e}", other.chat_id);
         }
-        Ok::<_, rusqlite::Error>(())
-    });
+    }
     Readmit::Opened
 }
 
@@ -500,7 +520,7 @@ pub fn pass(rt: &ChatRuntime, now: i64) -> usize {
             }
         }
     } else {
-        // Pass 1: a chat that is running now takes its waits as follow-ups.
+        // Pass 1: a chat that is running now is handed its waits as steers.
         for w in all.iter().filter(|w| busy.contains(&w.chat_id)) {
             if readmit(rt, w) == Readmit::Joined {
                 done += 1;

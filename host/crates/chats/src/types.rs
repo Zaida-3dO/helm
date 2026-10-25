@@ -373,7 +373,6 @@ pub struct Interaction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum SendMode {
-    Queue,
     Asap,
     Interrupt,
 }
@@ -416,8 +415,6 @@ pub struct ThreadState {
     pub compacting: Option<Compacting>,
     pub capabilities: Capabilities,
     pub send_behavior: SendBehavior,
-    /// After a restart an interrupted chat's queue waits for Send or `queue_resume`.
-    pub queue_held: bool,
     #[ts(type = "number")]
     pub revision: i64,
 }
@@ -890,7 +887,6 @@ pub struct ChatFindResult {
 pub enum SendAction {
     /// Apply `sendBehavior.mode` while busy; a plain prompt when idle.
     Default,
-    Queue,
     Steer,
     Now,
 }

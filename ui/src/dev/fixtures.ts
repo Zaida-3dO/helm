@@ -68,7 +68,6 @@ export function thread(p: Partial<ThreadState> = {}): ThreadState {
     compacting: null,
     capabilities: { withdraw: true, deliverNow: true, stopTool: false, compact: false },
     sendBehavior: { ...HOME_SEND_BEHAVIOR },
-    queueHeld: false,
     revision: 1,
     ...p,
   };

@@ -99,7 +99,7 @@ function ChatPane() {
       </SettingRow>
       <SettingRow
         title="A message sent while Claude is working"
-        description="Queue waits for the current turn to finish. Send soon hands it to Claude as it works. Interrupt stops the turn and sends it at once."
+        description="Send soon hands it to Claude as it works, and Claude reads it at the next step. Interrupt stops the turn and sends it at once."
         testId="setting-send-mode"
       >
         <Picker<SendMode>
@@ -107,11 +107,11 @@ function ChatPane() {
           label="A message sent while Claude is working"
           testId="settings-send-mode"
           value={sb.mode}
-          options={SEND_MODES.map((m) => ({ value: m, title: { queue: 'Queue it', asap: 'Send soon (default)', interrupt: 'Interrupt' }[m] }))}
+          options={SEND_MODES.map((m) => ({ value: m, title: { asap: 'Send soon (default)', interrupt: 'Interrupt' }[m] }))}
           onChange={(mode) => setSendBehavior({ mode })}
         />
       </SettingRow>
-      <SettingRow title="Show send choices" description="Offer Steer now and Send now on queued messages." testId="setting-send-choices">
+      <SettingRow title="Show send choices" description="Offer extra send keys and buttons for a message sent while Claude is working: Send now, or Steer in Interrupt mode." testId="setting-send-choices">
         <Checkbox checked={sb.showChoices} onChange={(showChoices) => setSendBehavior({ showChoices })} />
       </SettingRow>
       <SettingRow
@@ -128,7 +128,7 @@ function ChatPane() {
           onChange={(v) => setSendBehavior({ waitLimitSeconds: v === 'null' ? null : Number(v) })}
         />
       </SettingRow>
-      <SettingRow title="Stop sends waiting messages" description="Stopping a task also sends the messages waiting behind it, instead of pausing the queue." testId="setting-stop-sends">
+      <SettingRow title="Stop sends waiting messages" description="Stopping a task also sends the messages Claude had not read yet, instead of handing them back to you." testId="setting-stop-sends">
         <Checkbox checked={sb.stopSendsWaiting} onChange={(stopSendsWaiting) => setSendBehavior({ stopSendsWaiting })} />
       </SettingRow>
       <SettingRow title="Long commands" description="What happens when Claude starts a build, a test run, a server or a long sleep in the foreground." testId="setting-long-commands">

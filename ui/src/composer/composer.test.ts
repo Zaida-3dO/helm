@@ -12,9 +12,9 @@ import { SlotQueueStore, waitNotes, type SlotQueueView } from './slotQueue.ts';
 const key = (k: string, m: Partial<KeyShape> = {}): KeyShape => ({ key: k, ctrl: false, shift: false, alt: false, meta: false, ...m });
 const asap: KeyContext = { sendShortcut: 'mod-enter', mode: 'asap', showChoices: true };
 
-test('send keys follow the mode: asap has queue and send now as alternates', () => {
+test('send keys follow the mode: asap has send now as its alternate', () => {
   assert.deepEqual(resolveKey(key('Enter', { ctrl: true }), asap), { kind: 'send', action: 'default' });
-  assert.deepEqual(resolveKey(key('Enter', { alt: true }), asap), { kind: 'send', action: 'queue' });
+  assert.deepEqual(resolveKey(key('Enter', { alt: true }), asap), { kind: 'none' }, 'Alt+Enter no longer queues');
   assert.deepEqual(resolveKey(key('Enter', { ctrl: true, alt: true }), asap), { kind: 'send', action: 'now' });
   // Steer is the default in asap, so its key is not an alternate there.
   assert.deepEqual(resolveKey(key('Enter', { ctrl: true, shift: true }), asap), { kind: 'send', action: 'default' });
@@ -22,18 +22,15 @@ test('send keys follow the mode: asap has queue and send now as alternates', () 
   assert.deepEqual(resolveKey(key('Escape'), asap), { kind: 'stop-continue' });
 });
 
-test('queue mode offers steer; interrupt offers steer and queue', () => {
-  const q: KeyContext = { ...asap, mode: 'queue' };
-  assert.deepEqual(resolveKey(key('Enter', { ctrl: true, shift: true }), q), { kind: 'send', action: 'steer' });
-  assert.deepEqual(resolveKey(key('Enter', { alt: true }), q), { kind: 'send', action: 'default' });
+test('interrupt mode offers steer', () => {
   const i: KeyContext = { ...asap, mode: 'interrupt' };
-  assert.deepEqual(resolveKey(key('Enter', { alt: true }), i), { kind: 'send', action: 'queue' });
+  assert.deepEqual(resolveKey(key('Enter', { ctrl: true, shift: true }), i), { kind: 'send', action: 'steer' });
   assert.deepEqual(resolveKey(key('Enter', { ctrl: true, alt: true }), i), { kind: 'send', action: 'default' });
 });
 
 test('with choices hidden, alternate keys send with the default mode', () => {
   const hidden = { ...asap, showChoices: false };
-  assert.deepEqual(resolveKey(key('Enter', { alt: true }), hidden), { kind: 'send', action: 'default' });
+  assert.deepEqual(resolveKey(key('Enter', { ctrl: true, alt: true }), hidden), { kind: 'send', action: 'default' });
 });
 
 test('the Enter shortcut sends on plain Enter, Shift+Enter is a newline', () => {
@@ -43,9 +40,9 @@ test('the Enter shortcut sends on plain Enter, Shift+Enter is a newline', () => 
 });
 
 test('tooltips name what Send and Stop do', () => {
-  assert.match(sendTooltip(asap, true), /^Steer into the running task · Ctrl\+Enter · Alt\+Enter to queue$/);
+  assert.match(sendTooltip(asap, true), /^Steer into the running task · Ctrl\+Enter · Ctrl\+Alt\+Enter to send now$/);
   assert.equal(sendTooltip(asap, false), 'Send · Ctrl+Enter');
-  assert.equal(stopTooltip(false, true), 'Stop task and pause queue · Esc interrupts and continues the queue');
+  assert.equal(stopTooltip(false, true), 'Stop task and keep waiting messages unsent · Esc interrupts and sends waiting messages');
   assert.equal(stopTooltip(true, false), 'Stop task and send waiting messages');
 });
 
@@ -163,18 +160,16 @@ test('the permission chip shows bypass until a live mode is reported', () => {
   assert.equal(permissionLabel('plan'), 'Plan mode');
 });
 
-test('queue pills: tone follows the state, and a steer in queue mode reads Queued · Steer', () => {
+test('queue pills: tone follows the state', () => {
   const pending = [
     submission({ id: 's1', mode: 'steer', state: 'accepted', createdAt: 5 }),
     submission({ id: 'q1', position: 1, createdAt: 2 }),
     submission({ id: 'r1', state: 'rejected', position: 2, createdAt: 3 }),
   ];
   const caps = { withdraw: true, deliverNow: true, stopTool: false, compact: false };
-  const asap = queueView(pending, { running: true, showChoices: true, capabilities: caps, sendMode: 'asap' });
-  assert.deepEqual(asap.map((i) => [i.submission.id, i.label, i.tone]), [['s1', 'Pending', 'muted'], ['q1', 'Queued', 'amber'], ['r1', 'Not delivered', 'error']]);
-  assert.deepEqual(asap[1]!.actions, ['edit', 'sendNow'], 'ASAP offers only send now');
-  const queued = queueView(pending, { running: true, showChoices: true, capabilities: caps, sendMode: 'queue' });
-  assert.deepEqual([queued[0]!.label, queued[0]!.tone], ['Queued · Steer', 'steer']);
+  const view = queueView(pending, { running: true, showChoices: true, capabilities: caps });
+  assert.deepEqual(view.map((i) => [i.submission.id, i.label, i.tone]), [['s1', 'Pending', 'muted'], ['q1', 'Queued', 'amber'], ['r1', 'Not delivered', 'error']]);
+  assert.deepEqual(view[1]!.actions, ['edit', 'steerNow', 'sendNow']);
 });
 
 test('queue: dropping on another queued message lands on that message position', () => {

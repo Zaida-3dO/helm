@@ -876,13 +876,6 @@ button.danger {
   gap: 8px;
 }
 
-.queue-held {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  font-size: 13px;
-}
-
 /* Queued, steered and undelivered messages as bubbles with a delivery pill. */
 .queue-item {
   --tone: var(--delivery-pending);

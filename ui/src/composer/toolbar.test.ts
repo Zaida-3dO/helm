@@ -78,7 +78,6 @@ test('the permission chip shows a pick until the CLI reports it, then the live m
 test('the icon Send button names what it will do', () => {
   assert.equal(sendLabel(false, 'asap'), 'Send');
   assert.equal(sendLabel(true, 'asap'), 'Steer');
-  assert.equal(sendLabel(true, 'queue'), 'Queue');
   assert.equal(sendLabel(true, 'interrupt'), 'Interrupt');
 });
 

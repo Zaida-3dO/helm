@@ -473,10 +473,11 @@ async fn running_turn(h: &mut H) -> (String, String, FakeWorker) {
     (chat, sid, w)
 }
 
-/// With the default send behaviour a busy Send steers; it is Pending (accepted) until delivered.
-/// The queue action queues instead.
+/// A message sent while Claude works goes straight to it, whichever way it is sent, and is read
+/// at the next tool boundary (Pending until then). Nothing waits in Helm for the turn to end, and
+/// the old "queue" action no longer exists.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_busy_send_steers_by_default_and_queue_queues() {
+async fn a_busy_send_goes_to_claude_at_once() {
     let mut h = harness();
     let (chat, _, mut w) = running_turn(&mut h).await;
     let (steer, sent) = h.send(&chat, "also this", "default").await;
@@ -489,32 +490,52 @@ async fn a_busy_send_steers_by_default_and_queue_queues() {
         .await;
     h.until("delivered", |h| h.state(&steer) == "delivered")
         .await;
-    let (queued, sent) = h.send(&chat, "later", "queue").await;
-    assert_eq!(sent["submission"]["state"], "queued");
+    let (second, sent) = h.send(&chat, "and this", "steer").await;
+    assert_eq!(sent["submission"]["state"], "saved");
+    let p2 = w.expect("prompt").await;
+    assert_eq!(p2["submissionId"], second.as_str());
+    assert_eq!(p2["streamingBehavior"], "steer");
     assert!(
-        w.no_command_for(Duration::from_millis(100)).await.is_none(),
-        "queued stays host-side"
+        h.col("SELECT submission_id FROM queued_submissions")
+            .is_empty(),
+        "nothing waits in Helm"
     );
+    let gone = h
+        .api
+        .call(
+            &main(),
+            "chat_send",
+            json!({"chatId": chat, "submissionId": uuid::Uuid::new_v4().to_string(),
+                   "text": "x", "action": "queue", "draftRevision": 0}),
+        )
+        .await;
+    assert!(gone.is_err(), "the queue action is gone");
+    ack(&w, &p2).await;
+    w.emit(json!({"type": "submission_delivered", "submissionId": second}))
+        .await;
+    h.until("delivered", |h| h.state(&second) == "delivered")
+        .await;
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
         .await;
-    // Settle: the queued follow-up opens the next turn as a plain prompt.
-    let p2 = w.expect("prompt").await;
-    assert_eq!(p2["submissionId"], queued.as_str());
-    assert!(p2.get("streamingBehavior").is_none());
+    h.until("idle", |h| h.status(&chat) == "idle").await;
     assert_eq!(h.state(&steer), "complete");
+    assert!(w.no_command_for(Duration::from_millis(100)).await.is_none());
 }
 
-/// Stop sends abort; a clean settle is `stopped`; queued messages become uncertain;
-/// dropped steers come back to the queue (then uncertain too, since Stop pauses).
+/// Stop sends abort; a clean settle is `stopped`; the steers Claude had not read yet are dropped
+/// and come back as "not delivered", in the order they were sent, with nothing sent afterwards.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stop_pauses_the_queue_and_returns_dropped_steers() {
+async fn stop_hands_back_the_steers_nobody_read() {
     let mut h = harness();
     let (chat, _, mut w) = running_turn(&mut h).await;
-    let (queued, _) = h.send(&chat, "queued", "queue").await;
-    let (steer, _) = h.send(&chat, "steer", "steer").await;
+    let (first, _) = h.send(&chat, "one", "steer").await;
     let p = w.expect("prompt").await;
     ack(&w, &p).await;
-    h.until("accepted", |h| h.state(&steer) == "accepted").await;
+    let (second, _) = h.send(&chat, "two", "steer").await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    h.until("accepted", |h| h.state(&second) == "accepted")
+        .await;
     let api = h.api.clone();
     let c2 = chat.clone();
     let stop = tokio::spawn(async move {
@@ -529,7 +550,7 @@ async fn stop_pauses_the_queue_and_returns_dropped_steers() {
     assert_eq!(abort["continueQueue"], false);
     w.respond(
         &abort,
-        json!({"state": "stopping", "cancelledSubmissionIds": [steer]}),
+        json!({"state": "stopping", "cancelledSubmissionIds": [first, second]}),
     )
     .await;
     w.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
@@ -537,28 +558,32 @@ async fn stop_pauses_the_queue_and_returns_dropped_steers() {
     let r = stop.await.unwrap().unwrap();
     assert_eq!(r["status"], "stopped");
     assert_eq!(h.status(&chat), "stopped");
-    assert_eq!(h.state(&queued), "uncertain");
-    assert_eq!(h.state(&steer), "uncertain");
+    assert_eq!(h.state(&first), "uncertain");
+    assert_eq!(h.state(&second), "uncertain");
     let order = h.col(&format!(
         "SELECT submission_id FROM queued_submissions WHERE chat_id = '{chat}' ORDER BY position"
     ));
-    assert_eq!(
-        order,
-        [steer.clone(), queued.clone()],
-        "the dropped steer is at the front"
-    );
+    assert_eq!(order, [first.clone(), second.clone()]);
     assert!(
         w.no_command_for(Duration::from_millis(150)).await.is_none(),
         "nothing sent after Stop"
     );
 }
 
-/// Esc continues the queue.
+/// Esc (or "Stop sends waiting messages") sends the dropped steers again: the first opens the
+/// next turn and the second is read as it works, in order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn esc_lets_the_queue_continue() {
+async fn esc_sends_the_dropped_steers_again() {
     let mut h = harness();
     let (chat, _, mut w) = running_turn(&mut h).await;
-    let (queued, _) = h.send(&chat, "next", "queue").await;
+    let (first, _) = h.send(&chat, "one", "steer").await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    let (second, _) = h.send(&chat, "two", "steer").await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    h.until("accepted", |h| h.state(&second) == "accepted")
+        .await;
     let api = h.api.clone();
     let c2 = chat.clone();
     tokio::spawn(async move {
@@ -572,50 +597,43 @@ async fn esc_lets_the_queue_continue() {
     let abort = w.expect("abort").await;
     w.respond(
         &abort,
-        json!({"state": "stopping", "cancelledSubmissionIds": []}),
+        json!({"state": "stopping", "cancelledSubmissionIds": [first, second]}),
     )
     .await;
     w.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
         .await;
     let p = w.expect("prompt").await;
-    assert_eq!(p["submissionId"], queued.as_str());
+    assert_eq!(p["submissionId"], first.as_str());
+    assert!(p.get("streamingBehavior").is_none(), "it opens the turn");
+    let p = w.expect("prompt").await;
+    assert_eq!(p["submissionId"], second.as_str());
+    assert_eq!(p["streamingBehavior"], "steer");
 }
 
-/// A turn that ends abnormally (an error, not a user
-/// Stop) holds the queue, shown with Resume, instead of advancing into the next queued message.
+/// A failed turn holds nothing back: the chat is simply interrupted, there is no pause to
+/// release, and the next message starts a turn at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_abnormal_end_holds_the_queue_until_resume() {
+async fn a_failed_turn_leaves_nothing_held() {
     let mut h = harness();
     let (chat, _, mut w) = running_turn(&mut h).await;
-    let (queued, _) = h.send(&chat, "next", "queue").await;
     w.emit(json!({"type": "agent_settled", "outcome": "error", "error": "API error"}))
         .await;
     h.until("interrupted", |h| h.status(&chat) == "interrupted")
         .await;
-    assert!(
-        w.no_command_for(Duration::from_millis(200)).await.is_none(),
-        "the queued message is not sent"
-    );
-    assert_eq!(h.state(&queued), "queued");
-    // The hold is written just after the status (a loaded machine can see the gap).
-    h.until("held", |h| {
-        h.col(&format!(
-            "SELECT chat_id FROM chat_queue_holds WHERE chat_id = '{chat}'"
-        )) == std::slice::from_ref(&chat)
-    })
-    .await;
     let got = h
         .api
         .call(&main(), "chat_get", json!({"chatId": chat}))
         .await
         .unwrap();
-    assert_eq!(got["thread"]["queueHeld"], true);
-    h.api
+    assert!(got["thread"].get("queueHeld").is_none());
+    assert!(h
+        .api
         .call(&main(), "queue_resume", json!({"chatId": chat}))
         .await
-        .unwrap();
+        .is_err());
+    let (next, _) = h.send(&chat, "try again", "default").await;
     let p = w.expect("prompt").await;
-    assert_eq!(p["submissionId"], queued.as_str());
+    assert_eq!(p["submissionId"], next.as_str());
 }
 
 /// A worker that does not settle within the stop limit is closed, and the run is interrupted.
@@ -1054,6 +1072,62 @@ async fn a_restart_continuation_is_sent_once_with_the_native_session() {
         ["app"],
         "the restart continuation is the app's own send"
     );
+}
+
+/// Messages an older version left waiting are handed over after a restart, never held: in a chat
+/// with no continuation the first opens a turn and the rest are read as it works; in a chat that
+/// gets a continuation they all follow it as steers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_hands_over_what_was_waiting() {
+    let mut h = harness();
+    let db = h.db.clone();
+    let seed = move |chat: &str, ids: &[&str]| {
+        db.write(|tx| {
+            for (i, id) in ids.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO submissions(id, chat_id, text, mode, state, created_at)
+                     VALUES (?1, ?2, ?1, 'followUp', 'queued', ?3)",
+                    rusqlite::params![id, chat, i as i64],
+                )?;
+                tx.execute("INSERT INTO submission_meta(submission_id) VALUES (?1)", [id])?;
+                tx.execute(
+                    "INSERT INTO queued_submissions(submission_id, chat_id, position) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![id, chat, i as i64],
+                )?;
+            }
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    };
+    // No continuation: the first message starts the turn, the second is read as it works.
+    let plain = h.create().await;
+    seed(&plain, &["p1", "p2"]);
+    h.rt.start_continuations();
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert_eq!(p["submissionId"], "p1");
+    assert!(p.get("streamingBehavior").is_none());
+    ack(&w, &p).await;
+    let p = w.expect("prompt").await;
+    assert_eq!(p["submissionId"], "p2");
+    assert_eq!(p["streamingBehavior"], "steer");
+    assert!(h
+        .col("SELECT submission_id FROM queued_submissions")
+        .is_empty());
+    // A continuation goes first; what was waiting follows it as steers.
+    let resumed = h.create().await;
+    seed(&resumed, &["r1"]);
+    h.db.write(|tx| crate::schema::record_continuation(tx, &resumed, 1))
+        .unwrap();
+    h.rt.start_continuations();
+    let mut w2 = h.worker().await;
+    w2.ready().await;
+    let p = w2.expect("prompt").await;
+    assert_eq!(p["text"], crate::submit::CONTINUATION_TEXT);
+    let p = w2.expect("prompt").await;
+    assert_eq!(p["submissionId"], "r1");
+    assert_eq!(p["streamingBehavior"], "steer");
 }
 
 /// The drain records a continuation for the running chat and sends shutdown.
@@ -1940,7 +2014,7 @@ more detail",
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0]["forked"], false);
     // Later sends start no new job.
-    h.send(&chat, "and another", "queue").await;
+    h.send(&chat, "and another", "steer").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(h.spawner.title_jobs.lock().unwrap().len(), 1);
 }
@@ -2064,7 +2138,7 @@ async fn attached_images_ride_the_prompt() {
         .call(
             "chat_send",
             json!({"chatId": chat, "submissionId": uuid::Uuid::new_v4().to_string(), "text": "x",
-                   "action": "queue", "draftRevision": 0, "attachments": [id]}),
+                   "action": "steer", "draftRevision": 0, "attachments": [id]}),
         )
         .await
         .unwrap_err();
@@ -2750,7 +2824,7 @@ async fn a_full_channel_keeps_its_last_slot_for_interrupts() {
         "a best-effort command never takes the reserved slot"
     );
     assert!(
-        enqueue(&tx, crate::actor::Cmd::Kick).is_err(),
+        enqueue(&tx, crate::actor::Cmd::Dispatch(String::new())).is_err(),
         "nor does a send soon"
     );
     assert!(
@@ -2773,21 +2847,33 @@ async fn a_send_soon_waits_for_a_slot_then_gives_up_after_its_window() {
     assert!(enqueue(&tx, crate::actor::Cmd::Retire).is_ok());
     let sender = tx.clone();
     let waiting = tokio::spawn(async move {
-        send_soon(&sender, crate::actor::Cmd::Kick, Duration::from_secs(5))
-            .await
-            .is_ok()
+        send_soon(
+            &sender,
+            crate::actor::Cmd::Dispatch(String::new()),
+            Duration::from_secs(5),
+        )
+        .await
+        .is_ok()
     });
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert!(!waiting.is_finished(), "it waits while the channel is full");
     assert!(matches!(rx.recv().await, Some(crate::actor::Cmd::Retire)));
     assert!(waiting.await.unwrap(), "delivered once a slot freed");
-    assert!(matches!(rx.recv().await, Some(crate::actor::Cmd::Kick)));
+    assert!(matches!(
+        rx.recv().await,
+        Some(crate::actor::Cmd::Dispatch(_))
+    ));
 
     assert!(enqueue(&tx, crate::actor::Cmd::Retire).is_ok());
     let started = std::time::Instant::now();
-    let r = send_soon(&tx, crate::actor::Cmd::Kick, Duration::from_millis(200)).await;
+    let r = send_soon(
+        &tx,
+        crate::actor::Cmd::Dispatch(String::new()),
+        Duration::from_millis(200),
+    )
+    .await;
     assert!(
-        matches!(r, Err(crate::actor::Cmd::Kick)),
+        matches!(r, Err(crate::actor::Cmd::Dispatch(_))),
         "given back after the window"
     );
     assert!(started.elapsed() >= Duration::from_millis(200));
@@ -3109,7 +3195,7 @@ async fn references_ride_the_prompt_as_a_data_section() {
         .call(
             "chat_send",
             json!({"chatId": chat, "submissionId": uuid::Uuid::new_v4().to_string(), "text": "again",
-                   "action": "queue", "draftRevision": 0, "attachments": [f["attachmentId"]]}),
+                   "action": "steer", "draftRevision": 0, "attachments": [f["attachmentId"]]}),
         )
         .await
         .unwrap_err();

@@ -7,7 +7,7 @@ import type { SendBehavior } from '../../api/generated/index.ts';
 export type SendMode = SendBehavior['mode'];
 export type LongCommands = SendBehavior['longCommands'];
 
-export const SEND_MODES: SendMode[] = ['queue', 'asap', 'interrupt'];
+export const SEND_MODES: SendMode[] = ['asap', 'interrupt'];
 export const LONG_COMMANDS: LongCommands[] = ['off', 'warn', 'redirect'];
 /** `null` is "no limit"; the host accepts 5 to 3600 seconds. */
 export const WAIT_LIMITS: (number | null)[] = [null, 10, 30, 60, 120, 300, 600, 1800, 3600];

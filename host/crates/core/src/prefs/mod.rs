@@ -341,6 +341,8 @@ fn validate_send_behavior(value: &Value) -> Result<(), PrefError> {
     };
     for (k, v) in map {
         let ok = match k.as_str() {
+            // "queue" is a retired choice; it is still accepted so an old stored value is not an error
+            // (it reads as "asap").
             "mode" => matches!(v.as_str(), Some("queue" | "asap" | "interrupt")),
             "showChoices" | "stopSendsWaiting" | "toolStop" => v.is_boolean(),
             "waitLimitSeconds" => {

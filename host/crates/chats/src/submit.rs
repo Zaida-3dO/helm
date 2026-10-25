@@ -245,14 +245,12 @@ pub fn chat_send(
             } else {
                 let action = match a.action {
                     SendAction::Default => match sb.mode {
-                        SendMode::Queue => SendAction::Queue,
                         SendMode::Asap => SendAction::Steer,
                         SendMode::Interrupt => SendAction::Now,
                     },
                     other => other,
                 };
                 match action {
-                    SendAction::Queue => (SubmissionMode::FollowUp, SubmissionState::Queued, None),
                     SendAction::Now if status != ChatStatus::Starting => {
                         (SubmissionMode::Prompt, SubmissionState::Saved, Some("now"))
                     }
@@ -329,20 +327,13 @@ pub fn chat_send(
                     params![now, a.chat_id, a.draft_revision],
                 )?;
             }
-            tx.execute("DELETE FROM chat_queue_holds WHERE chat_id = ?1", [&a.chat_id])?;
-            if mode != SubmissionMode::Prompt || priority.is_some() {
-                // A busy send: the user row appears when the harness echoes it.
-            }
             let sub = store::get_submission(tx, &sid)?.expect("just inserted");
-            Ok(Ok(Out::New(sub, state != SubmissionState::Queued, title_job)))
+            Ok(Ok(Out::New(sub, true, title_job)))
         })
         .map_err(sql)??;
     let submission = match out {
         Out::Repeat(s) => s,
         Out::New(s, dispatch, title_job) => {
-            if let Some(live) = rt.sh.actors.lock().unwrap().get(&a.chat_id) {
-                live.live.lock().unwrap().thread.queue_held = false;
-            }
             if dispatch {
                 // Could not hand it over (refused now, or a send soon that never fit): undo,
                 // keep the text for the user.
@@ -384,12 +375,13 @@ pub fn chat_send(
     Ok(ChatSendResult { submission, chat })
 }
 
-/// How a host send lands on a busy chat (cross-chat messages).
+/// How a host send lands on a busy chat (cross-chat messages). Both go to Claude at once and are
+/// read at the next tool boundary of the running turn (never cancelling running tools); nothing
+/// waits in Helm for the turn to end. `Queue` is the older name, kept so existing callers and
+/// stored settings keep working.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostSendMode {
-    /// At the next supported boundary of the running turn (never cancels running tools).
     Steer,
-    /// As a follow-up after the running turn.
     Queue,
 }
 
@@ -409,9 +401,10 @@ pub struct HostSend<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostSent {
-    /// Saved, and handed to the chat now (idle: a prompt; busy and steer: a steer).
+    /// Saved, and handed to the chat now (idle: a prompt; busy: a steer).
     pub delivered: bool,
-    /// Saved as a follow-up behind the running turn.
+    /// Always false: a message no longer waits in Helm behind the running turn. Kept so the
+    /// shape of the tool replies does not change.
     pub queued: bool,
     /// Saved, waiting for a run slot: its 1-based place in the queue ([`crate::runslots`]).
     pub waiting: Option<usize>,
@@ -511,8 +504,9 @@ pub fn host_send_with_images(
             }
             let (mode, state) = match (busy, s.mode) {
                 (false, _) => (SubmissionMode::Prompt, SubmissionState::Saved),
-                (true, HostSendMode::Steer) => (SubmissionMode::Steer, SubmissionState::Saved),
-                (true, HostSendMode::Queue) => (SubmissionMode::FollowUp, SubmissionState::Queued),
+                (true, HostSendMode::Steer | HostSendMode::Queue) => {
+                    (SubmissionMode::Steer, SubmissionState::Saved)
+                }
             };
             let dir = rt.sh.cfg.profile_dir.join("attachments");
             let mut ids = Vec::new();
@@ -590,8 +584,9 @@ pub fn continuation(rt: &ChatRuntime, chat_id: &str) -> Result<(), ApiError> {
                 return Ok(None);
             };
             let busy = status.is_busy();
-            let state = if busy { SubmissionState::Queued } else { SubmissionState::Saved };
-            let mode = if busy { SubmissionMode::FollowUp } else { SubmissionMode::Prompt };
+            // A chat already working is not made to wait: the prompt is read at its next boundary.
+            let state = SubmissionState::Saved;
+            let mode = if busy { SubmissionMode::Steer } else { SubmissionMode::Prompt };
             insert_submission(
                 tx,
                 &NewSubmission {
@@ -622,25 +617,13 @@ pub fn continuation(rt: &ChatRuntime, chat_id: &str) -> Result<(), ApiError> {
                 parent_id: None,
             };
             session_log::upsert_row(tx, &artifacts, chat_id, &row, rt.clock().next())?;
-            Ok(Some(!busy))
+            Ok(Some(()))
         })
         .map_err(sql)?;
     match dispatch {
-        Some(true) => rt.command(chat_id, Cmd::Dispatch(sid)),
-        Some(false) => Ok(()),
+        Some(()) => rt.command(chat_id, Cmd::Dispatch(sid)),
         None => Ok(()),
     }
-}
-
-/// `queue_resume`: release a held queue and let it advance.
-pub fn queue_resume(rt: &ChatRuntime, chat_id: &str) -> Result<(), ApiError> {
-    rt.db()
-        .write(|tx| tx.execute("DELETE FROM chat_queue_holds WHERE chat_id = ?1", [chat_id]))
-        .map_err(sql)?;
-    if let Some(live) = rt.sh.actors.lock().unwrap().get(chat_id) {
-        live.live.lock().unwrap().thread.queue_held = false;
-    }
-    rt.command(chat_id, Cmd::Kick)
 }
 
 /// `submission_action`.

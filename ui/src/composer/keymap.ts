@@ -3,7 +3,7 @@
 //
 // Windows defaults: Mod is Ctrl. A Send now default of Ctrl+Enter would be the same chord on Windows
 // as the default send key Mod+Enter, and neither would yield by the chord rule while both are on
-// defaults, so Send now is Ctrl+Alt+Enter. Steer is Ctrl+Shift+Enter and Queue is Alt+Enter.
+// defaults, so Send now is Ctrl+Alt+Enter. Steer is Ctrl+Shift+Enter.
 
 import type { SendAction, SendMode } from '../api/types.ts';
 
@@ -32,12 +32,10 @@ export type KeyResult =
 /** The alternate send actions that are live in a mode. */
 export function alternates(mode: SendMode): SendAction[] {
   switch (mode) {
-    case 'queue':
-      return ['steer'];
     case 'asap':
-      return ['queue', 'now'];
+      return ['now'];
     case 'interrupt':
-      return ['steer', 'queue'];
+      return ['steer'];
   }
 }
 
@@ -49,7 +47,6 @@ function chord(k: KeyShape): string {
 export const CHORDS = {
   send: 'Mod+Enter',
   steer: 'Mod+Shift+Enter',
-  queue: 'Alt+Enter',
   now: 'Mod+Alt+Enter',
 } as const;
 
@@ -67,7 +64,6 @@ export function resolveKey(k: KeyShape, ctx: KeyContext): KeyResult {
   const alt = (a: SendAction): KeyResult => ({ kind: 'send', action: live.includes(a) ? a : 'default' });
 
   if (c === CHORDS.steer) return alt('steer');
-  if (c === CHORDS.queue) return alt('queue');
   if (c === CHORDS.now) return alt('now');
   if (c === CHORDS.send) return { kind: 'send', action: 'default' };
   if (ctx.sendShortcut === 'enter' && c === 'Enter') return { kind: 'send', action: 'default' };
@@ -78,24 +74,24 @@ export function resolveKey(k: KeyShape, ctx: KeyContext): KeyResult {
 export function sendTooltip(ctx: KeyContext, busy: boolean): string {
   const key = ctx.sendShortcut === 'enter' ? 'Enter' : chordLabel(CHORDS.send);
   if (!busy) return `Send · ${key}`;
-  const what = ctx.mode === 'asap' ? 'Steer into the running task' : ctx.mode === 'queue' ? 'Queue message' : 'Interrupt and send';
+  const what = ctx.mode === 'asap' ? 'Steer into the running task' : 'Interrupt and send';
   const live = ctx.showChoices ? alternates(ctx.mode) : [];
   const hint = live[0] ? ` · ${chordLabel(CHORDS[live[0] === 'default' ? 'send' : live[0]])} to ${verb(live[0])}` : '';
   return `${what} · ${key}${hint}`;
 }
 
 function verb(a: SendAction): string {
-  return a === 'steer' ? 'steer' : a === 'queue' ? 'queue' : a === 'now' ? 'send now' : 'send';
+  return a === 'steer' ? 'steer' : a === 'now' ? 'send now' : 'send';
 }
 
 /** The Stop button's tooltip. */
 export function stopTooltip(stopSendsWaiting: boolean, showChoices: boolean): string {
-  const base = stopSendsWaiting ? 'Stop task and send waiting messages' : 'Stop task and pause queue';
-  return showChoices ? `${base} · Esc interrupts and continues the queue` : base;
+  const base = stopSendsWaiting ? 'Stop task and send waiting messages' : 'Stop task and keep waiting messages unsent';
+  return showChoices ? `${base} · Esc interrupts and sends waiting messages` : base;
 }
 
 /** What Send does now, for its accessible name (the button is an icon). */
 export function sendLabel(busy: boolean, mode: string): string {
   if (!busy) return 'Send';
-  return mode === 'asap' ? 'Steer' : mode === 'queue' ? 'Queue' : 'Interrupt';
+  return mode === 'asap' ? 'Steer' : 'Interrupt';
 }

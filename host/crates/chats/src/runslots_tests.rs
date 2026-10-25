@@ -165,10 +165,10 @@ async fn a_gated_start_waits_only_when_the_slots_are_full() {
     let z = chat(&e.db);
     let s = send(&e.rt, &z, "an app note", false);
     assert_eq!((s.delivered, s.waiting), (true, None));
-    // A running chat's message joins its turn, gated or not.
+    // A running chat's message goes to its turn at once, gated or not.
     set_status(&e.db, &x, "running");
     let s = send(&e.rt, &x, "into the turn", true);
-    assert_eq!((s.queued, s.waiting), (true, None));
+    assert_eq!((s.delivered, s.queued, s.waiting), (true, false, None));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -239,7 +239,7 @@ async fn the_pump_fills_free_slots_in_order_and_sends_each_wait_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_wait_whose_chat_starts_running_joins_its_turn() {
+async fn a_wait_whose_chat_starts_running_is_handed_to_its_turn_as_a_steer() {
     let e = env();
     fill(&e.db, DEFAULT_LOW_RUNNING as usize);
     let a = chat(&e.db);
@@ -247,11 +247,18 @@ async fn a_wait_whose_chat_starts_running_joins_its_turn() {
     let sid = wait_rows(&e.db)[0].submission_id.clone();
     set_status(&e.db, &a, "running");
     assert!(settled(&e.db, &e.rt, 0).await.is_empty());
+    let mode: String =
+        e.db.snapshot(|tx| {
+            tx.query_row("SELECT mode FROM submissions WHERE id = ?1", [&sid], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
     assert_eq!(
-        state_of(&e.db, &sid),
-        "queued",
-        "a follow-up of the running turn"
+        mode, "steer",
+        "read at the running turn's next tool boundary"
     );
+    assert_ne!(state_of(&e.db, &sid), "queued", "it does not wait in Helm");
 }
 
 #[tokio::test(flavor = "multi_thread")]

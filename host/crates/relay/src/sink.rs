@@ -6,8 +6,8 @@
 //! - It is stored through the chats crate's host send with origin `telegram`, so it never counts
 //!   as consent and never trips the user's wait limit (that limit turns a waiting steer into an
 //!   interrupt, and applies only to sends typed in Helm's own window).
-//! - It follows the user's send behaviour, without ever aborting: "queue" queues it behind the
-//!   running turn; "asap" and "interrupt" steer it in at the next tool boundary.
+//! - It never aborts: on a busy chat it is handed to Claude at once and read at the next tool
+//!   boundary, whatever the user's send mode is.
 //! - Its submission id is fixed per hub message id, so a message delivered twice is stored once.
 //! - It is acknowledged to the hub only once it is stored. A chat that is stopping or full is
 //!   retried here for a short while first, because the hub resends an unacknowledged message
@@ -35,7 +35,7 @@ use crate::telegram::{self, ChatFacts, ChatPort, TagPolicy, TELEGRAM_ORIGIN};
 use helm_chats::submit::{
     host_send, host_send_with_images, HostImage, HostSend, HostSendMode, IMAGE_REFUSED,
 };
-use helm_chats::types::{ChatStatus, InteractionAttention, InteractionMethod, SendMode};
+use helm_chats::types::{ChatStatus, InteractionAttention, InteractionMethod};
 use helm_chats::ChatRuntime;
 use helm_core::db::Database;
 use helm_hosttools::OpInvoker;
@@ -318,14 +318,6 @@ pub enum Placed {
     Already,
 }
 
-/// How a Telegram message lands on a busy chat: the user's send mode, never an abort.
-pub fn host_mode(mode: SendMode) -> HostSendMode {
-    match mode {
-        SendMode::Queue => HostSendMode::Queue,
-        SendMode::Asap | SendMode::Interrupt => HostSendMode::Steer,
-    }
-}
-
 fn is_answerable(i: &helm_chats::types::Interaction) -> bool {
     i.attention == Some(InteractionAttention::Question)
         && matches!(
@@ -458,14 +450,6 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
             value,
         });
     }
-    let mode =
-        c.db.snapshot(|t| {
-            Ok::<_, rusqlite::Error>(helm_chats::send_behavior::resolve(
-                helm_core::prefs::read(t, "sendBehavior").as_ref(),
-            ))
-        })
-        .map(|sb| sb.mode)
-        .unwrap_or(SendMode::Asap);
     let sent = telegram::load_sent(&c.sent_path);
     let text = telegram::delivered_text(&msg.text, msg.age_minutes, &sent);
     // The pictures go in as the composer's do, checked by the same rules. One the chat will not
@@ -496,7 +480,7 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
                 chat_id: &chat,
                 submission_id: &sid,
                 text: &shown,
-                mode: host_mode(mode),
+                mode: HostSendMode::Steer,
                 origin: TELEGRAM_ORIGIN,
                 // The user's own message, typed on the phone: it never waits for a run slot.
                 gated: false,

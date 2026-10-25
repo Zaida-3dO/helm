@@ -152,46 +152,39 @@ describe("core scenarios end to end with the fake claude", { timeout: 15 * 60_00
     });
   });
 
-  test("E7: Stop leaves the chat stopped and the queued message uncertain; Esc lets the queue continue", async () => {
+  test("E7: Stop leaves the chat stopped and the unread message not delivered; Esc sends it again", async () => {
     await failShot("E7", async () => {
       await newChat(page(), folder());
       await send(page(), "[E7] wait a while");
       await page().waitForSelector(tid("tool-card", '[data-status="running"]'), { timeout: 20_000 });
-      // Queue explicitly (Alt+Enter): under asap a plain Send would steer instead.
-      await typeMessage(page(), "queued after stop");
-      await page().keyboard.press("Alt+Enter");
-      await page().waitForSelector(tid("queue-item", '[data-state="queued"]'), { timeout: 10_000 });
+      // Sent mid-turn it goes to Claude at once and waits there, unread, as pending.
+      await send(page(), "unread after stop");
+      await page().waitForSelector(tid("queue-item", '[data-state="pending"]'), { timeout: 10_000 });
       await page().click(tid("stop"));
       await waitStatus(page(), "stopped", 30_000);
       await page().waitForSelector(tid("queue-item", '[data-state="uncertain"]'), { timeout: 10_000 });
       await shot(page(), OUT, "E7-stopped");
 
-      // Esc: Stop that continues the queue.
+      // Esc: Stop that sends the unread message again.
       await send(page(), "[E7] wait again");
       await page().waitForSelector(tid("tool-card", '[data-status="running"]'), { timeout: 20_000 });
-      await typeMessage(page(), "after esc");
-      await page().keyboard.press("Alt+Enter");
-      await page().waitForSelector(tid("queue-item", '[data-state="queued"]'), { timeout: 10_000 });
+      await send(page(), "after esc");
+      await page().waitForSelector(tid("queue-item", '[data-state="pending"]'), { timeout: 10_000 });
       await page().locator(tid("composer")).click();
       await page().keyboard.press("Escape");
       await waitText(page(), "You said: after esc", 30_000);
     });
   });
 
-  test("an abnormal end (error, not Stop) holds the queue with Resume; Resume sends it", async () => {
-    await failShot("held-queue", async () => {
+  test("a failed turn (error, not Stop) holds nothing back: the next message goes straight in", async () => {
+    await failShot("failed-turn", async () => {
       await newChat(page(), folder());
       await send(page(), "[ERR] fail this turn");
       await page().waitForSelector(tid("tool-card", '[data-status="running"]'), { timeout: 20_000 });
-      await typeMessage(page(), "held follow-up");
-      await page().keyboard.press("Alt+Enter");
-      await page().waitForSelector(tid("queue-item", '[data-state="queued"]'), { timeout: 10_000 });
       await waitStatus(page(), "interrupted", 30_000);
-      await page().waitForSelector(tid("queue-resume"), { timeout: 10_000 });
-      await page().waitForTimeout(1_000);
-      assert.equal(await countRowsWith(page(), "You said: held follow-up"), 0, "the queue did not advance by itself");
-      await page().click(tid("queue-resume"));
-      await waitText(page(), "You said: held follow-up", 30_000);
+      assert.equal(await page().locator(tid("queue-resume")).count(), 0, "there is no pause to release");
+      await send(page(), "after the error");
+      await waitText(page(), "You said: after the error", 30_000);
     });
   });
 

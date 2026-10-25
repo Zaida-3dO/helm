@@ -219,7 +219,6 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         compacting: null,
         capabilities: { withdraw: true, deliverNow: true, stopTool: true, compact: true, stopSubagent: true },
         sendBehavior,
-        queueHeld: false,
         revision: rev(),
       },
       rows: [],
@@ -410,7 +409,6 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   }
 
   function startNext(c: FakeChat) {
-    if (c.thread.queueHeld) return;
     const next = c.pending.find((s) => s.state === 'queued');
     if (!next) return;
     c.pending = c.pending.filter((s) => s !== next);
@@ -545,12 +543,6 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         s.mode = 'steer';
         c.pending = [...c.pending, s];
         emitQueue(c);
-      } else if (mode === 'queue') {
-        s.mode = 'followUp';
-        s.state = 'queued';
-        s.position = c.pending.length;
-        c.pending = [...c.pending, s];
-        emitQueue(c);
       } else {
         s.state = 'queued';
         s.mode = 'followUp';
@@ -592,13 +584,6 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         c.pending = [{ ...s, state: 'rejected' as const }, ...c.pending];
         emitQueue(c);
       }
-      return null;
-    },
-    queue_resume: (a) => {
-      const c = find(a.chatId);
-      c.thread = { ...c.thread, queueHeld: false };
-      emitThread(c);
-      if (c.chat.status !== 'running') startNext(c);
       return null;
     },
     submission_action: (a) => {

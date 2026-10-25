@@ -1,6 +1,6 @@
-// The queue below the transcript: Pending steers with Withdraw, queued
-// follow-ups with Steer now, Send now and reorder, Recover to draft for unsent ones, and Resume for a
-// held queue. A message waiting for a free run slot shows an hourglass, why it waits, Start now and
+// The list below the transcript: Pending steers (sent to Claude, not read yet) with Withdraw,
+// Recover to draft for unsent ones, and any message still in the old queued state with Steer now,
+// Send now and reorder. A message waiting for a free run slot shows an hourglass, why it waits, Start now and
 // Cancel.
 
 import { useState, type DragEvent, type KeyboardEvent } from 'react';
@@ -34,11 +34,9 @@ export function QueueList({ pending, thread, running, ops, chatId }: QueueListPr
     running,
     capabilities: thread?.capabilities ?? DEFAULT_CAPS,
     showChoices: (thread?.sendBehavior ?? HOME_SEND_BEHAVIOR).showChoices,
-    sendMode: (thread?.sendBehavior ?? HOME_SEND_BEHAVIOR).mode,
     waits: waitNotes(slots),
   });
-  const held = Boolean(thread?.queueHeld);
-  if (!items.length && !held) return null;
+  if (!items.length) return null;
 
   // Withdraw and Recover: the host moves the text into the stored draft and sends a `chat` event
   // with the newer draft revision, which the composer picks up.
@@ -87,14 +85,6 @@ export function QueueList({ pending, thread, running, ops, chatId }: QueueListPr
 
   return (
     <div className="queue" data-testid="queue">
-      {held && (
-        <div className="queue-held">
-          <span className="muted">The queue is paused after the restart.</span>
-          <button type="button" data-testid="queue-resume" onClick={() => void ops.resumeQueue(chatId)}>
-            Resume
-          </button>
-        </div>
-      )}
       {items.map(({ submission: s, state, label, note, tone, actions }) => {
         const movable = actions.includes('move_up') || actions.includes('move_down');
         const dropTarget = drag !== null && movable && drag.id !== s.id;

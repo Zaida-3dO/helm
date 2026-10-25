@@ -114,17 +114,16 @@ describe("failure modes in the running app", { timeout: 10 * 60_000 }, () => {
     await until("the draft back in the composer", async () => (await composerText())?.includes("draft kept across a renderer crash"), 20_000);
   });
 
-  test("R2: after a hard kill, the running chat continues once, then its queued follow-up; the draft survives", async () => {
+  test("R2: after a hard kill, the running chat continues once; the message Claude had not read is shown as not delivered; the draft survives", async () => {
     // A fresh launch, so R2 never depends on how R1 left the page.
     await killHard(app!);
     app = await launchApp(profile);
     const running = await newChat(page(), work);
     await send(page(), "[E8-run] keep working");
     await page().waitForSelector(tid("tool-card", '[data-status="running"]'), { timeout: 20_000 });
-    // Queue explicitly (Alt+Enter): under asap a plain Send would steer instead.
-    await typeMessage(page(), "queued across a crash");
-    await page().keyboard.press("Alt+Enter");
-    await page().waitForSelector(tid("queue-item", '[data-state="queued"]'), { timeout: 10_000 });
+    // Sent mid-turn it goes to Claude at once and waits there, unread, as pending.
+    await send(page(), "unread across a crash");
+    await page().waitForSelector(tid("queue-item", '[data-state="pending"]'), { timeout: 10_000 });
     const other = await newChat(page(), work);
     await typeMessage(page(), "draft across a crash");
     await page().waitForTimeout(1_000); // drafts save 250 ms after the last edit
@@ -134,19 +133,16 @@ describe("failure modes in the running app", { timeout: 10 * 60_000 }, () => {
 
     app = await launchApp(profile);
     await openChat(page(), running);
-    // The continuation prompt is a user-side row; the queued follow-up's row appears once it is sent.
-    await until("the continuation, then the queued follow-up", async () => (await userRows()).some((t) => t.includes("queued across a crash")), 60_000);
+    // The continuation prompt is a user-side row; the unread message is never resent.
+    await until("the continuation", async () => (await userRows()).some((t) => t.includes("Helm was restarted")), 60_000);
     await waitStatus(page(), ["idle", "interrupted", "stopped"], 30_000);
     await page().waitForTimeout(2_000); // a second continuation or resend would land by now
     await unfoldAll(page());
     const users = await userRows();
     assert.equal(users.filter((t) => t.includes("Helm was restarted")).length, 1, `exactly one continuation: ${JSON.stringify(users)}`);
-    assert.equal(users.filter((t) => t.includes("queued across a crash")).length, 1, "the queued follow-up is sent once");
+    assert.equal(users.filter((t) => t.includes("unread across a crash")).length, 0, "the unread message is not resent");
+    await page().waitForSelector(tid("queue-item", '[data-state="uncertain"]'), { timeout: 10_000 });
     assert.equal(users.filter((t) => t.includes("[E8-run] keep working")).length, 1, "the interrupted prompt is not resent");
-    assert.ok(
-      users.findIndex((t) => t.includes("Helm was restarted")) < users.findIndex((t) => t.includes("queued across a crash")),
-      "the continuation goes first",
-    );
     await openChat(page(), other);
     await until("the draft in the other chat", async () => (await composerText())?.includes("draft across a crash"), 20_000);
   });

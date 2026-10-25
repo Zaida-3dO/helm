@@ -4,7 +4,6 @@
 //! |---|---|
 //! | `submission_meta` | per submission: origin (`user`/`harness`), send priority (`now` or null), the run it was dispatched in |
 //! | `restart_continuations` | chats owed one restart-continuation prompt (at most 100 rows) |
-//! | `chat_queue_holds` | chats whose queue waits for Send or `queue_resume` after a restart |
 //! | `chat_titles` | per chat: where the title came from (`fallback`/`generated`/`manual`) |
 //! | `unread_marks` | manual unread marks with their token |
 //! | `chat_completions` | the current completion per chat |
@@ -25,7 +24,7 @@
 //! Recovery, inside the one startup transaction:
 //! - **capture** (before core recovery rewrites statuses): every chat still `starting` or
 //!   `running` gets a continuation row. `stopping` chats are excluded: the user asked them to stop.
-//! - **after**: a chat with queued follow-ups but no continuation gets its queue held; retry
+//! - **after**: retry
 //!   states left `retrying` or `waiting` on a message become `cancelled`; every
 //!   persisted stalled flag is cleared, since no turn survives a restart.
 
@@ -41,7 +40,6 @@ pub fn register(reg: &mut MigrationRegistry) {
         .initializer("chats-flags", crate::flags::init)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
-        .recovery_step("chats-queue-holds", hold_queues)
         .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)
         .recovery_step("chats-stall-reset", reset_stalls);
 }
@@ -58,10 +56,7 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              chat_id     TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
              created_at  INTEGER NOT NULL
          );
-         CREATE TABLE IF NOT EXISTS chat_queue_holds (
-             chat_id  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
-             held_at  INTEGER NOT NULL
-         );
+         DROP TABLE IF EXISTS chat_queue_holds;
          CREATE INDEX IF NOT EXISTS messages_chat_order ON messages(chat_id, active, timestamp, id);
          CREATE TABLE IF NOT EXISTS chat_titles (
              chat_id  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
@@ -205,18 +200,6 @@ fn capture_continuations(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn hold_queues(tx: &Transaction<'_>) -> rusqlite::Result<()> {
-    tx.execute(
-        "INSERT OR IGNORE INTO chat_queue_holds(chat_id, held_at)
-         SELECT DISTINCT q.chat_id, ?1 FROM queued_submissions q
-         JOIN submissions s ON s.id = q.submission_id
-         WHERE s.state = 'queued'
-           AND q.chat_id NOT IN (SELECT chat_id FROM restart_continuations)",
-        [helm_core::now_ms()],
-    )?;
-    Ok(())
-}
-
 /// A stalled flag belongs to the turn that went quiet; after a restart no turn is running, and the
 /// actor's in-memory flag starts clear, so a stored one would never be cleared.
 fn reset_stalls(tx: &Transaction<'_>) -> rusqlite::Result<()> {
@@ -266,7 +249,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn recovery_captures_running_chats_holds_queues_and_cancels_retries() {
+    fn recovery_captures_running_chats_keeps_queued_messages_and_cancels_retries() {
         let (_d, db) = temp_db();
         db.write(|tx| {
             tx.execute_batch(
@@ -290,7 +273,17 @@ pub(crate) mod tests {
             ["run"],
             "only the running chat; a user-stopping chat is excluded"
         );
-        assert_eq!(col(&db, "SELECT chat_id FROM chat_queue_holds"), ["stop"]);
+        // The `run` chat stands for a killed process (a crash, a power cut, the installer ending
+        // Helm): no shutdown code ran, so its row still says `running`, and it is captured exactly
+        // like a chat found busy at a quit. Messages waiting from an older version are left for
+        // the startup send to deliver; nothing marks them held.
+        assert_eq!(
+            col(
+                &db,
+                "SELECT id FROM submissions WHERE state = 'queued' ORDER BY id"
+            ),
+            ["q-run", "q-stop"]
+        );
         assert_eq!(
             col(
                 &db,

@@ -47,9 +47,9 @@ test('stale chat and thread revisions are dropped', () => {
   let v = applyChat(emptyView('c1'), chat({ revision: 3, title: 'a' }));
   assert.equal(applyChat(v, chat({ revision: 3, title: 'b' })).chat?.title, 'a');
   assert.equal(applyChat(v, chat({ revision: 4, title: 'b' })).chat?.title, 'b');
-  v = applyThread(v, thread({ revision: 2, queueHeld: true }));
-  assert.equal(applyThread(v, thread({ revision: 1 })).thread?.queueHeld, true);
-  assert.equal(applyThread(v, thread({ revision: 3 })).thread?.queueHeld, false);
+  v = applyThread(v, thread({ revision: 2, permissionMode: 'plan' }));
+  assert.equal(applyThread(v, thread({ revision: 1 })).thread?.permissionMode, 'plan');
+  assert.equal(applyThread(v, thread({ revision: 3 })).thread?.permissionMode, null);
 });
 
 test('pages: replace resets, older prepends', () => {

@@ -111,13 +111,6 @@ fn a_turn_that_never_starts_is_not_left_silent() {
 }
 
 #[test]
-fn the_send_mode_never_aborts() {
-    assert_eq!(host_mode(SendMode::Queue), HostSendMode::Queue);
-    assert_eq!(host_mode(SendMode::Asap), HostSendMode::Steer);
-    assert_eq!(host_mode(SendMode::Interrupt), HostSendMode::Steer);
-}
-
-#[test]
 fn verbatim_prefixes_are_dropped() {
     assert_eq!(
         plain_path(std::path::Path::new(r"\\?\C:\p\telegram")),
@@ -409,7 +402,7 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_busy_chat_gets_a_steer_by_default_and_a_follow_up_in_queue_mode() {
+async fn a_busy_chat_gets_a_steer_whatever_the_send_mode() {
     let e = env();
     let chat = chat_of(&place_async(&e.ctx, msg("a", "first")).await.unwrap());
     settle().await;
@@ -429,7 +422,7 @@ async fn a_busy_chat_gets_a_steer_by_default_and_a_follow_up_in_queue_mode() {
         ("telegram", "steer"),
         "asap: a steer, never a stop"
     );
-    // The user's send behaviour says queue: it waits behind the turn.
+    // An old stored "queue" mode changes nothing: it is still a steer, never a stop.
     settle().await;
     sql(
         &e.db,
@@ -451,7 +444,7 @@ async fn a_busy_chat_gets_a_steer_by_default_and_a_follow_up_in_queue_mode() {
         .iter()
         .find(|r| r.0 == telegram::submission_id("c"))
         .unwrap();
-    assert_eq!((c.2.as_str(), c.3.as_str()), ("followUp", "queued"));
+    assert_eq!(c.2.as_str(), "steer");
 }
 
 /// Trust boundary: a Telegram message never counts as the user's consent, through the real send

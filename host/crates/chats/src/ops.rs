@@ -9,7 +9,6 @@
 //! | `chat_find` | heavy | [`ChatFindArgs`] → [`ChatFindResult`] (find in chat over the whole history, one step) |
 //! | `chat_send` | maintenance | [`ChatSendArgs`] → [`ChatSendResult`] |
 //! | `chat_stop` | async | [`ChatStopArgs`] → [`ChatStopResult`] |
-//! | `queue_resume` | maintenance | [`ChatIdArgs`] → `null` |
 //! | `submission_action` | maintenance | [`SubmissionActionArgs`] → [`SubmissionActionResult`] |
 //! | `interaction_answer` | async | [`InteractionAnswerArgs`] → `null` |
 //! | `draft_save` | blocking | [`DraftSaveArgs`] → [`DraftSaveResult`] |
@@ -41,7 +40,6 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("chat_find", OpClass::Heavy, chat_find)
         .blocking("chat_send", OpClass::Maintenance, chat_send)
         .async_op("chat_stop", chat_stop)
-        .blocking("queue_resume", OpClass::Maintenance, queue_resume)
         .blocking("submission_action", OpClass::Maintenance, submission_action)
         .async_op("interaction_answer", interaction_answer)
         .blocking("draft_save", OpClass::Blocking, draft_save)
@@ -215,12 +213,6 @@ async fn chat_stop(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
     to_value(&ChatStopResult { status })
 }
 
-fn queue_resume(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let a: ChatIdArgs = parse_args(args)?;
-    submit::queue_resume(&runtime(ctx)?, &a.chat_id)?;
-    Ok(Value::Null)
-}
-
 fn submission_action(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: SubmissionActionArgs = parse_args(args)?;
     to_value(&submit::submission_action(&runtime(ctx)?, a)?)
@@ -390,11 +382,6 @@ pub fn stored_thread(
     chat: &ChatRecord,
     revision: i64,
 ) -> rusqlite::Result<ThreadState> {
-    let held: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM chat_queue_holds WHERE chat_id = ?1)",
-        [&chat.id],
-        |r| r.get(0),
-    )?;
     let sb = send_behavior::resolve(helm_core::prefs::read(tx, "sendBehavior").as_ref());
     Ok(ThreadState {
         chat_id: chat.id.clone(),
@@ -408,7 +395,6 @@ pub fn stored_thread(
         compacting: None,
         capabilities: Capabilities::default(),
         send_behavior: sb,
-        queue_held: held,
         revision,
     })
 }
@@ -592,7 +578,6 @@ pub(crate) mod tests {
             ("chat_find", OpClass::Heavy),
             ("chat_send", OpClass::Maintenance),
             ("chat_stop", OpClass::Async),
-            ("queue_resume", OpClass::Maintenance),
             ("submission_action", OpClass::Maintenance),
             ("interaction_answer", OpClass::Async),
             ("draft_save", OpClass::Blocking),
