@@ -6,6 +6,7 @@ import { delimiterFor, entriesOf, filterRows, jsonMatches, parseDelimited, parse
 
 const MAX_CHILDREN = 200;
 const MAX_ROWS = 2000;
+const MAX_COLS = 200;
 
 export function canPreview(path: string, kind: string, language?: string): 'json' | 'table' | null {
   if (kind !== 'text') return null;
@@ -26,24 +27,30 @@ function Search({ value, onChange, label }: { value: string; onChange: (v: strin
   );
 }
 
+// A branch mounts its children only while it is open, so a large collapsed tree stays cheap. A
+// search forces every branch open so the matches are visible.
+function JsonBranch({ name, value, depth, q }: { name: string; value: object; depth: number; q: string }) {
+  const [open, setOpen] = useState(depth < 1);
+  const isOpen = q ? true : open;
+  const all = entriesOf(value);
+  const shown = isOpen ? all.filter(([k, v]) => jsonMatches(k, v, q)) : [];
+  const list = shown.slice(0, MAX_CHILDREN);
+  return (
+    <details className="jt-node" open={isOpen} onToggle={(e) => !q && setOpen(e.currentTarget.open)}>
+      <summary>
+        <span className="jt-key">{name}</span>
+        <span className="jt-meta">{Array.isArray(value) ? `[${all.length}]` : `{${all.length}}`}</span>
+      </summary>
+      {list.map(([k, v]) => (
+        <JsonNode key={k} name={k} value={v} depth={depth + 1} q={q} />
+      ))}
+      {shown.length > list.length && <div className="jt-more">… {shown.length - list.length} more</div>}
+    </details>
+  );
+}
+
 function JsonNode({ name, value, depth, q }: { name: string; value: unknown; depth: number; q: string }) {
-  if (value !== null && typeof value === 'object') {
-    const all = entriesOf(value);
-    const shown = all.filter(([k, v]) => jsonMatches(k, v, q));
-    const list = shown.slice(0, MAX_CHILDREN);
-    return (
-      <details className="jt-node" open={q ? true : depth < 1}>
-        <summary>
-          <span className="jt-key">{name}</span>
-          <span className="jt-meta">{Array.isArray(value) ? `[${all.length}]` : `{${all.length}}`}</span>
-        </summary>
-        {list.map(([k, v]) => (
-          <JsonNode key={k} name={k} value={v} depth={depth + 1} q={q} />
-        ))}
-        {shown.length > list.length && <div className="jt-more">… {shown.length - list.length} more</div>}
-      </details>
-    );
-  }
+  if (value !== null && typeof value === 'object') return <JsonBranch name={name} value={value} depth={depth} q={q} />;
   const kind = value === null ? 'null' : typeof value;
   return (
     <div className="jt-leaf">
@@ -77,7 +84,9 @@ export function TablePreview({ text, path }: { text: string; path: string }) {
   const header = rows[0] ?? [];
   const body = useMemo(() => filterRows(rows.slice(1), q), [rows, q]);
   const shown = body.slice(0, MAX_ROWS);
-  const cols = Math.max(header.length, ...rows.map((r) => r.length));
+  let cols = header.length;
+  for (const r of rows) if (r.length > cols) cols = r.length;
+  cols = Math.min(cols, MAX_COLS);
   return (
     <div className="pv-root" data-testid="table-preview">
       <div className="pv-bar">
