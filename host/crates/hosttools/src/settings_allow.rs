@@ -13,7 +13,6 @@ use helm_core::prefs::classes::{classify, PrefClass, Tier, CLASSIFIED};
 pub const USER_ONLY: &[(&str, &str)] = &[
     ("fastMode", "Settings > Runtime"),
     ("notifications", "Settings > Notifications"),
-    ("runSlots", "Settings > Chat (resource limits)"),
     ("loadGate", "Settings > Chat (resource limits)"),
     ("afk", "Settings > Away"),
     ("afkSchedule", "Settings > Away"),

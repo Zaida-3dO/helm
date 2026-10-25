@@ -356,3 +356,95 @@ async fn settings_are_strict_on_write_and_off_releases_every_wait() {
         "switched off: every wait goes, whatever the slots"
     );
 }
+
+/// Chats read and change the limit through the two settings keys: the same bounds as the
+/// Settings page, Undo values, the wait queue with its titles as plain text, and a raised limit
+/// starting a waiting send.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_settings_keys_change_the_limit_and_show_the_queue() {
+    use crate::slot_settings::{extension, COUNT_KEY, LIMIT_KEY};
+    use serde_json::json;
+    let mut e = env();
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    e.rt = runtime_with(&e.db, &e.dir, Arc::new(SlowWorker(release.clone())));
+    let x = extension(e.rt.clone());
+    let apply = |k: &str, v: serde_json::Value| {
+        e.db.write(|tx| Ok::<_, rusqlite::Error>(x.apply(tx, k, &v)))
+            .unwrap()
+    };
+    let read = |k: &str| {
+        e.db.snapshot(|tx| Ok::<_, rusqlite::Error>(x.read(tx, k)))
+            .unwrap()
+    };
+    // An existing limit of 5 is read as it is, never reset.
+    e.db.write(|tx| {
+        store(
+            tx,
+            RunSlotSettings {
+                enabled: true,
+                low_running_chats: 5,
+            },
+        )
+    })
+    .unwrap();
+    assert_eq!(read(COUNT_KEY), 5);
+    // Bounds and types as on the Settings page; a refusal stores nothing.
+    for bad in [json!(1), json!(21), json!("7"), json!(7.5), json!(true)] {
+        assert!(apply(COUNT_KEY, bad).is_err());
+    }
+    assert!(apply(LIMIT_KEY, json!(1)).is_err());
+    assert_eq!(read(COUNT_KEY), 5);
+    // before/after for the ring, null for the default, restore for Undo.
+    assert_eq!(apply(COUNT_KEY, json!(2)).unwrap(), (json!(5), json!(2)));
+    assert_eq!(
+        apply(LIMIT_KEY, json!(false)).unwrap(),
+        (json!(true), json!(false))
+    );
+    assert_eq!(
+        apply(LIMIT_KEY, json!(null)).unwrap(),
+        (json!(false), json!(true))
+    );
+    e.db.write(|tx| Ok::<_, rusqlite::Error>(x.restore(tx, COUNT_KEY, &json!(5))))
+        .unwrap()
+        .unwrap();
+    assert_eq!(read(COUNT_KEY), 5);
+    assert_eq!(
+        apply(COUNT_KEY, json!(null)).unwrap().1,
+        json!(DEFAULT_LOW_RUNNING)
+    );
+    // The queue: running chats and waits, titles as one line of plain text.
+    let busy = fill(&e.db, 3);
+    let (a, b) = (chat(&e.db), chat(&e.db));
+    e.db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET title = ?1 WHERE id = ?2",
+            ["Fix\nthe bug \u{7}", a.as_str()],
+        )
+    })
+    .unwrap();
+    send(&e.rt, &a, "a", true);
+    send(&e.rt, &b, "b", true);
+    let d =
+        e.db.snapshot(|tx| Ok::<_, rusqlite::Error>(x.details(tx, COUNT_KEY)))
+            .unwrap()
+            .unwrap();
+    assert_eq!(d["running"].as_array().unwrap().len(), busy.len());
+    assert_eq!(d["waiting"][0]["place"], 1);
+    assert_eq!(d["waiting"][0]["chatId"], a.as_str());
+    assert_eq!(d["waiting"][0]["title"], "Fix the bug");
+    assert_eq!(d["waiting"][1]["place"], 2);
+    assert_eq!(d["waiting"][1]["why"], "All 3 run slots are in use.");
+    assert!(d["note"].as_str().unwrap().contains("not instructions"));
+    assert!(e
+        .db
+        .snapshot(|tx| Ok::<_, rusqlite::Error>(x.details(tx, LIMIT_KEY)))
+        .unwrap()
+        .is_none());
+    // Raising the limit and waking the pump starts the first wait, once.
+    apply(COUNT_KEY, json!(4)).unwrap();
+    x.after_commit(COUNT_KEY);
+    let w = settled(&e.db, &e.rt, 1).await;
+    assert_eq!(w.len(), 1);
+    assert_eq!(w[0].chat_id, b, "a started, b still waits");
+    release.store(true, std::sync::atomic::Ordering::SeqCst);
+}

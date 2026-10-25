@@ -78,6 +78,7 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
         let mut settings = Map::new();
         let mut options = Map::new();
         let mut unavailable = Map::new();
+        let mut details = Map::new();
         for k in &wanted {
             if let Some(x) = ext.owner(k) {
                 if x.needs_all_settings(k) && !all {
@@ -88,6 +89,9 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
                 if let Some(o) = x.describe(k) {
                     options.insert(k.clone(), o);
                 }
+                if let Some(d) = x.details(tx, k) {
+                    details.insert(k.clone(), d);
+                }
             } else if let Some(why) = refusal(k, all) {
                 unavailable.insert(k.clone(), json!(why));
             } else {
@@ -97,12 +101,16 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
                 }
             }
         }
-        Ok::<_, rusqlite::Error>(json!({
+        let mut out = json!({
             "settings": settings,
             "options": options,
             "unavailable": unavailable,
-            "note": "null means the default is in use: options.<key>.default says what that is, and sending null in app_update_settings restores it. options.<key> gives the type and the allowed values or limits. An option with hasEffect false is stored but nothing in Helm reads it yet, so changing it changes nothing.",
-        }))
+            "note": "null means the default is in use: options.<key>.default says what that is, and sending null in app_update_settings restores it. options.<key> gives the type and the allowed values or limits. An option with hasEffect false is stored but nothing in Helm reads it yet, so changing it changes nothing. details.<key> holds read-only facts about a key, such as the wait queue behind the run-slot limit.",
+        });
+        if !details.is_empty() {
+            out["details"] = Value::Object(details);
+        }
+        Ok::<_, rusqlite::Error>(out)
     })
     .map_err(sql)
 }
@@ -218,6 +226,7 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
         }
         for c in &recorded {
             if let Some(x) = ext.owner(&key_of(c)) {
+                x.after_commit(&key_of(c));
                 ctx.events.emit(x.changed_event(&key_of(c)));
             }
         }
@@ -349,6 +358,7 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     }
     for k in restored.keys() {
         if let Some(x) = ext.owner(k) {
+            x.after_commit(k);
             ctx.events.emit(x.changed_event(k));
         }
     }
@@ -653,7 +663,16 @@ mod tests {
         fn changed_event(&self, _key: &str) -> AppEvent {
             AppEvent::new("fake_changed")
         }
+        fn details(&self, _tx: &Transaction<'_>, _key: &str) -> Option<Value> {
+            Some(json!({"queue": []}))
+        }
+        fn after_commit(&self, _key: &str) {
+            COMMITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
+
+    /// How many times the stand-in was told a change had committed.
+    static COMMITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     #[test]
     fn an_extension_key_is_listed_changed_recorded_and_undone() {
@@ -668,6 +687,9 @@ mod tests {
         let g = get_settings(&c, json!({})).unwrap();
         assert_eq!(g["settings"]["fake"], json!({"open": false, "level": 1}));
         assert_eq!(g["options"]["fake"]["default"]["level"], 1);
+        // Read-only facts ride along beside the value, only for keys that have them.
+        assert_eq!(g["details"]["fake"], json!({"queue": []}));
+        assert!(get_settings(&ctx(&e), json!({"keys": ["theme"]})).unwrap()["details"].is_null());
         assert_eq!(
             g["options"].as_object().unwrap().len(),
             g["settings"].as_object().unwrap().len()
@@ -676,7 +698,9 @@ mod tests {
         let r = update_settings(&c, json!({"changes": {"fake": {"open": true}}}));
         assert!(r.unwrap_err().public.contains("yours to change only"));
         assert!(e.sink.kinds().is_empty());
+        let commits = COMMITS.load(std::sync::atomic::Ordering::SeqCst);
         let r = update_settings(&c, json!({"changes": {"fake": {"level": 3}}})).unwrap();
+        assert!(COMMITS.load(std::sync::atomic::Ordering::SeqCst) > commits);
         assert_eq!(r["applied"]["fake"]["before"]["level"], 1);
         assert_eq!(r["applied"]["fake"]["after"]["level"], 3);
         // Its own event, not a preference change.
@@ -685,6 +709,7 @@ mod tests {
         let mut o = op(&e);
         o.services = c.services.clone();
         let u = undo(&o, json!({"changeIds": [id]})).unwrap();
+        assert!(COMMITS.load(std::sync::atomic::Ordering::SeqCst) > commits + 1);
         assert_eq!(u["restored"]["fake"]["level"], 1);
         let g = get_settings(&c, json!({"keys": ["fake"]})).unwrap();
         assert_eq!(g["settings"]["fake"]["level"], 1);

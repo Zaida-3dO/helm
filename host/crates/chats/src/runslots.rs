@@ -319,20 +319,34 @@ impl ChatRuntime {
 }
 
 pub fn view(rt: &ChatRuntime) -> Result<QueueView, ApiError> {
+    rt.db()
+        .snapshot(|tx| view_in(rt, tx))
+        .map_err(crate::ops::sql)
+}
+
+/// The queue as seen from a transaction the caller already holds.
+pub fn view_in(rt: &ChatRuntime, tx: &Transaction<'_>) -> rusqlite::Result<QueueView> {
     let held = rt.slot_hold(helm_core::now_ms());
     let reserved = rt.sh.run_slots.reserved();
-    rt.db()
-        .snapshot(|tx| {
-            let s = settings(tx);
-            Ok::<_, rusqlite::Error>(QueueView {
-                settings: s,
-                limit: s.low_running_chats,
-                running: running(tx, &reserved)?,
-                waiting: waits(tx)?,
-                held,
-            })
-        })
-        .map_err(crate::ops::sql)
+    let s = settings(tx);
+    Ok(QueueView {
+        settings: s,
+        limit: s.low_running_chats,
+        running: running(tx, &reserved)?,
+        waiting: waits(tx)?,
+        held,
+    })
+}
+
+/// The event a queue view goes out on.
+pub fn view_event(v: &QueueView) -> AppEvent {
+    let mut e = AppEvent::new(EVENT);
+    if let Ok(Value::Object(m)) = serde_json::to_value(v) {
+        for (k, v) in m {
+            e = e.with(&k, v);
+        }
+    }
+    e
 }
 
 fn publish(rt: &ChatRuntime, force: bool) {
@@ -349,15 +363,9 @@ fn publish(rt: &ChatRuntime, force: bool) {
     if !force && last.as_ref() == Some(&value) {
         return;
     }
-    *last = Some(value.clone());
+    *last = Some(value);
     drop(last);
-    let mut e = AppEvent::new(EVENT);
-    if let Value::Object(m) = value {
-        for (k, v) in m {
-            e = e.with(&k, v);
-        }
-    }
-    rt.sh.events.emit(e);
+    rt.sh.events.emit(view_event(&v));
 }
 
 fn is_busy(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<bool> {
@@ -598,19 +606,29 @@ pub fn cancel(rt: &ChatRuntime, submission_id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Validate `v` against the current settings and store the result, inside the caller's
+/// transaction. Every writer goes through here, so the bounds hold for all of them.
+pub fn save_in(tx: &Transaction<'_>, v: &Value) -> Result<RunSlotSettings, String> {
+    let s = parse_strict(v, settings(tx))?;
+    store(tx, s).map_err(|e| e.to_string())?;
+    Ok(s)
+}
+
+/// Store already-valid settings.
+pub fn store(tx: &Transaction<'_>, s: RunSlotSettings) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO run_slot_settings(id, value) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET value = excluded.value",
+        [serde_json::to_string(&s).expect("settings serialise")],
+    )?;
+    Ok(())
+}
+
 pub fn save_settings(rt: &ChatRuntime, v: &Value) -> Result<QueueView, ApiError> {
     rt.db()
-        .write(|tx| {
-            let s = match parse_strict(v, settings(tx)) {
-                Ok(s) => s,
-                Err(e) => return Ok(Err(ApiError::bad_args(e))),
-            };
-            tx.execute(
-                "INSERT INTO run_slot_settings(id, value) VALUES (1, ?1)
-                 ON CONFLICT(id) DO UPDATE SET value = excluded.value",
-                [serde_json::to_string(&s).expect("settings serialise")],
-            )?;
-            Ok::<_, rusqlite::Error>(Ok(()))
+        .write(|tx| match save_in(tx, v) {
+            Ok(_) => Ok::<_, rusqlite::Error>(Ok(())),
+            Err(e) => Ok(Err(ApiError::bad_args(e))),
         })
         .map_err(crate::ops::sql)??;
     rt.wake_slots();

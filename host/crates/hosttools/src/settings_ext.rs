@@ -46,6 +46,17 @@ pub trait SettingsExtension: Send + Sync {
 
     /// The event that tells the interface this key changed.
     fn changed_event(&self, key: &str) -> AppEvent;
+
+    /// Extra read-only facts about a key, shown beside its value in `app_get_settings` (for
+    /// example a queue the setting governs). `None` when there is nothing to add. Anything in it
+    /// that another chat wrote must be framed as untrusted text.
+    fn details(&self, _tx: &Transaction<'_>, _key: &str) -> Option<Value> {
+        None
+    }
+
+    /// Called once the change (an update or an Undo) is committed, for work that must not run
+    /// inside the transaction, such as waking a service that reads the new value.
+    fn after_commit(&self, _key: &str) {}
 }
 
 /// The registered extensions, one service.
