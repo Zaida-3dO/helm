@@ -1,8 +1,8 @@
-//! Tool shells for attention, saved items and schedules.
+//! Tool shells for attention and saved items.
 //!
 //! - Attention: `app_list_attention` reads the chats crate's attention summary; `app_update_attention`
 //!   marks a chat addressed or snoozes it, through the chats crate's own ops.
-//! - Saved items and schedules are not built yet. Their tools are registered so agents
+//! - Saved items are not built yet. Their tools are registered so agents
 //!   see the shape, and each answers a fixed refusal that names when the feature comes and that
 //!   nothing was changed (the readiness rule: every refusal for an unavailable feature says why
 //!   and where the user acts).
@@ -11,7 +11,6 @@ use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::spec::ToolSpec;
 use serde_json::{json, Value};
 
-pub const SCHEDULES_LATER: &str = "Schedules are not available in Helm yet; nothing was created or changed. Ask the user to set a reminder outside Helm for now.";
 pub const SAVED_LATER: &str = "Saved items are not built in Helm yet; nothing was saved or changed. Tell the user what you would have saved instead.";
 
 fn open(props: Value) -> Value {
@@ -118,33 +117,6 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         };
         r.blocking(spec, refuse(SAVED_LATER));
     }
-    let schedules = [
-        ("app_list_schedules", "List the user's schedules.", false),
-        (
-            "app_create_schedule",
-            "Create a schedule that sends a message to a chat later.",
-            true,
-        ),
-        ("app_update_schedule", "Change a schedule.", true),
-        ("app_cancel_schedule", "Cancel a schedule.", true),
-    ];
-    for (name, desc, write) in schedules {
-        let spec = if write {
-            ToolSpec::write(
-                name,
-                format!("{desc} Not built yet: it answers why.{EXPLICIT}"),
-                open(json!({})),
-            )
-            .large()
-        } else {
-            ToolSpec::read(
-                name,
-                format!("{desc} Not built yet: it answers why."),
-                open(json!({})),
-            )
-        };
-        r.blocking(spec, refuse(SCHEDULES_LATER));
-    }
 }
 
 #[cfg(test)]
@@ -165,21 +137,12 @@ mod tests {
             events: std::sync::Arc::new(helm_ipc::NullSink),
             ops: None,
         };
-        for (name, why) in [
-            ("app_create_schedule", "not available"),
-            ("app_save_item", "not built"),
-        ] {
-            let ToolHandler::Blocking(f) = r.get(name).unwrap().handler.clone() else {
-                panic!()
-            };
-            let e = f(&ctx, json!({})).unwrap_err();
-            assert!(
-                e.public.contains(why) && e.public.contains("nothing was"),
-                "{name}: {}",
-                e.public
-            );
-            assert_eq!(e.changed, crate::Changed::No);
-        }
+        let ToolHandler::Blocking(f) = r.get("app_save_item").unwrap().handler.clone() else {
+            panic!()
+        };
+        let e = f(&ctx, json!({})).unwrap_err();
+        assert!(e.public.contains("not built") && e.public.contains("nothing was"));
+        assert_eq!(e.changed, crate::Changed::No);
         assert!(r.contains("app_list_attention") && r.contains("app_update_attention"));
     }
 }

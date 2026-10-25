@@ -24,6 +24,7 @@ pub mod feedback;
 pub mod lines;
 pub mod registry;
 pub mod reserved;
+pub mod schedule_tools;
 pub mod sections;
 pub mod settings;
 pub mod settings_allow;
@@ -52,6 +53,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     tools::register_host_tools(r);
     settings::register_host_tools(r);
     shells::register_host_tools(r);
+    schedule_tools::register_host_tools(r);
     // Registered last among the built-ins.
     feedback::register_host_tools(r);
 }

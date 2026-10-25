@@ -11,9 +11,11 @@ helm-core.workspace = true
 helm-ipc.workspace = true
 rusqlite.workspace = true
 helm-workers.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

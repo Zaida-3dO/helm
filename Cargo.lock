@@ -1902,6 +1902,7 @@ dependencies = [
 name = "helm-hosttools"
 version = "0.2.1"
 dependencies = [
+ "chrono",
  "helm-core",
  "helm-ipc",
  "helm-workers",
@@ -1910,6 +1911,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
