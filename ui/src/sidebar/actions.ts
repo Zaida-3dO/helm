@@ -22,15 +22,18 @@ function message(e: unknown): string {
   return String((e as Error)?.message ?? e);
 }
 
+/** The host's refusal for a chat that still counts as working. */
+const STILL_BUSY = /stop the task first/i;
+
 /** Archive a chat that was just told to stop: it is refused while it still counts as busy, so try
- *  again for a few seconds until the stop has landed. */
+ *  again for a few seconds until the stop has landed. Any other refusal is final at once. */
 export async function archiveWhenIdle(ops: ChatOps, chatId: string, tries = 12, waitMs = 400): Promise<void> {
   for (let i = 1; ; i++) {
     try {
       await ops.archive(chatId);
       return;
     } catch (e) {
-      if (i >= tries) throw e;
+      if (i >= tries || !STILL_BUSY.test(message(e))) throw e;
       await new Promise((r) => setTimeout(r, waitMs));
     }
   }
@@ -41,6 +44,9 @@ export async function stopThenArchive(ops: ChatOps, chatId: string): Promise<voi
   await ops.stop(chatId, false);
   await archiveWhenIdle(ops, chatId);
 }
+
+/** What archiving needs to know about a chat: the top bar has a chat record, the sidebar a row. */
+export type ArchivableChat = Pick<SidebarRow, 'chatId' | 'title'>;
 
 export class SidebarActions {
   private readonly d: ActionDeps;
@@ -124,10 +130,15 @@ export class SidebarActions {
     return this.run(() => this.organize({ chatId: row.chatId, pinned })).then(() => undefined);
   }
 
-  async archive(row: SidebarRow): Promise<void> {
+  async archive(row: ArchivableChat): Promise<void> {
     const ok = await this.run(() => this.d.ops.archive(row.chatId).then(() => true));
     if (!ok) return;
     await this.d.data.refetch([row.chatId]);
+    this.archivedEntry(row);
+  }
+
+  /** Remember an archive so Ctrl+Z and the toast's Undo can revert it, and announce it. */
+  private archivedEntry(row: ArchivableChat): void {
     const entry: UndoEntry = {
       label: 'Archive chat',
       undo: async () => {
@@ -144,22 +155,11 @@ export class SidebarActions {
   }
 
   /** The stop-and-archive dialog's answer: stop the running task, then archive the chat. */
-  async stopAndArchive(row: SidebarRow): Promise<void> {
+  async stopAndArchive(row: ArchivableChat): Promise<void> {
     const ok = await this.run(() => stopThenArchive(this.d.ops, row.chatId).then(() => true));
     await this.d.data.refetch([row.chatId]);
     if (!ok) return;
-    this.d.undo.push({
-      label: 'Archive chat',
-      undo: async () => {
-        await this.d.ops.restore(row.chatId);
-        await this.d.data.refetch([row.chatId]);
-      },
-      redo: async () => {
-        await this.d.ops.archive(row.chatId);
-        await this.d.data.refetch([row.chatId]);
-      },
-    });
-    this.archivedToast(row.title || 'Untitled chat');
+    this.archivedEntry(row);
   }
 
   async restore(row: SidebarRow): Promise<void> {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ProjectNode, SidebarRow } from '../api/projects.ts';
 import { toast } from '../ui/toasts.ts';
-import { SidebarActions, type ActionDeps } from './actions.ts';
+import { archiveWhenIdle, SidebarActions, type ActionDeps } from './actions.ts';
 import { UndoStack } from './undo.ts';
 import { buildList, chatAncestors, headerSubtitle, HEIGHTS, nestRows, stepChat, visibleChatOrder, type ListItem } from './model.ts';
 import { loadMore, readBudget, type PageResult } from './paging.ts';
@@ -388,4 +388,27 @@ test('archiving a chat or a project shows an Undo toast whose button undoes it',
   await act.archiveProject(project('p1', { name: 'Atlas' }));
   assert.equal(toast.current()?.text, 'Archived “Atlas”');
   toast.dismiss(toast.current()!.id);
+});
+
+test('archiving after a stop retries only while the chat still counts as working', async () => {
+  const tries = (fail: string | null, times: number) => {
+    let n = 0;
+    const ops = {
+      archive: async () => {
+        n++;
+        if (fail && n <= times) throw new Error(fail);
+      },
+    };
+    return { ops: ops as never, count: () => n };
+  };
+  const busy = 'This chat is working; stop the task first, then archive it.';
+  const a = tries(busy, 2);
+  await archiveWhenIdle(a.ops, 'c1', 5, 1);
+  assert.equal(a.count(), 3, 'retried until the stop landed');
+  const b = tries('The chat store is locked.', 9);
+  await assert.rejects(archiveWhenIdle(b.ops, 'c1', 5, 1), /locked/);
+  assert.equal(b.count(), 1, 'any other refusal is final at once');
+  const c = tries(busy, 99);
+  await assert.rejects(archiveWhenIdle(c.ops, 'c1', 4, 1), /working/);
+  assert.equal(c.count(), 4, 'gives up after the last try');
 });
