@@ -24,10 +24,25 @@ test('every page is read, newest first, and returned oldest first', async () => 
     c2: { messages: [row({ id: 1, role: 'user' }), row({ id: 2, role: 'assistant' })], hasOlder: false, olderCursor: null },
   };
   const asked: string[] = [];
-  const all = await loadWholeChat(async (before) => {
+  const { rows: all, capped } = await loadWholeChat(async (before) => {
     asked.push(before ?? 'newest');
     return pages[before ?? 'newest']!;
   });
+  assert.equal(capped, false);
   assert.deepEqual(asked, ['newest', 'c1', 'c2']);
   assert.deepEqual(all.map((r) => r.id), [1, 2, 3, 4, 5, 6]);
+});
+
+test('with a side chat open, one view takes Ctrl+A when focus is on the page; a long chat says it was cut', async () => {
+  const { ownsPage } = await import('./useWholeChat.ts');
+  const { copiedNotice, MAX_ROWS } = await import('./wholeChat.ts');
+  const main = Symbol('main');
+  const side = Symbol('side');
+  // Neither clicked yet: the first opened (the main chat) owns it; after a click in the side chat, that one.
+  assert.deepEqual([ownsPage(main, [main, side], null), ownsPage(side, [main, side], null)], [true, false]);
+  assert.deepEqual([ownsPage(main, [main, side], side), ownsPage(side, [main, side], side)], [false, true]);
+  // The view clicked last was closed: back to the first.
+  assert.deepEqual([ownsPage(main, [main], side), ownsPage(side, [main], side)], [true, false]);
+  assert.equal(copiedNotice(false), 'Copied the whole chat.');
+  assert.match(copiedNotice(true), new RegExp(`newest ${MAX_ROWS.toLocaleString().replace(',', ',?')} rows`));
 });

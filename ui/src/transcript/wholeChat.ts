@@ -33,15 +33,21 @@ export function chatToMarkdown(rows: readonly MessageRow[]): string {
 /** Every row of the chat, oldest first, read a page at a time from the newest back. */
 export async function loadWholeChat(
   page: (before?: string) => Promise<Pick<TranscriptPage, 'messages' | 'hasOlder' | 'olderCursor'>>,
-): Promise<MessageRow[]> {
+): Promise<{ rows: MessageRow[]; capped: boolean }> {
   let rows: MessageRow[] = [];
   let before: string | undefined;
   for (;;) {
     const p = await page(before);
     rows = [...p.messages, ...rows];
-    if (!p.hasOlder || !p.olderCursor || rows.length >= MAX_ROWS) return rows.slice(-MAX_ROWS);
-    before = p.olderCursor;
+    const more = p.hasOlder && p.olderCursor !== null;
+    if (!more || rows.length >= MAX_ROWS) return { rows: rows.slice(-MAX_ROWS), capped: more || rows.length > MAX_ROWS };
+    before = p.olderCursor ?? undefined;
   }
+}
+
+/** What the notice says after a copy: the whole chat, or only its newest rows when it was cut. */
+export function copiedNotice(capped: boolean): string {
+  return capped ? `Copied the newest ${MAX_ROWS.toLocaleString()} rows of the chat; older ones were left out.` : 'Copied the whole chat.';
 }
 
 /** A key that the page itself would handle as text editing: it is left alone. */

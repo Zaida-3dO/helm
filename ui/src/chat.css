@@ -570,11 +570,9 @@ button.danger {
 
 .tool-box-label {
   flex: 1;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 550;
   color: var(--secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .tool-saved {
@@ -593,6 +591,19 @@ button.danger {
   border-radius: 5px;
   color: var(--muted);
   font-size: 11px;
+}
+
+.tool-box-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  padding: 0;
+}
+
+.tool-box-icon[aria-pressed='true'] {
+  background: var(--hover);
+  color: var(--text);
 }
 
 .tool-box-btn:hover:not(:disabled) {
@@ -1046,12 +1057,37 @@ button.danger {
   position: absolute;
   z-index: 5;
   display: flex;
-  gap: 4px;
+  gap: 2px;
   padding: 3px;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 10px;
   box-shadow: 0 2px 8px rgb(0 0 0 / 0.18);
+}
+
+/* One floating bar of quiet items, not separately bordered buttons. */
+.selection-toolbar button {
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.selection-toolbar button:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.selection-toolbar button:active {
+  background: var(--active, var(--hover));
+}
+
+.selection-toolbar button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .composer-dock {
   display: flex;

@@ -1,9 +1,20 @@
 // Ctrl+A in the transcript marks the whole chat as selected; Ctrl+C then copies all of it.
 // Anything else (a click, Escape, another key) lets go of the selection.
+//
+// A side chat can be open beside the main chat, and each has a view. With focus on the page itself
+// only one of them takes the keys: the one last clicked in, or the first opened when none was.
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import type { MessageRow, TranscriptPage } from '../api/types.ts';
-import { chatToMarkdown, isEditable, loadWholeChat } from './wholeChat.ts';
+import { chatToMarkdown, copiedNotice, isEditable, loadWholeChat } from './wholeChat.ts';
+
+const views: symbol[] = [];
+let lastUsed: symbol | null = null;
+
+/** Whether `me` is the view that takes a key pressed with focus on the page itself. */
+export function ownsPage(me: symbol, registered: readonly symbol[], used: symbol | null): boolean {
+  return used !== null && registered.includes(used) ? used === me : registered[0] === me;
+}
 
 export function useWholeChat(
   box: RefObject<HTMLElement | null>,
@@ -11,17 +22,29 @@ export function useWholeChat(
   onNotice: (text: string) => void,
 ): boolean {
   const [selected, setSelected] = useState(false);
-  const rows = useRef<Promise<MessageRow[]> | null>(null);
+  const rows = useRef<Promise<{ rows: MessageRow[]; capped: boolean }> | null>(null);
+  const me = useRef<symbol>(Symbol('chat view'));
   const loadRef = useRef(load);
   loadRef.current = load;
   const noticeRef = useRef(onNotice);
   noticeRef.current = onNotice;
 
   useEffect(() => {
+    const id = me.current;
+    views.push(id);
+    return () => {
+      views.splice(views.indexOf(id), 1);
+      if (lastUsed === id) lastUsed = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    // Focus on the page itself, or anywhere inside this transcript, but not in a text field.
     const inChat = (t: EventTarget | null) => {
       const el = t instanceof Element ? t : null;
-      // Focus on the page itself, or anywhere inside the transcript, but not in a text field.
-      return !isEditable(t) && (el === null || el === document.body || Boolean(box.current?.contains(el)));
+      if (isEditable(t)) return false;
+      if (el !== null && el !== document.body) return Boolean(box.current?.contains(el));
+      return ownsPage(me.current, views, lastUsed);
     };
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
@@ -36,17 +59,23 @@ export function useWholeChat(
       }
       if (!selected) return;
       if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'c') {
+        // Focus may have moved since Ctrl+A: then this is an ordinary copy, not ours.
+        if (!inChat(document.activeElement)) {
+          setSelected(false);
+          return;
+        }
         e.preventDefault();
-        const pending = rows.current;
-        pending
-          ?.then((all) => navigator.clipboard.writeText(chatToMarkdown(all)))
-          .then(() => noticeRef.current('Copied the whole chat.'))
+        rows.current
+          ?.then(({ rows: all, capped }) => navigator.clipboard.writeText(chatToMarkdown(all)).then(() => noticeRef.current(copiedNotice(capped))))
           .catch(() => noticeRef.current('Could not copy the chat.'));
         return;
       }
       if (e.key !== 'Control' && e.key !== 'Meta' && e.key !== 'Shift' && e.key !== 'Alt') setSelected(false);
     };
-    const onPointer = () => setSelected(false);
+    const onPointer = (e: Event) => {
+      if (box.current?.contains(e.target as Node)) lastUsed = me.current;
+      setSelected(false);
+    };
     document.addEventListener('keydown', onKey);
     document.addEventListener('pointerdown', onPointer, true);
     return () => {

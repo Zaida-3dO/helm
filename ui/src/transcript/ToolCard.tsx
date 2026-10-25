@@ -5,6 +5,7 @@
 import { useEffect, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
 import { useShell } from '../shell/context.ts';
+import { IconCopy, IconWrap } from '../ui/icons.tsx';
 import { Glyph, Spinner } from './icons.tsx';
 import { parseResult, type Cell, type GridRow } from './resultGrid.ts';
 import { TodoList } from './TodoList.tsx';
@@ -193,11 +194,18 @@ function OutputBox({ header, output, status, full }: { header: string; output: s
             {save.state === 'saving' ? 'Saving…' : 'Save full output'}
           </button>
         )}
-        <button type="button" className="tool-box-btn" aria-pressed={wrap} title={wrap ? 'Stop wrapping' : 'Wrap lines'} onClick={() => setWrap((w) => !w)}>
-          {wrap ? 'No wrap' : 'Wrap'}
+        <button
+          type="button"
+          className="tool-box-btn tool-box-icon"
+          aria-pressed={wrap}
+          aria-label="Wrap long lines"
+          title={wrap ? 'Stop wrapping long lines' : 'Wrap long lines'}
+          onClick={() => setWrap((w) => !w)}
+        >
+          <IconWrap size={13} />
         </button>
-        <button type="button" className="tool-box-btn" title="Copy" onClick={copy} disabled={!output}>
-          Copy
+        <button type="button" className="tool-box-btn tool-box-icon" aria-label="Copy the output" title="Copy" onClick={copy} disabled={!output}>
+          <IconCopy size={13} />
         </button>
       </div>
       <pre className={`tool-output mono ${wrap ? 'wrap' : ''}`}>{output || (status === 'running' ? 'Waiting for output…' : 'No text output.')}</pre>

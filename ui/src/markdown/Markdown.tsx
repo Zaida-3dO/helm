@@ -205,8 +205,11 @@ function hydrateCopyButtons(root: ParentNode): void {
 function runTool(button: HTMLElement): void {
   const kind = button.dataset.mdTool;
   if (kind === 'copy') {
-    const scope = button.closest('.md-diagram, pre.md-code');
-    const code = scope?.querySelector('code')?.textContent ?? '';
+    // A diagram copies its source, not whatever code element comes first in its frame.
+    const code =
+      button.closest('.md-diagram')?.querySelector('.md-diagram-source code')?.textContent ??
+      button.closest('pre.md-code')?.querySelector('code')?.textContent ??
+      '';
     void navigator.clipboard?.writeText(code).then(() => {
       button.innerHTML = ICON_DONE;
       window.setTimeout(() => {
