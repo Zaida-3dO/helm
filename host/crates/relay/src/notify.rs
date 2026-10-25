@@ -329,9 +329,11 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
             "Ask the user a question on Telegram with 2-4 buttons, for example whether you may \
              merge or deploy while they are away. Returns at once with an askId; when the user \
              taps a button, Helm sends you a note naming the option, checked as tapped on their \
-             own Telegram account for this question. Their typed replies are not answers. Only \
-             when the user has turned on Approve from Telegram in Settings → Hub; refused, with \
-             nothing asked, when it is off or Helm's line to the hub is not connected.",
+             own Telegram account for this question. Their typed replies are not answers. Ask \
+             only for a real decision, in a short plain-English question with no ids, hashes or \
+             jargon, and short option labels. Only when the user has turned on Approve from \
+             Telegram in Settings → Hub; refused, with nothing asked, when it is off or Helm's \
+             line to the hub is not connected.",
             json!({
                 "type": "object",
                 "properties": {
@@ -353,12 +355,16 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         ToolSpec::write(
             "app_telegram_send",
             format!(
-                "Send the user a short message on Telegram through Helm's bot, for example that \
-                 the work they asked you to report on is finished. It arrives as a new message on \
-                 their phone, headed by this chat's title; their reply goes to Helm's Telegram \
-                 chat, not here. text: at most {MAX_TEXT} characters of plain text. Refused, with \
-                 nothing sent, when Helm's line to the hub is not connected or {MAX_PER_HOUR} \
-                 messages were sent in the last hour."
+                "Send the user a short message on Telegram through Helm's bot. It arrives as a \
+                 new message on their phone, headed by this chat's title; their reply goes to \
+                 Helm's Telegram chat, not here. Send one only when it is worth their attention: \
+                 something they must act on or decide, finished work they asked to hear about, or \
+                 a real problem. Never routine progress. Write a few short lines of plain English \
+                 in the user's terms, a high-level summary with no ids, hashes, PR numbers, paths \
+                 or jargon unless they need one to act; when you need an answer, number the \
+                 choices. text: at most {MAX_TEXT} characters. Refused, with nothing sent, when \
+                 Helm's line to the hub is not connected or {MAX_PER_HOUR} messages were sent in \
+                 the last hour."
             ),
             json!({
                 "type": "object",
