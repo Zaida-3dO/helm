@@ -427,3 +427,20 @@ test('a diagram is named from the first word of its source, comments and blank l
   ];
   for (const [source, kind] of cases) assert.equal(diagramKind(source), kind, source);
 });
+
+test('math: $x$ and $$ blocks are marked for typesetting, prices and code are left alone', () => {
+  const marked = (md: string) => [...renderToHtml(md).matchAll(/data-md-math="(\w+)"><span class="md-math-src">([^<]*)</g)].map((m) => `${m[1]}:${m[2]}`);
+  const cases: [string, string[]][] = [
+    ['Energy $E = mc^2$ here.', ['inline:E = mc^2']],
+    ['Two $a$ and $b$ in a line', ['inline:a', 'inline:b']],
+    ['It costs $5 and $10 in total', []],
+    ['A lone $ sign, or $ spaced $ ones', []],
+    ['Use `$x$` in code', []],
+    ['Escaped \\$x\\$ stays', []],
+    ['$$\\int_0^1 x\\,dx$$ inline display', ['display:\\int_0^1 x\\,dx']],
+    ['Before\n\n$$\na^2 + b^2 = c^2\n$$\n\nAfter', ['display:a^2 + b^2 = c^2']],
+    ['$$\nunfinished', []],
+    ['```\n$$\nx\n$$\n```', []],
+  ];
+  for (const [src, want] of cases) assert.deepEqual(marked(src), want, src);
+});

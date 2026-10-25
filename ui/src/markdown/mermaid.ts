@@ -85,6 +85,19 @@ export function diagramKind(source: string): string {
 
 let configuredFor: boolean | null = null;
 
+type KatexApi = typeof import('katex').default;
+let katex: Promise<KatexApi> | null = null;
+
+/**
+ * Turns TeX into MathML (the webview draws it with the system's math font, so there are no
+ * fonts or stylesheet to ship). Loaded on first use. Rejects on a TeX error.
+ */
+export async function renderMath(tex: string, display: boolean): Promise<string> {
+  katex ??= import('katex').then((m) => m.default);
+  const k = await katex;
+  return k.renderToString(tex, { output: 'mathml', displayMode: display, throwOnError: true, strict: 'ignore', trust: false });
+}
+
 async function load(dark: boolean): Promise<MermaidApi> {
   loading ??= import('mermaid').then((m) => m.default);
   const mermaid = await loading;

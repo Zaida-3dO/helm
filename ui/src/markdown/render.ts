@@ -145,10 +145,51 @@ function renderProperties(props: Property[]): string {
   );
 }
 
+// Math: `$x^2$` inline, `$$ ... $$` as its own block. The source stays in the markup as text; the
+// component turns it into MathML afterwards (like a diagram), so this renderer stays plain
+// strings. An opening `$` must touch its text and a closing `$` must not be followed by a digit,
+// so prices ("$5 and $10") stay prices.
+const mathInline: TokenizerAndRendererExtension = {
+  name: 'mathInline',
+  level: 'inline',
+  start(src: string) {
+    const at = src.indexOf('$');
+    return at < 0 ? undefined : at;
+  },
+  tokenizer(src: string) {
+    const m = /^\$\$([^\n]+?)\$\$/.exec(src) ?? /^\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<![\s\\])\$(?!\d)/.exec(src);
+    if (!m) return undefined;
+    return { type: 'mathInline', raw: m[0], text: (m[1] as string).trim(), display: m[0].startsWith('$$') };
+  },
+  renderer(token) {
+    const t = token as unknown as { text: string; display: boolean };
+    const kind = t.display ? 'display' : 'inline';
+    return `<span class="md-math md-math-${kind}" data-md-math="${kind}"><span class="md-math-src">${escapeHtml(t.text)}</span></span>`;
+  },
+};
+
+const mathBlock: TokenizerAndRendererExtension = {
+  name: 'mathBlock',
+  level: 'block',
+  start(src: string) {
+    const at = src.search(/(?:^|\n) {0,3}\$\$/);
+    return at < 0 ? undefined : at;
+  },
+  tokenizer(src: string) {
+    const m = /^ {0,3}\$\$[ \t]*\n([\s\S]+?)\n[ \t]*\$\$[ \t]*(?:\n|$)/.exec(src);
+    if (!m) return undefined;
+    return { type: 'mathBlock', raw: m[0], text: (m[1] as string).trim() };
+  },
+  renderer(token) {
+    const t = token as unknown as { text: string };
+    return `<div class="md-math md-math-display" data-md-math="display"><span class="md-math-src">${escapeHtml(t.text)}</span></div>\n`;
+  },
+};
+
 const md = new Marked({ gfm: true, breaks: false, async: false });
 
 md.use({
-  extensions: [wikilink, pathref],
+  extensions: [wikilink, pathref, mathBlock, mathInline],
   renderer: {
     // Raw HTML becomes an inert marker. <br> is the one tag agents lean on in table cells.
     html(token: Tokens.HTML | Tokens.Tag) {

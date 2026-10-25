@@ -3,7 +3,7 @@ import type { MouseEvent } from 'react';
 import { LONG_TEXT_CHARS, renderShort, sharedOffloader } from './engine.ts';
 import { targetFromAttrs } from './links.ts';
 import type { LinkTarget } from './links.ts';
-import { diagramKind, renderDiagram } from './mermaid.ts';
+import { diagramKind, renderDiagram, renderMath } from './mermaid.ts';
 import { StreamBlocks } from './blocks.ts';
 import { renderPlain, renderToHtml } from './render.ts';
 import type { RenderOptions } from './render.ts';
@@ -115,6 +115,22 @@ function hydrateDiagrams(root: ParentNode, isCancelled: () => boolean): void {
         note.className = 'md-mermaid-message';
         note.textContent = error instanceof Error ? error.message : 'Diagram could not be rendered';
         el.prepend(note);
+      });
+  });
+}
+
+/** TeX in `$...$` and `$$...$$` becomes MathML; a TeX error leaves the source as written. */
+function hydrateMath(root: ParentNode, isCancelled: () => boolean): void {
+  root.querySelectorAll<HTMLElement>('[data-md-math]:not([data-md-math-done])').forEach((el) => {
+    const src = el.querySelector('.md-math-src')?.textContent ?? '';
+    renderMath(src, el.dataset.mdMath === 'display')
+      .then((html) => {
+        if (isCancelled() || !el.isConnected) return;
+        el.innerHTML = html;
+        el.setAttribute('data-md-math-done', '');
+      })
+      .catch(() => {
+        el.classList.add('md-math-error');
       });
   });
 }
@@ -249,6 +265,7 @@ function useIncremental(
     const hydrate = (f: DocumentFragment) => {
       const resolve = embeds.current;
       if (resolve) hydrateEmbeds(f, resolve, isCancelled);
+      hydrateMath(f, isCancelled);
       if (interactive) {
         hydrateDiagrams(f, isCancelled);
         hydrateCopyButtons(f);
@@ -298,6 +315,7 @@ export function Markdown({
     let cancelled = false;
     const isCancelled = () => cancelled;
     if (resolveEmbed) hydrateEmbeds(root, resolveEmbed, isCancelled);
+    hydrateMath(root, isCancelled);
     if (interactive) hydrateDiagrams(root, isCancelled);
     if (interactive) hydrateCopyButtons(root);
     return () => {
