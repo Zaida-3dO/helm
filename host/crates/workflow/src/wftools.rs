@@ -204,6 +204,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 &args,
                 helm_core::now_ms(),
             );
+            afk_sign_off(ctx, &db);
             emit(ctx);
             let out = out?;
             crate::land::kick();
@@ -229,10 +230,23 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 args,
                 helm_core::now_ms(),
             );
+            afk_sign_off(ctx, &db);
             emit(ctx);
             out
         },
     );
+}
+
+/// While AFK is on with plan approval set to approve, a plan that now waits on the user's
+/// sign-off (just recorded, or just approved by its review) is signed off for them.
+fn afk_sign_off(ctx: &ToolCtx, db: &Database) {
+    let Some(on) = ctx.services.get::<crate::user::AfkPlanSignOff>() else {
+        return;
+    };
+    if on.0() {
+        let chat = ctx.caller_chat_id.clone();
+        let _ = db.write(|tx| crate::user::afk_sign_off(tx, &chat, helm_core::now_ms()));
+    }
 }
 
 /// `land {repo, branch, userQuote | grant}`: the user's Merge of this task's `awaiting_merge`

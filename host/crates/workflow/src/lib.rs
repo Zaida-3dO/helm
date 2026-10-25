@@ -78,6 +78,7 @@ pub use kinds::register_allow_kinds;
 pub use ops::register_ops;
 pub use tool::{register_host_tools, WorkflowSection};
 pub use types::*;
+pub use user::{afk_sign_off_waiting, AfkPlanSignOff};
 
 pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
     reg.initializer("workflow-settings", settings::init)

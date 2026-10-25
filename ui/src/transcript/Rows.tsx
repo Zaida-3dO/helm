@@ -74,6 +74,7 @@ const CONTEXT_LABEL: Record<string, string> = {
   edit: 'Edited',
   orchestrator: 'Orchestrator',
   telegram: 'Telegram',
+  afk: 'AFK',
 };
 
 function Thinking({ text, streaming, onLink }: { text: string; streaming: boolean; onLink: RowContext['onLink'] }) {

@@ -9,22 +9,30 @@
 //! | [`digest`] | the digest prompt and the delivery step |
 //! | [`service`] | the change engine, the 30 s tick and digest delivery |
 //! | [`signals`] | Windows lock, sleep/resume and idle, on a hidden window of its own |
+//! | [`policy`] | what AFK does with a chat's asks and turns |
+//! | [`texts`] | the words agents are told |
 //! | `ops` | the UI-only `afk_*` ops |
 //!
-//! Not built yet: one-chat mode and the workers' automatic answers
-//! (per-chat AFK), the unsigned-commit authority (no wrapper on
-//! Windows), box chats, and the 5 s sleep hold (nothing is published to workers yet).
+//! While AFK is on for all chats, running chats get a note, every new turn carries a line saying
+//! so, questions get the automatic answer, plans follow the saved choice, and permission cards
+//! wait for the user ([`policy`]). What AFK did is kept for the digest.
+//!
+//! Not built yet: one-chat mode (per-chat AFK), refusing permission cards instead of leaving
+//! them waiting, the unsigned-commit authority (no wrapper on Windows), box chats, and the 5 s
+//! sleep hold.
 
 pub mod digest;
 pub mod monitor;
 mod ops;
+pub mod policy;
 pub mod service;
 pub mod settings;
 pub mod signals;
 pub mod store;
+pub mod texts;
 
 pub use ops::register_ops;
-pub use service::{AfkService, AfkView, AskSource, DigestSender};
+pub use service::{AfkHooks, AfkService, AfkView, AskSource, DigestSender};
 
 use helm_chats::ChatRuntime;
 use helm_core::db::Database;
@@ -74,18 +82,68 @@ impl AskSource for AttentionAsks {
     }
 }
 
+/// How AFK reaches the working chats and the orchestrator: notes through the chats crate's
+/// host-send path (steered into a running turn), the interaction sweep, and the workflow's plan
+/// sign-off.
+struct RuntimeHooks {
+    rt: ChatRuntime,
+    db: Arc<Database>,
+    events: Arc<dyn EventSink>,
+}
+
+impl AfkHooks for RuntimeHooks {
+    fn busy_chats(&self) -> Vec<String> {
+        self.rt.busy_chats()
+    }
+
+    fn note(&self, chat_id: &str, submission_id: &str, text: &str) -> Result<(), (String, String)> {
+        helm_chats::submit::host_send(
+            &self.rt,
+            helm_chats::submit::HostSend {
+                chat_id,
+                submission_id,
+                text,
+                mode: helm_chats::submit::HostSendMode::Steer,
+                origin: helm_chats::types::SubmissionOrigin::App,
+                gated: false,
+            },
+        )
+        .map(|_| ())
+        .map_err(|e| (e.code.to_string(), e.message))
+    }
+
+    fn sweep(&self) {
+        self.rt.afk_sweep();
+    }
+
+    fn sign_off_plans(&self, now: i64) -> usize {
+        helm_workflow::afk_sign_off_waiting(&self.db, &*self.events, now).len()
+    }
+}
+
 /// The shared [`AfkService`]. Needs the database and the chat runtime.
 pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
     let (Some(db), Some(rt)) = (services.get::<Database>(), services.get::<ChatRuntime>()) else {
         return;
     };
     let rt = (*rt).clone();
-    services.insert(Arc::new(AfkService::new(
-        db,
+    let svc = Arc::new(AfkService::new(
+        db.clone(),
         events.clone(),
         Arc::new(RuntimeSender(rt.clone())),
-        Arc::new(AttentionAsks(rt)),
-    )));
+        Arc::new(AttentionAsks(rt.clone())),
+    ));
+    svc.set_hooks(Arc::new(RuntimeHooks {
+        rt: rt.clone(),
+        db,
+        events: events.clone(),
+    }));
+    rt.set_afk_policy(Arc::new(policy::ServicePolicy(svc.clone())));
+    let for_plans = svc.clone();
+    services.insert(Arc::new(helm_workflow::AfkPlanSignOff(Arc::new(
+        move || for_plans.approves_plans(),
+    ))));
+    services.insert(svc);
 }
 
 /// Start auto-AFK: the Windows signal thread and the 30 s tick (which also delivers digests).

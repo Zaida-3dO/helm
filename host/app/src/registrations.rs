@@ -212,6 +212,8 @@ fn consent_tick(
     for chat in up.changed_chats {
         events.emit(helm_ipc::AppEvent::new("consent").with("chatId", chat));
     }
+    // Pending Allow requests count in the attention summary; it emits only when it changed.
+    rt.publish_attention();
     for d in up.deliveries {
         let sent = helm_chats::submit::host_send(
             rt,

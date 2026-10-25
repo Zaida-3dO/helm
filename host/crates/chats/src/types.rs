@@ -501,6 +501,9 @@ pub enum ContextKind {
     /// Something that happened on Telegram outside this chat's turns: an alert another chat
     /// sent the user, or an approval answered from the phone.
     Telegram,
+    /// Something AFK did with an ask while the user was away (an automatic answer, or an ask it
+    /// left waiting for them).
+    Afk,
 }
 
 /// The `details` bag of a message row. Every field is optional and absent when unset.

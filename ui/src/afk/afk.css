@@ -66,3 +66,36 @@
 .afk-state {
   color: var(--secondary);
 }
+
+/* The composer's AFK pill. */
+.afk-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 4px 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+.afk-pill-exit {
+  border: 0;
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 11px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.afk-pill-exit:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.afk-pill-error {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--danger);
+}

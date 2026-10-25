@@ -49,6 +49,11 @@ fn request_allow(ctx: &ToolCtx, a: Value) -> ToolResult {
     // A signal only: the card is rebuilt from consent_list.
     ctx.events
         .emit(AppEvent::new("consent").with("chatId", ctx.caller_chat_id.clone()));
+    // Wake the upkeep loop, which refreshes the attention badge: a request waiting for the user
+    // shows even when its chat is not open.
+    if let Some(w) = ctx.services.get::<ConsentWake>() {
+        w.0.notify_one();
+    }
     Ok(json!({
         "requestId": r.id,
         "state": "pending",

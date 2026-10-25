@@ -160,6 +160,78 @@ fn sign_off(tx: &Transaction<'_>, x: &Act<'_>, mut run: Run, a: &Value) -> actio
     Ok(Ok(json!({"signedOff": true, "changed": true})))
 }
 
+/// The service the AFK crate installs: whether AFK is on with plan approval set to approve. While
+/// it says yes, a plan that waits on the user's sign-off is signed off automatically.
+#[derive(Clone)]
+pub struct AfkPlanSignOff(pub std::sync::Arc<dyn Fn() -> bool + Send + Sync>);
+
+/// Sign off, for the user who is away, the plan of record of `chat_id`'s active task. It follows
+/// the same rules as the user's own sign-off (the workflow on for the chat, sign-off set to "me",
+/// the plan reviewed where a review is needed) and records `afk_plan_signed_off` with how to take
+/// it back. Returns whether it signed anything off.
+pub fn afk_sign_off(tx: &Transaction<'_>, chat_id: &str, now: i64) -> rusqlite::Result<bool> {
+    let s = crate::settings::load(tx)?;
+    if !s.enabled || s.plan_sign_off != SignOff::Me || !crate::mode::in_effect(tx, chat_id, &s)? {
+        return Ok(false);
+    }
+    let Some(mut run) = store::active_run(tx, chat_id)? else {
+        return Ok(false);
+    };
+    let Some(plan) = run.plan_id.clone() else {
+        return Ok(false);
+    };
+    let review = s.stages.plan_review.use_;
+    let review_needed = review == StageUse::Required
+        || (review == StageUse::Auto && !engine::skipped(&run, "planReview"));
+    if run.plan_signed_off || (review_needed && !run.plan_approved) {
+        return Ok(false);
+    }
+    run.plan_signed_off = true;
+    store::save_run(tx, &run, None, now)?;
+    store::event(
+        tx,
+        chat_id,
+        Some(&run),
+        &Event {
+            verdict: Some("afkSignOff"),
+            plan_id: Some(&plan),
+            body: Some(
+                "The plan was signed off automatically while you were away, because AFK plan approval is set to approve. To take it back, park the task and reopen it, or end the task.",
+            ),
+            ..ev("afk_plan_signed_off")
+        },
+        now,
+    )?;
+    Ok(true)
+}
+
+/// Every active task whose plan waits on the user, signed off through [`afk_sign_off`] (AFK just
+/// turned on). Returns the chats it signed off.
+pub fn afk_sign_off_waiting(
+    db: &helm_core::db::Database,
+    events: &dyn helm_ipc::EventSink,
+    now: i64,
+) -> Vec<String> {
+    let chats: Vec<String> = db
+        .snapshot(|tx| {
+            let mut st = tx.prepare(
+                "SELECT chat_id FROM workflow_runs
+                 WHERE status = 'active' AND plan_id IS NOT NULL AND plan_signed_off = 0",
+            )?;
+            let rows = st.query_map([], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<String>>>()
+        })
+        .unwrap_or_default();
+    let mut done = vec![];
+    for chat in chats {
+        if db.write(|tx| afk_sign_off(tx, &chat, now)).unwrap_or(false) {
+            done.push(chat);
+        }
+    }
+    store::emit_touched(events);
+    done
+}
+
 /// Reopen: a parked or handed-off task becomes active again with the next attempt,
 /// which voids every Allow grant and ask of the earlier one. Its handed-off, failed, declined and
 /// awaiting changes go back to open (their approval binding stays; a new hand-off is needed).

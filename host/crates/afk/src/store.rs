@@ -37,7 +37,16 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              created_at       INTEGER NOT NULL,
              PRIMARY KEY (span_id, chat_id)
          );
-         CREATE INDEX IF NOT EXISTS afk_digests_state ON afk_digests(state);",
+         CREATE INDEX IF NOT EXISTS afk_digests_state ON afk_digests(state);
+         CREATE TABLE IF NOT EXISTS afk_events (
+             id        INTEGER PRIMARY KEY AUTOINCREMENT,
+             span_id   TEXT NOT NULL,
+             chat_id   TEXT NOT NULL,
+             kind      TEXT NOT NULL,
+             title     TEXT NOT NULL,
+             at        INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS afk_events_span ON afk_events(span_id, chat_id);",
     )
 }
 
@@ -99,9 +108,11 @@ pub fn insert_span(tx: &Transaction<'_>, id: &str, src: Source, now: i64) -> rus
     Ok(())
 }
 
-/// Accidental: a short span with nothing deferred yields no digest. Nothing is
-/// deferred yet, so length alone decides.
-pub fn accidental(span: &Span, end: i64) -> bool {
+/// Accidental: a short span in which AFK handled nothing yields no digest.
+pub fn accidental(span: &Span, end: i64, handled: bool) -> bool {
+    if handled {
+        return false;
+    }
     let len = end - span.started_at;
     if span.source.automatic() {
         len < 5 * 60_000
@@ -138,8 +149,16 @@ pub fn close_span(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<Option<(Sp
     )?;
     span.ended_at = Some(end);
     let mut n = 0;
-    if !accidental(&span, end) {
-        for chat in digest_targets(tx, span.started_at, end)? {
+    let handled_chats = event_chats(tx, &span.id)?;
+    if !accidental(&span, end, !handled_chats.is_empty()) {
+        let mut targets = digest_targets(tx, span.started_at, end)?;
+        for c in handled_chats {
+            if !targets.contains(&c) && chat_available(tx, &c)? {
+                targets.push(c);
+            }
+        }
+        targets.truncate(MAX_DIGEST_CHATS);
+        for chat in targets {
             n += tx.execute(
                 "INSERT OR IGNORE INTO afk_digests (span_id, chat_id, state, created_at)
                  VALUES (?1, ?2, 'pending', ?3)",
@@ -350,4 +369,70 @@ pub fn any_span(tx: &Transaction<'_>) -> rusqlite::Result<bool> {
         .query_row("SELECT 1 FROM afk_spans LIMIT 1", [], |_| Ok(()))
         .optional()?
         .is_some())
+}
+
+/// What AFK did with one ask, kept for the digest.
+pub fn record_event(
+    tx: &Transaction<'_>,
+    span_id: &str,
+    chat_id: &str,
+    kind: &str,
+    title: &str,
+    at: i64,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO afk_events (span_id, chat_id, kind, title, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![span_id, chat_id, kind, title, at],
+    )?;
+    Ok(())
+}
+
+/// Chats AFK handled something in during the span.
+pub fn event_chats(tx: &Transaction<'_>, span_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut st = tx.prepare(
+        "SELECT chat_id FROM afk_events WHERE span_id = ?1 GROUP BY chat_id ORDER BY max(at) DESC",
+    )?;
+    let rows = st.query_map([span_id], |r| r.get(0))?;
+    rows.collect()
+}
+
+pub struct EventRow {
+    pub kind: String,
+    pub title: String,
+    pub at: i64,
+}
+
+/// The events of one chat in one span, oldest first (at most 40).
+pub fn chat_events(
+    tx: &Transaction<'_>,
+    span_id: &str,
+    chat_id: &str,
+) -> rusqlite::Result<Vec<EventRow>> {
+    let mut st = tx.prepare(
+        "SELECT kind, title, at FROM afk_events WHERE span_id = ?1 AND chat_id = ?2
+         ORDER BY id LIMIT 40",
+    )?;
+    let rows = st.query_map(params![span_id, chat_id], |r| {
+        Ok(EventRow {
+            kind: r.get(0)?,
+            title: r.get(1)?,
+            at: r.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Allow requests the chat filed since `since` that nobody decided (still waiting, or expired).
+/// The consent tables belong to another crate; without them the answer is none.
+pub fn undecided_allows(tx: &Transaction<'_>, chat_id: &str, since: i64) -> Vec<String> {
+    let Ok(mut st) = tx.prepare(
+        "SELECT summary FROM consent_requests
+         WHERE chat_id = ?1 AND created_at >= ?2 AND state IN ('pending', 'expired')
+         ORDER BY created_at LIMIT 20",
+    ) else {
+        return vec![];
+    };
+    st.query_map(params![chat_id, since], |r| r.get::<_, String>(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
 }

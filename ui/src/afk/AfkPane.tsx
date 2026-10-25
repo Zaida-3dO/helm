@@ -90,11 +90,11 @@ export function AfkPane() {
           data-testid="afk-answer"
           rows={4}
           maxLength={4000}
-          placeholder="Built-in: pick reasonable defaults and keep going; defer hard choices to the summary."
+          placeholder="Built-in: pick reasonable defaults and keep going; set hard choices aside for when you are back."
           value={form.answer ?? ''}
           onChange={(e) => patch({ answer: e.target.value === '' ? null : e.target.value })}
         />
-        <div className="afk-hint">Leave blank for the built-in answer. Chats do not answer automatically yet; this text is kept for when they do.</div>
+        <div className="afk-hint">Leave blank for the built-in answer. While AFK is on, a chat that asks a question gets this answer, followed by a fixed safety line. Permission cards and Allow requests are never answered: they wait for you and are listed in the summary.</div>
       </div>
       <SettingRow title="Plan approval" description="What happens when an agent asks to leave plan mode while you are away.">
         <Segmented<'defer' | 'approve'>

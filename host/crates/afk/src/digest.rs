@@ -79,6 +79,31 @@ pub fn substitute(template: &str, vals: &[(&str, &str)]) -> String {
     out
 }
 
+/// The `{deferred}` lines for one chat: what AFK answered or left waiting, then the Allow requests
+/// nobody decided.
+pub fn deferred_lines(events: &[crate::store::EventRow], allows: &[String]) -> Vec<String> {
+    let short = |s: &str| -> String { s.chars().take(200).collect() };
+    let mut out: Vec<String> = events
+        .iter()
+        .map(|e| {
+            let t = short(&e.title);
+            let at = hhmm(e.at);
+            match e.kind.as_str() {
+                "question" => format!("- {at} Answered a question automatically: \"{t}\""),
+                "plan_approved" => format!("- {at} Approved the plan automatically."),
+                "plan_deferred" => format!("- {at} Waiting for you: plan approval. {t}"),
+                _ => format!("- {at} Waiting for you: {t}"),
+            }
+        })
+        .collect();
+    out.extend(
+        allows
+            .iter()
+            .map(|a| format!("- Allow request waiting for you: {}", short(a))),
+    );
+    out
+}
+
 /// The whole digest message for one chat and span.
 pub fn compose(
     template: Option<&str>,

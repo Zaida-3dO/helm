@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clampInt, PresenceThrottle, sourceLabel, toggleWait } from './model.ts';
+import { clampInt, pillModel, PresenceThrottle, sourceLabel, toggleWait } from './model.ts';
 
 test('wait toggle stores null and restores 30', () => {
   assert.equal(toggleWait(12, false), null);
@@ -26,4 +26,13 @@ test('presence throttle reports input at most once per gap', () => {
 test('source labels match the Settings wording', () => {
   assert.equal(sourceLabel('screenLock'), 'screen locked');
   assert.equal(sourceLabel('unanswered'), 'question waiting');
+});
+
+test('the pill shows only while AFK is on for every chat', () => {
+  const at = new Date(2026, 0, 1, 9, 5).getTime();
+  const on = (source: 'manual' | 'idle', appliesTo: 'all' | 'chat' = 'all') => ({ open: { startedAt: at, source }, settings: { appliesTo } });
+  assert.equal(pillModel({ open: null, settings: { appliesTo: 'all' } }), null);
+  assert.equal(pillModel(on('manual', 'chat')), null);
+  assert.equal(pillModel(on('manual'))?.label, 'AFK since 09:05');
+  assert.match(pillModel(on('idle'))?.tooltip ?? '', /\(idle\) since 09:05/);
 });

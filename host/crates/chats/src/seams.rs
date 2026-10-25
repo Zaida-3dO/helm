@@ -5,6 +5,7 @@
 //! |---|---|---|
 //! | [`SendContextBuilder`] (service [`SendContext`]) | `helm_panel` (panel context) | `chat_send`, for a composer send that carries `context` |
 //! | [`ProjectGate`] (service [`ProjectGates`]) | `helm_projects` | `chat_restore` and `chat_create`: an archived project refuses both |
+//! | [`AfkPolicy`] (installed with [`crate::ChatRuntime::set_afk_policy`]) | `helm_afk` | each new interaction a worker raises, and each turn's context block |
 //!
 //! A seam with nothing registered is skipped: a context payload is dropped (logged once per send)
 //! and every project counts as open.
@@ -50,3 +51,33 @@ pub trait ProjectGate: Send + Sync {
 /// The service wrapper for [`ProjectGate`].
 #[derive(Clone)]
 pub struct ProjectGates(pub Arc<dyn ProjectGate>);
+
+/// What AFK does with one pending interaction.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AfkAction {
+    /// Not AFK's to handle: the card waits for the user as usual.
+    Leave,
+    /// Answer it now. `fields` are the answer's fields (`value`, `confirmed`); `marker` is the
+    /// transcript line recording what AFK did.
+    Answer {
+        fields: serde_json::Map<String, Value>,
+        marker: String,
+    },
+    /// Leave it waiting for the user, and say so in the transcript.
+    Defer { marker: String },
+}
+
+/// AFK's say over a chat, asked by the chat's actor. Implemented by the AFK crate; with nothing
+/// installed every chat behaves as if AFK were off.
+pub trait AfkPolicy: Send + Sync {
+    /// Text every new turn of this chat carries while AFK is on for it, `None` otherwise.
+    fn turn_text(&self, chat_id: &str) -> Option<String>;
+    /// What to do with an interaction the worker raised (or, with `at_flip`, one already waiting
+    /// when AFK turned on). The implementation records what it decides.
+    fn decide(
+        &self,
+        chat_id: &str,
+        interaction: &crate::types::Interaction,
+        at_flip: bool,
+    ) -> AfkAction;
+}

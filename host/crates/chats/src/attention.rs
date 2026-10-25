@@ -90,13 +90,33 @@ fn title_of(t: &str) -> String {
     }
 }
 
-/// Compute the summary from the database plus the waiting tracker.
+/// Chats with an Allow request waiting for the user. The consent tables belong to another crate;
+/// where they do not exist (a build or test without them) nobody is waiting.
+fn allow_waiting(tx: &Transaction<'_>, now: i64) -> Vec<String> {
+    let Ok(mut st) = tx.prepare_cached(
+        "SELECT DISTINCT chat_id FROM consent_requests WHERE state = 'pending' AND expires_at > ?1",
+    ) else {
+        return vec![];
+    };
+    st.query_map([now], |r| r.get::<_, String>(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
+/// Compute the summary from the database plus the waiting tracker. A pending Allow request counts
+/// as a request waiting for approval, so it raises the badge and the "needs you" row even when
+/// the chat is not open.
 pub fn compute(
     tx: &Transaction<'_>,
     needs: &Needs,
     revision: i64,
 ) -> rusqlite::Result<AttentionSummary> {
     let now = helm_core::now_ms();
+    let mut with_allows = needs.clone();
+    for chat in allow_waiting(tx, now) {
+        with_allows.entry(chat).or_insert(AttentionKind::Approval);
+    }
+    let needs = &with_allows;
     let triage_on = crate::triage::settings(tx).enabled;
     // `quiet`: addressed after the last activity, or snoozed into the future with no activity
     // since the snooze (?1 is now).
@@ -390,6 +410,36 @@ mod tests {
             summary(&db, &Needs::new()).badge,
             1,
             "a manual mark counts whatever the status"
+        );
+    }
+
+    #[test]
+    fn a_pending_allow_request_raises_the_badge_without_an_open_chat() {
+        let (_d, db) = temp_db();
+        let a = chat(&db, "needs an allow");
+        assert_eq!(
+            summary(&db, &Needs::new()).badge,
+            0,
+            "no table, nobody waiting"
+        );
+        exec(
+            &db,
+            "CREATE TABLE consent_requests (chat_id TEXT, state TEXT, expires_at INTEGER)",
+            &[],
+        );
+        exec(
+            &db,
+            "INSERT INTO consent_requests VALUES (?1, 'pending', 9999999999999)",
+            &[&a],
+        );
+        let s = summary(&db, &Needs::new());
+        assert_eq!(s.badge, 1);
+        assert_eq!(s.needs_you[0].kind, AttentionKind::Approval);
+        exec(&db, "UPDATE consent_requests SET state = 'allowed'", &[]);
+        assert_eq!(
+            summary(&db, &Needs::new()).badge,
+            0,
+            "decided: no longer waiting"
         );
     }
 

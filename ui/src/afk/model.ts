@@ -58,3 +58,14 @@ export class PresenceThrottle {
     return true;
   }
 }
+
+/** What the composer's AFK pill shows, or null while AFK is not on for every chat. */
+export function pillModel(view: { open: { startedAt: number; source: AfkSource } | null; settings: { appliesTo: 'all' | 'chat' } }): { label: string; tooltip: string } | null {
+  if (!view.open || view.settings.appliesTo !== 'all') return null;
+  const since = clockTime(view.open.startedAt);
+  const why = view.open.source === 'manual' ? '' : ` (${sourceLabel(view.open.source)})`;
+  return {
+    label: `AFK since ${since}`,
+    tooltip: `AFK is on${why} since ${since}. Chats are told; questions are answered for you, and permission cards and Allow requests wait until you are back.`,
+  };
+}

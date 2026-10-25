@@ -682,6 +682,63 @@ async fn interactions_pass_through() {
     .await;
 }
 
+/// While an AFK policy is installed it answers questions at once, leaves permission cards
+/// waiting (with a transcript line), and puts its text on each new turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn afk_policy_answers_questions_and_defers_cards() {
+    use crate::seams::{AfkAction, AfkPolicy};
+    use crate::types::{Interaction, InteractionAttention};
+    struct Policy;
+    impl AfkPolicy for Policy {
+        fn turn_text(&self, _: &str) -> Option<String> {
+            Some("[AFK] away".into())
+        }
+        fn decide(&self, _: &str, i: &Interaction, _: bool) -> AfkAction {
+            match i.attention {
+                Some(InteractionAttention::Question) => AfkAction::Answer {
+                    fields: serde_json::from_value(json!({"value": "go with the default"}))
+                        .unwrap(),
+                    marker: "AFK answered a question".into(),
+                },
+                Some(InteractionAttention::Approval) => AfkAction::Defer {
+                    marker: "AFK left this for you".into(),
+                },
+                _ => AfkAction::Leave,
+            }
+        }
+    }
+    let mut h = harness();
+    h.rt.set_afk_policy(Arc::new(Policy));
+    let (chat, _, mut w) = running_turn(&mut h).await;
+    w.emit(json!({"type": "extension_ui_request", "id": "q1", "method": "select", "attention": "question",
+                  "title": "Which?", "options": ["a", "b"]}))
+        .await;
+    let ans = w.expect("extension_ui_response").await;
+    assert_eq!(
+        (ans["id"].as_str(), ans["value"].as_str()),
+        (Some("q1"), Some("go with the default"))
+    );
+    w.emit(json!({"type": "extension_ui_request", "id": "a1", "method": "select", "attention": "approval",
+                  "title": "Run ls?", "options": ["Allow once", "Deny"]}))
+        .await;
+    h.until("card waits", |h| {
+        h.rt.live_thread(&chat)
+            .is_some_and(|t| t.interactions.len() == 1)
+    })
+    .await;
+    assert_eq!(h.rt.live_thread(&chat).unwrap().interactions[0].id, "a1");
+    h.until("markers", |h| {
+        h.col("SELECT text FROM messages WHERE role = 'context'")
+            == ["AFK answered a question", "AFK left this for you"]
+    })
+    .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    let (_, _) = h.send(&chat, "next", "default").await;
+    let p = w.expect("prompt").await;
+    assert_eq!(p["context"], "[AFK] away");
+}
+
 /// Tool start and end are written as they happen, with the live tool on the thread.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tools_are_written_at_start_and_end() {

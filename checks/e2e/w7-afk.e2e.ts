@@ -1,6 +1,7 @@
 // AFK and the usage governor end to end in the real debug app with the fake claude
 // (fixtures/w7-afk.json): Settings → AFK saves strictly, the AFK switch opens and closes a span,
-// a chat that worked while away gets one "While you were out" digest from Helm, and Settings →
+// the composer's AFK pill shows while it is on and its Exit ends it, a chat that worked while away
+// gets one "While you were out" digest from Helm, and Settings →
 // Usage governor bands the scripted plan usage against the user's thresholds.
 //
 // Run: `npm run build:debug` at the root, then `npm run e2e -w checks`.
@@ -95,8 +96,15 @@ describe("AFK spans, the digest and the usage governor", { timeout: 10 * 60_000 
       await waitText(page(), "You said: working while you are away", 30_000);
       // A manual span under a minute is accidental and gets no digest.
       await new Promise((r) => setTimeout(r, 61_000));
-      const off = (await api(page(), "afk_set", { on: false })) as Json;
-      assert.equal(off.open, null);
+      // The composer shows the AFK pill while it is on; Exit ends it.
+      await page().waitForSelector(tid("afk-pill"), { timeout: 20_000 });
+      assert.match(await page().locator(tid("afk-pill-label")).innerText(), /^AFK since \d\d:\d\d$/);
+      await page().click(tid("afk-pill-exit"));
+      const off = await until("AFK ended from the pill", async () => {
+        const v = await afk();
+        return v.open === null ? v : undefined;
+      });
+      await page().waitForSelector(tid("afk-pill"), { state: "detached", timeout: 20_000 });
       assert.equal(off.last.digests.length, 1);
       assert.equal(off.last.digests[0].chatId, chat);
       await waitText(page(), "Back from AFK", 30_000);
