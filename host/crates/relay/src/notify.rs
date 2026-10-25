@@ -66,11 +66,23 @@ impl Budget {
 
 static BUDGET: Budget = Budget(Mutex::new(VecDeque::new()));
 
-/// What the away watcher remembers between looks.
+/// One chat in one attention state ("Docs, asked a question").
+type Key = (String, String);
+
+/// What the away watcher remembers across one away span.
 #[derive(Default)]
 pub struct Away {
-    /// The attention rows already seen in this away span; `None` while the user is present.
-    seen: Option<HashSet<(String, String)>>,
+    /// What already waited when the span began, plus what has been alerted since; `None` while
+    /// the user is present. Kept for the whole span, so a chat that keeps finishing turns is
+    /// alerted once, not after every turn.
+    seen: Option<HashSet<Key>>,
+}
+
+/// An alert ready to send, and the rows it covers (marked seen only once it was sent).
+#[derive(Debug, PartialEq)]
+pub struct Alert {
+    pub text: String,
+    pub keys: Vec<Key>,
 }
 
 /// The rows an away alert is about: chats that need the user, have stalled, or finished a reply
@@ -84,42 +96,51 @@ pub fn alertable(a: &AttentionSummary) -> Vec<AttentionRow> {
         .collect()
 }
 
+fn key(r: &AttentionRow) -> Key {
+    (r.chat_id.clone(), format!("{:?}", r.kind))
+}
+
 impl Away {
-    /// One look. `away` is whether the user is away with alerts on; `skip` is the Telegram chat.
-    /// Returns the message to send, if anything is new. The first look of an away span only
-    /// records what is already waiting.
-    pub fn step(
-        &mut self,
-        away: bool,
-        rows: &[AttentionRow],
-        skip: Option<&str>,
-    ) -> Option<String> {
-        if !away {
-            self.seen = None;
-            return None;
-        }
-        let now: HashSet<(String, String)> = rows
-            .iter()
-            .map(|r| (r.chat_id.clone(), format!("{:?}", r.kind)))
-            .collect();
-        let Some(seen) = self.seen.replace(now) else {
+    /// The user is back (or alerts are off): the next away span starts afresh.
+    pub fn reset(&mut self) {
+        self.seen = None;
+    }
+
+    /// One look while the user is away; `skip` is the Telegram chat. The first look of a span
+    /// only records what is already waiting. Later looks return what is new since, once per
+    /// chat and state for the whole span.
+    pub fn step(&mut self, rows: &[AttentionRow], skip: Option<&str>) -> Option<Alert> {
+        let Some(seen) = &self.seen else {
+            self.seen = Some(rows.iter().map(key).collect());
             return None;
         };
         let mut lines: Vec<String> = vec![];
+        let mut keys: Vec<Key> = vec![];
         let mut chats: HashSet<&str> = HashSet::new();
         for r in rows {
-            let key = (r.chat_id.clone(), format!("{:?}", r.kind));
-            if seen.contains(&key) || Some(r.chat_id.as_str()) == skip {
+            let k = key(r);
+            if seen.contains(&k) || Some(r.chat_id.as_str()) == skip {
                 continue;
             }
             if chats.insert(&r.chat_id) {
                 lines.push(format!("• {}", compose(&r.title, &r.reason)));
             }
+            keys.push(k);
         }
         if lines.is_empty() {
             return None;
         }
-        Some(format!("While you're away:\n{}", lines.join("\n")))
+        Some(Alert {
+            text: format!("While you're away:\n{}", lines.join("\n")),
+            keys,
+        })
+    }
+
+    /// The alert went out: its rows are not alerted again this span.
+    pub fn sent(&mut self, keys: Vec<Key>) {
+        if let Some(seen) = &mut self.seen {
+            seen.extend(keys);
+        }
     }
 }
 
@@ -225,26 +246,32 @@ pub fn watch_away(
         loop {
             every.tick().await;
             let (rt, afk, dir) = (rt.clone(), afk.clone(), profile_dir.clone());
-            let online = line.state() == LineState::Online;
             let Ok(look) = tokio::task::spawn_blocking(move || {
-                let on = online
-                    && afk.open_source().is_some()
+                let on = afk.open_source().is_some()
                     && telegram::load_away_alerts(&telegram::policy_path(&dir));
-                let rows = if on {
-                    rt.attention().map(|a| alertable(&a)).unwrap_or_default()
-                } else {
-                    vec![]
-                };
+                // A failed read is no look at all, not "nothing waits".
+                let rows = on.then(|| rt.attention().ok().map(|a| alertable(&a)));
                 let skip = telegram::load_tag(&telegram::tag_path(&dir)).map(|t| t.chat_id);
-                (on, rows, skip)
+                (rows, skip)
             })
             .await
             else {
                 continue;
             };
-            let (on, rows, skip) = look;
-            if let Some(text) = away.step(on, &rows, skip.as_deref()) {
-                line.telegram_notify(&text);
+            let (rows, skip) = look;
+            let Some(rows) = rows else {
+                away.reset();
+                continue;
+            };
+            // With the line down, wait for it: what arrives meanwhile is alerted once it is back.
+            let (Some(rows), true) = (rows, line.state() == LineState::Online) else {
+                continue;
+            };
+            if let Some(alert) = away.step(&rows, skip.as_deref()) {
+                // Alerts share the chats' hourly cap; one not sent is tried again next look.
+                if BUDGET.take(helm_core::now_ms()) && line.telegram_notify(&alert.text) {
+                    away.sent(alert.keys);
+                }
             }
         }
     });
@@ -271,34 +298,52 @@ mod tests {
         let docs = row("c1", Unread, "Docs", "Finished a reply");
         let build = row("c2", Approval, "Build", "Waiting for an approval");
         let tg = row("tg", Question, "Telegram", "Asked a question");
+        let asked = row("c1", Question, "Docs", "Asked a question");
         let mut a = Away::default();
-        // (away, rows, expected message)
-        let steps: Vec<(bool, Vec<AttentionRow>, Option<&str>)> = vec![
-            (false, vec![docs.clone()], None),
+        // (away, rows, expected message, whether it was sent)
+        let steps: Vec<(bool, Vec<AttentionRow>, Option<&str>, bool)> = vec![
             // Going away records what already waits.
-            (true, vec![docs.clone()], None),
-            (true, vec![docs.clone()], None),
-            // New while away; the Telegram chat is left to its own mirror.
+            (true, vec![docs.clone()], None, true),
+            (true, vec![docs.clone()], None, true),
+            // New while away; the Telegram chat is left to its own mirror. Not sent (the line
+            // dropped), so it is offered again.
             (
                 true,
                 vec![docs.clone(), build.clone(), tg.clone()],
                 Some("While you're away:\n• Build: Waiting for an approval"),
+                false,
             ),
-            // The same chat in a new state is new again.
             (
                 true,
-                vec![
-                    row("c1", Question, "Docs", "Asked a question"),
-                    build.clone(),
-                ],
-                Some("While you're away:\n• Docs: Asked a question"),
+                vec![docs.clone(), build.clone()],
+                Some("While you're away:\n• Build: Waiting for an approval"),
+                true,
             ),
+            // The same chat in a new state is new again...
+            (
+                true,
+                vec![asked.clone(), build.clone()],
+                Some("While you're away:\n• Docs: Asked a question"),
+                true,
+            ),
+            // ...but a chat that leaves a state and comes back is not alerted twice in one span
+            // (a chat finishing turn after turn).
+            (true, vec![build.clone()], None, true),
+            (true, vec![asked.clone(), build.clone()], None, true),
             // Back, then away again: a fresh baseline.
-            (false, vec![], None),
-            (true, vec![build.clone()], None),
+            (false, vec![], None, true),
+            (true, vec![build.clone()], None, true),
         ];
-        for (i, (away, rows, want)) in steps.into_iter().enumerate() {
-            assert_eq!(a.step(away, &rows, Some("tg")).as_deref(), want, "step {i}");
+        for (i, (away, rows, want, sent)) in steps.into_iter().enumerate() {
+            if !away {
+                a.reset();
+                continue;
+            }
+            let got = a.step(&rows, Some("tg"));
+            assert_eq!(got.as_ref().map(|g| g.text.as_str()), want, "step {i}");
+            if let (Some(g), true) = (got, sent) {
+                a.sent(g.keys);
+            }
         }
         assert_eq!(compose("  ", " done "), "A Helm chat: done");
         let b = Budget::default();

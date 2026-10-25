@@ -106,7 +106,6 @@ impl LineHandle {
             .up
             .send(json!({ "type": "telegram_status", "text": text }));
     }
-    /// The turn's answer, sent by the hub as a new message; the status message goes.
     /// A message Helm starts (an alert). Sent only while the line is up, so it never waits in
     /// the queue for a later line; `false` when it was not sent.
     pub fn telegram_notify(&self, text: &str) -> bool {
@@ -116,7 +115,7 @@ impl LineHandle {
                 .send(json!({ "type": "telegram_notify", "text": text }))
                 .is_ok()
     }
-
+    /// The turn's answer, sent by the hub as a new message; the status message goes.
     pub fn telegram_final(&self, text: &str) {
         let _ = self
             .up
