@@ -145,8 +145,21 @@
   color: var(--secondary);
 }
 
+.nc-page {
+  --column-factor: var(--shell-column-factor, 0.75);
+}
+
+/* The box sits where it will sit in the chat, so it does not jump sideways when the first message is sent. */
 .nc-dock {
   flex: none;
+  width: 100%;
+  margin-left: max(0px, calc((100% - var(--chat-column) - 76px) / 2 * var(--column-factor) + 5px));
+  margin-right: auto;
+}
+@media (max-width: 1000px) {
+  .nc-dock {
+    margin-left: max(0px, calc((100% - var(--chat-column) - 50px) / 2 * var(--column-factor) + 5px));
+  }
 }
 
 /* Add project and Primary folder… dialogs. */

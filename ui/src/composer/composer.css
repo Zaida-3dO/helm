@@ -6,10 +6,10 @@
  * nothing.
  */
 
-/* The dock: the same 820 px column as the transcript, 33 px gutters, 13 px below the box. */
+/* The dock: the same column as the transcript, 33 px gutters, 13 px below the box. */
 .composer-dock {
   width: 100%;
-  max-width: calc(820px + 2 * 33px);
+  max-width: calc(var(--chat-column) + 2 * 33px);
   margin: 0 auto;
   padding: 0 33px 13px;
   gap: 8px;
@@ -155,7 +155,7 @@
 
 @media (max-width: 1000px) {
   .composer-dock {
-    max-width: calc(820px + 2 * 20px);
+    max-width: calc(var(--chat-column) + 2 * 20px);
     padding: 0 20px 13px;
   }
 }
@@ -206,10 +206,7 @@
 }
 
 /* The unified picker's popover, on the kit's ui-picker-* styles. */
-.model-picker-heading {
-  justify-content: space-between;
-}
-.model-picker-heading kbd,
+
 .model-picker-caption kbd {
   font-family: var(--font-mono, monospace);
   font-size: 10px;
@@ -272,16 +269,6 @@
   min-width: 64px;
   text-align: right;
   font-weight: 590;
-}
-.model-picker-hints {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  height: 30px;
-  padding: 0 12px;
-  border-top: 1px solid var(--line);
-  font-size: 10px;
-  color: var(--muted);
 }
 @media (prefers-reduced-motion: reduce) {
   .model-picker-stop > span {
@@ -672,33 +659,6 @@
   border-radius: 6px;
 }
 
-/* The model picker's search: a soft box with a magnifier, no heavy focus ring. */
-.model-picker-searchbox {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-.model-picker-searchbox > .ui-icon {
-  position: absolute;
-  left: 18px;
-  color: var(--muted);
-  pointer-events: none;
-}
-.model-picker-searchbox .ui-picker-search {
-  flex: 1;
-  min-width: 0;
-  padding-left: 30px;
-  border-color: transparent;
-  background: var(--surface-alt);
-  outline: none;
-}
-.model-picker-searchbox .ui-picker-search:focus,
-.model-picker-searchbox .ui-picker-search:focus-visible {
-  border-color: var(--line-strong);
-  outline: none;
-  box-shadow: none;
-}
-
 /* The make-default star after the model control. */
 .composer-dock .composer-default-star {
   width: 24px;
@@ -716,4 +676,24 @@
   color: var(--muted);
   font-size: 10px;
   white-space: nowrap;
+}
+
+/* Pressed states for the composer's small buttons (hover and keyboard focus come from the kit). */
+.composer-dock .composer-attach:active:not(:disabled),
+.composer-dock .composer-ref-x:active:not(:disabled),
+.composer-dock .composer-default-star:active:not(:disabled),
+.composer-dock .attachment-thumb-x:active:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+}
+.composer-dock .skill-row:active:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+/* A send on its way: the button dims and shows it is working. */
+.composer-dock [data-testid='send'][aria-busy='true'] {
+  opacity: 0.6;
+  cursor: progress;
+}
+.composer-dock .queue .pill-btn:active:not(:disabled),
+.composer-dock .queue .pill-grip:active:not(:disabled) {
+  background: color-mix(in srgb, currentColor 24%, transparent);
 }

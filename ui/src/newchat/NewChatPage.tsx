@@ -84,6 +84,10 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
   const projects = newChat.projects;
   const project = projects.find((p) => p.id === draft.projectId);
   const { folder, source } = newChat.place();
+  // With no project picked, the trigger names the one that owns the folder shown below (the open
+  // chat's), or the folder itself, instead of asking the user to choose again.
+  const owner = project ?? (folder ? projects.find((p) => p.kind === 'folder' && p.path && samePath(p.path, folder)) : undefined);
+  const shownName = owner?.name ?? (source === 'open-chat' && folder ? folderName(folder) : null);
   const folderBtn = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
@@ -147,10 +151,11 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
         <div className="nc-card" data-testid="newchat-card">
           <div className="nc-project">
             <Picker
-              value={project ? project.id : null}
+              value={owner ? owner.id : null}
               options={options}
               onChange={(v) => newChat.move(v === NO_PROJECT ? null : v)}
-              label={project ? `Project: ${project.name}` : 'Choose a project'}
+              label={shownName ? `Project: ${shownName}` : 'Choose a project'}
+              display={shownName ?? undefined}
               heading="Start the chat in"
               searchable
               placeholder="Choose a project"

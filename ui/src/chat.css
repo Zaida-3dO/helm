@@ -87,7 +87,13 @@ button.danger {
   background: var(--surface-alt);
 }
 
-/* The column: at most 820 px, sitting left of centre by --column-factor (.75 while the
+/* One width for the transcript column and the composer's box (the dock adds 33 px gutters, so the
+   dock reaches 820 px with this). */
+:root {
+  --chat-column: 754px;
+}
+
+/* The column: at most --chat-column, sitting left of centre by --column-factor (.75 while the
    sidebar shows; the shell sets 1 when it hides the sidebar). The composer dock below uses the same
    geometry. While the timeline rail shows, the transcript viewport gives up a 42 px right gutter
    (--rail-gutter), and the dock subtracts the same so the two still line up. */
@@ -106,8 +112,8 @@ button.danger {
 
 .row {
   padding: 6px 0;
-  max-width: 820px;
-  margin: 0 auto 0 max(0px, calc((100% - 820px) / 2 * var(--column-factor)));
+  max-width: var(--chat-column);
+  margin: 0 auto 0 max(0px, calc((100% - var(--chat-column)) / 2 * var(--column-factor)));
 }
 
 .row-user {
@@ -803,7 +809,7 @@ button.danger {
 .queue {
   margin: 0 auto;
   width: 100%;
-  max-width: calc(820px + 76px);
+  max-width: calc(var(--chat-column) + 76px);
   padding: 0 38px;
   display: flex;
   flex-direction: column;
@@ -1020,13 +1026,13 @@ button.danger {
 /* The dock's content edge lines up with the rows': transcript side padding 38 (25 at ≤ 1000 px)
    against the dock's 33 (20), hence the 5 px. */
 .chat-view .composer-dock {
-  margin-left: max(0px, calc((100% - var(--rail-gutter) - 896px) / 2 * var(--column-factor) + 5px));
+  margin-left: max(0px, calc((100% - var(--rail-gutter) - var(--chat-column) - 76px) / 2 * var(--column-factor) + 5px));
   margin-right: auto;
 }
 
 @media (max-width: 1000px) {
   .chat-view .composer-dock {
-    margin-left: max(0px, calc((100% - var(--rail-gutter) - 870px) / 2 * var(--column-factor) + 5px));
+    margin-left: max(0px, calc((100% - var(--rail-gutter) - var(--chat-column) - 50px) / 2 * var(--column-factor) + 5px));
   }
 }
 .composer-dock-stack {

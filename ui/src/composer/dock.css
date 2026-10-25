@@ -1,23 +1,23 @@
 /* The items above the composer: the live activity dock, the
- * question / approval / plan card and the banners. All share the composer dock's column: 820 px of content, 33 px gutters (20 at 1000 px and
+ * question / approval / plan card and the banners. All share the composer dock's column: the shared column width of content, 33 px gutters (20 at 1000 px and
  * below), left of centre by --column-factor, the timeline rail's gutter taken off.
  */
 
 .chat-view .activity-dock,
 .chat-view .ia-wrap {
   width: 100%;
-  max-width: calc(820px + 2 * 33px);
+  max-width: calc(var(--chat-column) + 2 * 33px);
   padding: 0 33px;
-  margin-left: max(0px, calc((100% - var(--rail-gutter, 0px) - 896px) / 2 * var(--column-factor, 0.75) + 5px));
+  margin-left: max(0px, calc((100% - var(--rail-gutter, 0px) - var(--chat-column) - 76px) / 2 * var(--column-factor, 0.75) + 5px));
   margin-right: auto;
 }
 
 @media (max-width: 1000px) {
   .chat-view .activity-dock,
   .chat-view .ia-wrap {
-    max-width: calc(820px + 2 * 20px);
+    max-width: calc(var(--chat-column) + 2 * 20px);
     padding: 0 20px;
-    margin-left: max(0px, calc((100% - var(--rail-gutter, 0px) - 870px) / 2 * var(--column-factor, 0.75) + 5px));
+    margin-left: max(0px, calc((100% - var(--rail-gutter, 0px) - var(--chat-column) - 50px) / 2 * var(--column-factor, 0.75) + 5px));
   }
 }
 
@@ -550,8 +550,8 @@
 }
 .chat-view > .notice {
   width: calc(100% - 66px);
-  max-width: 820px;
-  margin: 8px auto 4px max(33px, calc((100% - var(--rail-gutter, 0px) - 896px) / 2 * var(--column-factor, 0.75) + 38px));
+  max-width: var(--chat-column);
+  margin: 8px auto 4px max(33px, calc((100% - var(--rail-gutter, 0px) - var(--chat-column) - 76px) / 2 * var(--column-factor, 0.75) + 38px));
   padding: 8px 12px;
   border: 1px solid var(--line-strong);
   border-radius: 10px;

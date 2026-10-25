@@ -5,17 +5,15 @@
 // A change applies from the next turn (the host acknowledges within 10 s); a failed save shows an
 // error beside the trigger.
 //
-// Built from the kit's picker pieces (ui-picker-* styles, the layer stack, placeBelow) because the
-// kit Picker has no footer slot yet; the effort row needs one.
+// Built on the kit's shared picker popover, with the effort row in its footer slot.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatOps } from '../api/ops.ts';
 import type { ChatRecord, ModelCatalogue } from '../api/types.ts';
-import { useBinding, useLayer } from '../ui/hooks.ts';
-import { IconCheck, IconChevronDown, IconSearch } from '../ui/icons.tsx';
-import { layoutSize, nextIndex, pageZoom, placeBelow, unzoom, viewportAt } from '../ui/place.ts';
-import { commitPatch, effortLabel, FALLBACK_EFFORTS, filterRows, modelRows, stepEffort, triggerLabel } from './modelEffort.ts';
+import { useBinding } from '../ui/hooks.ts';
+import { IconChevronDown } from '../ui/icons.tsx';
+import { PickerPopover, type PickerOption } from '../ui/Picker.tsx';
+import { commitPatch, effortLabel, FALLBACK_EFFORTS, modelRows, stepEffort, triggerLabel } from './modelEffort.ts';
 
 let cached: Promise<ModelCatalogue> | null = null;
 
@@ -23,13 +21,8 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
   const [catalogue, setCatalogue] = useState<ModelCatalogue | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
-  const [q, setQ] = useState('');
-  const [active, setActive] = useState(-1);
   const [effortDraft, setEffortDraft] = useState('');
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
-  const pop = useRef<HTMLDivElement>(null);
-  const search = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let live = true;
@@ -46,35 +39,21 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
   const model = chat.model ?? catalogue?.models[0]?.id ?? '';
   const effort = chat.effort ?? catalogue?.defaultEffort ?? 'xhigh';
   const rows = useMemo(() => modelRows(catalogue, model || null), [catalogue, model]);
-  const shown = useMemo(() => filterRows(rows, q), [rows, q]);
+  const options: PickerOption<string>[] = useMemo(
+    () => rows.map((r) => ({ value: r.id, title: r.title, text: `${r.title} ${r.id} ${r.detail}`, subtitle: r.detail, disabled: r.disabled })),
+    [rows],
+  );
   const current = rows.find((r) => r.id === model);
   const label = triggerLabel(current?.title ?? (model || 'Default'), effort);
 
   const close = (focus = true) => {
     setOpen(false);
-    setQ('');
-    setPos(null);
     if (focus) trigger.current?.focus();
   };
   const openPicker = () => {
     setEffortDraft(effort);
     setOpen(true);
   };
-  useLayer('popover', open, () => close());
-  useLayer('search', open, () => setQ(''), () => q.length > 0);
-
-  useLayoutEffect(() => {
-    if (!open) return;
-    const a = trigger.current?.getBoundingClientRect();
-    const z = pageZoom();
-    if (a && pop.current) setPos(placeBelow(unzoom(a, z), layoutSize(pop.current), viewportAt(z), 6));
-    setActive(Math.max(0, shown.findIndex((o) => o.id === model)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-  // The popover is hidden until placed, and a hidden field cannot take focus: focus it once shown.
-  useEffect(() => {
-    if (open && pos) search.current?.focus();
-  }, [open, pos]);
 
   const commit = (id: string | undefined, chosenEffort = effortDraft) => {
     const row = rows.find((r) => r.id === id);
@@ -87,7 +66,16 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
   };
 
   return (
-    <span className="model-picker">
+    <span
+      className="model-picker"
+      onKeyDown={(e) => {
+        // Left and Right step the effort while the popover is open (its own keys cover the list).
+        if (open && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.altKey) {
+          e.preventDefault();
+          setEffortDraft((x) => stepEffort(efforts, x || effort, e.key === 'ArrowRight' ? 1 : -1));
+        }
+      }}
+    >
       {/* One registration per binding id: only the main chat's composer takes the shortcut, so a
           side chat closing cannot remove it. */}
       {!chat.sideSourceId && <PickerShortcut run={() => (open ? close() : openPicker())} />}
@@ -118,100 +106,49 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
           {error}
         </span>
       )}
-      {open &&
-        createPortal(
-          <>
-            <div className="ui-dismiss clear" onMouseDown={() => close(false)} />
-            <div
-              ref={pop}
-              className="ui-picker-pop searchable model-picker-pop"
-              data-testid="model-picker-pop"
-              style={{ left: pos?.left ?? 0, top: pos?.top ?? 0, visibility: pos ? 'visible' : 'hidden' }}
-              onKeyDown={(e) => {
-                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                  e.preventDefault();
-                  setActive(nextIndex(active, e.key === 'ArrowDown' ? 1 : -1, shown.map((o) => o.disabled)));
-                } else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !e.altKey) {
-                  e.preventDefault();
-                  setEffortDraft((x) => stepEffort(efforts, x || effort, e.key === 'ArrowRight' ? 1 : -1));
-                } else if (e.key === 'Enter') {
-                  e.preventDefault();
-                  commit(shown[active]?.id);
-                }
-              }}
-            >
-              <div className="ui-picker-heading model-picker-heading">
-                <span>Model and effort</span>
-                <kbd>esc</kbd>
-              </div>
-              <div className="model-picker-searchbox">
-                <IconSearch size={13} />
-                <input
-                  ref={search}
-                  className="ui-picker-search"
-                  placeholder="Find a model…"
-                  aria-label="Find a model"
-                  value={q}
-                  onChange={(e) => {
-                    setQ(e.target.value);
-                    setActive(0);
-                  }}
-                />
-              </div>
-              <div className="ui-picker-list" role="listbox" aria-label="Model">
-                {shown.length === 0 && <div className="ui-picker-empty">No matching models</div>}
-                {shown.map((o, i) => (
-                  <div
-                    key={o.id}
-                    role="option"
-                    aria-selected={o.id === model}
-                    aria-disabled={o.disabled || undefined}
-                    className={`ui-picker-option${i === active ? ' active' : ''}`}
-                    data-value={o.id}
-                    onMouseEnter={() => setActive(i)}
-                    onClick={() => !o.disabled && commit(o.id)}
-                  >
-                    <div className="ui-picker-text">
-                      <div className="ui-picker-title">{o.title}</div>
-                      <div className="ui-picker-sub">{o.detail}</div>
-                    </div>
-                    {o.id === model && <IconCheck />}
-                  </div>
-                ))}
-              </div>
-              <div className="model-picker-effort" data-testid="effort-picker">
-                <span className="model-picker-caption">
-                  Effort <kbd>←</kbd> <kbd>→</kbd>
-                </span>
-                <span className="model-picker-stops" role="radiogroup" aria-label="Effort">
-                  {efforts.map((x, i) => {
-                    const at = efforts.indexOf(effortDraft || effort);
-                    return (
-                      <button
-                        key={x}
-                        type="button"
-                        role="radio"
-                        aria-checked={i === at}
-                        aria-label={effortLabel(x)}
-                        title={effortLabel(x)}
-                        className={`model-picker-stop${i <= at ? ' lit' : ''}${i === at ? ' on' : ''}`}
-                        onClick={() => commit(model, x)}
-                      >
-                        <span />
-                      </button>
-                    );
-                  })}
-                </span>
-                <span className="model-picker-effort-value">{effortLabel(effortDraft || effort)}</span>
-              </div>
-              <div className="model-picker-hints">
-                <span>↑ ↓ navigate</span>
-                <span>↵ select</span>
-              </div>
+      {open && (
+        <PickerPopover
+          anchor={trigger}
+          value={model}
+          options={options}
+          label="Model"
+          heading="Model and effort"
+          searchable
+          searchPlaceholder="Find a model…"
+          className="model-picker-pop"
+          testId="model-picker-pop"
+          onClose={() => close()}
+          onPick={(id) => commit(id)}
+          extraHint={<span>← → effort</span>}
+          footer={
+            <div className="model-picker-effort" data-testid="effort-picker">
+              <span className="model-picker-caption">
+                Effort <kbd>←</kbd> <kbd>→</kbd>
+              </span>
+              <span className="model-picker-stops" role="radiogroup" aria-label="Effort">
+                {efforts.map((x, i) => {
+                  const at = efforts.indexOf(effortDraft || effort);
+                  return (
+                    <button
+                      key={x}
+                      type="button"
+                      role="radio"
+                      aria-checked={i === at}
+                      aria-label={effortLabel(x)}
+                      title={effortLabel(x)}
+                      className={`model-picker-stop${i <= at ? ' lit' : ''}${i === at ? ' on' : ''}`}
+                      onClick={() => commit(model, x)}
+                    >
+                      <span />
+                    </button>
+                  );
+                })}
+              </span>
+              <span className="model-picker-effort-value">{effortLabel(effortDraft || effort)}</span>
             </div>
-          </>,
-          document.body,
-        )}
+          }
+        />
+      )}
     </span>
   );
 }

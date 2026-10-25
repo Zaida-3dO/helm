@@ -57,6 +57,9 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   const [error, setError] = useState<string | null>(null);
   const [empty, setEmpty] = useState(!chat.draft);
   const stopping = useRef(false);
+  // True while a send is on its way to the host: a second press does not send the message twice.
+  const sendingRef = useRef(false);
+  const [sending, setSending] = useState(false);
   const behavior = thread?.sendBehavior ?? HOME_SEND_BEHAVIOR;
   const busy = isBusy(chat.status);
   // Send waits while Claude Code cannot be found, and while the agent starts with nothing in flight.
@@ -271,6 +274,9 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
         if (q && action === 'now') await ops.submissionAction(q.id, 'sendNow').catch(() => undefined);
         return;
       }
+      if (sendingRef.current) return;
+      sendingRef.current = true;
+      setSending(true);
       const token = saver.beginSend();
       try {
         const extra = collectSendContributions(chat.id);
@@ -296,6 +302,9 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       } catch (e) {
         // Refused: the text stays in the draft.
         setError(e instanceof ApiError ? e.message : String(e));
+      } finally {
+        sendingRef.current = false;
+        setSending(false);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -609,7 +618,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
               variant="send"
               label={sendLabel(busy, behavior.mode)}
               data-testid="send"
-              disabled={blocked || (empty && attached.length === 0 && refs.length === 0)}
+              disabled={blocked || sending || (empty && attached.length === 0 && refs.length === 0)}
+              aria-busy={sending || undefined}
               title={problems.length > 0 ? 'Connect Claude Code to send' : starting ? 'Claude Code is starting' : sendTooltip(ctx, busy)}
               onClick={() => void send('default')}
             />
