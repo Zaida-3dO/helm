@@ -97,6 +97,11 @@ export function askClaude(job: TitleJob, prompt: string): Promise<string> {
     "--no-session-persistence",
     "--setting-sources",
     "",
+    // The prompt carries chat text, which is data: the model gets no tools (print mode runs
+    // reads and searches without asking) and no MCP servers.
+    "--tools",
+    "",
+    "--strict-mcp-config",
   ];
   return new Promise((resolve, reject) => {
     let command = job.command;

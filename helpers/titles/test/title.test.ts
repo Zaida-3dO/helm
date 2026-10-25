@@ -101,6 +101,9 @@ process.stdin.on("end", () => {
   const i = seen.argv.indexOf("--setting-sources");
   assert.ok(i >= 0, JSON.stringify(seen.argv));
   assert.equal(seen.argv[i + 1], "", "no settings files load");
+  const t = seen.argv.indexOf("--tools");
+  assert.ok(t >= 0 && seen.argv[t + 1] === "", "the model gets no tools");
+  assert.ok(seen.argv.includes("--strict-mcp-config"), "no MCP servers load");
   for (let n = 0; n < 50 && fs.existsSync(seen.cwd); n++) await new Promise((res) => setTimeout(res, 20));
   assert.equal(fs.existsSync(seen.cwd), false, "the folder is removed");
 });

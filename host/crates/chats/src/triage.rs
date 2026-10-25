@@ -50,6 +50,19 @@ pub const MAX_REASON_CHARS: usize = 160;
 #[derive(Default)]
 pub(crate) struct Gate {
     running: bool,
+    /// When each check this session started, newest last (only the last hour is kept).
+    starts: Vec<i64>,
+}
+
+impl Gate {
+    /// Whether another check may start now: fewer than [`MAX_PER_HOUR`] in the last hour, and
+    /// [`MIN_GAP_MS`] since the last one. Each check counts, however many times one chat is
+    /// checked.
+    fn may_start(&mut self, now: i64) -> bool {
+        self.starts.retain(|t| now - t < 3_600_000 && *t <= now);
+        self.starts.len() < MAX_PER_HOUR as usize
+            && self.starts.last().is_none_or(|t| now - t >= MIN_GAP_MS)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,8 +250,8 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
     let rt = ChatRuntime { sh: sh.clone() };
     let now = helm_core::now_ms();
     {
-        let g = sh.triage.lock().unwrap_or_else(|p| p.into_inner());
-        if g.running {
+        let mut g = sh.triage.lock().unwrap_or_else(|p| p.into_inner());
+        if g.running || !g.may_start(now) {
             return;
         }
     }
@@ -247,14 +260,6 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
     let claimed = sh.db.write(|tx| {
         let s = settings(tx);
         if !s.enabled || held {
-            return Ok(None);
-        }
-        let (recent, last): (i64, i64) = tx.query_row(
-            "SELECT count(*), COALESCE(MAX(checked_at), 0) FROM chat_triage WHERE checked_at > ?1 - 3600000",
-            [now],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        if recent >= MAX_PER_HOUR || now - last < MIN_GAP_MS {
             return Ok(None);
         }
         let Some(c) = candidates(tx, &needs, now)?
@@ -279,7 +284,11 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
     let Ok(Some((chat, stamp, job))) = claimed else {
         return;
     };
-    sh.triage.lock().unwrap_or_else(|p| p.into_inner()).running = true;
+    {
+        let mut g = sh.triage.lock().unwrap_or_else(|p| p.into_inner());
+        g.running = true;
+        g.starts.push(now);
+    }
     let sh = sh.clone();
     sh.handle.clone().spawn(async move {
         let spawner = sh.spawner.clone();
@@ -445,6 +454,26 @@ mod tests {
             decide(&c, &s, true, now),
             Err(Skip::Held),
             "the usage governor holds"
+        );
+        let mut gate = Gate::default();
+        assert!(gate.may_start(1_000_000));
+        gate.starts.push(1_000_000);
+        assert!(
+            !gate.may_start(1_000_000 + MIN_GAP_MS - 1),
+            "too soon after the last check"
+        );
+        assert!(gate.may_start(1_000_000 + MIN_GAP_MS));
+        gate.starts = (0..MAX_PER_HOUR)
+            .map(|i| 1_000_000 + i * MIN_GAP_MS)
+            .collect();
+        let full = 1_000_000 + MAX_PER_HOUR * MIN_GAP_MS;
+        assert!(
+            !gate.may_start(full),
+            "a dozen checks in the hour, however few chats there are"
+        );
+        assert!(
+            gate.may_start(1_000_000 + 3_600_000 + 1),
+            "the oldest has aged out"
         );
         let eager = Settings { delay_ms: 0, ..s };
         assert_eq!(
