@@ -101,7 +101,7 @@ export function KeyboardPane() {
                         set(b.id, chord);
                       }}
                     >
-                      Press the new shortcut…
+                      Press the new shortcutâ€¦
                     </button>
                   ) : (
                     <button
