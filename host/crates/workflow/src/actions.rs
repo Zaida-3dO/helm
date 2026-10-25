@@ -242,6 +242,7 @@ fn run_view(
             plan: None,
             changes: Vec::new(),
             other_tasks: others,
+            guard: Vec::new(),
         });
     };
     let all = store::changes(tx, &run.id)?;
@@ -270,6 +271,7 @@ fn run_view(
         }),
         changes,
         other_tasks: others,
+        guard: Vec::new(),
     })
 }
 
@@ -310,7 +312,9 @@ pub fn chat_view(
         }
     }
     let current = current.or(open.first());
-    run_json(tx, s, current, &open)
+    let mut v = run_view(tx, s, current, &open)?;
+    v.guard = crate::hook::needs_you(tx, chat_id)?;
+    Ok(serde_json::to_value(v).expect("the run view serialises"))
 }
 
 /// `update {repo, branch, pr?, base?, visual?}`: open or annotate a change; mark the task visual.

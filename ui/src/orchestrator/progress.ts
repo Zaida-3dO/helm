@@ -140,6 +140,12 @@ export function needsYou(view: RunView, s: WorkflowSettings, allowRequests: numb
     }
   }
   if (allowRequests > 0) out.push({ id: 'allow', text: allowRequests === 1 ? 'allow request' : `${allowRequests} allow requests` });
+  // The landing guard let a command through on an override, or refused one: listed until the
+  // user's next message.
+  view.guard.forEach((g, i) => {
+    const what = g.command.length > 40 ? `${g.command.slice(0, 39)}…` : g.command;
+    out.push({ id: `guard:${i}`, text: `${g.overridden ? 'guard override' : 'guard refused'} · ${what}` });
+  });
   return out;
 }
 

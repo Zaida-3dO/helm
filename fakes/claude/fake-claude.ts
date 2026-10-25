@@ -43,10 +43,11 @@
 //   { "text": s, "parent": toolUseId }      a subagent's text message: one assistant record with
 //                                           parent_tool_use_id and no partial stream, as the CLI sends
 //   { "backgroundTasks": [ { "taskId", "description", "type"? } ] }
-//   { "hook": { "toolUseId", "tool"?, "input" }, "as"?: name }
+//   { "hook": { "toolUseId", "tool"?, "input", "callback"?, "agent"?, "cwd"? }, "as"?: name }
 //        a PreToolUse hook_callback for the first PreToolUse callback the client registered in
-//        initialize; the client's answer is saved under "as". No registration: nothing is sent and
-//        "as" is saved as {"none": true}.
+//        initialize (or the one named by "callback", when the client registered it); with agent_id
+//        when "agent" is set. The client's answer is saved under "as". No registration: nothing
+//        is sent and "as" is saved as {"none": true}.
 //   { "result": s, "isError"?: bool, "subtype"?: s }          end the turn
 //   { "mcp": { "server"?: s, "message": <JSON-RPC>, "hook"?: { "toolUseId", "agent"? } }, "as"?: name }
 //        an `mcp_message` control request to an SDK MCP server (default "helm"); with "hook", a
@@ -404,6 +405,12 @@ function hookCallbackId(tool?: string): string | undefined {
   return undefined;
 }
 
+function registeredCallback(id: string): boolean {
+  const hooks = (saved.init?.hooks ?? {}) as Json;
+  const pre = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as Json[]) : [];
+  return pre.some((m) => Array.isArray(m.hookCallbackIds) && (m.hookCallbackIds as unknown[]).includes(id));
+}
+
 function cond(c: Json): boolean {
   if (typeof c.flag === "string") return flags.includes(c.flag);
   if (c.unread === true) return unread.length > 0;
@@ -473,7 +480,7 @@ async function run(steps: Step[]): Promise<boolean> {
     } else if (step.hook) {
       const h = fill(step.hook) as Json;
       const as = typeof step.as === "string" ? step.as : "hook";
-      const cb = hookCallbackId();
+      const cb = typeof h.callback === "string" ? (registeredCallback(h.callback) ? h.callback : undefined) : hookCallbackId();
       if (!cb) {
         saved[as] = { none: true };
         continue;
@@ -485,7 +492,16 @@ async function run(steps: Step[]): Promise<boolean> {
         request: {
           subtype: "hook_callback",
           callback_id: cb,
-          input: { session_id: SESSION, hook_event_name: "PreToolUse", tool_name: h.tool ?? "Bash", tool_input: h.input ?? {}, tool_use_id: h.toolUseId, permission_mode: "default" },
+          input: {
+            session_id: SESSION,
+            hook_event_name: "PreToolUse",
+            tool_name: h.tool ?? "Bash",
+            tool_input: h.input ?? {},
+            tool_use_id: h.toolUseId,
+            permission_mode: "default",
+            ...(typeof h.agent === "string" ? { agent_id: h.agent } : {}),
+            ...(typeof h.cwd === "string" ? { cwd: h.cwd } : {}),
+          },
           tool_use_id: h.toolUseId,
         },
       });

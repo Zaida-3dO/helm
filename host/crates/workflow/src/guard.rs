@@ -1522,14 +1522,41 @@ impl LineFacts {
     }
 }
 
-/// `d` as the shell resolves it from `cwd`: `~` is the home folder.
+/// `d` as the shell resolves it from `cwd`: `~` is the home folder, and on Windows a Git Bash
+/// folder (`/c/x`, `/tmp`) is the Windows folder it stands for.
 fn join_dir(cwd: &Path, d: &str, home: Option<&Path>) -> PathBuf {
     match (d.strip_prefix('~'), home) {
         (Some(rest), Some(h)) if rest.is_empty() || rest.starts_with('/') => {
             h.join(rest.trim_start_matches('/'))
         }
+        _ if d.starts_with('/') => native_path(d),
         _ => cwd.join(d),
     }
+}
+
+/// A Git Bash folder as Windows reads it: `/c/x` is `C:/x`, `/tmp` the temporary folder. Other
+/// systems read folders as they are.
+pub fn native_path(p: &str) -> PathBuf {
+    if cfg!(windows) {
+        let mut chars = p.chars();
+        if let (Some('/'), Some(d)) = (chars.next(), chars.next()) {
+            let rest = chars.as_str();
+            if d.is_ascii_alphabetic() && (rest.is_empty() || rest.starts_with('/')) {
+                return PathBuf::from(format!(
+                    "{}:/{}",
+                    d.to_ascii_uppercase(),
+                    rest.trim_start_matches('/')
+                ));
+            }
+        }
+        if let Some(rest) = p
+            .strip_prefix("/tmp")
+            .filter(|r| r.is_empty() || r.starts_with('/'))
+        {
+            return std::env::temp_dir().join(rest.trim_start_matches('/'));
+        }
+    }
+    PathBuf::from(p)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4608,8 +4635,18 @@ pub(crate) mod tests {
     /// inbox and temporary folders are no repository.
     struct Machine;
 
+    /// A folder in the corpus's Git Bash form, whichever way the guard spelled it.
     fn norm(p: &Path) -> String {
-        p.to_string_lossy().replace('\\', "/")
+        let s = p.to_string_lossy().replace('\\', "/");
+        let tmp = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+        let tmp = tmp.trim_end_matches('/');
+        if let Some(rest) = s.strip_prefix(tmp) {
+            return format!("/tmp{rest}");
+        }
+        match s.as_bytes() {
+            [d, b':', ..] => format!("/{}{}", (*d as char).to_ascii_lowercase(), &s[2..]),
+            _ => s,
+        }
     }
 
     impl RepoFacts for Machine {

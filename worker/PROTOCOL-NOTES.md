@@ -96,7 +96,7 @@ steering and tool control" for why it is delivery and not the acknowledgement.
   another retry ends the earlier one `retried`; an error result ends it `failed`; a stop ends it
   `cancelled`. A failed request shows up as a synthetic assistant message, projected as an
   `error` row.
-- **Other CLI control requests:** `hook_callback` goes to the long-command guard when its
+- **Other CLI control requests:** `hook_callback` goes to the landing guard (see "Landing guard") or the long-command guard when its
   callback id is the one registered in `initialize` (see "Delivery, steering and tool control"),
   and is answered empty otherwise; `elicitation` declined; anything else answered with an error.
 
@@ -357,3 +357,19 @@ What cannot be done: Claude Code's built-in tools (Read, Bash, Grep and the rest
 output inside the CLI. A `PostToolUse` hook may add context but, per the hook documentation, can
 only replace the output of MCP tools (`updatedMCPToolOutput`), not of built-in ones. So built-in
 tool output is not capped by Helm; the CLI's own limits apply.
+
+## Landing guard
+
+Registered in every chat with host tools: one `PreToolUse` entry, matcher `Bash|PowerShell|mcp__.*`,
+callback `helm-landing-guard`, after the other entries (Claude Code runs every matching hook; any
+deny wins).
+
+| Line | Direction | Fields and behaviour |
+|---|---|---|
+| `guard_check` | worker → host | `id`, `kind` (`bash`, `powershell`, `mcp`), `root` (false when the hook input has an `agent_id` or the call came in a subagent's message), `turn` (changes when a turn ends), `cwd` (the hook input's), and `command` (cut just past 1 MiB) or `tool` and `input` (an input over 256 KiB is sent as `{}`). |
+| `guard_verdict` | host → worker, no response | `id`, `allow`, `reason?` (the deny reason the agent reads), `context?` (added to an allowed call as `additionalContext`), `active` (the guard is in force for this chat). |
+
+The host answers at once with `allow:true, active:false` in any chat without Orchestrator on and
+an active task, or with the guard switched off. No answer within `limits.guardTimeoutMs` (10 s):
+the call is refused with a try-again note if the last answer said `active`, and let through with a
+logged warning otherwise.

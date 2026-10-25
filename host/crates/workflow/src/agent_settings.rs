@@ -184,6 +184,7 @@ fn options() -> Value {
                 },
             },
             "moveFast": {"type": "boolean", "about": "Move fast: tests only what a change touches. Only the user can turn it on or off."},
+            "landingGuard": {"type": "boolean", "about": "The landing guard: refuses pushes, merges and other landings in chats with a task. Only the user can turn it on or off."},
             "newChats": {"type": "enum", "allowed": ["auto", "always", "never"], "about": "Whether new chats start with Orchestrator on."},
         },
     });

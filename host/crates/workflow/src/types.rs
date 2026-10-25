@@ -139,6 +139,8 @@ pub struct WorkflowSettings {
     pub landing: Landing,
     /// Move fast: user-only, default off.
     pub move_fast: bool,
+    /// The landing guard on Bash and MCP calls in chats with a task: user-only, default on.
+    pub landing_guard: bool,
     /// Defaults to `auto`.
     pub new_chats: NewChats,
 }
@@ -221,6 +223,26 @@ pub struct RunView {
     pub changes: Vec<RunChangeView>,
     /// The chat's other open tasks, each with the changes that wait on the user.
     pub other_tasks: Vec<OtherTaskView>,
+    /// The landing guard's overrides and refusals since the user last typed in the chat (only in
+    /// the UI's read; the orchestrator's `status` leaves it empty).
+    #[serde(default)]
+    pub guard: Vec<GuardNoteView>,
+}
+
+/// One landing-guard override or refusal, for the panel's Needs you.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GuardNoteView {
+    /// Let through by an override (else refused).
+    pub overridden: bool,
+    /// `bash` or `mcp`.
+    pub gate: String,
+    /// The guard's rule: `task_repo`, `containment`, `untracked`, `draft_rule`, `fail_closed`.
+    pub rule: String,
+    /// The command or call, cut to 120 characters.
+    pub command: String,
+    /// For an override: the user's quoted words were found.
+    pub verified: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

@@ -47,6 +47,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         RunPlanView::ident(),
         RunChangeView::ident(),
         OtherTaskView::ident(),
+        GuardNoteView::ident(),
     ];
     names.sort();
     let mut index = String::from(
