@@ -1949,6 +1949,7 @@ dependencies = [
  "helm-hosttools",
  "helm-ipc",
  "helm-platform",
+ "helm-workers",
  "rusqlite",
  "serde",
  "serde_json",

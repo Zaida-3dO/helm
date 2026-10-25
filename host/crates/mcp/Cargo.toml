@@ -11,6 +11,7 @@ helm-core.workspace = true
 helm-ipc.workspace = true
 helm-platform.workspace = true
 helm-hosttools = { path = "../hosttools" }
+helm-workers.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

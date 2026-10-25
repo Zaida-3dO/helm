@@ -10,8 +10,10 @@ use crate::validate::{class_ip, validate_server, HostClass};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
 use std::net::ToSocketAddrs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -196,15 +198,18 @@ fn agent() -> ureq::Agent {
 
 fn post(
     agent: &ureq::Agent,
-    url: &str,
+    target: &Target,
     headers: &BTreeMap<String, String>,
     session: Option<&str>,
     body: &Value,
 ) -> Result<Reply, String> {
     let mut req = agent
-        .post(url)
+        .post(target.url.as_str())
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream");
+    if let Some(h) = &target.host {
+        req = req.header("Host", h.as_str());
+    }
     for (k, v) in headers {
         req = req.header(k.as_str(), v.as_str());
     }
@@ -233,29 +238,63 @@ fn post(
     })
 }
 
-/// The plain-http address rule at connect time: the host's addresses must all be this computer,
-/// or (with the server's opt-in) the private network.
-fn check_plain_http_address(url: &url::Url, allow_private: bool) -> Result<(), String> {
+/// Where a request goes: the URL to connect to and, when the URL was pinned to one address, the
+/// original `Host` header.
+struct Target {
+    url: String,
+    host: Option<String>,
+}
+
+/// The plain-http address rule: every address the host name resolves to must be this computer or
+/// (with the server's opt-in) the private network. The request then goes to the one address that
+/// was checked, with the original `Host` header, so the address that was checked is the address
+/// connected to (no second lookup that could answer differently).
+fn pin_target(url: &url::Url, allow_private: bool) -> Result<Target, String> {
+    let plain = Target {
+        url: url.to_string(),
+        host: None,
+    };
     if url.scheme() != "http" {
-        return Ok(());
+        return Ok(plain);
     }
-    let host = url.host_str().unwrap_or_default();
-    let port = url.port_or_known_default().unwrap_or(80);
-    let addrs: Vec<_> = (host.trim_matches(['[', ']']), port)
-        .to_socket_addrs()
-        .map_err(|_| "The address could not be found.".to_owned())?
-        .collect();
-    let loopback_name = host.eq_ignore_ascii_case("localhost");
-    let ok = !addrs.is_empty()
-        && addrs.iter().all(|a| match class_ip(a.ip()) {
-            HostClass::Loopback => true,
-            HostClass::Private => allow_private && !loopback_name,
-            _ => false,
-        });
-    if ok {
-        Ok(())
-    } else {
-        Err("Plain http is only allowed to this computer or, with the opt-in, your private network.".into())
+    let refused = || {
+        "Plain http is only allowed to this computer or, with the opt-in, your private network."
+            .to_owned()
+    };
+    let loopback_name = url
+        .host_str()
+        .is_some_and(|h| h.eq_ignore_ascii_case("localhost"));
+    let allowed = |ip: std::net::IpAddr| match class_ip(ip) {
+        HostClass::Loopback => true,
+        HostClass::Private => allow_private && !loopback_name,
+        _ => false,
+    };
+    match url.host() {
+        Some(url::Host::Ipv4(a)) if allowed(a.into()) => Ok(plain),
+        Some(url::Host::Ipv6(a)) if allowed(a.into()) => Ok(plain),
+        Some(url::Host::Domain(name)) => {
+            let port = url.port_or_known_default().unwrap_or(80);
+            let addrs: Vec<_> = (name, port)
+                .to_socket_addrs()
+                .map_err(|_| "The address could not be found.".to_owned())?
+                .collect();
+            if addrs.is_empty() || !addrs.iter().all(|a| allowed(a.ip())) {
+                return Err(refused());
+            }
+            let mut pinned = url.clone();
+            pinned
+                .set_ip_host(addrs[0].ip())
+                .map_err(|_| "The address could not be used.".to_owned())?;
+            let host = match url.port() {
+                Some(p) => format!("{name}:{p}"),
+                None => name.to_owned(),
+            };
+            Ok(Target {
+                url: pinned.to_string(),
+                host: Some(host),
+            })
+        }
+        _ => Err(refused()),
     }
 }
 
@@ -266,11 +305,12 @@ fn test_http(r: &ResolvedServer) -> TestOutcome {
     let Ok(url) = url::Url::parse(raw) else {
         return TestOutcome::fail("The URL is not valid.");
     };
-    if let Err(why) = check_plain_http_address(&url, r.allow_private_http) {
-        return TestOutcome::fail(why);
-    }
+    let target = match pin_target(&url, r.allow_private_http) {
+        Ok(t) => t,
+        Err(why) => return TestOutcome::fail(why),
+    };
     let agent = agent();
-    let first = match post(&agent, raw, &r.headers, None, &init_request()) {
+    let first = match post(&agent, &target, &r.headers, None, &init_request()) {
         Ok(x) => x,
         Err(e) => return TestOutcome::fail(format!("Could not connect: {e}")),
     };
@@ -293,8 +333,8 @@ fn test_http(r: &ResolvedServer) -> TestOutcome {
         Err(e) => return TestOutcome::fail(e),
     };
     let session = first.session.as_deref();
-    let _ = post(&agent, raw, &r.headers, session, &initialized_note());
-    let tools = post(&agent, raw, &r.headers, session, &tools_request())
+    let _ = post(&agent, &target, &r.headers, session, &initialized_note());
+    let tools = post(&agent, &target, &r.headers, session, &tools_request())
         .ok()
         .filter(|t| (200..300).contains(&t.status))
         .and_then(|t| rpc_result(&t.body, 2).ok())
@@ -329,16 +369,156 @@ fn wait_for(rx: &mpsc::Receiver<String>, id: i64, deadline: Instant) -> Result<V
     }
 }
 
+/// Never handed to a program (as for the claude child, and as the chats' own client does).
+const STRIPPED_ENV: [&str; 5] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDECODE",
+];
+
+fn is_shim(p: &Path) -> bool {
+    matches!(
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("cmd" | "bat")
+    )
+}
+
+/// Finds a command on `path_var` the way CreateProcess would, preferring .exe, then .cmd, .bat.
+fn on_path(cmd: &str, path_var: &OsStr) -> Option<PathBuf> {
+    let c = Path::new(cmd);
+    if c.is_absolute() || cmd.contains(['/', '\\']) {
+        return c.exists().then(|| c.to_path_buf());
+    }
+    let exts: &[&str] = if c.extension().is_some() {
+        &[""]
+    } else {
+        &[".exe", ".cmd", ".bat", ""]
+    };
+    for dir in std::env::split_paths(path_var) {
+        for e in exts {
+            let p = dir.join(format!("{cmd}{e}"));
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// The script an npm-generated `.cmd` shim runs: npm's own `npx`/`npm`, or a package's bin made
+/// by cmd-shim. `None` when the file is not such a shim.
+pub fn shim_target(shim: &Path) -> Option<PathBuf> {
+    let meta = std::fs::metadata(shim).ok()?;
+    if !meta.is_file() || meta.len() > 16 * 1024 {
+        return None;
+    }
+    let text = std::fs::read_to_string(shim).ok()?;
+    let dir = shim.parent()?;
+    let lower = text.to_lowercase();
+    for name in ["npx", "npm"] {
+        if lower.contains(&format!("node_modules\\npm\\bin\\{name}-cli.js")) {
+            let p = dir
+                .join("node_modules")
+                .join("npm")
+                .join("bin")
+                .join(format!("{name}-cli.js"));
+            return p.exists().then_some(p);
+        }
+    }
+    // cmd-shim's package bins: "%_prog%"  "%dp0%\node_modules\pkg\bin\x.js" %*
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("\"%") {
+        rest = &rest[at + 2..];
+        let r = rest.strip_prefix('~').unwrap_or(rest);
+        let Some(r) = r.strip_prefix("dp0") else {
+            continue;
+        };
+        let r = r.strip_prefix('%').unwrap_or(r);
+        let Some(r) = r.strip_prefix('\\') else {
+            continue;
+        };
+        let Some(end) = r.find('"') else { continue };
+        let rel = &r[..end];
+        let low = rel.to_lowercase();
+        if rel.contains('%')
+            || !(low.ends_with(".js") || low.ends_with(".cjs") || low.ends_with(".mjs"))
+        {
+            continue;
+        }
+        let rel_path = Path::new(rel);
+        if rel_path
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return None; // would leave the shim's own folder
+        }
+        let target = dir.join(rel_path);
+        return target.exists().then_some(target);
+    }
+    None
+}
+
+/// What will actually be started for a program, or the refusal to show. On Windows only real
+/// executables run: a `.cmd` or `.bat` is refused, except npm's own shims and package-bin shims,
+/// which become `node.exe <the shim's script>`.
+pub fn plan_spawn(
+    program: &str,
+    args: &[String],
+    path_var: &OsStr,
+    node: Option<&Path>,
+    windows: bool,
+) -> Result<(PathBuf, Vec<String>), String> {
+    if !windows {
+        return Ok((PathBuf::from(program), args.to_vec()));
+    }
+    let Some(found) = on_path(program, path_var).filter(|p| is_shim(p)) else {
+        return Ok((PathBuf::from(program), args.to_vec()));
+    };
+    let name = found
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("that file");
+    let refused = || {
+        format!("{name} is a .cmd or .bat script, which Helm does not run. Use the program's .exe, or node.exe with the script's path.")
+    };
+    let target = shim_target(&found).ok_or_else(refused)?;
+    let node =
+        node.ok_or_else(|| "Node.js was not found, which this program needs to start.".to_owned())?;
+    let mut all = vec![target.to_string_lossy().into_owned()];
+    all.extend_from_slice(args);
+    Ok((node.to_path_buf(), all))
+}
+
 fn test_stdio(r: &ResolvedServer) -> TestOutcome {
     let Some(program) = r.command.as_deref() else {
         return TestOutcome::fail("The server has no program.");
     };
-    let mut cmd = Command::new(program);
-    cmd.args(&r.args)
+    let node = helm_workers::node::resolve_node(&helm_workers::node::NodeLookup::from_env()).ok();
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    let (exe, args) = match plan_spawn(
+        program,
+        &r.args,
+        &path_var,
+        node.as_ref().map(|n| n.path.as_path()),
+        cfg!(windows),
+    ) {
+        Ok(p) => p,
+        Err(why) => return TestOutcome::fail(why),
+    };
+    let mut cmd = Command::new(exe);
+    cmd.args(args)
         .envs(&r.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for k in STRIPPED_ENV {
+        cmd.env_remove(k);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -610,6 +790,104 @@ mod tests {
         let out = test_resolved(&d, &r);
         assert!(
             !out.ok && out.message.contains("Could not start"),
+            "{}",
+            out.message
+        );
+    }
+
+    #[test]
+    fn shims_are_refused_except_npms_own_which_run_through_node() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path();
+        let w = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/npm/bin")).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/pkg/bin")).unwrap();
+        w("node_modules/npm/bin/npx-cli.js", "");
+        w("node_modules/pkg/bin/x.js", "");
+        w(
+            "npx.cmd",
+            "\"%_prog%\" \"%dp0%\\node_modules\\npm\\bin\\npx-cli.js\" %*",
+        );
+        w(
+            "pkg.cmd",
+            "\"%_prog%\"  \"%dp0%\\node_modules\\pkg\\bin\\x.js\" %*",
+        );
+        w("escape.cmd", "\"%_prog%\"  \"%dp0%\\..\\evil.js\" %*");
+        w("plain.bat", "echo hello");
+        w("real.exe", "");
+        let path = std::env::join_paths([dir]).unwrap();
+        let node = Path::new("C:/node/node.exe");
+        let plan =
+            |cmd: &str, windows: bool| plan_spawn(cmd, &["-y".into()], &path, Some(node), windows);
+
+        let (exe, args) = plan("npx", true).unwrap();
+        assert_eq!(exe, node);
+        assert!(
+            args[0].ends_with("npx-cli.js") && args[1] == "-y",
+            "{args:?}"
+        );
+        let (_, args) = plan("pkg", true).unwrap();
+        assert!(args[0].ends_with("x.js"), "{args:?}");
+        for refused in ["plain", "escape", "plain.bat"] {
+            let why = plan(refused, true).unwrap_err();
+            assert!(why.contains(".cmd or .bat"), "{refused}: {why}");
+        }
+        assert_eq!(plan("real", true).unwrap().0, PathBuf::from("real"));
+        assert_eq!(
+            plan("npx", false).unwrap().0,
+            PathBuf::from("npx"),
+            "other systems run it as given"
+        );
+        assert!(plan_spawn("npx", &[], &path, None, true)
+            .unwrap_err()
+            .contains("Node.js"));
+    }
+
+    #[test]
+    fn a_name_is_pinned_to_the_address_that_was_checked() {
+        let url = |s: &str| url::Url::parse(s).unwrap();
+        let t = pin_target(&url("http://localhost:5000/mcp"), false).unwrap();
+        assert_eq!(t.host.as_deref(), Some("localhost:5000"));
+        assert!(
+            t.url.contains("127.0.0.1") || t.url.contains("[::1]"),
+            "{}",
+            t.url
+        );
+        assert!(pin_target(&url("http://127.0.0.1:5000/mcp"), false)
+            .unwrap()
+            .host
+            .is_none());
+        assert!(pin_target(&url("https://example.test/mcp"), false)
+            .unwrap()
+            .host
+            .is_none());
+        assert!(pin_target(&url("http://10.1.2.3/mcp"), false).is_err());
+        assert!(pin_target(&url("http://10.1.2.3/mcp"), true).is_ok());
+        assert!(pin_target(&url("http://93.184.216.34/mcp"), true).is_err());
+    }
+
+    #[test]
+    fn a_program_does_not_get_the_agent_keys() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let script = "const rl=require('readline').createInterface({input:process.stdin});rl.on('line',l=>{const m=JSON.parse(l);if(m.method==='initialize')console.log(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{serverInfo:{name:String(!!process.env.ANTHROPIC_API_KEY)+'-'+process.env.KEEP_ME}}}));else if(m.method==='tools/list')console.log(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{tools:[]}}));});";
+        let (mut d, mut r) = http_draft("http://127.0.0.1:1/mcp", None);
+        d.transport.kind = TransportKind::Stdio;
+        d.transport.url = None;
+        d.transport.command = Some("node".into());
+        r.transport = TransportKind::Stdio;
+        r.url = None;
+        r.command = Some("node".into());
+        r.args = vec!["-e".into(), script.into()];
+        r.env = BTreeMap::from([
+            ("ANTHROPIC_API_KEY".to_owned(), "secret-key".to_owned()),
+            ("KEEP_ME".to_owned(), "yes".to_owned()),
+        ]);
+        let out = test_resolved(&d, &r);
+        assert_eq!(
+            out.server_name.as_deref(),
+            Some("false-yes"),
             "{}",
             out.message
         );
