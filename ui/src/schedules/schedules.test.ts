@@ -2,9 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventBus } from '../api/events.ts';
 import type { Api } from '../api/client.ts';
-import type { Schedule, ScheduleList } from './api.ts';
+import type { Reminder, Schedule, ScheduleList } from './api.ts';
 import {
   daysText,
+  destinationText,
+  freshReminders,
+  newChatPaceProblem,
+  reminderText,
   defaultDraft,
   draftToTiming,
   intervalText,
@@ -151,9 +155,9 @@ test('a change goes to the host and then re-reads; a failure is kept as the erro
   await store.cancel({ id: 's1', revision: 2 });
   assert.deepEqual(
     calls.map((c) => c[0]),
-    ['schedule_update', 'schedule_list', 'schedule_cancel', 'schedule_list'],
+    ['schedule_update', 'schedule_list', 'reminder_list', 'schedule_cancel', 'schedule_list', 'reminder_list'],
   );
-  assert.deepEqual(calls[2], ['schedule_cancel', { scheduleId: 's1', revision: 2 }]);
+  assert.deepEqual(calls[3], ['schedule_cancel', { scheduleId: 's1', revision: 2 }]);
   const failing = new ScheduleStore({
     api: (async () => {
       throw new Error('host is down');
@@ -175,4 +179,44 @@ test('a slow older read cannot overwrite a newer one', async () => {
   const store = new ScheduleStore({ api, bus: new EventBus() });
   await Promise.all([store.refresh(), store.refresh()]);
   assert.equal(store.list?.schedules[0]?.id, 'newer');
+});
+
+test('destinations, reminder notices and the new-chat pace read in plain words', () => {
+  const def = (over: object) => ({ chatTitle: 'Work', definition: { kind: 'prompt', destination: 'chat', chatId: 'c', ...over } }) as Parameters<typeof destinationText>[0];
+  assert.equal(destinationText(def({})), 'Work');
+  assert.equal(destinationText(def({ destination: 'newChat', chatId: '' })), 'New chat in Work');
+  assert.equal(destinationText(def({ kind: 'reminder' })), 'Reminder, opens Work');
+  assert.equal(destinationText(def({ kind: 'reminder', chatId: '' })), 'Reminder');
+  assert.equal(reminderText({ title: 'Stand up', message: 'Join the call\nsecond line' }), 'Reminder: Stand up - Join the call');
+  assert.equal(reminderText({ title: 'Stand up', message: 'Stand up' }), 'Reminder: Stand up');
+  assert.match(newChatPaceProblem({ kind: 'interval', seconds: 3599 }) ?? '', /once an hour/);
+  assert.equal(newChatPaceProblem({ kind: 'interval', seconds: 3600 }), null);
+  assert.equal(newChatPaceProblem({ kind: 'weekly', hour: 9, minute: 0, days: [0] }), null);
+});
+
+test('the store announces only reminders that arrive after the first read, and dismisses through the host', async () => {
+  const rem = (id: string): Reminder => ({ id, scheduleId: 's1', title: 'T', message: 'M', chatId: null, chatTitle: '', createdAt: NOW });
+  assert.deepEqual(freshReminders(null, [rem('a')]), []);
+  assert.deepEqual(freshReminders(new Set(['a']), [rem('a'), rem('b')]).map((r) => r.id), ['b']);
+  const answers = [[rem('a')], [rem('a'), rem('b')], [rem('b')]];
+  let n = 0;
+  const calls: [string, unknown][] = [];
+  const api = (async (op: string, args?: unknown) => {
+    calls.push([op, args]);
+    if (op === 'schedule_list') return empty([]);
+    if (op === 'reminder_list') return { reminders: answers[Math.min(n++, answers.length - 1)] };
+    return { dismissed: 1 };
+  }) as Api;
+  const store = new ScheduleStore({ api, bus: new EventBus() });
+  const heard: string[] = [];
+  store.onReminder((r) => heard.push(r.id));
+  await store.refresh();
+  assert.deepEqual(heard, [], 'the first read announces nothing');
+  assert.equal(store.reminders.length, 1);
+  await store.refresh();
+  assert.deepEqual(heard, ['b']);
+  await store.dismiss('a');
+  assert.deepEqual(calls.find((c) => c[0] === 'reminder_dismiss'), ['reminder_dismiss', { reminderId: 'a' }]);
+  assert.deepEqual(heard, ['b'], 'a reminder is announced once');
+  assert.deepEqual(store.reminders.map((r) => r.id), ['b']);
 });

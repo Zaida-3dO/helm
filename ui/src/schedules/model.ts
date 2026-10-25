@@ -2,7 +2,7 @@
 // into a Timing (and back), and the relative "next run" text. Times are Unix milliseconds; weekdays
 // count from Monday = 0, as the host does.
 
-import type { Schedule, Timing } from './api.ts';
+import type { Definition, Reminder, Schedule, Timing } from './api.ts';
 
 export const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
 export const MIN_INTERVAL_SECONDS = 60;
@@ -79,6 +79,27 @@ export function statusText(s: Pick<Schedule, 'state' | 'nextRunAt'>, now: number
   }
 }
 
+/** Where a schedule's message goes, in words: "Reminder", "New chat in Helm" or the chat's title. */
+export function destinationText(s: Pick<Schedule, 'chatTitle'> & { definition: Pick<Definition, 'kind' | 'destination' | 'chatId'> }): string {
+  const { kind, destination, chatId } = s.definition;
+  if (kind === 'reminder') return chatId ? `Reminder, opens ${s.chatTitle || 'a chat'}` : 'Reminder';
+  if (destination === 'newChat') return `New chat in ${s.chatTitle || 'a project'}`;
+  return s.chatTitle || 'Chat unavailable';
+}
+
+/** The reminders in `next` that were not in `seen`. The first read (`seen` is null) announces none. */
+export function freshReminders(seen: ReadonlySet<string> | null, next: readonly Reminder[]): Reminder[] {
+  if (!seen) return [];
+  return next.filter((r) => !seen.has(r.id));
+}
+
+/** The toast line for a reminder: its name, then the first line of its message. */
+export function reminderText(r: Pick<Reminder, 'title' | 'message'>): string {
+  const first = r.message.trim().split('\n', 1)[0]?.trim() ?? '';
+  const line = first.length > 120 ? `${first.slice(0, 119)}…` : first;
+  return line && line !== r.title ? `Reminder: ${r.title} - ${line}` : `Reminder: ${r.title}`;
+}
+
 // The editor's fields.
 
 export type Kind = 'once' | 'interval' | 'weekly';
@@ -150,6 +171,14 @@ export function draftToTiming(d: Draft, now: number): Parsed<Timing> {
 /** Whether two timings are the same (an update sends timing only when it changed). */
 export function sameTiming(a: Timing, b: Timing): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** The shortest repeat for a schedule that starts a new chat on every run, in seconds. */
+export const MIN_NEW_CHAT_SECONDS = 3600;
+
+/** Why a timing is too fast for a new chat on every run, or null. */
+export function newChatPaceProblem(t: Timing): string | null {
+  return t.kind === 'interval' && t.seconds < MIN_NEW_CHAT_SECONDS ? 'A new chat each time can repeat at most once an hour.' : null;
 }
 
 /** The first problem with a title or message, or null. */

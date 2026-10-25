@@ -933,6 +933,11 @@
   min-width: 0;
 }
 
+/* The count on a footer entry keeps its own width. */
+.sb-root .sb-foot > .sb-nav-count {
+  flex: none;
+}
+
 /* A key hint at the right of a nav or footer entry (10 px muted, opacity .75). */
 .sb-kbd {
   flex: none;

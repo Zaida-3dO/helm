@@ -3,11 +3,13 @@
 
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { Run, RunStatus, Schedule, Template } from '../../schedules/api.ts';
-import { statusText, timingText } from '../../schedules/model.ts';
+import { destinationText, statusText, timingText } from '../../schedules/model.ts';
 import { scheduleStoreFor, type ScheduleStore } from '../../schedules/store.ts';
 import { useSelection, useShell } from '../../shell/context.ts';
 import { Button, Checkbox, Picker, toast } from '../../ui/index.ts';
-import { ScheduleEditor, type EditorStart, type SavePatch } from './ScheduleEditor.tsx';
+import { IconCheck, IconClock, IconRemind } from '../../ui/icons.tsx';
+import { projectOps } from '../../api/projects.ts';
+import { ScheduleEditor, type EditorStart, type ProjectChoice, type SavePatch } from './ScheduleEditor.tsx';
 import '../../schedules/schedules.css';
 import './schedules-pane.css';
 
@@ -18,6 +20,16 @@ const RUN_LABEL: Record<RunStatus, string> = {
   blocked: 'Chat unavailable',
   uncertain: 'Unknown (Helm closed while sending)',
 };
+
+/** The machine's time zone, e.g. "Europe/London (UTC+01:00)". */
+function timeZoneText(): string {
+  const name = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const off = -new Date().getTimezoneOffset();
+  const sign = off < 0 ? '-' : '+';
+  const hh = String(Math.floor(Math.abs(off) / 60)).padStart(2, '0');
+  const mm = String(Math.abs(off) % 60).padStart(2, '0');
+  return `${name}, UTC${sign}${hh}:${mm}`;
+}
 
 function errorText(e: unknown): string {
   return String((e as Error)?.message ?? e);
@@ -44,6 +56,17 @@ export function SchedulesPane() {
   }, []);
   useEffect(() => setNow(Date.now()), [list]);
   const [editing, setEditing] = useState<EditorStart | null>(null);
+  const reminders = useSyncExternalStore(store.subscribe, () => store.reminders);
+  // Folder projects a new-chat schedule can start chats in, read when the editor opens.
+  const [projects, setProjects] = useState<ProjectChoice[]>([]);
+  const editorOpen = editing !== null;
+  useEffect(() => {
+    if (!editorOpen) return;
+    projectOps(shell.api)
+      .list()
+      .then((all) => setProjects(all.filter((p) => p.kind === 'folder' && p.path && !p.archived).map((p) => ({ id: p.id, name: p.name }))))
+      .catch(() => setProjects([]));
+  }, [editorOpen, shell.api]);
   const [showInactive, setShowInactive] = useState(false);
 
   const all = list?.schedules ?? [];
@@ -61,7 +84,10 @@ export function SchedulesPane() {
         revision: s.revision,
         title: patch.title,
         message: patch.message,
+        kind: patch.kind,
+        destination: patch.destination,
         chatId: patch.chatId,
+        projectId: patch.projectId,
         ...(patch.timingChanged ? { timing: patch.timing } : {}),
       });
     } else {
@@ -70,7 +96,10 @@ export function SchedulesPane() {
         title: patch.title,
         message: patch.message,
         timing: patch.timing,
+        kind: patch.kind,
+        destination: patch.destination,
         chatId: patch.chatId,
+        ...(patch.projectId ? { projectId: patch.projectId } : {}),
         ...(target.template ? { template: target.template } : {}),
       });
     }
@@ -80,9 +109,44 @@ export function SchedulesPane() {
   return (
     <div className="sched-pane" data-testid="schedules-pane">
       <p className="sched-intro">
-        A schedule sends a saved message into one of your chats on a timer. It only runs while Helm is open and your computer is awake. If runs were missed, the chat gets
-        one message, not one per missed time, and a chat that is busy gets its message when it is free.
+        A schedule sends a saved message into a chat on a timer, starts a new chat with it each time, or just reminds you. It only runs while Helm is open and your computer is awake.
+        If runs were missed, you get one, not one per missed time, and a chat that is busy gets its message when it is free.
       </p>
+      <p className="sched-fine" data-testid="schedule-zone">
+        Times are in your computer's time zone ({timeZoneText()}).
+      </p>
+      {reminders.length > 0 && (
+        <section data-testid="reminder-list">
+          <div className="sched-head">
+            <h3>Reminders</h3>
+            <Button variant="text" onClick={() => void store.dismiss().catch((e) => toast.show({ kind: 'error', text: errorText(e) }))} data-testid="reminder-dismiss-all">
+              Dismiss all
+            </Button>
+          </div>
+          <ul className="sched-rows">
+            {reminders.map((r) => (
+              <li key={r.id} className="sched-row" data-testid="reminder-row" data-reminder-id={r.id}>
+                <div className="sched-row-main">
+                  <div className="sched-row-title">{r.title}</div>
+                  <div className="sched-reminder-note">{r.message}</div>
+                  <div className="sched-fine">{new Date(r.createdAt).toLocaleString()}</div>
+                </div>
+                <div className="sched-row-actions">
+                  {r.chatId && (
+                    <Button variant="text" onClick={() => shell.select(r.chatId)} data-testid={`reminder-${r.id}-open`}>
+                      Open {r.chatTitle || 'chat'}
+                    </Button>
+                  )}
+                  <Button variant="text" onClick={() => void store.dismiss(r.id).catch((e) => toast.show({ kind: 'error', text: errorText(e) }))} data-testid={`reminder-${r.id}-dismiss`}>
+                    <IconCheck size={13} />
+                    Dismiss
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {error && (
         <p className="sched-notice" data-testid="schedules-error">
           Schedules could not be read: {error}
@@ -115,13 +179,15 @@ export function SchedulesPane() {
           </Button>
         </div>
         {list && shown.length === 0 && (
-          <p className="sched-empty" data-testid="schedule-empty">
-            No schedules yet. Turn on a ready-made one above, or make your own.
-          </p>
+          <div className="sched-empty" data-testid="schedule-empty">
+            <IconClock size={20} />
+            <strong>No schedules</strong>
+            <span>Turn on a ready-made one above, or make your own.</span>
+          </div>
         )}
         <ul className="sched-rows">
           {shown.map((s) => (
-            <ScheduleRow key={s.id} schedule={s} store={store} now={now} onEdit={() => setEditing({ schedule: s, title: s.definition.title, message: s.definition.message, chatId: s.definition.chatId, timing: s.definition.timing })} />
+            <ScheduleRow key={s.id} schedule={s} store={store} now={now} onEdit={() => setEditing({ schedule: s, title: s.definition.title, message: s.definition.message, chatId: s.definition.chatId, timing: s.definition.timing, kind: s.definition.kind, destination: s.definition.destination, projectId: s.definition.projectId ?? null })} />
           ))}
         </ul>
         {all.length > live.length && (
@@ -129,7 +195,7 @@ export function SchedulesPane() {
         )}
       </section>
 
-      {editing && <ScheduleEditor start={editing} chats={chats} now={now} onSave={save} onClose={() => setEditing(null)} />}
+      {editing && <ScheduleEditor start={editing} chats={chats} projects={projects} now={now} onSave={save} onClose={() => setEditing(null)} />}
     </div>
   );
 }
@@ -228,9 +294,11 @@ function ScheduleRow({ schedule: s, store, now, onEdit }: { schedule: Schedule; 
   return (
     <li className="sched-row" data-testid="schedule-row" data-schedule-id={s.id} data-state={s.state}>
       <div className="sched-row-main">
-        <div className="sched-row-title">{s.definition.title}</div>
+        <div className="sched-row-title">
+          {s.definition.kind === 'reminder' && <IconRemind size={13} />} {s.definition.title}
+        </div>
         <div className="sched-fine">
-          {timingText(s.definition.timing)} · {s.chatTitle || 'Chat unavailable'}
+          {timingText(s.definition.timing)} · {destinationText(s)}
         </div>
         <div className="sched-fine" data-testid={`schedule-${s.id}-status`}>
           {statusText(s, now)}

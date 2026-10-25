@@ -4,12 +4,17 @@
 
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
-import { scheduleOps, type CreateArgs, type Schedule, type ScheduleList, type UpdateArgs } from './api.ts';
+import { scheduleOps, type CreateArgs, type Reminder, type Schedule, type ScheduleList, type UpdateArgs } from './api.ts';
+import { freshReminders } from './model.ts';
 
 type Listener = () => void;
 
 export class ScheduleStore {
   private data: ScheduleList | null = null;
+  private pending: Reminder[] = [];
+  /** Reminder ids already seen; null until the first read, which announces nothing. */
+  private seen: Set<string> | null = null;
+  private readonly reminderListeners = new Set<(r: Reminder) => void>();
   private failure: string | null = null;
   private readonly listeners = new Set<Listener>();
   private readonly ops: ReturnType<typeof scheduleOps>;
@@ -35,6 +40,19 @@ export class ScheduleStore {
   get list(): ScheduleList | null {
     return this.data;
   }
+
+  /** Reminders that came due and have not been dismissed, newest first. */
+  get reminders(): Reminder[] {
+    return this.pending;
+  }
+
+  /** Called once for each reminder that arrives after the first read. */
+  onReminder = (l: (r: Reminder) => void): (() => void) => {
+    this.reminderListeners.add(l);
+    return () => {
+      this.reminderListeners.delete(l);
+    };
+  };
 
   get error(): string | null {
     return this.failure;
@@ -68,7 +86,21 @@ export class ScheduleStore {
       if (n !== this.reads) return;
       this.failure = String((e as Error)?.message ?? e);
     }
+    await this.refreshReminders(n);
     this.emit();
+  }
+
+  private async refreshReminders(n: number): Promise<void> {
+    try {
+      const out = await this.ops.reminders();
+      if (n !== this.reads || !Array.isArray(out?.reminders)) return;
+      const fresh = freshReminders(this.seen, out.reminders);
+      this.pending = out.reminders;
+      this.seen = new Set(out.reminders.map((r) => r.id));
+      for (const r of fresh) for (const l of [...this.reminderListeners]) l(r);
+    } catch {
+      // The schedule list is what the pane needs; a failed reminder read just leaves the last one.
+    }
   }
 
   runs(scheduleId: string) {
@@ -85,6 +117,11 @@ export class ScheduleStore {
     const s = await this.ops.update(a);
     await this.refresh();
     return s;
+  }
+
+  async dismiss(reminderId?: string): Promise<void> {
+    await this.ops.dismiss(reminderId);
+    await this.refresh();
   }
 
   async cancel(s: Pick<Schedule, 'id' | 'revision'>): Promise<Schedule> {
