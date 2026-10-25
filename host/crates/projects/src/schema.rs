@@ -24,7 +24,8 @@ pub const ARCHIVED_REFUSAL: &str = "Restore this project first.";
 
 pub fn register(reg: &mut MigrationRegistry) {
     reg.initializer("projects-side-tables", init)
-        .one_time("projects-board-completed", add_board_completed);
+        .one_time("projects-board-completed", add_board_completed)
+        .initializer("projects-repositories", crate::repos::init);
 }
 
 fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {

@@ -12,11 +12,15 @@
 //! | [`store`] | project and sidebar reads and writes: names, nesting, order, archive, paging |
 //! | [`ops`] | the `api` ops |
 //! | [`board`] | the Agent Standup connection, the read-only sync and the mirror; the project gate |
+//! | [`repos`], [`repo_ops`], [`guard`] | the repository list, its ops and worktree status, and the git stand-in launch contributor |
 //! | [`bindings`] | `ui/src/api/generated/projects/` |
 
 pub mod bindings;
 pub mod board;
+pub mod guard;
 pub mod ops;
+pub mod repo_ops;
+pub mod repos;
 pub mod schema;
 pub mod store;
 pub mod types;

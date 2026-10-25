@@ -39,6 +39,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("sidebar_rows", OpClass::Blocking, sidebar_rows)
         .blocking("chat_organize", OpClass::Maintenance, chat_organize);
     crate::board::register_ops(reg);
+    crate::repo_ops::register_ops(reg);
 }
 
 pub(crate) fn parse_args<T: DeserializeOwned>(args: Value) -> Result<T, ApiError> {

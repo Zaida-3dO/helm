@@ -1,0 +1,19 @@
+[package]
+name = "helm-gitshim"
+description = "A real git.exe stand-in that Helm puts first on a chat's PATH while a repository has worktrees switched off. It passes everything to the real git except the worktree commands it guards."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+# Installed as git.exe in the profile's agent-bin folder; named differently here so that the
+# build output next to helm.exe is never found by a bare "git" lookup.
+name = "helm-git"
+path = "src/main.rs"
+
+[dependencies]
+helm-worktrees = { path = "../worktrees" }
+
+[dev-dependencies]
+tempfile.workspace = true

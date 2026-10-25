@@ -1,0 +1,13 @@
+[package]
+name = "helm-worktrees"
+description = "Worktree rules for Windows (short roots, names, path budget), link-safe removal of merged worktrees, git remote reading and the list of repositories whose worktrees are off."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-platform.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

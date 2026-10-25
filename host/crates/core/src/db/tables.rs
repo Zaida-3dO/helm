@@ -68,6 +68,17 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("project_local", Data),
     ("project_parents", Data),
     ("project_top_level", Data),
+    ("repositories", Tool),
+    ("repo_checkouts", Tool),
+    ("repo_ignored", Data),
+    (
+        "repo_worktree_settings",
+        UserOnly("Whether agents may make worktrees in a repository is yours to set; agents never change it."),
+    ),
+    (
+        "worktree_config",
+        UserOnly("Where agents' worktrees go is yours to set; agents never change it."),
+    ),
     (
         "board_connection",
         UserOnly("The Agent Standup address is yours to set in Settings; agents never change it."),
