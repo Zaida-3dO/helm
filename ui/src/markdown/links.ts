@@ -7,8 +7,8 @@ import { driveForm, isRemoteOrDevicePath } from './paths.ts';
 
 export interface LinkTarget {
   /** `path`: a file path written in inline code or plain text, resolved by the host on click. */
-  kind: 'url' | 'vault' | 'path';
-  /** `url`: the href as written (http, https, mailto, file, or a plain path). `path`: the path as written, with any line suffix. */
+  kind: 'url' | 'vault' | 'path' | 'chat';
+  /** `url`: the href as written (http, https, mailto, file, or a plain path). `path`: the path as written, with any line suffix. `chat`: the chat link as written. */
   href?: string;
   /** `vault` only: the note name or path, without `.md`. Empty means the current note. */
   note?: string;
@@ -23,6 +23,18 @@ const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|svg|webp|bmp|avif)$/i;
 
 export function isImageName(name: string): boolean {
   return IMAGE_EXTENSIONS.test(name);
+}
+
+const CHAT_LINK = /^helm:\/\/chats\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/messages\/(\d{1,15}))?$/;
+
+/**
+ * A chat link: `helm://chats/<id>`, optionally `/messages/<number>`. Strict on purpose: lowercase
+ * canonical id, no user info, port, query, fragment, trailing slash or extra segments.
+ */
+export function parseChatLink(href: string): { chatId: string; messageId?: number } | null {
+  const m = CHAT_LINK.exec(href);
+  if (!m) return null;
+  return m[2] === undefined ? { chatId: m[1] as string } : { chatId: m[1] as string, messageId: Number(m[2]) };
 }
 
 type Parts = Pick<LinkTarget, 'note' | 'heading' | 'block'>;
@@ -98,6 +110,7 @@ export function classifyHref(rawHref: string): LinkTarget | null {
       return { kind: 'url', href };
     }
     if (name === 'obsidian') return classifyObsidianUri(href);
+    if (name === 'helm') return parseChatLink(href) ? { kind: 'chat', href } : null;
     return null;
   }
 
@@ -144,7 +157,7 @@ export function targetAttrs(target: LinkTarget): Array<[string, string]> {
 /** Reads a target back from the attributes written by {@link targetAttrs}. */
 export function targetFromAttrs(get: (name: string) => string | null): LinkTarget | null {
   const kind = get('data-md-kind');
-  if (kind !== 'url' && kind !== 'vault' && kind !== 'path') return null;
+  if (kind !== 'url' && kind !== 'vault' && kind !== 'path' && kind !== 'chat') return null;
   const target: LinkTarget = { kind };
   const href = get('data-md-href');
   const note = get('data-md-note');

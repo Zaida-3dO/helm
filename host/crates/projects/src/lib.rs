@@ -11,6 +11,7 @@
 //! | [`schema`] | side tables and the archived-project triggers |
 //! | [`store`] | project and sidebar reads and writes: names, nesting, order, archive, paging |
 //! | [`ops`] | the `api` ops |
+//! | [`note`] | the shared project context note and its ops |
 //! | [`board`] | the Agent Standup connection, the read-only sync and the mirror; the project gate |
 //! | [`repos`], [`repo_ops`], [`guard`] | the repository list, its ops and worktree status, and the git stand-in launch contributor |
 //! | [`bindings`] | `ui/src/api/generated/projects/` |
@@ -18,6 +19,7 @@
 pub mod bindings;
 pub mod board;
 pub mod guard;
+pub mod note;
 pub mod ops;
 pub mod repo_ops;
 pub mod repos;

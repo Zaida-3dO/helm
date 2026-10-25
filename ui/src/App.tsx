@@ -9,7 +9,7 @@ import { SearchDialog } from './search/index.ts';
 import { chatOps } from './api/ops.ts';
 import { ChatMenu, ProjectTags, Sidebar } from './sidebar/index.ts';
 import { ChatView } from './ChatView.tsx';
-import { SidePanel } from './panel/index.ts';
+import { SidePanel, registerLinkRoute } from './panel/index.ts';
 import type { SendShortcut } from './composer/keymap.ts';
 import { SETTINGS_DIALOG, SettingsDialog } from './settings/index.ts';
 import './settings/general.tsx';
@@ -83,6 +83,20 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
         toast.show({ kind: 'error', text: `Roll over stopped: ${typeof message === 'string' ? message : 'something went wrong.'}` });
       }),
     [bus],
+  );
+  // Chat links in replies (`helm://chats/<id>`) open that chat, if it still exists.
+  useEffect(
+    () =>
+      registerLinkRoute('chat', async (req) => {
+        try {
+          await ops.get(req.chatId);
+        } catch {
+          return 'That chat no longer exists.';
+        }
+        shell.select(req.chatId);
+        return true;
+      }),
+    [ops, shell],
   );
   // The global hotkey lives in the same key map as every other shortcut (scope "global": the host
   // registers it with Windows; the window listener never fires it).

@@ -40,6 +40,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("chat_organize", OpClass::Maintenance, chat_organize);
     crate::board::register_ops(reg);
     crate::repo_ops::register_ops(reg);
+    crate::note::register_ops(reg);
 }
 
 pub(crate) fn parse_args<T: DeserializeOwned>(args: Value) -> Result<T, ApiError> {
