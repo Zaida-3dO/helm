@@ -65,6 +65,15 @@ pub fn plan(
     }
 }
 
+/// Put the change in the chat's transcript as a line the reader can see.
+pub fn record_row(rt: &helm_chats::ChatRuntime, chat_id: &str, c: &Changed) {
+    rt.add_context_row(
+        chat_id,
+        helm_chats::types::ContextKind::Orchestrator,
+        &c.row,
+    );
+}
+
 /// Carry out a [`Delivery`]. A note that cannot be delivered is logged, never retried here: the
 /// next launch carries the state anyway.
 pub fn deliver(rt: &helm_chats::ChatRuntime, chat_id: &str, d: Delivery) {

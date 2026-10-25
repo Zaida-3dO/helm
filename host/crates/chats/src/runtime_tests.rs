@@ -732,6 +732,28 @@ async fn an_unacknowledged_model_change_fails_the_run() {
     assert_eq!(ctx, ["modelChange"]);
 }
 
+/// A line added from another crate (the Orchestrator switch) lands in the transcript as a context
+/// row, in order with the chat's own rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_line_from_another_crate_becomes_a_context_row() {
+    let h = harness();
+    let chat = h.create().await;
+    h.rt.add_context_row(
+        &chat,
+        crate::types::ContextKind::Orchestrator,
+        "You turned Orchestrator on for this chat.",
+    );
+    h.until("row", |h| {
+        h.col("SELECT json_extract(details, '$.contextKind') FROM messages WHERE role = 'context'")
+            == ["orchestrator"]
+    })
+    .await;
+    assert_eq!(
+        h.col("SELECT text FROM messages WHERE role = 'context'"),
+        ["You turned Orchestrator on for this chat."]
+    );
+}
+
 /// Retry states land on the failed message's details.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retry_states_land_on_the_failed_message() {

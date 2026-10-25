@@ -668,6 +668,20 @@ impl ChatRuntime {
         let _ = enqueue(&self.actor(chat_id).tx, Cmd::Prewarm);
     }
 
+    /// Add a line to the chat's transcript (a context row), from another crate.
+    pub fn add_context_row(&self, chat_id: &str, kind: crate::types::ContextKind, text: &str) {
+        let cmd = Cmd::ContextRow {
+            kind,
+            text: text.to_owned(),
+        };
+        if let Err(e) = self.command(chat_id, cmd) {
+            log::warn!(
+                "transcript line for chat {chat_id} not written: {}",
+                e.message
+            );
+        }
+    }
+
     /// Retire the chat's worker if it has an actor (archive, delete). Never starts an actor.
     pub fn retire(&self, chat_id: &str) {
         let h = self.sh.actors.lock().unwrap().get(chat_id).cloned();

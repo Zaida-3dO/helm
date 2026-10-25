@@ -68,6 +68,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
             let chat = ctx.caller_chat_id.clone();
             let (c, busy, s) = turn_on(&db, &chat, ctx.is_child, ctx.origin, &args, now)?;
             if let Some(rt) = ctx.services.get::<helm_chats::ChatRuntime>() {
+                notes::record_row(&rt, &chat, &c);
                 notes::deliver(&rt, &chat, notes::plan(&chat, &c, busy, true, &s, now));
             }
             ctx.events

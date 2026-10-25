@@ -492,6 +492,8 @@ pub enum ContextKind {
     Fork,
     /// The marker an edit leaves where the new branch starts.
     Edit,
+    /// A change to the chat's Orchestrator state ("You turned Orchestrator on...").
+    Orchestrator,
 }
 
 /// The `details` bag of a message row. Every field is optional and absent when unset.

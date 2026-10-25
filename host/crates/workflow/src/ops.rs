@@ -140,6 +140,7 @@ fn chat_mode_set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let (view, changed, s) = out;
     if let Some(c) = &changed {
         if let Some(rt) = ctx.services.get::<helm_chats::ChatRuntime>() {
+            crate::notes::record_row(&rt, &a.chat_id, c);
             let d = crate::notes::plan(&a.chat_id, c, view.running, false, &s, now);
             crate::notes::deliver(&rt, &a.chat_id, d);
         }

@@ -78,6 +78,8 @@ pub(crate) enum Cmd {
     RefreshCatalogue { reply: oneshot::Sender<bool> },
     /// A line for the worker from another crate (`WorkerBroadcast`); held until it is ready.
     WorkerLine(Value),
+    /// A line for the transcript (a context row), written in order with the chat's own rows.
+    ContextRow { kind: ContextKind, text: String },
     /// Start the worker ahead of the first send ([`crate::runtime::ChatRuntime::prewarm`]):
     /// `get_state` only, so Claude Code's start-up runs while the user types.
     Prewarm,
@@ -1119,6 +1121,7 @@ impl Actor {
         match c {
             Cmd::Dispatch(sid) => self.dispatch(&sid, false),
             Cmd::Kick => self.advance_queue(),
+            Cmd::ContextRow { kind, text } => self.context_row(kind, &text),
             Cmd::Stop {
                 continue_queue,
                 reply,

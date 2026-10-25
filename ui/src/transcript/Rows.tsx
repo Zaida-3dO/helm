@@ -72,6 +72,7 @@ const CONTEXT_LABEL: Record<string, string> = {
   restart: 'Helm restarted',
   fork: 'Fork',
   edit: 'Edited',
+  orchestrator: 'Orchestrator',
 };
 
 function Thinking({ text, streaming, onLink }: { text: string; streaming: boolean; onLink: RowContext['onLink'] }) {
