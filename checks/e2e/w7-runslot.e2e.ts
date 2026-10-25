@@ -117,6 +117,12 @@ describe("the run-slot queue", { timeout: 10 * 60_000 }, () => {
     assert.equal(r.delivered, false);
     const q = await queue();
     assert.deepEqual(q.waiting.map((w: Json) => w.chatId), [c]);
+    // The chat shows the wait: an hourglass on its row, and the waiting bar with its two buttons.
+    await app!.page.waitForSelector(`[data-testid="chat-item"][data-chat-id="${c}"] .sb-wait`, { timeout: 15_000 });
+    await openChat(app!.page, c);
+    for (const id of ["queue-waiting", "queue-start-now", "queue-cancel-wait"]) {
+      await app!.page.waitForSelector(`[data-testid="${id}"]`, { timeout: 15_000 });
+    }
     await new Promise((x) => setTimeout(x, 6_000)); // past a pump tick
     assert.equal(await statusOf(c), "idle", "still waiting");
     assert.equal((await queue()).waiting.length, 1);
