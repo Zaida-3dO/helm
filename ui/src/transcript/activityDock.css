@@ -23,3 +23,83 @@
 .activity-dock.settled .ad-details-list li > .ui-icon:nth-last-child(2) {
   color: var(--success, var(--accent));
 }
+
+/* ---- Alive while it works ---- */
+
+/* The wheel turns slowly while the chat works, so a pause in the tool list never reads as stalled.
+   Quiet effects, reduced motion and the slow-display setting keep it still; the phase words and
+   the ticking time still show it is live. */
+.activity-dock .ad-glyph .ui-wheel-working {
+  animation: ui-wheel-turn 9s linear infinite;
+}
+
+:root[data-effects='quiet'] .activity-dock .ad-glyph .ui-wheel-working {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-dock .ad-glyph .ui-wheel-working {
+    animation: none;
+  }
+}
+
+/* What the turn is doing while no tool runs: thinking, writing, waiting. */
+.ad-phase {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.ad-phase > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ad-phase::before {
+  content: '';
+  align-self: center;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: ad-live 1.6s ease-in-out infinite;
+}
+
+@keyframes ad-live {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+:root[data-effects='quiet'] .ad-phase::before {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ad-phase::before {
+    animation: none;
+  }
+}
+
+/* Controls: hover, keyboard focus and pressed. */
+.activity-dock .ad-details:focus-visible,
+.activity-dock .ad-tool-stop:focus-visible,
+.activity-dock .bg-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.activity-dock .ad-details:active:not(:disabled),
+.activity-dock .ad-tool-stop:active:not(:disabled) {
+  background: var(--active, var(--hover));
+  transform: translateY(0.5px);
+}
+
+.activity-dock .ad-details-list li:hover {
+  background: var(--hover);
+}

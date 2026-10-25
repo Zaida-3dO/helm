@@ -76,3 +76,50 @@ export function finishedCount(t: Pick<FinishedTurn, 'tools' | 'edits'>): string 
   if (t.edits > 0) return `${t.edits} ${t.edits === 1 ? 'file' : 'files'} edited`;
   return t.tools.length > 0 ? `${t.tools.length} done` : null;
 }
+
+export interface DockActivity {
+  /** What the chat is doing while no tool runs. */
+  phase: 'thinking' | 'writing' | 'subagents' | 'model';
+  /** Line 2's words. */
+  label: string;
+  /** When this phase began, for the ticking time beside it. */
+  since: number;
+  /** The newest thing it said or thought, for line 1 (the narration). */
+  narration: string | null;
+}
+
+/** The last line of a block of text with anything in it, trimmed of list and heading marks. */
+export function lastLine(text: string): string | null {
+  const lines = text.split(String.fromCharCode(10));
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i]!.replace(/^(?:[#>*-]+|\d+[.)])\s*/, '').trim();
+    if (l) return l.length > 160 ? `${l.slice(0, 159)}…` : l;
+  }
+  return null;
+}
+
+/**
+ * What a running chat is doing when no tool runs, so the dock never reads as stalled: thinking,
+ * writing the reply, waiting on subagents, or waiting for the model to answer. `since` is when that
+ * phase began, so the dock can show a time that keeps ticking.
+ */
+export function dockActivity(
+  rows: readonly MessageRow[],
+  thread: Pick<ThreadState, 'subagents' | 'subagentsRunning'>,
+  turnStartedAt: number | null,
+): DockActivity {
+  const last = rows[rows.length - 1];
+  if (last && last.role === 'assistant' && last.status === 'streaming') {
+    if (last.text.trim()) return { phase: 'writing', label: 'Writing the reply', since: last.timestamp, narration: lastLine(last.text) };
+    if (last.thinking.trim()) return { phase: 'thinking', label: 'Thinking', since: last.timestamp, narration: lastLine(last.thinking) };
+  }
+  const n = thread.subagentsRunning ?? 0;
+  if (n > 0) {
+    const running = (thread.subagents ?? []).filter((s) => s.status === 'running');
+    const since = running.length > 0 ? Math.min(...running.map((s) => s.startedAt)) : (last?.timestamp ?? turnStartedAt ?? 0);
+    return { phase: 'subagents', label: `Waiting on ${n} ${n === 1 ? 'subagent' : 'subagents'}`, since, narration: null };
+  }
+  // Between steps: a tool just finished, or nothing has come back yet.
+  const since = last && last.status !== 'streaming' && last.role !== 'user' ? last.timestamp : (turnStartedAt ?? last?.timestamp ?? 0);
+  return { phase: 'model', label: last?.role === 'toolResult' ? 'Thinking about the result' : 'Waiting for the model', since, narration: null };
+}

@@ -54,3 +54,23 @@ test('the settled line comes from the last turn when it ended with a reply', asy
     assert.equal(t?.elapsedMs ?? null, elapsed, name);
   }
 });
+
+test('with no tool running the dock says what the turn is doing, and since when', async () => {
+  const { dockActivity, lastLine } = await import('./dockModel.ts');
+  const { row } = await import('../dev/fixtures.ts');
+  const none = { subagents: [], subagentsRunning: 0 };
+  const user = row({ id: 1, role: 'user', timestamp: 1000 });
+  const sub = { toolCallId: 's1', status: 'running' as const, startedAt: 5000 } as never;
+  const cases: [string, ReturnType<typeof row>[], typeof none, string, string | null, number][] = [
+    ['thinking', [user, row({ id: 2, role: 'assistant', status: 'streaming', thinking: 'Checking the tokens.\n- then the dock', timestamp: 2000 })], none, 'Thinking', 'then the dock', 2000],
+    ['writing', [user, row({ id: 2, role: 'assistant', status: 'streaming', thinking: 'hm', text: 'I changed the dock.', timestamp: 3000 })], none, 'Writing the reply', 'I changed the dock.', 3000],
+    ['waiting on subagents', [user, row({ id: 2, role: 'toolResult', toolName: 'Agent', timestamp: 4000 })], { subagents: [sub, { ...(sub as object), toolCallId: 's2', startedAt: 4500 } as never], subagentsRunning: 2 }, 'Waiting on 2 subagents', null, 4500],
+    ['after a tool', [user, row({ id: 2, role: 'toolResult', toolName: 'Read', timestamp: 6000 })], none, 'Thinking about the result', null, 6000],
+    ['nothing back yet', [user], none, 'Waiting for the model', null, 700],
+  ];
+  for (const [name, rows, thread, label, narration, since] of cases) {
+    const a = dockActivity(rows, thread, 700);
+    assert.deepEqual([a.label, a.narration, a.since], [label, narration, since], name);
+  }
+  assert.equal(lastLine('1. First\n\n## Second line  \n'), 'Second line');
+});

@@ -13,7 +13,7 @@ import { useLayer } from '../ui/hooks.ts';
 import { toolKind, toolLabel, toolStatus, toolTarget, toolVerb } from './toolKinds.ts';
 import { formatElapsed } from './workBlocks.ts';
 import { SubagentRosterChip } from './subagents/SubagentRoster.tsx';
-import { backgroundShells, dockShown, dockState, finishedCount, finishedTurn, type FinishedTurn } from './dockModel.ts';
+import { backgroundShells, dockActivity, dockShown, dockState, finishedCount, finishedTurn, type FinishedTurn } from './dockModel.ts';
 import '../composer/dock.css';
 import './activityDock.css';
 
@@ -79,9 +79,12 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
   const canStop = Boolean(latest && thread.sendBehavior.toolStop && thread.capabilities.stopTool && latest.stoppable);
   const state = dockState(chat.status, thread);
   const working = live || (thread.subagentsRunning ?? 0) > 0;
+  // With no tool running, say what the turn is doing instead: thinking, writing, waiting.
+  const activity = !latest && live && chat.status === 'running' && rows ? dockActivity(rows, thread, turnStartedAt) : null;
+  const narration = state.key === 'working' ? (activity?.narration ?? state.detail) : state.detail;
 
   return (
-    <div className="activity-dock" data-testid="activity-dock" data-state={state.key} ref={root}>
+    <div className="activity-dock" data-testid="activity-dock" data-state={state.key} data-phase={activity?.phase} ref={root}>
       <div className="ad-surface">
         <span className="ad-glyph" aria-hidden="true">
           {working ? (
@@ -93,7 +96,7 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
         <div className="ad-lines">
           <div className="ad-line1">
             <span className="ad-state">{state.label}</span>
-            {state.detail && <span className="ad-preview">{state.detail}</span>}
+            {narration && <span className="ad-preview">{narration}</span>}
           </div>
           <div className="ad-line2">
             {latest ? (
@@ -114,8 +117,13 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
                   </button>
                 )}
               </span>
+            ) : activity ? (
+              <span className="ad-phase" data-phase={activity.phase} data-testid="dock-phase">
+                <span>{activity.label}</span>
+                <span className="ad-tool-time">{formatElapsed(Math.max(0, now - activity.since))}</span>
+              </span>
             ) : (
-              <span className="ad-idle">{live ? 'No tool running' : 'Nothing running in this turn'}</span>
+              <span className="ad-idle">{live ? 'Working' : 'Nothing running in this turn'}</span>
             )}
           </div>
         </div>
