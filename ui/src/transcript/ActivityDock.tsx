@@ -95,7 +95,7 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
   const narration = state.key === 'working' ? (activity?.narration ?? state.detail) : state.detail;
 
   return (
-    <div className="activity-dock" data-testid="activity-dock" data-state={state.key} data-phase={activity?.phase} ref={root}>
+    <div className="activity-dock" aria-live="off" data-testid="activity-dock" data-state={state.key} data-phase={activity?.phase} ref={root}>
       <div className="ad-surface">
         <span className="ad-glyph" aria-hidden="true">
           {working ? (
