@@ -887,6 +887,12 @@
   padding-right: 59px;
 }
 
+/* A linked chat has a third action (open the linked item): 25 px more room. */
+.sb-chat-wrap[data-linked='true']:not([data-trailing='true']):hover .sb-chat,
+.sb-chat-wrap[data-linked='true']:not([data-trailing='true']):focus-within .sb-chat {
+  padding-right: 84px;
+}
+
 .sb-chat-wrap:hover .sb-age,
 .sb-chat-wrap:focus-within .sb-age,
 .sb-chat-wrap:hover .sb-draft,
@@ -908,6 +914,11 @@
 .sb-chat-wrap[data-trailing='true']:hover .sb-chat-text,
 .sb-chat-wrap[data-trailing='true']:focus-within .sb-chat-text {
   margin-right: 57px;
+}
+
+.sb-chat-wrap[data-linked='true'][data-trailing='true']:hover .sb-chat-text,
+.sb-chat-wrap[data-linked='true'][data-trailing='true']:focus-within .sb-chat-text {
+  margin-right: 82px;
 }
 
 /* ---- footer ---- */

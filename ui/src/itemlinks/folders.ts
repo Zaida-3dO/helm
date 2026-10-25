@@ -13,15 +13,24 @@ export interface ItemRef {
   itemId: string;
   /** The board title, or "Linked item" until the title is known. */
   title: string;
-  /** Whether `title` is a real board title (the chip shows an icon alone when it is not). */
+  /** Whether `title` is a real board title (the chip shows a board glyph alone when it is not). */
   named: boolean;
   isMain: boolean;
 }
 
 export const SHORT = 8;
 
+/** The longest title drawn. The title is text from outside (the board), so it is cut, never trusted. */
+export const MAX_TITLE = 160;
+
 export function itemTitle(l: { itemId: string; itemTitle?: string }): string {
-  return l.itemTitle?.trim() ? l.itemTitle : 'Linked item';
+  const t = l.itemTitle?.trim();
+  return t ? t.slice(0, MAX_TITLE) : 'Linked item';
+}
+
+/** What a linked-item mark says on hover and to a screen reader. */
+export function itemMarkLabel(ref: Pick<ItemRef, 'named' | 'title'>): string {
+  return ref.named ? `Linked to board item: ${ref.title}. Click to open` : 'Linked to a board item. Click to open';
 }
 
 /**

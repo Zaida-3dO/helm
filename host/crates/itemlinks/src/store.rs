@@ -18,10 +18,66 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              is_main    INTEGER NOT NULL DEFAULT 0,
              linked_by  TEXT NOT NULL CHECK (linked_by IN ('agent', 'user')),
              linked_at  INTEGER NOT NULL,
+             title      TEXT,
              PRIMARY KEY (item_id, chat_id)
          );
          CREATE INDEX IF NOT EXISTS item_chat_links_chat ON item_chat_links(chat_id);",
+    )?;
+    // The title arrived after the table did: an older profile gets the column here, with no
+    // title until an agent next names the item.
+    let present: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('item_chat_links') WHERE name = 'title')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !present {
+        tx.execute_batch("ALTER TABLE item_chat_links ADD COLUMN title TEXT")?;
+    }
+    Ok(())
+}
+
+/// Longest stored title, in characters. The title comes from the board, so it is cut, not trusted.
+pub const MAX_TITLE: usize = 160;
+
+/// A title as stored: control characters and runs of spaces collapsed, trimmed, capped. `None`
+/// when nothing is left.
+pub fn clean_title(raw: &str) -> Option<String> {
+    let flat = raw
+        .split(|c: char| c.is_control() || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if flat.is_empty() {
+        return None;
+    }
+    Some(flat.chars().take(MAX_TITLE).collect())
+}
+
+/// Remember the item's title (on every chat linked to it, so any of them can show it). A repeat
+/// with a new title replaces the old one, which is how a renamed item catches up. An empty title
+/// changes nothing.
+pub fn set_title(tx: &Transaction<'_>, item_id: &str, raw_title: &str) -> rusqlite::Result<()> {
+    let Some(title) = clean_title(raw_title) else {
+        return Ok(());
+    };
+    tx.execute(
+        "UPDATE item_chat_links SET title = ?2 WHERE item_id = ?1",
+        params![item_id, title],
+    )?;
+    Ok(())
+}
+
+/// The newest stored title among an item's links.
+fn stored_title(tx: &Transaction<'_>, id: &str) -> Option<String> {
+    tx.query_row(
+        "SELECT title FROM item_chat_links WHERE item_id = ?1 AND title IS NOT NULL
+         ORDER BY linked_at DESC LIMIT 1",
+        [id],
+        |r| r.get::<_, String>(0),
     )
+    .optional()
+    .ok()
+    .flatten()
 }
 
 fn by_str(b: LinkedBy) -> &'static str {
@@ -48,7 +104,8 @@ fn group_ids(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Vec<String>> {
     Ok(all.into_iter().filter(|o| ids::same_item(o, id)).collect())
 }
 
-/// The board project's title for an item the board mirror holds.
+/// The board project's title for an item the board mirror holds (a task is not in the mirror;
+/// its title is the one stored with the link).
 fn title_of(tx: &Transaction<'_>, id: &str) -> Option<String> {
     let has: bool = tx
         .query_row(
@@ -232,7 +289,7 @@ pub fn set_main(tx: &Transaction<'_>, raw_item: &str, chat_id: &str) -> Result<S
 fn row_link(tx: &Transaction<'_>, r: &rusqlite::Row<'_>) -> rusqlite::Result<ItemLink> {
     let item_id: String = r.get(0)?;
     Ok(ItemLink {
-        item_title: title_of(tx, &item_id),
+        item_title: title_of(tx, &item_id).or_else(|| stored_title(tx, &item_id)),
         item_id,
         chat_id: r.get(1)?,
         is_main: r.get(2)?,
@@ -514,4 +571,48 @@ pub(crate) mod tests {
             .unwrap();
         assert!(none.is_empty());
     }
+
+    #[test]
+    fn a_stored_title_names_a_task_the_mirror_lacks_and_a_repeat_renames_it() {
+        let (_d, db) = db(&["a", "b"]);
+        let title = |db: &Database, chat: &str| {
+            db.snapshot(|tx| for_chats(tx, &[chat.to_owned()]))
+                .unwrap()
+                .into_iter()
+                .find(|l| l.chat_id == chat)
+                .and_then(|l| l.item_title)
+        };
+        db.write::<_, rusqlite::Error>(|tx| {
+            link(tx, "a", "a1b2c3d4", false, LinkedBy::Agent, 1).unwrap();
+            set_title(
+                tx,
+                "a1b2c3d4",
+                "  Fix	the
+ deploy ",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(title(&db, "a").as_deref(), Some("Fix the deploy"));
+        // Every chat on the item shows it, including one linked later; blank input keeps it.
+        db.write::<_, rusqlite::Error>(|tx| {
+            let l = link(tx, "b", ITEM, false, LinkedBy::Agent, 2).unwrap();
+            set_title(tx, &l.item_id, "   ")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(title(&db, "a").as_deref(), Some("Fix the deploy"));
+        db.write::<_, rusqlite::Error>(|tx| set_title(tx, ITEM_ID, &"x".repeat(500)))
+            .unwrap();
+        assert_eq!(title(&db, "b").unwrap().chars().count(), MAX_TITLE);
+        // A profile from before titles loads: the column is added and no link has a title.
+        db.write::<_, rusqlite::Error>(|tx| {
+            tx.execute_batch("ALTER TABLE item_chat_links DROP COLUMN title")?;
+            init(tx)
+        })
+        .unwrap();
+        assert_eq!(title(&db, "a"), None);
+    }
+
+    const ITEM_ID: &str = "a1b2c3d4e5f64a7b8c9d0e1f2a3b4c5d";
 }

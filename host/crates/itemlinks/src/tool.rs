@@ -12,9 +12,9 @@ use helm_ipc::AppEvent;
 use helm_workers::contrib::LaunchCtx;
 use serde_json::{json, Value};
 
-pub const DESCRIPTION: &str = "Link THIS chat to a task-board item, so the user can find the chat from the item. itemId is the item's id: the full id, or its first 8 or more hex characters. main: true makes this chat the item's main chat, the one \"open this item\" goes to; do that when this chat becomes the place the item is being worked on. The first chat linked to an item is its main chat. unlink: true removes the link. Linking again changes nothing. It is stored in Helm only; the board is not changed.";
+pub const DESCRIPTION: &str = "Link THIS chat to a task-board item, so the user can find the chat from the item. itemId is the item's id: the full id, or its first 8 or more hex characters. main: true makes this chat the item's main chat, the one \"open this item\" goes to; do that when this chat becomes the place the item is being worked on. The first chat linked to an item is its main chat. unlink: true removes the link. title: the item's title, so the sidebar can say what the chat is linked to; always pass it when you know it. Linking again changes nothing except that a new title replaces the old one. It is stored in Helm only; the board is not changed.";
 
-pub const SECTION_TEXT: &str = "When a task-board item becomes what this chat is working on, call app_link_item with the item's id and main: true, so the user can open the item and land here. Link once per item; do not link items you only read or mention.";
+pub const SECTION_TEXT: &str = "When a task-board item becomes what this chat is working on, call app_link_item with the item's id and main: true, so the user can open the item and land here. Pass the item's title as title. Link once per item; do not link items you only read or mention.";
 
 pub fn schema() -> Value {
     json!({
@@ -22,7 +22,8 @@ pub fn schema() -> Value {
         "properties": {
             "itemId": {"type": "string", "description": "The item's full id, or its first 8 or more hex characters."},
             "main": {"type": "boolean", "description": "Make this chat the item's main chat."},
-            "unlink": {"type": "boolean", "description": "Remove this chat's link to the item instead."}
+            "unlink": {"type": "boolean", "description": "Remove this chat's link to the item instead."},
+            "title": {"type": "string", "description": "The item's title, shown beside the chat in the sidebar. Long titles are cut."}
         },
         "required": ["itemId"],
         "additionalProperties": false
@@ -42,6 +43,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
             if unlink && main {
                 return Err(ToolError::refused("Use main or unlink, not both."));
             }
+            let title = args.get("title").and_then(Value::as_str);
             let db = ctx
                 .services
                 .get::<Database>()
@@ -55,6 +57,12 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                         })
                     } else {
                         store::link(tx, &chat, item, main, LinkedBy::Agent, helm_core::now_ms())
+                            .and_then(|l| {
+                                if let Some(t) = title {
+                                    store::set_title(tx, &l.item_id, t).map_err(|e| e.to_string())?;
+                                }
+                                Ok(l)
+                            })
                             .map(|l| {
                                 (
                                     Some(l.item_id.clone()),
@@ -126,9 +134,13 @@ mod tests {
         register_host_tools(&mut r);
         let sink = Arc::new(RecordingSink::default());
         let a = ctx(db.clone(), "a", sink.clone());
-        let out = call(&r, &a, json!({"itemId": "A1B2C3D4"})).unwrap();
+        let out = call(&r, &a, json!({"itemId": "A1B2C3D4", "title": "Fix deploy"})).unwrap();
         assert_eq!(out["main"], true);
         assert_eq!(out["chatsLinkedToItem"], 1);
+        let shown = db
+            .snapshot(|tx| store::for_chats(tx, &["a".to_owned()]))
+            .unwrap();
+        assert_eq!(shown[0].item_title.as_deref(), Some("Fix deploy"));
         let b = ctx(db.clone(), "b", sink.clone());
         let out = call(&r, &b, json!({"itemId": "a1b2c3d4", "main": true})).unwrap();
         assert_eq!(out["main"], true);

@@ -4,7 +4,7 @@ import { EventBus } from '../api/events.ts';
 import type { ItemLink, ItemOpen } from '../api/itemlinks.ts';
 import type { ProjectNode, SidebarRow } from '../api/projects.ts';
 import { buildList } from '../sidebar/model.ts';
-import { arrange, itemTitle, refsByChat } from './folders.ts';
+import { arrange, itemMarkLabel, itemTitle, MAX_TITLE, refsByChat } from './folders.ts';
 import { ItemLinksStore, ItemPicker, itemPicker, openItem } from './store.ts';
 
 const A = 'demo0001d8324d0b8c1f34dd7d21a910';
@@ -20,10 +20,14 @@ function row(id: string, over: Partial<SidebarRow> = {}): SidebarRow {
 const link = (item: string, chat: string, over: Partial<ItemLink> = {}): ItemLink => ({ itemId: item, chatId: chat, isMain: false, linkedBy: 'agent', linkedAt: 1, ...over });
 const group = (): ProjectNode => ({ id: 'g', kind: 'folder', name: 'G', path: null, parentId: null, parentSource: null, icon: null, colour: null, pinned: false, collapsed: false, position: null, archived: false, board: null, primaryFolderProjectId: null, chatCount: 0, createdAt: 1, revision: 0 }) as ProjectNode;
 
-test('the title is the board title, else "Linked item"', () => {
+test('the title is the board title, else "Linked item"; the mark says what it is, with or without a title', () => {
   assert.equal(itemTitle({ itemId: A, itemTitle: 'Usage meter' }), 'Usage meter');
   assert.equal(itemTitle({ itemId: A }), 'Linked item');
   assert.equal(itemTitle({ itemId: A, itemTitle: '  ' }), 'Linked item');
+  assert.equal(itemTitle({ itemId: A, itemTitle: 'x'.repeat(500) }).length, MAX_TITLE, 'outside text is cut');
+  const named = refsByChat([link(A, 'a', { itemTitle: 'Fix the deploy' }), link(B, 'b')]);
+  assert.equal(itemMarkLabel(named.get('a')!), 'Linked to board item: Fix the deploy. Click to open');
+  assert.equal(itemMarkLabel(named.get('b')!), 'Linked to a board item. Click to open', 'no title: no bare id either');
 });
 
 test('a chat shows the item it is main chat of, else its newest link', () => {

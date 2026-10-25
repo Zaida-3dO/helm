@@ -24,7 +24,7 @@ import { chatMenuItems, projectMenuItems } from './menus.ts';
 import { buildList, chatAncestors, visibleChatOrder, type ListItem } from './model.ts';
 import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
-import { ItemChip, ItemFolderRow, ItemPickerHost, useItemRefs, useOpenItem } from '../itemlinks/ItemUi.tsx'; // item links
+import { ItemChip, ItemFolderRow, ItemOpenButton, ItemPickerHost, useItemRefs, useOpenItem } from '../itemlinks/ItemUi.tsx'; // item links
 import {
   IconArchive,
   IconBoard,
@@ -273,7 +273,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         remove: () => setConfirm(deleteChatConfirm(row, () => act.remove(row))),
       },
     ));
-    // The chip hides while the row is hovered, so the menu is where a keyboard or pointer user opens the linked item.
+    // On a hovered row the chip gives way to an "open" button; the menu keeps the entry for the keyboard.
     const linked = itemRefs.get(row.chatId);
     if (linked) items.splice(1, 0, { id: 'open-item', label: linked.named ? `Open item: ${linked.title}` : 'Open linked item', onSelect: () => openItem(linked.itemId) });
     return items;
@@ -956,6 +956,7 @@ function ChatRow({
       className="sb-chat-wrap"
       data-selected={selected ? 'true' : undefined}
       data-trailing={trailing ? 'true' : undefined}
+      data-linked={item.itemChip ? 'true' : undefined}
       data-coloured={colour ? 'true' : undefined}
       data-flagged={needsYou || flagReason !== undefined ? 'true' : undefined}
       data-drag-source={dragging ? 'true' : undefined}
@@ -1033,6 +1034,7 @@ function ChatRow({
         <span className="sb-age">{age(r.updatedAt, now)}</span>
       </button>
       <span className="sb-row-actions">
+        {item.itemChip && <ItemOpenButton item={item.itemChip} />}
         <button
           type="button"
           className="sb-act"

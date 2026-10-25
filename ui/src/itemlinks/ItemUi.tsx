@@ -5,8 +5,8 @@ import { useEffect, useSyncExternalStore } from 'react';
 import { itemLinkOps } from '../api/itemlinks.ts';
 import { useShell } from '../shell/context.ts';
 import { Button, Dialog, toast } from '../ui/index.ts';
-import { IconLink } from '../ui/icons.tsx';
-import type { ItemRef } from './folders.ts';
+import { IconBoard } from '../ui/icons.tsx';
+import { itemMarkLabel, type ItemRef } from './folders.ts';
 import { itemLinksStoreFor, itemPicker, openItem } from './store.ts';
 import './itemlinks.css';
 
@@ -32,7 +32,11 @@ export function useOpenItem() {
     });
 }
 
-/** A small chip on a chat row naming its item; a click opens the item (its main chat). */
+/**
+ * A small chip on a chat row naming its item (its title, or a board glyph while the title is
+ * unknown); a click opens the item (its main chat). While the row is hovered the row's own
+ * "Open linked item" button (`ItemOpenButton`) stands in for it.
+ */
 export function ItemChip({ item }: { item: ItemRef }) {
   const open = useOpenItem();
   return (
@@ -43,16 +47,27 @@ export function ItemChip({ item }: { item: ItemRef }) {
       data-testid="item-chip"
       data-item-id={item.itemId}
       data-named={item.named}
-      aria-label={item.named ? undefined : 'Linked board item'}
-      title={item.named ? `${item.title}: open this item` : `Linked board item ${item.itemId.slice(0, 8)}: open it`}
+      aria-label={itemMarkLabel(item)}
+      title={itemMarkLabel(item)}
       onClick={(e) => {
         e.stopPropagation();
         open(item.itemId);
       }}
       onPointerDown={(e) => e.stopPropagation()}
     >
-      {!item.named ? <IconLink size={11} /> : item.title.length > 14 ? `${item.title.slice(0, 13)}…` : item.title}
+      {!item.named ? <IconBoard size={11} /> : item.title.length > 14 ? `${item.title.slice(0, 13)}…` : item.title}
     </span>
+  );
+}
+
+/** The hover button that does what the chip does, so the item stays one click away on a hovered row. */
+export function ItemOpenButton({ item }: { item: ItemRef }) {
+  const open = useOpenItem();
+  const label = itemMarkLabel(item);
+  return (
+    <button type="button" className="sb-act" data-testid="item-open-button" aria-label={label} title={label} onClick={() => open(item.itemId)}>
+      <IconBoard size={14} />
+    </button>
   );
 }
 
