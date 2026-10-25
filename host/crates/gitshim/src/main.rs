@@ -21,6 +21,7 @@
 use helm_worktrees::argv::{self, Command};
 use helm_worktrees::git::{find_git_in, Git};
 use helm_worktrees::{links, offlist};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -36,9 +37,10 @@ fn real_git() -> Option<PathBuf> {
 }
 
 /// Run the real git with this process's arguments and environment and return its status.
-fn pass_through(real: &Path, args: &[String]) -> ExitCode {
+fn pass_through(real: &Path, args: &[OsString]) -> ExitCode {
     match std::process::Command::new(real).args(args).status() {
-        Ok(s) => ExitCode::from(s.code().unwrap_or(1).clamp(0, 255) as u8),
+        // A status outside 0..=255 (a crash code) is a failure, never a success.
+        Ok(s) => ExitCode::from(s.code().and_then(|c| u8::try_from(c).ok()).unwrap_or(1)),
         Err(e) => {
             eprintln!("helm git: could not start {}: {e}", real.display());
             ExitCode::from(127)
@@ -85,20 +87,25 @@ fn off_repo(real: &Path, parsed: &argv::Parsed, list: &[offlist::Line]) -> Optio
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // The arguments reach the real git byte for byte; only the reading below uses a lossy copy.
+    let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let args: Vec<String> = raw
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     let Some(real) = real_git() else {
         eprintln!("helm git: no git found on PATH");
         return ExitCode::from(127);
     };
     let parsed = argv::parse(&args);
     if parsed.command == Command::Other {
-        return pass_through(&real, &args);
+        return pass_through(&real, &raw);
     }
     let list = std::env::var_os("HELM_WORKTREE_OFF_LIST")
         .map(|p| offlist::read(Path::new(&p)))
         .unwrap_or_default();
     let Some(line) = off_repo(&real, &parsed, &list) else {
-        return pass_through(&real, &args);
+        return pass_through(&real, &raw);
     };
     match &parsed.command {
         Command::WorktreeAdd { .. } => refuse(&format!(
@@ -112,16 +119,16 @@ fn main() -> ExitCode {
                 .fold(std::env::current_dir().unwrap_or_default(), |acc, d| acc.join(d));
             let target = base.join(path);
             match links::link_entries(&target) {
-                Ok(l) if l.is_empty() => pass_through(&real, &args),
+                Ok(l) if l.is_empty() => pass_through(&real, &raw),
                 Ok(l) => refuse(&format!(
                     "Not removing {}: it still holds links, for example {}. Take each link out on its own first (rmdir on a junction, never rm -rf), then run this again.",
                     target.display(),
                     l[0].display()
                 )),
                 // Not a folder we can read: git will say what is wrong.
-                Err(_) => pass_through(&real, &args),
+                Err(_) => pass_through(&real, &raw),
             }
         }
-        _ => pass_through(&real, &args),
+        _ => pass_through(&real, &raw),
     }
 }
