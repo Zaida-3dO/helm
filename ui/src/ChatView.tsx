@@ -27,6 +27,7 @@ import { recallPrompts } from './composer/recall.ts';
 import { SelectionToolbar } from './transcript/SelectionToolbar.tsx';
 import { FindBar } from './transcript/FindBar.tsx';
 import { TimelineRail } from './transcript/TimelineRail.tsx';
+import { useWholeChat } from './transcript/useWholeChat.ts';
 import { registerSelectionAction } from './transcript/slots.ts';
 import { handleLink } from './panel/links.ts';
 import { openInPanel } from './panel/registry.ts';
@@ -181,6 +182,8 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   );
 
   const transcriptBox = useRef<HTMLDivElement>(null);
+  // Ctrl+A then Ctrl+C copies the whole chat, not just the rows that are mounted.
+  const wholeChat = useWholeChat(transcriptBox, (before) => ops.page(chatId, before ? { before } : {}), (text) => setNotice(text));
   // Find in chat: the host searches the whole history; a match in a row that is not
   // loaded loads the page around it first.
   const hostFind = useCallback((q: string, activity: boolean, after?: string) => ops.find(chatId, q, activity, after), [ops, chatId]);
@@ -269,7 +272,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
           </button>
         </div>
       )}
-      <div className="transcript-box" ref={transcriptBox}>
+      <div className="transcript-box" ref={transcriptBox} data-all-selected={wholeChat ? 'true' : undefined}>
       <SelectionToolbar chatId={chatId} container={transcriptBox} blocked={interactionOpen} />
       <FindBar rows={view.rows} hostFind={hostFind} container={transcriptBox} onJump={jumpToFound} onClose={() => setJumpTo(null)} />
       {elements.timeline !== 'hidden' && <TimelineRail rows={view.rows} onJump={jumpFromRail} container={transcriptBox} />}

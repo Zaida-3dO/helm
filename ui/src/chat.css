@@ -1240,6 +1240,13 @@ button.danger {
   overflow-x: auto;
 }
 
+/* Ctrl+A in the transcript: the whole chat is marked, ready to copy. */
+.transcript-box[data-all-selected] .row-user .bubble,
+.transcript-box[data-all-selected] .row-assistant {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: 8px;
+}
+
 /* Find in chat: a small bar at the transcript's top right. */
 .find-bar {
   position: absolute;
