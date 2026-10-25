@@ -3,6 +3,7 @@
 // the moment a search runs.
 
 import type { Api } from '../api/client.ts';
+import type { QuickResult } from '../api/panel.ts';
 import { searchOps, type SearchHit } from '../api/search.ts';
 import { absolutePath, baseName, dirName, rowId, type Row, type SearchSource } from './sources.ts';
 
@@ -36,11 +37,6 @@ export function chatsSource(d: ChatsDeps): SearchSource {
   };
 }
 
-interface QuickOpenHit {
-  path: string;
-  score?: number;
-}
-
 export interface FilesDeps {
   api: Api;
   /** The chat in view: quick_open searches that chat's folder. Null means no Files group. */
@@ -58,14 +54,16 @@ export function filesSource(d: FilesDeps): SearchSource {
       const chatId = d.chatId();
       const cwd = d.cwd();
       if (!chatId || !cwd) return [];
-      const hits = await d.api<QuickOpenHit[]>('quick_open', { chatId, query });
+      const res = await d.api<QuickResult>('quick_open', { chatId, query });
       if (signal.aborted) return [];
-      return hits.map((h): Row => {
+      return res.items.map((h): Row => {
         const abs = absolutePath(cwd, h.path);
+        // In file-search mode the label is the path inside the folder; in path mode it is just the name.
+        const shown = res.mode === 'files' ? h.label || h.path : h.path;
         return {
           id: rowId('files', abs),
-          title: baseName(h.path),
-          subtitle: dirName(h.path) || undefined,
+          title: baseName(shown),
+          subtitle: dirName(shown) || undefined,
           open: () => d.openFile(abs),
         };
       });

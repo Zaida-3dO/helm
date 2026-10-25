@@ -69,7 +69,7 @@ test('the chats source passes the filters and the current project, and labels ti
 
 test('the files source searches the chat folder through quick_open and opens an absolute path', async () => {
   const opened: string[] = [];
-  const { api, calls } = fakeApi({ quick_open: () => [{ path: 'src/main.ts', score: 3 }, { path: 'README.md' }] });
+  const { api, calls } = fakeApi({ quick_open: () => ({ mode: 'files', partial: false, items: [{ path: 'C:/work/app/src/main.ts', label: 'src/main.ts', kind: 'file', score: 3 }, { path: 'C:/work/app/README.md', label: 'README.md', kind: 'file', score: 1 }] }) });
   const src = filesSource({ api, chatId: () => 'c1', cwd: () => 'C:/work/app', openFile: (p) => opened.push(p) });
   const rows = await src.run('ma', new AbortController().signal);
   assert.deepEqual(calls[0], { op: 'quick_open', args: { chatId: 'c1', query: 'ma' } });
