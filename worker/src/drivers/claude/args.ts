@@ -17,13 +17,18 @@ export const DISALLOWED_TOOLS = ["CronCreate", "CronDelete", "CronList", "Schedu
 /** Claude Code's own worktree tools; kept off unless the user lets them through. */
 const WORKTREE_TOOLS = ["EnterWorktree", "ExitWorktree"];
 
+/** Claude Code's own schedule tools; offered only when the user lets them be (every call is then redirected). */
+const SCHEDULE_TOOLS = ["CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "RemoteTrigger"];
+
 /**
  * The tools to disallow. The worktree tools come off the list only when the launch asks for them
  * and no repository has worktrees switched off (Helm then sets HELM_WORKTREE_OFF_LIST for the chat).
+ * The schedule tools come off it when the launch asks for them.
  */
 export function disallowedTools(c: ClaudeLaunch, env: Record<string, string | undefined> = process.env): string[] {
   const allowWorktrees = c.worktreeTools === true && !env.HELM_WORKTREE_OFF_LIST;
-  return DISALLOWED_TOOLS.filter((t) => !(allowWorktrees && WORKTREE_TOOLS.includes(t)));
+  const allowSchedules = c.scheduleTools === true;
+  return DISALLOWED_TOOLS.filter((t) => !(allowWorktrees && WORKTREE_TOOLS.includes(t)) && !(allowSchedules && SCHEDULE_TOOLS.includes(t)));
 }
 
 export interface ArgOptions {

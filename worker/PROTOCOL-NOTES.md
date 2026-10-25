@@ -220,6 +220,7 @@ registers the PreToolUse hook in `initialize`.
 |---|---|
 | `submission_delivered` | `submissionId` |
 | `background_tasks` | `tasks: [{id, title, command?, kind:"shell"\|"agent", startedAt}]`, the full list each time |
+| `shell_changes` | `toolCallId, paths` (absolute, forward slashes; at most 200): the files a Bash call changed, from a git comparison before and after it; sent after the call's `tool_execution_end`, only when there are some |
 | `long_command` | `toolCallId, action:"denied"\|"reminded"\|"escaped", reason` |
 | `tool_execution_start` | adds `stoppable: false` |
 | `tool_execution_update` | `toolCallId, stoppable: true` once the call is a foreground task that `stop_task` can end |

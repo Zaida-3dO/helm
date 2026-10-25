@@ -21,6 +21,8 @@ pub const MAX_TORN: usize = 8;
 pub const ROW_TEXT_BYTES: usize = 64 * 1024;
 pub const ROW_THINKING_BYTES: usize = 16 * 1024;
 pub const THINKING_TAIL_CHARS: usize = 2400;
+/// Paths kept from one shell command's changes.
+pub const MAX_SHELL_PATHS: usize = 200;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,6 +101,19 @@ pub struct UsageEntry {
     pub running: Usage,
 }
 
+/// The files a shell command changed, found by comparing the checkout before and after it ran.
+/// `id` is `s:<toolCallId>`. It shows no row of its own: the turn's change card reads it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellChangesEntry {
+    pub id: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    pub timestamp: i64,
+    pub tool_call_id: String,
+    pub paths: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Entry {
@@ -107,6 +122,7 @@ pub enum Entry {
     Tool(ToolEntry),
     Context(ContextEntry),
     Usage(UsageEntry),
+    ShellChanges(ShellChangesEntry),
 }
 
 impl Entry {
@@ -120,6 +136,7 @@ impl Entry {
             Entry::Tool(e) => &e.id,
             Entry::Context(e) => &e.id,
             Entry::Usage(e) => &e.id,
+            Entry::ShellChanges(e) => &e.id,
         }
     }
     fn set_parent(&mut self, parent: Option<String>) {
@@ -128,6 +145,7 @@ impl Entry {
             Entry::Tool(e) => e.parent_id = parent,
             Entry::Context(e) => e.parent_id = parent,
             Entry::Usage(e) => e.parent_id = parent,
+            Entry::ShellChanges(e) => e.parent_id = parent,
         }
     }
     pub fn kind(&self) -> &'static str {
@@ -136,6 +154,7 @@ impl Entry {
             Entry::Tool(_) => "tool",
             Entry::Context(_) => "context",
             Entry::Usage(_) => "usage",
+            Entry::ShellChanges(_) => "shellChanges",
         }
     }
 }
@@ -515,9 +534,10 @@ pub fn status_str(s: MessageStatus) -> &'static str {
 }
 
 impl RowWrite {
-    /// The entry's message row; a usage entry has none.
+    /// The entry's message row; usage and shell-changes entries have none.
     pub fn from_entry(e: &Entry) -> Option<Self> {
         Some(match e {
+            Entry::ShellChanges(_) => return None,
             Entry::Message(m) => RowWrite {
                 source_key: m.id.clone(),
                 role: role_str(m.role),

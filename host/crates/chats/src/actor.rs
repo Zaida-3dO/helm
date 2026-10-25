@@ -2011,6 +2011,7 @@ impl Actor {
             "long_command" => {
                 log::info!("chat {}: long command {}", self.chat_id, v);
             }
+            "shell_changes" => self.on_shell_changes(&v),
             "worker_error" => {
                 self.worker_error = str_of(&v, "error");
             }
@@ -2020,6 +2021,36 @@ impl Actor {
             "chat_cancel" => crate::hostcalls::on_cancel(&mut self.host_calls, &v),
             _ => crate::hostcalls::other_line(&self.sh, &self.chat_id, &v),
         }
+    }
+
+    /// `shell_changes`: the files one shell command changed, as the worker found them. Kept as an
+    /// entry of its own (no row) that the turn's change card reads; a bad line is dropped.
+    fn on_shell_changes(&mut self, v: &Value) {
+        let Some(call) = str_of(v, "toolCallId").filter(|s| !s.is_empty() && s.len() <= 200) else {
+            return;
+        };
+        let paths: Vec<String> = v
+            .get("paths")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|p| !p.is_empty() && p.len() <= 1024 && !p.contains('\0'))
+                    .take(session_log::MAX_SHELL_PATHS)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if paths.is_empty() {
+            return;
+        }
+        self.record(Entry::ShellChanges(session_log::ShellChangesEntry {
+            id: format!("s:{call}"),
+            parent_id: None,
+            timestamp: now(),
+            tool_call_id: call,
+            paths,
+        }));
     }
 
     // ------------------------------------------------------------------ subagents

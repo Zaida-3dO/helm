@@ -24,6 +24,7 @@ message row's `source_key`, which is what makes projection idempotent.
 |---|---|---|---|
 | `message` | `u:<submissionId>` for a user row, `m:<messageId>` for an assistant row | `timestamp, role, text, thinking, status, details` | the worker ends the message (`message_end`) |
 | `tool` | `t:<toolCallId>` | `timestamp, toolCallId, toolName, args, result, isError, startedAt, endedAt` | the tool call ends; start and end are merged into one entry |
+| `shellChanges` | `s:<toolCallId>` | `timestamp, toolCallId, paths` | the worker found files a Bash call changed (compared the checkout before and after); no row, the turn's change card reads it |
 | `context` | `c:<uuid>` | `timestamp, kind, text`; `kind` is `compaction`, `model_change`, `effort_change`, `notice` or `restart` | the host records a context row |
 | `usage` | `s:<uuid>` | `timestamp, nativeSession, usage, running`: the turn's tokens (subagents included) and reported cost, and Claude Code's running totals after it | the worker reports a turn's result; projected into `chat_turn_usage`, not `messages` (see `src/turn_usage.rs`) |
 

@@ -195,6 +195,18 @@ export function RuntimePane() {
         <SettingRow title="Cut long tool output" description="The output of Helm's own tools past about 5,000 characters is cut to its start and end, with the whole text saved to a file the agent can read.">
           <Checkbox checked={s?.toolOutputCap ?? true} disabled={!s} onChange={(on) => save({ toolOutputCap: on })} data-testid="runtime-output-cap" aria-label="Cut long tool output" />
         </SettingRow>
+        <SettingRow
+          title="Offer Claude Code's schedule tools"
+          description="Claude Code's own cron, wake-up and remote-trigger tools. They never run: Helm turns each call down and points the chat at Helm's schedules, where you can see, pause and cancel them. Off by default."
+        >
+          <Checkbox
+            checked={s?.scheduleTools ?? false}
+            disabled={!s}
+            onChange={(on) => save({ scheduleTools: on })}
+            data-testid="runtime-schedule-tools"
+            aria-label="Offer Claude Code's schedule tools"
+          />
+        </SettingRow>
       </section>
 
       {repos && repos.length > 0 && (
