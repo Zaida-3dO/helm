@@ -1119,6 +1119,9 @@ dd {
   color: #ffffff;
 }
 .crumb-title {
+  /* A button centres its content by default; the title reads from the left and ends in an ellipsis. */
+  display: block;
+  text-align: left;
   border: 0;
   background: none;
   padding: 0;

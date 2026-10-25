@@ -130,6 +130,7 @@ export class SidebarData {
       unread,
       muted: c.muted,
       stalled: c.stalled,
+      hasDraft: c.draft.trim() !== '',
       lastActivityAt: c.lastActivityAt,
     };
     next.attention = rowAttention({ status: c.status, unread, lingering: false, pinned: c.pinned });

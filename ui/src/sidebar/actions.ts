@@ -22,6 +22,26 @@ function message(e: unknown): string {
   return String((e as Error)?.message ?? e);
 }
 
+/** Archive a chat that was just told to stop: it is refused while it still counts as busy, so try
+ *  again for a few seconds until the stop has landed. */
+export async function archiveWhenIdle(ops: ChatOps, chatId: string, tries = 12, waitMs = 400): Promise<void> {
+  for (let i = 1; ; i++) {
+    try {
+      await ops.archive(chatId);
+      return;
+    } catch (e) {
+      if (i >= tries) throw e;
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+}
+
+/** Stop a running chat, then archive it. */
+export async function stopThenArchive(ops: ChatOps, chatId: string): Promise<void> {
+  await ops.stop(chatId, false);
+  await archiveWhenIdle(ops, chatId);
+}
+
 export class SidebarActions {
   private readonly d: ActionDeps;
 
@@ -122,6 +142,25 @@ export class SidebarActions {
     this.archivedToast(row.title || 'Untitled chat');
   }
 
+  /** The stop-and-archive dialog's answer: stop the running task, then archive the chat. */
+  async stopAndArchive(row: SidebarRow): Promise<void> {
+    const ok = await this.run(() => stopThenArchive(this.d.ops, row.chatId).then(() => true));
+    await this.d.data.refetch([row.chatId]);
+    if (!ok) return;
+    this.d.undo.push({
+      label: 'Archive chat',
+      undo: async () => {
+        await this.d.ops.restore(row.chatId);
+        await this.d.data.refetch([row.chatId]);
+      },
+      redo: async () => {
+        await this.d.ops.archive(row.chatId);
+        await this.d.data.refetch([row.chatId]);
+      },
+    });
+    this.archivedToast(row.title || 'Untitled chat');
+  }
+
   async restore(row: SidebarRow): Promise<void> {
     await this.run(() => this.d.ops.restore(row.chatId));
     await this.d.data.refetch([row.chatId]);
@@ -194,7 +233,8 @@ export class SidebarActions {
     return this.updateProject(p, { parentId }, { parentId: p.parentId }, parentId ? 'Nest project' : 'Move project to top level');
   }
 
-  reorderProject(p: ProjectNode, beforeProjectId: string): Promise<void> {
+  /** Place a project before another one, or last when `beforeProjectId` is null. */
+  reorderProject(p: ProjectNode, beforeProjectId: string | null): Promise<void> {
     return this.updateProject(p, { beforeProjectId });
   }
 

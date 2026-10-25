@@ -48,6 +48,7 @@ function row(chatId: string, group: string, over: Partial<SidebarRow> = {}): Sid
     unread: false,
     muted: false,
     stalled: false,
+    hasDraft: false,
     lastActivityAt: 1,
     archived: false,
     position: null,
@@ -102,6 +103,16 @@ test('a three-level project tree renders depths 0/1/2 with child projects before
   ];
   const rows = [row('x', 'a'), row('y', 'c')];
   assert.deepEqual(shape(buildList(projects, rows, opts)), ['H0:a', 'H1:b', 'H2:c', 'C0:y', 'C0:x']);
+});
+
+test('a collapsed group totals the running and unread chats inside it and its nested projects', () => {
+  const projects = [project('a', { collapsed: true, chatCount: 3 }), project('kid', { parentId: 'a', chatCount: 1 }), project('open', { chatCount: 1 })];
+  const rows = [row('r1', 'a', { status: 'running' }), row('u1', 'a', { unread: true }), row('i1', 'a'), row('r2', 'kid', { status: 'starting' }), row('o1', 'open', { status: 'running' })];
+  const header = (items: ListItem[], id: string) => items.find((i): i is Extract<ListItem, { kind: 'header' }> => i.kind === 'header' && i.project.id === id)!;
+  const items = buildList(projects, rows, opts);
+  assert.deepEqual(header(items, 'a').marks, { running: 2, unread: 1 });
+  assert.equal(header(items, 'open').marks, null, 'an expanded group shows its own rows instead');
+  assert.equal(header(buildList([project('b', { collapsed: true, chatCount: 1 })], [row('x', 'b')], opts), 'b').marks, null, 'nothing going on, no marks');
 });
 
 test('a missing parent draws at the top level and a collapsed group hides its contents', () => {

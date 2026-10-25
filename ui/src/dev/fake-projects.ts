@@ -79,6 +79,7 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
       unread: c.chat.unread.markToken !== null || c.chat.unread.completionId !== null,
       muted: c.chat.muted,
       stalled: c.chat.stalled,
+      hasDraft: c.chat.draft.trim() !== '',
       lastActivityAt: c.chat.lastActivityAt,
       archived: c.archived,
       position: c.position,

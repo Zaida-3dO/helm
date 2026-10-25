@@ -154,6 +154,8 @@ pub struct SidebarRow {
     pub muted: bool,
     /// Running with no worker output for a while.
     pub stalled: bool,
+    /// The chat holds an unsent draft: drawn as a small pencil before the age.
+    pub has_draft: bool,
     #[ts(type = "number")]
     pub last_activity_at: i64,
     pub archived: bool,

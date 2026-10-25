@@ -734,6 +734,20 @@
   background: var(--interrupted, #be9562);
 }
 
+.sb-group-marks {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  flex: none;
+}
+
+.sb-draft {
+  flex: none;
+  display: inline-flex;
+  color: var(--sb-muted);
+}
+
 .sb-age {
   flex: none;
   font-size: 10px;
@@ -872,6 +886,8 @@
 
 .sb-chat-wrap:hover .sb-age,
 .sb-chat-wrap:focus-within .sb-age,
+.sb-chat-wrap:hover .sb-draft,
+.sb-chat-wrap:focus-within .sb-draft,
 .sb-chat-wrap:hover .sb-item-chip,
 .sb-chat-wrap:focus-within .sb-item-chip,
 .sb-chat-wrap:hover .sb-agg,

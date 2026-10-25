@@ -701,6 +701,7 @@ fn row_from(r: &Row<'_>, revision: i64) -> rusqlite::Result<RawRow> {
             unread: false,
             muted: false,
             stalled: false,
+            has_draft: false,
             last_activity_at: 0,
             archived: r.get::<_, i64>(8)? != 0,
             position: r.get(9)?,
@@ -861,6 +862,7 @@ fn finish(
                 r.row.unread = c.unread.mark_token.is_some() || c.unread.completion_id.is_some();
                 r.row.muted = c.muted;
                 r.row.stalled = c.stalled;
+                r.row.has_draft = !c.draft.trim().is_empty();
                 r.row.last_activity_at = c.last_activity_at;
                 r.row.attention = row_attention(r.row.status, r.row.unread, false, r.row.pinned);
             }

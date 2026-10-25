@@ -117,9 +117,8 @@ export function chatMenuItems(i: ChatMenuInput, a: ChatMenuActions): MenuItem[] 
   } else {
     items.push({
       id: 'archive',
-      label: busy ? 'Stop the task to archive it' : 'Archive chat',
+      label: busy ? 'Stop and archive…' : 'Archive chat',
       shortcut: 'Ctrl+Shift+Backspace',
-      disabled: busy,
       onSelect: a.archive,
     });
   }
@@ -136,6 +135,7 @@ export interface ProjectMenuActions {
   archive(): void;
   restore(): void;
   colour(c: string | null): void;
+  customColour(): void;
 }
 
 /** Valid "Nest under…" targets for a project: not itself or its subtree, depth index ≤ 2 with its
@@ -199,6 +199,7 @@ export function projectMenuItems(p: ProjectNode, all: ProjectNode[], a: ProjectM
           checked: p.colour === c,
           onSelect: () => a.colour(c),
         })),
+        { id: 'colour:custom', label: 'Custom…', separator: true, checked: p.colour?.startsWith('#') === true, onSelect: a.customColour },
       ],
     },
   );

@@ -14,6 +14,7 @@
 
 import type { ProjectNode, SidebarRow, SidebarView } from '../api/projects.ts';
 import { arrange, type ItemRef } from '../itemlinks/folders.ts';
+import { isBusy } from './status.ts';
 
 export const MAX_DEPTH = 2;
 
@@ -26,8 +27,14 @@ export const HEIGHTS = {
 /** Where an item sits in its project's block: the header and its chats draw as one tinted block. */
 export type BlockPos = 'only' | 'first' | 'mid' | 'last';
 
+/** What a collapsed group still has going on inside it: chats running and chats with an unread result. */
+export interface GroupMarks {
+  running: number;
+  unread: number;
+}
+
 export type ListItem = (
-  | { kind: 'header'; key: string; project: ProjectNode; depth: number; height: number; collapsed: boolean; subtitle: string | null }
+  | { kind: 'header'; key: string; project: ProjectNode; depth: number; height: number; collapsed: boolean; subtitle: string | null; marks: GroupMarks | null }
   | {
       kind: 'chat';
       key: string;
@@ -174,6 +181,25 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     return v;
   };
 
+  // Running and unread chats inside a project and the projects nested under it, for its header
+  // while it is collapsed.
+  const groupMarks = (p: ProjectNode, path: Set<string> = new Set()): GroupMarks | null => {
+    if (path.has(p.id)) return null;
+    const next = new Set(path).add(p.id);
+    let running = 0;
+    let unread = 0;
+    for (const r of byGroup.get(p.id) ?? []) {
+      if (isBusy(r.status)) running += 1;
+      else if (r.unread) unread += 1;
+    }
+    for (const k of kids.get(p.id) ?? []) {
+      const sub = groupMarks(k, next);
+      running += sub?.running ?? 0;
+      unread += sub?.unread ?? 0;
+    }
+    return running + unread > 0 ? { running, unread } : null;
+  };
+
   const out: ListItem[] = [];
   const emitGroup = (p: ProjectNode, depth: number, path: Set<string>) => {
     if (path.has(p.id) || !visible(p)) return;
@@ -187,6 +213,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
       height: subtitle ? h.headerSubtitle : h.header,
       collapsed,
       subtitle,
+      marks: collapsed ? groupMarks(p) : null,
     });
     if (collapsed) return;
     const next = new Set(path).add(p.id);

@@ -23,12 +23,15 @@ import { chatMenuItems, projectMenuItems } from './menus.ts';
 import { buildList, chatAncestors, visibleChatOrder, type ListItem } from './model.ts';
 import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
+import { StopArchiveDialog } from './StopArchiveDialog.tsx';
+import { isBusy } from './status.ts';
 import { ItemChip, ItemFolderRow, ItemPickerHost, useItemRefs, useOpenItem } from '../itemlinks/ItemUi.tsx'; // item links
 import {
   IconArchive,
   IconBoard,
   IconChevronDown,
   IconChevronRight,
+  IconEdit,
   IconFlag,
   IconFolder,
   IconGrip,
@@ -114,6 +117,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const [menu, setMenu] = useState<Menu | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
+  const [stopRow, setStopRow] = useState<SidebarRow | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
@@ -215,7 +219,18 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       return n;
     });
 
+  // A running chat is archived through a confirmation that stops its task first.
+  const archiveRow = (row: SidebarRow) => (isBusy(row.status) ? setStopRow(row) : void act.archive(row));
+
   // ---- menus ----
+  // Alt+Up and Alt+Down on a project header move it among its siblings (the same pinned group and parent).
+  const moveProject = (p: ProjectNode, dir: -1 | 1) => {
+    const sibs = items.flatMap((i) => (i.kind === 'header' && i.project.parentId === p.parentId && i.project.pinned === p.pinned ? [i.project] : []));
+    const at = sibs.findIndex((x) => x.id === p.id);
+    const to = at + dir;
+    if (at < 0 || to < 0 || to >= sibs.length) return;
+    void act.reorderProject(p, dir < 0 ? sibs[to]!.id : (sibs[to + 1]?.id ?? null));
+  };
   const promptRename = (row: SidebarRow) => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, onSave: (t) => act.renameChat(row, t) });
   const rowMenuItems = (row: SidebarRow): MenuItem[] => {
     const siblings = snap.rows.filter((r) => r.groupProjectId === row.groupProjectId && r.archived === row.archived);
@@ -252,7 +267,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         markUnread: () => void act.markUnread(row),
         pin: (p) => void act.pin(row, p),
         mute: (m) => void act.mute(row, m),
-        archive: () => void act.archive(row),
+        archive: () => archiveRow(row),
         restore: () => void act.restore(row),
         remove: () => setConfirm(deleteChatConfirm(row, () => act.remove(row))),
       },
@@ -279,6 +294,17 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       archive: () => setConfirm(archiveProjectConfirm(p, () => act.archiveProject(p))),
       restore: () => void act.restoreProject(p),
       colour: (c) => void act.updateProject(p, { colour: c }),
+      customColour: () =>
+        setPrompt({
+          title: 'Project colour',
+          label: 'Hex colour, like #4a90d9',
+          value: p.colour?.startsWith('#') ? p.colour : '#',
+          onSave: (v) => {
+            const hex = v.trim();
+            if (/^#[0-9a-fA-F]{6}$/.test(hex)) void act.updateProject(p, { colour: hex.toLowerCase() });
+            else setError('A colour is # followed by six hex digits, like #4a90d9.');
+          },
+        }),
     }), p);
   const openMenu = (x: number, y: number, items: MenuItem[], label: string) => {
     setPreview(null);
@@ -302,7 +328,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       if (id) onSelect(id);
     },
   });
-  useBinding({ id: 'chat.archive', title: 'Archive chat', defaultKeys: 'Mod+Shift+Backspace', enabled: () => !!selectedRow && !selectedRow.archived, run: () => selectedRow && void act.archive(selectedRow) });
+  useBinding({ id: 'chat.archive', title: 'Archive chat', defaultKeys: 'Mod+Shift+Backspace', enabled: () => !!selectedRow && !selectedRow.archived, run: () => selectedRow && archiveRow(selectedRow) });
 
   // ---- hover preview (300 ms) ----
   const previewTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -574,6 +600,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} label={menu.label} onClose={() => setMenu(null)} testId="sidebar-menu" />}
       {prompt && <PromptDialog prompt={prompt} onClose={() => setPrompt(null)} />}
       {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
+      {stopRow && <StopArchiveDialog title={stopRow.title} onClose={() => setStopRow(null)} onConfirm={() => void act.stopAndArchive(stopRow)} />}
       {inboxOpen && <AttentionInbox summary={snap.attention} ops={ops} onOpen={onSelect} onClose={() => setInboxOpen(false)} />}
       <ItemPickerHost />
       {preview && !menu && !drag && (
@@ -631,6 +658,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
             void act.updateProject(p, { collapsed: !it.collapsed });
           }}
           onPin={() => void act.updateProject(p, { pinned: !p.pinned })}
+          onMove={(dir) => moveProject(p, dir)}
           onNew={() => newChatIn(p)}
           onRestore={() => void act.restoreProject(p)}
           onMenu={(x, y) => openMenu(x, y, projectMenu(p), `Options for ${p.name}`)}
@@ -657,7 +685,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         onToggle={() => toggleChat(row.chatId)}
         onRename={() => promptRename(row)}
         onMenu={(x, y) => openMenu(x, y, rowMenuItems(row), `Options for ${row.title}`)}
-        onArchive={() => void (row.archived ? act.restore(row) : act.archive(row))}
+        onArchive={() => (row.archived ? void act.restore(row) : archiveRow(row))}
         onHover={(el) => hoverRow(row, el)}
         onLeave={leaveRow}
         onPointerDown={(e) => {
@@ -700,6 +728,7 @@ function GroupHeader({
   dragging,
   onToggle,
   onPin,
+  onMove,
   onNew,
   onRestore,
   onMenu,
@@ -710,6 +739,7 @@ function GroupHeader({
   dragging: boolean;
   onToggle: () => void;
   onPin: () => void;
+  onMove: (dir: -1 | 1) => void;
   onNew: () => void;
   onRestore: () => void;
   onMenu: (x: number, y: number) => void;
@@ -729,7 +759,7 @@ function GroupHeader({
       data-subtitle={item.subtitle ? 'true' : undefined}
       data-drag-source={dragging ? 'true' : undefined}
       style={{ marginLeft: item.depth * 16, ...(colour ? { ['--group-colour' as string]: colour } : {}) }}
-      title={[p.path ?? p.board?.title ?? p.name, p.board?.editedLocally ? 'Edited in Helm' : null, 'Drag to reorder or nest']
+      title={[p.path ?? p.board?.title ?? p.name, p.board?.editedLocally ? 'Edited in Helm' : null, 'Drag to reorder or nest (Alt+Up or Down moves it)']
         .filter(Boolean)
         .join('\n')}
       onContextMenu={(e) => {
@@ -747,7 +777,19 @@ function GroupHeader({
         >
           {item.collapsed ? <IconChevronRight size={11} strokeWidth={2.4} /> : <IconChevronDown size={11} strokeWidth={2.4} />}
         </button>
-        <button type="button" className="sb-name" onClick={onToggle} onPointerDown={onPointerDown} aria-expanded={!item.collapsed}>
+        <button
+          type="button"
+          className="sb-name"
+          onClick={onToggle}
+          onPointerDown={onPointerDown}
+          onKeyDown={(e) => {
+            if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+              e.preventDefault();
+              onMove(e.key === 'ArrowUp' ? -1 : 1);
+            }
+          }}
+          aria-expanded={!item.collapsed}
+        >
           <span className="sb-icon" aria-hidden="true">
             {p.icon && !p.icon.startsWith('lib:') ? p.icon : p.kind === 'board' ? <IconBoard size={16} strokeWidth={1.8} /> : <IconFolder size={16} strokeWidth={1.8} />}
           </span>
@@ -765,6 +807,20 @@ function GroupHeader({
           <span className="sb-count" title={`${p.chatCount} non-archived chats`}>
             {p.chatCount}
           </span>
+          {item.marks && (
+            <span className="sb-group-marks" data-testid="group-marks">
+              {item.marks.running > 0 && (
+                <span className="sb-ind" role="img" aria-label={`${item.marks.running} running`} title={`${item.marks.running} running`}>
+                  <WheelMark size={20} state="working" className="sb-ind-wheel" />
+                </span>
+              )}
+              {item.marks.unread > 0 && (
+                <span className="sb-ind" role="img" aria-label={`${item.marks.unread} unread`} title={`${item.marks.unread} unread`}>
+                  <StarMark size={26} className="sb-ind-star" />
+                </span>
+              )}
+            </span>
+          )}
         </button>
         <span className="sb-actions">
           {!p.archived && (
@@ -938,6 +994,11 @@ function ChatRow({
         )}
         {!item.expanded && item.children > 0 && <span className="sb-agg">{item.children}</span>}
         {item.itemChip && <ItemChip item={item.itemChip} />}
+        {r.hasDraft && (
+          <span className="sb-draft" role="img" aria-label="Unsent draft" title="Unsent draft">
+            <IconEdit size={10} />
+          </span>
+        )}
         <span className="sb-age">{age(r.updatedAt, now)}</span>
       </button>
       <span className="sb-row-actions">

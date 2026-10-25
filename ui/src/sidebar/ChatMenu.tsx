@@ -12,6 +12,8 @@ import { chatMenuItems } from './menus.ts';
 import { withChatIcons } from './menuIcons.tsx';
 import { IconMore } from '../ui/icons.tsx';
 import { deleteChatConfirm, PromptDialog, type Prompt } from './Sidebar.tsx';
+import { StopArchiveDialog } from './StopArchiveDialog.tsx';
+import { isBusy } from './status.ts';
 import { sidebarUndo } from './undo.ts';
 
 // Errors go to the shell's toast slot, where the user sees them.
@@ -24,6 +26,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
+  const [stopRow, setStopRow] = useState<SidebarRow | null>(null);
   const act = useMemo(
     () => new SidebarActions({ api: shell.api, pops, ops: shell.ops, data, undo: sidebarUndo, onError: showError }),
     [shell.api, shell.ops, pops, data],
@@ -57,7 +60,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
           markUnread: () => void act.markUnread(row),
           pin: (p) => void act.pin(row, p),
           mute: (m) => void act.mute(row, m),
-          archive: () => void act.archive(row),
+          archive: () => (isBusy(row.status) ? setStopRow(row) : void act.archive(row)),
           restore: () => void act.restore(row),
           remove: () => setConfirm(deleteChatConfirm(row, () => act.remove(row))),
         },
@@ -87,6 +90,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} label="Chat options" onClose={() => setMenu(null)} testId="chat-menu-list" />}
       {prompt && <PromptDialog prompt={prompt} onClose={() => setPrompt(null)} />}
       {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
+      {stopRow && <StopArchiveDialog title={stopRow.title} onClose={() => setStopRow(null)} onConfirm={() => void act.stopAndArchive(stopRow)} />}
     </>
   );
 }

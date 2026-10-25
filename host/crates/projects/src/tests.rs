@@ -948,8 +948,11 @@ fn rows_carry_unread_mute_and_stall_from_the_chat_record() {
         )
     })
     .unwrap();
+    assert!(!row(&db, &c).has_draft);
+    db.write(|tx| tx.execute("UPDATE chats SET draft = 'half a thought' WHERE id = ?1", [&c]))
+        .unwrap();
     let r = row(&db, &c);
-    assert!(r.unread && r.muted);
+    assert!(r.unread && r.muted && r.has_draft);
     assert_eq!(
         r.attention,
         Some(RowAttention::Unread),

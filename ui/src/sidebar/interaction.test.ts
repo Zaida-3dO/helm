@@ -7,10 +7,10 @@ import { UNDO_LIMIT, UndoStack } from './undo.ts';
 
 const noop = () => undefined;
 const chatActs: ChatMenuActions = { fork: noop, rename: noop, compact: noop, moveTo: noop, nestUnder: noop, topLevel: noop, toggleChildren: noop, markUnread: noop, pin: noop, mute: noop, archive: noop, restore: noop, remove: noop };
-const projActs: ProjectMenuActions = { newChat: noop, pin: noop, rename: noop, changeIcon: noop, nestUnder: noop, topLevel: noop, archive: noop, restore: noop, colour: noop };
+const projActs: ProjectMenuActions = { newChat: noop, pin: noop, rename: noop, changeIcon: noop, nestUnder: noop, topLevel: noop, archive: noop, restore: noop, colour: noop, customColour: noop };
 
 function row(chatId: string, over: Partial<SidebarRow> = {}): SidebarRow {
-  return { chatId, title: chatId, groupProjectId: 'g', folderProjectId: 'g', folderPath: 'C:/w', depth: 0, parentChatId: null, hasChildren: false, status: 'idle', attention: null, pinned: false, unread: false, muted: false, stalled: false, lastActivityAt: 1, archived: false, position: null, createdAt: 1, updatedAt: 1, revision: 1, ...over };
+  return { chatId, title: chatId, groupProjectId: 'g', folderProjectId: 'g', folderPath: 'C:/w', depth: 0, parentChatId: null, hasChildren: false, status: 'idle', attention: null, pinned: false, unread: false, muted: false, stalled: false, hasDraft: false, lastActivityAt: 1, archived: false, position: null, createdAt: 1, updatedAt: 1, revision: 1, ...over };
 }
 
 function project(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
@@ -98,7 +98,7 @@ test('the chat menu follows state: archive or restore and delete, stop first whi
   const archived = ids(row('a', { archived: true }));
   assert.ok(archived.includes('restore') && archived.includes('delete'));
   const busy = chatMenuItems({ row: row('a', { status: 'running' }), projects: [project('g')], siblings: [], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'projects' }, chatActs);
-  assert.equal(busy.find((i) => i.id === 'archive')?.disabled, true);
+  assert.deepEqual(busy.find((i) => i.id === 'archive')?.label, 'Stop and archive…', 'a busy chat can be archived through the stop dialog');
   assert.ok(ids(row('a', { parentChatId: 'p' })).includes('top'));
   const act = chatMenuItems({ row: row('a'), projects: [project('g')], siblings: [], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'activity' }, chatActs).map((i) => i.id);
   assert.ok(!act.includes('nest'), 'no nesting in Activity');
@@ -115,7 +115,7 @@ test('project nest targets keep three levels and refuse cycles', () => {
   const items = projectMenuItems(all[1]!, all, projActs).map((i) => i.id);
   assert.ok(items.includes('top') && items.includes('colour') && items.includes('archive'));
   const colours = projectMenuItems(all[1]!, all, projActs).find((i) => i.id === 'colour')!.submenu!;
-  assert.equal(colours.length, 9, 'no colour plus the eight named colours');
+  assert.equal(colours.length, 10, 'no colour, the eight named colours and a custom one');
 });
 
 test('the project menu places Primary folder… right after Rename', () => {

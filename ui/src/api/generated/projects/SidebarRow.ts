@@ -27,7 +27,11 @@ muted: boolean,
 /**
  * Running with no worker output for a while.
  */
-stalled: boolean, lastActivityAt: number, archived: boolean, position: number | null, createdAt: number, updatedAt: number, revision: number, 
+stalled: boolean, 
+/**
+ * The chat holds an unsent draft: drawn as a small pencil before the age.
+ */
+hasDraft: boolean, lastActivityAt: number, archived: boolean, position: number | null, createdAt: number, updatedAt: number, revision: number, 
 /**
  * The hover preview. Filled by `sidebar_rows`, which the sidebar calls for one
  * row on hover; pages leave it out.

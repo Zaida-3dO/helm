@@ -13,7 +13,7 @@ const B = '50f653d8aaaabbbbccccddddeeee0000';
 function row(id: string, over: Partial<SidebarRow> = {}): SidebarRow {
   return {
     chatId: id, title: `Chat ${id}`, groupProjectId: 'g', folderProjectId: 'g', folderPath: 'C:/w', depth: 0, parentChatId: null, hasChildren: false,
-    status: 'idle', attention: null, pinned: false, unread: false, muted: false, stalled: false, lastActivityAt: 1, archived: false, position: null,
+    status: 'idle', attention: null, pinned: false, unread: false, muted: false, stalled: false, hasDraft: false, lastActivityAt: 1, archived: false, position: null,
     createdAt: 1, updatedAt: 1, revision: 1, ...over,
   } as SidebarRow;
 }

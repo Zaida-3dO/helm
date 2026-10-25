@@ -13,6 +13,8 @@ import { useSelection, useShell } from '../shell/context.ts';
 import { Button, layers, TextInput, toast, useBinding, useHint } from '../ui/index.ts';
 import { IconArchive, IconChevronRight, IconFolder, IconFork, IconPanelLeft, IconPanelRight, IconPin, IconRestore } from '../ui/icons.tsx';
 import { sidebarLayout } from '../shell/layout.ts';
+import { stopThenArchive } from '../sidebar/actions.ts';
+import { StopArchiveDialog } from '../sidebar/StopArchiveDialog.tsx';
 import { UsageMeter } from '../usage/UsageMeter.tsx';
 import { CaptionButtons, dragHandlers } from './caption.tsx';
 import { topBarTier, type TopBarTier } from './fold.ts';
@@ -44,6 +46,7 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
     chatId ? (shell.store.view(chatId).chat ?? shell.store.chatList().find((c) => c.id === chatId) ?? null) : null,
   );
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [confirmStop, setConfirmStop] = useState(false);
   const project = folderLabel(chat?.cwd);
   const busy = chat ? chat.status === 'starting' || chat.status === 'running' || chat.status === 'stopping' : false;
   const rename = (title: string) => {
@@ -162,7 +165,7 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
                   variant="icon"
                   label={busy ? 'Stop and archive task…' : 'Archive chat'}
                   data-testid="topbar-archive"
-                  onClick={() => shell.ops.archive(chat.id).catch(err)}
+                  onClick={() => (busy ? setConfirmStop(true) : void shell.ops.archive(chat.id).catch(err))}
                 >
                   <IconArchive size={16} />
                 </Button>
@@ -180,6 +183,9 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
         </div>
         <CaptionButtons />
       </header>
+      {confirmStop && chat && (
+        <StopArchiveDialog title={chat.title} onClose={() => setConfirmStop(false)} onConfirm={() => void stopThenArchive(shell.ops, chat.id).catch(err)} />
+      )}
       {tags && <div className="tags-strip">{tags}</div>}
     </>
   );
