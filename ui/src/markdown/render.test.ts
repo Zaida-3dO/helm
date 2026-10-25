@@ -373,9 +373,10 @@ test('a remote image is never emitted as an <img>; it becomes a link', () => {
   assert.ok(!html.includes('<img'));
   assert.match(html, /<a class="md-link md-link-url md-image-link" href="https:\/\/tracker\.example\/pixel\.png"/);
   assert.match(html, />a cat<\/a>/);
-  // Relative and file images are not fetched either.
+  // Relative images are not fetched either. A file on this computer is an <img> with no src at all
+  // (the host sends the picture, see localImages.ts), so the browser fetches nothing.
   assert.ok(!renderToHtml('![x](pics/a.png)').includes('<img'));
-  assert.ok(!renderToHtml('![x](file:///C:/a.png)').includes('<img'));
+  assert.ok(!renderToHtml('![x](file:///C:/a.png)').includes(' src='));
 });
 
 test('an inline base64 image is the only image that renders', () => {
@@ -443,4 +444,25 @@ test('math: $x$ and $$ blocks are marked for typesetting, prices and code are le
     ['```\n$$\nx\n$$\n```', []],
   ];
   for (const [src, want] of cases) assert.deepEqual(marked(src), want, src);
+});
+
+test('a local picture is marked with its path and drawn later; other image targets are as before', async () => {
+  const { localImagePath } = await import('./localImages.ts');
+  const cases: [string, string | null][] = [
+    ['C:\\Users\\me\\shot.png', 'C:\\Users\\me\\shot.png'],
+    ['C:/Users/me/shot.JPG', 'C:/Users/me/shot.JPG'],
+    ['/home/me/a.webp', '/home/me/a.webp'],
+    ['file:///C:/Users/me/a%20b.gif', 'C:/Users/me/a b.gif'],
+    ['file:///home/me/a.png', '/home/me/a.png'],
+    ['//server/share/a.png', null],
+    ['relative/a.png', null],
+    ['C:\\Users\\me\\notes.txt', null],
+    ['C:\\Users\\me\\vector.svg', null],
+    ['https://example.com/a.png', null],
+    ['data:image/png;base64,AAAA', null],
+  ];
+  for (const [href, want] of cases) assert.equal(localImagePath(href), want, href);
+  const html = renderToHtml('![the shot](C:/Users/me/shot.png)');
+  assert.match(html, /<img class="md-image md-image-local" data-md-local-src="C:\/Users\/me\/shot\.png" alt="the shot">/);
+  assert.ok(!html.includes(' src='), 'no src until the host answers');
 });

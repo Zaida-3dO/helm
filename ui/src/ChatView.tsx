@@ -28,6 +28,7 @@ import { SelectionToolbar } from './transcript/SelectionToolbar.tsx';
 import { FindBar } from './transcript/FindBar.tsx';
 import { TimelineRail } from './transcript/TimelineRail.tsx';
 import { useWholeChat } from './transcript/useWholeChat.ts';
+import { setLocalImageLoader } from './markdown/localImages.ts';
 import { registerSelectionAction } from './transcript/slots.ts';
 import { handleLink } from './panel/links.ts';
 import { openInPanel } from './panel/registry.ts';
@@ -54,6 +55,8 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
 
   useEffect(() => store.watch(chatId), [store, chatId]);
   const shell = useShell();
+  // Pictures on disk named in replies and tool cards come from the host.
+  useEffect(() => setLocalImageLoader((path) => shell.api<{ mime: string; bytes: string }>('local_image_get', { path })), [shell]);
   // Transcript element toggles, read once and followed on change.
   const [elements, setElements] = useState<ChatElements>({});
   useEffect(() => {

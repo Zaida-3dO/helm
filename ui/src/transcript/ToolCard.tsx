@@ -8,7 +8,9 @@ import { useShell } from '../shell/context.ts';
 import { IconCopy, IconWrap } from '../ui/icons.tsx';
 import { Glyph, Spinner } from './icons.tsx';
 import { parseResult, type Cell, type GridRow } from './resultGrid.ts';
+import { LocalPicture } from './LocalPicture.tsx';
 import { TodoList } from './TodoList.tsx';
+import { localImagePath } from '../markdown/localImages.ts';
 import { parseTodos } from './todos.ts';
 import {
   changeLines,
@@ -151,6 +153,16 @@ function ToolBody({ row, kind, status, source, rawName }: { row: MessageRow; kin
   const todos = source === 'native' ? parseTodos(row) : null;
   if (todos) return <TodoList todos={todos} />;
   const output = row.text;
+  // Reading a picture file shows the picture.
+  const picture = source === 'native' && rawName === 'Read' ? localImagePath(toolTarget(row) ?? '') : null;
+  if (picture) {
+    return (
+      <div className="tool-box" data-testid="tool-box">
+        <LocalPicture path={picture} />
+        {output.trim() && <OutputBox header="Output" output={output} status={status} saved={false} />}
+      </div>
+    );
+  }
   const grid = source !== 'native' && output ? parseResult(output) : null;
   const header = status === 'failed' ? 'Error' : source !== 'native' ? 'Result' : rawName === 'Read' ? 'File contents' : 'Output';
   return (

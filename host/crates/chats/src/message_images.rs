@@ -26,7 +26,58 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 pub fn register(reg: &mut OpRegistry) {
-    reg.blocking("attachment_get", OpClass::Blocking, attachment_get);
+    reg.blocking("attachment_get", OpClass::Blocking, attachment_get)
+        .blocking("local_image_get", OpClass::Blocking, local_image_get);
+}
+
+/// The largest picture a reply or a tool card will show from disk.
+const LOCAL_IMAGE_MAX: u64 = 12 * 1024 * 1024;
+
+/// The type of a picture from its first bytes; `None` for anything that is not PNG, JPEG, GIF or WebP.
+fn sniff(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        Some("image/png")
+    } else if b.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if b.len() > 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// `local_image_get {path}` answers `{mime, bytes}` (base64) for a picture on this computer that a
+/// reply or a tool card points at. The path must be absolute and the file a regular one (a link
+/// is not followed), at most 12 MiB, and its first bytes must be a PNG, JPEG, GIF or WebP: nothing
+/// else is ever read back, whatever its name.
+fn local_image_get(_ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|p| !p.is_empty() && p.len() <= crate::attachments::MAX_PATH_BYTES)
+        .ok_or_else(|| ApiError::bad_args("path is required."))?;
+    let (mime, bytes) = read_local_image(Path::new(path))?;
+    Ok(json!({
+        "mime": mime,
+        "bytes": base64::engine::general_purpose::STANDARD.encode(bytes),
+    }))
+}
+
+fn read_local_image(path: &Path) -> Result<(&'static str, Vec<u8>), ApiError> {
+    if !path.is_absolute() {
+        return Err(ApiError::bad_args("The path must be absolute."));
+    }
+    let bytes = helm_core::privfs::read_capped(path, LOCAL_IMAGE_MAX).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            not_found()
+        } else {
+            ApiError::new("unavailable", "That picture could not be read.")
+        }
+    })?;
+    let mime = sniff(&bytes).ok_or_else(|| ApiError::bad_args("That file is not a picture."))?;
+    Ok((mime, bytes))
 }
 
 /// The images sent with a submission, oldest first; empty when it had none.
@@ -174,6 +225,50 @@ mod tests {
         b.extend(h.to_be_bytes());
         b.extend([8, 6, 0, 0, 0]);
         b
+    }
+
+    #[test]
+    fn a_local_picture_is_read_only_when_it_really_is_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, b: &[u8]| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, b).unwrap();
+            p
+        };
+        let ok = write("a.png", &png(4, 4));
+        assert_eq!(read_local_image(&ok).unwrap().0, "image/png");
+        // The name does not matter; the first bytes do.
+        assert_eq!(
+            read_local_image(&write("b.txt", &png(4, 4))).unwrap().0,
+            "image/png"
+        );
+        assert_eq!(
+            read_local_image(&write("c.jpg", &[0xff, 0xd8, 0xff, 0xe0, 0]))
+                .unwrap()
+                .0,
+            "image/jpeg"
+        );
+        assert_eq!(
+            read_local_image(&write("d.gif", b"GIF89a....")).unwrap().0,
+            "image/gif"
+        );
+        assert_eq!(
+            read_local_image(&write("e.webp", b"RIFF....WEBPVP8 "))
+                .unwrap()
+                .0,
+            "image/webp"
+        );
+        let refused = [
+            read_local_image(&write("notes.png", b"hello, not a picture")),
+            read_local_image(&dir.path().join("missing.png")),
+            read_local_image(dir.path()),
+            read_local_image(Path::new("relative/a.png")),
+        ];
+        let codes: Vec<_> = refused.into_iter().map(|r| r.unwrap_err().code).collect();
+        assert_eq!(codes[0], "bad_args");
+        assert_eq!(codes[1], "not_found");
+        assert_eq!(codes[3], "bad_args");
+        assert!(codes[2] == "unavailable" || codes[2] == "bad_args");
     }
 
     #[test]

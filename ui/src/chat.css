@@ -575,6 +575,25 @@ button.danger {
   color: var(--secondary);
 }
 
+.tool-picture {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  margin: 10px 12px;
+  border-radius: 6px;
+}
+
+.tool-picture-loading {
+  width: 160px;
+  height: 90px;
+  background: var(--surface-alt);
+}
+
+.tool-picture-missing {
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
 .tool-saved {
   min-width: 0;
   overflow: hidden;

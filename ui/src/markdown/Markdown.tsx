@@ -3,6 +3,7 @@ import type { MouseEvent } from 'react';
 import { LONG_TEXT_CHARS, renderShort, sharedOffloader } from './engine.ts';
 import { targetFromAttrs } from './links.ts';
 import type { LinkTarget } from './links.ts';
+import { loadLocalImage } from './localImages.ts';
 import { diagramKind, renderDiagram, renderMath } from './mermaid.ts';
 import { StreamBlocks } from './blocks.ts';
 import { renderPlain, renderToHtml } from './render.ts';
@@ -115,6 +116,25 @@ function hydrateDiagrams(root: ParentNode, isCancelled: () => boolean): void {
         note.className = 'md-mermaid-message';
         note.textContent = error instanceof Error ? error.message : 'Diagram could not be rendered';
         el.prepend(note);
+      });
+  });
+}
+
+/** Pictures from disk: asked of the host by path, drawn when they arrive, a note when they cannot be. */
+function hydrateLocalImages(root: ParentNode, isCancelled: () => boolean): void {
+  root.querySelectorAll<HTMLImageElement>('img[data-md-local-src]:not([src])').forEach((img) => {
+    const path = img.dataset.mdLocalSrc ?? '';
+    loadLocalImage(path)
+      .then((url) => {
+        if (!isCancelled() && img.isConnected) img.src = url;
+      })
+      .catch(() => {
+        if (isCancelled() || !img.isConnected) return;
+        const note = document.createElement('span');
+        note.className = 'md-image-missing';
+        note.title = path;
+        note.textContent = `${img.alt || 'Picture'} (could not be shown)`;
+        img.replaceWith(note);
       });
   });
 }
@@ -269,6 +289,7 @@ function useIncremental(
       const resolve = embeds.current;
       if (resolve) hydrateEmbeds(f, resolve, isCancelled);
       hydrateMath(f, isCancelled);
+      hydrateLocalImages(f, isCancelled);
       if (interactive) {
         hydrateDiagrams(f, isCancelled);
         hydrateCopyButtons(f);
@@ -319,6 +340,7 @@ export function Markdown({
     const isCancelled = () => cancelled;
     if (resolveEmbed) hydrateEmbeds(root, resolveEmbed, isCancelled);
     hydrateMath(root, isCancelled);
+    hydrateLocalImages(root, isCancelled);
     if (interactive) hydrateDiagrams(root, isCancelled);
     if (interactive) hydrateCopyButtons(root);
     return () => {

@@ -76,6 +76,8 @@
 }
 
 .md-image { max-width: 100%; height: auto; }
+.md-image-local { max-height: 420px; border-radius: 6px; }
+.md-image-missing { color: var(--md-muted); font-size: 0.9em; }
 
 /* Highlighting (highlight.js token classes; the file viewer reuses them as CodeMirror marks) */
 .hljs-comment, .hljs-quote { color: var(--syn-comment); font-style: italic; }

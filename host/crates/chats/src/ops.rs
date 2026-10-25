@@ -621,6 +621,7 @@ pub(crate) mod tests {
             ("message_resend", OpClass::Maintenance),
             ("attachment_put", OpClass::Maintenance),
             ("attachment_get", OpClass::Blocking),
+            ("local_image_get", OpClass::Blocking),
             ("attachment_ref", OpClass::Maintenance),
             ("message_output_save", OpClass::Blocking),
             ("side_chat_resolve", OpClass::Maintenance),

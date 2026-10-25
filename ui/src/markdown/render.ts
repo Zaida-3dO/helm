@@ -11,6 +11,7 @@ import { splitFrontmatter } from './frontmatter.ts';
 import type { Property } from './frontmatter.ts';
 import { highlightCode } from './highlight.ts';
 import { classifyHref, isImageName, parseWikilink, targetAttrs } from './links.ts';
+import { localImagePath } from './localImages.ts';
 import { pathInCode, pathInProse, PROSE_PATH_RUN, trimProseRun } from './pathrefs.ts';
 import type { LinkTarget } from './links.ts';
 
@@ -216,10 +217,16 @@ md.use({
     },
 
     // Never an <img> with a remote or relative src: the app fetches nothing it was not asked to.
+    // (A local picture has no src at all until the host answers.)
     image(token: Tokens.Image) {
       if (SAFE_DATA_IMAGE.test(token.href)) {
         const title = token.title ? ` title="${escapeAttr(token.title)}"` : '';
         return `<img class="md-image" src="${escapeAttr(token.href)}" alt="${escapeAttr(token.text)}"${title}>`;
+      }
+      // A picture on this computer: marked with its path, and drawn once the host has sent it.
+      const local = localImagePath(token.href);
+      if (local) {
+        return `<img class="md-image md-image-local" data-md-local-src="${escapeAttr(local)}" alt="${escapeAttr(token.text)}">`;
       }
       const label = escapeHtml(token.text || token.href);
       const target = classifyHref(token.href);
