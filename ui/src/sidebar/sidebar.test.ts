@@ -408,7 +408,8 @@ test('dropping a chat before another sends the target row level in one call, wit
     undo,
     onError: (m: string) => calls.push(`error ${m}`),
     pops: { organize: async (a: unknown) => (calls.push(a), []) },
-    data: { mergeRows: () => undefined },
+    // Top level of g, newest first: c, a (so a is followed by nothing); b is the only child of p.
+    data: { mergeRows: () => undefined, getSnapshot: () => ({ rows: [row('a', 'g', { createdAt: 1 }), row('c', 'g', { createdAt: 3 }), row('b', 'g', { parentChatId: 'p', createdAt: 5 }), row('b2', 'g', { parentChatId: 'p', createdAt: 4 })] }) },
   } as unknown as ActionDeps);
   // Before a nested child of p, from the top level: it takes parent p.
   await act.reorderBefore(row('a', 'g'), 'k', { parentChatId: 'p', pinned: false });
@@ -423,7 +424,11 @@ test('dropping a chat before another sends the target row level in one call, wit
   ]);
   assert.equal(undo.size, 2);
   await act.undo();
-  assert.deepEqual(calls.at(-1), { chatId: 'b', groupProjectId: 'g', parentChatId: 'p', pinned: false });
+  // b sat before b2 under p: undo names that slot.
+  assert.deepEqual(calls.at(-1), { chatId: 'b', groupProjectId: 'g', parentChatId: 'p', pinned: false, beforeChatId: 'b2' });
+  await act.undo();
+  // a was the last top-level chat: undo sends it to the end.
+  assert.deepEqual(calls.at(-1), { chatId: 'a', groupProjectId: 'g', parentChatId: null, pinned: false, toEnd: true });
 });
 
 test('archiving after a stop retries only while the chat still counts as working', async () => {

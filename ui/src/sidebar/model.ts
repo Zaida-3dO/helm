@@ -63,6 +63,12 @@ export interface BuildOptions {
   itemLinks?: { refs: ReadonlyMap<string, ItemRef>; collapsed: ReadonlySet<string> };
 }
 
+/** The host's order for chats in one group: pinned first, then dragged position, then newest first.
+ *  Equal rows compare as 0, so a stable sort keeps the order they came in. */
+export function chatOrder(a: SidebarRow, b: SidebarRow): number {
+  return Number(b.pinned) - Number(a.pinned) || (a.position ?? Number.MAX_SAFE_INTEGER) - (b.position ?? Number.MAX_SAFE_INTEGER) || b.createdAt - a.createdAt;
+}
+
 /** A board project whose work is all finished on the board. A stale or archived one is handled
  *  by those rules instead, and a folder project never is. */
 export function isFinished(p: ProjectNode): boolean {
@@ -158,9 +164,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
   // The host's order within a group: pinned first, then by dragged position, then newest first. The
   // rows may have arrived in another order (a drag changes positions after they were loaded); equal
   // rows keep the order they came in.
-  for (const list of byGroup.values()) {
-    list.sort((a, b) => Number(b.pinned) - Number(a.pinned) || (a.position ?? Number.MAX_SAFE_INTEGER) - (b.position ?? Number.MAX_SAFE_INTEGER) || b.createdAt - a.createdAt || 0);
-  }
+  for (const list of byGroup.values()) list.sort(chatOrder);
   const selectedGroup = o.selectedChatId ? rows.find((r) => r.chatId === o.selectedChatId)?.groupProjectId : undefined;
   const { roots, kids } = projectChildren(projects);
   const byId = new Map(projects.map((p) => [p.id, p]));

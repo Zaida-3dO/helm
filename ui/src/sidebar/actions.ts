@@ -6,6 +6,7 @@ import type { Api } from '../api/client.ts';
 import type { ChatOps } from '../api/ops.ts';
 import type { ChatOrganizeArgs, ProjectNode, ProjectOps, SidebarRow } from '../api/projects.ts';
 import type { SidebarData } from './data.ts';
+import { chatOrder } from './model.ts';
 import { UndoStack, type UndoEntry } from './undo.ts';
 import { toast } from '../ui/toasts.ts';
 
@@ -111,7 +112,11 @@ export class SidebarActions {
   /** Drop `row` before another chat, at that chat's level: its group (when different), its parent
    *  chat and its pin state travel with the move, so the host reorders among true siblings. */
   reorderBefore(row: SidebarRow, beforeChatId: string, level: { parentChatId: string | null; pinned: boolean; groupProjectId?: string }): Promise<void> {
-    const back: ChatOrganizeArgs = { ...this.placement(row), pinned: row.pinned };
+    // Undo puts the chat back in its exact slot: before the sibling that followed it, or last.
+    const mine = (r: SidebarRow) => r.groupProjectId === row.groupProjectId && r.pinned === row.pinned && r.parentChatId === row.parentChatId && r.archived === row.archived;
+    const old = this.d.data.getSnapshot().rows.filter(mine).sort(chatOrder);
+    const next = old[old.findIndex((r) => r.chatId === row.chatId) + 1];
+    const back: ChatOrganizeArgs = { ...this.placement(row), pinned: row.pinned, ...(next ? { beforeChatId: next.chatId } : { toEnd: true }) };
     const forward: ChatOrganizeArgs = { chatId: row.chatId, parentChatId: level.parentChatId, pinned: level.pinned, beforeChatId, ...(level.groupProjectId ? { groupProjectId: level.groupProjectId } : {}) };
     const levelChanged = !!level.groupProjectId || level.parentChatId !== row.parentChatId || level.pinned !== row.pinned;
     return this.run(async () => {
