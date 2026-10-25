@@ -13,7 +13,7 @@ import { createPortal } from 'react-dom';
 import type { ChatOps } from '../api/ops.ts';
 import type { ChatRecord, ModelCatalogue } from '../api/types.ts';
 import { useBinding, useLayer } from '../ui/hooks.ts';
-import { IconCheck, IconChevronDown } from '../ui/icons.tsx';
+import { IconCheck, IconChevronDown, IconSearch } from '../ui/icons.tsx';
 import { layoutSize, nextIndex, pageZoom, placeBelow, unzoom, viewportAt } from '../ui/place.ts';
 import { commitPatch, effortLabel, FALLBACK_EFFORTS, filterRows, modelRows, stepEffort, triggerLabel } from './modelEffort.ts';
 
@@ -144,17 +144,20 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
                 <span>Model and effort</span>
                 <kbd>esc</kbd>
               </div>
-              <input
-                ref={search}
-                className="ui-picker-search"
-                placeholder="Find a model…"
-                aria-label="Find a model"
-                value={q}
-                onChange={(e) => {
-                  setQ(e.target.value);
-                  setActive(0);
-                }}
-              />
+              <div className="model-picker-searchbox">
+                <IconSearch size={13} />
+                <input
+                  ref={search}
+                  className="ui-picker-search"
+                  placeholder="Find a model…"
+                  aria-label="Find a model"
+                  value={q}
+                  onChange={(e) => {
+                    setQ(e.target.value);
+                    setActive(0);
+                  }}
+                />
+              </div>
               <div className="ui-picker-list" role="listbox" aria-label="Model">
                 {shown.length === 0 && <div className="ui-picker-empty">No matching models</div>}
                 {shown.map((o, i) => (

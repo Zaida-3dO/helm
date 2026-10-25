@@ -12,14 +12,17 @@ import { Editor, type EditorHandle } from './Editor.tsx';
 import { resolveKey, sendLabel, sendTooltip, stopTooltip, type KeyContext, type SendShortcut } from './keymap.ts';
 import { Button } from '../ui/controls.tsx';
 import { IconAttach, IconChat, IconFileText as IconFile, IconFolder, IconFolderPlus, IconX } from '../ui/icons.tsx';
+import { SetupBanner, useRuntimeProblems } from './SetupBanner.tsx';
+import { ContextStatus } from './ContextStatus.tsx';
 import { useShell } from '../shell/context.ts';
 import { addRef, dropLandsIn, parseFileDrop, roomLeft, type AttachedRef } from './refs.ts';
 import { ModelPicker } from './ModelPicker.tsx';
+import { DefaultStar } from './DefaultStar.tsx';
 import { PermissionChip } from './PermissionChip.tsx';
 import { orderPending, itemState } from './queue.ts';
-import { refusal, toBase64, type Attached } from './attachments.ts';
+import { bytesToBase64, isAnimated, refusal, stashSent, type Attached, type SentAttachments } from './attachments.ts';
 import { Recall } from './recall.ts';
-import { commandWithArgs, moveActive, skillMenu, skillQuery, type Skill } from './skills.ts';
+import { commandWithArgs, moveActive, SCOPE_LABEL, skillMenu, skillQuery, type Skill } from './skills.ts';
 import { accessoriesAt, accessorySide, collectSendContributions, mountComposer, type AccessoryContext } from './slots.ts';
 import './composer.css';
 // The dock items and banners above the box share the dock sheet (ChatView mounts this composer).
@@ -55,6 +58,12 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   const stopping = useRef(false);
   const behavior = thread?.sendBehavior ?? HOME_SEND_BEHAVIOR;
   const busy = isBusy(chat.status);
+  // Send waits while Claude Code cannot be found, and while the agent starts with nothing in flight.
+  const problems = useRuntimeProblems();
+  const starting = chat.status === 'starting' && pending.length === 0;
+  const blocked = problems.length > 0 || starting;
+  const blockedRef = useRef(blocked);
+  blockedRef.current = blocked;
   const ctx: KeyContext = useMemo(
     () => ({ sendShortcut, mode: behavior.mode, showChoices: behavior.showChoices }),
     [sendShortcut, behavior.mode, behavior.showChoices],
@@ -95,7 +104,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
     };
     registerSetText(insert);
     // composerApi(chatId).insert(...) reaches this composer (slots.ts).
-    return mountComposer(chat.id, { insert, focus: () => editor.current?.focus() });
+    return mountComposer(chat.id, { insert, focus: () => editor.current?.focus(), restore: (s) => restoreRef.current(s) });
   }, [registerSetText, saver, chat.id]);
 
   const newestQueued = () => orderPending(pending).filter((s) => itemState(s) === 'queued').at(-1);
@@ -118,8 +127,13 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
           continue;
         }
         try {
-          const r = await ops.attach(chat.id, f.name || 'image', f.type, await toBase64(f));
-          const a: Attached = { id: r.attachmentId, name: f.name || 'image', size: f.size, url: URL.createObjectURL(f) };
+          const bytes = new Uint8Array(await f.arrayBuffer());
+          if (isAnimated(f.type, bytes)) {
+            setError(`${f.name || 'This image'} is animated. Only still images can be pasted; attach an animation as a file with the paperclip.`);
+            continue;
+          }
+          const r = await ops.attach(chat.id, f.name || 'image', f.type, bytesToBase64(bytes));
+          const a: Attached = { id: r.attachmentId, name: f.name || 'image', size: f.size, url: URL.createObjectURL(f), file: f };
           attachedRef.current = [...attachedRef.current, a];
           setAttached(attachedRef.current);
         } catch (e) {
@@ -170,6 +184,19 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
     }
   };
   const full = roomLeft(attached.length, refs.length) === 0;
+  // A taken-back message (withdrawn, recovered or edited) gives its images and files back.
+  const restore = useCallback(
+    (sent: SentAttachments) => {
+      void addFiles(sent.files as File[]);
+      for (const kind of ['path', 'chat'] as const) {
+        const targets = sent.refs.filter((r) => r.kind === kind).map((r) => r.target);
+        if (targets.length) void addRefs(kind, targets);
+      }
+    },
+    [addFiles, addRefs],
+  );
+  const restoreRef = useRef(restore);
+  restoreRef.current = restore;
 
   // Drops: files from Explorer arrive as the host's `file_drop` event
   // with paths; a chat row dragged from the sidebar is read from the sidebar's drag markers.
@@ -234,6 +261,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       const text = editor.current?.getText() ?? '';
       const images = attachedRef.current;
       const sentRefs = refsRef.current;
+      if (blockedRef.current) return;
       setError(null);
       if (!text.trim() && images.length === 0 && sentRefs.length === 0) {
         // Empty-composer shortcuts: steer or send now the newest queued message.
@@ -245,10 +273,16 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       const token = saver.beginSend();
       try {
         const extra = collectSendContributions(chat.id);
-        await ops.send(chat.id, uid(), text, action, saver.revision, {
+        const submissionId = uid();
+        await ops.send(chat.id, submissionId, text, action, saver.revision, {
           origin: 'composer',
           context: extra.context,
           attachments: [...images.map((a) => a.id), ...sentRefs.map((r) => r.id)],
+        });
+        // Kept for a while, so taking the message back (withdraw, recover) restores its attachments.
+        stashSent(submissionId, {
+          files: images.flatMap((a) => (a.file ? [a.file] : [])),
+          refs: sentRefs.map((r) => ({ kind: r.kind === 'chat' ? ('chat' as const) : ('path' as const), target: r.target })),
         });
         images.forEach((a) => URL.revokeObjectURL(a.url));
         setAttached((list) => list.filter((a) => !images.includes(a)));
@@ -287,6 +321,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   const recaller = useRef(new Recall());
   const [draftText, setDraftText] = useState(chat.draft);
   const [skills, setSkills] = useState<Skill[]>([]);
+  const commands = useMemo(() => new Set(skills.map((s) => s.name.toLowerCase())), [skills]);
   const skillPrefix = skillQuery(draftText);
   const wantsSkills = skillPrefix !== null || commandWithArgs(draftText) !== null;
   useEffect(() => {
@@ -439,6 +474,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
           ))}
         </div>
       )}
+      <SetupBanner problems={problems} />
       {error && (
         <div className="composer-error error" data-testid="composer-error">
           {error}
@@ -468,6 +504,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
                   <span className="skill-name">/{s.name}</span>
                   {s.description && <span className="skill-desc">{s.description}</span>}
                 </span>
+                {s.scope && <span className="skill-scope">{SCOPE_LABEL[s.scope] ?? s.scope}</span>}
               </button>
             ))}
           </div>
@@ -485,12 +522,28 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
             )}
           </div>
         )}
+        {attached.length > 0 && (
+          <div className="composer-attachments" data-testid="composer-attachments">
+            {attached.map((a) => (
+              <span key={a.id} className="attachment-thumb" title={a.name}>
+                <img src={a.url} alt={a.name} />
+                <span className="attachment-thumb-name">{a.name}</span>
+                <button type="button" className="attachment-thumb-x" aria-label={`Remove ${a.name}`} onClick={() => removeAttached(a.id)}>
+                  <IconX size={11} strokeWidth={2.4} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         {refs.length > 0 && (
           <div className="composer-refs" data-testid="composer-refs">
             {refs.map((r) => (
               <span key={r.id} className={`composer-ref composer-ref-${r.kind}`} title={r.kind === 'chat' ? r.name : r.target} data-kind={r.kind}>
-                {r.kind === 'chat' ? <IconChat size={13} /> : r.kind === 'folder' ? <IconFolder size={13} /> : <IconFile size={13} />}
-                <span className="composer-ref-name">{r.name}</span>
+                <span className="composer-ref-icon">{r.kind === 'chat' ? <IconChat size={14} /> : r.kind === 'folder' ? <IconFolder size={14} /> : <IconFile size={14} />}</span>
+                <span className="composer-ref-text">
+                  <span className="composer-ref-name">{r.name}</span>
+                  <span className="composer-ref-kind">{r.kind === 'chat' ? 'Chat reference' : r.kind === 'folder' ? 'Folder reference' : 'File reference'}</span>
+                </span>
                 <button
                   type="button"
                   className="composer-ref-x"
@@ -500,24 +553,13 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
                     setRefs(refsRef.current);
                   }}
                 >
-                  <IconX size={11} />
+                  <IconX size={14} />
                 </button>
               </span>
             ))}
           </div>
         )}
-        {attached.length > 0 && (
-          <div className="composer-attachments" data-testid="composer-attachments">
-            {attached.map((a) => (
-              <span key={a.id} className="attachment-thumb" title={a.name}>
-                <img src={a.url} alt={a.name} />
-                <button type="button" className="small link" aria-label={`Remove ${a.name}`} onClick={() => removeAttached(a.id)}>
-                  ×
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
+        <ContextStatus chatId={chat.id} />
         <Editor
           key={chat.id}
           initialText={chat.draft}
@@ -526,10 +568,12 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
           onKey={onKey}
           handle={editor}
           ghost={ghost}
+          commands={commands}
         />
         <div className="composer-bar">
           <div className="composer-selects">
             <ModelPicker chat={chat} ops={ops} />
+            <DefaultStar chat={chat} />
             <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} busy={busy} ops={ops} />
             {toolbarStart.map((a) => (
               <span key={a.id} className="composer-accessory" data-accessory={a.id}>
@@ -562,8 +606,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
               variant="send"
               label={sendLabel(busy, behavior.mode)}
               data-testid="send"
-              disabled={empty && attached.length === 0 && refs.length === 0}
-              title={sendTooltip(ctx, busy)}
+              disabled={blocked || (empty && attached.length === 0 && refs.length === 0)}
+              title={problems.length > 0 ? 'Connect Claude Code to send' : starting ? 'Claude Code is starting' : sendTooltip(ctx, busy)}
               onClick={() => void send('default')}
             />
           </div>

@@ -134,8 +134,8 @@ test('queue: an accepted steer is Pending with Withdraw; queued follow-ups reord
     ],
   );
   assert.deepEqual(v[0]!.actions, ['withdraw']);
-  assert.deepEqual(v[1]!.actions, ['steerNow', 'sendNow', 'move_down']);
-  assert.deepEqual(v[2]!.actions, ['steerNow', 'sendNow', 'move_up']);
+  assert.deepEqual(v[1]!.actions, ['edit', 'steerNow', 'sendNow', 'move_down']);
+  assert.deepEqual(v[2]!.actions, ['edit', 'steerNow', 'sendNow', 'move_up']);
   assert.deepEqual(v[3]!.actions, ['recover']);
   assert.equal(movePosition(pending, 'q2', -1), 1);
   assert.equal(movePosition(pending, 'q1', -1), null);
@@ -146,7 +146,7 @@ test('queue: Withdraw is hidden when the worker cannot withdraw; idle offers no 
   const ctx = { running: false, showChoices: true, capabilities: { withdraw: false, deliverNow: true, stopTool: false, compact: false } };
   const v = queueView(pending, ctx);
   assert.deepEqual(v[0]!.actions, []);
-  assert.deepEqual(v[1]!.actions, []);
+  assert.deepEqual(v[1]!.actions, ['edit']);
 });
 
 test('formatting keys wrap, unwrap, and leave the caret between empty markers', () => {
@@ -170,6 +170,7 @@ test('queue pills: tone follows the state, and a steer in queue mode reads Queue
   const caps = { withdraw: true, deliverNow: true, stopTool: false, compact: false };
   const asap = queueView(pending, { running: true, showChoices: true, capabilities: caps, sendMode: 'asap' });
   assert.deepEqual(asap.map((i) => [i.submission.id, i.label, i.tone]), [['s1', 'Pending', 'muted'], ['q1', 'Queued', 'amber'], ['r1', 'Not delivered', 'error']]);
+  assert.deepEqual(asap[1]!.actions, ['edit', 'sendNow'], 'ASAP offers only send now');
   const queued = queueView(pending, { running: true, showChoices: true, capabilities: caps, sendMode: 'queue' });
   assert.deepEqual([queued[0]!.label, queued[0]!.tone], ['Queued · Steer', 'steer']);
 });
@@ -198,4 +199,8 @@ test('live styling keeps every character and styles the Markdown it finds', () =
   assert.match(styled(2, 'gone')!, /line-through/);
   assert.equal(lines[4]!.length, 1, 'inside a fenced block nothing is parsed');
   assert.equal(lines[6]!.length, 1, 'a lone star and snake_case are plain text');
+  const chip = liveRuns('/review the diff, not /review', new Set(['review']))[0]!;
+  assert.match(chip[0]!.style, /background/, 'a leading known command is a chip');
+  assert.equal(chip.length, 2, 'only the leading one');
+  assert.equal(liveRuns('/nope x', new Set(['review']))[0]!.length, 1);
 });

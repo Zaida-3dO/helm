@@ -1040,17 +1040,6 @@ button.danger {
   gap: 6px;
 }
 
-.ghost-hint {
-  font-size: 12px;
-  padding: 0 4px;
-}
-.ghost-hint kbd {
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  padding: 0 3px;
-  font-size: 10px;
-}
-
 @media (max-width: 1000px) {
   .transcript {
     padding-left: 25px;

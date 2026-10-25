@@ -4,7 +4,11 @@
 export interface Skill {
   name: string;
   description: string;
+  /** Where the skill comes from, when the host says: shown at the right of its row. */
+  scope?: string;
 }
+
+export const SCOPE_LABEL: Record<string, string> = { personal: 'Personal skill', project: 'Project skill', plugin: 'Plugin skill', builtin: 'Command' };
 
 /** The typed prefix when the draft is a bare "/word" at its start, else null. */
 export function skillQuery(text: string): string | null {

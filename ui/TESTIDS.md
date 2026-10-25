@@ -46,7 +46,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `queue-item` | One pending or queued message under the transcript | `data-state` (`pending` `queued` `sending` `uncertain` `failed`), `data-submission` |
 | `queue-pending` | The "Pending" label of an unread asap steer | |
 | `queue-withdraw` | Withdraw on a pending steer (only when the worker can withdraw) | |
-| `queue-steer-now` / `queue-send-now` / `queue-recover` | Queue item actions | |
+| `queue-edit` / `queue-steer-now` / `queue-send-now` / `queue-recover` | Queue item actions | |
 | `queue-resume` | Resume on a held queue (after a restart) | |
 | `background-chip` | Background-tasks chip in the activity dock | `data-count` = number of tasks |
 | `activity-dock` | The live activity dock | |
@@ -62,6 +62,9 @@ breaks those checks, so change them only together with the checks. Everything el
 | `permission-chip` | Permission-mode chip (wraps `permission-picker`, the picker trigger) | `data-mode` = the live mode, empty when none reported; `data-picked` = a pick not yet live |
 | `attach-files` / `attach-folder` | The composer's Attach files (native multi-file dialog) and Attach a folder buttons | disabled at 20 attachments |
 | `composer-refs` | The tray of file, folder and chat chips in the composer box; each chip is `.composer-ref` | `data-kind` = `file`, `folder` or `chat` |
+| `composer-setup` / `composer-setup-details` / `composer-setup-open` | The setup card above the box while Claude Code cannot be found (Send is disabled), its details toggle and its Set up button | |
+| `composer-context-status` | The "Side panel context on." line inside the box | |
+| `make-default` | The star that makes the chat's model and effort the default for new chats | `aria-pressed` while it already is |
 | `composer-drop` | The drop target shown over the composer box while files (from Explorer) or a sidebar chat row are dragged over it | the box carries `data-drop` = `files` or `chat` |
 | `settings-send-key` | Settings → Chat: the Send message with picker (Ctrl+Enter or Enter) | |
 | `jump-latest` | "Jump to latest" button | |

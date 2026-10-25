@@ -17,7 +17,7 @@ export interface QueueItemView {
 
 export type QueueTone = 'amber' | 'steer' | 'muted' | 'error';
 
-export type QueueActionName = 'withdraw' | 'steerNow' | 'sendNow' | 'recover' | 'move_up' | 'move_down';
+export type QueueActionName = 'withdraw' | 'edit' | 'steerNow' | 'sendNow' | 'recover' | 'move_up' | 'move_down';
 
 export interface QueueContext {
   running: boolean;
@@ -66,7 +66,10 @@ export function queueView(pending: Submission[], ctx: QueueContext): QueueItemVi
     const actions: QueueActionName[] = [];
     if (state === 'pending' && s.state === 'accepted' && ctx.capabilities.withdraw) actions.push('withdraw');
     if (state === 'queued') {
-      if (ctx.running && ctx.showChoices) actions.push('steerNow', 'sendNow');
+      // Edit pulls the text (and its attachments) back into the draft.
+      actions.push('edit');
+      // In ASAP mode a waiting follow-up was queued on purpose, so only "send now" makes sense.
+      if (ctx.running && ctx.showChoices) actions.push(...(ctx.sendMode === 'asap' ? (['sendNow'] as const) : (['steerNow', 'sendNow'] as const)));
       const i = queuedIds.indexOf(s.id);
       if (ctx.running && i > 0) actions.push('move_up');
       if (ctx.running && i >= 0 && i < queuedIds.length - 1) actions.push('move_down');

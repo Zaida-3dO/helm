@@ -147,10 +147,6 @@
   overflow-y: auto;
 }
 
-.composer-dock .ghost-hint {
-  padding: 0 13px 4px;
-}
-
 .composer-dock .composer-error {
   font-size: 11px;
   padding: 0 4px 6px;
@@ -525,4 +521,199 @@
   font-size: 10px;
   color: var(--muted);
   vertical-align: 1px;
+}
+
+/* Setup card above the box. */
+.composer-dock .composer-setup {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning-text, #b45309) 40%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--warning-text, #b45309) 7%, var(--surface));
+  font-size: 12px;
+}
+.composer-setup > .ui-icon {
+  margin-top: 1px;
+  color: var(--warning-text, #b45309);
+}
+.composer-setup-body {
+  flex: 1;
+  min-width: 0;
+}
+.composer-setup-title {
+  font-weight: 600;
+}
+.composer-setup-sub {
+  margin-top: 1px;
+  color: var(--secondary);
+  font-size: 11px;
+}
+.composer-setup-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+}
+.composer-setup-toggle:hover {
+  color: var(--text);
+}
+.composer-setup-toggle .ui-icon {
+  transition: rotate 120ms ease;
+}
+.composer-setup-toggle .ui-icon.open {
+  rotate: 90deg;
+}
+.composer-setup-list {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  color: var(--secondary);
+  font-size: 11px;
+}
+
+/* The status line inside the box. */
+.composer-dock .composer-context-status {
+  padding: 4px 13px 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* Image tiles first: a picture, its name under it, a round remove badge on the corner. */
+.composer-dock .composer-attachments {
+  padding: 9px 10px 4px;
+  gap: 10px;
+}
+.composer-dock .attachment-thumb {
+  flex-direction: column;
+  width: 78px;
+  padding: 3px 3px 2px;
+  border-radius: 8px;
+}
+.composer-dock .attachment-thumb img {
+  width: 70px;
+  height: 56px;
+  border-radius: 5px;
+}
+.attachment-thumb-name {
+  width: 100%;
+  overflow: hidden;
+  padding: 2px 2px 0;
+  color: var(--muted);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-dock .attachment-thumb-x {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--elev-1);
+}
+.composer-dock .attachment-thumb-x:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+/* Two-line reference chips: an icon tile, the name over its kind, a larger remove button. */
+.composer-dock .composer-ref {
+  gap: 8px;
+  max-width: 280px;
+  padding: 5px 5px 5px 7px;
+  border-radius: 9px;
+}
+.composer-ref-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--surface-alt);
+  color: var(--muted);
+}
+.composer-dock .composer-ref-chat .composer-ref-icon {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+}
+.composer-ref-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+.composer-dock .composer-ref-name {
+  max-width: 190px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.composer-ref-kind {
+  color: var(--muted);
+  font-size: 10px;
+}
+.composer-dock .composer-ref-x {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+
+/* The model picker's search: a soft box with a magnifier, no heavy focus ring. */
+.model-picker-searchbox {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.model-picker-searchbox > .ui-icon {
+  position: absolute;
+  left: 18px;
+  color: var(--muted);
+  pointer-events: none;
+}
+.model-picker-searchbox .ui-picker-search {
+  flex: 1;
+  min-width: 0;
+  padding-left: 30px;
+  border-color: transparent;
+  background: var(--surface-alt);
+  outline: none;
+}
+.model-picker-searchbox .ui-picker-search:focus,
+.model-picker-searchbox .ui-picker-search:focus-visible {
+  border-color: var(--line-strong);
+  outline: none;
+  box-shadow: none;
+}
+
+/* The make-default star after the model control. */
+.composer-dock .composer-default-star {
+  width: 24px;
+  height: 24px;
+  color: var(--muted);
+}
+.composer-dock .composer-default-star.on {
+  color: var(--accent);
+}
+.skill-scope {
+  flex: none;
+  align-self: center;
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
 }

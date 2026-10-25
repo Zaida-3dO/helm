@@ -3,7 +3,7 @@
 // between an empty marker pair removes both markers; undo history is per draft (the editor is
 // keyed by chat, so each chat gets its own history).
 
-import { useEffect, useImperativeHandle, useState, type ReactNode, type Ref } from 'react';
+import { useEffect, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
 import { LexicalComposer } from '@lexical/react/LexicalComposer';
 import { PlainTextPlugin } from '@lexical/react/LexicalPlainTextPlugin';
 import { ContentEditable } from '@lexical/react/LexicalContentEditable';
@@ -18,6 +18,8 @@ import {
   $getRoot,
   $getSelection,
   $isLineBreakNode,
+  $isTabNode,
+  $createTabNode,
   $isRangeSelection,
   $isTextNode,
   $setSelection,
@@ -50,18 +52,24 @@ export interface EditorProps {
   handle: Ref<EditorHandle>;
   /** Muted text drawn straight after the draft's end, while the caret sits there. */
   ghost?: { base: string; completion: string } | null;
+  /** Names of the commands and skills the CLI knows; a draft that starts with one shows it as a chip. */
+  commands?: ReadonlySet<string>;
 }
 
-/** Drafts longer than this are left unstyled: styling re-reads the whole draft on every key. */
+/** Drafts longer than this are drawn plain: styling re-reads the whole draft on every key. */
 const STYLE_LIMIT = 20_000;
 
-type Piece = { br: true } | { br?: false; text: string; style: string };
+type Piece = { br: true } | { br?: false; tab?: boolean; text: string; style: string };
 
-const desiredPieces = (text: string): Piece[] => {
+const desiredPieces = (text: string, commands?: ReadonlySet<string>): Piece[] => {
   const out: Piece[] = [];
-  liveRuns(text).forEach((runs, i) => {
+  const lines = text.length > STYLE_LIMIT ? text.split('\n').map((t) => (t ? [{ text: t, style: '' }] : [])) : liveRuns(text, commands);
+  lines.forEach((runs, i) => {
     if (i > 0) out.push({ br: true });
-    for (const r of runs) out.push({ text: r.text, style: r.style });
+    for (const r of runs) {
+      // A tab is its own node, so the editor keeps handling it as a tab.
+      r.text.split(/(\t)/).forEach((part) => part && out.push({ text: part, style: r.style, tab: part === '\t' }));
+    }
   });
   return out;
 };
@@ -87,17 +95,16 @@ function offsetIn(p: ParagraphNode, nodeKey: string, offset: number, isElement: 
  * and their styles change; the characters (and so the draft) do not, and the selection is put back
  * at the same character offsets.
  */
-function restyle(p: ParagraphNode) {
-  const text = p.getTextContent();
-  if (text.length > STYLE_LIMIT) return;
-  const want = desiredPieces(text);
+function restyle(p: ParagraphNode, commands?: ReadonlySet<string>) {
+  const want = desiredPieces(p.getTextContent(), commands);
   const have = p.getChildren();
   const same =
     have.length === want.length &&
     have.every((k, i) => {
       const w = want[i]!;
       if (w.br) return $isLineBreakNode(k);
-      return $isTextNode(k) && k.getTextContent() === w.text && k.getStyle() === w.style && k.getMode() === 'normal';
+      if (!$isTextNode(k) || k.getTextContent() !== w.text || k.getStyle() !== w.style) return false;
+      return w.tab ? $isTabNode(k) : !$isTabNode(k) && k.getMode() === 'normal';
     });
   if (same) return;
 
@@ -111,7 +118,7 @@ function restyle(p: ParagraphNode) {
 
   const made: LexicalNode[] = want.map((w) => {
     if (w.br) return $createLineBreakNode();
-    const t = $createTextNode(w.text);
+    const t = w.tab ? $createTabNode() : $createTextNode(w.text);
     if (w.style) t.setStyle(w.style);
     return t;
   });
@@ -195,20 +202,28 @@ function Bridge({ onKey, handle }: Pick<EditorProps, 'onKey' | 'handle'>) {
 }
 
 /** Live styling for the editor's paragraphs. */
-function LiveStyle() {
+function LiveStyle({ commands }: { commands?: ReadonlySet<string> }) {
   const [editor] = useLexicalComposerContext();
+  const known = useRef(commands);
+  known.current = commands;
   useEffect(() => {
     // Element transforms only fire for an element marked dirty itself, and typing marks only
     // the text node, so the text and line-break transforms find the paragraph.
     const run = (n: LexicalNode) => {
       const p = n.getParent();
-      if (p instanceof ParagraphNode && !editor.isComposing()) restyle(p);
+      if (p instanceof ParagraphNode && !editor.isComposing()) restyle(p, known.current);
     };
-    const off = [editor.registerNodeTransform(TextNode, run), editor.registerNodeTransform(LineBreakNode, run), editor.registerNodeTransform(ParagraphNode, (p) => !editor.isComposing() && restyle(p))];
-    // Style the initial draft too: the transform only sees nodes marked dirty.
-    editor.update(() => $getRoot().getChildren().forEach((c) => c instanceof ParagraphNode && restyle(c)));
+    const off = [
+      editor.registerNodeTransform(TextNode, run),
+      editor.registerNodeTransform(LineBreakNode, run),
+      editor.registerNodeTransform(ParagraphNode, (p) => !editor.isComposing() && restyle(p, known.current)),
+    ];
     return () => off.forEach((f) => f());
   }, [editor]);
+  // A new command list restyles the draft; merged into the last undo step so it is not one of its own.
+  useEffect(() => {
+    editor.update(() => $getRoot().getChildren().forEach((c) => c instanceof ParagraphNode && restyle(c, commands)), { tag: 'history-merge' });
+  }, [editor, commands]);
   return null;
 }
 
@@ -312,11 +327,15 @@ function markupKey(editor: LexicalEditor, e: KeyboardEvent): boolean {
   return false;
 }
 
-export function Editor({ initialText, placeholder, onChange, onKey, handle, ghost }: EditorProps) {
+export function Editor({ initialText, placeholder, onChange, onKey, handle, ghost, commands }: EditorProps) {
   const config = {
     namespace: 'helm-composer',
     onError: (e: Error) => console.error(e),
-    editorState: () => $setText(initialText),
+    editorState: () => {
+      $setText(initialText);
+      // Styled before the first paint and before history starts, so Undo never lands on unstyled text.
+      $getRoot().getChildren().forEach((c) => c instanceof ParagraphNode && restyle(c, commands));
+    },
     theme: { paragraph: 'composer-p' },
   };
   return (
@@ -332,7 +351,7 @@ export function Editor({ initialText, placeholder, onChange, onKey, handle, ghos
           ignoreSelectionChange
           onChange={(state: EditorState) => onChange(state.read(() => $getRoot().getTextContent()))}
         />
-        <LiveStyle />
+        <LiveStyle commands={commands} />
         <Bridge onKey={onKey} handle={handle} />
         {ghost && <Ghost ghost={ghost} />}
       </div>

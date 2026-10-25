@@ -11,6 +11,7 @@
 
 import type { ReactNode } from 'react';
 import type { ChatRecord, ThreadState } from '../api/types.ts';
+import type { SentAttachments } from './attachments.ts';
 
 export interface AccessoryContext {
   chat: ChatRecord;
@@ -40,7 +41,13 @@ export type SendContributor = (chatId: string) => SendContribution | undefined;
 
 const accessories: ComposerAccessory[] = [];
 const contributors: SendContributor[] = [];
-const mounted = new Map<string, { insert: (text: string) => void; focus: () => void }>();
+interface MountedComposer {
+  insert: (text: string) => void;
+  focus: () => void;
+  /** Attach again what a taken-back message carried. */
+  restore?: (sent: SentAttachments) => void;
+}
+const mounted = new Map<string, MountedComposer>();
 
 export function registerComposerAccessory(a: ComposerAccessory): () => void {
   const i = accessories.findIndex((x) => x.id === a.id);
@@ -85,7 +92,7 @@ export function collectSendContributions(chatId: string): SendContribution {
 }
 
 /** Called by the composer when it mounts for a chat; returns the unmount. */
-export function mountComposer(chatId: string, handle: { insert: (text: string) => void; focus: () => void }): () => void {
+export function mountComposer(chatId: string, handle: MountedComposer): () => void {
   mounted.set(chatId, handle);
   return () => {
     if (mounted.get(chatId) === handle) mounted.delete(chatId);
@@ -99,6 +106,13 @@ export function composerApi(chatId: string) {
       const h = mounted.get(chatId);
       if (!h) return false;
       h.insert(text);
+      return true;
+    },
+    /** Put a taken-back message's images and files into the composer again. */
+    restore(sent: SentAttachments): boolean {
+      const h = mounted.get(chatId);
+      if (!h?.restore) return false;
+      h.restore(sent);
       return true;
     },
     focus(): boolean {

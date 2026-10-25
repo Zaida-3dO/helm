@@ -25,6 +25,7 @@ export interface StyledRun {
 const MARKER = 'color:var(--muted)';
 const MONO = 'font-family:var(--font-mono,monospace);font-size:.93em';
 const CODE = `${MONO};background:var(--surface-alt);border-radius:4px`;
+const CHIP = 'background:color-mix(in srgb, var(--accent) 12%, transparent);border-radius:5px;font-weight:550';
 const HEADING = ['font-size:1.32em', 'font-size:1.2em', 'font-size:1.1em', 'font-size:1.04em', 'font-size:1em', 'font-size:1em'];
 
 const INLINE =
@@ -72,9 +73,9 @@ function inlineRuns(text: string, base: string, runs: StyledRun[]) {
 }
 
 /** Every line of `text` as styled runs. Joining each line's runs gives the line back exactly. */
-export function liveRuns(text: string): StyledRun[][] {
+export function liveRuns(text: string, commands?: ReadonlySet<string>): StyledRun[][] {
   let fenced = false;
-  return text.split('\n').map((line) => {
+  return text.split('\n').map((line, n) => {
     const runs: StyledRun[] = [];
     if (/^\s*(```|~~~)/.test(line)) {
       fenced = !fenced;
@@ -104,6 +105,13 @@ export function liveRuns(text: string): StyledRun[][] {
     if (quote) {
       push(runs, quote[1]!, MARKER);
       inlineRuns(quote[2]!, 'color:var(--secondary)', runs);
+      return runs;
+    }
+    // A draft that opens with a known command or skill shows it as a chip.
+    const command = n === 0 && commands ? /^\/([A-Za-z0-9_:-]+)(?=\s|$)/.exec(line) : null;
+    if (command && commands!.has(command[1]!.toLowerCase())) {
+      push(runs, command[0], CHIP);
+      inlineRuns(line.slice(command[0].length), '', runs);
       return runs;
     }
     inlineRuns(line, '', runs);

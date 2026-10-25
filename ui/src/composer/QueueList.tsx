@@ -8,6 +8,8 @@ import type { Submission, ThreadState } from '../api/types.ts';
 import { HOME_SEND_BEHAVIOR } from '../api/types.ts';
 import { Glyph } from '../transcript/icons.tsx';
 import { dropPosition, movePosition, queueView } from './queue.ts';
+import { takeSent } from './attachments.ts';
+import { composerApi } from './slots.ts';
 
 export interface QueueListProps {
   pending: Submission[];
@@ -32,8 +34,16 @@ export function QueueList({ pending, thread, running, ops, chatId }: QueueListPr
 
   // Withdraw and Recover: the host moves the text into the stored draft and sends a `chat` event
   // with the newer draft revision, which the composer picks up.
+  // A taken-back message also gives its images and files back to the composer.
   const act = (s: Submission, action: 'withdraw' | 'steerNow' | 'sendNow' | 'recover') =>
-    ops.submissionAction(s.id, action).catch(() => undefined);
+    ops
+      .submissionAction(s.id, action)
+      .then(() => {
+        if (action !== 'withdraw' && action !== 'recover') return;
+        const sent = takeSent(s.id);
+        if (sent) composerApi(chatId).restore(sent);
+      })
+      .catch(() => undefined);
 
   const move = (s: Submission, delta: -1 | 1) => {
     const pos = movePosition(pending, s.id, delta);
@@ -107,6 +117,11 @@ export function QueueList({ pending, thread, running, ops, chatId }: QueueListPr
               {actions.includes('withdraw') && (
                 <button type="button" className="pill-btn" data-testid="queue-withdraw" onMouseDown={(e) => e.preventDefault()} onClick={() => void act(s, 'withdraw')}>
                   Withdraw
+                </button>
+              )}
+              {actions.includes('edit') && (
+                <button type="button" className="pill-btn" data-testid="queue-edit" title="Move the text back to the composer to change it" onMouseDown={(e) => e.preventDefault()} onClick={() => void act(s, 'recover')}>
+                  Edit
                 </button>
               )}
               {actions.includes('steerNow') && (
