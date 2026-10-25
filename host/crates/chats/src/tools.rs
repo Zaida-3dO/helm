@@ -372,7 +372,7 @@ fn serving_telegram_in(db: &Database, chat: &str) -> bool {
                     AND COALESCE((SELECT m.origin FROM submissions s
                          LEFT JOIN submission_meta m ON m.submission_id = s.id
                          WHERE s.chat_id = c.id
-                           AND s.state IN ('dispatching', 'accepted', 'delivered', 'complete')
+                           AND s.state IN ('dispatching', 'accepted', 'delivered')
                          ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1), '') = 'telegram'
              FROM chats c WHERE c.id = ?1",
             [chat],
@@ -993,6 +993,8 @@ mod tests {
             ("running", "typed", "delivered", false),
             ("running", "other_chat", "delivered", false),
             ("idle", "telegram", "complete", false),
+            // A turn the agent started by itself after the Telegram one had settled.
+            ("running", "telegram", "complete", false),
         ]
         .into_iter()
         .enumerate()

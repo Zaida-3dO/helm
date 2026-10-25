@@ -109,6 +109,9 @@ approval.
   removes the buttons. A tap is the only way to answer an ask: a text reply never is. The hub
   checks only the Telegram side (who tapped, where, and that the ask still waits); Helm checks the
   rest. The asks are in memory too.
+  - **With a shared bot** (`HUB_TELEGRAM_RECEIVE=off`) the taps come from the other service's
+    forwarder, and the hub can only trust what it posts: who tapped and which button. Approving
+    from Telegram then trusts that forwarder as much as the bot's own token.
 
 ### Receiving updates: polling or a shared bot
 

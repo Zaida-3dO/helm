@@ -380,10 +380,11 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
 }
 
 /// What one look found: the away rows (`None`: not away, or alerts off), the requests an ask
-/// could answer (`None`: approving from Telegram is off) and the Telegram chat.
+/// could answer (`None`: approving from Telegram is off) and the Telegram chat. The inner
+/// `None`s mean the attention read failed: no look at all, not "nothing waits".
 struct Look {
     rows: Option<Option<Vec<AttentionRow>>>,
-    waiting: Option<Vec<approve::Waiting>>,
+    waiting: Option<Option<Vec<approve::Waiting>>>,
     tg_chat: Option<String>,
 }
 
@@ -397,8 +398,9 @@ fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, dir: &Path) -> Look {
     // A failed read is no look at all, not "nothing waits".
     let rows = (away && policy.away_alerts).then(|| summary.as_ref().map(alertable));
     let waiting = policy.approvals.then(|| {
+        let summary = summary.as_ref()?;
         let mut out = vec![];
-        for r in summary.iter().flat_map(|a| &a.needs_you) {
+        for r in &summary.needs_you {
             let here = away || tg_chat.as_deref() == Some(r.chat_id.as_str());
             if !here || !matches!(r.kind, AttentionKind::Approval | AttentionKind::Plan) {
                 continue;
@@ -415,7 +417,7 @@ fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, dir: &Path) -> Look {
                 });
             }
         }
-        out
+        Some(out)
     });
     Look {
         rows,
@@ -447,7 +449,9 @@ pub fn watch_away(
             let online = line.state() == LineState::Online;
             // A line that went away may have taken the hub's buttons with it: ask afresh.
             if online && !was_online {
-                sink.asks.clear(false);
+                for id in sink.asks.clear(false) {
+                    line.telegram_ask_done(&id, "Asked again below.");
+                }
             }
             was_online = online;
             match &found.waiting {
@@ -459,7 +463,7 @@ pub fn watch_away(
                         );
                     }
                 }
-                Some(waiting) if online => {
+                Some(Some(waiting)) if online => {
                     let step = sink.asks.step(waiting, approve::new_id);
                     for (id, text, options) in step.ask {
                         if !line.telegram_ask(&id, &text, &options) {
@@ -480,6 +484,22 @@ pub fn watch_away(
             let (Some(rows), true) = (rows, online) else {
                 continue;
             };
+            // A request asked with buttons is not alerted as well.
+            let asked: HashSet<&str> = match &found.waiting {
+                Some(Some(w)) => w
+                    .iter()
+                    .filter(|w| approve::askable(&w.interaction))
+                    .map(|w| w.chat_id.as_str())
+                    .collect(),
+                _ => HashSet::new(),
+            };
+            let rows: Vec<AttentionRow> = rows
+                .into_iter()
+                .filter(|r| {
+                    !(matches!(r.kind, AttentionKind::Approval | AttentionKind::Plan)
+                        && asked.contains(r.chat_id.as_str()))
+                })
+                .collect();
             if let Some(alert) = away.step(&rows, found.tg_chat.as_deref()) {
                 // Alerts share the chats' hourly cap; one not sent is tried again next look.
                 if BUDGET.take(helm_core::now_ms()) && line.telegram_notify(&alert.text) {

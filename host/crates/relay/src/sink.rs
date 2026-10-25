@@ -773,18 +773,21 @@ impl TelegramSink for ChatSink {
             let Some(up) = self.up.get().cloned() else {
                 return;
             };
-            let nothing = "That request is no longer waiting, so nothing was answered.";
             let Some(ask) = self.asks.take(&id, index) else {
-                up.notify(nothing);
+                up.notify("That request is no longer waiting, so your tap was not used.");
                 return;
             };
             let label = ask.options[index].clone();
+            let nothing =
+                format!("Your \"{label}\" was not used: that request is no longer waiting.");
             if !telegram::load_approvals(&telegram::policy_path(&self.profile_dir)) {
-                up.notify("Approving from Telegram is off in Helm, so nothing was answered.");
+                up.notify(&format!(
+                    "Your \"{label}\" was not used: approving from Telegram is off in Helm."
+                ));
                 return;
             }
             let Ok(c) = self.ctx() else {
-                up.notify(nothing);
+                up.notify(&nothing);
                 return;
             };
             if let Some(question) = &ask.question {
@@ -818,7 +821,7 @@ impl TelegramSink for ChatSink {
                     .any(|i| i.id == ask.request_id && crate::approve::askable(i))
             });
             if !still {
-                up.notify(nothing);
+                up.notify(&nothing);
                 return;
             }
             match c
@@ -834,7 +837,10 @@ impl TelegramSink for ChatSink {
                     helm_chats::types::ContextKind::Telegram,
                     &format!("Answered from Telegram: {label}"),
                 ),
-                Err(e) => up.notify(&format!("Helm could not answer it: {}", e.message)),
+                Err(e) => up.notify(&format!(
+                    "Your \"{label}\" was not used: Helm could not answer it ({}).",
+                    e.message
+                )),
             }
         })
     }

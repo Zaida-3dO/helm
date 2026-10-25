@@ -9,6 +9,9 @@
 //!   once, and only while that request still waits. Text from Telegram never approves anything.
 //! - **What is sent.** Permission prompts and plan approvals. Folder-trust prompts and secret
 //!   inputs never are; questions are answered by replying in the Telegram chat.
+//! - **Nothing allowed unseen.** When the details are too long to show in full on the phone, the
+//!   ask offers only the options that allow nothing (Deny, Stop turn, Keep planning) and says to
+//!   open Helm to allow it.
 //! - **Kept in step.** A request answered in Helm, withdrawn or ended has its buttons taken down.
 //!   The asks live in memory: after a restart a tap on an old one says it is no longer waiting.
 //! - **A chat may ask too.** `app_telegram_ask` puts a chat's own question to the user with
@@ -31,6 +34,8 @@ pub struct Ask {
     pub method: InteractionMethod,
     pub plan: bool,
     pub options: Vec<String>,
+    /// For a yes/no confirmation: the label that answers yes (it may not be among `options`).
+    pub yes: Option<String>,
     /// A chat's own question (`app_telegram_ask`); `None` for a waiting request.
     pub question: Option<String>,
 }
@@ -90,8 +95,24 @@ fn cut(s: &str, max: usize) -> String {
     }
 }
 
-/// The ask's text: which chat, what it wants, and a short look at the details.
-pub fn ask_text(chat_title: &str, i: &Interaction) -> String {
+/// The options that allow nothing, offered when the details could not all be shown.
+fn refusing(options: &[String]) -> Vec<String> {
+    options
+        .iter()
+        .filter(|o| {
+            let l = o.to_lowercase();
+            ["deny", "stop", "keep planning", "reject", "cancel"]
+                .iter()
+                .any(|w| l.starts_with(w))
+        })
+        .cloned()
+        .collect()
+}
+
+/// The ask's text: which chat, what it wants, and a short look at the details, and whether all
+/// of the details fit.
+pub fn ask_text(chat_title: &str, i: &Interaction) -> (String, bool) {
+    let mut full = true;
     let what = if i.attention == Some(InteractionAttention::Plan) {
         "wants its plan approved"
     } else {
@@ -112,17 +133,22 @@ pub fn ask_text(chat_title: &str, i: &Interaction) -> String {
     {
         let p = part.trim();
         if !p.is_empty() && !s.contains(p) {
+            full &= p.chars().count() <= 600;
             s.push('\n');
             s.push_str(&cut(p, 600));
         }
     }
-    for c in i.context.iter().flatten().take(3) {
+    let rows: Vec<_> = i.context.iter().flatten().collect();
+    full &= rows.len() <= 3;
+    for c in rows.iter().take(3) {
         let t = c.text.trim();
         if !t.is_empty() {
+            full &= t.chars().count() <= 400;
             s.push_str(&format!("\n{}: {}", c.label.trim(), cut(t, 400)));
         }
     }
-    cut(&s, 3000)
+    full &= s.chars().count() <= 3000;
+    (cut(&s, 3000), full)
 }
 
 /// What the tapped option sends, as the card in Helm would: a confirmation answers yes for the
@@ -131,7 +157,7 @@ pub fn answer_args(ask: &Ask, index: usize) -> Value {
     let label = &ask.options[index];
     let mut a = json!({ "chatId": ask.chat_id, "requestId": ask.request_id });
     if ask.method == InteractionMethod::Confirm {
-        a["confirmed"] = json!(index == 0);
+        a["confirmed"] = json!(ask.yes.as_deref() == Some(label.as_str()));
     } else {
         a["value"] = json!(label);
         if ask.plan {
@@ -180,20 +206,28 @@ impl Asks {
             if asked {
                 continue;
             }
+            let all = options_of(&w.interaction);
+            let (mut text, full) = ask_text(&w.chat_title, &w.interaction);
+            let options = if full {
+                all.clone()
+            } else {
+                text.push_str("\n\nToo long to show in full here: open Helm to allow it.");
+                refusing(&all)
+            };
+            if options.is_empty() {
+                continue;
+            }
             let ask = Ask {
                 chat_id: w.chat_id.clone(),
                 request_id: w.interaction.id.clone(),
                 method: w.interaction.method,
                 plan: w.interaction.attention == Some(InteractionAttention::Plan),
-                options: options_of(&w.interaction),
+                options,
+                yes: (w.interaction.method == InteractionMethod::Confirm).then(|| all[0].clone()),
                 question: None,
             };
             let id = new_id();
-            step.ask.push((
-                id.clone(),
-                ask_text(&w.chat_title, &w.interaction),
-                ask.options.clone(),
-            ));
+            step.ask.push((id.clone(), text, ask.options.clone()));
             m.insert(id, ask);
         }
         step
@@ -209,6 +243,7 @@ impl Asks {
                 method: InteractionMethod::Select,
                 plan: false,
                 options,
+                yes: None,
                 question: Some(question.to_owned()),
             },
         );
@@ -320,7 +355,21 @@ mod tests {
         }
         assert_eq!(
             ask_text("Docs", &approval),
-            "Docs needs your approval:\nAllow Bash?\nCommand: cargo test"
+            (
+                "Docs needs your approval:\nAllow Bash?\nCommand: cargo test".to_owned(),
+                true
+            )
+        );
+        // Details too long for the phone: only the options that allow nothing are offered.
+        let mut long = approval.clone();
+        long.id = "r9".into();
+        long.context.as_mut().unwrap()[0].text = "x".repeat(401);
+        let s = Asks::default().step(&[waiting(long)], new_id);
+        assert_eq!(s.ask[0].2, ["Deny", "Stop turn"]);
+        assert!(
+            s.ask[0].1.ends_with("open Helm to allow it."),
+            "{}",
+            s.ask[0].1
         );
 
         let asks = Asks::default();
@@ -352,10 +401,17 @@ mod tests {
             method: Confirm,
             plan: true,
             options: vec!["Approve plan".into(), "Keep planning".into()],
+            yes: Some("Approve plan".into()),
             ..ask.clone()
         };
         assert_eq!(answer_args(&confirm, 1)["confirmed"], false);
         assert_eq!(answer_args(&confirm, 0)["confirmed"], true);
+        // With only the refusing option left, its index 0 still answers no.
+        let refused = Ask {
+            options: vec!["Keep planning".into()],
+            ..confirm.clone()
+        };
+        assert_eq!(answer_args(&refused, 0)["confirmed"], false);
         let plan_select = Ask {
             method: Select,
             plan: true,
