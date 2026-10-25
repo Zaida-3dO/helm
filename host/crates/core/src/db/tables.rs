@@ -49,6 +49,7 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("chat_attention", Data),
     ("chat_triage", Data),
     ("chat_flags", Data),
+    ("agent_waits", Data),
     (
         "chat_mutes",
         UserOnly("Muting a chat is yours to decide; agents never mute or unmute."),
@@ -136,6 +137,7 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ),
     ("afk_spans", Data),
     ("afk_digests", Data),
+    ("afk_events", Data),
     (
         "governor_settings",
         UserOnly("The usage governor can stop your chats, so only you set it."),
