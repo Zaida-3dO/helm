@@ -54,6 +54,11 @@ export interface FakeTelegram {
   message(from: number, text: string, chatId?: number): void;
   /** Queue a voice note from `from`; getFile and the file download then serve `bytes`. */
   voice(from: number, bytes: Uint8Array, chatId?: number): void;
+  /**
+   * Queue a picture from `from`: a photo (listed at two sizes) or, with `as: 'file'`, an image sent
+   * as a document of type `mime`. getFile and the file download then serve `bytes`.
+   */
+  picture(from: number, bytes: Uint8Array, opts?: { caption?: string; as?: 'photo' | 'file'; mime?: string; chatId?: number }): void;
   /** Queue a tap on a button (`data`, its callback data) of the bot's message `messageId`. */
   tap(from: number, messageId: number, data: string, chatId?: number): void;
   sent: SentCall[];
@@ -124,6 +129,27 @@ export async function startFakeTelegram(opts: { port?: number; token?: string } 
     files.set(fileId, { path: `voice/file_${n}.oga`, bytes });
     const voice = { file_id: fileId, file_unique_id: `u${n}`, duration: 1, mime_type: 'audio/ogg', file_size: bytes.length };
     push({ message: incoming(from, chatId, { voice }) });
+  };
+
+  const injectPicture = (
+    from: number,
+    bytes: Uint8Array,
+    { caption, as = 'photo', mime = 'image/jpeg', chatId = from }: { caption?: string; as?: 'photo' | 'file'; mime?: string; chatId?: number } = {},
+  ) => {
+    const n = nextFile++;
+    const fileId = `fake-file-${n}`;
+    files.set(fileId, { path: `photos/file_${n}`, bytes });
+    const kind =
+      as === 'photo'
+        ? {
+            photo: [
+              { file_id: `${fileId}-small`, file_unique_id: `s${n}`, width: 90, height: 90, file_size: 800 },
+              { file_id: fileId, file_unique_id: `u${n}`, width: 1280, height: 1280, file_size: bytes.length },
+            ],
+          }
+        : { document: { file_id: fileId, file_unique_id: `u${n}`, file_name: `picture_${n}`, mime_type: mime, file_size: bytes.length } };
+    files.set(`${fileId}-small`, { path: `photos/file_${n}_small`, bytes });
+    push({ message: incoming(from, chatId, { ...kind, ...(caption === undefined ? {} : { caption }) }) });
   };
 
   const injectTap = (from: number, messageId: number, data: string, chatId = from) => {
@@ -264,6 +290,7 @@ export async function startFakeTelegram(opts: { port?: number; token?: string } 
     token,
     message: (from, text, chatId) => inject(from, text, chatId),
     voice: (from, bytes, chatId) => injectVoice(from, bytes, chatId),
+    picture: (from, bytes, opts) => injectPicture(from, bytes, opts),
     tap: (from, messageId, data, chatId) => injectTap(from, messageId, data, chatId),
     sent,
     chat: (id) => chatOf(id).map((x) => ({ ...x })),

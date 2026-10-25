@@ -6,6 +6,8 @@
 //       tool off the hub's list never run;
 // - R3  app_send_message lands in the chat framed as another agent's, never as the user's;
 // - R4  the allowed Telegram user is forwarded (no offline reply); a stranger gets nothing;
+// - R4b a photo with a caption reaches the Telegram chat as an image the chat can see, and a
+//       picture Helm cannot read (a GIF) is refused on Telegram in plain words;
 // - R5  with Helm gone, a call answers "Helm offline, nothing sent or changed".
 //
 // Run: `npm run build:debug` at the root and `cargo build` in hub/, then
@@ -18,7 +20,7 @@ import net from "node:net";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { startFakeTelegram, type FakeTelegram } from "../../fakes/telegram/server.ts";
-import { api, dispose, launchApp, newChat, REPO, scratchDir, waitText, type App } from "./harness.ts";
+import { api, dispose, launchApp, newChat, openChat, REPO, scratchDir, tid, waitText, type App } from "./harness.ts";
 
 const HUB_EXE =
   process.env.HELM_E2E_HUB_EXE ?? path.join(REPO, "hub", "target", "debug", process.platform === "win32" ? "helm-hub.exe" : "helm-hub");
@@ -147,6 +149,28 @@ describe("the hub line, forwarding and the Telegram bot", { timeout: 10 * 60_000
       return all.find((c) => String(c.title).startsWith("Telegram ")) ?? undefined;
     });
     assert.ok(landed.id, "a Telegram chat holds it");
+  });
+
+  test("R4b: a photo arrives as an image in the Telegram chat; a GIF is refused on Telegram", async () => {
+    // A real 1x1 PNG: the chat shows a thumbnail of what arrived.
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    tg!.picture(ALLOWED_USER, png, { caption: "what colour is this?", as: "file", mime: "image/png" });
+    const telegramChat = await until("the Telegram chat", async () => {
+      const all = (await api(app!.page, "chat_list", {})) as Json[];
+      return all.find((c) => String(c.title).startsWith("Telegram ")) ?? undefined;
+    });
+    await openChat(app!.page, String(telegramChat.id));
+    await waitText(app!.page, "what colour is this?");
+    await app!.page.locator(tid("message-image")).first().waitFor({ timeout: 20_000 });
+    // A GIF is not passed on: the user is told why, in plain words, and Helm hears nothing.
+    tg!.picture(ALLOWED_USER, Buffer.concat([Buffer.from("GIF89a"), Buffer.from([1, 0, 1, 0])]), { as: "file", mime: "image/gif" });
+    const told = await until("the refusal on Telegram", () =>
+      tg!.chat(ALLOWED_USER).find((m) => m.text.startsWith("That picture was not sent to Helm: ")),
+    );
+    assert.match(told.text, /only still PNG, JPEG and WebP pictures, and this is a GIF/);
   });
 
   test("R5: with Helm gone, a call answers offline and nothing is sent", async () => {

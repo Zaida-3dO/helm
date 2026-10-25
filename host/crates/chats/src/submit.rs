@@ -417,7 +417,44 @@ pub struct HostSent {
     pub waiting: Option<usize>,
 }
 
+/// One picture sent with a host send (a photo from the phone): checked and stored exactly like an
+/// image attached in the composer.
+pub struct HostImage<'a> {
+    pub name: &'a str,
+    pub mime: &'a str,
+    pub bytes: &'a [u8],
+}
+
+/// Code of the error a host send answers when a picture is refused (its text says why), so the
+/// caller can send the message again without it.
+pub const IMAGE_REFUSED: &str = "image_refused";
+
+/// Forget pictures stored for a send that is not made after all.
+fn drop_stored(
+    tx: &Transaction<'_>,
+    dir: &std::path::Path,
+    ids: &[String],
+) -> rusqlite::Result<()> {
+    for id in ids {
+        tx.execute("DELETE FROM chat_attachments WHERE id = ?1", [id])?;
+        let _ = std::fs::remove_file(dir.join(id));
+    }
+    Ok(())
+}
+
 pub fn host_send(rt: &ChatRuntime, s: HostSend<'_>) -> Result<HostSent, ApiError> {
+    host_send_with_images(rt, s, &[])
+}
+
+/// [`host_send`] with pictures attached. Only an ungated send carries them.
+pub fn host_send_with_images(
+    rt: &ChatRuntime,
+    s: HostSend<'_>,
+    images: &[HostImage<'_>],
+) -> Result<HostSent, ApiError> {
+    if s.gated && !images.is_empty() {
+        return Err(ApiError::bad_args("A gated send carries no attachments."));
+    }
     if s.text.trim().is_empty() {
         return Err(ApiError::bad_args("The message is empty."));
     }
@@ -477,6 +514,17 @@ pub fn host_send(rt: &ChatRuntime, s: HostSend<'_>) -> Result<HostSent, ApiError
                 (true, HostSendMode::Steer) => (SubmissionMode::Steer, SubmissionState::Saved),
                 (true, HostSendMode::Queue) => (SubmissionMode::FollowUp, SubmissionState::Queued),
             };
+            let dir = rt.sh.cfg.profile_dir.join("attachments");
+            let mut ids = Vec::new();
+            for img in images {
+                match crate::attachments::put(tx, &dir, s.chat_id, img.name, img.mime, img.bytes, now)? {
+                    Ok(stored) => ids.push(stored.id),
+                    Err(r) => {
+                        drop_stored(tx, &dir, &ids)?;
+                        return Ok(Err(ApiError::new(IMAGE_REFUSED, r.message)));
+                    }
+                }
+            }
             insert_submission(
                 tx,
                 &NewSubmission {
@@ -488,10 +536,17 @@ pub fn host_send(rt: &ChatRuntime, s: HostSend<'_>) -> Result<HostSent, ApiError
                     origin: s.origin,
                     priority: None,
                     admission: if s.gated { AdmissionClass::Gated } else { AdmissionClass::Exempt },
-                    attachments: &[],
+                    attachments: &ids,
                     now,
                 },
             )?;
+            if !ids.is_empty() {
+                if let Err(r) = crate::attachments::link(tx, s.chat_id, s.submission_id, &ids)? {
+                    tx.execute("DELETE FROM submissions WHERE id = ?1", [s.submission_id])?;
+                    drop_stored(tx, &dir, &ids)?;
+                    return Ok(Err(ApiError::new(IMAGE_REFUSED, r.message)));
+                }
+            }
             tx.execute("UPDATE chats SET updated_at = ?1 WHERE id = ?2", params![now, s.chat_id])?;
             if let Some(head) = wait_head {
                 crate::runslots::insert_wait(tx, s.submission_id, s.chat_id, now, head)?;

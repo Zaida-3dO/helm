@@ -3,6 +3,7 @@
 
 pub mod apptools;
 pub mod auth;
+pub mod images;
 pub mod import;
 pub mod mcp;
 pub mod relay;

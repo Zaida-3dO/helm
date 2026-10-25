@@ -12,6 +12,7 @@ description = "Helm hub: shared memory over MCP, the relay line to Helm, and Hel
 [workspace]
 
 [dependencies]
+base64 = "0.22"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"] }
 tokio = { version = "1", features = ["rt", "macros", "net", "signal", "sync", "time"] }
 rusqlite = { version = "0.37", features = ["bundled"] }

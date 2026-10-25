@@ -2020,6 +2020,7 @@ dependencies = [
 name = "helm-relay"
 version = "0.3.0"
 dependencies = [
+ "base64 0.22.1",
  "futures-util",
  "helm-afk",
  "helm-chats",

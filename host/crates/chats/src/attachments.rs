@@ -85,6 +85,32 @@ pub fn dimensions(mime: &str, b: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
+/// Whether these bytes are an animated PNG (an `acTL` chunk ahead of the image data) or an
+/// animated WebP (the animation flag in its extended header). Only still images are attached.
+pub fn is_animated(mime: &str, b: &[u8]) -> bool {
+    match mime {
+        "image/png" => {
+            let mut at = 8usize;
+            while at + 8 <= b.len() {
+                match &b[at + 4..at + 8] {
+                    b"acTL" => return true,
+                    b"IDAT" | b"IEND" => return false,
+                    _ => {}
+                }
+                // The length is unsigned; a corrupt one that runs past the end ends the scan.
+                let len = u32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]) as usize;
+                at = match at.checked_add(12 + len) {
+                    Some(next) if next <= b.len() => next,
+                    _ => return false,
+                };
+            }
+            false
+        }
+        "image/webp" => b.get(12..16) == Some(b"VP8X") && b.get(20).is_some_and(|f| f & 0x02 != 0),
+        _ => false,
+    }
+}
+
 #[derive(Debug)]
 pub struct Stored {
     pub id: String,
@@ -136,6 +162,12 @@ pub fn put(
         return Ok(Err(Refusal::new(
             "too_large",
             "An image can be at most 20 megapixels.",
+        )));
+    }
+    if is_animated(mime, bytes) {
+        return Ok(Err(Refusal::new(
+            "bad_args",
+            "Animated images cannot be attached; only still ones.",
         )));
     }
     let name: String = name
@@ -573,6 +605,29 @@ mod tests {
             "over 20 MP"
         );
         assert!(put1("bad.png", "image/png", b"\x89PNG nope").is_err());
+        // A PNG with an animation chunk (and a WebP with the animation flag) is refused.
+        let chunk = |tag: &[u8], data: &[u8]| {
+            let mut c = (data.len() as u32).to_be_bytes().to_vec();
+            c.extend(tag);
+            c.extend(data);
+            c.extend([0; 4]);
+            c
+        };
+        let mut still = b"\x89PNG\r\n\x1a\n".to_vec();
+        still.extend(chunk(b"IHDR", &png(100, 100)[16..29]));
+        let mut apng = still.clone();
+        apng.extend(chunk(b"acTL", &[0; 8]));
+        still.extend(chunk(b"IDAT", &[0; 4]));
+        apng.extend(chunk(b"IDAT", &[0; 4]));
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8X\x0a\0\0\0\x02".to_vec();
+        webp.extend([0u8; 20]);
+        assert!(is_animated("image/png", &apng) && !is_animated("image/png", &still));
+        assert!(is_animated("image/webp", &webp));
+        assert_eq!(
+            put1("a.png", "image/png", &apng).unwrap_err().code,
+            "bad_args"
+        );
+        put1("still.png", "image/png", &still).unwrap();
         let ok = put1("ok.png", "image/png", &png(100, 100)).unwrap();
         assert!(att.join(&ok.id).is_file());
         let sub = db

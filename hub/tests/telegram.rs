@@ -10,9 +10,10 @@ use helm_hub::relay::{Line, Upstream, OFFLINE};
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
 use helm_hub::telegram::{
-    now_ms, parse_allowed, parse_receive, ApiError, ApiFuture, Bridge, Handled, HttpVoice, Receive,
-    SttConfig, TelegramApi, TelegramConfig, Voice, VoiceFuture, HELLO, POLL_SECONDS, QUEUED,
-    TAP_OFFLINE, TAP_SENT, TAP_STALE, VOICE_OFF, VOICE_TOO_BIG,
+    now_ms, parse_allowed, parse_receive, ApiError, ApiFuture, Bridge, Files, Handled, HttpFiles,
+    HttpVoice, Receive, SttConfig, TelegramApi, TelegramConfig, Voice, VoiceFuture, HELLO,
+    IMAGES_OFF, IMAGE_FAILED, POLL_SECONDS, QUEUED, TAP_OFFLINE, TAP_SENT, TAP_STALE, TEXT_ONLY,
+    VOICE_OFF, VOICE_TOO_BIG,
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
@@ -73,6 +74,11 @@ impl TelegramApi for FakeApi {
             "getFile" => Ok(match body["file_id"].as_str() {
                 Some("huge") => json!({ "file_id": "huge", "file_size": 21 * 1024 * 1024,
                                         "file_path": "voice/huge.oga" }),
+                Some("img-huge") => json!({ "file_id": "img-huge", "file_size": 21 * 1024 * 1024,
+                                           "file_path": "photos/img-huge" }),
+                Some(id) if id.starts_with("img-") => {
+                    json!({ "file_id": id, "file_size": 1234, "file_path": format!("photos/{id}") })
+                }
                 _ => json!({ "file_id": body["file_id"], "file_size": 1234,
                              "file_path": "voice/file_7.oga" }),
             }),
@@ -130,6 +136,25 @@ impl Voice for FakeVoice {
     }
 }
 
+/// Hands out the picture stored under a file id (`photos/<id>`), once the gate lets it.
+struct FakeFiles {
+    files: Vec<(&'static str, Vec<u8>)>,
+    gate: tokio::sync::Semaphore,
+}
+
+impl Files for FakeFiles {
+    fn download<'a>(&'a self, file_path: &'a str) -> VoiceFuture<'a, Vec<u8>> {
+        Box::pin(async move {
+            self.gate.acquire().await.unwrap().forget();
+            let id = file_path.strip_prefix("photos/").unwrap_or(file_path);
+            match self.files.iter().find(|(f, _)| *f == id) {
+                Some((_, bytes)) => Ok(bytes.clone()),
+                None => Err("the download from Telegram failed (HTTP 404)".into()),
+            }
+        })
+    }
+}
+
 fn cfg() -> TelegramConfig {
     TelegramConfig {
         token: Some("t".into()),
@@ -140,6 +165,31 @@ fn cfg() -> TelegramConfig {
         receive: Receive::Poll,
         stt: None,
     }
+}
+
+/// A PNG header-only picture of `w` x `h`, with an animation chunk when `animated`.
+fn png(w: u32, h: u32, animated: bool) -> Vec<u8> {
+    let chunk = |tag: &[u8], data: &[u8]| {
+        let mut c = (data.len() as u32).to_be_bytes().to_vec();
+        c.extend([tag, data, &[0; 4]].concat());
+        c
+    };
+    let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
+    let size = [w.to_be_bytes(), h.to_be_bytes()].concat();
+    b.extend(chunk(b"IHDR", &[size, vec![8, 6, 0, 0, 0]].concat()));
+    if animated {
+        b.extend(chunk(b"acTL", &[0; 8]));
+    }
+    b.extend(chunk(b"IDAT", &[0; 4]));
+    b
+}
+
+fn jpeg(w: u16, h: u16) -> Vec<u8> {
+    let mut b = vec![0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 17, 8];
+    b.extend(h.to_be_bytes());
+    b.extend(w.to_be_bytes());
+    b.extend([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    b
 }
 
 struct Env {
@@ -162,6 +212,19 @@ fn env_with(voice: Option<Arc<FakeVoice>>) -> Env {
     }
     let bridge = Arc::new(bridge);
     Env { api, line, bridge }
+}
+
+fn env_with_files(files: Vec<(&'static str, Vec<u8>)>, open: bool) -> (Env, Arc<FakeFiles>) {
+    let api = Arc::new(FakeApi::default());
+    let (line, _up) = Line::new();
+    let line = Arc::new(line);
+    let files = Arc::new(FakeFiles {
+        files,
+        gate: tokio::sync::Semaphore::new(if open { 100 } else { 0 }),
+    });
+    let bridge = Bridge::new(api.clone(), line.clone(), &cfg()).with_files(files.clone());
+    let bridge = Arc::new(bridge);
+    (Env { api, line, bridge }, files)
 }
 
 /// Let spawned work (a voice note's transcription) run to its end.
@@ -835,6 +898,206 @@ async fn voice_notes_are_transcribed_and_then_handled_like_text() {
     );
 }
 
+/// A picture as it went down the line: (name, type, bytes).
+type Down = (String, String, Vec<u8>);
+
+/// The `telegram` frames that went down: (text, its pictures).
+fn pictures_down(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<(String, Vec<Down>)> {
+    use base64::Engine as _;
+    frames(rx)
+        .iter()
+        .filter(|f| f["type"] == "telegram")
+        .map(|f| {
+            let images = f["images"].as_array().cloned().unwrap_or_default();
+            let images = images.iter().map(|i| {
+                let data = base64::engine::general_purpose::STANDARD
+                    .decode(i["data"].as_str().unwrap())
+                    .unwrap();
+                (
+                    i["name"].as_str().unwrap().to_owned(),
+                    i["mediaType"].as_str().unwrap().to_owned(),
+                    data,
+                )
+            });
+            (f["text"].as_str().unwrap().to_owned(), images.collect())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn pictures_reach_helm_as_attachments_and_the_unreadable_are_refused_in_plain_words() {
+    let photo = |id: &str, w: u32, h: u32| json!({ "file_id": id, "width": w, "height": h });
+    let sizes = json!([
+        photo("img-s", 90, 90),
+        photo("img-l", 1280, 1280),
+        photo("img-xl", 6000, 6000)
+    ]);
+    let doc = |mime: &str, id: &str| json!({ "file_id": id, "mime_type": mime, "file_name": "shot.png", "file_size": 1234 });
+    let (still, moving) = (png(64, 48, false), png(64, 48, true));
+    let files = vec![
+        ("img-l", jpeg(1280, 960)),
+        ("img-png", still.clone()),
+        ("img-apng", moving),
+        ("img-gif", b"GIF89a\x40\x00\x30\x00".to_vec()),
+        ("img-wide", png(8000, 4000, false)),
+        ("img-junk", b"this is not a picture at all".to_vec()),
+    ];
+    let (e, _files) = env_with_files(files.clone(), true);
+    let mut rx = line_up(&e);
+    let reply_to = json!({ "message_id": 3, "text": "Is this right?" });
+
+    // Forwarded: the largest size that fits (the 36 MP one is over the limit), its caption as the
+    // text, "[Photo]" without one, a file's own name, and a quoted reply.
+    for (fields, text, name, mime, bytes) in [
+        (
+            json!({ "photo": sizes, "caption": "what is this?" }),
+            "what is this?",
+            "photo.jpg",
+            "image/jpeg",
+            jpeg(1280, 960),
+        ),
+        (
+            json!({ "photo": sizes }),
+            "[Photo]",
+            "photo.jpg",
+            "image/jpeg",
+            jpeg(1280, 960),
+        ),
+        (
+            json!({ "document": doc("image/png", "img-png"), "caption": "/helm look" }),
+            "look",
+            "shot.png",
+            "image/png",
+            still.clone(),
+        ),
+        (
+            json!({ "document": doc("image/png", "img-png"), "reply_to_message": reply_to }),
+            "Replying to: \"Is this right?\"\n[Image]",
+            "shot.png",
+            "image/png",
+            still,
+        ),
+    ] {
+        let m = owner_message(fields);
+        assert_eq!(
+            e.bridge.on_update(&m, now_ms()).await,
+            Handled::Image,
+            "{m}"
+        );
+        settle().await;
+        assert_eq!(
+            pictures_down(&mut rx),
+            [(
+                text.to_owned(),
+                vec![(name.to_owned(), mime.to_owned(), bytes)]
+            )],
+            "{m}"
+        );
+        assert!(e.api.sent_texts().is_empty(), "{:?}", e.api.sent_texts());
+    }
+    assert_eq!(e.bridge.queued_len(), 4, "held until acknowledged");
+
+    // Refused with a reason and nothing sent to Helm: at once from what the message says, or
+    // after the fetch from the picture's own bytes.
+    let too_big = "it is larger than 20 MB";
+    let only = "Helm reads only still PNG, JPEG and WebP pictures";
+    for (fields, at_once, why) in [
+        (
+            json!({ "document": doc("image/gif", "x") }),
+            true,
+            format!("{only}, and this is a GIF"),
+        ),
+        (
+            json!({ "document": doc("image/heic", "x") }),
+            true,
+            format!("{only}, and this is image/heic"),
+        ),
+        (
+            json!({ "photo": [photo("img-xl", 6000, 6000)] }),
+            true,
+            "it is larger than 20 MB or 20 megapixels".into(),
+        ),
+        (
+            json!({ "document": { "file_id": "x", "mime_type": "image/png", "file_size": 21 << 20 } }),
+            true,
+            too_big.into(),
+        ),
+        (
+            json!({ "photo": [photo("img-huge", 640, 480)] }),
+            false,
+            too_big.into(),
+        ),
+        (
+            json!({ "document": doc("image/png", "img-gif") }),
+            false,
+            format!("{only}, and this is a GIF"),
+        ),
+        (
+            json!({ "document": doc("image/png", "img-apng") }),
+            false,
+            format!("{only}, and this one is animated"),
+        ),
+        (
+            json!({ "document": doc("image/png", "img-wide") }),
+            false,
+            "it is larger than 20 megapixels".into(),
+        ),
+        (
+            json!({ "document": doc("image/png", "img-junk") }),
+            false,
+            format!("{only}, and this is not one of those"),
+        ),
+        (
+            json!({ "document": doc("image/png", "img-gone") }),
+            false,
+            "the download from Telegram failed (HTTP 404)".into(),
+        ),
+    ] {
+        e.api.clear();
+        let m = owner_message(fields);
+        let want = if at_once {
+            Handled::Command
+        } else {
+            Handled::Image
+        };
+        assert_eq!(e.bridge.on_update(&m, now_ms()).await, want, "{m}");
+        settle().await;
+        assert_eq!(e.api.sent_texts(), [format!("{IMAGE_FAILED}{why}")], "{m}");
+        assert!(pictures_down(&mut rx).is_empty(), "{m}");
+    }
+    // Something that is not a picture is still text-only, and pictures can be switched off.
+    e.api.clear();
+    let pdf = owner_message(json!({ "document": doc("application/pdf", "x") }));
+    assert_eq!(e.bridge.on_update(&pdf, now_ms()).await, Handled::Command);
+    assert_eq!(e.api.sent_texts(), [TEXT_ONLY]);
+    let off = env();
+    let m = owner_message(json!({ "photo": sizes }));
+    off.bridge.on_update(&m, now_ms()).await;
+    assert_eq!(off.api.sent_texts(), [IMAGES_OFF]);
+
+    // The picture keeps its place: a message sent after it waits, then both go in order. Offline,
+    // it is queued with the usual reply and goes with its picture on reconnect.
+    let (e, files) = env_with_files(files, false);
+    let now = now_ms();
+    let first = owner_message(json!({ "photo": sizes, "caption": "first" }));
+    assert_eq!(e.bridge.on_update(&first, now).await, Handled::Image);
+    let second = update(OWNER, "second", now / 1000);
+    assert_eq!(e.bridge.on_update(&second, now).await, Handled::Queued);
+    settle().await;
+    assert_eq!(e.api.sent_texts(), [QUEUED]);
+    files.gate.add_permits(1);
+    settle().await;
+    let mut rx = line_up(&e);
+    e.bridge.flush(now_ms()).await;
+    let got = pictures_down(&mut rx);
+    assert_eq!(
+        got.iter()
+            .map(|(t, i)| (t.as_str(), i.len()))
+            .collect::<Vec<_>>(),
+        [("first", 1), ("second", 0)]
+    );
+}
+
 #[tokio::test]
 async fn a_reply_forwards_what_it_quotes_on_its_own_first_line() {
     let e = env();
@@ -1159,10 +1422,18 @@ async fn http_voice_downloads_the_file_and_posts_a_multipart_form() {
     }
     assert!(body.ends_with(&format!("--{boundary}--\r\n")), "{body:?}");
 
+    let files = HttpFiles::new(&base, TOKEN);
+    assert_eq!(
+        files.download("voice/file_1.oga").await.unwrap(),
+        b"OggS fake audio"
+    );
+
     // Nothing listening: a plain reason, and never the token.
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let gone = format!("http://{}", closed.local_addr().unwrap());
     drop(closed);
+    let refused = HttpFiles::new(&gone, TOKEN).download("photos/x.jpg").await;
+    assert!(!refused.unwrap_err().contains(TOKEN));
     let voice = HttpVoice::new(&gone, TOKEN, &stt(format!("{gone}/stt")));
     let (download, heard) = tokio::join!(
         voice.download("voice/file_1.oga"),

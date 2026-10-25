@@ -213,6 +213,7 @@ fn env() -> Env {
 
 fn msg(id: &str, text: &str) -> TelegramMessage {
     TelegramMessage {
+        images: vec![],
         id: id.into(),
         text: text.into(),
         sent_at: 0,
@@ -351,6 +352,59 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
     let dup = place_async(&restarted, msg("hub-3", "2")).await.unwrap();
     assert_eq!(dup, Placed::Already);
     assert_eq!(subs(&e.db, &chat).len(), 2);
+    // Pictures come in as the composer's do, stored and linked to the submission. One the chat
+    // refuses (here an animated PNG) does not hold the message back: its text goes alone, with a
+    // note saying why.
+    use base64::Engine as _;
+    let png = |animated: bool| {
+        let chunk = |tag: &[u8], data: &[u8]| {
+            let mut c = (data.len() as u32).to_be_bytes().to_vec();
+            c.extend([tag, data, &[0; 4]].concat());
+            c
+        };
+        let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
+        b.extend(chunk(
+            b"IHDR",
+            &[&[0, 0, 0, 10, 0, 0, 0, 10][..], &[8, 6, 0, 0, 0]].concat(),
+        ));
+        if animated {
+            b.extend(chunk(b"acTL", &[0; 8]));
+        }
+        b.extend(chunk(b"IDAT", &[0; 4]));
+        crate::client::TelegramImage {
+            name: "photo.png".into(),
+            media_type: "image/png".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(b),
+        }
+    };
+    for (id, animated) in [("hub-4", false), ("hub-5", true)] {
+        let m = TelegramMessage {
+            images: vec![png(animated)],
+            ..msg(id, "what is this?")
+        };
+        place_async(&e.ctx, m).await.unwrap();
+        let sid = telegram::submission_id(id);
+        let (attached, text): (i64, String) =
+            e.db.snapshot(|tx| {
+                Ok::<_, rusqlite::Error>((
+                    tx.query_row(
+                        "SELECT count(*) FROM chat_attachments WHERE submission_id = ?1",
+                        [&sid],
+                        |r| r.get(0),
+                    )?,
+                    tx.query_row("SELECT text FROM submissions WHERE id = ?1", [&sid], |r| {
+                        r.get(0)
+                    })?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(attached, i64::from(!animated), "{id}");
+        assert_eq!(
+            text.contains("could not be attached. Animated images"),
+            animated,
+            "{id}: {text}"
+        );
+    }
     drop(e.dir);
 }
 

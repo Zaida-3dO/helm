@@ -96,6 +96,16 @@ approval.
   The transcription runs beside the poll loop, and the note keeps its place in the queue, so a
   message sent after it waits for it. With voice notes off, the bot answers "Voice notes are off
   on this hub."
+- **Pictures.** A photo, or an image sent as a file, is fetched with `getFile` and goes down the
+  line as a `telegram` frame with an `images` list (`name`, `mediaType`, base64 `data`); its
+  caption is the text, and `[Photo]` or `[Image]` stands in when it has none. Of a photo's sizes
+  the largest that fits the limits is taken. Only still PNG, JPEG and WebP are passed on, judged by
+  the file's own bytes, up to 20 MB (the Bot API's download limit) and 20 megapixels. A GIF, an
+  animated image, another type, or a file that is too large gets a plain reply ("That picture was
+  not sent to Helm: ...") and nothing reaches Helm. Like a voice note, the picture keeps its place
+  in the queue while it is fetched. About 100 MB of pictures may wait for Helm at once; the next one
+  is refused with a reply until some arrive. Picture bytes are never logged. Helm checks the same
+  limits again when the message arrives.
 - **Quoted replies.** A message that replies to another, or quotes part of one, reaches Helm with
   `Replying to: "<quoted text>"` on its own first line: the quoted part if there is one, else the
   replied-to message's text or caption, on one line and cut to 300 characters. Voice notes too.
@@ -131,7 +141,7 @@ Content-Type: application/json
 
 The answer is `200 {"ok":true,"handled":[...]}`, one entry per update: `forwarded`, `queued`,
 `command`, `voice` (a voice note now being transcribed; it is forwarded or queued once it has its
-text), `button` (a tap on one of Helm's buttons), `ignored` (not a private message or tap from an
+text), `image` (a picture now being fetched, likewise), `button` (a tap on one of Helm's buttons), `ignored` (not a private message or tap from an
 allowed user) or `duplicate`. No token or an
 unknown one: 401; any other scope: 403; the bot off on this hub: 503; a body that is not an
 Update or an array of them: 400. The endpoint exists in both modes.

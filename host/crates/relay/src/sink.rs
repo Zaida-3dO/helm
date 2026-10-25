@@ -32,7 +32,9 @@
 use crate::client::{BoxFut, LineHandle, TelegramMessage, TelegramSink};
 use crate::exec::AppExecutor;
 use crate::telegram::{self, ChatFacts, ChatPort, TagPolicy, TELEGRAM_ORIGIN};
-use helm_chats::submit::{host_send, HostSend, HostSendMode};
+use helm_chats::submit::{
+    host_send, host_send_with_images, HostImage, HostSend, HostSendMode, IMAGE_REFUSED,
+};
 use helm_chats::types::{ChatStatus, InteractionAttention, InteractionMethod, SendMode};
 use helm_chats::ChatRuntime;
 use helm_core::db::Database;
@@ -430,7 +432,9 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
     let (chat, _created) =
         telegram::active_chat(&c.tag_path, &port, &c.policy, msg.bot.as_deref(), now)?;
     let baseline = max_row(&c.db, &chat);
-    if let Some(q) = answerable(&c.rt, &chat) {
+    // A picture is never an answer to a question: the message goes in as an ordinary one.
+    let question = answerable(&c.rt, &chat).filter(|_| msg.images.is_empty());
+    if let Some(q) = question {
         let value = match q.method {
             InteractionMethod::Select => {
                 telegram::question_answer(q.options.as_deref().unwrap_or(&[]), &msg.text)
@@ -464,21 +468,46 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         .unwrap_or(SendMode::Asap);
     let sent = telegram::load_sent(&c.sent_path);
     let text = telegram::delivered_text(&msg.text, msg.age_minutes, &sent);
+    // The pictures go in as the composer's do, checked by the same rules. One the chat will not
+    // take does not hold the message back: the text goes alone, saying so.
+    let (pictures, mut unreadable) = decode_images(&msg.images);
+    let mut with_pictures = !pictures.is_empty();
     let started = std::time::Instant::now();
     loop {
-        let r = host_send(
+        let shown = match unreadable.as_deref() {
+            Some(why) => format!(
+                "{text}
+
+(A picture came with this message but could not be attached. {why})"
+            ),
+            None => text.clone(),
+        };
+        let attach: Vec<HostImage> = if with_pictures {
+            pictures
+                .iter()
+                .map(|(name, mime, bytes)| HostImage { name, mime, bytes })
+                .collect()
+        } else {
+            vec![]
+        };
+        let r = host_send_with_images(
             &c.rt,
             HostSend {
                 chat_id: &chat,
                 submission_id: &sid,
-                text: &text,
+                text: &shown,
                 mode: host_mode(mode),
                 origin: TELEGRAM_ORIGIN,
                 // The user's own message, typed on the phone: it never waits for a run slot.
                 gated: false,
             },
+            &attach,
         );
         match r {
+            Err(e) if e.code == IMAGE_REFUSED && with_pictures => {
+                with_pictures = false;
+                unreadable = Some(e.message);
+            }
             Ok(_) => {
                 if !sent.is_empty() && telegram::clear_sent(&c.sent_path).is_err() {
                     log::warn!("relay: the notes of alerts sent could not be cleared");
@@ -494,6 +523,23 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
             Err(e) => return Err(e.message),
         }
     }
+}
+
+/// A picture ready for the chat: its name, type and bytes.
+type Decoded = (String, String, Vec<u8>);
+
+/// The pictures of a message, and why one could not be read at all.
+fn decode_images(images: &[crate::client::TelegramImage]) -> (Vec<Decoded>, Option<String>) {
+    use base64::Engine as _;
+    let mut out = vec![];
+    let mut why = None;
+    for i in images {
+        match base64::engine::general_purpose::STANDARD.decode(i.data.as_bytes()) {
+            Ok(bytes) => out.push((i.name.clone(), i.media_type.clone(), bytes)),
+            Err(_) => why = Some("It arrived damaged.".to_owned()),
+        }
+    }
+    (out, why)
 }
 
 /// The chat as the mirror sees it (blocking).

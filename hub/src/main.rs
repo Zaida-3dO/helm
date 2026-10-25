@@ -4,7 +4,7 @@ use helm_hub::mcp::Options;
 use helm_hub::relay::Line;
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
-use helm_hub::telegram::{Bridge, HttpApi, HttpVoice, Receive, TelegramConfig};
+use helm_hub::telegram::{Bridge, HttpApi, HttpFiles, HttpVoice, Receive, TelegramConfig};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -163,7 +163,8 @@ fn serve() -> ExitCode {
         None => {
             let token = telegram.token.clone().unwrap_or_default();
             let api = Arc::new(HttpApi::new(&telegram.api_base, &token));
-            let mut bridge = Bridge::new(api, line.clone(), &telegram);
+            let mut bridge = Bridge::new(api, line.clone(), &telegram)
+                .with_files(Arc::new(HttpFiles::new(&telegram.api_base, &token)));
             if let Some(stt) = &telegram.stt {
                 bridge =
                     bridge.with_voice(Arc::new(HttpVoice::new(&telegram.api_base, &token, stt)));

@@ -37,6 +37,12 @@
 //!   forwarded as `[Voice note] <transcript>`, by the same rules as text. The
 //!   transcription runs beside the poll loop, and the note keeps its place in
 //!   the queue: messages sent after it wait until it has its text.
+//! - **Pictures.** A photo, or an image sent as a file, is fetched with `getFile` and goes down the
+//!   line as an image attachment on the message, its caption as the text (`[Photo]` or `[Image]`
+//!   when it has none). The largest photo size that fits the limits is taken; only PNG, JPEG and
+//!   WebP, still, up to 20 megapixels and 20 MB are passed on, judged by the file's own bytes.
+//!   Anything else gets a plain reply saying why, and nothing is sent to Helm. Like a voice note,
+//!   a picture keeps its place in the queue while it is fetched.
 //! - **Quoted replies.** A reply to a message, or a quote from one, is
 //!   forwarded with `Replying to: "<quoted text>"` on its own first line.
 //! - **Approval buttons.** `telegram_ask` arrives as a new message with one
@@ -47,6 +53,7 @@
 //!
 //! The queue and the waiting asks live in memory: a container restart drops them.
 
+use crate::images;
 use crate::relay::{valid_ask_id, Line, Upstream, OFFLINE};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -73,8 +80,11 @@ pub const RESEND_AFTER: Duration = Duration::from_secs(45);
 pub const POLL_SECONDS: u64 = 25;
 /// How many recent `update_id`s are remembered, so an update is handled once.
 pub const SEEN_UPDATES: usize = 256;
-/// The largest file the Bot API lets a bot download, so the largest voice note transcribed.
+/// The largest file the Bot API lets a bot download, so the largest voice note transcribed and
+/// the largest picture passed on (the chat itself takes 25 MB).
 pub const MAX_VOICE_BYTES: u64 = 20 * 1024 * 1024;
+/// The most picture bytes held for Helm at once (waiting to go, or sent and not yet acknowledged).
+pub const MAX_QUEUED_IMAGE_BYTES: usize = 100 * 1024 * 1024;
 /// How long the speech-to-text server may take to accept the connection, and to answer in all.
 pub const STT_CONNECT: Duration = Duration::from_secs(5);
 pub const STT_TIMEOUT: Duration = Duration::from_secs(100);
@@ -99,6 +109,7 @@ pub const HELLO: &str =
 pub const VOICE_OFF: &str = "Voice notes are off on this hub.";
 pub const VOICE_TOO_BIG: &str =
     "That voice note is too large to transcribe (the limit is 20 MB), so nothing was sent to Helm.";
+pub const IMAGES_OFF: &str = "Pictures are off on this hub.";
 pub const TAP_SENT: &str = "Sent to Helm";
 pub const TAP_OFFLINE: &str = "Helm is offline; nothing was sent.";
 pub const TAP_STALE: &str = "This request is no longer waiting.";
@@ -125,6 +136,13 @@ pub trait Voice: Send + Sync {
         name: &'a str,
         mime: &'a str,
     ) -> VoiceFuture<'a, String>;
+}
+
+/// Fetching a file Telegram holds (a picture). The real one is [`HttpFiles`]; tests use a fake. No
+/// error may carry the bot token.
+pub trait Files: Send + Sync {
+    /// The file that `getFile` placed at `file_path`.
+    fn download<'a>(&'a self, file_path: &'a str) -> VoiceFuture<'a, Vec<u8>>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -264,6 +282,24 @@ struct Queued {
     sent_on: Option<u64>,
     /// When it last went down that line, for the resend timer.
     sent_down_ms: i64,
+    /// Pictures that go with it.
+    images: Vec<Image>,
+}
+
+/// A picture on its way to Helm: base64, ready for the frame. Its bytes are never printed.
+#[derive(Clone)]
+struct Image {
+    name: String,
+    mime: &'static str,
+    data: Arc<str>,
+    /// The size of the picture itself, for the cap on what is held.
+    len: usize,
+}
+
+impl std::fmt::Debug for Image {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Image({} {}, {} bytes)", self.name, self.mime, self.len)
+    }
 }
 
 /// An approval ask on the phone: the message that carries its buttons.
@@ -301,6 +337,8 @@ pub enum Handled {
     Command,
     /// A voice note now being transcribed; it is forwarded or queued once it has its text.
     Voice,
+    /// A picture now being fetched; it is forwarded or queued once it has arrived.
+    Image,
     /// A tap on a button, from an allowed user in a private chat.
     Button,
     /// An `update_id` already handled: dropped.
@@ -315,6 +353,7 @@ impl Handled {
             Handled::Queued => "queued",
             Handled::Command => "command",
             Handled::Voice => "voice",
+            Handled::Image => "image",
             Handled::Button => "button",
             Handled::Duplicate => "duplicate",
         }
@@ -330,6 +369,8 @@ pub struct Bridge {
     receive: Receive,
     /// `None`: voice notes are off.
     voice: Option<Arc<dyn Voice>>,
+    /// `None`: pictures are off.
+    files: Option<Arc<dyn Files>>,
     state: Mutex<State>,
     /// Serialises Telegram sends, so a status edit and the final answer never interleave.
     ops: tokio::sync::Mutex<()>,
@@ -380,6 +421,105 @@ fn with_quote(quote: Option<&str>, text: &str) -> String {
     }
 }
 
+/// Why a picture was not passed on, in front of the reason.
+pub const IMAGE_FAILED: &str = "That picture was not sent to Helm: ";
+const TOO_LARGE: &str = "it is larger than 20 MB";
+const ONLY_THESE: &str = "Helm reads only still PNG, JPEG and WebP pictures";
+
+/// A picture to fetch: which file, what it is called, and the text that stands for it when it has
+/// no caption.
+struct Pick {
+    file_id: String,
+    name: Option<String>,
+    label: &'static str,
+}
+
+fn pick_of(file_id: Option<&str>, name: Option<&str>, label: &'static str) -> Result<Pick, String> {
+    file_id.map_or_else(
+        || Err("Telegram sent no file with it".to_owned()),
+        |id| {
+            Ok(Pick {
+                file_id: id.to_owned(),
+                name: name.map(str::to_owned),
+                label,
+            })
+        },
+    )
+}
+
+/// The picture in `msg`, a photo or an image sent as a file; `None` when it holds neither. The
+/// `Err` is a refusal that needs no download: too large, or a type that cannot be read.
+fn pick_picture(msg: &Value) -> Option<Result<Pick, String>> {
+    if let Some(sizes) = msg.get("photo").and_then(Value::as_array) {
+        // Telegram lists a photo at several sizes: take the largest that fits the limits.
+        let num = |p: &Value, k: &str| p.get(k).and_then(Value::as_u64);
+        let area = |p: &Value| num(p, "width").unwrap_or(0) * num(p, "height").unwrap_or(0);
+        let mut sizes: Vec<&Value> = sizes.iter().collect();
+        sizes.sort_by_key(|p| std::cmp::Reverse(area(p)));
+        let fits = |p: &&Value| {
+            area(p) <= images::MAX_PIXELS
+                && num(p, "file_size").is_none_or(|n| n <= MAX_VOICE_BYTES)
+        };
+        return Some(match sizes.into_iter().find(fits) {
+            Some(p) => pick_of(p.get("file_id").and_then(Value::as_str), None, "[Photo]"),
+            None => Err("it is larger than 20 MB or 20 megapixels".to_owned()),
+        });
+    }
+    let doc = msg.get("document")?;
+    let mime = doc.get("mime_type").and_then(Value::as_str).unwrap_or("");
+    if !mime.starts_with("image/") {
+        return None;
+    }
+    Some(if mime == "image/gif" {
+        Err(format!("{ONLY_THESE}, and this is a GIF"))
+    } else if !["image/png", "image/jpeg", "image/webp"].contains(&mime) {
+        Err(format!("{ONLY_THESE}, and this is {mime}"))
+    } else if doc
+        .get("file_size")
+        .and_then(Value::as_u64)
+        .is_some_and(|n| n > MAX_VOICE_BYTES)
+    {
+        Err(TOO_LARGE.to_owned())
+    } else {
+        pick_of(
+            doc.get("file_id").and_then(Value::as_str),
+            doc.get("file_name").and_then(Value::as_str),
+            "[Image]",
+        )
+    })
+}
+
+/// Check a downloaded picture by its own bytes (what Telegram or the sender says it is does not
+/// count) and ready it for the line.
+fn inspect(bytes: Vec<u8>, name: Option<&str>) -> Result<Image, String> {
+    use base64::Engine as _;
+    let kind = match images::sniff(&bytes) {
+        Some(images::Kind::Gif) => return Err(format!("{ONLY_THESE}, and this is a GIF")),
+        Some(k) => k,
+        None => return Err(format!("{ONLY_THESE}, and this is not one of those")),
+    };
+    let (w, h) = images::dimensions(kind, &bytes).ok_or("it is not a readable picture")?;
+    if u64::from(w) * u64::from(h) > images::MAX_PIXELS {
+        return Err("it is larger than 20 megapixels".into());
+    }
+    if images::is_animated(kind, &bytes) {
+        return Err(format!("{ONLY_THESE}, and this one is animated"));
+    }
+    // The name shows on the picture in the chat: the file's own, else a plain one.
+    let name: String = name
+        .map(|n| n.chars().filter(|c| !c.is_control()).take(120).collect())
+        .filter(|n: &String| !n.trim().is_empty())
+        .unwrap_or_else(|| format!("photo.{}", kind.extension()));
+    Ok(Image {
+        name,
+        mime: kind.mime(),
+        len: bytes.len(),
+        data: base64::engine::general_purpose::STANDARD
+            .encode(&bytes)
+            .into(),
+    })
+}
+
 /// A button's callback data, `a:<ask id>:<index>`.
 fn parse_button(data: &str) -> Option<(&str, usize)> {
     let (id, index) = data.strip_prefix("a:")?.split_once(':')?;
@@ -406,6 +546,7 @@ impl Bridge {
             queue_max: cfg.queue_max,
             receive: cfg.receive,
             voice: None,
+            files: None,
             state: Mutex::new(State::default()),
             ops: tokio::sync::Mutex::new(()),
         }
@@ -414,6 +555,12 @@ impl Bridge {
     /// Turn voice notes on, transcribed by `voice`.
     pub fn with_voice(mut self, voice: Arc<dyn Voice>) -> Self {
         self.voice = Some(voice);
+        self
+    }
+
+    /// Turn pictures on, fetched with `files`.
+    pub fn with_files(mut self, files: Arc<dyn Files>) -> Self {
+        self.files = Some(files);
         self
     }
 
@@ -494,6 +641,9 @@ impl Bridge {
             if let Some(note) = msg.get("voice").or_else(|| msg.get("audio")) {
                 return self.on_voice(msg, note, chat, quote, now).await;
             }
+            if let Some(pick) = pick_picture(msg) {
+                return self.on_image(msg, pick, chat, quote, now).await;
+            }
             self.reply(chat, TEXT_ONLY).await;
             return Handled::Command;
         };
@@ -568,6 +718,7 @@ impl Bridge {
                 .unwrap_or(now),
             sent_on: None,
             sent_down_ms: now,
+            images: vec![],
         });
         Some(id)
     }
@@ -670,35 +821,136 @@ impl Bridge {
         quote: Option<String>,
         heard: Result<String, String>,
     ) {
-        let now = now_ms();
         match heard {
             Ok(t) => {
                 let text = with_quote(quote.as_deref(), &format!("[Voice note] {t}"));
-                let kept = match self.st().queue.iter_mut().find(|q| q.id == slot) {
-                    Some(q) => {
-                        q.text = Some(text);
-                        true
-                    }
-                    None => false, // dropped meanwhile with /cancel
-                };
-                if kept {
-                    self.deliver(slot, chat, now).await;
-                }
+                self.fill(slot, chat, text, None).await;
             }
             Err(why) => {
-                self.st().queue.retain(|q| q.id != slot);
-                self.reply(
-                    chat,
-                    &format!(
-                        "The voice note could not be transcribed, so nothing was sent to Helm: \
-                         {why}"
-                    ),
-                )
-                .await;
-                // What waited behind it may go now.
-                self.flush(now).await;
+                let said = format!(
+                    "The voice note could not be transcribed, so nothing was sent to Helm: {why}"
+                );
+                self.free(slot, chat, &said).await;
             }
         }
+    }
+
+    /// Give the place held at `slot` its message (and picture) and send what may go. A message
+    /// dropped meanwhile with /cancel is not brought back.
+    async fn fill(&self, slot: &str, chat: i64, text: String, image: Option<Image>) {
+        let held = {
+            let mut st = self.st();
+            let others: usize = st
+                .queue
+                .iter()
+                .filter(|q| q.id != slot)
+                .flat_map(|q| &q.images)
+                .map(|i| i.len)
+                .sum();
+            match st.queue.iter_mut().find(|q| q.id == slot) {
+                None => None,
+                Some(_)
+                    if image
+                        .as_ref()
+                        .is_some_and(|i| others + i.len > MAX_QUEUED_IMAGE_BYTES) =>
+                {
+                    Some(false)
+                }
+                Some(q) => {
+                    q.text = Some(text);
+                    q.images = image.into_iter().collect();
+                    Some(true)
+                }
+            }
+        };
+        match held {
+            Some(true) => {
+                self.deliver(slot, chat, now_ms()).await;
+            }
+            Some(false) => {
+                let said = format!(
+                    "{IMAGE_FAILED}too many pictures are already waiting to reach Helm. Try again \
+                     in a moment."
+                );
+                self.free(slot, chat, &said).await;
+            }
+            None => {}
+        }
+    }
+
+    /// A failure frees the place held at `slot`, tells the user, and lets what waited behind it go.
+    async fn free(&self, slot: &str, chat: i64, said: &str) {
+        self.st().queue.retain(|q| q.id != slot);
+        self.reply(chat, said).await;
+        self.flush(now_ms()).await;
+    }
+
+    /// A picture: hold its place in the queue and fetch it beside the poll loop.
+    async fn on_image(
+        self: &Arc<Self>,
+        msg: &Value,
+        pick: Result<Pick, String>,
+        chat: i64,
+        quote: Option<String>,
+        now: i64,
+    ) -> Handled {
+        let Some(files) = self.files.clone() else {
+            self.reply(chat, IMAGES_OFF).await;
+            return Handled::Command;
+        };
+        let pick = match pick {
+            Ok(p) => p,
+            Err(why) => {
+                self.reply(chat, &format!("{IMAGE_FAILED}{why}")).await;
+                return Handled::Command;
+            }
+        };
+        let Some(slot) = self.push(msg, None, now) else {
+            self.reply_full(chat).await;
+            return Handled::Queued;
+        };
+        // The caption is the message; `/helm` on it routes it as it does on text.
+        let caption = msg.get("caption").and_then(Value::as_str).unwrap_or("");
+        let caption = strip_helm(caption).unwrap_or(caption).trim();
+        let text = with_quote(
+            quote.as_deref(),
+            if caption.is_empty() {
+                pick.label
+            } else {
+                caption
+            },
+        );
+        let me = self.clone();
+        tokio::spawn(async move {
+            match me.fetch_image(&*files, &pick).await {
+                Ok(image) => me.fill(&slot, chat, text, Some(image)).await,
+                Err(why) => me.free(&slot, chat, &format!("{IMAGE_FAILED}{why}")).await,
+            }
+        });
+        Handled::Image
+    }
+
+    /// `getFile`, the download, then the checks on the picture's own bytes.
+    async fn fetch_image(&self, files: &dyn Files, pick: &Pick) -> Result<Image, String> {
+        let file = self
+            .api
+            .call("getFile", json!({ "file_id": pick.file_id }))
+            .await
+            .map_err(|e| format!("Telegram did not hand over the picture ({})", e.description))?;
+        if file
+            .get("file_size")
+            .and_then(Value::as_u64)
+            .is_some_and(|n| n > MAX_VOICE_BYTES)
+        {
+            return Err(TOO_LARGE.into());
+        }
+        let path = file
+            .get("file_path")
+            .and_then(Value::as_str)
+            .ok_or("Telegram gave no download path for it")?;
+        let bytes = files.download(path).await?;
+        let name = pick.name.clone();
+        blocking(move || inspect(bytes, name.as_deref())).await
     }
 
     /// Expire old messages, take back unacknowledged ones from a line that went away, and send
@@ -744,17 +996,24 @@ impl Bridge {
                     // Order is kept: nothing overtakes a voice note still being transcribed.
                     let Some(text) = &q.text else { break };
                     let age = (now - q.sent_at_ms) / 60_000;
-                    frames.push((
-                        json!({
-                            "type": "telegram",
-                            "id": q.id,
-                            "text": text,
-                            "sentAt": q.sent_at_ms,
-                            "ageMinutes": if age >= 1 { json!(age) } else { Value::Null },
-                            "bot": bot,
-                        }),
-                        q.id.clone(),
-                    ));
+                    let mut frame = json!({
+                        "type": "telegram",
+                        "id": q.id,
+                        "text": text,
+                        "sentAt": q.sent_at_ms,
+                        "ageMinutes": if age >= 1 { json!(age) } else { Value::Null },
+                        "bot": bot,
+                    });
+                    if !q.images.is_empty() {
+                        frame["images"] = q
+                            .images
+                            .iter()
+                            .map(|i| {
+                                json!({ "name": i.name, "mediaType": i.mime, "data": &*i.data })
+                            })
+                            .collect();
+                    }
+                    frames.push((frame, q.id.clone()));
                     q.sent_on = Some(gen);
                     q.sent_down_ms = now;
                 }
@@ -1219,6 +1478,62 @@ impl HttpVoice {
     }
 }
 
+/// Pictures over HTTP: the file from the Bot API's file host.
+pub struct HttpFiles {
+    base: String,
+    token: String,
+    agent: ureq::Agent,
+}
+
+impl HttpFiles {
+    pub fn new(api_base: &str, token: &str) -> Self {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(STT_CONNECT))
+            .timeout_global(Some(STT_TIMEOUT))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        HttpFiles {
+            base: api_base.trim_end_matches('/').to_owned(),
+            token: token.to_owned(),
+            agent,
+        }
+    }
+}
+
+impl Files for HttpFiles {
+    fn download<'a>(&'a self, file_path: &'a str) -> VoiceFuture<'a, Vec<u8>> {
+        fetch(&self.agent, &self.base, &self.token, file_path)
+    }
+}
+
+/// A file from the Bot API's file host, at most [`MAX_VOICE_BYTES`]. No error carries the token.
+fn fetch<'a>(
+    agent: &ureq::Agent,
+    base: &str,
+    token: &str,
+    file_path: &str,
+) -> VoiceFuture<'a, Vec<u8>> {
+    let url = format!("{base}/file/bot{token}/{file_path}");
+    let (agent, token) = (agent.clone(), token.to_owned());
+    Box::pin(blocking(move || {
+        let failed = |e: ureq::Error| match e {
+            ureq::Error::BodyExceedsLimit(_) => TOO_LARGE.to_owned(),
+            e => scrub(format!("the download from Telegram failed: {e}"), &token),
+        };
+        let mut resp = agent.get(&url).call().map_err(failed)?;
+        let status = resp.status().as_u16();
+        if status != 200 {
+            return Err(format!("the download from Telegram failed (HTTP {status})"));
+        }
+        resp.body_mut()
+            .with_config()
+            .limit(MAX_VOICE_BYTES)
+            .read_to_vec()
+            .map_err(failed)
+    }))
+}
+
 /// Run a blocking HTTP exchange on the blocking pool.
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, String> + Send + 'static,
@@ -1278,24 +1593,7 @@ fn stt_reply(status: u16, body: &str) -> Result<String, String> {
 
 impl Voice for HttpVoice {
     fn download<'a>(&'a self, file_path: &'a str) -> VoiceFuture<'a, Vec<u8>> {
-        let url = format!("{}/file/bot{}/{}", self.base, self.token, file_path);
-        let (agent, token) = (self.agent.clone(), self.token.clone());
-        Box::pin(blocking(move || {
-            let failed = |e: ureq::Error| match e {
-                ureq::Error::BodyExceedsLimit(_) => "it is larger than 20 MB".to_owned(),
-                e => scrub(format!("the download from Telegram failed: {e}"), &token),
-            };
-            let mut resp = agent.get(&url).call().map_err(failed)?;
-            let status = resp.status().as_u16();
-            if status != 200 {
-                return Err(format!("the download from Telegram failed (HTTP {status})"));
-            }
-            resp.body_mut()
-                .with_config()
-                .limit(MAX_VOICE_BYTES)
-                .read_to_vec()
-                .map_err(failed)
-        }))
+        fetch(&self.agent, &self.base, &self.token, file_path)
     }
 
     fn transcribe<'a>(

@@ -65,11 +65,17 @@ test('send, edit and delete change the chat as a phone would show it', async () 
 test('voice notes download and transcribe; buttons are tapped, answered and removed', async () => {
   const [tg, stt] = await Promise.all([startFakeTelegram(), startFakeStt()]);
   try {
+    tg.picture(42, new Uint8Array([1, 2, 3]), { caption: 'look' });
     tg.voice(42, new Uint8Array([79, 103, 103, 83]));
     const keyboard = { inline_keyboard: [[{ text: 'Allow', callback_data: 'a:0123456789abcdef:0' }]] };
     const ask = await call(tg.url, DEFAULT_TOKEN, 'sendMessage', { chat_id: 42, text: 'Run it?', reply_markup: keyboard });
     tg.tap(42, ask.body.result.message_id, 'a:0123456789abcdef:0');
-    const [note, tap] = (await call(tg.url, DEFAULT_TOKEN, 'getUpdates', { offset: 0 })).body.result as any[];
+    const [pic, note, tap] = (await call(tg.url, DEFAULT_TOKEN, 'getUpdates', { offset: 0 })).body.result as any[];
+    assert.equal(pic.message.caption, 'look');
+    const best = pic.message.photo.at(-1);
+    const info = (await call(tg.url, DEFAULT_TOKEN, 'getFile', { file_id: best.file_id })).body.result;
+    const photoBytes = await fetch(`${tg.url}/file/bot${DEFAULT_TOKEN}/${info.file_path}`);
+    assert.deepEqual(new Uint8Array(await photoBytes.arrayBuffer()), new Uint8Array([1, 2, 3]));
     const file = (await call(tg.url, DEFAULT_TOKEN, 'getFile', { file_id: note.message.voice.file_id })).body.result;
     assert.equal(file.file_size, 4);
     const audio = await fetch(`${tg.url}/file/bot${DEFAULT_TOKEN}/${file.file_path}`);
