@@ -12,7 +12,11 @@
 //       shared with another service), starts a new chat, and its bubble shows the Telegram badge
 //       without the note for the agent;
 // - T5  while the user is away, a chat that finishes a reply sends one "While you're away" line
-//       to the phone (Helm speaking first), and nothing is sent once they are back.
+//       to the phone (Helm speaking first), and nothing is sent once they are back;
+// - T6  a voice note is transcribed by the speech-to-text server and reaches the chat as
+//       "[Voice note] ..." (quoted replies are pinned in the hub's own tests);
+// - T7  with Approve from Telegram on, the Telegram chat's permission prompts arrive as buttons:
+//       one tap allows, one denies, and each answer leaves a line in the chat.
 //
 // Origin `telegram` and "never consent" are pinned in Rust (helm-relay sink tests) through the
 // real send path. Run: `npm run build:debug` at the root and `cargo build` in hub/, then
@@ -23,7 +27,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import { BOT_USERNAME, startFakeTelegram, type FakeTelegram } from "../../fakes/telegram/server.ts";
+import { BOT_USERNAME, FAKE_TRANSCRIPT, startFakeStt, startFakeTelegram, type FakeStt, type FakeTelegram } from "../../fakes/telegram/server.ts";
 import { api, dispose, launchApp, REPO, rows, scratchDir, tid, type App } from "./harness.ts";
 
 const HUB_EXE =
@@ -38,6 +42,7 @@ let app: App | undefined;
 let hub: ChildProcess | undefined;
 let hubLog = "";
 let tg: FakeTelegram | undefined;
+let stt: FakeStt | undefined;
 let hubUrl = "";
 type Json = Record<string, any>;
 
@@ -74,6 +79,7 @@ describe("Telegram messages into chats, and the turn mirrored back", { timeout: 
   let chatId = "";
   before(async () => {
     tg = await startFakeTelegram();
+    stt = await startFakeStt();
     const port = await freePort();
     hub = spawn(HUB_EXE, ["serve"], {
       env: {
@@ -84,6 +90,7 @@ describe("Telegram messages into chats, and the turn mirrored back", { timeout: 
         HUB_TELEGRAM_BOT_TOKEN: tg.token,
         HUB_TELEGRAM_ALLOWED_USERS: String(ALLOWED_USER),
         HUB_TELEGRAM_API: tg.url,
+        HUB_TELEGRAM_STT_URL: stt.url,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -99,6 +106,7 @@ describe("Telegram messages into chats, and the turn mirrored back", { timeout: 
     await dispose(app);
     hub?.kill();
     await tg?.close();
+    await stt?.close();
   });
 
   test("T1: the first message starts the Telegram chat and its answer arrives as a new message", async () => {
@@ -197,5 +205,39 @@ describe("Telegram messages into chats, and the turn mirrored back", { timeout: 
     const alert = await until("the away alert", () => phone().slice(mark).find((t) => t.startsWith("While you're away:")), 90_000);
     assert.equal(alert.split("\n").length, 2, `one line, for the one chat that needs you: ${alert}`);
     await api(page, "afk_set", { on: false });
+  });
+  test("T6: a voice note is transcribed by the speech-to-text server and reaches the chat", async () => {
+    tg!.voice(ALLOWED_USER, new Uint8Array([79, 103, 103, 83, 0, 1, 2, 3]));
+    await until("the voice note's answer", () => (phone().some((t) => t.includes("You said:") && t.includes(`[Voice note] ${FAKE_TRANSCRIPT}`)) ? true : undefined));
+    assert.equal(stt!.uploads.length, 1, "one upload to the speech-to-text server");
+  });
+
+  test("T7: Approve from Telegram: a tap allows, a tap denies, and each leaves a line", async () => {
+    const page = app!.page;
+    const before = (await api(page, "relay_telegram_get", {})) as Json;
+    await api(page, "relay_telegram_save", { maxAgeHours: before.maxAgeHours, maxTokens: before.maxTokens, awayAlerts: before.awayAlerts, approvals: true });
+    const mark = tg!.sent.length;
+    tg!.message(ALLOWED_USER, "[E2] tidy the folder");
+    type Button = { text: string; callback_data: string };
+    const ask = async (n: number) =>
+      until(`approval ask ${n}`, () => {
+        const asks = tg!.sent.slice(mark).filter((c) => c.method === "sendMessage" && c.replyMarkup);
+        return asks.length >= n ? asks[n - 1] : undefined;
+      });
+    const tap = (a: { messageId: number; replyMarkup?: unknown }, label: string) => {
+      const rows = (a.replyMarkup as { inline_keyboard: Button[][] }).inline_keyboard;
+      const b = rows.flat().find((x) => x.text === label);
+      assert.ok(b, `a "${label}" button: ${JSON.stringify(rows)}`);
+      tg!.tap(ALLOWED_USER, a.messageId, b!.callback_data);
+    };
+    const first = await ask(1);
+    assert.match(String(first.text), /needs your approval/);
+    tap(first, "Allow once");
+    tap(await ask(2), "Deny");
+    await until("the turn's answer", () => (phone().some((t) => t.includes("second call denied")) ? true : undefined));
+    const chatId = ((await api(page, "relay_telegram_get", {})) as Json).chat.id;
+    const tPage = (await api(page, "transcript_page", { chatId })) as Json;
+    const lines = (tPage.messages as Json[]).filter((r) => r.role === "context" && r.details?.contextKind === "telegram").map((r) => r.text);
+    assert.deepEqual(lines.filter((t: string) => t.startsWith("Answered from Telegram")), ["Answered from Telegram: Allow once", "Answered from Telegram: Deny"]);
   });
 });
