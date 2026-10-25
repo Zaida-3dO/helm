@@ -41,6 +41,7 @@ import { followSendShortcut } from './hosttools/sendShortcut.ts';
 import './hosttools/index.ts'; // the Allow cards
 import { NewChatHost } from './newchat/index.ts';
 import { FrameStats } from './perf/index.ts'; // the frame-stats overlay (Mod+Shift+P)
+import { ErrorBoundary } from './safety/ErrorBoundary.tsx';
 
 export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers: Flushers }) {
   const ops = useMemo(() => chatOps(api), [api]);
@@ -104,9 +105,11 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
   );
 
   return (
-    <ShellProvider shell={shell}>
-      <Frame flushers={flushers} />
-    </ShellProvider>
+    <ErrorBoundary name="app" fatal>
+      <ShellProvider shell={shell}>
+        <Frame flushers={flushers} />
+      </ShellProvider>
+    </ErrorBoundary>
   );
 }
 
@@ -130,23 +133,29 @@ function Frame({ flushers }: { flushers: Flushers }) {
   return (
     <div className="shell" data-testid="shell">
       <aside className="shell-sidebar" aria-label="Sidebar" hidden={!layout.visible} style={{ '--sidebar-width': `${layout.width}px` } as CSSProperties}>
-        <Sidebar /> {/* chat and project tree */}
+        <ErrorBoundary name="sidebar">
+          <Sidebar /> {/* chat and project tree */}
+        </ErrorBoundary>
         <SidebarResizer />
       </aside>
       <main className="shell-main">
         <TopBar actionRow={<ActionRow chatId={chatId} />} chatMenu={<ChatMenu chatId={chatId} />} tags={<ProjectTags chatId={chatId} />} />
         <div className="shell-chat">
-          {chatId ? (
-            <ChatView key={chatId} chatId={chatId} store={shell.store} ops={shell.ops} flushers={flushers} sendShortcut={sendShortcut} />
-          ) : (
-            <EmptyMain />
-          )}
+          <ErrorBoundary name="chat" resetKey={chatId}>
+            {chatId ? (
+              <ChatView key={chatId} chatId={chatId} store={shell.store} ops={shell.ops} flushers={flushers} sendShortcut={sendShortcut} />
+            ) : (
+              <EmptyMain />
+            )}
+          </ErrorBoundary>
           <NewChatHost flushers={flushers} sendShortcut={sendShortcut} /> {/* the new-chat page */}
         </div>
         <TerminalDock />
         <Notifications /> {/* over the chat column only, never the side panel */}
       </main>
-      <SidePanel api={shell.api} chatId={chatId} /> {/* side panel */}
+      <ErrorBoundary name="side panel" resetKey={chatId}>
+        <SidePanel api={shell.api} chatId={chatId} /> {/* side panel */}
+      </ErrorBoundary>
       <ToastSlotView />
       <ShellShortcuts />
       <SettingsToast api={shell.api} bus={shell.bus} onOpenChat={(id) => shell.select(id)} /> {/* settings-change toast */}

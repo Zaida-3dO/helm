@@ -4,6 +4,8 @@ import { App } from './App.tsx';
 import { createApi, type Api } from './api/client.ts';
 import { EventBus } from './api/events.ts';
 import { Flushers, installQuitHandling } from './shell/quit.ts';
+import { installContextMenuPolicy } from './safety/contextMenu.ts';
+import { installErrorReporting } from './safety/report.ts';
 import './styles.css';
 import './ui/ui.css';
 import './ui/status/status.css';
@@ -26,6 +28,8 @@ async function boot(): Promise<{ api: Api; bus: EventBus }> {
 
 void boot().then(({ api, bus }) => {
   const flushers = new Flushers();
+  installErrorReporting(api);
+  installContextMenuPolicy(document, import.meta.env.DEV);
   installQuitHandling(bus, api, flushers);
   const root = document.getElementById('root');
   if (root) {

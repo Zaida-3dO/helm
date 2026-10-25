@@ -9,12 +9,14 @@
 //! | `folder_pick` | blocking | the native folder dialog; see [`folder`] |
 //! | `files_pick` | blocking | the native multi-file dialog; see [`files`] |
 //! | `window_zoom` | maintenance | `{level}` 50-200 in steps of 10: zoom the web view itself |
+//! | `ui_error_report` | maintenance | `{kind, message, stack?, source?}`: one line in the renderer error log, see [`errlog`] |
 //!
 //! The app registers a [`ShellService`] (`register_services`) and taps every event through
 //! [`ShellService::observe`]. The tray, hotkey, badge and toasts are drawn by the app
 //! (`host/app/src/tray.rs`) through [`ShellHost`].
 
 pub mod bindings;
+pub mod errlog;
 pub mod files;
 pub mod folder;
 pub mod notify;
@@ -41,7 +43,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("open_external", OpClass::Maintenance, open_external)
         .blocking("folder_pick", OpClass::Blocking, folder::folder_pick)
         .blocking("files_pick", OpClass::Blocking, files::files_pick)
-        .blocking("window_zoom", OpClass::Maintenance, window_zoom);
+        .blocking("window_zoom", OpClass::Maintenance, window_zoom)
+        .blocking("ui_error_report", OpClass::Maintenance, ui_error_report);
 }
 
 /// Adds the [`ShellService`]. Needs the database and platform already registered.
@@ -74,6 +77,23 @@ fn settings_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let svc = ctx.services.need::<ShellService>()?;
     let view = svc.save(s).map_err(ApiError::bad_args)?;
     to_value(&view)
+}
+
+/// The page reports an error it hit; the line goes to the diagnostics folder, rate limited.
+fn ui_error_report(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let profile = ctx.services.need::<helm_core::profile::Profile>()?;
+    let field = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or_default();
+    let outcome = errlog::global()
+        .record(
+            &profile.path("diagnostics"),
+            helm_core::now_ms(),
+            field("kind"),
+            field("message"),
+            field("stack"),
+            field("source"),
+        )
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(serde_json::json!({ "logged": outcome == errlog::Outcome::Written }))
 }
 
 fn window_zoom(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {

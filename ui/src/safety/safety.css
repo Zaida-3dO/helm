@@ -1,0 +1,51 @@
+.safety-fatal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--text);
+  text-align: center;
+}
+
+.safety-fatal h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.safety-fatal p {
+  margin: 0;
+  color: var(--secondary);
+}
+
+.safety-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 24px;
+  color: var(--secondary);
+  text-align: center;
+}
+
+.safety-pane p {
+  margin: 0;
+}
+
+.safety-detail {
+  max-width: 560px;
+  max-height: 120px;
+  margin: 0;
+  overflow: auto;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
