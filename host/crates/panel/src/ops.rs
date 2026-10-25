@@ -21,6 +21,7 @@
 //! | `review_comment_add` | maintenance | `{chatId, id, path, diffSide, side, startLine, endLine, body, fingerprint}` → comment |
 //! | `review_comment_list` / `_remove` / `_clear` | blocking / maintenance / maintenance | `{chatId}` / `{chatId, id}` / `{chatId}` |
 //! | `review_turns` | heavy | `{chatId, messageIds[≤600]}` → `TurnChanges[]` (completed turns only) |
+//! | `review_turn_diff` | heavy | `{chatId, messageId, path}` → `{patch, complete, time}`: one file's recorded diff in a finished turn |
 //! | `panel_tabs_get` / `panel_tabs_save` | blocking / maintenance | `{}` → `panelTabs` v1 / `{value}` → `null` |
 //!
 //! Arguments are parsed strictly. Refusals come back as `{code: "refused", message}`; the message
@@ -65,6 +66,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         )
         .blocking("review_comment_clear", OpClass::Maintenance, comment_clear)
         .blocking("review_turns", OpClass::Heavy, review_turns_op)
+        .blocking("review_turn_diff", OpClass::Heavy, review_turn_diff_op)
         .blocking("changes", OpClass::Heavy, changes_op)
         .blocking("diff", OpClass::Heavy, diff_op)
         // Staging takes its own process-wide try-lock, never the maintenance lock or a read permit.
@@ -662,6 +664,39 @@ fn comment_clear(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 struct TurnsArgs {
     chat_id: String,
     message_ids: Vec<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct TurnDiffArgs {
+    chat_id: String,
+    message_id: i64,
+    path: String,
+}
+
+fn review_turn_diff_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: TurnDiffArgs = parse(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let out = db
+        .snapshot(|tx| {
+            let status: Option<String> = tx
+                .query_row(
+                    "SELECT status FROM chats WHERE id = ?1",
+                    [&a.chat_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let running = matches!(status.as_deref(), Some("starting" | "running" | "stopping"));
+            turns::review_turn_diff(tx, &a.chat_id, a.message_id, &a.path, running)
+        })
+        .map_err(db_err)?;
+    match out {
+        Some(d) => serde_json::to_value(d).map_err(|e| ApiError::internal(e.to_string())),
+        None => Err(ApiError::new(
+            "not_found",
+            "That turn's record of this file is no longer available.",
+        )),
+    }
 }
 
 fn review_turns_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {

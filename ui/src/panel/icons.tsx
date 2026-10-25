@@ -11,6 +11,7 @@ import {
   IconChevronRight,
   IconCopy,
   IconEye,
+  IconEyeOff,
   IconExternalLink,
   IconFileDiff,
   IconFileText,
@@ -52,8 +53,9 @@ export const UpIcon = panelIcon(IconArrowUp, 14);
 export const WrapIcon = panelIcon(IconWrap, 14);
 export const ReloadIcon = panelIcon(IconRefresh, 14);
 export const CopyIcon = panelIcon(IconCopy, 13);
-export const EyeIcon = panelIcon(IconEye, 13);
 export const BrowseFolderIcon = panelIcon(IconBrowseFolder, 13);
+export const EyeIcon = panelIcon(IconEye, 14);
+export const EyeOffIcon = panelIcon(IconEyeOff, 14);
 export const ExternalIcon = panelIcon(IconExternalLink, 13);
 export const ChevronIcon = panelIcon(IconChevronRight, 13);
 export const BranchIcon = panelIcon(IconFork, 13);

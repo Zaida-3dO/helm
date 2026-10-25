@@ -82,13 +82,6 @@
 .term-title {
   font-weight: 540;
 }
-.term-cwd {
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
 .term-x {
   width: 17px;
   height: 17px;

@@ -6,11 +6,12 @@ import { useEffect, useMemo, useState } from 'react';
 import type { FileView, PanelOps } from '../../api/panel.ts';
 import { Markdown } from '../../markdown/index.ts';
 import type { LinkTarget } from '../../markdown/index.ts';
-import { BackIcon, BrowseFolderIcon, ChevronIcon, CopyIcon, FileTextIcon, FolderOpenIcon, ForwardIcon, ReloadIcon, UpIcon, WrapIcon } from '../icons.tsx';
+import { BackIcon, BrowseFolderIcon, ChevronIcon, CopyIcon, EyeIcon, EyeOffIcon, FileTextIcon, FolderOpenIcon, ForwardIcon, ReloadIcon, UpIcon, WrapIcon } from '../icons.tsx';
 import { gateTarget, handleLink } from '../links.ts';
 import { openInPanel } from '../registry.ts';
 import { CodeView } from './CodeView.tsx';
 import { dirname, displayPath, joinPath, pathKey, splitSegments } from './paths.ts';
+import { canPreview, ImagePreview, JsonPreview, TablePreview } from './previews.tsx';
 
 export interface Location {
   path: string;
@@ -34,6 +35,11 @@ const KIND_LABEL: Record<string, string> = {
   powershell: 'PowerShell', dos: 'Batch', go: 'Go', java: 'Java', csharp: 'C#', c: 'C', cpp: 'C++',
   sql: 'SQL', diff: 'Diff',
 };
+
+/** How many entries a folder listing shows, with hidden (dot) entries counted only when shown. */
+function shownEntries(entries: FileView['entries'], showHidden: boolean): number {
+  return (entries ?? []).filter((e) => showHidden || !e.name.startsWith('.')).length;
+}
 
 function kindLabel(v: FileView): string {
   if (v.kind === 'dir') return 'Folder';
@@ -87,6 +93,7 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
   const [wrap, setWrap] = useState(false);
   const [mode, setMode] = useState<'preview' | 'source' | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showHidden, setShowHidden] = useState(false);
 
   // A new start (the same file reopened at another line) resets the history.
   useEffect(() => {
@@ -141,7 +148,8 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
     });
 
   const isMarkdown = view?.kind === 'text' && view.language === 'markdown';
-  const renderable = isMarkdown || view?.kind === 'html';
+  const richKind = view ? canPreview(loc.path, view.kind, view.language) : null;
+  const renderable = isMarkdown || view?.kind === 'html' || richKind !== null;
   // Source is the default when the link carries a line number.
   const effectiveMode = mode ?? (loc.line ? 'source' : 'preview');
   const parent = dirname(loc.path);
@@ -197,6 +205,18 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
               Source
             </button>
           </span>
+        )}
+        {view?.kind === 'dir' && (
+          <button
+            type="button"
+            className="fv-icon-btn"
+            aria-pressed={showHidden}
+            aria-label="Show hidden files"
+            title={showHidden ? 'Hide hidden files' : 'Show hidden files'}
+            onClick={() => setShowHidden((v) => !v)}
+          >
+            {showHidden ? <EyeIcon /> : <EyeOffIcon />}
+          </button>
         )}
         {showWrap && (
           <button type="button" className="fv-icon-btn" aria-pressed={wrap} aria-label="Word wrap" title="Word wrap" onClick={() => setWrap((w) => !w)}>
@@ -263,7 +283,7 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
       <nav className="fv-crumbs" aria-label="Path">
         {segments.map((seg, i) => (
           <span key={seg.path} className="fv-crumb-wrap">
-            <span className="fv-crumb-sep">{i > 0 ? <ChevronIcon size={12} /> : '/'}</span>
+            <span className="fv-crumb-sep">{i > 0 ? <ChevronIcon size={12} /> : null}</span>
             <button type="button" className="fv-crumb" aria-current={i === segments.length - 1 ? 'page' : undefined} onClick={() => go({ path: seg.path })}>
               {seg.name}
             </button>
@@ -303,7 +323,7 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
             <div>
               <div className="fv-folder-name">{name}</div>
               <div className="fv-folder-count">
-                {view.entries?.length ?? 0} items{view.truncated ? ' (listing limited to 1,000 entries)' : ''}
+                {shownEntries(view.entries, showHidden)} items{view.truncated ? ' (listing limited to 1,000 entries)' : ''}
               </div>
             </div>
           </div>
@@ -314,7 +334,7 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
             <span className="fv-entry-name">..</span>
           </button>
         )}
-        {(view.entries ?? []).map((e) => (
+        {(view.entries ?? []).filter((e) => showHidden || !e.name.startsWith('.')).map((e) => (
           <button
             type="button"
             key={e.name}
@@ -336,14 +356,14 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
       </div>
     );
   } else if (view.kind === 'image') {
-    body = (
-      <div className="fv-image">
-        {imageUrl ? <img src={imageUrl} alt={segments[segments.length - 1]?.name ?? ''} /> : null}
-      </div>
-    );
+    body = <ImagePreview url={imageUrl} name={name} size={view.size} />;
   } else if (view.kind === 'html' && effectiveMode === 'preview') {
     // Fully sandboxed: no scripts, no same-origin, no forms, no navigation.
     body = <iframe className="fv-html" title="HTML preview" sandbox="" srcDoc={view.text ?? ''} referrerPolicy="no-referrer" />;
+  } else if (richKind === 'json' && effectiveMode === 'preview') {
+    body = <JsonPreview text={view.text ?? ''} />;
+  } else if (richKind === 'table' && effectiveMode === 'preview') {
+    body = <TablePreview text={view.text ?? ''} path={loc.path} />;
   } else if (isMarkdown && effectiveMode === 'preview') {
     body = (
       <div className="fv-markdown">

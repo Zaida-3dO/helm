@@ -16,8 +16,13 @@ const FILES: Record<string, string> = {
   'docs\\guide.md': '# Guide\n\nBack to the [readme](../README.md).\n',
   'src\\app.ts': `import { value1 } from './values';\n\nexport function main(): number {\n  return value1 + 1;\n}\n`,
   'src\\values.ts': LONG,
+  'data\\config.json': JSON.stringify({ name: 'demo', version: '1.2.0', private: true, scripts: { build: 'vite build', test: 'node --test' }, tags: ['one', 'two', 'three'], nested: { deep: { ok: true, none: null, n: 42 } } }, null, 2),
+  'data\\people.csv': 'name,team,note\nAnn,Core,"likes tests, mostly"\nBob,UI,\nCat,Hub,"says ""hi"""\n',
+  '.env.example': 'TOKEN=changeme\n',
   'page.html': '<h1>Hello</h1><script>document.body.innerHTML = "scripts must not run"</script>',
 };
+
+const LOGO_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="140"><rect width="240" height="140" fill="#3b6fb6"/><circle cx="120" cy="70" r="40" fill="#fff"/></svg>';
 
 function norm(p: string): string {
   return p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
@@ -26,6 +31,7 @@ function norm(p: string): string {
 function language(name: string): string | undefined {
   if (name.endsWith('.ts')) return 'typescript';
   if (name.endsWith('.md')) return 'markdown';
+  if (name.endsWith('.json')) return 'json';
   return undefined;
 }
 
@@ -34,6 +40,9 @@ function read(path: string): FileView {
   const root = norm(FAKE_ROOT);
   if (!n.startsWith(root)) throw new ApiError('not_found', 'The file was not found.');
   const rel = n.slice(root.length).replace(/^\\/, '');
+  if (rel === 'logo.svg') {
+    return { path, kind: 'image', size: LOGO_SVG.length, bytes: btoa(LOGO_SVG), mime: 'image/svg+xml', truncated: false };
+  }
   const fileKey = Object.keys(FILES).find((k) => k.toLowerCase() === rel);
   if (fileKey !== undefined) {
     const text = FILES[fileKey] as string;
@@ -55,6 +64,7 @@ function read(path: string): FileView {
     const at = rest.indexOf('\\');
     names.set(at < 0 ? rest : rest.slice(0, at), at < 0 ? 'file' : 'dir');
   }
+  if (!rel) names.set('logo.svg', 'file');
   if (names.size === 0) throw new ApiError('not_found', 'The file was not found.');
   const entries = [...names].map(([name, kind]) => ({ name, kind })).sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1));
   return { path, kind: 'dir', size: 0, entries, truncated: false };
@@ -102,6 +112,15 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
           ],
           truncated: false,
         }));
+      case 'review_turn_diff': {
+        const path = String(args.path);
+        if (path.endsWith('guide.md')) return { patch: '', complete: false, time: 1700000000 };
+        return {
+          patch: ['@@ @@ edit', ' keep this line', '-const before = 1;', '+const after = 2;', ' and this one', ''].join('\n'),
+          complete: true,
+          time: 1700000000,
+        };
+      }
       case 'panel_context_get':
         return { on: contextOn.has(String(args.chatId)) };
       case 'panel_context_set':
@@ -175,7 +194,7 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       }
       case 'quick_open': {
         const q = String(args.query ?? '').toLowerCase();
-        const items = Object.keys(FILES)
+        const items = [...Object.keys(FILES), 'logo.svg']
           .filter((k) => k.toLowerCase().includes(q))
           .map((k, i) => ({ path: `${FAKE_ROOT}\\${k}`, label: k, kind: 'file', score: 100 - i }));
         return { mode: 'files', items, partial: false };
@@ -189,5 +208,5 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         throw new ApiError('refused', 'This operation is not available here.');
     }
   };
-  return { prefixes: ['file_', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_', 'path_resolve', 'quick_open', 'changes', 'diff', 'vault_', 'panel_context_', 'review_comment_', 'review_turns'], handler };
+  return { prefixes: ['file_', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_', 'path_resolve', 'quick_open', 'changes', 'diff', 'vault_', 'panel_context_', 'review_comment_', 'review_turns', 'review_turn_diff'], handler };
 }

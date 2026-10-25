@@ -47,6 +47,20 @@ test('expanding a gap reveals lines from its top, and fully expanded it disappea
   assert.equal(all.filter((r) => r.kind === 'ctx').length, 11);
 });
 
+test('a hunk header without numbers gives rows without line numbers and a plain label', () => {
+  const rows = parseDiff('@@ @@ edit\n keep\n-one\n+two\n');
+  assert.deepEqual(
+    rows.map((r) => [r.kind, r.text, r.oldNo, r.newNo]),
+    [
+      ['hunk', 'edit', undefined, undefined],
+      ['ctx', 'keep', undefined, undefined],
+      ['del', 'one', undefined, undefined],
+      ['add', 'two', undefined, undefined],
+    ],
+  );
+  assert.deepEqual(parseDiff('@@ -0,0 +1,2 @@\n+a\n+b\n').map((r) => r.newNo), [undefined, 1, 2]);
+});
+
 test('short runs are never folded', () => {
   const p = '@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n';
   assert.ok(!fold(parseDiff(p)).some((r) => r.kind === 'gap'));

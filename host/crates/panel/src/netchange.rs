@@ -85,8 +85,15 @@ struct Region {
     new: String,
 }
 
-/// The net change of a file's events in order.
-pub fn net(events: &[Event]) -> Net {
+/// What a file's events settle to: a snapshot (known or unknown base, final text) or edit regions.
+struct Settled {
+    complete: bool,
+    snapshot: Option<(Option<String>, String)>,
+    regions: Vec<Region>,
+}
+
+/// Plays a file's events in order.
+fn settle(events: &[Event]) -> Settled {
     let mut complete = true;
     // With a snapshot: the known text before (None = unknown) and now.
     let mut snapshot: Option<(Option<String>, String)> = None;
@@ -162,6 +169,20 @@ pub fn net(events: &[Event]) -> Net {
             }
         }
     }
+    Settled {
+        complete,
+        snapshot,
+        regions,
+    }
+}
+
+/// The net change of a file's events in order.
+pub fn net(events: &[Event]) -> Net {
+    let Settled {
+        complete,
+        snapshot,
+        regions,
+    } = settle(events);
     let mut total = Net {
         added: 0,
         removed: 0,
@@ -189,6 +210,121 @@ pub fn net(events: &[Event]) -> Net {
         total.removed = 0;
     }
     total
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Op<'a> {
+    Keep(&'a str),
+    Del(&'a str),
+    Add(&'a str),
+}
+
+/// A line-level edit script from `a` to `b`, or None over the same budget as [`line_diff`].
+fn edit_script<'a>(a: &'a str, b: &'a str) -> Option<Vec<Op<'a>>> {
+    if a.len() > MAX_BYTES || b.len() > MAX_BYTES {
+        return None;
+    }
+    let (x, y) = (lines(a), lines(b));
+    if x.len() > MAX_LINES || y.len() > MAX_LINES {
+        return None;
+    }
+    let mut start = 0;
+    while start < x.len() && start < y.len() && x[start] == y[start] {
+        start += 1;
+    }
+    let mut end = 0;
+    while end < x.len() - start
+        && end < y.len() - start
+        && x[x.len() - 1 - end] == y[y.len() - 1 - end]
+    {
+        end += 1;
+    }
+    let xs = &x[start..x.len() - end];
+    let ys = &y[start..y.len() - end];
+    if xs.len().saturating_mul(ys.len()) > MAX_CELLS {
+        return None;
+    }
+    // lcs[i][j]: the common length of xs[i..] and ys[j..].
+    let w = ys.len() + 1;
+    let mut lcs = vec![0u32; (xs.len() + 1) * w];
+    for i in (0..xs.len()).rev() {
+        for j in (0..ys.len()).rev() {
+            lcs[i * w + j] = if xs[i] == ys[j] {
+                lcs[(i + 1) * w + j + 1] + 1
+            } else {
+                lcs[(i + 1) * w + j].max(lcs[i * w + j + 1])
+            };
+        }
+    }
+    let mut out: Vec<Op> = x[..start].iter().map(|l| Op::Keep(l)).collect();
+    let (mut i, mut j) = (0, 0);
+    while i < xs.len() || j < ys.len() {
+        if i < xs.len() && j < ys.len() && xs[i] == ys[j] {
+            out.push(Op::Keep(xs[i]));
+            i += 1;
+            j += 1;
+        } else if i < xs.len() && (j == ys.len() || lcs[(i + 1) * w + j] >= lcs[i * w + j + 1]) {
+            // Removals before additions, as a reader expects to see a replaced line.
+            out.push(Op::Del(xs[i]));
+            i += 1;
+        } else {
+            out.push(Op::Add(ys[j]));
+            j += 1;
+        }
+    }
+    out.extend(x[x.len() - end..].iter().map(|l| Op::Keep(l)));
+    Some(out)
+}
+
+fn push_ops(out: &mut String, ops: &[Op<'_>]) {
+    for op in ops {
+        let (sign, text) = match op {
+            Op::Keep(t) => (' ', t),
+            Op::Del(t) => ('-', t),
+            Op::Add(t) => ('+', t),
+        };
+        out.push(sign);
+        out.push_str(text);
+        out.push('\n');
+    }
+}
+
+/// The file's net change as unified-diff text, and whether every edit could be verified.
+///
+/// A file the turn created is all additions with real line numbers. Otherwise each edit region is
+/// one hunk with its own surrounding lines and the header `@@ @@ edit`: the position of an edit in
+/// the file is not recorded, so no line numbers are claimed. None when the file's earlier text is
+/// unknown (it was overwritten whole) or a region is over the size budget.
+pub fn patch(events: &[Event]) -> Option<(String, bool)> {
+    let Settled {
+        complete,
+        snapshot,
+        regions,
+    } = settle(events);
+    let mut out = String::new();
+    match snapshot {
+        Some((Some(base), now)) => {
+            let ops = edit_script(&base, &now)?;
+            if base.is_empty() {
+                out.push_str(&format!("@@ -0,0 +1,{} @@\n", lines(&now).len()));
+            } else {
+                out.push_str("@@ @@ whole file\n");
+            }
+            push_ops(&mut out, &ops);
+        }
+        Some((None, _)) => return None,
+        None => {
+            for r in &regions {
+                let ops = edit_script(&r.old, &r.new)?;
+                if ops.iter().all(|o| matches!(o, Op::Keep(_))) {
+                    continue;
+                }
+                out.push_str("@@ @@ edit\n");
+                push_ops(&mut out, &ops);
+            }
+        }
+    }
+    Some((out, complete))
 }
 
 /// True when `needle` occurs in `hay` starting and ending on line boundaries.

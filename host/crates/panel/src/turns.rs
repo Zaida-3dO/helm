@@ -45,6 +45,7 @@ struct Row {
     tool: Option<String>,
     entry: Option<String>,
     status: String,
+    timestamp: i64,
 }
 
 /// The events one tool call contributes, from its arguments (Claude Code's Edit/MultiEdit/Write).
@@ -112,16 +113,12 @@ fn repo_root(file: &Path, cache: &mut HashMap<PathBuf, Option<PathBuf>>) -> Opti
     found
 }
 
-pub fn review_turns(
-    tx: &Transaction<'_>,
-    chat_id: &str,
-    ids: &[i64],
-    chat_running: bool,
-) -> rusqlite::Result<Vec<TurnChanges>> {
+/// The message rows of a chat's active branch, in order.
+fn load_rows(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Vec<Row>> {
     let mut st = tx.prepare(
-        "SELECT id, role, tool_name, entry_id, status FROM messages WHERE chat_id = ?1 AND active = 1 ORDER BY sequence, id",
+        "SELECT id, role, tool_name, entry_id, status, timestamp FROM messages WHERE chat_id = ?1 AND active = 1 ORDER BY sequence, id",
     )?;
-    let rows: Vec<Row> = st
+    let rows = st
         .query_map([chat_id], |r| {
             Ok(Row {
                 id: r.get(0)?,
@@ -129,10 +126,15 @@ pub fn review_turns(
                 tool: r.get(2)?,
                 entry: r.get(3)?,
                 status: r.get(4)?,
+                timestamp: r.get(5)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
-    // Split into turns at each user message.
+    Ok(rows)
+}
+
+/// Splits rows into turns at each user message.
+fn split_turns(rows: &[Row]) -> Vec<std::ops::Range<usize>> {
     let mut turns: Vec<std::ops::Range<usize>> = Vec::new();
     let mut start = 0;
     for (i, r) in rows.iter().enumerate() {
@@ -144,6 +146,95 @@ pub fn review_turns(
     if start < rows.len() {
         turns.push(start..rows.len());
     }
+    turns
+}
+
+/// What one turn's file-change tool calls amount to.
+struct Gathered {
+    /// Per file (first spelling of its path): the events in order and whether none was malformed.
+    files: Vec<(String, Vec<Event>, bool)>,
+    truncated: bool,
+    /// When the last change was made.
+    last_time: Option<i64>,
+}
+
+fn gather_turn(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    rows: &[Row],
+    budget: &mut usize,
+) -> rusqlite::Result<Gathered> {
+    let mut files: Vec<(String, Vec<Event>, bool)> = Vec::new();
+    let mut truncated = false;
+    let mut count = 0;
+    let mut last_time = None;
+    for r in rows {
+        let Some(tool) = r.tool.as_deref() else {
+            continue;
+        };
+        if !matches!(tool, "Edit" | "MultiEdit" | "Write") || r.status != "complete" {
+            continue;
+        }
+        if count >= MAX_EVENTS_PER_TURN || *budget == 0 {
+            truncated = true;
+            break;
+        }
+        let Some(entry) = r.entry.as_deref() else {
+            continue;
+        };
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT raw FROM entries WHERE chat_id = ?1 AND entry_id = ?2",
+                params![chat_id, entry],
+                |x| x.get(0),
+            )
+            .optional()?;
+        let Some(raw) = raw.and_then(|r| serde_json::from_str::<Value>(&r).ok()) else {
+            continue;
+        };
+        if raw.get("isError").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let args = raw
+            .get("args")
+            .and_then(Value::as_str)
+            .and_then(|a| serde_json::from_str::<Value>(a).ok());
+        let result = raw
+            .get("result")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let Some((path, evs, whole)) = args.as_ref().and_then(|a| events_of(tool, a, result))
+        else {
+            truncated = true;
+            continue;
+        };
+        count += 1;
+        *budget -= 1;
+        last_time = Some(r.timestamp);
+        let key = path.to_lowercase();
+        match files.iter_mut().find(|(p, _, _)| p.to_lowercase() == key) {
+            Some((_, list, ok)) => {
+                list.extend(evs);
+                *ok &= whole;
+            }
+            None => files.push((path, evs, whole)),
+        }
+    }
+    Ok(Gathered {
+        files,
+        truncated,
+        last_time,
+    })
+}
+
+pub fn review_turns(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    ids: &[i64],
+    chat_running: bool,
+) -> rusqlite::Result<Vec<TurnChanges>> {
+    let rows = load_rows(tx, chat_id)?;
+    let turns = split_turns(&rows);
     let wanted: std::collections::HashSet<i64> = ids.iter().take(MAX_IDS).copied().collect();
     let mut out = Vec::new();
     let mut budget = MAX_EVENTS;
@@ -162,60 +253,9 @@ pub fn review_turns(
     }
     let skip = picked.len().saturating_sub(MAX_TURNS);
     for (ti, message_id) in picked.into_iter().skip(skip) {
-        let mut files: Vec<(String, Vec<Event>, bool)> = Vec::new();
-        let mut truncated = false;
-        let mut count = 0;
-        for r in &rows[turns[ti].clone()] {
-            let Some(tool) = r.tool.as_deref() else {
-                continue;
-            };
-            if !matches!(tool, "Edit" | "MultiEdit" | "Write") || r.status != "complete" {
-                continue;
-            }
-            if count >= MAX_EVENTS_PER_TURN || budget == 0 {
-                truncated = true;
-                break;
-            }
-            let Some(entry) = r.entry.as_deref() else {
-                continue;
-            };
-            let raw: Option<String> = tx
-                .query_row(
-                    "SELECT raw FROM entries WHERE chat_id = ?1 AND entry_id = ?2",
-                    params![chat_id, entry],
-                    |x| x.get(0),
-                )
-                .optional()?;
-            let Some(raw) = raw.and_then(|r| serde_json::from_str::<Value>(&r).ok()) else {
-                continue;
-            };
-            if raw.get("isError").and_then(Value::as_bool) == Some(true) {
-                continue;
-            }
-            let args = raw
-                .get("args")
-                .and_then(Value::as_str)
-                .and_then(|a| serde_json::from_str::<Value>(a).ok());
-            let result = raw
-                .get("result")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let Some((path, evs, whole)) = args.as_ref().and_then(|a| events_of(tool, a, result))
-            else {
-                truncated = true;
-                continue;
-            };
-            count += 1;
-            budget -= 1;
-            let key = path.to_lowercase();
-            match files.iter_mut().find(|(p, _, _)| p.to_lowercase() == key) {
-                Some((_, list, ok)) => {
-                    list.extend(evs);
-                    *ok &= whole;
-                }
-                None => files.push((path, evs, whole)),
-            }
-        }
+        let Gathered {
+            files, truncated, ..
+        } = gather_turn(tx, chat_id, &rows[turns[ti].clone()], &mut budget)?;
         let files = files
             .into_iter()
             .map(|(path, evs, whole)| {
@@ -252,6 +292,59 @@ pub fn review_turns(
     Ok(out)
 }
 
+/// One file's recorded change in a turn, as a unified diff of the edits the agent made.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnDiff {
+    /// Empty when the history cannot be turned into a diff (see `complete`).
+    pub patch: String,
+    /// False when some edit could not be verified or the file's earlier text is unknown.
+    pub complete: bool,
+    /// The `timestamp` of the last change to the file, as stored.
+    pub time: Option<i64>,
+}
+
+/// The recorded diff of `path` in the turn that ends with assistant message `message_id`.
+/// `None` when that message does not end a finished turn, or the turn did not change the file.
+pub fn review_turn_diff(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    message_id: i64,
+    path: &str,
+    chat_running: bool,
+) -> rusqlite::Result<Option<TurnDiff>> {
+    let rows = load_rows(tx, chat_id)?;
+    let turns = split_turns(&rows);
+    let last_turn = turns.len().saturating_sub(1);
+    let Some((ti, range)) = turns.iter().enumerate().find(|(_, t)| {
+        rows[(*t).clone()]
+            .iter()
+            .rev()
+            .find(|r| r.role == "assistant")
+            .is_some_and(|end| end.id == message_id)
+    }) else {
+        return Ok(None);
+    };
+    if ti == last_turn && chat_running {
+        return Ok(None);
+    }
+    let mut budget = MAX_EVENTS;
+    let g = gather_turn(tx, chat_id, &rows[range.clone()], &mut budget)?;
+    let key = path.to_lowercase();
+    let Some((_, evs, whole)) = g.files.iter().find(|(p, _, _)| p.to_lowercase() == key) else {
+        return Ok(None);
+    };
+    let (patch, complete) = match netchange::patch(evs) {
+        Some((patch, complete)) => (patch, complete && *whole && !g.truncated),
+        None => (String::new(), false),
+    };
+    Ok(Some(TurnDiff {
+        patch,
+        complete,
+        time: g.last_time,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +378,41 @@ mod tests {
             .unwrap();
         }
         tx.last_insert_rowid()
+    }
+
+    #[test]
+    fn a_turns_recorded_diff_shows_its_edits_and_hides_nothing_it_cannot_prove() {
+        let (_d, db) = db();
+        let (end, running_end) = db
+            .write(|tx| {
+                row(tx, 1, "user", None);
+                row(tx, 2, "toolResult", Some(("Edit", json!({"file_path": "C:/x/a.ts", "old_string": "keep\none\nkeep2", "new_string": "keep\ntwo\nkeep2"}), false)));
+                row(tx, 3, "toolResult", Some(("Write", json!({"file_path": "C:/x/new.md", "content": "a\nb\n"}), false)));
+                row(tx, 4, "toolResult", Some(("Edit", json!({"file_path": "C:/x/new.md", "old_string": "b", "new_string": "c"}), false)));
+                let end = row(tx, 5, "assistant", None);
+                row(tx, 6, "user", None);
+                let running_end = row(tx, 7, "assistant", None);
+                Ok::<_, rusqlite::Error>((end, running_end))
+            })
+            .unwrap();
+        let get = |id: i64, path: &str, running: bool| {
+            db.write(|tx| review_turn_diff(tx, "c", id, path, running))
+                .unwrap()
+        };
+        let edit = get(end, "c:/X/A.ts", false).expect("a file the turn changed, any spelling");
+        assert!(edit.complete);
+        assert_eq!(
+            edit.patch, "@@ @@ edit\n keep\n-one\n+two\n keep2\n",
+            "an edit is shown with its own surrounding lines and no line numbers"
+        );
+        let made = get(end, "C:/x/new.md", false).unwrap();
+        assert_eq!(
+            made.patch, "@@ -0,0 +1,2 @@\n+a\n+c\n",
+            "a created file is all additions of its final text"
+        );
+        assert!(get(end, "C:/x/other.ts", false).is_none());
+        assert!(get(running_end, "C:/x/a.ts", true).is_none());
+        assert!(get(end + 100, "C:/x/a.ts", false).is_none());
     }
 
     #[test]

@@ -4,13 +4,15 @@
 // gutters and expandable gaps. Reads only while shown, on Refresh, and when the chat's turn ends.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { ChangeRecord, ChangeSection, ChangesView, DiffSide, DiffView, PanelOps } from '../../api/panel.ts';
+import type { ChangeRecord, ChangeSection, ChangesView, DiffSide, DiffView, PanelOps, TurnFile } from '../../api/panel.ts';
 import { panelOps } from '../../api/panel.ts';
 import { useShell } from '../../shell/context.ts';
+import { Markdown } from '../../markdown/index.ts';
 import { Button, TextArea } from '../../ui/index.ts';
 import { focusComment, pendingComments, report, setComments } from '../context/store.ts';
-import { BranchIcon, ChevronIcon, FileDiffIcon, ReloadIcon } from '../icons.tsx';
+import { BranchIcon, ChevronIcon, FileDiffIcon, ReloadIcon, WrapIcon } from '../icons.tsx';
 import { openInPanel, panelStore } from '../registry.ts';
+import { reviewTarget } from '../turns/review.ts';
 import { joinPath, pathKey } from '../viewer/paths.ts';
 import { counts, EXPAND_STEP, fold, parseDiff } from './diffModel.ts';
 import type { DiffRow, DisplayRow } from './diffModel.ts';
@@ -36,8 +38,8 @@ export function statusKind(status: string, section?: ChangeSection): StatusKind 
   if (status.includes('D')) return 'deleted';
   if (status.includes('R')) return 'renamed';
   if (status.includes('A')) return 'added';
-  if (status.includes('M')) return 'modified';
-  return 'conflict';
+  if (status.includes('C')) return 'added';
+  return 'modified';
 }
 
 const rowKey = (r: Pick<ChangeRecord, 'path' | 'section'>) => `${r.section}:${r.path}`;
@@ -61,6 +63,10 @@ export function ChangesSlot({ chatId, visible }: { chatId: string | null; visibl
   const [busy, setBusy] = useState<string | null>(null);
   const [announce, setAnnounce] = useState('');
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
+  const [wrap, setWrap] = useState(false);
+  const [mode, setMode] = useState<'tree' | 'review'>('tree');
+  const asked = useSyncExternalStore(reviewTarget.subscribe, reviewTarget.get);
+  const review = asked && asked.chatId === chatId ? asked : null;
   const focusNext = useRef<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
 
@@ -69,6 +75,11 @@ export function ChangesSlot({ chatId, visible }: { chatId: string | null; visibl
     setError(null);
     setOpen(new Set());
   }, [chatId]);
+
+  // Asking to review a turn (its card's Review button) switches to that turn's recorded edits.
+  useEffect(() => {
+    setMode(review ? 'review' : 'tree');
+  }, [review?.nonce, review]);
 
   useEffect(() => {
     if (!visible || !chatId || !ops) return;
@@ -138,14 +149,32 @@ export function ChangesSlot({ chatId, visible }: { chatId: string | null; visibl
   const records = view?.records ?? [];
   const changed = new Set(records.map((r) => r.path)).size;
 
+  if (review && mode === 'review' && ops) {
+    return (
+      <div className="ch-root" data-testid="changes-view" data-mode="review" ref={root}>
+        <div className="ch-modes">
+          <ModeSwitch mode={mode} onChange={setMode} />
+          <WrapToggle wrap={wrap} onToggle={() => setWrap((w) => !w)} />
+        </div>
+        <TurnReview ops={ops} chatId={chatId} messageId={review.messageId} wrap={wrap} />
+      </div>
+    );
+  }
+
   return (
     <div className="ch-root" data-testid="changes-view" ref={root}>
+      {review && (
+        <div className="ch-modes">
+          <ModeSwitch mode={mode} onChange={setMode} />
+        </div>
+      )}
       <div className="ch-subtitle">
         <span className="ch-branch">
           <BranchIcon />
           <span>{view?.branch ?? (view ? 'detached' : '')}</span>
         </span>
         <span className="ch-count">{view ? `${changed} changed` : ''}</span>
+        <WrapToggle wrap={wrap} onToggle={() => setWrap((w) => !w)} />
         <Button variant="icon" label="Refresh changes from disk" onClick={() => setTick((t) => t + 1)} disabled={loading}>
           <ReloadIcon />
         </Button>
@@ -177,6 +206,7 @@ export function ChangesSlot({ chatId, visible }: { chatId: string | null; visibl
                     repoTop={view.repoTop}
                     record={r}
                     open={open.has(rowKey(r))}
+                    wrap={wrap}
                     onToggle={() =>
                       setOpen((s) => {
                         const n = new Set(s);
@@ -218,12 +248,13 @@ interface FileRowProps {
   repoTop: string;
   record: ChangeRecord;
   open: boolean;
+  wrap: boolean;
   onToggle: () => void;
   busy: string | null;
   onStage: () => void;
 }
 
-function FileRow({ ops, chatId, repoTop, record: r, open, onToggle, busy, onStage }: FileRowProps) {
+function FileRow({ ops, chatId, repoTop, record: r, open, wrap, onToggle, busy, onStage }: FileRowProps) {
   const { dir, base } = splitPath(r.path);
   const deleted = r.status.includes('D');
   const key = rowKey(r);
@@ -289,7 +320,117 @@ function FileRow({ ops, chatId, repoTop, record: r, open, onToggle, busy, onStag
           </Button>
         )}
       </div>
-      {open && <DiffBody ops={ops} chatId={chatId} repoTop={repoTop} record={r} />}
+      {open && <DiffBody ops={ops} chatId={chatId} repoTop={repoTop} record={r} wrap={wrap} />}
+    </div>
+  );
+}
+
+function ModeSwitch({ mode, onChange }: { mode: 'tree' | 'review'; onChange: (m: 'tree' | 'review') => void }) {
+  return (
+    <div className="ch-view-switch" role="group" aria-label="Changes view">
+      <button type="button" aria-pressed={mode === 'tree'} onClick={() => onChange('tree')} data-testid="mode-working-tree">
+        Working tree
+      </button>
+      <button type="button" aria-pressed={mode === 'review'} onClick={() => onChange('review')} data-testid="mode-review">
+        Review
+      </button>
+    </div>
+  );
+}
+
+function WrapToggle({ wrap, onToggle }: { wrap: boolean; onToggle: () => void }) {
+  return (
+    <Button variant="icon" label="Word wrap" pressed={wrap} onClick={onToggle}>
+      <WrapIcon />
+    </Button>
+  );
+}
+
+/** One finished turn's recorded edits: each file the agent changed, with the diff of what it did. */
+function TurnReview({ ops, chatId, messageId, wrap }: { ops: PanelOps; chatId: string; messageId: number; wrap: boolean }) {
+  const [files, setFiles] = useState<TurnFile[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    let cancelled = false;
+    setFiles(null);
+    setError(null);
+    setOpen(new Set());
+    ops
+      .reviewTurns(chatId, [messageId])
+      .then((r) => {
+        if (cancelled) return;
+        const list = r.find((t) => t.messageId === messageId)?.files ?? [];
+        setFiles(list);
+        // A turn that changed one file opens it straight away.
+        if (list.length === 1) setOpen(new Set([(list[0] as TurnFile).path]));
+      })
+      .catch((e: unknown) => !cancelled && setError(e instanceof Error ? e.message : String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [ops, chatId, messageId]);
+  if (error) return <div className="ch-error" role="alert">{error}</div>;
+  if (!files) return <div className="ch-hint">Loading…</div>;
+  if (files.length === 0) return <Empty heading="Nothing recorded" text="That turn's edits are no longer available." />;
+  return (
+    <div className="ch-scroll" data-testid="turn-review">
+      <div className="ch-notice">Net change this turn: what the agent edited, not the current state of the files</div>
+      {files.map((f) => {
+        const isOpen = open.has(f.path);
+        const { dir, base } = splitPath(f.repositoryPath);
+        const toggle = () =>
+          setOpen((s) => {
+            const n = new Set(s);
+            if (n.has(f.path)) n.delete(f.path);
+            else n.add(f.path);
+            return n;
+          });
+        return (
+          <div key={f.path} className="ch-file" data-testid="turn-review-row" data-path={f.repositoryPath}>
+            <div
+              className={isOpen ? 'ch-file-row open' : 'ch-file-row'}
+              role="button"
+              tabIndex={0}
+              aria-expanded={isOpen}
+              aria-label={f.repositoryPath}
+              onClick={toggle}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  toggle();
+                }
+              }}
+            >
+              <span className="ch-chevron" aria-hidden>
+                <ChevronIcon size={13} />
+              </span>
+              <FileDiffIcon size={15} />
+              <span className="ch-path">
+                <span className="ch-dir">{dir}</span>
+                <span className="ch-base">{base}</span>
+              </span>
+              {f.added !== null && f.removed !== null ? (
+                <span className="ch-counts">
+                  <span className="ch-add">+{f.added}</span> <span className="ch-del">−{f.removed}</span>
+                </span>
+              ) : (
+                <span className="ch-partial">counts unavailable</span>
+              )}
+            </div>
+            {isOpen && (
+              <DiffBody
+                ops={ops}
+                chatId={chatId}
+                repoTop={f.repositoryRoot ?? ''}
+                record={{ path: f.repositoryPath, status: 'M', section: 'unstaged', partial: false }}
+                wrap={wrap}
+                turn={{ messageId, path: f.path }}
+              />
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -309,8 +450,50 @@ async function fingerprintOf(patch: string): Promise<string> {
 
 const lineOn = (row: DiffRow, side: Side) => (side === 'left' ? row.oldNo : row.newNo);
 
-function DiffBody({ ops, chatId, repoTop, record: r }: { ops: PanelOps; chatId: string; repoTop: string; record: ChangeRecord }) {
+interface DiffBodyProps {
+  ops: PanelOps;
+  chatId: string;
+  repoTop: string;
+  record: ChangeRecord;
+  wrap: boolean;
+  /** A finished turn's recorded edits instead of the working tree: read-only, no line comments. */
+  turn?: { messageId: number; path: string };
+}
+
+const isMarkdownPath = (p: string) => /\.(md|markdown)$/i.test(p);
+
+function formatTime(t: number): string {
+  const ms = t < 1e12 ? t * 1000 : t;
+  return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+/** The file as it is now, rendered: the other half of a Markdown file's Rendered / Diff switch. */
+function RenderedDoc({ ops, chatId, path }: { ops: PanelOps; chatId: string; path: string }) {
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    ops
+      .fileRead(path, chatId)
+      .then((v) => !cancelled && setText(v.text ?? ''))
+      .catch((e: unknown) => !cancelled && setError(e instanceof Error ? e.message : String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [ops, chatId, path]);
+  if (error) return <div className="ch-hint">{error}</div>;
+  if (text === null) return <div className="ch-hint">Loading…</div>;
+  return (
+    <div className="ch-rendered fv-markdown" data-testid="diff-rendered">
+      <Markdown text={text} />
+    </div>
+  );
+}
+
+function DiffBody({ ops, chatId, repoTop, record: r, wrap, turn }: DiffBodyProps) {
   const [diff, setDiff] = useState<DiffView | null>(null);
+  const [recorded, setRecorded] = useState<{ complete: boolean; time: number | null } | null>(null);
+  const [shownAs, setShownAs] = useState<'diff' | 'rendered'>('diff');
   const [error, setError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<ReadonlyMap<number, number>>(new Map());
   const [sel, setSel] = useState<Sel | null>(null);
@@ -320,14 +503,17 @@ function DiffBody({ ops, chatId, repoTop, record: r }: { ops: PanelOps; chatId: 
   const diffSide: DiffSide = r.section === 'conflicts' ? 'head' : r.section;
   useEffect(() => {
     let cancelled = false;
-    ops
-      .diff(chatId, r.path, diffSide, r.section === 'staged' ? r.from : undefined)
-      .then((d) => !cancelled && setDiff(d))
-      .catch((e: unknown) => !cancelled && setError(e instanceof Error ? e.message : String(e)));
+    const load: Promise<DiffView> = turn
+      ? ops.turnDiff(chatId, turn.messageId, turn.path).then((d) => {
+          if (!cancelled) setRecorded({ complete: d.complete, time: d.time });
+          return { patch: d.patch, fullContext: false, truncated: false };
+        })
+      : ops.diff(chatId, r.path, diffSide, r.section === 'staged' ? r.from : undefined);
+    load.then((d) => !cancelled && setDiff(d)).catch((e: unknown) => !cancelled && setError(e instanceof Error ? e.message : String(e)));
     return () => {
       cancelled = true;
     };
-  }, [ops, chatId, r.path, r.section, r.from, diffSide]);
+  }, [ops, chatId, r.path, r.section, r.from, diffSide, turn?.messageId, turn?.path]);
   const rows = useMemo(() => (diff ? parseDiff(diff.patch) : []), [diff]);
   const shown = useMemo<DisplayRow[]>(() => fold(rows, revealed), [rows, revealed]);
 
@@ -352,15 +538,55 @@ function DiffBody({ ops, chatId, repoTop, record: r }: { ops: PanelOps; chatId: 
     });
   }, [sel, rows, chatId, repoTop, r.path, diffSide]);
 
+  const absPath = turn ? turn.path : joinPath(repoTop, r.path);
+  const canRender = isMarkdownPath(r.path) && !r.status.includes('D');
+  const switcher = canRender ? (
+    <div className="ch-view-switch" role="group" aria-label="Show as">
+      <button type="button" aria-pressed={shownAs === 'rendered'} onClick={() => setShownAs('rendered')}>
+        Rendered
+      </button>
+      <button type="button" aria-pressed={shownAs === 'diff'} onClick={() => setShownAs('diff')}>
+        Diff
+      </button>
+    </div>
+  ) : null;
+  const stamp =
+    turn && recorded ? (
+      <div className="ch-turn-stamp">
+        <span>Net change this turn</span>
+        {recorded.time !== null && <span>{formatTime(recorded.time)}</span>}
+      </div>
+    ) : null;
   if (error) return <div className="ch-hint">{error}</div>;
   if (!diff) return <div className="ch-hint">Loading diff…</div>;
-  if (rows.length === 0) return <div className="ch-hint">No textual changes (binary, mode-only or empty).</div>;
+  if (canRender && shownAs === 'rendered') {
+    return (
+      <>
+        {stamp}
+        {switcher}
+        <RenderedDoc ops={ops} chatId={chatId} path={absPath} />
+      </>
+    );
+  }
+  if (rows.length === 0) {
+    return (
+      <>
+        {stamp}
+        {switcher}
+        <div className="ch-hint">
+          {turn && recorded && !recorded.complete
+            ? 'The record of this file’s earlier contents is incomplete, so no diff can be shown.'
+            : 'No textual changes (binary, mode-only or empty).'}
+        </div>
+      </>
+    );
+  }
   const total = counts(rows);
   const comments = (pendingComments.get(chatId) ?? []).filter((c) => c.path === r.path && c.diffSide === diffSide);
 
   const pick = (row: DiffRow, side: Side, extend: boolean) => {
     const n = lineOn(row, side);
-    if (n === undefined) return;
+    if (n === undefined || turn) return;
     if (extend && sel && sel.side === side) {
       const start = Math.min(sel.start, n);
       const end = Math.max(sel.end, n);
@@ -404,7 +630,15 @@ function DiffBody({ ops, chatId, repoTop, record: r }: { ops: PanelOps; chatId: 
   };
 
   return (
-    <div className="ch-diff" data-testid="diff-view" role="table" aria-label={`Diff of ${r.path}, ${total.added} added, ${total.removed} removed`}>
+    <div
+      className={wrap ? 'ch-diff wrap' : 'ch-diff'}
+      data-testid="diff-view"
+      role="table"
+      aria-label={`Diff of ${r.path}, ${total.added} added, ${total.removed} removed`}
+    >
+      {stamp}
+      {switcher}
+      {recorded && !recorded.complete && <div className="ch-hint">Some edits could not be verified, so this diff may be missing changes.</div>}
       {diff.truncated && <div className="ch-hint">Excerpt of this diff</div>}
       {shown.map((row, i) =>
         row.kind === 'gap' ? (
@@ -499,7 +733,7 @@ function DiffBody({ ops, chatId, repoTop, record: r }: { ops: PanelOps; chatId: 
           </button>
         </div>
       )}
-      <div className="ch-help">Click a line number to comment; Shift-click to extend.</div>
+      {!turn && <div className="ch-help">Click a line number to comment; Shift-click to extend.</div>}
     </div>
   );
 }

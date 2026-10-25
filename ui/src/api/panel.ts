@@ -126,6 +126,15 @@ export interface TurnChanges {
   truncated: boolean;
 }
 
+/** One file's recorded diff in a finished turn (the edits the agent made, not the working tree). */
+export interface TurnDiff {
+  patch: string;
+  /** False when some edit could not be verified or the file's earlier text is unknown. */
+  complete: boolean;
+  /** The stored timestamp of the file's last change in the turn. */
+  time: number | null;
+}
+
 export function panelOps(api: Api) {
   return {
     fileRead: (path: string, chatId?: string | null) =>
@@ -151,6 +160,8 @@ export function panelOps(api: Api) {
     commentRemove: (chatId: string, id: string) => api<ReviewComment[]>('review_comment_remove', { chatId, id }),
     commentClear: (chatId: string) => api<ReviewComment[]>('review_comment_clear', { chatId }),
     reviewTurns: (chatId: string, messageIds: number[]) => api<TurnChanges[]>('review_turns', { chatId, messageIds }),
+    turnDiff: (chatId: string, messageId: number, path: string) =>
+      api<TurnDiff>('review_turn_diff', { chatId, messageId, path }),
     tabsGet: () => api<unknown>('panel_tabs_get', {}),
     tabsSave: (value: unknown) => api<null>('panel_tabs_save', { value }),
   };

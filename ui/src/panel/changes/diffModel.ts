@@ -22,28 +22,34 @@ export type DisplayRow = DiffRow | Gap;
 export const CONTEXT = 3;
 export const EXPAND_STEP = 20;
 
-/** Parses a git unified diff. File headers (`diff --git`, `---`, `+++`, `index`) are dropped. */
+/**
+ * Parses a git unified diff. File headers (`diff --git`, `---`, `+++`, `index`) are dropped. A hunk
+ * header with no numbers (`@@ @@ label`) starts a hunk whose lines carry no line numbers: the
+ * recorded edits of a turn, whose place in the file is not known.
+ */
 export function parseDiff(patch: string): DiffRow[] {
   const rows: DiffRow[] = [];
   let oldNo = 0;
   let newNo = 0;
   let inHunk = false;
+  let numbered = true;
   const lines = patch.replace(/\r\n/g, '\n').split('\n');
   if (lines[lines.length - 1] === '') lines.pop();
   for (const line of lines) {
-    const h = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(line);
+    const h = /^@@ (?:-(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? )?@@(.*)$/.exec(line);
     if (h) {
-      oldNo = Number(h[1]);
-      newNo = Number(h[2]);
+      numbered = h[1] !== undefined;
+      oldNo = Number(h[1] ?? 0);
+      newNo = Number(h[2] ?? 0);
       inHunk = true;
-      rows.push({ kind: 'hunk', text: line });
+      rows.push({ kind: 'hunk', text: numbered ? line : (h[3] ?? '').trim() || 'edit' });
       continue;
     }
     if (!inHunk) continue;
     const c = line.charAt(0);
-    if (c === '+') rows.push({ kind: 'add', text: line.slice(1), newNo: newNo++ });
-    else if (c === '-') rows.push({ kind: 'del', text: line.slice(1), oldNo: oldNo++ });
-    else if (c === ' ') rows.push({ kind: 'ctx', text: line.slice(1), oldNo: oldNo++, newNo: newNo++ });
+    if (c === '+') rows.push(numbered ? { kind: 'add', text: line.slice(1), newNo: newNo++ } : { kind: 'add', text: line.slice(1) });
+    else if (c === '-') rows.push(numbered ? { kind: 'del', text: line.slice(1), oldNo: oldNo++ } : { kind: 'del', text: line.slice(1) });
+    else if (c === ' ') rows.push(numbered ? { kind: 'ctx', text: line.slice(1), oldNo: oldNo++, newNo: newNo++ } : { kind: 'ctx', text: line.slice(1) });
     else if (c === '\\') rows.push({ kind: 'meta', text: line.slice(1).trim() });
     else if (line.startsWith('diff --git')) inHunk = false;
   }

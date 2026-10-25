@@ -1,7 +1,7 @@
 // The "Edited N files" card: under the last reply of a completed turn, the
 // files the agent changed that turn with net counts ("Net diff unavailable" when the history could
 // not be reconstructed). Five files, then "Show N more files"; grouped by repository when more than
-// one. Clicking a file opens it in the side panel; Review opens the Changes view; the minimise
+// one. Clicking a file opens it in the side panel; Review opens that turn's recorded edits in the Changes view; the minimise
 // button collapses every change card in the chat.
 
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
@@ -10,9 +10,10 @@ import { panelOps } from '../../api/panel.ts';
 import { splitPath } from '../../transcript/toolKinds.ts';
 import { registerRowFooter } from '../../transcript/slots.ts';
 import { IconChevronDown, IconFileDiff, IconMaximize, IconMinimize } from '../../ui/icons.tsx';
-import { openInPanel, panelStore, showSlot } from '../registry.ts';
+import { openInPanel, panelStore } from '../registry.ts';
 import { displayPath, pathKey } from '../viewer/paths.ts';
 import { TurnLoader } from './loader.ts';
+import { openTurnReview } from './review.ts';
 import './turns.css';
 
 const SHOWN = 5;
@@ -112,7 +113,7 @@ function TurnCard({ chatId, messageId, revision }: { chatId: string; messageId: 
         </span>
         {unknown ? <span className="ec-unavailable">—</span> : <Counts added={totals.added} removed={totals.removed} partial={partial} />}
         <span className="ec-spacer" />
-        <button type="button" className="ec-review" data-testid="turn-changes-review" onClick={() => showSlot('changes')}>
+        <button type="button" className="ec-review" data-testid="turn-changes-review" onClick={() => openTurnReview(chatId, messageId)}>
           Review
         </button>
         <button
