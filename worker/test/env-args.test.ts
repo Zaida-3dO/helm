@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildClaudeArgs } from "../src/drivers/claude/args.ts";
+import { buildClaudeArgs, disallowedTools } from "../src/drivers/claude/args.ts";
 import { buildClaudeEnv, STRIPPED_UNLESS_API_KEY_MODE } from "../src/drivers/claude/env.ts";
 
 const base = {
@@ -69,6 +69,18 @@ test("skip permissions, resume and settings flags", () => {
   assert.equal(flag(a, "--resume"), "s-1");
   assert.deepEqual(JSON.parse(flag(a, "--settings") ?? "null"), { other: 1, fastMode: true });
   assert.equal(buildClaudeArgs({}).includes("--permission-mode"), false);
+});
+
+test("Claude Code's worktree tools stay disallowed unless the launch allows them and no repository has worktrees off", () => {
+  const list = (c: object, env: Record<string, string> = {}) => disallowedTools(c, env);
+  assert.ok(list({}).includes("EnterWorktree") && list({}).includes("ExitWorktree"));
+  assert.ok(list({ worktreeTools: false }).includes("EnterWorktree"));
+  const on = list({ worktreeTools: true });
+  assert.ok(!on.includes("EnterWorktree") && !on.includes("ExitWorktree"));
+  assert.ok(on.includes("CronCreate"), "the other native tools stay disallowed");
+  assert.ok(list({ worktreeTools: true }, { HELM_WORKTREE_OFF_LIST: "C:/p/worktrees-off.tsv" }).includes("EnterWorktree"));
+  const flagValue = flag(buildClaudeArgs({ worktreeTools: true }), "--disallowedTools") ?? "";
+  assert.ok(!flagValue.includes("EnterWorktree") && flagValue.includes("RemoteTrigger"));
 });
 
 test("a fork's first launch resumes as a new session; --fork-session needs a session to resume", () => {

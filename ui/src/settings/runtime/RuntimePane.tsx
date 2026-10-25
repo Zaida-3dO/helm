@@ -12,7 +12,9 @@ import {
   PERMISSION_OPTIONS,
   statusLine,
   VERBOSITY_OPTIONS,
+  repoSummary,
   type Found,
+  type RepoRow,
   type RuntimeSettings,
   type RuntimeStatus,
   type SettingsPatch,
@@ -43,6 +45,7 @@ export function RuntimePane() {
   const [settings, setSettings] = useState<RuntimeSettings | null>(null);
   const [models, setModels] = useState<{ id: string; name: string; description?: string }[]>([]);
   const [exe, setExe] = useState('');
+  const [repos, setRepos] = useState<RepoRow[] | null>(null);
 
   const check = useCallback(() => {
     setChecking(true);
@@ -63,6 +66,10 @@ export function RuntimePane() {
       })
       .catch(() => undefined);
     void shell
+      .api<{ entries: RepoRow[] }>('repo_list', {})
+      .then((r) => setRepos(r.entries))
+      .catch(() => setRepos([]));
+    void shell
       .api<{ models: { id: string; name: string; description?: string }[] }>('model_catalogue', { harness: 'claude' })
       .then((c) => setModels(c.models))
       .catch(() => undefined);
@@ -81,6 +88,14 @@ export function RuntimePane() {
         setSettings(before);
         toast.show({ kind: 'error', text: `Could not save: ${String((e as Error).message ?? e)}` });
       });
+  };
+
+  const setWorktrees = (repo: RepoRow, allowed: boolean) => {
+    setRepos((list) => list && list.map((r) => (r.repoId === repo.repoId ? { ...r, worktreesAllowed: allowed } : r)));
+    void shell.api<RepoRow>('repo_set_worktrees', { repoId: repo.repoId, allowed }).catch((e: unknown) => {
+      setRepos((list) => list && list.map((r) => (r.repoId === repo.repoId ? { ...r, worktreesAllowed: !allowed } : r)));
+      toast.show({ kind: 'error', text: `Could not save: ${String((e as Error).message ?? e)}` });
+    });
   };
 
   const s = settings;
@@ -139,7 +154,38 @@ export function RuntimePane() {
         <SettingRow title="Fast mode" description="Quicker replies on models that support it, at a higher token price.">
           <Checkbox checked={s?.fastMode ?? true} disabled={!s} onChange={(on) => save({ fastMode: on })} data-testid="runtime-fast-mode" aria-label="Fast mode" />
         </SettingRow>
+        <SettingRow
+          title="Use Claude Code's worktree tools"
+          description="Lets Claude Code enter and leave its own worktrees. Off by default, and it stays off while any repository below has worktrees switched off."
+        >
+          <Checkbox
+            checked={s?.worktreeTools ?? false}
+            disabled={!s}
+            onChange={(on) => save({ worktreeTools: on })}
+            data-testid="runtime-worktree-tools"
+            aria-label="Use Claude Code's worktree tools"
+          />
+        </SettingRow>
       </section>
+
+      {repos && repos.length > 0 && (
+        <section className="rt-section" data-testid="runtime-repos">
+          <h3>Repositories</h3>
+          <p className="rt-help">
+            Helm lists the git clones of your projects. Switch worktrees off for a repository and chats are stopped from running git worktree add there. This is a guard against accidents, not a lock: a program that does not use git.exe, or git called by its full path, is not stopped. Chats pick it up when they next start.
+          </p>
+          {repos.map((r) => (
+            <SettingRow key={r.repoId} title={r.repoId} description={repoSummary(r)}>
+              <Checkbox
+                checked={r.worktreesAllowed}
+                onChange={(on) => setWorktrees(r, on)}
+                data-testid={`runtime-repo-worktrees-${r.repoId}`}
+                aria-label={`Agents may create worktrees in ${r.repoId}`}
+              />
+            </SettingRow>
+          ))}
+        </section>
+      )}
 
       <section className="rt-section">
         <h3>New chats</h3>

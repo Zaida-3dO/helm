@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { DEFAULT_MODEL, modelOptions, sourceLabel, statusLine } from './model.ts';
+import { DEFAULT_MODEL, modelOptions, repoSummary, sourceLabel, statusLine } from './model.ts';
 
 test('a found component shows its version and where it came from; a missing one shows why', () => {
   assert.deepEqual(statusLine({ path: 'C:/node/node.exe', source: 'PATH', version: 'v24.14.0', problem: null }), {
@@ -15,6 +15,10 @@ test('a found component shows its version and where it came from; a missing one 
   assert.equal(quiet.ready, false);
   assert.equal(quiet.text, 'version unknown, in ~/.local/bin: did not answer --version.');
   assert.equal(sourceLabel('something-new'), 'something-new');
+  const repo = (paths: string[]) => ({ repoId: 'r', worktreesAllowed: true, locations: paths.map((path, i) => ({ id: String(i), path })) });
+  assert.equal(repoSummary(repo([])), 'No checkout listed');
+  assert.equal(repoSummary(repo(['C:/a'])), 'C:/a');
+  assert.equal(repoSummary(repo(['C:/a', 'C:/b', 'C:/c'])), 'C:/a and 2 more');
 });
 
 test("the model picker starts with Claude Code's default and keeps a stored model it no longer lists", () => {

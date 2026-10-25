@@ -26,6 +26,8 @@ export interface ClaudeLaunch {
   strictMcpConfig?: boolean;
   /** Native MCP servers whose tools are disallowed (held repository servers). */
   disabledMcpServers?: string[];
+  /** Claude Code's own worktree tools (EnterWorktree, ExitWorktree) may be offered. Absent: off. */
+  worktreeTools?: boolean;
 }
 
 export interface LaunchLimits {
