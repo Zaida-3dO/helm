@@ -5,6 +5,8 @@
 //! that bash would expand, a `#` inside `(( ))`, brace expansion, `eval`, `sh -c`, inline interpreter code) is either marked **computed** or
 //! reported as **unreadable**, and the guard fails closed on it where work is at stake.
 
+use std::collections::HashMap;
+
 /// One simple command: leading `NAME=value` assignments, then its words.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Simple {
@@ -15,8 +17,24 @@ pub struct Simple {
     /// The bodies of command and process substitutions in this command (`$(…)`, backticks,
     /// `<(…)`, `>(…)`), which the guard judges as commands of their own.
     pub subs: Vec<String>,
+    /// For each word, whether it held a computed part.
+    pub computed_words: Vec<bool>,
     /// The command's input is a heredoc, a here-string or a pipe.
     pub stdin_fed: bool,
+    /// The command reads the previous command's output (it is not first in its pipeline).
+    pub piped: bool,
+    /// The heredocs this command reads, in order.
+    pub heredocs: Vec<HeredocText>,
+    /// Its redirections, each as the operator followed by the target (`>/dev/null`, `<&0`).
+    pub redirs: Vec<String>,
+}
+
+/// The text of one heredoc, without its end line.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HeredocText {
+    pub body: String,
+    /// The delimiter was quoted, so bash expands nothing in the text.
+    pub quoted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,7 +54,29 @@ const BRACES: &str = "brace expansion, which the guard does not read";
 const MAX_NESTING: usize = 64;
 
 /// Split `line` into simple commands at `;`, `&&`, `||`, `|`, `&`, newlines and parentheses.
+///
+/// A variable set once on the line, to a plain literal value, by an assignment that always runs
+/// before the rest of the line (it comes before any pipe, `&&`, `||`, `&`, subshell, group or
+/// compound command) is read as that value where it is used later (`W=/x/y; git -C $W status`).
+/// Every other expansion stays computed.
 pub fn parse(line: &str) -> Parsed {
+    let none = HashMap::new();
+    let mut notes = Vec::new();
+    let first = read(line, &none, &mut notes);
+    if notes.is_empty() || matches!(first, Parsed::Unreadable(_)) {
+        return first;
+    }
+    let vars = resolvable(line, notes);
+    if vars.is_empty() {
+        return first;
+    }
+    read(line, &vars, &mut Vec::new())
+}
+
+/// A literal assignment seen on the first read: name, value and where it ends.
+type Note = (String, String, usize);
+
+fn read(line: &str, vars: &HashMap<String, (usize, String)>, notes: &mut Vec<Note>) -> Parsed {
     let chars: Vec<char> = line.chars().collect();
     let mut r = Reader {
         s: &chars,
@@ -44,12 +84,51 @@ pub fn parse(line: &str) -> Parsed {
         nesting: 0,
         heredocs: Vec::new(),
         arith_sub: false,
+        vars,
+        straight: true,
+        notes: Vec::new(),
     };
-    match r.list(false) {
+    let out = match r.list(false) {
         Ok(_) if !r.heredocs.is_empty() => Parsed::Unreadable("a heredoc without its end line"),
         Ok(c) => Parsed::Commands(c),
         Err(why) => Parsed::Unreadable(why),
+    };
+    *notes = r.notes;
+    out
+}
+
+/// The assignments that may be read as their value: each name is assigned exactly once on the
+/// line and never named any other way (`read W`, `for W in`, `export W`, `unset W`), and its
+/// value is one plain word.
+fn resolvable(line: &str, notes: Vec<Note>) -> HashMap<String, (usize, String)> {
+    let mut out = HashMap::new();
+    for (k, v, at) in &notes {
+        let plain = !v.is_empty()
+            && !v.contains(|c: char| {
+                c.is_whitespace() || matches!(c, '$' | '`' | '*' | '?' | '[' | '\\' | '~')
+            });
+        let once = notes.iter().filter(|(n, _, _)| n == k).count() == 1;
+        if plain && once && bare_mentions(line, k) == 1 {
+            out.insert(k.clone(), (*at, v.clone()));
+        }
     }
+    out
+}
+
+/// How often `name` appears in `line` as a word of its own, not as `$name` or `${name`.
+fn bare_mentions(line: &str, name: &str) -> usize {
+    let b = line.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    line.match_indices(name)
+        .filter(|(i, _)| {
+            let before = if *i == 0 { None } else { Some(b[i - 1]) };
+            let after = b.get(i + name.len()).copied();
+            let whole = !before.is_some_and(ident) && !after.is_some_and(ident);
+            let used =
+                before == Some(b'$') || (before == Some(b'{') && *i >= 2 && b[i - 2] == b'$');
+            whole && !used
+        })
+        .count()
 }
 
 struct Reader<'a> {
@@ -60,6 +139,11 @@ struct Reader<'a> {
     heredocs: Vec<Heredoc>,
     /// The substitution about to be read is `$((…))`.
     arith_sub: bool,
+    /// Variables read as their literal value (see [`parse`]).
+    vars: &'a HashMap<String, (usize, String)>,
+    /// Nothing so far at the top level could stop a later command from running.
+    straight: bool,
+    notes: Vec<Note>,
 }
 
 /// A `<<WORD` (or `<<-WORD`) waiting for its text.
@@ -72,6 +156,8 @@ struct Heredoc {
     quoted: bool,
     /// The substitution depth it was written at.
     nesting: usize,
+    /// The index its command will have in the list being read.
+    owner: usize,
 }
 
 /// The commands read so far, and the command and word being built.
@@ -88,6 +174,10 @@ struct Build {
     target: bool,
     /// Part of the word so far was quoted or escaped.
     quoted: bool,
+    /// The operator of the redirection whose target is being read.
+    target_op: String,
+    /// A `{` or `}` group word was read.
+    grouped: bool,
 }
 
 impl Build {
@@ -102,9 +192,13 @@ impl Build {
         let word = std::mem::take(&mut self.word);
         if std::mem::take(&mut self.target) {
             self.cur.computed |= computed;
+            let op = std::mem::take(&mut self.target_op);
+            self.cur.redirs.push(format!("{op}{word}"));
             return Ok(());
         }
-        if self.cur.words.is_empty() && !computed {
+        // An assignment whose value is computed (`T=$(…)`) is still an assignment; its
+        // substitution is judged as a command of its own, and the value keeps the `$` mark.
+        if self.cur.words.is_empty() {
             if let Some((k, v)) = word.split_once('=') {
                 if !k.is_empty()
                     && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -119,6 +213,7 @@ impl Build {
         // they end the command. Where bash would read one as a plain word instead, splitting
         // there only shows the guard more commands.
         if word == "{" || word == "}" {
+            self.grouped = true;
             self.push_command();
             return Ok(());
         }
@@ -128,6 +223,7 @@ impl Build {
         }
         self.cur.computed |= computed;
         self.cur.words.push(word);
+        self.cur.computed_words.push(computed);
         Ok(())
     }
 
@@ -258,12 +354,13 @@ impl Reader<'_> {
 
     /// After the newline that ends a line with heredocs: skip each one's text, up to its end
     /// line. The text is not commands. Unquoted text is expanded by bash, so a `$`, backtick or
-    /// backslash in it makes the line unreadable.
-    fn heredoc_text(&mut self) -> Res<()> {
+    /// backslash in it makes the line unreadable. Each text goes to the command that reads it.
+    fn heredoc_text(&mut self, b: &mut Build) -> Res<()> {
         for h in std::mem::take(&mut self.heredocs) {
             if h.nesting != self.nesting {
                 return Err("a heredoc whose text starts inside a substitution");
             }
+            let mut body: Vec<String> = Vec::new();
             loop {
                 if self.peek().is_none() {
                     return Err("a heredoc without its end line");
@@ -284,6 +381,57 @@ impl Reader<'_> {
                 }
                 if !h.quoted && line.contains(['$', '`', '\\']) {
                     return Err("a heredoc whose text bash expands");
+                }
+                body.push(line);
+            }
+            if let Some(c) = b.cmds.get_mut(h.owner) {
+                c.heredocs.push(HeredocText {
+                    body: body.join("\n"),
+                    quoted: h.quoted,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// End the command being built, and keep what the variable reading needs: a top-level
+    /// assignment that always runs, and whether later commands still always run.
+    fn end_command(&mut self, b: &mut Build, nested: bool) -> Res<()> {
+        let before = b.cmds.len();
+        b.end_command(nested)?;
+        if self.nesting != 0 {
+            return Ok(());
+        }
+        if b.grouped {
+            self.straight = false;
+        }
+        if let Some(c) = b.cmds.get(before) {
+            let keyword = c.words.first().is_some_and(|w| {
+                matches!(
+                    w.as_str(),
+                    "if" | "then"
+                        | "else"
+                        | "elif"
+                        | "fi"
+                        | "for"
+                        | "while"
+                        | "until"
+                        | "do"
+                        | "done"
+                        | "case"
+                        | "esac"
+                        | "select"
+                        | "function"
+                        | "[["
+                        | "!"
+                )
+            });
+            if keyword {
+                self.straight = false;
+            }
+            if self.straight && c.words.is_empty() && c.subs.is_empty() && !c.computed {
+                for (k, v) in &c.assigns {
+                    self.notes.push((k.clone(), v.clone(), self.i));
                 }
             }
         }
@@ -358,12 +506,16 @@ impl Reader<'_> {
                     }
                 }
                 ';' | '\n' | '|' | '&' => {
-                    b.end_command(nested)?;
+                    self.end_command(&mut b, nested)?;
+                    if matches!(c, '|' | '&') {
+                        self.straight = false;
+                    }
                     if matches!(c, '|' | '&') && self.peek() == Some(c) {
                         self.i += 1;
                     } else if c == '|' {
                         // The next command reads this one's output.
                         b.cur.stdin_fed = true;
+                        b.cur.piped = true;
                     }
                     if c == '\n' && !self.heredocs.is_empty() {
                         // bash reads `(( … ))` as one span, so heredoc text starts only after
@@ -371,7 +523,7 @@ impl Reader<'_> {
                         if in_arith {
                             return Err("a heredoc whose text starts inside (( ))");
                         }
-                        self.heredoc_text()?;
+                        self.heredoc_text(&mut b)?;
                     }
                 }
                 // Inside `(( … ))`, `<`, `>`, `<<` and `>>` compare and shift numbers: they are
@@ -395,6 +547,7 @@ impl Reader<'_> {
                         // but is not an argument.
                         self.i += 1;
                         b.target = true;
+                        b.target_op = "<<<".into();
                     } else {
                         let strip_tabs = self.peek() == Some('-');
                         if strip_tabs {
@@ -406,6 +559,7 @@ impl Reader<'_> {
                             strip_tabs,
                             quoted,
                             nesting: self.nesting,
+                            owner: b.cmds.len(),
                         });
                     }
                 }
@@ -413,7 +567,9 @@ impl Reader<'_> {
                     // A redirection ends the word; its target is not an argument.
                     b.drop_fd_number();
                     b.end_word(nested)?;
-                    while self.peek().is_some_and(|x| matches!(x, '>' | '&' | '|')) {
+                    let mut op = c.to_string();
+                    while let Some(x) = self.peek().filter(|x| matches!(x, '>' | '&' | '|')) {
+                        op.push(x);
                         self.i += 1;
                         self.skip_joins();
                     }
@@ -433,10 +589,12 @@ impl Reader<'_> {
                         b.word.push('$');
                     } else {
                         b.target = true;
+                        b.target_op = op;
                     }
                 }
                 '(' => {
-                    b.end_command(nested)?;
+                    self.end_command(&mut b, nested)?;
+                    self.straight = false;
                     if self.peek() == Some('(') {
                         // `((` opens an arithmetic command (also in `for ((`).
                         self.i += 1;
@@ -447,7 +605,8 @@ impl Reader<'_> {
                     depth += 1;
                 }
                 ')' => {
-                    b.end_command(nested)?;
+                    self.end_command(&mut b, nested)?;
+                    self.straight = false;
                     if nested && depth == 0 {
                         return Ok(b.cmds);
                     }
@@ -484,7 +643,7 @@ impl Reader<'_> {
         if nested {
             return Err("an unclosed command substitution");
         }
-        b.end_command(nested)?;
+        self.end_command(&mut b, nested)?;
         Ok(b.cmds)
     }
 
@@ -531,7 +690,13 @@ impl Reader<'_> {
             }
             Some('{') => {
                 self.i += 1;
+                let start = self.i;
                 self.parameter()?;
+                let name: String = self.s[start..self.i - 1].iter().collect();
+                if let Some(v) = self.known(&name, start) {
+                    b.word.push_str(&v);
+                    return Ok(());
+                }
             }
             // The old `$[ … ]` arithmetic: its `<<` and newlines follow other rules.
             Some('[') => return Err("a $[ ] arithmetic expansion"),
@@ -541,11 +706,38 @@ impl Reader<'_> {
             {
                 self.i += 1;
             }
+            Some(x) if x.is_ascii_alphabetic() || x == '_' => {
+                let start = self.i;
+                while self
+                    .peek()
+                    .is_some_and(|x| x.is_ascii_alphanumeric() || x == '_')
+                {
+                    self.i += 1;
+                }
+                let name: String = self.s[start..self.i].iter().collect();
+                if let Some(v) = self.known(&name, start) {
+                    b.word.push_str(&v);
+                    return Ok(());
+                }
+                b.computed_word = true;
+                b.word.push('$');
+                b.word.push_str(&name);
+                return Ok(());
+            }
             _ => {}
         }
         b.computed_word = true;
         b.word.push('$');
         Ok(())
+    }
+
+    /// The literal value of `name` used at `at`, when it was assigned earlier on the line in a
+    /// way that always runs (see [`parse`]).
+    fn known(&self, name: &str, at: usize) -> Option<String> {
+        self.vars
+            .get(name)
+            .filter(|(end, _)| *end <= at)
+            .map(|(_, v)| v.clone())
     }
 
     /// After `$(` or `<(`: the body up to the matching `)`, read with the same rules as the
