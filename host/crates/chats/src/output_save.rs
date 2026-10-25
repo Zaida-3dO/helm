@@ -74,7 +74,7 @@ fn message_output_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let Some(path) = chosen else {
         return Ok(json!({ "path": null }));
     };
-    std::fs::write(&path, full.text.as_bytes())
+    helm_core::privfs::write_atomic(&path, full.text.as_bytes())
         .map_err(|e| ApiError::new("internal", format!("Could not save the file: {e}")))?;
     Ok(json!({ "path": path.to_string_lossy() }))
 }

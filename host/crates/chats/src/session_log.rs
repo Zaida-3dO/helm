@@ -548,6 +548,9 @@ impl RowWrite {
     }
 }
 
+/// The largest artifact read back for saving (the file holds the text and the thinking).
+const ARTIFACT_READ_CAP: u64 = 256 * 1024 * 1024;
+
 /// A message's complete text, for saving it.
 pub struct FullText {
     pub role: String,
@@ -577,9 +580,9 @@ pub fn full_text(
     if let Some(name) = artifact
         .filter(|n| n.len() < 100 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.'))
     {
-        match std::fs::read_to_string(artifacts.join(&name))
+        match helm_core::privfs::read_capped(&artifacts.join(&name), ARTIFACT_READ_CAP)
             .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
             .and_then(|v| v.get("text").and_then(Value::as_str).map(str::to_owned))
         {
             Some(full) => text = full,
