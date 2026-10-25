@@ -59,3 +59,67 @@
   border-radius: 6px;
   padding: 6px 8px;
 }
+
+/* The Answer question button above the composer, and its popup. */
+.answer-bar {
+  display: flex;
+  align-items: center;
+  padding: 6px 0;
+}
+.answer-button {
+  gap: 6px;
+  border-radius: var(--radius-pill, 999px);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
+}
+
+.aq-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 2px 20px 8px;
+}
+.aq-question {
+  font-size: calc(14 * var(--ui-unit, 1px));
+  max-height: 34vh;
+  overflow-y: auto;
+}
+.aq-option {
+  align-items: flex-start;
+}
+.aq-option .ia-option-label {
+  font-weight: 500;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.aq-option[aria-checked='true'] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+}
+.aq-option[aria-checked='true'] .ia-num {
+  background: var(--accent);
+  color: var(--on-accent-fill, var(--surface));
+  box-shadow: none;
+}
+.aq-other {
+  width: 100%;
+}
+.aq-hints {
+  color: var(--muted);
+}
+
+/* The agent's own card, hosted in the popup: the dialog already draws the frame. */
+.ui-dialog .ia-in-popup {
+  padding: 0;
+}
+.ui-dialog .ia-in-popup .ia-card {
+  max-width: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: none;
+  animation: none;
+}
+.ui-dialog .ia-in-popup .ia-card::before {
+  display: none;
+}

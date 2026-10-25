@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { optionCaption, optionDraftText, optionSendText, parseOptions } from './options.ts';
+import { answerLabel, answerText, defaultOption, optionCaption, optionDraftText, optionSendText, parseOptions, parseReplyQuestion } from './options.ts';
 
 const labels = (t: string) => parseOptions(t)?.map((o) => o.label) ?? null;
 
@@ -8,16 +8,42 @@ test('a numbered list followed by a question is a set of choices', () => {
   assert.deepEqual(labels('Two ways forward:\n\n1. Rewrite the parser\n2. Patch the parser\n\nWhich do you prefer?'), ['1', '2']);
 });
 
-test('the item text becomes the tooltip title, without markdown', () => {
-  const o = parseOptions('Pick one:\n1. **Rewrite** the [parser](http://x) in `rust`\n2. Patch it');
-  assert.equal(o?.[0]?.title, 'Rewrite the parser in rust');
-  assert.equal(o?.[1]?.title, 'Patch it');
+test('each item is kept in full, without markdown, and gets a short form for the chip', () => {
+  const rows: [string, string, string][] = [
+    ['Pick one:\n1. **Rewrite** the [parser](http://x) in `rust`\n2. Patch it', 'Rewrite the parser in rust', 'Rewrite the parser in rust'],
+    ['Pick one:\n1. Split the stylesheet by area: faster to review\n2. x', 'Split the stylesheet by area: faster to review', 'Split the stylesheet by area'],
+    [`Choose:\n1. ${'word '.repeat(40)}\n2. short`, 'word '.repeat(40).trim(), 'word word word word word word…'],
+    ['Pick one:\n1. Keep going\n2. Stop here - safest', 'Keep going', 'Keep going'],
+  ];
+  for (const [text, full, short] of rows) {
+    const o = parseOptions(text)?.[0];
+    assert.equal(o?.text, full, text);
+    assert.equal(o?.short.slice(0, 20), short.slice(0, 20), text);
+    assert.ok((o?.short.length ?? 0) <= 36, text);
+  }
+  assert.equal(optionCaption(parseOptions('Pick one:\n1. Keep going\n2. Stop here')![1]!), 'Stop here');
+  assert.equal(optionCaption({ label: 'B', text: '', short: '', recommended: false }), 'Option B');
 });
 
-test('long titles are cut at 80 characters', () => {
-  const o = parseOptions(`Choose:\n1. ${'word '.repeat(40)}\n2. short`);
-  assert.ok((o?.[0]?.title.length ?? 0) <= 80);
-  assert.ok(o?.[0]?.title.endsWith('…'));
+test('an option keeps its continuation lines and sub-bullets, but not the closing question', () => {
+  const o = parseOptions('Which one?\n\n1. First\n   with more detail\n   - and a point\n2. Second\n\nWhich do you prefer?');
+  assert.equal(o?.[0]?.text, 'First with more detail and a point');
+  assert.equal(o?.[1]?.text, 'Second');
+});
+
+test('a recommended or default marker is noticed and taken out of the text', () => {
+  const rows: [string, number | null, string][] = [
+    ['Which one?\n1. Rewrite it\n2. Patch it (Recommended)', 1, 'Patch it'],
+    ['Which one?\n1. Rewrite it [default]\n2. Patch it', 0, 'Rewrite it'],
+    ['Which one?\n1. Rewrite it\n2. Patch it - recommended', 1, 'Patch it'],
+    ['Which one?\n1. Rewrite it\n2. Keep the default settings', null, 'Keep the default settings'],
+  ];
+  for (const [text, at, shown] of rows) {
+    const opts = parseOptions(text)!;
+    assert.equal(opts.findIndex((o) => o.recommended), at ?? -1, text);
+    assert.equal(opts[at ?? 1]!.text, shown, text);
+    assert.equal(defaultOption(opts), at === null ? null : opts[at]!);
+  }
 });
 
 test('explicit "Option N" markers need no other signal', () => {
@@ -120,9 +146,33 @@ test('a numbered list later followed by an unrelated question still counts as si
   assert.deepEqual(labels('Findings:\n1. one\n2. two\n\nWhat do you think?'), ['1', '2']);
 });
 
-test('captions and the texts a click and a pencil produce', () => {
-  const o = { label: 'B', title: 'x' };
-  assert.equal(optionCaption(o), 'Option B');
-  assert.equal(optionSendText(o), 'Go with option B.');
-  assert.equal(optionDraftText(o), 'Go with option B ');
+test('the popup question is the prose around the list, and multi-select is read from its wording', () => {
+  const rows: [string, string, boolean][] = [
+    ['Two ways forward:\n\n1. Rewrite the parser\n2. Patch the parser\n\nWhich do you prefer?', 'Two ways forward:\n\nWhich do you prefer?', false],
+    ['Some notes first.\n\nWhich areas should I cover? Select all that apply.\n\n1. Docs\n2. Tests\n3. CI', 'Which areas should I cover? Select all that apply.', true],
+    ['I looked at the code.\n\nOptions:\n\nOption A: tweak\nOption B: rebuild', 'I looked at the code.\n\nOptions:', false],
+  ];
+  for (const [text, question, multi] of rows) {
+    const q = parseReplyQuestion(text);
+    assert.equal(q?.question, question, text);
+    assert.equal(q?.multi, multi, text);
+  }
+  assert.equal(parseReplyQuestion('Done. The tests pass.'), null);
+});
+
+test('what an answer sends names the option and writes it out; typed text is sent as typed', () => {
+  const [a, b, c] = parseOptions('Which areas?\n1. Split the stylesheet by area\n2. Move the tokens (Recommended)\n3. Re-run checks.')!;
+  const rows: [string, string][] = [
+    [answerText([a!]), 'Go with option 1: Split the stylesheet by area.'],
+    [answerText([b!]), 'Go with option 2: Move the tokens.'],
+    [optionSendText(c!), 'Go with option 3: Re-run checks.'],
+    [answerText([a!, c!]), 'Go with options 1 and 3: Split the stylesheet by area; Re-run checks.'],
+    [answerText([a!, b!, c!]), 'Go with options 1, 2 and 3: Split the stylesheet by area; Move the tokens; Re-run checks.'],
+    [answerText([b!], 'and keep the old names'), 'Go with option 2: Move the tokens. Also: and keep the old names.'],
+    [answerText([], '  something else entirely '), 'something else entirely'],
+    [answerText([{ label: 'B', text: '', short: '', recommended: false }]), 'Go with option B.'],
+    [optionDraftText(a!), 'Go with option 1: Split the stylesheet by area '],
+  ];
+  for (const [got, want] of rows) assert.equal(got, want);
+  assert.deepEqual([1, 2, 5].map(answerLabel), ['Answer question', 'Answer 2 questions', 'Answer 5 questions']);
 });

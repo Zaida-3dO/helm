@@ -10,6 +10,7 @@ import { registerSettingsPane } from '../settings/registry.ts';
 import { useShell } from '../shell/context.ts';
 import { registerMessageAction, registerRowFooter } from '../transcript/slots.ts';
 import { explainAppliesTo, ExplainPlainlyIcon } from './ExplainPlainly.tsx';
+import { AnswerButton } from './AnswerPopup.tsx';
 import { OptionButtons, QuickReplies } from './Replies.tsx';
 import { EXPLAIN_PLAINLY_TEXT, sendActionText } from './send.ts';
 
@@ -18,6 +19,11 @@ export function LeafSlots(): null {
   useEffect(() => {
     const api = shell.api;
     const offs = [
+      registerComposerAccessory({
+        id: 'leaf-answer-button',
+        placement: 'above',
+        render: (ctx) => <AnswerButton chatId={ctx.chat.id} />,
+      }),
       registerComposerAccessory({
         id: 'leaf-quick-replies',
         placement: 'above',

@@ -50,7 +50,7 @@ import {
 import { withChatIcons, withProjectIcons } from './menuIcons.tsx';
 import { StarMark, WheelMark } from '../ui/status/index.ts';
 import { openNewChat } from '../newchat/index.ts';
-import { ATTENTION_LABEL, age, trailingIndicator } from './status.ts';
+import { ATTENTION_LABEL, age, needsYouLabel, trailingIndicator } from './status.ts';
 import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
 import { useSlotWaiting } from '../composer/useSlotQueue.ts';
 import { startSyncTriggers, syncDisplay, type SyncHost } from './sync.ts';
@@ -690,6 +690,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         project={projectsById.get(row.groupProjectId)}
         selected={row.chatId === selected}
         needsYou={snap.needsYou.has(row.chatId)}
+        needsLabel={needsYouLabel(snap.attention?.needsYou.find((r) => r.chatId === row.chatId)?.kind)}
         flagReason={snap.flagged.get(row.chatId)}
         dragging={drag?.active === true && drag.src.kind === 'chat' && drag.src.chatId === row.chatId}
         now={now}
@@ -911,6 +912,7 @@ function ChatRow({
   project,
   selected,
   needsYou,
+  needsLabel,
   flagReason,
   dragging,
   now,
@@ -928,6 +930,8 @@ function ChatRow({
   project: ProjectNode | undefined;
   selected: boolean;
   needsYou: boolean;
+  /** The flag's wording: "Answer question" when the chat waits on an answer, else "Needs you". */
+  needsLabel: string;
   /** Why the idle check thinks this quiet chat still needs you. */
   flagReason: string | undefined;
   dragging: boolean;
@@ -1004,7 +1008,7 @@ function ChatRow({
           {item.twoLine && <span className="sb-chat-sub">{project?.name ?? r.folderPath}</span>}
         </span>
         {needsYou && (
-          <span className="sb-flag" role="img" aria-label="Needs you" title="Needs you">
+          <span className="sb-flag" role="img" aria-label={needsLabel} title={needsLabel}>
             <IconFlag size={12} filled />
           </span>
         )}

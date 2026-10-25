@@ -55,7 +55,7 @@ export function QuickReplies({ chatId }: Props) {
   );
 }
 
-/** Option 1, Option A, ... under the latest reply. The pencil puts the answer in the composer. */
+/** The latest reply's options as chips, each with its short text. The pencil puts the answer in the composer. */
 export function OptionButtons({ chatId }: Props) {
   const { api, store } = useShell();
   const insertDraft = (text: string) => composerApi(chatId).insert(text);
@@ -72,7 +72,7 @@ export function OptionButtons({ chatId }: Props) {
             className="option-button"
             data-testid="option-button"
             data-option={o.label}
-            title={`${o.title}\nShift+click to amend before sending`}
+            title={`${o.text || optionCaption(o)}\nShift+click to amend before sending`}
             onClick={(e) => {
               if (e.shiftKey) {
                 insertDraft(optionDraftText(o));

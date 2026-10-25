@@ -6,7 +6,7 @@ import { archiveWhenIdle, SidebarActions, type ActionDeps } from './actions.ts';
 import { UndoStack } from './undo.ts';
 import { buildList, chatAncestors, headerSubtitle, HEIGHTS, nestRows, stepChat, visibleChatOrder, type ListItem } from './model.ts';
 import { loadMore, readBudget, type PageResult } from './paging.ts';
-import { age, rowAttention, trailingIndicator } from './status.ts';
+import { age, needsYouLabel, rowAttention, trailingIndicator } from './status.ts';
 import { layout, visibleRange } from './virtual.ts';
 
 function project(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
@@ -85,6 +85,8 @@ test('status priority: running > unread > lingering > interrupted > pinned', () 
   assert.equal(rowAttention(base), null);
   assert.equal(trailingIndicator('lingering'), true);
   assert.equal(trailingIndicator('interrupted'), false);
+  // The flag on a chat waiting on an answer says so.
+  assert.deepEqual(['question', 'plan', 'approval', 'triage', undefined].map((k) => needsYouLabel(k as never)), ['Answer question', 'Answer question', 'Answer question', 'Needs you', 'Needs you']);
 });
 
 test('age is relative: now, minutes, hours, days', () => {

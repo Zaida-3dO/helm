@@ -1,6 +1,6 @@
 // A fake host for checking the UI in a plain browser. It implements the host's ops and
 // events with a scripted turn: streamed text, a tool card, and an approval, question or plan
-// card when the prompt asks for one ("approve", "question", "plan"). "todo" adds a TodoWrite checklist and "code" streams a fenced code block. "long" in a prompt adds a
+// card when the prompt asks for one ("approve", "question", "plan"). "todo" adds a TodoWrite checklist and "code" streams a fenced code block. "options" ends the reply with a numbered list of choices. "long" in a prompt adds a
 // background task. A steer sent mid-turn shows as Pending and is read about 1.5 s later.
 //
 // Dev builds only: main.tsx imports it behind `import.meta.env.DEV`, so production drops it.
@@ -372,7 +372,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         const questions = ['Which colour?', 'Which size?'];
         const out: string[] = [];
         for (let s = 0; s < questions.length; ) {
-          const a = await ask(c, { method: 'select', attention: 'question', title: questions[s], options: s === 0 ? ['Red', 'Blue'] : ['Small', 'Large'], allowOther: true, step: s, steps: questions.length, prefill: out[s] });
+          const a = await ask(c, { method: 'select', attention: 'question', title: questions[s], options: s === 0 ? ['Red', 'Blue (Recommended)'] : ['Small', 'Large'], optionDescriptions: s === 0 ? ['Warm and loud', 'Calm, and what the rest of the app uses'] : undefined, allowOther: true, step: s, steps: questions.length, prefill: out[s] });
           if (typeof a.goto === 'number') {
             s = a.goto;
             continue;
@@ -388,7 +388,13 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         await streamText(c, a.confirmed || a.value === 'Approve plan' ? 'Plan approved, starting. ' : 'Keeping on planning. ', cancelled);
       }
       if (/\[stream\]/i.test(text)) await streamLong(c, cancelled); // the long reply is the final one
-      else await streamText(c, 'All done: the folder has a README, a package file and a src folder, and **main.ts** now exports two constants.', cancelled);
+      else if (/options/i.test(text)) {
+        await streamText(
+          c,
+          'The folder has a README, a package file and a src folder. There are three ways to carry on:\n\n1. **Split the stylesheet by area**: smaller files, easier to review, but a wider diff now (Recommended)\n2. Move the shared colours and spacing into one tokens file\n3. Leave the styles as they are and only fix the two broken screens\n\nSay if you want me to start with the first item.',
+          cancelled,
+        );
+      } else await streamText(c, 'All done: the folder has a README, a package file and a src folder, and **main.ts** now exports two constants.', cancelled);
       setStatus(c, 'idle');
       complete(c);
       startNext(c);

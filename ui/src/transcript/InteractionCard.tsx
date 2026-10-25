@@ -15,12 +15,14 @@ import type { Interaction } from '../api/types.ts';
 import type { InteractionAnswer } from '../api/ops.ts';
 import { IconChevronRight, IconHelp, IconPlan, IconSend, IconShield } from '../ui/icons.tsx';
 import { Markdown } from './Markdown.tsx';
-import { eyebrowOf, optionAnswer, pickIndex, KEY_GUARD_MS } from './interactionModel.ts';
+import { defaultIndex, eyebrowOf, optionAnswer, pickIndex, splitRecommended, KEY_GUARD_MS } from './interactionModel.ts';
 import '../composer/dock.css';
 
 export interface InteractionCardProps {
   interaction: Interaction;
   onAnswer: (requestId: string, answer: InteractionAnswer) => void;
+  /** Shown inside the answer popup: a question's default option takes focus, so Enter sends it. */
+  popup?: boolean;
 }
 
 function Context({ i }: { i: Interaction }) {
@@ -45,7 +47,7 @@ function Badge({ kind }: { kind: string }) {
   );
 }
 
-export function InteractionCard({ interaction: i, onAnswer }: InteractionCardProps) {
+export function InteractionCard({ interaction: i, onAnswer, popup }: InteractionCardProps) {
   const [other, setOther] = useState(i.prefill ?? '');
   const shownAt = useRef(performance.now());
   const card = useRef<HTMLDivElement>(null);
@@ -56,6 +58,7 @@ export function InteractionCard({ interaction: i, onAnswer }: InteractionCardPro
   const kind = i.attention ?? 'approval';
   const options = i.options ?? [];
   const testId = kind === 'plan' ? 'plan-button' : kind === 'question' ? 'question-button' : 'approval-button';
+  const focusAt = popup ? defaultIndex(kind, options) : null;
   const confirmOnly = kind !== 'plan' && kind !== 'question' && i.method === 'confirm' && options.length === 0;
 
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -72,7 +75,7 @@ export function InteractionCard({ interaction: i, onAnswer }: InteractionCardPro
   };
 
   return (
-    <div className="ia-wrap">
+    <div className={`ia-wrap${popup ? ' ia-in-popup' : ''}`}>
       <div ref={card} className={`ia-card ia-${kind}`} data-testid="interaction-card" data-attention={kind} onKeyDown={onKey}>
         <div className="ia-head">
           <Badge kind={kind} />
@@ -97,6 +100,7 @@ export function InteractionCard({ interaction: i, onAnswer }: InteractionCardPro
             <div className="ia-options" role="group" aria-label="Choices">
               {options.map((o, n) => {
                 const chosen = kind === 'question' && i.prefill === o;
+                const tag = splitRecommended(o);
                 const danger = kind !== 'plan' && kind !== 'question' && (o === 'Deny' || o === 'Stop turn');
                 return (
                   <button
@@ -105,14 +109,16 @@ export function InteractionCard({ interaction: i, onAnswer }: InteractionCardPro
                     className={`ia-option${chosen ? ' chosen' : ''}${danger ? ' ia-danger' : ''}`}
                     data-testid={testId}
                     data-option={o}
+                    data-autofocus={focusAt === n ? '' : undefined}
                     title={i.optionDescriptions?.[n]}
                     onClick={() => answer(optionAnswer(kind, o))}
                   >
                     <span className="ia-num">{n < 9 ? n + 1 : ''}</span>
                     <span className="ia-option-text">
-                      <span className="ia-option-label">{o}</span>
+                      <span className="ia-option-label">{tag.label}</span>
                       {i.optionDescriptions?.[n] && <span className="ia-option-desc">{i.optionDescriptions[n]}</span>}
                     </span>
+                    {tag.recommended && <span className="ia-pill">Recommended</span>}
                     {chosen && <span className="ia-pill">Your answer</span>}
                     <span className="ia-arrow" aria-hidden="true">
                       <IconChevronRight size={14} />

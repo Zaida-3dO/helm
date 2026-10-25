@@ -4,6 +4,7 @@
 
 import type { ChatStatus } from '../api/types.ts';
 import type { RowAttention } from '../api/projects.ts';
+import type { AttentionKind } from '../api/generated/AttentionKind.ts';
 
 export interface RowSignals {
   status: ChatStatus;
@@ -48,3 +49,8 @@ export const ATTENTION_LABEL: Record<RowAttention, string> = {
   interrupted: 'Interrupted',
   pinned: 'Pinned',
 };
+
+/** The flag on a chat waiting on you: a question, plan or permission asks to be answered. */
+export function needsYouLabel(kind: AttentionKind | undefined): string {
+  return kind === 'question' || kind === 'plan' || kind === 'approval' ? 'Answer question' : 'Needs you';
+}
