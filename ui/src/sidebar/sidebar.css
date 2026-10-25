@@ -1048,6 +1048,12 @@
   margin-right: 57px;
 }
 
+/* A linked row also shows the open-item button, so the reserve is wider. */
+.sb-chat-wrap[data-trailing='true'][data-flagged='true'][data-linked='true']:hover .sb-flag,
+.sb-chat-wrap[data-trailing='true'][data-flagged='true'][data-linked='true']:focus-within .sb-flag {
+  margin-right: 82px;
+}
+
 /* No hover actions while dragging. */
 .sb-root[data-dragging='true'] .sb-row-actions,
 .sb-root[data-dragging='true'] .sb-actions {

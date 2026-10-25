@@ -25,6 +25,7 @@ test('the title is the board title, else "Linked item"; the mark says what it is
   assert.equal(itemTitle({ itemId: A }), 'Linked item');
   assert.equal(itemTitle({ itemId: A, itemTitle: '  ' }), 'Linked item');
   assert.equal(itemTitle({ itemId: A, itemTitle: 'x'.repeat(500) }).length, MAX_TITLE, 'outside text is cut');
+  assert.equal(Array.from(itemTitle({ itemId: A, itemTitle: '😀'.repeat(500) })).length, MAX_TITLE, 'cut by characters, never mid-pair');
   const named = refsByChat([link(A, 'a', { itemTitle: 'Fix the deploy' }), link(B, 'b')]);
   assert.equal(itemMarkLabel(named.get('a')!), 'Linked to board item: Fix the deploy. Click to open');
   assert.equal(itemMarkLabel(named.get('b')!), 'Linked to a board item. Click to open', 'no title: no bare id either');

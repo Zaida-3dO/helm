@@ -25,7 +25,7 @@ export const MAX_TITLE = 160;
 
 export function itemTitle(l: { itemId: string; itemTitle?: string }): string {
   const t = l.itemTitle?.trim();
-  return t ? t.slice(0, MAX_TITLE) : 'Linked item';
+  return t ? Array.from(t).slice(0, MAX_TITLE).join('') : 'Linked item';
 }
 
 /** What a linked-item mark says on hover and to a screen reader. */
