@@ -440,7 +440,12 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   }
 
   // Settings → Runtime's stored settings.
-  const runtimeSettings: Record<string, unknown> = { executable: '', skipPermissions: true, fastMode: true, model: null, effort: 'xhigh', responseVerbosity: 'low', problem: null };
+  const runtimeSettings: Record<string, unknown> = { executable: '', skipPermissions: true, fastMode: true, worktreeTools: false, model: null, effort: 'xhigh', responseVerbosity: 'low', problem: null };
+
+  // Settings → Runtime's repositories.
+  const repos: { repoId: string; remoteUrl?: string; worktreesAllowed: boolean; locations: { id: string; path: string }[] }[] = [
+    { repoId: 'github.com/me/demo', remoteUrl: 'https://github.com/me/demo', worktreesAllowed: true, locations: [{ id: 'l1', path: 'C:/Users/me/Documents/Coding/demo' }] },
+  ];
 
   function find(chatId: unknown): FakeChat {
     const c = chats.get(String(chatId));
@@ -666,6 +671,13 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     runtime_settings_save: (a) => {
       Object.assign(runtimeSettings, a, 'model' in a ? { model: a.model ? String(a.model) : null } : {});
       return { ...runtimeSettings };
+    },
+    repo_list: () => ({ entries: repos }),
+    repo_set_worktrees: (a) => {
+      const r = repos.find((x) => x.repoId === a.repoId);
+      if (!r) throw { code: 'not_found', message: 'There is no repository with that id.' };
+      r.worktreesAllowed = a.allowed !== false;
+      return { ...r };
     },
     attention_get: () => attention(),
     chat_archive: (a) => {

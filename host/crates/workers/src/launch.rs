@@ -37,6 +37,10 @@ pub struct ClaudeLaunch {
     /// Native MCP servers the CLI must not use (their tools are disallowed); absent when none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub disabled_mcp_servers: Vec<String>,
+    /// Claude Code's own worktree tools (EnterWorktree, ExitWorktree) may be offered. Absent
+    /// unless the user turned them on in Settings > Runtime.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub worktree_tools: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -79,7 +83,7 @@ impl Launch {
     }
 }
 
-/// `<profile>/claude-runtime.json` (settings-schema): `{executable, skipPermissions, fastMode}`.
+/// `<profile>/claude-runtime.json` (settings-schema): `{executable, skipPermissions, fastMode, worktreeTools}`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClaudeRuntime {
@@ -92,6 +96,9 @@ pub struct ClaudeRuntime {
     /// `false` turns it off.
     #[serde(default = "yes")]
     pub fast_mode: bool,
+    /// Let Claude Code's own worktree tools through. Off by default: a missing key means off.
+    #[serde(default)]
+    pub worktree_tools: bool,
 }
 
 fn yes() -> bool {
@@ -104,6 +111,7 @@ impl Default for ClaudeRuntime {
             executable: String::new(),
             skip_permissions: true,
             fast_mode: true,
+            worktree_tools: false,
         }
     }
 }
@@ -180,6 +188,7 @@ pub fn claude_launch(
         fork_session: false,
         strict_mcp_config: false,
         disabled_mcp_servers: Vec::new(),
+        worktree_tools: runtime.worktree_tools,
     };
     if let Some(t) = test {
         c.command = Some(t.command.clone());
@@ -208,6 +217,10 @@ mod tests {
         assert_eq!((rt.clone(), err), (ClaudeRuntime::default(), None));
         assert!(rt.skip_permissions, "skip permission prompts defaults on");
         assert!(rt.fast_mode, "fast mode defaults on");
+        assert!(
+            !rt.worktree_tools,
+            "Claude Code's worktree tools default off"
+        );
         std::fs::write(
             dir.path().join("claude-runtime.json"),
             r#"{"skipPermissions": false}"#,
@@ -234,6 +247,7 @@ mod tests {
             executable: "C:/tools/claude.exe".into(),
             skip_permissions: false,
             fast_mode: false,
+            worktree_tools: true,
         };
         mine.save(dir.path()).unwrap();
         assert_eq!(ClaudeRuntime::load(dir.path()), (mine, None));
@@ -269,6 +283,16 @@ mod tests {
             "fast mode is explicit and on by default"
         );
         assert!(!v.to_string().contains("apiKeyMode"));
+        assert!(
+            v["claude"].get("worktreeTools").is_none(),
+            "absent unless the user turned Claude Code's worktree tools on"
+        );
+        let on = ClaudeRuntime {
+            worktree_tools: true,
+            ..ClaudeRuntime::default()
+        };
+        let v = serde_json::to_value(claude_launch(&on, None, None, None, None)).unwrap();
+        assert_eq!(v["worktreeTools"], true);
         assert!(
             !v.to_string().contains("appendSystemPrompt"),
             "absent unless a contributor adds a fragment"

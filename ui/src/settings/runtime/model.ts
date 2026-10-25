@@ -22,12 +22,30 @@ export interface RuntimeSettings {
   executable: string;
   skipPermissions: boolean;
   fastMode: boolean;
+  /** Claude Code's own worktree tools (EnterWorktree, ExitWorktree) may be offered to chats. */
+  worktreeTools: boolean;
   /** null: Claude Code's default model. */
   model: string | null;
   effort: string;
   responseVerbosity: string;
   /** claude-runtime.json could not be read. */
   problem: string | null;
+}
+
+/** One repository in Helm's list (`repo_list`), as far as this pane shows it. */
+export interface RepoRow {
+  repoId: string;
+  remoteUrl?: string;
+  worktreesAllowed: boolean;
+  locations: { id: string; path: string; label?: string }[];
+}
+
+/** The line under a repository: where it is checked out. */
+export function repoSummary(r: RepoRow): string {
+  const n = r.locations.length;
+  const first = r.locations[0]?.path;
+  if (n === 0) return 'No checkout listed';
+  return n === 1 ? first! : `${first} and ${n - 1} more`;
 }
 
 export type SettingsPatch = Partial<Omit<RuntimeSettings, 'problem' | 'model'>> & { model?: string };
