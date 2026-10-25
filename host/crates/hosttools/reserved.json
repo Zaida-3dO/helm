@@ -40,6 +40,7 @@
     "app_send_message",
     "app_set_chat_archived",
     "app_stop_chat",
+    "app_telegram_send",
     "app_update_attention",
     "app_update_chat",
     "app_update_feedback",

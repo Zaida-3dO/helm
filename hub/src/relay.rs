@@ -17,6 +17,7 @@
 //! | Helm → hub | `telegram_ack` | `id` |
 //! | Helm → hub | `telegram_status` | `text`: the one live status message, edited in place |
 //! | Helm → hub | `telegram_final` | `text`: the turn's answer, sent as a new message |
+//! | Helm → hub | `telegram_notify` | `text`: a message Helm starts (an alert), sent as a new message; the live status is left alone |
 //!
 //! A newer line replaces an older one (the PC reconnected before the old
 //! socket timed out). When the line drops, calls waiting on it are answered
@@ -47,6 +48,7 @@ pub enum Upstream {
     TelegramAck(String),
     TelegramStatus(String),
     TelegramFinal(String),
+    TelegramNotify(String),
 }
 
 /// The outcome of a forwarded call, as the MCP caller sees it.
@@ -264,6 +266,10 @@ impl Line {
                 Some(t) => self.upstream.send(Upstream::TelegramFinal(t)).is_ok(),
                 None => false,
             },
+            Some("telegram_notify") => match s("text") {
+                Some(t) => self.upstream.send(Upstream::TelegramNotify(t)).is_ok(),
+                None => false,
+            },
             _ => false,
         }
     }
@@ -371,6 +377,7 @@ mod tests {
         assert!(line.receive(gen, r#"{"type":"telegram_status","text":"Running tests"}"#));
         assert!(line.receive(gen, r#"{"type":"telegram_final","text":"Done"}"#));
         assert!(line.receive(gen, r#"{"type":"telegram_ack","id":"m1"}"#));
+        assert!(line.receive(gen, r#"{"type":"telegram_notify","text":"Build finished"}"#));
         assert!(!line.receive(gen, "not json"));
         assert!(!line.receive(gen, r#"{"type":"call","id":"x"}"#));
         assert_eq!(
@@ -382,6 +389,10 @@ mod tests {
             Upstream::TelegramFinal("Done".into())
         );
         assert_eq!(up.try_recv().unwrap(), Upstream::TelegramAck("m1".into()));
+        assert_eq!(
+            up.try_recv().unwrap(),
+            Upstream::TelegramNotify("Build finished".into())
+        );
     }
 
     #[tokio::test]

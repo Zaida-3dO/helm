@@ -12,6 +12,7 @@
 //! | [`client`] | the line: connect, reconnect, answer calls, deliver and acknowledge Telegram |
 //! | [`telegram`] | the telegram origin, the active Telegram chat tag, its rotation and the phone renderer |
 //! | [`sink`] | Telegram messages into the active chat, and the status and answer mirrored back |
+//! | [`notify`] | Helm speaking first: the `app_telegram_send` tool and alerts while the user is away |
 //!
 //! Wiring: [`register_services`] adds the line (its [`client::LineHandle`] and
 //! [`client::Client`]) and [`start`] connects it once the host-tool dispatcher exists;
@@ -21,13 +22,15 @@
 //! Ops: `relay_connection_get` → [`config::RelayConnectionView`] (booleans and the line state,
 //! never a value) and `relay_connection_save` ([`config::RelaySaveArgs`]: absent keeps, empty
 //! clears). For Settings → Hub's Telegram section: `relay_telegram_get` →
-//! [`sink::TelegramView`], `relay_telegram_save` ([`telegram::PolicyFile`]: the limits) and
+//! [`sink::TelegramView`], `relay_telegram_save` ([`telegram::PolicyFile`]: the limits and the
+//! away-alerts switch) and
 //! `relay_telegram_reset` (drop the tag, so the next message starts a new chat).
 
 pub mod client;
 pub mod config;
 pub mod exec;
 pub mod gate;
+pub mod notify;
 pub mod sink;
 pub mod telegram;
 
@@ -95,7 +98,20 @@ pub fn start(handle: &tokio::runtime::Handle, ctx: &OpCtx, tools: Arc<helm_hostt
         events: ctx.events.clone(),
         tools,
     });
+    let line = client.handle();
     handle.spawn(client.run());
+    if let (Some(rt), Some(afk), Some(profile)) = (
+        ctx.services.get::<helm_chats::ChatRuntime>(),
+        ctx.services.get::<helm_afk::AfkService>(),
+        ctx.services.get::<Profile>(),
+    ) {
+        notify::watch_away(handle, (*rt).clone(), afk, line, profile.dir.clone());
+    }
+}
+
+/// This crate's host tool: `app_telegram_send` ([`notify`]).
+pub fn register_host_tools(r: &mut helm_hosttools::HostToolRegistry) {
+    notify::register_host_tools(r);
 }
 
 /// Give the Telegram sink the op dispatcher: it creates the Telegram chat, stops it on `/stop`
@@ -152,10 +168,10 @@ fn telegram_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
 
 fn telegram_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let f: telegram::PolicyFile = serde_json::from_value(args)
-        .map_err(|_| ApiError::bad_args("Expected maxAgeHours and maxTokens."))?;
-    let policy = f.check().map_err(ApiError::bad_args)?;
+        .map_err(|_| ApiError::bad_args("Expected maxAgeHours, maxTokens and awayAlerts."))?;
+    f.check().map_err(ApiError::bad_args)?;
     let profile = ctx.services.need::<Profile>()?;
-    telegram::save_policy(&telegram::policy_path(&profile.dir), policy)
+    telegram::save_policy(&telegram::policy_path(&profile.dir), f)
         .map_err(|_| ApiError::internal("The Telegram limits could not be saved."))?;
     telegram_view(ctx)
 }

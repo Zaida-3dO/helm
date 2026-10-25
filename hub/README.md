@@ -80,6 +80,9 @@ approval.
   is told it could not be delivered. A resend carries the same id.
 - While a turn runs, ONE status message is edited in place, at most every 3 s. The answer arrives
   as a new message (so the phone notifies) and the status message is deleted.
+- Helm can also speak first (`telegram_notify`: a chat telling the user its work is finished, or
+  an alert while the user is away). That arrives as a new message too, and leaves a live status
+  message where it is.
 
 ### Receiving updates: polling or a shared bot
 

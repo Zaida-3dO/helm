@@ -12,6 +12,7 @@ helm-ipc.workspace = true
 helm-chats.workspace = true
 helm-platform.workspace = true
 helm-hosttools = { path = "../hosttools" }
+helm-afk = { path = "../afk" }
 tokio.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

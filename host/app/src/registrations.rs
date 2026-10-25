@@ -131,6 +131,7 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_mcp::register_host_tools(&mut reg);
     helm_itemlinks::register_host_tools(&mut reg);
     helm_workflow::register_host_tools(&mut reg);
+    helm_relay::register_host_tools(&mut reg);
     reg
 }
 
@@ -362,6 +363,7 @@ mod host_tool_tests {
             "app_orchestrator_on",
             "app_workflow",
             "app_workflow_report",
+            "app_telegram_send",
         ];
         assert_eq!(names(Default::default()), base);
         let delta = |k: helm_hosttools::LaunchKeys| -> Vec<String> {

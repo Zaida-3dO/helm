@@ -375,6 +375,16 @@ async fn one_status_message_is_edited_in_place_then_replaced_by_the_answer() {
         "only the latest text is sent"
     );
     let status_id = calls[1].1["message_id"].clone();
+    // An alert Helm starts mid-turn is a new, notifying message, and the status stays.
+    e.api.clear();
+    e.bridge
+        .on_upstream(Upstream::TelegramNotify("Docs chat: finished".into()))
+        .await;
+    let calls = e.api.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].0, "sendMessage");
+    assert_eq!(calls[0].1["text"], "Docs chat: finished");
+    assert_eq!(calls[0].1["disable_notification"], false);
     e.api.clear();
     e.bridge.on_final("All 5 passed.").await;
     let calls = e.api.calls();

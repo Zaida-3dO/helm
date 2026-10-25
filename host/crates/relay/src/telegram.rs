@@ -8,8 +8,9 @@
 //!   or deleted), Helm starts a new chat named `Telegram <bot name> <date>`. The tag is a small
 //!   file in the profile, `relay/telegram-chat.json`.
 //! - **Queued messages** arrive marked with how long ago they were sent.
-//! - **The limits** (age and tokens) are set in Settings → Hub and kept beside the tag, in
-//!   `relay/telegram-policy.json`; Settings can also drop the tag so the next message starts fresh.
+//! - **The limits** (age and tokens) and the away-alerts switch ([`crate::notify`]) are set in
+//!   Settings → Hub and kept beside the tag, in `relay/telegram-policy.json`; Settings can also
+//!   drop the tag so the next message starts fresh.
 //! - **Answered questions.** The hub ids of replies that answered a question are kept in
 //!   `relay/telegram-answered.json`, so a resend after a restart is not taken as a new prompt.
 //!
@@ -47,19 +48,28 @@ impl Default for TagPolicy {
     }
 }
 
-/// The limits as stored and as Settings shows them.
+/// The limits and the away-alerts switch, as stored and as Settings shows them.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PolicyFile {
     pub max_age_hours: i64,
     pub max_tokens: u64,
+    /// Telegram alerts while the user is away. On unless turned off.
+    #[serde(default = "on")]
+    pub away_alerts: bool,
 }
 
-impl From<TagPolicy> for PolicyFile {
-    fn from(p: TagPolicy) -> Self {
+fn on() -> bool {
+    true
+}
+
+impl Default for PolicyFile {
+    fn default() -> Self {
+        let p = TagPolicy::default();
         PolicyFile {
             max_age_hours: p.max_age_ms / HOUR_MS,
             max_tokens: p.max_tokens,
+            away_alerts: true,
         }
     }
 }
@@ -84,17 +94,28 @@ pub fn policy_path(profile_dir: &Path) -> PathBuf {
     profile_dir.join("relay").join("telegram-policy.json")
 }
 
-/// The saved limits, or the defaults when none are saved (or the file is unreadable).
-pub fn load_policy(path: &Path) -> TagPolicy {
+/// The saved settings, or the defaults when none are saved (or the file is unreadable).
+pub fn load_file(path: &Path) -> PolicyFile {
     helm_core::privfs::read_capped(path, 4 * 1024)
         .ok()
         .and_then(|b| serde_json::from_slice::<PolicyFile>(&b).ok())
-        .and_then(|f| f.check().ok())
+        .filter(|f| f.check().is_ok())
         .unwrap_or_default()
 }
 
-pub fn save_policy(path: &Path, policy: TagPolicy) -> std::io::Result<()> {
-    write_private(path, &PolicyFile::from(policy))
+/// The saved limits.
+pub fn load_policy(path: &Path) -> TagPolicy {
+    load_file(path).check().unwrap_or_default()
+}
+
+/// Whether away alerts are on.
+pub fn load_away_alerts(path: &Path) -> bool {
+    load_file(path).away_alerts
+}
+
+/// Save settings that passed [`PolicyFile::check`].
+pub fn save_policy(path: &Path, f: PolicyFile) -> std::io::Result<()> {
+    write_private(path, &f)
 }
 
 fn write_private<T: Serialize>(path: &Path, v: &T) -> std::io::Result<()> {
@@ -553,16 +574,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = policy_path(dir.path());
         assert_eq!(load_policy(&p), TagPolicy::default());
+        assert!(load_away_alerts(&p), "on by default");
         let set = PolicyFile {
             max_age_hours: 6,
             max_tokens: 50_000,
+            away_alerts: false,
         };
-        save_policy(&p, set.check().unwrap()).unwrap();
-        assert_eq!(PolicyFile::from(load_policy(&p)), set);
+        save_policy(&p, set).unwrap();
+        assert_eq!(load_file(&p), set);
+        assert_eq!(load_policy(&p), set.check().unwrap());
+        assert!(!load_away_alerts(&p));
         for (hours, tokens) in [(0, 50_000), (721, 50_000), (6, 9_999), (6, 5_000_001)] {
             let bad = PolicyFile {
                 max_age_hours: hours,
                 max_tokens: tokens,
+                away_alerts: true,
             };
             assert!(bad.check().is_err(), "{bad:?}");
         }

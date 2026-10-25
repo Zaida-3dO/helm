@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { hubOps, type HubConnection, type HubConnectionSave, type LineState, type TelegramSettings } from '../../api/hub.ts';
 import { useShell } from '../../shell/context.ts';
-import { Button, SettingRow, TextInput } from '../../ui/index.ts';
+import { Button, Checkbox, SettingRow, TextInput } from '../../ui/index.ts';
 import { SETTINGS_DIALOG } from '../SettingsDialog.tsx';
 import { compactCount } from '../../transcript/rowMeta.ts';
 import './hub.css';
@@ -203,12 +203,27 @@ export function HubPane() {
             />
             k tokens
           </label>
-          <Button variant="secondary" disabled={busy || !limitsValid || !limitsChanged} onClick={() => void run(ops.saveTelegram(hours, ktokens * 1000), showTelegram)}>
+          <Button variant="secondary" disabled={busy || !limitsValid || !limitsChanged} onClick={() => void run(ops.saveTelegram({ maxAgeHours: hours, maxTokens: ktokens * 1000, awayAlerts: tg?.awayAlerts ?? true }), showTelegram)}>
             Save
           </Button>
         </SettingRow>
       )}
       {limits && !limitsValid && <div className="ui-field-error">Hours must be 1 to 720, and tokens 10k to 5,000k.</div>}
+      {tg && (
+        <SettingRow
+          testId="hub-away-alerts"
+          title="Telegram alerts while you're away"
+          description="While AFK is on, a chat that newly needs you (a question, an approval, a stall) or finishes a reply sends you one line on Telegram. Chats can also message you there when you ask them to."
+        >
+          <Checkbox
+            checked={tg.awayAlerts}
+            disabled={busy}
+            aria-label="Telegram alerts while you're away"
+            data-testid="hub-away-alerts-box"
+            onChange={(on) => void run(ops.saveTelegram({ maxAgeHours: tg.maxAgeHours, maxTokens: tg.maxTokens, awayAlerts: on }), showTelegram)}
+          />
+        </SettingRow>
+      )}
       {error && (
         <div className="ui-field-error" role="alert" data-testid="hub-error">
           {error}

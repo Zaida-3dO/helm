@@ -9,7 +9,8 @@
 //! - `telegram`: handed to the [`TelegramSink`]; acknowledged only once the sink took it, so a
 //!   message is never lost to a drop between the hub and the chat.
 //! - `telegram_stop`: the sink stops the running turn.
-//! - Upward, [`LineHandle`] sends the Telegram status and final answer.
+//! - Upward, [`LineHandle`] sends the Telegram status and final answer, and alerts Helm starts
+//!   ([`crate::notify`]).
 
 use crate::config::RelayConfig;
 use crate::gate;
@@ -106,6 +107,16 @@ impl LineHandle {
             .send(json!({ "type": "telegram_status", "text": text }));
     }
     /// The turn's answer, sent by the hub as a new message; the status message goes.
+    /// A message Helm starts (an alert). Sent only while the line is up, so it never waits in
+    /// the queue for a later line; `false` when it was not sent.
+    pub fn telegram_notify(&self, text: &str) -> bool {
+        self.state() == LineState::Online
+            && self
+                .up
+                .send(json!({ "type": "telegram_notify", "text": text }))
+                .is_ok()
+    }
+
     pub fn telegram_final(&self, text: &str) {
         let _ = self
             .up

@@ -2020,6 +2020,7 @@ name = "helm-relay"
 version = "0.2.1"
 dependencies = [
  "futures-util",
+ "helm-afk",
  "helm-chats",
  "helm-consent",
  "helm-core",

@@ -10,7 +10,9 @@
 // - T4  Settings → Hub shows the line connected and the Telegram chat; "Start a new chat" drops
 //       the tag, so the next message, posted by a forwarder to the hub's inbound endpoint (a bot
 //       shared with another service), starts a new chat, and its bubble shows the Telegram badge
-//       without the note for the agent.
+//       without the note for the agent;
+// - T5  while the user is away, a chat that finishes a reply sends one "While you're away" line
+//       to the phone (Helm speaking first), and nothing is sent once they are back.
 //
 // Origin `telegram` and "never consent" are pinned in Rust (helm-relay sink tests) through the
 // real send path. Run: `npm run build:debug` at the root and `cargo build` in hub/, then
@@ -180,5 +182,20 @@ describe("Telegram messages into chats, and the turn mirrored back", { timeout: 
     const shown = String(await user.locator(".bubble").textContent());
     assert.match(shown, /from the shared bot/);
     assert.doesNotMatch(shown, /Sent from Telegram|\/helm/, "the note for the agent and the routing command stay hidden");
+  });
+
+  test("T5: away alerts reach the phone while the user is away", async () => {
+    const page = app!.page;
+    await page.keyboard.press("Escape");
+    await api(page, "afk_settings", { settings: { enabled: true } });
+    await api(page, "afk_set", { on: true });
+    // The first look of an away span only records what already waits (it runs every 20 s).
+    await new Promise((r) => setTimeout(r, 25_000));
+    const mark = phone().length;
+    const chat = (await api(page, "chat_create", { cwd: scratchDir("helm-e2e-away-") })) as Json;
+    await api(page, "chat_send", { chatId: chat.id, submissionId: crypto.randomUUID(), text: "done while you were away", action: "default", draftRevision: 0 });
+    const alert = await until("the away alert", () => phone().slice(mark).find((t) => t.startsWith("While you're away:")), 90_000);
+    assert.equal(alert.split("\n").length, 2, `one line, for the one chat that needs you: ${alert}`);
+    await api(page, "afk_set", { on: false });
   });
 });

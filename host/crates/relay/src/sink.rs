@@ -227,10 +227,13 @@ pub struct TelegramView {
     pub chat: Option<TelegramChatView>,
     pub max_age_hours: i64,
     pub max_tokens: u64,
+    /// Telegram alerts while the user is away ([`crate::notify`]).
+    pub away_alerts: bool,
 }
 
 pub fn telegram_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> TelegramView {
-    let policy = telegram::load_policy(&telegram::policy_path(profile_dir));
+    let file = telegram::load_file(&telegram::policy_path(profile_dir));
+    let policy = file.check().unwrap_or_default();
     let chat = telegram::load_tag(&telegram::tag_path(profile_dir)).and_then(|tag| {
         let facts = chat_facts(db, &tag.chat_id);
         if telegram::expired(&tag, facts, &policy, now).is_some() {
@@ -257,11 +260,11 @@ pub fn telegram_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> 
             id: tag.chat_id,
         })
     });
-    let p = telegram::PolicyFile::from(policy);
     TelegramView {
         chat,
-        max_age_hours: p.max_age_hours,
-        max_tokens: p.max_tokens,
+        max_age_hours: file.max_age_hours,
+        max_tokens: file.max_tokens,
+        away_alerts: file.away_alerts,
     }
 }
 

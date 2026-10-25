@@ -26,6 +26,8 @@
 //!   chat sooner than that), until it is acknowledged or outlives the queue
 //!   lifetime. `/cancel` drops the queue; `/stop` asks Helm to stop the
 //!   running turn.
+//! - **Helm can speak first.** `telegram_notify` (an alert: a chat finished, or something needs
+//!   the user while they are away) arrives as a new message and leaves the live status alone.
 //! - **Never silent while working.** Helm sends the live status as
 //!   `telegram_status`; the bot keeps ONE status message and edits it in place,
 //!   at most once per [`EDIT_INTERVAL`]. `telegram_final` arrives as a NEW
@@ -614,12 +616,25 @@ impl Bridge {
         }
     }
 
+    /// A message Helm starts (an alert): a new message, so the phone notifies. Unlike a final
+    /// answer it leaves the live status message where it is, since a turn may still be running.
+    pub async fn on_notify(&self, text: &str) {
+        let _g = self.ops.lock().await;
+        let chat = self.reply_chat();
+        for piece in split_text(text.trim(), MAX_TEXT) {
+            if let Err(e) = self.send(chat, &piece, false).await {
+                eprintln!("telegram: alert failed: {}", e.description);
+            }
+        }
+    }
+
     /// Handle one frame Helm sent up the line.
     pub async fn on_upstream(&self, u: Upstream) {
         match u {
             Upstream::TelegramAck(id) => self.on_ack(&id),
             Upstream::TelegramStatus(t) => self.on_status(&t),
             Upstream::TelegramFinal(t) => self.on_final(&t).await,
+            Upstream::TelegramNotify(t) => self.on_notify(&t).await,
         }
     }
 

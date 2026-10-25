@@ -22,7 +22,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `settings-hub`, `hub-state`, `hub-field-lanUrl`, `hub-field-fallbackUrl`, `hub-field-token`, `hub-save`, `hub-error` | Settings → Hub: the pane, the line state, the write-only address, fallback and token rows ("Set."/"Not set." in the description), Save and the error line | `hub-state`: `data-state` (`off` `connecting` `online` `offline`) |
 | `update-pill`, `update-busy` | The top bar's "Restart to update" pill (shown only when the update folder holds a newer setup) and the list of running chats in its confirm dialog | |
 | `setting-update-folder`, `update-folder-path`, `update-folder-choose`, `update-folder-check`, `update-folder-clear` | Settings → General's Update folder row: the path, Choose/Change, Check now and Clear | |
-| `hub-telegram-chat`, `hub-telegram-reset`, `hub-telegram-limits` | Settings → Hub's Telegram section: the chat Telegram messages go to (with Open), Start a new chat, and the age and token limits | |
+| `hub-telegram-chat`, `hub-telegram-reset`, `hub-telegram-limits`, `hub-away-alerts`, `hub-away-alerts-box` | Settings → Hub's Telegram section: the chat Telegram messages go to (with Open), Start a new chat, the age and token limits, and the away-alerts row and its checkbox | |
 | `chat-view` | The open chat | `data-chat-id`, `data-chat-status` |
 | `chat-status` | The chat's status, a visually hidden span (screen readers and tests; not a visible pill) | text = the status |
 | `composer` | The editable message box (Lexical `contenteditable`) | |

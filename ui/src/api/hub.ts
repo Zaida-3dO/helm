@@ -34,6 +34,8 @@ export interface TelegramSettings {
   chat: TelegramChat | null;
   maxAgeHours: number;
   maxTokens: number;
+  /** While the user is away, a chat that newly needs them sends one line on Telegram. */
+  awayAlerts: boolean;
 }
 
 export function hubOps(api: Api) {
@@ -41,7 +43,8 @@ export function hubOps(api: Api) {
     connection: () => api<HubConnection>('relay_connection_get', {}),
     saveConnection: (a: HubConnectionSave) => api<HubConnection>('relay_connection_save', a),
     telegram: () => api<TelegramSettings>('relay_telegram_get', {}),
-    saveTelegram: (maxAgeHours: number, maxTokens: number) => api<TelegramSettings>('relay_telegram_save', { maxAgeHours, maxTokens }),
+    saveTelegram: (s: Pick<TelegramSettings, 'maxAgeHours' | 'maxTokens' | 'awayAlerts'>) =>
+      api<TelegramSettings>('relay_telegram_save', { maxAgeHours: s.maxAgeHours, maxTokens: s.maxTokens, awayAlerts: s.awayAlerts }),
     resetTelegram: () => api<TelegramSettings>('relay_telegram_reset', {}),
   };
 }
