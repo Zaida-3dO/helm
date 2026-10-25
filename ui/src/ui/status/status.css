@@ -152,3 +152,48 @@
     color: CanvasText;
   }
 }
+
+/* ---- Marks that move ---- */
+
+/* A wheel marking work that is happening now turns slowly (the same keyframes as the activity
+   dock's wheel). Only the working state turns: stopping and background work stay still. It is a
+   rotation on its own compositor layer, so any number of running rows cost no layout or paint. */
+.ui-wheel-working {
+  animation: ui-wheel-turn 9s linear infinite;
+}
+
+/* The unread star shimmers: its aura breathes and its rays twinkle, out of step, in the star's own
+   colours. Opt in with .ui-star-shimmer. */
+.ui-star-shimmer .ui-star-aura {
+  animation: ui-star-breathe 3.6s ease-in-out infinite;
+}
+.ui-star-shimmer .ui-star-rays {
+  animation: ui-star-twinkle 2.4s ease-in-out -0.9s infinite;
+}
+.ui-star-shimmer .ui-star-core {
+  animation: ui-star-twinkle 2.4s ease-in-out infinite;
+}
+@keyframes ui-star-breathe {
+  50% {
+    opacity: 0.62;
+    transform: scale(1);
+  }
+}
+@keyframes ui-star-twinkle {
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* Quiet effects and reduced motion keep every mark still. (The slow-display setting does the same
+   for every animation at once, in perf.css.) */
+:root[data-effects='quiet'] .ui-wheel-working,
+:root[data-effects='quiet'] .ui-star-shimmer * {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-wheel-working,
+  .ui-star-shimmer * {
+    animation: none;
+  }
+}

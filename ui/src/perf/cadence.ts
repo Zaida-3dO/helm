@@ -7,12 +7,16 @@
 // The cadence is sampled for about a second shortly after start, and again whenever the window
 // comes back into view (a Remote Desktop session may have connected or left in between). A slow
 // sample must be confirmed by the next one. Frames slower than 100 ms are a throttled or busy
-// window, not a display, and are ignored.
+// window, not a display, and are ignored. While the verdict is low it is sampled again every 30 s,
+// so a false one (two busy spells in a row at start-up) clears itself.
 
 export const LOW_CADENCE_MS = 25;
 export const SAMPLE_MS = 1000;
 const MAX_FRAME_MS = 100;
 const MIN_FRAMES = 12;
+
+/** While motion is held low, look again this often, so a verdict reached during a busy spell heals. */
+export const RECHECK_MS = 30_000;
 
 export type Cadence = 'low' | 'normal';
 
@@ -126,8 +130,10 @@ export function watchCadence(doc: Document, policy: MotionPolicy = motion, start
         return;
       }
       const next = gate.push(classifyCadence(intervals));
-      if (next === 'low' || next === 'normal') policy.setCadence(next);
-      else if (next === 'confirm') timer = setTimeout(sample, CONFIRM_MS);
+      if (next === 'low' || next === 'normal') {
+        policy.setCadence(next);
+        if (next === 'low') timer = setTimeout(sample, RECHECK_MS);
+      } else if (next === 'confirm') timer = setTimeout(sample, CONFIRM_MS);
       else if (++tries < 3) timer = setTimeout(sample, 5000);
     };
     raf = requestAnimationFrame(step);

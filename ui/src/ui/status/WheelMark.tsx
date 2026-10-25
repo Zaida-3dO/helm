@@ -1,7 +1,7 @@
 // The wheel mark: Helm's brand mark is a ship's wheel on its own, transparent,
 // no tile, with a brass hub. This is the small in-app drawing, simplified from the app icon art
 // (host/app/icons/source/helm-detailed.svg) so it reads at 20-40 px: eight turned spokes with
-// handles, a wooden rim, brass studs and a domed hub. Still; it does not animate.
+// handles, a wooden rim, brass studs and a domed hub. The drawing is still; in the working state status.css turns it slowly.
 
 import { useId } from 'react';
 

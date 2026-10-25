@@ -833,7 +833,7 @@ function GroupHeader({
               )}
               {item.marks.unread > 0 && (
                 <span className="sb-ind" role="img" aria-label={`${item.marks.unread} unread`} title={`${item.marks.unread} unread`}>
-                  <StarMark size={26} className="sb-ind-star" />
+                  <StarMark size={26} className="sb-ind-star ui-star-shimmer" />
                 </span>
               )}
             </span>
@@ -900,7 +900,7 @@ function Indicator({ row }: { row: SidebarRow }) {
       {a === 'pinned' && <IconPin size={11} />}
       {a === 'running' && <WheelMark size={20} state={row.status === 'stopping' ? 'stopping' : 'working'} className="sb-ind-wheel" />}
       {a === 'lingering' && <WheelMark size={20} state="calm" className="sb-ind-wheel" />}
-      {a === 'unread' && <StarMark size={26} className="sb-ind-star" />}
+      {a === 'unread' && <StarMark size={26} className="sb-ind-star ui-star-shimmer" />}
     </span>
   );
 }
