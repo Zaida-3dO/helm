@@ -1,6 +1,7 @@
 // Basic controls. Styles in ui.css; tokens in styles.css.
 
 import { forwardRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type TextareaHTMLAttributes } from 'react';
+import { WheelMark } from './status/WheelMark.tsx';
 import { IconAlert, IconCheck, IconChevronDown, IconChevronRight, IconInfo, IconSearch, IconSend, IconStop, IconX } from './icons.tsx';
 
 /**
@@ -17,13 +18,15 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   /** Icon buttons need a label for screen readers; it is also the native tooltip. */
   label?: string;
   pressed?: boolean;
+  /** Waiting on the host: the ship's wheel turns before the label and the button ignores presses. */
+  busy?: boolean;
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { variant = 'secondary', danger, label, pressed, className, title, type, children, ...rest },
+  { variant = 'secondary', danger, label, pressed, busy, className, title, type, children, disabled, ...rest },
   ref,
 ) {
-  const cls = ['ui-btn', `ui-btn-${variant}`, danger ? 'ui-danger' : '', className ?? ''].filter(Boolean).join(' ');
+  const cls = ['ui-btn', `ui-btn-${variant}`, danger ? 'ui-danger' : '', busy ? 'ui-btn-busy' : '', className ?? ''].filter(Boolean).join(' ');
   return (
     <button
       ref={ref}
@@ -32,8 +35,11 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       aria-label={label}
       title={title ?? label}
       aria-pressed={pressed}
+      aria-busy={busy || undefined}
+      disabled={disabled || busy}
       {...rest}
     >
+      {busy && <WheelMark size={14} />}
       {children ?? defaultGlyph(variant)}
     </button>
   );

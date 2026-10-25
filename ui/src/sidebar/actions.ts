@@ -38,6 +38,15 @@ export class SidebarActions {
     }
   }
 
+  private async attempt(f: () => Promise<unknown>): Promise<string | null> {
+    try {
+      await f();
+      return null;
+    } catch (e) {
+      return message(e);
+    }
+  }
+
   private async organize(a: ChatOrganizeArgs): Promise<void> {
     const rows = await this.d.pops.organize(a);
     this.d.data.mergeRows(rows);
@@ -140,6 +149,23 @@ export class SidebarActions {
 
   rename(row: SidebarRow, title: string): Promise<unknown> {
     return this.run(() => this.d.api('chat_rename', { chatId: row.chatId, title }));
+  }
+
+  /** Rename for a dialog: waits for the host and answers with the reason it failed, or null. */
+  renameChat(row: SidebarRow, title: string): Promise<string | null> {
+    return this.attempt(() => this.d.api('chat_rename', { chatId: row.chatId, title }));
+  }
+
+  /** Edit a project for a dialog: waits for the host and answers with the reason it failed, or null. */
+  editProject(p: ProjectNode, patch: Record<string, unknown>): Promise<string | null> {
+    return this.attempt(async () => {
+      try {
+        this.d.data.project(await this.d.pops.update({ projectId: p.id, revision: p.revision, ...patch }));
+      } catch (e) {
+        void this.d.data.loadProjects();
+        throw e;
+      }
+    });
   }
 
   // ---- projects ----

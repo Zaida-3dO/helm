@@ -51,11 +51,13 @@ export interface DialogProps {
   intro?: ReactNode;
   footer?: ReactNode;
   headerActions?: ReactNode;
+  /** Give the body the same side inset as the header and footer (for a dialog whose content has none of its own). */
+  padded?: boolean;
   testId?: string;
   children?: ReactNode;
 }
 
-export function Dialog({ title, onClose, wide, busy, intro, footer, headerActions, testId, children }: DialogProps) {
+export function Dialog({ title, onClose, wide, busy, intro, footer, headerActions, padded, testId, children }: DialogProps) {
   const panel = useRef<HTMLDivElement>(null);
   useFocusTrap(panel);
   useLayer('dialog', true, () => {
@@ -80,7 +82,7 @@ export function Dialog({ title, onClose, wide, busy, intro, footer, headerAction
           </div>
         </header>
         {intro && <div className="ui-dialog-intro">{intro}</div>}
-        <div className="ui-dialog-body">{children}</div>
+        <div className={`ui-dialog-body${padded ? ' padded' : ''}`}>{children}</div>
         {footer && <footer className="ui-dialog-foot">{footer}</footer>}
       </div>
     </div>,

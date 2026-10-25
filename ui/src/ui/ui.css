@@ -21,6 +21,27 @@
   opacity: 0.45;
   cursor: var(--cursor-default);
 }
+/* Waiting on the host: the button keeps its full colour and the wheel turns. */
+.ui-btn-busy:disabled {
+  opacity: 1;
+  cursor: progress;
+}
+.ui-btn-busy .ui-wheel {
+  animation: ui-wheel-turn 2.4s linear infinite;
+}
+@keyframes ui-wheel-turn {
+  to {
+    rotate: 360deg;
+  }
+}
+:root[data-effects='quiet'] .ui-btn-busy .ui-wheel {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-btn-busy .ui-wheel {
+    animation: none;
+  }
+}
 .ui-btn-primary {
   background: var(--text);
   color: var(--surface);
@@ -164,6 +185,22 @@
   font: inherit;
   padding: 9px 11px;
   cursor: var(--cursor-text);
+}
+.ui-input {
+  transition:
+    border-color var(--motion-button-colour, 110ms) ease,
+    box-shadow var(--motion-button-colour, 110ms) ease;
+}
+.ui-input:hover:not(:disabled):not(:focus) {
+  border-color: var(--secondary);
+}
+.ui-input:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.ui-input:disabled {
+  opacity: 0.55;
 }
 .ui-input::placeholder {
   color: var(--muted);
@@ -346,6 +383,9 @@ button.ui-chip-main:hover {
   overscroll-behavior: contain;
   /* Focusing a control scrolls it in; leave room for its ring beside the edge. */
   scroll-padding: 8px;
+}
+.ui-dialog-body.padded {
+  padding: calc(4 * var(--ui-unit)) calc(20 * var(--ui-unit)) calc(16 * var(--ui-unit));
 }
 .ui-dialog-foot {
   flex: none;

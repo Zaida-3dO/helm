@@ -90,7 +90,13 @@ export function colourCss(c: string | null | undefined): string | null {
 }
 
 type Menu = { x: number; y: number; items: MenuItem[]; label: string };
-export type Prompt = { title: string; label: string; value: string; onSave: (v: string) => void };
+export type Prompt = {
+  title: string;
+  label: string;
+  value: string;
+  /** Answers with why it failed (the dialog stays open and shows it), or nothing on success. */
+  onSave: (v: string) => Promise<string | null | void> | void;
+};
 type Preview = { row: SidebarRow; top: number; left: number };
 type Drag = { src: DragSource; x0: number; y0: number; active: boolean; title: string; target: DropTarget | null; x: number; y: number };
 
@@ -226,7 +232,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       { row, projects: snap.projects, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view },
       {
         fork: () => void act.fork(row),
-        rename: () => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, onSave: (t) => void act.rename(row, t) }),
+        rename: () => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, onSave: (t) => act.renameChat(row, t) }),
         compact: () => void compactChat(ops, row.chatId, setError),
         moveTo: (id) => void act.moveTo(row, id),
         nestUnder: (id) => {
@@ -249,13 +255,13 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     withProjectIcons(projectMenuItems(p, snap.projects, {
       newChat: () => newChatIn(p),
       pin: (pinned) => void act.updateProject(p, { pinned }),
-      rename: () => setPrompt({ title: 'Rename project', label: 'Name', value: p.name, onSave: (name) => void act.updateProject(p, { name }) }),
+      rename: () => setPrompt({ title: 'Rename project', label: 'Name', value: p.name, onSave: (name) => act.editProject(p, { name }) }),
       changeIcon: () =>
         setPrompt({
           title: 'Project icon',
           label: 'One emoji (empty for the default icon)',
           value: p.icon ?? '',
-          onSave: (v) => void act.updateProject(p, { icon: v.trim() ? v.trim() : null }),
+          onSave: (v) => act.editProject(p, { icon: v.trim() ? v.trim() : null }),
         }),
       nestUnder: (id) => void act.nestProject(p, id),
       topLevel: () => void act.nestProject(p, null),
@@ -934,22 +940,37 @@ function ChatRow({
 
 export function PromptDialog({ prompt, onClose }: { prompt: Prompt; onClose: () => void }) {
   const [value, setValue] = useState(prompt.value);
-  const save = () => {
-    prompt.onSave(value);
-    onClose();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const canSave = value !== prompt.value && !busy;
+  const save = async () => {
+    if (!canSave) return;
+    setBusy(true);
+    setError(null);
+    let failed: string | null | void = null;
+    try {
+      failed = await prompt.onSave(value);
+    } catch (e) {
+      failed = String((e as Error)?.message ?? e);
+    }
+    setBusy(false);
+    if (failed) setError(failed);
+    else onClose();
   };
   return (
     <Dialog
       title={prompt.title}
       onClose={onClose}
+      busy={busy}
+      padded
       testId="sidebar-prompt"
       footer={
         <>
-          <Button variant="secondary" onClick={onClose}>
+          <Button variant="secondary" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={save} disabled={value === prompt.value}>
-            Save
+          <Button variant="primary" onClick={() => void save()} disabled={value === prompt.value} busy={busy} data-testid="sidebar-prompt-save">
+            {busy ? 'Saving…' : 'Save'}
           </Button>
         </>
       }
@@ -960,9 +981,14 @@ export function PromptDialog({ prompt, onClose }: { prompt: Prompt; onClose: () 
           autoFocus
           value={value}
           maxLength={120}
-          onChange={(e) => setValue(e.target.value)}
+          invalid={error}
+          readOnly={busy}
+          onChange={(e) => {
+            setValue(e.target.value);
+            setError(null);
+          }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') save();
+            if (e.key === 'Enter') void save();
           }}
         />
       </label>

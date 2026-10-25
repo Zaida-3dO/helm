@@ -47,7 +47,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
         },
         {
           fork: () => void act.fork(row),
-          rename: () => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, onSave: (t) => void act.rename(row, t) }),
+          rename: () => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, onSave: (t) => act.renameChat(row, t) }),
           compact: () => void compactChat(shell.ops, row.chatId, showError),
           moveTo: (id) => void act.moveTo(row, id),
           nestUnder: (id) => void act.nestUnder(row, id),

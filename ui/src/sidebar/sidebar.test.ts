@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ProjectNode, SidebarRow } from '../api/projects.ts';
+import { SidebarActions, type ActionDeps } from './actions.ts';
 import { buildList, chatAncestors, headerSubtitle, HEIGHTS, nestRows, stepChat, visibleChatOrder, type ListItem } from './model.ts';
 import { loadMore, readBudget, type PageResult } from './paging.ts';
 import { age, rowAttention, trailingIndicator } from './status.ts';
@@ -323,4 +324,24 @@ test('the list ending completes the view', async () => {
   assert.equal(second.complete, true);
   assert.equal(second.cursor, null);
   assert.equal(held.size, 700);
+});
+
+test('dialog saves wait for the host and answer with why they failed', async () => {
+  const seen: unknown[] = [];
+  const fail = new Error('The host refused');
+  const mk = (api: () => Promise<unknown>, update: () => Promise<ProjectNode>) =>
+    new SidebarActions({
+      api,
+      pops: { update },
+      data: { project: (p: ProjectNode) => seen.push(p.id), loadProjects: async () => void seen.push('reload') },
+    } as unknown as ActionDeps);
+  const row = { chatId: 'c1' } as SidebarRow;
+  const ok = mk(async () => null, async () => project('p1'));
+  assert.equal(await ok.renameChat(row, 'New'), null);
+  assert.equal(await ok.editProject(project('p1'), { name: 'x' }), null);
+  assert.deepEqual(seen, ['p1']);
+  const bad = mk(async () => { throw fail; }, async () => { throw fail; });
+  assert.equal(await bad.renameChat(row, 'New'), 'The host refused');
+  assert.equal(await bad.editProject(project('p1'), { name: 'x' }), 'The host refused');
+  assert.deepEqual(seen, ['p1', 'reload']);
 });
