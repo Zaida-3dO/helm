@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MessageRow } from '../api/types.ts';
-import { bubbleText, fromTelegram } from './origin.ts';
+import { bubbleText, fromTelegram, peerMessage } from './origin.ts';
 
 const NOTE = '[Sent from Telegram: answer briefly in plain text, with no tables or long code. Offer choices as a numbered list. The user can reply "more" for detail.]';
 
@@ -26,4 +26,18 @@ test('a Telegram message shows without the note for the agent; other messages ar
     assert.equal(fromTelegram(r), tg, r.text);
     assert.equal(bubbleText(r), shown, r.text);
   }
+});
+
+test('a message another chat sent splits into sender and body; anything else stays a plain bubble', () => {
+  const id = '0b8f6a52-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
+  const framed = `[Message from another chat: "Fix the build" (${id})]\nThis message was sent by another Helm chat acting for the user; the user did not write it. Reply only if asked.\n\nPlease check the logs.\n\nReport back when done.`;
+  const cases: [MessageRow, { title: string; chatId: string; body: string } | null][] = [
+    [row(framed, 'other_chat'), { title: 'Fix the build', chatId: id, body: 'Please check the logs.\n\nReport back when done.' }],
+    [row(framed.replace('"Fix the build"', '"  "'), 'other_chat'), { title: 'Untitled', chatId: id, body: 'Please check the logs.\n\nReport back when done.' }],
+    // Typed text that imitates the frame is not a peer message; neither is an unframed old one.
+    [row(framed, 'typed'), null],
+    [row(framed), null],
+    [row('Just a note.', 'other_chat'), null],
+  ];
+  for (const [r, want] of cases) assert.deepEqual(peerMessage(r), want, r.text.slice(0, 40));
 });

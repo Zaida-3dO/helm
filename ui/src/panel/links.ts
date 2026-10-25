@@ -10,6 +10,7 @@
 import type { LinkTarget } from '../markdown/links.ts';
 import { driveForm, isRemoteOrDevicePath } from '../markdown/paths.ts';
 import { splitPathSuffix } from '../markdown/pathrefs.ts';
+import { parseChatLink } from '../markdown/links.ts';
 
 export const MAX_LINK_BYTES = 8 * 1024;
 
@@ -23,6 +24,8 @@ export type GateResult =
   | { action: 'path'; path: string; line?: number; endLine?: number; column?: number }
   | { action: 'vault'; note: string; heading?: string; block?: string; vault?: string }
   | { action: 'anchor'; heading?: string; block?: string }
+  /** A chat link from a reply or a tool result: opens that chat. */
+  | { action: 'chat'; chatId: string; messageId?: number }
   | { action: 'refuse'; reason: string };
 
 export const REFUSED = {
@@ -125,6 +128,11 @@ export function gateTarget(target: unknown): GateResult {
     return refuse(REFUSED.relative);
   }
 
+  if (t.kind === 'chat') {
+    const chat = typeof t.href === 'string' ? parseChatLink(t.href.trim()) : null;
+    return chat ? { action: 'chat', ...chat } : refuse(REFUSED.malformed);
+  }
+
   if (t.kind === 'path') {
     const raw = typeof t.href === 'string' ? t.href.trim() : '';
     if (!raw) return refuse(REFUSED.empty);
@@ -166,6 +174,8 @@ export function gateTarget(target: unknown): GateResult {
   return refuse(REFUSED.scheme);
 }
 
+type ChatRoute = (req: Extract<GateResult, { action: 'chat' }>, ctx: LinkContext) => Promise<boolean | string> | boolean | string;
+
 export type LinkOutcome = { ok: true; action: GateResult['action'] } | { ok: false; reason: string };
 
 export interface LinkContext {
@@ -186,7 +196,7 @@ interface LinkDeps {
   notify: (message: string) => void;
 }
 
-const routes: { file?: FileRoute; vault?: VaultRoute; path?: PathRoute } = {};
+const routes: { file?: FileRoute; vault?: VaultRoute; path?: PathRoute; chat?: ChatRoute } = {};
 let deps: LinkDeps = {
   openExternal: () => Promise.reject(new Error('The link handler is not connected yet.')),
   notify: (m) => console.warn(m),
@@ -201,7 +211,8 @@ export function configureLinks(next: Partial<LinkDeps>): void {
 export function registerLinkRoute(kind: 'file', route: FileRoute): () => void;
 export function registerLinkRoute(kind: 'vault', route: VaultRoute): () => void;
 export function registerLinkRoute(kind: 'path', route: PathRoute): () => void;
-export function registerLinkRoute(kind: 'file' | 'vault' | 'path', route: FileRoute | VaultRoute | PathRoute): () => void {
+export function registerLinkRoute(kind: 'chat', route: ChatRoute): () => void;
+export function registerLinkRoute(kind: 'file' | 'vault' | 'path' | 'chat', route: FileRoute | VaultRoute | PathRoute | ChatRoute): () => void {
   (routes as Record<string, unknown>)[kind] = route;
   return () => {
     if ((routes as Record<string, unknown>)[kind] === route) delete (routes as Record<string, unknown>)[kind];
@@ -238,6 +249,13 @@ export async function handleLink(target: LinkTarget, ctx: LinkContext): Promise<
         const r = await route(gate, ctx);
         if (r === true) return { ok: true, action: 'path' };
         return fail(typeof r === 'string' ? r : 'The file could not be opened.');
+      }
+      case 'chat': {
+        const route = routes.chat;
+        if (!route) return fail(NOT_AVAILABLE);
+        const r = await route(gate, ctx);
+        if (r === true) return { ok: true, action: 'chat' };
+        return fail(typeof r === 'string' ? r : 'The chat could not be opened.');
       }
       case 'vault':
       case 'anchor': {

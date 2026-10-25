@@ -379,6 +379,8 @@ mod host_tool_tests {
             "app_list_projects",
             "app_create_project",
             "app_update_project",
+            "app_read_project_context",
+            "app_update_project_context",
             "app_worktree_status",
             "app_register_checkout",
             "app_get_settings",

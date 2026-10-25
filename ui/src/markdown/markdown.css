@@ -16,6 +16,7 @@
 
 .md-root a { color: var(--md-accent); text-decoration: underline; cursor: pointer; }
 .md-root a.md-link-vault { text-decoration-style: dotted; }
+.md-root a.md-link-chat { text-decoration-style: dashed; }
 
 .md-root code { font-family: var(--font-mono); font-size: 0.9em; }
 .md-root :not(pre) > code { background: var(--md-surface); border-radius: 4px; padding: 0.1em 0.35em; }

@@ -78,6 +78,7 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
         "worktree_config",
         UserOnly("Where agents' worktrees go is yours to set; agents never change it."),
     ),
+    ("project_notes", Tool),
     (
         "board_connection",
         UserOnly("The Agent Standup address is yours to set in Settings; agents never change it."),

@@ -30,6 +30,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `stop` | Stop button, shown only while a turn runs (Stop that pauses the queue) | |
 | `transcript` | The transcript scroller | |
 | `transcript-row` | One message row | `data-status` (`saved` `streaming` `complete` `error` `interrupted`), `data-role` (`user` `assistant` `toolResult` `context`), `data-row-id` |
+| `peer-card` | A user row that another chat sent (origin `other_chat`): the "From <chat>" card with the sender's link, the body and a note that the user did not write it | `data-from` (the sending chat's id) |
 | `row-origin` | Above a user bubble that did not come from the composer: "Telegram" for a message from the hub's bot (the bubble hides the note for the agent) | `data-origin` (`telegram`) |
 | `message-images` / `message-image` | The thumbnails in a user bubble, and one of them (`message-image-viewer` is the full-size dialog, `message-image-full` the image in it: `data-state` `loading` `ready` `failed`) | `message-image`: `data-state` (`loading` `ready` `failed`); a `ready` one is a button |
 | `work-fold` | "Worked for …" row of a settled turn; click to unfold | |

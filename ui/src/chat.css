@@ -141,6 +141,29 @@ button.danger {
   margin-top: 2px;
 }
 
+/* A message another chat sent: sender and link, the body, and a quiet note that the user did not write it. */
+.peer-card {
+  border-left: 3px solid var(--md-border, currentColor);
+}
+.peer-card-head {
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.peer-card-from {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  text-decoration: underline dashed;
+  cursor: pointer;
+}
+.peer-card-note {
+  font-size: 12px;
+  margin-top: 6px;
+}
+
 /* Where a message came from, above its bubble (a Telegram message). */
 .row-origin {
   display: inline-flex;

@@ -73,6 +73,31 @@ test('vault targets keep note, heading, block and vault; an empty note is an in-
   assert.deepEqual(gateTarget({ kind: 'vault', note: 'C:x' }), { action: 'refuse', reason: REFUSED.driveRelative });
 });
 
+test('a chat link opens its chat through the chat route and nothing else', async () => {
+  const id = '0b8f6a52-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
+  const chat = (href: string) => ({ kind: 'chat' as const, href });
+  assert.deepEqual(gateTarget(chat(`helm://chats/${id}`)), { action: 'chat', chatId: id });
+  assert.deepEqual(gateTarget(chat(`helm://chats/${id}/messages/3`)), { action: 'chat', chatId: id, messageId: 3 });
+  assert.deepEqual(gateTarget(chat(`helm://chats/${id}/x`)), { action: 'refuse', reason: REFUSED.malformed });
+  assert.equal(gateTarget({ kind: 'chat' }).action, 'refuse');
+  // A url target in the chat scheme is not a chat link: it is an address Helm does not open.
+  assert.deepEqual(gateTarget(url(`helm://chats/${id}`)), { action: 'refuse', reason: REFUSED.scheme });
+  const notices: string[] = [];
+  configureLinks({ notify: (m) => void notices.push(m) });
+  assert.equal((await handleLink(chat(`helm://chats/${id}`), { chatId: null })).ok, false, 'no route yet');
+  const opened: string[] = [];
+  const off = registerLinkRoute('chat', (req) => (req.chatId === id ? (opened.push(req.chatId), true) : 'That chat no longer exists.'));
+  try {
+    assert.deepEqual(await handleLink(chat(`helm://chats/${id}`), { chatId: 'c1' }), { ok: true, action: 'chat' });
+    const gone = '1b8f6a52-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
+    assert.deepEqual(await handleLink(chat(`helm://chats/${gone}`), { chatId: 'c1' }), { ok: false, reason: 'That chat no longer exists.' });
+  } finally {
+    off();
+  }
+  assert.deepEqual(opened, [id]);
+  assert.equal(notices.at(-1), 'That chat no longer exists.');
+});
+
 test('anything that is not a known target is refused', () => {
   for (const t of [null, undefined, 1, 'x', {}, { kind: 'script', href: 'x' }, { kind: 'url' }]) {
     assert.equal(gateTarget(t).action, 'refuse', JSON.stringify(t));

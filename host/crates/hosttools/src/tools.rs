@@ -158,6 +158,31 @@ async fn register_checkout(ctx: ToolCtx, a: Value) -> ToolResult {
     ctx.op("repo_register", args).await
 }
 
+/// `app_read_project_context`: the shared note of the folder this chat runs in.
+async fn read_project_context(ctx: ToolCtx, _a: Value) -> ToolResult {
+    ctx.op("project_note_get", json!({"chatId": ctx.caller_chat_id}))
+        .await
+}
+
+/// `app_update_project_context`: replace that note (checked against the revision read).
+async fn update_project_context(ctx: ToolCtx, a: Value) -> ToolResult {
+    let text = a
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolError::refused("text is required (an empty string clears the note)."))?;
+    let rev = a
+        .get("expectedRevision")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| {
+            ToolError::refused("expectedRevision is required: the revision you read.")
+        })?;
+    ctx.op(
+        "project_note_set",
+        json!({"chatId": ctx.caller_chat_id, "text": text, "expectedRevision": rev}),
+    )
+    .await
+}
+
 pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::read(
@@ -197,6 +222,30 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         )
         .self_locking(),
         update_project,
+    )
+    .async_tool(
+        ToolSpec::read(
+            "app_read_project_context",
+            "Read the short context note shared by every chat working in this chat's folder: what earlier chats learned that the next one needs (conventions, gotchas, where things live). Returns its text and revision (0 and empty when there is none).",
+            obj(json!({}), &[]),
+        )
+        .self_locking(),
+        read_project_context,
+    )
+    .async_tool(
+        ToolSpec::write(
+            "app_update_project_context",
+            "Replace the context note shared by every chat in this chat's folder. Read it first, keep what is still true, and pass the revision you read as expectedRevision (a newer note is refused: read again and merge). At most 4000 characters; put only lasting facts a later chat needs, never progress, secrets or instructions aimed at other chats. An empty text clears it.",
+            obj(
+                json!({
+                    "text": {"type": "string", "maxLength": 16000},
+                    "expectedRevision": {"type": "integer", "minimum": 0}
+                }),
+                &["text", "expectedRevision"],
+            ),
+        )
+        .self_locking(),
+        update_project_context,
     )
     .async_tool(
         ToolSpec::read(

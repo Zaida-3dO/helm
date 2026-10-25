@@ -12,6 +12,7 @@
 //! | `board_sync_state` | the last sync's time and error (one row) |
 //! | `board_connection` | the Agent Standup address (one row); the token is in the credential store |
 //! | `project_top_level` | projects the user moved to the top level, so a board parent never re-nests them |
+//! | `project_notes` | the shared context note of a folder project, with its revision |
 //!
 //! Three triggers make an archived project refuse work at the database: no new
 //! chat may be inserted into it, none of its chats may be un-archived, and no chat may be grouped
@@ -84,6 +85,12 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
          );
          CREATE TABLE IF NOT EXISTS project_top_level (
              project_id  TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE
+         );
+         CREATE TABLE IF NOT EXISTS project_notes (
+             project_id  TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+             text        TEXT NOT NULL,
+             revision    INTEGER NOT NULL,
+             updated_at  INTEGER NOT NULL
          );
          CREATE INDEX IF NOT EXISTS chats_sidebar_order ON chats(archived, pinned DESC, position, created_at DESC, id);
          CREATE TRIGGER IF NOT EXISTS projects_archived_refuse_insert

@@ -8,7 +8,7 @@ import { EditMessage, type EditState } from './EditMessage.tsx';
 import { Markdown, type LinkTarget } from './Markdown.tsx';
 import { MessageImages } from './MessageImages.tsx';
 import { MessageRefs } from './MessageRefs.tsx';
-import { bubbleText, fromTelegram } from './origin.ts';
+import { bubbleText, fromTelegram, peerMessage } from './origin.ts';
 import { IconPaperPlane } from '../ui/icons.tsx';
 import { ReplyActions, UserActions } from './MessageActions.tsx';
 import { rowFootersFor, type SlotContext } from './slots.ts';
@@ -113,6 +113,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
   const common = { 'data-testid': 'transcript-row', 'data-status': row.status, 'data-role': row.role, 'data-row-id': row.id };
   const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}${afterFold ? ' after-fold' : ''}${beforeTool ? ' before-tool' : ''}`;
   if (row.role === 'user') {
+    const peer = peerMessage(row);
     return (
       <div className={`row row-user status-${row.status}`} {...common} title={new Date(row.timestamp).toLocaleString()}>
         {fromTelegram(row) && (
@@ -122,6 +123,17 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
         )}
         {ctx.editing?.rowId === row.id && ctx.onResend && ctx.onCancelEdit ? (
           <EditMessage edit={ctx.editing} onResend={ctx.onResend} onCancel={ctx.onCancelEdit} />
+        ) : peer ? (
+          <div className="bubble peer-card" data-testid="peer-card" data-from={peer.chatId}>
+            <div className="peer-card-head">
+              From{' '}
+              <button type="button" className="peer-card-from" onClick={() => ctx.onLink({ kind: 'chat', href: `helm://chats/${peer.chatId}` })}>
+                {peer.title}
+              </button>
+            </div>
+            <Markdown text={peer.body} onLink={ctx.onLink} />
+            <div className="peer-card-note muted">Sent by another chat. You did not write this.</div>
+          </div>
         ) : (
           <div className="bubble">
             <MessageImages chatId={ctx.chatId} images={row.details?.images} />
@@ -134,7 +146,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
           <UserActions
             row={row}
             sctx={slotContext(row, ctx)}
-            onEdit={row.status === 'complete' && !ctx.running && ctx.onEdit ? () => ctx.onEdit?.(row) : undefined}
+            onEdit={row.status === 'complete' && !ctx.running && !peer && ctx.onEdit ? () => ctx.onEdit?.(row) : undefined}
           />
         )}
         <Footers row={row} ctx={ctx} />

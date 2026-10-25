@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { classifyHref, isImageName, parseWikilink, targetAttrs, targetFromAttrs } from './links.ts';
+import { classifyHref, isImageName, parseChatLink, parseWikilink, targetAttrs, targetFromAttrs } from './links.ts';
 
 test('parseWikilink splits note, heading, block and alias', () => {
   assert.deepEqual(parseWikilink('Note'), { kind: 'vault', note: 'Note' });
@@ -35,6 +35,27 @@ test('classifyHref allows only the listed schemes', () => {
     '',
   ]) {
     assert.equal(classifyHref(bad), null, JSON.stringify(bad));
+  }
+});
+
+test('chat links are accepted only in their strict forms', () => {
+  const id = '0b8f6a52-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
+  assert.deepEqual(classifyHref(`helm://chats/${id}`), { kind: 'chat', href: `helm://chats/${id}` });
+  assert.deepEqual(parseChatLink(`helm://chats/${id}/messages/42`), { chatId: id, messageId: 42 });
+  for (const bad of [
+    `helm://chats/${id}/`,
+    `helm://chats/${id}?x=1`,
+    `helm://chats/${id}#m`,
+    `helm://u@chats/${id}`,
+    `helm://chats:80/${id}`,
+    `helm://chats/${id}/messages/abc`,
+    `helm://chats/${id}/extra`,
+    `helm://chats/${id.toUpperCase()}`,
+    'helm://chats/not-an-id',
+    `other://chats/${id}`,
+  ]) {
+    assert.equal(parseChatLink(bad), null, bad);
+    assert.equal(classifyHref(bad), null, bad);
   }
 });
 
