@@ -98,6 +98,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         });
     crate::manage::register(reg);
     crate::message_images::register(reg);
+    crate::output_save::register(reg); // message_output_save
     crate::attachments::register(reg); // attachment_ref
     crate::runtime_settings::register_ops(reg); // Settings → Runtime
 }
@@ -621,6 +622,7 @@ pub(crate) mod tests {
             ("attachment_put", OpClass::Maintenance),
             ("attachment_get", OpClass::Blocking),
             ("attachment_ref", OpClass::Maintenance),
+            ("message_output_save", OpClass::Blocking),
             ("side_chat_resolve", OpClass::Maintenance),
             ("chat_mute", OpClass::Maintenance),
             ("attention_address", OpClass::Maintenance),

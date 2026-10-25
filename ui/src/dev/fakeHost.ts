@@ -684,6 +684,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       emitChat(c);
       return c.chat;
     },
+    // Save full output: the dev host pretends to write the file.
+    message_output_save: () => ({ path: 'C:/Users/me/Downloads/output.txt' }),
     // references and the native file dialog, faked.
     attachment_ref: (a) => {
       const target = String(a.target);

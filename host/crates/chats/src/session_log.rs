@@ -548,6 +548,47 @@ impl RowWrite {
     }
 }
 
+/// A message's complete text, for saving it.
+pub struct FullText {
+    pub role: String,
+    pub tool: Option<String>,
+    pub text: String,
+}
+
+/// A row's whole text: the row itself, or the artifact file holding what did not fit on it. `None`
+/// when the chat has no such row.
+pub fn full_text(
+    conn: &rusqlite::Connection,
+    artifacts: &Path,
+    chat_id: &str,
+    row_id: i64,
+) -> rusqlite::Result<Option<FullText>> {
+    let row: Option<(String, Option<String>, String, Option<String>)> = conn
+        .query_row(
+            "SELECT role, tool_name, text, artifact FROM messages WHERE chat_id = ?1 AND id = ?2",
+            rusqlite::params![chat_id, row_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((role, tool, mut text, artifact)) = row else {
+        return Ok(None);
+    };
+    // The name was made by this module (`<sha256>.json`); anything else is never opened.
+    if let Some(name) = artifact
+        .filter(|n| n.len() < 100 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.'))
+    {
+        match std::fs::read_to_string(artifacts.join(&name))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|v| v.get("text").and_then(Value::as_str).map(str::to_owned))
+        {
+            Some(full) => text = full,
+            None => log::warn!("artifact {name} could not be read; saving the part on the row"),
+        }
+    }
+    Ok(Some(FullText { role, tool, text }))
+}
+
 /// Upsert one message row by `(chat, source_key)`. Text plus thinking over 64 KiB goes to a
 /// content-addressed artifact (`artifacts/<sha256>.json`), and the row keeps 64 KiB of text,
 /// 16 KiB of thinking and the thinking tail. Returns the row id.
@@ -994,6 +1035,19 @@ mod tests {
         let d: Value = serde_json::from_str(&details).unwrap();
         assert!(d["thinkingTail"].as_str().unwrap().ends_with("THE-END"));
         assert_eq!(d["textTruncated"], true);
+        // Saving reads the whole text back from the artifact, and nothing for a row that is not there.
+        let id: i64 = db
+            .snapshot(|tx| tx.query_row("SELECT id FROM messages", [], |r| r.get(0)))
+            .unwrap();
+        let full = db
+            .snapshot(|tx| full_text(tx, &artifacts, "c", id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(full.text, "é".repeat(40 * 1024));
+        assert!(db
+            .snapshot(|tx| full_text(tx, &artifacts, "other", id))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

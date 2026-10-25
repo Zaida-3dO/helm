@@ -58,6 +58,9 @@ pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) 
         probe::Probe::from_env(cfg!(debug_assertions)),
     );
     services.insert(Arc::new(svc));
+    services.insert(Arc::new(helm_chats::FileSaver(Arc::new(
+        files::save_native,
+    ))));
 }
 
 fn settings_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {

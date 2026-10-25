@@ -46,6 +46,7 @@ mod latency_tests;
 pub mod manage;
 pub mod message_images;
 pub mod ops;
+pub mod output_save;
 pub mod runslots;
 pub mod runtime;
 pub mod runtime_settings;
@@ -67,6 +68,7 @@ pub mod types;
 
 pub use hostcalls::HostSeam;
 pub use ops::register_ops;
+pub use output_save::FileSaver;
 pub use runtime::{ChatRuntime, ProcessSpawner, RuntimeConfig, RuntimeDrain};
 pub use tools::register_host_tools;
 

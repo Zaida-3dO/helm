@@ -4,6 +4,7 @@
 
 import { useEffect, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
+import { useShell } from '../shell/context.ts';
 import { Glyph, Spinner } from './icons.tsx';
 import { parseResult, type Cell, type GridRow } from './resultGrid.ts';
 import { TodoList } from './TodoList.tsx';
@@ -154,19 +155,44 @@ function ToolBody({ row, kind, status, source, rawName }: { row: MessageRow; kin
   return (
     <div className="tool-box" data-testid="tool-box">
       {source === 'mcp' && <div className="tool-id-strip">Tool ID {rawName}</div>}
-      {grid ? <GridView rows={grid} header={header} /> : <OutputBox header={header} output={output} status={status} saved={Boolean(row.artifact)} />}
+      {grid ? <GridView rows={grid} header={header} /> : <OutputBox header={header} output={output} status={status} full={row.artifact ? { chatId: row.chatId, messageId: row.id } : null} />}
     </div>
   );
 }
 
-function OutputBox({ header, output, status, saved }: { header: string; output: string; status: ToolStatus; saved: boolean }) {
+/** What saving the whole output needs when the row holds only the start of it. */
+interface FullOutput {
+  chatId: string;
+  messageId: number;
+}
+
+function OutputBox({ header, output, status, full }: { header: string; output: string; status: ToolStatus; full: FullOutput | null }) {
+  const { api } = useShell();
   const [wrap, setWrap] = useState(true);
+  const [save, setSave] = useState<{ state: 'idle' | 'saving' | 'saved' | 'failed'; note?: string }>({ state: 'idle' });
   const copy = () => void navigator.clipboard?.writeText(output);
+  // The row keeps only the start of a long output; the whole text is in a file the host holds.
+  const saveFull = () => {
+    if (!full) return;
+    setSave({ state: 'saving' });
+    api<{ path: string | null }>('message_output_save', full)
+      .then((r) => setSave(r.path ? { state: 'saved', note: r.path } : { state: 'idle' }))
+      .catch((e: unknown) => setSave({ state: 'failed', note: e instanceof Error ? e.message : String(e) }));
+  };
   return (
     <>
       <div className="tool-box-head">
         <span className="tool-box-label">{header}</span>
-        {saved && <span className="muted tool-saved">Full output saved</span>}
+        {full && (
+          <span className="muted tool-saved" data-testid="tool-saved" role={save.state === 'failed' ? 'alert' : undefined}>
+            {save.state === 'saved' ? `Saved to ${save.note}` : save.state === 'failed' ? `Not saved: ${save.note}` : 'The first part is shown'}
+          </span>
+        )}
+        {full && (
+          <button type="button" className="tool-box-btn" data-testid="tool-save-full" title="Save the whole output to a file" disabled={save.state === 'saving'} onClick={saveFull}>
+            {save.state === 'saving' ? 'Saving…' : 'Save full output'}
+          </button>
+        )}
         <button type="button" className="tool-box-btn" aria-pressed={wrap} title={wrap ? 'Stop wrapping' : 'Wrap lines'} onClick={() => setWrap((w) => !w)}>
           {wrap ? 'No wrap' : 'Wrap'}
         </button>

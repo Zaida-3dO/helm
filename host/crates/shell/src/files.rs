@@ -66,6 +66,23 @@ pub(crate) fn files_pick(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     Ok(json!({ "paths": paths }))
 }
 
+/// The native "save as" dialog behind Save full output: the chosen path, `Ok(None)` when cancelled.
+#[cfg(windows)]
+pub fn save_native(file_name: &str) -> Result<Option<PathBuf>, String> {
+    let name = file_name.to_owned();
+    std::thread::Builder::new()
+        .name("helm-file-save".into())
+        .spawn(move || rfd::FileDialog::new().set_file_name(&name).save_file())
+        .map_err(|e| format!("Could not open the save dialog: {e}"))?
+        .join()
+        .map_err(|_| "The save dialog failed.".to_owned())
+}
+
+#[cfg(not(windows))]
+pub fn save_native(_file_name: &str) -> Result<Option<PathBuf>, String> {
+    Err("The save dialog is only available on Windows.".to_owned())
+}
+
 #[cfg(windows)]
 fn native(title: &str) -> Result<Vec<PathBuf>, String> {
     let title = title.to_owned();
