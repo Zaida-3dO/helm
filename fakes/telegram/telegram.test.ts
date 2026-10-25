@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BOT_USERNAME, DEFAULT_TOKEN, startFakeTelegram } from './server.ts';
+import { BOT_USERNAME, DEFAULT_TOKEN, FAKE_TRANSCRIPT, startFakeStt, startFakeTelegram } from './server.ts';
 
 const call = async (base: string, token: string, method: string, body: unknown = {}) => {
   const r = await fetch(`${base}/bot${token}/${method}`, {
@@ -59,5 +59,39 @@ test('send, edit and delete change the chat as a phone would show it', async () 
     assert.equal(long.status, 400);
   } finally {
     await tg.close();
+  }
+});
+
+test('voice notes download and transcribe; buttons are tapped, answered and removed', async () => {
+  const [tg, stt] = await Promise.all([startFakeTelegram(), startFakeStt()]);
+  try {
+    tg.voice(42, new Uint8Array([79, 103, 103, 83]));
+    const keyboard = { inline_keyboard: [[{ text: 'Allow', callback_data: 'a:0123456789abcdef:0' }]] };
+    const ask = await call(tg.url, DEFAULT_TOKEN, 'sendMessage', { chat_id: 42, text: 'Run it?', reply_markup: keyboard });
+    tg.tap(42, ask.body.result.message_id, 'a:0123456789abcdef:0');
+    const [note, tap] = (await call(tg.url, DEFAULT_TOKEN, 'getUpdates', { offset: 0 })).body.result as any[];
+    const file = (await call(tg.url, DEFAULT_TOKEN, 'getFile', { file_id: note.message.voice.file_id })).body.result;
+    assert.equal(file.file_size, 4);
+    const audio = await fetch(`${tg.url}/file/bot${DEFAULT_TOKEN}/${file.file_path}`);
+    assert.deepEqual(new Uint8Array(await audio.arrayBuffer()), new Uint8Array([79, 103, 103, 83]));
+    assert.equal((await fetch(`${tg.url}/file/botnope/${file.file_path}`)).status, 401);
+    const form = new FormData();
+    form.append('file', new Blob([new Uint8Array([1, 2, 3])]), 'file_1.oga');
+    form.append('model', 'large-v3-turbo');
+    const heard = await fetch(stt.url, { method: 'POST', body: form });
+    assert.equal(await heard.text(), FAKE_TRANSCRIPT);
+    assert.deepEqual(stt.uploads, [{ fields: { model: 'large-v3-turbo' }, fileName: 'file_1.oga', fileBytes: 3 }]);
+    assert.equal(tap.callback_query.data, 'a:0123456789abcdef:0');
+    assert.equal(tap.callback_query.message.chat.type, 'private');
+    const answer = { callback_query_id: tap.callback_query.id, text: 'Sent to Helm' };
+    assert.equal((await call(tg.url, DEFAULT_TOKEN, 'answerCallbackQuery', answer)).status, 200);
+    assert.equal((await call(tg.url, DEFAULT_TOKEN, 'answerCallbackQuery', answer)).status, 400, 'answered once');
+    assert.deepEqual(tg.chat(42)[0]!.replyMarkup, keyboard);
+    await call(tg.url, DEFAULT_TOKEN, 'editMessageText', { chat_id: 42, message_id: ask.body.result.message_id, text: 'Run it?\n\n→ Allow' });
+    assert.equal(tg.chat(42)[0]!.replyMarkup, undefined, 'an edit without a keyboard removes it');
+    assert.deepEqual(tg.sent.map((c) => c.method), ['sendMessage', 'answerCallbackQuery', 'editMessageText']);
+    assert.equal(tg.sent[1]!.messageId, ask.body.result.message_id);
+  } finally {
+    await Promise.all([tg.close(), stt.close()]);
   }
 });

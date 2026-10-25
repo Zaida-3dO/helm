@@ -4,7 +4,7 @@ use helm_hub::mcp::Options;
 use helm_hub::relay::Line;
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
-use helm_hub::telegram::{Bridge, HttpApi, Receive, TelegramConfig};
+use helm_hub::telegram::{Bridge, HttpApi, HttpVoice, Receive, TelegramConfig};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -28,7 +28,12 @@ ENVIRONMENT:
   HUB_TELEGRAM_QUEUE_MAX      how many offline messages wait (default 50)
   HUB_TELEGRAM_RECEIVE        poll (default): the hub polls the bot's updates;
                               off: another service that already runs the bot posts
-                              them to /telegram/update with a telegram-scope token";
+                              them to /telegram/update with a telegram-scope token
+  HUB_TELEGRAM_STT_URL        an OpenAI-compatible speech-to-text endpoint for voice
+                              notes, e.g. http://<host>:<port>/v1/audio/transcriptions;
+                              unset: voice notes are off
+  HUB_TELEGRAM_STT_MODEL      the model it is asked for (default large-v3-turbo)
+  HUB_TELEGRAM_STT_LANGUAGE   the language of the voice notes (default en)";
 
 fn db_path() -> PathBuf {
     std::env::var_os("HUB_DB")
@@ -158,7 +163,12 @@ fn serve() -> ExitCode {
         None => {
             let token = telegram.token.clone().unwrap_or_default();
             let api = Arc::new(HttpApi::new(&telegram.api_base, &token));
-            Some(Arc::new(Bridge::new(api, line.clone(), &telegram)))
+            let mut bridge = Bridge::new(api, line.clone(), &telegram);
+            if let Some(stt) = &telegram.stt {
+                bridge =
+                    bridge.with_voice(Arc::new(HttpVoice::new(&telegram.api_base, &token, stt)));
+            }
+            Some(Arc::new(bridge))
         }
     };
     let state = Arc::new(AppState {
@@ -190,12 +200,13 @@ fn serve() -> ExitCode {
         };
         if let Some(bridge) = bridge {
             eprintln!(
-                "telegram: on, {} allowed user(s), {}",
+                "telegram: on, {} allowed user(s), {}; voice notes {}",
                 telegram.allowed.len(),
                 match telegram.receive {
                     Receive::Poll => "polling for updates",
                     Receive::Off => "not polling; updates are posted to /telegram/update",
-                }
+                },
+                if telegram.stt.is_some() { "on" } else { "off" }
             );
             tokio::spawn(bridge.run(upstream));
         }

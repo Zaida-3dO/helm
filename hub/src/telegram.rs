@@ -32,10 +32,22 @@
 //!   `telegram_status`; the bot keeps ONE status message and edits it in place,
 //!   at most once per [`EDIT_INTERVAL`]. `telegram_final` arrives as a NEW
 //!   message (so the phone notifies) and the status message is then deleted.
+//! - **Voice notes.** With a speech-to-text server configured, a voice note (or
+//!   an audio file) is fetched with `getFile`, transcribed by that server and
+//!   forwarded as `[Voice note] <transcript>`, by the same rules as text. The
+//!   transcription runs beside the poll loop, and the note keeps its place in
+//!   the queue: messages sent after it wait until it has its text.
+//! - **Quoted replies.** A reply to a message, or a quote from one, is
+//!   forwarded with `Replying to: "<quoted text>"` on its own first line.
+//! - **Approval buttons.** `telegram_ask` arrives as a new message with one
+//!   inline button per option. A tap goes to Helm once, as `telegram_answer`.
+//!   The hub checks only the Telegram side (an allowed user, a private chat, an
+//!   ask that still waits); Helm checks the rest. Text never answers an ask.
+//!   `telegram_ask_done` (settled in Helm) closes the message.
 //!
-//! The queue lives in memory: a container restart drops it.
+//! The queue and the waiting asks live in memory: a container restart drops them.
 
-use crate::relay::{Line, Upstream, OFFLINE};
+use crate::relay::{valid_ask_id, Line, Upstream, OFFLINE};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::future::Future;
@@ -61,6 +73,22 @@ pub const RESEND_AFTER: Duration = Duration::from_secs(45);
 pub const POLL_SECONDS: u64 = 25;
 /// How many recent `update_id`s are remembered, so an update is handled once.
 pub const SEEN_UPDATES: usize = 256;
+/// The largest file the Bot API lets a bot download, so the largest voice note transcribed.
+pub const MAX_VOICE_BYTES: u64 = 20 * 1024 * 1024;
+/// How long the speech-to-text server may take to accept the connection, and to answer in all.
+pub const STT_CONNECT: Duration = Duration::from_secs(5);
+pub const STT_TIMEOUT: Duration = Duration::from_secs(100);
+/// A voice note whose transcription has not ended this long after it arrived (it never should:
+/// each HTTP step has its own timeout) gives up its place in the queue.
+const TRANSCRIBING_MAX_MS: i64 = 10 * 60_000;
+/// A quoted message is context for the reply, so it is cut to this many characters.
+pub const MAX_QUOTE: usize = 300;
+/// How many asks wait for a tap at once; a newer one pushes out the oldest.
+pub const MAX_ASKS: usize = 50;
+/// The longest button label.
+pub const MAX_OPTION: usize = 40;
+/// An ask's text leaves room in the message for the line that closes it.
+pub const MAX_ASK_TEXT: usize = MAX_TEXT - 100;
 
 pub const QUEUED: &str =
     "Helm is offline. Queued; it will be delivered when Helm reconnects. /cancel drops the queue.";
@@ -68,12 +96,35 @@ pub const TEXT_ONLY: &str = "Only text messages reach Helm for now.";
 pub const HELLO: &str =
     "Helm is listening. Messages here go to the active Telegram chat in Helm. /stop stops the \
      running turn; /cancel drops messages queued while Helm is offline.";
+pub const VOICE_OFF: &str = "Voice notes are off on this hub.";
+pub const VOICE_TOO_BIG: &str =
+    "That voice note is too large to transcribe (the limit is 20 MB), so nothing was sent to Helm.";
+pub const TAP_SENT: &str = "Sent to Helm";
+pub const TAP_OFFLINE: &str = "Helm is offline; nothing was sent.";
+pub const TAP_STALE: &str = "This request is no longer waiting.";
 
 pub type ApiFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, ApiError>> + Send + 'a>>;
 
 /// One Bot API method call. The real one is [`HttpApi`]; tests use a recording fake.
 pub trait TelegramApi: Send + Sync {
     fn call<'a>(&'a self, method: &'a str, body: Value) -> ApiFuture<'a>;
+}
+
+/// A voice step's result; the error is a reason in plain words for the user.
+pub type VoiceFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
+
+/// Fetching a voice note's audio and turning it into text. The real one is [`HttpVoice`]; tests
+/// use a fake. No error may carry the bot token.
+pub trait Voice: Send + Sync {
+    /// The file that `getFile` placed at `file_path`.
+    fn download<'a>(&'a self, file_path: &'a str) -> VoiceFuture<'a, Vec<u8>>;
+    /// The transcript of `audio`, uploaded as the file `name` of type `mime`.
+    fn transcribe<'a>(
+        &'a self,
+        audio: Vec<u8>,
+        name: &'a str,
+        mime: &'a str,
+    ) -> VoiceFuture<'a, String>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +143,15 @@ pub enum Receive {
     Off,
 }
 
+/// The OpenAI-compatible speech-to-text server voice notes go to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SttConfig {
+    /// The transcriptions endpoint, e.g. `http://<host>:<port>/v1/audio/transcriptions`.
+    pub url: String,
+    pub model: String,
+    pub language: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct TelegramConfig {
     pub token: Option<String>,
@@ -100,13 +160,17 @@ pub struct TelegramConfig {
     pub queue_lifetime: Duration,
     pub queue_max: usize,
     pub receive: Receive,
+    /// `None`: voice notes are off.
+    pub stt: Option<SttConfig>,
 }
 
 impl TelegramConfig {
     /// Reads `HUB_TELEGRAM_BOT_TOKEN`, `HUB_TELEGRAM_ALLOWED_USERS` (comma-separated numeric
     /// ids), `HUB_TELEGRAM_API` (default the public Bot API), `HUB_TELEGRAM_QUEUE_MINUTES`
-    /// (default 120), `HUB_TELEGRAM_QUEUE_MAX` (default 50) and `HUB_TELEGRAM_RECEIVE`
-    /// (`poll`, the default, or `off`).
+    /// (default 120), `HUB_TELEGRAM_QUEUE_MAX` (default 50), `HUB_TELEGRAM_RECEIVE`
+    /// (`poll`, the default, or `off`) and, for voice notes, `HUB_TELEGRAM_STT_URL` (unset:
+    /// off), `HUB_TELEGRAM_STT_MODEL` (default `large-v3-turbo`) and
+    /// `HUB_TELEGRAM_STT_LANGUAGE` (default `en`).
     pub fn from_env() -> Result<Self, String> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let allowed = parse_allowed(&var("HUB_TELEGRAM_ALLOWED_USERS").unwrap_or_default())?;
@@ -129,6 +193,20 @@ impl TelegramConfig {
                 .ok_or("HUB_TELEGRAM_QUEUE_MAX must be 1-1000")?,
             None => 50,
         };
+        let setting = |k: &str, default: &str| {
+            var(k).map_or_else(|| default.to_owned(), |v| v.trim().to_owned())
+        };
+        let stt = match var("HUB_TELEGRAM_STT_URL").map(|u| u.trim().to_owned()) {
+            Some(url) if url.starts_with("http://") || url.starts_with("https://") => {
+                Some(SttConfig {
+                    url,
+                    model: setting("HUB_TELEGRAM_STT_MODEL", "large-v3-turbo"),
+                    language: setting("HUB_TELEGRAM_STT_LANGUAGE", "en"),
+                })
+            }
+            Some(_) => return Err("HUB_TELEGRAM_STT_URL must be an http:// or https:// URL".into()),
+            None => None,
+        };
         Ok(TelegramConfig {
             token: var("HUB_TELEGRAM_BOT_TOKEN").map(|t| t.trim().to_owned()),
             allowed,
@@ -139,6 +217,7 @@ impl TelegramConfig {
             queue_lifetime: Duration::from_secs(minutes * 60),
             queue_max,
             receive,
+            stt,
         })
     }
 
@@ -178,12 +257,23 @@ pub fn parse_allowed(spec: &str) -> Result<Vec<i64>, String> {
 #[derive(Debug, Clone)]
 struct Queued {
     id: String,
-    text: String,
+    /// `None` while its voice note is being transcribed: it and everything after it wait.
+    text: Option<String>,
     sent_at_ms: i64,
     /// The line generation it went down, while it waits for Helm's acknowledgement.
     sent_on: Option<u64>,
     /// When it last went down that line, for the resend timer.
     sent_down_ms: i64,
+}
+
+/// An approval ask on the phone: the message that carries its buttons.
+#[derive(Debug, Clone)]
+struct Ask {
+    id: String,
+    chat: i64,
+    message_id: i64,
+    text: String,
+    options: Vec<String>,
 }
 
 #[derive(Default)]
@@ -197,6 +287,8 @@ struct State {
     bot_name: Option<String>,
     /// The most recent `update_id`s handled, oldest first.
     seen: VecDeque<i64>,
+    /// Asks whose buttons still wait for a tap, oldest first.
+    asks: VecDeque<Ask>,
 }
 
 /// What [`Bridge::on_update`] did, for tests and the log.
@@ -207,6 +299,10 @@ pub enum Handled {
     Forwarded,
     Queued,
     Command,
+    /// A voice note now being transcribed; it is forwarded or queued once it has its text.
+    Voice,
+    /// A tap on a button, from an allowed user in a private chat.
+    Button,
     /// An `update_id` already handled: dropped.
     Duplicate,
 }
@@ -218,6 +314,8 @@ impl Handled {
             Handled::Forwarded => "forwarded",
             Handled::Queued => "queued",
             Handled::Command => "command",
+            Handled::Voice => "voice",
+            Handled::Button => "button",
             Handled::Duplicate => "duplicate",
         }
     }
@@ -230,6 +328,8 @@ pub struct Bridge {
     lifetime_ms: i64,
     queue_max: usize,
     receive: Receive,
+    /// `None`: voice notes are off.
+    voice: Option<Arc<dyn Voice>>,
     state: Mutex<State>,
     /// Serialises Telegram sends, so a status edit and the final answer never interleave.
     ops: tokio::sync::Mutex<()>,
@@ -250,11 +350,41 @@ fn strip_helm(text: &str) -> Option<&str> {
     (word.split('@').next() == Some("/helm")).then(|| rest.trim_start())
 }
 
+/// `s` in at most `max` characters, ending in an ellipsis when it was cut.
 fn cut(s: &str, max: usize) -> String {
-    match s.char_indices().nth(max) {
-        Some((i, _)) => format!("{}…", &s[..i]),
-        None => s.to_owned(),
+    if s.chars().nth(max).is_none() {
+        return s.to_owned();
     }
+    let end = s
+        .char_indices()
+        .nth(max.saturating_sub(1))
+        .map_or(s.len(), |(i, _)| i);
+    format!("{}…", &s[..end])
+}
+
+/// What the message replies to: the part quoted, else the whole replied-to message, flattened
+/// onto one line and cut. `None`: not a reply, or a reply to a message without text.
+fn quoted(msg: &Value) -> Option<String> {
+    let text = |p: &str| msg.pointer(p).and_then(Value::as_str);
+    let q = text("/quote/text")
+        .or_else(|| text("/reply_to_message/text"))
+        .or_else(|| text("/reply_to_message/caption"))?;
+    let q = q.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!q.is_empty()).then(|| cut(&q, MAX_QUOTE))
+}
+
+fn with_quote(quote: Option<&str>, text: &str) -> String {
+    match quote {
+        Some(q) => format!("Replying to: \"{q}\"\n{text}"),
+        None => text.to_owned(),
+    }
+}
+
+/// A button's callback data, `a:<ask id>:<index>`.
+fn parse_button(data: &str) -> Option<(&str, usize)> {
+    let (id, index) = data.strip_prefix("a:")?.split_once(':')?;
+    let index = index.parse::<usize>().ok()?;
+    valid_ask_id(id).then_some((id, index))
 }
 
 /// Split a long answer into Telegram-sized pieces, on character boundaries.
@@ -275,9 +405,16 @@ impl Bridge {
             lifetime_ms: cfg.queue_lifetime.as_millis() as i64,
             queue_max: cfg.queue_max,
             receive: cfg.receive,
+            voice: None,
             state: Mutex::new(State::default()),
             ops: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Turn voice notes on, transcribed by `voice`.
+    pub fn with_voice(mut self, voice: Arc<dyn Voice>) -> Self {
+        self.voice = Some(voice);
+        self
     }
 
     fn st(&self) -> std::sync::MutexGuard<'_, State> {
@@ -323,7 +460,7 @@ impl Bridge {
     }
 
     /// One update, from `getUpdates` or posted to `/telegram/update`.
-    pub async fn on_update(&self, update: &Value, now: i64) -> Handled {
+    pub async fn on_update(self: &Arc<Self>, update: &Value, now: i64) -> Handled {
         if let Some(id) = update.get("update_id").and_then(Value::as_i64) {
             let mut st = self.st();
             if st.seen.contains(&id) {
@@ -333,6 +470,9 @@ impl Bridge {
                 st.seen.pop_front();
             }
             st.seen.push_back(id);
+        }
+        if let Some(q) = update.get("callback_query") {
+            return self.on_button(q).await;
         }
         let Some(msg) = update.get("message") else {
             return Handled::Ignored;
@@ -349,7 +489,11 @@ impl Bridge {
             return Handled::Ignored;
         }
         self.st().reply_chat = Some(chat);
+        let quote = quoted(msg);
         let Some(text) = msg.get("text").and_then(Value::as_str) else {
+            if let Some(note) = msg.get("voice").or_else(|| msg.get("audio")) {
+                return self.on_voice(msg, note, chat, quote, now).await;
+            }
             self.reply(chat, TEXT_ONLY).await;
             return Handled::Command;
         };
@@ -399,38 +543,161 @@ impl Bridge {
             }
             _ => {}
         }
-        let full = {
-            let mut st = self.st();
-            if st.queue.iter().filter(|q| q.sent_on.is_none()).count() >= self.queue_max {
-                true
-            } else {
-                st.queue.push_back(Queued {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    text: text.to_owned(),
-                    sent_at_ms: msg
-                        .get("date")
-                        .and_then(Value::as_i64)
-                        .map(|s| s * 1000)
-                        .unwrap_or(now),
-                    sent_on: None,
-                    sent_down_ms: now,
-                });
-                false
-            }
-        };
-        if full {
-            self.reply(
-                chat,
-                "Helm is offline and the queue is full, so this message was not kept.",
-            )
-            .await;
+        let text = with_quote(quote.as_deref(), text);
+        let Some(id) = self.push(msg, Some(text), now) else {
+            self.reply_full(chat).await;
             return Handled::Queued;
+        };
+        self.deliver(&id, chat, now).await
+    }
+
+    /// Queue one message in order; `None` when the queue of waiting messages is full.
+    fn push(&self, msg: &Value, text: Option<String>, now: i64) -> Option<String> {
+        let mut st = self.st();
+        if st.queue.iter().filter(|q| q.sent_on.is_none()).count() >= self.queue_max {
+            return None;
         }
-        if self.flush(now).await > 0 {
-            Handled::Forwarded
-        } else {
+        let id = uuid::Uuid::new_v4().to_string();
+        st.queue.push_back(Queued {
+            id: id.clone(),
+            text,
+            sent_at_ms: msg
+                .get("date")
+                .and_then(Value::as_i64)
+                .map(|s| s * 1000)
+                .unwrap_or(now),
+            sent_on: None,
+            sent_down_ms: now,
+        });
+        Some(id)
+    }
+
+    async fn reply_full(&self, chat: i64) {
+        self.reply(
+            chat,
+            "Helm is offline and the queue is full, so this message was not kept.",
+        )
+        .await;
+    }
+
+    /// Send what may go, and say whether message `id` went with it. A message that stays behind
+    /// while the line is up waits for a voice note before it, so only a line that is down earns
+    /// the "offline" reply.
+    async fn deliver(&self, id: &str, chat: i64, now: i64) -> Handled {
+        if self.flush_sent(now).await.iter().any(|s| s == id) {
+            return Handled::Forwarded;
+        }
+        if !self.line.is_up() {
             self.reply(chat, QUEUED).await;
-            Handled::Queued
+        }
+        Handled::Queued
+    }
+
+    /// A voice note: hold its place in the queue and transcribe it beside the poll loop.
+    async fn on_voice(
+        self: &Arc<Self>,
+        msg: &Value,
+        note: &Value,
+        chat: i64,
+        quote: Option<String>,
+        now: i64,
+    ) -> Handled {
+        let Some(voice) = self.voice.clone() else {
+            self.reply(chat, VOICE_OFF).await;
+            return Handled::Command;
+        };
+        let size = note.get("file_size").and_then(Value::as_u64);
+        if size.is_some_and(|n| n > MAX_VOICE_BYTES) {
+            self.reply(chat, VOICE_TOO_BIG).await;
+            return Handled::Command;
+        }
+        let Some(slot) = self.push(msg, None, now) else {
+            self.reply_full(chat).await;
+            return Handled::Queued;
+        };
+        let (me, note) = (self.clone(), note.clone());
+        tokio::spawn(async move {
+            let heard = me.transcribe(&*voice, &note).await;
+            me.voice_done(&slot, chat, quote, heard).await;
+        });
+        Handled::Voice
+    }
+
+    /// `getFile`, the download, then the speech-to-text server.
+    async fn transcribe(&self, voice: &dyn Voice, note: &Value) -> Result<String, String> {
+        let file_id = note
+            .get("file_id")
+            .and_then(Value::as_str)
+            .ok_or("Telegram sent no file with it")?;
+        let file = self
+            .api
+            .call("getFile", json!({ "file_id": file_id }))
+            .await
+            .map_err(|e| format!("Telegram did not hand over the audio ({})", e.description))?;
+        if file
+            .get("file_size")
+            .and_then(Value::as_u64)
+            .is_some_and(|n| n > MAX_VOICE_BYTES)
+        {
+            return Err("it is larger than 20 MB".into());
+        }
+        let path = file
+            .get("file_path")
+            .and_then(Value::as_str)
+            .ok_or("Telegram gave no download path for it")?;
+        let audio = voice.download(path).await?;
+        let name = path
+            .rsplit('/')
+            .next()
+            .filter(|n| !n.is_empty())
+            .unwrap_or("voice.ogg");
+        let mime = note
+            .get("mime_type")
+            .and_then(Value::as_str)
+            .unwrap_or("application/octet-stream");
+        let text = voice.transcribe(audio, name, mime).await?;
+        match text.trim() {
+            "" => Err("the speech-to-text server returned no text".into()),
+            t => Ok(t.to_owned()),
+        }
+    }
+
+    /// The transcript fills the voice note's place in the queue; a failure frees it.
+    async fn voice_done(
+        &self,
+        slot: &str,
+        chat: i64,
+        quote: Option<String>,
+        heard: Result<String, String>,
+    ) {
+        let now = now_ms();
+        match heard {
+            Ok(t) => {
+                let text = with_quote(quote.as_deref(), &format!("[Voice note] {t}"));
+                let kept = match self.st().queue.iter_mut().find(|q| q.id == slot) {
+                    Some(q) => {
+                        q.text = Some(text);
+                        true
+                    }
+                    None => false, // dropped meanwhile with /cancel
+                };
+                if kept {
+                    self.deliver(slot, chat, now).await;
+                }
+            }
+            Err(why) => {
+                self.st().queue.retain(|q| q.id != slot);
+                self.reply(
+                    chat,
+                    &format!(
+                        "The voice note could not be transcribed, so nothing was sent to Helm: \
+                         {why}"
+                    ),
+                )
+                .await;
+                // What waited behind it may go now.
+                self.flush(now).await;
+            }
         }
     }
 
@@ -438,6 +705,11 @@ impl Bridge {
     /// what waits down the current line, in order, along with any message that line has not
     /// acknowledged within [`RESEND_AFTER`]. Returns how many were sent.
     pub async fn flush(&self, now: i64) -> usize {
+        self.flush_sent(now).await.len()
+    }
+
+    /// [`Bridge::flush`], returning the ids of the messages sent.
+    async fn flush_sent(&self, now: i64) -> Vec<String> {
         let generation = self.line.generation();
         let resend_ms = RESEND_AFTER.as_millis() as i64;
         let (frames, expired, undelivered) = {
@@ -448,11 +720,15 @@ impl Bridge {
                 }
             }
             // Past the lifetime a message goes, waiting or unacknowledged alike: one Helm keeps
-            // refusing would otherwise be resent for ever.
+            // refusing would otherwise be resent for ever. A voice note still being transcribed
+            // keeps its place for far longer than its HTTP timeouts allow, but not for ever.
             let lifetime = self.lifetime_ms;
             let (mut expired, mut undelivered) = (0, 0);
             st.queue.retain(|q| {
-                let keep = now - q.sent_at_ms <= lifetime;
+                let keep = match q.text {
+                    None => now - q.sent_down_ms <= TRANSCRIBING_MAX_MS,
+                    Some(_) => now - q.sent_at_ms <= lifetime,
+                };
                 match (keep, q.sent_on) {
                     (false, None) => expired += 1,
                     (false, Some(_)) => undelivered += 1,
@@ -465,12 +741,14 @@ impl Bridge {
             if let Some(gen) = generation {
                 let due = |q: &Queued| q.sent_on.is_none() || now - q.sent_down_ms >= resend_ms;
                 for q in st.queue.iter_mut().filter(|q| due(q)) {
+                    // Order is kept: nothing overtakes a voice note still being transcribed.
+                    let Some(text) = &q.text else { break };
                     let age = (now - q.sent_at_ms) / 60_000;
                     frames.push((
                         json!({
                             "type": "telegram",
                             "id": q.id,
-                            "text": q.text,
+                            "text": text,
                             "sentAt": q.sent_at_ms,
                             "ageMinutes": if age >= 1 { json!(age) } else { Value::Null },
                             "bot": bot,
@@ -483,10 +761,10 @@ impl Bridge {
             }
             (frames, expired, undelivered)
         };
-        let mut sent = 0;
+        let mut sent = vec![];
         for (frame, id) in frames {
             if self.line.send(&frame) {
-                sent += 1;
+                sent.push(id);
             } else {
                 // The line dropped mid-flush: this one and the rest wait for the next.
                 let mut st = self.st();
@@ -632,6 +910,140 @@ impl Bridge {
         }
     }
 
+    /// An approval ask: a new (notifying) message with one button per option, one per row. An id
+    /// already on the phone is not sent twice.
+    pub async fn on_ask(&self, id: &str, text: &str, options: &[String]) {
+        let _g = self.ops.lock().await;
+        if self.st().asks.iter().any(|a| a.id == id) {
+            return;
+        }
+        let chat = self.reply_chat();
+        let text = cut(text.trim(), MAX_ASK_TEXT);
+        let options: Vec<String> = options
+            .iter()
+            .take(4)
+            .map(|o| cut(o.trim(), MAX_OPTION))
+            .collect();
+        let rows: Vec<Value> = options
+            .iter()
+            .enumerate()
+            .map(|(i, o)| json!([{ "text": o, "callback_data": format!("a:{id}:{i}") }]))
+            .collect();
+        let r = self
+            .api
+            .call(
+                "sendMessage",
+                json!({ "chat_id": chat, "text": text, "disable_notification": false,
+                        "reply_markup": { "inline_keyboard": rows } }),
+            )
+            .await;
+        match r.map(|v| v.get("message_id").and_then(Value::as_i64)) {
+            Ok(Some(message_id)) => {
+                let mut st = self.st();
+                if st.asks.len() >= MAX_ASKS {
+                    st.asks.pop_front();
+                }
+                st.asks.push_back(Ask {
+                    id: id.to_owned(),
+                    chat,
+                    message_id,
+                    text,
+                    options,
+                });
+            }
+            Ok(None) => eprintln!("telegram: the ask was sent but no message id came back"),
+            Err(e) => eprintln!("telegram: sending an ask failed: {}", e.description),
+        }
+    }
+
+    /// The ask was settled in Helm: its message gains `text` and loses its buttons.
+    pub async fn on_ask_done(&self, id: &str, text: &str) {
+        let _g = self.ops.lock().await;
+        let ask = {
+            let mut st = self.st();
+            let i = st.asks.iter().position(|a| a.id == id);
+            i.and_then(|i| st.asks.remove(i))
+        };
+        if let Some(ask) = ask {
+            let text = format!("{}\n\n{}", ask.text, text.trim());
+            self.edit_closed(&ask, &text).await;
+        }
+    }
+
+    /// Edit an ask's message to `text`. An edit that carries no keyboard removes the buttons.
+    async fn edit_closed(&self, ask: &Ask, text: &str) {
+        let body = json!({ "chat_id": ask.chat, "message_id": ask.message_id,
+                           "text": cut(text, MAX_TEXT) });
+        if let Err(e) = self.api.call("editMessageText", body).await {
+            eprintln!("telegram: closing an ask failed: {}", e.description);
+        }
+    }
+
+    async fn answer_query(&self, query: &str, text: Option<&str>) {
+        let mut body = json!({ "callback_query_id": query });
+        if let Some(t) = text {
+            body["text"] = json!(t);
+        }
+        if let Err(e) = self.api.call("answerCallbackQuery", body).await {
+            eprintln!("telegram: answering a tap failed: {}", e.description);
+        }
+    }
+
+    /// A tap on a button. Only an allowed user in a private chat gets any answer; a known ask
+    /// goes to Helm once, as `telegram_answer`.
+    async fn on_button(&self, q: &Value) -> Handled {
+        let from = q.pointer("/from/id").and_then(Value::as_i64);
+        if !from.is_some_and(|f| self.allowed.contains(&f)) {
+            return Handled::Ignored;
+        }
+        let chat = q.pointer("/message/chat/id").and_then(Value::as_i64);
+        let message_id = q.pointer("/message/message_id").and_then(Value::as_i64);
+        let query = q.get("id").and_then(Value::as_str);
+        let (Some(chat), Some(message_id), Some(query)) = (chat, message_id, query) else {
+            return Handled::Ignored;
+        };
+        if q.pointer("/message/chat/type").and_then(Value::as_str) != Some("private") {
+            return Handled::Ignored;
+        }
+        let _g = self.ops.lock().await;
+        let Some((id, index)) = q.get("data").and_then(Value::as_str).and_then(parse_button) else {
+            self.answer_query(query, None).await;
+            return Handled::Button;
+        };
+        let ask = {
+            let st = self.st();
+            st.asks
+                .iter()
+                .find(|a| a.id == id && a.chat == chat && a.message_id == message_id)
+                .cloned()
+        };
+        let Some(ask) = ask else {
+            self.answer_query(query, Some(TAP_STALE)).await;
+            let body = json!({ "chat_id": chat, "message_id": message_id });
+            if let Err(e) = self.api.call("editMessageReplyMarkup", body).await {
+                eprintln!("telegram: removing stale buttons failed: {}", e.description);
+            }
+            return Handled::Button;
+        };
+        let Some(label) = ask.options.get(index) else {
+            self.answer_query(query, None).await;
+            return Handled::Button;
+        };
+        if !self
+            .line
+            .send(&json!({ "type": "telegram_answer", "id": id, "index": index }))
+        {
+            // Nothing reached Helm, so the buttons stay for another try.
+            self.answer_query(query, Some(TAP_OFFLINE)).await;
+            return Handled::Button;
+        }
+        self.st().asks.retain(|a| a.id != id);
+        self.answer_query(query, Some(TAP_SENT)).await;
+        self.edit_closed(&ask, &format!("{}\n\n→ {label}", ask.text))
+            .await;
+        Handled::Button
+    }
+
     /// Handle one frame Helm sent up the line.
     pub async fn on_upstream(&self, u: Upstream) {
         match u {
@@ -639,6 +1051,8 @@ impl Bridge {
             Upstream::TelegramStatus(t) => self.on_status(&t),
             Upstream::TelegramFinal(t) => self.on_final(&t).await,
             Upstream::TelegramNotify(t) => self.on_notify(&t).await,
+            Upstream::TelegramAsk { id, text, options } => self.on_ask(&id, &text, &options).await,
+            Upstream::TelegramAskDone { id, text } => self.on_ask_done(&id, &text).await,
         }
     }
 
@@ -677,7 +1091,8 @@ impl Bridge {
                 .api
                 .call(
                     "getUpdates",
-                    json!({ "offset": offset, "timeout": POLL_SECONDS, "allowed_updates": ["message"] }),
+                    json!({ "offset": offset, "timeout": POLL_SECONDS,
+                            "allowed_updates": ["message", "callback_query"] }),
                 )
                 .await;
             match r {
@@ -699,6 +1114,11 @@ impl Bridge {
             }
         }
     }
+}
+
+/// Errors are reported without the URL, which carries the bot token.
+fn scrub(text: String, token: &str) -> String {
+    text.replace(token, "<token>")
 }
 
 /// The Bot API over HTTPS (or plain http for a local fake).
@@ -729,15 +1149,13 @@ impl HttpApi {
         token: &str,
         body: &Value,
     ) -> Result<Value, ApiError> {
-        // Errors are reported without the URL, which carries the bot token.
-        let scrub = |s: String| s.replace(token, "<token>");
         let mut resp = agent.post(url).send_json(body).map_err(|e| ApiError {
             code: None,
-            description: scrub(format!("request failed: {e}")),
+            description: scrub(format!("request failed: {e}"), token),
         })?;
         let v: Value = resp.body_mut().read_json().map_err(|e| ApiError {
             code: None,
-            description: scrub(format!("unreadable reply: {e}")),
+            description: scrub(format!("unreadable reply: {e}"), token),
         })?;
         if v.get("ok") == Some(&Value::Bool(true)) {
             Ok(v.get("result").cloned().unwrap_or(Value::Null))
@@ -749,6 +1167,7 @@ impl HttpApi {
                         .and_then(Value::as_str)
                         .unwrap_or("the Bot API refused the call")
                         .to_owned(),
+                    token,
                 ),
             })
         }
@@ -770,5 +1189,150 @@ impl TelegramApi for HttpApi {
                     })
                 })
         })
+    }
+}
+
+/// Voice notes over HTTP: the file from the Bot API's file host, the transcript from an
+/// OpenAI-compatible speech-to-text server (a multipart form with `file`, `model`, `language`
+/// and `response_format=text`; no auth).
+pub struct HttpVoice {
+    base: String,
+    token: String,
+    stt: SttConfig,
+    agent: ureq::Agent,
+}
+
+impl HttpVoice {
+    pub fn new(api_base: &str, token: &str, stt: &SttConfig) -> Self {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(STT_CONNECT))
+            .timeout_global(Some(STT_TIMEOUT))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        HttpVoice {
+            base: api_base.trim_end_matches('/').to_owned(),
+            token: token.to_owned(),
+            stt: stt.clone(),
+            agent,
+        }
+    }
+}
+
+/// Run a blocking HTTP exchange on the blocking pool.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| Err(format!("the call did not finish: {e}")))
+}
+
+/// A `multipart/form-data` body: the file part, then the plain fields.
+fn multipart(boundary: &str, file: (&str, &str, &[u8]), fields: &[(&str, &str)]) -> Vec<u8> {
+    let (name, mime, bytes) = file;
+    let name = name.replace(['"', '\\', '\r', '\n'], "_");
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\n\
+         Content-Type: {mime}\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(bytes);
+    for (k, v) in fields {
+        body.extend_from_slice(
+            format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}")
+                .as_bytes(),
+        );
+    }
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+/// The speech-to-text server's answer as a transcript, or why it is not one.
+fn stt_reply(status: u16, body: &str) -> Result<String, String> {
+    let body = body.trim();
+    let server = "the speech-to-text server";
+    if status != 200 {
+        return Err(match body {
+            "" => format!("{server} answered HTTP {status}"),
+            b => format!("{server} answered HTTP {status}: {}", cut(b, 300)),
+        });
+    }
+    if body.starts_with('{') {
+        if body.contains("\"error\"") {
+            return Err(format!("{server} reported an error: {}", cut(body, 300)));
+        }
+        // A server that ignored `response_format=text` answers JSON with the text in it.
+        if let Some(t) = serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|v| v.get("text")?.as_str().map(str::to_owned))
+        {
+            return Ok(t.trim().to_owned());
+        }
+    }
+    match body {
+        "" => Err(format!("{server} returned no text")),
+        b => Ok(b.to_owned()),
+    }
+}
+
+impl Voice for HttpVoice {
+    fn download<'a>(&'a self, file_path: &'a str) -> VoiceFuture<'a, Vec<u8>> {
+        let url = format!("{}/file/bot{}/{}", self.base, self.token, file_path);
+        let (agent, token) = (self.agent.clone(), self.token.clone());
+        Box::pin(blocking(move || {
+            let failed = |e: ureq::Error| match e {
+                ureq::Error::BodyExceedsLimit(_) => "it is larger than 20 MB".to_owned(),
+                e => scrub(format!("the download from Telegram failed: {e}"), &token),
+            };
+            let mut resp = agent.get(&url).call().map_err(failed)?;
+            let status = resp.status().as_u16();
+            if status != 200 {
+                return Err(format!("the download from Telegram failed (HTTP {status})"));
+            }
+            resp.body_mut()
+                .with_config()
+                .limit(MAX_VOICE_BYTES)
+                .read_to_vec()
+                .map_err(failed)
+        }))
+    }
+
+    fn transcribe<'a>(
+        &'a self,
+        audio: Vec<u8>,
+        name: &'a str,
+        mime: &'a str,
+    ) -> VoiceFuture<'a, String> {
+        let boundary = format!("helm-hub-{}", uuid::Uuid::new_v4().simple());
+        let body = multipart(
+            &boundary,
+            (name, mime, audio.as_slice()),
+            &[
+                ("model", self.stt.model.as_str()),
+                ("language", self.stt.language.as_str()),
+                ("response_format", "text"),
+            ],
+        );
+        let (agent, url) = (self.agent.clone(), self.stt.url.clone());
+        Box::pin(blocking(move || {
+            let mut resp = agent
+                .post(&url)
+                .header(
+                    "Content-Type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .send(&body[..])
+                .map_err(|e| format!("the speech-to-text server could not be reached: {e}"))?;
+            let status = resp.status().as_u16();
+            let text = resp
+                .body_mut()
+                .with_config()
+                .limit(1024 * 1024)
+                .lossy_utf8(true)
+                .read_to_string()
+                .map_err(|e| format!("the speech-to-text server's answer was unreadable: {e}"))?;
+            stt_reply(status, &text)
+        }))
     }
 }

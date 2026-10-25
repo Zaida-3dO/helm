@@ -11,13 +11,16 @@
 //! |---|---|---|
 //! | hub → Helm | `welcome` | `version` |
 //! | hub → Helm | `call` | `id`, `client`, `tool`, `args` |
-//! | hub → Helm | `telegram` | `id`, `text`, `sentAt` (ms), `ageMinutes` (null when fresh) |
+//! | hub → Helm | `telegram` | `id`, `text`, `sentAt` (ms), `ageMinutes` (null when fresh), `bot`. A voice note's `text` is `[Voice note] <transcript>`; a reply or quote puts `Replying to: "<quoted text>"` on the first line |
 //! | hub → Helm | `telegram_stop` | — |
+//! | hub → Helm | `telegram_answer` | `id`, `index`: the user tapped button `index` (from 0) of the ask `id`. Sent once per ask |
 //! | Helm → hub | `result` | `id`, `ok`, `result` or `error`, `changed` (`no` or `maybe`) |
 //! | Helm → hub | `telegram_ack` | `id` |
 //! | Helm → hub | `telegram_status` | `text`: the one live status message, edited in place |
 //! | Helm → hub | `telegram_final` | `text`: the turn's answer, sent as a new message |
 //! | Helm → hub | `telegram_notify` | `text`: a message Helm starts (an alert), sent as a new message; the live status is left alone |
+//! | Helm → hub | `telegram_ask` | `id` (16-32 lowercase hex), `text`, `options` (1-4 strings): a new message with one button per option |
+//! | Helm → hub | `telegram_ask_done` | `id`, `text`: the ask was settled in Helm; its message gains `text` and loses its buttons |
 //!
 //! A newer line replaces an older one (the PC reconnected before the old
 //! socket timed out). When the line drops, calls waiting on it are answered
@@ -49,6 +52,20 @@ pub enum Upstream {
     TelegramStatus(String),
     TelegramFinal(String),
     TelegramNotify(String),
+    TelegramAsk {
+        id: String,
+        text: String,
+        options: Vec<String>,
+    },
+    TelegramAskDone {
+        id: String,
+        text: String,
+    },
+}
+
+/// An ask's id: 16 to 32 lowercase hex characters, so it fits a button's callback data.
+pub fn valid_ask_id(id: &str) -> bool {
+    (16..=32).contains(&id.len()) && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// The outcome of a forwarded call, as the MCP caller sees it.
@@ -270,6 +287,33 @@ impl Line {
                 Some(t) => self.upstream.send(Upstream::TelegramNotify(t)).is_ok(),
                 None => false,
             },
+            Some("telegram_ask") => {
+                // Telegram refuses an empty message or button, so such an ask is malformed.
+                let options: Option<Vec<String>> = v
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .and_then(|a| a.iter().map(|o| o.as_str().map(str::to_owned)).collect());
+                match (s("id"), s("text"), options) {
+                    (Some(id), Some(text), Some(options))
+                        if valid_ask_id(&id)
+                            && !text.trim().is_empty()
+                            && (1..=4).contains(&options.len())
+                            && options.iter().all(|o| !o.trim().is_empty()) =>
+                    {
+                        self.upstream
+                            .send(Upstream::TelegramAsk { id, text, options })
+                            .is_ok()
+                    }
+                    _ => false,
+                }
+            }
+            Some("telegram_ask_done") => match (s("id"), s("text")) {
+                (Some(id), Some(text)) => self
+                    .upstream
+                    .send(Upstream::TelegramAskDone { id, text })
+                    .is_ok(),
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -378,6 +422,33 @@ mod tests {
         assert!(line.receive(gen, r#"{"type":"telegram_final","text":"Done"}"#));
         assert!(line.receive(gen, r#"{"type":"telegram_ack","id":"m1"}"#));
         assert!(line.receive(gen, r#"{"type":"telegram_notify","text":"Build finished"}"#));
+        let id = "0123456789abcdef";
+        let ask = |id: &str, options: Value| {
+            json!({"type": "telegram_ask", "id": id, "text": "Run it?", "options": options})
+                .to_string()
+        };
+        assert!(line.receive(gen, &ask(id, json!(["Allow", "Deny"]))));
+        assert!(line.receive(
+            gen,
+            &json!({"type": "telegram_ask_done", "id": id, "text": "Allowed in Helm"}).to_string()
+        ));
+        // A bad id, no options, too many, an empty or a non-string option: dropped.
+        let long = "a".repeat(33);
+        for (id, options) in [
+            ("0123456789ABCDEF", json!(["Allow"])),
+            ("0123456789abcde", json!(["Allow"])),
+            (long.as_str(), json!(["Allow"])),
+            (id, json!([])),
+            (id, json!(["1", "2", "3", "4", "5"])),
+            (id, json!(["Allow", " "])),
+            (id, json!(["Allow", 2])),
+            (id, json!("Allow")),
+        ] {
+            assert!(
+                !line.receive(gen, &ask(id, options.clone())),
+                "{id} {options}"
+            );
+        }
         assert!(!line.receive(gen, "not json"));
         assert!(!line.receive(gen, r#"{"type":"call","id":"x"}"#));
         assert_eq!(
@@ -393,6 +464,22 @@ mod tests {
             up.try_recv().unwrap(),
             Upstream::TelegramNotify("Build finished".into())
         );
+        assert_eq!(
+            up.try_recv().unwrap(),
+            Upstream::TelegramAsk {
+                id: id.into(),
+                text: "Run it?".into(),
+                options: vec!["Allow".into(), "Deny".into()]
+            }
+        );
+        assert_eq!(
+            up.try_recv().unwrap(),
+            Upstream::TelegramAskDone {
+                id: id.into(),
+                text: "Allowed in Helm".into()
+            }
+        );
+        assert!(up.try_recv().is_err(), "nothing malformed went upstream");
     }
 
     #[tokio::test]

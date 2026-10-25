@@ -67,6 +67,9 @@ approval.
 | `HUB_TELEGRAM_QUEUE_MINUTES` | How long a message waits while Helm is offline (default 120) |
 | `HUB_TELEGRAM_QUEUE_MAX` | How many messages wait (default 50) |
 | `HUB_TELEGRAM_RECEIVE` | `poll` (default) or `off`, below. Anything else: the hub refuses to start |
+| `HUB_TELEGRAM_STT_URL` | An OpenAI-compatible speech-to-text endpoint for voice notes, e.g. `http://<host>:<port>/v1/audio/transcriptions`. Unset: voice notes are off. Not an `http://` or `https://` URL: the hub refuses to start |
+| `HUB_TELEGRAM_STT_MODEL` | The model the server is asked for (default `large-v3-turbo`) |
+| `HUB_TELEGRAM_STT_LANGUAGE` | The language of the voice notes (default `en`) |
 
 - A sender not on the allow-list gets nothing: no forward and no reply.
 - While Helm is offline a message is queued in order and the sender is told at once. On reconnect
@@ -83,6 +86,29 @@ approval.
 - Helm can also speak first (`telegram_notify`: a chat telling the user its work is finished, or
   an alert while the user is away). That arrives as a new message too, and leaves a live status
   message where it is.
+- **Voice notes.** With `HUB_TELEGRAM_STT_URL` set, a voice note (or an audio file) is fetched
+  with `getFile` and sent to the speech-to-text server as a multipart form (`file` as uploaded,
+  Telegram's OGG/Opus is fine; `model`; `language`; `response_format=text`; no auth). Its plain
+  text answer goes to Helm as `[Voice note] <transcript>`, by the same queueing, offline and
+  duplicate rules as text. A file above 20 MB (the Bot API's download limit) is refused. A server
+  that cannot be reached (5 s to connect, about 100 s in all), answers anything but 200, returns
+  no text or returns a JSON error is a failure: the user is told why and nothing reaches Helm.
+  The transcription runs beside the poll loop, and the note keeps its place in the queue, so a
+  message sent after it waits for it. With voice notes off, the bot answers "Voice notes are off
+  on this hub."
+- **Quoted replies.** A message that replies to another, or quotes part of one, reaches Helm with
+  `Replying to: "<quoted text>"` on its own first line: the quoted part if there is one, else the
+  replied-to message's text or caption, on one line and cut to 300 characters. Voice notes too.
+- **Approval buttons.** Helm sends `telegram_ask {id, text, options}` and the bot posts a new
+  message with one inline button per option (at most 4, each cut to 40 characters). A tap from an
+  allowed user in a private chat goes to Helm once, as `telegram_answer {id, index}`, and the
+  message then shows the choice and loses its buttons. With the line down the tap answers "Helm
+  is offline; nothing was sent." and the buttons stay. A tap on an ask that no longer waits (used,
+  settled, or among more than the 50 newest) answers "This request is no longer waiting." and the
+  buttons go. `telegram_ask_done {id, text}` (settled in Helm) adds `text` to the message and
+  removes the buttons. A tap is the only way to answer an ask: a text reply never is. The hub
+  checks only the Telegram side (who tapped, where, and that the ask still waits); Helm checks the
+  rest. The asks are in memory too.
 
 ### Receiving updates: polling or a shared bot
 
@@ -101,10 +127,14 @@ Content-Type: application/json
 ```
 
 The answer is `200 {"ok":true,"handled":[...]}`, one entry per update: `forwarded`, `queued`,
-`command`, `ignored` (not a private message from an allowed user) or `duplicate`. No token or an
+`command`, `voice` (a voice note now being transcribed; it is forwarded or queued once it has its
+text), `button` (a tap on one of Helm's buttons), `ignored` (not a private message or tap from an
+allowed user) or `duplicate`. No token or an
 unknown one: 401; any other scope: 403; the bot off on this hub: 503; a body that is not an
 Update or an array of them: 400. The endpoint exists in both modes.
 
+- The hub reads two kinds of update: `message` and `callback_query` (a button tap). Polling asks
+  for just those, and a forwarder should post both.
 - Posted and polled updates take the same path: the allow-list, private chats only, and the
   commands. Each `update_id` is handled once (the last 256 are remembered), so a forwarder's
   retry, or an update that arrives both ways, is dropped as `duplicate`.

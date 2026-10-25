@@ -4,7 +4,9 @@
 # which is never committed. Without a bot token the Telegram bot stays off.
 # On a bot another service already runs, set HUB_TELEGRAM_RECEIVE=off and give
 # that service's forwarder a telegram-scope token in HUB_TOKENS
-# (forwarder:<token>:telegram); it posts updates to /telegram/update.
+# (forwarder:<token>:telegram); it posts updates (messages and button taps) to
+# /telegram/update. Voice notes need a speech-to-text server: uncomment the
+# HUB_TELEGRAM_STT_* lines and fill in its address.
 services:
   helm-hub:
     build: ./helm-hub
@@ -16,6 +18,9 @@ services:
     environment:
       - TZ=Europe/London
       - HUB_TELEGRAM_RECEIVE=poll # or off: another service runs the bot and posts its updates
+      # - HUB_TELEGRAM_STT_URL=http://<stt-host>:<stt-port>/v1/audio/transcriptions # unset: voice notes off
+      # - HUB_TELEGRAM_STT_MODEL=large-v3-turbo
+      # - HUB_TELEGRAM_STT_LANGUAGE=en
     volumes:
       - ./helm-hub/data:/data # hub.db (SQLite, WAL)
       - /path/to/memory-folder:/mnt/memory:ro # source for `helm-hub import`
