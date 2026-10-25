@@ -147,10 +147,6 @@ export class SidebarActions {
     return this.run(() => this.d.api('chat_fork', { chatId: row.chatId, forkId }));
   }
 
-  rename(row: SidebarRow, title: string): Promise<unknown> {
-    return this.run(() => this.d.api('chat_rename', { chatId: row.chatId, title }));
-  }
-
   /** Rename for a dialog: waits for the host and answers with the reason it failed, or null. */
   renameChat(row: SidebarRow, title: string): Promise<string | null> {
     return this.attempt(() => this.d.api('chat_rename', { chatId: row.chatId, title }));

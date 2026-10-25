@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { handleLink } from '../panel/index.ts';
 import { useDialog, useShell } from '../shell/context.ts';
-import { Checkbox, Dialog, TextInput, useBinding, useLayer } from '../ui/index.ts';
+import { Checkbox, Dialog, Picker, TextInput, useBinding, useLayer, type PickerOption } from '../ui/index.ts';
 import { flatRows, moveHighlight, movePage, statusLine, UniversalSearch } from './controller.ts';
 import { chatsSource, filesSource } from './defaultSources.ts';
 import { GROUP_LABEL, groupOrder, type SourceId } from './sources.ts';
@@ -93,6 +93,10 @@ function SearchBody({ close }: { close: () => void }) {
     setIndex(0);
   }, [search, text, projectId, archived]);
 
+  const projectOptions = useMemo<PickerOption<string>[]>(
+    () => [{ value: '', title: 'All projects' }, ...projects.map((p) => ({ value: p.id, title: p.name }))],
+    [projects],
+  );
   const rows = flatRows(state);
   const current = rows[index];
   useEffect(() => {
@@ -138,14 +142,17 @@ function SearchBody({ close }: { close: () => void }) {
         />
         <div className="search-filters">
           {projects.length > 0 && (
-            <select aria-label="Project" value={projectId ?? ''} onChange={(e) => setProjectId(e.target.value || null)}>
-              <option value="">All projects</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
+            <Picker
+              className="search-project"
+              label="Project"
+              heading="Search in"
+              searchable={projects.length > 8}
+              searchPlaceholder="Find a project…"
+              value={projectId ?? ''}
+              options={projectOptions}
+              onChange={(v) => setProjectId(v || null)}
+              testId="search-project"
+            />
           )}
           <Checkbox className="search-archived" checked={archived} onChange={setArchived} label="Archived chats" />
           <span className="search-status muted" role="status" aria-live="polite" data-testid="search-status" data-state={state.status}>

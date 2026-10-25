@@ -970,6 +970,7 @@ export function PromptDialog({ prompt, onClose }: { prompt: Prompt; onClose: () 
   const [value, setValue] = useState(prompt.value);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const field = useRef<HTMLInputElement>(null);
   const canSave = value !== prompt.value && !busy;
   const save = async () => {
     if (!canSave) return;
@@ -982,8 +983,11 @@ export function PromptDialog({ prompt, onClose }: { prompt: Prompt; onClose: () 
       failed = String((e as Error)?.message ?? e);
     }
     setBusy(false);
-    if (failed) setError(failed);
-    else onClose();
+    if (failed) {
+      setError(failed);
+      // The field was read-only while saving; hand focus back to it once it is editable again.
+      setTimeout(() => field.current?.focus(), 0);
+    } else onClose();
   };
   return (
     <Dialog
@@ -1006,6 +1010,7 @@ export function PromptDialog({ prompt, onClose }: { prompt: Prompt; onClose: () 
       <label className="sb-prompt">
         <span>{prompt.label}</span>
         <TextInput
+          ref={field}
           autoFocus
           value={value}
           maxLength={120}
