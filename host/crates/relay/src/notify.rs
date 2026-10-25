@@ -11,18 +11,23 @@
 //!   the Telegram chat is left to its own mirror. Settings → Hub turns them off.
 //!
 //! Both go up as `telegram_notify`, which the hub sends as a new message without touching a live
-//! status message.
+//! status message, and both are written into the Telegram chat: a line in its transcript, and a
+//! note its agent gets with the user's next message, so a reply to an alert makes sense there.
+//!
+//! The same watcher sends approval asks when approving from Telegram is on ([`crate::approve`]).
 
+use crate::approve;
 use crate::client::{LineHandle, LineState};
+use crate::sink::ChatSink;
 use crate::telegram;
-use helm_chats::types::{AttentionRow, AttentionSummary};
+use helm_chats::types::{AttentionKind, AttentionRow, AttentionSummary, ContextKind};
 use helm_chats::ChatRuntime;
 use helm_core::db::Database;
 use helm_hosttools::{HostToolRegistry, ToolCtx, ToolError, ToolResult, ToolSpec};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,8 +35,8 @@ use std::time::Duration;
 pub const MAX_PER_HOUR: usize = 20;
 /// The longest text a chat may send.
 pub const MAX_TEXT: usize = 2000;
-/// How often the away watcher looks at the attention summary.
-const TICK: Duration = Duration::from_secs(20);
+/// How often the watcher looks at the attention summary (away alerts and approval asks).
+const TICK: Duration = Duration::from_secs(5);
 const HOUR_MS: i64 = 60 * 60 * 1000;
 
 /// A chat's message as the phone shows it: the chat's title, then the text.
@@ -156,6 +161,28 @@ fn title_of(db: &Database, chat: &str) -> Option<String> {
     .flatten()
 }
 
+/// Write what was sent to the user on Telegram into the Telegram chat: a line in its transcript,
+/// and a note for its agent with the next message. Not for the Telegram chat's own sends.
+fn record_sent(rt: Option<&ChatRuntime>, dir: &Path, from: &str, text: &str, caller: Option<&str>) {
+    let Some(tag) = telegram::load_tag(&telegram::tag_path(dir)) else {
+        return;
+    };
+    if Some(tag.chat_id.as_str()) == caller {
+        return;
+    }
+    if let Some(rt) = rt {
+        let line: String = text.chars().take(600).collect();
+        rt.add_context_row(
+            &tag.chat_id,
+            ContextKind::Telegram,
+            &format!("Sent to you on Telegram by {from}: {line}"),
+        );
+    }
+    if telegram::remember_sent(&telegram::sent_path(dir), from, text).is_err() {
+        log::warn!("relay: the note of an alert sent could not be saved");
+    }
+}
+
 fn profile_dir(ctx: &ToolCtx) -> Option<PathBuf> {
     ctx.services
         .get::<helm_core::profile::Profile>()
@@ -203,6 +230,15 @@ fn send(ctx: &ToolCtx, a: Value) -> ToolResult {
             "Helm's line to the hub dropped, so nothing was sent.",
         ));
     }
+    if let Some(dir) = profile_dir(ctx) {
+        let rt = ctx.services.get::<ChatRuntime>();
+        let from = if title.trim().is_empty() {
+            "a Helm chat"
+        } else {
+            title.trim()
+        };
+        record_sent(rt.as_deref(), &dir, from, text, Some(&ctx.caller_chat_id));
+    }
     Ok(json!({ "sent": true }))
 }
 
@@ -232,44 +268,115 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     );
 }
 
-/// Watch for away alerts on the app's runtime, until the app exits.
+/// What one look found: the away rows (`None`: not away, or alerts off), the requests an ask
+/// could answer (`None`: approving from Telegram is off) and the Telegram chat.
+struct Look {
+    rows: Option<Option<Vec<AttentionRow>>>,
+    waiting: Option<Vec<approve::Waiting>>,
+    tg_chat: Option<String>,
+}
+
+fn look(rt: &ChatRuntime, afk: &helm_afk::AfkService, dir: &Path) -> Look {
+    let policy = telegram::load_file(&telegram::policy_path(dir));
+    let away = afk.open_source().is_some();
+    let tg_chat = telegram::load_tag(&telegram::tag_path(dir)).map(|t| t.chat_id);
+    let summary = (away || policy.approvals)
+        .then(|| rt.attention().ok())
+        .flatten();
+    // A failed read is no look at all, not "nothing waits".
+    let rows = (away && policy.away_alerts).then(|| summary.as_ref().map(alertable));
+    let waiting = policy.approvals.then(|| {
+        let mut out = vec![];
+        for r in summary.iter().flat_map(|a| &a.needs_you) {
+            let here = away || tg_chat.as_deref() == Some(r.chat_id.as_str());
+            if !here || !matches!(r.kind, AttentionKind::Approval | AttentionKind::Plan) {
+                continue;
+            }
+            for i in rt
+                .live_thread(&r.chat_id)
+                .map(|t| t.interactions)
+                .unwrap_or_default()
+            {
+                out.push(approve::Waiting {
+                    chat_id: r.chat_id.clone(),
+                    chat_title: r.title.clone(),
+                    interaction: i,
+                });
+            }
+        }
+        out
+    });
+    Look {
+        rows,
+        waiting,
+        tg_chat,
+    }
+}
+
+/// Watch for away alerts and approval asks on the app's runtime, until the app exits.
 pub fn watch_away(
     handle: &tokio::runtime::Handle,
     rt: ChatRuntime,
     afk: Arc<helm_afk::AfkService>,
     line: Arc<LineHandle>,
+    sink: Arc<ChatSink>,
     profile_dir: PathBuf,
 ) {
     handle.spawn(async move {
         let mut away = Away::default();
+        let mut was_online = false;
         let mut every = tokio::time::interval(TICK);
         loop {
             every.tick().await;
-            let (rt, afk, dir) = (rt.clone(), afk.clone(), profile_dir.clone());
-            let Ok(look) = tokio::task::spawn_blocking(move || {
-                let on = afk.open_source().is_some()
-                    && telegram::load_away_alerts(&telegram::policy_path(&dir));
-                // A failed read is no look at all, not "nothing waits".
-                let rows = on.then(|| rt.attention().ok().map(|a| alertable(&a)));
-                let skip = telegram::load_tag(&telegram::tag_path(&dir)).map(|t| t.chat_id);
-                (rows, skip)
-            })
-            .await
+            let (rt2, afk, dir) = (rt.clone(), afk.clone(), profile_dir.clone());
+            let Ok(found) = tokio::task::spawn_blocking(move || look(&rt2, &afk, &dir)).await
             else {
                 continue;
             };
-            let (rows, skip) = look;
-            let Some(rows) = rows else {
+            let online = line.state() == LineState::Online;
+            // A line that went away may have taken the hub's buttons with it: ask afresh.
+            if online && !was_online {
+                sink.asks.clear();
+            }
+            was_online = online;
+            match &found.waiting {
+                None => {
+                    for id in sink.asks.clear() {
+                        line.telegram_ask_done(
+                            &id,
+                            "Approving from Telegram was turned off in Helm.",
+                        );
+                    }
+                }
+                Some(waiting) if online => {
+                    let step = sink.asks.step(waiting, approve::new_id);
+                    for (id, text, options) in step.ask {
+                        if !line.telegram_ask(&id, &text, &options) {
+                            sink.asks.unsent(&id);
+                        }
+                    }
+                    for (id, note) in step.done {
+                        line.telegram_ask_done(&id, &note);
+                    }
+                }
+                Some(_) => {}
+            }
+            let Some(rows) = found.rows else {
                 away.reset();
                 continue;
             };
             // With the line down, wait for it: what arrives meanwhile is alerted once it is back.
-            let (Some(rows), true) = (rows, line.state() == LineState::Online) else {
+            let (Some(rows), true) = (rows, online) else {
                 continue;
             };
-            if let Some(alert) = away.step(&rows, skip.as_deref()) {
+            if let Some(alert) = away.step(&rows, found.tg_chat.as_deref()) {
                 // Alerts share the chats' hourly cap; one not sent is tried again next look.
                 if BUDGET.take(helm_core::now_ms()) && line.telegram_notify(&alert.text) {
+                    let (rt2, dir, text) = (rt.clone(), profile_dir.clone(), alert.text.clone());
+                    let _ = tokio::task::spawn_blocking(move || {
+                        record_sent(Some(&rt2), &dir, "Helm, while you were away", &text, None)
+                    })
+                    .await;
                     away.sent(alert.keys);
                 }
             }

@@ -498,6 +498,9 @@ pub enum ContextKind {
     Edit,
     /// A change to the chat's Orchestrator state ("You turned Orchestrator on...").
     Orchestrator,
+    /// Something that happened on Telegram outside this chat's turns: an alert another chat
+    /// sent the user, or an approval answered from the phone.
+    Telegram,
 }
 
 /// The `details` bag of a message row. Every field is optional and absent when unset.

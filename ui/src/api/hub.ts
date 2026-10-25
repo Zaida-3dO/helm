@@ -36,6 +36,8 @@ export interface TelegramSettings {
   maxTokens: number;
   /** While the user is away, a chat that newly needs them sends one line on Telegram. */
   awayAlerts: boolean;
+  /** Permission prompts and plan approvals can be answered with Telegram buttons. */
+  approvals: boolean;
 }
 
 export function hubOps(api: Api) {
@@ -43,8 +45,13 @@ export function hubOps(api: Api) {
     connection: () => api<HubConnection>('relay_connection_get', {}),
     saveConnection: (a: HubConnectionSave) => api<HubConnection>('relay_connection_save', a),
     telegram: () => api<TelegramSettings>('relay_telegram_get', {}),
-    saveTelegram: (s: Pick<TelegramSettings, 'maxAgeHours' | 'maxTokens' | 'awayAlerts'>) =>
-      api<TelegramSettings>('relay_telegram_save', { maxAgeHours: s.maxAgeHours, maxTokens: s.maxTokens, awayAlerts: s.awayAlerts }),
+    saveTelegram: (s: Pick<TelegramSettings, 'maxAgeHours' | 'maxTokens' | 'awayAlerts' | 'approvals'>) =>
+      api<TelegramSettings>('relay_telegram_save', {
+        maxAgeHours: s.maxAgeHours,
+        maxTokens: s.maxTokens,
+        awayAlerts: s.awayAlerts,
+        approvals: s.approvals,
+      }),
     resetTelegram: () => api<TelegramSettings>('relay_telegram_reset', {}),
   };
 }

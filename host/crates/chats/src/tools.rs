@@ -358,6 +358,30 @@ fn message_arg(a: &Value) -> Result<String, ToolError> {
     Ok(m.to_owned())
 }
 
+/// Whether the calling chat is acting on a message the user sent from Telegram: its current turn
+/// is running and the last message its agent received has origin `telegram`. Only Helm's
+/// Telegram bridge stores that origin, so no other chat can claim it.
+fn serving_telegram(ctx: &ToolCtx) -> bool {
+    db(ctx).is_ok_and(|db| serving_telegram_in(&db, &ctx.caller_chat_id))
+}
+
+fn serving_telegram_in(db: &Database, chat: &str) -> bool {
+    db.snapshot(|tx| {
+        tx.query_row(
+            "SELECT c.status IN ('starting', 'running')
+                    AND COALESCE((SELECT m.origin FROM submissions s
+                         LEFT JOIN submission_meta m ON m.submission_id = s.id
+                         WHERE s.chat_id = c.id
+                           AND s.state IN ('dispatching', 'accepted', 'delivered', 'complete')
+                         ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1), '') = 'telegram'
+             FROM chats c WHERE c.id = ?1",
+            [chat],
+            |r| r.get::<_, bool>(0),
+        )
+    })
+    .unwrap_or(false)
+}
+
 fn send_framed(
     ctx: &ToolCtx,
     to: &str,
@@ -379,7 +403,9 @@ fn send_framed(
             text: &text,
             mode,
             origin: SubmissionOrigin::OtherChat,
-            gated: true,
+            // Passing on what the user asked for from Telegram is the user's own request, so it
+            // does not wait for a run slot; any other relayed send does.
+            gated: !serving_telegram(ctx),
         },
     )
     .map_err(|e| ToolError::refused(e.message))
@@ -958,6 +984,36 @@ mod tests {
             "SELECT m.origin FROM submissions s JOIN submission_meta m ON m.submission_id = s.id WHERE s.chat_id = '{b}'"
         ));
         assert_eq!(origins, ["other_chat"]);
+        // A chat passing on what the user asked from Telegram is not gated; only a running turn
+        // whose last delivered message came from Telegram counts. (status, origin, state, want)
+        let c = h.create().await;
+        for (i, (status, origin, state, want)) in [
+            ("running", "telegram", "delivered", true),
+            ("running", "telegram", "queued", false),
+            ("running", "typed", "delivered", false),
+            ("running", "other_chat", "delivered", false),
+            ("idle", "telegram", "complete", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            h.db.write(|tx| {
+                tx.execute("DELETE FROM submissions WHERE chat_id = ?1", [&c])?;
+                tx.execute("UPDATE chats SET status = ?2 WHERE id = ?1", [&c, status])?;
+                tx.execute(
+                    "INSERT INTO submissions(id, chat_id, text, state, created_at)
+                     VALUES ('s-tg', ?1, 'hi', ?2, 1)",
+                    [&c, state],
+                )?;
+                tx.execute(
+                    "INSERT INTO submission_meta(submission_id, origin) VALUES ('s-tg', ?1)",
+                    [origin],
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+            assert_eq!(serving_telegram_in(&h.db, &c), want, "case {i}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

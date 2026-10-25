@@ -206,6 +206,7 @@ fn env() -> Env {
         policy: TagPolicy::default(),
         answered: Arc::new(Mutex::new(VecDeque::new())),
         answered_path: telegram::answered_path(&dir.path().join("prof")),
+        sent_path: telegram::sent_path(&dir.path().join("prof")),
     };
     Env { dir, db, ops, ctx }
 }

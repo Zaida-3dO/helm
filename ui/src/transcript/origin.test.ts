@@ -16,6 +16,7 @@ function row(text: string, origin?: MessageRow['details']['origin']): MessageRow
 test('a Telegram message shows without the note for the agent; other messages are left alone', () => {
   const cases: [MessageRow, boolean, string][] = [
     [row(`${NOTE}\nhello`, 'telegram'), true, 'hello'],
+    [row(`${NOTE}\n[Sent to the user on Telegram by other chats since their last message: Docs: "done"]\nok`, 'telegram'), true, 'ok'],
     [row(`${NOTE}\n(sent 3 min ago, queued while Helm was offline)\nhi`, 'telegram'), true, '(sent 3 min ago, queued while Helm was offline)\nhi'],
     [row('[Sent from Telegram: x]\nnot from telegram'), false, '[Sent from Telegram: x]\nnot from telegram'],
     [row(`${NOTE}\nscheduled`, 'schedule'), false, `${NOTE}\nscheduled`],

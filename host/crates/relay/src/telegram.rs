@@ -57,6 +57,10 @@ pub struct PolicyFile {
     /// Telegram alerts while the user is away. On unless turned off.
     #[serde(default = "on")]
     pub away_alerts: bool,
+    /// Approval prompts can be answered with Telegram buttons ([`crate::approve`]). Off unless
+    /// the user turns it on in Settings.
+    #[serde(default)]
+    pub approvals: bool,
 }
 
 fn on() -> bool {
@@ -70,6 +74,7 @@ impl Default for PolicyFile {
             max_age_hours: p.max_age_ms / HOUR_MS,
             max_tokens: p.max_tokens,
             away_alerts: true,
+            approvals: false,
         }
     }
 }
@@ -111,6 +116,50 @@ pub fn load_policy(path: &Path) -> TagPolicy {
 /// Whether away alerts are on.
 pub fn load_away_alerts(path: &Path) -> bool {
     load_file(path).away_alerts
+}
+
+/// Whether approvals may be answered from Telegram.
+pub fn load_approvals(path: &Path) -> bool {
+    load_file(path).approvals
+}
+
+/// What was sent to the user on Telegram outside the Telegram chat (alerts from other chats), so
+/// the Telegram chat's agent hears about it with the user's next message.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SentNote {
+    pub from: String,
+    pub text: String,
+}
+
+/// How many such notes wait for the next message; older ones go first.
+pub const SENT_KEPT: usize = 10;
+
+pub fn sent_path(profile_dir: &Path) -> PathBuf {
+    profile_dir.join("relay").join("telegram-sent.json")
+}
+
+pub fn load_sent(path: &Path) -> Vec<SentNote> {
+    helm_core::privfs::read_capped(path, 64 * 1024)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn remember_sent(path: &Path, from: &str, text: &str) -> std::io::Result<()> {
+    let mut list = load_sent(path);
+    list.push(SentNote {
+        from: from.to_owned(),
+        text: cut_chars(text, 600).0,
+    });
+    let skip = list.len().saturating_sub(SENT_KEPT);
+    write_private(path, &list[skip..].to_vec())
+}
+
+pub fn clear_sent(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// Save settings that passed [`PolicyFile::check`].
@@ -297,9 +346,30 @@ pub fn submission_id(hub_id: &str) -> String {
 pub const BRIEF_NOTE: &str = "[Sent from Telegram: answer briefly in plain text, with no tables \
 or long code. Offer choices as a numbered list. The user can reply \"more\" for detail.]";
 
-/// The text a Telegram message is stored with: the brief note, then the (age-marked) message.
-pub fn delivered_text(text: &str, age_minutes: Option<i64>) -> String {
-    format!("{BRIEF_NOTE}\n{}", inbound_text(text, age_minutes))
+/// The note that tells the agent what other chats sent the user since the last message: one
+/// bracketed line, so the bubble can hide it like the brief note.
+pub fn sent_line(sent: &[SentNote]) -> Option<String> {
+    if sent.is_empty() {
+        return None;
+    }
+    let clean = |s: &str| s.replace(['\n', '\r'], " ").replace(']', ")");
+    let items: Vec<String> = sent
+        .iter()
+        .map(|n| format!("{}: \"{}\"", clean(&n.from), clean(&n.text)))
+        .collect();
+    Some(format!(
+        "[Sent to the user on Telegram by other chats since their last message: {}]",
+        items.join("; ")
+    ))
+}
+
+/// The text a Telegram message is stored with: the brief note, what other chats sent the user
+/// meanwhile, then the (age-marked) message.
+pub fn delivered_text(text: &str, age_minutes: Option<i64>, sent: &[SentNote]) -> String {
+    match sent_line(sent) {
+        Some(line) => format!("{BRIEF_NOTE}\n{line}\n{}", inbound_text(text, age_minutes)),
+        None => format!("{BRIEF_NOTE}\n{}", inbound_text(text, age_minutes)),
+    }
 }
 
 /// The longest final answer sent to Telegram before it is cut (Telegram's own cap is 4096).
@@ -539,9 +609,25 @@ mod tests {
         assert_eq!(submission_id("ab-12"), submission_id("ab-12"));
         assert_ne!(submission_id("ab-12"), submission_id("ab-13"));
         assert!(uuid::Uuid::parse_str(&submission_id("a/b\\c")).is_ok());
-        let d = delivered_text("hi", Some(3));
+        let d = delivered_text("hi", Some(3), &[]);
         assert!(d.starts_with(BRIEF_NOTE), "{d}");
         assert!(d.ends_with("queued while Helm was offline)\nhi"), "{d}");
+        let note = |from: &str, text: &str| SentNote {
+            from: from.into(),
+            text: text.into(),
+        };
+        let d = delivered_text(
+            "ok",
+            None,
+            &[note("Docs", "done]\nall good"), note("Build", "failed")],
+        );
+        assert_eq!(
+            d,
+            format!(
+                "{BRIEF_NOTE}\n[Sent to the user on Telegram by other chats since their last \
+                 message: Docs: \"done) all good\"; Build: \"failed\"]\nok"
+            )
+        );
     }
 
     #[test]
@@ -575,10 +661,12 @@ mod tests {
         let p = policy_path(dir.path());
         assert_eq!(load_policy(&p), TagPolicy::default());
         assert!(load_away_alerts(&p), "on by default");
+        assert!(!load_approvals(&p), "approvals are off unless turned on");
         let set = PolicyFile {
             max_age_hours: 6,
             max_tokens: 50_000,
             away_alerts: false,
+            approvals: true,
         };
         save_policy(&p, set).unwrap();
         assert_eq!(load_file(&p), set);
@@ -589,9 +677,20 @@ mod tests {
                 max_age_hours: hours,
                 max_tokens: tokens,
                 away_alerts: true,
+                approvals: false,
             };
             assert!(bad.check().is_err(), "{bad:?}");
         }
+        assert!(load_approvals(&p), "saved on");
+        let s = sent_path(dir.path());
+        for i in 0..=SENT_KEPT {
+            remember_sent(&s, "Docs", &format!("n{i}")).unwrap();
+        }
+        let kept = load_sent(&s);
+        assert_eq!(kept.len(), SENT_KEPT);
+        assert_eq!(kept[0].text, "n1", "the oldest went first");
+        clear_sent(&s).unwrap();
+        assert!(load_sent(&s).is_empty());
         let a = answered_path(dir.path());
         let mut list = load_answered(&a);
         for i in 0..=ANSWERED_KEPT {

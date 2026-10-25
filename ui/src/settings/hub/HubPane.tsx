@@ -203,7 +203,7 @@ export function HubPane() {
             />
             k tokens
           </label>
-          <Button variant="secondary" disabled={busy || !limitsValid || !limitsChanged} onClick={() => void run(ops.saveTelegram({ maxAgeHours: hours, maxTokens: ktokens * 1000, awayAlerts: tg?.awayAlerts ?? true }), showTelegram)}>
+          <Button variant="secondary" disabled={busy || !limitsValid || !limitsChanged} onClick={() => tg && void run(ops.saveTelegram({ ...tg, maxAgeHours: hours, maxTokens: ktokens * 1000 }), showTelegram)}>
             Save
           </Button>
         </SettingRow>
@@ -220,7 +220,22 @@ export function HubPane() {
             disabled={busy}
             aria-label="Telegram alerts while you're away"
             data-testid="hub-away-alerts-box"
-            onChange={(on) => void run(ops.saveTelegram({ maxAgeHours: tg.maxAgeHours, maxTokens: tg.maxTokens, awayAlerts: on }), showTelegram)}
+            onChange={(on) => void run(ops.saveTelegram({ ...tg, awayAlerts: on }), showTelegram)}
+          />
+        </SettingRow>
+      )}
+      {tg && (
+        <SettingRow
+          testId="hub-approvals"
+          title="Approve from Telegram"
+          description="Permission prompts and plan approvals that wait while you're away, or in the Telegram chat, come to Telegram with a button per option. Only a tap from your own Telegram account on that request's button answers it; a typed reply never approves anything."
+        >
+          <Checkbox
+            checked={tg.approvals}
+            disabled={busy}
+            aria-label="Approve from Telegram"
+            data-testid="hub-approvals-box"
+            onChange={(on) => void run(ops.saveTelegram({ ...tg, approvals: on }), showTelegram)}
           />
         </SettingRow>
       )}

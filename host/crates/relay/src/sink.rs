@@ -57,6 +57,8 @@ const BUSY_RETRY: Duration = Duration::from_secs(20);
 pub trait Upstream: Send + Sync {
     fn status(&self, text: &str);
     fn final_answer(&self, text: &str);
+    /// A note to the phone that leaves the live status alone.
+    fn notify(&self, _text: &str) {}
 }
 
 impl Upstream for LineHandle {
@@ -65,6 +67,9 @@ impl Upstream for LineHandle {
     }
     fn final_answer(&self, text: &str) {
         self.telegram_final(text)
+    }
+    fn notify(&self, text: &str) {
+        self.telegram_notify(text);
     }
 }
 
@@ -229,6 +234,8 @@ pub struct TelegramView {
     pub max_tokens: u64,
     /// Telegram alerts while the user is away ([`crate::notify`]).
     pub away_alerts: bool,
+    /// Approval prompts answered with Telegram buttons ([`crate::approve`]).
+    pub approvals: bool,
 }
 
 pub fn telegram_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> TelegramView {
@@ -265,6 +272,7 @@ pub fn telegram_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> 
         max_age_hours: file.max_age_hours,
         max_tokens: file.max_tokens,
         away_alerts: file.away_alerts,
+        approvals: file.approvals,
     }
 }
 
@@ -333,12 +341,16 @@ pub fn answerable(rt: &ChatRuntime, chat: &str) -> Option<helm_chats::types::Int
         .find(is_answerable)
 }
 
-/// The first waiting prompt Telegram may not answer (an approval, a plan, a trust prompt).
-fn blocking(rt: &ChatRuntime, chat: &str) -> Option<helm_chats::types::Interaction> {
-    rt.live_thread(chat)?
-        .interactions
-        .into_iter()
-        .find(|i| i.attention.is_some() && !is_answerable(i))
+/// The first waiting prompt a Telegram reply may not answer (an approval, a plan, a trust
+/// prompt). With approving from Telegram on, the ones it asks with buttons are left to it.
+fn blocking(
+    rt: &ChatRuntime,
+    chat: &str,
+    approvals: bool,
+) -> Option<helm_chats::types::Interaction> {
+    rt.live_thread(chat)?.interactions.into_iter().find(|i| {
+        i.attention.is_some() && !is_answerable(i) && !(approvals && crate::approve::askable(i))
+    })
 }
 
 fn max_row(db: &Database, chat: &str) -> i64 {
@@ -367,6 +379,8 @@ pub struct Ctx {
     /// prompt), and the file they are kept in.
     pub answered: Arc<Mutex<VecDeque<String>>>,
     pub answered_path: PathBuf,
+    /// Alerts other chats sent the user since the last message ([`telegram::SentNote`]).
+    pub sent_path: PathBuf,
 }
 
 /// Put one message into its chat (blocking). `Err` leaves it unacknowledged at the hub.
@@ -448,7 +462,8 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         })
         .map(|sb| sb.mode)
         .unwrap_or(SendMode::Asap);
-    let text = telegram::delivered_text(&msg.text, msg.age_minutes);
+    let sent = telegram::load_sent(&c.sent_path);
+    let text = telegram::delivered_text(&msg.text, msg.age_minutes, &sent);
     let started = std::time::Instant::now();
     loop {
         let r = host_send(
@@ -464,7 +479,12 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
             },
         );
         match r {
-            Ok(_) => return Ok(Placed::Sent { chat, baseline }),
+            Ok(_) => {
+                if !sent.is_empty() && telegram::clear_sent(&c.sent_path).is_err() {
+                    log::warn!("relay: the notes of alerts sent could not be cleared");
+                }
+                return Ok(Placed::Sent { chat, baseline });
+            }
             Err(e)
                 if matches!(e.code.as_str(), "busy" | "capacity")
                     && started.elapsed() < BUSY_RETRY =>
@@ -477,7 +497,13 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
 }
 
 /// The chat as the mirror sees it (blocking).
-pub fn snapshot(rt: &ChatRuntime, db: &Database, chat: &str, baseline: i64) -> Snap {
+pub fn snapshot(
+    rt: &ChatRuntime,
+    db: &Database,
+    chat: &str,
+    baseline: i64,
+    approvals: bool,
+) -> Snap {
     let row = db
         .snapshot(|tx| {
             let status: Option<String> = tx
@@ -541,7 +567,7 @@ pub fn snapshot(rt: &ChatRuntime, db: &Database, chat: &str, baseline: i64) -> S
         };
         (q.id, text)
     });
-    let blocked = blocking(rt, chat).map(|b| {
+    let blocked = blocking(rt, chat, approvals).map(|b| {
         (
             b.id,
             telegram::render_blocked(b.title.as_deref(), b.message.as_deref()),
@@ -566,12 +592,18 @@ pub async fn mirror(
     up: Arc<dyn Upstream>,
     chat: String,
     baseline: i64,
+    policy: PathBuf,
 ) {
     let mut m = Mirror::new(baseline, helm_core::now_ms());
     while !m.done {
         tokio::time::sleep(POLL).await;
         let (rt2, db2, chat2, base) = (rt.clone(), db.clone(), chat.clone(), m.baseline);
-        let Ok(s) = tokio::task::spawn_blocking(move || snapshot(&rt2, &db2, &chat2, base)).await
+        let policy = policy.clone();
+        let Ok(s) = tokio::task::spawn_blocking(move || {
+            let approvals = telegram::load_approvals(&policy);
+            snapshot(&rt2, &db2, &chat2, base, approvals)
+        })
+        .await
         else {
             return;
         };
@@ -595,6 +627,8 @@ pub struct ChatSink {
     serial: tokio::sync::Mutex<()>,
     answered: Arc<Mutex<VecDeque<String>>>,
     watching: Mutex<Option<(String, tokio::task::JoinHandle<()>)>>,
+    /// Approvals asked on Telegram and not yet answered ([`crate::approve`]).
+    pub asks: crate::approve::Asks,
 }
 
 /// A path the worker can be started in: without Windows' verbatim prefix.
@@ -616,6 +650,7 @@ impl ChatSink {
             profile_dir,
             serial: tokio::sync::Mutex::new(()),
             answered: Arc::new(Mutex::new(answered)),
+            asks: crate::approve::Asks::default(),
             watching: Mutex::new(None),
         }
     }
@@ -657,6 +692,7 @@ impl ChatSink {
             policy: telegram::load_policy(&telegram::policy_path(&self.profile_dir)),
             answered: self.answered.clone(),
             answered_path: telegram::answered_path(&self.profile_dir),
+            sent_path: telegram::sent_path(&self.profile_dir),
         })
     }
 
@@ -678,6 +714,7 @@ impl ChatSink {
             up,
             chat.to_owned(),
             baseline,
+            telegram::policy_path(&self.profile_dir),
         ));
         *w = Some((chat.to_owned(), task));
     }
@@ -727,6 +764,52 @@ impl TelegramSink for ChatSink {
                 .await
             {
                 log::warn!("relay: /stop from Telegram failed: {}", e.message);
+            }
+        })
+    }
+
+    fn answer<'a>(&'a self, id: String, index: usize) -> BoxFut<'a, ()> {
+        Box::pin(async move {
+            let Some(up) = self.up.get().cloned() else {
+                return;
+            };
+            let nothing = "That request is no longer waiting, so nothing was answered.";
+            let Some(ask) = self.asks.take(&id, index) else {
+                up.notify(nothing);
+                return;
+            };
+            if !telegram::load_approvals(&telegram::policy_path(&self.profile_dir)) {
+                up.notify("Approving from Telegram is off in Helm, so nothing was answered.");
+                return;
+            }
+            let Ok(c) = self.ctx() else {
+                up.notify(nothing);
+                return;
+            };
+            let still = c.rt.live_thread(&ask.chat_id).is_some_and(|t| {
+                t.interactions
+                    .iter()
+                    .any(|i| i.id == ask.request_id && crate::approve::askable(i))
+            });
+            if !still {
+                up.notify(nothing);
+                return;
+            }
+            let label = ask.options[index].clone();
+            match c
+                .ops
+                .invoke(
+                    "interaction_answer",
+                    crate::approve::answer_args(&ask, index),
+                )
+                .await
+            {
+                Ok(_) => c.rt.add_context_row(
+                    &ask.chat_id,
+                    helm_chats::types::ContextKind::Telegram,
+                    &format!("Answered from Telegram: {label}"),
+                ),
+                Err(e) => up.notify(&format!("Helm could not answer it: {}", e.message)),
             }
         })
     }

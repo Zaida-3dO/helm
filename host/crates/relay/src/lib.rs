@@ -13,6 +13,7 @@
 //! | [`telegram`] | the telegram origin, the active Telegram chat tag, its rotation and the phone renderer |
 //! | [`sink`] | Telegram messages into the active chat, and the status and answer mirrored back |
 //! | [`notify`] | Helm speaking first: the `app_telegram_send` tool and alerts while the user is away |
+//! | [`approve`] | approving from Telegram: buttons for permission prompts and plan approvals, off by default |
 //!
 //! Wiring: [`register_services`] adds the line (its [`client::LineHandle`] and
 //! [`client::Client`]) and [`start`] connects it once the host-tool dispatcher exists;
@@ -22,10 +23,11 @@
 //! Ops: `relay_connection_get` → [`config::RelayConnectionView`] (booleans and the line state,
 //! never a value) and `relay_connection_save` ([`config::RelaySaveArgs`]: absent keeps, empty
 //! clears). For Settings → Hub's Telegram section: `relay_telegram_get` →
-//! [`sink::TelegramView`], `relay_telegram_save` ([`telegram::PolicyFile`]: the limits and the
-//! away-alerts switch) and
+//! [`sink::TelegramView`], `relay_telegram_save` ([`telegram::PolicyFile`]: the limits, the
+//! away-alerts switch and approving from Telegram) and
 //! `relay_telegram_reset` (drop the tag, so the next message starts a new chat).
 
+pub mod approve;
 pub mod client;
 pub mod config;
 pub mod exec;
@@ -100,12 +102,13 @@ pub fn start(handle: &tokio::runtime::Handle, ctx: &OpCtx, tools: Arc<helm_hostt
     });
     let line = client.handle();
     handle.spawn(client.run());
-    if let (Some(rt), Some(afk), Some(profile)) = (
+    if let (Some(rt), Some(afk), Some(profile), Some(sink)) = (
         ctx.services.get::<helm_chats::ChatRuntime>(),
         ctx.services.get::<helm_afk::AfkService>(),
         ctx.services.get::<Profile>(),
+        ctx.services.get::<sink::ChatSink>(),
     ) {
-        notify::watch_away(handle, (*rt).clone(), afk, line, profile.dir.clone());
+        notify::watch_away(handle, (*rt).clone(), afk, line, sink, profile.dir.clone());
     }
 }
 
@@ -167,8 +170,9 @@ fn telegram_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
 }
 
 fn telegram_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let f: telegram::PolicyFile = serde_json::from_value(args)
-        .map_err(|_| ApiError::bad_args("Expected maxAgeHours, maxTokens and awayAlerts."))?;
+    let f: telegram::PolicyFile = serde_json::from_value(args).map_err(|_| {
+        ApiError::bad_args("Expected maxAgeHours, maxTokens, awayAlerts and approvals.")
+    })?;
     f.check().map_err(ApiError::bad_args)?;
     let profile = ctx.services.need::<Profile>()?;
     telegram::save_policy(&telegram::policy_path(&profile.dir), f)

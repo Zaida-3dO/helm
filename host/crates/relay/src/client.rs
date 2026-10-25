@@ -58,6 +58,8 @@ pub trait TelegramSink: Send + Sync {
     /// `Ok` once the message is safely in Helm (it is then acknowledged to the hub).
     fn deliver<'a>(&'a self, msg: TelegramMessage) -> BoxFut<'a, Result<(), String>>;
     fn stop<'a>(&'a self) -> BoxFut<'a, ()>;
+    /// The user tapped button `index` of the approval ask `id` ([`LineHandle::telegram_ask`]).
+    fn answer<'a>(&'a self, id: String, index: usize) -> BoxFut<'a, ()>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +116,21 @@ impl LineHandle {
                 .up
                 .send(json!({ "type": "telegram_notify", "text": text }))
                 .is_ok()
+    }
+    /// An approval ask: a new message with one button per option. Only a tap on one of them
+    /// comes back (`telegram_answer`); `false` when it was not sent.
+    pub fn telegram_ask(&self, id: &str, text: &str, options: &[String]) -> bool {
+        self.state() == LineState::Online
+            && self
+                .up
+                .send(json!({ "type": "telegram_ask", "id": id, "text": text, "options": options }))
+                .is_ok()
+    }
+    /// The ask was settled in Helm or went away: the hub takes its buttons down.
+    pub fn telegram_ask_done(&self, id: &str, text: &str) {
+        let _ = self
+            .up
+            .send(json!({ "type": "telegram_ask_done", "id": id, "text": text }));
     }
     /// The turn's answer, sent by the hub as a new message; the status message goes.
     pub fn telegram_final(&self, text: &str) {
@@ -341,6 +358,14 @@ impl Client {
                 let sink = self.sink.clone();
                 tokio::spawn(async move { sink.stop().await });
             }
+            Some("telegram_answer") => {
+                let (Some(id), Some(index)) = (s("id"), v.get("index").and_then(Value::as_u64))
+                else {
+                    return;
+                };
+                let sink = self.sink.clone();
+                tokio::spawn(async move { sink.answer(id, index as usize).await });
+            }
             _ => {}
         }
     }
@@ -388,6 +413,9 @@ mod tests {
         }
         fn stop<'a>(&'a self) -> BoxFut<'a, ()> {
             *self.stops.lock().unwrap() += 1;
+            Box::pin(async {})
+        }
+        fn answer<'a>(&'a self, _id: String, _index: usize) -> BoxFut<'a, ()> {
             Box::pin(async {})
         }
     }
