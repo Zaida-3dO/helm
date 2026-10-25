@@ -77,6 +77,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         },
     );
     crate::wftools::register_host_tools(r);
+    crate::gates::register_host_tools(r);
 }
 
 /// The `workflow` prompt section (order 90, after every other section). Pins the chat's state at

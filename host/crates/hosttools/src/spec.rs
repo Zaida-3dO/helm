@@ -41,6 +41,8 @@ pub enum Condition {
     ProjectsModeAndAllSettings,
     /// At least one enabled MCP server.
     McpEnabled,
+    /// Never listed: the worker itself calls it (a hook asking the host), agents never see it.
+    Worker,
 }
 
 /// Who may call a listed tool.
@@ -219,6 +221,7 @@ impl LaunchKeys {
             Condition::ProjectsMode => self.projects_mode,
             Condition::ProjectsModeAndAllSettings => self.projects_mode && self.all_settings,
             Condition::McpEnabled => self.mcp_enabled,
+            Condition::Worker => false,
         }
     }
 }

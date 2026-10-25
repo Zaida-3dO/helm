@@ -6,6 +6,7 @@
 //!   (and the defaults have the master switch off).
 //! - The stored form leaves out what is at its quiet default: `moveFast` only while true,
 //!   `landingGuard` only while false,
+//!   `dispatchGate` only while false,
 //!   `newChats` only when not `auto` (the default), `landing.method` only when
 //!   not `merge`, so a value saved without those fields is byte-identical. A stored `always` is
 //!   written out and read back as `always`. A value stored before the default changed, with no
@@ -72,6 +73,7 @@ impl Default for WorkflowSettings {
             },
             move_fast: false,
             landing_guard: true,
+            dispatch_gate: true,
             // Auto by default.
             new_chats: NewChats::Auto,
         }
@@ -542,6 +544,7 @@ pub fn validate(v: Value) -> Result<WorkflowSettings, String> {
     let landing = landing(o.take("landing"), &d.landing)?;
     let move_fast = o.bool("moveFast", d.move_fast)?;
     let landing_guard = o.bool("landingGuard", d.landing_guard)?;
+    let dispatch_gate = o.bool("dispatchGate", d.dispatch_gate)?;
     let new_chats = match o.take("newChats") {
         None => d.new_chats,
         Some(Value::String(s)) if s == "always" => NewChats::Always,
@@ -559,6 +562,7 @@ pub fn validate(v: Value) -> Result<WorkflowSettings, String> {
         landing,
         move_fast,
         landing_guard,
+        dispatch_gate,
         new_chats,
     })
 }
@@ -572,6 +576,9 @@ pub fn stored_form(s: &WorkflowSettings) -> Value {
     }
     if s.landing_guard {
         o.remove("landingGuard");
+    }
+    if s.dispatch_gate {
+        o.remove("dispatchGate");
     }
     if s.new_chats == NewChats::Auto {
         o.remove("newChats");

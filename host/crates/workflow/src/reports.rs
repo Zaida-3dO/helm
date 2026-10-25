@@ -81,12 +81,19 @@ pub fn parse(args: Value) -> Result<Report, String> {
         "cleanup" => (&[], &["repo", "branch", "tip", "pr"]),
         "visual_review" => (&["pass", "fail", "pending"], &["repo", "branch"]),
         "after_land" => {
-            return Err(
-                "Post-land stages are not in this build, so after_land reports are not taken."
-                    .into(),
-            )
+            if r.repo.is_some()
+                || r.branch.is_some()
+                || r.tip.is_some()
+                || r.base.is_some()
+                || r.pr.is_some()
+            {
+                return bad("an after_land report names no change: leave out repo, branch, tip, base and pr");
+            }
+            (&crate::postland::AFTER_LAND[..], &[][..])
         }
-        _ => return bad("kind must be plan_review, build, code_review, cleanup or visual_review"),
+        _ => return bad(
+            "kind must be plan_review, build, code_review, cleanup, visual_review or after_land",
+        ),
     };
     match (&r.verdict, verdicts.is_empty()) {
         (Some(_), true) => return bad(&format!("a {} report has no verdict", r.kind)),
@@ -129,7 +136,7 @@ fn change_of(
     Ok(Ok((repo, branch, c)))
 }
 
-fn follow_ups(r: &Report) -> Vec<String> {
+pub fn follow_ups(r: &Report) -> Vec<String> {
     r.follow_ups
         .iter()
         .flatten()
@@ -152,6 +159,10 @@ pub fn report(
 ) -> Out {
     if !is_child {
         return Ok(Err("Only a stage agent the orchestrator dispatched can report; the orchestrator never reports itself.".into()));
+    }
+    if r.kind == "after_land" {
+        let body = json!({"summary": r.summary, "followUps": follow_ups(&r)}).to_string();
+        return crate::postland::after_land_report(tx, x, &r, &body);
     }
     let mut run = match actions::active(tx, x.chat_id)? {
         Ok(run) => run,
@@ -212,6 +223,9 @@ pub fn report(
         ("build", None) => {
             if store::changes(tx, &run.id)?.len() >= 32 {
                 return Ok(Err("Permanent: a task holds at most 32 changes.".into()));
+            }
+            if let Some(why) = crate::claims::open_refusal(tx, &run, &repo, &branch, x.now)? {
+                return Ok(Err(format!("Permanent: {why} Tell the orchestrator.")));
             }
             Change {
                 run_id: run.id.clone(),
@@ -355,6 +369,10 @@ pub fn report(
         }
     };
     store::upsert_change(tx, &c, x.now)?;
+    // An approving review's follow-ups are work for after the change: queue them on the task.
+    if kind == "review_round" && ev_verdict.as_deref() == Some("approved") {
+        crate::postland::queue(tx, &run, &branch, &follow_ups(&r), x.now)?;
+    }
     store::event(
         tx,
         x.chat_id,

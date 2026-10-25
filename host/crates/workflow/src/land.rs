@@ -510,6 +510,12 @@ pub fn pass(db: &Database, gh: &dyn Gh, flight: &Flight, now: i64) -> rusqlite::
             _ => draft_pass(gh, &st, &c),
         };
         db.write(|tx| apply(tx, &c, &step, now))?;
+        // The wrap-up and the post-land due check, outside the land's own transaction.
+        if matches!(step, Step::Landed(_) | Step::HandedOff(_)) {
+            if let Err(e) = crate::postland::after_step(db, &c, now) {
+                log::warn!("post-land step for {}: {e}", c.branch);
+            }
+        }
         flight.give(&k);
         done += 1;
     }
@@ -525,6 +531,7 @@ pub fn start_driver(handle: &tokio::runtime::Handle, ctx: &helm_ipc::OpCtx) {
         .get_or_init(|| Arc::new(tokio::sync::Notify::new()))
         .clone();
     let events = ctx.events.clone();
+    let services = ctx.services.clone();
     handle.spawn(async move {
         let d = db.clone();
         // The chats each pass wrote run rows for are read on the pass's own thread.
@@ -539,9 +546,15 @@ pub fn start_driver(handle: &tokio::runtime::Handle, ctx: &helm_ipc::OpCtx) {
         let flight = Arc::new(Flight::default());
         loop {
             let (d, f) = (db.clone(), flight.clone());
+            let rt = services.get::<helm_chats::ChatRuntime>();
             let chats = tokio::task::spawn_blocking(move || {
                 if let Err(e) = pass(&d, &crate::gh::GhCli, &f, helm_core::now_ms()) {
                     log::warn!("land step: {e}");
+                }
+                // The notes a finished land wrote (the post-land due note) go out from here.
+                let notes = crate::notes::take_pending();
+                if let Some(rt) = rt {
+                    crate::notes::deliver_pending(&d, &rt, notes);
                 }
                 store::take_touched()
             })

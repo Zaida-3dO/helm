@@ -101,6 +101,75 @@ pub fn deliver(rt: &helm_chats::ChatRuntime, chat_id: &str, d: Delivery) {
     }
 }
 
+thread_local! {
+    /// Workflow notes written on this thread since the last [`take_pending`]: a take-over tells
+    /// both chats, a finished land tells the orchestrator. They are delivered after the
+    /// transaction that wrote them, by whoever ran it (a tool handler or the land driver).
+    static PENDING: std::cell::RefCell<Vec<Pending>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// One workflow note for a chat's transcript.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pending {
+    pub chat_id: String,
+    pub text: String,
+    /// Also queue it as an app note to the chat's agent, but only while a turn runs: an idle chat
+    /// is never woken by a note.
+    pub steer: bool,
+    /// The note's fixed submission id, so a retry never sends it twice.
+    pub id: String,
+}
+
+pub fn queue(chat_id: &str, text: String, steer: bool, id: String) {
+    PENDING.with(|p| {
+        p.borrow_mut().push(Pending {
+            chat_id: chat_id.to_owned(),
+            text,
+            steer,
+            id,
+        })
+    });
+}
+
+/// Drain the notes this thread queued. A refused call may leave some behind; draining before a
+/// call starts keeps them from leaking into the next one.
+pub fn take_pending() -> Vec<Pending> {
+    PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()))
+}
+
+/// Write each note as a transcript row, and queue the steering ones behind a running turn.
+pub fn deliver_pending(
+    db: &helm_core::db::Database,
+    rt: &helm_chats::ChatRuntime,
+    notes: Vec<Pending>,
+) {
+    for n in notes {
+        rt.add_context_row(
+            &n.chat_id,
+            helm_chats::types::ContextKind::Orchestrator,
+            &n.text,
+        );
+        if !n.steer {
+            continue;
+        }
+        let busy = db
+            .snapshot(|tx| crate::mode::facts(tx, &n.chat_id))
+            .ok()
+            .flatten()
+            .is_some_and(|f| f.busy);
+        if busy {
+            deliver(
+                rt,
+                &n.chat_id,
+                Delivery::Note {
+                    submission_id: n.id,
+                    text: format!("{FRAME} {}", n.text),
+                },
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

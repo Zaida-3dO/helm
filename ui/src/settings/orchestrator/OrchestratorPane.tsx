@@ -241,7 +241,14 @@ export function OrchestratorPane() {
         <TextInput aria-label="Agents that are not a build" value={texts.buildExempt} onChange={(e) => text('buildExempt')(e.target.value)} />
       </SettingRow>
 
-      <SettingRow title="Orchestrator edits" description="Whether the orchestrator may edit files in a task's repositories itself." testId="orch-edits-row">
+      <SettingRow
+        title="Dispatch gate"
+        description="During a task, each agent the orchestrator dispatches faces its stage's gate (a build waits for an approved plan, a review for a round under its cap), and sub-agents may not dispatch stage agents. Refusals say the way through. Off lets every dispatch run."
+        testId="orch-dispatchgate-row"
+      >
+        <Checkbox checked={draft.dispatchGate} label={draft.dispatchGate ? 'On' : 'Off'} onChange={(v) => patch((d) => ({ ...d, dispatchGate: v }))} data-testid="orch-dispatchgate" />
+      </SettingRow>
+      <SettingRow title="Orchestrator edits" description="Whether the orchestrator may edit files in a task's repositories itself. Deny turns on the edit gate: it can still grant itself one file at a time, which shows in the chat." testId="orch-edits-row">
         <Segmented
           label="Orchestrator edits"
           testId="orch-edits"

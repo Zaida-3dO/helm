@@ -6,8 +6,9 @@
 //! The task and change engine runs **on the host** and is reached through the reserved host tools
 //! (`app_workflow`, `app_workflow_report`, `app_orchestrator_on`). The host re-derives everything
 //! that decides an irreversible step, so keeping the engine beside it loses no safety. The per-tool
-//! hooks for the spawn and edit gates are not wired yet. The landing guard is: the worker asks
-//! [`hook`] before each Bash, PowerShell or MCP call in a chat with a task.
+//! hooks: the landing guard on Bash, PowerShell and MCP calls (the worker asks [`hook`] before
+//! each such call in a chat with a task), and the dispatch and edit gates ([`gates`]), asked through
+//! an unlisted host tool.
 //!
 //! A mid-chat change of a chat's Orchestrator state cannot reach a persistent worker's launch, so
 //! it is delivered as an **app note** (`helm_chats::submit::host_send`, origin App, Exempt, one
@@ -25,9 +26,11 @@
 //! | table `chat_workflow_modes` | per chat: mode, set_by, reason ≤ 500, updated_at |
 //! | host tool `app_orchestrator_on {reason}` | an Auto chat's root agent turns it on |
 //! | prompt section `workflow` | the generated Workflow rules, plus the Move fast block when on |
-//! | host tools `app_workflow`, `app_workflow_report` | tasks, changes, plan of record, rounds and caps, commit-bound approval, hand-off |
+//! | host tools `app_workflow`, `app_workflow_report` | tasks, changes, plan of record, rounds and caps, commit-bound approval, hand-off, take-over ([`claims`]), post-land reports and follow-ups ([`postland`]) |
+//! | host tool `app_workflow_gate` (never listed) | the worker's dispatch and edit gate questions ([`gates`]); launch variable `HELM_WORKFLOW_GATES` |
+//! | table `workflow_followups` | queued follow-ups per task |
 //! | tables `workflow_runs`, `workflow_changes`, `workflow_events` | per task / per change / per event |
-//! | allow kinds | `land`, `ready`, `skip`, `allowMore`, `drop`, `reopen` on `helm_consent` |
+//! | allow kinds | `land`, `ready`, `skip`, `allowMore`, `drop`, `reopen`, `takeOver` on `helm_consent` |
 //! | worker line `guard_check` → `guard_verdict` | the landing guard on Bash, PowerShell and MCP calls ([`hook`]): only in a chat with Orchestrator on and an active task, while Settings → Orchestrator → Landing guard is on (default on); overrides recorded as `guard_override`, refusals as `gate_denied`, both listed under Needs you |
 //! | table `workflow_standup_outbox` | stage records written to Agent Standup, with an "outcome unknown" read-back before any resend |
 //! | land step | `gh` merge pinned to the approved head, readback must say MERGED; draft land |
@@ -42,9 +45,11 @@
 pub mod actions;
 pub mod agent_settings;
 pub mod bindings;
+pub mod claims;
 pub mod engine;
 #[cfg(test)]
 mod flow_tests;
+pub mod gates;
 pub mod gh;
 pub mod git;
 pub mod guard;
@@ -59,6 +64,7 @@ pub mod notes;
 mod ops;
 pub mod outage_rules;
 pub mod overrides;
+pub mod postland;
 pub mod reports;
 pub mod rules;
 pub mod sa_outbox;
@@ -76,6 +82,7 @@ mod user_tests;
 pub mod wftools;
 
 pub use agent_settings::extension as settings_extension;
+pub use gates::GateLaunch;
 pub use hook::register_worker_lines;
 pub use kinds::register_allow_kinds;
 pub use ops::register_ops;
@@ -88,7 +95,8 @@ pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
         .initializer("workflow-chat-modes", mode::init)
         .initializer("workflow-tasks", store::init)
         .initializer("workflow-standup-outbox", sa_outbox::init)
-        .initializer("workflow-land-waits", land::init);
+        .initializer("workflow-land-waits", land::init)
+        .initializer("workflow-followups", postland::init);
 }
 
 /// Every minute, send the Agent Standup records that are due. Started once with the host

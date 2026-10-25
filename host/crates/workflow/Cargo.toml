@@ -14,6 +14,7 @@ helm-workers.workspace = true
 helm-hosttools = { path = "../hosttools" }
 helm-consent = { path = "../consent" }
 helm-standup = { path = "../standup" }
+helm-worktrees = { path = "../worktrees" }
 helm-platform.workspace = true
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 tokio.workspace = true

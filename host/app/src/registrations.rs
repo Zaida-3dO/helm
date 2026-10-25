@@ -339,6 +339,8 @@ pub fn launch_contributors(
     .register_section(Arc::new(helm_workflow::WorkflowSection { db: db.clone() }));
     let mut c = helm_workers::contrib::LaunchContributors::new();
     c.add(Arc::new(a));
+    // The workflow's dispatch and edit gates: a launch variable, only for chats they may act in.
+    c.add(Arc::new(helm_workflow::GateLaunch { db: db.clone() }));
     // The git stand-in goes on a chat's PATH only while some repository has worktrees off.
     if let Some(profile_dir) = db.path().parent() {
         c.add(Arc::new(helm_projects::guard::GitGuard::new(

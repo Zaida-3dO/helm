@@ -131,6 +131,8 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("workflow_standup_outbox", Data),
     // The land step's readiness waits.
     ("workflow_land_waits", Data),
+    // Follow-ups queued from reviews and post-land reports (read and dropped through app_workflow).
+    ("workflow_followups", Tool),
     // AFK and the usage governor.
     (
         "afk_settings",

@@ -17,26 +17,27 @@ use std::sync::Arc;
 
 pub const OFF: &str = "Orchestrator is off for this chat, so the workflow tools do nothing here. The user can turn it on with the Orchestrator switch in the composer.";
 
-pub const WORKFLOW_DESCRIPTION: &str = "The orchestrator workflow for THIS chat (only while Orchestrator is on). action is one of: start {title, itemId?, new?}; plan {text | path, title?, itemId?}; status; update {repo, branch, pr?, base?, visual?}; skip {stage, reason}; park {reason}; drop {repo, branch, reason}; hand_off {changes?, final?, summary?}; finish; allowMore {stage, repo?, branch?, reason}; land {repo, branch} (the user's Merge of a change waiting for it; needs userQuote or grant). repo is host/owner/name. Steps only the user could take accept userQuote (the user's exact words) or grant (an Allow request id); never claim consent the user did not give. Only the chat's own agent may call it.";
+pub const WORKFLOW_DESCRIPTION: &str = "The orchestrator workflow for THIS chat (only while Orchestrator is on). action is one of: start {title, itemId?, new?}; plan {text | path, title?, itemId?}; status; update {repo, branch, pr?, base?, visual?}; skip {stage, reason}; park {reason}; drop {repo, branch, reason} or drop {queued} (discard a queued follow-up); hand_off {changes?, final?, summary?}; finish; allowMore {stage, repo?, branch?, reason}; land {repo, branch} (the user's Merge of a change waiting for it; needs userQuote or grant); take_over {repo, branch, reason, check?} (move a change another chat holds into this task; check: true only reports); allow_edit {file, reason} (edit that one file yourself until the task ends). repo is host/owner/name. Steps only the user could take accept userQuote (the user's exact words) or grant (an Allow request id); never claim consent the user did not give. Only the chat's own agent may call it.";
 
-pub const REPORT_DESCRIPTION: &str = "Report a stage verdict to Helm. Only stage agents the orchestrator dispatched may call it, and only this report counts. kind: plan_review {verdict: approve|changes_required, findings?}; build {repo, branch, tip, base?, pr?}; code_review {repo, branch, tip, base, verdict: lgtm|lgtm_with_nits|changes_required, findings?, followUps?}; cleanup {repo, branch, tip, pr}; visual_review {repo, branch, verdict: pass|fail|pending, evidence?}. Every report has summary (at most 8000 characters). tip is the full 40-character commit sha. Unknown fields are refused. If a refusal says Correctable, fix the report and send it once more; if it says Permanent, state the refusal in your reply.";
+pub const REPORT_DESCRIPTION: &str = "Report a stage verdict to Helm. Only stage agents the orchestrator dispatched may call it, and only this report counts. kind: plan_review {verdict: approve|changes_required, findings?}; build {repo, branch, tip, base?, pr?}; code_review {repo, branch, tip, base, verdict: lgtm|lgtm_with_nits|changes_required, findings?, followUps?}; cleanup {repo, branch, tip, pr}; visual_review {repo, branch, verdict: pass|fail|pending, evidence?}; after_land {verdict: done|awaiting_merge|not_done, followUps?} (post-land work on a task that finished landing). Every report has summary (at most 8000 characters). tip is the full 40-character commit sha. Unknown fields are refused. If a refusal says Correctable, fix the report and send it once more; if it says Permanent, state the refusal in your reply.";
 
 fn workflow_schema() -> Value {
     json!({"type": "object", "properties": {
-        "action": {"type": "string", "enum": ["start", "plan", "status", "update", "skip", "park", "drop", "hand_off", "finish", "allowMore", "land"]},
+        "action": {"type": "string", "enum": ["start", "plan", "status", "update", "skip", "park", "drop", "hand_off", "finish", "allowMore", "land", "take_over", "allow_edit"]},
         "title": {"type": "string"}, "itemId": {"type": "string"}, "new": {"type": "boolean"},
         "text": {"type": "string"}, "path": {"type": "string"},
         "repo": {"type": "string"}, "branch": {"type": "string"}, "pr": {"type": "string"}, "base": {"type": "string"},
         "visual": {"type": "boolean"}, "stage": {"type": "string"}, "reason": {"type": "string"},
         "changes": {"type": "array", "items": {"type": "object", "properties": {"repo": {"type": "string"}, "branch": {"type": "string"}}}},
         "final": {"type": "boolean"}, "summary": {"type": "string"}, "n": {"type": "integer"},
-        "userQuote": {"type": "string"}, "grant": {"type": "string"}
+        "userQuote": {"type": "string"}, "grant": {"type": "string"},
+        "check": {"type": "boolean"}, "file": {"type": "string"}, "queued": {"type": "string"}
     }, "required": ["action"]})
 }
 
 fn report_schema() -> Value {
     json!({"type": "object", "properties": {
-        "kind": {"type": "string", "enum": ["plan_review", "build", "code_review", "cleanup", "visual_review"]},
+        "kind": {"type": "string", "enum": ["plan_review", "build", "code_review", "cleanup", "visual_review", "after_land"]},
         "verdict": {"type": "string"}, "repo": {"type": "string"}, "branch": {"type": "string"},
         "tip": {"type": "string"}, "base": {"type": "string"}, "pr": {"type": "string"},
         "summary": {"type": "string"},
@@ -118,6 +119,20 @@ pub fn workflow_call(
     } else {
         None
     };
+    // allow_edit: the file and the repositories are read by the host, before the transaction.
+    let (edit_file, edit_repo, cwd_repo) = if action == "allow_edit" {
+        let cwd = chat_cwd(db, chat);
+        let file = args
+            .get("file")
+            .and_then(Value::as_str)
+            .and_then(|f| crate::gates::lexical_abs(cwd.as_deref(), f));
+        let repo = file
+            .as_deref()
+            .and_then(|f| crate::gates::repo_of(f.parent().unwrap_or(f)));
+        (file, repo, cwd.as_deref().and_then(crate::gates::repo_of))
+    } else {
+        (None, None, None)
+    };
     db.write(|tx| {
         let s = settings::load(tx)?;
         if !mode::in_effect(tx, chat, &s)? {
@@ -136,7 +151,9 @@ pub fn workflow_call(
             "finish" => handoff::finish(tx, &x),
             "allowMore" => actions::allow_more(tx, &x, args),
             "land" => land_consented(tx, &x, args),
-            _ => Ok(Err("action must be start, plan, status, update, skip, park, drop, hand_off, finish, allowMore or land.".into())),
+            "take_over" => crate::claims::take_over(tx, &x, args),
+            "allow_edit" => crate::gates::allow_edit(tx, &x, args, edit_file.as_deref(), edit_repo.as_deref(), cwd_repo.as_deref()),
+            _ => Ok(Err("action must be start, plan, status, update, skip, park, drop, hand_off, finish, allowMore, land, take_over or allow_edit.".into())),
         }
     })
     .map_err(|e| ToolError::maybe(e.to_string()))?
@@ -183,9 +200,20 @@ fn kinds_of(ctx: &ToolCtx) -> Arc<AllowKinds> {
     })
 }
 
-/// After a tool call, tell the UI which chats' runs it wrote (a refusal can write a row too).
+/// After a tool call, tell the UI which chats' runs it wrote (a refusal can write a row too), and
+/// deliver the workflow notes it queued.
 fn emit(ctx: &ToolCtx) {
     crate::store::emit_touched(&*ctx.events);
+    let notes = crate::notes::take_pending();
+    if notes.is_empty() {
+        return;
+    }
+    if let (Some(db), Some(rt)) = (
+        ctx.services.get::<Database>(),
+        ctx.services.get::<helm_chats::ChatRuntime>(),
+    ) {
+        crate::notes::deliver_pending(&db, &rt, notes);
+    }
 }
 
 pub fn register_host_tools(r: &mut HostToolRegistry) {
@@ -204,6 +232,10 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 &args,
                 helm_core::now_ms(),
             );
+            if out.is_err() {
+                // A refused call delivers nothing it may have queued.
+                crate::notes::take_pending();
+            }
             afk_sign_off(ctx, &db);
             emit(ctx);
             let out = out?;

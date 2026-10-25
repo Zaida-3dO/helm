@@ -137,8 +137,33 @@ pub enum Outcome {
 /// Remove `worktree` if [`decide`] says so: unlink every link, then `git worktree remove` without
 /// force and `git worktree prune`. Anything unexpected keeps the worktree and says why.
 pub fn remove(git: &Git, worktree: &Path, in_use: Option<bool>) -> Outcome {
-    let facts = gather(git, worktree, in_use);
-    if let Decision::Keep(why) = decide(&facts) {
+    remove_with(git, worktree, &gather(git, worktree, in_use))
+}
+
+/// [`remove`] for a branch whose pull request was just merged at `landed_tip`: a worktree whose
+/// HEAD is still exactly that commit counts as merged even when the merge squashed or rebased it
+/// (so HEAD is not in the base branch's history). Every other rule is the same.
+pub fn remove_landed(
+    git: &Git,
+    worktree: &Path,
+    landed_tip: &str,
+    in_use: Option<bool>,
+) -> Outcome {
+    let mut facts = gather(git, worktree, in_use);
+    if facts.merged != Some(true) {
+        let head = git
+            .run(worktree, &["rev-parse", "HEAD"])
+            .filter(|o| o.ok())
+            .map(|o| o.text().to_owned());
+        if !landed_tip.is_empty() && head.as_deref() == Some(landed_tip) {
+            facts.merged = Some(true);
+        }
+    }
+    remove_with(git, worktree, &facts)
+}
+
+fn remove_with(git: &Git, worktree: &Path, facts: &Facts) -> Outcome {
+    if let Decision::Keep(why) = decide(facts) {
         return Outcome::Kept(why);
     }
     let Some(main) = main_checkout(git, worktree) else {
@@ -286,6 +311,26 @@ mod tests {
         git_ok(&busy, &["commit", "-q", "-am", "ahead"]);
         assert!(
             matches!(remove(&git, &busy, Some(false)), Outcome::Kept(m) if m.contains("not merged"))
+        );
+        assert!(shared.join("keep.txt").exists());
+        // Landed by a squash: HEAD is not in main, but it is exactly the commit that was merged.
+        let head = git
+            .run(&busy, &["rev-parse", "HEAD"])
+            .unwrap()
+            .text()
+            .to_owned();
+        let other = "0".repeat(40);
+        assert!(matches!(
+            remove_landed(&git, &busy, &other, Some(false)),
+            Outcome::Kept(m) if m.contains("not merged")
+        ));
+        assert!(matches!(
+            remove_landed(&git, &busy, &head, Some(true)),
+            Outcome::Kept(_)
+        ));
+        assert_eq!(
+            remove_landed(&git, &busy, &head, Some(false)),
+            Outcome::Removed { links_removed: 1 }
         );
         assert!(shared.join("keep.txt").exists());
 
