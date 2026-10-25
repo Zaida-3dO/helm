@@ -10,7 +10,7 @@ use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
 use helm_hub::telegram::{
     now_ms, parse_allowed, parse_receive, ApiError, ApiFuture, Bridge, Handled, Receive,
-    TelegramApi, TelegramConfig, HELLO, QUEUED,
+    TelegramApi, TelegramConfig, HELLO, POLL_SECONDS, QUEUED,
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
@@ -461,7 +461,13 @@ async fn receive_off_never_polls_but_still_names_the_bot() {
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
-        let methods: Vec<String> = api.calls().into_iter().map(|(m, _)| m).collect();
+        let calls = api.calls();
+        if let Some((_, body)) = calls.iter().find(|(m, _)| m == "getUpdates") {
+            // A short long poll, so a connection a router drops while idle is replaced quickly.
+            assert_eq!(body["timeout"], POLL_SECONDS);
+            const { assert!(POLL_SECONDS <= 30) };
+        }
+        let methods: Vec<String> = calls.into_iter().map(|(m, _)| m).collect();
         assert!(methods.contains(&"getMe".to_owned()), "{methods:?}");
         assert_eq!(
             methods.contains(&"getUpdates".to_owned()),

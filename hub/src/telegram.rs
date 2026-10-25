@@ -55,6 +55,10 @@ pub const TICK: Duration = Duration::from_millis(500);
 /// A message sent down the line and not acknowledged this long after is sent again on the same
 /// line. Helm retries a busy chat for less than this before giving up without an ack.
 pub const RESEND_AFTER: Duration = Duration::from_secs(45);
+/// How long one `getUpdates` long poll waits for a message. Kept short: a home router may drop
+/// a connection that is idle much longer, and then the poll hangs until the request timeout, so a
+/// message sent meanwhile waits for the next poll.
+pub const POLL_SECONDS: u64 = 25;
 /// How many recent `update_id`s are remembered, so an update is handled once.
 pub const SEEN_UPDATES: usize = 256;
 
@@ -673,7 +677,7 @@ impl Bridge {
                 .api
                 .call(
                     "getUpdates",
-                    json!({ "offset": offset, "timeout": 50, "allowed_updates": ["message"] }),
+                    json!({ "offset": offset, "timeout": POLL_SECONDS, "allowed_updates": ["message"] }),
                 )
                 .await;
             match r {
@@ -707,7 +711,8 @@ pub struct HttpApi {
 impl HttpApi {
     pub fn new(base: &str, token: &str) -> Self {
         let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(70)))
+            // A long poll plus headroom; any other call answers well inside it.
+            .timeout_global(Some(Duration::from_secs(POLL_SECONDS + 15)))
             .http_status_as_error(false)
             .build()
             .into();
