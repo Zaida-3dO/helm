@@ -9,6 +9,7 @@ import type { Invoke } from '../api/client.ts';
 import type {
   ChatRecord,
   Interaction,
+  MessageDetails,
   MessageRow,
   SendBehavior,
   Submission,
@@ -96,6 +97,10 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   const uid = () => (globalThis.crypto?.randomUUID?.() ?? `id-${Math.random().toString(16).slice(2)}`);
   /** Images put by the composer, kept so a sent message's thumbnail can be read back. */
   const attachments = new Map<string, { name: string; mime: string; bytes: string }>();
+  /** References made by the composer, kept so the sent message's bubble can show them. */
+  /** The images and references of a send, for the row written when its turn starts. */
+  const sentExtras = new Map<string, Pick<MessageDetails, 'images' | 'refs'>>();
+  const sentRefList = new Map<string, { kind: string; name: string; target: string }>();
 
   function emitChat(c: FakeChat) {
     c.chat = { ...c.chat, revision: rev(), updatedAt: now() };
@@ -396,7 +401,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     if (!next) return;
     c.pending = c.pending.filter((s) => s !== next);
     emitQueue(c);
-    addRow(c, { role: 'user', text: next.text, sourceKey: next.id, details: { submissionId: next.id } });
+    addRow(c, { role: 'user', text: next.text, sourceKey: next.id, details: { submissionId: next.id, ...sentExtras.get(next.id) } });
     void runTurn(c, next.text);
   }
 
@@ -487,8 +492,10 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         const img = attachments.get(id);
         return img ? [{ id, name: img.name, mime: img.mime, width: 160, height: 120 }] : [];
       });
-      if (!text.trim() && sentImages.length === 0) throw { code: 'refused', message: 'Nothing to send.' };
+      const sentRefs = ((a.attachments as string[] | undefined) ?? []).flatMap((id) => sentRefList.get(id) ?? []);
+      if (!text.trim() && sentImages.length === 0 && sentRefs.length === 0) throw { code: 'refused', message: 'Nothing to send.' };
       const busy = c.chat.status === 'running' || c.chat.status === 'starting';
+      sentExtras.set(String(a.submissionId), { ...(sentImages.length ? { images: sentImages } : {}), ...(sentRefs.length ? { refs: sentRefs } : {}) });
       const action = String(a.action);
       const mode = action === 'default' ? sendBehavior.mode : action;
       const s: Submission = {
@@ -503,7 +510,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       };
       if (c.chat.title === 'New chat') c.chat = { ...c.chat, title: text.slice(0, 40) };
       if (!busy) {
-        addRow(c, { role: 'user', text, sourceKey: s.id, details: { submissionId: s.id, ...(sentImages.length ? { images: sentImages } : {}) } });
+        addRow(c, { role: 'user', text, sourceKey: s.id, details: { submissionId: s.id, ...(sentImages.length ? { images: sentImages } : {}), ...(sentRefs.length ? { refs: sentRefs } : {}) } });
         void runTurn(c, text);
       } else if (mode === 'asap' || mode === 'steer') {
         s.mode = 'steer';
@@ -678,9 +685,16 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     // references and the native file dialog, faked.
     attachment_ref: (a) => {
       const target = String(a.target);
-      if (a.kind === 'chat') return { attachmentId: uid(), kind: 'chat', name: find(String(target)).chat.title };
+      const attachmentId = uid();
+      if (a.kind === 'chat') {
+        const name = find(String(target)).chat.title;
+        sentRefList.set(attachmentId, { kind: 'chat', name, target });
+        return { attachmentId, kind: 'chat', name };
+      }
       const name = target.split(/[\\/]/).filter(Boolean).pop() ?? target;
-      return { attachmentId: uid(), kind: /\.[a-z0-9]+$/i.test(name) ? 'file' : 'folder', name };
+      const kind = /\.[a-z0-9]+$/i.test(name) ? 'file' : 'folder';
+      sentRefList.set(attachmentId, { kind, name, target });
+      return { attachmentId, kind, name };
     },
     files_pick: () => ({ paths: ['C:\\Users\\me\\Documents\\notes.md', 'C:\\Users\\me\\Pictures\\shot.png'] }),
     attachment_put: (a) => {

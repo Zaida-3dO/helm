@@ -400,7 +400,7 @@ pub fn put_ref(
 pub fn refs_for(tx: &Transaction<'_>, submission_id: &str) -> rusqlite::Result<Vec<Ref>> {
     let mut st = tx.prepare(
         "SELECT id, kind, target, name FROM chat_attachment_refs
-         WHERE submission_id = ?1 ORDER BY created_at, id",
+         WHERE submission_id = ?1 ORDER BY created_at, rowid",
     )?;
     let rows = st
         .query_map([submission_id], |r| {
@@ -413,6 +413,20 @@ pub fn refs_for(tx: &Transaction<'_>, submission_id: &str) -> rusqlite::Result<V
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+/// A submission's references as the user row carries them, for the chips in the bubble; empty when
+/// it had none or the read failed.
+pub fn for_row(db: &helm_core::db::Database, submission_id: &str) -> Vec<crate::types::MessageRef> {
+    db.snapshot(|t| refs_for(t, submission_id))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| crate::types::MessageRef {
+            kind: r.kind,
+            name: r.name,
+            target: r.target,
+        })
+        .collect()
 }
 
 /// The prompt section for a message's references: files

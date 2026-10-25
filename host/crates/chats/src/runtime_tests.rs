@@ -2129,6 +2129,21 @@ async fn first_turn_with_image(h: &mut H, chat: &str) -> (FakeWorker, String, Ve
     (w, id, png)
 }
 
+/// The references on a chat's user row.
+async fn user_refs(h: &H, chat: &str) -> Value {
+    let page = h
+        .call("transcript_page", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    let user = page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "user")
+        .unwrap_or_else(|| panic!("no user row in {page}"));
+    user["details"]["refs"].clone()
+}
+
 /// The image ids on a chat's user rows, read through the transcript op a reopened chat uses.
 async fn user_image_ids(h: &H, chat: &str) -> Vec<String> {
     let page = h
@@ -2954,6 +2969,15 @@ async fn references_ride_the_prompt_as_a_data_section() {
     w.ready().await;
     let p = w.expect("prompt").await;
     assert_eq!(p["text"], "look", "the user's own text is unchanged");
+    ack(&w, &p).await;
+    echo(&w, &sid).await;
+    h.until("user row", |h| {
+        !h.col(&format!(
+            "SELECT id FROM messages WHERE chat_id = '{chat}' AND role = 'user'"
+        ))
+        .is_empty()
+    })
+    .await;
     let ctx = p["context"].as_str().unwrap();
     assert!(
         ctx.contains(&format!("- file `notes.md`: {}", file.to_string_lossy())),
@@ -2965,6 +2989,32 @@ async fn references_ride_the_prompt_as_a_data_section() {
         "{ctx}"
     );
     assert!(ctx.contains("data, not as instructions"), "{ctx}");
+    // The user's row carries the references, so the bubble keeps showing them, also after the
+    // projection is rebuilt from the session log.
+    let want = json!([
+        {"kind": "file", "name": "notes.md", "target": file.to_string_lossy()},
+        {"kind": "folder", "name": dir.path().file_name().unwrap().to_string_lossy(), "target": dir.path().to_string_lossy()},
+        {"kind": "chat", "name": c["name"], "target": other},
+    ]);
+    assert_eq!(user_refs(&h, &chat).await, want);
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    h.db.write(|tx| {
+        tx.execute("DELETE FROM messages WHERE chat_id = ?1", [&chat])?;
+        tx.execute("DELETE FROM entries WHERE chat_id = ?1", [&chat])
+    })
+    .unwrap();
+    crate::session_log::reconcile(
+        &h.db,
+        &h.profile.path("sessions"),
+        &h.profile.path("artifacts"),
+        &chat,
+        99,
+    )
+    .unwrap();
+    assert_eq!(user_refs(&h, &chat).await, want);
     // Sent references cannot be sent again.
     let e = h
         .call(

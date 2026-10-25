@@ -549,6 +549,11 @@ pub struct MessageDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub images: Option<Vec<MessageImage>>,
+    /// For a user row: the files, folders and chats attached by reference, shown as chips in the
+    /// bubble.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub refs: Option<Vec<MessageRef>>,
     /// For an Agent tool row: the subagent's final state and report, written when it ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -565,6 +570,18 @@ pub struct MessageImage {
     pub mime: String,
     pub width: u32,
     pub height: u32,
+}
+
+/// One file, folder or chat attached to a user message by reference.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageRef {
+    /// `file`, `folder` or `chat`.
+    pub kind: String,
+    /// The file or folder name, or the chat's title when it was attached.
+    pub name: String,
+    /// The absolute path, or the referenced chat's id.
+    pub target: String,
 }
 
 /// Which server a tool came from: Helm's own host tools, an MCP server, or Claude Code itself.

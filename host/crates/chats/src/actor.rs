@@ -1365,6 +1365,10 @@ impl Actor {
             if !images.is_empty() {
                 details["images"] = json!(images);
             }
+            let refs = crate::attachments::for_row(&self.sh.db, sid);
+            if !refs.is_empty() {
+                details["refs"] = json!(refs);
+            }
             Some(RowWrite {
                 source_key: format!("u:{sid}"),
                 role: "user",
@@ -2159,6 +2163,7 @@ impl Actor {
             let sid = str_of(&msg, "submissionId").unwrap_or(mid);
             let sub = self.submission(&sid);
             let images = crate::message_images::for_submission(&self.sh.db, &sid);
+            let refs = crate::attachments::for_row(&self.sh.db, &sid);
             let entry = MessageEntry {
                 id: format!("u:{sid}"),
                 parent_id: None,
@@ -2182,6 +2187,7 @@ impl Actor {
                         .map(|s| s.origin)
                         .filter(|o| *o != SubmissionOrigin::Typed),
                     images: (!images.is_empty()).then_some(images),
+                    refs: (!refs.is_empty()).then_some(refs),
                     ..Default::default()
                 },
             };

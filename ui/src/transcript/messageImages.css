@@ -61,3 +61,62 @@ button.msg-image:hover {
 .msg-image-full-pending {
   opacity: 0.7;
 }
+
+/* Files, folders and chats attached by reference, in the user's bubble. */
+.msg-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.msg-refs:last-child {
+  margin-bottom: 0;
+}
+
+.msg-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: calc(11 * var(--ui-unit, 1px));
+}
+
+.msg-ref .ui-icon {
+  flex: none;
+  color: var(--muted);
+}
+
+.msg-ref-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-ref-chat {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line-strong));
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  font-weight: 600;
+}
+
+.msg-ref-chat .ui-icon {
+  color: var(--accent);
+}
+
+button.msg-ref {
+  cursor: var(--cursor-pointer);
+}
+
+button.msg-ref:hover {
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+}
+
+button.msg-ref:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

@@ -47,6 +47,7 @@ export type { MessageDetails } from './MessageDetails.ts';
 export type { MessageEditOpenArgs } from './MessageEditOpenArgs.ts';
 export type { MessageEditOpenResult } from './MessageEditOpenResult.ts';
 export type { MessageImage } from './MessageImage.ts';
+export type { MessageRef } from './MessageRef.ts';
 export type { MessageResendArgs } from './MessageResendArgs.ts';
 export type { MessageRole } from './MessageRole.ts';
 export type { MessageRow } from './MessageRow.ts';

@@ -7,6 +7,7 @@ import type { MessageRow } from '../api/types.ts';
 import { EditMessage, type EditState } from './EditMessage.tsx';
 import { Markdown, type LinkTarget } from './Markdown.tsx';
 import { MessageImages } from './MessageImages.tsx';
+import { MessageRefs } from './MessageRefs.tsx';
 import { bubbleText, fromTelegram } from './origin.ts';
 import { IconPaperPlane } from '../ui/icons.tsx';
 import { ReplyActions, UserActions } from './MessageActions.tsx';
@@ -121,6 +122,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
         ) : (
           <div className="bubble">
             <MessageImages chatId={ctx.chatId} images={row.details?.images} />
+            <MessageRefs refs={row.details?.refs} />
             <Markdown text={bubbleText(row)} onLink={ctx.onLink} />
           </div>
         )}
