@@ -1104,7 +1104,13 @@ mod tests {
             "mcp__github__merge_pull_request",
             merge.clone(),
         );
-        assert!(!refused.allow && refused.reason.unwrap().contains("send this exact call again"));
+        assert!(
+            !refused.allow
+                && refused
+                    .reason
+                    .unwrap()
+                    .contains("send this exact call again")
+        );
         let arm = t.bash("# helm-override: merge it [user: \"push the hotfix to main\"]");
         assert!(!arm.allow && arm.reason.unwrap().contains("armed"));
         assert!(
