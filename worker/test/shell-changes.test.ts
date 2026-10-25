@@ -17,9 +17,9 @@ test("a shell command's changed files are found by comparing the checkout before
     for (const f of ["a.txt", "b.txt", "c.txt"]) fs.writeFileSync(path.join(repo, f), `${f}\n`);
     git(repo, "add", "."), git(repo, "commit", "-q", "-m", "one");
     const at = (f: string) => `${repo.replace(/\\/g, "/")}/${f}`;
-    const cap = new ShellChangeCapture(repo);
+    const cap = new ShellChangeCapture();
     const run = async (id: string, command: () => void): Promise<string[]> => {
-      await cap.begin(id);
+      await cap.begin(id, repo);
       command();
       return (await cap.finish(id)).sort();
     };
@@ -44,13 +44,22 @@ test("a shell command's changed files are found by comparing the checkout before
     git(repo, "commit", "-q", "-am", "three");
     assert.deepEqual(await run("switch", () => git(repo, "checkout", "-q", "main")), [at("c.txt")]);
     // Two commands at once in one checkout cannot be told apart: neither is credited.
-    await cap.begin("p1");
-    await cap.begin("p2");
+    await cap.begin("p1", repo);
+    await cap.begin("p2", repo);
     fs.writeFileSync(path.join(repo, "a.txt"), "someone changed this\n");
     assert.deepEqual([await cap.finish("p1"), await cap.finish("p2")], [[], []]);
+    // A call that never ends is dropped once too many are waiting, and a slow git is cut off.
+    for (let i = 0; i < 8; i++) await cap.begin(`stuck${i}`, repo);
+    await cap.begin("ninth", repo);
+    assert.deepEqual(await cap.finish("ninth"), [], "past eight waiting calls, a new one is not tracked");
+    cap.clear();
+    const slow = new ShellChangeCapture(() => new Promise<string | null>(() => undefined), 50);
+    const started = Date.now();
+    await slow.begin("slow", repo);
+    assert.ok(Date.now() - started < 1_000 && (await slow.finish("slow")).length === 0, "a command is not held up past the deadline");
     // Outside a checkout, or for a call that was never tracked: nothing, and no error.
-    const plain = new ShellChangeCapture(dir);
-    await plain.begin("x");
+    const plain = new ShellChangeCapture();
+    await plain.begin("x", dir);
     assert.deepEqual([await plain.finish("x"), await cap.finish("never")], [[], []]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

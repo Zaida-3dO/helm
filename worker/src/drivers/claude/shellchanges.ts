@@ -15,6 +15,12 @@ import * as path from "node:path";
 
 export const SHELL_CHANGES_HOOK_ID = "helm-shell-changes";
 export const GIT_TIMEOUT_MS = 1_500;
+/** The most a command may be held up before it starts, snapshots included. */
+export const BEGIN_DEADLINE_MS = 1_500;
+/** Commands tracked at once; past this, new ones are not tracked. */
+export const MAX_PENDING = 8;
+/** File lookups run this many at a time. */
+const STAT_PARALLEL = 16;
 /** A checkout listing more changed files than this is skipped. */
 export const MAX_LISTED = 2_000;
 /** Paths reported for one command. */
@@ -82,8 +88,19 @@ async function snapshot(git: Git, root: string): Promise<Snapshot | null> {
   const parsed = out === null ? null : parseStatus(out);
   if (!parsed) return null;
   const dirty = new Map<string, string>();
-  for (const rel of parsed.paths) dirty.set(rel, await signature(root, rel));
+  await eachParallel(parsed.paths, async (rel) => {
+    dirty.set(rel, await signature(root, rel));
+  });
   return { oid: parsed.oid, dirty };
+}
+
+/** Runs `fn` over `items` a few at a time. */
+async function eachParallel<T>(items: T[], fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) await fn(items[next++] as T);
+  };
+  await Promise.all(Array.from({ length: Math.min(STAT_PARALLEL, items.length) }, worker));
 }
 
 interface Pending {
@@ -95,21 +112,42 @@ interface Pending {
 
 export class ShellChangeCapture {
   private readonly pending = new Map<string, Pending>();
-  private readonly cwd: string;
   private readonly git: Git;
+  private readonly deadlineMs: number;
 
-  constructor(cwd: string, git: Git = runGit) {
-    this.cwd = cwd;
+  constructor(git: Git = runGit, deadlineMs: number = BEGIN_DEADLINE_MS) {
     this.git = git;
+    this.deadlineMs = deadlineMs;
   }
 
-  /** Before a command runs. Never throws; a command with no snapshot is simply not tracked. */
-  async begin(id: string): Promise<void> {
+  /**
+   * Before a command runs, in the folder it runs in. Never throws, and never takes longer than
+   * the deadline; a command with no snapshot is simply not tracked.
+   */
+  async begin(id: string, cwd: string): Promise<void> {
+    if (this.pending.size >= MAX_PENDING) return;
+    let late = false;
+    const work = this.snapshotFor(id, cwd, () => late);
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        late = true;
+        resolve();
+      }, this.deadlineMs);
+    });
     try {
-      const root = await findRoot(this.cwd);
+      await Promise.race([work, deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async snapshotFor(id: string, cwd: string, late: () => boolean): Promise<void> {
+    try {
+      const root = await findRoot(cwd);
       if (!root) return;
       const before = await snapshot(this.git, root);
-      if (!before) return;
+      if (!before || late()) return;
       let overlapped = false;
       for (const other of this.pending.values()) {
         if (other.root === root) {

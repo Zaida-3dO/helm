@@ -42,6 +42,8 @@ export interface RuntimeSettings {
   toolOutputCap: boolean;
   /** Claude Code's own schedule tools may be offered; each call is redirected to Helm's schedules. */
   scheduleTools: boolean;
+  /** Record which files shell commands change, for the turn's change card. */
+  shellChanges: boolean;
   /** null: Claude Code's default model. */
   model: string | null;
   effort: string;
