@@ -66,6 +66,15 @@ describe("installer: what the NSIS bundle carries", () => {
     }
   });
 
+  test("the installer carries the git stand-in beside helm.exe and builds it first", () => {
+    // Kept out of tauri.conf.json so that debug builds, which never build the stand-in in release,
+    // do not fail on a missing resource; the installer build adds it with --config.
+    const overlay = JSON.parse(fs.readFileSync(path.join(REPO, "host", "app", "tauri.installer.json"), "utf8")) as { bundle: { resources: Record<string, string> } };
+    assert.equal(overlay.bundle.resources["../../target/release/helm-git.exe"], "helm-git.exe", "helm-git.exe lands next to helm.exe, where the host looks for it");
+    const script = (JSON.parse(fs.readFileSync(path.join(REPO, "package.json"), "utf8")) as { scripts: Record<string, string> }).scripts["build:installer"]!;
+    assert.match(script, /cargo build --release -p helm-gitshim && tauri build .*--config host\/app\/tauri\.installer\.json/, "the stand-in is built before the bundle and the overlay is applied");
+  });
+
   test("every relative import in a bundled file lands inside the bundle", () => {
     const missing: string[] = [];
     for (const r of bundled()) {

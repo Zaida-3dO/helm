@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../../target/release/helm-git.exe": "helm-git.exe"
+    }
+  }
+}
