@@ -19,7 +19,7 @@ import { useSelection, useShell } from '../shell/context.ts';
 import { Button, ConfirmDialog, ContextMenu, Dialog, TextInput, useBinding, type ConfirmSpec, type MenuItem } from '../ui/index.ts';
 import { SidebarActions, compactChat } from './actions.ts';
 import { SidebarData, errorText } from './data.ts';
-import { dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
+import { canSitUnder, dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
 import { chatMenuItems, projectMenuItems } from './menus.ts';
 import { buildList, chatAncestors, visibleChatOrder, type ListItem } from './model.ts';
 import { setVisibleOrder } from './rowOrder.ts';
@@ -385,7 +385,19 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       if (chat) {
         const row = data.row(chat.dataset.chatId ?? '');
         if (!row) return null;
-        return { kind: 'chat', chatId: row.chatId, groupId: row.groupProjectId, pinned: row.pinned, lowerHalf: lowerOf(chat) };
+        const moving = dragRef.current?.src;
+        const rows = data.getSnapshot().rows;
+        const mine = moving?.kind === 'chat' ? moving.chatId : null;
+        return {
+          kind: 'chat',
+          chatId: row.chatId,
+          groupId: row.groupProjectId,
+          pinned: row.pinned,
+          lowerHalf: lowerOf(chat),
+          parentChatId: row.parentChatId,
+          levelOk: mine ? canSitUnder(rows, mine, row.parentChatId) : true,
+          nestOk: mine ? canSitUnder(rows, mine, row.chatId) : true,
+        };
       }
       return null;
     };
@@ -417,7 +429,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         const row = data.row(a.chatId);
         if (!row) return;
         if (a.kind === 'chat-to-group') void act.moveTo(row, a.groupId);
-        else if (a.kind === 'chat-before') void act.reorderBefore(row, a.beforeChatId, a.moveGroup ? a.groupId : undefined);
+        else if (a.kind === 'chat-before') void act.reorderBefore(row, a.beforeChatId, { parentChatId: a.parentChatId, pinned: a.pinned, ...(a.moveGroup ? { groupProjectId: a.groupId } : {}) });
         else {
           userCollapsed.current.delete(a.parentChatId);
           setExpanded((s) => new Set(s).add(a.parentChatId));

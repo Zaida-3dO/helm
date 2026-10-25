@@ -209,6 +209,17 @@ test('chats nest under held parents in the same group, capped at depth 2, collap
   assert.equal(a.expanded, false);
 });
 
+test('chats in a group follow the host order: pinned first, then dragged position, then newest', () => {
+  const rows = [
+    row('a', 'g', { createdAt: 1 }),
+    row('b', 'g', { createdAt: 2 }),
+    row('c', 'g', { createdAt: 3 }),
+    row('d', 'g', { createdAt: 4, pinned: true }),
+    row('e', 'g', { createdAt: 0, position: 0 }),
+  ];
+  assert.deepEqual(shape(buildList([project('g')], rows, opts)), ['H0:g', 'C0:d', 'C0:e', 'C0:c', 'C0:b', 'C0:a']);
+});
+
 test('a chat cycle is cut rather than looping', () => {
   const { order } = nestRows([row('a', 'g', { parentChatId: 'b' }), row('b', 'g', { parentChatId: 'a' })]);
   assert.deepEqual(
@@ -388,6 +399,31 @@ test('archiving a chat or a project shows an Undo toast whose button undoes it',
   await act.archiveProject(project('p1', { name: 'Atlas' }));
   assert.equal(toast.current()?.text, 'Archived “Atlas”');
   toast.dismiss(toast.current()!.id);
+});
+
+test('dropping a chat before another sends the target row level in one call, with an undo back to where it was', async () => {
+  const calls: unknown[] = [];
+  const undo = new UndoStack();
+  const act = new SidebarActions({
+    undo,
+    onError: (m: string) => calls.push(`error ${m}`),
+    pops: { organize: async (a: unknown) => (calls.push(a), []) },
+    data: { mergeRows: () => undefined },
+  } as unknown as ActionDeps);
+  // Before a nested child of p, from the top level: it takes parent p.
+  await act.reorderBefore(row('a', 'g'), 'k', { parentChatId: 'p', pinned: false });
+  // Before a top-level row of another group, from under p: top level there.
+  await act.reorderBefore(row('b', 'g', { parentChatId: 'p' }), 'z', { parentChatId: null, pinned: false, groupProjectId: 'h' });
+  // Same level: nothing to undo.
+  await act.reorderBefore(row('c', 'g'), 'k', { parentChatId: null, pinned: false });
+  assert.deepEqual(calls, [
+    { chatId: 'a', parentChatId: 'p', pinned: false, beforeChatId: 'k' },
+    { chatId: 'b', parentChatId: null, pinned: false, beforeChatId: 'z', groupProjectId: 'h' },
+    { chatId: 'c', parentChatId: null, pinned: false, beforeChatId: 'k' },
+  ]);
+  assert.equal(undo.size, 2);
+  await act.undo();
+  assert.deepEqual(calls.at(-1), { chatId: 'b', groupProjectId: 'g', parentChatId: 'p', pinned: false });
 });
 
 test('archiving after a stop retries only while the chat still counts as working', async () => {

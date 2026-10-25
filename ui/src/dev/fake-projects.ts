@@ -176,9 +176,29 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
         const c = chats.get(id)!;
         if (typeof args.groupProjectId === 'string') c.group = args.groupProjectId === c.chat.projectId ? null : args.groupProjectId;
         if ('parentChatId' in args) c.parent = (args.parentChatId as string) ?? null;
-        if (typeof args.pinned === 'boolean') c.pinned = args.pinned;
-        emit({ kind: 'sidebar', chatIds: [id] });
-        return [toRow(id)];
+        if (typeof args.pinned === 'boolean' && args.pinned !== c.pinned) {
+          c.pinned = args.pinned;
+          c.position = null;
+        }
+        const changed = [id];
+        if (typeof args.beforeChatId === 'string') {
+          // The host's rule: a chat is reordered only among chats of its own group, pin state, parent
+          // chat and archived state, shown newest first unless positioned.
+          const same = (k: string) => groupOf(k) === groupOf(id) && chats.get(k)!.pinned === c.pinned && chats.get(k)!.parent === c.parent && chats.get(k)!.archived === c.archived;
+          const order = [...chats.keys()]
+            .filter(same)
+            .sort((a, b) => (chats.get(a)!.position ?? 1e9) - (chats.get(b)!.position ?? 1e9) || chats.get(b)!.chat.createdAt - chats.get(a)!.chat.createdAt);
+          const rest = order.filter((k) => k !== id);
+          const at = rest.indexOf(args.beforeChatId);
+          if (at < 0) throw new ApiError('refused', 'A chat can only be reordered among chats of its own project and pin state.');
+          rest.splice(at, 0, id);
+          rest.forEach((k, i) => {
+            chats.get(k)!.position = i;
+            if (k !== id) changed.push(k);
+          });
+        }
+        emit({ kind: 'sidebar', chatIds: changed });
+        return changed.map(toRow);
       }
       case 'board_connection_get':
         return { url, hasToken };

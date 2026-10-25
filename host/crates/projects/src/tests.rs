@@ -554,6 +554,51 @@ fn reorder_stays_within_the_group_and_pin_state() {
     )
     .is_err());
     assert_eq!(row(&db, &b).attention, Some(RowAttention::Pinned));
+
+    // A drop before a row at another level carries that row's parent and pin state with it, and
+    // the one call lands. Without them the same drop is refused.
+    let n1 = chat_in(&db, "C:/w/app", 5);
+    let n2 = chat_in(&db, "C:/w/app", 6);
+    for n in [&n1, &n2] {
+        organize(
+            &db,
+            ChatOrganizeArgs {
+                chat_id: n.clone(),
+                parent_chat_id: Some(Some(c.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let drop_a = |parent: Option<Option<String>>, pinned: Option<bool>, before: &str| {
+        organize(
+            &db,
+            ChatOrganizeArgs {
+                chat_id: a.clone(),
+                parent_chat_id: parent,
+                pinned,
+                before_chat_id: Some(before.to_owned()),
+                ..Default::default()
+            },
+        )
+    };
+    assert!(
+        drop_a(None, None, &n1).is_err(),
+        "a top-level chat before a nested one"
+    );
+    drop_a(Some(Some(c.clone())), None, &n1).unwrap();
+    assert_eq!(row(&db, &a).parent_chat_id.as_deref(), Some(c.as_str()));
+    // Now nested: before the pinned top-level row b, taking its level (top level, pinned).
+    assert!(
+        drop_a(None, None, &b).is_err(),
+        "unpinned before a pinned row"
+    );
+    drop_a(Some(None), Some(true), &b).unwrap();
+    let r = row(&db, &a);
+    assert_eq!(r.parent_chat_id, None);
+    assert_eq!(r.attention, Some(RowAttention::Pinned));
+    // A drop at the level it already has changes nothing and is not refused.
+    drop_a(Some(None), Some(true), &b).unwrap();
 }
 
 #[test]

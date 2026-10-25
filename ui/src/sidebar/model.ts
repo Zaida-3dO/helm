@@ -155,6 +155,12 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     list.push(r);
     byGroup.set(r.groupProjectId, list);
   }
+  // The host's order within a group: pinned first, then by dragged position, then newest first. The
+  // rows may have arrived in another order (a drag changes positions after they were loaded); equal
+  // rows keep the order they came in.
+  for (const list of byGroup.values()) {
+    list.sort((a, b) => Number(b.pinned) - Number(a.pinned) || (a.position ?? Number.MAX_SAFE_INTEGER) - (b.position ?? Number.MAX_SAFE_INTEGER) || b.createdAt - a.createdAt || 0);
+  }
   const selectedGroup = o.selectedChatId ? rows.find((r) => r.chatId === o.selectedChatId)?.groupProjectId : undefined;
   const { roots, kids } = projectChildren(projects);
   const byId = new Map(projects.map((p) => [p.id, p]));

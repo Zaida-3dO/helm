@@ -108,21 +108,15 @@ export class SidebarActions {
     return this.move(row, { chatId: row.chatId, parentChatId: null }, 'Move chat to top level');
   }
 
-  reorderBefore(row: SidebarRow, beforeChatId: string, groupProjectId?: string): Promise<void> {
-    const back = this.placement(row);
+  /** Drop `row` before another chat, at that chat's level: its group (when different), its parent
+   *  chat and its pin state travel with the move, so the host reorders among true siblings. */
+  reorderBefore(row: SidebarRow, beforeChatId: string, level: { parentChatId: string | null; pinned: boolean; groupProjectId?: string }): Promise<void> {
+    const back: ChatOrganizeArgs = { ...this.placement(row), pinned: row.pinned };
+    const forward: ChatOrganizeArgs = { chatId: row.chatId, parentChatId: level.parentChatId, pinned: level.pinned, beforeChatId, ...(level.groupProjectId ? { groupProjectId: level.groupProjectId } : {}) };
+    const levelChanged = !!level.groupProjectId || level.parentChatId !== row.parentChatId || level.pinned !== row.pinned;
     return this.run(async () => {
-      if (groupProjectId) await this.organize({ chatId: row.chatId, groupProjectId, parentChatId: null });
-      await this.organize({ chatId: row.chatId, beforeChatId });
-      if (groupProjectId) {
-        this.d.undo.push({
-          label: 'Move chat',
-          undo: () => this.organize(back),
-          redo: async () => {
-            await this.organize({ chatId: row.chatId, groupProjectId, parentChatId: null });
-            await this.organize({ chatId: row.chatId, beforeChatId });
-          },
-        });
-      }
+      await this.organize(forward);
+      if (levelChanged) this.d.undo.push({ label: 'Move chat', undo: () => this.organize(back), redo: () => this.organize(forward) });
     }).then(() => undefined);
   }
 

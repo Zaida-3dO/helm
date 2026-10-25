@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ProjectNode, SidebarRow } from '../api/projects.ts';
-import { dropAction, passedThreshold } from './drag.ts';
+import { canSitUnder, dropAction, passedThreshold } from './drag.ts';
 import { chatMenuItems, nestTargets, projectMenuItems, projectNestTargets, type ChatMenuActions, type ProjectMenuActions } from './menus.ts';
 import { UNDO_LIMIT, UndoStack } from './undo.ts';
 
@@ -23,19 +23,40 @@ test('drag starts only after 4 px', () => {
   assert.equal(passedThreshold(4, 0), true);
 });
 
-test('drop decisions: onto a group, before a chat, under a chat; no pin change by drop', () => {
+test('drop decisions: onto a group, before a chat at its level, under a chat; levels a chat may not take are not offered', () => {
   const src = { kind: 'chat' as const, chatId: 'a', groupId: 'g', pinned: false };
   assert.deepEqual(dropAction(src, { kind: 'header', projectId: 'h', parentId: null, pinned: false, lowerHalf: false }), { kind: 'chat-to-group', chatId: 'a', groupId: 'h' });
   assert.equal(dropAction(src, { kind: 'header', projectId: 'g', parentId: null, pinned: false, lowerHalf: false }), null, 'its own group changes nothing');
-  assert.deepEqual(dropAction(src, { kind: 'chat', chatId: 'b', groupId: 'g', pinned: false, lowerHalf: false }), { kind: 'chat-before', chatId: 'a', beforeChatId: 'b', groupId: 'g', moveGroup: false });
+  assert.deepEqual(dropAction(src, { kind: 'chat', chatId: 'b', groupId: 'g', pinned: false, lowerHalf: false }), { kind: 'chat-before', chatId: 'a', beforeChatId: 'b', groupId: 'g', moveGroup: false, parentChatId: null, pinned: false });
   assert.deepEqual(dropAction(src, { kind: 'chat', chatId: 'b', groupId: 'g', pinned: false, lowerHalf: true }), { kind: 'chat-nest', chatId: 'a', parentChatId: 'b', groupId: 'g', moveGroup: false });
-  assert.equal(dropAction(src, { kind: 'chat', chatId: 'b', groupId: 'g', pinned: true, lowerHalf: false }), null, 'no pin by drop');
+  // Before a nested child or a pinned row: the chat takes that row's parent and pin state.
+  assert.deepEqual(dropAction(src, { kind: 'chat', chatId: 'k', groupId: 'g', pinned: false, lowerHalf: false, parentChatId: 'b', levelOk: true }), { kind: 'chat-before', chatId: 'a', beforeChatId: 'k', groupId: 'g', moveGroup: false, parentChatId: 'b', pinned: false });
+  assert.deepEqual(dropAction(src, { kind: 'chat', chatId: 'b', groupId: 'h', pinned: true, lowerHalf: false, parentChatId: null }), { kind: 'chat-before', chatId: 'a', beforeChatId: 'b', groupId: 'h', moveGroup: true, parentChatId: null, pinned: true });
+  assert.equal(dropAction(src, { kind: 'chat', chatId: 'k', groupId: 'g', pinned: false, lowerHalf: false, parentChatId: 'b', levelOk: false }), null, 'a level it may not take');
+  assert.equal(dropAction(src, { kind: 'chat', chatId: 'b', groupId: 'g', pinned: false, lowerHalf: true, nestOk: false }), null, 'no nesting where it does not fit');
   assert.equal(dropAction(src, { kind: 'chat', chatId: 'a', groupId: 'g', pinned: false, lowerHalf: true }), null, 'not onto itself');
   const p = { kind: 'project' as const, projectId: 'p', parentId: null, pinned: false };
   assert.deepEqual(dropAction(p, { kind: 'header', projectId: 'q', parentId: null, pinned: false, lowerHalf: false }), { kind: 'project-before', projectId: 'p', beforeProjectId: 'q' });
   assert.deepEqual(dropAction(p, { kind: 'header', projectId: 'q', parentId: 'x', pinned: false, lowerHalf: true }), { kind: 'project-nest', projectId: 'p', parentId: 'q' });
   assert.equal(dropAction(p, { kind: 'header', projectId: 'q', parentId: 'x', pinned: false, lowerHalf: false }), null, 'reorder only among siblings');
   assert.equal(dropAction(p, { kind: 'chat', chatId: 'c', groupId: 'g', pinned: false, lowerHalf: false }), null);
+});
+
+test('a chat may sit under a parent unless that is itself, its own started chat, or past three levels', () => {
+  const rows = [row('a'), row('b', { parentChatId: 'a' }), row('c', { parentChatId: 'b' }), row('d'), row('e', { parentChatId: 'd' })];
+  const table: [string, string | null, boolean][] = [
+    ['d', null, true],
+    ['c', null, true],
+    ['d', 'a', true],
+    ['d', 'b', false], // d carries e: three levels
+    ['d', 'c', false], // c is already two levels down
+    ['a', 'c', false], // under its own started chat
+    ['a', 'a', false],
+    ['a', 'd', false], // a carries two levels: it can only stay at the top
+    ['e', 'b', true],
+    ['c', 'a', true],
+  ];
+  for (const [chat, parent, ok] of table) assert.equal(canSitUnder(rows, chat, parent), ok, `${chat} under ${parent}`);
 });
 
 test('the undo stack holds 50, undoes newest first, and a new action clears redo', async () => {
