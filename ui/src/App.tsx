@@ -144,12 +144,12 @@ function Frame({ flushers }: { flushers: Flushers }) {
           <NewChatHost flushers={flushers} sendShortcut={sendShortcut} /> {/* the new-chat page */}
         </div>
         <TerminalDock />
+        <Notifications /> {/* over the chat column only, never the side panel */}
       </main>
       <SidePanel api={shell.api} chatId={chatId} /> {/* side panel */}
       <ToastSlotView />
       <ShellShortcuts />
       <SettingsToast api={shell.api} bus={shell.bus} onOpenChat={(id) => shell.select(id)} /> {/* settings-change toast */}
-      <Notifications />
       <SettingsDialog />
       <SearchDialog /> {/* Mod+K search */}
       <LeafSlots /> {/* registers the action slots */}

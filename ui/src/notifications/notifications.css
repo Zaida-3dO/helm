@@ -1,14 +1,15 @@
 /* The completion stack, bottom-right. Opaque like every floating notice. */
-/* Top right, under the top bar: at the bottom it sat over the composer's Send and attach buttons. */
+/* Top right of the chat column, under the top bar: at the bottom it sat over the composer's Send and
+   attach buttons, and anchored to the window it would sit over the side panel's actions. */
 .notice-stack {
-  position: fixed;
+  position: absolute;
   right: 18px;
   top: 58px;
   z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: min(360px, calc(100vw - 36px));
+  width: min(360px, calc(100% - 36px));
 }
 .completion-notice {
   align-items: flex-start;
