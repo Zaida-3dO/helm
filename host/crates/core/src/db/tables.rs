@@ -101,6 +101,7 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     // Schedules: saved prompts and their run receipts.
     ("schedules", Tool),
     ("schedule_runs", Data),
+    ("schedule_reminders", Data),
     // Workflow: Settings > Orchestrator and the per-chat Orchestrator state.
     (
         "workflow_settings",
