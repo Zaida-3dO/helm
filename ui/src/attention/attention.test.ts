@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AttentionRow, AttentionSummary } from '../api/types.ts';
-import { countText, inboxCount, inboxRows, nextAttention, snoozeChoices, whenText } from './model.ts';
+import { countText, flagFor, inboxCount, inboxRows, nextAttention, snoozeChoices, whenText } from './model.ts';
 
 const row = (chatId: string, kind: AttentionRow['kind'] = 'question'): AttentionRow => ({ chatId, title: chatId, project: 'p', kind, reason: 'r' });
 const summary = (over: Partial<AttentionSummary> = {}): AttentionSummary => ({
@@ -81,4 +81,13 @@ test('snooze choices: 20 min, 1 h, 3 h, tomorrow 9:15, and Monday 9:15 only when
   const m = snoozeChoices(mon).find((x) => x.id === 'monday')!;
   assert.equal(new Date(m.until).getDate(), 2);
   assert.equal(whenText(new Date(2026, 9, 26, 23, 5), mon), '23:05');
+});
+
+test('a chat shows the note only while the host lists it as flagged and the check is on', () => {
+  const s = summary({ flagged: [{ ...row('f', 'triage'), reason: 'The tests were never run.' }], needsYou: [row('a')] });
+  assert.equal(flagFor(s, 'f')?.reason, 'The tests were never run.');
+  assert.equal(flagFor(s, 'a'), null, 'a chat waiting on you has its own card, not this note');
+  assert.equal(flagFor(s, 'f', false), null, 'switching the check off hides it at once');
+  assert.equal(flagFor(summary(), 'f'), null, 'once the flag clears, the note goes');
+  assert.equal(flagFor(null, 'f'), null);
 });

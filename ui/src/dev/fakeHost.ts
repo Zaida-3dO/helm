@@ -92,6 +92,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   let revision = 1;
   let rowId = 1;
   const chats = new Map<string, FakeChat>();
+  /** Chats the idle check has flagged, with its reason. A prompt containing "flag" leaves one after its turn; new activity, snooze or mark complete clears it. */
+  const flags = new Map<string, string>();
   let sendBehavior: SendBehavior = { ...HOME_SEND_BEHAVIOR };
   const prefs = new Map<string, unknown>();
   const answers = new Map<string, (a: Record<string, unknown>) => void>();
@@ -329,6 +331,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     let stopped = false;
     const cancelled = () => stopped;
     c.turn = { cancel: () => (stopped = true) };
+    flags.delete(c.chat.id);
+    if (/flag/i.test(text)) flags.set(c.chat.id, `You asked for "${text.slice(0, 40)}" and the last reply stopped before the tests were run. It looks unfinished: nobody has confirmed the change works.`);
     setStatus(c, 'running');
     try {
       await sleep(step * 2, cancelled);
@@ -427,7 +431,10 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       running: busy.slice(0, 8).map((c) => row(c, 'running')),
       unread: unread.slice(0, 8).map((c) => row(c, 'unread')),
       stalled: [],
-      flagged: [],
+      flagged: list
+        .filter((c) => flags.has(c.chat.id) && !['starting', 'running', 'stopping'].includes(c.chat.status) && !needs.includes(c) && !unread.includes(c))
+        .slice(0, 8)
+        .map((c) => ({ ...row(c, 'triage'), reason: flags.get(c.chat.id) ?? '' })),
       revision,
     };
   }
@@ -691,7 +698,11 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       emitAttention();
       return c.chat;
     },
-    attention_address: () => null,
+    attention_address: (a) => {
+      flags.delete(String(a.chatId));
+      emitAttention();
+      return null;
+    },
     autocomplete_suggest: (a) => {
       const words = ['component', 'composer', 'completion', 'transcript', 'thinking'];
       const last = String(a.draft ?? '').split(/\s/).pop() ?? '';
@@ -745,7 +756,11 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       { name: 'review', description: 'Review the current changes' },
       { name: 'compact', description: 'Compact the conversation' },
     ],
-    attention_snooze: () => null,
+    attention_snooze: (a) => {
+      flags.delete(String(a.chatId));
+      emitAttention();
+      return null;
+    },
     unread_mark: (a) => {
       const c = find(a.chatId);
       c.chat = { ...c.chat, unread: { ...c.chat.unread, markToken: uid() } };

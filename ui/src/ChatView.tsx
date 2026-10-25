@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import type { ChatOps } from './api/ops.ts';
 import type { MessageRow } from './api/types.ts';
 import { HOME_SEND_BEHAVIOR } from './api/types.ts';
+import { FlagNote } from './attention/index.ts';
 import { Composer, isBusy } from './composer/Composer.tsx';
 import type { SendShortcut } from './composer/keymap.ts';
 import { movePosition, orderPending, itemState } from './composer/queue.ts';
@@ -324,6 +325,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
           {a.render({ chat, thread, busy, draftEmpty: !chat.draft })}
         </div>
       ))}
+      {!chat.sideSourceId && <FlagNote chatId={chatId} ops={ops} />}
       <QueueList pending={view.pending} thread={thread} running={busy} ops={ops} chatId={chatId} />
       </div>
       {/* The activity line sits directly on the box, below the waiting and queued messages. */}

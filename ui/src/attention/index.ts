@@ -2,5 +2,6 @@
 
 export { ATTENTION_DIALOG, AttentionInbox } from './AttentionInbox.tsx';
 export type { AttentionActions, AttentionInboxProps } from './AttentionInbox.tsx';
-export { countText, inboxCount, inboxRows, nextAttention, snoozeChoices, whenText } from './model.ts';
+export { FlagNote } from './FlagNote.tsx';
+export { countText, flagFor, inboxCount, inboxRows, nextAttention, snoozeChoices, whenText } from './model.ts';
 export type { InboxGroup, InboxRow, SnoozeChoice } from './model.ts';

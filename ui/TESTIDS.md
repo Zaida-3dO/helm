@@ -59,6 +59,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `subagent-chip`, `subagent-roster`, `subagent-roster-row` | The dock's subagent chip, its "Across this chat" roster and one row in it | chip: `data-running` (count); row: `data-status` |
 | `dock-tool-stop` | Stop beside the latest tool line in the dock | |
 | `interrupted-banner` / `recover-draft` | Banner on an interrupted chat / its Recover draft button | |
+| `flag-note` / `flag-note-reason` / `flag-note-snooze` / `flag-note-complete` / `flag-note-menu` | The idle check's note above the composer on a flagged chat, its reason, its Snooze button and menu, and Mark complete | `flag-note`: `aria-busy` while an action runs |
 | `composer-error` | A refused send's message (the draft is kept) | |
 | `model-picker` | The unified "Model · Effort" picker trigger (Ctrl+Shift+M opens it) | |
 | `model-picker-pop` | Its popover: model rows are `[role="option"]` with `data-value` = the model id | |

@@ -99,3 +99,10 @@ export function whenText(d: Date, now: Date): string {
 export function groupLabel(g: InboxGroup): string {
   return g === 'needsYou' ? 'Waiting on you' : g === 'flagged' ? 'May still need you' : g === 'stalled' ? 'May be stuck' : 'Ready to read';
 }
+
+/** The idle check's flag on one chat, or null: the row the host lists for it among the quiet chats
+ *  that may still need you. `enabled: false` hides it at once when the check was just switched off. */
+export function flagFor(s: AttentionSummary | null, chatId: string, enabled = true): AttentionRow | null {
+  if (!s || !enabled) return null;
+  return s.flagged.find((r) => r.chatId === chatId) ?? null;
+}
