@@ -476,16 +476,22 @@ pub fn plan_spawn(
     if !windows {
         return Ok((PathBuf::from(program), args.to_vec()));
     }
+    let refused_named = |name: &str| {
+        format!("{name} is a .cmd or .bat script, which Helm does not run. Use the program's .exe, or node.exe with the script's path.")
+    };
     let Some(found) = on_path(program, path_var).filter(|p| is_shim(p)) else {
+        // A .cmd or .bat name we could not resolve to a script is refused outright: left to the
+        // operating system's own search, it could still end up running through cmd.exe.
+        if is_shim(Path::new(program)) {
+            return Err(refused_named(program));
+        }
         return Ok((PathBuf::from(program), args.to_vec()));
     };
     let name = found
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("that file");
-    let refused = || {
-        format!("{name} is a .cmd or .bat script, which Helm does not run. Use the program's .exe, or node.exe with the script's path.")
-    };
+    let refused = || refused_named(name);
     let target = shim_target(&found).ok_or_else(refused)?;
     let node =
         node.ok_or_else(|| "Node.js was not found, which this program needs to start.".to_owned())?;
@@ -828,7 +834,7 @@ mod tests {
         );
         let (_, args) = plan("pkg", true).unwrap();
         assert!(args[0].ends_with("x.js"), "{args:?}");
-        for refused in ["plain", "escape", "plain.bat"] {
+        for refused in ["plain", "escape", "plain.bat", "missing.cmd", ".\\gone.BAT"] {
             let why = plan(refused, true).unwrap_err();
             assert!(why.contains(".cmd or .bat"), "{refused}: {why}");
         }
