@@ -778,6 +778,7 @@ impl TelegramSink for ChatSink {
                 up.notify(nothing);
                 return;
             };
+            let label = ask.options[index].clone();
             if !telegram::load_approvals(&telegram::policy_path(&self.profile_dir)) {
                 up.notify("Approving from Telegram is off in Helm, so nothing was answered.");
                 return;
@@ -786,6 +787,31 @@ impl TelegramSink for ChatSink {
                 up.notify(nothing);
                 return;
             };
+            if let Some(question) = &ask.question {
+                // A chat's own question: the tapped option goes back to it as a note from Helm.
+                let note = crate::approve::answer_note(&id, question, &label);
+                let sid = telegram::submission_id(&format!("ask/{id}"));
+                let sent = host_send(
+                    &c.rt,
+                    HostSend {
+                        chat_id: &ask.chat_id,
+                        submission_id: &sid,
+                        text: &note,
+                        mode: HostSendMode::Steer,
+                        origin: helm_chats::types::SubmissionOrigin::App,
+                        gated: false,
+                    },
+                );
+                match sent {
+                    Ok(_) => c.rt.add_context_row(
+                        &ask.chat_id,
+                        helm_chats::types::ContextKind::Telegram,
+                        &format!("Answered from Telegram: {label}"),
+                    ),
+                    Err(e) => up.notify(&format!("Helm could not pass it on: {}", e.message)),
+                }
+                return;
+            }
             let still = c.rt.live_thread(&ask.chat_id).is_some_and(|t| {
                 t.interactions
                     .iter()
@@ -795,7 +821,6 @@ impl TelegramSink for ChatSink {
                 up.notify(nothing);
                 return;
             }
-            let label = ask.options[index].clone();
             match c
                 .ops
                 .invoke(

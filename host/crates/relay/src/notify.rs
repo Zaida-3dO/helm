@@ -242,8 +242,113 @@ fn send(ctx: &ToolCtx, a: Value) -> ToolResult {
     Ok(json!({ "sent": true }))
 }
 
-/// The `app_telegram_send` host tool.
+fn ask(ctx: &ToolCtx, a: Value) -> ToolResult {
+    let question = a
+        .get("question")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if question.is_empty() || question.chars().count() > 1000 {
+        return Err(ToolError::refused(
+            "question is required, at most 1000 characters.",
+        ));
+    }
+    let options: Vec<String> = a
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|o| {
+            o.iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.trim().chars().take(40).collect::<String>())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !(2..=approve::MAX_OPTIONS).contains(&options.len()) {
+        return Err(ToolError::refused("options: 2 to 4 short labels."));
+    }
+    let dir = profile_dir(ctx).ok_or_else(|| ToolError::refused("Helm is still starting."))?;
+    if !telegram::load_approvals(&telegram::policy_path(&dir)) {
+        return Err(ToolError::refused(
+            "Approving from Telegram is off (the user turns it on in Settings → Hub), so nothing was asked.",
+        ));
+    }
+    let (Some(line), Some(sink)) = (
+        ctx.services.get::<LineHandle>(),
+        ctx.services.get::<ChatSink>(),
+    ) else {
+        return Err(ToolError::refused(
+            "Helm's line to the hub is not available.",
+        ));
+    };
+    if line.state() != LineState::Online {
+        return Err(ToolError::refused(
+            "Helm's line to the hub is not connected (Settings → Hub), so nothing was asked.",
+        ));
+    }
+    if !BUDGET.take(helm_core::now_ms()) {
+        return Err(ToolError::refused(format!(
+            "{MAX_PER_HOUR} Telegram messages were already sent in the last hour, so nothing was asked."
+        )));
+    }
+    let title = ctx
+        .services
+        .get::<Database>()
+        .and_then(|db| title_of(&db, &ctx.caller_chat_id))
+        .unwrap_or_default();
+    let id = approve::new_id();
+    sink.asks
+        .add_question(&id, &ctx.caller_chat_id, question, options.clone());
+    if !line.telegram_ask(&id, &compose(&title, question), &options) {
+        sink.asks.unsent(&id);
+        return Err(ToolError::refused(
+            "Helm's line to the hub dropped, so nothing was asked.",
+        ));
+    }
+    let rt = ctx.services.get::<ChatRuntime>();
+    let from = if title.trim().is_empty() {
+        "a Helm chat"
+    } else {
+        title.trim()
+    };
+    record_sent(
+        rt.as_deref(),
+        &dir,
+        from,
+        &format!("asked: {question}"),
+        Some(&ctx.caller_chat_id),
+    );
+    Ok(json!({ "asked": true, "askId": id }))
+}
+
+/// The `app_telegram_send` and `app_telegram_ask` host tools.
 pub fn register_host_tools(r: &mut HostToolRegistry) {
+    r.blocking(
+        ToolSpec::write(
+            "app_telegram_ask",
+            "Ask the user a question on Telegram with 2-4 buttons, for example whether you may \
+             merge or deploy while they are away. Returns at once with an askId; when the user \
+             taps a button, Helm sends you a note naming the option, checked as tapped on their \
+             own Telegram account for this question. Their typed replies are not answers. Only \
+             when the user has turned on Approve from Telegram in Settings → Hub; refused, with \
+             nothing asked, when it is off or Helm's line to the hub is not connected.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string", "minLength": 1, "maxLength": 1000 },
+                    "options": {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1, "maxLength": 40 },
+                        "minItems": 2,
+                        "maxItems": 4
+                    }
+                },
+                "required": ["question", "options"],
+                "additionalProperties": false
+            }),
+        ),
+        ask,
+    );
     r.blocking(
         ToolSpec::write(
             "app_telegram_send",
@@ -336,12 +441,12 @@ pub fn watch_away(
             let online = line.state() == LineState::Online;
             // A line that went away may have taken the hub's buttons with it: ask afresh.
             if online && !was_online {
-                sink.asks.clear();
+                sink.asks.clear(false);
             }
             was_online = online;
             match &found.waiting {
                 None => {
-                    for id in sink.asks.clear() {
+                    for id in sink.asks.clear(true) {
                         line.telegram_ask_done(
                             &id,
                             "Approving from Telegram was turned off in Helm.",

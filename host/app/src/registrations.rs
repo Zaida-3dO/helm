@@ -363,6 +363,7 @@ mod host_tool_tests {
             "app_orchestrator_on",
             "app_workflow",
             "app_workflow_report",
+            "app_telegram_ask",
             "app_telegram_send",
         ];
         assert_eq!(names(Default::default()), base);

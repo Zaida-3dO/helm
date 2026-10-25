@@ -11,6 +11,9 @@
 //!   inputs never are; questions are answered by replying in the Telegram chat.
 //! - **Kept in step.** A request answered in Helm, withdrawn or ended has its buttons taken down.
 //!   The asks live in memory: after a restart a tap on an old one says it is no longer waiting.
+//! - **A chat may ask too.** `app_telegram_ask` puts a chat's own question to the user with
+//!   buttons ("May I merge and redeploy?"); the tapped option comes back to that chat as a note
+//!   from Helm saying it was tapped on the user's own Telegram account.
 
 use helm_chats::types::{Interaction, InteractionAttention, InteractionMethod};
 use serde_json::{json, Value};
@@ -28,6 +31,8 @@ pub struct Ask {
     pub method: InteractionMethod,
     pub plan: bool,
     pub options: Vec<String>,
+    /// A chat's own question (`app_telegram_ask`); `None` for a waiting request.
+    pub question: Option<String>,
 }
 
 /// A request waiting in a chat, as the watcher found it.
@@ -156,7 +161,9 @@ impl Asks {
             .collect();
         let gone: Vec<String> = m
             .iter()
-            .filter(|(_, a)| !live.contains(&(a.chat_id.as_str(), a.request_id.as_str())))
+            .filter(|(_, a)| {
+                a.question.is_none() && !live.contains(&(a.chat_id.as_str(), a.request_id.as_str()))
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for id in gone {
@@ -179,6 +186,7 @@ impl Asks {
                 method: w.interaction.method,
                 plan: w.interaction.attention == Some(InteractionAttention::Plan),
                 options: options_of(&w.interaction),
+                question: None,
             };
             let id = new_id();
             step.ask.push((
@@ -191,14 +199,39 @@ impl Asks {
         step
     }
 
+    /// A chat's own question, put to the user with buttons. Kept until a tap or a restart.
+    pub fn add_question(&self, id: &str, chat_id: &str, question: &str, options: Vec<String>) {
+        self.map().insert(
+            id.to_owned(),
+            Ask {
+                chat_id: chat_id.to_owned(),
+                request_id: String::new(),
+                method: InteractionMethod::Select,
+                plan: false,
+                options,
+                question: Some(question.to_owned()),
+            },
+        );
+    }
+
     /// An ask the hub could not send: forget it, so the next look asks again.
     pub fn unsent(&self, id: &str) {
         self.map().remove(id);
     }
 
-    /// Take every open ask down (approvals were turned off, or the line went away).
-    pub fn clear(&self) -> Vec<String> {
-        self.map().drain().map(|(id, _)| id).collect()
+    /// Take every open ask down (approvals were turned off, or the line went away). With
+    /// `questions` false, chats' own questions stay: they are not asked again.
+    pub fn clear(&self, questions: bool) -> Vec<String> {
+        let mut m = self.map();
+        let ids: Vec<String> = m
+            .iter()
+            .filter(|(_, a)| questions || a.question.is_none())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            m.remove(id);
+        }
+        ids
     }
 
     /// The user's tap. Single use: the ask is gone afterwards, whatever the outcome.
@@ -206,6 +239,15 @@ impl Asks {
         let ask = self.map().remove(id)?;
         (index < ask.options.len()).then_some(ask)
     }
+}
+
+/// The note a chat gets when the user taps an option of its question.
+pub fn answer_note(id: &str, question: &str, label: &str) -> String {
+    format!(
+        "[Answer from Telegram] The user tapped \"{label}\" on their own Telegram account, \
+         answering your question \"{question}\" (ask {id}). Helm checked that the tap came from \
+         the user's account, for this question, once."
+    )
 }
 
 /// A fresh ask id: 32 hex digits from a random UUID.
@@ -325,5 +367,18 @@ mod tests {
             json!({"chatId": "c1", "requestId": "r1", "value": "Approve plan", "confirmed": true})
         );
         assert_eq!(new_id().len(), 32);
+        // A chat's own question is not taken down by looks or by clearing waiting asks.
+        let asks = Asks::default();
+        asks.add_question(
+            "q1",
+            "c9",
+            "Merge and redeploy?",
+            vec!["Yes".into(), "No".into()],
+        );
+        assert!(asks.step(&[], new_id).done.is_empty());
+        assert!(asks.clear(false).is_empty());
+        let q = asks.take("q1", 0).unwrap();
+        assert_eq!(q.question.as_deref(), Some("Merge and redeploy?"));
+        assert!(answer_note("q1", "Merge and redeploy?", "Yes").contains("tapped \"Yes\""));
     }
 }
