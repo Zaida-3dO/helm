@@ -15,9 +15,11 @@ const message = (e: unknown) => (e instanceof ApiError || e instanceof Error ? e
 
 export function AddProjectDialog() {
   const shell = useShell();
-  const [mode, setMode] = useState<'existing' | 'new'>('existing');
+  // Opened from the project picker's create row: straight to the New folder tab, name filled in.
+  const preset = newChat.dialog?.kind === 'add-project' ? newChat.dialog.newName : undefined;
+  const [mode, setMode] = useState<'existing' | 'new'>(preset !== undefined ? 'new' : 'existing');
   const [path, setPath] = useState('');
-  const [name, setName] = useState('');
+  const [name, setName] = useState(preset ?? '');
   const [nameEdited, setNameEdited] = useState(false);
   const [parent, setParent] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

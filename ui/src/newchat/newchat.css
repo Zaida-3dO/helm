@@ -200,3 +200,15 @@
   font-size: 12px;
   color: var(--error);
 }
+
+/* The project picker's "Show completed" toggle, between the list and the key hints. */
+.nc-completed {
+  padding: 6px 12px 2px;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+.nc-completed + .ui-picker-hints {
+  margin-top: 4px;
+}

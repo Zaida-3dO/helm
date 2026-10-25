@@ -9,15 +9,17 @@ import { Composer } from '../composer/Composer.tsx';
 import type { SendShortcut } from '../composer/keymap.ts';
 import type { Flushers } from '../shell/quit.ts';
 import { useShell } from '../shell/context.ts';
-import { ContextMenu, Picker, toast, useBinding, type MenuItem, type PickerOption } from '../ui/index.ts';
+import { Checkbox, ContextMenu, Picker, toast, useBinding, type MenuItem, type PickerOption } from '../ui/index.ts';
 import { IconCheck, IconCopy } from '../ui/icons.tsx';
+import { isFinished } from '../sidebar/model.ts';
 import { pickFolder } from './api.ts';
 import { draftOps, newChat } from './controller.ts';
-import { folderMenu, folderName, samePath } from './places.ts';
+import { folderMenu, folderName, pickerProjects, samePath } from './places.ts';
 import { AddProjectDialog, PrimaryFolderDialog } from './ProjectDialogs.tsx';
 import './newchat.css';
 
 const NO_PROJECT = '__none__';
+const NEW_PROJECT = '__new__';
 
 /** Mounted once in the frame's chat area (App.tsx). */
 export function NewChatHost({ flushers, sendShortcut }: { flushers: Flushers; sendShortcut: SendShortcut }) {
@@ -90,6 +92,7 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
   const shownName = owner?.name ?? (source === 'open-chat' && folder ? folderName(folder) : null);
   const folderBtn = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [showCompleted, setShowCompleted] = useState(false);
 
   useBinding({
     id: 'newchat.projectPicker',
@@ -100,11 +103,26 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
 
   const options: PickerOption<string>[] = useMemo(
     () => [
-      ...projects.map((p) => ({ value: p.id, title: p.name, text: `${p.name} ${p.path ?? ''}`, subtitle: subtitleOf(p) })),
+      ...pickerProjects(projects, showCompleted, owner?.id ?? draft.projectId).map((p) => ({
+        value: p.id,
+        title: p.name,
+        text: `${p.name} ${p.path ?? ''}`,
+        subtitle: subtitleOf(p),
+      })),
       { value: NO_PROJECT, title: 'No project', subtitle: 'Use the folder’s own project' },
     ],
-    [projects],
+    [projects, showCompleted, owner?.id, draft.projectId],
   );
+  const hasCompleted = projects.some((p) => isFinished(p));
+  // The row after the matches: always there; with nothing found it offers to create what was typed.
+  const createRow = (query: string, matches: number): PickerOption<string> => {
+    const typed = query.trim();
+    return { value: NEW_PROJECT, title: matches === 0 && typed ? `Create project “${typed}”` : 'New project…' };
+  };
+  const onPick = (v: string, query: string) => {
+    if (v === NEW_PROJECT) newChat.openDialog({ kind: 'add-project', newName: query.trim() });
+    else newChat.move(v === NO_PROJECT ? null : v);
+  };
 
   const browse = async () => {
     try {
@@ -153,7 +171,15 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
             <Picker
               value={owner ? owner.id : null}
               options={options}
-              onChange={(v) => newChat.move(v === NO_PROJECT ? null : v)}
+              onChange={onPick}
+              extraOption={createRow}
+              footer={
+                hasCompleted && (
+                  <div className="nc-completed" onKeyDown={(e) => e.stopPropagation()}>
+                    <Checkbox label="Show completed" checked={showCompleted} onChange={setShowCompleted} data-testid="newchat-show-completed" />
+                  </div>
+                )
+              }
               label={shownName ? `Project: ${shownName}` : 'Choose a project'}
               display={shownName ?? undefined}
               heading="Start the chat in"
@@ -243,7 +269,7 @@ function FolderLabel({ name, path }: { name: string; path: string }) {
 }
 
 function subtitleOf(p: ProjectNode): string {
-  if (p.kind === 'board') return 'Agent Standup';
+  if (p.kind === 'board') return isFinished(p) ? 'Agent Standup · finished' : 'Agent Standup';
   return p.path ?? 'Local group';
 }
 

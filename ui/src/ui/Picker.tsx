@@ -26,7 +26,8 @@ export interface PickerOption<T extends string> {
 export interface PickerProps<T extends string> {
   value: T | null;
   options: PickerOption<T>[];
-  onChange: (v: T) => void;
+  /** Called with the chosen value and what was typed in the search box. */
+  onChange: (v: T, query: string) => void;
   label: string;
   /** The popover's heading; defaults to the label. */
   heading?: string;
@@ -43,6 +44,10 @@ export interface PickerProps<T extends string> {
   display?: ReactNode;
   /** The trigger's tooltip. */
   title?: string;
+  /** An extra row between the list and the key hints (a toggle, say). */
+  footer?: ReactNode;
+  /** A row after the matches that no search filters out; see `PickerPopoverProps.extraOption`. */
+  extraOption?: (query: string, matches: number) => PickerOption<T> | null;
   disabled?: boolean;
   placeholder?: string;
   /** An extra class on the trigger, for a place that needs it smaller or outlined. */
@@ -62,8 +67,8 @@ export interface PickerPopoverProps<T extends string> {
   anchor: RefObject<HTMLElement | null>;
   value: T | null;
   options: PickerOption<T>[];
-  /** Called with the chosen option's value; the popover does not close itself. */
-  onPick: (v: T) => void;
+  /** Called with the chosen option's value and the search text; the popover does not close itself. */
+  onPick: (v: T, query: string) => void;
   onClose: () => void;
   label: string;
   /** The heading row; it carries an `esc` key hint. */
@@ -72,6 +77,12 @@ export interface PickerPopoverProps<T extends string> {
   searchPlaceholder?: string;
   /** An extra row between the list and the key hints. */
   footer?: ReactNode;
+  /**
+   * A row drawn after the matches whatever the search says, for an action such as "New project…".
+   * It takes part in keyboard navigation, and when nothing matches it is the selected row. It
+   * receives the search text and how many options matched, so it can name what was typed.
+   */
+  extraOption?: (query: string, matches: number) => PickerOption<T> | null;
   /** An extra key hint between "navigate" and "select". */
   extraHint?: ReactNode;
   testId?: string;
@@ -93,6 +104,7 @@ export function PickerPopover<T extends string>({
   searchPlaceholder = 'Search',
   footer,
   extraHint,
+  extraOption,
   testId,
   className,
   alignEnd,
@@ -101,7 +113,9 @@ export function PickerPopover<T extends string>({
   const search = useRef<HTMLInputElement>(null);
   const [q, setQ] = useState('');
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
-  const shown = useMemo(() => filterOptions(options, q), [options, q]);
+  const matches = useMemo(() => filterOptions(options, q), [options, q]);
+  const extra = extraOption?.(q, matches.length) ?? null;
+  const shown = useMemo(() => (extra ? [...matches, extra] : matches), [matches, extra]);
   const [active, setActive] = useState(() => Math.max(0, options.findIndex((o) => o.value === value)));
   useLayer('popover', true, onClose);
   useLayer('search', true, () => setQ(''), () => q.length > 0);
@@ -124,9 +138,9 @@ export function PickerPopover<T extends string>({
   useLayoutEffect(() => {
     pop.current?.querySelector('.ui-picker-option.active')?.scrollIntoView?.({ block: 'nearest' });
   }, [active]);
-  const choices = shown.filter((o) => !o.disabled).length;
+  const choices = matches.filter((o) => !o.disabled).length;
   const pick = (o: PickerOption<T> | undefined) => {
-    if (o && !o.disabled) onPick(o.value);
+    if (o && !o.disabled) onPick(o.value, q);
   };
   return createPortal(
     <>
@@ -178,7 +192,7 @@ export function PickerPopover<T extends string>({
               role="option"
               aria-selected={o.value === value}
               aria-disabled={o.disabled || undefined}
-              className={`ui-picker-option${i === active ? ' active' : ''}`}
+              className={`ui-picker-option${i === active ? ' active' : ''}${o === extra ? ' extra' : ''}`}
               data-value={o.value}
               onMouseEnter={() => setActive(i)}
               onClick={() => pick(o)}
@@ -217,6 +231,8 @@ export function Picker<T extends string>({
   compact,
   display,
   title,
+  footer,
+  extraOption,
   disabled,
   placeholder,
   className,
@@ -264,9 +280,11 @@ export function Picker<T extends string>({
           searchable={searchable}
           searchPlaceholder={searchPlaceholder}
           alignEnd={settings}
+          footer={footer}
+          extraOption={extraOption}
           onClose={close}
-          onPick={(v) => {
-            onChange(v);
+          onPick={(v, query) => {
+            onChange(v, query);
             close();
           }}
         />

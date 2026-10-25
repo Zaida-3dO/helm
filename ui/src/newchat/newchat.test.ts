@@ -8,7 +8,7 @@ import type { ChatRecord } from '../api/types.ts';
 import { LAST_PROJECT_KEY, NewChatController, draftOps, newChat, type NewChatEnv } from './controller.ts';
 import { primaryFolderMenuItem } from './menu.ts';
 import { addExistingFolder, addNewFolder, currentFolder, setPrimaryFolder } from './projects.ts';
-import { LEGACY_LAST_FOLDER_KEY, MAX_RECENTS, RECENTS_KEY, folderMenu, folderProjectFor, pushRecent, readRecents, resolveFolder, samePath } from './places.ts';
+import { LEGACY_LAST_FOLDER_KEY, MAX_RECENTS, RECENTS_KEY, folderMenu, folderProjectFor, pickerProjects, pushRecent, readRecents, resolveFolder, samePath } from './places.ts';
 
 function node(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
   return {
@@ -445,6 +445,24 @@ test('the menu item opens the Primary folder dialog for its project and is off f
   newChat.closeDialog();
   assert.equal(newChat.dialog, null);
   assert.equal(primaryFolderMenuItem(PROJECTS.find((p) => p.id === 'old')!).disabled, true);
+});
+
+test('the project picker lists open projects, keeps the draft’s own, and brings finished ones back on request; the create row opens the dialog on the new-folder tab', () => {
+  const board = (id: string, completed: boolean, over: Partial<ProjectNode> = {}) =>
+    node(id, { kind: 'board', board: { boardProjectId: id, url: '', title: id, headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: false, completed, editedLocally: false }, ...over });
+  const list = [node('a', { path: 'C:/a' }), board('open', false), board('done', true), board('done-stale', true, { board: { ...board('x', true).board!, stale: true } }), node('gone', { archived: true })];
+  const ids = (l: ProjectNode[]) => l.map((p) => p.id);
+  const cases: [boolean, string | null, string[]][] = [
+    [false, null, ['a', 'open', 'done-stale']],
+    [true, null, ['a', 'open', 'done', 'done-stale']],
+    [false, 'done', ['a', 'open', 'done', 'done-stale']],
+    [false, 'gone', ['a', 'open', 'done-stale', 'gone']],
+  ];
+  for (const [completed, current, want] of cases) assert.deepEqual(ids(pickerProjects(list, completed, current)), want, `${completed} ${current}`);
+
+  newChat.openDialog({ kind: 'add-project', newName: 'Brand new idea' });
+  assert.deepEqual(newChat.dialog, { kind: 'add-project', newName: 'Brand new idea' });
+  newChat.closeDialog();
 });
 
 test('opening the chat a refused first send made does not discard it; a running send keeps its chat until it is refused', async () => {

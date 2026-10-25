@@ -65,7 +65,9 @@ export const LAST_PROJECT_KEY = 'helm.newchat.lastProject';
 export const DRAFT_TEXT_KEY = 'helm.newchat.draftText';
 
 /** The dialogs the new-chat area draws (Add project, Primary folder…). */
-export type NewChatDialog = { kind: 'add-project' } | { kind: 'primary-folder'; projectId: string };
+export type NewChatDialog =
+  | { kind: 'add-project'; /** Open on the New folder tab with this name filled in. */ newName?: string }
+  | { kind: 'primary-folder'; projectId: string };
 
 type Listener = () => void;
 export type ReadyListener = (place: { projectId: string | null; folder: string | null }) => void;

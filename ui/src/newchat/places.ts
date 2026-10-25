@@ -3,6 +3,7 @@
 // group or a board project); the folder is where the chat's agent works.
 
 import type { ProjectNode } from '../api/projects.ts';
+import { isFinished } from '../sidebar/model.ts';
 
 /** Why the place line shows the folder it shows. */
 export type FolderSource = 'chosen' | 'project' | 'primary' | 'open-chat' | 'first-open' | null;
@@ -55,6 +56,15 @@ export function resolveFolder(projectId: string | null, chosen: string | null, p
 export function folderProjectFor(projectId: string | null, folder: string, projects: ProjectNode[]): string | null {
   const p = projects.find((x) => x.id === projectId);
   return p && p.kind === 'folder' && usable(p) && samePath(p.path, folder) ? p.id : null;
+}
+
+/**
+ * The projects the new-chat picker lists: open ones only, unless `showCompleted` is on. Archived
+ * projects never show, and neither do finished board projects, except the one the draft is already
+ * in (`currentId`), which always stays so the picker never hides its own choice.
+ */
+export function pickerProjects(projects: ProjectNode[], showCompleted: boolean, currentId: string | null): ProjectNode[] {
+  return projects.filter((p) => p.id === currentId || (!p.archived && (showCompleted || !isFinished(p))));
 }
 
 /** The last segment of a path, for labels. */
