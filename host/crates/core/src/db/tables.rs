@@ -91,6 +91,8 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     // Host tools: the "Changed by chats" ring with Undo.
     ("settings_changes", Data),
     ("agent_feedback", Data),
+    ("feedback_items", Tool),
+    ("feedback_entries", Tool),
     // Usage: the last plan-usage reading.
     ("plan_usage", Data),
     // Item links: which chats work on which board item. Stored only in Helm.

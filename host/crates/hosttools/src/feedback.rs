@@ -60,7 +60,12 @@ pub fn feature_key(feature: &str) -> String {
         .collect()
 }
 
-fn text(a: &Value, k: &str, min: usize, max: usize) -> Result<Option<String>, ToolError> {
+pub(crate) fn text(
+    a: &Value,
+    k: &str,
+    min: usize,
+    max: usize,
+) -> Result<Option<String>, ToolError> {
     let bad = || ToolError::refused(format!("{k} must be {min}-{max} characters."));
     match a.get(k) {
         None | Some(Value::Null) if min == 0 => Ok(None),
@@ -163,7 +168,7 @@ pub(crate) fn record(db: &Database, ctx: &ToolCtx, a: &Value, now: i64) -> ToolR
 }
 
 /// RFC 3339 or YYYY-MM-DD (UTC) to Unix ms.
-fn parse_since(s: &str) -> Option<i64> {
+pub(crate) fn parse_since(s: &str) -> Option<i64> {
     let date = s.get(..10)?;
     let mut p = date.split('-');
     let (y, m, d): (i64, i64, i64) = (

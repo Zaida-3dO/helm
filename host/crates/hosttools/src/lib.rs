@@ -21,6 +21,7 @@
 pub mod addendum;
 pub mod dispatch;
 pub mod feedback;
+pub mod feedback_items;
 pub mod lines;
 pub mod registry;
 pub mod reserved;
@@ -56,16 +57,19 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     schedule_tools::register_host_tools(r);
     // Registered last among the built-ins.
     feedback::register_host_tools(r);
+    feedback_items::register_host_tools(r);
 }
 
 /// The settings change ring (`settings_changes`).
 pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
     reg.initializer("hosttools-settings-changes", settings::init);
     reg.initializer("hosttools-agent-feedback", feedback::init);
+    reg.initializer("hosttools-feedback-items", feedback_items::init);
 }
 
 /// `settings_changes_list` and `settings_undo`.
 pub fn register_ops(reg: &mut helm_ipc::OpRegistry) {
     settings::register_ops(reg);
     feedback::register_ops(reg);
+    feedback_items::register_ops(reg);
 }

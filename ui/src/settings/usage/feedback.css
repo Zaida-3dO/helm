@@ -1,0 +1,144 @@
+/* Settings → Usage → Helm feedback. Builds on the .fb-* list styles in usage/usage.css. */
+
+.hf-head-actions {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.hf-form .ui-textarea {
+  min-height: 64px;
+}
+
+.hf-intro {
+  margin: 4px 0 10px;
+}
+
+.hf-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.hf-search {
+  flex: 1 1 140px;
+  min-width: 120px;
+}
+
+.hf-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.hf-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.hf-item {
+  padding: 0;
+}
+
+.hf-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: var(--cursor-pointer);
+}
+
+.hf-row:hover {
+  background: var(--hover);
+}
+
+.hf-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.hf-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--secondary);
+}
+
+.hf-snippet {
+  font-size: 12px;
+  color: var(--secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hf-badge {
+  padding: 1px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--secondary);
+}
+
+.hf-badge[data-author='human'] {
+  background: var(--accent-bg);
+  color: var(--text);
+}
+
+.hf-status[data-status='done'],
+.hf-status[data-status='wont_do'] {
+  color: var(--muted);
+}
+
+.hf-thread {
+  padding: 0 12px 12px;
+}
+
+.hf-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.hf-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.hf-entry-text {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.hf-admin {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hf-board {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}

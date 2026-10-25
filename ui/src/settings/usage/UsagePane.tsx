@@ -1,5 +1,5 @@
 // Settings → Usage. Tab one: plan usage cards, then Request
-// modes. Tab two: what agents said about Helm's features. Every empty state names its reason.
+// modes. Tab two: feedback threads about Helm. Tab three: what agents said about Helm's features. Every empty state names its reason.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { usageOps, type RequestModes, type UsageSnapshot } from '../../api/usage.ts';
@@ -8,9 +8,10 @@ import { asOf, percentText, RANGES, rangeOf, resetLine, expired, sourceLabel, ty
 import { useUsageStore } from '../../usage/UsageMeter.tsx';
 import { Button, PillTabs, Segmented } from '../../ui/index.ts';
 import { FeedbackTab } from './FeedbackTab.tsx';
+import { HelmFeedbackTab } from './HelmFeedbackTab.tsx';
 import '../../usage/usage.css';
 
-type TabId = 'usage' | 'feedback';
+type TabId = 'usage' | 'helm-feedback' | 'feedback';
 
 function errorText(e: unknown): string {
   return String((e as Error)?.message ?? e);
@@ -27,10 +28,11 @@ export function UsagePane() {
         testId="usage-tabs"
         tabs={[
           { id: 'usage', label: 'Usage' },
+          { id: 'helm-feedback', label: 'Helm feedback' },
           { id: 'feedback', label: 'Agent feedback' },
         ]}
       />
-      {tab === 'usage' ? <UsageTab /> : <FeedbackTab />}
+      {tab === 'usage' ? <UsageTab /> : tab === 'helm-feedback' ? <HelmFeedbackTab /> : <FeedbackTab />}
     </div>
   );
 }
