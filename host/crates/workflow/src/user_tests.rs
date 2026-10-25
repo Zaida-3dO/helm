@@ -152,6 +152,30 @@ fn sign_off_binds_to_the_plan_shown_and_waits_for_the_review() {
     t.wf(json!({"action": "plan", "text": "# Do it differently"}))
         .unwrap();
     assert!(!t.run(&run).plan_signed_off);
+    // While the user is away (AFK plan approval: approve) the plan is signed off for them, once
+    // its review has approved it, and the event says so.
+    let t = setup(|s| s.plan_sign_off = SignOff::Me);
+    t.wf(json!({"action": "plan", "text": "# Away"})).unwrap();
+    let run = t.run_id();
+    let afk = |t: &T| {
+        t.db.write(|tx| crate::user::afk_sign_off(tx, "c", 30))
+            .unwrap()
+    };
+    assert!(!afk(&t), "the review has not approved the plan yet");
+    t.db.write(|tx| {
+        let mut r = store::run(tx, &run)?.unwrap();
+        r.plan_approved = true;
+        store::save_run(tx, &r, None, 7)
+    })
+    .unwrap();
+    assert!(afk(&t) && t.run(&run).plan_signed_off);
+    assert!(!afk(&t), "signed once");
+    assert_eq!(t.events("afk_plan_signed_off", None), 1);
+    assert_eq!(
+        t.events("consent", Some("signOff")),
+        0,
+        "not the user's own sign-off"
+    );
     // With sign-off by review only, there is nothing to sign.
     let t = setup(|_| {});
     t.wf(json!({"action": "plan", "text": "x"})).unwrap();

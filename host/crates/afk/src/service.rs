@@ -8,6 +8,7 @@ use crate::digest::{self, Step};
 use crate::monitor::{self, Action, Cfg, MonitorState, Signal, Source};
 use crate::settings::{self, AfkSettings, AutoEnd};
 use crate::store::{self, Span, SpanDigests};
+use crate::texts;
 use helm_core::db::Database;
 use helm_ipc::{ApiError, AppEvent, EventSink};
 use serde::Serialize;
@@ -26,6 +27,28 @@ pub trait DigestSender: Send + Sync {
         submission_id: &str,
         text: &str,
     ) -> Result<bool, (String, String)>;
+}
+
+/// How AFK reaches the running agents and the orchestrator. The app installs the real thing;
+/// without it AFK still keeps spans and digests but tells nobody.
+pub trait AfkHooks: Send + Sync {
+    /// Chats whose agent is working now.
+    fn busy_chats(&self) -> Vec<String>;
+    /// Hand a chat a note, now if it is mid-turn. Idempotent per `submission_id`.
+    fn note(&self, chat_id: &str, submission_id: &str, text: &str) -> Result<(), (String, String)>;
+    /// AFK just turned on: run the questions already waiting past the automatic answer.
+    fn sweep(&self);
+    /// AFK just turned on with plan approval set to approve: sign off the plans waiting on the
+    /// user. Returns how many.
+    fn sign_off_plans(&self, now: i64) -> usize;
+}
+
+/// AFK as it stands now, for the chats it applies to.
+#[derive(Clone, Debug)]
+pub struct Active {
+    pub span_id: String,
+    pub started_at: i64,
+    pub settings: AfkSettings,
 }
 
 /// Which chats are waiting on the user right now (a question or an approval).
@@ -73,6 +96,7 @@ pub struct AfkService {
     events: Arc<dyn EventSink>,
     sender: Arc<dyn DigestSender>,
     asks: Arc<dyn AskSource>,
+    hooks: Mutex<Option<Arc<dyn AfkHooks>>>,
     inner: Mutex<Inner>,
     delivering: Mutex<()>,
 }
@@ -110,8 +134,114 @@ impl AfkService {
             events,
             sender,
             asks,
+            hooks: Mutex::new(None),
             inner: Mutex::new(inner),
             delivering: Mutex::new(()),
+        }
+    }
+
+    /// Install how AFK reaches the agents (once the app's services exist).
+    pub fn set_hooks(&self, h: Arc<dyn AfkHooks>) {
+        *self.hooks.lock().unwrap_or_else(|p| p.into_inner()) = Some(h);
+    }
+
+    fn hooks(&self) -> Option<Arc<dyn AfkHooks>> {
+        self.hooks.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// AFK for every chat, if it is on: enabled, in all-chats mode, with a span open. One-chat
+    /// mode is not built, so it never counts here.
+    pub fn active(&self) -> Option<Active> {
+        self.db
+            .snapshot(|tx| {
+                let s = store::load_settings(tx)?;
+                if !s.enabled || s.applies_to != settings::AppliesTo::All {
+                    return Ok::<_, rusqlite::Error>(None);
+                }
+                Ok(store::open_span(tx)?.map(|sp| Active {
+                    span_id: sp.id,
+                    started_at: sp.started_at,
+                    settings: s,
+                }))
+            })
+            .ok()
+            .flatten()
+    }
+
+    /// Whether plans that wait on the user's sign-off should be signed off for them now.
+    pub fn approves_plans(&self) -> bool {
+        self.active()
+            .is_some_and(|a| a.settings.plan_approval == settings::PlanApproval::Approve)
+    }
+
+    /// Keep what AFK did with one ask, for the digest. Never fails the caller.
+    pub fn record(&self, span_id: &str, chat_id: &str, kind: &str, title: &str, now: i64) {
+        let title: String = title.chars().take(500).collect();
+        if let Err(e) = self
+            .db
+            .write(|tx| store::record_event(tx, span_id, chat_id, kind, &title, now))
+        {
+            log::warn!("AFK event not kept: {e}");
+        }
+    }
+
+    fn open_now(&self) -> Option<Span> {
+        self.db.snapshot(store::open_span).ok().flatten()
+    }
+
+    /// After a change: tell the agents when a span opened or closed. Never under the leaf lock.
+    fn announce(&self, before: Option<Span>, now: i64) {
+        let after = self.open_now();
+        if before.as_ref().map(|s| &s.id) == after.as_ref().map(|s| &s.id) {
+            return;
+        }
+        if let Some(b) = before {
+            self.announce_off(&b.id);
+        }
+        if let Some(a) = after {
+            self.announce_on(&a, now);
+        }
+    }
+
+    fn announce_on(&self, span: &Span, now: i64) {
+        let (Some(hooks), Some(active)) = (self.hooks(), self.active()) else {
+            return;
+        };
+        let approve = active.settings.plan_approval == settings::PlanApproval::Approve;
+        let text = texts::on_note(span.started_at, approve);
+        for chat in hooks.busy_chats() {
+            let id = format!("afk-note:{}:on:{chat}", span.id);
+            if let Err((code, msg)) = hooks.note(&chat, &id, &text) {
+                log::info!("AFK note to {chat} not delivered ({code}): {msg}");
+            }
+        }
+        hooks.sweep();
+        if approve {
+            hooks.sign_off_plans(now);
+        }
+    }
+
+    /// The chats that get a digest hear the user is back from it; the other working chats get a
+    /// short note.
+    fn announce_off(&self, span_id: &str) {
+        let Some(hooks) = self.hooks() else { return };
+        let digested: Vec<String> = self
+            .db
+            .snapshot(|tx| {
+                let mut st = tx.prepare("SELECT chat_id FROM afk_digests WHERE span_id = ?1")?;
+                let rows = st.query_map([span_id], |r| r.get(0))?;
+                rows.collect::<rusqlite::Result<Vec<String>>>()
+            })
+            .unwrap_or_default();
+        let text = texts::off_note();
+        for chat in hooks.busy_chats() {
+            if digested.contains(&chat) {
+                continue;
+            }
+            let id = format!("afk-note:{span_id}:off:{chat}");
+            if let Err((code, msg)) = hooks.note(&chat, &id, &text) {
+                log::info!("AFK note to {chat} not delivered ({code}): {msg}");
+            }
         }
     }
 
@@ -207,6 +337,7 @@ impl AfkService {
     /// Feed one signal to the decision function and apply its answer.
     pub fn signal(&self, sig: Signal, now: i64) {
         let cfg = cfg_of(&self.settings());
+        let before = self.open_now();
         let changed = {
             let mut inner = self.lock();
             match monitor::decide(&mut inner.mon, &cfg, sig) {
@@ -219,6 +350,7 @@ impl AfkService {
         };
         if changed {
             self.publish();
+            self.announce(before, now);
             self.deliver(now);
         }
     }
@@ -247,6 +379,7 @@ impl AfkService {
 
     /// The user's switch (afk_set): on opens a manual span; off ends any open span.
     pub fn set(&self, on: bool, now: i64) -> Result<AfkView, ApiError> {
+        let before = self.open_now();
         let changed = {
             let mut inner = self.lock();
             if on {
@@ -263,6 +396,7 @@ impl AfkService {
         };
         if changed {
             self.publish();
+            self.announce(before, now);
             self.deliver(now);
         }
         self.view()
@@ -272,6 +406,7 @@ impl AfkService {
     /// digests. Any save forgets a recorded lock: the user is evidently at the machine.
     pub fn save_settings(&self, v: &Value, now: i64) -> Result<AfkView, ApiError> {
         let new = settings::parse_strict(v).map_err(ApiError::bad_args)?;
+        let before = self.open_now();
         {
             let mut inner = self.lock();
             let old = self.settings();
@@ -285,6 +420,7 @@ impl AfkService {
             inner.seq += 1;
         }
         self.publish();
+        self.announce(before, now);
         self.deliver(now);
         self.view()
     }
@@ -339,16 +475,20 @@ impl AfkService {
     }
 
     fn deliver_one(&self, row: &store::DigestRow, template: Option<&str>, now: i64) -> bool {
-        let (sub_state, available, span) = match self.db.snapshot(|tx| {
+        let (sub_state, available, span, deferred) = match self.db.snapshot(|tx| {
             let s = match &row.submission_id {
                 Some(id) => store::submission_state(tx, id)?,
                 None => None,
             };
-            Ok::<_, rusqlite::Error>((
-                s,
-                store::chat_available(tx, &row.chat_id)?,
-                store::span(tx, &row.span_id)?,
-            ))
+            let span = store::span(tx, &row.span_id)?;
+            let deferred = match &span {
+                Some(sp) => digest::deferred_lines(
+                    &store::chat_events(tx, &sp.id, &row.chat_id)?,
+                    &store::undecided_allows(tx, &row.chat_id, sp.started_at),
+                ),
+                None => vec![],
+            };
+            Ok::<_, rusqlite::Error>((s, store::chat_available(tx, &row.chat_id)?, span, deferred))
         }) {
             Ok(v) => v,
             Err(e) => {
@@ -394,7 +534,7 @@ impl AfkService {
                     &span.id,
                     span.started_at,
                     span.ended_at.unwrap_or(now),
-                    &[],
+                    &deferred,
                 );
                 match self.sender.send(&row.chat_id, &id, &text) {
                     Ok(true) => mark("queued", None),
@@ -687,5 +827,212 @@ mod tests {
         drop(svc);
         let again = AfkService::new(db, Arc::new(helm_ipc::NullSink), sent, asks);
         assert_eq!(again.open_source(), Some(Source::Sleep));
+    }
+
+    #[derive(Default)]
+    struct Hooks {
+        busy: M<Vec<String>>,
+        notes: M<Vec<(String, String, String)>>,
+        sweeps: M<u32>,
+        signed: M<u32>,
+    }
+    impl AfkHooks for Hooks {
+        fn busy_chats(&self) -> Vec<String> {
+            self.busy.lock().unwrap().clone()
+        }
+        fn note(&self, chat: &str, id: &str, text: &str) -> Result<(), (String, String)> {
+            self.notes
+                .lock()
+                .unwrap()
+                .push((chat.into(), id.into(), text.into()));
+            Ok(())
+        }
+        fn sweep(&self) {
+            *self.sweeps.lock().unwrap() += 1;
+        }
+        fn sign_off_plans(&self, _now: i64) -> usize {
+            *self.signed.lock().unwrap() += 1;
+            0
+        }
+    }
+
+    #[test]
+    fn agents_are_told_when_afk_starts_and_ends_and_the_digest_lists_what_waited() {
+        let (_d, db, sent, _a, svc) = setup();
+        let hooks = Arc::new(Hooks::default());
+        *hooks.busy.lock().unwrap() = vec!["c1".into(), "c2".into()];
+        svc.set_hooks(hooks.clone());
+        svc.save_settings(&json!({"enabled": true, "planApproval": "approve"}), 0)
+            .unwrap();
+        assert!(!svc.approves_plans(), "not before a span is open");
+        let start = 1_000 * MIN;
+        svc.set(true, start).unwrap();
+        assert!(svc.approves_plans());
+        {
+            let notes = hooks.notes.lock().unwrap();
+            assert_eq!(notes.len(), 2, "both working chats hear it start");
+            assert!(
+                notes[0].2.contains("AFK is on") && notes[0].2.contains("approved automatically")
+            );
+            assert!(notes[0].1.starts_with("afk-note:") && notes[0].1.ends_with(":on:c1"));
+        }
+        assert_eq!(
+            (*hooks.sweeps.lock().unwrap(), *hooks.signed.lock().unwrap()),
+            (1, 1)
+        );
+
+        // What AFK did while away: it counts even though the span is otherwise accidental.
+        let span = v_span(&db);
+        svc.record(&span, "c1", "question", "Which database?", start + 10_000);
+        svc.record(
+            &span,
+            "c1",
+            "approval_deferred",
+            "Allow Bash? rm -rf x",
+            start + 20_000,
+        );
+        svc.record(
+            &span,
+            "c3",
+            "plan_deferred",
+            "approval of the plan",
+            start + 30_000,
+        );
+        db.write(|tx| {
+            tx.execute_batch(
+                "CREATE TABLE consent_requests (chat_id TEXT, summary TEXT, state TEXT, created_at INTEGER);
+                 INSERT INTO consent_requests VALUES ('c1', 'Allow the repo server', 'pending', 1000000000);
+                 INSERT INTO consent_requests VALUES ('c1', 'Old one', 'denied', 1000000000);",
+            )
+        })
+        .unwrap();
+        svc.set(false, start + 40_000).unwrap();
+        let calls = sent.calls.lock().unwrap().clone();
+        let mut chats: Vec<&str> = calls.iter().map(|c| c.0.as_str()).collect();
+        chats.sort();
+        assert_eq!(
+            chats,
+            ["c1", "c3"],
+            "neither ran, but AFK handled something for both"
+        );
+        let c1 = &calls.iter().find(|c| c.0 == "c1").unwrap().2;
+        assert!(c1.contains("Answered a question automatically: \"Which database?\""));
+        assert!(c1.contains("Waiting for you: Allow Bash? rm -rf x"));
+        assert!(c1.contains("Allow request waiting for you: Allow the repo server"));
+        assert!(!c1.contains("Old one"));
+        // c1 and c3 get the digest; c2 is working but gets the short note.
+        let off: Vec<_> = hooks
+            .notes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|n| n.1.contains(":off:"))
+            .map(|n| n.0.clone())
+            .collect();
+        assert_eq!(off, ["c2"]);
+    }
+
+    #[test]
+    fn asks_are_answered_or_left_by_kind() {
+        use crate::policy::decide_with;
+        use helm_chats::seams::AfkAction;
+        let active = |plan: &str, answer: Option<&str>| Active {
+            span_id: "s".into(),
+            started_at: 0,
+            settings: settings::parse_strict(&json!({
+                "enabled": true, "planApproval": plan, "answer": answer
+            }))
+            .unwrap(),
+        };
+        let ask = |v: Value| -> helm_chats::types::Interaction {
+            let mut o = json!({"chatId": "c", "id": "r", "method": "select"});
+            o.as_object_mut()
+                .unwrap()
+                .extend(v.as_object().unwrap().clone());
+            serde_json::from_value(o).unwrap()
+        };
+        let kept = M::new(Vec::<(String, String)>::new());
+        let keep = |k: &str, w: &str| kept.lock().unwrap().push((k.into(), w.into()));
+        let plan = json!({"attention": "plan", "options": ["Approve plan", "Keep planning"]});
+        let cases = [
+            // (ask, plan setting, at flip, expect answered, kept kind)
+            (
+                json!({"attention": "question", "title": "Which?"}),
+                "defer",
+                false,
+                true,
+                "question",
+            ),
+            (
+                json!({"attention": "question", "secret": true}),
+                "defer",
+                false,
+                false,
+                "",
+            ),
+            (plan.clone(), "approve", false, true, "plan_approved"),
+            (plan.clone(), "approve", true, false, "plan_deferred"),
+            (plan.clone(), "defer", false, false, "plan_deferred"),
+            (
+                json!({"attention": "plan", "options": ["Keep planning"]}),
+                "approve",
+                false,
+                false,
+                "plan_deferred",
+            ),
+            (
+                json!({"attention": "approval", "title": "Allow Bash?", "context": [{"label": "Command", "text": "npm test"}]}),
+                "approve",
+                false,
+                false,
+                "approval_deferred",
+            ),
+            (
+                json!({"attention": "trust", "title": "Trust this folder?"}),
+                "approve",
+                false,
+                false,
+                "approval_deferred",
+            ),
+            (
+                json!({"title": "Pick a file", "method": "input"}),
+                "approve",
+                false,
+                false,
+                "",
+            ),
+        ];
+        for (n, (v, plan_setting, flip, answered, kind)) in cases.into_iter().enumerate() {
+            kept.lock().unwrap().clear();
+            let act = decide_with(
+                &active(plan_setting, Some("Go with the default.")),
+                &ask(v),
+                flip,
+                &keep,
+            );
+            let got = kept.lock().unwrap().clone();
+            match (&act, answered) {
+                (AfkAction::Answer { fields, marker }, true) => {
+                    assert!(marker.starts_with("AFK "), "case {n}");
+                    if kind == "question" {
+                        let text = fields["value"].as_str().unwrap();
+                        assert!(
+                            text.starts_with("Go with the default.")
+                                && text.ends_with(texts::SAFETY)
+                        );
+                    } else {
+                        assert_eq!(fields["confirmed"], json!(true), "case {n}");
+                    }
+                }
+                (AfkAction::Defer { .. }, false) => assert!(!kind.is_empty(), "case {n}"),
+                (AfkAction::Leave, false) => assert!(kind.is_empty(), "case {n}"),
+                (other, _) => panic!("case {n}: {other:?}"),
+            }
+            assert_eq!(
+                got.first().map(|k| k.0.as_str()).unwrap_or(""),
+                kind,
+                "case {n}"
+            );
+        }
     }
 }

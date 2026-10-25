@@ -109,6 +109,7 @@ Queue `Alt+Enter`, Send now `Ctrl+Alt+Enter`, Stop that continues the queue `Esc
 
 | Hook | Element | Attributes |
 |---|---|---|
+| `afk-pill` / `afk-pill-label` / `afk-pill-exit` / `afk-pill-error` | The AFK pill in the composer toolbar while AFK is on for all chats, its text, its Exit button and an inline refusal | the pill's `title` is the tooltip |
 | `orchestrator-switch` | The Orchestrator switch in the composer toolbar (Claude Code chats, while Settings → Orchestrator is on). Inert states use `aria-disabled`, never `disabled` | `data-look` (`off` `auto` `on-user` `on-agent` `unavailable`), `data-mode` (`on` `off` `auto`), `aria-pressed`, `title` = the tooltip |
 | `orchestrator-error` | The red line after the switch when the host refused a click | text = the host's sentence |
 | `orchestrator-pane` | Settings → Orchestrator (`settings-pane` with `data-pane="orchestrator"`) | |

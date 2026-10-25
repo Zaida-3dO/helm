@@ -397,6 +397,8 @@ pub(crate) struct Shared {
     pub host: std::sync::OnceLock<crate::hostcalls::HostSeam>,
     /// The run-slot queue's hold and pump wake ([`crate::runslots`]).
     pub run_slots: crate::runslots::Slots,
+    /// AFK's say over interactions and turns ([`crate::seams::AfkPolicy`]), installed once.
+    pub afk: std::sync::OnceLock<Arc<dyn crate::seams::AfkPolicy>>,
 }
 
 /// The runtime service.
@@ -433,6 +435,7 @@ impl ChatRuntime {
                 autocomplete: Mutex::new(Default::default()),
                 host: std::sync::OnceLock::new(),
                 run_slots: Default::default(),
+                afk: std::sync::OnceLock::new(),
             }),
         };
         rt.start_tick();
@@ -687,6 +690,36 @@ impl ChatRuntime {
             return;
         }
         let _ = enqueue(&self.actor(chat_id).tx, Cmd::Prewarm);
+    }
+
+    /// Install AFK's policy (once). Without it no chat answers or defers anything on its own.
+    pub fn set_afk_policy(&self, p: Arc<dyn crate::seams::AfkPolicy>) {
+        if self.sh.afk.set(p).is_err() {
+            log::warn!("an AFK policy is already installed; keeping the first");
+        }
+    }
+
+    /// Ask every live chat to run its waiting interactions past the AFK policy again (AFK just
+    /// turned on).
+    pub fn afk_sweep(&self) {
+        let handles: Vec<ActorHandle> = self.sh.actors.lock().unwrap().values().cloned().collect();
+        for h in handles {
+            if !h.live.lock().unwrap().thread.interactions.is_empty() {
+                let _ = enqueue(&h.tx, Cmd::AfkSweep);
+            }
+        }
+    }
+
+    /// The chats whose agent is working now (starting, running or stopping).
+    pub fn busy_chats(&self) -> Vec<String> {
+        self.sh
+            .actors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, h)| h.live.lock().unwrap().thread.status.is_busy())
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Add a line to the chat's transcript (a context row), from another crate.

@@ -10,6 +10,7 @@ publish.workspace = true
 helm-core.workspace = true
 helm-ipc.workspace = true
 helm-chats.workspace = true
+helm-workflow = { path = "../workflow" }
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true

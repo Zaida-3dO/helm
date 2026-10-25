@@ -83,6 +83,8 @@ pub(crate) enum Cmd {
     /// Start the worker ahead of the first send ([`crate::runtime::ChatRuntime::prewarm`]):
     /// `get_state` only, so Claude Code's start-up runs while the user types.
     Prewarm,
+    /// AFK just turned on: run the interactions already waiting past the AFK policy.
+    AfkSweep,
 }
 
 pub(crate) const STOP_TIMEOUT_ERROR: &str =
@@ -562,6 +564,28 @@ impl Actor {
             self.write(|t| session_log::project(t, &artifacts, &id, obj, rev));
         }
         self.emit_rows(&[key]);
+    }
+
+    /// Ask the AFK policy about one interaction. Returns true when AFK answered it (so it is not
+    /// listed as waiting). A deferral is written to the transcript and the card stays.
+    fn afk_handle(&mut self, i: &Interaction, at_flip: bool) -> bool {
+        let Some(policy) = self.sh.afk.get().cloned() else {
+            return false;
+        };
+        match policy.decide(&self.chat_id, i, at_flip) {
+            crate::seams::AfkAction::Leave => false,
+            crate::seams::AfkAction::Defer { marker } => {
+                self.context_row(ContextKind::Afk, &marker);
+                false
+            }
+            crate::seams::AfkAction::Answer { mut fields, marker } => {
+                fields.insert("id".into(), json!(i.id));
+                fields.insert("type".into(), json!("extension_ui_response"));
+                self.send(Value::Object(fields));
+                self.context_row(ContextKind::Afk, &marker);
+                true
+            }
+        }
     }
 
     fn context_row(&mut self, kind: ContextKind, text: &str) {
@@ -1122,6 +1146,21 @@ impl Actor {
             Cmd::Dispatch(sid) => self.dispatch(&sid, false),
             Cmd::Kick => self.advance_queue(),
             Cmd::ContextRow { kind, text } => self.context_row(kind, &text),
+            Cmd::AfkSweep => {
+                let waiting: Vec<Interaction> =
+                    self.live.lock().unwrap().thread.interactions.clone();
+                for i in waiting {
+                    if self.afk_handle(&i, true) {
+                        self.live
+                            .lock()
+                            .unwrap()
+                            .thread
+                            .interactions
+                            .retain(|x| x.id != i.id);
+                    }
+                }
+                self.emit_thread();
+            }
             Cmd::Stop {
                 continue_queue,
                 reply,
@@ -1457,6 +1496,17 @@ impl Actor {
             cmd["images"] = json!(images);
         }
         let context = match (carry, context) {
+            (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+            (a, b) => a.or(b),
+        };
+        // While AFK is on, every turn says so (AFK's own notes already say it).
+        let afk_text = self
+            .sh
+            .afk
+            .get()
+            .filter(|_| !sid.starts_with("afk-note:"))
+            .and_then(|p| p.turn_text(&self.chat_id));
+        let context = match (context, afk_text) {
             (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
             (a, b) => a.or(b),
         };
@@ -1799,6 +1849,7 @@ impl Actor {
             "extension_ui_request" => {
                 let method = str_of(&v, "method").unwrap_or_default();
                 let id = str_of(&v, "id").unwrap_or_default();
+                let mut parsed = None;
                 {
                     let mut live = self.live.lock().unwrap();
                     live.thread.interactions.retain(|i| i.id != id);
@@ -1808,11 +1859,18 @@ impl Actor {
                         obj.remove("remaining");
                         obj.insert("chatId".into(), json!(self.chat_id));
                         match serde_json::from_value::<Interaction>(Value::Object(obj)) {
-                            Ok(i) => live.thread.interactions.push(i),
+                            Ok(i) => parsed = Some(i),
                             Err(e) => {
                                 log::warn!("chat {}: unreadable interaction: {e}", self.chat_id)
                             }
                         }
+                    }
+                }
+                if let Some(i) = parsed {
+                    // While AFK is on, AFK may answer it at once; otherwise (or when it defers)
+                    // the card waits for the user.
+                    if !self.afk_handle(&i, false) {
+                        self.live.lock().unwrap().thread.interactions.push(i);
                     }
                 }
                 self.emit_thread();

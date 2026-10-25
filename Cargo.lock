@@ -1773,6 +1773,7 @@ dependencies = [
  "helm-chats",
  "helm-core",
  "helm-ipc",
+ "helm-workflow",
  "log",
  "rusqlite",
  "serde",
