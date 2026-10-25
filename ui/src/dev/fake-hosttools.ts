@@ -28,6 +28,11 @@ export function hosttoolsFakeOps(): { prefixes: string[]; handler: FakeOpHandler
     grantExpiresAt: null,
     note: null,
   });
+  // Two sample changes so Settings → General has something to show and undo.
+  const changes = [
+    { changeId: 2, chatId: 'fake', key: 'compactSidebar', before: null, after: true, at: Date.now() - 3_600_000, undone: false },
+    { changeId: 1, chatId: 'fake', key: 'zoomLevel', before: 100, after: 120, at: Date.now() - 86_400_000, undone: false },
+  ];
   const handler: FakeOpHandler = (op, args, ctx) => {
     switch (op) {
       case 'consent_list': {
@@ -43,13 +48,20 @@ export function hosttoolsFakeOps(): { prefixes: string[]; handler: FakeOpHandler
         ctx.emit({ kind: 'consent', chatId });
         return { ...card(chatId), state: decided.get(id)?.state };
       }
-      case 'settings_undo':
+      case 'settings_undo': {
+        for (const id of (args.changeIds as number[]) ?? []) {
+          const c = changes.find((x) => x.changeId === id);
+          if (c) c.undone = true;
+        }
         return { restored: {} };
+      }
       case 'settings_changes_list':
-        return { changes: [] };
+        return { changes };
+      case 'settings_all_set':
+        return null;
       default:
         return undefined;
     }
   };
-  return { prefixes: ['consent_', 'settings_undo', 'settings_changes_list'], handler };
+  return { prefixes: ['consent_', 'settings_undo', 'settings_changes_list', 'settings_all_set'], handler };
 }

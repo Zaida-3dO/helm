@@ -21,3 +21,8 @@ export function zoomOptions(): SizeOption[] {
   for (let n = 50; n <= 200; n += 10) out.push({ value: String(n), title: n === ZOOM_DEFAULT ? `${n}% (default)` : `${n}%` });
   return out;
 }
+
+/** The next zoom level one step up (1) or down (-1), kept within 50 to 200. */
+export function stepZoom(current: number, dir: 1 | -1): number {
+  return Math.min(200, Math.max(50, current + dir * 10));
+}

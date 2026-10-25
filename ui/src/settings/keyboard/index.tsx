@@ -10,7 +10,7 @@ import { registerSettingsPane } from '../registry.ts';
 import { conflictedIds, groupKeyboardRows, keyboardRows } from './model.ts';
 import './keyboard.css';
 
-function KeyboardPane() {
+export function KeyboardPane() {
   const shell = useShell();
   useSyncExternalStore(keys.subscribe, keys.getVersion);
   const [query, setQuery] = useState('');

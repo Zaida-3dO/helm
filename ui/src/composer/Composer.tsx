@@ -23,6 +23,7 @@ import { orderPending, itemState } from './queue.ts';
 import { bytesToBase64, isAnimated, refusal, stashSent, type Attached, type SentAttachments } from './attachments.ts';
 import { Recall } from './recall.ts';
 import { commandWithArgs, moveActive, SCOPE_LABEL, skillMenu, skillQuery, type Skill } from './skills.ts';
+import { useHiddenSkills } from '../settings/applied.ts';
 import { accessoriesAt, accessorySide, collectSendContributions, mountComposer, type AccessoryContext } from './slots.ts';
 import './composer.css';
 // The dock items and banners above the box share the dock sheet (ChatView mounts this composer).
@@ -335,7 +336,9 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   // with its description, while the arguments are typed. Escape closes it until the draft changes.
   const [menuShut, setMenuShut] = useState<string | null>(null);
   const [active, setActive] = useState(0);
-  const menu = menuShut === draftText ? null : skillMenu(draftText, skills);
+  const hiddenSkills = useHiddenSkills();
+  const shownSkills = useMemo(() => skills.filter((k) => !hiddenSkills.some((h) => h.toLowerCase() === k.name.toLowerCase())), [skills, hiddenSkills]);
+  const menu = menuShut === draftText ? null : skillMenu(draftText, shownSkills);
   const menuKey = menu ? `${menu.mode}:${menu.items.map((x) => x.name).join(',')}` : '';
   useEffect(() => setActive(0), [menuKey]);
   const pickSkill = (name: string) => {

@@ -7,7 +7,7 @@ import { ChatStore } from '../state/store.ts';
 import { parseSelection, ShellController } from './context.ts';
 import { keys } from '../ui/keys.ts';
 import { resolveTheme, parseAppearance } from './theme.ts';
-import { filterPanes, registerSettingsPane, settingsPanes } from '../settings/registry.ts';
+import { registerSettingsPane, settingsPanes } from '../settings/registry.ts';
 
 function harness(stored: Record<string, unknown> = {}) {
   const calls: { op: string; args: unknown }[] = [];
@@ -94,7 +94,7 @@ test('theme: system follows the OS, explicit modes win, junk is system', () => {
   assert.equal(resolveTheme(parseAppearance('purple'), true), 'dark');
 });
 
-test('settings panes sort by order then title, replace by id, and filter by title', () => {
+test('settings panes sort by order then title, replace by id', () => {
   const offB = registerSettingsPane({ id: 'b', title: 'Beta', order: 2, render: () => null });
   const offA = registerSettingsPane({ id: 'a', title: 'Alpha', order: 2, render: () => null });
   const offS = registerSettingsPane({ id: 's', title: 'Shell', order: 1, render: () => null });
@@ -103,7 +103,6 @@ test('settings panes sort by order then title, replace by id, and filter by titl
   assert.deepEqual(settingsPanes().map((p) => p.id), ['b', 's', 'a']);
   offB(); // a stale unregister does not remove the replacement
   assert.equal(settingsPanes().length, 3);
-  assert.deepEqual(filterPanes(settingsPanes(), ' SHE').map((p) => p.id), ['s']);
   offA();
   offS();
 });

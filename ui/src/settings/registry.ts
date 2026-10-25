@@ -44,13 +44,6 @@ export function subscribeSettingsPanes(l: () => void): () => void {
   };
 }
 
-/** Panes whose title matches the search text (case-insensitive); all of them for empty text. */
-export function filterPanes(list: SettingsPane[], query: string): SettingsPane[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return list;
-  return list.filter((p) => p.title.toLowerCase().includes(q));
-}
-
 // A pane to show when the dialog next opens ("Open Settings → Usage" from the top-bar meter).
 let requested: string | null = null;
 

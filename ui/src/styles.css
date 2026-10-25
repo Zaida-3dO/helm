@@ -1017,6 +1017,12 @@ dd {
   color: var(--muted);
   margin: 18px 0 4px;
 }
+/* A heading inside a pane, between groups of rows. */
+.settings-body .settings-section {
+  margin: 26px 0 2px;
+  font-size: calc(12 * var(--ui-unit));
+  font-weight: 600;
+}
 /* Row titles read as headings over their descriptions. */
 .settings-body .setting-title {
   font-weight: 560;

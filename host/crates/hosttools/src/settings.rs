@@ -355,9 +355,29 @@ pub(crate) fn undo(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     Ok(json!({ "restored": restored }))
 }
 
+/// `settings_all_set {enabled}`: the user's switch for "Chats can change all settings". It is
+/// its own op, not a generic preference write, so the one switch that widens what a chat may
+/// change cannot be reached through the settings tools.
+pub(crate) fn all_settings_set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let enabled = args
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| ApiError::bad_args("enabled must be true or false."))?;
+    let db = ctx.services.need::<Database>()?;
+    db.write(|tx| {
+        prefs::set_raw(tx, "agentSettingsAll", &json!(enabled))
+            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))
+    })
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    ctx.events
+        .emit(AppEvent::new("preferences").with("changed", json!({ "agentSettingsAll": enabled })));
+    Ok(Value::Null)
+}
+
 pub fn register_ops(reg: &mut OpRegistry) {
     reg.blocking("settings_changes_list", OpClass::Blocking, changes_list)
-        .blocking("settings_undo", OpClass::Maintenance, undo);
+        .blocking("settings_undo", OpClass::Maintenance, undo)
+        .blocking("settings_all_set", OpClass::Maintenance, all_settings_set);
 }
 
 pub fn register_host_tools(r: &mut HostToolRegistry) {
@@ -449,6 +469,22 @@ mod tests {
         let ev = e.sink.events.lock().unwrap()[1].clone();
         assert_eq!(ev.fields["chatId"], "chat-1");
         assert_eq!(ev.fields["changes"][0]["key"], "compactSidebar");
+    }
+
+    #[test]
+    fn the_all_settings_switch_is_the_users_op_and_opens_the_all_tier() {
+        let e = env();
+        let blocked = update_settings(&ctx(&e), json!({"changes": {"keybindings": {}}}));
+        assert!(blocked.unwrap_err().public.contains("all settings"));
+        assert!(all_settings_set(&op(&e), json!({"enabled": "yes"})).is_err());
+        all_settings_set(&op(&e), json!({"enabled": true})).unwrap();
+        assert_eq!(e.sink.kinds(), ["preferences"]);
+        assert!(update_settings(&ctx(&e), json!({"changes": {"keybindings": {}}})).is_ok());
+        // The generic preference writer still refuses it.
+        assert!(e
+            .db
+            .write(|tx| prefs::set_generic(tx, "agentSettingsAll", &json!(false)))
+            .is_err());
     }
 
     #[test]

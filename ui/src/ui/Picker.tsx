@@ -76,6 +76,8 @@ export interface PickerPopoverProps<T extends string> {
   extraHint?: ReactNode;
   testId?: string;
   className?: string;
+  /** Line the popover's right edge up with the control's, for a control at the right edge of a dialog. */
+  alignEnd?: boolean;
 }
 
 /** The shared picker popover (see the file comment). Mount it while open. */
@@ -93,6 +95,7 @@ export function PickerPopover<T extends string>({
   extraHint,
   testId,
   className,
+  alignEnd,
 }: PickerPopoverProps<T>) {
   const pop = useRef<HTMLDivElement>(null);
   const search = useRef<HTMLInputElement>(null);
@@ -105,7 +108,13 @@ export function PickerPopover<T extends string>({
   useLayoutEffect(() => {
     const a = anchor.current?.getBoundingClientRect();
     const z = pageZoom();
-    if (a && pop.current) setPos(placeBelow(unzoom(a, z), layoutSize(pop.current), viewportAt(z), 4));
+    if (a && pop.current) {
+      const at = unzoom(a, z);
+      const size = layoutSize(pop.current);
+      const placed = placeBelow(at, size, viewportAt(z), 4);
+      if (alignEnd) placed.left = Math.max(8, at.left + at.width - size.width);
+      setPos(placed);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   // The popover is hidden until placed, and a hidden field cannot take focus: focus it once shown.
@@ -254,6 +263,7 @@ export function Picker<T extends string>({
           heading={heading ?? label}
           searchable={searchable}
           searchPlaceholder={searchPlaceholder}
+          alignEnd={settings}
           onClose={close}
           onPick={(v) => {
             onChange(v);

@@ -60,6 +60,10 @@ pub const STALL_MINUTES: PrefKey = PrefKey::classified("stallMinutes");
 pub const CHAT_ELEMENTS: PrefKey = PrefKey::classified("chatElements");
 /// Composer autocomplete: `{enabled}`, off when missing.
 pub const AUTOCOMPLETE: PrefKey = PrefKey::classified("autocomplete");
+/// Settings > General: the sidebar entries the user hides, by id.
+pub const HIDDEN_SIDEBAR_ITEMS: PrefKey = PrefKey::classified("hiddenSidebarItems");
+/// Settings > Chat: skill names hidden from the `/` menu, without a leading `$`.
+pub const HIDDEN_SKILLS: PrefKey = PrefKey::classified("hiddenSkills");
 
 /// Keys the generic `preference` op accepts. Every other key has its own feature operation.
 /// The list starts with the layout keys and grows it
@@ -84,6 +88,8 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     STALL_MINUTES,
     CHAT_ELEMENTS,
     AUTOCOMPLETE,
+    HIDDEN_SIDEBAR_ITEMS,
+    HIDDEN_SKILLS,
 ];
 
 /// The stored value, or `None` when the row is missing or its JSON does not parse.
@@ -198,6 +204,20 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
             }),
         },
         "sendBehavior" => validate_send_behavior(value),
+        "hiddenSidebarItems" => validate_name_list(
+            value,
+            "hiddenSidebarItems",
+            9,
+            |n| SIDEBAR_ITEM_IDS.contains(&n),
+            "lists sidebar entries by id, each once",
+        ),
+        "hiddenSkills" => validate_name_list(
+            value,
+            "hiddenSkills",
+            512,
+            |n| !n.is_empty() && n.len() <= 128 && !n.starts_with('$'),
+            "lists skill names without a leading $, each once",
+        ),
         "selection" => validate_selection(value),
         "appearance" => match value.as_str() {
             Some("system" | "light" | "dark") => Ok(()),
@@ -252,6 +272,43 @@ fn validate_selection(value: &Value) -> Result<(), PrefError> {
         }
     }
     Ok(())
+}
+
+/// The sidebar entries that can be hidden.
+const SIDEBAR_ITEM_IDS: &[&str] = &[
+    "newChat",
+    "search",
+    "swarm",
+    "attention",
+    "tasks",
+    "saved",
+    "schedules",
+    "archived",
+    "coder",
+];
+
+/// A list of distinct strings, at most `max` long, each accepted by `ok`.
+fn validate_name_list(
+    value: &Value,
+    key: &'static str,
+    max: usize,
+    ok: impl Fn(&str) -> bool,
+    why: &'static str,
+) -> Result<(), PrefError> {
+    let bad = PrefError::Invalid { key, why };
+    let Some(items) = value.as_array() else {
+        return Err(bad);
+    };
+    let mut seen = std::collections::HashSet::new();
+    let fine = items.len() <= max
+        && items
+            .iter()
+            .all(|v| v.as_str().is_some_and(|n| ok(n) && seen.insert(n)));
+    if fine {
+        Ok(())
+    } else {
+        Err(bad)
+    }
 }
 
 /// `sendBehavior` holds a subset of its six keys; unknown keys are refused.
@@ -409,6 +466,30 @@ mod tests {
         ] {
             let r = db.write(|tx| set_generic(tx, "keybindings", &bad));
             assert!(matches!(r, Err(PrefError::Invalid { .. })), "{bad}");
+        }
+    }
+
+    #[test]
+    fn hidden_lists_are_generic_and_validated() {
+        let (_d, db) = temp_db(&MigrationRegistry::new());
+        for (key, ok, bad) in [
+            (
+                "hiddenSidebarItems",
+                json!(["search", "archived"]),
+                json!(["search", "nope"]),
+            ),
+            ("hiddenSidebarItems", json!([]), json!(["search", "search"])),
+            (
+                "hiddenSkills",
+                json!(["review", "deploy-check"]),
+                json!(["$deploy"]),
+            ),
+            ("hiddenSkills", json!([]), json!([""])),
+            ("hiddenSkills", json!(["a"]), json!("a")),
+        ] {
+            assert!(db.write(|tx| set_generic(tx, key, &ok)).is_ok(), "{key}");
+            let r = db.write(|tx| set_generic(tx, key, &bad));
+            assert!(matches!(r, Err(PrefError::Invalid { .. })), "{key} {bad}");
         }
     }
 

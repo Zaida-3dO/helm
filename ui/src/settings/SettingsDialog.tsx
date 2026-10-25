@@ -8,14 +8,19 @@ import { useDialog, useShell } from '../shell/context.ts';
 import { Dialog, useLayer } from '../ui/index.ts';
 import { IconSearch } from '../ui/icons.tsx';
 import { applySearch, clearHighlight } from './search.ts';
+import { SettingsWatchers } from './watchers.tsx';
 import { settingsPanes, subscribeSettingsPanes, peekRequestedPane, clearRequestedPane } from './registry.ts';
 
 export const SETTINGS_DIALOG = 'settings';
 
 export function SettingsDialog() {
   const { open, close } = useDialog(SETTINGS_DIALOG);
-  if (!open) return null;
-  return <SettingsBody close={close} />;
+  return (
+    <>
+      <SettingsWatchers />
+      {open && <SettingsBody close={close} />}
+    </>
+  );
 }
 
 function SettingsBody({ close }: { close: () => void }) {
@@ -24,7 +29,15 @@ function SettingsBody({ close }: { close: () => void }) {
   useEffect(() => clearRequestedPane, []);
   const [query, setQuery] = useState('');
   useLayer('search', true, () => setQuery(''), () => query.length > 0);
-  const searching = query.trim().length > 0;
+  // Searching mounts every pane (their rows are what gets searched), and each pane loads its own
+  // data, so wait for a pause in typing before starting.
+  const [applied, setApplied] = useState('');
+  useEffect(() => {
+    if (query.trim() === '') return setApplied('');
+    const t = setTimeout(() => setApplied(query), 250);
+    return () => clearTimeout(t);
+  }, [query]);
+  const searching = applied.trim().length > 0;
   const bodyRef = useRef<HTMLDivElement>(null);
   const [hits, setHits] = useState(0);
   const current = panes.find((p) => p.id === tab) ?? panes[0];
@@ -39,7 +52,7 @@ function SettingsBody({ close }: { close: () => void }) {
       clearHighlight();
       return;
     }
-    const run = () => setHits(applySearch(body, query));
+    const run = () => setHits(applySearch(body, applied));
     run();
     let frame = 0;
     const watch = new MutationObserver(() => {
@@ -51,7 +64,7 @@ function SettingsBody({ close }: { close: () => void }) {
       watch.disconnect();
       cancelAnimationFrame(frame);
     };
-  }, [query, searching, panes]);
+  }, [applied, searching, panes]);
   useEffect(() => clearHighlight, []);
   const footer = (
     <>
@@ -69,10 +82,11 @@ function SettingsBody({ close }: { close: () => void }) {
             type="button"
             role="tab"
             className="settings-tab"
-            aria-selected={!searching && p.id === current?.id}
+            aria-selected={query.trim() === '' && p.id === current?.id}
             data-tab={p.id}
             onClick={() => {
               setQuery('');
+              setApplied('');
               setTab(p.id);
             }}
           >
@@ -97,7 +111,7 @@ function SettingsBody({ close }: { close: () => void }) {
         {searching && hits === 0 && (
           <div className="settings-nomatch" data-testid="settings-nomatch">
             <IconSearch size={22} />
-            <span>No settings match "{query.trim()}"</span>
+            <span>No settings match "{applied.trim()}"</span>
           </div>
         )}
         {searching

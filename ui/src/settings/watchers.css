@@ -1,0 +1,15 @@
+/* The sidebar entries Settings → General can hide (set as data-hide-sidebar on the page). */
+[data-hide-sidebar~='newChat'] .sb-navs [data-testid='new-chat'],
+[data-hide-sidebar~='search'] .sb-navs [data-testid='nav-search'],
+[data-hide-sidebar~='attention'] .sb-navs [data-testid='nav-attention'] {
+  display: none;
+}
+
+/* The shortcuts sheet: the keyboard list in a 620 px dialog. */
+.ui-dialog[data-testid='shortcuts-sheet'] {
+  width: 620px;
+  height: min(640px, 100%);
+}
+.shortcuts-sheet {
+  padding: 0 20px 20px;
+}

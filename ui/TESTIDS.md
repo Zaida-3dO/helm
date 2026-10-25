@@ -66,6 +66,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `composer-context-status` | The "Side panel context on." line inside the box | |
 | `make-default` | The star that makes the chat's model and effort the default for new chats | `aria-pressed` while it already is |
 | `composer-drop` | The drop target shown over the composer box while files (from Explorer) or a sidebar chat row are dragged over it | the box carries `data-drop` = `files` or `chat` |
+| `settings-send-mode` / `settings-wait-limit` / `settings-long-commands` / `settings-hidden-skills` / `changed-by-chats` / `shortcuts-sheet` / `settings-nomatch` | Settings → Chat's send-behaviour pickers and the hidden-skills box; Settings → General's Changed by chats list (one `changed-<id>` row each); the Ctrl+/ shortcuts sheet; the empty state of a search with no match | |
 | `settings-send-key` | Settings → Chat: the Send message with picker (Ctrl+Enter or Enter) | |
 | `jump-latest` | "Jump to latest" button | |
 | `side-panel` / `panel-tab` / `panel-slot` / `panel-tab-body` | Side panel: the panel, a document tab, an Inspector slot (Changes, Files), a tab's body. The link gate's refusals show in the shared `toast-slot` | `panel-tab`: `data-kind`, `data-intent` (`user` `program`), `aria-selected`; `panel-slot`: `data-slot`; `panel-tab-body`: `data-kind` |

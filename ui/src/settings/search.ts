@@ -1,6 +1,6 @@
 // Settings search. Every pane stays mounted while the search box has text; this file decides
 // which rows (and which panes) stay on screen and marks the matched words. It works on the
-// rendered rows, so a pane needs no search code of its own: any `.setting-row` is searchable by
+// rendered rows, so a pane needs no search code of its own: any `.setting-row` (and the keyboard and MCP server rows) is searchable by
 // its title, description and control text.
 
 /** The words of a query: lower-cased, split on spaces. */
@@ -14,13 +14,17 @@ export function matchesQuery(text: string, query: string): boolean {
   return searchTerms(query).every((t) => lower.includes(t));
 }
 
+/** The elements that count as one searchable row, and the text inside them that gets the match marks. */
+const ROW = '.setting-row, .kb-row, .mcp-server';
+const MARKED = '.setting-title, .setting-desc, .kb-title > span, .mcp-server-name, .mcp-meta';
+
 const HIDE_ATTR = 'data-search-hide';
 const HIGHLIGHT = 'settings-hit';
 
 /** Hide `el`'s children that hold no kept row, descending into those that do. */
 function prune(el: Element, keep: Set<Element>): void {
   for (const child of Array.from(el.children)) {
-    if (keep.has(child) || child.classList.contains('settings-pane-label')) continue;
+    if (keep.has(child) || child.classList.contains('settings-pane-label') || child.classList.contains('kb-section-title')) continue;
     const holdsKept = [...keep].some((k) => child.contains(k));
     if (holdsKept) prune(child, keep);
     else child.setAttribute(HIDE_ATTR, '');
@@ -42,7 +46,7 @@ export function applySearch(root: HTMLElement, query: string): number {
       marked.push(section);
       continue;
     }
-    const rows = Array.from(section.querySelectorAll('.setting-row'));
+    const rows = Array.from(section.querySelectorAll(ROW));
     const keep = new Set(rows.filter((r) => matchesQuery(r.textContent ?? '', query)));
     if (keep.size === 0) {
       section.setAttribute(HIDE_ATTR, '');
@@ -64,7 +68,7 @@ function highlight(scopes: Element[], terms: string[]): void {
   const ranges: Range[] = [];
   if (terms.length > 0) {
     for (const scope of scopes) {
-      for (const text of Array.from(scope.querySelectorAll('.setting-title, .setting-desc'))) {
+      for (const text of Array.from(scope.querySelectorAll(MARKED))) {
         const walker = document.createTreeWalker(text, NodeFilter.SHOW_TEXT);
         for (let n = walker.nextNode(); n; n = walker.nextNode()) {
           const lower = (n.nodeValue ?? '').toLowerCase();

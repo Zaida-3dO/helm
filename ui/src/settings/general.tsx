@@ -8,6 +8,8 @@ import { Checkbox, ChoiceTiles, Picker, SettingRow, toast } from '../ui/index.ts
 import { IconMonitor, IconMoon, IconSun } from '../ui/icons.tsx';
 import { sizeOptions, zoomOptions } from './generalOptions.ts';
 import { registerSettingsPane } from './registry.ts';
+import { ChangedByChats } from './changed/ChangedByChats.tsx';
+import { parseNameList, SIDEBAR_ENTRIES } from './applied.ts';
 
 function GeneralPane() {
   const shell = useShell();
@@ -15,6 +17,8 @@ function GeneralPane() {
   const [compact, setCompact] = useState(false);
   const [sizes, setSizes] = useState<FontSizes>(FONT_DEFAULTS);
   const [zoom, setZoom] = useState(ZOOM_DEFAULT);
+  const [allSettings, setAllSettings] = useState(false);
+  const [hiddenItems, setHiddenItems] = useState<string[]>([]);
   useEffect(() => {
     shell
       .api<unknown>('preference_get', { key: 'fontSizes' })
@@ -27,6 +31,14 @@ function GeneralPane() {
     shell
       .api<unknown>('preference_get', { key: 'appearance' })
       .then((v) => setAppearance(parseAppearance(v)))
+      .catch(() => undefined);
+    shell
+      .api<unknown>('preference_get', { key: 'agentSettingsAll' })
+      .then((v) => setAllSettings(v === true))
+      .catch(() => undefined);
+    shell
+      .api<unknown>('preference_get', { key: 'hiddenSidebarItems' })
+      .then((v) => setHiddenItems(parseNameList(v)))
       .catch(() => undefined);
     shell
       .api<unknown>('preference_get', { key: 'compactSidebar' })
@@ -122,6 +134,40 @@ function GeneralPane() {
           }}
         />
       </SettingRow>
+      {SIDEBAR_ENTRIES.map((e) => (
+        <SettingRow key={e.id} title={`Show ${e.title} in the sidebar`} description={e.description} testId={`setting-sidebar-${e.id}`}>
+          <Checkbox
+            checked={!hiddenItems.includes(e.id)}
+            onChange={(show) => {
+              const before = hiddenItems;
+              const next = show ? before.filter((x) => x !== e.id) : [...before, e.id];
+              setHiddenItems(next);
+              apply('hiddenSidebarItems', next);
+              void save('hiddenSidebarItems', next, () => {
+                setHiddenItems(before);
+                apply('hiddenSidebarItems', before);
+              });
+            }}
+          />
+        </SettingRow>
+      ))}
+      <SettingRow
+        title="Chats can change all settings"
+        description="Chats can already change most settings and you can undo each change below. Turn this on to let them change every setting, including your shortcuts."
+        testId="setting-agent-all"
+      >
+        <Checkbox
+          checked={allSettings}
+          onChange={(on) => {
+            setAllSettings(on);
+            shell.api('settings_all_set', { enabled: on }).catch((e: unknown) => {
+              setAllSettings(!on);
+              toast.show({ kind: 'error', text: `Could not save: ${String((e as Error).message ?? e)}` });
+            });
+          }}
+        />
+      </SettingRow>
+      <ChangedByChats />
     </div>
   );
 }
