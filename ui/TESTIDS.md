@@ -27,7 +27,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `chat-status` | The chat's status, a visually hidden span (screen readers and tests; not a visible pill) | text = the status |
 | `composer` | The editable message box (Lexical `contenteditable`) | |
 | `send` | Send button (reads Send, Steer, Queue or Interrupt) | `disabled` while the draft is empty |
-| `stop` | Stop button, shown only while a turn runs (Stop that pauses the queue) | |
+| `stop` | Stop button, shown only while a turn runs (Stop; waiting messages follow the setting) | |
 | `transcript` | The transcript scroller | |
 | `transcript-row` | One message row | `data-status` (`saved` `streaming` `complete` `error` `interrupted`), `data-role` (`user` `assistant` `toolResult` `context`), `data-row-id` |
 | `peer-card` | A user row that another chat sent (origin `other_chat`): the "From <chat>" card with the sender's link, the body and a note that the user did not write it | `data-from` (the sending chat's id) |
@@ -105,7 +105,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `search-dialog` / `search-input` / `search-status` / `search-results` / `search-group` / `search-hit` | Mod+K search: dialog, query box, live status line, result list, a group, a row | `search-group`, `search-hit`: `data-group` = `chats` `files`; `search-status`: `data-state` |
 
 Keys (Windows): Send `Ctrl+Enter` (or `Enter` with the Enter send shortcut), Steer `Ctrl+Shift+Enter`,
-Queue `Alt+Enter`, Send now `Ctrl+Alt+Enter`, Stop that continues the queue `Esc`.
+Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 
 ## Orchestrator
 

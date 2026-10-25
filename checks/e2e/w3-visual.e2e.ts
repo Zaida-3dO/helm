@@ -268,7 +268,9 @@ describe("visual check and the host probes", { timeout: 15 * 60_000 }, () => {
       await page().waitForSelector(tid("toast", `[data-chat-id="${bg}"]`), { timeout: 30_000 });
       assert.equal(await page().locator(tid("toast")).count(), 1, "one toast");
       const toast = await measure(page(), tid("toast"));
-      assert.ok(toast.y >= 40 && toast.y < 120 && toast.x + toast.w <= toast.vw, "top right of the chat column, under the top bar");
+      const column = await page().evaluate(() => document.querySelector('[data-testid="chat-view"]')!.getBoundingClientRect().right);
+      const gap = column - (toast.x + toast.w);
+      assert.ok(toast.y >= 40 && toast.y < 120 && gap >= 0 && gap <= 40, `top right of the chat column, under the top bar (gap to the column edge ${gap}px)`);
       await opaque(tid("toast"));
       await readable(`${tid("toast")} .notice-title`);
       // Nothing overlaps it.

@@ -552,6 +552,13 @@ async fn stop_hands_back_the_steers_nobody_read() {
     ack(&w, &p).await;
     h.until("accepted", |h| h.state(&second) == "accepted")
         .await;
+    h.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('late', ?1, 't', 'saved', 9)",
+            [&chat],
+        )
+    })
+    .unwrap();
     let api = h.api.clone();
     let c2 = chat.clone();
     let stop = tokio::spawn(async move {
@@ -583,6 +590,11 @@ async fn stop_hands_back_the_steers_nobody_read() {
     assert!(
         w.no_command_for(Duration::from_millis(150)).await.is_none(),
         "nothing sent after Stop"
+    );
+    assert_eq!(
+        h.state("late"),
+        "saved",
+        "a message saved a moment before a plain Stop is still on its way"
     );
 }
 
@@ -1510,6 +1522,13 @@ async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it
     ack(&w, &p).await;
     h.until("accepted", |h| h.state(&unread) == "accepted")
         .await;
+    h.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('late', ?1, 't', 'saved', 9)",
+            [&chat],
+        )
+    })
+    .unwrap();
     let archived = h
         .call("chat_archive", json!({"chatId": chat}))
         .await
@@ -1533,6 +1552,11 @@ async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it
     esc.await.unwrap().ok();
     w.expect("shutdown").await;
     assert_eq!(h.col("SELECT archived FROM chats"), ["1"]);
+    assert_eq!(
+        h.state("late"),
+        "uncertain",
+        "an archive voids a saved message too"
+    );
     assert!(h.events("completion").is_empty(), "no notification");
     assert!(h.col("SELECT chat_id FROM chat_completions").is_empty());
     assert!(h.col("SELECT chat_id FROM unread_marks").is_empty());
@@ -1556,6 +1580,26 @@ async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it
         "uncertain",
         "recoverable after the restore"
     );
+
+    // Undo inside the archive window: the short kill deadline is dropped, so the chat is not
+    // ended with the 60-second note while its worker is still winding down.
+    let (chat4, _, mut w4) = running_turn(&mut h).await;
+    h.call("chat_archive", json!({"chatId": chat4}))
+        .await
+        .unwrap();
+    w4.expect("abort").await;
+    h.call("chat_restore", json!({"chatId": chat4}))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(350)).await; // past archive_stop (300 ms)
+    assert_ne!(
+        h.status(&chat4),
+        "interrupted",
+        "the archive deadline does not fire after a restore"
+    );
+    w4.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+        .await;
+    h.until("stopped", |h| h.status(&chat4) == "stopped").await;
 
     // A worker that never answers the stop is killed after the archive stop limit.
     let (chat2, _, mut w2) = running_turn(&mut h).await;
@@ -3003,6 +3047,22 @@ async fn a_send_soon_waits_for_a_slot_then_gives_up_after_its_window() {
         rx.recv().await,
         Some(crate::actor::Cmd::Dispatch(_))
     ));
+
+    // The archive's stop is retried in the background when the channel is full, not dropped.
+    assert!(enqueue(&tx, crate::actor::Cmd::Retire).is_ok());
+    assert!(enqueue(&tx, crate::actor::Cmd::Terminate).is_ok());
+    crate::runtime::enqueue_or_retry(
+        &tokio::runtime::Handle::current(),
+        tx.clone(),
+        crate::actor::Cmd::Archived,
+        Duration::from_secs(5),
+    );
+    assert!(matches!(rx.recv().await, Some(crate::actor::Cmd::Retire)));
+    assert!(matches!(
+        rx.recv().await,
+        Some(crate::actor::Cmd::Terminate)
+    ));
+    assert!(matches!(rx.recv().await, Some(crate::actor::Cmd::Archived)));
 
     assert!(enqueue(&tx, crate::actor::Cmd::Retire).is_ok());
     let started = std::time::Instant::now();

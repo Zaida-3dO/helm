@@ -1103,11 +1103,19 @@ impl Actor {
         let chat = self.chat_id.clone();
         if !continue_queue || self.archived {
             // An archived chat sends nothing, whatever the Stop asked: what Claude had not read
-            // reads "not delivered", so the text can be taken back after a restore.
+            // reads "not delivered", so the text can be taken back after a restore. On an
+            // ordinary Stop a message saved a moment ago is still on its way and stays so.
+            let states = if self.archived {
+                "'queued', 'accepted', 'saved'"
+            } else {
+                "'queued', 'accepted'"
+            };
             self.write(|t| {
                 t.execute(
-                    "UPDATE submissions SET state = 'uncertain'
-                     WHERE chat_id = ?1 AND state IN ('queued', 'accepted', 'saved')",
+                    &format!(
+                        "UPDATE submissions SET state = 'uncertain'
+                         WHERE chat_id = ?1 AND state IN ({states})"
+                    ),
                     [&chat],
                 )
             });
@@ -1360,6 +1368,13 @@ impl Actor {
             Cmd::Archived => self.on_archived(),
             Cmd::Restored => {
                 self.archived = false;
+                if self.stopping.is_some() {
+                    // The short archive deadline no longer applies: the stop already under way
+                    // gets the ordinary stop time instead.
+                    self.clear_timer(|t| matches!(t, Timer::StopDeadline));
+                    let lim = self.sh.cfg.limits.stop;
+                    self.add_timer(lim, Timer::StopDeadline);
+                }
                 // A worker still closing stays closed; the next send starts a new one.
                 if !self
                     .sh

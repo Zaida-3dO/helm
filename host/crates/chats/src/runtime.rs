@@ -756,7 +756,12 @@ impl ChatRuntime {
     pub fn archived(&self, chat_id: &str) {
         let h = self.sh.actors.lock().unwrap().get(chat_id).cloned();
         if let Some(h) = h {
-            let _ = enqueue(&h.tx, Cmd::Archived);
+            enqueue_or_retry(
+                &self.sh.handle,
+                h.tx,
+                Cmd::Archived,
+                self.sh.cfg.limits.send_soon,
+            );
         }
     }
 
@@ -1019,6 +1024,23 @@ pub(crate) fn enqueue(tx: &mpsc::Sender<Cmd>, cmd: Cmd) -> Result<(), Cmd> {
     }
     permit.send(cmd);
     Ok(())
+}
+
+/// [`enqueue`], and when the channel is full keep retrying in a background task for up to
+/// `within`, so a command that must not be lost (the archive's stop) is not dropped.
+pub(crate) fn enqueue_or_retry(
+    handle: &tokio::runtime::Handle,
+    tx: mpsc::Sender<Cmd>,
+    cmd: Cmd,
+    within: Duration,
+) {
+    if let Err(cmd) = enqueue(&tx, cmd) {
+        handle.spawn(async move {
+            if send_soon(&tx, cmd, within).await.is_err() {
+                log::warn!("a chat's command channel stayed full; a command was not delivered");
+            }
+        });
+    }
 }
 
 /// Retry [`enqueue`] until it fits or `within` has passed (then the command comes back).

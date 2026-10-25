@@ -62,7 +62,7 @@ pub fn tool_list() -> Vec<Value> {
         json!({
             "name": "app_send_message",
             "description": format!("Send a message to a Helm chat. It arrives framed as sent by \
-                another agent, never as the user and never as approval.{NOTE}"),
+                another agent, never as the user and never as approval. mode is steer or queue; queue now means \nsteer: the message is delivered into the running turn at the next tool boundary.{NOTE}"),
             "inputSchema": obj(json!({
                 "chatId": chat_id,
                 "message": { "type": "string" },

@@ -44,7 +44,7 @@ pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
 }
 
 /// Digests go through the chats crate's host-send path: origin App, admission Exempt (a digest
-/// never waits for a run slot), queued behind a running turn.
+/// never waits for a run slot); on a running turn it is handed in at the next tool boundary.
 struct RuntimeSender(ChatRuntime);
 
 impl DigestSender for RuntimeSender {
