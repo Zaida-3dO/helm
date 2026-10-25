@@ -44,7 +44,10 @@ export function isAnimated(mime: string, b: Uint8Array): boolean {
     for (let at = 8; at + 8 <= b.length; ) {
       if (tag(at + 4, 'acTL')) return true;
       if (tag(at + 4, 'IDAT') || tag(at + 4, 'IEND')) return false;
-      at += 12 + ((b[at]! << 24) | (b[at + 1]! << 16) | (b[at + 2]! << 8) | b[at + 3]!);
+      // The length is unsigned; a corrupt one that runs past the end ends the scan.
+      const next = at + 12 + (((b[at]! << 24) | (b[at + 1]! << 16) | (b[at + 2]! << 8) | b[at + 3]!) >>> 0);
+      if (next > b.length) return false;
+      at = next;
     }
     return false;
   }
@@ -71,13 +74,32 @@ export interface SentAttachments {
 }
 
 const KEEP_SENDS = 8;
-const sent = new Map<string, SentAttachments>();
+/** Most bytes of pictures kept for taking sends back; the oldest sends go first. */
+const KEEP_BYTES = 100 * 1024 * 1024;
+const sent = new Map<string, SentAttachments & { at: number }>();
 
 /** Remember a send's attachments under its submission id (only the last few are kept). */
-export function stashSent(submissionId: string, s: SentAttachments): void {
+export function stashSent(submissionId: string, s: SentAttachments, now = Date.now()): void {
   if (!s.files.length && !s.refs.length) return;
-  sent.set(submissionId, s);
-  while (sent.size > KEEP_SENDS) sent.delete(sent.keys().next().value!);
+  sent.set(submissionId, { ...s, at: now });
+  const bytes = () => [...sent.values()].reduce((n, x) => n + x.files.reduce((m, f) => m + f.size, 0), 0);
+  while (sent.size > 1 && (sent.size > KEEP_SENDS || bytes() > KEEP_BYTES)) sent.delete(sent.keys().next().value!);
+}
+
+/** Forget one send's attachments (it was delivered, or its chat closed). */
+export function forgetSent(submissionId: string): void {
+  sent.delete(submissionId);
+}
+
+/**
+ * Forget the sends among `ids` that are no longer waiting: not in `waiting` (the chat's unsent
+ * submissions) and older than `graceMs`, which covers the moment before the host lists a new send.
+ */
+export function forgetDelivered(ids: Iterable<string>, waiting: ReadonlySet<string>, now = Date.now(), graceMs = 5000): void {
+  for (const id of ids) {
+    const s = sent.get(id);
+    if (s && !waiting.has(id) && now - s.at > graceMs) sent.delete(id);
+  }
 }
 
 /** The attachments of a send, once: null when it carried none or is forgotten. */

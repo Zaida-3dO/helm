@@ -2,37 +2,42 @@
 // could not run. The draft stays editable; Send is disabled until the runtime check passes. The
 // check is the one Settings → Runtime shows.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useDialog, useShell } from '../shell/context.ts';
 import { requestPane } from '../settings/registry.ts';
 import { SETTINGS_DIALOG } from '../settings/SettingsDialog.tsx';
-import type { RuntimeStatus } from '../settings/runtime/model.ts';
+import { runtimeCheck, type RuntimeCheck } from './runtimeCheck.ts';
 import { Button } from '../ui/controls.tsx';
 import { IconChevronRight, IconWarning } from '../ui/icons.tsx';
 
-/** What the runtime check found wrong (empty when ready or not yet known). Refreshes when Settings closes. */
-export function useRuntimeProblems(): string[] {
+/**
+ * What the runtime check found. One check serves the whole app; it is asked again when the window
+ * comes back to the front while a problem stands, when Settings closes, and from the card's Retry.
+ */
+export function useRuntimeCheck(): RuntimeCheck & { retry: () => void } {
   const shell = useShell();
   const settings = useDialog(SETTINGS_DIALOG);
-  const [problems, setProblems] = useState<string[]>([]);
+  const check = useSyncExternalStore(runtimeCheck.subscribe, runtimeCheck.get);
+  const api = shell.api as (op: string, args: unknown) => Promise<unknown>;
+  const wasOpen = useRef(false);
   useEffect(() => {
-    if (settings.open) return;
-    let live = true;
-    shell
-      .api<RuntimeStatus>('runtime_status', {})
-      .then((s) => live && setProblems(s.problems ?? []))
-      .catch(() => undefined);
-    return () => {
-      live = false;
-    };
-  }, [shell, settings.open]);
-  return problems;
+    runtimeCheck.ensure(api);
+    const focus = () => runtimeCheck.get().blocked && void runtimeCheck.refresh(api);
+    window.addEventListener('focus', focus);
+    return () => window.removeEventListener('focus', focus);
+  }, [api]);
+  useEffect(() => {
+    if (wasOpen.current && !settings.open) void runtimeCheck.refresh(api);
+    wasOpen.current = settings.open;
+  }, [settings.open, api]);
+  return { ...check, retry: () => void runtimeCheck.refresh(api) };
 }
 
-export function SetupBanner({ problems }: { problems: string[] }) {
+export function SetupBanner({ check, onRetry }: { check: RuntimeCheck; onRetry: () => void }) {
   const shell = useShell();
   const [details, setDetails] = useState(false);
-  if (problems.length === 0) return null;
+  if (!check.blocked) return null;
+  const problems = check.problems;
   return (
     <div className="composer-setup" data-testid="composer-setup" role="status">
       <IconWarning size={16} />
@@ -50,6 +55,9 @@ export function SetupBanner({ problems }: { problems: string[] }) {
           </ul>
         )}
       </div>
+      <Button variant="text" data-testid="composer-setup-retry" onClick={onRetry}>
+        Check again
+      </Button>
       <Button
         variant="secondary"
         data-testid="composer-setup-open"

@@ -12,7 +12,7 @@ import { Editor, type EditorHandle } from './Editor.tsx';
 import { resolveKey, sendLabel, sendTooltip, stopTooltip, type KeyContext, type SendShortcut } from './keymap.ts';
 import { Button } from '../ui/controls.tsx';
 import { IconAttach, IconChat, IconFileText as IconFile, IconFolder, IconFolderPlus, IconX } from '../ui/icons.tsx';
-import { SetupBanner, useRuntimeProblems } from './SetupBanner.tsx';
+import { SetupBanner, useRuntimeCheck } from './SetupBanner.tsx';
 import { ContextStatus } from './ContextStatus.tsx';
 import { useShell } from '../shell/context.ts';
 import { addRef, dropLandsIn, parseFileDrop, roomLeft, type AttachedRef } from './refs.ts';
@@ -20,7 +20,7 @@ import { ModelPicker } from './ModelPicker.tsx';
 import { DefaultStar } from './DefaultStar.tsx';
 import { PermissionChip } from './PermissionChip.tsx';
 import { orderPending, itemState } from './queue.ts';
-import { bytesToBase64, isAnimated, refusal, stashSent, type Attached, type SentAttachments } from './attachments.ts';
+import { bytesToBase64, forgetDelivered, forgetSent, isAnimated, refusal, stashSent, type Attached, type SentAttachments } from './attachments.ts';
 import { Recall } from './recall.ts';
 import { commandWithArgs, moveActive, SCOPE_LABEL, skillMenu, skillQuery, type Skill } from './skills.ts';
 import { useHiddenSkills } from '../settings/applied.ts';
@@ -57,15 +57,17 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   const [error, setError] = useState<string | null>(null);
   const [empty, setEmpty] = useState(!chat.draft);
   const stopping = useRef(false);
+  // The sends this composer made whose attachments are kept for taking the message back.
+  const mine = useRef(new Set<string>());
   // True while a send is on its way to the host: a second press does not send the message twice.
   const sendingRef = useRef(false);
   const [sending, setSending] = useState(false);
   const behavior = thread?.sendBehavior ?? HOME_SEND_BEHAVIOR;
   const busy = isBusy(chat.status);
   // Send waits while Claude Code cannot be found, and while the agent starts with nothing in flight.
-  const problems = useRuntimeProblems();
+  const runtime = useRuntimeCheck();
   const starting = chat.status === 'starting' && pending.length === 0;
-  const blocked = problems.length > 0 || starting;
+  const blocked = runtime.blocked || starting;
   const blockedRef = useRef(blocked);
   blockedRef.current = blocked;
   const ctx: KeyContext = useMemo(
@@ -110,6 +112,21 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
     // composerApi(chatId).insert(...) reaches this composer (slots.ts).
     return mountComposer(chat.id, { insert, focus: () => editor.current?.focus(), restore: (s) => restoreRef.current(s) });
   }, [registerSetText, saver, chat.id]);
+
+  useEffect(() => {
+    const waiting = new Set(orderPending(pending).map((s) => s.id));
+    forgetDelivered(mine.current, waiting);
+    // Check again after the grace period so a send that was delivered quietly is let go too.
+    const t = setTimeout(() => forgetDelivered(mine.current, waiting), 5500);
+    return () => clearTimeout(t);
+  }, [pending]);
+  useEffect(
+    () => () => {
+      mine.current.forEach(forgetSent);
+      mine.current.clear();
+    },
+    [],
+  );
 
   const newestQueued = () => orderPending(pending).filter((s) => itemState(s) === 'queued').at(-1);
 
@@ -287,6 +304,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
           attachments: [...images.map((a) => a.id), ...sentRefs.map((r) => r.id)],
         });
         // Kept for a while, so taking the message back (withdraw, recover) restores its attachments.
+        mine.current.add(submissionId);
         stashSent(submissionId, {
           files: images.flatMap((a) => (a.file ? [a.file] : [])),
           refs: sentRefs.map((r) => ({ kind: r.kind === 'chat' ? ('chat' as const) : ('path' as const), target: r.target })),
@@ -486,7 +504,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
           ))}
         </div>
       )}
-      <SetupBanner problems={problems} />
+      <SetupBanner check={runtime} onRetry={runtime.retry} />
       {error && (
         <div className="composer-error error" data-testid="composer-error">
           {error}
@@ -620,7 +638,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
               data-testid="send"
               disabled={blocked || sending || (empty && attached.length === 0 && refs.length === 0)}
               aria-busy={sending || undefined}
-              title={problems.length > 0 ? 'Connect Claude Code to send' : starting ? 'Claude Code is starting' : sendTooltip(ctx, busy)}
+              title={runtime.blocked ? 'Connect Claude Code to send' : starting ? 'Claude Code is starting' : sendTooltip(ctx, busy)}
               onClick={() => void send('default')}
             />
           </div>
