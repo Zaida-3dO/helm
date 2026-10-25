@@ -92,6 +92,14 @@ pub fn start(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
             }
         }
     }
+    // A board item another chat is already working on is refused, unless the user agrees.
+    let second_start = match item {
+        Some(i) => match crate::claims::check_item(tx, x, i, a)? {
+            Ok(b) => b,
+            Err(e) => return Ok(Err(e)),
+        },
+        None => false,
+    };
     let id = uuid::Uuid::new_v4().to_string();
     store::insert_run(tx, &id, x.chat_id, &title, item, x.now)?;
     let run = store::run(tx, &id)?.expect("just inserted");
@@ -105,6 +113,19 @@ pub fn start(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
         },
         x.now,
     )?;
+    if second_start {
+        store::event(
+            tx,
+            x.chat_id,
+            Some(&run),
+            &Event {
+                verdict: Some("takeOver"),
+                body: Some("A second task for this board item, with the user's agreement."),
+                ..ev("consent")
+            },
+            x.now,
+        )?;
+    }
     Ok(Ok(json!({"runId": id, "title": title, "started": true})))
 }
 
@@ -139,8 +160,10 @@ pub fn plan(tx: &Transaction<'_>, x: &Act<'_>, a: &Value, plan_text: &str) -> Ou
         };
         let mut sa =
             json!({"title": title, "new": a.get("new").cloned().unwrap_or(Value::Bool(false))});
-        if let Some(i) = a.get("itemId") {
-            sa["itemId"] = i.clone();
+        for k in ["itemId", "userQuote", "grant"] {
+            if let Some(v) = a.get(k) {
+                sa[k] = v.clone();
+            }
         }
         if let Err(e) = start(tx, x, &sa)? {
             return Ok(Err(e));
@@ -289,7 +312,9 @@ fn run_json(
 pub fn status(tx: &Transaction<'_>, x: &Act<'_>) -> Out {
     let open = store::open_runs(tx, x.chat_id)?;
     let run = store::active_run(tx, x.chat_id)?;
-    Ok(Ok(run_json(tx, x.s, run.as_ref(), &open)?))
+    let mut v = run_json(tx, x.s, run.as_ref(), &open)?;
+    crate::postland::add_to_status(tx, x.chat_id, &mut v)?;
+    Ok(Ok(v))
 }
 
 /// The UI's view of a chat's workflow (`workflow_run_get`): the `status` shape around the chat's
@@ -351,6 +376,11 @@ pub fn update(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
     let existing = store::change(tx, &run.id, &repo, &branch)?;
     if existing.is_none() && store::changes(tx, &run.id)?.len() >= 32 {
         return Ok(Err("A task holds at most 32 changes.".into()));
+    }
+    if existing.is_none() {
+        if let Some(why) = crate::claims::open_refusal(tx, &run, &repo, &branch, x.now)? {
+            return Ok(Err(why));
+        }
     }
     let mut c = existing.clone().unwrap_or(Change {
         run_id: run.id.clone(),
@@ -506,8 +536,12 @@ pub fn park(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
     Ok(Ok(json!({"runId": run.id, "status": "parked"})))
 }
 
-/// `drop {repo, branch, reason}` on the active or a parked task.
+/// `drop {repo, branch, reason}` on the active or a parked task, or `drop {queued}` to discard a
+/// queued follow-up.
 pub fn drop(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
+    if a.get("queued").is_some() {
+        return crate::postland::discard(tx, x, a);
+    }
     let (repo, branch) = match target(a) {
         Ok(t) => t,
         Err(e) => return Ok(Err(e)),

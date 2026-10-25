@@ -141,6 +141,8 @@ pub struct WorkflowSettings {
     pub move_fast: bool,
     /// The landing guard on Bash and MCP calls in chats with a task: user-only, default on.
     pub landing_guard: bool,
+    /// The dispatch gate on agent spawns during a task: user-only, default on.
+    pub dispatch_gate: bool,
     /// Defaults to `auto`.
     pub new_chats: NewChats,
 }

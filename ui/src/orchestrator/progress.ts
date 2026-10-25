@@ -150,7 +150,7 @@ export function needsYou(view: RunView, s: WorkflowSettings, allowRequests: numb
 }
 
 /** The consent kinds the workflow registers (host/crates/workflow kinds.rs). */
-export const WORKFLOW_CONSENT_KINDS = ['land', 'ready', 'drop', 'skip', 'allowMore', 'reopen'];
+export const WORKFLOW_CONSENT_KINDS = ['land', 'ready', 'drop', 'skip', 'allowMore', 'reopen', 'takeOver'];
 
 export const isWorkflowConsent = (kind: string): boolean => WORKFLOW_CONSENT_KINDS.includes(kind);
 

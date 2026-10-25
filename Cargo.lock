@@ -2210,6 +2210,7 @@ dependencies = [
  "helm-platform",
  "helm-standup",
  "helm-workers",
+ "helm-worktrees",
  "hex",
  "log",
  "rusqlite",

@@ -19,6 +19,7 @@ import { assertNotShim, resolveClaude, type Resolved } from "./resolve.ts";
 import { StreamTranslator } from "./translate.ts";
 import { Attribution } from "../../hosttools/attribution.ts";
 import { fileSaver, DEFAULT_MAX_CHARS } from "../../hosttools/cap.ts";
+import { decideGate, gateHook, gatesWanted, WORKFLOW_GATE_HOOK_ID } from "./gates.ts";
 import { RequestChannel } from "../../hosttools/channel.ts";
 import { HostToolServer, SERVER_NAME, sdkMcpConfig, toolPrefix } from "../../hosttools/server.ts";
 import { planUsageFromRateLimit } from "../../usage/rateLimit.ts";
@@ -153,6 +154,8 @@ export class ClaudeDriver implements Driver {
   private readonly budget: SubagentBudget;
   /** The landing guard (guard.ts): asks the host before Bash, PowerShell and MCP calls. */
   private readonly guard: LandingGuard | undefined;
+  /** The host-tool channel, when the workflow's gates may act in this chat (gates.ts). */
+  private readonly gateChannel: RequestChannel | undefined;
 
   constructor(launch: Launch, channel: HostChannel, deps: DriverDeps) {
     this.launch = launch;
@@ -180,11 +183,13 @@ export class ClaudeDriver implements Driver {
     });
     if (Array.isArray(launch.hostTools) && typeof launch.chatToolsDirectory === "string" && launch.chatToolsDirectory) {
       this.mcp = createMcpBridge((l) => this.ch.emit(l), { cwd: launch.cwd });
+      const channel = new RequestChannel({ dir: launch.chatToolsDirectory, emit: (rec) => this.ch.emit(rec) });
+      if (gatesWanted(deps.env)) this.gateChannel = channel;
       this.hostTools = new HostToolServer({
         bridge: asHostToolBridge(this.mcp),
         hostTools: launch.hostTools,
         outputCap: c.toolOutputCap === true ? { maxChars: DEFAULT_MAX_CHARS, save: fileSaver(launch.chatId) } : undefined,
-        channel: new RequestChannel({ dir: launch.chatToolsDirectory, emit: (rec) => this.ch.emit(rec) }),
+        channel,
         // A successful self-archive ends the turn.
         onEndTurn: () => {
           if (this.turnOpen) this.control({ subtype: "interrupt" }, this.limits.controlTimeoutMs).catch((e: Error) => this.deps.diag(`self-archive interrupt failed: ${e.message}`));
@@ -255,6 +260,7 @@ export class ClaudeDriver implements Driver {
       preToolUse.push({ matcher: `${toolPrefix}.*`, hookCallbackIds: [HOST_TOOL_HOOK_ID] });
       if (this.mcp) preToolUse.push({ matcher: "mcp__.*", hookCallbackIds: [DUPLICATE_MCP_HOOK_ID] });
       if (this.guard) preToolUse.push({ matcher: LANDING_GUARD_MATCHER, hookCallbackIds: [LANDING_GUARD_HOOK_ID] });
+      if (this.gateChannel) preToolUse.push(gateHook());
       initRequest.sdkMcpServers = [SERVER_NAME];
     }
     if (this.budget.enabled) preToolUse.push({ matcher: ".*", hookCallbackIds: [BUDGET_HOOK_ID] });
@@ -716,6 +722,12 @@ export class ClaudeDriver implements Driver {
     if (req.callback_id === HOST_TOOL_HOOK_ID) {
       this.attribution.noteHook({ ...input, tool_use_id: req.tool_use_id ?? input.tool_use_id });
       return this.controlReply(requestId, {});
+    }
+    if (req.callback_id === WORKFLOW_GATE_HOOK_ID && this.gateChannel) {
+      const id = String(req.tool_use_id ?? input.tool_use_id ?? "");
+      const child = (typeof input.agent_id === "string" && input.agent_id !== "") || this.subagentTools.has(id);
+      void decideGate(this.gateChannel, input, child).then((r) => this.controlReply(requestId, r));
+      return;
     }
     if (req.callback_id === DUPLICATE_MCP_HOOK_ID) {
       const reason = duplicateMcpRefusal(String(input.tool_name ?? ""), this.mcp);

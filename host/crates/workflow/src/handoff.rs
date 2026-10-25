@@ -66,7 +66,9 @@ pub fn hand_off(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
     let mut ready = Vec::new();
     let mut missing = Vec::new();
     for c in &chosen {
-        let m = engine::missing(x.s, &run, c, &all);
+        let mut m = engine::missing(x.s, &run, c, &all);
+        // The first claimant wins: a change an earlier task of another chat holds stays there.
+        m.extend(crate::claims::earlier_holder(tx, &run, c, x.now)?);
         if m.is_empty() {
             ready.push(c.clone());
         } else {

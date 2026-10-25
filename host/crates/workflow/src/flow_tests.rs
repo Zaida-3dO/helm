@@ -353,3 +353,436 @@ fn dropping_a_handed_off_change_needs_consent_bound_to_its_own_task() {
         .unwrap();
     assert_eq!(on_task, 1);
 }
+
+// ---- claims, take-over, gates and post-land ------------------------------------------------
+
+const MIN: i64 = 60_000;
+
+impl T {
+    fn add_chat(&self, id: &str, title: &str) {
+        self.db
+            .write::<_, rusqlite::Error>(|tx| {
+                tx.execute(
+                    "INSERT INTO chats(id, project_id, title, created_at, updated_at) VALUES (?1, 'p', ?2, 1, 1)",
+                    params![id, title],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    fn wf_in(&self, chat: &str, args: Value, now: i64) -> Result<Value, String> {
+        workflow_call(&self.db, &self.kinds, chat, false, &args, now).map_err(|e| e.text())
+    }
+    fn sql(&self, q: &str) {
+        self.db
+            .write::<_, rusqlite::Error>(|tx| tx.execute_batch(q))
+            .unwrap();
+    }
+    fn count(&self, q: &str) -> i64 {
+        self.db
+            .snapshot(|tx| tx.query_row(q, [], |r| r.get(0)))
+            .unwrap()
+    }
+    fn gate(&self, tool: &str, input: Value, child: bool) -> Value {
+        crate::gates::gate_call(
+            &self.db,
+            "c",
+            &json!({"tool": tool, "input": input, "child": child}),
+            50,
+        )
+        .unwrap()
+    }
+    fn set_path(&self, p: &std::path::Path) {
+        self.db
+            .write::<_, rusqlite::Error>(|tx| {
+                tx.execute("UPDATE projects SET path = ?1", [p.to_string_lossy()])?;
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn one_task_holds_a_change_and_take_over_moves_it_from_a_stopped_chat() {
+    let t = setup(|_| {});
+    t.add_chat("d", "Second");
+    let feat = json!({"action": "update", "repo": REPO, "branch": "feat-x"});
+    t.wf_in(
+        "c",
+        json!({"action": "start", "title": "One", "itemId": "item-1"}),
+        10,
+    )
+    .unwrap();
+    t.wf_in("c", feat.clone(), 10).unwrap();
+    // A second start on the same board item from another chat is refused, naming the holder.
+    let e = t
+        .wf_in(
+            "d",
+            json!({"action": "start", "title": "Two", "itemId": "item-1"}),
+            20,
+        )
+        .unwrap_err();
+    assert!(
+        e.contains("already being worked on") && e.contains("\"T\""),
+        "{e}"
+    );
+    assert!(
+        e.contains("Take over item item-1."),
+        "the user's sentence is named: {e}"
+    );
+    t.wf_in("d", json!({"action": "start", "title": "Two"}), 20)
+        .unwrap();
+    // Opening the same branch is refused softly with the way through.
+    let e = t.wf_in("d", feat.clone(), 20).unwrap_err();
+    assert!(e.contains("held by") && e.contains("take_over"), "{e}");
+    // A build report that would open it is refused the same way.
+    t.sql("UPDATE workflow_runs SET plan_id = 'p', plan_approved = 1 WHERE chat_id = 'd'");
+    let e = report_call(
+        &t.db,
+        &t.kinds,
+        &t.trees,
+        "d",
+        true,
+        json!({"kind": "build", "repo": REPO, "branch": "feat-x", "tip": A, "summary": "b"}),
+        20,
+    )
+    .map_err(|e| e.text())
+    .unwrap_err();
+    assert!(e.starts_with("Permanent") && e.contains("held by"), "{e}");
+    // The holder is active and was touched just now: a check reports it needs the user.
+    let take = json!({"action": "take_over", "repo": REPO, "branch": "feat-x", "reason": "continuing it here"});
+    let chk = t
+        .wf_in(
+            "d",
+            json!({"action": "take_over", "repo": REPO, "branch": "feat-x", "check": true}),
+            30,
+        )
+        .unwrap();
+    assert_eq!(chk["wouldGoThrough"], false);
+    assert_eq!(chk["needsUser"], true);
+    let takeovers = "SELECT count(*) FROM workflow_events WHERE kind = 'claim_takeover'";
+    assert_eq!(t.count(takeovers), 0, "a check writes nothing");
+    let e = t.wf_in("d", take.clone(), 30).unwrap_err();
+    assert!(
+        e.contains("Take over feat-x.") && e.contains("app_request_allow"),
+        "{e}"
+    );
+    let _ = crate::notes::take_pending();
+    // Idle for 30 minutes: the holder counts as stopped, so no words are needed.
+    let out = t.wf_in("d", take.clone(), 10 + 31 * MIN).unwrap();
+    assert_eq!(out["takenOver"], true);
+    assert_eq!(out["withUser"], false);
+    let notes = crate::notes::take_pending();
+    let to: Vec<&str> = notes.iter().map(|n| n.chat_id.as_str()).collect();
+    assert_eq!(to, ["c", "d"], "a note in both chats");
+    assert!(
+        notes[0].steer && !notes[1].steer,
+        "only the holder may be steered"
+    );
+    assert_eq!(t.count(takeovers), 2);
+    assert_eq!(t.count("SELECT count(*) FROM workflow_events WHERE kind = 'change_dropped' AND verdict = 'taken_over' AND chat_id = 'c'"), 1);
+    assert_eq!(t.count("SELECT count(*) FROM workflow_changes c JOIN workflow_runs r ON r.id = c.run_id WHERE r.chat_id = 'd' AND c.state = 'open'"), 1);
+    // Now the second chat is the holder another chat is told about.
+    t.add_chat("e", "Third");
+    t.wf_in(
+        "e",
+        json!({"action": "start", "title": "Three"}),
+        10 + 32 * MIN,
+    )
+    .unwrap();
+    assert!(t
+        .wf_in("e", feat.clone(), 10 + 32 * MIN)
+        .unwrap_err()
+        .contains("\"Second\""));
+    // Mid-land changes are never taken over; an archived chat's item no longer blocks a start.
+    t.sql("UPDATE workflow_changes SET state = 'landing' WHERE state = 'open'");
+    let e = t
+        .wf_in(
+            "c",
+            json!({"action": "take_over", "repo": REPO, "branch": "feat-x", "reason": "x"}),
+            10 + 33 * MIN,
+        )
+        .unwrap_err();
+    assert!(e.contains("being landed"), "{e}");
+    t.add_chat("f", "Fourth");
+    t.sql("UPDATE chats SET archived = 1 WHERE id = 'c'");
+    t.wf_in(
+        "f",
+        json!({"action": "start", "title": "Four", "itemId": "item-1"}),
+        10 + 34 * MIN,
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_gates_act_only_with_orchestrator_on_and_a_task_active() {
+    let allow = json!({"allow": true});
+    // Orchestrator off for the chat: no launch variable, and every question is allowed.
+    let off = setup(|s| s.new_chats = NewChats::Never);
+    assert!(!crate::gates::launch_wants_gates(&off.db, "c"));
+    assert_eq!(
+        off.gate("Agent", json!({"subagent_type": "coder"}), false),
+        allow
+    );
+    assert_eq!(
+        off.gate("Write", json!({"file_path": "C:/w/a.rs"}), false),
+        allow
+    );
+    assert_eq!(off.count("SELECT count(*) FROM workflow_events"), 0);
+    let master_off = setup(|s| s.enabled = false);
+    assert!(!crate::gates::launch_wants_gates(&master_off.db, "c"));
+    // On, but no task yet: allowed.
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("r");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(
+        repo.join(".git/config"),
+        "[remote \"origin\"]\n\turl = https://github.com/o/r.git\n",
+    )
+    .unwrap();
+    let t = setup(|_| {});
+    t.set_path(&repo);
+    assert!(crate::gates::launch_wants_gates(&t.db, "c"));
+    assert_eq!(
+        t.gate("Agent", json!({"subagent_type": "coder"}), false),
+        allow
+    );
+    t.wf(json!({"action": "start", "title": "One"})).unwrap();
+    let f = repo.join("src").join("a.rs").to_string_lossy().to_string();
+    let outside = dir.path().join("notes.md").to_string_lossy().to_string();
+    let deny = |v: Value, has: &str| {
+        assert_eq!(v["allow"], false, "{v}");
+        assert!(v["reason"].as_str().unwrap().contains(has), "{v}");
+    };
+    // (tool, input, child, None = allowed or Some(text in the refusal))
+    let rows: Vec<(&str, Value, bool, Option<&str>)> = vec![
+        ("Agent", json!({"subagent_type": "planner"}), false, None),
+        (
+            "Agent",
+            json!({"subagent_type": "coder"}),
+            false,
+            Some("needs the plan first"),
+        ),
+        ("Agent", json!({}), false, Some("Build-exempt")),
+        (
+            "Task",
+            json!({"subagent_type": "Explore"}),
+            false,
+            Some("Build-exempt"),
+        ),
+        (
+            "Agent",
+            json!({"subagent_type": "plan-reviewer"}),
+            false,
+            Some("no plan of record"),
+        ),
+        (
+            "Agent",
+            json!({"subagent_type": "pr-cleanup"}),
+            false,
+            Some("clean-up basis"),
+        ),
+        (
+            "Agent",
+            json!({"subagent_type": "planner", "isolation": "remote"}),
+            false,
+            Some("remote"),
+        ),
+        (
+            "Agent",
+            json!({"subagent_type": "reviewer--2"}),
+            true,
+            Some("only the task's orchestrator"),
+        ),
+        (
+            "Agent",
+            json!({"subagent_type": "Explore", "run_in_background": true}),
+            true,
+            Some("background"),
+        ),
+        ("Agent", json!({"subagent_type": "Explore"}), true, None),
+        ("Bash", json!({"command": "ls"}), false, None),
+        ("Write", json!({"file_path": f}), false, Some("allow_edit")),
+        ("Edit", json!({"file_path": f}), true, None),
+        ("Write", json!({"file_path": outside}), false, None),
+    ];
+    for (tool, input, child, want) in rows {
+        let got = t.gate(tool, input.clone(), child);
+        match want {
+            None => assert_eq!(got, allow, "{tool} {input} child={child}"),
+            Some(has) => deny(got, has),
+        }
+    }
+    assert_eq!(
+        t.count("SELECT count(*) FROM workflow_events WHERE kind = 'gate_denied'"),
+        9
+    );
+    // The ways through: an approved plan opens the build gate; allow_edit opens one file.
+    t.approved_plan();
+    assert_eq!(
+        t.gate("Agent", json!({"subagent_type": "coder"}), false),
+        allow
+    );
+    let g = t
+        .wf(json!({"action": "allow_edit", "file": f, "reason": "the task's notes file"}))
+        .unwrap();
+    assert_eq!(g["granted"], true);
+    assert_eq!(t.gate("Write", json!({"file_path": f}), false), allow);
+    let other = repo.join("b.rs").to_string_lossy().to_string();
+    deny(
+        t.gate("Write", json!({"file_path": other}), false),
+        "allow_edit",
+    );
+    let g = t
+        .wf(json!({"action": "allow_edit", "file": outside, "reason": "x"}))
+        .unwrap();
+    assert_eq!(
+        g["gated"], false,
+        "a file outside the task's repositories needs no grant"
+    );
+    // Each gate's user switch turns it off.
+    t.db.write::<_, rusqlite::Error>(|tx| {
+        let mut s = settings::load(tx)?;
+        s.dispatch_gate = false;
+        s.orchestrator_edits = EditsRule::Allow;
+        settings::store(tx, &s, 2)
+    })
+    .unwrap();
+    assert_eq!(
+        t.gate(
+            "Task",
+            json!({"subagent_type": "Explore", "isolation": "remote"}),
+            false
+        ),
+        allow
+    );
+    assert_eq!(t.gate("Write", json!({"file_path": other}), false), allow);
+    assert!(
+        !crate::gates::launch_wants_gates(&t.db, "c"),
+        "nothing left to gate"
+    );
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let o = std::process::Command::new("git")
+        .current_dir(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .expect("git on PATH");
+    assert!(o.status.success(), "git {args:?}");
+    String::from_utf8_lossy(&o.stdout).trim().to_owned()
+}
+
+#[test]
+fn a_finished_land_wraps_up_its_worktree_and_queues_follow_ups() {
+    let t = setup(|s| {
+        s.stages.cleanup.use_ = StageUse::Off;
+        s.landing.repos.push(RepoRule {
+            repo: REPO.into(),
+            mode: LandMode::Merge,
+            method: Some(MergeMethod::Squash),
+        })
+    });
+    // A clone of the change's repository with a worktree for its branch.
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("main");
+    std::fs::create_dir(&main).unwrap();
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(
+        &main,
+        &["remote", "add", "origin", "https://github.com/o/r.git"],
+    );
+    std::fs::write(main.join("a.txt"), "a").unwrap();
+    git(&main, &["add", "a.txt"]);
+    git(&main, &["commit", "-q", "-m", "one"]);
+    let wt = dir.path().join("wt");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat-x",
+            &wt.to_string_lossy(),
+        ],
+    );
+    assert_eq!(
+        crate::gates::repo_of(&wt).as_deref(),
+        Some(REPO),
+        "a worktree's repository is its main clone's"
+    );
+    t.set_path(&main);
+    let after_land = json!({"kind": "after_land", "verdict": "done", "summary": "closed the item", "followUps": ["File the docs item"]});
+    assert!(t
+        .rep(after_land.clone())
+        .unwrap_err()
+        .contains("no task in this chat has finished landing"));
+    t.trees.set(A, "t1");
+    t.approved_plan();
+    t.build(A).unwrap();
+    t.rep(json!({"kind": "code_review", "repo": REPO, "branch": "feat-x", "tip": A, "base": "main", "verdict": "lgtm", "summary": "r",
+        "followUps": ["Rename the helper", "Rename the helper", "Add a test for empty input"]}))
+        .unwrap();
+    assert_eq!(t.events("followups_queued"), 1);
+    t.wf(json!({"action": "hand_off", "summary": "done"}))
+        .unwrap();
+    // The land step merges it.
+    let before =
+        t.db.write::<_, rusqlite::Error>(|tx| {
+            let run = store::run(
+                tx,
+                &tx.query_row("SELECT id FROM workflow_runs", [], |r| {
+                    r.get::<_, String>(0)
+                })?,
+            )?
+            .unwrap();
+            let mut c = store::change(tx, &run.id, REPO, "feat-x")?.unwrap();
+            crate::engine::move_change(tx, &run, &mut c, "landing", false, 20)?.unwrap();
+            crate::land::apply(tx, &c, &crate::land::Step::Landed(B.into()), 20)?;
+            Ok(c)
+        })
+        .unwrap();
+    let _ = crate::notes::take_pending();
+    crate::postland::after_step(&t.db, &before, 21).unwrap();
+    assert!(!wt.exists(), "the merged, clean, unused worktree is gone");
+    assert!(main.join("a.txt").exists());
+    assert_eq!(t.count("SELECT count(*) FROM workflow_events WHERE kind = 'stage_report' AND verdict = 'worktree_removed'"), 1);
+    assert_eq!(t.events("stage_due"), 1);
+    let notes = crate::notes::take_pending();
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].text.contains("finished landing")
+            && notes[0].text.contains("removed the worktree"),
+        "{}",
+        notes[0].text
+    );
+    // The orchestrator sees the queue and the due post-land stage; it discards one follow-up.
+    let s = t.wf(json!({"action": "status"})).unwrap();
+    assert_eq!(s["followUps"]["total"], 2, "duplicates are skipped: {s}");
+    assert_eq!(s["postLand"]["due"].as_array().unwrap().len(), 1);
+    let id = s["followUps"]["queued"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    t.wf(json!({"action": "drop", "queued": id})).unwrap();
+    assert!(t.wf(json!({"action": "drop", "queued": id})).is_err());
+    // One post-land report settles it and queues its own follow-ups.
+    let out = t.rep(after_land.clone()).unwrap();
+    assert_eq!(out["queued"], 1);
+    assert!(t.rep(after_land).is_err(), "nothing is due any more");
+    let s = t.wf(json!({"action": "status"})).unwrap();
+    assert!(s.get("postLand").is_none());
+    assert_eq!(s["followUps"]["total"], 2);
+    // Running it again changes nothing: the due row is once per attempt.
+    crate::postland::after_step(&t.db, &before, 22).unwrap();
+    assert_eq!(t.events("stage_due"), 1);
+}

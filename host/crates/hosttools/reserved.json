@@ -60,6 +60,7 @@
     "app_wait_for",
     "app_workflow",
     "app_workflow_consent",
+    "app_workflow_gate",
     "app_workflow_report",
     "app_workflow_take_over",
     "app_worktree_status"

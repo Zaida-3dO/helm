@@ -1,0 +1,11 @@
+{
+  "description": "The workflow gate hook: an orchestrator's Agent spawn, its own Write and a sub-agent's Write, each sent to the gate's PreToolUse callback.",
+  "steps": [
+    { "await": { "type": "user" }, "as": "p" },
+    { "init": { "tools": [] } },
+    { "hook": { "toolUseId": "g1", "tool": "Agent", "callback": "helm-workflow-gates", "input": { "subagent_type": "coder", "description": "build it", "prompt": "a long brief the host never needs" } }, "as": "h1" },
+    { "hook": { "toolUseId": "g2", "tool": "Write", "callback": "helm-workflow-gates", "input": { "file_path": "C:/w/a.rs", "content": "fn main() {}" } }, "as": "h2" },
+    { "hook": { "toolUseId": "g3", "tool": "Write", "callback": "helm-workflow-gates", "agent": "sub-1", "input": { "file_path": "C:/w/b.rs", "content": "x" } }, "as": "h3" },
+    { "result": "done" }
+  ]
+}

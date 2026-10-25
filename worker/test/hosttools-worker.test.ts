@@ -221,3 +221,59 @@ test("the landing guard asks the host before Bash and MCP calls, and fails close
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("the workflow gate hook asks the host only when the launch says so, and lets an unanswered call through", async () => {
+  const hookAnswers = (got: Json[]) =>
+    got
+      .filter((r) => r.type === "control_response" && String((r.response as Json)?.request_id ?? "").startsWith("fake-hook-"))
+      .map((r) => ((r.response as Json).response as Json) ?? {});
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-ht-g-"));
+  const s = startWithFixture("workflow-gates", { env: { HELM_WORKFLOW_GATES: "1" }, launch: { hostTools: [LIST_CHATS], chatToolsDirectory: dir } });
+  try {
+    await s.host.ready();
+    // Play the host: refuse the spawn, fail the edit question (a failure lets the call through).
+    const asked: Json[] = [];
+    const serve = async () => {
+      for (let n = 0; n < 2; n++) {
+        const r = await s.host.waitFor((e) => e.type === "chat_request" && !asked.includes(e), 10_000, 0);
+        asked.push(r);
+        const body = n === 0 ? { id: r.id, ok: true, result: { allow: false, reason: "the build gate needs the plan first" } } : { id: r.id, ok: false, error: "no", changed: "no" };
+        fs.writeFileSync(path.join(dir, String(r.id), "response.json"), JSON.stringify(body));
+      }
+    };
+    const served = serve();
+    const resp = await prompt(s.host, "go");
+    assert.equal(resp.success, true);
+    await served;
+    await s.host.waitForType("agent_settled");
+    assert.deepEqual(
+      asked.map((r) => [r.operation, r.args]),
+      [
+        ["app_workflow_gate", { tool: "Agent", input: { subagent_type: "coder" }, child: false }],
+        ["app_workflow_gate", { tool: "Write", input: { file_path: "C:/w/a.rs" }, child: false }],
+      ],
+      "only what the host decides on is sent: no prompt, no file content; a sub-agent's edit is not asked",
+    );
+    const answers = hookAnswers(s.received());
+    assert.equal(answers.length, 3);
+    assert.deepEqual(answers[0], { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "the build gate needs the plan first" } });
+    assert.deepEqual(answers.slice(1), [{}, {}]);
+  } finally {
+    await s.done();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  // Without the launch variable (Orchestrator off), nothing is registered and nothing is asked.
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "helm-ht-g-"));
+  const off = startWithFixture("workflow-gates", { launch: { hostTools: [LIST_CHATS], chatToolsDirectory: dir2 } });
+  try {
+    await off.host.ready();
+    assert.equal((await prompt(off.host, "go")).success, true);
+    await off.host.waitForType("agent_settled");
+    const init = off.received().find((r) => r.type === "control_request" && (r.request as Json).subtype === "initialize")?.request as Json;
+    assert.ok(!JSON.stringify(init.hooks).includes("helm-workflow-gates"));
+    assert.equal(off.host.ofType("chat_request").length, 0);
+  } finally {
+    await off.done();
+    fs.rmSync(dir2, { recursive: true, force: true });
+  }
+});

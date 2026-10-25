@@ -15,7 +15,12 @@ pub fn register_allow_kinds(k: &mut AllowKinds) {
         .register(kind("drop", "Drop a change", drop))
         .register(kind("skip", "Skip a stage", skip))
         .register(kind("allowMore", "Allow more rounds", allow_more))
-        .register(kind("reopen", "Reopen the task", reopen));
+        .register(kind("reopen", "Reopen the task", reopen))
+        .register(kind(
+            "takeOver",
+            "Take over a change",
+            crate::claims::canonical,
+        ));
 }
 
 fn kind(
@@ -262,12 +267,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_six_kinds_register_once() {
+    fn the_seven_kinds_register_once() {
         let mut k = AllowKinds::new();
         register_allow_kinds(&mut k);
         assert_eq!(
             k.ids(),
-            ["land", "ready", "drop", "skip", "allowMore", "reopen"]
+            [
+                "land",
+                "ready",
+                "drop",
+                "skip",
+                "allowMore",
+                "reopen",
+                "takeOver"
+            ]
         );
     }
 

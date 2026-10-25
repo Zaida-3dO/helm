@@ -28,6 +28,10 @@ moveFast: boolean,
  */
 landingGuard: boolean, 
 /**
+ * The dispatch gate on agent spawns during a task: user-only, default on.
+ */
+dispatchGate: boolean, 
+/**
  * Defaults to `auto`.
  */
 newChats: NewChats, };

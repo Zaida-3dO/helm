@@ -64,7 +64,7 @@ pub fn workflow_rules(s: &WorkflowSettings) -> String {
         agent(&st.build.agent)
     ));
     out.push(match s.orchestrator_edits {
-        EditsRule::Deny => "Do not edit files in a task's repositories yourself.".into(),
+        EditsRule::Deny => "Do not edit files in a task's repositories yourself; Helm refuses those edits during a task. If one file is genuinely yours (a plan or a note, not the change's code), grant it with app_workflow {action: \"allow_edit\", file, reason}.".into(),
         EditsRule::Allow => "You may edit files in a task's repositories yourself.".into(),
     });
     if st.review.use_ == StageUse::Off {
@@ -115,6 +115,7 @@ pub fn workflow_rules(s: &WorkflowSettings) -> String {
     out.push(format!(
         "If the task has a board item, record the plan and the reviews on it. Create PRs as drafts. When every change holds, call app_workflow {{action: \"hand_off\"}}, and Helm lands each change by its repository's rule. Never mark a PR ready, merge it, push onto {protected} or remove a review label yourself. Never run a round just to use it up."
     ));
+    out.push("One change belongs to one task: Helm refuses a branch another task holds and names it; app_workflow {action: \"take_over\", repo, branch, reason} moves it into this task (check: true only reports). When a task finishes landing, Helm removes its merged worktrees and tells you; status lists the follow-ups reviewers queued (discard one with {action: \"drop\", queued}).".into());
     out.push(CONSENT.into());
     if s.move_fast {
         out.push(MOVE_FAST.into());
