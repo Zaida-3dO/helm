@@ -227,6 +227,10 @@ pub struct RunView {
     /// the UI's read; the orchestrator's `status` leaves it empty).
     #[serde(default)]
     pub guard: Vec<GuardNoteView>,
+    /// Stage records for the task board that Helm has not been able to send yet (it retries every
+    /// minute). Only in the UI's read; the orchestrator's `status` leaves it 0.
+    #[serde(default)]
+    pub board_queued: u32,
 }
 
 /// One landing-guard override or refusal, for the panel's Needs you.

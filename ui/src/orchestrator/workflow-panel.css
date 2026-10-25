@@ -72,6 +72,10 @@ span.orch-panel-title {
   background: var(--surface-alt);
 }
 
+.orch-board-queue {
+  color: var(--muted);
+}
+
 .orch-needs {
   font-weight: 600;
   color: var(--warning-text);

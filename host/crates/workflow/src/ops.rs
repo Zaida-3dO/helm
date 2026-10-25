@@ -357,7 +357,7 @@ mod tests {
         let none = run_get(&c, json!({"chatId": "a"})).unwrap();
         assert_eq!(
             none,
-            json!({"task": null, "plan": null, "changes": [], "otherTasks": [], "guard": []})
+            json!({"task": null, "plan": null, "changes": [], "otherTasks": [], "guard": [], "boardQueued": 0})
         );
         assert_eq!(
             run_get(&c, json!({"chatId": "zz"})).unwrap_err().code,

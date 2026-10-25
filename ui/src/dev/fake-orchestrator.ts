@@ -49,17 +49,17 @@ export function fakeRun(kind: string): RunView {
   const plan = (over: Partial<RunPlanView>): RunPlanView => ({ id: 'p'.repeat(64), approved: true, signedOff: false, rounds: 1, cap: 3, missing: null, ...over });
   switch (kind) {
     case 'none':
-      return { task: null, plan: null, changes: [], otherTasks: [], guard: [] };
+      return { task: null, plan: null, changes: [], otherTasks: [], guard: [], boardQueued: 0 };
     case 'plan':
-      return { task, plan: plan({ id: null, approved: false, rounds: 0, missing: 'the task has no plan of record yet; adopt one with app_workflow plan' }), changes: [], otherTasks: [], guard: [] };
+      return { task, plan: plan({ id: null, approved: false, rounds: 0, missing: 'the task has no plan of record yet; adopt one with app_workflow plan' }), changes: [], otherTasks: [], guard: [], boardQueued: 0 };
     case 'signoff':
-      return { task, plan: plan({ missing: "the plan waits for the user's sign-off" }), changes: [], otherTasks: [], guard: [] };
+      return { task, plan: plan({ missing: "the plan waits for the user's sign-off" }), changes: [], otherTasks: [], guard: [], boardQueued: 0 };
     case 'cap':
-      return { task, plan: plan({}), changes: [change({ reviewRounds: 3, missing: ['feat/login: no approving review at the latest commit'] })], otherTasks: [], guard: [] };
+      return { task, plan: plan({}), changes: [change({ reviewRounds: 3, missing: ['feat/login: no approving review at the latest commit'] })], otherTasks: [], guard: [], boardQueued: 0 };
     case 'landing':
-      return { task, plan: plan({ signedOff: true }), changes: [change({ state: 'awaiting_merge', approved: true, pr: `https://${REPO}/pull/12` }), change({ branch: 'feat/api', state: 'landed', approved: true })], otherTasks: [], guard: [] };
+      return { task, plan: plan({ signedOff: true }), changes: [change({ state: 'awaiting_merge', approved: true, pr: `https://${REPO}/pull/12` }), change({ branch: 'feat/api', state: 'landed', approved: true })], otherTasks: [], guard: [], boardQueued: 0 };
     case 'failed':
-      return { task, plan: plan({ signedOff: true }), changes: [change({ state: 'land_failed', approved: true, error: 'The base branch moved; the merge was refused.' })], otherTasks: [{ runId: 'run-0', title: 'Older task', status: 'parked', parkReason: 'chat turned off', waiting: [] }], guard: [] };
+      return { task, plan: plan({ signedOff: true }), changes: [change({ state: 'land_failed', approved: true, error: 'The base branch moved; the merge was refused.' })], otherTasks: [{ runId: 'run-0', title: 'Older task', status: 'parked', parkReason: 'chat turned off', waiting: [] }], guard: [], boardQueued: 0 };
     case 'others': {
       // The current task is mid-build; an older task has a draft PR waiting on the user.
       const older: OtherTaskView = {
@@ -69,10 +69,10 @@ export function fakeRun(kind: string): RunView {
         parkReason: null,
         waiting: [change({ repo: REPO, branch: 'feat/older', state: 'awaiting_merge', approved: true, pr: `https://${REPO}/pull/9` })],
       };
-      return { task, plan: plan({ signedOff: true }), changes: [change({})], otherTasks: [older], guard: [] };
+      return { task, plan: plan({ signedOff: true }), changes: [change({})], otherTasks: [older], guard: [], boardQueued: 0 };
     }
     default:
-      return { task, plan: plan({ signedOff: true }), changes: [change({ missing: ['feat/login: no approving review at the latest commit'] })], otherTasks: [], guard: [] };
+      return { task, plan: plan({ signedOff: true }), changes: [change({ missing: ['feat/login: no approving review at the latest commit'] })], otherTasks: [], guard: [], boardQueued: 0 };
   }
 }
 

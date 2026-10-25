@@ -154,6 +154,15 @@ fn only_a_linked_task_queues_records_and_they_carry_no_token() {
         2,
         "a transition to executing and a plan artifact"
     );
+    let queued = |chat: &str| {
+        t.db.snapshot(|tx| crate::sa_outbox::waiting(tx, chat))
+            .unwrap()
+    };
+    assert_eq!(
+        (queued("c"), queued("other")),
+        (2, 0),
+        "the panel's count of records waiting"
+    );
     let board = FakeBoard::new();
     assert_eq!(
         flush(&t.db, &target(), &board, 100, 50).unwrap(),
@@ -162,6 +171,7 @@ fn only_a_linked_task_queues_records_and_they_carry_no_token() {
             ..Default::default()
         }
     );
+    assert_eq!(queued("c"), 0, "nothing waits once the board has them");
     let stored = board.stored();
     assert!(stored[0]
         .0

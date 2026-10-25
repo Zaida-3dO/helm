@@ -34,6 +34,8 @@ export interface RunView {
   otherTasks: OtherTask[];
   /** The landing guard's overrides and refusals since the user last typed; commands made inert. */
   guard: GuardNoteView[];
+  /** Records for the task board that Helm could not send yet; it retries every minute. */
+  boardQueued: number;
 }
 
 /** Agent-supplied text (task titles, branches, gate sentences): hidden and direction-changing characters shown as tokens, on one line. */
@@ -65,5 +67,6 @@ export function showRun(host: HostRunView): RunView {
       waiting: o.waiting.map(showChange),
     })),
     guard: (host.guard ?? []).map((g) => ({ ...g, command: inert(g.command) })),
+    boardQueued: host.boardQueued ?? 0,
   };
 }

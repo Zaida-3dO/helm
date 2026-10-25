@@ -243,6 +243,7 @@ fn run_view(
             changes: Vec::new(),
             other_tasks: others,
             guard: Vec::new(),
+            board_queued: 0,
         });
     };
     let all = store::changes(tx, &run.id)?;
@@ -272,6 +273,7 @@ fn run_view(
         changes,
         other_tasks: others,
         guard: Vec::new(),
+        board_queued: 0,
     })
 }
 
@@ -314,6 +316,7 @@ pub fn chat_view(
     let current = current.or(open.first());
     let mut v = run_view(tx, s, current, &open)?;
     v.guard = crate::hook::needs_you(tx, chat_id)?;
+    v.board_queued = crate::sa_outbox::waiting(tx, chat_id)?;
     Ok(serde_json::to_value(v).expect("the run view serialises"))
 }
 

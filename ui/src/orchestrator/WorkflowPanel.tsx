@@ -174,6 +174,11 @@ export function WorkflowPanel({ ctx }: { ctx: AccessoryContext }) {
             {itemTitle.length > 24 ? `${itemTitle.slice(0, 23)}…` : itemTitle}
           </button>
         )}
+        {view.boardQueued > 0 && (
+          <span className="orch-board-queue" data-testid="workflow-board-queue" title="Helm could not reach the task board. These records are kept and sent when it answers; it tries again every minute.">
+            Board · {view.boardQueued} waiting
+          </span>
+        )}
         {needs.length > 0 && (
           <span className="orch-needs" data-testid="workflow-needs">
             Needs you · {needs.map((n) => n.text).join(' · ')}

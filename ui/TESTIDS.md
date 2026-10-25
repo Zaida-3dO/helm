@@ -123,7 +123,7 @@ Queue `Alt+Enter`, Send now `Ctrl+Alt+Enter`, Stop that continues the queue `Esc
 | `orch-edits` / `orch-signoff` / `orch-landdefault` / `orch-method` | The other segmented settings | segments carry `data-value` |
 | `orch-save` / `orch-revert` / `orch-saved` / `orch-error` | Save, Revert, the "Saved" word, a refused save's message | |
 | `workflow-panel` | The workflow panel in the composer dock (a Claude Code chat with a task, master switch on) | `data-status` (the task's status, or `none`), `data-needs` (how many Needs-you items), `aria-busy` while one of your steps runs |
-| `workflow-needs` / `workflow-stages` / `workflow-stage` | The Needs-you line, the stage row, one stage | `workflow-stage`: `data-stage`, `data-state` (`done` `current` `pending` `off`) |
+| `workflow-needs` / `workflow-board-queue` / `workflow-stages` / `workflow-stage` | The Needs-you line, the count of records waiting for the task board (shown only when some are), the stage row, one stage | `workflow-stage`: `data-stage`, `data-state` (`done` `current` `pending` `off`) |
 | `workflow-signoff` | Sign off plan (only while the plan waits for your sign-off) | |
 | `workflow-waiting` | One change waiting on you, with its buttons | `data-branch` |
 | `workflow-change-action` | A button on that change | `data-action` (`merge` `decline` `drop` `retry` `ready`) |

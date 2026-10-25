@@ -115,6 +115,7 @@ pub fn workflow_rules(s: &WorkflowSettings) -> String {
     out.push(format!(
         "If the task has a board item, record the plan and the reviews on it. Create PRs as drafts. When every change holds, call app_workflow {{action: \"hand_off\"}}, and Helm lands each change by its repository's rule. Never mark a PR ready, merge it, push onto {protected} or remove a review label yourself. Never run a round just to use it up."
     ));
+    out.push(crate::outage_rules::BOARD_OUTAGE.into());
     out.push(CONSENT.into());
     if s.move_fast {
         out.push(MOVE_FAST.into());
@@ -135,6 +136,10 @@ mod tests {
         assert!(r.contains("`coder`"));
         assert!(r.contains("main, master"));
         assert!(!r.contains("Move fast"), "Move fast is off by default");
+        assert!(
+            r.contains(crate::outage_rules::BOARD_OUTAGE),
+            "the board-outage rule is part of the rules"
+        );
         assert!(!r.contains("signs it off"));
         let mut s = d.clone();
         s.stages.review.max_rounds = 7;

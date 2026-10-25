@@ -72,7 +72,8 @@ test('agent text is made inert, on the current task and on the others', () => {
   assert.equal(v.otherTasks[0]?.parkReason, 'r⟨U+202E⟩s');
   assert.equal(v.otherTasks[0]?.waiting[0]?.branch, 'w⟨U+200B⟩');
   assert.deepEqual(v.otherTasks[0]?.waiting[0]?.target.branch, 'w​', 'sent back as the host named it');
-  assert.deepEqual(parseRun(fakeRun('none')), { task: null, plan: null, changes: [], otherTasks: [], guard: [] });
+  assert.deepEqual(parseRun(fakeRun('none')), { task: null, plan: null, changes: [], otherTasks: [], guard: [], boardQueued: 0 });
+  assert.equal(parseRun({ ...fakeRun('none'), boardQueued: 3 }).boardQueued, 3, 'records waiting for the board come through');
   // The landing guard's overrides and refusals are Needs you items, their commands made inert.
   const guarded = parseRun({ ...fakeRun('none'), guard: [
     { overridden: false, gate: 'bash', rule: 'task_repo', command: 'git push origin HEAD:main', verified: false },

@@ -30,4 +30,9 @@ otherTasks: Array<OtherTaskView>,
  * The landing guard's overrides and refusals since the user last typed in the chat (only in
  * the UI's read; the orchestrator's `status` leaves it empty).
  */
-guard: Array<GuardNoteView>, };
+guard: Array<GuardNoteView>, 
+/**
+ * Stage records for the task board that Helm has not been able to send yet (it retries every
+ * minute). Only in the UI's read; the orchestrator's `status` leaves it 0.
+ */
+boardQueued: number, };

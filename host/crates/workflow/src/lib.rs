@@ -57,6 +57,7 @@ mod land_tests;
 pub mod mode;
 pub mod notes;
 mod ops;
+pub mod outage_rules;
 pub mod overrides;
 pub mod reports;
 pub mod rules;

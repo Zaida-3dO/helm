@@ -339,6 +339,15 @@ fn landed(target: &Target, t: &dyn WriteTransport, r: &Row) -> Result<bool, Send
         }))
 }
 
+/// How many of a chat's records are still waiting to reach the board (not yet sent, not given up).
+pub fn waiting(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<u32> {
+    tx.query_row(
+        "SELECT count(*) FROM workflow_standup_outbox WHERE chat_id = ?1 AND state IN ('pending', 'unknown')",
+        [chat_id],
+        |r| r.get(0),
+    )
+}
+
 /// Send what is due. Network calls happen outside any transaction.
 pub fn flush(
     db: &Database,
