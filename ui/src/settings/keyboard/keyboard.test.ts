@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { conflictedIds, keyboardRows } from './model.ts';
+import { conflictedIds, groupKeyboardRows, keyboardRows, sectionOf } from './model.ts';
 import { hintLabel, isAssignable, KeyRegistry } from '../../ui/keys.ts';
 
 const row = (id: string, title: string, chord: string | null, scope?: 'app' | 'global') => ({ id, title, chord, custom: false, scope });
@@ -62,3 +62,27 @@ test('Ctrl+Tab and Ctrl+Shift+Tab are chords the registry can dispatch', () => {
   assert.equal(k.dispatch(ev(true)), true);
   assert.deepEqual(got, ['next', 'prev']);
 });
+
+test('commands are grouped into sections by id, and empty sections are left out', () => {
+  const ids: [string, string][] = [
+    ['chat.new', 'Workspace'],
+    ['sidebar.toggle', 'Workspace'],
+    ['terminal.toggle', 'Workspace'],
+    ['search.toggle', 'Workspace'],
+    ['chat.find', 'Conversation'],
+    ['chat.archive', 'Conversation'],
+    ['composer.modelPicker', 'Composer'],
+    ['settings.toggle', 'Window'],
+    ['something.new', 'Window'],
+  ];
+  for (const [id, want] of ids) assert.equal(sectionOf(id), want, id);
+  assert.deepEqual(
+    groupKeyboardRows([{ id: 'settings.toggle' }, { id: 'chat.new' }, { id: 'chat.find' }]).map((g) => [g.section, g.rows.length]),
+    [
+      ['Workspace', 1],
+      ['Conversation', 1],
+      ['Window', 1],
+    ],
+  );
+}
+);

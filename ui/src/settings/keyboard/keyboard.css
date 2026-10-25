@@ -11,6 +11,14 @@
   flex: 1;
   padding: 7px 10px;
 }
+.kb-hint {
+  margin: 0 0 4px;
+}
+.kb-section-title {
+  margin: 16px 0 2px;
+  font-size: calc(12 * var(--ui-unit));
+  font-weight: 560;
+}
 .kb-row {
   display: grid;
   grid-template-columns: 1fr auto auto;
@@ -47,6 +55,13 @@
   background: var(--surface-alt);
   color: var(--text);
   white-space: nowrap;
+  cursor: var(--cursor-pointer);
+  min-width: 56px;
+  justify-content: center;
+}
+.kb-chord:hover:not(:disabled) {
+  border-color: var(--muted);
+  background: var(--hover);
 }
 .kb-chord.unset {
   border-style: dashed;
@@ -62,8 +77,13 @@
 .kb-actions {
   display: flex;
   gap: 10px;
-  min-width: 120px;
   justify-content: flex-end;
+  /* Clear and Reset stay out of the way until the row is pointed at or focused. */
+  opacity: 0;
+}
+.kb-row:hover .kb-actions,
+.kb-row:focus-within .kb-actions {
+  opacity: 1;
 }
 .kb-empty {
   color: var(--muted);

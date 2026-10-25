@@ -129,3 +129,9 @@
   gap: 6px;
   margin: 8px 0 0;
 }
+
+/* Server card actions: quiet buttons, not bare links. */
+.mcp-act {
+  padding: 3px 10px;
+  font-size: 12px;
+}

@@ -409,8 +409,7 @@ body,
 }
 /* A control that fills the edge of a clipping box (the window, a scroller, a tab strip) draws its
    ring inside, where nothing can cut it off. */
-.caption-btn:focus-visible,
-.settings-tab:focus-visible {
+.caption-btn:focus-visible {
   outline-offset: -2px;
 }
 
@@ -568,8 +567,7 @@ kbd {
    stay, shadows and tints go. A selected tab therefore needs a shape that is not a tint or a shadow. */
 @media (forced-colors: active) {
   .settings-tab[aria-selected='true'] {
-    border-bottom: 2px solid Highlight;
-    padding-bottom: 8px;
+    border: 2px solid Highlight;
     font-weight: 600;
   }
 }
@@ -920,36 +918,45 @@ dd {
   }
 }
 
-/* Settings frame. */
+/* Settings frame: a fixed-size window; the title and the tab strip stay put (they sit outside the
+   scrolling body), so switching tabs never changes the window's size. */
+.ui-dialog.wide[data-testid='settings'] {
+  width: 750px;
+  height: 712px;
+}
+.ui-dialog[data-testid='settings'] .ui-dialog-intro {
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+}
 .settings-tabs {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 18px;
-  padding: 2px 23px 0;
-  border-bottom: 1px solid var(--line);
+  gap: 4px 6px;
+  padding: 2px 20px 12px;
 }
 .settings-tab {
-  border: 0;
-  border-bottom: 1px solid transparent;
-  border-radius: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
   background: none;
-  padding: 9px 0;
+  padding: 4px 10px;
   font-size: calc(12 * var(--ui-unit));
   color: var(--muted);
   flex: none;
 }
 .settings-tab:hover:not(:disabled) {
-  background: none;
+  background: var(--hover);
   color: var(--text);
 }
 .settings-tab[aria-selected='true'] {
   color: var(--text);
-  border-bottom-color: var(--text);
+  background: var(--selected);
+  border-color: var(--line);
+  font-weight: 560;
 }
 .settings-search {
   margin-left: auto;
-  flex: 0 1 220px;
+  flex: 0 1 230px;
   min-width: 160px;
   height: 28px;
   padding: 0 10px !important;
@@ -957,13 +964,12 @@ dd {
   border-radius: 8px !important;
   background: var(--surface-alt) !important;
   font-size: calc(12 * var(--ui-unit));
-  margin-bottom: 6px;
 }
 .settings-search:focus {
   border-color: var(--line-strong) !important;
 }
 .settings-body {
-  padding: 10px 24px 24px;
+  padding: 4px 24px 24px;
 }
 .settings-body h3 {
   font-size: calc(12 * var(--ui-unit));
@@ -981,6 +987,60 @@ dd {
   letter-spacing: 0.04em;
   color: var(--muted);
   margin: 18px 0 4px;
+}
+/* Row titles read as headings over their descriptions. */
+.settings-body .setting-title {
+  font-weight: 560;
+}
+/* Search: what the search hid, the empty state and the matched words. */
+.settings-body [data-search-hide] {
+  display: none !important;
+}
+.settings-nomatch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 90px 0;
+  color: var(--muted);
+  font-size: calc(12 * var(--ui-unit));
+}
+::highlight(settings-hit) {
+  background-color: var(--accent-bg);
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--accent-fill);
+}
+/* Quieter checkboxes in settings: a light box with an accent tick, instead of a filled square. */
+.settings-body .ui-check input {
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  display: inline-grid;
+  place-content: center;
+  cursor: var(--cursor-pointer);
+}
+.settings-body .ui-check input::after {
+  content: '';
+  width: 11px;
+  height: 11px;
+  background: var(--accent-fill);
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 8.5l3.2 3.2L13 4.8'/%3E%3C/svg%3E") center / contain no-repeat;
+  transform: scale(0);
+  transition: transform var(--motion-appear, 90ms) ease;
+}
+.settings-body .ui-check input:checked::after {
+  transform: scale(1);
+}
+.settings-body .ui-check input:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+.settings-body .ui-check input:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 /* The setting row pattern panes use. */
 .setting-row {
@@ -1076,4 +1136,13 @@ dd {
 .settings-version .muted,
 .settings-foot-note {
   color: var(--muted);
+}
+
+/* Pressed states in the settings frame. */
+.settings-tab:active:not(:disabled) {
+  background: var(--selected);
+}
+.kb-chord:active:not(:disabled),
+.mcp-act:active:not(:disabled) {
+  background: var(--selected);
 }

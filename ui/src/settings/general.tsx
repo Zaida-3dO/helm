@@ -74,7 +74,7 @@ function GeneralPane() {
           }}
         />
       </SettingRow>
-      <SettingRow title="Interface text size" description="Menus, the sidebar and every control. The whole interface scales with it." testId="setting-interface-size">
+      <SettingRow title="Interface text size" description="The font size of menus, the sidebar and every control. The whole interface scales with it." testId="setting-interface-size">
         <Picker<string>
           settings
           label="Interface text size"
@@ -84,7 +84,7 @@ function GeneralPane() {
           onChange={(v) => setSize('interface', Number(v))}
         />
       </SettingRow>
-      <SettingRow title="Reply text size" description="The text of Claude's replies in the chat." testId="setting-response-size">
+      <SettingRow title="Reply text size" description="The font size of Claude's replies in the chat." testId="setting-response-size">
         <Picker<string>
           settings
           label="Reply text size"

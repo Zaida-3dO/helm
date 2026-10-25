@@ -286,10 +286,10 @@ export function McpPane() {
                   onChange={(on) => void run(() => ops.setEnabled(s.id, on, revision))}
                   label="On"
                 />
-                <Button variant="text" onClick={() => setDraft({ server: structuredClone(s), isNew: false })}>
+                <Button className="mcp-act" onClick={() => setDraft({ server: structuredClone(s), isNew: false })}>
                   Edit
                 </Button>
-                <Button variant="text" danger disabled={busy} onClick={() => void run(() => ops.remove(s.id, revision))}>
+                <Button className="mcp-act" disabled={busy} onClick={() => void run(() => ops.remove(s.id, revision))}>
                   Remove
                 </Button>
               </li>
@@ -352,12 +352,12 @@ export function McpPane() {
                       </span>
                     </div>
                     {r.state === 'held' && (
-                      <Button disabled={busy} onClick={() => ops.repoApprove(r).then(setRepo).catch((e: unknown) => setError(errorText(e)))}>
+                      <Button className="mcp-act" disabled={busy} onClick={() => ops.repoApprove(r).then(setRepo).catch((e: unknown) => setError(errorText(e)))}>
                         Approve
                       </Button>
                     )}
                     {r.state === 'approved' && (
-                      <Button variant="text" danger disabled={busy} onClick={() => ops.repoRevoke(r).then(setRepo).catch((e: unknown) => setError(errorText(e)))}>
+                      <Button className="mcp-act" disabled={busy} onClick={() => ops.repoRevoke(r).then(setRepo).catch((e: unknown) => setError(errorText(e)))}>
                         Revoke
                       </Button>
                     )}

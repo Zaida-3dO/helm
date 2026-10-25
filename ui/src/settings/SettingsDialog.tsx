@@ -1,11 +1,14 @@
-// The settings frame: a centred 620 px modal on Ctrl+, with wrapping tabs, a search
-// field at the end of the tab row (the first Escape clears it), and the selected pane's body.
+// The settings frame: a centred modal of fixed size on Ctrl+,. The title, the pill tabs and the
+// search field stay put (the first Escape clears the search); only the selected pane's body scrolls.
+// A search lists every matching row from every pane under its pane's name (see search.ts).
 // Panes come from the registry; each pane decides whether it saves per control or with a Save.
 
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useDialog, useShell } from '../shell/context.ts';
 import { Dialog, useLayer } from '../ui/index.ts';
-import { filterPanes, settingsPanes, subscribeSettingsPanes, peekRequestedPane, clearRequestedPane } from './registry.ts';
+import { IconSearch } from '../ui/icons.tsx';
+import { applySearch, clearHighlight } from './search.ts';
+import { settingsPanes, subscribeSettingsPanes, peekRequestedPane, clearRequestedPane } from './registry.ts';
 
 export const SETTINGS_DIALOG = 'settings';
 
@@ -22,9 +25,34 @@ function SettingsBody({ close }: { close: () => void }) {
   const [query, setQuery] = useState('');
   useLayer('search', true, () => setQuery(''), () => query.length > 0);
   const searching = query.trim().length > 0;
-  const shown = filterPanes(panes, query);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [hits, setHits] = useState(0);
   const current = panes.find((p) => p.id === tab) ?? panes[0];
   const version = useAppVersion();
+  // Filter the rendered rows after every render and whenever a pane changes its own content
+  // (data arriving late), so a search never shows a stale list.
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    if (!searching) {
+      applySearch(body, '');
+      clearHighlight();
+      return;
+    }
+    const run = () => setHits(applySearch(body, query));
+    run();
+    let frame = 0;
+    const watch = new MutationObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(run);
+    });
+    watch.observe(body, { childList: true, subtree: true, characterData: true });
+    return () => {
+      watch.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [query, searching, panes]);
+  useEffect(() => clearHighlight, []);
   const footer = (
     <>
       <span className="settings-version" data-testid="settings-version">
@@ -33,9 +61,8 @@ function SettingsBody({ close }: { close: () => void }) {
       <span className="settings-foot-note">Runs Claude Code under your own login</span>
     </>
   );
-  return (
-    <Dialog title="Settings" onClose={close} wide testId="settings" footer={footer}>
-      <div className="settings-tabs" role="tablist">
+  const tabs = (
+    <div className="settings-tabs" role="tablist">
         {panes.map((p) => (
           <button
             key={p.id}
@@ -62,18 +89,26 @@ function SettingsBody({ close }: { close: () => void }) {
           data-autofocus=""
         />
       </div>
-      <div className="settings-body">
+  );
+  return (
+    <Dialog title="Settings" onClose={close} wide testId="settings" footer={footer} intro={tabs}>
+      <div className="settings-body" ref={bodyRef}>
         {panes.length === 0 && <p className="muted">No settings yet.</p>}
-        {searching && shown.length === 0 && <p className="secondary">No settings match "{query.trim()}"</p>}
+        {searching && hits === 0 && (
+          <div className="settings-nomatch" data-testid="settings-nomatch">
+            <IconSearch size={22} />
+            <span>No settings match "{query.trim()}"</span>
+          </div>
+        )}
         {searching
-          ? shown.map((p) => (
-              <section key={p.id} data-testid="settings-pane" data-pane={p.id}>
+          ? panes.map((p) => (
+              <section key={p.id} data-testid="settings-pane" data-pane={p.id} data-title={p.title}>
                 <h4 className="settings-pane-label">{p.title}</h4>
                 {p.render()}
               </section>
             ))
           : current && (
-              <section data-testid="settings-pane" data-pane={current.id}>
+              <section data-testid="settings-pane" data-pane={current.id} data-title={current.title}>
                 {current.render()}
               </section>
             )}
