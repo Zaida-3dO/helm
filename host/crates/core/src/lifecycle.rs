@@ -15,6 +15,8 @@ use tokio::sync::Notify;
 
 pub const DRAFT_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 pub const WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(8);
+/// An update restart waits longer for the drafts, because it replaces the app afterwards.
+pub const UPDATE_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The worker side of shutdown. [`NoWorkers`] stands in when there are none.
 pub trait WorkerDrain: Send + Sync {
@@ -54,6 +56,9 @@ pub enum QuitOutcome {
     Quit { ui_saved: bool, drained: bool },
     /// A quit is already in progress.
     Busy,
+    /// An update restart that needs the UI's drafts saved first did not get that acknowledgement
+    /// in time. Nothing was stopped; the app stays as it was.
+    SaveFailed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -90,12 +95,8 @@ impl QuitCoordinator {
         workers: Arc<dyn WorkerDrain>,
         db: Option<Arc<Database>>,
     ) -> QuitOutcome {
-        {
-            let mut phase = self.phase.lock().unwrap();
-            if *phase != Phase::Idle {
-                return QuitOutcome::Busy;
-            }
-            *phase = Phase::Confirming;
+        if !self.begin() {
+            return QuitOutcome::Busy;
         }
         let running = workers.running_work();
         let message = if running.is_empty() {
@@ -113,14 +114,62 @@ impl QuitCoordinator {
             *self.phase.lock().unwrap() = Phase::Idle;
             return QuitOutcome::Cancelled;
         }
+        self.finish_quit(events, workers, db, DRAFT_FLUSH_TIMEOUT, false)
+            .await
+    }
 
+    /// The quit sequence for a restart that installs an update. The user already confirmed in
+    /// Helm's own dialog, so there is no native prompt. Unlike an ordinary quit it never goes on
+    /// without the UI's acknowledgement: replacing the app with unsaved drafts is not allowed, so
+    /// a missing acknowledgement ends in [`QuitOutcome::SaveFailed`] before anything is stopped.
+    pub async fn run_for_update(
+        &self,
+        events: Arc<dyn EventSink>,
+        workers: Arc<dyn WorkerDrain>,
+        db: Option<Arc<Database>>,
+    ) -> QuitOutcome {
+        if !self.begin() {
+            return QuitOutcome::Busy;
+        }
+        self.finish_quit(events, workers, db, UPDATE_FLUSH_TIMEOUT, true)
+            .await
+    }
+
+    /// Back to idle after a quit that was started but cannot go on (the update could not be
+    /// started after the workers had drained).
+    pub fn abort(&self) {
+        *self.saved.lock().unwrap() = None;
+        *self.phase.lock().unwrap() = Phase::Idle;
+    }
+
+    fn begin(&self) -> bool {
+        let mut phase = self.phase.lock().unwrap();
+        if *phase != Phase::Idle {
+            return false;
+        }
+        *phase = Phase::Confirming;
+        true
+    }
+
+    async fn finish_quit(
+        &self,
+        events: Arc<dyn EventSink>,
+        workers: Arc<dyn WorkerDrain>,
+        db: Option<Arc<Database>>,
+        flush_timeout: Duration,
+        require_saved: bool,
+    ) -> QuitOutcome {
         let notify = Arc::new(Notify::new());
         *self.saved.lock().unwrap() = Some(notify.clone());
         *self.phase.lock().unwrap() = Phase::Quitting;
         events.emit(AppEvent::new("quitting"));
-        let ui_saved = tokio::time::timeout(DRAFT_FLUSH_TIMEOUT, notify.notified())
+        let ui_saved = tokio::time::timeout(flush_timeout, notify.notified())
             .await
             .is_ok();
+        if require_saved && !ui_saved {
+            self.abort();
+            return QuitOutcome::SaveFailed;
+        }
         let drained = tokio::time::timeout(WORKER_DRAIN_TIMEOUT, workers.drain())
             .await
             .is_ok();
@@ -243,6 +292,21 @@ mod tests {
         );
         assert!(workers.1.load(Ordering::SeqCst));
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_update_restart_never_goes_on_without_saved_drafts() {
+        let q = QuitCoordinator::new();
+        let sink = Arc::new(RecordingSink::default());
+        let workers = Arc::new(SlowWorkers(
+            Duration::from_millis(1),
+            AtomicBool::new(false),
+        ));
+        let out = q.run_for_update(sink.clone(), workers.clone(), None).await;
+        assert_eq!(out, QuitOutcome::SaveFailed);
+        assert!(!workers.1.load(Ordering::SeqCst), "no worker was stopped");
+        assert!(!q.is_quitting(), "back to idle");
+        assert_eq!(sink.kinds(), ["quitting"]);
     }
 
     #[tokio::test]

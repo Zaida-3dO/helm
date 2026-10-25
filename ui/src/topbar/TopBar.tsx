@@ -18,6 +18,7 @@ import { SidebarActions } from '../sidebar/actions.ts';
 import { SidebarData } from '../sidebar/data.ts';
 import { sidebarUndo } from '../sidebar/undo.ts';
 import { StopArchiveDialog } from '../sidebar/StopArchiveDialog.tsx';
+import { UpdatePill } from '../updates/UpdatePill.tsx';
 import { UsageMeter } from '../usage/UsageMeter.tsx';
 import { CaptionButtons, dragHandlers } from './caption.tsx';
 import { topBarTier, type TopBarTier } from './fold.ts';
@@ -30,7 +31,7 @@ export interface TopBarProps {
   chatMenu?: ReactNode;
   /** The sidebar's Project / Workspace tags strip, drawn under the bar. */
   tags?: ReactNode;
-  /** Reserved: the one-click update pill and the Swarm toggle. */
+  /** Replaces the default "Restart to update" pill (reserved for a richer update control). */
   updatePill?: ReactNode;
   swarm?: ReactNode;
   /** Reserved: the chat-view picker (Settings → Chat). */
@@ -149,7 +150,7 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
         </nav>
         <div className="topbar-actions">
           <UsageMeter />
-          {updatePill}
+          {updatePill ?? <UpdatePill />}
           {swarm}
           {chat && (
             <span className="topbar-quick">

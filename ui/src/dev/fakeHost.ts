@@ -25,6 +25,7 @@ import { shellFakeOps } from './fake-shell.ts';
 import { mcpFakeOps } from './fake-mcp.ts';
 import { hosttoolsFakeOps } from './fake-hosttools.ts';
 import { usageFakeOps } from './fake-usage.ts';
+import { updatesFakeOps } from './fake-updates.ts';
 import { itemLinksFakeOps } from './fake-itemlinks.ts';
 import { hubFakeOps } from './fake-hub.ts';
 import { orchestratorFakeOps } from './fake-orchestrator.ts';
@@ -61,6 +62,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const mcp = mcpFakeOps(); registerFakeOps(mcp.prefixes, mcp.handler); }
 { const ht = hosttoolsFakeOps(); registerFakeOps(ht.prefixes, ht.handler); }
 { const us = usageFakeOps(); registerFakeOps(us.prefixes, us.handler); }
+{ const up = updatesFakeOps(); registerFakeOps(up.prefixes, up.handler); }
 { const il = itemLinksFakeOps(); registerFakeOps(il.prefixes, il.handler); }
 { const oc = orchestratorFakeOps(); registerFakeOps(oc.prefixes, oc.handler); }
 { const nc = newChatFakeOps(); registerFakeOps(nc.prefixes, nc.handler); }

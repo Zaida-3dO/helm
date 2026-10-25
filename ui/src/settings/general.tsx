@@ -10,6 +10,7 @@ import { sizeOptions, zoomOptions } from './generalOptions.ts';
 import { registerSettingsPane } from './registry.ts';
 import { ChangedByChats } from './changed/ChangedByChats.tsx';
 import { parseNameList, SIDEBAR_ENTRIES } from './applied.ts';
+import { UpdateSourceRow } from '../updates/UpdateSourceRow.tsx';
 
 function GeneralPane() {
   const shell = useShell();
@@ -167,6 +168,7 @@ function GeneralPane() {
           }}
         />
       </SettingRow>
+      <UpdateSourceRow />
       <ChangedByChats />
     </div>
   );

@@ -105,6 +105,7 @@ async fn quit_request(ctx: OpCtx, _args: Value) -> Result<Value, ApiError> {
         }
         QuitOutcome::Cancelled => Ok(json!({"outcome": "cancelled"})),
         QuitOutcome::Busy => Ok(json!({"outcome": "busy"})),
+        QuitOutcome::SaveFailed => Ok(json!({"outcome": "save_failed"})),
     }
 }
 

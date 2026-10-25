@@ -19,6 +19,8 @@ breaks those checks, so change them only together with the checks. Everything el
 | `board-sync` | The Agent Standup sync line under the view switch | `data-state` (`never` `unconfigured` `syncing` `ok` `error`) |
 | `board-url`, `board-token`, `board-token-state`, `board-test`, `board-last-sync` | Settings → Projects connection fields: address, write-only token, "set"/"not set", Test connection, last sync | |
 | `settings-hub`, `hub-state`, `hub-field-lanUrl`, `hub-field-fallbackUrl`, `hub-field-token`, `hub-save`, `hub-error` | Settings → Hub: the pane, the line state, the write-only address, fallback and token rows ("Set."/"Not set." in the description), Save and the error line | `hub-state`: `data-state` (`off` `connecting` `online` `offline`) |
+| `update-pill`, `update-busy` | The top bar's "Restart to update" pill (shown only when the update folder holds a newer setup) and the list of running chats in its confirm dialog | |
+| `setting-update-folder`, `update-folder-path`, `update-folder-choose`, `update-folder-check`, `update-folder-clear` | Settings → General's Update folder row: the path, Choose/Change, Check now and Clear | |
 | `hub-telegram-chat`, `hub-telegram-reset`, `hub-telegram-limits` | Settings → Hub's Telegram section: the chat Telegram messages go to (with Open), Start a new chat, and the age and token limits | |
 | `chat-view` | The open chat | `data-chat-id`, `data-chat-status` |
 | `chat-status` | The chat's status, a visually hidden span (screen readers and tests; not a visible pill) | text = the status |

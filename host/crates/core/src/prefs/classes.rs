@@ -128,6 +128,10 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         "nativeMcp",
         UserOnly("Which of your own MCP servers chats load is yours to choose."),
     ),
+    (
+        "updateSource",
+        UserOnly("Decides which program Helm runs to update itself, so only you choose it."),
+    ),
     // An internal setting that only the user sets.
     (
         "sendBehavior",

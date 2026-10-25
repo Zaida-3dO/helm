@@ -27,6 +27,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_afk::register_ops(reg);
     helm_governor::register_ops(reg);
     helm_relay::register_ops(reg);
+    helm_updates::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -63,6 +64,7 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_afk::register_services(services, events);
     helm_governor::register_services(services, events);
     helm_relay::register_services(services, events);
+    helm_updates::register_services(services, events);
     services.insert(Arc::new(host_tools()));
     // Settings that live outside the preference table but that chats read and change.
     services.insert(Arc::new(helm_hosttools::SettingsExtensions(vec![

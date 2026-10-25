@@ -1807,6 +1807,7 @@ dependencies = [
  "helm-search",
  "helm-shell",
  "helm-terminal",
+ "helm-updates",
  "helm-usage",
  "helm-workers",
  "helm-workflow",
@@ -2111,6 +2112,21 @@ dependencies = [
  "ts-rs",
  "uuid",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "helm-updates"
+version = "0.2.1"
+dependencies = [
+ "helm-core",
+ "helm-ipc",
+ "helm-platform",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

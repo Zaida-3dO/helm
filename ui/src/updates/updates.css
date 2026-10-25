@@ -1,0 +1,41 @@
+/* The "Restart to update" pill in the top bar and its confirm dialog's list of running chats. */
+
+.update-pill {
+  display: inline-flex;
+  align-items: center;
+  height: calc(24 * var(--ui-unit));
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill, 999px);
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-size: calc(11 * var(--ui-unit));
+  white-space: nowrap;
+  cursor: var(--cursor-pointer);
+}
+
+.update-pill:hover {
+  border-color: var(--accent);
+}
+
+.update-busy {
+  display: block;
+  margin-top: 8px;
+}
+
+.update-busy > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.update-source-path {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
