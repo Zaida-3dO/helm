@@ -94,18 +94,18 @@ function Thinking({ text, streaming, onLink }: { text: string; streaming: boolea
   );
 }
 
-function AssistantBody({ row, ctx }: { row: MessageRow; ctx: RowContext }) {
+function AssistantBody({ row, ctx, hideThinking }: { row: MessageRow; ctx: RowContext; hideThinking?: boolean }) {
   const streaming = row.status === 'streaming';
   const text = usePacedText(row.text, streaming);
   return (
     <>
-      <Thinking text={row.thinking} streaming={streaming} onLink={ctx.onLink} />
+      <Thinking text={hideThinking ? '' : row.thinking} streaming={streaming} onLink={ctx.onLink} />
       {text && <Markdown text={text} streaming={streaming} interactive onLink={ctx.onLink} />}
     </>
   );
 }
 
-export const Row = memo(function Row({ row, ctx, final, afterTool, indent, afterFold, turnMs }: { row: MessageRow; ctx: RowContext; turnMs?: number } & RowFlags) {
+export const Row = memo(function Row({ row, ctx, final, afterTool, indent, afterFold, hideThinking, turnMs }: { row: MessageRow; ctx: RowContext; turnMs?: number } & RowFlags) {
   const retry = row.details?.retry;
   const common = { 'data-testid': 'transcript-row', 'data-status': row.status, 'data-role': row.role, 'data-row-id': row.id };
   const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}${afterFold ? ' after-fold' : ''}`;
@@ -156,7 +156,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
   }
   return (
     <div className={`row row-assistant status-${row.status}${place}`} {...common} data-final={final ? 'true' : undefined}>
-      <AssistantBody row={row} ctx={ctx} />
+      <AssistantBody row={row} ctx={ctx} hideThinking={hideThinking} />
       {row.status === 'error' && (
         <div className="error-row" data-testid="error-row">
           {row.details?.errorMessage ?? 'The request failed.'}

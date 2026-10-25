@@ -7,7 +7,7 @@ import { FoldRow, Row, type RowContext } from './Rows.tsx';
 import { VirtualList } from './VirtualList.tsx';
 import { turnTimes } from './rowMeta.ts';
 import { estimateItem, layout, type Item } from './workBlocks.ts';
-import { useRunningAgents } from '../state/runningAgents.ts';
+import { AgentGroup } from './subagents/AgentGroup.tsx';
 
 export interface TranscriptProps {
   rows: MessageRow[];
@@ -26,10 +26,16 @@ function itemKey(i: Item): string {
 
 export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLatest, onFollowChange, jumpToRowId }: TranscriptProps) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  // Agent calls whose subagent still runs stay out of the fold (workBlocks.ts).
-  const runningAgents = useRunningAgents(ctx.chatId);
-  const items = useMemo(() => layout(rows, live, expanded, runningAgents), [rows, live, expanded, runningAgents]);
-  const byKey = useMemo(() => new Map(items.map((i) => [itemKey(i), i])), [items]);
+  const items = useMemo(() => layout(rows, live, expanded), [rows, live, expanded]);
+  // A row inside a subagent group is found under the group's key.
+  const byKey = useMemo(() => {
+    const m = new Map<string, Item>();
+    for (const i of items) {
+      m.set(itemKey(i), i);
+      if (i.kind === 'agents') i.rows.forEach((r) => m.set(`r:${r.id}`, i));
+    }
+    return m;
+  }, [items]);
   const keys = useMemo(() => items.map(itemKey), [items]);
   const times = useMemo(() => turnTimes(items), [items]);
 
@@ -54,7 +60,8 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
       }
     }
   }, [jumpToRowId, rows, byKey]);
-  const jumpKey = jumpToRowId != null && byKey.has(`r:${jumpToRowId}`) ? `r:${jumpToRowId}` : null;
+  const jumpItem = jumpToRowId != null ? byKey.get(`r:${jumpToRowId}`) : undefined;
+  const jumpKey = jumpItem ? itemKey(jumpItem) : null;
 
   if (rows.length === 0) {
     return (
@@ -78,8 +85,9 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
         const item = byKey.get(k);
         if (!item) return null;
         if (item.kind === 'row') return (
-            <Row row={item.row} ctx={ctx} final={item.final} afterTool={item.afterTool} indent={item.indent} afterFold={item.afterFold} turnMs={times.get(item.row.id)} />
+            <Row row={item.row} ctx={ctx} final={item.final} afterTool={item.afterTool} indent={item.indent} afterFold={item.afterFold} hideThinking={item.hideThinking} turnMs={times.get(item.row.id)} />
           );
+        if (item.kind === 'agents') return <AgentGroup rows={item.rows} ctx={ctx} />;
         return (
           <FoldRow
             count={item.rows.length}

@@ -15,11 +15,11 @@ function turn() {
 }
 
 const shape = (items: Item[]) =>
-  items.map((i) => (i.kind === 'row' ? i.row.id : `fold[${i.rows.map((r) => r.id).join(',')}]`));
+  items.map((i) => (i.kind === 'row' ? i.row.id : `${i.kind}[${i.rows.map((r) => r.id).join(',')}]`));
 
-test('a settled turn folds its work, keeping errors and the final reply', () => {
+test('a settled turn folds its tool calls, keeping notes, errors and the final reply', () => {
   const items = layout(turn(), false);
-  assert.deepEqual(shape(items), [1, 'fold[2,3]', 4, 5]);
+  assert.deepEqual(shape(items), [1, 'fold[3]', 2, 4, 5]);
   const fold = items.find((i) => i.kind === 'fold');
   // Timed from the run's first output (1 s), not from the prompt (0 s).
   assert.equal(fold?.kind === 'fold' && fold.elapsedMs, 64_000);
@@ -52,8 +52,8 @@ test('the row right after a closed fold is marked, so it draws no second rule', 
     const it = items.find((i) => i.kind === 'row' && i.row.id === id);
     return it?.kind === 'row' && it.afterFold;
   };
-  assert.equal(flag(4), true);
-  assert.equal(flag(5), false);
+  assert.equal(flag(2), true);
+  assert.equal(flag(4), false);
   const plain = layout([row({ id: 1, role: 'user' }), row({ id: 2, role: 'toolResult' }), row({ id: 3, role: 'assistant', text: 'done' })], false);
   const done = plain.find((i) => i.kind === 'row' && i.row.id === 3);
   assert.equal(done?.kind === 'row' && done.final && done.afterFold, true);
@@ -66,7 +66,7 @@ test('the row right after a closed fold is marked, so it draws no second rule', 
 test('a live turn folds as it goes, so settling changes nothing', () => {
   const live = layout(turn(), true);
   const settled = layout(turn(), false);
-  assert.deepEqual(shape(live), [1, 'fold[2,3]', 4, 5]);
+  assert.deepEqual(shape(live), [1, 'fold[3]', 2, 4, 5]);
   assert.deepEqual(shape(live), shape(settled));
   // The reply being written after the last tool already has its final look.
   const flags = (items: Item[]) => items.map((i) => (i.kind === 'row' ? [i.final, i.afterFold, i.afterTool] : 'fold'));
@@ -81,10 +81,10 @@ test('while a tool is the newest row, it is the open part and the work before it
     row({ id: 4, role: 'assistant', text: 'now the tests', timestamp: 3000 }),
     row({ id: 5, role: 'toolResult', toolName: 'Bash', status: 'streaming', timestamp: 4000 }),
   ];
-  assert.deepEqual(shape(layout(rows, true)), [1, 'fold[2,3,4]', 5]);
+  assert.deepEqual(shape(layout(rows, true)), [1, 'fold[3]', 2, 4, 5]);
   // Text written after it opens instead, and the tool folds.
   const more = [...rows.slice(0, 4), { ...rows[4]!, status: 'complete' as const }, row({ id: 6, role: 'assistant', text: 'All', timestamp: 5000 })];
-  assert.deepEqual(shape(layout(more, true)), [1, 'fold[2,3,4,5]', 6]);
+  assert.deepEqual(shape(layout(more, true)), [1, 'fold[3,5]', 2, 4, 6]);
 });
 
 test('live, nothing folds until there is visible work to fold (no "Worked for 0s" over the first tool)', () => {
@@ -109,18 +109,18 @@ test('a live turn that only thought folds its thinking behind the newest row', (
   assert.deepEqual(shape(layout(rows, false)), [1, 'fold[2]', 3]);
 });
 
-test('an Agent call whose subagent still runs stays after the fold, and folds once it finishes', () => {
+test('Agent calls stay in the flow, side by side as one group, whether they run or have finished', () => {
   const rows = [
     row({ id: 1, role: 'user', timestamp: 0 }),
     row({ id: 2, role: 'toolResult', toolName: 'Agent', toolCallId: 'a1', timestamp: 1000 }),
     row({ id: 3, role: 'toolResult', toolName: 'Read', timestamp: 2000 }),
-    row({ id: 4, role: 'assistant', text: 'Started a reviewer.', timestamp: 3000 }),
+    row({ id: 4, role: 'toolResult', toolName: 'Task', toolCallId: 'a2', timestamp: 3000 }),
+    row({ id: 5, role: 'assistant', text: 'Started two reviewers.', timestamp: 4000 }),
+    row({ id: 6, role: 'toolResult', toolName: 'Agent', toolCallId: 'a3', timestamp: 5000 }),
   ];
-  assert.deepEqual(shape(layout(rows, false, new Set(), new Set(['a1']))), [1, 'fold[3]', 2, 4]);
-  assert.deepEqual(shape(layout(rows, false, new Set(), new Set())), [1, 'fold[2,3]', 4]);
-  // Only Agent rows are held open by a running id.
-  const read = rows.map((r) => (r.id === 3 ? { ...r, toolCallId: 'a1' } : r));
-  assert.deepEqual(shape(layout(read, false, new Set(), new Set(['zz']))), [1, 'fold[2,3]', 4]);
+  // The Read between the first two folds away, so the two calls are neighbours; the note splits the third off.
+  assert.deepEqual(shape(layout(rows, false)), [1, 'fold[3]', 'agents[2,4]', 5, 'agents[6]']);
+  assert.deepEqual(shape(layout(rows, true)), shape(layout(rows, false)));
 });
 
 test('an earlier turn folds while the latest is live; expanding unfolds it', () => {
@@ -129,9 +129,9 @@ test('an earlier turn folds while the latest is live; expanding unfolds it', () 
     row({ id: 6, role: 'user', timestamp: 70_000 }),
     row({ id: 7, role: 'toolResult', timestamp: 71_000 }),
   ];
-  assert.deepEqual(shape(layout(rows, true)), [1, 'fold[2,3]', 4, 5, 6, 7]);
+  assert.deepEqual(shape(layout(rows, true)), [1, 'fold[3]', 2, 4, 5, 6, 7]);
   // Opened: the "Worked for" row stays (so it can be closed again) and the work follows in order.
-  assert.deepEqual(shape(layout(rows, true, new Set(['k1']))), [1, 'fold[2,3]', 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(shape(layout(rows, true, new Set(['k1']))), [1, 'fold[3]', 2, 3, 4, 5, 6, 7]);
 });
 
 test('context, retry and interrupted rows stay visible', () => {
@@ -190,7 +190,8 @@ test('opened work is indented, the shown rows are not', () => {
     const it = items.find((i) => i.kind === 'row' && i.row.id === id);
     return it?.kind === 'row' && it.indent;
   };
-  assert.equal(ind(2), true);
+  assert.equal(ind(3), true);
+  assert.equal(ind(2), false);
   assert.equal(ind(5), false);
 });
 
@@ -208,4 +209,20 @@ test('estimateItem guesses by kind and length, and remembers each row', () => {
   const first = estimateItem({ kind: 'row', row: frozen });
   Object.defineProperty(frozen, 'text', { get: () => assert.fail('text read twice') });
   assert.equal(estimateItem({ kind: 'row', row: frozen }), first);
+});
+
+test('thinking behind a closed fold is hidden on the notes that carry it, and shown once opened', () => {
+  const rows = [
+    row({ id: 1, role: 'user', timestamp: 0 }),
+    row({ id: 2, role: 'assistant', text: 'note', thinking: 'why', timestamp: 1000 }),
+    row({ id: 3, role: 'toolResult', toolName: 'Read', timestamp: 2000 }),
+    row({ id: 4, role: 'assistant', text: 'answer', thinking: 'wrap up', timestamp: 3000 }),
+  ];
+  const hidden = (items: Item[]) => items.flatMap((i) => (i.kind === 'row' && i.hideThinking ? [i.row.id] : []));
+  assert.deepEqual(hidden(layout(rows, false)), [2, 4]);
+  assert.deepEqual(hidden(layout(rows, false, new Set(['k1']))), []);
+  // Live, the part still being written keeps its thinking in view.
+  assert.deepEqual(hidden(layout(rows, true)), [2]);
+  // A turn that only thought and answered has nothing to fold: the thinking stays where it is.
+  assert.deepEqual(hidden(layout([rows[0]!, { ...rows[3]!, id: 2 }], false)), []);
 });

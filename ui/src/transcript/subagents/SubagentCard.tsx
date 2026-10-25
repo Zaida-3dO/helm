@@ -21,7 +21,7 @@ function useTicker(live: boolean): number {
   return now;
 }
 
-function useThread(chatId: string): ThreadState | null {
+export function useThread(chatId: string): ThreadState | null {
   const { store } = useShell();
   return useSyncExternalStore(store.subscribe, () => store.view(chatId).thread);
 }
@@ -97,13 +97,12 @@ function AgentCard({ row }: { row: MessageRow }) {
         </span>
         <span className="subagent-main">
           <span className="subagent-title">
-            <span className="subagent-name">{name}</span>
-            {type && <span className="subagent-type">{type}</span>}
+            <span className="subagent-name">{type ?? name}</span>
             <span className="subagent-spacer" />
             <span className="subagent-elapsed muted">{formatElapsed(elapsedMs(s, now))}</span>
             <StatusMark s={s} />
           </span>
-          {s.assignment && <span className="subagent-assignment">{s.assignment.split('\n')[0]}</span>}
+          {(type ? name : s.assignment?.split('\n')[0]) && <span className="subagent-assignment">{type ? name : s.assignment?.split('\n')[0]}</span>}
           <span className={`subagent-preview${s.status === 'failed' ? ' is-error' : ''}`} data-testid="subagent-preview">
             {previewLine(s)}
           </span>

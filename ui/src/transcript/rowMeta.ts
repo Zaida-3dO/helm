@@ -54,6 +54,7 @@ export function turnTimes(items: Item[]): Map<number, number> {
     reply = null;
   };
   for (const it of items) {
+    if (it.kind === 'agents') continue;
     if (it.kind === 'fold') elapsed = it.elapsedMs;
     else if (it.row.role === 'user' && it.row.details?.mode !== 'steer') close();
     else if (elapsed !== null && it.row.role === 'assistant' && it.row.text.trim()) reply = it.row.id;

@@ -1,13 +1,13 @@
 // Turn work blocks. A turn starts at a user row (a steer read mid-turn does not
-// start one, and is always shown); the agent activity after it (tool results, intermediate notes,
-// thinking) is its work, and it folds behind one "worked for …" row, but only when the turn did
-// real work (a tool call or thinking): a plain reply to "Hello" shows as it is. Errors,
-// interruptions, retries and context rows are always shown, and so is the turn's final reply.
+// start one, and is always shown); the agent activity after it is its work. Only the tool calls
+// and the thinking fold behind one "worked for ..." row, and only when the turn did real work (a
+// tool call or thinking): a plain reply to "Hello" shows as it is. The notes the agent wrote between
+// tool calls, the subagent cards, errors, interruptions, retries, context rows and the turn's final
+// reply stay in the flow. Consecutive Agent calls are drawn as one group of cards.
 //
-// A live turn folds as it goes: only its newest activity stays open, either the running tool or the text written since
-// the last tool, so at settle nothing but that last piece folds and the transcript does not
-// jump. An Agent call whose subagent is still running stays open after the fold, even once the
-// turn has settled, and folds when the subagent finishes.
+// A live turn folds as it goes: only its newest activity stays open, either the running tool or the
+// text written since the last tool, so at settle nothing but that last piece folds and the
+// transcript does not jump.
 
 import type { MessageRow } from '../api/types.ts';
 import { isAgentRow } from './subagents/model.ts';
@@ -24,6 +24,8 @@ export interface RowFlags {
   indent?: boolean;
   /** The row directly after a closed "worked for" row, whose rule already separates it. */
   afterFold?: boolean;
+  /** An assistant row whose thinking sits behind the closed "worked for" row. */
+  hideThinking?: boolean;
 }
 
 export type Item =
@@ -38,7 +40,9 @@ export type Item =
       failed: number;
       /** The reader has opened this turn, so its work is listed after the row. */
       open: boolean;
-    };
+    }
+  // Agent calls that follow one another, drawn as one header over a grid of subagent cards.
+  | { kind: 'agents'; key: string; rows: MessageRow[] };
 
 /** A steer read mid-turn belongs to the running turn; only other user rows open a new turn. */
 function opensTurn(r: MessageRow): boolean {
@@ -58,12 +62,28 @@ function alwaysShown(r: MessageRow): boolean {
   return false;
 }
 
+/** A note: what the agent wrote between tool calls (and the reply itself). */
+function isNote(r: MessageRow): boolean {
+  return r.role === 'assistant' && r.text.trim() !== '';
+}
+
+/** Agent calls that follow one another become one item. */
+function groupAgents(items: Item[]): Item[] {
+  const out: Item[] = [];
+  for (const it of items) {
+    const prev = out[out.length - 1];
+    if (it.kind !== 'row' || !isAgentRow(it.row)) out.push(it);
+    else if (prev?.kind === 'agents') prev.rows.push(it.row);
+    else out.push({ kind: 'agents', key: `agents:${it.row.id}`, rows: [it.row] });
+  }
+  return out;
+}
+
 /**
  * Lay out rows as items. `live` says whether the newest turn is still running; `expanded` lists the
- * turn keys the reader has opened; `runningAgents` holds the tool call ids of Agent calls whose
- * subagent is still running.
+ * turn keys the reader has opened.
  */
-export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<string> = new Set(), runningAgents: ReadonlySet<string> = new Set()): Item[] {
+export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<string> = new Set()): Item[] {
   const items: Item[] = [];
   let i = 0;
   // Rows before the first user row (a page that starts mid-turn) are shown as they are.
@@ -101,7 +121,7 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
       openFrom = lastTool < 0 ? work.length - 1 : lastTool === work.length - 1 ? lastTool : lastTool + 1;
     }
     const open = (j: number) => (settled ? j === reply : j >= openFrom);
-    const push = (r: MessageRow, j: number, indent: boolean) => {
+    const push = (r: MessageRow, j: number, indent: boolean, hideThinking = false) => {
       const prev = j > 0 ? work[j - 1] : user;
       const last = items[items.length - 1];
       items.push({
@@ -113,6 +133,7 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
         afterTool: prev?.role === 'toolResult',
         indent,
         afterFold: last?.kind === 'fold' && !last.open,
+        hideThinking,
       });
     };
     // Nothing to fold away: the turn is empty, or did no work beyond replying.
@@ -120,17 +141,20 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
       work.forEach((r, j) => push(r, j, false));
       continue;
     }
-    const keep = (r: MessageRow) => alwaysShown(r) || (isAgentRow(r) && r.toolCallId !== null && runningAgents.has(r.toolCallId));
+    // Tool calls and thinking fold; notes, subagent cards and the always-shown rows stay.
+    const keep = (r: MessageRow) => alwaysShown(r) || isAgentRow(r) || isNote(r);
     const foldedIdx: number[] = [];
     const shownIdx: number[] = [];
     work.forEach((r, j) => (open(j) || keep(r) ? shownIdx : foldedIdx).push(j));
+    // A kept note's own thinking goes behind the fold as well; the part still being written stays.
+    const thoughtIdx = (!hadTools && foldedIdx.length === 0 ? [] : shownIdx).filter((j) => work[j]!.role === 'assistant' && work[j]!.thinking.trim() !== '' && (settled || j < openFrom));
     // Live, a fold of nothing visible (the empty message a tool call is saved under) would only
     // put "Worked for 0s" above the first tool: wait for real work to fold.
-    if (!settled && foldedIdx.every((j) => isBlank(work[j]!))) {
+    if (!settled && thoughtIdx.length === 0 && foldedIdx.every((j) => isBlank(work[j]!))) {
       work.forEach((r, j) => push(r, j, false));
       continue;
     }
-    if (foldedIdx.length > 0) {
+    if (foldedIdx.length > 0 || thoughtIdx.length > 0) {
       // Timed from the run's first output, not the prompt: starting the worker, Claude Code and its
       // session hooks is not work the agent did on this turn.
       const first = work[0]!;
@@ -139,7 +163,7 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
         kind: 'fold',
         key: `fold:${turnKey}`,
         turnKey,
-        rows: foldedIdx.map((j) => work[j]!),
+        rows: [...foldedIdx, ...thoughtIdx].sort((a, b) => a - b).map((j) => work[j]!),
         elapsedMs: Math.max(0, last.timestamp - first.timestamp),
         failed: foldedIdx.filter((j) => toolStatus(work[j]!) === 'failed' && work[j]!.role === 'toolResult').length,
         open: isOpen,
@@ -149,10 +173,11 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
       const folded = new Set(foldedIdx);
       work.forEach((r, j) => push(r, j, folded.has(j)));
     } else {
-      shownIdx.forEach((j) => push(work[j]!, j, false));
+      const hidden = new Set(thoughtIdx);
+      shownIdx.forEach((j) => push(work[j]!, j, false, hidden.has(j)));
     }
   }
-  return items;
+  return groupAgents(items);
 }
 
 export function formatElapsed(ms: number): string {
@@ -172,6 +197,8 @@ const estimates = new WeakMap<MessageRow, number>();
 export function estimateItem(item: Item | undefined): number {
   if (!item) return ESTIMATE;
   if (item.kind === 'fold') return estimateHeight({ kind: 'fold', chars: 0, lines: 0 });
+  // A header and two cards a line.
+  if (item.kind === 'agents') return 44 + 96 * Math.ceil(item.rows.length / 2);
   const row = item.row;
   let h = estimates.get(row);
   if (h === undefined) {

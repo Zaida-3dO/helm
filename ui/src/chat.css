@@ -244,6 +244,11 @@ button.danger {
   cursor: var(--cursor-pointer);
 }
 
+.thinking-label {
+  flex: none;
+  white-space: nowrap;
+}
+
 .thinking-label.live {
   color: var(--secondary);
 }
@@ -281,9 +286,9 @@ button.danger {
   font-size: 15px;
 }
 
-/* The answer after a thinking block sits 32 px below it. */
+/* The text after a thinking block sits a short step below it, so opened work keeps a tight rhythm. */
 .thinking + .md-root {
-  margin-top: 32px;
+  margin-top: 8px;
 }
 
 .row-context {
@@ -1067,6 +1072,10 @@ button.danger {
 
 .row-tool {
   padding: 0;
+}
+
+.row.agent-group {
+  padding: 6px 0 16px;
 }
 
 .row-assistant.after-tool {

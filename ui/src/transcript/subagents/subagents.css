@@ -1,9 +1,37 @@
 /* Subagent cards and roster. */
 
+/* Consecutive Agent calls: a header over a grid of cards, 250 px at the least, 7 px apart. */
+.agent-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.agent-group-spacer {
+  flex: 1;
+}
+
+.agent-group-note {
+  opacity: 0.8;
+}
+
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 7px;
+}
+
+/* An opened card takes the whole line, so its detail has room. */
+.agent-grid .subagent-card.open {
+  grid-column: 1 / -1;
+}
+
 .subagent-card {
   position: relative;
-  margin: 4px 0 8px 22px;
-  max-width: 620px;
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: color-mix(in srgb, var(--text) 3%, transparent);
