@@ -86,6 +86,18 @@ test('the / menu stays open with the chosen command while its arguments are type
   assert.equal(skillMenu('/unknown thing', list), null, 'an unknown command closes it');
   assert.equal(skillMenu('/zzz', list), null, 'no matches closes it');
   assert.equal(skillMenu('hello', list), null);
+  // Helm's own commands lead the list, shadow a CLI skill of the same name, and are found however
+  // they are spaced; only a whole draft naming one runs it.
+  const { helmCommand, withHelmCommands, SCOPE_LABEL } = await import('./skills.ts');
+  const all = withHelmCommands([...list, { name: 'roll-over', description: 'a CLI skill' }]);
+  assert.deepEqual(all.map((s) => s.name), ['rollover', 'review', 'reviewer', 'deploy']);
+  assert.equal(SCOPE_LABEL[all[0]!.scope!], 'Helm command');
+  for (const typed of ['/roll', '/rollover', '/roll-over', '/roll-o', '/roll over', '/Roll Over', '/roll ']) {
+    assert.deepEqual(skillMenu(typed, all)?.items.map((s) => s.name), ['rollover'], typed);
+  }
+  assert.equal(skillMenu('/review the diff', all)?.mode, 'args', 'a spaced CLI command is untouched');
+  for (const sent of ['/rollover', '/rollover ', ' /roll-over', '/Roll over']) assert.equal(helmCommand(sent)?.name, 'rollover', sent);
+  for (const sent of ['/roll', '/rollover now', 'rollover', 'please /rollover']) assert.equal(helmCommand(sent), null, sent);
   assert.equal(moveActive(0, 3, -1), 2);
   assert.equal(moveActive(2, 3, 1), 0);
   assert.equal(moveActive(0, 0, 1), -1);

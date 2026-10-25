@@ -22,7 +22,9 @@ import { PermissionChip } from './PermissionChip.tsx';
 import { orderPending, itemState } from './queue.ts';
 import { bytesToBase64, forgetDelivered, forgetSent, isAnimated, refusal, stashSent, type Attached, type SentAttachments } from './attachments.ts';
 import { Recall } from './recall.ts';
-import { commandWithArgs, moveActive, SCOPE_LABEL, skillMenu, skillQuery, type Skill } from './skills.ts';
+import { commandWithArgs, helmCommand, moveActive, SCOPE_LABEL, skillMenu, skillQuery, withHelmCommands, type Skill } from './skills.ts';
+import { rollOverChat } from '../sidebar/actions.ts';
+import { toast } from '../ui/index.ts';
 import { useHiddenSkills } from '../settings/applied.ts';
 import { accessoriesAt, accessorySide, collectSendContributions, mountComposer, type AccessoryContext } from './slots.ts';
 import './composer.css';
@@ -292,6 +294,21 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
         return;
       }
       if (sendingRef.current) return;
+      // A Helm command is run here, not sent to Claude; the draft clears only once it has started.
+      if (helmCommand(text)?.name === 'rollover') {
+        sendingRef.current = true;
+        setSending(true);
+        try {
+          if (await rollOverChat(ops, chat.id, (m) => toast.show({ kind: 'error', text: m }))) {
+            editor.current?.setText('');
+            setEmpty(true);
+          }
+        } finally {
+          sendingRef.current = false;
+          setSending(false);
+        }
+        return;
+      }
       sendingRef.current = true;
       setSending(true);
       const token = saver.beginSend();
@@ -349,7 +366,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   const recaller = useRef(new Recall());
   const [draftText, setDraftText] = useState(chat.draft);
   const [skills, setSkills] = useState<Skill[]>([]);
-  const commands = useMemo(() => new Set(skills.map((s) => s.name.toLowerCase())), [skills]);
+  const commands = useMemo(() => new Set(withHelmCommands(skills).map((s) => s.name.toLowerCase())), [skills]);
   const skillPrefix = skillQuery(draftText);
   const wantsSkills = skillPrefix !== null || commandWithArgs(draftText) !== null;
   useEffect(() => {
@@ -364,7 +381,10 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   const [menuShut, setMenuShut] = useState<string | null>(null);
   const [active, setActive] = useState(0);
   const hiddenSkills = useHiddenSkills();
-  const shownSkills = useMemo(() => skills.filter((k) => !hiddenSkills.some((h) => h.toLowerCase() === k.name.toLowerCase())), [skills, hiddenSkills]);
+  const shownSkills = useMemo(
+    () => withHelmCommands(skills.filter((k) => !hiddenSkills.some((h) => h.toLowerCase() === k.name.toLowerCase()))),
+    [skills, hiddenSkills],
+  );
   const menu = menuShut === draftText ? null : skillMenu(draftText, shownSkills);
   const menuKey = menu ? `${menu.mode}:${menu.items.map((x) => x.name).join(',')}` : '';
   useEffect(() => setActive(0), [menuKey]);

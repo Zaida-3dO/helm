@@ -1,5 +1,8 @@
 // Skill completion: typing "/" and a prefix at the start of the draft offers the
-// CLI's own commands and skills; choosing one puts "/name " in the draft.
+// CLI's own commands and skills, and Helm's own commands; choosing one puts "/name " in the draft.
+// A Helm command is run by Helm when sent, never passed to Claude.
+
+const norm = (s: string) => s.toLowerCase().replace(/[-_\s]/g, '');
 
 export interface Skill {
   name: string;
@@ -8,7 +11,27 @@ export interface Skill {
   scope?: string;
 }
 
-export const SCOPE_LABEL: Record<string, string> = { personal: 'Personal skill', project: 'Project skill', plugin: 'Plugin skill', builtin: 'Command' };
+export const SCOPE_LABEL: Record<string, string> = { personal: 'Personal skill', project: 'Project skill', plugin: 'Plugin skill', builtin: 'Command', helm: 'Helm command' };
+
+/** Commands Helm runs itself. They lead the `/` menu's list and shadow a CLI skill of the same name. */
+export const HELM_COMMANDS: readonly Skill[] = [
+  { name: 'rollover', description: 'Hand this chat’s work to a fresh chat, then archive this one', scope: 'helm' },
+];
+
+/** The menu's list: Helm's commands, then the CLI's (minus any a Helm command shadows). */
+export function withHelmCommands(list: readonly Skill[]): Skill[] {
+  const own = new Set(HELM_COMMANDS.map((c) => norm(c.name)));
+  return [...HELM_COMMANDS, ...list.filter((s) => !own.has(norm(s.name)))];
+}
+
+/** The Helm command a whole draft names, however it is spaced or hyphenated ("/rollover",
+ *  "/roll-over", "/Roll over"), or null. Sending such a draft runs the command. */
+export function helmCommand(text: string): Skill | null {
+  const m = /^\/([A-Za-z][A-Za-z _-]{0,40})$/.exec(text.trim());
+  if (!m) return null;
+  const n = norm(m[1]!);
+  return HELM_COMMANDS.find((c) => norm(c.name) === n) ?? null;
+}
 
 /** The typed prefix when the draft is a bare "/word" at its start, else null. */
 export function skillQuery(text: string): string | null {
@@ -16,7 +39,6 @@ export function skillQuery(text: string): string | null {
   return m ? m[1]! : null;
 }
 
-const norm = (s: string) => s.toLowerCase().replace(/[-_\s]/g, '');
 
 /** Best first: exact, prefix, word prefix, substring, description substring; ties by name. */
 export function rankSkills(list: readonly Skill[], query: string, limit = 8): Skill[] {
@@ -26,7 +48,7 @@ export function rankSkills(list: readonly Skill[], query: string, limit = 8): Sk
     const n = s.name.toLowerCase();
     if (!q) return 4;
     if (n === q || norm(n) === nq) return 0;
-    if (n.startsWith(q)) return 1;
+    if (n.startsWith(q) || (nq && norm(n).startsWith(nq))) return 1;
     if (n.split(/[-_:\s]/).some((w) => w.startsWith(q))) return 2;
     if (n.includes(q)) return 3;
     if (s.description.toLowerCase().includes(q)) return 5;
@@ -54,6 +76,10 @@ export interface SkillMenu {
 
 /** What the `/` menu shows for a draft, or null when it is closed. */
 export function skillMenu(text: string, list: readonly Skill[], limit = 12): SkillMenu | null {
+  // A Helm command typed with a space ("/roll over") is still that command.
+  const spaced = /^\/[A-Za-z]+[ ]+[A-Za-z]*$/.exec(text) ? norm(text.slice(1)) : '';
+  const own = spaced ? list.filter((s) => s.scope === 'helm' && norm(s.name).startsWith(spaced)) : [];
+  if (own.length) return { mode: 'pick', items: own };
   const q = skillQuery(text);
   if (q !== null) {
     const items = rankSkills(list, q, limit);

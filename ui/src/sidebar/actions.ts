@@ -273,13 +273,16 @@ export async function compactChat(ops: Pick<ChatOps, 'compact'>, chatId: string,
   }
 }
 
-/** "Roll over": the agent writes a hand-off, a new chat takes it, and this chat is archived. */
-export async function rollOverChat(ops: Pick<ChatOps, 'rollOver'>, chatId: string, onError: (message: string) => void): Promise<void> {
+/** "Roll over": the agent writes a hand-off, a new chat takes it, and this chat is archived.
+ *  True when it started. */
+export async function rollOverChat(ops: Pick<ChatOps, 'rollOver'>, chatId: string, onError: (message: string) => void): Promise<boolean> {
   try {
     await ops.rollOver(chatId);
     toast.show({ kind: 'info', text: 'Rolling over: the agent is writing a hand-off. The new chat opens when it is ready.' });
+    return true;
   } catch (e) {
     onError(`Could not roll over this chat: ${message(e)}`);
+    return false;
   }
 }
 
