@@ -167,7 +167,7 @@ export class ClaudeDriver implements Driver {
     this.model = c.model;
     this.effort = isEffort(c.effort) ? c.effort : DEFAULT_EFFORT;
     this.budget = new SubagentBudget({ softTurns: typeof c.subagentSoftTurns === "number" && c.subagentSoftTurns > 0 ? c.subagentSoftTurns : 0, hardStop: c.subagentHardStop === true });
-    if (c.shellChanges === true && launch.cwd) this.shellChanges = new ShellChangeCapture(launch.cwd);
+    if (c.shellChanges === true) this.shellChanges = new ShellChangeCapture();
     const level = launch.sendBehavior?.longCommands;
     this.longCommands = new LongCommandPolicy(isLongCommandLevel(level) ? level : "off");
     this.translator = new StreamTranslator({ emit: (e) => this.onTranslated(e), diag: deps.diag });
@@ -742,8 +742,12 @@ export class ClaudeDriver implements Driver {
       // The snapshot is taken before the command is allowed to start; it never refuses anything.
       const id = String(req.tool_use_id ?? input.tool_use_id ?? "");
       const background = obj(input.tool_input).run_in_background === true;
-      if (!this.shellChanges || !id || background) return this.controlReply(requestId, {});
-      void this.shellChanges.begin(id).then(() => this.controlReply(requestId, {}));
+      // A sub-agent's call never gets an end of its own here, so it is not tracked; neither is a
+      // background one. The folder is the one the command runs in.
+      const sub = Boolean(input.agent_id) || this.subagentTools.has(id);
+      const cwd = typeof input.cwd === "string" && input.cwd !== "" ? input.cwd : this.launch.cwd;
+      if (!this.shellChanges || !id || background || sub || !cwd) return this.controlReply(requestId, {});
+      void this.shellChanges.begin(id, cwd).then(() => this.controlReply(requestId, {}));
       return;
     }
     if (req.callback_id === SCHEDULE_REDIRECT_HOOK_ID) {

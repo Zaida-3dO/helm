@@ -196,6 +196,12 @@ export function RuntimePane() {
           <Checkbox checked={s?.toolOutputCap ?? true} disabled={!s} onChange={(on) => save({ toolOutputCap: on })} data-testid="runtime-output-cap" aria-label="Cut long tool output" />
         </SettingRow>
         <SettingRow
+          title="Record files that shell commands change"
+          description="Compares your git checkout before and after each shell command a chat runs, so the turn's change card lists files changed by sed, formatters and git. On by default; it costs a quick git status either side of each command. Chats pick it up when they next start."
+        >
+          <Checkbox checked={s?.shellChanges ?? true} disabled={!s} onChange={(on) => save({ shellChanges: on })} data-testid="runtime-shell-changes" aria-label="Record files that shell commands change" />
+        </SettingRow>
+        <SettingRow
           title="Offer Claude Code's schedule tools"
           description="Claude Code's own cron, wake-up and remote-trigger tools. They never run: Helm turns each call down and points the chat at Helm's schedules, where you can see, pause and cancel them. Off by default."
         >

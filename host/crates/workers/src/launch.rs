@@ -131,6 +131,10 @@ pub struct ClaudeRuntime {
     /// schedules). Off by default: a missing key means off.
     #[serde(default)]
     pub schedule_tools: bool,
+    /// Record which files shell commands change, for the turn's change card. On by default: a
+    /// missing key means on.
+    #[serde(default = "yes")]
+    pub shell_changes: bool,
 }
 
 /// Which chats the sub-agent limits apply to.
@@ -185,6 +189,7 @@ impl Default for ClaudeRuntime {
             subagent_soft_turns: DEFAULT_SOFT_TURNS,
             tool_output_cap: true,
             schedule_tools: false,
+            shell_changes: true,
         }
     }
 }
@@ -267,7 +272,7 @@ pub fn claude_launch(
         subagent_hard_stop: runtime.subagent_hard_stop,
         tool_output_cap: runtime.tool_output_cap,
         schedule_tools: runtime.schedule_tools,
-        shell_changes: true,
+        shell_changes: runtime.shell_changes,
     };
     if let Some(t) = test {
         c.command = Some(t.command.clone());
@@ -332,6 +337,7 @@ mod tests {
             subagent_soft_turns: 40,
             tool_output_cap: false,
             schedule_tools: true,
+            shell_changes: false,
         };
         mine.save(dir.path()).unwrap();
         assert_eq!(ClaudeRuntime::load(dir.path()), (mine.clone(), None));
@@ -427,8 +433,14 @@ mod tests {
         assert_eq!(v["scheduleTools"], true);
         assert_eq!(
             v["shellChanges"], true,
-            "shell-command change capture is on for every Claude Code chat"
+            "shell-command change capture is on unless the user turned it off"
         );
+        let off = ClaudeRuntime {
+            shell_changes: false,
+            ..ClaudeRuntime::default()
+        };
+        let v = serde_json::to_value(claude_launch(&off, None, None, None, None)).unwrap();
+        assert_eq!(v["shellChanges"], false);
         assert!(
             !v.to_string().contains("appendSystemPrompt"),
             "absent unless a contributor adds a fragment"
