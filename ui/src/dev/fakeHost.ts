@@ -28,6 +28,7 @@ import { usageFakeOps } from './fake-usage.ts';
 import { updatesFakeOps } from './fake-updates.ts';
 import { itemLinksFakeOps } from './fake-itemlinks.ts';
 import { hubFakeOps } from './fake-hub.ts';
+import { holdForSlot, isSlotWaitPrompt, slotsFakeOps } from './fake-slots.ts';
 import { orchestratorFakeOps } from './fake-orchestrator.ts';
 import { newChatFakeOps } from '../newchat/fake.ts';
 import { runFakeSubagents } from '../transcript/subagents/fake.ts';
@@ -67,6 +68,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const oc = orchestratorFakeOps(); registerFakeOps(oc.prefixes, oc.handler); }
 { const nc = newChatFakeOps(); registerFakeOps(nc.prefixes, nc.handler); }
 { const hub = hubFakeOps(); registerFakeOps(hub.prefixes, hub.handler); }
+{ const sl = slotsFakeOps(); registerFakeOps(sl.prefixes, sl.handler); }
 
 export function fakeOpFor(op: string): FakeOpHandler | undefined {
   return extraOps.find((r) => r.prefixes.some((p) => op.startsWith(p)))?.handler;
@@ -512,7 +514,13 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         createdAt: now(),
       };
       if (c.chat.title === 'New chat') c.chat = { ...c.chat, title: text.slice(0, 40) };
-      if (!busy) {
+      if (!busy && isSlotWaitPrompt(text)) {
+        // A send held for a free run slot: saved, not yet delivered.
+        s.state = 'saved';
+        c.pending = [...c.pending, s];
+        emitQueue(c);
+        holdForSlot(c.chat.id, s.id);
+      } else if (!busy) {
         addRow(c, { role: 'user', text, sourceKey: s.id, details: { submissionId: s.id, ...(sentImages.length ? { images: sentImages } : {}), ...(sentRefs.length ? { refs: sentRefs } : {}) } });
         void runTurn(c, text);
       } else if (mode === 'asap' || mode === 'steer') {
@@ -551,6 +559,22 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         emitQueue(c);
       }
       return { status: 'stopping' };
+    },
+    // Dev-only: the slot queue's Start now (run the held send) and Cancel (mark it not delivered).
+    dev_release_wait: (a) => {
+      const c = find(a.chatId);
+      const s = c.pending.find((x) => x.id === a.submissionId);
+      if (!s) return null;
+      c.pending = c.pending.filter((x) => x.id !== s.id);
+      if (a.start) {
+        emitQueue(c);
+        addRow(c, { role: 'user', text: s.text, sourceKey: s.id, details: { submissionId: s.id } });
+        void runTurn(c, s.text);
+      } else {
+        c.pending = [{ ...s, state: 'rejected' as const }, ...c.pending];
+        emitQueue(c);
+      }
+      return null;
     },
     queue_resume: (a) => {
       const c = find(a.chatId);

@@ -57,6 +57,7 @@ import {
   Globe,
   GripVertical,
   Hand,
+  Hourglass,
   Image,
   Info,
   Keyboard,
@@ -221,6 +222,8 @@ export const IconRemind = kitIcon(AlarmClock, 'alarm-clock');
 export const IconEdit = kitIcon(Pencil, 'pencil');
 export const IconUndo = kitIcon(Undo2, 'undo-2');
 export const IconClock = kitIcon(Clock, 'clock');
+/** A send waiting for a free run slot (waiting is not working, so it is not the wheel). */
+export const IconHourglass = kitIcon(Hourglass, 'hourglass');
 export const IconTerminal = kitIcon(Terminal, 'terminal');
 export const IconScrollDown = kitIcon(ArrowDown, 'arrow-down');
 

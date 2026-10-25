@@ -6,6 +6,7 @@ import { useShell } from '../shell/context.ts';
 import { Button, Checkbox, Segmented, SettingRow, TextInput, toast } from '../ui/index.ts';
 import { bandLabel, governorOps, thresholdsError, type GovernorSettings, type GovernorView } from './governor.ts';
 import { clampInt, clockTime, dirty } from './model.ts';
+import { RunSlotsSection } from './RunSlotsSection.tsx';
 import './afk.css';
 
 function errorText(e: unknown): string {
@@ -79,8 +80,8 @@ export function GovernorPane() {
       <SettingRow title="Usage governor" description="Watches your plan usage (the higher of the 5-hour and weekly windows) and slows agents down near the limit. It acts only on a fresh reading." testId="governor-enabled">
         <Checkbox checked={form.enabled} onChange={(on) => setForm({ ...form, enabled: on })} data-testid="governor-enabled-box" />
       </SettingRow>
-      {pct('selectivePct', 'Selective from', 'Only your own work and replies should start. (Automated sends will wait once the run-slot queue lands.)')}
-      {pct('windDownPct', 'Wind down from', 'Running agents are told once to finish their step, save their work and stop starting new work.')}
+      {pct('selectivePct', 'Selective from', 'Only your own work and replies should start.')}
+      {pct('windDownPct', 'Wind down from', 'Running agents are told once to finish their step, save their work and stop starting new work. Automated starts wait from here until usage drops.')}
       {pct('stopPct', 'Stop at', 'Running agents are stopped once. A chat you start again yourself is left alone.')}
       <SettingRow title="At the limit" description="Stop running agents, or only tell them to wrap up.">
         <Segmented<'stop' | 'wrapUp'>
@@ -106,6 +107,7 @@ export function GovernorPane() {
           Save
         </Button>
       </div>
+      <RunSlotsSection />
     </div>
   );
 }

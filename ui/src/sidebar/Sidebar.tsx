@@ -37,6 +37,7 @@ import {
   IconFolder,
   IconGrip,
   IconMore,
+  IconHourglass,
   IconMute,
   IconPin,
   IconPlus,
@@ -51,6 +52,7 @@ import { StarMark, WheelMark } from '../ui/status/index.ts';
 import { openNewChat } from '../newchat/index.ts';
 import { ATTENTION_LABEL, age, trailingIndicator } from './status.ts';
 import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
+import { useSlotWaiting } from '../composer/useSlotQueue.ts';
 import { startSyncTriggers, syncDisplay, type SyncHost } from './sync.ts';
 import { sidebarUndo } from './undo.ts';
 import { layout, visibleRange } from './virtual.ts';
@@ -930,6 +932,7 @@ function ChatRow({
 }) {
   // A chat whose own turn ended but whose subagents still run shows the wheel.
   const subagents = useSubagentsRunning(item.row.chatId);
+  const waitingForSlot = useSlotWaiting(item.row.chatId);
   const r = subagents > 0 && item.row.attention !== 'running' ? { ...item.row, attention: 'running' as const } : item.row;
   const colour = colourCss(project?.colour);
   const trailing = trailingIndicator(r.attention);
@@ -996,6 +999,11 @@ function ChatRow({
         {!needsYou && flagReason !== undefined && (
           <span className="sb-flag" data-kind="quiet" data-testid="chat-flag" role="img" aria-label={`May still need you: ${flagReason}`} title={`May still need you: ${flagReason}`}>
             <IconFlag size={12} filled />
+          </span>
+        )}
+        {waitingForSlot && (
+          <span className="sb-wait" role="img" aria-label="Waiting for a free run slot" title="Waiting for a free run slot">
+            <IconHourglass size={11} />
           </span>
         )}
         {r.muted && (

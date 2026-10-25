@@ -6,6 +6,8 @@ import { dropPosition, movePosition, queueView } from './queue.ts';
 import { submission } from '../dev/fixtures.ts';
 import { liveRuns, wrapMarker } from './markup.ts';
 import { permissionLabel } from './permission.ts';
+import { EventBus } from '../api/events.ts';
+import { SlotQueueStore, waitNotes, type SlotQueueView } from './slotQueue.ts';
 
 const key = (k: string, m: Partial<KeyShape> = {}): KeyShape => ({ key: k, ctrl: false, shift: false, alt: false, meta: false, ...m });
 const asap: KeyContext = { sendShortcut: 'mod-enter', mode: 'asap', showChoices: true };
@@ -203,4 +205,35 @@ test('live styling keeps every character and styles the Markdown it finds', () =
   assert.match(chip[0]!.style, /background/, 'a leading known command is a chip');
   assert.equal(chip.length, 2, 'only the leading one');
   assert.equal(liveRuns('/nope x', new Set(['review']))[0]!.length, 1);
+});
+
+test('a send waiting for a run slot shows why, its place in line, and Start now and Cancel', async () => {
+  const wait = (n: number) => ({ chatId: 'c1', submissionId: `w${n}`, position: n, since: 0, head: false });
+  const base: SlotQueueView = { settings: { enabled: true, lowRunningChats: 3 }, limit: 3, running: ['a', 'b', 'c'], waiting: [wait(1), wait(2), wait(3)], held: null };
+  const notes = (v: Partial<SlotQueueView>) => [...waitNotes({ ...base, ...v })].map(([, n]) => n);
+  assert.deepEqual(notes({}), ['All 3 run slots are busy · next in line', 'All 3 run slots are busy · 2nd in line', 'All 3 run slots are busy · 3rd in line']);
+  assert.match(notes({ held: 'Plan usage is near its limit, so automated starts wait.' })[0]!, /^Plan usage is near its limit, so automated starts wait · next in line$/);
+  assert.match(notes({ running: ['a'] })[0]!, /^Behind an earlier message/);
+
+  const pending = [submission({ id: 'w1', state: 'saved', position: null }), submission({ id: 'q1', position: 1 })];
+  const caps = { withdraw: true, deliverNow: true, stopTool: false, compact: false };
+  const v = queueView(pending, { running: false, showChoices: true, capabilities: caps, waits: waitNotes({ ...base, waiting: [wait(1)] }) });
+  assert.deepEqual(v.map((i) => [i.submission.id, i.state, i.label, i.tone]), [['q1', 'queued', 'Queued', 'amber'], ['w1', 'waiting', 'Waiting for a free slot', 'amber']]);
+  assert.deepEqual(v[1]!.actions, ['startNow', 'cancelWait']);
+  assert.equal(v[1]!.note, 'All 3 run slots are busy · next in line');
+  assert.equal(queueView(pending, { running: false, showChoices: true, capabilities: caps })[1]!.state, 'sending');
+
+  // The store follows the host's event, and a read that comes back late does not overwrite it.
+  const bus = new EventBus();
+  let answer: (v: SlotQueueView) => void = () => undefined;
+  const api = (() => new Promise((r) => (answer = r as typeof answer))) as never;
+  const store = new SlotQueueStore(api, bus);
+  store.start();
+  bus.dispatch({ kind: 'resource-queue', ...base, waiting: [wait(1)] });
+  assert.equal(store.isWaiting('c1'), true);
+  answer({ ...base, waiting: [] });
+  await Promise.resolve();
+  assert.equal(store.isWaiting('c1'), true);
+  bus.dispatch({ kind: 'resource-queue', ...base, waiting: [] });
+  assert.equal(store.isWaiting('c1'), false);
 });

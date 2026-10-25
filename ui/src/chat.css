@@ -905,6 +905,11 @@ button.danger {
   background: color-mix(in srgb, var(--tone) 12%, var(--surface));
 }
 
+.queue-note {
+  font-weight: 400;
+  color: var(--secondary);
+}
+
 .queue-item .queue-bubble {
   background: color-mix(in srgb, var(--tone) 7%, var(--surface));
   border-color: color-mix(in srgb, var(--tone) 32%, transparent);
