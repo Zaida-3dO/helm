@@ -1,8 +1,9 @@
 /* The completion stack, bottom-right. Opaque like every floating notice. */
+/* Top right, under the top bar: at the bottom it sat over the composer's Send and attach buttons. */
 .notice-stack {
   position: fixed;
   right: 18px;
-  bottom: 18px;
+  top: 58px;
   z-index: var(--z-toast);
   display: flex;
   flex-direction: column;

@@ -112,7 +112,7 @@ export function chatMenuItems(i: ChatMenuInput, a: ChatMenuActions): MenuItem[] 
     { id: 'mute', label: r.muted ? 'Unmute chat' : 'Mute chat', onSelect: () => a.mute(!r.muted) },
   );
   if (r.archived) {
-    items.push({ id: 'restore', label: 'Restore chat', disabled: archivedGroup, onSelect: a.restore });
+    items.push({ id: 'restore', label: 'Restore chat', onSelect: a.restore });
     items.push({ id: 'delete', label: 'Delete permanently…', danger: true, disabled: busy, onSelect: a.remove });
   } else {
     items.push({

@@ -6,7 +6,7 @@ import type { Api } from '../api/client.ts';
 import type { ChatOps } from '../api/ops.ts';
 import type { ChatOrganizeArgs, ProjectNode, ProjectOps, SidebarRow } from '../api/projects.ts';
 import type { SidebarData } from './data.ts';
-import { UndoStack } from './undo.ts';
+import { UndoStack, type UndoEntry } from './undo.ts';
 import { toast } from '../ui/toasts.ts';
 
 export interface ActionDeps {
@@ -128,7 +128,7 @@ export class SidebarActions {
     const ok = await this.run(() => this.d.ops.archive(row.chatId).then(() => true));
     if (!ok) return;
     await this.d.data.refetch([row.chatId]);
-    this.d.undo.push({
+    const entry: UndoEntry = {
       label: 'Archive chat',
       undo: async () => {
         await this.d.ops.restore(row.chatId);
@@ -138,8 +138,9 @@ export class SidebarActions {
         await this.d.ops.archive(row.chatId);
         await this.d.data.refetch([row.chatId]);
       },
-    });
-    this.archivedToast(row.title || 'Untitled chat');
+    };
+    this.d.undo.push(entry);
+    this.archivedToast(row.title || 'Untitled chat', entry);
   }
 
   /** The stop-and-archive dialog's answer: stop the running task, then archive the chat. */
@@ -243,7 +244,7 @@ export class SidebarActions {
     if (!ok) return;
     void this.d.data.loadProjects();
     this.d.data.invalidatePaging();
-    this.d.undo.push({
+    const entry: UndoEntry = {
       label: 'Archive project',
       undo: async () => {
         await this.d.pops.restore(p.id);
@@ -253,13 +254,19 @@ export class SidebarActions {
         await this.d.pops.archive(p.id);
         await this.d.data.loadProjects();
       },
-    });
-    this.archivedToast(p.name);
+    };
+    this.d.undo.push(entry);
+    this.archivedToast(p.name, entry);
   }
 
-  /** "Archived <title> · Undo": the undo entry just pushed is the one the button undoes. */
-  private archivedToast(title: string): void {
-    toast.show({ kind: 'undo', text: `Archived “${title}”`, action: { label: 'Undo', hint: 'Ctrl+Z', run: () => void this.undo() } });
+  /** "Archived <title> · Undo": the button undoes this archive, not whatever was done last. */
+  private archivedToast(title: string, entry: UndoEntry): void {
+    toast.show({
+      kind: 'undo',
+      icon: 'archive',
+      text: `Archived “${title}”`,
+      action: { label: 'Undo', hint: 'Ctrl+Z', run: () => void this.run(() => this.d.undo.undoEntry(entry)) },
+    });
   }
 
   async restoreProject(p: ProjectNode): Promise<void> {

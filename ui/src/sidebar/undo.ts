@@ -36,6 +36,16 @@ export class UndoStack {
     return e;
   }
 
+  /** Undo one named entry wherever it sits (the Undo button of the toast that announced it). */
+  async undoEntry(e: UndoEntry): Promise<boolean> {
+    const i = this.done.indexOf(e);
+    if (i < 0) return false;
+    this.done.splice(i, 1);
+    await e.undo();
+    this.undone.push(e);
+    return true;
+  }
+
   async redo(): Promise<UndoEntry | null> {
     const e = this.undone.pop();
     if (!e) return null;

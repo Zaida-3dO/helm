@@ -32,9 +32,21 @@ export interface Notice {
   at: number;
 }
 
-/** One line, at most 240 characters with an ellipsis. */
+/** The words of a Markdown reply without its marks: `**bold**` reads as bold, a link as its text. */
+export function stripMarkdown(md: string): string {
+  return md
+    .replace(/^[ \t]*```.*$/gm, ' ')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/^[ \t]{0,3}(?:#{1,6}[ \t]+|>[ \t]?|[-*+][ \t]+|\d+[.)][ \t]+)/gm, '')
+    .replace(/(\*\*|__|~~)(.+?)\1/g, '$2')
+    .replace(/(^|[\s(])([*_])([^\s*_](?:[^*_\n]*[^\s*_])?)\2(?=$|[\s).,;:!?])/g, '$1$3')
+    .replace(/`([^`\n]+)`/g, '$1');
+}
+
+/** One plain line, at most 240 characters with an ellipsis. */
 export function flatten(text: string, max = PREVIEW_MAX): string {
-  const one = text.replace(/\s+/g, ' ').trim();
+  const one = stripMarkdown(text).replace(/\s+/g, ' ').trim();
   return one.length > max ? `${one.slice(0, max - 1)}…` : one;
 }
 

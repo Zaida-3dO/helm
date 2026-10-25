@@ -377,9 +377,14 @@ test('archiving a chat or a project shows an Undo toast whose button undoes it',
   await act.archive({ chatId: 'c1', title: 'Plans' } as SidebarRow);
   assert.equal(toast.current()?.kind, 'undo');
   assert.equal(toast.current()?.text, 'Archived “Plans”');
-  toast.current()!.action!.run();
+  // The button undoes the archive it announced, even when another archive came after it.
+  const plans = toast.current()!;
+  await act.archive({ chatId: 'c2', title: 'Other' } as SidebarRow);
+  plans.action!.run();
   await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(log, ['archive c1', 'restore c1']);
+  assert.deepEqual(log, ['archive c1', 'archive c2', 'restore c1']);
+  await act.undo();
+  assert.deepEqual(log.slice(3), ['restore c2']);
   await act.archiveProject(project('p1', { name: 'Atlas' }));
   assert.equal(toast.current()?.text, 'Archived “Atlas”');
   toast.dismiss(toast.current()!.id);

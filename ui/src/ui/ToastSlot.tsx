@@ -1,6 +1,7 @@
 // The main toast slot's view: fixed top-centre below the top bar.
 
 import { useSyncExternalStore } from 'react';
+import { IconArchive } from './icons.tsx';
 import { Toast } from './misc.tsx';
 import { toast } from './toasts.ts';
 
@@ -13,7 +14,7 @@ export function ToastSlotView() {
         key={t.id}
         kind={t.kind}
         testId="notice"
-        icon={t.kind === 'error' ? 'alert' : 'info'}
+        icon={t.icon === 'archive' ? <IconArchive size={16} /> : t.kind === 'error' ? 'alert' : 'info'}
         action={t.action ? { label: t.action.label, hint: t.action.hint, onClick: () => (toast.dismiss(t.id), t.action?.run()) } : undefined}
         onDismiss={() => toast.dismiss(t.id)}
       >

@@ -61,6 +61,16 @@ test('previews are one line of at most 240 characters', () => {
   assert.equal(flatten('x\n\ny'), 'x y');
 });
 
+test('previews show the words of a Markdown reply, not its marks', () => {
+  const cases: [string, string][] = [
+    ['Edited **main.ts** and `app.ts`', 'Edited main.ts and app.ts'],
+    ['## Done\n- fixed _two_ bugs\n1. see [the notes](https://x.test/n)', 'Done fixed two bugs see the notes'],
+    ['> quoted ~~old~~ text and a_b_c and 2 * 3 * 4', 'quoted old text and a_b_c and 2 * 3 * 4'],
+    ['```ts\nconst a = 1;\n```', 'const a = 1;'],
+  ];
+  for (const [md, plain] of cases) assert.equal(flatten(md), plain, md);
+});
+
 test('a blank title reads "Task finished"', () => {
   const s = new NoticeStack(() => 0);
   s.completion(c('k1', 'a', 0, { title: '  ' }), null);

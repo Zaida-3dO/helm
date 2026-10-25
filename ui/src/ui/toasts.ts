@@ -10,6 +10,8 @@ const LIFETIME_MS: Record<ToastKind, number> = { error: 5000, info: 5000, restor
 
 export interface ToastSpec {
   kind: ToastKind;
+  /** The glyph: the notice kinds draw an alert or an info mark by default. */
+  icon?: 'archive';
   text: string;
   action?: { label: string; hint?: string; run: () => void };
   /** Override the kind's lifetime (tests, or a notice that must linger). */
