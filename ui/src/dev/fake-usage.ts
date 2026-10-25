@@ -63,7 +63,7 @@ export function usageFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       ],
     },
     {
-      id: 1, title: 'Sidebar jumps when the window is resized', status: 'filed', boardItem: '6c91e818-ef71', author: { kind: 'human' }, createdAt: t0 - 30 * HOUR, updatedAt: t0 - 30 * HOUR,
+      id: 1, title: 'Sidebar jumps when the window is resized', status: 'filed', boardItem: '0f0f0f0f-aaaa', author: { kind: 'human' }, createdAt: t0 - 30 * HOUR, updatedAt: t0 - 30 * HOUR,
       entries: [{ id: 1, text: 'It jumps back to the top.', author: { kind: 'human' }, at: t0 - 30 * HOUR }],
     },
     {

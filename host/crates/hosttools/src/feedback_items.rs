@@ -416,9 +416,7 @@ fn filter_from(a: &Value) -> Result<Filter, String> {
         Some(s) => Some(parse_since(s).ok_or("since must be RFC 3339 or YYYY-MM-DD.")?),
         None => None,
     };
-    let text = opt_str(a, "text")
-        .map(one_line)
-        .filter(|t| !t.is_empty());
+    let text = opt_str(a, "text").map(one_line).filter(|t| !t.is_empty());
     let limit = a
         .get("limit")
         .and_then(Value::as_u64)
@@ -481,6 +479,25 @@ pub(crate) fn update_tool(ctx: &ToolCtx, a: Value, now: i64) -> ToolResult {
     only_keys(&a, "app_update_feedback", &["id", "status", "boardItem"])?;
     let db = db_of(ctx)?;
     let id = id_arg(&a).map_err(ToolError::refused)?;
+    // Closing an item the user filed is the user's call; an agent may file it and link a board item.
+    if matches!(opt_str(&a, "status"), Some("done" | "wont_do")) {
+        let human: bool = db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT author_kind = 'human' FROM feedback_items WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()
+            })
+            .map_err(|e| ToolError::refused(e.to_string()))?
+            .unwrap_or(false);
+        if human {
+            return Err(ToolError::refused(
+                "Feedback the user filed is closed by the user. Append a note or attach the board item instead.",
+            ));
+        }
+    }
     update(
         &db,
         id,
@@ -635,7 +652,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .blocking(
         ToolSpec::write(
             "app_update_feedback",
-            "Set a feedback item's status (open, filed, done, wont_do) and/or attach the board item it was triaged into (boardItem). Attaching a board item to an open item marks it filed.",
+            "Set a feedback item's status (open, filed, done, wont_do) and/or attach the board item it was triaged into (boardItem). Attaching a board item to an open item marks it filed. You cannot set done or wont_do on feedback the user filed; the user closes those.",
             json!({
                 "type": "object",
                 "properties": {
@@ -799,14 +816,23 @@ mod tests {
     fn status_and_board_item_and_validation() {
         let (_d, db, ctx) = setup();
         let id = create(&db, &Author::human(), "t", "x", 1).unwrap();
-        update_tool(&ctx, json!({"id": id, "boardItem": "6c91e818-ef71"}), 5).unwrap();
+        update_tool(&ctx, json!({"id": id, "boardItem": "0f0f0f0f-aaaa"}), 5).unwrap();
         let got = get(&db, id).unwrap().unwrap();
         assert_eq!(
             (got["status"].as_str(), got["boardItem"].as_str()),
-            (Some("filed"), Some("6c91e818-ef71"))
+            (Some("filed"), Some("0f0f0f0f-aaaa"))
         );
-        update_tool(&ctx, json!({"id": id, "status": "done"}), 6).unwrap();
-        assert_eq!(get(&db, id).unwrap().unwrap()["boardItem"], "6c91e818-ef71");
+        // An agent cannot close what the user filed; the user can.
+        assert!(
+            refused(update_tool(&ctx, json!({"id": id, "status": "done"}), 6))
+                .contains("closed by the user")
+        );
+        update(&db, id, Some("done"), None, 6).unwrap();
+        let mine = create_tool(&ctx, json!({"title": "mine", "text": "x"}), 6).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        update_tool(&ctx, json!({"id": mine, "status": "wont_do"}), 7).unwrap();
+        assert_eq!(get(&db, id).unwrap().unwrap()["boardItem"], "0f0f0f0f-aaaa");
         for bad in [
             json!({"id": id}),
             json!({"id": id, "status": "nope"}),
