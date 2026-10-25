@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 const T0: i64 = 1_800_000_000_000;
 const MIN: i64 = 60_000;
+const HR: i64 = 60 * MIN;
 const ZONE: FixedZone = FixedZone(0);
 
 fn registry() -> MigrationRegistry {
@@ -619,7 +620,13 @@ fn chat_count(db: &Database) -> i64 {
 }
 
 fn kinds(c: &str, kind: ScheduleKind, dest: Destination, project: Option<&str>) -> NewSchedule {
-    let mut n = new(&uuid::Uuid::new_v4().to_string(), c, interval(60));
+    // A new chat on every run is limited to an hourly pace; the rest repeat every minute.
+    let every = if dest == Destination::NewChat && kind == ScheduleKind::Prompt {
+        3600
+    } else {
+        60
+    };
+    let mut n = new(&uuid::Uuid::new_v4().to_string(), c, interval(every));
     n.definition.kind = kind;
     n.definition.destination = dest;
     n.definition.project_id = project.map(str::to_owned);
@@ -628,8 +635,13 @@ fn kinds(c: &str, kind: ScheduleKind, dest: Destination, project: Option<&str>) 
 
 #[test]
 fn reminders_post_a_note_and_new_chat_runs_start_their_own_chat() {
-    let (_d, db) = temp();
-    let c = chat(&db);
+    let (dir, db) = temp();
+    // The project's folder must really exist for a new chat to start in it.
+    let c = db
+        .write(|tx| {
+            helm_chats::store::create_chat(tx, &dir.path().to_string_lossy(), None, None, 1)
+        })
+        .unwrap();
     let project = project_of(&db, &c);
     let create = |n: NewSchedule| db.write(|tx| store::create(tx, &ZONE, T0, n));
 
@@ -665,6 +677,16 @@ fn reminders_post_a_note_and_new_chat_runs_start_their_own_chat() {
     ))
     .is_err());
 
+    // A new chat on every run may not repeat more than hourly.
+    let mut quick = kinds(
+        &c,
+        ScheduleKind::Prompt,
+        Destination::NewChat,
+        Some(&project),
+    );
+    quick.definition.timing = interval(3599);
+    assert!(create(quick).is_err());
+
     let note = create(kinds(
         &c,
         ScheduleKind::Reminder,
@@ -698,7 +720,7 @@ fn reminders_post_a_note_and_new_chat_runs_start_their_own_chat() {
     );
     let (svc, sink) = svc(&db);
     let send = Recording(Mutex::new(vec![]), Mutex::new(None));
-    assert_eq!(scheduler::tick(&svc, &send, T0 + MIN), 3);
+    assert_eq!(scheduler::tick(&svc, &send, T0 + 2 * HR), 3);
     let sent = send.0.lock().unwrap().clone();
     assert_eq!(sent.len(), 1);
     let started = &sent[0].0;
@@ -727,7 +749,7 @@ fn reminders_post_a_note_and_new_chat_runs_start_their_own_chat() {
     // A refused send leaves no empty chat behind; reminders can be dismissed one by one or all.
     let before = chat_count(&db);
     *send.1.lock().unwrap() = Some(ApiError::new("capacity", "busy"));
-    scheduler::tick(&svc, &send, T0 + 2 * MIN);
+    scheduler::tick(&svc, &send, T0 + 3 * HR);
     assert_eq!(chat_count(&db), before);
     assert_eq!(runs(&db, &fresh.id)[0].status, RunStatus::Failed);
     assert_eq!(db.snapshot(store::reminders).unwrap().len(), 4);
@@ -741,6 +763,23 @@ fn reminders_post_a_note_and_new_chat_runs_start_their_own_chat() {
         3
     );
     assert!(db.snapshot(store::reminders).unwrap().is_empty());
+
+    // A vanished folder fails the run without starting a chat or calling the project missing.
+    sql(
+        &db,
+        "UPDATE projects SET path = ?2 WHERE id = ?1",
+        &[&project, &"C:/no/such/folder"],
+    );
+    let before = chat_count(&db);
+    scheduler::tick(&svc, &send, T0 + 4 * HR);
+    assert_eq!(chat_count(&db), before);
+    let failed = &runs(&db, &fresh.id)[0];
+    assert_eq!(failed.status, RunStatus::Failed);
+    assert!(failed
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("folder no longer exists"));
 
     // Updates move a schedule between kinds, and re-check the destination only when it changes.
     let moved = db
@@ -762,6 +801,29 @@ fn reminders_post_a_note_and_new_chat_runs_start_their_own_chat() {
     assert_eq!(
         (moved.definition.destination, moved.definition.project_id),
         (Destination::Chat, None)
+    );
+    // Moving it back into the chat that made it drops the "made by another chat" mark.
+    assert_eq!(moved.definition.created_by_chat, None);
+    let again = db
+        .write(|tx| {
+            store::update(
+                tx,
+                &ZONE,
+                T0,
+                &fresh.id,
+                moved.revision,
+                Update {
+                    destination: Some(Destination::NewChat),
+                    project_id: Some(project.clone()),
+                    timing: Some(interval(60)),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap_err();
+    assert!(
+        matches!(again, store::SErr::Api(_)),
+        "an hourly floor applies to updates too"
     );
 }
 

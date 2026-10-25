@@ -22,6 +22,7 @@ use helm_chats::types::{ChatEvent, SubmissionOrigin};
 use helm_chats::ChatRuntime;
 use helm_core::db::Database;
 use helm_ipc::{ApiError, AppEvent, EventSink};
+use rusqlite::OptionalExtension;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -81,7 +82,7 @@ pub fn frame(
 ) -> String {
     let clean = |t: &str| -> String {
         t.chars()
-            .filter(|c| !c.is_control() && !"[]`".contains(*c))
+            .filter(|c| !c.is_control() && !"[]`\"".contains(*c))
             .collect()
     };
     let title = clean(title);
@@ -110,11 +111,15 @@ fn start_chat(svc: &SchedulesService, project_id: Option<&str>) -> Result<String
                     [project],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
-                .ok();
+                .optional()?;
             match row {
                 None => return Ok(Err("The project no longer exists.")),
                 Some((k, p)) if k != "folder" || p.as_deref().is_none_or(str::is_empty) => {
                     return Ok(Err("The project has no folder to start a chat in."))
+                }
+                // The same check a chat started by hand gets: the folder must still be there.
+                Some((_, Some(p))) if !std::path::Path::new(&p).is_dir() => {
+                    return Ok(Err("The project's folder no longer exists."))
                 }
                 Some(_) => {}
             }

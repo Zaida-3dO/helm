@@ -260,7 +260,31 @@ fn settle_destination(tx: &Transaction<'_>, def: &mut Definition) -> Result<(), 
             check_project(tx, def.project_id.as_deref())?;
         }
     }
+    // A schedule that sends into the chat that made it has nothing to say about where it came from.
+    if def.kind == ScheduleKind::Reminder
+        || (def.destination == Destination::Chat
+            && def.created_by_chat.as_deref() == Some(def.chat_id.as_str()))
+    {
+        def.created_by_chat = None;
+    }
     Ok(())
+}
+
+/// The shortest repeat for a schedule that starts a new chat on every run: each run makes a chat
+/// the user then has to tidy, so a short interval would flood the sidebar.
+pub const MIN_NEW_CHAT_SECONDS: u64 = 3600;
+
+fn check_pace(def: &Definition) -> Result<(), SErr> {
+    match (&def.timing, def.kind, def.destination) {
+        (Timing::Interval { seconds, .. }, ScheduleKind::Prompt, Destination::NewChat)
+            if *seconds < MIN_NEW_CHAT_SECONDS =>
+        {
+            Err(bad(
+                "A schedule that starts a new chat each time must repeat at most once an hour.",
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn live_count(tx: &Transaction<'_>) -> Result<i64, SErr> {
@@ -313,6 +337,7 @@ pub fn create(
         return Err(bad(m));
     }
     settle_destination(tx, &mut def)?;
+    check_pace(&def)?;
     if live_count(tx)? >= MAX_SCHEDULES {
         return Err(bad("There are already 256 schedules. Cancel one first."));
     }
@@ -396,11 +421,13 @@ pub fn update(
         moved |= p != r.def.project_id;
         r.def.project_id = p;
     }
+    if let Some(by) = u.created_by_chat {
+        let by = Some(by).filter(|b| !b.is_empty());
+        moved |= by != r.def.created_by_chat;
+        r.def.created_by_chat = by;
+    }
     if moved {
         settle_destination(tx, &mut r.def)?;
-    }
-    if let Some(by) = u.created_by_chat {
-        r.def.created_by_chat = Some(by).filter(|b| !b.is_empty());
     }
     if let Some(t) = u.timing {
         if let Some(m) = timing::check(&t) {
@@ -415,6 +442,7 @@ pub fn update(
             r.state = ScheduleState::Paused;
         }
     }
+    check_pace(&r.def)?;
     match u.paused {
         Some(true) if r.state == ScheduleState::Active => r.state = ScheduleState::Paused,
         Some(false) if r.state != ScheduleState::Active => {

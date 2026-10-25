@@ -278,7 +278,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "message": {"type": "string", "description": "What to send, at most 8000 bytes."},
                     "timing": timing_schema(),
                     "kind": {"type": "string", "enum": ["prompt", "reminder"], "description": "prompt (default) sends the message to a chat; reminder shows it to the user as a note in Helm and sends nothing."},
-                    "destination": {"type": "string", "enum": ["chat", "newChat"], "description": "For a prompt: chat (default) sends into chatId; newChat starts a fresh chat in projectId for each run."},
+                    "destination": {"type": "string", "enum": ["chat", "newChat"], "description": "For a prompt: chat (default) sends into chatId; newChat starts a fresh chat in projectId for each run, so it can repeat at most hourly."},
                     "chatId": {"type": "string", "description": "The chat to send into; defaults to this chat. For a reminder, the chat to open from the note."},
                     "projectId": {"type": "string", "description": "The folder project a newChat destination starts its chats in."}
                 },
