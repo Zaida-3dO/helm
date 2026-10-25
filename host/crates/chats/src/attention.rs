@@ -64,6 +64,8 @@ struct Cand {
     stalled: bool,
     /// Marked addressed or snoozed, with no activity since.
     quiet: bool,
+    /// The idle check's reason, while its verdict is current and triage is on.
+    flagged: Option<String>,
 }
 
 /// The plain-language reason a row is listed.
@@ -76,6 +78,7 @@ pub fn reason(kind: AttentionKind, marked: bool) -> &'static str {
         AttentionKind::Unread if marked => "Marked unread",
         AttentionKind::Unread => "Finished; not read yet",
         AttentionKind::Stalled => "No output for a while; it may be stuck",
+        AttentionKind::Triage => "May still need you",
     }
 }
 
@@ -94,16 +97,20 @@ pub fn compute(
     revision: i64,
 ) -> rusqlite::Result<AttentionSummary> {
     let now = helm_core::now_ms();
+    let triage_on = crate::triage::settings(tx).enabled;
     // `quiet`: addressed after the last activity, or snoozed into the future with no activity
     // since the snooze (?1 is now).
-    const COLS: &str = "c.id, c.title, COALESCE(p.name, ''), c.status, c.error IS NOT NULL, \
+    // The idle check's verdict counts only while it was made for the chat's current activity.
+    const COLS: &str = concat!(
+        "c.id, c.title, COALESCE(p.name, ''), c.status, c.error IS NOT NULL, \
          EXISTS(SELECT 1 FROM unread_marks u WHERE u.chat_id = c.id), \
          EXISTS(SELECT 1 FROM chat_completions k WHERE k.chat_id = c.id AND k.read = 0), \
          EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id), \
-         COALESCE((SELECT a.stalled FROM chat_activity a WHERE a.chat_id = c.id), 0), \
-         EXISTS(SELECT 1 FROM chat_attention t WHERE t.chat_id = c.id AND ( \
-             t.addressed_at >= MAX(c.updated_at, COALESCE((SELECT a.last_activity_at FROM chat_activity a WHERE a.chat_id = c.id), 0)) \
-             OR (t.snoozed_until > ?1 AND t.snoozed_at >= MAX(c.updated_at, COALESCE((SELECT a.last_activity_at FROM chat_activity a WHERE a.chat_id = c.id), 0)))))";
+         COALESCE((SELECT a.stalled FROM chat_activity a WHERE a.chat_id = c.id), 0), ",
+        crate::quiet_sql!(),
+        ", (SELECT g.reason FROM chat_triage g WHERE g.chat_id = c.id AND g.needs = 1 AND g.failed = 0 \
+             AND g.stamp = MAX(c.updated_at, COALESCE((SELECT a.last_activity_at FROM chat_activity a WHERE a.chat_id = c.id), 0)))"
+    );
     let read = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Cand> {
         Ok(Cand {
             id: r.get(0)?,
@@ -116,6 +123,7 @@ pub fn compute(
             muted: r.get(7)?,
             stalled: r.get(8)?,
             quiet: r.get(9)?,
+            flagged: if triage_on { r.get(10)? } else { None },
         })
     };
     let mut cands: Vec<Cand> = {
@@ -124,7 +132,8 @@ pub fn compute(
              WHERE c.archived = 0 AND c.side_source_id IS NULL
                AND (c.status IN ('starting', 'running', 'stopping')
                     OR EXISTS(SELECT 1 FROM unread_marks u WHERE u.chat_id = c.id)
-                    OR EXISTS(SELECT 1 FROM chat_completions k WHERE k.chat_id = c.id AND k.read = 0))
+                    OR EXISTS(SELECT 1 FROM chat_completions k WHERE k.chat_id = c.id AND k.read = 0)
+                    OR EXISTS(SELECT 1 FROM chat_triage g WHERE g.chat_id = c.id AND g.needs = 1 AND g.failed = 0))
              ORDER BY c.updated_at DESC, c.id"
         ))?;
         let rows = st.query_map([now], read)?;
@@ -155,6 +164,7 @@ pub fn compute(
         running: vec![],
         unread: vec![],
         stalled: vec![],
+        flagged: vec![],
         revision,
     };
     for c in &cands {
@@ -173,7 +183,9 @@ pub fn compute(
         let need = needs.get(&c.id).copied();
         let unread = c.marked || (c.completion && c.status == ChatStatus::Idle && !c.error);
         let stalled = c.stalled && c.status.is_busy();
-        if need.is_some() || unread || stalled {
+        // The idle check only speaks for a chat the host is not already listing.
+        let flagged = c.flagged.is_some() && !c.status.is_busy();
+        if need.is_some() || unread || stalled || flagged {
             s.badge += 1;
         }
         if stalled && s.stalled.len() < MAX_ROWS {
@@ -186,6 +198,13 @@ pub fn compute(
         }
         if unread && s.unread.len() < MAX_ROWS {
             s.unread.push(row(c, AttentionKind::Unread));
+        }
+        if flagged && !unread && need.is_none() && s.flagged.len() < MAX_ROWS {
+            let mut r = row(c, AttentionKind::Triage);
+            if let Some(why) = c.flagged.as_ref().filter(|w| !w.is_empty()) {
+                r.reason = why.clone();
+            }
+            s.flagged.push(r);
         }
     }
     Ok(s)

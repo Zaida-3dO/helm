@@ -49,6 +49,7 @@
       "../../helpers/package.json": "helpers/package.json",
       "../../helpers/usage/src/": "helpers/usage/src/",
       "../../helpers/titles/src/": "helpers/titles/src/",
+      "../../helpers/triage/src/": "helpers/triage/src/",
       "../../helpers/autocomplete/src/": "helpers/autocomplete/src/"
     },
     "targets": [

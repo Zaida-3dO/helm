@@ -9,7 +9,7 @@ import type { AttentionSummary, Completion } from '../api/types.ts';
 
 type Listener = () => void;
 
-export const EMPTY_ATTENTION: AttentionSummary = { badge: 0, busy: 0, needsYou: [], running: [], unread: [], stalled: [], revision: 0 };
+export const EMPTY_ATTENTION: AttentionSummary = { badge: 0, busy: 0, needsYou: [], running: [], unread: [], stalled: [], flagged: [], revision: 0 };
 
 export class AttentionStore {
   private summary: AttentionSummary = EMPTY_ATTENTION;

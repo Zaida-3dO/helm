@@ -23,6 +23,8 @@ export interface SidebarSnapshot {
   sync: BoardSyncState | null;
   error: string | null;
   needsYou: ReadonlySet<string>;
+  /** Quiet chats the idle check thinks still need you, by chat id, with its reason. */
+  flagged: ReadonlyMap<string, string>;
   /** The whole attention summary (null until the first read), for the nav count, the Workspace
    *  status popover and the Needs attention inbox. */
   attention: AttentionSummary | null;
@@ -41,6 +43,7 @@ export class SidebarData {
   };
   private sync: BoardSyncState | null = null;
   private needsYou: ReadonlySet<string> = new Set();
+  private flagged: ReadonlyMap<string, string> = new Map();
   private summary: AttentionSummary | null = null;
   private error: string | null = null;
   private listeners = new Set<() => void>();
@@ -67,6 +70,7 @@ export class SidebarData {
       sync: this.sync,
       error: this.error,
       needsYou: this.needsYou,
+      flagged: this.flagged,
       attention: this.summary,
     };
   }
@@ -142,6 +146,7 @@ export class SidebarData {
   /** Chats waiting on the user, from the attention summary. */
   attention(summary: AttentionSummary): void {
     this.needsYou = new Set(summary.needsYou.map((r) => r.chatId));
+    this.flagged = new Map(summary.flagged.map((r) => [r.chatId, r.reason]));
     this.summary = summary;
     this.emit();
   }

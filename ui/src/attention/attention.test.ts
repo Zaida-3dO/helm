@@ -11,21 +11,28 @@ const summary = (over: Partial<AttentionSummary> = {}): AttentionSummary => ({
   running: [],
   unread: [],
   stalled: [],
+  flagged: [],
   revision: 1,
   ...over,
 });
 
-test('the inbox lists waiting-on-you, then stuck, then unread, each chat once; running chats are not listed', () => {
+test('the inbox lists waiting-on-you, then quiet-but-flagged, then stuck, then unread, each chat once; running chats are not listed', () => {
   const s = summary({
-    badge: 4,
+    badge: 5,
     needsYou: [row('a'), row('b', 'approval')],
+    flagged: [row('f', 'triage'), row('b', 'triage')],
     stalled: [row('c', 'stalled'), row('a', 'stalled')],
     unread: [row('d', 'unread'), row('b', 'unread')],
     running: [row('r', 'running')],
   });
   assert.deepEqual(
     inboxRows(s).map((r) => `${r.chatId}:${r.group}`),
-    ['a:needsYou', 'b:needsYou', 'c:stalled', 'd:unread'],
+    ['a:needsYou', 'b:needsYou', 'f:flagged', 'c:stalled', 'd:unread'],
+  );
+  assert.deepEqual(
+    inboxRows(s, { flagged: false }).map((r) => r.chatId),
+    ['a', 'b', 'c', 'd'],
+    'with the idle check off, its rows are left out at once',
   );
   assert.deepEqual(inboxRows(null), []);
 });

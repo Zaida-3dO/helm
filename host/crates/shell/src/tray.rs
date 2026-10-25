@@ -189,6 +189,7 @@ mod tests {
                 .collect(),
             unread: vec![],
             stalled: vec![],
+            flagged: vec![],
             revision: 1,
         };
         let m = menu_model(Some(&s), &[], &ShellSettings::default());

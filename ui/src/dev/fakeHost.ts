@@ -425,6 +425,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       running: busy.slice(0, 8).map((c) => row(c, 'running')),
       unread: unread.slice(0, 8).map((c) => row(c, 'unread')),
       stalled: [],
+      flagged: [],
       revision,
     };
   }

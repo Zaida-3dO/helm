@@ -134,6 +134,11 @@ pub trait Spawner: Send + Sync {
         Err("titles are not available".into())
     }
 
+    /// Run the triage helper on one job and answer `(needs you, reason)` ([`crate::triage`]).
+    fn run_triage(&self, _job: &Value) -> Result<(bool, String), String> {
+        Err("triage is not available".into())
+    }
+
     /// Run the autocomplete helper on one job and answer the completion ([`crate::autocomplete`]).
     fn run_autocomplete(&self, _job: &Value) -> Result<String, String> {
         Err("autocomplete is not available".into())
@@ -294,6 +299,19 @@ impl Spawner for ProcessSpawner {
         }
     }
 
+    fn run_triage(&self, job: &Value) -> Result<(bool, String), String> {
+        let out = self.run_helper("triage", job, crate::triage::HOST_TIMEOUT)?;
+        match (
+            out.get("needs").and_then(Value::as_bool),
+            out.get("reason").and_then(Value::as_str),
+            out.get("error").and_then(Value::as_str),
+        ) {
+            (Some(n), reason, _) => Ok((n, reason.unwrap_or_default().to_owned())),
+            (_, _, Some(e)) => Err(e.to_owned()),
+            _ => Err("the helper gave no verdict".into()),
+        }
+    }
+
     fn run_autocomplete(&self, job: &Value) -> Result<String, String> {
         let out = self.run_helper("autocomplete", job, crate::autocomplete::DEADLINE)?;
         match (
@@ -373,6 +391,7 @@ pub(crate) struct Shared {
     /// The last published attention summary ([`crate::attention::publish`]).
     pub attention: Mutex<Option<AttentionSummary>>,
     pub titles: TitleQueue,
+    pub triage: Mutex<crate::triage::Gate>,
     pub autocomplete: Mutex<crate::autocomplete::AutocompleteGate>,
     /// Host tools and the worker-message registry, attached once the app's services exist.
     pub host: std::sync::OnceLock<crate::hostcalls::HostSeam>,
@@ -410,6 +429,7 @@ impl ChatRuntime {
                     slots: tokio::sync::Semaphore::new(crate::titles::MAX_CONCURRENT),
                     jobs: std::sync::atomic::AtomicUsize::new(0),
                 },
+                triage: Mutex::new(Default::default()),
                 autocomplete: Mutex::new(Default::default()),
                 host: std::sync::OnceLock::new(),
                 run_slots: Default::default(),
@@ -454,6 +474,7 @@ impl ChatRuntime {
                     let _ = enqueue(&h.tx, Cmd::StallCheck { after });
                 }
                 crate::attention::publish(&sh);
+                crate::triage::pass(&sh);
                 ChatRuntime { sh: sh.clone() }.apply_send_behavior();
             }
         });

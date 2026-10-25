@@ -1,18 +1,20 @@
 // The Needs attention inbox as pure functions
-// over the host's one attention summary (`host/crates/chats/src/attention.rs`). There is no AI
-// triage yet, so the inbox lists what the summary already knows: chats waiting on you, chats that
-// may be stuck, and unread results. Mark addressed and Snooze take a chat out until new activity.
+// over the host's one attention summary (`host/crates/chats/src/attention.rs`): chats waiting on
+// you, quiet chats the idle check thinks still need you (with its reason), chats that may be
+// stuck, and unread results. Mark addressed and Snooze take a chat out until new activity.
 
 import type { AttentionRow, AttentionSummary } from '../api/types.ts';
 
-export type InboxGroup = 'needsYou' | 'stalled' | 'unread';
+export type InboxGroup = 'needsYou' | 'flagged' | 'stalled' | 'unread';
 
 export interface InboxRow extends AttentionRow {
   group: InboxGroup;
 }
 
-/** Waiting on you first, then possibly stuck, then unread results; each chat once. */
-export function inboxRows(s: AttentionSummary | null): InboxRow[] {
+/** Waiting on you first, then quiet chats that may still need you, then possibly stuck, then unread
+ *  results; each chat once. `flagged: false` leaves the idle check's rows out (it was switched off
+ *  and the host has not published yet). */
+export function inboxRows(s: AttentionSummary | null, opts: { flagged?: boolean } = {}): InboxRow[] {
   if (!s) return [];
   const out: InboxRow[] = [];
   const seen = new Set<string>();
@@ -24,6 +26,7 @@ export function inboxRows(s: AttentionSummary | null): InboxRow[] {
     }
   };
   add(s.needsYou, 'needsYou');
+  if (opts.flagged !== false) add(s.flagged, 'flagged');
   add(s.stalled, 'stalled');
   add(s.unread, 'unread');
   return out;
@@ -94,5 +97,5 @@ export function whenText(d: Date, now: Date): string {
 
 /** The label above a card's reason. */
 export function groupLabel(g: InboxGroup): string {
-  return g === 'needsYou' ? 'Waiting on you' : g === 'stalled' ? 'May be stuck' : 'Ready to read';
+  return g === 'needsYou' ? 'Waiting on you' : g === 'flagged' ? 'May still need you' : g === 'stalled' ? 'May be stuck' : 'Ready to read';
 }

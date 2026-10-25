@@ -15,7 +15,8 @@ breaks those checks, so change them only together with the checks. Everything el
 | `sidebar-group` | One project header in the sidebar | `data-project-id`, `data-kind` (`folder` `board`), `data-depth` (project nesting 0–2) |
 | `sidebar-titlestrip`, `sidebar-beacon`, `workspace-status` | The sidebar's 48 px title strip, the beacon (mark, wordmark, chevron) and its Workspace status popover | beacon: `aria-expanded` |
 | `nav-search`, `nav-attention` | The sidebar's Search chats and Needs attention nav entries | |
-| `attention-inbox`, `attention-card`, `attention-snooze-menu` | The Needs attention dialog, one card in it, and a card's Snooze menu | card: `data-chat-id`, `data-group` (`needsYou` `stalled` `unread`) |
+| `attention-inbox`, `attention-card`, `attention-snooze-menu` | The Needs attention dialog, one card in it, and a card's Snooze menu | card: `data-chat-id`, `data-group` (`needsYou` `flagged` `stalled` `unread`) |
+| `attention-triage-setting`, `chat-flag` | The idle-check switch in the Needs attention dialog, and the flag on a sidebar row the idle check raised | |
 | `board-sync` | The Agent Standup sync line under the view switch | `data-state` (`never` `unconfigured` `syncing` `ok` `error`) |
 | `board-url`, `board-token`, `board-token-state`, `board-test`, `board-last-sync` | Settings → Projects connection fields: address, write-only token, "set"/"not set", Test connection, last sync | |
 | `settings-hub`, `hub-state`, `hub-field-lanUrl`, `hub-field-fallbackUrl`, `hub-field-token`, `hub-save`, `hub-error` | Settings → Hub: the pane, the line state, the write-only address, fallback and token rows ("Set."/"Not set." in the description), Save and the error line | `hub-state`: `data-state` (`off` `connecting` `online` `offline`) |

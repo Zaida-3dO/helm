@@ -124,6 +124,13 @@ export function chatOps(api: Api) {
     markAddressed: (chatId: string) => api<null>('attention_address', { chatId }),
     /** Out of the attention groups until `until` (Unix ms) or new activity; null unsnoozes. */
     snooze: (chatId: string, until: number | null) => api<null>('attention_snooze', { chatId, until }),
+    /** Whether the idle check is on (it is until switched off). */
+    triageEnabled: async () => (await api<{ enabled?: boolean } | null>('preference_get', { key: 'taskTriage' }))?.enabled !== false,
+    /** Switch the idle check; the delay and prompt already stored are kept. */
+    setTriageEnabled: async (enabled: boolean) => {
+      const was = await api<{ delayMinutes?: number; prompt?: string | null } | null>('preference_get', { key: 'taskTriage' });
+      return api<null>('preference', { key: 'taskTriage', value: { enabled, delayMinutes: was?.delayMinutes ?? 15, prompt: was?.prompt ?? null } });
+    },
   };
 }
 

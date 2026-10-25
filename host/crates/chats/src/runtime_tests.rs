@@ -104,6 +104,9 @@ pub struct FakeSpawner {
     pub title: Mutex<Result<String, String>>,
     pub title_delay: Mutex<Duration>,
     pub title_jobs: Mutex<Vec<Value>>,
+    /// The triage helper's answer.
+    pub triage: Mutex<Result<(bool, String), String>>,
+    pub triage_jobs: Mutex<Vec<Value>>,
 }
 
 impl Spawner for FakeSpawner {
@@ -131,6 +134,11 @@ impl Spawner for FakeSpawner {
         self.title_jobs.lock().unwrap().push(job.clone());
         std::thread::sleep(*self.title_delay.lock().unwrap());
         self.title.lock().unwrap().clone()
+    }
+
+    fn run_triage(&self, job: &Value) -> Result<(bool, String), String> {
+        self.triage_jobs.lock().unwrap().push(job.clone());
+        self.triage.lock().unwrap().clone()
     }
 }
 
@@ -182,6 +190,8 @@ pub fn harness_with(limits: Limits) -> H {
         title: Mutex::new(Err("no titles in this test".into())),
         title_delay: Mutex::new(Duration::ZERO),
         title_jobs: Mutex::new(Vec::new()),
+        triage: Mutex::new(Err("no triage in this test".into())),
+        triage_jobs: Mutex::new(Vec::new()),
     });
     let rt = ChatRuntime::new(
         db.clone(),
@@ -3158,4 +3168,82 @@ async fn chat_find_searches_the_whole_history_in_steps() {
         .call("chat_find", json!({"chatId": "nope", "query": "x"}))
         .await
         .is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_idle_check_flags_a_quiet_chat_once_and_new_activity_clears_it() {
+    let h = harness();
+    let held = Arc::new(AtomicBool::new(true));
+    let hold = held.clone();
+    h.rt.set_slot_hold(Arc::new(move |_| {
+        hold.load(Ordering::SeqCst).then(|| "wind-down".to_owned())
+    }));
+    let chat = h.create().await;
+    let quiet_since = helm_core::now_ms() - 20 * 60_000;
+    h.db.write(|tx| {
+        tx.execute("UPDATE chats SET updated_at = ?1 WHERE id = ?2", rusqlite::params![quiet_since, chat])?;
+        tx.execute(
+            "INSERT INTO messages(chat_id, source_key, role, text, timestamp) VALUES (?1, 'u1', 'user', 'finish the migration', ?2)",
+            rusqlite::params![chat, quiet_since],
+        )
+    })
+    .unwrap();
+    *h.spawner.triage.lock().unwrap() =
+        Ok((true, "The migration still fails on the last step.".into()));
+    let jobs = || h.spawner.triage_jobs.lock().unwrap().len();
+    let flagged = || h.rt.attention().unwrap().flagged;
+    let wait_for = |want: usize| async move {
+        for _ in 0..100 {
+            if flagged().len() == want {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        panic!("expected {want} flagged chats");
+    };
+
+    // Held by the usage governor: nothing runs.
+    crate::triage::pass(&h.rt.sh);
+    assert_eq!(jobs(), 0);
+
+    held.store(false, Ordering::SeqCst);
+    crate::triage::pass(&h.rt.sh);
+    wait_for(1).await;
+    let s = h.rt.attention().unwrap();
+    assert_eq!(
+        (s.badge, s.flagged[0].kind),
+        (1, crate::types::AttentionKind::Triage)
+    );
+    assert_eq!(
+        s.flagged[0].reason,
+        "The migration still fails on the last step."
+    );
+    let job = h.spawner.triage_jobs.lock().unwrap()[0].clone();
+    assert_eq!(job["turns"][0]["text"], "finish the migration");
+    assert_eq!(job["status"], "idle");
+
+    // Once per quiet stretch (the 30 s gap and the checked stamp both say no).
+    crate::triage::pass(&h.rt.sh);
+    assert_eq!(jobs(), 1);
+
+    // Triage off hides the flag; on again, it is back; new activity clears it for good.
+    let set = |v: Value| {
+        h.db.write(|tx| helm_core::prefs::set_generic(tx, "taskTriage", &v))
+            .unwrap()
+    };
+    set(json!({"enabled": false, "delayMinutes": 15, "prompt": null}));
+    assert!(flagged().is_empty());
+    set(json!({"enabled": true, "delayMinutes": 15, "prompt": null}));
+    assert_eq!(flagged().len(), 1);
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![helm_core::now_ms(), chat],
+        )
+    })
+    .unwrap();
+    assert!(
+        flagged().is_empty(),
+        "the verdict was for the earlier activity"
+    );
 }

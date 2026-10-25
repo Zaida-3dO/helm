@@ -674,6 +674,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         project={projectsById.get(row.groupProjectId)}
         selected={row.chatId === selected}
         needsYou={snap.needsYou.has(row.chatId)}
+        flagReason={snap.flagged.get(row.chatId)}
         dragging={drag?.active === true && drag.src.kind === 'chat' && drag.src.chatId === row.chatId}
         now={now}
         onOpen={() => {
@@ -894,6 +895,7 @@ function ChatRow({
   project,
   selected,
   needsYou,
+  flagReason,
   dragging,
   now,
   onOpen,
@@ -910,6 +912,8 @@ function ChatRow({
   project: ProjectNode | undefined;
   selected: boolean;
   needsYou: boolean;
+  /** Why the idle check thinks this quiet chat still needs you. */
+  flagReason: string | undefined;
   dragging: boolean;
   now: number;
   onOpen: () => void;
@@ -936,7 +940,7 @@ function ChatRow({
       data-selected={selected ? 'true' : undefined}
       data-trailing={trailing ? 'true' : undefined}
       data-coloured={colour ? 'true' : undefined}
-      data-flagged={needsYou ? 'true' : undefined}
+      data-flagged={needsYou || flagReason !== undefined ? 'true' : undefined}
       data-drag-source={dragging ? 'true' : undefined}
       data-chat-id={r.chatId}
       style={{
@@ -984,6 +988,11 @@ function ChatRow({
         </span>
         {needsYou && (
           <span className="sb-flag" role="img" aria-label="Needs you" title="Needs you">
+            <IconFlag size={12} filled />
+          </span>
+        )}
+        {!needsYou && flagReason !== undefined && (
+          <span className="sb-flag" data-kind="quiet" data-testid="chat-flag" role="img" aria-label={`May still need you: ${flagReason}`} title={`May still need you: ${flagReason}`}>
             <IconFlag size={12} filled />
           </span>
         )}

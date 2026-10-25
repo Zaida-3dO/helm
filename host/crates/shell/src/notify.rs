@@ -164,6 +164,7 @@ mod tests {
                 .map(|c| row(c, AttentionKind::Unread))
                 .collect(),
             stalled: vec![],
+            flagged: vec![],
             revision: 1,
         }
     }

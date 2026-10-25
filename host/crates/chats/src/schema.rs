@@ -11,6 +11,7 @@
 //! | `chat_mutes` | muted chats (user-only) |
 //! | `chat_activity` | per chat: the last worker output time and the stalled flag |
 //! | `chat_attention` | per chat: when its attention was marked addressed, and a snooze |
+//! | `chat_triage` | per chat: the idle check's last verdict, and the activity it was made for |
 //! | trigger `restart_cancel_changed_chat` | drops a pending continuation on archive or a project, harness, model or effort change |
 //! | `chat_forks` | fork ids and what they were asked for, for idempotent forks |
 //! | `pending_edits` | an edit staged with its submission, applied once the worker closes ([`crate::edit`]) |
@@ -93,6 +94,14 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              addressed_at   INTEGER,
              snoozed_until  INTEGER,
              snoozed_at     INTEGER
+         );
+         CREATE TABLE IF NOT EXISTS chat_triage (
+             chat_id     TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             stamp       INTEGER NOT NULL,
+             checked_at  INTEGER NOT NULL,
+             needs       INTEGER NOT NULL DEFAULT 0,
+             reason      TEXT NOT NULL DEFAULT '',
+             failed      INTEGER NOT NULL DEFAULT 0
          );
          -- A pending restart continuation goes when its chat is archived or its project,
          -- harness, provider, model or effort changes; deletion cascades.

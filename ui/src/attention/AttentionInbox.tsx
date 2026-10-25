@@ -3,9 +3,9 @@
 // it), Snooze (a menu of times) and Mark addressed. Both actions hide the chat until something new
 // happens in it; the host publishes a fresh summary, which this dialog re-renders from.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { AttentionSummary } from '../api/types.ts';
-import { Button, ContextMenu, Dialog, toast, type MenuItem } from '../ui/index.ts';
+import { Button, Checkbox, ContextMenu, Dialog, toast, type MenuItem } from '../ui/index.ts';
 import { IconCheck, IconClock, IconExternalLink, IconFlag } from '../ui/icons.tsx';
 import { groupLabel, inboxRows, snoozeChoices, type InboxRow } from './model.ts';
 import './attention.css';
@@ -15,6 +15,9 @@ export const ATTENTION_DIALOG = 'attention';
 export interface AttentionActions {
   markAddressed: (chatId: string) => Promise<unknown>;
   snooze: (chatId: string, until: number | null) => Promise<unknown>;
+  /** Whether the idle check is on, and a way to switch it. */
+  triageEnabled: () => Promise<boolean>;
+  setTriageEnabled: (enabled: boolean) => Promise<unknown>;
 }
 
 export interface AttentionInboxProps {
@@ -25,7 +28,26 @@ export interface AttentionInboxProps {
 }
 
 export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInboxProps) {
-  const rows = inboxRows(summary);
+  // Null until the setting is read; the host's rows stand until then.
+  const [triageOn, setTriageOn] = useState<boolean | null>(null);
+  const rows = inboxRows(summary, { flagged: triageOn !== false });
+  useEffect(() => {
+    let live = true;
+    ops
+      .triageEnabled()
+      .then((on) => live && setTriageOn(on))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [ops]);
+  const switchTriage = (on: boolean) => {
+    setTriageOn(on);
+    ops.setTriageEnabled(on).catch((e) => {
+      setTriageOn(!on);
+      toast.show({ kind: 'error', text: `Could not change this setting: ${String((e as Error)?.message ?? e)}` });
+    });
+  };
   const [busy, setBusy] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; row: InboxRow } | null>(null);
 
@@ -54,7 +76,7 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
       onClose={onClose}
       wide
       testId="attention-inbox"
-      intro="Chats waiting on you, chats that may be stuck, and results you have not read. Mark addressed or snooze one to set it aside until something new happens in it."
+      intro="Chats waiting on you, quiet chats that may still need you, chats that may be stuck, and results you have not read. Mark addressed or snooze one to set it aside until something new happens in it."
     >
       <div className="att-body">
         {!summary && <p className="att-note">Checking chats…</p>}
@@ -62,7 +84,7 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
           <div className="att-empty">
             <IconCheck size={20} />
             <strong>Nothing needs you</strong>
-            <span>Chats that wait on you, stall or finish unread appear here.</span>
+            <span>Chats that wait on you, go quiet with work left, stall or finish unread appear here.</span>
           </div>
         )}
         <div className="att-cards">
@@ -119,6 +141,20 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
           Mark addressed or Snooze takes a chat out of this list until something new happens in it. The conversation and its unread
           state are not changed.
         </p>
+        <div className="att-triage" data-testid="attention-triage-setting">
+          <Checkbox
+            label="Check quiet chats for unfinished work"
+            checked={triageOn !== false}
+            disabled={triageOn === null}
+            onChange={switchTriage}
+          />
+          <p className="att-foot">
+            About 15 minutes after a chat goes quiet, Helm asks a small Claude model, under your own sign-in, whether the end of the
+            conversation still needs you. It sends the last few messages, never drafts, files or tool output, checks each quiet
+            stretch once, runs a dozen checks an hour at most, and counts toward your plan usage. A flag is a suggestion, not proof;
+            opening the chat does not clear it.
+          </p>
+        </div>
       </div>
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={snoozeItems(menu.row)} label={`Snooze ${menu.row.title}`} onClose={() => setMenu(null)} testId="attention-snooze-menu" />

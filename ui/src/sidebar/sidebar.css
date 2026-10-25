@@ -992,6 +992,11 @@
   color: var(--warning-text, var(--sb-secondary));
 }
 
+/* The idle check's flag: a quiet chat that may still need you, in the triage colour. */
+.sb-flag[data-kind='quiet'] {
+  color: var(--att-triage, var(--sb-secondary));
+}
+
 .sb-muted {
   flex: none;
   display: inline-flex;

@@ -161,6 +161,8 @@ pub enum AttentionKind {
     Running,
     Unread,
     Stalled,
+    /// The idle check thinks the chat still needs you.
+    Triage,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -187,6 +189,8 @@ pub struct AttentionSummary {
     pub unread: Vec<AttentionRow>,
     /// Running chats with no output for the stall limit; they count in the badge.
     pub stalled: Vec<AttentionRow>,
+    /// Quiet chats the idle check thinks still need you; the reason is the check's own.
+    pub flagged: Vec<AttentionRow>,
     #[ts(type = "number")]
     pub revision: i64,
 }

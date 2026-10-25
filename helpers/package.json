@@ -2,12 +2,12 @@
   "name": "@helm/helpers",
   "version": "0.0.0",
   "private": true,
-  "description": "Short-lived Node helpers the host starts per job: titles/ (chat titles) and autocomplete/ (composer suggestions). One package; each helper is its own folder.",
+  "description": "Short-lived Node helpers the host starts per job: titles/ (chat titles), autocomplete/ (composer suggestions) and triage/ (idle-chat checks). One package; each helper is its own folder.",
   "type": "module",
   "engines": {
     "node": ">=22.19"
   },
   "scripts": {
-    "test": "node --test \"titles/**/*.test.ts\" \"autocomplete/**/*.test.ts\" \"usage/**/*.test.ts\""
+    "test": "node --test \"titles/**/*.test.ts\" \"autocomplete/**/*.test.ts\" \"usage/**/*.test.ts\" \"triage/**/*.test.ts\""
   }
 }

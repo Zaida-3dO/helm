@@ -60,6 +60,8 @@ pub const STALL_MINUTES: PrefKey = PrefKey::classified("stallMinutes");
 pub const CHAT_ELEMENTS: PrefKey = PrefKey::classified("chatElements");
 /// Composer autocomplete: `{enabled}`, off when missing.
 pub const AUTOCOMPLETE: PrefKey = PrefKey::classified("autocomplete");
+/// The idle-chat check: `{enabled, delayMinutes, prompt}`, on with a 15 minute delay when missing.
+pub const TASK_TRIAGE: PrefKey = PrefKey::classified("taskTriage");
 /// Settings > General: the sidebar entries the user hides, by id.
 pub const HIDDEN_SIDEBAR_ITEMS: PrefKey = PrefKey::classified("hiddenSidebarItems");
 /// Settings > Chat: skill names hidden from the `/` menu, without a leading `$`.
@@ -88,6 +90,7 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     STALL_MINUTES,
     CHAT_ELEMENTS,
     AUTOCOMPLETE,
+    TASK_TRIAGE,
     HIDDEN_SIDEBAR_ITEMS,
     HIDDEN_SKILLS,
 ];
@@ -185,6 +188,22 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
             _ => Err(PrefError::Invalid {
                 key: k,
                 why: "is {enabled: true or false}",
+            }),
+        },
+        "taskTriage" => match value.as_object() {
+            Some(m)
+                if m.iter().all(|(k, v)| match k.as_str() {
+                    "enabled" => v.is_boolean(),
+                    "delayMinutes" => v.as_i64().is_some_and(|n| (0..=1440).contains(&n)),
+                    "prompt" => v.is_null() || v.as_str().is_some_and(|s| s.len() <= 8000),
+                    _ => false,
+                }) =>
+            {
+                Ok(())
+            }
+            _ => Err(PrefError::Invalid {
+                key: k,
+                why: "is {enabled, delayMinutes (0 to 1440), prompt (text or null)}",
             }),
         },
         "chatElements" => match value.as_object() {

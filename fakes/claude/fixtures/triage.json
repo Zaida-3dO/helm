@@ -1,0 +1,23 @@
+{
+  "description": "Scripts the triage helper's answer from a tag in the chat text it is given: [TRIAGE-NEEDS] says the user is needed, [TRIAGE-LONG] answers a reason that is too long, [TRIAGE-BAD] answers prose, anything else says nothing is needed.",
+  "steps": [
+    { "await": { "type": "user" }, "as": "p", "timeoutMs": 600000 },
+    {
+      "if": { "saved": "p", "contains": "[TRIAGE-NEEDS]" },
+      "then": [{ "result": "{\"needs\": true, \"reason\": \"The migration still fails on the last step and nobody has looked at it.\"}" }],
+      "else": [
+        {
+          "if": { "saved": "p", "contains": "[TRIAGE-LONG]" },
+          "then": [{ "result": "{\"needs\": true, \"reason\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}" }],
+          "else": [
+            {
+              "if": { "saved": "p", "contains": "[TRIAGE-BAD]" },
+              "then": [{ "result": "I think this chat is fine." }],
+              "else": [{ "result": "{\"needs\": false, \"reason\": \"\"}" }]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -21,6 +21,7 @@
 //! | [`archive`] | archive and restore inside a caller's transaction |
 //! | [`attention`] | the attention summary behind the badge, tray and row marks |
 //! | [`delete`] | hard delete and its batched, retried file cleanup |
+//! | [`triage`] | the idle-chat check: a quiet helper says whether a chat needs you |
 //! | [`edit`] | two-phase, crash-safe edit and resend |
 //! | [`fork`] | forks and side-chat creation |
 //! | [`manage`] | archive, restore, delete, unread marks and completion acks |
@@ -28,6 +29,17 @@
 //! | [`search_source`] | the searchable message text the search crate indexes |
 //! | `timeline` | one log line per turn-opening send, from saved to first output |
 //! | [`runtime_settings`] | Settings → Runtime: Node/Claude status, launch options, new-chat defaults |
+
+/// SQL for "this chat was addressed or snoozed, with no activity since" (`?1` is now; `c` is the
+/// chat). Shared by the attention summary and the idle check, so they agree on what is set aside.
+macro_rules! quiet_sql {
+    () => {
+        "EXISTS(SELECT 1 FROM chat_attention t WHERE t.chat_id = c.id AND ( \
+             t.addressed_at >= MAX(c.updated_at, COALESCE((SELECT a.last_activity_at FROM chat_activity a WHERE a.chat_id = c.id), 0)) \
+             OR (t.snoozed_until > ?1 AND t.snoozed_at >= MAX(c.updated_at, COALESCE((SELECT a.last_activity_at FROM chat_activity a WHERE a.chat_id = c.id), 0)))))"
+    };
+}
+pub(crate) use quiet_sql;
 
 mod actor;
 pub mod archive;
@@ -64,6 +76,7 @@ pub mod thumbs;
 mod timeline;
 pub mod titles;
 pub mod tools;
+pub mod triage;
 pub mod types;
 
 pub use hostcalls::HostSeam;
