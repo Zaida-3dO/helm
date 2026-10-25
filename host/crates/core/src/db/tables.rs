@@ -49,6 +49,7 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("chat_attachment_refs", Data), // file, folder and chat references
     ("chat_attention", Data),
     ("chat_triage", Data),
+    ("chat_flags", Data),
     (
         "chat_mutes",
         UserOnly("Muting a chat is yours to decide; agents never mute or unmute."),

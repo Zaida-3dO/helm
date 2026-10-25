@@ -45,6 +45,7 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_workflow::register_migrations(reg);
     helm_afk::register_migrations(reg);
     helm_governor::register_migrations(reg);
+    helm_waits::register_migrations(reg);
 }
 
 /// Shared services a crate adds for op handlers (`ctx.services.need::<T>()`), called once at
@@ -59,6 +60,7 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_mcp::register_services(services, events);
     helm_usage::register_services(services, events);
     helm_schedules::register_services(services, events);
+    helm_waits::register_services(services, events);
 
     // After usage, which the governor reads.
     helm_afk::register_services(services, events);
@@ -134,6 +136,8 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_itemlinks::register_host_tools(&mut reg);
     helm_workflow::register_host_tools(&mut reg);
     helm_relay::register_host_tools(&mut reg);
+    helm_waits::register_host_tools(&mut reg);
+    helm_usage::register_host_tools(&mut reg);
     reg
 }
 
@@ -169,6 +173,8 @@ pub fn attach_host_tools(
         host_seam(dispatcher).tools,
     );
     helm_relay::attach_ops(dispatcher); // Telegram into chats
+                                        // Declared waits: the watcher loops and the delivery of their messages.
+    helm_waits::start(runtime, &dispatcher.ctx().services);
 }
 
 /// The consent upkeep: every minute, and at once after a decision,
@@ -334,6 +340,7 @@ mod host_tool_tests {
             "app_update_chat",
             "app_set_chat_archived",
             "app_stop_chat",
+            "app_flag_attention",
             "app_list_projects",
             "app_create_project",
             "app_update_project",
@@ -367,6 +374,9 @@ mod host_tool_tests {
             "app_workflow_report",
             "app_telegram_ask",
             "app_telegram_send",
+            "app_wait_for",
+            "app_background_result",
+            "app_usage_summary",
         ];
         assert_eq!(names(Default::default()), base);
         let delta = |k: helm_hosttools::LaunchKeys| -> Vec<String> {

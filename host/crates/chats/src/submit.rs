@@ -97,6 +97,10 @@ pub(crate) fn insert_submission(
         "INSERT INTO submission_meta(submission_id, origin, priority) VALUES (?1, ?2, ?3)",
         params![id, origin.as_str(), priority],
     )?;
+    // The user writing in the chat answers anything its agent flagged for them.
+    if matches!(origin, SubmissionOrigin::Typed | SubmissionOrigin::Answer) {
+        crate::flags::clear(tx, chat_id)?;
+    }
     if state == SubmissionState::Queued {
         let pos: i64 = tx.query_row(
             "SELECT COALESCE(MAX(position) + 1, 0) FROM queued_submissions WHERE chat_id = ?1",

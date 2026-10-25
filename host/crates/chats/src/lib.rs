@@ -23,6 +23,7 @@
 //! | [`delete`] | hard delete and its batched, retried file cleanup |
 //! | [`triage`] | the idle-chat check: a quiet helper says whether a chat needs you |
 //! | [`edit`] | two-phase, crash-safe edit and resend |
+//! | [`flags`] | the agent's own attention flag: one question for the user, per chat |
 //! | [`fork`] | forks and side-chat creation |
 //! | [`manage`] | archive, restore, delete, unread marks and completion acks |
 //! | [`seams`] | traits other crates implement (panel context, project gate) |
@@ -51,6 +52,7 @@ pub mod catalogue;
 pub mod clock;
 pub mod delete;
 pub mod edit;
+pub mod flags;
 pub mod fork;
 pub mod hostcalls;
 #[cfg(test)]

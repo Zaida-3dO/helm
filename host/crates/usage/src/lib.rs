@@ -11,6 +11,7 @@
 //! | [`service`] | the cadence (launch, 10 min while visible, Refresh; 60 s floor) and readiness |
 //! | [`helper`] | starting `helpers/usage` |
 //! | [`modes`] | Request modes: Fast / Standard / unknown counts from Helm's native transcripts |
+//! | [`summary`] | the `app_usage_summary` host tool: tokens and cost by model, day and chat |
 //! | [`lines`] | the `plan_usage` worker line, through the host-tools registry |
 //! | `ops` | `usage_get`, `usage_refresh` and `request_modes` |
 //! | [`bindings`] | generated TypeScript in `ui/src/api/generated/usage/` |
@@ -24,12 +25,14 @@ pub mod modes;
 mod ops;
 pub mod service;
 pub mod store;
+pub mod summary;
 pub mod types;
 
 pub use lines::register_worker_lines;
 pub use modes::RequestModes;
 pub use ops::register_ops;
 pub use service::{ControlAnswer, PlanReader, UsageService};
+pub use summary::register_host_tools;
 pub use types::*;
 
 use helm_core::db::Database;

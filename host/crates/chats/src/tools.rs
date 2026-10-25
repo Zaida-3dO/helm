@@ -705,6 +705,40 @@ async fn open_chat(ctx: ToolCtx, a: Value) -> ToolResult {
     Ok(json!({"navigated": true, "chatId": id}))
 }
 
+/// `app_flag_attention`: the calling chat's own root agent files one question for the user (the
+/// dispatcher refuses a sub-agent's call, as for every root-only tool).
+fn flag_attention(ctx: &ToolCtx, a: Value, limits: &crate::flags::FlagLimits) -> ToolResult {
+    let text = |k: &str, max: usize| -> Result<String, ToolError> {
+        let v = str_arg(&a, k).map(str::trim).unwrap_or("");
+        if v.is_empty() || v.chars().count() > max {
+            return Err(refuse(format!("{k} is required, 1 to {max} characters.")));
+        }
+        Ok(v.to_owned())
+    };
+    let question = text("question", 500)?;
+    let reason = text("reason", 240)?;
+    let priority = match str_arg(&a, "priority") {
+        None | Some("normal") => "normal",
+        Some("high") => "high",
+        Some(_) => return Err(refuse("priority is normal or high.")),
+    };
+    let rt = rt(ctx)?;
+    let now = helm_core::now_ms();
+    let chat = ctx.caller_chat_id.clone();
+    limits.check(&chat, Instant::now()).map_err(refuse)?;
+    let filed = rt
+        .db()
+        .write(|tx| crate::flags::file(tx, &chat, &question, &reason, priority, now))
+        .map_err(|e| ToolError::maybe(e.to_string()))?
+        .ok_or_else(|| refuse("This chat no longer exists."))?;
+    // A repeat of the open flag changes nothing, so it is not counted.
+    if filed != crate::flags::Filed::Duplicate {
+        limits.record(&chat, Instant::now());
+        rt.publish_attention();
+    }
+    Ok(json!({"status": filed.as_str()}))
+}
+
 /// Register the chat tools.
 pub fn register_host_tools(r: &mut HostToolRegistry) {
     let limits = Arc::new(SendLimits::default());
@@ -837,6 +871,24 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         )
         .self_locking(),
         stop_chat,
+    )
+    .blocking(
+        ToolSpec::write(
+            "app_flag_attention",
+            "Flag this chat for the user's attention: file one question in Needs attention, with the reason it blocks your work. Use it only when you cannot go on without the user (a decision, a credential, a choice only they can make); never for progress or finished work. One flag per chat: filing again replaces it. It clears when the user next writes in this chat or marks it addressed. At most 6 per hour. Then end your turn instead of waiting.",
+            obj(
+                json!({
+                    "question": {"type": "string", "minLength": 1, "maxLength": 500},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 240},
+                    "priority": {"type": "string", "enum": ["normal", "high"]}
+                }),
+                &["question", "reason"],
+            ),
+        ),
+        {
+            let flags = Arc::new(crate::flags::FlagLimits::default());
+            move |ctx, a| flag_attention(ctx, a, &flags)
+        },
     );
 }
 
@@ -1089,5 +1141,65 @@ mod tests {
              WHERE s.chat_id = '{c1}' AND m.origin = 'other_chat'"
         ));
         assert_eq!(n, ["1"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flag_attention_lists_one_question_and_ends_when_the_user_answers() {
+        let h = harness();
+        let t = tools(&h);
+        let a = h.create().await;
+        let flag = |q: &str| json!({"question": q, "reason": "Blocked on the answer."});
+        let needs =
+            || async { h.call("attention_get", json!({})).await.unwrap()["needsYou"].clone() };
+        let r = call(&h, &t, &a, "app_flag_attention", flag("Ship it?")).await;
+        assert_eq!(r["result"]["status"], "filed", "{r}");
+        let rows = needs().await;
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert!(rows[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Asked by the agent: Ship it?"));
+        // The same flag again is a duplicate; a different one replaces it.
+        let r = call(&h, &t, &a, "app_flag_attention", flag("Ship it?")).await;
+        assert_eq!(r["result"]["status"], "duplicate");
+        let r = call(&h, &t, &a, "app_flag_attention", flag("Ship it now?")).await;
+        assert_eq!(r["result"]["status"], "replaced");
+        assert_eq!(needs().await.as_array().unwrap().len(), 1);
+        // Bad input is refused with nothing filed.
+        let r = call(
+            &h,
+            &t,
+            &a,
+            "app_flag_attention",
+            json!({"question": "", "reason": "x"}),
+        )
+        .await;
+        assert_eq!(r["ok"], false);
+        // Marking it addressed ends it, and activity does not bring it back.
+        h.call("attention_address", json!({"chatId": a}))
+            .await
+            .unwrap();
+        assert_eq!(h.col("SELECT count(*) FROM chat_flags"), ["0"]);
+        // The user writing in the chat ends a later flag too.
+        call(&h, &t, &a, "app_flag_attention", flag("Again?")).await;
+        assert_eq!(h.col("SELECT count(*) FROM chat_flags"), ["1"]);
+        h.send(&a, "Yes, go ahead.", "default").await;
+        assert_eq!(h.col("SELECT count(*) FROM chat_flags"), ["0"]);
+        // Six an hour.
+        let mut last = Value::Null;
+        for i in 0..crate::flags::PER_HOUR + 1 {
+            last = call(
+                &h,
+                &t,
+                &a,
+                "app_flag_attention",
+                flag(&format!("Question {i}")),
+            )
+            .await;
+        }
+        assert!(
+            last["error"].as_str().unwrap().contains("last hour"),
+            "{last}"
+        );
     }
 }

@@ -1809,6 +1809,7 @@ dependencies = [
  "helm-terminal",
  "helm-updates",
  "helm-usage",
+ "helm-waits",
  "helm-workers",
  "helm-workflow",
  "log",
@@ -2134,6 +2135,7 @@ dependencies = [
 name = "helm-usage"
 version = "0.3.0"
 dependencies = [
+ "chrono",
  "helm-core",
  "helm-hosttools",
  "helm-ipc",
@@ -2144,6 +2146,25 @@ dependencies = [
  "serde_json",
  "tempfile",
  "ts-rs",
+]
+
+[[package]]
+name = "helm-waits"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "helm-chats",
+ "helm-core",
+ "helm-hosttools",
+ "helm-ipc",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

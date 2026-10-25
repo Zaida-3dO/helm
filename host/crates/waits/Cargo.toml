@@ -1,0 +1,26 @@
+[package]
+name = "helm-waits"
+description = "Declared waits: an agent says what it is waiting on, a fixed watcher in the host watches it, and the chat gets one message when it finishes, changes, dies or times out."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+helm-chats.workspace = true
+helm-hosttools = { path = "../hosttools" }
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+log.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile.workspace = true

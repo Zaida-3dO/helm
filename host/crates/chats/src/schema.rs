@@ -12,6 +12,7 @@
 //! | `chat_activity` | per chat: the last worker output time and the stalled flag |
 //! | `chat_attention` | per chat: when its attention was marked addressed, and a snooze |
 //! | `chat_triage` | per chat: the idle check's last verdict, and the activity it was made for |
+//! | `chat_flags` | per chat: the question its agent flagged for the user ([`crate::flags`]) |
 //! | trigger `restart_cancel_changed_chat` | drops a pending continuation on archive or a project, harness, model or effort change |
 //! | `chat_forks` | fork ids and what they were asked for, for idempotent forks |
 //! | `pending_edits` | an edit staged with its submission, applied once the worker closes ([`crate::edit`]) |
@@ -37,6 +38,7 @@ pub fn register(reg: &mut MigrationRegistry) {
     reg.initializer("chats-side-tables", init)
         .initializer("chats-run-slots", crate::runslots::init)
         .initializer("chats-attachment-refs", crate::attachments::init)
+        .initializer("chats-flags", crate::flags::init)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-queue-holds", hold_queues)

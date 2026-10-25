@@ -40,6 +40,7 @@ helm-afk = { path = "../crates/afk" }
 helm-governor = { path = "../crates/governor" }
 helm-relay = { path = "../crates/relay" }
 helm-updates = { path = "../crates/updates" }
+helm-waits = { path = "../crates/waits" }
 serde_json.workspace = true
 tokio.workspace = true
 log.workspace = true

@@ -66,6 +66,8 @@ struct Cand {
     quiet: bool,
     /// The idle check's reason, while its verdict is current and triage is on.
     flagged: Option<String>,
+    /// The question its own agent flagged for the user ([`crate::flags`]).
+    asked: Option<(String, String)>,
 }
 
 /// The plain-language reason a row is listed.
@@ -109,7 +111,7 @@ pub fn compute(
          COALESCE((SELECT a.stalled FROM chat_activity a WHERE a.chat_id = c.id), 0), ",
         crate::quiet_sql!(),
         ", (SELECT g.reason FROM chat_triage g WHERE g.chat_id = c.id AND g.needs = 1 AND g.failed = 0 \
-             AND g.stamp = MAX(c.updated_at, COALESCE((SELECT a.last_activity_at FROM chat_activity a WHERE a.chat_id = c.id), 0)))"
+             AND g.stamp = MAX(c.updated_at, COALESCE((SELECT a.last_activity_at FROM chat_activity a WHERE a.chat_id = c.id), 0))),          (SELECT f.question FROM chat_flags f WHERE f.chat_id = c.id),          (SELECT f.reason FROM chat_flags f WHERE f.chat_id = c.id)"
     );
     let read = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Cand> {
         Ok(Cand {
@@ -124,6 +126,13 @@ pub fn compute(
             stalled: r.get(8)?,
             quiet: r.get(9)?,
             flagged: if triage_on { r.get(10)? } else { None },
+            asked: match (
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, Option<String>>(12)?,
+            ) {
+                (Some(q), Some(why)) => Some((q, why)),
+                _ => None,
+            },
         })
     };
     let mut cands: Vec<Cand> = {
@@ -133,6 +142,7 @@ pub fn compute(
                AND (c.status IN ('starting', 'running', 'stopping')
                     OR EXISTS(SELECT 1 FROM unread_marks u WHERE u.chat_id = c.id)
                     OR EXISTS(SELECT 1 FROM chat_completions k WHERE k.chat_id = c.id AND k.read = 0)
+                    OR EXISTS(SELECT 1 FROM chat_flags f WHERE f.chat_id = c.id)
                     OR EXISTS(SELECT 1 FROM chat_triage g WHERE g.chat_id = c.id AND g.needs = 1 AND g.failed = 0))
              ORDER BY c.updated_at DESC, c.id"
         ))?;
@@ -180,7 +190,9 @@ pub fn compute(
         if c.muted || c.quiet {
             continue;
         }
-        let need = needs.get(&c.id).copied();
+        // A live request (approval, question, plan) comes first; else the agent's own flag.
+        let live_need = needs.get(&c.id).copied();
+        let need = live_need.or(c.asked.as_ref().map(|_| AttentionKind::Question));
         let unread = c.marked || (c.completion && c.status == ChatStatus::Idle && !c.error);
         let stalled = c.stalled && c.status.is_busy();
         // The idle check only speaks for a chat the host is not already listing.
@@ -193,7 +205,12 @@ pub fn compute(
         }
         if let Some(k) = need {
             if s.needs_you.len() < MAX_ROWS {
-                s.needs_you.push(row(c, k));
+                let mut r = row(c, k);
+                if let (None, Some((question, why))) = (live_need, &c.asked) {
+                    r.reason =
+                        format!("Asked by the agent: {question} (Why it blocks the work: {why})");
+                }
+                s.needs_you.push(r);
             }
         }
         if unread && s.unread.len() < MAX_ROWS {

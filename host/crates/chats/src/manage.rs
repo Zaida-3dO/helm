@@ -458,6 +458,12 @@ fn attention_write(
 
 fn attention_address(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatIdArgs = parse_args(args)?;
+    // Addressed also ends a question its agent flagged, which would otherwise come back with
+    // the chat's next activity.
+    ctx.services
+        .need::<Database>()?
+        .write(|tx| crate::flags::clear(tx, &a.chat_id))
+        .map_err(sql)?;
     attention_write(
         ctx,
         &a.chat_id,
