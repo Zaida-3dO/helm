@@ -69,6 +69,14 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              submission_id  TEXT NOT NULL,
              error          TEXT,
              PRIMARY KEY (schedule_id, scheduled_at)
+         );
+         CREATE TABLE IF NOT EXISTS schedule_reminders (
+             id            TEXT PRIMARY KEY,
+             schedule_id   TEXT NOT NULL,
+             title         TEXT NOT NULL,
+             message       TEXT NOT NULL,
+             chat_id       TEXT,
+             created_at    INTEGER NOT NULL
          );",
     )
 }
@@ -151,6 +159,9 @@ fn load(tx: &Transaction<'_>, id: &str) -> Result<Row, SErr> {
 }
 
 fn chat_title(tx: &Transaction<'_>, chat_id: &str) -> String {
+    if chat_id.is_empty() {
+        return String::new();
+    }
     helm_chats::store::get_chat(tx, chat_id, 0)
         .ok()
         .flatten()
@@ -158,9 +169,27 @@ fn chat_title(tx: &Transaction<'_>, chat_id: &str) -> String {
         .unwrap_or_default()
 }
 
+fn project_name(tx: &Transaction<'_>, project_id: &str) -> String {
+    tx.query_row(
+        "SELECT name FROM projects WHERE id = ?1",
+        [project_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+}
+
 fn view(tx: &Transaction<'_>, r: Row) -> Schedule {
+    let dest_name = match (&r.def.destination, &r.def.project_id) {
+        (Destination::NewChat, Some(p)) if r.def.kind == ScheduleKind::Prompt => {
+            project_name(tx, p)
+        }
+        _ => chat_title(tx, &r.def.chat_id),
+    };
     Schedule {
-        chat_title: chat_title(tx, &r.def.chat_id),
+        chat_title: dest_name,
         id: r.id,
         definition: r.def,
         state: r.state,
@@ -188,6 +217,50 @@ fn check_chat(tx: &Transaction<'_>, chat_id: &str) -> Result<(), SErr> {
         Some(c) if c.archived => Err(bad("That chat is archived. Restore it first.")),
         Some(_) => Ok(()),
     }
+}
+
+/// A new-chat destination needs a folder project (one with a folder to work in).
+fn check_project(tx: &Transaction<'_>, project_id: Option<&str>) -> Result<(), SErr> {
+    let Some(p) = project_id.filter(|p| !p.is_empty()) else {
+        return Err(bad("Pick the project the new chats start in."));
+    };
+    let row: Option<(String, Option<String>)> = tx
+        .query_row("SELECT kind, path FROM projects WHERE id = ?1", [p], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()?;
+    match row {
+        None => Err(bad("That project does not exist.")),
+        Some((kind, path))
+            if kind == "folder" && path.as_deref().is_some_and(|p| !p.is_empty()) =>
+        {
+            Ok(())
+        }
+        Some(_) => Err(bad("That project has no folder to start a chat in.")),
+    }
+}
+
+/// Make the destination fields agree with the kind and check them: a reminder only names an
+/// optional chat to open; a prompt goes to an existing chat or starts one in a project.
+fn settle_destination(tx: &Transaction<'_>, def: &mut Definition) -> Result<(), SErr> {
+    match (def.kind, def.destination) {
+        (ScheduleKind::Reminder, _) => {
+            def.destination = Destination::Chat;
+            def.project_id = None;
+            if !def.chat_id.is_empty() {
+                check_chat(tx, &def.chat_id)?;
+            }
+        }
+        (ScheduleKind::Prompt, Destination::Chat) => {
+            def.project_id = None;
+            check_chat(tx, &def.chat_id)?;
+        }
+        (ScheduleKind::Prompt, Destination::NewChat) => {
+            def.chat_id.clear();
+            check_project(tx, def.project_id.as_deref())?;
+        }
+    }
+    Ok(())
 }
 
 fn live_count(tx: &Transaction<'_>) -> Result<i64, SErr> {
@@ -239,7 +312,7 @@ pub fn create(
     if let Some(m) = timing::check(&def.timing) {
         return Err(bad(m));
     }
-    check_chat(tx, &def.chat_id)?;
+    settle_destination(tx, &mut def)?;
     if live_count(tx)? >= MAX_SCHEDULES {
         return Err(bad("There are already 256 schedules. Cancel one first."));
     }
@@ -271,6 +344,10 @@ pub struct Update {
     pub message: Option<String>,
     pub timing: Option<Timing>,
     pub chat_id: Option<String>,
+    pub kind: Option<ScheduleKind>,
+    pub destination: Option<Destination>,
+    pub project_id: Option<String>,
+    pub created_by_chat: Option<String>,
     pub paused: Option<bool>,
 }
 
@@ -299,11 +376,31 @@ pub fn update(
     if let Some(m) = check_text(&r.def.title, &r.def.message) {
         return Err(bad(m));
     }
+    // The destination is checked only when the update touches it, so a pause or a rename still
+    // works on a schedule whose chat has since been archived.
+    let mut moved = false;
     if let Some(c) = u.chat_id {
-        if c != r.def.chat_id {
-            check_chat(tx, &c)?;
-            r.def.chat_id = c;
-        }
+        moved |= c != r.def.chat_id;
+        r.def.chat_id = c;
+    }
+    if let Some(k) = u.kind {
+        moved |= k != r.def.kind;
+        r.def.kind = k;
+    }
+    if let Some(d) = u.destination {
+        moved |= d != r.def.destination;
+        r.def.destination = d;
+    }
+    if let Some(p) = u.project_id {
+        let p = Some(p).filter(|p| !p.is_empty());
+        moved |= p != r.def.project_id;
+        r.def.project_id = p;
+    }
+    if moved {
+        settle_destination(tx, &mut r.def)?;
+    }
+    if let Some(by) = u.created_by_chat {
+        r.def.created_by_chat = Some(by).filter(|b| !b.is_empty());
     }
     if let Some(t) = u.timing {
         if let Some(m) = timing::check(&t) {
@@ -324,7 +421,7 @@ pub fn update(
             if r.state == ScheduleState::Completed && r.next_run_at.is_none() {
                 return Err(bad("Choose a new time first."));
             }
-            check_chat(tx, &r.def.chat_id)?;
+            settle_destination(tx, &mut r.def)?;
             match r.next_run_at {
                 None => return Err(bad("Choose a new time first.")),
                 // Slots that passed while it was paused are not replayed.
@@ -400,10 +497,14 @@ pub fn runs(tx: &Transaction<'_>, id: &str) -> Result<Vec<Run>, SErr> {
 pub struct Claim {
     pub schedule_id: String,
     pub scheduled_at: i64,
+    /// The chat to send into; empty when the run starts a new chat in `project_id`.
     pub chat_id: String,
+    pub project_id: Option<String>,
     pub title: String,
     pub message: String,
     pub submission_id: String,
+    /// The title and id of the chat that made the schedule, when it was another chat.
+    pub created_by: Option<(String, String)>,
 }
 
 /// Whether a chat should not be sent a scheduled prompt right now: a turn is running, or it still
@@ -446,6 +547,51 @@ pub fn claim_due(
             break;
         }
         let Some(slot) = r.next_run_at else { continue };
+        if r.def.kind == ScheduleKind::Reminder {
+            // A note to the user: nothing is sent, so there is no chat to wait for.
+            let sid = submission_id(&r.id, slot);
+            let fresh = insert_receipt(
+                tx,
+                &r.id,
+                slot,
+                now,
+                RunStatus::Started,
+                &r.def.chat_id,
+                &sid,
+                None,
+            )?;
+            if fresh {
+                post_reminder(tx, &r, now)?;
+            }
+            advance(&mut r, slot, now, zone);
+            save(tx, &r)?;
+            prune(tx, &r.id)?;
+            claimed += 1;
+            continue;
+        }
+        if r.def.destination == Destination::NewChat {
+            // Each run starts its own chat, so no existing chat can be busy or gone.
+            let sid = submission_id(&r.id, slot);
+            let fresh =
+                insert_receipt(tx, &r.id, slot, now, RunStatus::Dispatching, "", &sid, None)?;
+            advance(&mut r, slot, now, zone);
+            save(tx, &r)?;
+            prune(tx, &r.id)?;
+            claimed += 1;
+            if fresh {
+                claims.push(Claim {
+                    schedule_id: r.id.clone(),
+                    scheduled_at: slot,
+                    chat_id: String::new(),
+                    project_id: r.def.project_id.clone(),
+                    title: r.def.title.clone(),
+                    message: r.def.message.clone(),
+                    submission_id: sid,
+                    created_by: created_by(tx, &r),
+                });
+            }
+            continue;
+        }
         let chat = helm_chats::store::get_chat(tx, &r.def.chat_id, 0)?;
         let usable = chat.as_ref().filter(|c| !c.archived);
         let sid = submission_id(&r.id, slot);
@@ -484,12 +630,7 @@ pub fn claim_due(
             &sid,
             None,
         )?;
-        r.next_run_at = timing::next_after(&r.def.timing, slot, now, zone);
-        if r.next_run_at.is_none() {
-            r.state = ScheduleState::Completed;
-        }
-        r.calendar_offset = r.next_run_at.map_or(0, |n| zone.offset_secs(n));
-        r.revision += 1;
+        advance(&mut r, slot, now, zone);
         save(tx, &r)?;
         prune(tx, &r.id)?;
         claimed += 1;
@@ -498,13 +639,91 @@ pub fn claim_due(
                 schedule_id: r.id.clone(),
                 scheduled_at: slot,
                 chat_id: r.def.chat_id.clone(),
+                project_id: None,
                 title: r.def.title.clone(),
                 message: r.def.message.clone(),
                 submission_id: sid,
+                created_by: created_by(tx, &r),
             });
         }
     }
     Ok((claims, claimed))
+}
+
+/// Move a schedule on to the first slot after `now` (which folds every missed slot into the run
+/// just claimed), or finish it when it has none.
+fn advance(r: &mut Row, slot: i64, now: i64, zone: &dyn Zone) {
+    r.next_run_at = timing::next_after(&r.def.timing, slot, now, zone);
+    if r.next_run_at.is_none() {
+        r.state = ScheduleState::Completed;
+    }
+    r.calendar_offset = r.next_run_at.map_or(0, |n| zone.offset_secs(n));
+    r.revision += 1;
+}
+
+fn created_by(tx: &Transaction<'_>, r: &Row) -> Option<(String, String)> {
+    let id = r.def.created_by_chat.as_deref()?;
+    Some((chat_title(tx, id), id.to_owned()))
+}
+
+/// Reminders kept; the oldest go first.
+const KEEP_REMINDERS: i64 = 200;
+
+fn post_reminder(tx: &Transaction<'_>, r: &Row, now: i64) -> Result<(), SErr> {
+    let chat = Some(r.def.chat_id.as_str()).filter(|c| !c.is_empty());
+    tx.execute(
+        "INSERT INTO schedule_reminders(id, schedule_id, title, message, chat_id, created_at)          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            r.id,
+            r.def.title,
+            r.def.message,
+            chat,
+            now
+        ],
+    )?;
+    tx.execute(
+        "DELETE FROM schedule_reminders WHERE id NOT IN          (SELECT id FROM schedule_reminders ORDER BY created_at DESC, id LIMIT ?1)",
+        [KEEP_REMINDERS],
+    )?;
+    Ok(())
+}
+
+/// The reminders not yet dismissed, newest first.
+pub fn reminders(tx: &Transaction<'_>) -> Result<Vec<Reminder>, SErr> {
+    let mut st = tx.prepare(
+        "SELECT id, schedule_id, title, message, chat_id, created_at FROM schedule_reminders          ORDER BY created_at DESC, id",
+    )?;
+    let rows = st
+        .query_map([], |r| {
+            Ok(Reminder {
+                id: r.get(0)?,
+                schedule_id: r.get(1)?,
+                title: r.get(2)?,
+                message: r.get(3)?,
+                chat_id: r.get(4)?,
+                chat_title: String::new(),
+                created_at: r.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .into_iter()
+        .map(|mut r| {
+            if let Some(c) = &r.chat_id {
+                r.chat_title = chat_title(tx, c);
+            }
+            r
+        })
+        .collect())
+}
+
+/// Dismiss one reminder, or all of them with `None`. Returns how many went.
+pub fn dismiss_reminders(tx: &Transaction<'_>, id: Option<&str>) -> Result<usize, SErr> {
+    Ok(match id {
+        Some(id) => tx.execute("DELETE FROM schedule_reminders WHERE id = ?1", [id])?,
+        None => tx.execute("DELETE FROM schedule_reminders", [])?,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -543,10 +762,27 @@ pub fn finish(
     status: RunStatus,
     error: Option<&str>,
 ) -> Result<(), SErr> {
+    finish_in(tx, claim, status, error, None)
+}
+
+/// [`finish`], also recording the chat a new-chat run started.
+pub fn finish_in(
+    tx: &Transaction<'_>,
+    claim: &Claim,
+    status: RunStatus,
+    error: Option<&str>,
+    chat_id: Option<&str>,
+) -> Result<(), SErr> {
     let error = error.map(|e| e.chars().take(MAX_ERROR).collect::<String>());
     tx.execute(
-        "UPDATE schedule_runs SET status = ?3, error = ?4 WHERE schedule_id = ?1 AND scheduled_at = ?2",
-        params![claim.schedule_id, claim.scheduled_at, status.as_str(), error],
+        "UPDATE schedule_runs SET status = ?3, error = ?4, chat_id = COALESCE(?5, chat_id)          WHERE schedule_id = ?1 AND scheduled_at = ?2",
+        params![
+            claim.schedule_id,
+            claim.scheduled_at,
+            status.as_str(),
+            error,
+            chat_id
+        ],
     )?;
     Ok(())
 }

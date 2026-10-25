@@ -12,6 +12,7 @@ nextRunAt: number | null,
  */
 revision: number, createdAt: number, 
 /**
- * The chat's title, for the list (empty when the chat is gone).
+ * The destination's name for the list: the chat's title, or the project's name for a new-chat
+ * destination (empty when it is gone or there is none).
  */
 chatTitle: string, };

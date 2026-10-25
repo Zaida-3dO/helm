@@ -18,6 +18,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     ScheduleList::export_all_to(dir).map_err(|e| e.to_string())?;
     RunList::export_all_to(dir).map_err(|e| e.to_string())?;
+    ReminderList::export_all_to(dir).map_err(|e| e.to_string())?;
     let mut names = vec![
         Timing::ident(),
         ScheduleState::ident(),
@@ -28,6 +29,10 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         Template::ident(),
         ScheduleList::ident(),
         RunList::ident(),
+        ScheduleKind::ident(),
+        Destination::ident(),
+        Reminder::ident(),
+        ReminderList::ident(),
     ];
     names.sort();
     let mut index = String::from(

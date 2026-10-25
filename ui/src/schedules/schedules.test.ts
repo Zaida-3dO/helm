@@ -96,7 +96,7 @@ test('the status line says when it runs or why it does not', () => {
 function sched(over: Partial<Schedule> = {}): Schedule {
   return {
     id: 's1',
-    definition: { title: 'Check-in', message: 'hi', timing: { kind: 'interval', seconds: 1800 }, chatId: 'c1' },
+    definition: { title: 'Check-in', message: 'hi', timing: { kind: 'interval', seconds: 1800 }, kind: 'prompt', destination: 'chat', chatId: 'c1' },
     state: 'active',
     nextRunAt: NOW,
     revision: 1,

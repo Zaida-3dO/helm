@@ -49,7 +49,11 @@ fn new(request: &str, chat: &str, timing: Timing) -> NewSchedule {
             title: " Check-in ".into(),
             message: "How is it going?".into(),
             timing,
+            kind: ScheduleKind::Prompt,
+            destination: Destination::Chat,
             chat_id: chat.into(),
+            project_id: None,
+            created_by_chat: None,
             template: None,
         },
     }
@@ -511,9 +515,12 @@ fn the_submission_id_is_fixed_per_slot_and_shaped_like_a_uuid() {
 
 #[test]
 fn the_prompt_names_the_schedule_and_carries_the_message() {
-    let t = scheduler::frame("Morning [x]`", "abc", "Do the thing.");
+    let t = scheduler::frame("Morning [x]`", "abc", "Do the thing.", None);
     assert!(t.starts_with("[Scheduled prompt] \"Morning x\" (schedule abc)\n"));
     assert!(t.contains("not typed by the user"));
+    assert!(!t.contains("another chat"));
+    let from = scheduler::frame("T", "abc", "m", Some(("Planner [x]", "c9")));
+    assert!(from.contains("created by another chat, \"Planner x\" (c9)"));
     assert!(t.ends_with("\n\nDo the thing."));
 }
 
@@ -551,6 +558,8 @@ fn svc(db: &Arc<Database>) -> (SchedulesService, Arc<RecordingSink>) {
             db: db.clone(),
             zone: Arc::new(ZONE),
             events: sink.clone(),
+            clock: None,
+            gates: None,
         },
         sink,
     )
@@ -595,6 +604,183 @@ fn a_refused_send_is_recorded_as_failed_with_a_short_error_and_not_retried() {
     assert_eq!(send.0.lock().unwrap().len(), 1);
 }
 
+fn project_of(db: &Database, chat: &str) -> String {
+    db.snapshot(|tx| {
+        tx.query_row("SELECT project_id FROM chats WHERE id = ?1", [chat], |r| {
+            r.get(0)
+        })
+    })
+    .unwrap()
+}
+
+fn chat_count(db: &Database) -> i64 {
+    db.snapshot(|tx| tx.query_row("SELECT count(*) FROM chats", [], |r| r.get(0)))
+        .unwrap()
+}
+
+fn kinds(c: &str, kind: ScheduleKind, dest: Destination, project: Option<&str>) -> NewSchedule {
+    let mut n = new(&uuid::Uuid::new_v4().to_string(), c, interval(60));
+    n.definition.kind = kind;
+    n.definition.destination = dest;
+    n.definition.project_id = project.map(str::to_owned);
+    n
+}
+
+#[test]
+fn reminders_post_a_note_and_new_chat_runs_start_their_own_chat() {
+    let (_d, db) = temp();
+    let c = chat(&db);
+    let project = project_of(&db, &c);
+    let create = |n: NewSchedule| db.write(|tx| store::create(tx, &ZONE, T0, n));
+
+    // Validation: a reminder may name no chat but not a missing one; a new-chat prompt needs a
+    // folder project, and drops any chat it was given.
+    assert!(create(kinds("", ScheduleKind::Reminder, Destination::Chat, None)).is_ok());
+    assert!(create(kinds(
+        "gone",
+        ScheduleKind::Reminder,
+        Destination::Chat,
+        None
+    ))
+    .is_err());
+    assert!(create(kinds("", ScheduleKind::Prompt, Destination::NewChat, None)).is_err());
+    assert!(create(kinds(
+        "",
+        ScheduleKind::Prompt,
+        Destination::NewChat,
+        Some("nope")
+    ))
+    .is_err());
+    assert!(create(kinds("", ScheduleKind::Prompt, Destination::Chat, None)).is_err());
+    sql(
+        &db,
+        "INSERT INTO projects(id, kind, name, created_at) VALUES ('group', 'board', 'G', 1)",
+        &[],
+    );
+    assert!(create(kinds(
+        "",
+        ScheduleKind::Prompt,
+        Destination::NewChat,
+        Some("group")
+    ))
+    .is_err());
+
+    let note = create(kinds(
+        &c,
+        ScheduleKind::Reminder,
+        Destination::NewChat,
+        Some(&project),
+    ))
+    .unwrap();
+    assert_eq!(
+        note.definition.destination,
+        Destination::Chat,
+        "a reminder has no destination"
+    );
+    assert_eq!(note.definition.project_id, None);
+    let mut made = kinds(
+        &c,
+        ScheduleKind::Prompt,
+        Destination::NewChat,
+        Some(&project),
+    );
+    made.definition.created_by_chat = Some(c.clone());
+    let fresh = create(made).unwrap();
+    assert_eq!(fresh.definition.chat_id, "");
+    assert_eq!(fresh.chat_title, project_name(&db, &project));
+
+    // Both fire at once even though the linked chat is busy: a reminder sends nothing, and a new
+    // chat has no busy chat to wait for.
+    sql(
+        &db,
+        "UPDATE chats SET status = 'running' WHERE id = ?1",
+        &[&c],
+    );
+    let (svc, sink) = svc(&db);
+    let send = Recording(Mutex::new(vec![]), Mutex::new(None));
+    assert_eq!(scheduler::tick(&svc, &send, T0 + MIN), 3);
+    let sent = send.0.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    let started = &sent[0].0;
+    assert_ne!(started, &c);
+    assert!(
+        sent[0].2.contains("created by another chat"),
+        "{}",
+        sent[0].2
+    );
+    assert_eq!(project_of(&db, started), project);
+    assert_eq!(runs(&db, &fresh.id)[0].chat_id, *started);
+    assert_eq!(runs(&db, &note.id)[0].status, RunStatus::Started);
+    let pending = db.snapshot(store::reminders).unwrap();
+    assert_eq!(
+        pending.len(),
+        2,
+        "this one and the chat-less one from the checks above"
+    );
+    let linked = pending.iter().find(|r| r.chat_id.is_some()).unwrap();
+    assert_eq!(
+        (linked.title.as_str(), linked.chat_id.as_deref()),
+        ("Check-in", Some(c.as_str()))
+    );
+    assert!(sink.kinds().contains(&"schedules".to_string()));
+
+    // A refused send leaves no empty chat behind; reminders can be dismissed one by one or all.
+    let before = chat_count(&db);
+    *send.1.lock().unwrap() = Some(ApiError::new("capacity", "busy"));
+    scheduler::tick(&svc, &send, T0 + 2 * MIN);
+    assert_eq!(chat_count(&db), before);
+    assert_eq!(runs(&db, &fresh.id)[0].status, RunStatus::Failed);
+    assert_eq!(db.snapshot(store::reminders).unwrap().len(), 4);
+    assert_eq!(
+        db.write(|tx| store::dismiss_reminders(tx, Some(&linked.id)))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.write(|tx| store::dismiss_reminders(tx, None)).unwrap(),
+        3
+    );
+    assert!(db.snapshot(store::reminders).unwrap().is_empty());
+
+    // Updates move a schedule between kinds, and re-check the destination only when it changes.
+    let moved = db
+        .write(|tx| {
+            store::update(
+                tx,
+                &ZONE,
+                T0,
+                &fresh.id,
+                db_revision(tx, &fresh.id),
+                Update {
+                    destination: Some(Destination::Chat),
+                    chat_id: Some(c.clone()),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        (moved.definition.destination, moved.definition.project_id),
+        (Destination::Chat, None)
+    );
+}
+
+fn project_name(db: &Database, id: &str) -> String {
+    db.snapshot(|tx| {
+        tx.query_row("SELECT name FROM projects WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+    })
+    .unwrap()
+}
+
+fn db_revision(tx: &rusqlite::Transaction<'_>, id: &str) -> i64 {
+    tx.query_row("SELECT revision FROM schedules WHERE id = ?1", [id], |r| {
+        r.get(0)
+    })
+    .unwrap()
+}
+
 // The send itself, through a real chat runtime.
 
 struct NoWorker;
@@ -628,6 +814,8 @@ async fn the_runtime_send_is_a_schedule_origin_submission_stored_once_per_slot()
         db: db.clone(),
         zone: Arc::new(ZONE),
         events: sink,
+        clock: None,
+        gates: None,
     });
     let slot = T0 + MIN;
     let sid = store::submission_id(&s.id, slot);

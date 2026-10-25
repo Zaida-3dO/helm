@@ -68,7 +68,10 @@ fn timing(v: &Value) -> Result<Value, ToolError> {
         "once" => {
             let at = match (o.get("at"), o.get("inSeconds").and_then(Value::as_i64)) {
                 (Some(at), None) => instant(at, "at")?,
-                (None, Some(s)) if s > 0 => helm_core::now_ms() + s * 1000,
+                (None, Some(s)) if s > 0 => s
+                    .checked_mul(1000)
+                    .and_then(|ms| helm_core::now_ms().checked_add(ms))
+                    .ok_or_else(|| refuse("inSeconds is too large."))?,
                 _ => return Err(refuse("A one-time timing needs either at or inSeconds.")),
             };
             out.insert("at".into(), json!(at));
@@ -112,7 +115,10 @@ fn summary(s: &Value) -> Value {
         "title": d["title"],
         "message": d["message"],
         "timing": d["timing"],
+        "kind": d["kind"],
+        "destination": d["destination"],
         "chatId": d["chatId"],
+        "projectId": d["projectId"],
         "chatTitle": s["chatTitle"],
         "state": s["state"],
         "revision": s["revision"],
@@ -165,17 +171,36 @@ async fn create(ctx: ToolCtx, a: Value) -> ToolResult {
         a.get("timing")
             .ok_or_else(|| refuse("timing is required."))?,
     )?;
-    let chat = str_of("chatId").unwrap_or(&ctx.caller_chat_id);
-    let request_id = match &ctx.tool_call_id {
-        Some(id) => format!("tool:{}:{id}", ctx.caller_chat_id),
-        None => format!("tool:{}", uuid::Uuid::new_v4()),
+    let kind = str_of("kind").unwrap_or("prompt");
+    let destination = str_of("destination").unwrap_or("chat");
+    if !["prompt", "reminder"].contains(&kind) || !["chat", "newChat"].contains(&destination) {
+        return Err(refuse(
+            "kind is prompt or reminder; destination is chat or newChat.",
+        ));
+    }
+    let new_chat = kind == "prompt" && destination == "newChat";
+    // A prompt goes into the chat named, or this one. A reminder may link a chat to open from it.
+    let chat = if new_chat {
+        ""
+    } else {
+        str_of("chatId").unwrap_or(&ctx.caller_chat_id)
     };
-    let s = ctx
-        .op(
-            "schedule_create",
-            json!({"requestId": request_id, "title": title, "message": message, "timing": t, "chatId": chat}),
-        )
-        .await?;
+    let mut args = json!({
+        "requestId": match &ctx.tool_call_id {
+            Some(id) => format!("tool:{}:{id}", ctx.caller_chat_id),
+            None => format!("tool:{}", uuid::Uuid::new_v4()),
+        },
+        "title": title, "message": message, "timing": t,
+        "kind": kind, "destination": destination, "chatId": chat,
+    });
+    if let Some(p) = str_of("projectId") {
+        args["projectId"] = json!(p);
+    }
+    // A prompt that lands somewhere other than this chat says which chat made it.
+    if kind == "prompt" && (new_chat || chat != ctx.caller_chat_id) {
+        args["createdByChat"] = json!(ctx.caller_chat_id);
+    }
+    let s = ctx.op("schedule_create", args).await?;
     Ok(json!({"created": summary(&s)}))
 }
 
@@ -185,17 +210,33 @@ async fn update(ctx: ToolCtx, a: Value) -> ToolResult {
     let mut args = Map::new();
     args.insert("scheduleId".into(), json!(id));
     args.insert("revision".into(), current["revision"].clone());
-    for k in ["title", "message", "chatId", "paused"] {
+    for k in [
+        "title",
+        "message",
+        "chatId",
+        "paused",
+        "kind",
+        "destination",
+        "projectId",
+    ] {
         if let Some(v) = a.get(k).filter(|v| !v.is_null()) {
             args.insert(k.into(), v.clone());
         }
+    }
+    let elsewhere = a
+        .get("chatId")
+        .and_then(Value::as_str)
+        .is_some_and(|c| c != ctx.caller_chat_id)
+        || a.get("destination").and_then(Value::as_str) == Some("newChat");
+    if elsewhere && a.get("kind").and_then(Value::as_str) != Some("reminder") {
+        args.insert("createdByChat".into(), json!(ctx.caller_chat_id));
     }
     if let Some(t) = a.get("timing").filter(|v| !v.is_null()) {
         args.insert("timing".into(), timing(t)?);
     }
     if args.len() == 2 {
         return Err(refuse(
-            "Nothing to change: pass title, message, timing, chatId or paused.",
+            "Nothing to change: pass title, message, timing, kind, destination, chatId, projectId or paused.",
         ));
     }
     let s = ctx.op("schedule_update", Value::Object(args)).await?;
@@ -228,7 +269,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         ToolSpec::write(
             "app_create_schedule",
             format!(
-                "Create a schedule that sends a saved message into a chat later, once, every so often or on chosen weekdays. It runs only while Helm is open and awake. The chat defaults to this one.{EXPLICIT}"
+                "Create a schedule that, once, every so often or on chosen weekdays, sends a saved message into a chat (or into a fresh chat in a project), or shows it to the user as a reminder note. It runs only while Helm is open and awake. The chat defaults to this one.{EXPLICIT}"
             ),
             json!({
                 "type": "object",
@@ -236,7 +277,10 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "title": {"type": "string", "description": "A short name, at most 160 characters."},
                     "message": {"type": "string", "description": "What to send, at most 8000 bytes."},
                     "timing": timing_schema(),
-                    "chatId": {"type": "string", "description": "The chat to send into; defaults to this chat."}
+                    "kind": {"type": "string", "enum": ["prompt", "reminder"], "description": "prompt (default) sends the message to a chat; reminder shows it to the user as a note in Helm and sends nothing."},
+                    "destination": {"type": "string", "enum": ["chat", "newChat"], "description": "For a prompt: chat (default) sends into chatId; newChat starts a fresh chat in projectId for each run."},
+                    "chatId": {"type": "string", "description": "The chat to send into; defaults to this chat. For a reminder, the chat to open from the note."},
+                    "projectId": {"type": "string", "description": "The folder project a newChat destination starts its chats in."}
                 },
                 "required": ["title", "message", "timing"],
                 "additionalProperties": false
@@ -250,7 +294,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         ToolSpec::write(
             "app_update_schedule",
             format!(
-                "Change a schedule's name, message, timing or chat, or pause (paused: true) or resume (paused: false) it. A new time on a finished schedule leaves it paused until resumed.{EXPLICIT}"
+                "Change a schedule's name, message, timing, kind, destination or chat, or pause (paused: true) or resume (paused: false) it. A new time on a finished schedule leaves it paused until resumed.{EXPLICIT}"
             ),
             json!({
                 "type": "object",
@@ -259,7 +303,10 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "title": {"type": "string"},
                     "message": {"type": "string"},
                     "timing": timing_schema(),
+                    "kind": {"type": "string", "enum": ["prompt", "reminder"]},
+                    "destination": {"type": "string", "enum": ["chat", "newChat"]},
                     "chatId": {"type": "string"},
+                    "projectId": {"type": "string"},
                     "paused": {"type": "boolean"}
                 },
                 "required": ["scheduleId"],
@@ -366,6 +413,63 @@ mod tests {
         assert_eq!(args["chatId"], "me");
         assert_eq!(args["requestId"], "tool:me:tc1");
         assert!(args["timing"]["at"].as_i64().unwrap() > helm_core::now_ms());
+
+        // A prompt into another chat, or a fresh one, says which chat made it; a reminder does not.
+        let make = |extra: Value| {
+            let mut a = json!({"title": "T", "message": "M", "timing": {"kind": "interval", "seconds": 60}});
+            a.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            a
+        };
+        call(
+            &fake,
+            "app_create_schedule",
+            make(json!({"chatId": "other"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(last(&fake).1["createdByChat"], "me");
+        call(
+            &fake,
+            "app_create_schedule",
+            make(json!({"destination": "newChat", "projectId": "p"})),
+        )
+        .await
+        .unwrap();
+        let (_, a) = last(&fake);
+        assert_eq!(
+            (
+                a["chatId"].as_str(),
+                a["projectId"].as_str(),
+                a["createdByChat"].as_str()
+            ),
+            (Some(""), Some("p"), Some("me"))
+        );
+        call(
+            &fake,
+            "app_create_schedule",
+            make(json!({"kind": "reminder"})),
+        )
+        .await
+        .unwrap();
+        let (_, a) = last(&fake);
+        assert_eq!(
+            (
+                a["kind"].as_str(),
+                a["chatId"].as_str(),
+                a.get("createdByChat")
+            ),
+            (Some("reminder"), Some("me"), None)
+        );
+        assert!(
+            call(&fake, "app_create_schedule", make(json!({"kind": "nag"})))
+                .await
+                .is_err()
+        );
+
+        // A delay too large to add to the clock is refused, not wrapped.
+        assert!(timing(&json!({"kind": "once", "inSeconds": i64::MAX})).is_err());
 
         // ISO times, weekly and interval timings pass through in the op's shape.
         assert_eq!(

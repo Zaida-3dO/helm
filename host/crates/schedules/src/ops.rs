@@ -4,9 +4,12 @@
 //! |---|---|---|
 //! | `schedule_list` | blocking | `{includeInactive?}` to [`ScheduleList`] (schedules newest first, the templates, the host clock) |
 //! | `schedule_runs` | blocking | `{scheduleId}` to [`RunList`] (the newest 20 receipts) |
-//! | `schedule_create` | maintenance | `{requestId, title, message, timing, chatId, template?}` to [`Schedule`]; repeating a request id returns the saved schedule |
-//! | `schedule_update` | maintenance | `{scheduleId, revision, title?, message?, timing?, chatId?, paused?}` to [`Schedule`] |
+//! | `schedule_create` | maintenance | `{requestId, title, message, timing, kind?, destination?, chatId?, projectId?, createdByChat?, template?}` to [`Schedule`]; repeating a request id returns the saved schedule |
+//! | `schedule_update` | maintenance | `{scheduleId, revision, title?, message?, timing?, kind?, destination?, chatId?, projectId?, paused?}` to [`Schedule`] |
 //! | `schedule_cancel` | maintenance | `{scheduleId, revision}` to [`Schedule`] |
+//!
+//! | `reminder_list` | blocking | `{}` to [`ReminderList`] (reminders that came due and are not dismissed) |
+//! | `reminder_dismiss` | maintenance | `{reminderId?}` (all of them when absent) to `{dismissed}` |
 //!
 //! Every change emits the `schedules` event; the pane re-reads on it.
 
@@ -38,7 +41,16 @@ struct CreateArgs {
     title: String,
     message: String,
     timing: Timing,
+    #[serde(default)]
+    kind: ScheduleKind,
+    #[serde(default)]
+    destination: Destination,
+    #[serde(default)]
     chat_id: String,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    created_by_chat: Option<String>,
     #[serde(default)]
     template: Option<String>,
 }
@@ -57,8 +69,27 @@ struct UpdateArgs {
     #[serde(default)]
     chat_id: Option<String>,
     #[serde(default)]
+    kind: Option<ScheduleKind>,
+    #[serde(default)]
+    destination: Option<Destination>,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    created_by_chat: Option<String>,
+    #[serde(default)]
     paused: Option<bool>,
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DismissArgs {
+    #[serde(default)]
+    reminder_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoArgs {}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -80,7 +111,9 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("schedule_runs", OpClass::Blocking, runs)
         .blocking("schedule_create", OpClass::Maintenance, create)
         .blocking("schedule_update", OpClass::Maintenance, update)
-        .blocking("schedule_cancel", OpClass::Maintenance, cancel);
+        .blocking("schedule_cancel", OpClass::Maintenance, cancel)
+        .blocking("reminder_list", OpClass::Blocking, reminder_list)
+        .blocking("reminder_dismiss", OpClass::Maintenance, reminder_dismiss);
 }
 
 fn list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -121,7 +154,11 @@ fn create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                     title: a.title,
                     message: a.message,
                     timing: a.timing,
+                    kind: a.kind,
+                    destination: a.destination,
                     chat_id: a.chat_id,
+                    project_id: a.project_id,
+                    created_by_chat: a.created_by_chat,
                     template: a.template,
                 },
             },
@@ -147,6 +184,10 @@ fn update(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 message: a.message,
                 timing: a.timing,
                 chat_id: a.chat_id,
+                kind: a.kind,
+                destination: a.destination,
+                project_id: a.project_id,
+                created_by_chat: a.created_by_chat,
                 paused: a.paused,
             },
         )
@@ -163,4 +204,23 @@ fn cancel(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .write(|tx| store::cancel(tx, &a.schedule_id, a.revision))?;
     svc.changed();
     to_value(&s)
+}
+
+fn reminder_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    parse::<NoArgs>(args)?;
+    let svc = ctx.services.need::<SchedulesService>()?;
+    let reminders = svc.db.snapshot(store::reminders)?;
+    to_value(&ReminderList { reminders })
+}
+
+fn reminder_dismiss(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: DismissArgs = parse(args)?;
+    let svc = ctx.services.need::<SchedulesService>()?;
+    let n = svc
+        .db
+        .write(|tx| store::dismiss_reminders(tx, a.reminder_id.as_deref()))?;
+    if n > 0 {
+        svc.changed();
+    }
+    Ok(serde_json::json!({"dismissed": n}))
 }

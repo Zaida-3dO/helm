@@ -1,8 +1,10 @@
-//! Schedules: saved prompts sent into an existing chat on a timer.
+//! Schedules: saved prompts sent into a chat on a timer, or reminders shown to the user.
 //!
 //! - They run only while the app is open and awake.
 //! - Runs missed meanwhile coalesce into one.
 //! - A busy chat makes the run wait; it is claimed once the chat is idle.
+//! - A prompt goes to an existing chat or to a fresh chat started in a project for each run. A
+//!   reminder sends nothing: it posts a note the user sees in the app and dismisses.
 //! - They are sent through `helm_chats::submit::host_send` with origin `schedule`, gated, under a
 //!   fixed submission id per (schedule, slot). Never through `chat_send`: that records the send as
 //!   the user's own.
@@ -14,11 +16,10 @@
 //! | [`store`] | the tables, create / update / cancel, the claim, recovery |
 //! | [`scheduler`] | the 5 s tick, the prompt framing and the send |
 //! | [`templates`] | the 30-minute check-in and the noon digest, off until enabled |
-//! | `ops` | `schedule_list`, `schedule_runs`, `schedule_create`, `schedule_update`, `schedule_cancel` |
+//! | `ops` | `schedule_list`, `schedule_runs`, `schedule_create`, `schedule_update`, `schedule_cancel`, `reminder_list`, `reminder_dismiss` |
 //! | [`bindings`] | generated TypeScript in `ui/src/api/generated/schedules/` |
 //!
-//! Not built here (follow-ups): reminder mode and the reminders inbox, `newChat` destinations, the
-//! agent host tools (`app_*_schedule`), run-slot waiting.
+//! Not built here (follow-up): run-slot waiting.
 
 pub mod bindings;
 mod ops;
@@ -49,6 +50,8 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
         db: db.clone(),
         zone: Arc::new(timing::LocalZone),
         events: events.clone(),
+        clock: services.get::<helm_chats::clock::Clock>(),
+        gates: services.get::<helm_chats::seams::ProjectGates>(),
     });
     services.insert(svc.clone());
     match services.get::<helm_chats::ChatRuntime>() {
