@@ -62,11 +62,7 @@ const shape = (items: ListItem[]) =>
       ? `H${i.depth}:${i.project.id}`
       : i.kind === 'chat'
         ? `C${i.depth}:${i.row.chatId}`
-        : i.kind === 'emptyToggle'
-          ? `E${i.count}${i.shown ? '+' : '-'}`
-          : i.kind === 'finishedToggle'
-            ? `F${i.count}${i.shown ? '+' : '-'}`
-            : '--',
+        : '--',
   );
 
 /** A board project; `completed` marks all its work finished on the board. */
@@ -113,149 +109,45 @@ test('a missing parent draws at the top level and a collapsed group hides its co
   assert.deepEqual(shape(buildList(projects, rows, { ...opts, selectedChatId: 'x' })), ['H0:a', 'H0:b', 'H1:c', 'C0:x']);
 });
 
-test('empty projects hide by default, with a "Show N empty projects" row that brings them back', () => {
+test('empty projects never show, with no row to bring them back; a finished project shows while it holds chats', () => {
   const projects = [
     project('full', { kind: 'board', path: null, chatCount: 2 }), // counted by the host, no rows held yet
     project('held'), // count still 0, but a held row stands in
     project('bare', { kind: 'board', path: null }),
     project('parent'), // empty itself, but its child has chats
     project('kid', { parentId: 'parent', chatCount: 1 }),
-    project('shell'), // empty, with an empty child: two hidden
+    project('shell'), // empty, with an empty child: both hidden
     project('shellKid', { parentId: 'shell' }),
     project('pinned', { pinned: true }),
     project('open'),
     project('gone', { kind: 'board', path: null, board: { stale: true } as ProjectNode['board'] }),
     project('arch', { archived: true }),
-  ];
-  const rows = [row('h1', 'held'), row('o1', 'open', { archived: true })];
-  const hidden = buildList(projects, rows, opts);
-  assert.deepEqual(shape(hidden), ['H0:pinned', '--', 'H0:full', 'H0:held', 'C0:h1', 'H0:parent', 'H1:kid', 'E4-']);
-  // The open chat's group shows even when it holds nothing else (here its chat is archived).
-  const open = buildList(projects, rows, { ...opts, selectedChatId: 'o1' });
-  assert.ok(shape(open).includes('H0:open'));
-  assert.deepEqual(shape(open).slice(-1), ['E3-']);
-  // Shown: every empty group draws, in host order; stale and archived groups stay hidden.
-  const shown = buildList(projects, rows, { ...opts, showEmpty: true });
-  assert.deepEqual(shape(shown), [
-    'H0:pinned',
-    '--',
-    'H0:full',
-    'H0:held',
-    'C0:h1',
-    'H0:bare',
-    'H0:parent',
-    'H1:kid',
-    'H0:shell',
-    'H1:shellKid',
-    'H0:open',
-    'E4+',
-  ]);
-  // No toggle row when nothing is empty, nor in the activity or archived views.
-  assert.deepEqual(shape(buildList([project('full', { chatCount: 1 })], [], opts)), ['H0:full']);
-  assert.ok(!shape(buildList(projects, rows, { ...opts, view: 'archived' })).some((s) => s.startsWith('E')));
-  assert.ok(!shape(buildList(projects, rows, { ...opts, view: 'activity' })).some((s) => s.startsWith('E')));
-});
-
-test('finished board projects hide by default, with a "Show N finished projects" row that brings them back', () => {
-  const projects = [
     boardProject('live', false, { chatCount: 1 }),
-    boardProject('done', true, { chatCount: 2 }), // finished, with idle chats: still hidden
-    boardProject('doneBare', true), // finished and empty: counted as finished only
-    project('folder', { chatCount: 1, board: null }), // folder projects are never finished
-    boardProject('gone', true, { chatCount: 1, board: { stale: true } as ProjectNode['board'] }), // stale wins
-    boardProject('goneBare', true, { board: { stale: true } as ProjectNode['board'] }), // stale and empty: never offered
+    boardProject('done', true, { chatCount: 2 }), // finished, with chats: stays in view, says so
+    boardProject('doneRows', true), // finished, rows held though the count is 0
+    boardProject('doneBare', true), // finished and empty: hidden
+    boardProject('donePinned', true, { pinned: true }),
+    boardProject('doneShell', true), // finished and empty, with a live child: drawn as its parent
+    project('doneKid', { parentId: 'doneShell', chatCount: 1 }),
+    boardProject('goneBare', true, { board: { stale: true } as ProjectNode['board'] }), // stale and empty
   ];
-  const rows = [row('l1', 'live'), row('d1', 'done'), row('d2', 'done'), row('g1', 'gone')];
-  assert.deepEqual(shape(buildList(projects, rows, opts)), ['H0:live', 'C0:l1', 'H0:folder', 'H0:gone', 'C0:g1', 'F2-']);
-  const shown = buildList(projects, rows, { ...opts, showFinished: true });
-  assert.deepEqual(shape(shown), ['H0:live', 'C0:l1', 'H0:done', 'C0:d1', 'C0:d2', 'H0:doneBare', 'H0:folder', 'H0:gone', 'C0:g1', 'F2+']);
+  const rows = [row('h1', 'held'), row('o1', 'open', { archived: true }), row('d1', 'doneRows')];
+  const hidden = shape(buildList(projects, rows, opts));
+  assert.deepEqual(hidden, ['H0:pinned', 'H0:donePinned', '--', 'H0:full', 'H0:held', 'C0:h1', 'H0:parent', 'H1:kid', 'H0:live', 'H0:done', 'H0:doneRows', 'C0:d1', 'H0:doneShell', 'H1:doneKid']);
+  // The open chat's group shows even when it holds nothing else (here its chat is archived).
+  assert.ok(shape(buildList(projects, rows, { ...opts, selectedChatId: 'o1' })).includes('H0:open'));
   // A shown finished project says so under its name; a stale one still reads as gone.
+  const shown = buildList(projects, rows, opts);
   const header = (id: string) => shown.find((i): i is Extract<ListItem, { kind: 'header' }> => i.kind === 'header' && i.project.id === id)!;
   assert.equal(header('done').subtitle, 'Finished');
   assert.equal(header('done').height, HEIGHTS.normal.headerSubtitle);
-  assert.equal(header('gone').subtitle, 'Not on the board');
   assert.equal(header('live').subtitle, null);
+  assert.equal(headerSubtitle(project('gone', { board: { stale: true } as ProjectNode['board'] }), new Map()), 'Not on the board');
   assert.equal(headerSubtitle(project('f', { board: null }), new Map()), null);
   // The archived view keeps its own rule: a finished project holding an archived chat shows there.
-  const archived = buildList(projects, [row('a1', 'done', { archived: true })], { ...opts, view: 'archived' });
-  assert.deepEqual(shape(archived), ['H0:done', 'C0:a1']);
-  // An older board sends no counts, so nothing is finished and no row appears.
-  assert.ok(!shape(buildList([boardProject('x', false, { chatCount: 1 })], [], opts)).some((s) => s.startsWith('F')));
-});
-
-test('a finished project stays in view while pinned, open, or holding a chat that wants the user', () => {
-  const finished = (id: string, over: Partial<ProjectNode> = {}) => boardProject(id, true, { chatCount: 1, ...over });
-  const projects = [
-    finished('pinned', { pinned: true }),
-    finished('open'),
-    finished('running'),
-    finished('unread'),
-    finished('interrupted'),
-    finished('pinnedChat'),
-    finished('idle'),
-    finished('parent', { chatCount: 0 }),
-    project('kid', { parentId: 'parent', chatCount: 1 }), // a live child keeps its finished parent drawn
-  ];
-  const rows = [
-    row('o1', 'open'),
-    row('r1', 'running', { status: 'running', attention: 'running' }),
-    row('u1', 'unread', { unread: true, attention: 'unread' }),
-    row('i1', 'interrupted', { status: 'interrupted', attention: 'interrupted' }),
-    row('p1', 'pinnedChat', { pinned: true, attention: 'pinned' }),
-    row('i2', 'idle'),
-    row('k1', 'kid'),
-  ];
-  const items = buildList(projects, rows, { ...opts, selectedChatId: 'o1' });
-  assert.deepEqual(shape(items), [
-    'H0:pinned',
-    '--',
-    'H0:open',
-    'C0:o1',
-    'H0:running',
-    'C0:r1',
-    'H0:unread',
-    'C0:u1',
-    'H0:interrupted',
-    'C0:i1',
-    'H0:pinnedChat',
-    'C0:p1',
-    'H0:parent',
-    'H1:kid',
-    'C0:k1',
-    'F1-',
-  ]);
-  // A busy status alone is enough, even before the row's mark catches up.
-  assert.ok(shape(buildList([finished('busy')], [row('b1', 'busy', { status: 'starting' })], opts)).includes('H0:busy'));
-  // With nothing open, the open chat's project hides again.
-  assert.ok(!shape(buildList(projects, rows, opts)).includes('H0:open'));
-});
-
-test('a project hidden for being finished counts under the finished row only, never also as empty', () => {
-  const projects = [
-    boardProject('doneBare', true), // finished and holds nothing
-    boardProject('doneShell', true), // finished, with an empty child under it
-    project('shellKid', { parentId: 'doneShell' }),
-    boardProject('bare', false), // live and empty
-    project('folderBare'), // a folder project with nothing in it
-    project('emptyParent'), // empty, with a finished project nested under it
-    boardProject('doneUnder', true, { parentId: 'emptyParent' }),
-  ];
-  // Each row offers only what clicking it would draw: the empty child of a hidden finished
-  // project, and the finished child of a hidden empty one, wait for their parent.
-  assert.deepEqual(shape(buildList(projects, [], opts)), ['E3-', 'F2-']);
-  assert.deepEqual(shape(buildList(projects, [], { ...opts, showEmpty: true })), ['H0:bare', 'H0:folderBare', 'H0:emptyParent', 'E3+', 'F3-']);
-  assert.deepEqual(shape(buildList(projects, [], { ...opts, showFinished: true })), ['H0:doneBare', 'H0:doneShell', 'E4-', 'F2+']);
-  assert.deepEqual(shape(buildList(projects, [], { ...opts, showEmpty: true, showFinished: true })), [
-    'H0:doneBare',
-    'H0:doneShell',
-    'H1:shellKid',
-    'H0:bare',
-    'H0:folderBare',
-    'H0:emptyParent',
-    'H1:doneUnder',
-    'E4+',
-    'F3+',
-  ]);
+  assert.deepEqual(shape(buildList(projects, [row('a1', 'done', { archived: true })], { ...opts, view: 'archived' })), ['H0:arch', 'H0:done', 'C0:a1']);
+  // An older board sends no counts, so nothing is finished.
+  assert.deepEqual(shape(buildList([boardProject('x', false, { chatCount: 1 })], [], opts)), ['H0:x']);
 });
 
 test('the drawn chat order skips collapsed groups and parents; Ctrl+Tab steps through it, wrapping', () => {

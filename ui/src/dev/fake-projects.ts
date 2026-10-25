@@ -1,7 +1,7 @@
 // The dev fake host's project and sidebar ops, for checking
 // the sidebar in a plain browser. fakeHost.ts registers it through `registerFakeOps`; chats come
 // from the fake host's own `chat_list`. It seeds a three-level tree of board and folder projects,
-// plus one board project whose work is all finished (hidden behind "Show 1 finished project").
+// plus one board project whose work is all finished (shown only while it holds chats).
 //
 // Dev builds only. fakeHost.ts imports this file, so this file only imports types from it.
 

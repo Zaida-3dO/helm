@@ -32,9 +32,6 @@ describe("live: Agent Standup read sync (L1)", { skip: !enabled || !token || !ur
       const text = await page.textContent(tid("board-sync")).catch(() => "");
       throw new Error(`sync did not reach ok (state ${state}: ${text}): ${(e as Error).message.split("\n")[0]}`);
     });
-    // Empty projects hide by default: reveal them before counting.
-    const toggle = page.locator(tid("sidebar-empty-toggle"));
-    if ((await toggle.count()) > 0 && (await toggle.getAttribute("aria-pressed")) !== "true") await toggle.click();
     const groups = await page.$$eval(tid("sidebar-group", '[data-kind="board"]'), (els) => els.map((e) => (e.querySelector(".sb-name")?.textContent ?? "").trim()));
     assert.ok(groups.length > 0, "at least one board project");
     // Names only, never the token: they are the user's own project titles.

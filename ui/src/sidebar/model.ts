@@ -8,12 +8,12 @@
 // Activity view: every held chat, newest activity first, as two-line rows; no headers or nesting.
 // Archived view: the projects grouping, holding only archived chats, showing only groups that hold
 // one (or are themselves archived).
-// Finished board projects (all their work done on the board) hide in the projects view behind
-// their own "Show N finished projects" row, unless something in them still wants the user.
+// Projects with no chats never show in the projects view (a pinned one, the open chat's project and
+// a parent of a shown project excepted). A finished board project (all its work done on the board)
+// shows only while it still holds chats, so none of them become unreachable.
 
 import type { ProjectNode, SidebarRow, SidebarView } from '../api/projects.ts';
 import { arrange, type ItemRef } from '../itemlinks/folders.ts';
-import { isBusy } from './status.ts';
 
 export const MAX_DEPTH = 2;
 
@@ -39,11 +39,7 @@ export type ListItem =
       itemChip?: ItemRef;
     }
   | { kind: 'itemFolder'; key: string; itemId: string; title: string; members: number; depth: number; height: number; collapsed: boolean }
-  | { kind: 'pinBreak'; key: string; height: number }
-  /** "Show N empty projects" / "Hide N empty projects" at the end of the projects view. */
-  | { kind: 'emptyToggle'; key: string; height: number; count: number; shown: boolean }
-  /** "Show N finished projects" / "Hide N finished projects", after the empty-projects row. */
-  | { kind: 'finishedToggle'; key: string; height: number; count: number; shown: boolean };
+  | { kind: 'pinBreak'; key: string; height: number };
 
 export interface BuildOptions {
   view: SidebarView;
@@ -54,21 +50,12 @@ export interface BuildOptions {
   selectedChatId: string | null;
   /** Item links: the item each chat shows, and the item folders the user collapsed. */
   itemLinks?: { refs: ReadonlyMap<string, ItemRef>; collapsed: ReadonlySet<string> };
-  /** Show projects that hold no chats (hidden by default; extended to every kind). */
-  showEmpty?: boolean;
-  /** Show board projects whose work is all finished (hidden by default). */
-  showFinished?: boolean;
 }
 
 /** A board project whose work is all finished on the board. A stale or archived one is handled
  *  by those rules instead, and a folder project never is. */
 export function isFinished(p: ProjectNode): boolean {
   return p.board?.completed === true && !p.board.stale && !p.archived;
-}
-
-/** A chat that keeps a finished project in view: running, waiting on the user, or pinned. */
-function wantsUser(r: SidebarRow): boolean {
-  return isBusy(r.status) || r.attention !== null || r.pinned || r.unread;
 }
 
 /** Per-row drawn depth and the children each row holds, for one group's held rows. */
@@ -164,34 +151,24 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
   // Which groups to draw: in the archived view only those holding an archived chat (or archived
   // themselves, or with such a descendant). A stale board group with no chats is dropped. In the
   // projects view a group with no chats (its host count and the rows held both zero) and no shown
-  // child is hidden unless it is pinned or holds the open chat; "Show N empty projects" brings
-  // those back. A finished board project is hidden whether or not it holds chats, unless it is
-  // pinned, holds the open chat or a chat that wants the user, or has a shown child; "Show N
-  // finished projects" brings those back. Each hidden group is counted under one row only.
+  // child is hidden unless it is pinned or holds the open chat. A finished board project follows
+  // the same rule, so it stays in view for as long as it holds chats.
   const memo = new Map<string, boolean>();
-  const base = (p: ProjectNode, guard: Set<string> = new Set()): boolean => {
+  const visible = (p: ProjectNode, guard: Set<string> = new Set()): boolean => {
     const known = memo.get(p.id);
     if (known !== undefined) return known;
     if (guard.has(p.id)) return false;
     guard.add(p.id);
     const own = (byGroup.get(p.id)?.length ?? 0) > 0;
-    const child = (kids.get(p.id) ?? []).some((k) => base(k, guard));
+    const child = (kids.get(p.id) ?? []).some((k) => visible(k, guard));
     let v: boolean;
     if (archivedView) v = own || child || p.archived;
     else if (p.archived) v = false;
     else if (p.board?.stale) v = own || child || p.id === selectedGroup;
-    else if (isFinished(p)) v = child || p.pinned || p.id === selectedGroup || (byGroup.get(p.id) ?? []).some(wantsUser);
     else v = own || child || p.chatCount > 0 || p.pinned || p.id === selectedGroup;
     memo.set(p.id, v);
     return v;
   };
-  /** Hidden only for being finished: shown when the user asks for finished projects. */
-  const finishedOnly = (p: ProjectNode) => !archivedView && isFinished(p) && !base(p);
-  /** Hidden only for being empty: shown when the user asks for empty projects. */
-  const emptyOnly = (p: ProjectNode) => !archivedView && !p.archived && !p.board?.stale && !isFinished(p) && !base(p);
-  const visibleWith = (p: ProjectNode, showEmpty: boolean, showFinished: boolean): boolean =>
-    base(p) || (showEmpty && emptyOnly(p)) || (showFinished && finishedOnly(p));
-  const visible = (p: ProjectNode): boolean => visibleWith(p, o.showEmpty === true, o.showFinished === true);
 
   const out: ListItem[] = [];
   const emitGroup = (p: ProjectNode, depth: number, path: Set<string>) => {
@@ -252,27 +229,6 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     for (const row of orphans) {
       out.push({ kind: 'chat', key: row.chatId, row, depth: 0, height: h.chat, children: 0, expanded: false, twoLine: false });
     }
-  }
-
-  // Count the groups each row would bring back, walking the tree as it would draw with that row's
-  // groups shown and the other row as it stands (a group under an archived, stale or still hidden
-  // parent never draws, so it is not counted).
-  if (!archivedView) {
-    const count = (hiddenFor: (p: ProjectNode) => boolean, showEmpty: boolean, showFinished: boolean) => {
-      let n = 0;
-      const walk = (p: ProjectNode, path: Set<string>) => {
-        if (path.has(p.id) || !visibleWith(p, showEmpty, showFinished)) return;
-        if (hiddenFor(p)) n += 1;
-        const next = new Set(path).add(p.id);
-        for (const k of kids.get(p.id) ?? []) walk(k, next);
-      };
-      for (const p of roots) walk(p, new Set());
-      return n;
-    };
-    const empty = count(emptyOnly, true, o.showFinished === true);
-    if (empty > 0) out.push({ kind: 'emptyToggle', key: 'empty-toggle', height: h.chat, count: empty, shown: o.showEmpty === true });
-    const finished = count(finishedOnly, o.showEmpty === true, true);
-    if (finished > 0) out.push({ kind: 'finishedToggle', key: 'finished-toggle', height: h.chat, count: finished, shown: o.showFinished === true });
   }
   return out;
 }

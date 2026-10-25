@@ -13,8 +13,6 @@ breaks those checks, so change them only together with the checks. Everything el
 | `primary-folder`, `primary-folder-path`, `primary-folder-save`, `primary-folder-error` | The Primary folder… dialog | |
 | `chat-item` | One chat row in the sidebar | `data-chat-id`, `data-status`, `data-depth` (chat nesting 0–2), `data-group` (the project it is shown under) |
 | `sidebar-group` | One project header in the sidebar | `data-project-id`, `data-kind` (`folder` `board`), `data-depth` (project nesting 0–2) |
-| `sidebar-empty-toggle` | "Show N empty projects" / "Hide N empty projects" row at the end of the projects view | `aria-pressed` (empty projects shown) |
-| `sidebar-finished-toggle` | "Show N finished projects" / "Hide N finished projects" row after it (board projects whose work is all finished) | `aria-pressed` (finished projects shown) |
 | `sidebar-titlestrip`, `sidebar-beacon`, `workspace-status` | The sidebar's 48 px title strip, the beacon (mark, wordmark, chevron) and its Workspace status popover | beacon: `aria-expanded` |
 | `nav-search`, `nav-attention` | The sidebar's Search chats and Needs attention nav entries | |
 | `attention-inbox`, `attention-card`, `attention-snooze-menu` | The Needs attention dialog, one card in it, and a card's Snooze menu | card: `data-chat-id`, `data-group` (`needsYou` `stalled` `unread`) |

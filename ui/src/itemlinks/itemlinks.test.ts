@@ -22,8 +22,8 @@ const group = (): ProjectNode => ({ id: 'g', kind: 'folder', name: 'G', path: nu
 
 test('the title is the board title, else the first 8 characters of the id', () => {
   assert.equal(itemTitle({ itemId: A, itemTitle: 'Usage meter' }), 'Usage meter');
-  assert.equal(itemTitle({ itemId: A }), 'Item demo0001');
-  assert.equal(itemTitle({ itemId: A, itemTitle: '  ' }), 'Item demo0001');
+  assert.equal(itemTitle({ itemId: A }), 'Linked item');
+  assert.equal(itemTitle({ itemId: A, itemTitle: '  ' }), 'Linked item');
 });
 
 test('a chat shows the item it is main chat of, else its newest link', () => {
@@ -71,7 +71,7 @@ test('buildList draws the folder as one list item and keeps chat heights', () =>
   assert.deepEqual(list.map((i) => i.kind), ['header', 'itemFolder', 'chat', 'chat', 'chat']);
   const folder = list[1] as { members: number; title: string; height: number };
   assert.equal(folder.members, 2);
-  assert.equal(folder.title, 'Item demo0001');
+  assert.equal(folder.title, 'Linked item');
   assert.equal(folder.height, (list[2] as { height: number }).height);
   const none = buildList([group()], rows, { view: 'projects', compact: false, expandedChats: new Set(), selectedChatId: null });
   assert.deepEqual(none.map((i) => i.kind), ['header', 'chat', 'chat', 'chat'], 'no links: the list is as before');

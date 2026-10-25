@@ -34,14 +34,6 @@ async function boardGroups(): Promise<{ id: string; title: string; depth: string
   );
 }
 
-/** Empty projects hide by default; the fixture's board projects hold no
- *  chats, so reveal them before counting groups. The choice is remembered for the session. */
-async function showEmptyProjects(p = page()): Promise<void> {
-  const t = p.locator(tid("sidebar-empty-toggle"));
-  await t.waitFor({ timeout: 20_000 });
-  if ((await t.getAttribute("aria-pressed")) !== "true") await t.click();
-}
-
 async function waitSync(state: string): Promise<void> {
   await page().waitForSelector(tid("board-sync", `[data-state="${state}"]`), { state: "attached", timeout: 30_000 });
 }
@@ -59,7 +51,6 @@ describe("sidebar: Agent Standup sync, groups and nesting", { timeout: 10 * 60_0
   test("S1: one sync shows the board's projects as top-level groups, in order, read-only", async () => {
     try {
       await waitSync("ok");
-      await showEmptyProjects();
       const fixtures = fixtureProjects();
       await page().waitForFunction((n) => document.querySelectorAll('[data-testid="sidebar-group"][data-kind="board"]').length >= n, fixtures.length, { timeout: 20_000 });
       const groups = await boardGroups();

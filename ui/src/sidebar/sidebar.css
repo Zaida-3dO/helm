@@ -448,25 +448,6 @@
   background: var(--sb-surface-alt);
 }
 
-/* "Show N empty projects" and "Show N finished projects": quiet rows at the end of the projects
-   view, styled like the list's other empty-state buttons (12 px muted text, text colour on hover). */
-.sb-root .sb-empty-toggle {
-  display: flex;
-  align-items: center;
-  width: calc(100% - 16px);
-  height: var(--sb-chat-h);
-  margin: 0 8px;
-  padding: 0 12px;
-  border-radius: 6px;
-  font-size: 12px;
-  color: var(--sb-muted);
-}
-
-.sb-root .sb-empty-toggle:hover {
-  color: var(--sb-text);
-  background: var(--sb-hover);
-}
-
 .sb-pin-break {
   margin: 6px 10px 0;
   border-top: 1px solid var(--sb-line);
@@ -847,6 +828,8 @@
 
 .sb-chat-wrap:hover .sb-age,
 .sb-chat-wrap:focus-within .sb-age,
+.sb-chat-wrap:hover .sb-item-chip,
+.sb-chat-wrap:focus-within .sb-item-chip,
 .sb-chat-wrap:hover .sb-agg,
 .sb-chat-wrap:focus-within .sb-agg {
   display: none;

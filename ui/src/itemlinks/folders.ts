@@ -11,15 +11,17 @@ import type { SidebarRow } from '../api/projects.ts';
 /** What a chat shows for its item. */
 export interface ItemRef {
   itemId: string;
-  /** The board title, or the first 8 characters of the id. */
+  /** The board title, or "Linked item" until the title is known. */
   title: string;
+  /** Whether `title` is a real board title (the chip shows an icon alone when it is not). */
+  named: boolean;
   isMain: boolean;
 }
 
 export const SHORT = 8;
 
 export function itemTitle(l: { itemId: string; itemTitle?: string }): string {
-  return l.itemTitle?.trim() ? l.itemTitle : `Item ${l.itemId.slice(0, SHORT)}`;
+  return l.itemTitle?.trim() ? l.itemTitle : 'Linked item';
 }
 
 /**
@@ -33,7 +35,7 @@ export function refsByChat(links: readonly ItemLink[]): Map<string, ItemRef> {
     if (!cur || (l.isMain && !cur.isMain) || (l.isMain === cur.isMain && l.linkedAt > cur.linkedAt)) best.set(l.chatId, l);
   }
   const out = new Map<string, ItemRef>();
-  for (const [chat, l] of best) out.set(chat, { itemId: l.itemId, title: itemTitle(l), isMain: l.isMain });
+  for (const [chat, l] of best) out.set(chat, { itemId: l.itemId, title: itemTitle(l), named: !!l.itemTitle?.trim(), isMain: l.isMain });
   return out;
 }
 

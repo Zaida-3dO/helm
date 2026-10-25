@@ -5,6 +5,7 @@ import { useEffect, useSyncExternalStore } from 'react';
 import { itemLinkOps } from '../api/itemlinks.ts';
 import { useShell } from '../shell/context.ts';
 import { Button, Dialog, toast } from '../ui/index.ts';
+import { IconLink } from '../ui/icons.tsx';
 import type { ItemRef } from './folders.ts';
 import { itemLinksStoreFor, itemPicker, openItem } from './store.ts';
 import './itemlinks.css';
@@ -40,14 +41,16 @@ export function ItemChip({ item }: { item: ItemRef }) {
       tabIndex={-1}
       data-testid="item-chip"
       data-item-id={item.itemId}
-      title={`${item.title}: open this item`}
+      data-named={item.named}
+      aria-label={item.named ? undefined : 'Linked board item'}
+      title={item.named ? `${item.title}: open this item` : `Linked board item ${item.itemId.slice(0, 8)}: open it`}
       onClick={(e) => {
         e.stopPropagation();
         open(item.itemId);
       }}
       onPointerDown={(e) => e.stopPropagation()}
     >
-      {item.title.length > 14 ? `${item.title.slice(0, 13)}…` : item.title}
+      {!item.named ? <IconLink size={11} /> : item.title.length > 14 ? `${item.title.slice(0, 13)}…` : item.title}
     </span>
   );
 }
@@ -97,7 +100,7 @@ export function ItemPickerHost() {
   };
   const ops = itemLinkOps(shell.api);
   return (
-    <Dialog title={cur.itemTitle ?? `Item ${cur.itemId.slice(0, 8)}`} onClose={close} testId="item-picker" intro="This item has several chats. Pick one to open.">
+    <Dialog title={cur.itemTitle?.trim() || 'Linked item'} onClose={close} testId="item-picker" intro="This item has several chats. Pick one to open.">
       <ul className="item-picker-list">
         {cur.candidates.map((c) => (
           <li key={c.chatId}>
