@@ -1754,7 +1754,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "helm-actions"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "helm-core",
  "helm-ipc",
@@ -1767,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "helm-afk"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "helm-chats",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "helm-app"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "env_logger",
  "helm-actions",
@@ -1822,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "helm-chats"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "helm-core",
@@ -1844,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "helm-consent"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "helm-core",
  "helm-hosttools",
@@ -1862,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "helm-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "getrandom 0.3.4",
@@ -1883,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "helm-governor"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "helm-chats",
  "helm-core",
@@ -1901,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "helm-hosttools"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "helm-core",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "helm-ipc"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "log",
  "serde",
@@ -1929,7 +1929,7 @@ dependencies = [
 
 [[package]]
 name = "helm-itemlinks"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "helm-core",
  "helm-hosttools",
@@ -1944,7 +1944,7 @@ dependencies = [
 
 [[package]]
 name = "helm-mcp"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "helm-core",
  "helm-hosttools",
@@ -1964,7 +1964,7 @@ dependencies = [
 
 [[package]]
 name = "helm-panel"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "helm-chats",
@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "helm-platform"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "keyring",
  "log",
@@ -1998,7 +1998,7 @@ dependencies = [
 
 [[package]]
 name = "helm-projects"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "helm-chats",
  "helm-core",
@@ -2017,7 +2017,7 @@ dependencies = [
 
 [[package]]
 name = "helm-relay"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "futures-util",
  "helm-afk",
@@ -2040,7 +2040,7 @@ dependencies = [
 
 [[package]]
 name = "helm-schedules"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "helm-chats",
@@ -2059,7 +2059,7 @@ dependencies = [
 
 [[package]]
 name = "helm-search"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "helm-chats",
  "helm-core",
@@ -2073,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "helm-shell"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "helm-chats",
  "helm-core",
@@ -2090,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "helm-standup"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "log",
  "serde",
@@ -2100,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "helm-terminal"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "helm-core",
  "helm-ipc",
@@ -2117,7 +2117,7 @@ dependencies = [
 
 [[package]]
 name = "helm-updates"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "helm-core",
  "helm-ipc",
@@ -2132,7 +2132,7 @@ dependencies = [
 
 [[package]]
 name = "helm-usage"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "helm-core",
  "helm-hosttools",
@@ -2148,7 +2148,7 @@ dependencies = [
 
 [[package]]
 name = "helm-workers"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "helm-core",
  "hex",
@@ -2167,7 +2167,7 @@ dependencies = [
 
 [[package]]
 name = "helm-workflow"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "helm-chats",
  "helm-consent",
