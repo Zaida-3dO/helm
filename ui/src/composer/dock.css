@@ -21,6 +21,13 @@
   }
 }
 
+/* Inside the composer dock the activity line already shares the dock's column and gutters. */
+.chat-view .composer-dock .activity-dock {
+  max-width: none;
+  margin: 0;
+  padding: 0 0 8px;
+}
+
 /* ---- The activity dock ---- */
 .activity-dock {
   position: relative;

@@ -1,4 +1,4 @@
-// One chat: transcript, activity dock, interaction cards, queue and composer.
+// One chat: transcript, interaction cards, queue, activity dock and composer.
 
 import { flushSync } from 'react-dom';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
@@ -294,7 +294,6 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         onFollowChange={(f) => store.setKeep(chatId, f ? 'newest' : 'oldest')}
       />
       </div>
-      {thread && <ActivityDock chat={chat} thread={thread} turnStartedAt={turnStartedAt} onStopTool={stopTool} rows={view.hasNewer ? undefined : view.rows} />}
       {thread?.interactions.map((i) => (
         <InteractionCard key={i.id} interaction={i} onAnswer={(id, a) => void ops.answer(chatId, id, a).catch(() => undefined)} />
       ))}
@@ -324,6 +323,8 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       ))}
       <QueueList pending={view.pending} thread={thread} running={busy} ops={ops} chatId={chatId} />
       </div>
+      {/* The activity line sits directly on the box, below the waiting and queued messages. */}
+      {thread && <ActivityDock chat={chat} thread={thread} turnStartedAt={turnStartedAt} onStopTool={stopTool} rows={view.hasNewer ? undefined : view.rows} />}
       <Composer
         recall={recallPrompts(view.rows)}
         autocomplete={autocompleteOn}
