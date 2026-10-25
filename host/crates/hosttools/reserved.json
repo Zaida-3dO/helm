@@ -32,6 +32,7 @@
     "app_open_chat",
     "app_orchestrator_on",
     "app_read_chat",
+    "app_register_checkout",
     "app_reload_configuration",
     "app_remove_mcp_server",
     "app_repo_locations",
@@ -58,7 +59,8 @@
     "app_workflow",
     "app_workflow_consent",
     "app_workflow_report",
-    "app_workflow_take_over"
+    "app_workflow_take_over",
+    "app_worktree_status"
   ],
   "dropped": [
     "app_handback_result",

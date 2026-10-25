@@ -1884,6 +1884,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "helm-gitshim"
+version = "0.3.0"
+dependencies = [
+ "helm-worktrees",
+ "tempfile",
+]
+
+[[package]]
 name = "helm-governor"
 version = "0.3.0"
 dependencies = [
@@ -2007,6 +2015,8 @@ dependencies = [
  "helm-ipc",
  "helm-platform",
  "helm-standup",
+ "helm-workers",
+ "helm-worktrees",
  "log",
  "rusqlite",
  "serde",
@@ -2211,6 +2221,14 @@ dependencies = [
  "ts-rs",
  "ureq",
  "uuid",
+]
+
+[[package]]
+name = "helm-worktrees"
+version = "0.3.0"
+dependencies = [
+ "helm-platform",
+ "tempfile",
 ]
 
 [[package]]

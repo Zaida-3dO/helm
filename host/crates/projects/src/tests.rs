@@ -1123,3 +1123,299 @@ fn a_long_reply_is_cut_at_the_excerpt_limit_with_an_ellipsis() {
         "short reply"
     );
 }
+
+// ---- Repositories and worktrees ------------------------------------------------------------
+
+/// A folder that looks like a clone to Helm: `.git/config` with an origin, no git needed.
+fn fake_clone(root: &std::path::Path, name: &str, origin: Option<&str>) -> std::path::PathBuf {
+    let dir = root.join(name);
+    std::fs::create_dir_all(dir.join(".git/refs/remotes/origin")).unwrap();
+    let config = origin
+        .map(|u| format!("[remote \"origin\"]\n\turl = {u}\n"))
+        .unwrap_or_default();
+    std::fs::write(dir.join(".git/config"), config).unwrap();
+    std::fs::write(
+        dir.join(".git/refs/remotes/origin/HEAD"),
+        "ref: refs/remotes/origin/main\n",
+    )
+    .unwrap();
+    dir
+}
+
+fn repo_ctx(db: Database, profile: &std::path::Path) -> helm_ipc::OpCtx {
+    let mut services = helm_ipc::Services::new();
+    services.insert(std::sync::Arc::new(db));
+    services.insert(std::sync::Arc::new(helm_core::profile::Profile {
+        dir: profile.to_path_buf(),
+        hash: String::new(),
+    }));
+    helm_ipc::OpCtx {
+        services: std::sync::Arc::new(services),
+        events: std::sync::Arc::new(helm_ipc::NullSink),
+    }
+}
+
+fn chat_in_db(ctx: &helm_ipc::OpCtx, cwd: &str) -> String {
+    let db = ctx.services.need::<Database>().unwrap();
+    chat_in(&db, cwd, 9)
+}
+
+/// The list fills itself from folder projects that are clones, joins clones of one remote, keeps
+/// removed folders out, compares revisions on edit, locks a repository whose worktrees are off,
+/// and tells a chat where it stands.
+#[test]
+fn repositories_fill_from_clones_and_edits_are_checked_and_status_reports_the_neighbours() {
+    use crate::repo_ops::*;
+    use serde_json::json;
+
+    let (dir, db) = temp_db();
+    let code = tempfile::tempdir().unwrap();
+    let a = fake_clone(
+        code.path(),
+        "helm",
+        Some("https://github.com/Owner/Helm.git"),
+    );
+    let a2 = fake_clone(
+        code.path(),
+        "helm-two",
+        Some("git@github.com:owner/helm.git"),
+    );
+    let local = fake_clone(code.path(), "scratch", None);
+    let gitlab = fake_clone(code.path(), "other", Some("https://gitlab.com/o/x.git"));
+    let plain = code.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    let linked = code.path().join("linked");
+    std::fs::create_dir(&linked).unwrap();
+    std::fs::write(linked.join(".git"), "gitdir: nowhere").unwrap();
+    for (i, p) in [&a, &a2, &local, &gitlab, &plain, &linked]
+        .iter()
+        .enumerate()
+    {
+        folder(&db, &format!("p{i}"), Some(&p.to_string_lossy()));
+    }
+    let chat = chat_in(&db, &a.to_string_lossy(), 5);
+    let neighbour = chat_in(&db, &a.join("sub").to_string_lossy(), 6);
+    let profile = dir.path().join("profile");
+    std::fs::create_dir_all(&profile).unwrap();
+    let ctx = repo_ctx(db, &profile);
+    let off_file = profile.join(helm_worktrees::offlist::FILE_NAME);
+
+    // Filled from clones: two clones of one remote share an entry; no remote names it after the
+    // folder; other hosts keep no remote; a plain folder and a linked worktree are not clones.
+    let list = repo_list(&ctx, json!({"chatId": chat})).unwrap();
+    let ids: Vec<&str> = list["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["repoId"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["github.com/Owner/Helm", "other", "scratch"]);
+    let helm = &list["entries"][0];
+    assert_eq!(helm["locations"].as_array().unwrap().len(), 2);
+    assert_eq!(helm["remoteUrl"], "https://github.com/Owner/Helm");
+    assert_eq!(helm["defaultBranch"], "main");
+    assert_eq!(helm["protectedBases"], json!(["main"]));
+    assert!(
+        list["entries"][1].get("remoteUrl").is_none(),
+        "only github.com is recognised"
+    );
+    assert_eq!(list["chatRepo"]["repoId"], "github.com/Owner/Helm");
+    let count = |v: serde_json::Value| {
+        repo_list(&ctx, v).unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(
+        count(json!({"path": a.join("src").to_string_lossy()})),
+        1,
+        "a path inside a checkout finds its repository"
+    );
+    assert_eq!(count(json!({"query": "SCRATCH"})), 1);
+    assert_eq!(count(json!({})), 3, "a second fill adds nothing");
+
+    // Edits: stale revision, bad remote, a duplicate remote, a missing or listed folder, success.
+    let rev = helm["revision"].as_i64().unwrap();
+    let id = "github.com/Owner/Helm";
+    let code_of = |v: serde_json::Value| repo_update(&ctx, v).unwrap_err().code;
+    let remote =
+        |rev: i64, url: &str| json!({"repoId": id, "expectedRevision": rev, "remoteUrl": url});
+    assert_eq!(
+        code_of(remote(rev + 5, "https://github.com/o/z")),
+        "conflict"
+    );
+    assert_eq!(
+        code_of(remote(rev, "https://user:pw@gitlab.com/o/z")),
+        "bad_args"
+    );
+    assert_eq!(
+        code_of(
+            json!({"repoId": "scratch", "expectedRevision": 0, "remoteUrl": "https://github.com/owner/helm"})
+        ),
+        "conflict"
+    );
+    let add = |p: &std::path::Path| json!({"repoId": id, "expectedRevision": rev, "addLocations": [{"path": p.to_string_lossy(), "label": "extra"}]});
+    assert_eq!(code_of(add(&code.path().join("missing"))), "bad_args");
+    assert_eq!(code_of(add(&local)), "conflict");
+    let extra = code.path().join("extra");
+    std::fs::create_dir(&extra).unwrap();
+    let e = repo_update(&ctx, add(&extra)).unwrap();
+    assert_eq!(e["locations"].as_array().unwrap().len(), 3);
+    assert_eq!(e["revision"], rev + 1);
+
+    // Removing an entry keeps its folders from coming back on the next fill.
+    let scratch = &repo_list(&ctx, json!({"repoId": "scratch"})).unwrap()["entries"][0];
+    repo_update(
+        &ctx,
+        json!({"repoId": "scratch", "expectedRevision": scratch["revision"], "remove": true}),
+    )
+    .unwrap();
+    assert_eq!(count(json!({})), 2);
+
+    // Worktrees off: the checkouts are locked (the remote can still change) and the off list
+    // names them for the git stand-in.
+    let e = repo_set_worktrees(&ctx, json!({"repoId": id, "allowed": false})).unwrap();
+    assert_eq!(e["worktreesAllowed"], false);
+    let rev = e["revision"].as_i64().unwrap();
+    assert_eq!(
+        code_of(json!({"repoId": id, "expectedRevision": rev, "remove": true})),
+        "refused"
+    );
+    assert_eq!(
+        code_of(
+            json!({"repoId": id, "expectedRevision": rev, "removeLocationIds": [e["locations"][0]["id"]]})
+        ),
+        "refused"
+    );
+    repo_update(&ctx, remote(rev, "https://github.com/Owner/Helm")).unwrap();
+    let off = helm_worktrees::offlist::read(&off_file);
+    assert_eq!(off.len(), 3);
+    assert!(off.iter().all(|l| l.repo_id == id));
+
+    // Status: a chat in an off repository is told so, with its neighbours; back on, it gets the
+    // path to use and the free checkouts of the same repository.
+    let s = worktree_status(&ctx, json!({"chatId": chat})).unwrap();
+    assert_eq!(s["worktrees"], "off");
+    assert_eq!(s["repo"]["repoId"], id);
+    assert_eq!(s["otherChats"][0]["chatId"], neighbour);
+    assert!(s["enforcement"].as_str().unwrap().contains("refused"));
+    repo_set_worktrees(&ctx, json!({"repoId": id, "allowed": true})).unwrap();
+    assert!(helm_worktrees::offlist::read(&off_file).is_empty());
+    let s = worktree_status(&ctx, json!({"chatId": chat})).unwrap();
+    assert_eq!(s["worktrees"], "allowed");
+    assert!(
+        s["suggestedPath"].as_str().unwrap().ends_with("<name>"),
+        "{s}"
+    );
+    let free: Vec<&str> = s["freeCheckouts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        free.iter().any(|p| p.contains("helm-two")) && !free.iter().any(|p| p.ends_with("helm")),
+        "{free:?}"
+    );
+    assert_eq!(s["claudeWorktreeTools"], false);
+
+    // Registering: a linked worktree is refused, a listed folder is a no-op, a new clone joins
+    // by remote or becomes its own entry, and an off repository takes no new checkout.
+    let in_linked = chat_in_db(&ctx, &linked.to_string_lossy());
+    assert_eq!(
+        repo_register(&ctx, json!({"chatId": in_linked}))
+            .unwrap_err()
+            .code,
+        "refused"
+    );
+    assert_eq!(
+        repo_register(&ctx, json!({"chatId": chat})).unwrap()["result"],
+        "alreadyListed"
+    );
+    let a3 = fake_clone(
+        code.path(),
+        "helm-three",
+        Some("https://github.com/owner/helm"),
+    );
+    let c3 = chat_in_db(&ctx, &a3.to_string_lossy());
+    let added = repo_register(&ctx, json!({"chatId": c3})).unwrap();
+    assert_eq!(
+        (added["result"].as_str(), added["repoId"].as_str()),
+        (Some("added"), Some(id))
+    );
+    let fresh = fake_clone(code.path(), "fresh", None);
+    let c4 = chat_in_db(&ctx, &fresh.to_string_lossy());
+    assert_eq!(
+        repo_register(&ctx, json!({"chatId": c4})).unwrap()["result"],
+        "created"
+    );
+    repo_set_worktrees(&ctx, json!({"repoId": id, "allowed": false})).unwrap();
+    let a4 = fake_clone(
+        code.path(),
+        "helm-four",
+        Some("https://github.com/owner/helm"),
+    );
+    let c5 = chat_in_db(&ctx, &a4.to_string_lossy());
+    assert_eq!(
+        repo_register(&ctx, json!({"chatId": c5})).unwrap_err().code,
+        "refused"
+    );
+
+    // The worktree root: the default, a custom one, and one too long to hold a worktree.
+    let default_root = worktree_config(&ctx, json!({})).unwrap()["root"].clone();
+    assert_eq!(
+        default_root,
+        helm_worktrees::rules::default_root()
+            .to_string_lossy()
+            .as_ref()
+    );
+    let custom = code.path().join("w");
+    let set = worktree_config(&ctx, json!({"root": custom.to_string_lossy()})).unwrap();
+    assert_eq!(set["root"], custom.to_string_lossy().as_ref());
+    let too_long = code
+        .path()
+        .join("a-folder-name-that-is-much-too-long-for-a-worktree-root");
+    assert_eq!(
+        worktree_config(&ctx, json!({"root": too_long.to_string_lossy()}))
+            .unwrap_err()
+            .code,
+        "bad_args"
+    );
+    assert_eq!(
+        worktree_config(&ctx, json!({"root": ""})).unwrap()["root"],
+        default_root
+    );
+}
+
+/// The git stand-in reaches a chat's launch only while a repository has worktrees off.
+#[test]
+fn the_git_stand_in_is_on_the_path_only_while_a_repository_is_off() {
+    use helm_workers::contrib::{LaunchContributor, LaunchCtx};
+    let d = tempfile::tempdir().unwrap();
+    let shim = d.path().join("helm-git.exe");
+    std::fs::write(&shim, b"not really a program").unwrap();
+    let guard = crate::guard::GitGuard::new(d.path().to_path_buf()).with_shim_source(shim);
+    let ctx = LaunchCtx {
+        chat_id: "c",
+        cwd: "C:/w",
+    };
+    let list = d.path().join(helm_worktrees::offlist::FILE_NAME);
+    assert!(
+        guard.contribute(&ctx).is_empty(),
+        "nothing is off: the launch is untouched"
+    );
+    std::fs::write(&list, "r\tC:/code/r\n").unwrap();
+    let x = guard.contribute(&ctx);
+    assert_eq!(x.path_prepend, [d.path().join("agent-bin")]);
+    let installed = if cfg!(windows) { "git.exe" } else { "git" };
+    assert!(d.path().join("agent-bin").join(installed).is_file());
+    assert!(x
+        .env
+        .iter()
+        .any(|(k, v)| k == "HELM_WORKTREE_OFF_LIST" && v.ends_with("worktrees-off.tsv")));
+    std::fs::write(&list, "").unwrap();
+    assert!(
+        guard.contribute(&ctx).is_empty(),
+        "switched back on: untouched again"
+    );
+}

@@ -3,9 +3,9 @@
 //! They act through the projects crate's own `api` ops ([`ToolCtx::op`]), so its rules (paths,
 //! archive, revisions) apply unchanged and this crate needs no dependency on it.
 //!
-//! Helm has no repository registry (no saved remotes or declared checkouts), so
-//! `app_repo_locations` reports each folder project as a local checkout, and `app_update_repo`
-//! answers that the registry is not built yet and changes nothing.
+//! The repository list lives in the projects crate (`repo_*` ops): `app_repo_locations` reads it,
+//! `app_update_repo` edits an entry, `app_register_checkout` adds the chat's own folder and
+//! `app_worktree_status` says where the chat stands and what the repository allows.
 
 use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::spec::{Condition, ToolSpec};
@@ -135,46 +135,27 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
 }
 
 async fn repo_locations(ctx: ToolCtx, a: Value) -> ToolResult {
-    let path = a.get("path").and_then(Value::as_str).map(str::to_lowercase);
-    let q = a
-        .get("query")
-        .and_then(Value::as_str)
-        .map(str::to_lowercase);
-    let entries: Vec<Value> = all_projects(&ctx, false)
-        .await?
-        .iter()
-        .filter(|p| p["path"].is_string())
-        .filter(|p| {
-            let pp = p["path"].as_str().unwrap_or("").to_lowercase();
-            path.as_ref().is_none_or(|x| &pp == x)
-                && q.as_ref().is_none_or(|x| {
-                    pp.contains(x.as_str())
-                        || p["name"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_lowercase()
-                            .contains(x.as_str())
-                })
-        })
-        .take(50)
-        .map(|p| {
-            json!({
-                "projectId": p["id"],
-                "name": p["name"],
-                "locations": [{"kind": "local", "path": p["path"]}],
-            })
-        })
-        .collect();
-    Ok(json!({
-        "entries": entries,
-        "note": "Helm has no saved repository registry yet: each folder project is listed as a local checkout.",
-    }))
+    let mut args = a;
+    args["chatId"] = json!(ctx.caller_chat_id);
+    ctx.op("repo_list", args).await
 }
 
-fn update_repo(_ctx: &ToolCtx, _a: Value) -> ToolResult {
-    Err(ToolError::refused(
-        "Helm has no saved repository registry yet, so there is nothing to change; add or move a project folder in the sidebar instead.",
-    ))
+async fn update_repo(ctx: ToolCtx, a: Value) -> ToolResult {
+    let r = ctx.op("repo_update", a).await?;
+    Ok(json!({"repository": r}))
+}
+
+async fn worktree_status(ctx: ToolCtx, _a: Value) -> ToolResult {
+    ctx.op("worktree_status", json!({"chatId": ctx.caller_chat_id}))
+        .await
+}
+
+async fn register_checkout(ctx: ToolCtx, a: Value) -> ToolResult {
+    let mut args = json!({"chatId": ctx.caller_chat_id});
+    if let Some(id) = a.get("repoId") {
+        args["repoId"] = id.clone();
+    }
+    ctx.op("repo_register", args).await
 }
 
 pub fn register_host_tools(r: &mut HostToolRegistry) {
@@ -230,7 +211,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
         .self_locking(),
         repo_locations,
     )
-    .blocking(
+    .async_tool(
         ToolSpec::write(
             "app_update_repo",
             format!("Change one saved repository entry (remote URL, checkout locations).{EXPLICIT}"),
@@ -239,15 +220,39 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "repoId": {"type": "string"},
                     "expectedRevision": {"type": "integer", "minimum": 0},
                     "remoteUrl": {"type": "string", "maxLength": 2048},
-                    "addLocations": {"type": "array", "maxItems": 4},
-                    "removeLocationIds": {"type": "array", "maxItems": 20},
+                    "addLocations": {
+                        "type": "array",
+                        "maxItems": 4,
+                        "items": obj(json!({"path": {"type": "string", "minLength": 1, "maxLength": 1024}, "label": {"type": "string", "maxLength": 128}}), &["path"])
+                    },
+                    "removeLocationIds": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
                     "remove": {"type": "boolean"}
                 }),
                 &["repoId", "expectedRevision"],
             ),
         )
-        .when(Condition::ProjectsModeAndAllSettings),
+        .when(Condition::ProjectsModeAndAllSettings)
+        .self_locking(),
         update_repo,
+    )
+    .async_tool(
+        ToolSpec::read(
+            "app_worktree_status",
+            "Where this chat is working and whether another worktree is needed: its repository and checkout, whether agents may create worktrees there, other chats in the same checkout, free checkouts of the same repository, and the path rules for new worktrees. Answered from Helm's own records.",
+            obj(json!({}), &[]),
+        )
+        .guidelines("Stay in this chat's own checkout. Create a worktree only when the checkout has uncommitted changes you did not make or another chat is working in it, and only if the status says worktrees are allowed. When they are off and the checkout is busy, do not work around it: name a free checkout if the status lists one, tell the user, and stop. Put new worktrees under worktreeRoot as suggestedPath describes, with a name of lowercase letters, digits and hyphens (at most 32 characters). Never remove a worktree you did not make or whose work is not merged.")
+        .self_locking(),
+        worktree_status,
+    )
+    .async_tool(
+        ToolSpec::write(
+            "app_register_checkout",
+            "Add the folder this chat works in to Helm's repository list, when it is the root of a clone. It joins the repository with the same GitHub remote, or becomes a new one named after the remote (or the folder when there is no remote). It only adds; it never changes or removes anything.",
+            obj(json!({"repoId": {"type": "string", "minLength": 1, "maxLength": 512}}), &[]),
+        )
+        .self_locking(),
+        register_checkout,
     );
 }
 
@@ -317,15 +322,22 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.public.contains("path cannot be changed"));
-        let r = repo_locations(ctx(ops.clone()), json!({})).await.unwrap();
-        assert_eq!(
-            r["entries"].as_array().unwrap().len(),
-            1,
-            "folder projects only"
-        );
-        assert!(update_repo(&ctx(ops), json!({}))
-            .unwrap_err()
-            .public
-            .contains("no saved repository registry"));
+        // The repository tools hand their arguments to the repository ops, with the caller's chat.
+        repo_locations(ctx(ops.clone()), json!({"query": "helm"}))
+            .await
+            .unwrap_err();
+        let _ = update_repo(
+            ctx(ops.clone()),
+            json!({"repoId": "r", "expectedRevision": 1}),
+        )
+        .await;
+        let _ = worktree_status(ctx(ops.clone()), json!({})).await;
+        let _ = register_checkout(ctx(ops.clone()), json!({"repoId": "x"})).await;
+        let calls = ops.0.lock().unwrap().clone();
+        let call = |op: &str| calls.iter().rev().find(|(o, _)| o == op).unwrap().1.clone();
+        assert_eq!(call("repo_list"), json!({"query": "helm", "chatId": "c"}));
+        assert_eq!(call("repo_update")["expectedRevision"], 1);
+        assert_eq!(call("worktree_status"), json!({"chatId": "c"}));
+        assert_eq!(call("repo_register"), json!({"chatId": "c", "repoId": "x"}));
     }
 }

@@ -313,6 +313,12 @@ pub fn launch_contributors(
     .register_section(Arc::new(helm_workflow::WorkflowSection { db: db.clone() }));
     let mut c = helm_workers::contrib::LaunchContributors::new();
     c.add(Arc::new(a));
+    // The git stand-in goes on a chat's PATH only while some repository has worktrees off.
+    if let Some(profile_dir) = db.path().parent() {
+        c.add(Arc::new(helm_projects::guard::GitGuard::new(
+            profile_dir.to_path_buf(),
+        )));
+    }
     c
 }
 
@@ -346,6 +352,8 @@ mod host_tool_tests {
             "app_list_projects",
             "app_create_project",
             "app_update_project",
+            "app_worktree_status",
+            "app_register_checkout",
             "app_get_settings",
             "app_update_settings",
             "app_list_attention",
