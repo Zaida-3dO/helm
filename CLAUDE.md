@@ -52,6 +52,17 @@ and `host/crates/usage/NOTES.md` (what the plan-usage meter reads).
 | Installer (`host/app/tauri.conf.json`, `host/app/windows/`) | `npm run build:installer` writes `target/release/bundle/nsis/Helm_<version>_x64-setup.exe` (per-user NSIS, no updater; built locally, not published). It bundles `worker/src` and every `helpers/<name>/src` as resources; a new helper must be added to `bundle.resources`. `bundle.windows.allowDowngrades` stays `true`, so a setup installs in place over a build with a higher version number | `node --test e2e/w5-installer.e2e.ts` in `checks/` (what the bundle must carry); smoke from the INSTALLED app: install with `/S`, launch `Programs\Helm\helm.exe` with `HELM_PROFILE_DIR` set to a scratch folder, check the usage meter shows numbers, a new chat gets an automatic title and a chat round-trips; then uninstall (`uninstall.exe /S`; the profile stays) |
 | Full checkpoint (all of the above) | `npm ci` (CI does the same), then `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && npm run build:debug` | `cargo test --workspace && npm run typecheck -w ui && npm test` (`npm test` runs every workspace's tests), then `npm run e2e -w checks` |
 
+### Writing tests: fewer tests that cover more
+
+Prefer a few tests that each cover many cases over many tiny ones. Every new test file and every slow test
+adds to every run, locally and in CI, and slows everyone down.
+
+- Add a case to an existing table-driven test before writing a new test. One table with twenty rows beats
+  twenty one-case tests.
+- One end-to-end check that walks a whole flow beats a separate test per step.
+- Do not add a new test file for a small fix; put the case in the file that already tests that code.
+- Test behaviour a user or another component relies on, not private helpers or copy text.
+
 ## Hard rules
 
 1. **Auth.** Never read `~/.claude/.credentials.json` or any token store. Never call
