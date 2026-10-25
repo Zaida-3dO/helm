@@ -52,6 +52,11 @@ export function SettingsWatchers() {
   useBinding({ id: 'window.zoomIn', title: 'Zoom in', defaultKeys: 'Ctrl+=', run: () => void zoom(1) });
   useBinding({ id: 'window.zoomOut', title: 'Zoom out', defaultKeys: 'Ctrl+-', run: () => void zoom(-1) });
   useBinding({ id: 'window.zoomReset', title: 'Reset zoom', defaultKeys: 'Ctrl+0', run: () => void zoom(0) });
+  // The same three on the keys other keyboards use: Ctrl+Shift+= (the + key) and the numpad.
+  useBinding({ id: 'window.zoomInPlus', title: 'Zoom in (alternative)', defaultKeys: 'Ctrl+Shift+=', run: () => void zoom(1) });
+  useBinding({ id: 'window.zoomInPad', title: 'Zoom in (numpad)', defaultKeys: 'Ctrl+NumpadAdd', run: () => void zoom(1) });
+  useBinding({ id: 'window.zoomOutPad', title: 'Zoom out (numpad)', defaultKeys: 'Ctrl+NumpadSubtract', run: () => void zoom(-1) });
+  useBinding({ id: 'window.zoomResetPad', title: 'Reset zoom (numpad)', defaultKeys: 'Ctrl+Numpad0', run: () => void zoom(0) });
   useBinding({
     id: 'shortcuts.sheet',
     title: 'Keyboard shortcuts',

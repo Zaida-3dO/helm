@@ -8,6 +8,7 @@
 //! | [`admin`] | the `app_` MCP admin tool bodies |
 //! | `ops` | the Settings → MCP `api` ops |
 //! | [`lines`] | the `mcp_config` start line and re-send, and `mcp_status` from workers |
+//! | [`probe`] | Settings → MCP's Test connection: one handshake and a tool count |
 //! | [`presets`] | Agent Standup, Home Assistant and hub presets (MC7) |
 //! | [`repo_gate`] | the repository-server gate and its seeding from Claude Code |
 //! | [`status`] | the newest per-server status across workers (MC3) |
@@ -23,6 +24,7 @@ pub mod config;
 pub mod lines;
 mod ops;
 pub mod presets;
+pub mod probe;
 pub mod repo_gate;
 pub mod status;
 pub mod tools;

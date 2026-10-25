@@ -1,7 +1,7 @@
 // Settings → Chat: the transcript element toggles. Each switch saves at
 // once through the generic `preference` op, writing the whole object.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useShell } from '../../shell/context.ts';
 import { Checkbox, Picker, SettingRow, TextArea, toast } from '../../ui/index.ts';
 import type { SendBehavior } from '../../api/generated/index.ts';
@@ -20,6 +20,8 @@ function ChatPane() {
   const [sendKey, setSendKey] = useState<SendShortcut>('mod-enter');
   const [sb, setSb] = useState<SendBehavior>(HOME_SEND_BEHAVIOR);
   const [hiddenSkills, setHiddenSkills] = useState('');
+  // The list as last saved, so a failed save can put the box and the window back.
+  const savedSkills = useRef<string[]>([]);
   useEffect(() => {
     void shell
       .api<unknown>('preference_get', { key: 'sendShortcut' })
@@ -31,7 +33,10 @@ function ChatPane() {
       .catch(() => undefined);
     void shell
       .api<unknown>('preference_get', { key: 'hiddenSkills' })
-      .then((v) => setHiddenSkills(parseNameList(v).join('\n')))
+      .then((v) => {
+        savedSkills.current = parseNameList(v);
+        setHiddenSkills(savedSkills.current.join('\n'));
+      })
       .catch(() => undefined);
     void shell
       .api<unknown>('preference_get', { key: 'chatElements' })
@@ -54,10 +59,18 @@ function ChatPane() {
     });
   };
   const saveHiddenSkills = () => {
+    const before = savedSkills.current;
     const list = parseNameList(hiddenSkills.split('\n').map((n) => n.trim().replace(/^[$/]/, '')));
+    if (list.join('\n') === before.join('\n')) return setHiddenSkills(list.join('\n'));
+    savedSkills.current = list;
     setHiddenSkills(list.join('\n'));
     shell.bus.dispatch({ kind: 'preferences', changed: { hiddenSkills: list } });
-    void shell.api('preference', { key: 'hiddenSkills', value: list }).catch(saveError);
+    void shell.api('preference', { key: 'hiddenSkills', value: list }).catch((err: unknown) => {
+      savedSkills.current = before;
+      setHiddenSkills(before.join('\n'));
+      shell.bus.dispatch({ kind: 'preferences', changed: { hiddenSkills: before } });
+      saveError(err);
+    });
   };
   return (
     <div data-testid="settings-chat">

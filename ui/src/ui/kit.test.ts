@@ -73,6 +73,12 @@ test('chords normalise; Cmd reads as Ctrl and Option as Alt', () => {
   assert.equal(chordOf(key('k', { ctrl: true, shift: true })), 'Ctrl+Shift+K');
   assert.equal(chordOf({ key: '`', code: 'Backquote', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false }), 'Ctrl+`');
   assert.equal(chordOf({ key: 'Control', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false }), null);
+  // The zoom keys: the + key is Shift+=, and the numpad keys keep their own names.
+  const mods = { ctrlKey: true, metaKey: false, altKey: false };
+  assert.equal(chordOf({ key: '+', code: 'Equal', shiftKey: true, ...mods }), 'Ctrl+Shift+=');
+  assert.equal(chordOf({ key: '-', code: 'Minus', shiftKey: false, ...mods }), 'Ctrl+-');
+  assert.equal(chordOf({ key: '+', code: 'NumpadAdd', shiftKey: false, ...mods }), 'Ctrl+NumpadAdd');
+  assert.equal(chordOf({ key: '0', code: 'Numpad0', shiftKey: false, ...mods }), 'Ctrl+Numpad0');
 });
 
 test('the registry dispatches, honours user rebinding and clearing, and reports conflicts', () => {

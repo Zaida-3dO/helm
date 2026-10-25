@@ -135,3 +135,19 @@
   padding: 3px 10px;
   font-size: 12px;
 }
+
+/* The editor's connection test answer. */
+.mcp-test {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--secondary);
+}
+.mcp-test[data-state='ok'] {
+  color: var(--text);
+}
+.mcp-test[data-state='failed'] {
+  color: var(--error);
+}

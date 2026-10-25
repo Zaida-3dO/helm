@@ -67,6 +67,13 @@ export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         if (r && r.state !== 'reserved') r.state = op === 'mcp_repo_approve' ? 'approved' : 'held';
         return repo;
       }
+      case 'mcp_server_test': {
+        const t = (a.server as McpServer).transport;
+        const url = t.url ?? '';
+        if (url.includes('fail')) return { ok: false, message: 'Could not connect: connection refused', signinRequired: false };
+        if (url.includes('auth')) return { ok: false, message: 'The server answered 401: it needs a sign-in or a different token. Check the headers.', signinRequired: true };
+        return { ok: true, message: 'Connected to fake-server 1.0. It offers 3 tools.', serverName: 'fake-server', toolCount: 3, signinRequired: false };
+      }
       case 'mcp_server_save': {
         check(a);
         const s = structuredClone(a.server as McpServer);

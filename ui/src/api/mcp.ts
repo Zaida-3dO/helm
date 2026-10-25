@@ -2,7 +2,7 @@
 // api(op, args).
 
 import type { Api } from './client.ts';
-import type { McpEditorSnapshot, McpPreset, McpServer, RepoServer, ServerStatus } from './generated/mcp/index.ts';
+import type { McpEditorSnapshot, McpPreset, McpServer, RepoServer, ServerStatus, TestOutcome } from './generated/mcp/index.ts';
 
 /** "Use my Claude Code MCP servers" (user-only; on by default). */
 export const NATIVE_MCP_PREF = 'nativeMcp';
@@ -16,6 +16,7 @@ export type {
   RepoServerState,
   ServerState,
   ServerStatus,
+  TestOutcome,
   Transport,
   TransportKind,
   ValueRef,
@@ -29,6 +30,8 @@ export function mcpOps(api: Api) {
       api<McpEditorSnapshot>('mcp_server_remove', { serverId, ...(revision ? { revision } : {}) }),
     setEnabled: (serverId: string, enabled: boolean, revision?: string) =>
       api<McpEditorSnapshot>('mcp_server_set_enabled', { serverId, enabled, ...(revision ? { revision } : {}) }),
+    /** Connect once to a draft server and list its tools; saves nothing. */
+    test: (server: McpServer) => api<TestOutcome>('mcp_server_test', { server }),
     presets: () => api<McpPreset[]>('mcp_presets_list', {}),
     status: () => api<ServerStatus[]>('mcp_servers_status', {}),
     repoList: () => api<RepoServer[]>('mcp_repo_servers_list', {}),

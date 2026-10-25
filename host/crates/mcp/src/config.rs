@@ -245,6 +245,13 @@ impl McpStore {
         Ok((revision, resolved))
     }
 
+    /// One draft server with its references resolved, for a connection test. A literal secret
+    /// that was typed but not saved yet is used as typed; saved ones are read from the credential
+    /// store as usual.
+    pub fn resolve_draft(&self, s: &McpServer) -> ResolvedServer {
+        self.resolve_one(s, &|k| std::env::var(k).ok())
+    }
+
     fn resolve_one(&self, s: &McpServer, env: &dyn Fn(&str) -> Option<String>) -> ResolvedServer {
         let t = &s.transport;
         let mut out = ResolvedServer {
@@ -313,6 +320,13 @@ impl McpStore {
             }
             RefKind::File => read_secret_file(r.value.as_deref().unwrap_or(""))
                 .map_err(|why| format!("{label}: {why}"))?,
+            RefKind::Literal
+                if r.secret_id.as_deref().unwrap_or("").is_empty()
+                    && r.value.as_deref().is_some_and(|v| !v.is_empty()) =>
+            {
+                // Typed in the editor and not saved yet (only a connection test sees this form).
+                r.value.clone().unwrap_or_default()
+            }
             RefKind::Literal => {
                 let id = r.secret_id.as_deref().unwrap_or("");
                 let bytes = self

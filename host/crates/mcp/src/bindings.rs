@@ -21,6 +21,8 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
     McpServerSaveArgs::export_all_to(dir).map_err(|e| e.to_string())?;
     McpServerRemoveArgs::export_all_to(dir).map_err(|e| e.to_string())?;
     McpServerEnableArgs::export_all_to(dir).map_err(|e| e.to_string())?;
+    crate::probe::McpServerTestArgs::export_all_to(dir).map_err(|e| e.to_string())?;
+    crate::probe::TestOutcome::export_all_to(dir).map_err(|e| e.to_string())?;
     crate::presets::McpPreset::export_all_to(dir).map_err(|e| e.to_string())?;
     crate::status::ServerStatus::export_all_to(dir).map_err(|e| e.to_string())?;
     crate::repo_gate::RepoServer::export_all_to(dir).map_err(|e| e.to_string())?;
@@ -38,6 +40,8 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         McpServerSaveArgs::ident(),
         McpServerRemoveArgs::ident(),
         McpServerEnableArgs::ident(),
+        crate::probe::McpServerTestArgs::ident(),
+        crate::probe::TestOutcome::ident(),
         crate::presets::McpPreset::ident(),
         crate::status::ServerStatus::ident(),
         crate::status::ServerState::ident(),

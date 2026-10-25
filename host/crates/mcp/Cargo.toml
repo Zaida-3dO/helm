@@ -17,6 +17,7 @@ thiserror.workspace = true
 uuid.workspace = true
 rusqlite.workspace = true
 url = "2.5"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
 
 [dev-dependencies]

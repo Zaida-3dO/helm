@@ -2,10 +2,12 @@
 // server's live status and readiness, an editor, and presets. Secrets are write-only: the pane
 // only ever sees a saved secret's id, never its value.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { mcpOps, type McpPreset, type McpServer, type RefKind, type RepoServer, type ServerStatus, type ValueRef } from '../../api/mcp.ts';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { mcpOps, type McpPreset, type McpServer, type RefKind, type RepoServer, type ServerStatus, type TestOutcome, type ValueRef } from '../../api/mcp.ts';
 import { useShell } from '../../shell/context.ts';
 import { Button, Checkbox, Segmented, TextArea, TextInput } from '../../ui/index.ts';
+import { IconCheck, IconWarning } from '../../ui/icons.tsx';
+import { WheelMark } from '../../ui/status/index.ts';
 import { blankServer, draftFromPreset, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
 type Refs = { [key in string]?: ValueRef };
@@ -73,6 +75,7 @@ function Editor({
   onChange,
   onSave,
   onCancel,
+  onTest,
   preset,
 }: {
   draft: McpServer;
@@ -81,11 +84,27 @@ function Editor({
   onChange: (d: McpServer) => void;
   onSave: () => void;
   onCancel: () => void;
+  /** Connect once with the draft as it stands and report what happened. */
+  onTest: (server: McpServer) => Promise<TestOutcome>;
   preset?: McpPreset;
 }) {
   const t = draft.transport;
   const setT = (patch: Partial<McpServer['transport']>) => onChange({ ...draft, transport: { ...t, ...patch } });
   const remote = t.type !== 'stdio';
+  // The last connection test. Any edit to the draft makes its answer stale, so it is dropped.
+  const [test, setTest] = useState<{ running: boolean; outcome?: TestOutcome; failed?: string }>({ running: false });
+  const run = useRef(0);
+  useEffect(() => {
+    run.current++;
+    setTest({ running: false });
+  }, [draft]);
+  const runTest = () => {
+    const mine = ++run.current;
+    setTest({ running: true });
+    onTest(toSaveable(draft))
+      .then((outcome) => mine === run.current && setTest({ running: false, outcome }))
+      .catch((e: unknown) => mine === run.current && setTest({ running: false, failed: errorText(e) }));
+  };
   return (
     <div className="mcp-editor" data-testid="mcp-editor">
       <h4>{isNew ? 'Add a server' : `Edit ${draft.name}`}</h4>
@@ -180,8 +199,23 @@ function Editor({
         <Button variant="primary" data-testid="mcp-save" disabled={busy} onClick={onSave}>
           Save
         </Button>
+        <Button data-testid="mcp-test" disabled={test.running} onClick={runTest}>
+          {test.running ? 'Testing…' : 'Test connection'}
+        </Button>
         <Button onClick={onCancel}>Cancel</Button>
       </div>
+      {test.running && (
+        <p className="mcp-test" data-testid="mcp-test-result" data-state="running" role="status">
+          <WheelMark size={14} state="working" />
+          Connecting…
+        </p>
+      )}
+      {(test.outcome || test.failed) && (
+        <p className="mcp-test" data-testid="mcp-test-result" data-state={test.outcome?.ok ? 'ok' : 'failed'} role="status">
+          {test.outcome?.ok ? <IconCheck size={14} /> : <IconWarning size={14} />}
+          {test.outcome?.message ?? `The test could not run: ${test.failed}`}
+        </p>
+      )}
     </div>
   );
 }
@@ -310,6 +344,7 @@ export function McpPane() {
             onChange={(server) => setDraft({ ...draft, server })}
             onSave={() => void save()}
             onCancel={() => setDraft(null)}
+            onTest={ops.test}
           />
         )}
       </section>

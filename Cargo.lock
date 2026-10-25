@@ -1955,6 +1955,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "ts-rs",
+ "ureq",
  "url",
  "uuid",
 ]

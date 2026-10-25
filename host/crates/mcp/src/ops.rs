@@ -8,6 +8,7 @@
 //! | `mcp_server_remove` | maintenance | [`McpServerRemoveArgs`] → [`McpEditorSnapshot`] |
 //! | `mcp_server_set_enabled` | maintenance | [`McpServerEnableArgs`] → [`McpEditorSnapshot`] |
 //!
+//! | `mcp_server_test` | blocking | [`McpServerTestArgs`](crate::probe::McpServerTestArgs) → [`TestOutcome`](crate::probe::TestOutcome) (connects once, saves nothing) |
 //! | `mcp_presets_list` | blocking | `{}` → [`McpPreset`](crate::presets::McpPreset)`[]` |
 //! | `mcp_servers_status` | blocking | `{}` → [`ServerStatus`](crate::status::ServerStatus)`[]` |
 //! | `mcp_repo_servers_list` | blocking | `{}` → [`RepoServer`](crate::repo_gate::RepoServer)`[]` (seen since launch) |
@@ -31,6 +32,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
             OpClass::Maintenance,
             server_set_enabled,
         )
+        .blocking("mcp_server_test", OpClass::Blocking, server_test)
         .blocking("mcp_presets_list", OpClass::Blocking, |_, _| {
             to_value(&crate::presets::presets())
         })
@@ -110,6 +112,13 @@ fn server_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: McpServerSaveArgs = parse(args)?;
     let st = ctx.services.need::<McpStore>()?;
     to_value(&save(&st, a).map_err(api_error)?)
+}
+
+fn server_test(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: crate::probe::McpServerTestArgs = parse(args)?;
+    let st = ctx.services.need::<McpStore>()?;
+    let resolved = st.resolve_draft(&a.server);
+    to_value(&crate::probe::test_resolved(&a.server, &resolved))
 }
 
 fn server_remove(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {

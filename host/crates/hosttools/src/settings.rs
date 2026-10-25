@@ -602,15 +602,16 @@ mod tests {
         let r =
             update_settings(&ctx(&e), json!({"changes": {"hiddenSkills": ["review"]}})).unwrap();
         assert_eq!(r["applied"]["hiddenSkills"]["after"], json!(["review"]));
-        // Nothing reads the key yet, and the answer says so.
-        assert!(r["applied"]["hiddenSkills"]["note"]
+        // A key something reads carries no warning; one nothing reads yet says so.
+        assert!(r["applied"]["hiddenSkills"].get("note").is_none());
+        let g = get_settings(&ctx(&e), json!({"keys": ["hiddenSkills", "cursorTrail"]})).unwrap();
+        assert!(g["options"]["hiddenSkills"].get("hasEffect").is_none());
+        assert_eq!(g["options"]["cursorTrail"]["hasEffect"], false);
+        let r = update_settings(&ctx(&e), json!({"changes": {"cursorTrail": true}})).unwrap();
+        assert!(r["applied"]["cursorTrail"]["note"]
             .as_str()
             .unwrap()
             .contains("nothing in Helm reads"));
-        assert!(r["applied"]["hiddenSkills"]["after"].is_array());
-        let g = get_settings(&ctx(&e), json!({"keys": ["hiddenSkills", "zoomLevel"]})).unwrap();
-        assert_eq!(g["options"]["hiddenSkills"]["hasEffect"], false);
-        assert!(g["options"]["zoomLevel"].get("hasEffect").is_none());
     }
 
     /// A stand-in extension: one key holding `{open, level}`; chats may change only `level`.

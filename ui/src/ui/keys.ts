@@ -67,6 +67,9 @@ export function chordOf(e: { key: string; code?: string; ctrlKey: boolean; metaK
   else if (e.code === 'Comma') key = ',';
   else if (e.code === 'Period') key = '.';
   else if (e.code === 'Slash') key = '/';
+  else if (e.code === 'Equal') key = '=';
+  else if (e.code === 'Minus') key = '-';
+  else if (e.code?.startsWith('Numpad') && e.code.length > 6) key = e.code;
   else if (key === ' ') key = 'Space';
   const mods: string[] = [];
   if (e.ctrlKey) mods.push('Ctrl');
