@@ -95,7 +95,7 @@ let katex: Promise<KatexApi> | null = null;
 export async function renderMath(tex: string, display: boolean): Promise<string> {
   katex ??= import('katex').then((m) => m.default);
   const k = await katex;
-  return k.renderToString(tex, { output: 'mathml', displayMode: display, throwOnError: true, strict: 'ignore', trust: false });
+  return k.renderToString(tex, { output: 'mathml', displayMode: display, throwOnError: true, strict: 'ignore', trust: false, maxSize: 20, maxExpand: 1000 });
 }
 
 async function load(dark: boolean): Promise<MermaidApi> {

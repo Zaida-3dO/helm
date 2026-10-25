@@ -148,8 +148,8 @@ function renderProperties(props: Property[]): string {
 
 // Math: `$x^2$` inline, `$$ ... $$` as its own block. The source stays in the markup as text; the
 // component turns it into MathML afterwards (like a diagram), so this renderer stays plain
-// strings. An opening `$` must touch its text and a closing `$` must not be followed by a digit,
-// so prices ("$5 and $10") stay prices.
+// strings. An opening `$` must touch its text and a closing `$` must not be followed by a digit
+// or a letter, so prices ("$5 and $10") and shell variables ("$HOME:$PATH") stay text.
 const mathInline: TokenizerAndRendererExtension = {
   name: 'mathInline',
   level: 'inline',
@@ -158,7 +158,7 @@ const mathInline: TokenizerAndRendererExtension = {
     return at < 0 ? undefined : at;
   },
   tokenizer(src: string) {
-    const m = /^\$\$([^\n]+?)\$\$/.exec(src) ?? /^\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<![\s\\])\$(?!\d)/.exec(src);
+    const m = /^\$\$([^\n]+?)\$\$/.exec(src) ?? /^\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<![\s\\])\$(?!\w)/.exec(src);
     if (!m) return undefined;
     return { type: 'mathInline', raw: m[0], text: (m[1] as string).trim(), display: m[0].startsWith('$$') };
   },

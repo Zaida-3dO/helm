@@ -52,17 +52,42 @@ fn sniff(b: &[u8]) -> Option<&'static str> {
 /// reply or a tool card points at. The path must be absolute and the file a regular one (a link
 /// is not followed), at most 12 MiB, and its first bytes must be a PNG, JPEG, GIF or WebP: nothing
 /// else is ever read back, whatever its name.
-fn local_image_get(_ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+fn local_image_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let path = args
         .get("path")
         .and_then(Value::as_str)
-        .filter(|p| !p.is_empty() && p.len() <= crate::attachments::MAX_PATH_BYTES)
         .ok_or_else(|| ApiError::bad_args("path is required."))?;
-    let (mime, bytes) = read_local_image(Path::new(path))?;
+    // The side panel's checks come first, before the disk is touched: the lexical gate (no shares,
+    // device paths, reserved names or alternate streams: opening a share would offer the user's
+    // credentials to that server), then no links along the path, then the app's own folders.
+    let mut private = Vec::new();
+    if let Some(p) = ctx.services.get::<Profile>() {
+        private.push(p.dir.clone());
+    }
+    if let Ok(d) = helm_core::profile::default_profile_dir() {
+        private.push(d);
+    }
+    let path = admit_local_path(path, &helm_platform::private::PrivateRoots::new(&private))?;
+    let (mime, bytes) = read_local_image(&path)?;
     Ok(json!({
         "mime": mime,
         "bytes": base64::engine::general_purpose::STANDARD.encode(bytes),
     }))
+}
+
+/// The path a picture may be read from, or the refusal. Nothing is read here.
+fn admit_local_path(
+    raw: &str,
+    roots: &helm_platform::private::PrivateRoots,
+) -> Result<std::path::PathBuf, ApiError> {
+    let path =
+        helm_platform::pathgate::check(raw).map_err(|r| ApiError::new("refused", r.message()))?;
+    helm_platform::fs::refuse_links_along(&path)
+        .map_err(|e| ApiError::new("refused", e.to_string()))?;
+    if roots.contains(&path) {
+        return Err(ApiError::new("refused", "Helm's own data is not shown."));
+    }
+    Ok(path)
 }
 
 fn read_local_image(path: &Path) -> Result<(&'static str, Vec<u8>), ApiError> {
@@ -225,6 +250,40 @@ mod tests {
         b.extend(h.to_be_bytes());
         b.extend([8, 6, 0, 0, 0]);
         b
+    }
+
+    /// The side panel's gate runs before anything is read: shares (which would make Windows offer
+    /// credentials to the server), devices, alternate streams, links and the app's own folders.
+    #[cfg(windows)]
+    #[test]
+    fn a_picture_path_passes_the_panel_gate_before_the_disk_is_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("Helm");
+        std::fs::create_dir_all(&profile).unwrap();
+        let roots = helm_platform::private::PrivateRoots::new(std::slice::from_ref(&profile));
+        let outside = dir.path().join("pic.png");
+        std::fs::write(&outside, png(2, 2)).unwrap();
+        let ok = outside.to_string_lossy().into_owned();
+        assert!(admit_local_path(&ok, &roots).is_ok());
+        let own = profile.join("attachments").join("x.png");
+        let refused = [
+            r"\host\share\a.png".to_owned(),
+            "//host/share/a.png".to_owned(),
+            r"\?\C:\a.png".to_owned(),
+            r"\.\pipe\a.png".to_owned(),
+            r"C:\x.txt:hidden.png".to_owned(),
+            r"C:\x\nul.png".to_owned(),
+            r"C:\a\..\b.png".to_owned(),
+            own.to_string_lossy().into_owned(),
+            "relative.png".to_owned(),
+        ];
+        for p in refused {
+            assert_eq!(
+                admit_local_path(&p, &roots).unwrap_err().code,
+                "refused",
+                "{p}"
+            );
+        }
     }
 
     #[test]

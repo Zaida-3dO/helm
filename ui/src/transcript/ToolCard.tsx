@@ -159,7 +159,7 @@ function ToolBody({ row, kind, status, source, rawName }: { row: MessageRow; kin
     return (
       <div className="tool-box" data-testid="tool-box">
         <LocalPicture path={picture} />
-        {output.trim() && <OutputBox header="Output" output={output} status={status} saved={false} />}
+        {output.trim() && <OutputBox header="Output" output={output} status={status} full={null} />}
       </div>
     );
   }

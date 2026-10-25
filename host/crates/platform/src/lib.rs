@@ -13,7 +13,9 @@ pub mod external;
 pub mod fs;
 pub mod instance;
 pub mod keychain;
+pub mod pathgate;
 pub mod power;
+pub mod private;
 pub mod stubs;
 
 use std::sync::Arc;

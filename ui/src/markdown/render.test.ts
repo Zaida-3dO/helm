@@ -435,6 +435,8 @@ test('math: $x$ and $$ blocks are marked for typesetting, prices and code are le
     ['Energy $E = mc^2$ here.', ['inline:E = mc^2']],
     ['Two $a$ and $b$ in a line', ['inline:a', 'inline:b']],
     ['It costs $5 and $10 in total', []],
+    ['echo $HOME:$PATH and $USER', []],
+    ['The triangle $ABC$ is right', ['inline:ABC']],
     ['A lone $ sign, or $ spaced $ ones', []],
     ['Use `$x$` in code', []],
     ['Escaped \\$x\\$ stays', []],
