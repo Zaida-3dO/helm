@@ -29,3 +29,28 @@ test("line 1 names what the chat is doing", async () => {
   assert.equal(dockState('idle', { ...t, subagentsRunning: 1 }).key, 'subagents');
   assert.equal(dockState('idle', t).key, 'background');
 });
+
+test('the settled line comes from the last turn when it ended with a reply', async () => {
+  const { finishedTurn, finishedCount } = await import('./dockModel.ts');
+  const { row } = await import('../dev/fixtures.ts');
+  const user = row({ id: 1, role: 'user', timestamp: 0 });
+  const note = row({ id: 2, role: 'assistant', text: 'looking', timestamp: 1000 });
+  const read = row({ id: 3, role: 'toolResult', toolName: 'Read', timestamp: 2000 });
+  const edit = row({ id: 4, role: 'toolResult', toolName: 'Edit', timestamp: 3000 });
+  const reply = row({ id: 5, role: 'assistant', text: 'done', timestamp: 48_000 });
+  const cases: [string, ReturnType<typeof row>[], string | null, number | null][] = [
+    ['tools and a reply', [user, note, read, reply], '1 done', 47_000],
+    ['edits are counted as files', [user, note, read, edit, reply], '1 file edited', 47_000],
+    ['a plain reply', [user, row({ id: 2, role: 'assistant', text: 'Hi', timestamp: 500 })], null, 0],
+    ['no reply yet', [user, read], 'none', null],
+    ['a tool still running', [user, row({ id: 3, role: 'toolResult', toolName: 'Bash', status: 'streaming', timestamp: 2000 }), reply], 'none', null],
+    ['a failed turn', [user, { ...reply, status: 'error' as const }], 'none', null],
+    ['a stopped turn', [user, note, { ...read, status: 'interrupted' as const }], 'none', null],
+    ['no turn at all', [], 'none', null],
+  ];
+  for (const [name, rows, count, elapsed] of cases) {
+    const t = finishedTurn(rows);
+    assert.equal(t === null ? 'none' : finishedCount(t), count ?? null, name);
+    assert.equal(t?.elapsedMs ?? null, elapsed, name);
+  }
+});

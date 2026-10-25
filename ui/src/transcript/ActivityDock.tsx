@@ -6,15 +6,16 @@
 // opens a list of what is running now.
 
 import { useEffect, useRef, useState } from 'react';
-import type { ChatRecord, ThreadState } from '../api/types.ts';
+import type { ChatRecord, MessageRow, ThreadState } from '../api/types.ts';
 import { IconBrowser, IconCheck, IconChevronRight, IconFileText, IconSearch, IconStop, IconTerminal, IconWand } from '../ui/icons.tsx';
 import { WheelMark } from '../ui/status/index.ts';
 import { useLayer } from '../ui/hooks.ts';
-import { toolKind, toolLabel } from './toolKinds.ts';
+import { toolKind, toolLabel, toolStatus, toolTarget, toolVerb } from './toolKinds.ts';
 import { formatElapsed } from './workBlocks.ts';
 import { SubagentRosterChip } from './subagents/SubagentRoster.tsx';
-import { backgroundShells, dockShown, dockState } from './dockModel.ts';
+import { backgroundShells, dockShown, dockState, finishedCount, finishedTurn, type FinishedTurn } from './dockModel.ts';
 import '../composer/dock.css';
+import './activityDock.css';
 
 function useNow(live: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -31,6 +32,8 @@ export interface DockProps {
   thread: ThreadState;
   turnStartedAt: number | null;
   onStopTool: (toolCallId: string) => void;
+  /** The chat's loaded rows, for the settled line after a turn ends. */
+  rows?: readonly MessageRow[];
 }
 
 function ToolIcon({ name }: { name: string }) {
@@ -42,7 +45,7 @@ function ToolIcon({ name }: { name: string }) {
   return <IconWand size={13} />;
 }
 
-export function ActivityDock({ chat, thread, turnStartedAt, onStopTool }: DockProps) {
+export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: DockProps) {
   const live = chat.status === 'running' || chat.status === 'starting' || chat.status === 'stopping';
   const bg = backgroundShells(thread);
   const now = useNow(live || bg.length > 0);
@@ -68,7 +71,10 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool }: DockPr
     document.addEventListener('mousedown', away);
     return () => document.removeEventListener('mousedown', away);
   }, [details]);
-  if (!shown) return null;
+  if (!shown) {
+    const done = chat.status === 'idle' && rows ? finishedTurn(rows) : null;
+    return done ? <FinishedLine turn={done} /> : null;
+  }
   const latest = thread.liveTools.at(-1);
   const canStop = Boolean(latest && thread.sendBehavior.toolStop && thread.capabilities.stopTool && latest.stoppable);
   const state = dockState(chat.status, thread);
@@ -183,6 +189,89 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool }: DockPr
                   <span>{t.title || t.command || 'Background shell'}</span>
                   <span className="ad-details-status">Background</span>
                   <span className="muted mono">{formatElapsed(now - t.startedAt)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function firstLine(s: string | null): string {
+  return (s ?? '').split(String.fromCharCode(10))[0] ?? '';
+}
+
+/**
+ * What stays after a turn ends: a check, "Finished", how long it worked, a count, and Details,
+ * which lists the tool calls the turn made. It stays for the chat, so a reopened chat shows it too.
+ */
+function FinishedLine({ turn }: { turn: FinishedTurn }) {
+  const [details, setDetails] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const toggle = useRef<HTMLButtonElement>(null);
+  useLayer('popover', details, () => {
+    setDetails(false);
+    toggle.current?.focus();
+  });
+  useEffect(() => {
+    if (!details) return;
+    const away = (e: MouseEvent) => {
+      if (!root.current?.contains(e.target as Node)) setDetails(false);
+    };
+    document.addEventListener('mousedown', away);
+    return () => document.removeEventListener('mousedown', away);
+  }, [details]);
+  const count = finishedCount(turn);
+  return (
+    <div className="activity-dock settled" data-testid="activity-dock" data-state="finished" ref={root}>
+      <div className="ad-surface">
+        <span className="ad-glyph" aria-hidden="true">
+          <IconCheck size={20} />
+        </span>
+        <div className="ad-lines">
+          <div className="ad-line1">
+            <span className="ad-state">Finished</span>
+            {turn.elapsedMs >= 1000 && <span className="ad-preview">Worked for {formatElapsed(turn.elapsedMs)}</span>}
+          </div>
+        </div>
+        <div className="ad-side">
+          <button
+            ref={toggle}
+            type="button"
+            className={`ad-details${details ? ' open' : ''}`}
+            aria-expanded={details}
+            data-testid="dock-details"
+            onClick={() => setDetails((d) => !d)}
+          >
+            Details <IconChevronRight size={12} />
+          </button>
+          {count && (
+            <div className="ad-counts">
+              <span data-testid="finished-count">{count}</span>
+            </div>
+          )}
+        </div>
+      </div>
+      {details && (
+        <div className="ad-details-pop" role="region" aria-label="Activity" data-testid="dock-details-pop">
+          <div className="ad-details-head">
+            <strong>Activity</strong>
+            <span className="muted">Latest turn · {formatElapsed(turn.elapsedMs)}</span>
+          </div>
+          {turn.tools.length === 0 ? (
+            <div className="ad-details-empty muted">This turn made no tool calls.</div>
+          ) : (
+            <ul className="ad-details-list">
+              {turn.tools.map((t) => (
+                <li key={t.id}>
+                  <ToolIcon name={t.toolName ?? ''} />
+                  <span>
+                    {toolVerb(t)} <span className="muted">{firstLine(toolTarget(t))}</span>
+                  </span>
+                  {toolStatus(t) === 'complete' && <IconCheck size={12} />}
+                  <span className="muted mono">{new Date(t.timestamp).toLocaleTimeString([], { hour12: false })}</span>
                 </li>
               ))}
             </ul>

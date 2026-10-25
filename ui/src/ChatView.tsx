@@ -291,7 +291,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         onFollowChange={(f) => store.setKeep(chatId, f ? 'newest' : 'oldest')}
       />
       </div>
-      {thread && <ActivityDock chat={chat} thread={thread} turnStartedAt={turnStartedAt} onStopTool={stopTool} />}
+      {thread && <ActivityDock chat={chat} thread={thread} turnStartedAt={turnStartedAt} onStopTool={stopTool} rows={view.rows} />}
       {thread?.interactions.map((i) => (
         <InteractionCard key={i.id} interaction={i} onAnswer={(id, a) => void ops.answer(chatId, id, a).catch(() => undefined)} />
       ))}

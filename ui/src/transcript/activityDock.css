@@ -1,0 +1,25 @@
+/* The activity dock's own look. Loaded after the shared dock rules, so these win. */
+
+/* The dock sits on the page: no card border, shadow or fill. */
+.chat-view .activity-dock .ad-surface {
+  border-color: transparent;
+  background: none;
+  box-shadow: none;
+}
+
+/* The settled line after a turn: one quiet row. */
+.activity-dock.settled .ad-surface {
+  min-height: 44px;
+}
+
+.activity-dock.settled .ad-state {
+  color: var(--text);
+}
+
+.activity-dock.settled .ad-glyph {
+  color: var(--muted);
+}
+
+.activity-dock.settled .ad-details-list li > .ui-icon:nth-last-child(2) {
+  color: var(--success, var(--accent));
+}
