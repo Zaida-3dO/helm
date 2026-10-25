@@ -86,7 +86,7 @@ fn target(ctx: &ToolCtx, svc: &WaitsService, a: &Value) -> Result<Target, ToolEr
             if id == ctx.caller_chat_id {
                 return Err(refuse("A chat cannot wait for itself."));
             }
-            if svc.probes().chat(id).is_none() {
+            if svc.probes().chat(id).map_err(refuse)?.is_none() {
                 return Err(refuse("There is no chat with that id."));
             }
             Ok(Target::ChatIdle {
@@ -99,7 +99,10 @@ fn target(ctx: &ToolCtx, svc: &WaitsService, a: &Value) -> Result<Target, ToolEr
                 .and_then(Value::as_u64)
                 .filter(|p| *p > 0 && *p <= u32::MAX as u64)
                 .ok_or_else(|| refuse("pid must be a process id."))? as u32;
-            if svc.probes().process(pid) != crate::model::ProcessObs::Alive {
+            if !matches!(
+                svc.probes().process(pid),
+                crate::model::ProcessObs::Alive(_)
+            ) {
                 return Err(refuse(
                     "That process is not running (it may already have exited).",
                 ));
@@ -109,8 +112,12 @@ fn target(ctx: &ToolCtx, svc: &WaitsService, a: &Value) -> Result<Target, ToolEr
         "file" => {
             let path = str_arg(a, "path").ok_or_else(|| refuse("path is required."))?;
             let p = std::path::Path::new(path);
-            if !p.is_absolute() || path.len() > 1000 || path.contains("..") {
-                return Err(refuse("path must be an absolute path without '..'."));
+            let unc = path.starts_with("\\\\") || path.starts_with("//");
+            let climbs = path.split(['/', '\\']).any(|part| part == "..");
+            if !p.is_absolute() || path.len() > 1000 || unc || climbs {
+                return Err(refuse(
+                    "path must be an absolute local path (not a network share) with no '..' part.",
+                ));
             }
             Ok(Target::File {
                 path: path.to_owned(),
@@ -157,7 +164,12 @@ async fn declare(ctx: &ToolCtx, svc: std::sync::Arc<WaitsService>, a: &Value) ->
             state["file"] = file_state(&svc.probes().file(path));
         }
         Target::ChatIdle { chat_id } => {
-            let busy = svc.probes().chat(chat_id).is_some_and(|c| c.busy);
+            let busy = svc
+                .probes()
+                .chat(chat_id)
+                .ok()
+                .flatten()
+                .is_some_and(|c| c.busy);
             state["seenBusy"] = json!(busy);
         }
         Target::PrChecks { url } | Target::PrReview { url } => {
@@ -173,7 +185,12 @@ async fn declare(ctx: &ToolCtx, svc: std::sync::Arc<WaitsService>, a: &Value) ->
                     json!({"decision": obs.review_decision, "count": obs.review_count});
             }
         }
-        Target::Process { .. } => {}
+        Target::Process { pid } => {
+            // The start time tells this process from a later one given the same id.
+            if let crate::model::ProcessObs::Alive(Some(started)) = svc.probes().process(*pid) {
+                state["started"] = json!(started);
+            }
+        }
     }
     let w = Wait {
         id: uuid::Uuid::new_v4().to_string(),
@@ -229,7 +246,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                  model and sends this chat exactly one message when it finishes, changes, dies or \
                  times out (outcome timeout). Use this instead of sleeping, polling or re-reading \
                  output in a loop. Kinds: chat_idle (chatId: another chat's turn ends, it stops or \
-                 errors), process (pid: it exits), file (path, absolute: it appears, changes or is \
+                 errors), process (pid, a Windows process id: it exits), file (path, absolute: it appears, changes or is \
                  removed), pr_checks and pr_review (url, or repo owner/name and number: a github.com \
                  pull request, read through the gh tool). timeoutSeconds is required, 60 to \
                  {MAX_TIMEOUT_SECS}. note (optional) is returned to you in the message. At most \
@@ -257,6 +274,8 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 "additionalProperties": false
             }),
         )
+        // The handler reads GitHub before it writes, so it must not hold the app-wide lock.
+        .self_locking()
         .timeout_ms(30_000),
         wait_for,
     )
@@ -392,6 +411,14 @@ mod tests {
                 wait(json!({"kind": "file", "path": "relative/x"})),
                 "absolute",
             ),
+            (
+                wait(json!({"kind": "file", "path": "\\\\host\\share\\x.txt"})),
+                "network share",
+            ),
+            (
+                wait(json!({"kind": "file", "path": "C:/work/../x.txt"})),
+                "no '..'",
+            ),
             (wait(json!({"kind": "board_item"})), "not available"),
             (
                 wait(json!({"kind": "pr_checks", "url": "https://gitlab.com/o/r/pull/1"})),
@@ -423,7 +450,7 @@ mod tests {
         let mut ids = vec![];
         for args in [
             wait(json!({"kind": "chat_idle", "chatId": other, "note": "the reviewer"})),
-            wait(json!({"kind": "file", "path": "C:/work/out.txt"})),
+            wait(json!({"kind": "file", "path": "C:/work/a..b.txt"})),
             wait(json!({"kind": "pr_checks", "repo": "o/r", "number": 3})),
         ] {
             let r = call("app_wait_for", args).await;

@@ -115,9 +115,14 @@ impl WaitsService {
         let mut seen: HashMap<&str, bool> = HashMap::new();
         for w in waits {
             let dead = *seen.entry(w.chat_id.as_str()).or_insert_with(|| {
-                self.probes
-                    .chat(&w.chat_id)
-                    .is_none_or(|c| c.archived || c.stopped)
+                // A chat that could not be looked at is not a chat that is gone.
+                match self.probes.chat(&w.chat_id) {
+                    Ok(c) => c.is_none_or(|c| c.archived || c.stopped),
+                    Err(e) => {
+                        log::warn!("wait {}: chat not read: {e}", w.id);
+                        false
+                    }
+                }
             });
             if dead {
                 let _ = self.db.write(|tx| store::cancel(tx, &w.id, None, now));
@@ -136,7 +141,10 @@ impl WaitsService {
                 continue;
             }
             let obs = match &w.target {
-                Target::ChatIdle { chat_id } => Observation::Chat(self.probes.chat(chat_id)),
+                Target::ChatIdle { chat_id } => match self.probes.chat(chat_id) {
+                    Ok(c) => Observation::Chat(c),
+                    Err(_) => Observation::Skipped,
+                },
                 Target::Process { pid } => Observation::Process(self.probes.process(*pid)),
                 Target::File { path } => Observation::File(self.probes.file(path)),
                 _ => Observation::Skipped,
@@ -277,6 +285,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut reg = MigrationRegistry::new();
         crate::register_migrations(&mut reg);
+        helm_chats::register_migrations(&mut reg);
         let db = Arc::new(Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap());
         let ids: Vec<String> = (0..9).map(|i| format!("c{i}")).collect();
         db.write(|tx| {
@@ -438,5 +447,41 @@ mod tests {
         svc.sweep_network(t0 + 101_000);
         assert_eq!(probes.polls.load(Ordering::SeqCst), 2);
         assert!(svc.list(Some("c5")).unwrap().len() == 1);
+
+        // A chat that cannot be read is unknown, not gone: nothing is cancelled or fired.
+        probes.fail_chat.store(true, Ordering::SeqCst);
+        svc.declare(&wait(
+            "e1",
+            "c6",
+            Target::ChatIdle {
+                chat_id: "c7".into(),
+            },
+            t0,
+            3_600,
+        ))
+        .unwrap()
+        .unwrap();
+        svc.sweep_local(t0 + 200_000);
+        svc.sweep_network(t0 + 200_000);
+        probes.fail_chat.store(false, Ordering::SeqCst);
+        let open: Vec<String> = svc.list(None).unwrap().into_iter().map(|w| w.id).collect();
+        assert!(open.contains(&"e1".to_string()) && open.contains(&"p1".to_string()));
+
+        // A message waiting for a run slot counts as queued, so the chat is not yet idle.
+        let real = crate::probes::RealProbes { db: db.clone() };
+        assert!(!real.chat("c7").unwrap().unwrap().queued);
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('s1', 'c7', 'hi', 'saved', 1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO slot_waits(submission_id, chat_id, since) VALUES ('s1', 'c7', 1)",
+                [],
+            )
+        })
+        .unwrap();
+        assert!(real.chat("c7").unwrap().unwrap().queued);
+        assert!(real.chat("nope").unwrap().is_none());
     }
 }

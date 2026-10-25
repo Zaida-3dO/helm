@@ -12,19 +12,24 @@ pub struct Fake {
     pub chats: Mutex<HashMap<String, ChatObs>>,
     pub gone: Mutex<Vec<u32>>,
     pub polls: AtomicUsize,
+    /// Make every chat read fail, as a database error would.
+    pub fail_chat: std::sync::atomic::AtomicBool,
     /// What a pull request read returns; `None` is a failed read.
     pub pr_ok: Mutex<Option<PrObs>>,
 }
 
 impl Probes for Fake {
-    fn chat(&self, id: &str) -> Option<ChatObs> {
-        self.chats.lock().unwrap().get(id).cloned()
+    fn chat(&self, id: &str) -> Result<Option<ChatObs>, String> {
+        if self.fail_chat.load(Ordering::SeqCst) {
+            return Err("database is busy".into());
+        }
+        Ok(self.chats.lock().unwrap().get(id).cloned())
     }
     fn process(&self, pid: u32) -> ProcessObs {
         if self.gone.lock().unwrap().contains(&pid) {
             ProcessObs::Gone(Some(0))
         } else {
-            ProcessObs::Alive
+            ProcessObs::Alive(Some(1))
         }
     }
     fn file(&self, _: &str) -> FileObs {

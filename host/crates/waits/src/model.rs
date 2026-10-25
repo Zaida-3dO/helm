@@ -90,7 +90,8 @@ pub struct ChatObs {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProcessObs {
-    Alive,
+    /// Running, with its start time when the system gave one (a reused pid has a new one).
+    Alive(Option<u64>),
     /// Gone, with its exit code when the system still knew it.
     Gone(Option<i64>),
 }
@@ -161,7 +162,7 @@ pub fn judge(w: &mut Wait, obs: &Observation, now: i64) -> Option<Outcome> {
     let hit = match (&w.target, obs) {
         (Target::ChatIdle { .. }, Observation::Chat(c)) => judge_chat(w, c.as_ref(), now),
         (Target::Process { .. }, Observation::Process(p)) => match p {
-            ProcessObs::Alive => None,
+            ProcessObs::Alive(started) => judge_process(w, *started),
             ProcessObs::Gone(Some(code)) => out("exited", format!("It exited with code {code}.")),
             ProcessObs::Gone(None) => out("exited", "It is no longer running."),
         },
@@ -176,6 +177,23 @@ pub fn judge(w: &mut Wait, obs: &Observation, now: i64) -> Option<Outcome> {
             detail: "The wait timed out before anything happened.".into(),
         })
     })
+}
+
+/// The first start time seen is the baseline; a different one later is another process that
+/// was given the same id.
+fn judge_process(w: &mut Wait, started: Option<u64>) -> Option<Outcome> {
+    let started = started?;
+    match w.state.get("started").and_then(Value::as_u64) {
+        None => {
+            w.state["started"] = json!(started);
+            None
+        }
+        Some(base) if base == started => None,
+        Some(_) => out(
+            "exited",
+            "The process is gone; its id now belongs to a different process.",
+        ),
+    }
 }
 
 fn judge_chat(w: &mut Wait, c: Option<&ChatObs>, now: i64) -> Option<Outcome> {
@@ -471,7 +489,7 @@ mod tests {
             (
                 "process runs",
                 Target::Process { pid: 9 },
-                vec![(2_000, Observation::Process(ProcessObs::Alive))],
+                vec![(2_000, Observation::Process(ProcessObs::Alive(None)))],
                 None,
             ),
             (
@@ -479,6 +497,24 @@ mod tests {
                 Target::Process { pid: 9 },
                 vec![(2_000, Observation::Process(ProcessObs::Gone(Some(3))))],
                 Some("exited"),
+            ),
+            (
+                "pid reused by another process",
+                Target::Process { pid: 9 },
+                vec![
+                    (2_000, Observation::Process(ProcessObs::Alive(Some(1)))),
+                    (3_000, Observation::Process(ProcessObs::Alive(Some(2)))),
+                ],
+                Some("exited"),
+            ),
+            (
+                "same process still running",
+                Target::Process { pid: 9 },
+                vec![
+                    (2_000, Observation::Process(ProcessObs::Alive(Some(1)))),
+                    (3_000, Observation::Process(ProcessObs::Alive(Some(1)))),
+                ],
+                None,
             ),
             // A file: the first sight is the baseline.
             (
@@ -579,8 +615,8 @@ mod tests {
                 "timeout with nothing happening",
                 Target::Process { pid: 9 },
                 vec![
-                    (2_000, Observation::Process(ProcessObs::Alive)),
-                    (61_000, Observation::Process(ProcessObs::Alive)),
+                    (2_000, Observation::Process(ProcessObs::Alive(None))),
+                    (61_000, Observation::Process(ProcessObs::Alive(None))),
                 ],
                 Some("timeout"),
             ),

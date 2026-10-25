@@ -17,7 +17,9 @@ const GH_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// What the watcher can look at. A test supplies its own.
 pub trait Probes: Send + Sync {
-    fn chat(&self, chat_id: &str) -> Option<ChatObs>;
+    /// `Ok(None)` is a chat that does not exist; an `Err` means "could not look", which is
+    /// never treated as the chat being gone.
+    fn chat(&self, chat_id: &str) -> Result<Option<ChatObs>, String>;
     fn process(&self, pid: u32) -> ProcessObs;
     fn file(&self, path: &str) -> FileObs;
     /// Blocking; runs on the blocking pool.
@@ -29,12 +31,13 @@ pub struct RealProbes {
 }
 
 impl Probes for RealProbes {
-    fn chat(&self, chat_id: &str) -> Option<ChatObs> {
+    fn chat(&self, chat_id: &str) -> Result<Option<ChatObs>, String> {
         self.db
             .snapshot(|tx| {
                 tx.query_row(
                     "SELECT archived, status, error,
                             EXISTS(SELECT 1 FROM queued_submissions q WHERE q.chat_id = chats.id)
+                         OR EXISTS(SELECT 1 FROM slot_waits s WHERE s.chat_id = chats.id)
                      FROM chats WHERE id = ?1",
                     [chat_id],
                     |r| {
@@ -50,8 +53,7 @@ impl Probes for RealProbes {
                 )
                 .optional()
             })
-            .ok()
-            .flatten()
+            .map_err(|e| e.to_string())
     }
 
     fn process(&self, pid: u32) -> ProcessObs {
@@ -86,10 +88,10 @@ impl Probes for RealProbes {
 #[cfg(windows)]
 fn process_state(pid: u32) -> ProcessObs {
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE,
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, FILETIME, STILL_ACTIVE,
     };
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     // SAFETY: a query-only handle, closed before returning.
     unsafe {
@@ -97,16 +99,24 @@ fn process_state(pid: u32) -> ProcessObs {
         if h.is_null() {
             // A process we may not query is still there.
             return if GetLastError() == ERROR_ACCESS_DENIED {
-                ProcessObs::Alive
+                ProcessObs::Alive(None)
             } else {
                 ProcessObs::Gone(None)
             };
         }
         let mut code = 0u32;
         let ok = GetExitCodeProcess(h, &mut code);
+        let zero = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut created, mut x, mut y, mut z) = (zero, zero, zero, zero);
+        let timed = GetProcessTimes(h, &mut created, &mut x, &mut y, &mut z) != 0;
         CloseHandle(h);
         if ok == 0 || code == STILL_ACTIVE as u32 {
-            ProcessObs::Alive
+            let started = timed
+                .then_some((created.dwHighDateTime as u64) << 32 | created.dwLowDateTime as u64);
+            ProcessObs::Alive(started)
         } else {
             ProcessObs::Gone(Some(code as i64))
         }
@@ -115,10 +125,14 @@ fn process_state(pid: u32) -> ProcessObs {
 
 #[cfg(not(windows))]
 fn process_state(pid: u32) -> ProcessObs {
-    if std::path::Path::new(&format!("/proc/{pid}")).exists() {
-        ProcessObs::Alive
-    } else {
-        ProcessObs::Gone(None)
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // The start time is field 22; the fields after the parenthesised name begin at field 3.
+        Ok(stat) => ProcessObs::Alive(
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+                .and_then(|v| v.parse().ok()),
+        ),
+        Err(_) => ProcessObs::Gone(None),
     }
 }
 
