@@ -494,3 +494,35 @@
 .skill-menu[data-mode='args'] .skill-desc {
   white-space: normal;
 }
+
+/* Ghost text: the completion drawn straight after the draft's end. The copy of the draft is
+   invisible and styled like the editor, so the suggestion wraps where the text really would. */
+.composer-dock .editor-ghost {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.composer-dock .editor-ghost-text {
+  padding: 13px 13px 6px;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.composer-dock .editor-ghost-copy {
+  visibility: hidden;
+}
+.composer-dock .editor-ghost-completion {
+  color: var(--muted);
+}
+.composer-dock .editor-ghost kbd {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  color: var(--muted);
+  vertical-align: 1px;
+}

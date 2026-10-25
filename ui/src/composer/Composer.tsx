@@ -323,7 +323,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       void ops
         .autocomplete(chat.id, base)
         .then((r) => {
-          if (r.completion && (editor.current?.getText() ?? '') === base) setGhost({ base, completion: r.completion });
+          if (r.completion && (editor.current?.getText() ?? '') === base && editor.current?.caretAtEnd()) setGhost({ base, completion: r.completion });
         })
         .catch(() => undefined);
     }, 350);
@@ -360,7 +360,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       }
       if (ghost && plain && e.key === 'Tab') {
         const current = editor.current?.getText() ?? '';
-        if (current === ghost.base) {
+        if (current === ghost.base && editor.current?.caretAtEnd()) {
           showText(ghost.base + ghost.completion);
           setGhost(null);
           return true;
@@ -525,12 +525,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
           onChange={onChange}
           onKey={onKey}
           handle={editor}
+          ghost={ghost}
         />
-        {ghost && (
-          <div className="ghost-hint muted" data-testid="autocomplete-ghost">
-            …{ghost.completion} <kbd>Tab</kbd>
-          </div>
-        )}
         <div className="composer-bar">
           <div className="composer-selects">
             <ModelPicker chat={chat} ops={ops} />

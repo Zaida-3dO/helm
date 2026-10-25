@@ -4,7 +4,7 @@ import { resolveKey, sendTooltip, stopTooltip, type KeyContext, type KeyShape } 
 import { DRAFT_DEBOUNCE_MS, DraftSaver, nextRevision, type Timers } from './drafts.ts';
 import { dropPosition, movePosition, queueView } from './queue.ts';
 import { submission } from '../dev/fixtures.ts';
-import { wrapMarker } from './markup.ts';
+import { liveRuns, wrapMarker } from './markup.ts';
 import { permissionLabel } from './permission.ts';
 
 const key = (k: string, m: Partial<KeyShape> = {}): KeyShape => ({ key: k, ctrl: false, shift: false, alt: false, meta: false, ...m });
@@ -180,4 +180,22 @@ test('queue: dropping on another queued message lands on that message position',
   assert.equal(dropPosition(pending, 'q3', 'q1'), 1);
   assert.equal(dropPosition(pending, 'q2', 'q2'), null);
   assert.equal(dropPosition(pending, 'q2', 'nope'), null);
+});
+
+test('live styling keeps every character and styles the Markdown it finds', () => {
+  const src = '# Title\nSome **bold**, *it* and `code` at https://example.com/a?b=1.\n- item ~~gone~~\n```\n**not bold**\n```\n2x*3 and snake_case_name';
+  const lines = liveRuns(src);
+  assert.equal(lines.map((l) => l.map((r) => r.text).join('')).join('\n'), src, 'joining the runs gives the draft back');
+  const styled = (line: number, text: string) => lines[line]!.find((r) => r.text === text)?.style ?? null;
+  assert.match(styled(0, 'Title')!, /font-size:1\.32em/);
+  assert.equal(styled(0, '# '), 'color:var(--muted);font-size:inherit');
+  assert.match(styled(1, 'bold')!, /font-weight:650/);
+  assert.equal(styled(1, '**'), 'color:var(--muted)');
+  assert.match(styled(1, 'it')!, /italic/);
+  assert.match(styled(1, 'code')!, /monospace/);
+  assert.match(styled(1, 'https://example.com/a?b=1')!, /underline/, 'a link is underlined');
+  assert.match(styled(2, '-')!, /var\(--accent\)/);
+  assert.match(styled(2, 'gone')!, /line-through/);
+  assert.equal(lines[4]!.length, 1, 'inside a fenced block nothing is parsed');
+  assert.equal(lines[6]!.length, 1, 'a lone star and snake_case are plain text');
 });
