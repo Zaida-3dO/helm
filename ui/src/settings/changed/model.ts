@@ -41,3 +41,17 @@ export function keyTitle(key: string): string {
   const words = key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
+
+/**
+ * Who made a change, for the list: the chat's title with control and direction characters removed
+ * and cut at 64 characters, so a title cannot pose as anything else. A chat that is no longer
+ * listed (archived or deleted) reads as "a chat that is gone".
+ */
+export function changedBy(chatId: string, chats: { id: string; title: string }[]): { text: string; known: boolean } {
+  const chat = chats.find((c) => c.id === chatId);
+  if (!chat) return { text: 'a chat that is gone', known: false };
+  // eslint-disable-next-line no-control-regex
+  const clean = chat.title.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').trim();
+  const cut = clean.length > 64 ? `${clean.slice(0, 63)}\u2026` : clean;
+  return { text: cut === '' ? 'an untitled chat' : cut, known: true };
+}

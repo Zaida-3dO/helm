@@ -444,7 +444,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   }
 
   // Settings → Runtime's stored settings.
-  const runtimeSettings: Record<string, unknown> = { executable: '', skipPermissions: true, fastMode: true, worktreeTools: false, subagentLimits: 'orchestrator', subagentHardStop: false, subagentSoftTurns: 100, toolOutputCap: true, model: null, effort: 'xhigh', responseVerbosity: 'low', problem: null };
+  const runtimeSettings: Record<string, unknown> = { executable: '', skipPermissions: true, fastMode: true, worktreeTools: false, scheduleTools: false, subagentLimits: 'orchestrator', subagentHardStop: false, subagentSoftTurns: 100, toolOutputCap: true, model: null, effort: 'xhigh', responseVerbosity: 'low', problem: null };
 
   // Settings → Runtime's repositories.
   const repos: { repoId: string; remoteUrl?: string; worktreesAllowed: boolean; locations: { id: string; path: string }[] }[] = [

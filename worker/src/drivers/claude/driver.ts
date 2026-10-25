@@ -16,6 +16,8 @@ import { BUDGET_HOOK_ID, SubagentBudget, subagentRule } from "./limits.ts";
 import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE } from "./longcmd.ts";
 import { LANDING_GUARD_HOOK_ID, LANDING_GUARD_MATCHER, LandingGuard } from "./guard.ts";
 import { assertNotShim, resolveClaude, type Resolved } from "./resolve.ts";
+import { NATIVE_SCHEDULE_MATCHER, SCHEDULE_REDIRECT_HOOK_ID, scheduleRedirect } from "./schedulecalls.ts";
+import { SHELL_CHANGES_HOOK_ID, ShellChangeCapture } from "./shellchanges.ts";
 import { StreamTranslator } from "./translate.ts";
 import { Attribution } from "../../hosttools/attribution.ts";
 import { fileSaver, DEFAULT_MAX_CHARS } from "../../hosttools/cap.ts";
@@ -153,6 +155,8 @@ export class ClaudeDriver implements Driver {
   private readonly budget: SubagentBudget;
   /** The landing guard (guard.ts): asks the host before Bash, PowerShell and MCP calls. */
   private readonly guard: LandingGuard | undefined;
+  /** Finds the files each Bash call changed, when the launch asks for it and has a folder. */
+  private readonly shellChanges: ShellChangeCapture | undefined;
 
   constructor(launch: Launch, channel: HostChannel, deps: DriverDeps) {
     this.launch = launch;
@@ -163,6 +167,7 @@ export class ClaudeDriver implements Driver {
     this.model = c.model;
     this.effort = isEffort(c.effort) ? c.effort : DEFAULT_EFFORT;
     this.budget = new SubagentBudget({ softTurns: typeof c.subagentSoftTurns === "number" && c.subagentSoftTurns > 0 ? c.subagentSoftTurns : 0, hardStop: c.subagentHardStop === true });
+    if (c.shellChanges === true && launch.cwd) this.shellChanges = new ShellChangeCapture(launch.cwd);
     const level = launch.sendBehavior?.longCommands;
     this.longCommands = new LongCommandPolicy(isLongCommandLevel(level) ? level : "off");
     this.translator = new StreamTranslator({ emit: (e) => this.onTranslated(e), diag: deps.diag });
@@ -258,6 +263,8 @@ export class ClaudeDriver implements Driver {
       initRequest.sdkMcpServers = [SERVER_NAME];
     }
     if (this.budget.enabled) preToolUse.push({ matcher: ".*", hookCallbackIds: [BUDGET_HOOK_ID] });
+    if (this.shellChanges) preToolUse.push({ matcher: "Bash", hookCallbackIds: [SHELL_CHANGES_HOOK_ID] });
+    if (this.launch.claude?.scheduleTools === true) preToolUse.push({ matcher: NATIVE_SCHEDULE_MATCHER, hookCallbackIds: [SCHEDULE_REDIRECT_HOOK_ID] });
     if (preToolUse.length > 0) initRequest.hooks = { PreToolUse: preToolUse };
     const init = await this.control(initRequest, this.limits.controlTimeoutMs);
     markLaunch("initialized");
@@ -318,6 +325,7 @@ export class ClaudeDriver implements Driver {
       const t = this.liveTools.get(String(e.toolCallId));
       if (t?.taskId) this.taskTools.delete(t.taskId);
       this.liveTools.delete(String(e.toolCallId));
+      this.reportShellChanges(String(e.toolCallId));
     }
     if (e.type === "compaction_end") {
       if (this.compacting) this.compacting.boundary = true;
@@ -325,6 +333,15 @@ export class ClaudeDriver implements Driver {
       return;
     }
     this.ch.emit(e);
+  }
+
+  /** After a Bash call: tell the host which files it changed, if the snapshots found any. */
+  private reportShellChanges(id: string): void {
+    const capture = this.shellChanges;
+    if (!capture) return;
+    void capture.finish(id).then((paths) => {
+      if (paths.length > 0) this.ch.emit({ type: "shell_changes", toolCallId: id, paths });
+    });
   }
 
   /** `mcp_config` from the host, or the composer's `set_permission_mode` pick. */
@@ -721,6 +738,18 @@ export class ClaudeDriver implements Driver {
       const reason = duplicateMcpRefusal(String(input.tool_name ?? ""), this.mcp);
       return this.controlReply(requestId, reason ? { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } } : {});
     }
+    if (req.callback_id === SHELL_CHANGES_HOOK_ID) {
+      // The snapshot is taken before the command is allowed to start; it never refuses anything.
+      const id = String(req.tool_use_id ?? input.tool_use_id ?? "");
+      const background = obj(input.tool_input).run_in_background === true;
+      if (!this.shellChanges || !id || background) return this.controlReply(requestId, {});
+      void this.shellChanges.begin(id).then(() => this.controlReply(requestId, {}));
+      return;
+    }
+    if (req.callback_id === SCHEDULE_REDIRECT_HOOK_ID) {
+      const reason = scheduleRedirect(String(input.tool_name ?? ""), input.tool_input);
+      return this.controlReply(requestId, { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } });
+    }
     const toolUseId = String(req.tool_use_id ?? input.tool_use_id ?? "");
     const isRootBash = req.callback_id === LONG_COMMAND_HOOK_ID && input.tool_name === "Bash" && !input.agent_id && !this.subagentTools.has(toolUseId);
     if (!isRootBash) return this.controlReply(requestId, {});
@@ -756,6 +785,7 @@ export class ClaudeDriver implements Driver {
     this.interactions.dismissAll();
     this.longCommands.endTurn();
     this.guard?.endTurn();
+    this.shellChanges?.clear();
     this.attribution.clear();
     if (this.compacting) {
       if (!this.compacting.boundary) this.ch.emit({ type: "compaction_end", trigger: "manual", ok: false });

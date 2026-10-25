@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { HOME_SEND_BEHAVIOR } from '../api/types.ts';
 import { parseSendBehavior, sendBehaviorDiff, waitLimitLabel } from './chat/sendBehavior.ts';
-import { changeText, describeValue, keyTitle, parseChanges } from './changed/model.ts';
+import { changedBy, changeText, describeValue, keyTitle, parseChanges } from './changed/model.ts';
 import { parseNameList } from './applied.ts';
 import { stepZoom } from './generalOptions.ts';
 
@@ -34,6 +34,11 @@ test('changes by chats are read leniently and described in plain words', () => {
   assert.equal(describeValue({ a: 'x'.repeat(100) }).length, 60);
   assert.equal(keyTitle('compactSidebar'), 'Compact sidebar');
   assert.deepEqual(parseChanges(undefined), []);
+  const chats = [{ id: 'c', title: 'Fix\u202e it\n' + 'x'.repeat(80) }, { id: 'd', title: ' ' }];
+  const who = changedBy('c', chats);
+  assert.ok(who.known && who.text.startsWith('Fix it') && !who.text.includes('\u202e') && who.text.length === 64);
+  assert.deepEqual(changedBy('d', chats), { text: 'an untitled chat', known: true });
+  assert.deepEqual(changedBy('gone', chats), { text: 'a chat that is gone', known: false });
 });
 
 test('name lists and zoom steps stay in range', () => {

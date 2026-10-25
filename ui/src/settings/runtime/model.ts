@@ -40,6 +40,8 @@ export interface RuntimeSettings {
   subagentSoftTurns: number;
   /** Cut very long outputs of Helm's own tools to a head and a tail. */
   toolOutputCap: boolean;
+  /** Claude Code's own schedule tools may be offered; each call is redirected to Helm's schedules. */
+  scheduleTools: boolean;
   /** null: Claude Code's default model. */
   model: string | null;
   effort: string;

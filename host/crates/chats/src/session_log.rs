@@ -21,6 +21,8 @@ pub const MAX_TORN: usize = 8;
 pub const ROW_TEXT_BYTES: usize = 64 * 1024;
 pub const ROW_THINKING_BYTES: usize = 16 * 1024;
 pub const THINKING_TAIL_CHARS: usize = 2400;
+/// Paths kept from one shell command's changes.
+pub const MAX_SHELL_PATHS: usize = 200;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +83,19 @@ pub struct ContextEntry {
     pub text: String,
 }
 
+/// The files a shell command changed, found by comparing the checkout before and after it ran.
+/// `id` is `s:<toolCallId>`. It shows no row of its own: the turn's change card reads it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellChangesEntry {
+    pub id: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    pub timestamp: i64,
+    pub tool_call_id: String,
+    pub paths: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Entry {
@@ -88,6 +103,7 @@ pub enum Entry {
     Message(Box<MessageEntry>),
     Tool(ToolEntry),
     Context(ContextEntry),
+    ShellChanges(ShellChangesEntry),
 }
 
 impl Entry {
@@ -100,6 +116,7 @@ impl Entry {
             Entry::Message(e) => &e.id,
             Entry::Tool(e) => &e.id,
             Entry::Context(e) => &e.id,
+            Entry::ShellChanges(e) => &e.id,
         }
     }
     fn set_parent(&mut self, parent: Option<String>) {
@@ -107,6 +124,7 @@ impl Entry {
             Entry::Message(e) => e.parent_id = parent,
             Entry::Tool(e) => e.parent_id = parent,
             Entry::Context(e) => e.parent_id = parent,
+            Entry::ShellChanges(e) => e.parent_id = parent,
         }
     }
     pub fn kind(&self) -> &'static str {
@@ -114,6 +132,7 @@ impl Entry {
             Entry::Message(_) => "message",
             Entry::Tool(_) => "tool",
             Entry::Context(_) => "context",
+            Entry::ShellChanges(_) => "shellChanges",
         }
     }
 }
@@ -493,8 +512,10 @@ pub fn status_str(s: MessageStatus) -> &'static str {
 }
 
 impl RowWrite {
-    pub fn from_entry(e: &Entry) -> Self {
-        match e {
+    /// The row an entry shows, or `None` for an entry that has none (shell changes).
+    pub fn from_entry(e: &Entry) -> Option<Self> {
+        Some(match e {
+            Entry::ShellChanges(_) => return None,
             Entry::Message(m) => RowWrite {
                 source_key: m.id.clone(),
                 role: role_str(m.role),
@@ -544,7 +565,7 @@ impl RowWrite {
                 entry_id: Some(c.id.clone()),
                 parent_id: c.parent_id.clone(),
             },
-        }
+        })
     }
 }
 
@@ -689,13 +710,9 @@ pub fn project(
         (chat_id, id, parent, kind, Value::Object(raw.clone()).to_string()),
     )? > 0;
     if let Ok(entry) = serde_json::from_value::<Entry>(Value::Object(raw.clone())) {
-        upsert_row(
-            tx,
-            artifacts,
-            chat_id,
-            &RowWrite::from_entry(&entry),
-            revision,
-        )?;
+        if let Some(row) = RowWrite::from_entry(&entry) {
+            upsert_row(tx, artifacts, chat_id, &row, revision)?;
+        }
     }
     Ok(inserted)
 }

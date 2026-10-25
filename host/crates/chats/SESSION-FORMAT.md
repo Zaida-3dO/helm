@@ -24,6 +24,7 @@ message row's `source_key`, which is what makes projection idempotent.
 |---|---|---|---|
 | `message` | `u:<submissionId>` for a user row, `m:<messageId>` for an assistant row | `timestamp, role, text, thinking, status, details` | the worker ends the message (`message_end`) |
 | `tool` | `t:<toolCallId>` | `timestamp, toolCallId, toolName, args, result, isError, startedAt, endedAt` | the tool call ends; start and end are merged into one entry |
+| `shellChanges` | `s:<toolCallId>` | `timestamp, toolCallId, paths` | the worker found files a Bash call changed (compared the checkout before and after); no row, the turn's change card reads it |
 | `context` | `c:<uuid>` | `timestamp, kind, text`; `kind` is `compaction`, `model_change`, `effort_change`, `notice` or `restart` | the host records a context row |
 
 Reserved and not written: `fork`, `harness_switch`, `rewind`, `subagent_name`. A reader keeps an

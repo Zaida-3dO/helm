@@ -49,6 +49,13 @@ pub struct ClaudeLaunch {
     pub subagent_hard_stop: bool,
     /// Cut very long outputs of Helm's own tools to a head and a tail.
     pub tool_output_cap: bool,
+    /// Claude Code's own schedule tools may be offered (every call is refused with directions to
+    /// Helm's schedules). Absent unless the user turned them on in Settings > Runtime.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub schedule_tools: bool,
+    /// The worker compares the checkout before and after each Bash call, to list the files a
+    /// shell command changed on the turn's change card.
+    pub shell_changes: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -91,7 +98,7 @@ impl Launch {
     }
 }
 
-/// `<profile>/claude-runtime.json` (settings-schema): `{executable, skipPermissions, fastMode, worktreeTools}`.
+/// `<profile>/claude-runtime.json` (settings-schema): `{executable, skipPermissions, fastMode, worktreeTools, scheduleTools}`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClaudeRuntime {
@@ -120,6 +127,10 @@ pub struct ClaudeRuntime {
     /// Cut very long outputs of Helm's own tools. On by default.
     #[serde(default = "yes")]
     pub tool_output_cap: bool,
+    /// Let Claude Code's own schedule tools be offered (calls are redirected to Helm's
+    /// schedules). Off by default: a missing key means off.
+    #[serde(default)]
+    pub schedule_tools: bool,
 }
 
 /// Which chats the sub-agent limits apply to.
@@ -173,6 +184,7 @@ impl Default for ClaudeRuntime {
             subagent_hard_stop: false,
             subagent_soft_turns: DEFAULT_SOFT_TURNS,
             tool_output_cap: true,
+            schedule_tools: false,
         }
     }
 }
@@ -254,6 +266,8 @@ pub fn claude_launch(
         subagent_soft_turns: runtime.subagent_turns(false),
         subagent_hard_stop: runtime.subagent_hard_stop,
         tool_output_cap: runtime.tool_output_cap,
+        schedule_tools: runtime.schedule_tools,
+        shell_changes: true,
     };
     if let Some(t) = test {
         c.command = Some(t.command.clone());
@@ -317,6 +331,7 @@ mod tests {
             subagent_hard_stop: true,
             subagent_soft_turns: 40,
             tool_output_cap: false,
+            schedule_tools: true,
         };
         mine.save(dir.path()).unwrap();
         assert_eq!(ClaudeRuntime::load(dir.path()), (mine.clone(), None));
@@ -400,6 +415,20 @@ mod tests {
         };
         let v = serde_json::to_value(claude_launch(&on, None, None, None, None)).unwrap();
         assert_eq!(v["worktreeTools"], true);
+        assert!(
+            v.get("scheduleTools").is_none(),
+            "absent unless the user turned Claude Code's schedule tools on"
+        );
+        let on = ClaudeRuntime {
+            schedule_tools: true,
+            ..ClaudeRuntime::default()
+        };
+        let v = serde_json::to_value(claude_launch(&on, None, None, None, None)).unwrap();
+        assert_eq!(v["scheduleTools"], true);
+        assert_eq!(
+            v["shellChanges"], true,
+            "shell-command change capture is on for every Claude Code chat"
+        );
         assert!(
             !v.to_string().contains("appendSystemPrompt"),
             "absent unless a contributor adds a fragment"

@@ -4,7 +4,8 @@
 //! `review_turns {chatId, messageIds}` takes a page of at most 600 message ids. For each id that is
 //! the last assistant reply of a completed turn, it collects that turn's file-change tool calls
 //! (Edit, MultiEdit, Write that ended without error) and computes each file's net change
-//! ([`crate::netchange`]). Budgets: the last 64 turns of the page, 512 events per turn, 2,048
+//! ([`crate::netchange`]). Files a Bash call changed (found by the worker comparing the checkout
+//! before and after, kept as a `shellChanges` log entry) are listed too, without counts. Budgets: the last 64 turns of the page, 512 events per turn, 2,048
 //! overall; anything cut is flagged. Each file's repository is found by probing upward for a
 //! `.git` entry (which also finds worktrees and nested repositories), cached per request.
 
@@ -149,6 +150,67 @@ fn split_turns(rows: &[Row]) -> Vec<std::ops::Range<usize>> {
     turns
 }
 
+/// Whether two spellings of a path name the same file: case and slash direction do not matter.
+fn same_file(a: &str, b: &str) -> bool {
+    let norm = |p: &str| p.replace('\\', "/").to_lowercase();
+    norm(a) == norm(b)
+}
+
+/// The turn's running budgets, handed to [`add_shell_changes`].
+struct Spent<'a> {
+    count: &'a mut usize,
+    budget: &'a mut usize,
+    truncated: &'a mut bool,
+    last_time: &'a mut Option<i64>,
+}
+
+/// Adds the files a Bash call changed (recorded by the worker as it compared the checkout before
+/// and after the command) to the turn's files. There is no edit history for them, so their
+/// counts are never complete; a file an edit tool also changed loses its counts too.
+fn add_shell_changes(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    row: &Row,
+    files: &mut Vec<(String, Vec<Event>, bool)>,
+    spent: &mut Spent<'_>,
+) -> rusqlite::Result<()> {
+    let Some(call) = row.entry.as_deref().and_then(|e| e.strip_prefix("t:")) else {
+        return Ok(());
+    };
+    let raw: Option<String> = tx
+        .query_row(
+            "SELECT raw FROM entries WHERE chat_id = ?1 AND entry_id = ?2",
+            params![chat_id, format!("s:{call}")],
+            |x| x.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw.and_then(|r| serde_json::from_str::<Value>(&r).ok()) else {
+        return Ok(());
+    };
+    for path in raw
+        .get("paths")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        match files.iter_mut().find(|(p, _, _)| same_file(p, path)) {
+            Some((_, _, ok)) => *ok = false,
+            None => {
+                if *spent.count >= MAX_EVENTS_PER_TURN || *spent.budget == 0 {
+                    *spent.truncated = true;
+                    return Ok(());
+                }
+                *spent.count += 1;
+                *spent.budget -= 1;
+                files.push((path.to_owned(), Vec::new(), false));
+            }
+        }
+        *spent.last_time = Some(row.timestamp);
+    }
+    Ok(())
+}
+
 /// What one turn's file-change tool calls amount to.
 struct Gathered {
     /// Per file (first spelling of its path): the events in order and whether none was malformed.
@@ -172,6 +234,21 @@ fn gather_turn(
         let Some(tool) = r.tool.as_deref() else {
             continue;
         };
+        if tool == "Bash" && r.status == "complete" {
+            add_shell_changes(
+                tx,
+                chat_id,
+                r,
+                &mut files,
+                &mut Spent {
+                    count: &mut count,
+                    budget,
+                    truncated: &mut truncated,
+                    last_time: &mut last_time,
+                },
+            )?;
+            continue;
+        }
         if !matches!(tool, "Edit" | "MultiEdit" | "Write") || r.status != "complete" {
             continue;
         }
@@ -211,8 +288,7 @@ fn gather_turn(
         count += 1;
         *budget -= 1;
         last_time = Some(r.timestamp);
-        let key = path.to_lowercase();
-        match files.iter_mut().find(|(p, _, _)| p.to_lowercase() == key) {
+        match files.iter_mut().find(|(p, _, _)| same_file(p, &path)) {
             Some((_, list, ok)) => {
                 list.extend(evs);
                 *ok &= whole;
@@ -330,8 +406,7 @@ pub fn review_turn_diff(
     }
     let mut budget = MAX_EVENTS;
     let g = gather_turn(tx, chat_id, &rows[range.clone()], &mut budget)?;
-    let key = path.to_lowercase();
-    let Some((_, evs, whole)) = g.files.iter().find(|(p, _, _)| p.to_lowercase() == key) else {
+    let Some((_, evs, whole)) = g.files.iter().find(|(p, _, _)| same_file(p, path)) else {
         return Ok(None);
     };
     let (patch, complete) = match netchange::patch(evs) {
@@ -426,6 +501,11 @@ mod tests {
                 row(tx, 4, "toolResult", Some(("Write", json!({"file_path": "C:/x/new.md", "content": "a\nb\n"}), false)));
                 row(tx, 5, "toolResult", Some(("Edit", json!({"file_path": "C:/x/failed.ts", "old_string": "a", "new_string": "b"}), true)));
                 row(tx, 6, "toolResult", Some(("Bash", json!({"command": "ls"}), false)));
+                // The worker found two files that command changed: one the Edit calls also changed
+                // (another spelling of its path), one nothing else touched.
+                tx.execute("UPDATE messages SET entry_id = 't:b1' WHERE sequence = 6", [])?;
+                let paths = json!({"id": "s:b1", "type": "shellChanges", "paths": ["c:\\x\\A.ts", "C:/x/sed.txt"]});
+                tx.execute("INSERT INTO entries (chat_id, entry_id, kind, raw) VALUES ('c', 's:b1', 'shellChanges', ?1)", params![paths.to_string()])?;
                 let end1 = row(tx, 7, "assistant", None);
                 row(tx, 8, "user", None);
                 let end2 = row(tx, 9, "assistant", None);
@@ -441,11 +521,16 @@ mod tests {
             .iter()
             .map(|f| (f.path.as_str(), (f.added, f.removed, f.complete_counts)))
             .collect();
-        assert_eq!(by.len(), 2, "same file in two spellings is one entry; failed and non-file tools are skipped: {by:?}");
+        assert_eq!(by.len(), 3, "same file in two spellings is one entry; failed and non-file tools are skipped: {by:?}");
         assert_eq!(
             by["C:/x/a.ts"],
-            (Some(1), Some(1), true),
-            "repeated edits count once"
+            (None, None, false),
+            "a shell command also changed it, so the edit counts are not the whole story"
+        );
+        assert_eq!(
+            by["C:/x/sed.txt"],
+            (None, None, false),
+            "a file only a shell command changed is listed without counts"
         );
         assert_eq!(by["C:/x/new.md"], (Some(2), Some(0), true));
         assert!(out

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildClaudeArgs, disallowedTools } from "../src/drivers/claude/args.ts";
+import { cronTiming, NATIVE_SCHEDULE_TOOLS, scheduleRedirect } from "../src/drivers/claude/schedulecalls.ts";
 import { buildClaudeEnv, STRIPPED_UNLESS_API_KEY_MODE } from "../src/drivers/claude/env.ts";
 
 const base = {
@@ -81,6 +82,27 @@ test("Claude Code's worktree tools stay disallowed unless the launch allows them
   assert.ok(list({ worktreeTools: true }, { HELM_WORKTREE_OFF_LIST: "C:/p/worktrees-off.tsv" }).includes("EnterWorktree"));
   const flagValue = flag(buildClaudeArgs({ worktreeTools: true }), "--disallowedTools") ?? "";
   assert.ok(!flagValue.includes("EnterWorktree") && flagValue.includes("RemoteTrigger"));
+});
+
+test("Claude Code's schedule tools come off the disallowed list only on request, and every call is redirected", () => {
+  assert.ok(NATIVE_SCHEDULE_TOOLS.every((t) => disallowedTools({}, {}).includes(t)));
+  const on = disallowedTools({ scheduleTools: true }, {});
+  assert.ok(NATIVE_SCHEDULE_TOOLS.every((t) => !on.includes(t)) && on.includes("EnterWorktree"), "only the schedule tools move");
+  // The cron rules that map exactly, and one that does not.
+  assert.deepEqual(cronTiming("*/15 * * * *"), { kind: "interval", seconds: 900 });
+  assert.deepEqual(cronTiming("0 */6 * * *"), { kind: "interval", seconds: 21600 });
+  assert.deepEqual(cronTiming("30 9 * * 1-5"), { kind: "weekly", hour: 9, minute: 30, days: [0, 1, 2, 3, 4] });
+  assert.deepEqual(cronTiming("0 8 * * 0"), { kind: "weekly", hour: 8, minute: 0, days: [6] });
+  assert.equal(cronTiming("*/7 * * * *"), null);
+  assert.equal(cronTiming("0 9 1 * *"), null);
+  // The refusal names Helm's tool, clamps the wake-up delay and never repeats the prompt.
+  const wake = scheduleRedirect("ScheduleWakeup", { delaySeconds: 5, prompt: "SECRET PROMPT" });
+  assert.ok(wake.includes("app_create_schedule") && wake.includes('"inSeconds":60') && !wake.includes("SECRET"));
+  assert.ok(scheduleRedirect("ScheduleWakeup", { delaySeconds: 99999 }).includes('"inSeconds":3600'));
+  assert.ok(scheduleRedirect("CronCreate", { cron: "*/5 * * * *", prompt: "SECRET" }).includes('"seconds":300'));
+  assert.ok(scheduleRedirect("CronList", {}).includes("app_list_schedules"));
+  assert.ok(scheduleRedirect("CronDelete", {}).includes("app_cancel_schedule"));
+  assert.ok(scheduleRedirect("RemoteTrigger", {}).includes("app_create_schedule"));
 });
 
 test("a fork's first launch resumes as a new session; --fork-session needs a session to resume", () => {

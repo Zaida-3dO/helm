@@ -88,6 +88,8 @@ pub struct RuntimeSettings {
     pub subagent_soft_turns: u32,
     /// Cut very long outputs of Helm's own tools.
     pub tool_output_cap: bool,
+    /// Claude Code's own schedule tools may be offered; each call is redirected to Helm's schedules.
+    pub schedule_tools: bool,
     /// `None`: Claude Code's default model.
     pub model: Option<String>,
     pub effort: String,
@@ -107,6 +109,7 @@ pub struct RuntimeSettingsPatch {
     pub subagent_hard_stop: Option<bool>,
     pub subagent_soft_turns: Option<u32>,
     pub tool_output_cap: Option<bool>,
+    pub schedule_tools: Option<bool>,
     /// An empty string clears it (Claude Code's default).
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -133,6 +136,7 @@ fn read_settings(ctx: &OpCtx) -> Result<RuntimeSettings, ApiError> {
         subagent_hard_stop: rt.subagent_hard_stop,
         subagent_soft_turns: rt.subagent_soft_turns,
         tool_output_cap: rt.tool_output_cap,
+        schedule_tools: rt.schedule_tools,
         model,
         effort,
         response_verbosity,
@@ -195,6 +199,7 @@ fn runtime_settings_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         || p.subagent_hard_stop.is_some()
         || p.subagent_soft_turns.is_some()
         || p.tool_output_cap.is_some()
+        || p.schedule_tools.is_some()
     {
         let (mut rt, _) = ClaudeRuntime::load(&profile.dir);
         if let Some(x) = p.executable {
@@ -220,6 +225,9 @@ fn runtime_settings_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         }
         if let Some(v) = p.tool_output_cap {
             rt.tool_output_cap = v;
+        }
+        if let Some(w) = p.schedule_tools {
+            rt.schedule_tools = w;
         }
         rt.save(&profile.dir)
             .map_err(|e| ApiError::internal(format!("claude-runtime.json not saved: {e}")))?;
@@ -304,6 +312,10 @@ mod tests {
             s["worktreeTools"], false,
             "Claude Code's worktree tools default off"
         );
+        assert_eq!(
+            s["scheduleTools"], false,
+            "Claude Code's schedule tools default off"
+        );
         assert_eq!(s["effort"], catalogue::DEFAULT_EFFORT);
         assert_eq!(s["model"], Value::Null);
         assert_eq!(s["responseVerbosity"], "low");
@@ -357,7 +369,7 @@ mod tests {
         assert_eq!(bad.code, "bad_args");
         let s = api(
             "runtime_settings_save",
-            json!({"fastMode": false, "worktreeTools": true, "skipPermissions": false, "model": "sonnet", "effort": "high", "responseVerbosity": "medium"}),
+            json!({"fastMode": false, "worktreeTools": true, "scheduleTools": true, "skipPermissions": false, "model": "sonnet", "effort": "high", "responseVerbosity": "medium"}),
         )
         .await
         .unwrap();
@@ -383,6 +395,7 @@ mod tests {
         .unwrap();
         assert_eq!(file["fastMode"], false);
         assert_eq!(file["worktreeTools"], true);
+        assert_eq!(file["scheduleTools"], true);
         assert_eq!(file["skipPermissions"], false);
         // A new chat starts with the defaults; explicit arguments still win.
         let c = api("chat_create", json!({"cwd": h.work.to_string_lossy()}))

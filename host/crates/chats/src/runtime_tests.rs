@@ -795,6 +795,31 @@ async fn tools_are_written_at_start_and_end() {
         .col("SELECT json_extract(details, '$.toolArgs') FROM messages WHERE source_key = 't:tc1'");
     assert_eq!(args, [r#"{"command":"ls"}"#], "toolArgs is JSON text");
     assert!(h.rt.live_thread(&chat).unwrap().live_tools.is_empty());
+    // The files the command changed are kept as an entry of their own, with no row; a line with
+    // no usable path is dropped.
+    w.emit(json!({"type": "shell_changes", "toolCallId": "tc1", "paths": ["C:/p/a.txt", "", 5]}))
+        .await;
+    w.emit(json!({"type": "shell_changes", "toolCallId": "tc2", "paths": []}))
+        .await;
+    h.until("shell changes", |h| {
+        !h.col("SELECT raw FROM entries WHERE entry_id = 's:tc1'")
+            .is_empty()
+    })
+    .await;
+    assert_eq!(
+        h.col("SELECT json_extract(raw, '$.paths[0]') FROM entries WHERE entry_id = 's:tc1'"),
+        ["C:/p/a.txt"]
+    );
+    assert_eq!(
+        h.col("SELECT json_array_length(raw, '$.paths') FROM entries WHERE entry_id = 's:tc1'"),
+        ["1"]
+    );
+    assert!(h
+        .col("SELECT 1 FROM messages WHERE source_key LIKE 's:%'")
+        .is_empty());
+    assert!(h
+        .col("SELECT 1 FROM entries WHERE entry_id = 's:tc2'")
+        .is_empty());
 }
 
 /// A model change not acknowledged within the limit fails the run.

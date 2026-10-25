@@ -34,6 +34,10 @@ export interface ClaudeLaunch {
   subagentHardStop?: boolean;
   /** Cut very long results of Helm's own tools to a head and a tail. */
   toolOutputCap?: boolean;
+  /** Claude Code's own schedule tools may be offered; every call is refused with a redirect to Helm's schedules. Absent: off. */
+  scheduleTools?: boolean;
+  /** Record which files each Bash call changed (compares the checkout before and after). Absent: off. */
+  shellChanges?: boolean;
 }
 
 export interface LaunchLimits {

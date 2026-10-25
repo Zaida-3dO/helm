@@ -13,6 +13,7 @@ use helm_core::prefs::classes::{classify, PrefClass, Tier, CLASSIFIED};
 pub const USER_ONLY: &[(&str, &str)] = &[
     ("fastMode", "Settings > Runtime"),
     ("worktreeTools", "Settings > Runtime"),
+    ("scheduleTools", "Settings > Runtime"),
     ("notifications", "Settings > Notifications"),
     ("loadGate", "Settings > Chat (resource limits)"),
     ("afk", "Settings > Away"),
