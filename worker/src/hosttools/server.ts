@@ -9,6 +9,7 @@
 
 import type { Json } from "../protocol/types.ts";
 import { DEFAULT_TIMEOUT_MS, NOTHING_CHANGED, type CallResult, type RequestChannel } from "./channel.ts";
+import { capToolResult, type OutputCap } from "./cap.ts";
 import { COMPAT_ALWAYS, COMPAT_WITH_MCP } from "./names.ts";
 
 export const SERVER_NAME = "helm";
@@ -53,6 +54,8 @@ export interface ServerOptions {
   bridge?: McpBridgeLike;
   /** A successful self-archive with `archivePending: true` ends the turn. */
   onEndTurn?: () => void;
+  /** Cut very long tool results to a head and a tail. Absent: results pass whole. */
+  outputCap?: OutputCap;
 }
 
 type RpcId = string | number | null;
@@ -172,7 +175,8 @@ export class HostToolServer {
       case "tools/call": {
         const name = String(msg.params?.name ?? "");
         const args = (msg.params?.arguments ?? {}) as Json;
-        return ok(toolResult(await this.call(name, args, caller, signal)));
+        const result = toolResult(await this.call(name, args, caller, signal));
+        return ok(this.o.outputCap ? capToolResult(result, name, this.o.outputCap) : result);
       }
       default:
         return err(-32601, `Method not found: ${String(msg.method)}`);

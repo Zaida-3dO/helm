@@ -20,7 +20,9 @@ use crate::catalogue;
 use helm_core::db::Database;
 use helm_core::profile::Profile;
 use helm_ipc::{ApiError, OpClass, OpCtx, OpRegistry};
-use helm_workers::launch::{test_claude, ClaudeRuntime};
+use helm_workers::launch::{
+    test_claude, ClaudeRuntime, SubagentScope, MAX_SOFT_TURNS, MIN_SOFT_TURNS,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -77,6 +79,15 @@ pub struct RuntimeSettings {
     pub fast_mode: bool,
     /// Claude Code's own worktree tools (EnterWorktree, ExitWorktree) may be offered to chats.
     pub worktree_tools: bool,
+    /// Which chats get turn and context limits on their sub-agents: `off`, `orchestrator`
+    /// (chats with Orchestrator on, the default) or `all`.
+    pub subagent_limits: SubagentScope,
+    /// Refuse a sub-agent's tool calls past the hard limit (otherwise it is only told).
+    pub subagent_hard_stop: bool,
+    /// Turns before a sub-agent is told to hand off.
+    pub subagent_soft_turns: u32,
+    /// Cut very long outputs of Helm's own tools.
+    pub tool_output_cap: bool,
     /// `None`: Claude Code's default model.
     pub model: Option<String>,
     pub effort: String,
@@ -92,6 +103,10 @@ pub struct RuntimeSettingsPatch {
     pub skip_permissions: Option<bool>,
     pub fast_mode: Option<bool>,
     pub worktree_tools: Option<bool>,
+    pub subagent_limits: Option<SubagentScope>,
+    pub subagent_hard_stop: Option<bool>,
+    pub subagent_soft_turns: Option<u32>,
+    pub tool_output_cap: Option<bool>,
     /// An empty string clears it (Claude Code's default).
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -114,6 +129,10 @@ fn read_settings(ctx: &OpCtx) -> Result<RuntimeSettings, ApiError> {
         skip_permissions: rt.skip_permissions,
         fast_mode: rt.fast_mode,
         worktree_tools: rt.worktree_tools,
+        subagent_limits: rt.subagent_limits,
+        subagent_hard_stop: rt.subagent_hard_stop,
+        subagent_soft_turns: rt.subagent_soft_turns,
+        tool_output_cap: rt.tool_output_cap,
         model,
         effort,
         response_verbosity,
@@ -141,6 +160,13 @@ fn runtime_settings_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             ));
         }
     }
+    if let Some(n) = p.subagent_soft_turns {
+        if !(MIN_SOFT_TURNS..=MAX_SOFT_TURNS).contains(&n) {
+            return Err(ApiError::bad_args(format!(
+                "Sub-agent turns must be between {MIN_SOFT_TURNS} and {MAX_SOFT_TURNS}."
+            )));
+        }
+    }
     if let Some(m) = p.model.as_deref() {
         if m.len() > MAX_MODEL_BYTES || m.chars().any(char::is_control) {
             return Err(ApiError::bad_args("That model name is not valid."));
@@ -165,6 +191,10 @@ fn runtime_settings_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         || p.skip_permissions.is_some()
         || p.fast_mode.is_some()
         || p.worktree_tools.is_some()
+        || p.subagent_limits.is_some()
+        || p.subagent_hard_stop.is_some()
+        || p.subagent_soft_turns.is_some()
+        || p.tool_output_cap.is_some()
     {
         let (mut rt, _) = ClaudeRuntime::load(&profile.dir);
         if let Some(x) = p.executable {
@@ -178,6 +208,18 @@ fn runtime_settings_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         }
         if let Some(w) = p.worktree_tools {
             rt.worktree_tools = w;
+        }
+        if let Some(v) = p.subagent_limits {
+            rt.subagent_limits = v;
+        }
+        if let Some(v) = p.subagent_hard_stop {
+            rt.subagent_hard_stop = v;
+        }
+        if let Some(v) = p.subagent_soft_turns {
+            rt.subagent_soft_turns = v;
+        }
+        if let Some(v) = p.tool_output_cap {
+            rt.tool_output_cap = v;
         }
         rt.save(&profile.dir)
             .map_err(|e| ApiError::internal(format!("claude-runtime.json not saved: {e}")))?;
@@ -265,6 +307,43 @@ mod tests {
         assert_eq!(s["effort"], catalogue::DEFAULT_EFFORT);
         assert_eq!(s["model"], Value::Null);
         assert_eq!(s["responseVerbosity"], "low");
+        assert_eq!(
+            (
+                &s["subagentLimits"],
+                &s["subagentHardStop"],
+                &s["subagentSoftTurns"],
+                &s["toolOutputCap"]
+            ),
+            (
+                &json!("orchestrator"),
+                &json!(false),
+                &json!(100),
+                &json!(true)
+            ),
+            "the limits default to Orchestrator chats, notes only"
+        );
+        let bad = api("runtime_settings_save", json!({"subagentLimits": "some"}))
+            .await
+            .unwrap_err();
+        assert_eq!(bad.code, "bad_args");
+        let bad = api("runtime_settings_save", json!({"subagentSoftTurns": 3}))
+            .await
+            .unwrap_err();
+        assert_eq!(bad.code, "bad_args");
+        let s = api(
+            "runtime_settings_save",
+            json!({"subagentLimits": "all", "subagentHardStop": true, "subagentSoftTurns": 60, "toolOutputCap": false}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (
+                &s["subagentLimits"],
+                &s["subagentSoftTurns"],
+                &s["toolOutputCap"]
+            ),
+            (&json!("all"), &json!(60), &json!(false))
+        );
         let bad = api("runtime_settings_save", json!({"effort": "turbo"}))
             .await
             .unwrap_err();

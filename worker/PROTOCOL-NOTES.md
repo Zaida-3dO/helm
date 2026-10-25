@@ -319,3 +319,41 @@ Choices made here:
 
 Skip permission prompts (the launch flag) auto-allows tool requests only until a pick that asks;
 after `default`, `acceptEdits` or `plan` the CLI's requests become approval cards.
+
+## Sub-agent limits and the tool output cap
+
+Launch fields (`claude`): `subagentSoftTurns` (0 or absent: no limits), `subagentHardStop` (true:
+refuse past the hard limit; otherwise only remind) and `toolOutputCap` (true: cut long tool
+results). They come from Settings → Runtime through `claude-runtime.json`, read when a worker
+starts. The limits default to chats with Orchestrator on (the host sets `subagentSoftTurns` to 0
+for any other chat unless the setting is "all chats"), with notes only; a chat with Orchestrator
+off launches exactly as before.
+
+**Sub-agent limits** (`worker/src/drivers/claude/limits.ts`). With a non-zero `subagentSoftTurns`
+the worker registers one more `PreToolUse` hook, matcher `.*`, callback `helm-subagent-budget`.
+Calls with no `agent_id` and whose tool-use id was not seen in a sub-agent's assistant record (the
+chat's own agent) are always allowed and never counted. For a sub-agent:
+- Turns are its tool calls, counted from the hook. Context is read from the usage of its latest
+  assistant record (`parent_tool_use_id` set): `input_tokens + cache_read_input_tokens +
+  cache_creation_input_tokens`.
+- First call: `additionalContext` asks for a short final report (a few lines, detail in a file).
+- At the soft limit (default 100 calls, or 300k tokens of context): `additionalContext` telling it
+  to finish its step, write a short hand-off and stop; repeated every five calls.
+- Past 130% of either limit: with `subagentHardStop`, `permissionDecision: "deny"` with the same
+  instruction (the sub-agent's reply is the way out); without it, the reminder continues.
+- Only when limits apply, the chat's own agent's instructions get one paragraph saying so (and to ask sub-agents for short
+  reports), appended with the long-command rule.
+Not verified against a live CLI: that a sub-agent sees a PreToolUse `additionalContext` note (it is
+documented for hooks in general; the fake CLI does not model sub-agent hooks).
+
+**Tool output cap** (`worker/src/hosttools/cap.ts`). A result of the helm server's tools (host
+tools and the MCP tools it proxies, including through `app_mcp_call`) longer than 5,000 characters
+keeps its first ~3,250 and last ~1,750 characters around a marker saying how much was cut and
+where the whole text is (a file under the system temp folder, `helm-tool-output`, cleared after a
+day; if it cannot be written the marker says to ask for less). The structured copy of the result is
+dropped when it is cut. Tool discovery (`app_list_tools`, `app_mcp_tools`) is exempt.
+
+What cannot be done: Claude Code's built-in tools (Read, Bash, Grep and the rest) produce their
+output inside the CLI. A `PostToolUse` hook may add context but, per the hook documentation, can
+only replace the output of MCP tools (`updatedMCPToolOutput`), not of built-in ones. So built-in
+tool output is not capped by Helm; the CLI's own limits apply.

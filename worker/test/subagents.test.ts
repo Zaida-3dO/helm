@@ -4,6 +4,7 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { SubagentBudget } from "../src/drivers/claude/limits.ts";
 import { StreamTranslator, assignmentPreview } from "../src/drivers/claude/translate.ts";
 import type { Json } from "../src/protocol/types.ts";
 import { prompt, startWithFixture, waitReceived } from "./helpers.ts";
@@ -254,5 +255,48 @@ describe("stopping one subagent", () => {
     } finally {
       await s.done();
     }
+  });
+});
+
+describe("sub-agent limits", () => {
+  const call = (parent: string, id: string, usage?: Json): Json => ({
+    type: "assistant",
+    message: { id: `m_${id}`, content: [{ type: "tool_use", id, name: "Read", input: {} }], ...(usage ? { usage } : {}) },
+    parent_tool_use_id: parent,
+  });
+
+  test("a sub-agent is noted at its first call and at the soft limit, refused past the hard limit; the chat's own agent is never counted", () => {
+    const b = new SubagentBudget({ softTurns: 10, hardStop: true });
+    const step = (agent: string | undefined, id: string) => b.decide({ ...(agent ? { agent_id: agent } : {}) }, id);
+    const kinds = (agent: string | undefined, n: number) => Array.from({ length: n }, (_, i) => step(agent, `${agent}-${i}`).kind);
+    // The chat's own agent: 40 calls, all allowed, no notes.
+    assert.deepEqual([...new Set(kinds(undefined, 40))], ["allow"]);
+    // One sub-agent: first call carries the reporting note, then plain until call 10 (soft), a
+    // reminder five calls on, then refused after call 13 (130%).
+    const seq = kinds("a1", 15);
+    assert.deepEqual(seq, ["note", ...Array(8).fill("allow"), "note", "allow", "allow", "allow", "deny", "deny"]);
+    assert.match((step("a1", "x") as { text: string }).text, /hand-off/);
+    // Without the hard stop (the default) a sub-agent past the limit is only reminded, never refused.
+    const soft = new SubagentBudget({ softTurns: 10 });
+    const softKinds = Array.from({ length: 40 }, (_, i) => soft.decide({ agent_id: "s" }, `s${i}`).kind);
+    assert.ok(!softKinds.includes("deny") && softKinds.filter((k) => k === "note").length > 3);
+    // Another sub-agent has its own count.
+    assert.equal(step("a2", "y").kind, "note");
+    // Off: nothing is ever noted or refused.
+    const off = new SubagentBudget({ softTurns: 0 });
+    assert.equal(off.enabled, false);
+    assert.equal(off.decide({ agent_id: "a1" }, "t").kind, "allow");
+  });
+
+  test("a sub-agent past the context budget is told to hand off; the owner is found from its assistant records", () => {
+    const b = new SubagentBudget({ softTurns: 100, hardStop: true });
+    b.decide({ agent_id: "a1" }, "warm"); // first-call note out of the way
+    b.noteAssistant(call("agent_1", "t1", { input_tokens: 10, cache_read_input_tokens: 296_000, cache_creation_input_tokens: 5_000 }));
+    // No agent_id on the hook: the tool-use id still names the owner.
+    const d = b.decide({}, "t1");
+    assert.equal(d.kind, "note");
+    assert.match((d as { text: string }).text, /301k tokens/);
+    b.noteAssistant(call("agent_1", "t2", { input_tokens: 10, cache_read_input_tokens: 400_000 }));
+    assert.equal(b.decide({}, "t2").kind, "deny");
   });
 });

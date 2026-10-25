@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { DEFAULT_MODEL, modelOptions, repoSummary, sourceLabel, statusLine } from './model.ts';
+import { DEFAULT_MODEL, modelOptions, repoSummary, sourceLabel, statusLine, turnOptions } from './model.ts';
 
 test('a found component shows its version and where it came from; a missing one shows why', () => {
   assert.deepEqual(statusLine({ path: 'C:/node/node.exe', source: 'PATH', version: 'v24.14.0', problem: null }), {
@@ -35,4 +35,9 @@ test("the model picker starts with Claude Code's default and keeps a stored mode
     [DEFAULT_MODEL, 'opus', 'retired-model'],
   );
   assert.equal(opts[1]?.subtitle, 'Most capable');
+});
+
+test('the sub-agent tool-call picker lists the choices in order and keeps an unlisted stored value', () => {
+  assert.deepEqual(turnOptions(null).map((o) => o.value), ['40', '60', '100', '150', '250', '500']);
+  assert.deepEqual(turnOptions(120).map((o) => o.value), ['40', '60', '100', '120', '150', '250', '500']);
 });

@@ -238,6 +238,9 @@ impl Spawner for ProcessSpawner {
             req.resume_session_id.clone(),
         );
         claude.append_system_prompt = contrib::system_prompt(&extras);
+        if extras.orchestrator_on {
+            claude.subagent_soft_turns = runtime.subagent_turns(true);
+        }
         claude.fork_session = req.fork_session;
         let worker_dir = PathBuf::from(&self.data_root)
             .join("workers")

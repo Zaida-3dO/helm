@@ -28,6 +28,12 @@ export interface ClaudeLaunch {
   disabledMcpServers?: string[];
   /** Claude Code's own worktree tools (EnterWorktree, ExitWorktree) may be offered. Absent: off. */
   worktreeTools?: boolean;
+  /** Tool calls a sub-agent may make before it is told to hand off and stop; 0 or absent: no limits. */
+  subagentSoftTurns?: number;
+  /** Past 30% over the limit, refuse a sub-agent's tool calls (otherwise it is only reminded). */
+  subagentHardStop?: boolean;
+  /** Cut very long results of Helm's own tools to a head and a tail. */
+  toolOutputCap?: boolean;
 }
 
 export interface LaunchLimits {

@@ -3390,3 +3390,76 @@ async fn the_idle_check_flags_a_quiet_chat_once_and_new_activity_clears_it() {
         "the verdict was for the earlier activity"
     );
 }
+
+/// Roll over asks the agent for a hand-off, starts a successor in the same folder whose first
+/// message carries it, archives the old chat and opens the new one. A chat with no reply, or one
+/// that is working, is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn roll_over_hands_the_work_to_a_successor_and_archives_the_old_chat() {
+    let mut h = harness();
+    let chat = h.create().await;
+    let none = h
+        .call("chat_roll_over", json!({"chatId": chat}))
+        .await
+        .unwrap_err();
+    assert!(none.message.contains("no replies"), "{}", none.message);
+    let (sid, _) = h.send(&chat, "build the thing", "default").await;
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    echo(&w, &sid).await;
+    reply(&h, &w, "msg_1", "Built part one.").await;
+    let busy = h
+        .call("chat_roll_over", json!({"chatId": chat}))
+        .await
+        .unwrap_err();
+    assert!(busy.message.contains("working"), "{}", busy.message);
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+
+    let started = h
+        .call("chat_roll_over", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    assert_eq!(started["started"], true);
+    let p = w.expect("prompt").await;
+    assert!(p["text"].as_str().unwrap().contains("rolled over"));
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    let text = "Goal: finish it. Left to do: part two.";
+    w.emit(json!({"type": "message_start", "message": {"id": "msg_2", "role": "assistant", "content": []}}))
+        .await;
+    w.emit(json!({"type": "message_end", "message": {"id": "msg_2", "role": "assistant", "content": [{"type": "text", "text": text}], "status": "complete"}}))
+        .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+
+    let mut w2 = h.worker().await;
+    w2.ready().await;
+    let first = w2.expect("prompt").await;
+    let text = first["text"].as_str().unwrap();
+    assert!(
+        text.contains(&chat) && text.contains("Left to do: part two."),
+        "{text}"
+    );
+    h.until("old chat archived", |h| {
+        h.col(&format!("SELECT archived FROM chats WHERE id = '{chat}'")) == ["1"]
+    })
+    .await;
+    h.until("new chat opened", |h| {
+        !h.events("shell_open_chat").is_empty()
+    })
+    .await;
+    let new = h.events("shell_open_chat")[0]["chatId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(new, chat);
+    assert_eq!(
+        h.col(&format!("SELECT project_id = (SELECT project_id FROM chats WHERE id = '{chat}') FROM chats WHERE id = '{new}'")),
+        ["1"]
+    );
+}

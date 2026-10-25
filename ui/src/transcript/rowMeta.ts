@@ -20,6 +20,24 @@ export function newTokens(u: Usage): number {
   return u.inputTokens + u.cacheWriteTokens + u.outputTokens;
 }
 
+/** Context size at which the chat offers a prominent Roll over button. */
+export const ROLL_OVER_TOKENS = 250_000;
+/** Below this the context size is not worth showing. */
+export const CONTEXT_SHOWN_TOKENS = 50_000;
+
+/**
+ * How much context the chat holds now: input, cache reads and cache writes of the newest reply
+ * that reports usage. Null when no reply does (or the newest rows are not loaded).
+ */
+export function contextTokens(rows: MessageRow[]): number | null {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i]!;
+    const u = r.role === 'assistant' ? r.details?.usage : undefined;
+    if (u) return u.inputTokens + u.cacheReadTokens + u.cacheWriteTokens;
+  }
+  return null;
+}
+
 /** A compact count: 950, 1.2k, 12k, 3.4M. */
 export function compactCount(n: number): string {
   if (n < 1000) return String(n);

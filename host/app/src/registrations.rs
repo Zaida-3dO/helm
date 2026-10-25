@@ -289,6 +289,31 @@ pub fn allow_kinds() -> helm_consent::AllowKinds {
     k
 }
 
+/// Tells the launch whether Orchestrator is on for the chat, so settings that apply only to such
+/// chats (the sub-agent limits) leave every other chat exactly as it was.
+struct OrchestratorScope {
+    db: Arc<helm_core::db::Database>,
+}
+
+impl helm_workers::contrib::LaunchContributor for OrchestratorScope {
+    fn contribute(
+        &self,
+        ctx: &helm_workers::contrib::LaunchCtx<'_>,
+    ) -> helm_workers::contrib::LaunchExtras {
+        let on = self
+            .db
+            .snapshot(|tx| {
+                let s = helm_workflow::settings::load(tx)?;
+                helm_workflow::mode::in_effect(tx, ctx.chat_id, &s)
+            })
+            .unwrap_or(false);
+        helm_workers::contrib::LaunchExtras {
+            orchestrator_on: on,
+            ..Default::default()
+        }
+    }
+}
+
 /// Launch contributors: what each crate adds to every worker launch (`PATH`
 /// prefixes, variables, system-prompt fragments; `helm_workers::contrib`). Each crate adds one
 /// `add` line. Nothing contributed means a launch identical to one without this seam.
@@ -319,6 +344,7 @@ pub fn launch_contributors(
             profile_dir.to_path_buf(),
         )));
     }
+    c.add(Arc::new(OrchestratorScope { db: db.clone() }));
     c
 }
 
@@ -472,6 +498,10 @@ mod launch_tests {
             chat_id: "c",
             cwd: "C:/w",
         });
+        assert!(
+            !extras.orchestrator_on,
+            "a chat with no Orchestrator is not marked, so its launch is unchanged"
+        );
         let prompt = helm_workers::contrib::system_prompt(&extras).unwrap_or_default();
         // The file-link part is always there; the vault part needs a known vault on the machine.
         assert!(

@@ -12,10 +12,12 @@ import { isAlive, treeKill } from "../../process/kill.ts";
 import { buildClaudeArgs, modelTakesEffort } from "./args.ts";
 import { buildClaudeEnv } from "./env.ts";
 import { Interactions } from "./interactions.ts";
+import { BUDGET_HOOK_ID, SubagentBudget, subagentRule } from "./limits.ts";
 import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE } from "./longcmd.ts";
 import { assertNotShim, resolveClaude, type Resolved } from "./resolve.ts";
 import { StreamTranslator } from "./translate.ts";
 import { Attribution } from "../../hosttools/attribution.ts";
+import { fileSaver, DEFAULT_MAX_CHARS } from "../../hosttools/cap.ts";
 import { RequestChannel } from "../../hosttools/channel.ts";
 import { HostToolServer, SERVER_NAME, sdkMcpConfig, toolPrefix } from "../../hosttools/server.ts";
 import { planUsageFromRateLimit } from "../../usage/rateLimit.ts";
@@ -144,6 +146,8 @@ export class ClaudeDriver implements Driver {
   /** Helm's own MCP client (the bridge), reached through the helm server's tools. */
   private readonly mcp: McpBridge | undefined;
   private readonly attribution = new Attribution(toolPrefix);
+  /** Sub-agent turn and context limits (off when the launch sets none). */
+  private readonly budget: SubagentBudget;
 
   constructor(launch: Launch, channel: HostChannel, deps: DriverDeps) {
     this.launch = launch;
@@ -153,6 +157,7 @@ export class ClaudeDriver implements Driver {
     const c = launch.claude ?? {};
     this.model = c.model;
     this.effort = isEffort(c.effort) ? c.effort : DEFAULT_EFFORT;
+    this.budget = new SubagentBudget({ softTurns: typeof c.subagentSoftTurns === "number" && c.subagentSoftTurns > 0 ? c.subagentSoftTurns : 0, hardStop: c.subagentHardStop === true });
     const level = launch.sendBehavior?.longCommands;
     this.longCommands = new LongCommandPolicy(isLongCommandLevel(level) ? level : "off");
     this.translator = new StreamTranslator({ emit: (e) => this.onTranslated(e), diag: deps.diag });
@@ -173,6 +178,7 @@ export class ClaudeDriver implements Driver {
       this.hostTools = new HostToolServer({
         bridge: asHostToolBridge(this.mcp),
         hostTools: launch.hostTools,
+        outputCap: c.toolOutputCap === true ? { maxChars: DEFAULT_MAX_CHARS, save: fileSaver(launch.chatId) } : undefined,
         channel: new RequestChannel({ dir: launch.chatToolsDirectory, emit: (rec) => this.ch.emit(rec) }),
         // A successful self-archive ends the turn.
         onEndTurn: () => {
@@ -201,7 +207,7 @@ export class ClaudeDriver implements Driver {
     }
     const args = [
       ...(c.commandArgs ?? []),
-      ...buildClaudeArgs(c, { promptRule: this.longCommands.enabled ? PROMPT_RULE : undefined, mcpConfig: this.hostTools ? sdkMcpConfig() : undefined }),
+      ...buildClaudeArgs(c, { promptRule: this.promptRule(), mcpConfig: this.hostTools ? sdkMcpConfig() : undefined }),
     ];
     const env = buildClaudeEnv(this.deps.env, { apiKeyMode: c.apiKeyMode === true, chatId: this.launch.chatId });
     const child = spawn(command, args, {
@@ -244,6 +250,7 @@ export class ClaudeDriver implements Driver {
       if (this.mcp) preToolUse.push({ matcher: "mcp__.*", hookCallbackIds: [DUPLICATE_MCP_HOOK_ID] });
       initRequest.sdkMcpServers = [SERVER_NAME];
     }
+    if (this.budget.enabled) preToolUse.push({ matcher: ".*", hookCallbackIds: [BUDGET_HOOK_ID] });
     if (preToolUse.length > 0) initRequest.hooks = { PreToolUse: preToolUse };
     const init = await this.control(initRequest, this.limits.controlTimeoutMs);
     markLaunch("initialized");
@@ -495,7 +502,10 @@ export class ClaudeDriver implements Driver {
         return;
       case "stream_event":
       case "assistant":
-        if (rec.parent_tool_use_id) this.noteSubagentTools(rec);
+        if (rec.parent_tool_use_id) {
+          this.noteSubagentTools(rec);
+          this.budget.noteAssistant(rec);
+        }
         else this.openTurnIfNeeded();
         this.translator.handle(rec);
         return;
@@ -673,8 +683,20 @@ export class ClaudeDriver implements Driver {
     });
   }
 
+  /** The rules appended to the chat's own agent's instructions: long commands, sub-agent limits. */
+  private promptRule(): string | undefined {
+    const parts = [this.longCommands.enabled ? PROMPT_RULE : "", this.budget.enabled ? subagentRule(this.budget.softTurns) : ""].filter(Boolean);
+    return parts.length > 0 ? parts.join("\n\n") : undefined;
+  }
+
   private onHook(requestId: string, req: Json): void {
     const input = obj(req.input);
+    if (req.callback_id === BUDGET_HOOK_ID) {
+      const d = this.budget.decide(input, String(req.tool_use_id ?? input.tool_use_id ?? ""));
+      if (d.kind === "note") return this.controlReply(requestId, { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: d.text } });
+      if (d.kind === "deny") return this.controlReply(requestId, { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: d.text } });
+      return this.controlReply(requestId, {});
+    }
     if (req.callback_id === HOST_TOOL_HOOK_ID) {
       this.attribution.noteHook({ ...input, tool_use_id: req.tool_use_id ?? input.tool_use_id });
       return this.controlReply(requestId, {});

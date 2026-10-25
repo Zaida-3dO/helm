@@ -14,6 +14,8 @@ export interface ChatMenuActions {
   rename(): void;
   /** Compact the chat's context (the `chat_compact` op). */
   compact(): void;
+  /** Hand the chat's work to a fresh chat (the `chat_roll_over` op), after a confirmation. */
+  rollOver(): void;
   moveTo(projectId: string): void;
   nestUnder(chatId: string): void;
   topLevel(): void;
@@ -78,6 +80,8 @@ export function chatMenuItems(i: ChatMenuInput, a: ChatMenuActions): MenuItem[] 
     { id: 'rename', label: 'Rename chat…', shortcut: 'Ctrl+Alt+R', onSelect: a.rename },
     // Compacting summarises the conversation so far to free context; not while a turn runs.
     { id: 'compact', label: 'Compact context', disabled: r.archived || busy, onSelect: a.compact },
+    // Rolling over needs the chat idle: the agent writes the hand-off in a turn of its own.
+    { id: 'rollover', label: 'Roll over…', disabled: r.archived || busy || archivedGroup, onSelect: a.rollOver },
     {
       id: 'move',
       label: 'Move to project',

@@ -41,6 +41,14 @@ pub struct ClaudeLaunch {
     /// unless the user turned them on in Settings > Runtime.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub worktree_tools: bool,
+    /// Turns (tool calls) a sub-agent may make before it is told to hand off and stop; 0 means no
+    /// sub-agent limits in this chat.
+    pub subagent_soft_turns: u32,
+    /// Past 30% over the limit, further sub-agent tool calls are refused (otherwise only noted).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub subagent_hard_stop: bool,
+    /// Cut very long outputs of Helm's own tools to a head and a tail.
+    pub tool_output_cap: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -99,6 +107,55 @@ pub struct ClaudeRuntime {
     /// Let Claude Code's own worktree tools through. Off by default: a missing key means off.
     #[serde(default)]
     pub worktree_tools: bool,
+    /// Which chats get sub-agent turn and context limits. A missing key means the default,
+    /// Orchestrator chats only.
+    #[serde(default)]
+    pub subagent_limits: SubagentScope,
+    /// Refuse a sub-agent's tool calls past the hard limit. Off by default: it is only told.
+    #[serde(default)]
+    pub subagent_hard_stop: bool,
+    /// Turns before a sub-agent is told to hand off (the hard stop comes 30% later).
+    #[serde(default = "default_soft_turns")]
+    pub subagent_soft_turns: u32,
+    /// Cut very long outputs of Helm's own tools. On by default.
+    #[serde(default = "yes")]
+    pub tool_output_cap: bool,
+}
+
+/// Which chats the sub-agent limits apply to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SubagentScope {
+    Off,
+    /// Chats with Orchestrator on.
+    #[default]
+    Orchestrator,
+    All,
+}
+
+impl ClaudeRuntime {
+    /// The sub-agent turn limit for a chat (`orchestrator_on`: Orchestrator is on for it); 0: none.
+    pub fn subagent_turns(&self, orchestrator_on: bool) -> u32 {
+        let applies = match self.subagent_limits {
+            SubagentScope::Off => false,
+            SubagentScope::Orchestrator => orchestrator_on,
+            SubagentScope::All => true,
+        };
+        if applies {
+            self.subagent_soft_turns
+                .clamp(MIN_SOFT_TURNS, MAX_SOFT_TURNS)
+        } else {
+            0
+        }
+    }
+}
+
+pub const DEFAULT_SOFT_TURNS: u32 = 100;
+pub const MIN_SOFT_TURNS: u32 = 20;
+pub const MAX_SOFT_TURNS: u32 = 1000;
+
+fn default_soft_turns() -> u32 {
+    DEFAULT_SOFT_TURNS
 }
 
 fn yes() -> bool {
@@ -112,6 +169,10 @@ impl Default for ClaudeRuntime {
             skip_permissions: true,
             fast_mode: true,
             worktree_tools: false,
+            subagent_limits: SubagentScope::Orchestrator,
+            subagent_hard_stop: false,
+            subagent_soft_turns: DEFAULT_SOFT_TURNS,
+            tool_output_cap: true,
         }
     }
 }
@@ -189,6 +250,10 @@ pub fn claude_launch(
         strict_mcp_config: false,
         disabled_mcp_servers: Vec::new(),
         worktree_tools: runtime.worktree_tools,
+        // Chats with Orchestrator on get their limit when the launch learns that.
+        subagent_soft_turns: runtime.subagent_turns(false),
+        subagent_hard_stop: runtime.subagent_hard_stop,
+        tool_output_cap: runtime.tool_output_cap,
     };
     if let Some(t) = test {
         c.command = Some(t.command.clone());
@@ -248,9 +313,51 @@ mod tests {
             skip_permissions: false,
             fast_mode: false,
             worktree_tools: true,
+            subagent_limits: SubagentScope::Off,
+            subagent_hard_stop: true,
+            subagent_soft_turns: 40,
+            tool_output_cap: false,
         };
         mine.save(dir.path()).unwrap();
-        assert_eq!(ClaudeRuntime::load(dir.path()), (mine, None));
+        assert_eq!(ClaudeRuntime::load(dir.path()), (mine.clone(), None));
+        // The limits reach the launch: a missing key is Orchestrator chats only with no hard
+        // stop; "off" is never; "all" is every chat; a value is clamped.
+        std::fs::write(
+            dir.path().join("claude-runtime.json"),
+            r#"{"fastMode": true}"#,
+        )
+        .unwrap();
+        let dflt = ClaudeRuntime::load(dir.path()).0;
+        assert_eq!(dflt, ClaudeRuntime::default());
+        assert_eq!(dflt.subagent_limits, SubagentScope::Orchestrator);
+        assert!(!dflt.subagent_hard_stop && dflt.tool_output_cap);
+        assert_eq!(
+            dflt.subagent_turns(false),
+            0,
+            "a chat without Orchestrator is untouched"
+        );
+        assert_eq!(dflt.subagent_turns(true), 100);
+        let launch = claude_launch(&dflt, None, None, None, None);
+        assert_eq!(
+            (launch.subagent_soft_turns, launch.subagent_hard_stop),
+            (0, false)
+        );
+        let all = ClaudeRuntime {
+            subagent_limits: SubagentScope::All,
+            subagent_soft_turns: 5,
+            ..mine.clone()
+        };
+        assert_eq!(all.subagent_turns(false), MIN_SOFT_TURNS);
+        assert_eq!(mine.subagent_turns(true), 0, "off is off");
+        let off = claude_launch(&mine, None, None, None, None);
+        assert_eq!(
+            (
+                off.subagent_soft_turns,
+                off.tool_output_cap,
+                off.subagent_hard_stop
+            ),
+            (0, false, true)
+        );
     }
 
     #[test]

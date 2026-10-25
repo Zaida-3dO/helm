@@ -11,6 +11,8 @@ import {
   modelOptions,
   PERMISSION_OPTIONS,
   statusLine,
+  SUBAGENT_SCOPE_OPTIONS,
+  turnOptions,
   VERBOSITY_OPTIONS,
   repoSummary,
   type Found,
@@ -18,6 +20,7 @@ import {
   type RuntimeSettings,
   type RuntimeStatus,
   type SettingsPatch,
+  type SubagentScope,
 } from './model.ts';
 import './runtime.css';
 
@@ -165,6 +168,32 @@ export function RuntimePane() {
             data-testid="runtime-worktree-tools"
             aria-label="Use Claude Code's worktree tools"
           />
+        </SettingRow>
+        <SettingRow title="Sub-agent limits" description="A sub-agent that has used its tool calls, or about 300k tokens of context, is told to write a short hand-off and stop. Your chat's own agent is never limited.">
+          <Picker
+            settings
+            label="Sub-agent limits"
+            testId="runtime-subagent-limits"
+            value={s?.subagentLimits ?? null}
+            options={SUBAGENT_SCOPE_OPTIONS}
+            disabled={!s}
+            onChange={(v: string) => save({ subagentLimits: v as SubagentScope })}
+          />
+          <Picker
+            settings
+            label="Sub-agent tool calls"
+            testId="runtime-subagent-turns"
+            value={s ? String(s.subagentSoftTurns) : null}
+            options={turnOptions(s?.subagentSoftTurns ?? null)}
+            disabled={!s || s.subagentLimits === 'off'}
+            onChange={(v: string) => save({ subagentSoftTurns: Number(v) })}
+          />
+        </SettingRow>
+        <SettingRow title="Refuse tool calls past the limit" description="Off: a sub-agent past its limit is only reminded to hand off. On: its tool calls are refused from 30% over, so it has to reply.">
+          <Checkbox checked={s?.subagentHardStop ?? false} disabled={!s || s.subagentLimits === 'off'} onChange={(on) => save({ subagentHardStop: on })} data-testid="runtime-subagent-hard-stop" aria-label="Refuse tool calls past the limit" />
+        </SettingRow>
+        <SettingRow title="Cut long tool output" description="The output of Helm's own tools past about 5,000 characters is cut to its start and end, with the whole text saved to a file the agent can read.">
+          <Checkbox checked={s?.toolOutputCap ?? true} disabled={!s} onChange={(on) => save({ toolOutputCap: on })} data-testid="runtime-output-cap" aria-label="Cut long tool output" />
         </SettingRow>
       </section>
 

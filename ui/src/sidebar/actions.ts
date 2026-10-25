@@ -9,6 +9,7 @@ import type { SidebarData } from './data.ts';
 import { chatOrder } from './model.ts';
 import { UndoStack, type UndoEntry } from './undo.ts';
 import { toast } from '../ui/toasts.ts';
+import type { ConfirmSpec } from '../ui/index.ts';
 
 export interface ActionDeps {
   api: Api;
@@ -301,4 +302,23 @@ export async function compactChat(ops: Pick<ChatOps, 'compact'>, chatId: string,
   } catch (e) {
     onError(`Could not compact this chat: ${message(e)}`);
   }
+}
+
+/** "Roll over": the agent writes a hand-off, a new chat takes it, and this chat is archived. */
+export async function rollOverChat(ops: Pick<ChatOps, 'rollOver'>, chatId: string, onError: (message: string) => void): Promise<void> {
+  try {
+    await ops.rollOver(chatId);
+    toast.show({ kind: 'info', text: 'Rolling over: the agent is writing a hand-off. The new chat opens when it is ready.' });
+  } catch (e) {
+    onError(`Could not roll over this chat: ${message(e)}`);
+  }
+}
+
+export function rollOverConfirm(title: string, onConfirm: () => void | Promise<unknown>): ConfirmSpec {
+  return {
+    title: 'Roll over this chat?',
+    body: `The agent in “${title || 'Untitled chat'}” writes a short hand-off, a new chat in the same project starts from it, and this chat is archived. Running work in this chat is not carried over.`,
+    confirm: 'Roll over',
+    onConfirm,
+  };
 }

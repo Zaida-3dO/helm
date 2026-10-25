@@ -21,7 +21,9 @@ import type { EditState } from './transcript/EditMessage.tsx';
 import { forkAction } from './transcript/forkAction.ts';
 import { registerMessageAction } from './transcript/slots.ts';
 import { useShell } from './shell/context.ts';
-import { useLayer } from './ui/index.ts';
+import { ConfirmDialog, useLayer, type ConfirmSpec } from './ui/index.ts';
+import { rollOverChat, rollOverConfirm } from './sidebar/actions.ts';
+import { ContextBar } from './transcript/ContextBar.tsx';
 import { IconFork } from './ui/icons.tsx';
 import { accessoriesAt } from './composer/slots.ts';
 import { recallPrompts } from './composer/recall.ts';
@@ -52,6 +54,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   const [notice, setNotice] = useState<string | null>(null);
   const [jumpTo, setJumpTo] = useState<number | null>(null);
   const [editing, setEditing] = useState<EditState | null>(null);
+  const [rollConfirm, setRollConfirm] = useState<ConfirmSpec | null>(null);
   const setTextRef = useRef<(text: string) => void>(() => undefined);
 
   useEffect(() => store.watch(chatId), [store, chatId]);
@@ -315,6 +318,13 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
           )}
         </div>
       )}
+      <ContextBar
+        chat={chat}
+        rows={view.rows}
+        hasNewer={view.hasNewer}
+        busy={busy}
+        onRollOver={() => setRollConfirm(rollOverConfirm(chat.title, () => rollOverChat(ops, chatId, (m) => setNotice(m))))}
+      />
       {accessoriesAt('consent').map((a) => (
         <div key={a.id} className="composer-accessory" data-accessory={a.id}>
           {a.render({ chat, thread, busy, draftEmpty: !chat.draft })}
@@ -345,6 +355,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         }}
       />
       </div>
+      {rollConfirm && <ConfirmDialog spec={rollConfirm} onClose={() => setRollConfirm(null)} />}
     </div>
   );
 }

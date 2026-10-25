@@ -101,3 +101,68 @@ test("native MCP off adds --strict-mcp-config; held servers are disallowed", asy
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("very long results of Helm's tools are cut to a head and a tail; short ones, discovery and an off cap pass whole", async () => {
+  const { HostToolServer } = await import("../src/hosttools/server.ts");
+  const { capText, fileSaver } = await import("../src/hosttools/cap.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-cap-"));
+  try {
+    const bridge = {
+      enabled: () => true,
+      tools: async () => ({ text: "t".repeat(9000) }),
+      has: (n: string) => n === "big" || n === "small",
+      call: async (n: string) => ({ ok: true as const, result: { text: n === "big" ? `HEAD${"x".repeat(9000)}TAIL` : "ok" } }),
+    };
+    const make = (cap: boolean) =>
+      new HostToolServer({ hostTools: [], channel: {} as never, bridge, outputCap: cap ? { maxChars: 5000, save: fileSaver("c1", dir) } : undefined });
+    const text = async (s: InstanceType<typeof HostToolServer>, name: string, args: Json = {}) => {
+      const r = (await s.handle({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, { child: false })) as Json;
+      return (r.result as Json) ?? {};
+    };
+    const big = await text(make(true), "big");
+    const cut = ((big.content as Json[])[0].text as string);
+    assert.ok(cut.length < 5600 && cut.startsWith('{"text":"HEAD') && cut.endsWith('TAIL"}'), "head and tail kept");
+    assert.match(cut, /Helm cut [\d,]+ characters from the middle of this output \([\d,]+ in all\)/);
+    assert.equal(big.structuredContent, undefined, "the structured copy would defeat the cut");
+    const saved = /saved at (.+?); read that file/.exec(cut)?.[1] ?? "";
+    const onDisk = fs.readFileSync(saved, "utf8");
+    assert.ok(onDisk.includes("x".repeat(9000)), "the whole output is in the file");
+    assert.ok(onDisk.startsWith('{' + String.fromCharCode(10) + '  "text": "HEAD'), "JSON is indented so a line-limited reader can page through it");
+    if (process.platform !== "win32") assert.equal(fs.statSync(saved).mode & 0o777, 0o600);
+    assert.ok(((await text(make(true), "small")).content as Json[])[0].text === '{"text":"ok"}', "short results pass whole");
+    assert.equal(((await text(make(true), "app_mcp_tools")).content as Json[])[0].text, JSON.stringify({ text: "t".repeat(9000) }), "tool discovery is exempt");
+    assert.ok((((await text(make(false), "big")).content as Json[])[0].text as string).length > 9000, "cap off: whole");
+    // Without a place to save, the marker says to ask for less; a surrogate pair is never split.
+    assert.match(capText("a".repeat(100), 20), /Ask again for less/);
+    assert.doesNotMatch(capText("😀".repeat(50), 21), /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sub-agent limits register one hook and add a rule to the chat's instructions, only when the launch sets them", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-ht-w-"));
+  const run = async (claude: Json) => {
+    const s = startWithFixture("tool-call", { claude, launch: { hostTools: [], chatToolsDirectory: dir } });
+    try {
+      await s.host.ready();
+      const argv = (s.fakeStart()?.argv ?? []) as string[];
+      const init = s.received().find((r) => r.type === "control_request" && (r.request as Json).subtype === "initialize")?.request as Json;
+      return { hooks: JSON.stringify(init.hooks), append: argv[argv.indexOf("--append-system-prompt") + 1] ?? "" };
+    } finally {
+      await s.done();
+    }
+  };
+  try {
+    const on = await run({ subagentSoftTurns: 60 });
+    assert.ok(on.hooks.includes("helm-subagent-budget"));
+    assert.match(on.append, /about 60 tool calls/);
+    assert.match(on.append, /short final reports/);
+    for (const claude of [{ subagentSoftTurns: 0 }, {}]) {
+      const off = await run(claude);
+      assert.ok(!off.hooks.includes("helm-subagent-budget") && !off.append.includes("Sub-agents:"), JSON.stringify(claude));
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

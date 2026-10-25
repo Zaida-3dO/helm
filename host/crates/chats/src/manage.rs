@@ -92,7 +92,7 @@ fn to_value<T: serde::Serialize>(v: &T) -> Result<Value, ApiError> {
     serde_json::to_value(v).map_err(|e| ApiError::internal(e.to_string()))
 }
 
-fn chat_archive(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+pub(crate) fn chat_archive(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatIdArgs = parse_args(args)?;
     let db = ctx.services.need::<Database>()?;
     let now = helm_core::now_ms();
@@ -188,7 +188,7 @@ fn chat_discard_untouched(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     Ok(serde_json::json!({ "discarded": discarded }))
 }
 
-fn chat_delete(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+pub(crate) fn chat_delete(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatIdArgs = parse_args(args)?;
     delete_chat(ctx, &a.chat_id, DeleteRule::Archived)?;
     Ok(Value::Null)

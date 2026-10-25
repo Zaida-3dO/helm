@@ -16,6 +16,7 @@
 //! | `model_catalogue` | blocking | [`ModelCatalogueArgs`] → [`ModelCatalogue`] |
 //! | `tool_stop` | async | [`ToolStopArgs`] → [`ToolStopResult`] |
 //! | `chat_compact` | maintenance | [`ChatIdArgs`] → `null` |
+//! | `chat_roll_over` | async | [`ChatIdArgs`] → `{started}` (see [`crate::rollover`]) |
 //! | `attention_get` | blocking | `{}` → [`AttentionSummary`] |
 //!
 //! Argument parsing is strict (an unknown field is `bad_args`). Ops that touch a running chat go
@@ -97,6 +98,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
     crate::manage::register(reg);
     crate::message_images::register(reg);
     crate::output_save::register(reg); // message_output_save
+    crate::rollover::register(reg); // chat_roll_over
     crate::attachments::register(reg); // attachment_ref
     crate::runtime_settings::register_ops(reg); // Settings → Runtime
 }
@@ -304,7 +306,7 @@ enum CreateRefusal {
     OtherFolder,
 }
 
-fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatCreateArgs = parse_args(args)?;
     let cwd = a.cwd.trim();
     let path = std::path::Path::new(cwd);
@@ -586,6 +588,7 @@ pub(crate) mod tests {
             ("model_catalogue", OpClass::Blocking),
             ("tool_stop", OpClass::Async),
             ("chat_compact", OpClass::Maintenance),
+            ("chat_roll_over", OpClass::Async),
             ("attention_get", OpClass::Blocking),
             ("chat_rename", OpClass::Maintenance),
             ("title_suggest", OpClass::Async),

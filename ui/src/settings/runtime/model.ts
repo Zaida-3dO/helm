@@ -17,6 +17,14 @@ export interface RuntimeStatus {
   problems: string[];
 }
 
+export type SubagentScope = 'off' | 'orchestrator' | 'all';
+
+export const SUBAGENT_SCOPE_OPTIONS = [
+  { value: 'off', title: 'Off', subtitle: 'Sub-agents are never limited' },
+  { value: 'orchestrator', title: 'Orchestrator chats', subtitle: 'Only chats with Orchestrator on' },
+  { value: 'all', title: 'All chats', subtitle: 'Every chat with Claude Code sub-agents' },
+];
+
 export interface RuntimeSettings {
   /** Empty: Helm finds Claude Code itself. */
   executable: string;
@@ -24,6 +32,14 @@ export interface RuntimeSettings {
   fastMode: boolean;
   /** Claude Code's own worktree tools (EnterWorktree, ExitWorktree) may be offered to chats. */
   worktreeTools: boolean;
+  /** Which chats get turn and context limits on their sub-agents. */
+  subagentLimits: SubagentScope;
+  /** Refuse a sub-agent's tool calls past the hard limit (otherwise it is only told). */
+  subagentHardStop: boolean;
+  /** Tool calls before a sub-agent is told to hand off and stop. */
+  subagentSoftTurns: number;
+  /** Cut very long outputs of Helm's own tools to a head and a tail. */
+  toolOutputCap: boolean;
   /** null: Claude Code's default model. */
   model: string | null;
   effort: string;
@@ -100,6 +116,13 @@ export const VERBOSITY_OPTIONS = [
   { value: 'medium', title: 'Medium', subtitle: 'The result, then the detail that matters' },
   { value: 'high', title: 'Full', subtitle: "Claude Code's own length" },
 ];
+
+/** Picker options for the sub-agent turn limit; a stored value that is not listed still shows. */
+export function turnOptions(current: number | null): { value: string; title: string }[] {
+  const values = [40, 60, 100, 150, 250, 500];
+  if (current !== null && !values.includes(current)) values.push(current);
+  return values.sort((a, b) => a - b).map((n) => ({ value: String(n), title: `${n} tool calls` }));
+}
 
 export const PERMISSION_OPTIONS = [
   { value: 'bypass', title: 'Bypass permissions', subtitle: 'Runs every tool without asking' },

@@ -72,6 +72,8 @@ export function chatOps(api: Api) {
     catalogue: (refresh = false) => api<ModelCatalogue>('model_catalogue', { harness: 'claude', refresh }),
     stopTool: (chatId: string, toolCallId: string) => api<{ stopped: boolean }>('tool_stop', { chatId, toolCallId }),
     compact: (chatId: string) => api<null>('chat_compact', { chatId }),
+    /** Ask the agent for a hand-off, start a successor chat with it and archive this one. */
+    rollOver: (chatId: string) => api<{ started: boolean }>('chat_roll_over', { chatId }),
     attention: () => api<AttentionSummary>('attention_get', {}),
     archive: (chatId: string) => api<ChatRecord>('chat_archive', { chatId }),
     restore: (chatId: string) => api<ChatRecord>('chat_restore', { chatId }),

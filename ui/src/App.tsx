@@ -75,6 +75,15 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
       }),
     [bus, shell],
   );
+  // A roll over that could not finish says why (the old chat is left as it was).
+  useEffect(
+    () =>
+      bus.on('chat_roll_over_failed', (e) => {
+        const message = (e as { message?: unknown }).message;
+        toast.show({ kind: 'error', text: `Roll over stopped: ${typeof message === 'string' ? message : 'something went wrong.'}` });
+      }),
+    [bus],
+  );
   // The global hotkey lives in the same key map as every other shortcut (scope "global": the host
   // registers it with Windows; the window listener never fires it).
   useEffect(() => {

@@ -61,6 +61,7 @@ pub mod manage;
 pub mod message_images;
 pub mod ops;
 pub mod output_save;
+pub mod rollover;
 pub mod runslots;
 pub mod runtime;
 pub mod runtime_settings;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compactCount, formatTurnTime, newTokens, tokenChip, turnTimes } from './rowMeta.ts';
+import { compactCount, contextTokens, formatTurnTime, newTokens, tokenChip, turnTimes } from './rowMeta.ts';
 
 const usage = { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 40_000, cacheWriteTokens: 500, costUsd: 0 };
 
@@ -40,4 +40,18 @@ test('the turn time sits on the last reply of a turn whose work folded', async (
   ];
   const times = turnTimes(layout(rows, false));
   assert.deepEqual([...times], [[4, 15_000]]);
+});
+
+test('the context size is the newest reply that reports usage: input plus cache reads and writes', async () => {
+  const { row } = await import('../dev/fixtures.ts');
+  const usage = (inputTokens: number, cacheReadTokens: number, cacheWriteTokens: number) => ({ inputTokens, cacheReadTokens, cacheWriteTokens, outputTokens: 5, costUsd: 0 });
+  const rows = [
+    row({ id: 1, role: 'user' }),
+    row({ id: 2, role: 'assistant', details: { usage: usage(10, 90_000, 500) } }),
+    row({ id: 3, role: 'assistant', details: { usage: usage(20, 120_000, 1_000) } }),
+    row({ id: 4, role: 'assistant' }),
+  ];
+  assert.equal(contextTokens(rows), 121_020);
+  assert.equal(contextTokens(rows.slice(0, 1)), null);
+  assert.equal(contextTokens([]), null);
 });

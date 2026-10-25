@@ -27,11 +27,17 @@ pub struct LaunchExtras {
     pub env: Vec<(String, String)>,
     /// Fragments appended to Claude Code's system prompt, joined by blank lines.
     pub system_prompt: Vec<String>,
+    /// Orchestrator is on for this chat. Settings that apply only to such chats (the sub-agent
+    /// limits) read it; any contributor may say so.
+    pub orchestrator_on: bool,
 }
 
 impl LaunchExtras {
     pub fn is_empty(&self) -> bool {
-        self.path_prepend.is_empty() && self.env.is_empty() && self.system_prompt.is_empty()
+        self.path_prepend.is_empty()
+            && self.env.is_empty()
+            && self.system_prompt.is_empty()
+            && !self.orchestrator_on
     }
 }
 
@@ -70,6 +76,7 @@ impl LaunchContributors {
             let e = c.contribute(ctx);
             out.path_prepend.extend(e.path_prepend);
             out.env.extend(e.env);
+            out.orchestrator_on |= e.orchestrator_on;
             out.system_prompt
                 .extend(e.system_prompt.into_iter().filter(|s| !s.trim().is_empty()));
         }
@@ -147,11 +154,13 @@ mod tests {
                 (WORKER_CHAT_ID.into(), "evil".into()),
             ],
             system_prompt: vec!["one".into()],
+            orchestrator_on: false,
         })))
         .add(Arc::new(Fixed(LaunchExtras {
             path_prepend: vec![PathBuf::from("C:/two")],
             env: vec![],
             system_prompt: vec!["  ".into(), "two".into()],
+            orchestrator_on: true,
         })));
         let extras = list.collect(&ctx());
         let mut env = EnvMap::default();
@@ -165,5 +174,6 @@ mod tests {
         assert_eq!(env.get("GIT_X"), Some("1"));
         assert_eq!(env.get(WORKER_CHAT_ID), Some("c"));
         assert_eq!(system_prompt(&extras).as_deref(), Some("one\n\ntwo"));
+        assert!(extras.orchestrator_on, "any contributor may mark the chat");
     }
 }

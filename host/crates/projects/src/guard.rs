@@ -102,6 +102,7 @@ impl LaunchContributor for GitGuard {
                 list.to_string_lossy().into_owned(),
             )],
             system_prompt: Vec::new(),
+            ..Default::default()
         };
         if let Some(real) = find_git(Some(Path::new(&dir))) {
             extras
