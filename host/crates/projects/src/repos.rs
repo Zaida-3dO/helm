@@ -372,7 +372,7 @@ pub fn sync_from_projects(tx: &Transaction<'_>, now: i64) -> Result<usize, Refus
         "SELECT p.path FROM projects p
          LEFT JOIN project_local l ON l.project_id = p.id
          WHERE p.kind = 'folder' AND p.path IS NOT NULL AND COALESCE(l.archived, 0) = 0
-         ORDER BY p.created_at, p.id",
+         ORDER BY p.created_at, lower(p.path)",
     )?;
     let paths: Vec<String> = st
         .query_map([], |r| r.get(0))?
