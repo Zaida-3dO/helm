@@ -404,12 +404,13 @@ test('archiving a chat or a project shows an Undo toast whose button undoes it',
 test('dropping a chat before another sends the target row level in one call, with an undo back to where it was', async () => {
   const calls: unknown[] = [];
   const undo = new UndoStack();
+  let held = [row('a', 'g', { createdAt: 1 }), row('c', 'g', { createdAt: 3 }), row('e', 'g', { createdAt: 2 }), row('b', 'g', { parentChatId: 'p', createdAt: 5 }), row('b2', 'g', { parentChatId: 'p', createdAt: 4 })];
   const act = new SidebarActions({
     undo,
     onError: (m: string) => calls.push(`error ${m}`),
     pops: { organize: async (a: unknown) => (calls.push(a), []) },
     // Top level of g, newest first: c, a (so a is followed by nothing); b is the only child of p.
-    data: { mergeRows: () => undefined, getSnapshot: () => ({ rows: [row('a', 'g', { createdAt: 1 }), row('c', 'g', { createdAt: 3 }), row('b', 'g', { parentChatId: 'p', createdAt: 5 }), row('b2', 'g', { parentChatId: 'p', createdAt: 4 })] }) },
+    data: { mergeRows: () => undefined, getSnapshot: () => ({ rows: held }) },
   } as unknown as ActionDeps);
   // Before a nested child of p, from the top level: it takes parent p.
   await act.reorderBefore(row('a', 'g'), 'k', { parentChatId: 'p', pinned: false });
@@ -417,12 +418,17 @@ test('dropping a chat before another sends the target row level in one call, wit
   await act.reorderBefore(row('b', 'g', { parentChatId: 'p' }), 'z', { parentChatId: null, pinned: false, groupProjectId: 'h' });
   // Same level: nothing to undo.
   await act.reorderBefore(row('c', 'g'), 'k', { parentChatId: null, pinned: false });
-  assert.deepEqual(calls, [
+  // e sat before a, then a is pinned (leaves that level): e's undo goes last rather than being refused.
+  await act.reorderBefore(row('e', 'g', { createdAt: 2 }), 'k', { parentChatId: 'p', pinned: false });
+  held = held.map((r) => (r.chatId === 'a' ? { ...r, pinned: true } : r));
+  assert.deepEqual(calls.slice(0, 3), [
     { chatId: 'a', parentChatId: 'p', pinned: false, beforeChatId: 'k' },
     { chatId: 'b', parentChatId: null, pinned: false, beforeChatId: 'z', groupProjectId: 'h' },
     { chatId: 'c', parentChatId: null, pinned: false, beforeChatId: 'k' },
   ]);
-  assert.equal(undo.size, 2);
+  assert.equal(undo.size, 3);
+  await act.undo();
+  assert.deepEqual(calls.at(-1), { chatId: 'e', groupProjectId: 'g', parentChatId: null, pinned: false, toEnd: true });
   await act.undo();
   // b sat before b2 under p: undo names that slot.
   assert.deepEqual(calls.at(-1), { chatId: 'b', groupProjectId: 'g', parentChatId: 'p', pinned: false, beforeChatId: 'b2' });

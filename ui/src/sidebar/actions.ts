@@ -112,16 +112,27 @@ export class SidebarActions {
   /** Drop `row` before another chat, at that chat's level: its group (when different), its parent
    *  chat and its pin state travel with the move, so the host reorders among true siblings. */
   reorderBefore(row: SidebarRow, beforeChatId: string, level: { parentChatId: string | null; pinned: boolean; groupProjectId?: string }): Promise<void> {
-    // Undo puts the chat back in its exact slot: before the sibling that followed it, or last.
-    const mine = (r: SidebarRow) => r.groupProjectId === row.groupProjectId && r.pinned === row.pinned && r.parentChatId === row.parentChatId && r.archived === row.archived;
-    const old = this.d.data.getSnapshot().rows.filter(mine).sort(chatOrder);
-    const next = old[old.findIndex((r) => r.chatId === row.chatId) + 1];
-    const back: ChatOrganizeArgs = { ...this.placement(row), pinned: row.pinned, ...(next ? { beforeChatId: next.chatId } : { toEnd: true }) };
+    // Undo puts the chat back in its exact slot: before the sibling that followed it, or last. The
+    // slot is decided when the undo runs: that sibling may have left the level since (pinned,
+    // archived, moved, deleted), and then the chat goes last instead of the undo being refused.
+    const atOldLevel = (r: SidebarRow) => r.groupProjectId === row.groupProjectId && r.pinned === row.pinned && r.parentChatId === row.parentChatId && r.archived === row.archived;
+    const old = this.d.data.getSnapshot().rows.filter(atOldLevel).sort(chatOrder);
+    const nextId = old[old.findIndex((r) => r.chatId === row.chatId) + 1]?.chatId;
+    const back = async () => {
+      const level: ChatOrganizeArgs = { ...this.placement(row), pinned: row.pinned };
+      const stays = nextId !== undefined && this.d.data.getSnapshot().rows.some((r) => r.chatId === nextId && atOldLevel(r));
+      if (!stays) return this.organize({ ...level, toEnd: true });
+      try {
+        await this.organize({ ...level, beforeChatId: nextId });
+      } catch {
+        await this.organize({ ...level, toEnd: true });
+      }
+    };
     const forward: ChatOrganizeArgs = { chatId: row.chatId, parentChatId: level.parentChatId, pinned: level.pinned, beforeChatId, ...(level.groupProjectId ? { groupProjectId: level.groupProjectId } : {}) };
     const levelChanged = !!level.groupProjectId || level.parentChatId !== row.parentChatId || level.pinned !== row.pinned;
     return this.run(async () => {
       await this.organize(forward);
-      if (levelChanged) this.d.undo.push({ label: 'Move chat', undo: () => this.organize(back), redo: () => this.organize(forward) });
+      if (levelChanged) this.d.undo.push({ label: 'Move chat', undo: back, redo: () => this.organize(forward) });
     }).then(() => undefined);
   }
 
