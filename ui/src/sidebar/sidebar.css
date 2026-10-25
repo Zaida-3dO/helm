@@ -719,11 +719,14 @@
   position: absolute;
   left: 50%;
   top: 50%;
-  transform: translate(-50%, -50%);
+  /* The individual translate and scale properties, not transform: the working wheel turns with
+     the rotate property, which applies after translate and before transform, so a transform
+     translate would make the wheel swing around its slot instead of turning on its own centre. */
+  translate: -50% -50%;
 }
 
 .sb-root[data-compact='true'] .sb-ind-wheel {
-  transform: translate(-50%, -50%) scale(0.85);
+  scale: 0.85;
 }
 
 .sb-ind-interrupted::before {

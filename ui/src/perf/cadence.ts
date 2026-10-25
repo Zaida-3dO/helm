@@ -134,6 +134,7 @@ export function watchCadence(doc: Document, policy: MotionPolicy = motion, start
         policy.setCadence(next);
         if (next === 'low') timer = setTimeout(sample, RECHECK_MS);
       } else if (next === 'confirm') timer = setTimeout(sample, CONFIRM_MS);
+      else if (policy.low) timer = setTimeout(sample, RECHECK_MS);
       else if (++tries < 3) timer = setTimeout(sample, 5000);
     };
     raf = requestAnimationFrame(step);
