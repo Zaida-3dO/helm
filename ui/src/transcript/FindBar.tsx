@@ -14,7 +14,7 @@ const ACTIVITY_KEY = 'helm.find.includeActivity';
 const ALL = 'helm-find';
 const CURRENT = 'helm-find-current';
 /** Text inside these is chrome, not the conversation, and is never highlighted. */
-const SKIP = '.row-actions, .row-user-actions, .md-code-copy';
+const SKIP = '.row-actions, .row-user-actions, .md-code-tools, .md-diagram-head';
 
 interface HighlightApi {
   highlights: Map<string, unknown>;

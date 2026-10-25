@@ -105,10 +105,10 @@ function AssistantBody({ row, ctx, hideThinking }: { row: MessageRow; ctx: RowCo
   );
 }
 
-export const Row = memo(function Row({ row, ctx, final, afterTool, indent, afterFold, hideThinking, turnMs }: { row: MessageRow; ctx: RowContext; turnMs?: number } & RowFlags) {
+export const Row = memo(function Row({ row, ctx, final, afterTool, indent, afterFold, hideThinking, beforeTool, turnMs }: { row: MessageRow; ctx: RowContext; turnMs?: number } & RowFlags) {
   const retry = row.details?.retry;
   const common = { 'data-testid': 'transcript-row', 'data-status': row.status, 'data-role': row.role, 'data-row-id': row.id };
-  const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}${afterFold ? ' after-fold' : ''}`;
+  const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}${afterFold ? ' after-fold' : ''}${beforeTool ? ' before-tool' : ''}`;
   if (row.role === 'user') {
     return (
       <div className={`row row-user status-${row.status}`} {...common} title={new Date(row.timestamp).toLocaleString()}>
@@ -159,10 +159,16 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
       <AssistantBody row={row} ctx={ctx} hideThinking={hideThinking} />
       {row.status === 'error' && (
         <div className="error-row" data-testid="error-row">
-          {row.details?.errorMessage ?? 'The request failed.'}
+          <Glyph name="alert" size={14} />
+          <span>{row.details?.errorMessage ?? 'The request failed.'}</span>
         </div>
       )}
-      {row.status === 'interrupted' && <div className="muted">Interrupted.</div>}
+      {row.status === 'interrupted' && (
+        <div className="interrupted-row muted" data-testid="interrupted-row">
+          <Glyph name="pause" size={14} />
+          <span>Interrupted</span>
+        </div>
+      )}
       {retry && (
         <div className={`retry-row retry-${retry.state}`} data-testid="retry-row" data-state={retry.state}>
           {RETRY_TEXT[retry.state]} {retry.attempt > 1 ? `(attempt ${retry.attempt})` : ''}

@@ -309,7 +309,6 @@ button.danger {
   color: var(--text);
 }
 
-.error-row,
 .retry-row {
   font-size: 13px;
   margin-top: 4px;
@@ -318,7 +317,25 @@ button.danger {
   border: 1px solid var(--line);
 }
 
+/* An error or a stop is one inline line with an icon, not a box. */
 .error-row,
+.interrupted-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.error-row .glyph,
+.interrupted-row .glyph {
+  flex: none;
+}
+
+.error-row {
+  color: var(--error);
+}
+
 .retry-failed {
   color: var(--error);
   border-color: var(--error);
@@ -1075,6 +1092,11 @@ button.danger {
 
 .row-assistant.after-tool {
   padding-top: 16px;
+}
+
+/* In an opened turn, a note sits close above the tool rows it leads into. */
+.row-assistant.before-tool {
+  padding-bottom: 6px;
 }
 
 /* The turn's final answer: 32 px below the work, with a hairline 20 px above the text. */

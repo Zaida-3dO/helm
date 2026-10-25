@@ -41,7 +41,8 @@ test('the settled line comes from the last turn when it ended with a reply', asy
   const cases: [string, ReturnType<typeof row>[], string | null, number | null][] = [
     ['tools and a reply', [user, note, read, reply], '1 done', 47_000],
     ['edits are counted as files', [user, note, read, edit, reply], '1 file edited', 47_000],
-    ['a plain reply', [user, row({ id: 2, role: 'assistant', text: 'Hi', timestamp: 500 })], null, 0],
+    ['a quick reply is timed from the message', [user, row({ id: 2, role: 'assistant', text: 'Hi', timestamp: 500 })], null, 500],
+    ['one file edited twice is one file', [user, note, { ...edit, details: { toolArgs: JSON.stringify({ file_path: 'a.ts' }) } }, { ...edit, id: 6, details: { toolArgs: JSON.stringify({ file_path: 'a.ts' }) } }, reply], '1 file edited', 47_000],
     ['no reply yet', [user, read], 'none', null],
     ['a tool still running', [user, row({ id: 3, role: 'toolResult', toolName: 'Bash', status: 'streaming', timestamp: 2000 }), reply], 'none', null],
     ['a failed turn', [user, { ...reply, status: 'error' as const }], 'none', null],

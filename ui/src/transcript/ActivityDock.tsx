@@ -45,6 +45,16 @@ function ToolIcon({ name }: { name: string }) {
   return <IconWand size={13} />;
 }
 
+/**
+ * When the dock's current phase began. A phase that is already under way when the dock appears
+ * counts from its own start; once the phase changes (thinking, then writing), the time starts over.
+ */
+function usePhaseSince(label: string | null, since: number | null): number | null {
+  const seen = useRef<{ label: string | null; at: number | null }>({ label, at: since });
+  if (seen.current.label !== label) seen.current = { label, at: label === null ? null : Date.now() };
+  return label === null ? null : (seen.current.at ?? since);
+}
+
 export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: DockProps) {
   const live = chat.status === 'running' || chat.status === 'starting' || chat.status === 'stopping';
   const bg = backgroundShells(thread);
@@ -71,16 +81,17 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
     document.addEventListener('mousedown', away);
     return () => document.removeEventListener('mousedown', away);
   }, [details]);
+  const latest = thread.liveTools.at(-1);
+  // With no tool running, say what the turn is doing instead: thinking, writing, waiting.
+  const activity = shown && !latest && live && chat.status === 'running' && rows ? dockActivity(rows, thread, turnStartedAt) : null;
+  const phaseSince = usePhaseSince(activity?.label ?? null, activity?.since ?? null);
   if (!shown) {
     const done = chat.status === 'idle' && rows ? finishedTurn(rows) : null;
     return done ? <FinishedLine turn={done} /> : null;
   }
-  const latest = thread.liveTools.at(-1);
   const canStop = Boolean(latest && thread.sendBehavior.toolStop && thread.capabilities.stopTool && latest.stoppable);
   const state = dockState(chat.status, thread);
   const working = live || (thread.subagentsRunning ?? 0) > 0;
-  // With no tool running, say what the turn is doing instead: thinking, writing, waiting.
-  const activity = !latest && live && chat.status === 'running' && rows ? dockActivity(rows, thread, turnStartedAt) : null;
   const narration = state.key === 'working' ? (activity?.narration ?? state.detail) : state.detail;
 
   return (
@@ -120,7 +131,7 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
             ) : activity ? (
               <span className="ad-phase" data-phase={activity.phase} data-testid="dock-phase">
                 <span>{activity.label}</span>
-                <span className="ad-tool-time">{formatElapsed(Math.max(0, now - activity.since))}</span>
+                <span className="ad-tool-time">{formatElapsed(Math.max(0, now - (phaseSince ?? activity.since)))}</span>
               </span>
             ) : (
               <span className="ad-idle">{live ? 'Working' : 'Nothing running in this turn'}</span>

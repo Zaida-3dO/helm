@@ -221,6 +221,12 @@ test('thinking behind a closed fold is hidden on the notes that carry it, and sh
   const hidden = (items: Item[]) => items.flatMap((i) => (i.kind === 'row' && i.hideThinking ? [i.row.id] : []));
   assert.deepEqual(hidden(layout(rows, false)), [2, 4]);
   assert.deepEqual(hidden(layout(rows, false, new Set(['k1']))), []);
+  // The step count is tool calls and thinking blocks, not the final reply's thinking.
+  const fold = layout(rows, false).find((i) => i.kind === 'fold');
+  assert.equal(fold?.kind === 'fold' && fold.steps, 2);
+  // Opened, the note above a tool row tightens its bottom padding; the reply does not.
+  const tight = layout(rows, false, new Set(['k1'])).flatMap((i) => (i.kind === 'row' && i.beforeTool ? [i.row.id] : []));
+  assert.deepEqual(tight, [2]);
   // Live, the part still being written keeps its thinking in view.
   assert.deepEqual(hidden(layout(rows, true)), [2]);
   // A turn that only thought and answered has nothing to fold: the thinking stays where it is.

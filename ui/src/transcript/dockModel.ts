@@ -1,7 +1,7 @@
 // The activity dock's counts. Pure, so it is tested.
 
 import type { MessageRow, ThreadState } from '../api/types.ts';
-import { toolKind, toolStatus } from './toolKinds.ts';
+import { toolKind, toolStatus, toolTarget } from './toolKinds.ts';
 
 /**
  * The background chip's tasks: shells only. Background subagents are counted once, by the
@@ -43,11 +43,11 @@ export function dockState(
 
 /** What the settled line says about the chat's last turn. */
 export interface FinishedTurn {
-  /** From the turn's first output to its last, the span the "Worked for" row shows. */
+  /** From the turn's first output to its last (the span the "Worked for" row shows); a one-step reply is timed from the message. */
   elapsedMs: number;
   /** The tool calls the turn made, in order. */
   tools: MessageRow[];
-  /** How many of them changed files. */
+  /** How many different files they changed. */
   edits: number;
 }
 
@@ -65,9 +65,9 @@ export function finishedTurn(rows: readonly MessageRow[]): FinishedTurn | null {
   const tools = work.filter((r) => r.role === 'toolResult');
   if (tools.some((r) => toolStatus(r) === 'running')) return null;
   return {
-    elapsedMs: Math.max(0, work[work.length - 1]!.timestamp - work[0]!.timestamp),
+    elapsedMs: Math.max(0, work[work.length - 1]!.timestamp - (work.length > 1 ? work[0]! : rows[u]!).timestamp),
     tools,
-    edits: tools.filter((r) => toolKind(r.toolName) === 'edit').length,
+    edits: new Set(tools.filter((r) => toolKind(r.toolName) === 'edit').map((r) => toolTarget(r) ?? `row:${r.id}`)).size,
   };
 }
 

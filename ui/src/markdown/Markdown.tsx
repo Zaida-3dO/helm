@@ -3,7 +3,7 @@ import type { MouseEvent } from 'react';
 import { LONG_TEXT_CHARS, renderShort, sharedOffloader } from './engine.ts';
 import { targetFromAttrs } from './links.ts';
 import type { LinkTarget } from './links.ts';
-import { renderDiagram } from './mermaid.ts';
+import { diagramKind, renderDiagram } from './mermaid.ts';
 import { StreamBlocks } from './blocks.ts';
 import { renderPlain, renderToHtml } from './render.ts';
 import type { RenderOptions } from './render.ts';
@@ -104,7 +104,8 @@ function hydrateDiagrams(root: ParentNode, isCancelled: () => boolean): void {
     renderDiagram(source)
       .then((svg) => {
         if (isCancelled() || !el.isConnected) return;
-        el.innerHTML = svg;
+        el.innerHTML = '';
+        el.append(diagramShell(source, svg));
         el.classList.add('md-mermaid-rendered');
       })
       .catch((error: unknown) => {
@@ -118,31 +119,93 @@ function hydrateDiagrams(root: ParentNode, isCancelled: () => boolean): void {
   });
 }
 
+const ICON_COPY =
+  '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>';
+const ICON_DONE =
+  '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+const ICON_WRAP =
+  '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M3 12h14a3 3 0 0 1 0 6h-4m0 0 2-2m-2 2 2 2M3 18h5"/></svg>';
+const ICON_CODE =
+  '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></svg>';
+
+function iconButton(kind: string, title: string, icon: string): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `md-tool md-tool-${kind}`;
+  button.dataset.mdTool = kind;
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.innerHTML = icon;
+  return button;
+}
+
 /**
- * A Copy button in each code block's label bar. The HTML is a string, so the buttons are
+ * A rendered diagram in the same shell as a code block: a header naming the kind of diagram, a
+ * toggle for its source and Copy, then the picture.
+ */
+function diagramShell(source: string, svg: string): HTMLElement {
+  const shell = document.createElement('div');
+  shell.className = 'md-diagram';
+  const head = document.createElement('div');
+  head.className = 'md-diagram-head';
+  const kind = document.createElement('span');
+  kind.className = 'md-diagram-kind';
+  kind.textContent = diagramKind(source);
+  const spacer = document.createElement('span');
+  spacer.className = 'md-diagram-spacer';
+  const toggle = iconButton('source', 'Show the source', ICON_CODE);
+  toggle.setAttribute('aria-pressed', 'false');
+  head.append(kind, spacer, toggle, iconButton('copy', 'Copy the source', ICON_COPY));
+  const view = document.createElement('div');
+  view.className = 'md-diagram-view';
+  view.innerHTML = svg;
+  const code = document.createElement('pre');
+  code.className = 'md-diagram-source';
+  code.hidden = true;
+  const inner = document.createElement('code');
+  inner.textContent = source;
+  code.append(inner);
+  shell.append(head, view, code);
+  return shell;
+}
+
+/**
+ * A wrap toggle and a Copy button in each code block's label bar. The HTML is a string, so the buttons are
  * added to the live DOM after each render; one click handler on the root serves them all.
  */
 function hydrateCopyButtons(root: ParentNode): void {
   root.querySelectorAll<HTMLElement>('pre.md-code').forEach((pre) => {
-    if (pre.closest('.md-mermaid') || pre.querySelector(':scope > .md-code-copy')) return;
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'md-code-copy';
-    button.dataset.mdCopy = '';
-    button.title = 'Copy code';
-    button.textContent = 'Copy';
-    pre.appendChild(button);
+    if (pre.closest('.md-mermaid') || pre.querySelector(':scope > .md-code-tools')) return;
+    const bar = document.createElement('span');
+    bar.className = 'md-code-tools';
+    const wrap = iconButton('wrap', 'Wrap long lines', ICON_WRAP);
+    wrap.setAttribute('aria-pressed', 'false');
+    bar.append(wrap, iconButton('copy', 'Copy code', ICON_COPY));
+    pre.appendChild(bar);
   });
 }
 
-function copyCode(button: HTMLElement): void {
-  const code = button.parentElement?.querySelector('code')?.textContent ?? '';
-  void navigator.clipboard?.writeText(code).then(() => {
-    button.textContent = 'Copied';
-    window.setTimeout(() => {
-      button.textContent = 'Copy';
-    }, 1500);
-  });
+/** One click on a code block's or diagram's tool button. */
+function runTool(button: HTMLElement): void {
+  const kind = button.dataset.mdTool;
+  if (kind === 'copy') {
+    const scope = button.closest('.md-diagram, pre.md-code');
+    const code = scope?.querySelector('code')?.textContent ?? '';
+    void navigator.clipboard?.writeText(code).then(() => {
+      button.innerHTML = ICON_DONE;
+      window.setTimeout(() => {
+        button.innerHTML = ICON_COPY;
+      }, 1500);
+    });
+  } else if (kind === 'wrap') {
+    const on = button.closest('pre.md-code')?.classList.toggle('md-wrap') ?? false;
+    button.setAttribute('aria-pressed', String(on));
+  } else if (kind === 'source') {
+    const source = button.closest('.md-diagram')?.querySelector<HTMLElement>('.md-diagram-source');
+    if (!source) return;
+    source.hidden = !source.hidden;
+    button.setAttribute('aria-pressed', String(!source.hidden));
+  }
 }
 
 /** Parses `html` into nodes without touching the live DOM. */
@@ -255,9 +318,9 @@ export function Markdown({
       ref={ref}
       className={className ? `md-root ${className}` : 'md-root'}
       onClick={(event) => {
-        const copy = (event.target as Element).closest<HTMLElement>('[data-md-copy]');
-        if (copy && event.currentTarget.contains(copy)) {
-          copyCode(copy);
+        const tool = (event.target as Element).closest<HTMLElement>('[data-md-tool]');
+        if (tool && event.currentTarget.contains(tool)) {
+          runTool(tool);
           return;
         }
         const target = linkFor(event);

@@ -26,6 +26,8 @@ export interface RowFlags {
   afterFold?: boolean;
   /** An assistant row whose thinking sits behind the closed "worked for" row. */
   hideThinking?: boolean;
+  /** In an opened turn, a note straight above a tool row: its bottom padding is tightened. */
+  beforeTool?: boolean;
 }
 
 export type Item =
@@ -38,11 +40,13 @@ export type Item =
       elapsedMs: number;
       /** How many of the folded tool calls failed. */
       failed: number;
+      /** What the hidden part holds: tool calls and thinking blocks, not the final reply's thinking. */
+      steps: number;
       /** The reader has opened this turn, so its work is listed after the row. */
       open: boolean;
     }
   // Agent calls that follow one another, drawn as one header over a grid of subagent cards.
-  | { kind: 'agents'; key: string; rows: MessageRow[] };
+  | { kind: 'agents'; key: string; rows: MessageRow[]; flags: RowFlags[] };
 
 /** A steer read mid-turn belongs to the running turn; only other user rows open a new turn. */
 function opensTurn(r: MessageRow): boolean {
@@ -72,9 +76,15 @@ function groupAgents(items: Item[]): Item[] {
   const out: Item[] = [];
   for (const it of items) {
     const prev = out[out.length - 1];
-    if (it.kind !== 'row' || !isAgentRow(it.row)) out.push(it);
-    else if (prev?.kind === 'agents') prev.rows.push(it.row);
-    else out.push({ kind: 'agents', key: `agents:${it.row.id}`, rows: [it.row] });
+    if (it.kind !== 'row' || !isAgentRow(it.row)) {
+      out.push(it);
+      continue;
+    }
+    const { kind: _kind, row, ...flags } = it;
+    if (prev?.kind === 'agents') {
+      prev.rows.push(row);
+      prev.flags.push(flags);
+    } else out.push({ kind: 'agents', key: `agents:${row.id}`, rows: [row], flags: [flags] });
   }
   return out;
 }
@@ -134,6 +144,7 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
         indent,
         afterFold: last?.kind === 'fold' && !last.open,
         hideThinking,
+        beforeTool: isOpen && work[j + 1]?.role === 'toolResult' && !isAgentRow(work[j + 1]!),
       });
     };
     // Nothing to fold away: the turn is empty, or did no work beyond replying.
@@ -164,6 +175,7 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
         key: `fold:${turnKey}`,
         turnKey,
         rows: [...foldedIdx, ...thoughtIdx].sort((a, b) => a - b).map((j) => work[j]!),
+        steps: foldedIdx.length + thoughtIdx.filter((j) => j !== reply).length,
         elapsedMs: Math.max(0, last.timestamp - first.timestamp),
         failed: foldedIdx.filter((j) => toolStatus(work[j]!) === 'failed' && work[j]!.role === 'toolResult').length,
         open: isOpen,

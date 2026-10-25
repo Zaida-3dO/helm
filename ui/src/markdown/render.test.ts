@@ -414,3 +414,16 @@ test('a path inside link text is not linked twice', () => {
   const html = renderToHtml('[open src/a/b.ts](https://x.example)');
   assert.equal((html.match(/<a /g) ?? []).length, 1);
 });
+
+test('a diagram is named from the first word of its source, comments and blank lines skipped', async () => {
+  const { diagramKind } = await import('./mermaid.ts');
+  const cases: [string, string][] = [
+    ['flowchart LR\n  A --> B', 'Flowchart'],
+    ['\n%% note\ngraph TD\n  A-->B', 'Flowchart'],
+    ['sequenceDiagram\n  A->>B: hi', 'Sequence diagram'],
+    ['stateDiagram-v2\n  [*] --> A', 'State diagram'],
+    ['quadrantChart\n  title x', 'Diagram'],
+    ['', 'Diagram'],
+  ];
+  for (const [source, kind] of cases) assert.equal(diagramKind(source), kind, source);
+});

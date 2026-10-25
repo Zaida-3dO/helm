@@ -3,15 +3,17 @@
 
 import type { RowContext } from '../Rows.tsx';
 import { Row } from '../Rows.tsx';
+import type { RowFlags } from '../workBlocks.ts';
 import type { MessageRow } from '../../api/types.ts';
 import { BranchGlyph, SubagentCard, useThread } from './SubagentCard.tsx';
 import { subagentFor } from './model.ts';
 import './subagents.css';
 
-export function AgentGroup({ rows, ctx }: { rows: MessageRow[]; ctx: RowContext }) {
+export function AgentGroup({ rows, flags, ctx }: { rows: MessageRow[]; flags: RowFlags[]; ctx: RowContext }) {
   const thread = useThread(ctx.chatId);
-  const cards = rows.filter((r) => subagentFor(r, thread));
-  const plain = rows.filter((r) => !subagentFor(r, thread));
+  const shown = rows.map((r, i) => ({ r, flags: flags[i], card: subagentFor(r, thread) !== null }));
+  const cards = shown.filter((x) => x.card).map((x) => x.r);
+  const plain = shown.filter((x) => !x.card);
   return (
     <div className="row agent-group" data-testid="agent-group" data-count={cards.length}>
       {cards.length > 0 && (
@@ -31,8 +33,8 @@ export function AgentGroup({ rows, ctx }: { rows: MessageRow[]; ctx: RowContext 
           </div>
         </>
       )}
-      {plain.map((r) => (
-        <Row key={r.id} row={r} ctx={ctx} />
+      {plain.map((x) => (
+        <Row key={x.r.id} row={x.r} ctx={ctx} {...x.flags} />
       ))}
     </div>
   );

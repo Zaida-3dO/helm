@@ -59,33 +59,6 @@
   white-space: nowrap;
 }
 
-.ad-phase::before {
-  content: '';
-  align-self: center;
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: ad-live 1.6s ease-in-out infinite;
-}
-
-@keyframes ad-live {
-  50% {
-    opacity: 0.3;
-  }
-}
-
-:root[data-effects='quiet'] .ad-phase::before {
-  animation: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ad-phase::before {
-    animation: none;
-  }
-}
-
 /* Controls: hover, keyboard focus and pressed. */
 .activity-dock .ad-details:focus-visible,
 .activity-dock .ad-tool-stop:focus-visible,
