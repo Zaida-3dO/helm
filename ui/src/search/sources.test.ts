@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Api } from '../api/client.ts';
 import { chatsSource, filesSource } from './defaultSources.ts';
-import { absolutePath, baseName, dirName, groupOrder, looksLikePath, rowId } from './sources.ts';
+import { absolutePath, baseName, dirName, groupOrder, looksLikePath, rowId, shortFolder } from './sources.ts';
 
 test('a query looks like a path when it has a separator, a ~ or drive start, or is one name.ext word', () => {
   for (const q of ['src/main.ts', 'a\\b', '~/notes', 'C:', 'c:/x', 'README.md', 'main.rs', './x']) assert.equal(looksLikePath(q), true, q);
@@ -29,6 +29,10 @@ test('paths are made absolute against the chat folder, keeping absolute ones', (
   assert.equal(baseName('src/deep/a.ts'), 'a.ts');
   assert.equal(dirName('src/deep/a.ts'), 'src/deep');
   assert.equal(dirName('a.ts'), '');
+  assert.equal(shortFolder('C:/work/app/src/deep', 'C:\\work\\app'), 'src/deep');
+  assert.equal(shortFolder('C:/work/app', 'C:/work/app'), '');
+  assert.equal(shortFolder('C:/other/very/long/folder/name', 'C:/work/app'), '…/long/folder/name');
+  assert.equal(shortFolder('home/me', null), 'home/me');
 });
 
 function fakeApi(handlers: Record<string, (args: Record<string, unknown>) => unknown>): { api: Api; calls: { op: string; args: Record<string, unknown> }[] } {
@@ -69,11 +73,21 @@ test('the chats source passes the filters and the current project, and labels ti
 
 test('the files source searches the chat folder through quick_open and opens an absolute path', async () => {
   const opened: string[] = [];
-  const { api, calls } = fakeApi({ quick_open: () => ({ mode: 'files', partial: false, items: [{ path: 'C:/work/app/src/main.ts', label: 'src/main.ts', kind: 'file', score: 3 }, { path: 'C:/work/app/README.md', label: 'README.md', kind: 'file', score: 1 }] }) });
+  const { api, calls } = fakeApi({
+    quick_open: () => ({
+      mode: 'files',
+      partial: false,
+      items: [
+        { path: 'C:/work/app/src/main.ts', label: 'src/main.ts', kind: 'file', score: 3 },
+        { path: 'C:/work/app/README.md', label: 'README.md', kind: 'file', score: 1 },
+        { path: 'C:/work/app/src/ui', label: 'src/ui', kind: 'dir', score: 1 },
+      ],
+    }),
+  });
   const src = filesSource({ api, chatId: () => 'c1', cwd: () => 'C:/work/app', openFile: (p) => opened.push(p) });
   const rows = await src.run('ma', new AbortController().signal);
   assert.deepEqual(calls[0], { op: 'quick_open', args: { chatId: 'c1', query: 'ma' } });
-  assert.deepEqual(rows.map((r) => [r.title, r.subtitle]), [['main.ts', 'src'], ['README.md', undefined]]);
+  assert.deepEqual(rows.map((r) => [r.title, r.subtitle, r.tag]), [['main.ts', 'src', undefined], ['README.md', undefined, undefined], ['ui', 'src', 'folder']]);
   rows[0]!.open();
   assert.deepEqual(opened, ['C:/work/app/src/main.ts']);
 });

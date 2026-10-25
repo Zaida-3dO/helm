@@ -5,7 +5,7 @@
 import type { Api } from '../api/client.ts';
 import type { QuickResult } from '../api/panel.ts';
 import { searchOps, type SearchHit } from '../api/search.ts';
-import { absolutePath, baseName, dirName, rowId, type Row, type SearchSource } from './sources.ts';
+import { absolutePath, baseName, dirName, rowId, shortFolder, type Row, type SearchSource } from './sources.ts';
 
 export interface ChatsDeps {
   api: Api;
@@ -63,7 +63,10 @@ export function filesSource(d: FilesDeps): SearchSource {
         return {
           id: rowId('files', abs),
           title: baseName(shown),
-          subtitle: dirName(shown) || undefined,
+          // The row's folder is shown short: inside the chat's folder it is relative to it.
+          subtitle: shortFolder(dirName(abs), cwd) || undefined,
+          // A folder opens in the panel's viewer, which lists it; the tag tells it apart from a file.
+          tag: h.kind === 'dir' ? 'folder' : undefined,
           open: () => d.openFile(abs),
         };
       });

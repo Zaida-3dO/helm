@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { handleLink } from '../panel/index.ts';
 import { useDialog, useShell } from '../shell/context.ts';
-import { Checkbox, Dialog, Picker, TextInput, useBinding, useLayer, type PickerOption } from '../ui/index.ts';
+import { Checkbox, Dialog, Icon, Picker, useBinding, useLayer, type PickerOption } from '../ui/index.ts';
 import { flatRows, moveHighlight, movePage, statusLine, UniversalSearch } from './controller.ts';
 import { chatsSource, filesSource } from './defaultSources.ts';
 import { GROUP_LABEL, groupOrder, type SourceId } from './sources.ts';
@@ -122,24 +122,30 @@ function SearchBody({ close }: { close: () => void }) {
   const typed = state.query !== '';
   const nothing = typed && state.status === 'done' && rows.length === 0 && order.every((g) => state.groups[g]?.status !== 'error');
   return (
-    <Dialog title="Search" onClose={close} testId="search-dialog">
+    <Dialog title="Search chats" wide onClose={close} testId="search-dialog">
       <div className="search-box">
-        <TextInput
-          type="text"
-          role="combobox"
-          aria-expanded={rows.length > 0}
-          aria-controls="search-results"
-          aria-activedescendant={current?.row.id}
-          aria-autocomplete="list"
-          className="search-input"
-          data-testid="search-input"
-          placeholder={'Search chats and files…'}
-          aria-label="Search"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={onKey}
-          autoFocus
-        />
+        <div className="search-field">
+          <span className="search-field-icon" aria-hidden="true">
+            <Icon name="search" size={16} />
+          </span>
+          <input
+            type="text"
+            role="combobox"
+            aria-expanded={rows.length > 0}
+            aria-controls="search-results"
+            aria-activedescendant={current?.row.id}
+            aria-autocomplete="list"
+            className="search-input"
+            data-testid="search-input"
+            placeholder={'Search chats and files…'}
+            aria-label="Search"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={onKey}
+            autoFocus
+          />
+          <kbd className="search-esc">esc</kbd>
+        </div>
         <div className="search-filters">
           {projects.length > 0 && (
             <Picker
@@ -162,6 +168,9 @@ function SearchBody({ close }: { close: () => void }) {
       </div>
       {!typed && (
         <p className="search-empty muted">
+          <span className="search-empty-icon" aria-hidden="true">
+            <Icon name="search" size={22} />
+          </span>
           Find something you worked on.
           <br />
           Search stays on this PC and never calls a model.

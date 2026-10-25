@@ -73,6 +73,19 @@ export function baseName(path: string): string {
   return parts.at(-1) ?? path;
 }
 
+const segments = (path: string) => path.replace(/\\/g, '/').split('/').filter(Boolean);
+
+/**
+ * A short form of a file's parent folder for the second line of a row: relative to the chat's folder
+ * when it is inside it, otherwise the last three folders behind an ellipsis.
+ */
+export function shortFolder(dir: string, cwd: string | null): string {
+  const d = segments(dir);
+  const c = cwd ? segments(cwd) : [];
+  if (c.length > 0 && d.length >= c.length && c.every((s, i) => s.toLowerCase() === d[i]!.toLowerCase())) return d.slice(c.length).join('/');
+  return d.length > 3 ? `…/${d.slice(-3).join('/')}` : d.join('/');
+}
+
 export function dirName(path: string): string {
   const parts = path.replace(/\\/g, '/').split('/').filter(Boolean);
   return parts.slice(0, -1).join('/');

@@ -183,7 +183,9 @@ export function PickerPopover<T extends string>({
         </div>
         {footer}
         <div className="ui-picker-hints">
-          <span>↑ ↓ navigate</span>
+          <span>
+            {shown.length} {shown.length === 1 ? 'option' : 'options'} · ↑ ↓ navigate
+          </span>
           {extraHint}
           <span>↵ select</span>
         </div>
