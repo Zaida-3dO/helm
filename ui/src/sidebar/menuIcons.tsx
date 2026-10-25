@@ -8,6 +8,7 @@ import {
   IconArchive,
   IconChevronDown,
   IconChevronRight,
+  IconCoins,
   IconCompact,
   IconFolder,
   IconFolderTree,
@@ -33,6 +34,7 @@ const CHAT: Record<string, (label: string) => ReactNode> = {
   rename: () => <IconRename />,
   compact: () => <IconCompact />,
   rollover: () => <IconRefresh />,
+  cost: () => <IconCoins />,
   move: () => <IconFolder />,
   nest: () => <IconNest />,
   top: () => <IconUnnest />,
@@ -52,6 +54,7 @@ const PROJECT: Record<string, (label: string, p: ProjectNode) => ReactNode> = {
   'primary-folder': () => <IconFolder />,
   // "Change icon…" shows the project's own icon.
   icon: (_l, p) => (p.icon && !p.icon.startsWith('lib:') ? <span className="sb-menu-emoji">{p.icon}</span> : <IconSparkles />),
+  cost: () => <IconCoins />,
   nest: () => <IconFolderTree />,
   top: () => <IconUnnest />,
   archive: () => <IconArchive />,

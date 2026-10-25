@@ -13,6 +13,7 @@ import { withChatIcons } from './menuIcons.tsx';
 import { IconMore } from '../ui/icons.tsx';
 import { deleteChatConfirm, PromptDialog, type Prompt } from './Sidebar.tsx';
 import { sidebarUndo } from './undo.ts';
+import { CostDialog } from '../usage/CostDialog.tsx';
 
 // Errors go to the shell's toast slot, where the user sees them.
 const showError = (text: string) => toast.show({ kind: 'error', text });
@@ -24,6 +25,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
+  const [cost, setCost] = useState<string | null>(null);
   const act = useMemo(
     () => new SidebarActions({ api: shell.api, pops, ops: shell.ops, data, undo: sidebarUndo, onError: showError }),
     [shell.api, shell.ops, pops, data],
@@ -51,6 +53,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
           rename: () => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, onSave: (t) => act.renameChat(row, t) }),
           compact: () => void compactChat(shell.ops, row.chatId, showError),
           rollOver: () => setConfirm(rollOverConfirm(row.title, () => rollOverChat(shell.ops, row.chatId, showError))),
+          cost: () => setCost(row.chatId),
           moveTo: (id) => void act.moveTo(row, id),
           nestUnder: (id) => void act.nestUnder(row, id),
           topLevel: () => void act.topLevel(row),
@@ -88,6 +91,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} label="Chat options" onClose={() => setMenu(null)} testId="chat-menu-list" />}
       {prompt && <PromptDialog prompt={prompt} onClose={() => setPrompt(null)} />}
       {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
+      {cost && <CostDialog api={shell.api} target={{ chatId: cost }} onClose={() => setCost(null)} />}
     </>
   );
 }

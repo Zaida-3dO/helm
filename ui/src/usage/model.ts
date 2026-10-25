@@ -116,3 +116,23 @@ export function rangeOf(id: RangeId, now: number): { since: number; until: numbe
       return { since: 0, until };
   }
 }
+
+// ---- The Cost dialog (a chat's, or a folder's or project's) ----
+
+/** "1,234,567". */
+export function tokensText(n: number): string {
+  return Math.round(n).toLocaleString('en-US');
+}
+
+/** "$1.23", "$0.004" under a cent, "$0.00" for nothing. */
+export function usdText(n: number): string {
+  if (n > 0 && n < 0.01) return `$${n.toFixed(3)}`;
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** A share in percent: "12%", "4.5%", "<0.1%" for a sliver, "0%" for none. */
+export function shareText(pct: number): string {
+  if (pct <= 0) return '0%';
+  if (pct < 0.1) return '<0.1%';
+  return pct < 10 ? `${pct.toFixed(1)}%` : `${Math.round(pct)}%`;
+}

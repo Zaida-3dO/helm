@@ -7,7 +7,7 @@
 
 import { ApiError } from '../api/client.ts';
 import type { FeedbackEntryRow, FeedbackItemRow, FeedbackStatus, FeedbackThread } from '../api/feedback.ts';
-import type { RequestModes, UsageSnapshot } from '../api/usage.ts';
+import type { CostReport, CostTotals, RequestModes, UsageSnapshot } from '../api/usage.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
 
 type Mode = 'live' | 'stale' | 'none' | 'unsupported' | 'chat';
@@ -130,6 +130,8 @@ export function usageFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       case 'usage_refresh':
         setTimeout(() => ctx.emit({ kind: 'plan_usage', ...snapshot() }), 50);
         return { ...snapshot(), refreshing: true };
+      case 'usage_cost':
+        return costReport(a, t0);
       case 'request_modes': {
         if (typeof a.since !== 'number' || typeof a.until !== 'number' || a.until <= a.since) throw new ApiError('bad_args', 'The range must end after it starts.');
         return a.since === 0 ? { ...modes, fast: 40, standard: 2_100 } : modes;
@@ -148,4 +150,32 @@ export function usageFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
     }
   };
   return { prefixes: ['usage_', 'request_modes', 'feedback_'], handler };
+}
+
+// `usage_cost`: sample numbers, the same for any chat; a project lists four chats, one archived.
+function costReport(a: Record<string, unknown>, t0: number): CostReport {
+  const totals = (input: number, output: number, read: number, write: number, cost: number): CostTotals => ({
+    inputTokens: input,
+    outputTokens: output,
+    cacheReadTokens: read,
+    cacheWriteTokens: write,
+    totalTokens: input + output + read + write,
+    costUsd: cost,
+  });
+  const helm = 84.2;
+  const weekPct = 56;
+  const weekly = (cost: number) => ({ weekPct, windowStart: t0 + 50 * HOUR - 7 * 24 * HOUR, resetsAt: t0 + 50 * HOUR, helmCostUsd: helm, costUsd: cost, sharePct: (cost / helm) * weekPct });
+  const chat = (chatId: string, title: string, archived: boolean, t: CostTotals, week: number) => ({ chatId, title, archived, totals: t, weekCostUsd: week, weeklyPct: (week / helm) * weekPct });
+  if (typeof a.chatId === 'string') {
+    const t = totals(18_420, 96_310, 4_812_550, 402_118, 12.84);
+    return { scope: 'chat', name: 'Fix the flaky sidebar test', totals: t, weekly: weekly(9.31), chats: [chat(a.chatId, 'Fix the flaky sidebar test', false, t, 9.31)], archivedChats: 0 };
+  }
+  const chats = [
+    chat('c-1', 'Build the cost dialog', false, totals(31_200, 151_000, 9_120_400, 640_210, 23.18), 23.18),
+    chat('c-2', 'Fix the flaky sidebar test', false, totals(18_420, 96_310, 4_812_550, 402_118, 12.84), 9.31),
+    chat('c-3', 'Roll over: release notes', true, totals(6_010, 22_800, 1_204_330, 98_400, 3.07), 0),
+    chat('c-4', 'Quick question about tokens', false, totals(1_200, 2_400, 38_000, 9_100, 0.12), 0.12),
+  ];
+  const sum = chats.reduce((s, c) => totals(s.inputTokens + c.totals.inputTokens, s.outputTokens + c.totals.outputTokens, s.cacheReadTokens + c.totals.cacheReadTokens, s.cacheWriteTokens + c.totals.cacheWriteTokens, s.costUsd + c.totals.costUsd), totals(0, 0, 0, 0, 0));
+  return { scope: 'project', name: 'Helm', totals: sum, weekly: weekly(chats.reduce((s, c) => s + c.weekCostUsd, 0)), chats, archivedChats: 1 };
 }

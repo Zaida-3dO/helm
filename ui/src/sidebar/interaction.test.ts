@@ -6,8 +6,8 @@ import { chatMenuItems, nestTargets, projectMenuItems, projectNestTargets, type 
 import { UNDO_LIMIT, UndoStack } from './undo.ts';
 
 const noop = () => undefined;
-const chatActs: ChatMenuActions = { fork: noop, rename: noop, compact: noop, rollOver: noop, moveTo: noop, nestUnder: noop, topLevel: noop, toggleChildren: noop, markUnread: noop, pin: noop, mute: noop, archive: noop, restore: noop, remove: noop };
-const projActs: ProjectMenuActions = { newChat: noop, pin: noop, rename: noop, changeIcon: noop, nestUnder: noop, topLevel: noop, archive: noop, restore: noop, colour: noop, customColour: noop };
+const chatActs: ChatMenuActions = { fork: noop, rename: noop, compact: noop, rollOver: noop, cost: noop, moveTo: noop, nestUnder: noop, topLevel: noop, toggleChildren: noop, markUnread: noop, pin: noop, mute: noop, archive: noop, restore: noop, remove: noop };
+const projActs: ProjectMenuActions = { newChat: noop, pin: noop, rename: noop, changeIcon: noop, cost: noop, nestUnder: noop, topLevel: noop, archive: noop, restore: noop, colour: noop, customColour: noop };
 
 function row(chatId: string, over: Partial<SidebarRow> = {}): SidebarRow {
   return { chatId, title: chatId, groupProjectId: 'g', folderProjectId: 'g', folderPath: 'C:/w', depth: 0, parentChatId: null, hasChildren: false, status: 'idle', attention: null, pinned: false, unread: false, muted: false, stalled: false, hasDraft: false, lastActivityAt: 1, archived: false, position: null, createdAt: 1, updatedAt: 1, revision: 1, ...over };
@@ -109,6 +109,8 @@ test('nest targets exclude itself, its descendants, its parent, other groups and
 test('the chat menu follows state: archive or restore and delete, stop first while busy', () => {
   const ids = (r: SidebarRow) => chatMenuItems({ row: r, projects: [project('g')], siblings: [r], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'projects' }, chatActs).map((i) => i.id);
   assert.ok(ids(row('a')).includes('archive'));
+  // Cost is there for every chat, archived or busy too.
+  assert.ok(ids(row('a', { archived: true })).includes('cost') && ids(row('a', { status: 'running' })).includes('cost'));
   // Compact context: offered on an idle chat, not while it runs or once archived.
   const compact = (r: SidebarRow) =>
     chatMenuItems({ row: r, projects: [project('g')], siblings: [r], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'projects' }, chatActs).find((i) => i.id === 'compact');
@@ -143,7 +145,7 @@ test('project nest targets keep three levels and refuse cycles', () => {
   assert.deepEqual(names(all[0]!), [], 'a carries two levels');
   assert.deepEqual(names(all[2]!), ['a', 'd'], 'not its own parent b');
   const items = projectMenuItems(all[1]!, all, projActs).map((i) => i.id);
-  assert.ok(items.includes('top') && items.includes('colour') && items.includes('archive'));
+  assert.ok(items.includes('top') && items.includes('colour') && items.includes('archive') && items.includes('cost'));
   const colours = projectMenuItems(all[1]!, all, projActs).find((i) => i.id === 'colour')!.submenu!;
   assert.equal(colours.length, 10, 'no colour, the eight named colours and a custom one');
 });

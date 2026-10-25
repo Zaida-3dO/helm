@@ -3,8 +3,13 @@
 //! The records are the token counts and reported cost already stored on each assistant message,
 //! so this reads Helm's database and nothing else: no plan percentage, no reset time (the meter
 //! owns those) and no network. Cost is what the binary reported, never an estimate. A message's
-//! model is its chat's current model, since the rows themselves do not record one.
+//! model is its chat's current model, since the rows themselves do not record one. A fork's copied
+//! history counts for the chat it came from only (see [`OWN_USAGE`]).
+//!
+//! `usage_cost` ([`cost_report`]) reads the same records for one chat or project, and adds an
+//! estimated share of the plan's weekly window from the meter's last reading.
 
+use crate::types::{ChatCost, CostReport, CostScope, CostTotals, WeeklyShare};
 use helm_core::db::Database;
 use helm_hosttools::{HostToolRegistry, ToolCtx, ToolError, ToolResult, ToolSpec};
 use serde_json::{json, Map, Value};
@@ -135,7 +140,7 @@ fn read_rows(
                     SUM(COALESCE(json_extract(m.details, '$.usage.costUsd'), 0.0))
              FROM messages m JOIN chats c ON c.id = m.chat_id
              WHERE m.role = 'assistant' AND m.details IS NOT NULL AND json_valid(m.details)
-               AND json_extract(m.details, '$.usage') IS NOT NULL
+               AND json_extract(m.details, '$.usage') IS NOT NULL AND m.timestamp >= c.created_at
                AND m.timestamp >= ?1 AND m.timestamp < ?2
                AND (?3 IS NULL OR c.id = ?3)
              GROUP BY c.id, 3, 4",
@@ -245,6 +250,154 @@ pub fn digest(db: &Database, a: &Value, now: i64) -> ToolResult {
     Ok(out)
 }
 
+const WEEK_MS: i64 = 7 * DAY_MS;
+
+/// A message counts for its chat only if it is newer than the chat. A fork's log starts with copies
+/// of its source's messages (usage included) under their original times, so this leaves the
+/// inherited history with the chat it came from and nothing is counted twice.
+const OWN_USAGE: &str = "m.role = 'assistant' AND m.details IS NOT NULL AND json_valid(m.details)
+     AND json_extract(m.details, '$.usage') IS NOT NULL AND m.timestamp >= c.created_at";
+
+fn totals(s: &Sums) -> CostTotals {
+    CostTotals {
+        input_tokens: s.input,
+        output_tokens: s.output,
+        cache_read_tokens: s.cache_read,
+        cache_write_tokens: s.cache_write,
+        total_tokens: s.total(),
+        cost_usd: s.cost,
+    }
+}
+
+/// `usage_cost`: what one chat, or every chat in a project and its sub-projects, used. Archived
+/// chats count. `weekly` is the meter's weekly window as `(percent used, resets at)`.
+///
+/// The weekly share is an estimate: the plan reports only one percentage for everything, so it is
+/// split in proportion to cost since the window began (its reset time minus seven days), across all
+/// Helm chats. Cost rather than tokens, because cost already weighs model and cache pricing, which
+/// is closer to how the limit is spent than a raw token count. It assumes the week's usage all
+/// came through Helm.
+pub fn cost_report(
+    db: &Database,
+    scope: CostScope,
+    id: &str,
+    weekly: Option<(f64, i64)>,
+    now: i64,
+) -> Result<CostReport, String> {
+    let window = weekly.filter(|(_, resets)| *resets > now);
+    let since = window.map_or(i64::MAX, |(_, r)| r - WEEK_MS);
+    type Line = (String, String, bool, Sums, f64);
+    let read = db.snapshot(|tx| {
+        let name: Option<String> = match scope {
+            CostScope::Chat => tx.query_row("SELECT title FROM chats WHERE id = ?1", [id], |r| r.get(0)),
+            CostScope::Project => tx.query_row("SELECT name FROM projects WHERE id = ?1", [id], |r| r.get(0)),
+        }
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })?;
+        let Some(name) = name else {
+            return Ok(None);
+        };
+        let chats = match scope {
+            CostScope::Chat => "c.id = ?1",
+            CostScope::Project => {
+                "c.project_id IN (WITH RECURSIVE tree(id) AS (SELECT ?1 UNION
+                     SELECT pp.project_id FROM project_parents pp JOIN tree t ON pp.parent_id = t.id)
+                 SELECT id FROM tree)"
+            }
+        };
+        let mut st = tx.prepare(&format!(
+            "SELECT c.id, c.title, c.archived, COUNT(*),
+                    SUM(COALESCE(json_extract(m.details, '$.usage.inputTokens'), 0)),
+                    SUM(COALESCE(json_extract(m.details, '$.usage.outputTokens'), 0)),
+                    SUM(COALESCE(json_extract(m.details, '$.usage.cacheReadTokens'), 0)),
+                    SUM(COALESCE(json_extract(m.details, '$.usage.cacheWriteTokens'), 0)),
+                    SUM(COALESCE(json_extract(m.details, '$.usage.costUsd'), 0.0)),
+                    SUM(CASE WHEN m.timestamp >= ?2
+                        THEN COALESCE(json_extract(m.details, '$.usage.costUsd'), 0.0) ELSE 0.0 END)
+             FROM messages m JOIN chats c ON c.id = m.chat_id
+             WHERE {chats} AND {OWN_USAGE}
+             GROUP BY c.id"
+        ))?;
+        let lines = st
+            .query_map(rusqlite::params![id, since], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                    Sums {
+                        requests: r.get(3)?,
+                        input: r.get(4)?,
+                        output: r.get(5)?,
+                        cache_read: r.get(6)?,
+                        cache_write: r.get(7)?,
+                        cost: r.get(8)?,
+                    },
+                    r.get::<_, f64>(9)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<Line>>>()?;
+        let helm: f64 = tx.query_row(
+            &format!(
+                "SELECT COALESCE(SUM(COALESCE(json_extract(m.details, '$.usage.costUsd'), 0.0)), 0.0)
+                 FROM messages m JOIN chats c ON c.id = m.chat_id
+                 WHERE m.timestamp >= ?1 AND {OWN_USAGE}"
+            ),
+            [since],
+            |r| r.get(0),
+        )?;
+        Ok::<_, rusqlite::Error>(Some((name, lines, helm)))
+    });
+    let (name, mut lines, helm) = read
+        .map_err(|e| format!("The usage records could not be read: {e}"))?
+        .ok_or_else(|| match scope {
+            CostScope::Chat => "There is no such chat.".to_owned(),
+            CostScope::Project => "There is no such project.".to_owned(),
+        })?;
+    lines.sort_by(|a, b| {
+        b.3.cost
+            .total_cmp(&a.3.cost)
+            .then(b.3.total().cmp(&a.3.total()))
+    });
+    let share = |cost: f64| window.map(|(pct, _)| if helm > 0.0 { cost / helm * pct } else { 0.0 });
+    let mut sum = Sums::default();
+    let mut week_cost = 0.0;
+    let mut archived_chats = 0;
+    let chats = lines
+        .into_iter()
+        .map(|(chat_id, title, archived, s, week)| {
+            sum.add(&s);
+            week_cost += week;
+            archived_chats += u32::from(archived);
+            ChatCost {
+                chat_id,
+                title,
+                archived,
+                totals: totals(&s),
+                week_cost_usd: week,
+                weekly_pct: share(week),
+            }
+        })
+        .collect();
+    Ok(CostReport {
+        scope,
+        name,
+        totals: totals(&sum),
+        weekly: window.map(|(week_pct, resets_at)| WeeklyShare {
+            week_pct,
+            window_start: resets_at - WEEK_MS,
+            resets_at,
+            helm_cost_usd: helm,
+            cost_usd: week_cost,
+            share_pct: share(week_cost).unwrap_or(0.0),
+        }),
+        chats,
+        archived_chats,
+    })
+}
+
 pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
@@ -287,15 +440,22 @@ mod tests {
             .to_string()
         };
         db.write(|tx| {
-            tx.execute(
-                "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1)",
-                [],
+            // Project q is nested in p (the projects crate's table, made here by hand); its
+            // archived chat f is a fork made at day 9.5, so its day-9 row is inherited history.
+            tx.execute_batch(
+                "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1), ('q', 'Q', 1);
+                 CREATE TABLE project_parents(project_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL);
+                 INSERT INTO project_parents VALUES ('q', 'p');",
             )?;
-            for (id, model) in [("a", Some("opus")), ("b", None)] {
+            for (id, project, model, created, archived) in [
+                ("a", "p", Some("opus"), 1, false),
+                ("b", "p", None, 1, false),
+                ("f", "q", None, 9 * DAY_MS + DAY_MS / 2, true),
+            ] {
                 tx.execute(
-                    "INSERT INTO chats(id, project_id, title, model, created_at, updated_at)
-                     VALUES (?1, 'p', ?1, ?2, 1, 1)",
-                    rusqlite::params![id, model],
+                    "INSERT INTO chats(id, project_id, title, model, created_at, updated_at, archived)
+                     VALUES (?1, ?2, ?1, ?3, ?4, 1, ?5)",
+                    rusqlite::params![id, project, model, created, archived],
                 )?;
             }
             // (chat, key, role, timestamp, details)
@@ -318,6 +478,14 @@ mod tests {
                     2 * DAY_MS,
                     Some(usage(1000, 1000, 1.0)),
                 ),
+                ("f", "m7", "assistant", 9 * DAY_MS, Some(usage(50, 5, 0.25))),
+                (
+                    "f",
+                    "m8",
+                    "assistant",
+                    10 * DAY_MS,
+                    Some(usage(10, 1, 0.24)),
+                ),
             ];
             for (chat, key, role, ts, details) in rows {
                 tx.execute(
@@ -331,13 +499,15 @@ mod tests {
         .unwrap();
 
         let all = digest(&db, &json!({"range": "7d"}), now).unwrap();
-        // m6 is outside seven days; the user row and the row with no usage are not requests.
-        assert_eq!(all["total"]["requests"], 3);
-        assert_eq!(all["total"]["inputTokens"], 157);
-        assert_eq!(all["total"]["costUsd"], 0.76);
+        // m6 is outside seven days; the user row and the row with no usage are not requests; the
+        // fork's inherited m7 is its source's.
+        assert_eq!(all["total"]["requests"], 4);
+        assert_eq!(all["total"]["inputTokens"], 167);
+        assert_eq!(all["total"]["costUsd"], 1.0);
         assert_eq!(all["byModel"][0]["model"], "opus");
         assert_eq!(all["byModel"][1]["model"], "default");
         assert_eq!(all["byDay"].as_array().unwrap().len(), 2);
+        assert_eq!(all["chatsWithUsage"], 3);
         assert_eq!(all["topChats"][0]["chatId"], "a");
         let one = digest(&db, &json!({"range": "all", "chatId": "b"}), now).unwrap();
         assert_eq!(one["total"]["requests"], 1);
@@ -348,6 +518,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(custom["total"]["requests"], 2);
+
+        // Cost reports. The weekly window began at day 5: a, b and f cost 1.00 in it, and the
+        // plan's 40% is shared out in proportion.
+        let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-9, "{a} != {b}");
+        let week = Some((40.0, now + 2 * DAY_MS));
+        let a = cost_report(&db, CostScope::Chat, "a", week, now).unwrap();
+        assert_eq!(a.name, "a");
+        assert_eq!(a.totals.input_tokens, 1150);
+        assert_eq!(a.totals.total_tokens, 1150 + 1015 + 3 + 6);
+        close(a.totals.cost_usd, 1.75);
+        let w = a.weekly.as_ref().unwrap();
+        assert_eq!(w.window_start, 5 * DAY_MS + 5_000);
+        close(w.helm_cost_usd, 1.0);
+        close(w.cost_usd, 0.75);
+        close(w.share_pct, 30.0);
+        let f = cost_report(&db, CostScope::Chat, "f", week, now).unwrap();
+        assert_eq!((f.totals.input_tokens, f.archived_chats), (10, 1));
+        // A project counts its sub-projects and archived chats, costliest chat first.
+        let p = cost_report(&db, CostScope::Project, "p", week, now).unwrap();
+        let ids: Vec<&str> = p.chats.iter().map(|c| c.chat_id.as_str()).collect();
+        assert_eq!(ids, ["a", "f", "b"]);
+        assert_eq!(p.archived_chats, 1);
+        close(p.totals.cost_usd, 2.0);
+        close(p.weekly.as_ref().unwrap().share_pct, 40.0);
+        close(p.chats[1].weekly_pct.unwrap(), 9.6);
+        let q = cost_report(&db, CostScope::Project, "q", week, now).unwrap();
+        assert_eq!(q.chats.len(), 1);
+        // A weekly window that has already reset gives no share; unknown ids are refused.
+        let old = cost_report(&db, CostScope::Chat, "a", Some((40.0, now - 1)), now).unwrap();
+        assert!(old.weekly.is_none() && old.chats[0].weekly_pct.is_none());
+        assert!(cost_report(&db, CostScope::Chat, "zz", week, now).is_err());
+        assert!(cost_report(&db, CostScope::Project, "zz", None, now).is_err());
         // Bad input is refused with nothing read.
         for bad in [
             json!({"range": "year"}),

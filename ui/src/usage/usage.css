@@ -254,3 +254,109 @@
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
+
+/* The Cost dialog */
+
+.cost-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.cost-headline {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.cost-figure {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-alt);
+}
+
+.cost-big {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-caption {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.cost-tokens,
+.cost-chats {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-tokens td,
+.cost-chats td,
+.cost-chats th {
+  padding: 3px 0 3px 12px;
+  text-align: right;
+}
+
+.cost-tokens th {
+  padding: 3px 0;
+  text-align: left;
+  font-weight: 400;
+  color: var(--secondary);
+}
+
+.cost-chats td:first-child,
+.cost-chats th:first-child {
+  padding-left: 0;
+  text-align: left;
+}
+
+.cost-tokens .cost-total th,
+.cost-tokens .cost-total td {
+  border-top: 1px solid var(--line);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.cost-chats thead th {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+
+.cost-chat-title {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cost-tag {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--surface-alt);
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.cost-notes p,
+.cost-note,
+.cost-error {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.cost-error {
+  color: var(--error);
+}

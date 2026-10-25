@@ -16,6 +16,8 @@ export interface ChatMenuActions {
   compact(): void;
   /** Hand the chat's work to a fresh chat (the `chat_roll_over` op), after a confirmation. */
   rollOver(): void;
+  /** Show what the chat has used: tokens, estimated cost, weekly share. */
+  cost(): void;
   moveTo(projectId: string): void;
   nestUnder(chatId: string): void;
   topLevel(): void;
@@ -82,6 +84,7 @@ export function chatMenuItems(i: ChatMenuInput, a: ChatMenuActions): MenuItem[] 
     { id: 'compact', label: 'Compact context', disabled: r.archived || busy, onSelect: a.compact },
     // Rolling over needs the chat idle: the agent writes the hand-off in a turn of its own.
     { id: 'rollover', label: 'Roll over…', disabled: r.archived || busy || archivedGroup, onSelect: a.rollOver },
+    { id: 'cost', label: 'Cost…', onSelect: a.cost },
     {
       id: 'move',
       label: 'Move to project',
@@ -134,6 +137,8 @@ export interface ProjectMenuActions {
   pin(pinned: boolean): void;
   rename(): void;
   changeIcon(): void;
+  /** Show what every chat inside has used. */
+  cost(): void;
   nestUnder(projectId: string): void;
   topLevel(): void;
   archive(): void;
@@ -179,6 +184,7 @@ export function projectMenuItems(p: ProjectNode, all: ProjectNode[], a: ProjectM
     { id: 'rename', label: 'Rename project…', onSelect: a.rename },
     primaryFolderMenuItem(p),
     { id: 'icon', label: 'Change icon…', onSelect: a.changeIcon },
+    { id: 'cost', label: 'Cost…', onSelect: a.cost },
     {
       id: 'nest',
       label: 'Nest under…',

@@ -127,3 +127,81 @@ pub struct UsageSnapshot {
     #[ts(optional, type = "number")]
     pub next_refresh_at: Option<i64>,
 }
+
+/// Token counts and the cost the binary reported, summed over some messages.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CostTotals {
+    #[ts(type = "number")]
+    pub input_tokens: i64,
+    #[ts(type = "number")]
+    pub output_tokens: i64,
+    #[ts(type = "number")]
+    pub cache_read_tokens: i64,
+    #[ts(type = "number")]
+    pub cache_write_tokens: i64,
+    /// The four counts added up.
+    #[ts(type = "number")]
+    pub total_tokens: i64,
+    /// Claude Code's API-equivalent estimate in US dollars, not what a plan bills.
+    pub cost_usd: f64,
+}
+
+/// One chat's line in a cost report.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatCost {
+    pub chat_id: String,
+    pub title: String,
+    pub archived: bool,
+    pub totals: CostTotals,
+    /// This chat's cost since the current weekly window began.
+    pub week_cost_usd: f64,
+    /// The estimated share of the weekly plan limit this chat used, in percent of the limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub weekly_pct: Option<f64>,
+}
+
+/// How a report's weekly share was worked out.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct WeeklyShare {
+    /// The plan's weekly window, percent used, as the meter last read it.
+    pub week_pct: f64,
+    /// When the current weekly window began and when it resets (epoch milliseconds).
+    #[ts(type = "number")]
+    pub window_start: i64,
+    #[ts(type = "number")]
+    pub resets_at: i64,
+    /// What every Helm chat cost in the window, and what this report's chats cost in it.
+    pub helm_cost_usd: f64,
+    pub cost_usd: f64,
+    /// The estimated share of the weekly limit this report's chats used, in percent of the limit.
+    pub share_pct: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CostScope {
+    Chat,
+    Project,
+}
+
+/// The answer of `usage_cost`: what one chat, or every chat in a project and its sub-projects, used.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CostReport {
+    pub scope: CostScope,
+    /// The chat's title or the project's name.
+    pub name: String,
+    pub totals: CostTotals,
+    /// `None` when the meter has no current weekly reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub weekly: Option<WeeklyShare>,
+    /// Every chat that used anything, the costliest first (one line for a chat report).
+    pub chats: Vec<ChatCost>,
+    /// How many of those chats are archived (they are counted).
+    pub archived_chats: u32,
+}

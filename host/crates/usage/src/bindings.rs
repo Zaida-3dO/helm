@@ -18,6 +18,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     UsageSnapshot::export_all_to(dir).map_err(|e| e.to_string())?;
     crate::modes::RequestModes::export_all_to(dir).map_err(|e| e.to_string())?;
+    CostReport::export_all_to(dir).map_err(|e| e.to_string())?;
     let mut names = vec![
         UsageSource::ident(),
         UsageWindow::ident(),
@@ -27,6 +28,11 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         UsageReadiness::ident(),
         UsageSnapshot::ident(),
         crate::modes::RequestModes::ident(),
+        CostTotals::ident(),
+        ChatCost::ident(),
+        WeeklyShare::ident(),
+        CostScope::ident(),
+        CostReport::ident(),
     ];
     names.sort();
     let mut index = String::from(

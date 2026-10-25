@@ -53,6 +53,7 @@ import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
 import { useSlotWaiting } from '../composer/useSlotQueue.ts';
 import { startSyncTriggers, syncDisplay, type SyncHost } from './sync.ts';
 import { sidebarUndo } from './undo.ts';
+import { CostDialog, type CostTarget } from '../usage/CostDialog.tsx';
 import { layout, visibleRange } from './virtual.ts';
 import './sidebar.css';
 
@@ -118,6 +119,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const [menu, setMenu] = useState<Menu | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
+  const [cost, setCost] = useState<CostTarget | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
@@ -257,6 +259,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         rename: () => promptRename(row),
         compact: () => void compactChat(ops, row.chatId, setError),
         rollOver: () => setConfirm(rollOverConfirm(row.title, () => rollOverChat(ops, row.chatId, setError))),
+        cost: () => setCost({ chatId: row.chatId }),
         moveTo: (id) => void act.moveTo(row, id),
         nestUnder: (id) => {
           userCollapsed.current.delete(id);
@@ -290,6 +293,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           value: p.icon ?? '',
           onSave: (v) => act.editProject(p, { icon: v.trim() ? v.trim() : null }),
         }),
+      cost: () => setCost({ projectId: p.id }),
       nestUnder: (id) => void act.nestProject(p, id),
       topLevel: () => void act.nestProject(p, null),
       archive: () => setConfirm(archiveProjectConfirm(p, () => act.archiveProject(p))),
@@ -614,6 +618,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} label={menu.label} onClose={() => setMenu(null)} testId="sidebar-menu" />}
       {prompt && <PromptDialog prompt={prompt} onClose={() => setPrompt(null)} />}
       {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
+      {cost && <CostDialog api={api} target={cost} onClose={() => setCost(null)} />}
       {inboxOpen && <AttentionInbox summary={snap.attention} ops={ops} onOpen={onSelect} onClose={() => setInboxOpen(false)} />}
       <ItemPickerHost />
       {preview && !menu && !drag && (

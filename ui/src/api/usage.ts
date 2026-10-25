@@ -2,9 +2,14 @@
 // api(op, args).
 
 import type { Api } from './client.ts';
-import type { RequestModes, UsageSnapshot } from './generated/usage/index.ts';
+import type { CostReport, RequestModes, UsageSnapshot } from './generated/usage/index.ts';
 
 export type {
+  ChatCost,
+  CostReport,
+  CostScope,
+  CostTotals,
+  WeeklyShare,
   ModelUsage,
   PlanUsageReading,
   ReadinessState,
@@ -42,6 +47,8 @@ export function usageOps(api: Api) {
     get: () => api<UsageSnapshot>('usage_get', {}),
     refresh: () => api<UsageSnapshot>('usage_refresh', {}),
     modes: (since: number, until: number) => api<RequestModes>('request_modes', { since, until }),
+    /** What one chat, or every chat in a project and its sub-projects, used. */
+    cost: (of: { chatId: string } | { projectId: string }) => api<CostReport>('usage_cost', of),
     feedbackReport: (feature?: string, since?: string) =>
       api<{ features: FeedbackFeature[] }>('feedback_report', { ...(feature ? { feature } : {}), ...(since ? { since } : {}) }),
     feedbackExport: () => api<{ entries: FeedbackEntry[] }>('feedback_export', {}),
