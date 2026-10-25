@@ -160,6 +160,7 @@ pub fn limits() -> Limits {
         // At 400 ms the prompt ack raced the fake worker's answer under full-suite load.
         ack: Duration::from_secs(3),
         stop: Duration::from_millis(400),
+        archive_stop: Duration::from_millis(300),
         model_ack: Duration::from_millis(300),
         flush: Duration::from_millis(20),
         stream_db: Duration::ZERO,
@@ -1423,23 +1424,90 @@ async fn acknowledging_the_completion_clears_the_badge() {
     .await;
 }
 
-/// Archive retires the idle worker; archiving a running chat is refused.
+/// Archiving a running chat is immediate: the row is archived at once, the turn is stopped in the
+/// background and the worker killed if it does not settle, a late event from it changes nothing
+/// the user sees, and nothing queued is sent. An idle chat's worker is simply retired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn archive_is_refused_while_busy_and_retires_the_idle_worker() {
+async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it_back() {
     let mut h = harness();
+    // A worker that settles late, after the archive: its completion must not be announced.
     let (chat, _, mut w) = running_turn(&mut h).await;
-    let busy = h
+    // A message Claude has not read yet (a steer waiting for the next boundary).
+    let (unread, _) = h.send(&chat, "later", "default").await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    h.until("accepted", |h| h.state(&unread) == "accepted")
+        .await;
+    let archived = h
         .call("chat_archive", json!({"chatId": chat}))
         .await
-        .unwrap_err();
-    assert_eq!(busy.message, crate::archive::BUSY_MESSAGE);
+        .unwrap();
+    assert_eq!(archived["archived"], true, "no wait for the stop");
+    w.expect("abort").await;
+    // An Esc (stop and send what is waiting) landing together with the archive must not send it.
+    let (api, c2) = (h.api.clone(), chat.clone());
+    let esc = tokio::spawn(async move {
+        api.call(
+            &main(),
+            "chat_stop",
+            json!({"chatId": c2, "continueQueue": true}),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
         .await;
-    h.until("idle", |h| h.status(&chat) == "idle").await;
-    h.call("chat_archive", json!({"chatId": chat}))
+    h.until("stopped", |h| h.status(&chat) == "stopped").await;
+    esc.await.unwrap().ok();
+    w.expect("shutdown").await;
+    assert_eq!(h.col("SELECT archived FROM chats"), ["1"]);
+    assert!(h.events("completion").is_empty(), "no notification");
+    assert!(h.col("SELECT chat_id FROM chat_completions").is_empty());
+    assert!(h.col("SELECT chat_id FROM unread_marks").is_empty());
+    assert_eq!(
+        h.state(&unread),
+        "uncertain",
+        "the unread message reads not delivered and is not sent"
+    );
+    assert!(
+        h.rt.attention().unwrap().needs_you.is_empty(),
+        "nothing to attend to"
+    );
+    // Undo restores the chat as it stands, not the stopped turn.
+    h.call("chat_restore", json!({"chatId": chat}))
         .await
         .unwrap();
-    w.expect("shutdown").await;
+    assert_eq!(h.col("SELECT archived FROM chats"), ["0"]);
+    assert_eq!(h.status(&chat), "stopped");
+    assert_eq!(
+        h.state(&unread),
+        "uncertain",
+        "recoverable after the restore"
+    );
+
+    // A worker that never answers the stop is killed after the archive stop limit.
+    let (chat2, _, mut w2) = running_turn(&mut h).await;
+    h.call("chat_archive", json!({"chatId": chat2}))
+        .await
+        .unwrap();
+    w2.expect("abort").await;
+    h.until("killed", |h| h.status(&chat2) == "stopped").await;
+    assert_eq!(
+        h.col(&format!("SELECT error FROM chats WHERE id = '{chat2}'")),
+        ["NULL"],
+        "an archive-time stop is not an error"
+    );
+    assert!(h.events("completion").is_empty());
+
+    // An idle chat's worker is retired.
+    let (chat3, _, mut w3) = running_turn(&mut h).await;
+    w3.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(&chat3) == "idle").await;
+    h.call("chat_archive", json!({"chatId": chat3}))
+        .await
+        .unwrap();
+    w3.expect("shutdown").await;
 }
 
 /// A running chat with no output for the stall limit is flagged and counted; the

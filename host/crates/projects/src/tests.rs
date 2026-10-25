@@ -152,16 +152,29 @@ fn archive_restores_exactly_the_chats_it_archived() {
 }
 
 #[test]
-fn archive_refuses_while_a_chat_is_busy() {
+fn archive_takes_a_project_with_a_running_chat_at_once() {
     let (_d, db) = temp_db();
-    let c = chat_in(&db, "C:/w/app", 1);
-    let p = project_of(&db, &c);
-    status(&db, &c, "starting");
-    assert!(matches!(
-        db.write(|tx| store::archive_project(tx, &p)),
-        Err(Refusal::Refused(_))
-    ));
-    assert!(!archived(&db, &c));
+    let busy = chat_in(&db, "C:/w/app", 1);
+    let p = project_of(&db, &busy);
+    status(&db, &busy, "starting");
+    let ids = db.write(|tx| store::archive_project(tx, &p)).unwrap();
+    assert_eq!(ids, std::slice::from_ref(&busy));
+    assert!(archived(&db, &busy));
+    // The host stops the turn afterwards; the row's status is left to it.
+    let st: String = db
+        .snapshot(|tx| {
+            tx.query_row("SELECT status FROM chats WHERE id = ?1", [&busy], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(st, "starting");
+    // Restoring brings the chat back with the project.
+    assert_eq!(
+        db.write(|tx| store::restore_project(tx, &p)).unwrap(),
+        std::slice::from_ref(&busy)
+    );
+    assert!(!archived(&db, &busy));
 }
 
 #[test]

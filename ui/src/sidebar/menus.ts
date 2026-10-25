@@ -121,7 +121,7 @@ export function chatMenuItems(i: ChatMenuInput, a: ChatMenuActions): MenuItem[] 
   } else {
     items.push({
       id: 'archive',
-      label: busy ? 'Stop and archive…' : 'Archive chat',
+      label: 'Archive chat',
       shortcut: 'Ctrl+Shift+Backspace',
       onSelect: a.archive,
     });

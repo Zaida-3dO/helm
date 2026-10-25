@@ -24,8 +24,6 @@ import { chatMenuItems, projectMenuItems } from './menus.ts';
 import { buildList, chatAncestors, visibleChatOrder, type ListItem } from './model.ts';
 import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
-import { StopArchiveDialog } from './StopArchiveDialog.tsx';
-import { isBusy } from './status.ts';
 import { ItemChip, ItemFolderRow, ItemPickerHost, useItemRefs, useOpenItem } from '../itemlinks/ItemUi.tsx'; // item links
 import {
   IconArchive,
@@ -120,7 +118,6 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const [menu, setMenu] = useState<Menu | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
-  const [stopRow, setStopRow] = useState<SidebarRow | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
@@ -223,7 +220,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     });
 
   // A running chat is archived through a confirmation that stops its task first.
-  const archiveRow = (row: SidebarRow) => (isBusy(row.status) ? setStopRow(row) : void act.archive(row));
+  const archiveRow = (row: SidebarRow) => void act.archive(row);
 
   // ---- menus ----
   // Alt+Up and Alt+Down on a project header move it among its siblings (the same pinned group and parent).
@@ -617,7 +614,6 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} label={menu.label} onClose={() => setMenu(null)} testId="sidebar-menu" />}
       {prompt && <PromptDialog prompt={prompt} onClose={() => setPrompt(null)} />}
       {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
-      {stopRow && <StopArchiveDialog title={stopRow.title} onClose={() => setStopRow(null)} onConfirm={() => void act.stopAndArchive(stopRow)} />}
       {inboxOpen && <AttentionInbox summary={snap.attention} ops={ops} onOpen={onSelect} onClose={() => setInboxOpen(false)} />}
       <ItemPickerHost />
       {preview && !menu && !drag && (
@@ -953,7 +949,6 @@ function ChatRow({
   const r = subagents > 0 && item.row.attention !== 'running' ? { ...item.row, attention: 'running' as const } : item.row;
   const colour = colourCss(project?.colour);
   const trailing = trailingIndicator(r.attention);
-  const busy = r.status === 'starting' || r.status === 'running' || r.status === 'stopping';
   const wrap = useRef<HTMLDivElement>(null);
   return (
     <div
@@ -1054,8 +1049,7 @@ function ChatRow({
           type="button"
           className="sb-act"
           aria-label={r.archived ? `Restore ${r.title}` : `Archive ${r.title}`}
-          title={r.archived ? 'Restore chat' : busy ? 'Stop the task first, then archive it' : 'Archive chat'}
-          disabled={!r.archived && busy}
+          title={r.archived ? 'Restore chat' : 'Archive chat'}
           onClick={onArchive}
         >
           {r.archived ? <IconRestore /> : <IconArchive />}

@@ -65,6 +65,11 @@ pub(crate) enum Cmd {
     Terminate,
     /// Idle over the cap: shut the worker down.
     Retire,
+    /// The chat was archived (its row is already marked): stop a running turn in the background,
+    /// kill the worker if the stop is slow, then close it. Nothing waits on the answer.
+    Archived,
+    /// The chat was restored while a worker was still winding down from its archive.
+    Restored,
     /// The maintenance tick: mark the chat stalled if it has had no output for `after`.
     StallCheck { after: std::time::Duration },
     /// Apply the staged edit once the worker has closed, then send its submission.
@@ -87,6 +92,8 @@ pub(crate) enum Cmd {
 
 pub(crate) const STOP_TIMEOUT_ERROR: &str =
     "The task did not stop within 60 seconds, so Helm closed it.";
+/// Why a turn was stopped when its chat was archived.
+pub(crate) const ARCHIVE_STOP_NOTE: &str = "Stopped because the chat was archived.";
 pub(crate) const ACK_TIMEOUT_ERROR: &str =
     "Claude Code did not confirm the message in time. It was not sent again; recover it from the queue if it is missing.";
 pub(crate) const MODEL_ACK_ERROR: &str =
@@ -173,6 +180,9 @@ struct Actor {
     /// Host-tool calls still running, by request id (`chat_cancel` aborts them).
     host_calls: HashMap<String, tokio::task::AbortHandle>,
     retiring: bool,
+    /// The chat is archived: a late event from the dying worker changes nothing the user sees
+    /// (no completion, no unread mark) and nothing queued is sent.
+    archived: bool,
     finished: bool,
     /// The last worker output (or turn start).
     last_output: Instant,
@@ -259,6 +269,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         shutdown_replies: Vec::new(),
         host_calls: HashMap::new(),
         retiring: false,
+        archived: false,
         finished: false,
         last_output: Instant::now(),
         activity_written: None,
@@ -812,7 +823,12 @@ impl Actor {
                     [&id],
                 )
             });
-            self.end_run(ChatStatus::Interrupted, Some(&error), "interrupted");
+            if self.archived {
+                // The archive stopped it: not a crash, so nothing to resume or explain.
+                self.end_run(ChatStatus::Stopped, None, "stopped");
+            } else {
+                self.end_run(ChatStatus::Interrupted, Some(&error), "interrupted");
+            }
             self.emit_queue();
             if let Some(s) = self.stopping.take() {
                 self.settle_dropped(s.continue_queue);
@@ -1068,13 +1084,17 @@ impl Actor {
     /// to continue), or become "not delivered" so their text can be taken back.
     fn settle_dropped(&mut self, continue_queue: bool) {
         let chat = self.chat_id.clone();
-        if !continue_queue {
+        if !continue_queue || self.archived {
+            // An archived chat sends nothing, whatever the Stop asked: what Claude had not read
+            // reads "not delivered", so the text can be taken back after a restore.
             self.write(|t| {
                 t.execute(
-                    "UPDATE submissions SET state = 'uncertain' WHERE chat_id = ?1 AND state IN ('queued', 'accepted')",
+                    "UPDATE submissions SET state = 'uncertain'
+                     WHERE chat_id = ?1 AND state IN ('queued', 'accepted', 'saved')",
                     [&chat],
                 )
             });
+            self.emit_queue();
             return;
         }
         let quitting = self
@@ -1120,6 +1140,18 @@ impl Actor {
         // worker look newer than another's, or the idle cap retires the wrong one.
         if !matches!(c, Cmd::Retire | Cmd::StallCheck { .. }) {
             self.touch();
+        }
+        if self.archived {
+            match &c {
+                // Nothing starts or sends for an archived chat.
+                Cmd::Dispatch(sid) => {
+                    self.set_submission(sid, SubmissionState::Rejected);
+                    self.emit_queue();
+                    return;
+                }
+                Cmd::Prewarm | Cmd::DeliverNow { .. } => return,
+                _ => {}
+            }
         }
         match c {
             Cmd::Dispatch(sid) => self.dispatch(&sid),
@@ -1308,6 +1340,18 @@ impl Actor {
                     self.set_stalled(true);
                 }
             }
+            Cmd::Archived => self.on_archived(),
+            Cmd::Restored => {
+                self.archived = false;
+                // A worker still closing stays closed; the next send starts a new one.
+                if !self
+                    .sh
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    self.retiring = false;
+                }
+            }
             Cmd::Retire => {
                 if self.link.is_none() {
                     // No worker to shut down: the actor itself goes (archive, delete).
@@ -1319,6 +1363,24 @@ impl Actor {
                     }
                 }
             }
+        }
+    }
+
+    /// The chat was archived: retire the idle worker, or stop the running turn with a short
+    /// deadline (the kill path is the ordinary stop deadline). Nothing sends from here on.
+    fn on_archived(&mut self) {
+        self.archived = true;
+        if !self.status().is_busy() {
+            self.on_cmd(Cmd::Retire);
+            return;
+        }
+        self.retiring = true;
+        let (reply, _) = oneshot::channel();
+        self.stop(false, reply);
+        if self.stopping.is_some() {
+            self.clear_timer(|t| matches!(t, Timer::StopDeadline));
+            let lim = self.sh.cfg.limits.archive_stop;
+            self.add_timer(lim, Timer::StopDeadline);
         }
     }
 
@@ -1599,11 +1661,16 @@ impl Actor {
                 }
                 Timer::StopDeadline => {
                     if self.stopping.is_some() {
-                        self.worker_error = Some(STOP_TIMEOUT_ERROR.into());
+                        let why = if self.archived {
+                            ARCHIVE_STOP_NOTE
+                        } else {
+                            STOP_TIMEOUT_ERROR
+                        };
+                        self.worker_error = Some(why.into());
                         if let Some(l) = &self.link {
                             l.terminate();
                         } else {
-                            self.settle("interrupted", Some(STOP_TIMEOUT_ERROR.into()));
+                            self.settle("interrupted", Some(why.into()));
                         }
                     }
                 }
@@ -2078,6 +2145,15 @@ impl Actor {
     /// runs once nothing is left running, and the idle-worker cap is applied.
     fn on_quiet(&mut self) {
         if self.status().is_busy() {
+            return;
+        }
+        if self.retiring && !self.finished {
+            // An archived chat's turn is over: close its worker (on_exit ends the actor).
+            if let Some(l) = &self.link {
+                l.send(&json!({"type": "shutdown"}));
+            } else {
+                self.finished = true;
+            }
             return;
         }
         if self.relaunch_on_idle && !self.agents_running() {
@@ -2564,7 +2640,7 @@ impl Actor {
             .unwrap_or(0);
         match stopping {
             Some(stop) => {
-                let status = if outcome == "stopped" {
+                let status = if outcome == "stopped" || self.archived {
                     ChatStatus::Stopped
                 } else {
                     ChatStatus::Interrupted

@@ -433,21 +433,15 @@ pub fn reorder(items: &[String], id: &str, before: Option<&str>) -> Option<Vec<S
     Some(out)
 }
 
-fn any_busy_chat(
-    tx: &Transaction<'_>,
-    project_id: &str,
-    folder_only: bool,
-) -> rusqlite::Result<bool> {
-    let sql = if folder_only {
-        "SELECT 1 FROM chats c WHERE c.project_id = ?1
-           AND c.status IN ('starting', 'running', 'stopping') LIMIT 1"
-    } else {
-        "SELECT 1 FROM chats c LEFT JOIN chat_groups g ON g.chat_id = c.id
-         WHERE COALESCE(g.project_id, c.project_id) = ?1
-           AND c.status IN ('starting', 'running', 'stopping') LIMIT 1"
-    };
+/// Whether a chat that runs in this project's folder is working.
+fn any_busy_chat(tx: &Transaction<'_>, project_id: &str) -> rusqlite::Result<bool> {
     Ok(tx
-        .query_row(sql, [project_id], |_| Ok(()))
+        .query_row(
+            "SELECT 1 FROM chats c WHERE c.project_id = ?1
+               AND c.status IN ('starting', 'running', 'stopping') LIMIT 1",
+            [project_id],
+            |_| Ok(()),
+        )
         .optional()?
         .is_some())
 }
@@ -530,7 +524,7 @@ pub fn update_project(tx: &Transaction<'_>, a: &ProjectUpdateArgs) -> Res<i64> {
         let path = path.as_deref().map(validate_path).transpose()?;
         if path != node.path {
             // The run location changes, so every chat that runs here must be idle.
-            if any_busy_chat(tx, id, true)? {
+            if any_busy_chat(tx, id)? {
                 return Err(Refusal::Refused(
                     "Stop all tasks in this project first.".into(),
                 ));
@@ -585,18 +579,14 @@ fn has_chats_running_here(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<bo
 }
 
 /// Archive a project and every chat shown under it, recording exactly which chats this archived.
-/// Refuses while any of them is busy. Returns the chat ids it archived.
+/// Running chats are archived too; the caller stops them in the background. Returns the chat ids
+/// it archived.
 pub fn archive_project(tx: &Transaction<'_>, id: &str) -> Res<Vec<String>> {
     if !exists(tx, id)? {
         return Err(Refusal::NotFound("That project does not exist.".into()));
     }
     if is_archived(tx, id)? {
         return Ok(Vec::new());
-    }
-    if any_busy_chat(tx, id, false)? {
-        return Err(Refusal::Refused(
-            "Stop all tasks in this project first.".into(),
-        ));
     }
     let ids: Vec<String> = {
         let mut st = tx.prepare(
@@ -608,7 +598,7 @@ pub fn archive_project(tx: &Transaction<'_>, id: &str) -> Res<Vec<String>> {
     };
     let now = helm_core::now_ms();
     for c in &ids {
-        // The chats crate's own archive step (busy chats were refused above).
+        // The chats crate's own archive step.
         if let Err(r) = helm_chats::archive::archive_in_tx(tx, c, now)? {
             return Err(Refusal::Refused(r.message));
         }

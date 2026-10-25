@@ -183,7 +183,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .async_tool(
         ToolSpec::write(
             "app_update_project",
-            format!("Rename, pin or unpin, recolour (a palette name, #rrggbb or none), archive or restore a project. Archiving archives its chats and fails while any of them is working.{EXPLICIT}"),
+            format!("Rename, pin or unpin, recolour (a palette name, #rrggbb or none), archive or restore a project. Archiving archives its chats; working ones are stopped in the background.{EXPLICIT}"),
             obj(
                 json!({
                     "projectId": {"type": "string"},

@@ -673,8 +673,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     attention_get: () => attention(),
     chat_archive: (a) => {
       const c = find(a.chatId);
-      if (['starting', 'running', 'stopping'].includes(c.chat.status)) throw { code: 'refused', message: 'This chat is working; stop the task first, then archive it.' };
-      c.chat = { ...c.chat, archived: true };
+      // A working chat is archived at once; the host stops its turn behind the scenes.
+      c.chat = { ...c.chat, archived: true, ...(['starting', 'running', 'stopping'].includes(c.chat.status) ? { status: 'stopped' as const } : {}) };
       emitChat(c);
       emitAttention();
       return c.chat;

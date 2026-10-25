@@ -101,7 +101,7 @@ pub(crate) fn chat_archive(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> 
         .map_err(sql)?;
     r.map_err(ApiError::from)?;
     if let Some(rt) = ctx.services.get::<ChatRuntime>() {
-        rt.retire(&a.chat_id);
+        rt.archived(&a.chat_id);
     }
     to_value(&changed(ctx, &a.chat_id)?)
 }
@@ -128,6 +128,9 @@ fn chat_restore(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         })
         .map_err(sql)?;
     r.map_err(ApiError::from)?;
+    if let Some(rt) = ctx.services.get::<ChatRuntime>() {
+        rt.restored(&a.chat_id);
+    }
     to_value(&changed(ctx, &a.chat_id)?)
 }
 
@@ -510,7 +513,8 @@ pub fn preview(text: &str) -> String {
 }
 
 /// A clean finish: create or refresh the chat's completion (new id, read and dismissed cleared).
-/// Returns it for the `completion` event, or `None` for a side chat (never announced).
+/// Returns it for the `completion` event, or `None` for a side chat (never announced) or an
+/// archived chat (a worker winding down after the archive leaves no unread mark).
 pub fn record_completion(
     tx: &Transaction<'_>,
     chat_id: &str,
@@ -519,7 +523,7 @@ pub fn record_completion(
     let row: Option<(String, String, Option<String>)> = tx
         .query_row(
             "SELECT c.title, COALESCE(p.name, ''), c.side_source_id FROM chats c
-             JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
+             JOIN projects p ON p.id = c.project_id WHERE c.id = ?1 AND c.archived = 0",
             [chat_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )

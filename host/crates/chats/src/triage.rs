@@ -325,6 +325,7 @@ fn finish(sh: &Arc<Shared>, chat_id: &str, stamp: i64, needs: bool, reason: &str
             let n = tx.execute(
                 "UPDATE chat_triage SET needs = ?1, reason = ?2, failed = 0
                  WHERE chat_id = ?3 AND stamp = ?4
+                   AND (SELECT archived FROM chats WHERE id = ?3) = 0
                    AND stamp = (SELECT MAX(c.updated_at, COALESCE(a.last_activity_at, 0)) FROM chats c
                                 LEFT JOIN chat_activity a ON a.chat_id = c.id WHERE c.id = ?3)",
                 params![needs && !reason.is_empty(), reason, chat_id, stamp],

@@ -128,7 +128,7 @@ test('the chat menu follows state: archive or restore and delete, stop first whi
   const archived = ids(row('a', { archived: true }));
   assert.ok(archived.includes('restore') && archived.includes('delete'));
   const busy = chatMenuItems({ row: row('a', { status: 'running' }), projects: [project('g')], siblings: [], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'projects' }, chatActs);
-  assert.deepEqual(busy.find((i) => i.id === 'archive')?.label, 'Stop and archive…', 'a busy chat can be archived through the stop dialog');
+  assert.deepEqual(busy.find((i) => i.id === 'archive')?.label, 'Archive chat', 'a busy chat is archived at once, like any other');
   assert.ok(ids(row('a', { parentChatId: 'p' })).includes('top'));
   const act = chatMenuItems({ row: row('a'), projects: [project('g')], siblings: [], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'activity' }, chatActs).map((i) => i.id);
   assert.ok(!act.includes('nest'), 'no nesting in Activity');

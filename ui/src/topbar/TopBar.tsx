@@ -17,7 +17,6 @@ import { sidebarLayout } from '../shell/layout.ts';
 import { SidebarActions } from '../sidebar/actions.ts';
 import { SidebarData } from '../sidebar/data.ts';
 import { sidebarUndo } from '../sidebar/undo.ts';
-import { StopArchiveDialog } from '../sidebar/StopArchiveDialog.tsx';
 import { UpdatePill } from '../updates/UpdatePill.tsx';
 import { UsageMeter } from '../usage/UsageMeter.tsx';
 import { CaptionButtons, dragHandlers } from './caption.tsx';
@@ -50,14 +49,12 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
     chatId ? (shell.store.view(chatId).chat ?? shell.store.chatList().find((c) => c.id === chatId) ?? null) : null,
   );
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [confirmStop, setConfirmStop] = useState(false);
   // Archiving from here is the sidebar's archive: it pushes the undo entry and shows the Undo toast.
   const act = useMemo(() => {
     const pops = projectOps(shell.api);
     return new SidebarActions({ api: shell.api, pops, ops: shell.ops, data: new SidebarData(pops), undo: sidebarUndo, onError: (m) => toast.show({ kind: 'error', text: m }) });
   }, [shell.api, shell.ops]);
   const project = folderLabel(chat?.cwd);
-  const busy = chat ? chat.status === 'starting' || chat.status === 'running' || chat.status === 'stopping' : false;
   const rename = (title: string) => {
     setRenaming(null);
     const t = title.trim();
@@ -172,9 +169,9 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
               ) : (
                 <Button
                   variant="icon"
-                  label={busy ? 'Stop and archive task…' : 'Archive chat'}
+                  label="Archive chat"
                   data-testid="topbar-archive"
-                  onClick={() => (busy ? setConfirmStop(true) : void act.archive({ chatId: chat.id, title: chat.title }))}
+                  onClick={() => void act.archive({ chatId: chat.id, title: chat.title })}
                 >
                   <IconArchive size={16} />
                 </Button>
@@ -192,9 +189,6 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
         </div>
         <CaptionButtons />
       </header>
-      {confirmStop && chat && (
-        <StopArchiveDialog title={chat.title} onClose={() => setConfirmStop(false)} onConfirm={() => void act.stopAndArchive({ chatId: chat.id, title: chat.title })} />
-      )}
       {tags && <div className="tags-strip">{tags}</div>}
     </>
   );

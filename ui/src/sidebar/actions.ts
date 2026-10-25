@@ -24,29 +24,6 @@ function message(e: unknown): string {
   return String((e as Error)?.message ?? e);
 }
 
-/** The host's refusal for a chat that still counts as working. */
-const STILL_BUSY = /stop the task first/i;
-
-/** Archive a chat that was just told to stop: it is refused while it still counts as busy, so try
- *  again for a few seconds until the stop has landed. Any other refusal is final at once. */
-export async function archiveWhenIdle(ops: ChatOps, chatId: string, tries = 12, waitMs = 400): Promise<void> {
-  for (let i = 1; ; i++) {
-    try {
-      await ops.archive(chatId);
-      return;
-    } catch (e) {
-      if (i >= tries || !STILL_BUSY.test(message(e))) throw e;
-      await new Promise((r) => setTimeout(r, waitMs));
-    }
-  }
-}
-
-/** Stop a running chat, then archive it. */
-export async function stopThenArchive(ops: ChatOps, chatId: string): Promise<void> {
-  await ops.stop(chatId, false);
-  await archiveWhenIdle(ops, chatId);
-}
-
 /** What archiving needs to know about a chat: the top bar has a chat record, the sidebar a row. */
 export type ArchivableChat = Pick<SidebarRow, 'chatId' | 'title'>;
 
@@ -163,14 +140,6 @@ export class SidebarActions {
     };
     this.d.undo.push(entry);
     this.archivedToast(row.title || 'Untitled chat', entry);
-  }
-
-  /** The stop-and-archive dialog's answer: stop the running task, then archive the chat. */
-  async stopAndArchive(row: ArchivableChat): Promise<void> {
-    const ok = await this.run(() => stopThenArchive(this.d.ops, row.chatId).then(() => true));
-    await this.d.data.refetch([row.chatId]);
-    if (!ok) return;
-    this.archivedEntry(row);
   }
 
   async restore(row: SidebarRow): Promise<void> {

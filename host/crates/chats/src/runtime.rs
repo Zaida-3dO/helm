@@ -35,6 +35,9 @@ pub struct Limits {
     pub ack: Duration,
     /// After a Stop, a worker that has not settled is closed.
     pub stop: Duration,
+    /// After a chat is archived while it works, the stop gets this long before the worker is
+    /// closed outright (nobody is waiting on the answer).
+    pub archive_stop: Duration,
     /// A model or effort change not acknowledged in time fails the run.
     pub model_ack: Duration,
     /// The streaming flush tick.
@@ -63,6 +66,7 @@ impl Default for Limits {
         Self {
             ack: Duration::from_secs(35),
             stop: Duration::from_secs(60),
+            archive_stop: Duration::from_secs(5),
             model_ack: Duration::from_secs(10),
             flush: Duration::from_millis(80),
             stream_db: Duration::from_secs(1),
@@ -747,6 +751,23 @@ impl ChatRuntime {
         }
     }
 
+    /// The chat was just archived (its row is already marked): stop its turn behind the scenes
+    /// and close its worker, killing it if the stop is slow. Never starts an actor.
+    pub fn archived(&self, chat_id: &str) {
+        let h = self.sh.actors.lock().unwrap().get(chat_id).cloned();
+        if let Some(h) = h {
+            let _ = enqueue(&h.tx, Cmd::Archived);
+        }
+    }
+
+    /// The chat was restored: a worker still winding down from the archive stays available.
+    pub fn restored(&self, chat_id: &str) {
+        let h = self.sh.actors.lock().unwrap().get(chat_id).cloned();
+        if let Some(h) = h {
+            let _ = enqueue(&h.tx, Cmd::Restored);
+        }
+    }
+
     /// Recompute the attention summary and emit it if it changed.
     pub fn publish_attention(&self) {
         crate::attention::publish(&self.sh);
@@ -979,7 +1000,7 @@ pub(crate) enum Lane {
 
 pub(crate) fn lane(cmd: &Cmd) -> Lane {
     match cmd {
-        Cmd::Stop { .. } | Cmd::ToolStop { .. } | Cmd::Terminate => Lane::Interrupt,
+        Cmd::Stop { .. } | Cmd::ToolStop { .. } | Cmd::Terminate | Cmd::Archived => Lane::Interrupt,
         Cmd::Dispatch(_) | Cmd::ApplyEdit => Lane::Soon,
         _ => Lane::Other,
     }

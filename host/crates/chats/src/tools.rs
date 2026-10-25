@@ -640,7 +640,6 @@ async fn set_archived(ctx: ToolCtx, a: Value) -> ToolResult {
         .get("archived")
         .and_then(Value::as_bool)
         .ok_or_else(|| refuse("archived is required."))?;
-    let stop_first = a.get("stopFirst").and_then(Value::as_bool).unwrap_or(false);
     if !archived {
         ctx.op("chat_restore", json!({"chatId": id})).await?;
         return meta(&ctx, &id);
@@ -663,21 +662,8 @@ async fn set_archived(ctx: ToolCtx, a: Value) -> ToolResult {
         m["archivePending"] = json!(true);
         return Ok(m);
     }
-    let m = meta(&ctx, &id)?;
-    if ChatStatus::parse(m["status"].as_str().unwrap_or("idle")).is_busy() {
-        if !stop_first {
-            return Err(refuse(
-                "That chat is working; pass stopFirst: true to stop it first.",
-            ));
-        }
-        ctx.op("chat_stop", json!({"chatId": id, "continueQueue": false}))
-            .await?;
-        if !wait_idle(&ctx, &id, Duration::from_secs(15)).await? {
-            return Err(refuse(
-                "That chat did not stop within 15 s, so nothing was archived.",
-            ));
-        }
-    }
+    // A working chat is archived at once; the host stops it in the background.
+    meta(&ctx, &id)?;
     ctx.op("chat_archive", json!({"chatId": id})).await?;
     meta(&ctx, &id)
 }
@@ -854,7 +840,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .async_tool(
         ToolSpec::write(
             "app_set_chat_archived",
-            format!("Archive or restore a chat. A working chat needs stopFirst: true. Archiving this chat itself ends your turn; it is archived once the turn is over.{EXPLICIT}"),
+            format!("Archive or restore a chat. A working chat is archived at once and stopped in the background (stopFirst is accepted and not needed). Archiving this chat itself ends your turn; it is archived once the turn is over.{EXPLICIT}"),
             obj(
                 json!({"chatId": id, "archived": {"type": "boolean"}, "stopFirst": {"type": "boolean"}}),
                 &["chatId", "archived"],

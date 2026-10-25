@@ -259,6 +259,17 @@ fn archive_or_restore(ctx: &OpCtx, args: Value, archive: bool) -> Result<Value, 
         };
         Ok::<_, Refusal>((store::get_project(tx, &a.project_id)?, ids))
     })?;
+    // The rows are already archived; each running chat is stopped behind the scenes and its worker
+    // closed. A restore tells actors still winding down that their chat is back.
+    if let Some(rt) = ctx.services.get::<helm_chats::runtime::ChatRuntime>() {
+        for id in &ids {
+            if archive {
+                rt.archived(id);
+            } else {
+                rt.restored(id);
+            }
+        }
+    }
     emit_project(ctx, &node);
     emit_sidebar(ctx, &ids);
     to_value(&node)
