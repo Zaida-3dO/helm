@@ -113,6 +113,12 @@ fn refusing(options: &[String]) -> Vec<String> {
 /// of the details fit.
 pub fn ask_text(chat_title: &str, i: &Interaction) -> (String, bool) {
     let mut full = true;
+    // A plan is its message, so it gets most of a Telegram message (the hub's limit is 3900).
+    let max = if i.attention == Some(InteractionAttention::Plan) {
+        2800
+    } else {
+        600
+    };
     let what = if i.attention == Some(InteractionAttention::Plan) {
         "wants its plan approved"
     } else {
@@ -133,9 +139,9 @@ pub fn ask_text(chat_title: &str, i: &Interaction) -> (String, bool) {
     {
         let p = part.trim();
         if !p.is_empty() && !s.contains(p) {
-            full &= p.chars().count() <= 600;
+            full &= p.chars().count() <= max;
             s.push('\n');
-            s.push_str(&cut(p, 600));
+            s.push_str(&cut(p, max));
         }
     }
     let rows: Vec<_> = i.context.iter().flatten().collect();
@@ -147,8 +153,8 @@ pub fn ask_text(chat_title: &str, i: &Interaction) -> (String, bool) {
             s.push_str(&format!("\n{}: {}", c.label.trim(), cut(t, 400)));
         }
     }
-    full &= s.chars().count() <= 3000;
-    (cut(&s, 3000), full)
+    full &= s.chars().count() <= 3500;
+    (cut(&s, 3500), full)
 }
 
 /// What the tapped option sends, as the card in Helm would: a confirmation answers yes for the
@@ -223,7 +229,15 @@ impl Asks {
                 method: w.interaction.method,
                 plan: w.interaction.attention == Some(InteractionAttention::Plan),
                 options,
-                yes: (w.interaction.method == InteractionMethod::Confirm).then(|| all[0].clone()),
+                // The label that answers yes, found by name: a refusing button left on its own
+                // never becomes it.
+                yes: (w.interaction.method == InteractionMethod::Confirm)
+                    .then(|| {
+                        all.iter()
+                            .find(|o| matches!(o.as_str(), "Approve plan" | "Allow"))
+                            .cloned()
+                    })
+                    .flatten(),
                 question: None,
             };
             let id = new_id();
