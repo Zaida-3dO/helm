@@ -11,9 +11,8 @@
 //! | `worktree_config` | maintenance | `{root?}` → `{root}` (`root: ""` goes back to the default) |
 //!
 //! After any change that can move the list of repositories with worktrees off, the list file is
-//! rewritten (it is what the git stand-in reads), and when it goes from empty to non-empty or the
-//! other way round, idle chat workers are retired so their next turn starts with the right
-//! `PATH`.
+//! rewritten (it is what the git stand-in reads). Running workers are left alone; a chat gets the
+//! stand-in on its `PATH` (or loses it) when its worker next starts.
 
 use crate::ops::{parse_args, to_value};
 use crate::repos::{self, Entry, Patch, Registered};
@@ -41,34 +40,17 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("worktree_config", OpClass::Maintenance, worktree_config);
 }
 
-/// Rewrite the off list; retire idle workers when it flips between empty and not empty.
+/// Rewrite the off list. Chats that are already running keep the `PATH` they started with; a
+/// chat picks up the change when its worker next starts (workers are not retired here, since an
+/// idle chat may still have sub-agents working in the background).
 fn refresh_off_list(ctx: &OpCtx, db: &Database) {
     let Ok(profile) = ctx.services.need::<Profile>() else {
         return;
     };
     let file = profile.dir.join(offlist::FILE_NAME);
     let lines = db.snapshot(repos::off_lines).unwrap_or_default();
-    let was_on = !offlist::read(&file).is_empty();
-    match offlist::write(&file, &lines) {
-        Ok(true) if was_on != !lines.is_empty() => retire_all(ctx, db),
-        Ok(_) => {}
-        Err(e) => log::warn!("the worktree off list was not written: {e}"),
-    }
-}
-
-fn retire_all(ctx: &OpCtx, db: &Database) {
-    let Some(rt) = ctx.services.get::<helm_chats::runtime::ChatRuntime>() else {
-        return;
-    };
-    let ids: Vec<String> = db
-        .snapshot(|tx| {
-            let mut st = tx.prepare("SELECT id FROM chats WHERE archived = 0")?;
-            let rows = st.query_map([], |r| r.get(0))?;
-            rows.collect::<rusqlite::Result<Vec<String>>>()
-        })
-        .unwrap_or_default();
-    for id in ids {
-        rt.retire(&id);
+    if let Err(e) = offlist::write(&file, &lines) {
+        log::warn!("the worktree off list was not written: {e}");
     }
 }
 
