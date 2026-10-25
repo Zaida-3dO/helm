@@ -72,7 +72,16 @@ test('agent text is made inert, on the current task and on the others', () => {
   assert.equal(v.otherTasks[0]?.parkReason, 'r⟨U+202E⟩s');
   assert.equal(v.otherTasks[0]?.waiting[0]?.branch, 'w⟨U+200B⟩');
   assert.deepEqual(v.otherTasks[0]?.waiting[0]?.target.branch, 'w​', 'sent back as the host named it');
-  assert.deepEqual(parseRun(fakeRun('none')), { task: null, plan: null, changes: [], otherTasks: [] });
+  assert.deepEqual(parseRun(fakeRun('none')), { task: null, plan: null, changes: [], otherTasks: [], guard: [] });
+  // The landing guard's overrides and refusals are Needs you items, their commands made inert.
+  const guarded = parseRun({ ...fakeRun('none'), guard: [
+    { overridden: false, gate: 'bash', rule: 'task_repo', command: 'git push origin HEAD:main', verified: false },
+    { overridden: true, gate: 'mcp', rule: 'task_repo', command: 'mcp__github__merge_pull_request {"owner":"o","repo":"r","pullNumber":7}', verified: true },
+  ] });
+  assert.deepEqual(needsYou(guarded, settings, 0).map((n) => n.text), [
+    'guard refused · git push origin HEAD:main',
+    'guard override · mcp__github__merge_pull_request {"owner…',
+  ]);
 });
 
 test('a non-current task with a change waiting on the user gets its own row and a Needs you item', () => {

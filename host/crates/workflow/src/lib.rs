@@ -6,8 +6,8 @@
 //! The task and change engine runs **on the host** and is reached through the reserved host tools
 //! (`app_workflow`, `app_workflow_report`, `app_orchestrator_on`). The host re-derives everything
 //! that decides an irreversible step, so keeping the engine beside it loses no safety. The per-tool
-//! hooks (spawn gate, edit gate, the Bash landing guard) are not wired yet; their evaluators are
-//! built here as pure functions ready to wire.
+//! hooks for the spawn and edit gates are not wired yet. The landing guard is: the worker asks
+//! [`hook`] before each Bash, PowerShell or MCP call in a chat with a task.
 //!
 //! A mid-chat change of a chat's Orchestrator state cannot reach a persistent worker's launch, so
 //! it is delivered as an **app note** (`helm_chats::submit::host_send`, origin App, Exempt, one
@@ -28,7 +28,7 @@
 //! | host tools `app_workflow`, `app_workflow_report` | tasks, changes, plan of record, rounds and caps, commit-bound approval, hand-off |
 //! | tables `workflow_runs`, `workflow_changes`, `workflow_events` | per task / per change / per event |
 //! | allow kinds | `land`, `ready`, `skip`, `allowMore`, `drop`, `reopen` on `helm_consent` |
-//! | guard evaluator | landing-guard classifier and the override marker, pure, not wired yet |
+//! | worker line `guard_check` → `guard_verdict` | the landing guard on Bash, PowerShell and MCP calls ([`hook`]): only in a chat with Orchestrator on and an active task, while Settings → Orchestrator → Landing guard is on (default on); overrides recorded as `guard_override`, refusals as `gate_denied`, both listed under Needs you |
 //! | table `workflow_standup_outbox` | stage records written to Agent Standup, with an "outcome unknown" read-back before any resend |
 //! | land step | `gh` merge pinned to the approved head, readback must say MERGED; draft land |
 //! | op `workflow_run_get`, event `workflow_run` | the workflow panel's live read |
@@ -49,6 +49,7 @@ pub mod gh;
 pub mod git;
 pub mod guard;
 pub mod handoff;
+pub mod hook;
 pub mod kinds;
 pub mod land;
 #[cfg(test)]
@@ -74,6 +75,7 @@ mod user_tests;
 pub mod wftools;
 
 pub use agent_settings::extension as settings_extension;
+pub use hook::register_worker_lines;
 pub use kinds::register_allow_kinds;
 pub use ops::register_ops;
 pub use tool::{register_host_tools, WorkflowSection};

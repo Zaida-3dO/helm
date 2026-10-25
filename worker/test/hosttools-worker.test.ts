@@ -166,3 +166,58 @@ test("sub-agent limits register one hook and add a rule to the chat's instructio
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("the landing guard asks the host before Bash and MCP calls, and fails closed only where it is in force", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-guard-w-"));
+  const s = startWithFixture("landing-guard", { launch: { hostTools: [LIST_CHATS], chatToolsDirectory: dir }, limits: { guardTimeoutMs: 300 } });
+  try {
+    await s.host.ready();
+    const init = s.received().find((r) => r.type === "control_request" && (r.request as Json).subtype === "initialize")?.request as Json;
+    assert.ok(((init.hooks as Json).PreToolUse as Json[]).some((m) => m.matcher === "Bash|PowerShell|mcp__.*" && (m.hookCallbackIds as string[])[0] === "helm-landing-guard"));
+    await prompt(s.host, "land it");
+    // Play the host: the first three checks get answers, the fourth none (the guard was in force),
+    // the fifth says the guard is off for this chat, the sixth again none.
+    const answers: (Json | undefined)[] = [
+      { allow: false, reason: "Helm refused: landing on main.", active: true },
+      { allow: true, context: "Helm recorded this override.", active: true },
+      { allow: true, active: true },
+      undefined,
+      { allow: true, active: false },
+      undefined,
+    ];
+    const checks: Json[] = [];
+    for (const a of answers) {
+      const c = await s.host.waitFor((e) => e.type === "guard_check" && !checks.includes(e), 5000, 0);
+      checks.push(c);
+      if (a) s.host.send({ type: "guard_verdict", id: c.id, ...a });
+    }
+    await s.host.waitForType("agent_settled", 8000, 0);
+    assert.deepEqual(
+      checks.map((c) => [c.kind, c.root, c.command ?? c.tool]),
+      [
+        ["bash", true, "git push origin HEAD:main"],
+        ["bash", false, "git push origin HEAD:main"],
+        ["mcp", true, "mcp__github__merge_pull_request"],
+        ["bash", true, "git status"],
+        ["bash", true, "git status"],
+        ["bash", true, "git status"],
+      ],
+    );
+    assert.equal(checks[0].cwd, "C:/w");
+    assert.deepEqual(checks[2].input, { owner: "o", repo: "r", pullNumber: 7 });
+    assert.ok(checks.every((c) => c.turn === checks[0].turn), "one turn");
+    const replies = s
+      .received()
+      .filter((r) => r.type === "control_response" && String((r.response as Json)?.request_id ?? "").startsWith("fake-hook-"))
+      .map((r) => (((r.response as Json).response as Json).hookSpecificOutput as Json | undefined) ?? {});
+    assert.deepEqual(
+      replies.map((h) => h.permissionDecision ?? (h.additionalContext ? "note" : "allow")),
+      ["deny", "note", "allow", "deny", "allow", "allow"],
+    );
+    assert.equal(replies[0].permissionDecisionReason, "Helm refused: landing on main.");
+    assert.match(String(replies[3].permissionDecisionReason), /did not answer the landing guard in time/);
+  } finally {
+    await s.done();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

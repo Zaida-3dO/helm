@@ -116,6 +116,7 @@ Queue `Alt+Enter`, Send now `Ctrl+Alt+Enter`, Stop that continues the queue `Esc
 | `context-size` / `context-bar` / `roll-over-button` | The quiet context size above the composer (from 50k tokens), and the prominent bar with its Roll over button (from 250k; the button is disabled while the chat works). The menu entry is the chat menu item with id `rollover` | |
 | `runtime-subagent-limits` / `runtime-subagent-turns` / `runtime-subagent-hard-stop` / `runtime-output-cap` | Settings → Runtime: which chats get sub-agent limits (off, Orchestrator chats, all), the tool-call picker, the refuse-past-the-limit switch, and the long tool output cut switch | |
 | `orch-enabled` / `orch-movefast` | The master switch and Move fast checkboxes | |
+| `orch-guard` | The landing guard checkbox (Settings → Orchestrator) | |
 | `orch-newchats` | The Always / Never / Auto group for new chats | segments carry `data-value` (`always` `never` `auto`) |
 | `orch-use-<stage>` | One stage's Required / Auto / Off group, stage = `plan` `planReview` `review` `cleanup` `smoketest` | segments carry `data-value` |
 | `orch-edits` / `orch-signoff` / `orch-landdefault` / `orch-method` | The other segmented settings | segments carry `data-value` |

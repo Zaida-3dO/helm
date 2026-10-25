@@ -42,6 +42,8 @@ export interface LaunchLimits {
   stopSettleMs?: number;
   controlTimeoutMs?: number;
   shutdownGraceMs?: number;
+  /** How long a tool call waits for the landing guard's answer (default 10 s). */
+  guardTimeoutMs?: number;
 }
 
 /** Workers receive only these send-behaviour fields at launch. */

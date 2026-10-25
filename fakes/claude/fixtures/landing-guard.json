@@ -1,0 +1,14 @@
+{
+  "description": "Bash and MCP calls through the landing guard's PreToolUse hook: a root call, a subagent's, an MCP merge, and three more Bash calls for the no-answer cases, so a test can play the host and read every hook answer.",
+  "steps": [
+    { "await": { "type": "user" }, "as": "p" },
+    { "init": {} },
+    { "hook": { "toolUseId": "g1", "tool": "Bash", "input": { "command": "git push origin HEAD:main" }, "callback": "helm-landing-guard", "cwd": "C:/w" } },
+    { "hook": { "toolUseId": "g2", "tool": "Bash", "input": { "command": "git push origin HEAD:main" }, "callback": "helm-landing-guard", "agent": "sub-1" } },
+    { "hook": { "toolUseId": "g3", "tool": "mcp__github__merge_pull_request", "input": { "owner": "o", "repo": "r", "pullNumber": 7 }, "callback": "helm-landing-guard" } },
+    { "hook": { "toolUseId": "g4", "tool": "Bash", "input": { "command": "git status" }, "callback": "helm-landing-guard" } },
+    { "hook": { "toolUseId": "g5", "tool": "Bash", "input": { "command": "git status" }, "callback": "helm-landing-guard" } },
+    { "hook": { "toolUseId": "g6", "tool": "Bash", "input": { "command": "git status" }, "callback": "helm-landing-guard" } },
+    { "result": "done" }
+  ]
+}

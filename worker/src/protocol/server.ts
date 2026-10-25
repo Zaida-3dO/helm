@@ -135,6 +135,10 @@ export function serve(opts: ServeOptions): void {
         // The composer's permission-mode pick; applied before the next prompt, no response.
         if (!driver.hostLine?.(cmd)) diag("set_permission_mode ignored: this worker has no permission modes");
         return;
+      case "guard_verdict":
+        // The landing guard's answer to a guard_check (drivers/claude/guard.ts); no response.
+        if (!driver.hostLine?.(cmd)) diag("guard_verdict ignored: nothing in this worker asked");
+        return;
       case "deliver_now":
       case "withdraw":
       case "stop_tool":

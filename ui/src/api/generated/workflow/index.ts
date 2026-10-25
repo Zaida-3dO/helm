@@ -7,6 +7,7 @@ export type { ChatModeSetArgs } from './ChatModeSetArgs.ts';
 export type { ChatModeSetResult } from './ChatModeSetResult.ts';
 export type { ChatModeView } from './ChatModeView.ts';
 export type { EditsRule } from './EditsRule.ts';
+export type { GuardNoteView } from './GuardNoteView.ts';
 export type { LandMode } from './LandMode.ts';
 export type { Landing } from './Landing.ts';
 export type { MergeMethod } from './MergeMethod.ts';

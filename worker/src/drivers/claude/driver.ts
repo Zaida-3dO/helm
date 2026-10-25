@@ -14,6 +14,7 @@ import { buildClaudeEnv } from "./env.ts";
 import { Interactions } from "./interactions.ts";
 import { BUDGET_HOOK_ID, SubagentBudget, subagentRule } from "./limits.ts";
 import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE } from "./longcmd.ts";
+import { LANDING_GUARD_HOOK_ID, LANDING_GUARD_MATCHER, LandingGuard } from "./guard.ts";
 import { assertNotShim, resolveClaude, type Resolved } from "./resolve.ts";
 import { StreamTranslator } from "./translate.ts";
 import { Attribution } from "../../hosttools/attribution.ts";
@@ -32,6 +33,8 @@ const DEFAULTS = {
   controlTimeoutMs: 60_000,
   modelAckMs: 10_000,
   shutdownGraceMs: 3_000,
+  /** How long a tool call waits for the landing guard's answer from the host. */
+  guardTimeoutMs: 10_000,
 };
 /** Short limits for the send-behaviour controls: a slow answer must not hold up the host. */
 const QUICK_CONTROL_MS = 5_000;
@@ -148,6 +151,8 @@ export class ClaudeDriver implements Driver {
   private readonly attribution = new Attribution(toolPrefix);
   /** Sub-agent turn and context limits (off when the launch sets none). */
   private readonly budget: SubagentBudget;
+  /** The landing guard (guard.ts): asks the host before Bash, PowerShell and MCP calls. */
+  private readonly guard: LandingGuard | undefined;
 
   constructor(launch: Launch, channel: HostChannel, deps: DriverDeps) {
     this.launch = launch;
@@ -185,6 +190,7 @@ export class ClaudeDriver implements Driver {
           if (this.turnOpen) this.control({ subtype: "interrupt" }, this.limits.controlTimeoutMs).catch((e: Error) => this.deps.diag(`self-archive interrupt failed: ${e.message}`));
         },
       });
+      this.guard = new LandingGuard({ emit: (l) => this.ch.emit(l), diag: deps.diag, timeoutMs: this.limits.guardTimeoutMs });
     }
   }
 
@@ -248,6 +254,7 @@ export class ClaudeDriver implements Driver {
     if (this.hostTools) {
       preToolUse.push({ matcher: `${toolPrefix}.*`, hookCallbackIds: [HOST_TOOL_HOOK_ID] });
       if (this.mcp) preToolUse.push({ matcher: "mcp__.*", hookCallbackIds: [DUPLICATE_MCP_HOOK_ID] });
+      if (this.guard) preToolUse.push({ matcher: LANDING_GUARD_MATCHER, hookCallbackIds: [LANDING_GUARD_HOOK_ID] });
       initRequest.sdkMcpServers = [SERVER_NAME];
     }
     if (this.budget.enabled) preToolUse.push({ matcher: ".*", hookCallbackIds: [BUDGET_HOOK_ID] });
@@ -323,6 +330,7 @@ export class ClaudeDriver implements Driver {
   /** `mcp_config` from the host, or the composer's `set_permission_mode` pick. */
   hostLine(cmd: Json): boolean {
     if (cmd.type === "set_permission_mode") return this.setPermissionMode(cmd);
+    if (cmd.type === "guard_verdict") return this.guard?.onVerdict(cmd) ?? false;
     return this.mcp ? applyConfigLine(this.mcp, cmd) : false;
   }
 
@@ -376,6 +384,7 @@ export class ClaudeDriver implements Driver {
     if (this.shuttingDown) return this.exited;
     this.shuttingDown = true;
     this.mcp?.close();
+    this.guard?.close();
     this.deps.diag(`claude driver shutting down: ${reason}`);
     clearTimeout(this.stopTimer);
     for (const s of this.subs.values()) {
@@ -697,6 +706,13 @@ export class ClaudeDriver implements Driver {
       if (d.kind === "deny") return this.controlReply(requestId, { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: d.text } });
       return this.controlReply(requestId, {});
     }
+    if (req.callback_id === LANDING_GUARD_HOOK_ID && this.guard) {
+      const toolUseId = String(req.tool_use_id ?? input.tool_use_id ?? "");
+      const root = !input.agent_id && !this.subagentTools.has(toolUseId);
+      const call = { tool: String(input.tool_name ?? ""), input: obj(input.tool_input), root, cwd: typeof input.cwd === "string" ? input.cwd : undefined };
+      void this.guard.decide(call).then((reply) => this.controlReply(requestId, reply));
+      return;
+    }
     if (req.callback_id === HOST_TOOL_HOOK_ID) {
       this.attribution.noteHook({ ...input, tool_use_id: req.tool_use_id ?? input.tool_use_id });
       return this.controlReply(requestId, {});
@@ -739,6 +755,7 @@ export class ClaudeDriver implements Driver {
     this.stopping = false;
     this.interactions.dismissAll();
     this.longCommands.endTurn();
+    this.guard?.endTurn();
     this.attribution.clear();
     if (this.compacting) {
       if (!this.compacting.boundary) this.ch.emit({ type: "compaction_end", trigger: "manual", ok: false });

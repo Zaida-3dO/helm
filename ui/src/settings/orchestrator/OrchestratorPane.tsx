@@ -165,6 +165,14 @@ export function OrchestratorPane() {
         <Checkbox checked={draft.moveFast} label={draft.moveFast ? 'On' : 'Off'} onChange={(v) => patch((d) => ({ ...d, moveFast: v }))} data-testid="orch-movefast" />
       </SettingRow>
 
+      <SettingRow
+        title="Landing guard"
+        description="In a chat with Orchestrator on and a task running, refuses pushes to protected branches, merges, ready flips and other landings, by Bash or by MCP tools, and explains how to get your permission. Chats with Orchestrator off are never checked. Turn it off to let every command through."
+        testId="orch-guard-row"
+      >
+        <Checkbox checked={draft.landingGuard} label={draft.landingGuard ? 'On' : 'Off'} onChange={(v) => patch((d) => ({ ...d, landingGuard: v }))} data-testid="orch-guard" />
+      </SettingRow>
+
       <h3 className="orch-h">Stages</h3>
       <div className="orch-stages" data-testid="orch-stages">
         <StageLine

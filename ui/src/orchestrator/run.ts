@@ -4,6 +4,7 @@
 // safe to show and keeps each change's own repo and branch for sending back.
 
 import type {
+  GuardNoteView,
   OtherTaskView,
   RunChangeView,
   RunPlanView,
@@ -31,6 +32,8 @@ export interface RunView {
   plan: RunPlan | null;
   changes: RunChange[];
   otherTasks: OtherTask[];
+  /** The landing guard's overrides and refusals since the user last typed; commands made inert. */
+  guard: GuardNoteView[];
 }
 
 /** Agent-supplied text (task titles, branches, gate sentences): hidden and direction-changing characters shown as tokens, on one line. */
@@ -61,5 +64,6 @@ export function showRun(host: HostRunView): RunView {
       parkReason: inertOrNull(o.parkReason),
       waiting: o.waiting.map(showChange),
     })),
+    guard: (host.guard ?? []).map((g) => ({ ...g, command: inert(g.command) })),
   };
 }

@@ -24,6 +24,10 @@ homeRepos: Array<string>, landing: Landing,
  */
 moveFast: boolean, 
 /**
+ * The landing guard on Bash and MCP calls in chats with a task: user-only, default on.
+ */
+landingGuard: boolean, 
+/**
  * Defaults to `auto`.
  */
 newChats: NewChats, };
