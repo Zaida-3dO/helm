@@ -221,9 +221,9 @@ describe("core scenarios end to end with the fake claude", { timeout: 15 * 60_00
       await newChat(page(), folder());
       await send(page(), "[MD] show markdown");
       await page().waitForSelector(".md-callout", { timeout: 20_000 });
-      await page().waitForSelector(".md-mermaid svg", { timeout: 30_000 });
+      await page().waitForSelector(".md-diagram-view svg", { timeout: 30_000 });
       const dom = await page().evaluate(() => {
-        const svg = document.querySelector(".md-mermaid svg")!;
+        const svg = document.querySelector(".md-diagram-view svg")!;
         const node = svg.querySelector("g.node rect, g.node polygon, rect.basic, .node rect") as SVGElement | null;
         const callout = document.querySelector(".md-callout")!;
         return {

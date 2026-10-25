@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { fixtureProjects, startFakeBoard, type FakeBoard } from "../../fakes/board/server.ts";
-import { api, dispose, launchApp, newChat, scratchDir, shot, tid, type App } from "./harness.ts";
+import { api, dispose, launchApp, newChat, scratchDir, seedBoardChats, shot, tid, type App } from "./harness.ts";
 
 const OUT = process.env.HELM_E2E_OUT ?? scratchDir("helm-e2e-out-");
 const profile = scratchDir("helm-e2e-profile-");
@@ -51,12 +51,13 @@ describe("sidebar: Agent Standup sync, groups and nesting", { timeout: 10 * 60_0
   test("S1: one sync shows the board's projects as top-level groups, in order, read-only", async () => {
     try {
       await waitSync("ok");
+      await seedBoardChats(page());
       const fixtures = fixtureProjects();
       await page().waitForFunction((n) => document.querySelectorAll('[data-testid="sidebar-group"][data-kind="board"]').length >= n, fixtures.length, { timeout: 20_000 });
       const groups = await boardGroups();
       assert.deepEqual(groups.map((g) => g.title), fixtures.map((f) => f.title), "board order and titles");
       assert.ok(groups.every((g) => g.depth === "0"), "Agent Standup projects are top level");
-      assert.ok(groups.every((g) => g.height === 38), `header element 38 px (40 with its gap): ${groups.map((g) => g.height)}`);
+      assert.ok(groups.every((g) => g.height === 40), `header slot 40 px (the 38 px header and its gap): ${groups.map((g) => g.height)}`);
       const width = await page().$eval(".shell-sidebar", (e) => Math.round(e.getBoundingClientRect().width));
       assert.equal(width, 480, "sidebar 480 px by default");
       assert.deepEqual(board!.violations, [], "no request but GET reached the board");
@@ -88,14 +89,14 @@ describe("sidebar: Agent Standup sync, groups and nesting", { timeout: 10 * 60_0
     }
   });
 
-  test("S3: chat rows are 34 px (36 with the gap); a chat dragged under another nests at depth 1", async () => {
+  test("S3: chat rows fill a 36 px slot; a chat dragged under another nests at depth 1", async () => {
     try {
       const folder = scratchDir("helm-e2e-chat-");
       const first = await newChat(page(), folder);
       const second = await newChat(page(), folder);
       const row = (id: string) => page().locator(tid("chat-item", `[data-chat-id="${id}"]`));
       const h = await row(first).evaluate((e) => Math.round(e.getBoundingClientRect().height));
-      assert.equal(h, 34);
+      assert.equal(h, 36);
       const src = await row(second).boundingBox();
       const dst = await row(first).boundingBox();
       assert.ok(src && dst);

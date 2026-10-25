@@ -202,6 +202,23 @@ export async function newChat(page: Page, folder: string): Promise<string> {
   return id;
 }
 
+/**
+ * The sidebar hides projects with no chats, and a freshly synced board project holds none: put one
+ * chat under each board project so its group draws. Returns the board projects' ids, in list order.
+ */
+export async function seedBoardChats(page: Page): Promise<string[]> {
+  const folder = scratchDir("helm-e2e-board-");
+  const nodes = (await api(page, "project_list", {})) as { id: string; board: unknown }[];
+  const ids: string[] = [];
+  for (const n of nodes.filter((x) => x.board)) {
+    const made = (await api(page, "chat_create", { cwd: folder })) as { id: string };
+    await api(page, "chat_organize", { chatId: made.id, groupProjectId: n.id });
+    ids.push(n.id);
+  }
+  await page.waitForFunction((n) => document.querySelectorAll('[data-testid="sidebar-group"][data-kind="board"]').length >= n, ids.length, { timeout: 20_000 });
+  return ids;
+}
+
 export async function openChat(page: Page, chatId: string): Promise<void> {
   await page.click(tid("chat-item", `[data-chat-id="${chatId}"]`));
   await page.waitForSelector(tid("chat-view", `[data-chat-id="${chatId}"]`), { timeout: 15_000 });

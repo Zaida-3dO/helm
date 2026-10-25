@@ -96,7 +96,7 @@ describe("the plan-usage meter, Settings → Usage and item links", { timeout: 1
       await sendMessage("link this chat too");
       await until("the second link", async () => ((await links()).length === 2 ? true : undefined));
       await page().waitForSelector(tid("item-folder"), { timeout: 15_000 });
-      assert.match((await page().textContent(tid("item-folder"))) ?? "", /Item 0badcafe.*2/);
+      assert.match((await page().textContent(tid("item-folder"))) ?? "", /Linked item.*2/);
       assert.equal(await page().locator(tid("item-chip")).count(), 0, "inside a folder the folder names the item");
       assert.ok((await page().locator(tid("chat-item", `[data-chat-id="${one}"]`)).count()) === 1);
       assert.ok((await page().locator(tid("chat-item", `[data-chat-id="${two}"]`)).count()) === 1);

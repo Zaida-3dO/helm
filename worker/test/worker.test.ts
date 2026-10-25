@@ -648,7 +648,13 @@ test("every fake claude fixture is used by a worker test or a fake test", async 
   const path = await import("node:path");
   const { FIXTURES } = await import("./helpers.ts");
   const { fileURLToPath } = await import("node:url");
-  const dirs = [path.dirname(fileURLToPath(import.meta.url)), path.resolve(FIXTURES, "../../test")];
+  // Helpers (titles, triage...) drive the fake claude too, so their tests count as users.
+  const helpers = path.resolve(FIXTURES, "../../../helpers");
+  const helperTests = fs
+    .readdirSync(helpers)
+    .map((n: string) => path.join(helpers, n, "test"))
+    .filter((d: string) => fs.existsSync(d));
+  const dirs = [path.dirname(fileURLToPath(import.meta.url)), path.resolve(FIXTURES, "../../test"), ...helperTests];
   const src = dirs
     .flatMap((d) => fs.readdirSync(d).filter((n: string) => n.endsWith(".test.ts")).map((n: string) => fs.readFileSync(path.join(d, n), "utf8")))
     .join("\n");

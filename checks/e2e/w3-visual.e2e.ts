@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import { api, contrast, dispose, FAKE_CLAUDE, launchApp, measure, newChat, REPO, scratchDir, send, shot, tid, waitStatus, type App } from "./harness.ts";
+import { api, contrast, dispose, FAKE_CLAUDE, launchApp, measure, newChat, REPO, scratchDir, seedBoardChats, send, shot, tid, waitStatus, type App } from "./harness.ts";
 
 const OUT = process.env.HELM_E2E_OUT ?? scratchDir("helm-e2e-out-");
 const profile = scratchDir("helm-w3v-profile-");
@@ -148,6 +148,7 @@ describe("visual check and the host probes", { timeout: 15 * 60_000 }, () => {
     if (!board) return t.skip("the fake board (fakes/board) is not available");
     await step("V1", async () => {
       await page().waitForSelector(tid("board-sync", '[data-state="ok"]'), { timeout: 30_000 });
+      await seedBoardChats(page());
       const groups = await page().$$eval(tid("sidebar-group", '[data-kind="board"]'), (els) =>
         els.map((e) => ({ id: e.getAttribute("data-project-id"), depth: e.getAttribute("data-depth"), h: e.getBoundingClientRect().height, text: e.textContent ?? "" })),
       );
@@ -159,7 +160,10 @@ describe("visual check and the host probes", { timeout: 15 * 60_000 }, () => {
       for (const g of groups) assert.ok(g.h >= 37 && g.h <= 41, `group header 38-40 px (${g.h})`);
       // V2: a local folder project nested under a board project draws at depth 1.
       const parent = groups[0]!.id!;
-      const child = (await api(page(), "project_create", { name: "Nested here", path: scratchDir("helm-w3v-proj-"), parentId: parent })) as { id: string };
+      const childPath = scratchDir("helm-w3v-proj-");
+      const child = (await api(page(), "project_create", { name: "Nested here", path: childPath, parentId: parent })) as { id: string };
+      // A project with no chats does not draw, so put one in it.
+      await api(page(), "chat_create", { cwd: childPath, projectId: child.id });
       await page().waitForSelector(tid("sidebar-group", `[data-project-id="${child.id}"][data-depth="1"]`), { timeout: 10_000 });
       // V3: a local rename of a board project survives a second sync.
       const p = (await api(page(), "project_list", {})) as { id: string; revision: number; kind: string }[];
@@ -178,7 +182,7 @@ describe("visual check and the host probes", { timeout: 15 * 60_000 }, () => {
       const folder = scratchDir("helm-w3v-chat-");
       const parent = await newChat(page(), folder);
       const row = await measure(page(), tid("chat-item", `[data-chat-id="${parent}"]`));
-      assert.ok(row.h >= 33 && row.h <= 37, `chat row: a 34 px button in a 36 px slot (${row.h})`);
+      assert.ok(row.h >= 31 && row.h <= 37, `chat row: a 36 px slot, 4 px shorter as the last of its block (${row.h})`);
       // Chats nest only within one project, so the child shares the folder.
       const child = await newChat(page(), folder);
       await api(page(), "chat_organize", { chatId: child, parentChatId: parent });
@@ -264,7 +268,7 @@ describe("visual check and the host probes", { timeout: 15 * 60_000 }, () => {
       await page().waitForSelector(tid("toast", `[data-chat-id="${bg}"]`), { timeout: 30_000 });
       assert.equal(await page().locator(tid("toast")).count(), 1, "one toast");
       const toast = await measure(page(), tid("toast"));
-      assert.ok(toast.x + toast.w > toast.vw - 60 && toast.y + toast.h > toast.vh - 60, "bottom-right");
+      assert.ok(toast.y >= 40 && toast.y < 120 && toast.x + toast.w <= toast.vw, "top right of the chat column, under the top bar");
       await opaque(tid("toast"));
       await readable(`${tid("toast")} .notice-title`);
       // Nothing overlaps it.
