@@ -199,6 +199,13 @@
   outline: none;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
 }
+/* Forced colours drop shadows, so the focus ring needs a real outline there. */
+@media (forced-colors: active) {
+  .ui-input:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 1px;
+  }
+}
 .ui-input:disabled {
   opacity: 0.55;
 }

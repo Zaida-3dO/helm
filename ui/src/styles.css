@@ -570,6 +570,12 @@ kbd {
     border: 2px solid Highlight;
     font-weight: 600;
   }
+  .search-field {
+    border-bottom: 2px solid transparent;
+  }
+  .search-field:focus-within {
+    border-bottom-color: Highlight;
+  }
 }
 
 /* Kill switches: Reduce Motion removes every animation and transition; the Zen
