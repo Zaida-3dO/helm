@@ -429,6 +429,50 @@
   right: 0;
 }
 
+/* One project, one block: the header and its chats share the group colour's tint with no gap
+   between them. The slot carries the tint; corners are rounded (7 px) on the block's first and last
+   slot only, and the last slot is 4 px shorter than its place in the list, which is the gap to the
+   next block. The header, rows and item folders inside draw no fill of their own. */
+.sb-slot[data-block][data-coloured='true'] {
+  background: color-mix(in srgb, var(--group-colour) 8%, transparent);
+}
+
+.sb-slot[data-block='first'],
+.sb-slot[data-block='only'] {
+  border-top-left-radius: 7px;
+  border-top-right-radius: 7px;
+}
+
+.sb-slot[data-block='last'],
+.sb-slot[data-block='only'] {
+  border-bottom-left-radius: 7px;
+  border-bottom-right-radius: 7px;
+}
+
+.sb-slot[data-block] .sb-header,
+.sb-slot[data-block] .sb-chat-wrap,
+.sb-slot[data-block] .sb-item-folder {
+  height: 100%;
+}
+
+.sb-slot[data-block] .sb-header[data-coloured='true'],
+.sb-slot[data-block] .sb-chat-wrap[data-coloured='true'] {
+  background: none;
+}
+
+.sb-slot[data-block] .sb-chat-wrap {
+  margin-right: 4px;
+}
+
+.sb-slot[data-block] .sb-chat-wrap[data-coloured='true']:hover .sb-chat {
+  background: color-mix(in srgb, var(--group-colour) 8%, transparent);
+}
+
+.sb-slot[data-block] .sb-root .sb-chat,
+.sb-root .sb-slot[data-block] .sb-chat {
+  height: 100%;
+}
+
 .sb-empty {
   padding: 10px 12px;
   font-size: 12px;

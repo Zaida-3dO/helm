@@ -641,6 +641,11 @@ kbd {
 .shell-sidebar[hidden] {
   display: none;
 }
+/* With the sidebar hidden the conversation column centres (it sits a little left of centre while
+   the sidebar shows). */
+.shell:has(> .shell-sidebar[hidden]) {
+  --shell-column-factor: 1;
+}
 /* The sidebar's resizer: a 1 px line (the sidebar's own border) under a 7 px hit
    area, 3 px left and 4 px right of it. */
 .shell-resizer {
@@ -831,8 +836,32 @@ dd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.crumb-chevron {
+.crumb-chevron,
+.crumb-folder {
   color: var(--muted);
+  flex: none;
+}
+.topbar-quick {
+  display: contents;
+}
+/* Narrower main pane: shed the optional parts (see topBarTier). Fork, Pin and Archive stay in the
+   chat menu, and the usage meter stays in Settings. */
+.topbar[data-tier='mid'] .usage-track {
+  display: none;
+}
+.topbar[data-tier='narrow'] .usage-meter,
+.topbar[data-tier='narrow'] .topbar-quick,
+.topbar[data-tier='tight'] .usage-meter,
+.topbar[data-tier='tight'] .topbar-quick,
+.topbar[data-tier='tight'] .action-row {
+  display: none;
+}
+.topbar[data-tier='tight'] .crumb-project,
+.topbar[data-tier='tight'] .crumb-folder,
+.topbar[data-tier='tight'] .crumb-chevron {
+  display: none;
+}
+.topbar .caption {
   flex: none;
 }
 .crumb-title {

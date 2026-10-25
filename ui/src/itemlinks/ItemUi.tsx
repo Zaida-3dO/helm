@@ -23,7 +23,8 @@ export function useItemRefs(chatIds: readonly string[]): ReadonlyMap<string, Ite
   return useSyncExternalStore(store.subscribe, () => store.snapshot);
 }
 
-function useOpenItem() {
+/** Opens an item by id: its main chat, or the picker when it has several. */
+export function useOpenItem() {
   const shell = useShell();
   return (itemId: string) =>
     void openItem(shell.api, (id) => shell.select(id), itemId).then((err) => {

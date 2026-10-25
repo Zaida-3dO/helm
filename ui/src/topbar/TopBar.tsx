@@ -7,14 +7,15 @@
 // The bar is a window drag region: a left press that is not on a control starts a native drag, and
 // a double-click toggles maximise.
 
-import { useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { panelStore, togglePanel } from '../panel/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, layers, TextInput, toast, useBinding, useHint } from '../ui/index.ts';
-import { IconArchive, IconChevronRight, IconFork, IconPanelLeft, IconPanelRight, IconPin, IconRestore } from '../ui/icons.tsx';
+import { IconArchive, IconChevronRight, IconFolder, IconFork, IconPanelLeft, IconPanelRight, IconPin, IconRestore } from '../ui/icons.tsx';
 import { sidebarLayout } from '../shell/layout.ts';
 import { UsageMeter } from '../usage/UsageMeter.tsx';
 import { CaptionButtons, dragHandlers } from './caption.tsx';
+import { topBarTier, type TopBarTier } from './fold.ts';
 import { folderLabel, RenameEdit } from './label.ts';
 
 export interface TopBarProps {
@@ -68,10 +69,23 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
   const renameHint = useHint('Double-click to rename', 'chat.rename');
   const panelHint = useHint('Toggle inspector', 'panel.toggle');
   const showSidebarHint = useHint('Show sidebar', 'sidebar.toggle');
+  // The bar sheds optional parts as the main pane narrows, so the title and the window buttons
+  // always fit (they used to be pushed under the side panel).
+  const barRef = useRef<HTMLElement | null>(null);
+  const [tier, setTier] = useState<TopBarTier>('wide');
+  useLayoutEffect(() => {
+    const el = barRef.current;
+    if (!el) return;
+    const measure = () => setTier(topBarTier(el.getBoundingClientRect().width));
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const sidebarVisible = useSyncExternalStore(sidebarLayout.subscribe, () => sidebarLayout.get().visible);
   return (
     <>
-      <header className="topbar" data-testid="topbar" {...dragHandlers()}>
+      <header ref={barRef} className="topbar" data-testid="topbar" data-tier={tier} {...dragHandlers()}>
         {!sidebarVisible && (
           <Button variant="icon" label={showSidebarHint} data-testid="show-sidebar" onClick={() => sidebarLayout.setVisible(true)}>
             <IconPanelLeft size={16} />
@@ -80,6 +94,7 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
         <nav className="crumbs" aria-label="Breadcrumb">
           {project && (
             <>
+              <IconFolder className="crumb-folder" size={13} />
               <span className="crumb-project" title={chat?.cwd ?? ''}>
                 {project}
               </span>
@@ -126,14 +141,13 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
           {updatePill}
           {swarm}
           {chat && (
-            <>
+            <span className="topbar-quick">
               <Button variant="icon" label={forkHint} data-testid="topbar-fork" onClick={fork}>
                 <IconFork size={16} />
               </Button>
               <Button
                 variant="icon"
                 label={chat.pinned ? 'Unpin chat' : 'Pin chat'}
-                pressed={chat.pinned}
                 data-testid="topbar-pin"
                 onClick={() => shell.api('chat_organize', { chatId: chat.id, pinned: !chat.pinned }).catch(err)}
               >
@@ -153,7 +167,7 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
                   <IconArchive size={16} />
                 </Button>
               )}
-            </>
+            </span>
           )}
           {actionRow}
           {chat && (

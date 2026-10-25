@@ -20,7 +20,7 @@ function row(id: string, over: Partial<SidebarRow> = {}): SidebarRow {
 const link = (item: string, chat: string, over: Partial<ItemLink> = {}): ItemLink => ({ itemId: item, chatId: chat, isMain: false, linkedBy: 'agent', linkedAt: 1, ...over });
 const group = (): ProjectNode => ({ id: 'g', kind: 'folder', name: 'G', path: null, parentId: null, parentSource: null, icon: null, colour: null, pinned: false, collapsed: false, position: null, archived: false, board: null, primaryFolderProjectId: null, chatCount: 0, createdAt: 1, revision: 0 }) as ProjectNode;
 
-test('the title is the board title, else the first 8 characters of the id', () => {
+test('the title is the board title, else "Linked item"', () => {
   assert.equal(itemTitle({ itemId: A, itemTitle: 'Usage meter' }), 'Usage meter');
   assert.equal(itemTitle({ itemId: A }), 'Linked item');
   assert.equal(itemTitle({ itemId: A, itemTitle: '  ' }), 'Linked item');

@@ -23,7 +23,10 @@ export const HEIGHTS = {
   compact: { chat: 28, twoLine: 38, header: 34, headerSubtitle: 50, pinBreak: 13 },
 } as const;
 
-export type ListItem =
+/** Where an item sits in its project's block: the header and its chats draw as one tinted block. */
+export type BlockPos = 'only' | 'first' | 'mid' | 'last';
+
+export type ListItem = (
   | { kind: 'header'; key: string; project: ProjectNode; depth: number; height: number; collapsed: boolean; subtitle: string | null }
   | {
       kind: 'chat';
@@ -38,8 +41,9 @@ export type ListItem =
       /** The task-board item this chat is linked to, shown as a small chip. */
       itemChip?: ItemRef;
     }
-  | { kind: 'itemFolder'; key: string; itemId: string; title: string; members: number; depth: number; height: number; collapsed: boolean }
-  | { kind: 'pinBreak'; key: string; height: number };
+  | { kind: 'itemFolder'; key: string; groupId: string; itemId: string; title: string; members: number; depth: number; height: number; collapsed: boolean }
+  | { kind: 'pinBreak'; key: string; height: number }
+) & { block?: BlockPos };
 
 export interface BuildOptions {
   view: SidebarView;
@@ -191,7 +195,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     const hidden = new Set<string>();
     for (const e of arrange(order, o.itemLinks?.refs, o.itemLinks?.collapsed, MAX_DEPTH, o.selectedChatId)) {
       if (e.type === 'folder') {
-        out.push({ kind: 'itemFolder', key: `i:${p.id}:${e.itemId}`, itemId: e.itemId, title: e.title, members: e.members, depth: e.depth, height: h.chat, collapsed: e.collapsed });
+        out.push({ kind: 'itemFolder', key: `i:${p.id}:${e.itemId}`, groupId: p.id, itemId: e.itemId, title: e.title, members: e.members, depth: e.depth, height: h.chat, collapsed: e.collapsed });
         continue;
       }
       const { row, depth: d } = e;
@@ -230,7 +234,27 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
       out.push({ kind: 'chat', key: row.chatId, row, depth: 0, height: h.chat, children: 0, expanded: false, twoLine: false });
     }
   }
+  markBlocks(out);
   return out;
+}
+
+/** The project an item belongs to, for grouping neighbours into one block. */
+function ownerOf(i: ListItem): string | null {
+  return i.kind === 'header' ? i.project.id : i.kind === 'chat' ? i.row.groupProjectId : i.kind === 'itemFolder' ? i.groupId : null;
+}
+
+/** Mark each run of items that share a project as one block (first, mid and last), so the sidebar
+ *  can draw a project's header and chats as a single tinted shape instead of separate pills. A
+ *  header always starts a block; the activity view is not marked (its rows stay separate). */
+function markBlocks(items: ListItem[]): void {
+  items.forEach((it, k) => {
+    const owner = ownerOf(it);
+    if (owner === null) return;
+    const above = k > 0 && it.kind !== 'header' && ownerOf(items[k - 1]!) === owner;
+    const next = items[k + 1];
+    const below = next !== undefined && next.kind !== 'header' && ownerOf(next) === owner;
+    it.block = above ? (below ? 'mid' : 'last') : below ? 'first' : 'only';
+  });
 }
 
 /** The muted line under a header: where a board project's chats

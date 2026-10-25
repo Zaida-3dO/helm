@@ -23,7 +23,7 @@ import { chatMenuItems, projectMenuItems } from './menus.ts';
 import { buildList, chatAncestors, visibleChatOrder, type ListItem } from './model.ts';
 import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
-import { ItemChip, ItemFolderRow, ItemPickerHost, useItemRefs } from '../itemlinks/ItemUi.tsx'; // item links
+import { ItemChip, ItemFolderRow, ItemPickerHost, useItemRefs, useOpenItem } from '../itemlinks/ItemUi.tsx'; // item links
 import {
   IconArchive,
   IconBoard,
@@ -53,6 +53,8 @@ import { layout, visibleRange } from './virtual.ts';
 import './sidebar.css';
 
 export const PREVIEW_DELAY_MS = 300;
+/** The space between one project's block and the next, in pixels. */
+const BLOCK_GAP = 4;
 
 export interface SidebarProps {
   api: Api;
@@ -166,6 +168,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     if (up.some((id) => !expanded.has(id))) setExpanded((s) => new Set([...s, ...up]));
   }, [selected, snap.rows, expanded]);
 
+  const openItem = useOpenItem();
   const itemRefs = useItemRefs(useMemo(() => snap.rows.map((r) => r.chatId), [snap.rows]));
   const items = useMemo(
     () =>
@@ -180,6 +183,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   );
   useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
   const projectsById = useMemo(() => new Map(snap.projects.map((p) => [p.id, p])), [snap.projects]);
+  const slotProject = (it: ListItem): ProjectNode | undefined =>
+    projectsById.get(it.kind === 'header' ? it.project.id : it.kind === 'chat' ? it.row.groupProjectId : it.kind === 'itemFolder' ? it.groupId : '');
   const groupDepth = useMemo(() => {
     const m = new Map<string, number>();
     for (const it of items) if (it.kind === 'header') m.set(it.project.id, it.depth);
@@ -210,6 +215,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     });
 
   // ---- menus ----
+  const promptRename = (row: SidebarRow) => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, onSave: (t) => act.renameChat(row, t) });
   const rowMenuItems = (row: SidebarRow): MenuItem[] => {
     const siblings = snap.rows.filter((r) => r.groupProjectId === row.groupProjectId && r.archived === row.archived);
     const byId = new Map(siblings.map((r) => [r.chatId, r]));
@@ -228,11 +234,11 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       const kids = siblings.filter((r) => r.parentChatId === id);
       return kids.length === 0 ? 0 : 1 + Math.max(...kids.map((k) => heightOf(k.chatId)));
     };
-    return withChatIcons(chatMenuItems(
+    const items = withChatIcons(chatMenuItems(
       { row, projects: snap.projects, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view },
       {
         fork: () => void act.fork(row),
-        rename: () => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, onSave: (t) => act.renameChat(row, t) }),
+        rename: () => promptRename(row),
         compact: () => void compactChat(ops, row.chatId, setError),
         moveTo: (id) => void act.moveTo(row, id),
         nestUnder: (id) => {
@@ -250,6 +256,10 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         remove: () => void act.remove(row),
       },
     ));
+    // The chip hides while the row is hovered, so the menu is where a keyboard or pointer user opens the linked item.
+    const linked = itemRefs.get(row.chatId);
+    if (linked) items.splice(1, 0, { id: 'open-item', label: linked.named ? `Open item: ${linked.title}` : 'Open linked item', onSelect: () => openItem(linked.itemId) });
+    return items;
   };
   const projectMenu = (p: ProjectNode): MenuItem[] =>
     withProjectIcons(projectMenuItems(p, snap.projects, {
@@ -504,16 +514,29 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         }}
       >
         <div className="sb-list-inner" style={{ height: lay.total }}>
-          {items.slice(start, end).map((it, k) => (
-            <div
-              key={it.key}
-              className="sb-slot"
-              data-drop={dropKey === it.key ? (dropOk ? (drag?.target?.lowerHalf ? 'into' : 'before') : 'no') : undefined}
-              style={{ height: it.height, transform: `translateY(${lay.offsets[start + k]}px)` }}
-            >
-              {renderItem(it)}
-            </div>
-          ))}
+          {items.slice(start, end).map((it, k) => {
+            // A project's header and chats draw as one tinted block: the slot carries the tint and
+            // the corners (rounded on the block's first and last slot), and the last slot is
+            // shortened by the gap that separates it from the next block.
+            const colour = it.block ? colourCss(slotProject(it)?.colour) : null;
+            const gap = it.block === 'last' || it.block === 'only' ? BLOCK_GAP : 0;
+            return (
+              <div
+                key={it.key}
+                className="sb-slot"
+                data-block={it.block}
+                data-coloured={colour ? 'true' : undefined}
+                data-drop={dropKey === it.key ? (dropOk ? (drag?.target?.lowerHalf ? 'into' : 'before') : 'no') : undefined}
+                style={{
+                  height: it.height - gap,
+                  transform: `translateY(${lay.offsets[start + k]}px)`,
+                  ...(colour ? { ['--group-colour' as string]: colour } : {}),
+                }}
+              >
+                {renderItem(it)}
+              </div>
+            );
+          })}
         </div>
         {items.length === 0 && !paging.loading && (
           <div className="sb-empty">
@@ -583,7 +606,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           title={it.title}
           members={it.members}
           collapsed={it.collapsed}
-          indent={(groupDepth.get(it.key.slice(2, it.key.indexOf(':', 2))) ?? 0) * 16 + it.depth * 16}
+          indent={(groupDepth.get(it.groupId) ?? 0) * 16 + it.depth * 16 + (it.block ? 4 : 0)}
           onToggle={() =>
             setCollapsedItems((s) => {
               const n = new Set(s);
@@ -617,7 +640,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     return (
       <ChatRow
         item={it}
-        indent={view === 'activity' ? 0 : (groupDepth.get(row.groupProjectId) ?? 0) * 16}
+        indent={view === 'activity' ? 0 : (groupDepth.get(row.groupProjectId) ?? 0) * 16 + (it.block ? 4 : 0)}
         project={projectsById.get(row.groupProjectId)}
         selected={row.chatId === selected}
         needsYou={snap.needsYou.has(row.chatId)}
@@ -630,6 +653,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           onSelect(row.chatId);
         }}
         onToggle={() => toggleChat(row.chatId)}
+        onRename={() => promptRename(row)}
         onMenu={(x, y) => openMenu(x, y, rowMenuItems(row), `Options for ${row.title}`)}
         onArchive={() => void (row.archived ? act.restore(row) : act.archive(row))}
         onHover={(el) => hoverRow(row, el)}
@@ -816,6 +840,7 @@ function ChatRow({
   now,
   onOpen,
   onToggle,
+  onRename,
   onMenu,
   onArchive,
   onHover,
@@ -831,6 +856,8 @@ function ChatRow({
   now: number;
   onOpen: () => void;
   onToggle: () => void;
+  /** Double-click on the row. */
+  onRename: () => void;
   onMenu: (x: number, y: number) => void;
   onArchive: () => void;
   onHover: (el: HTMLElement | null) => void;
@@ -889,6 +916,7 @@ function ChatRow({
         data-stalled={r.stalled ? 'true' : undefined}
         aria-current={selected ? 'true' : undefined}
         onClick={onOpen}
+        onDoubleClick={onRename}
         onPointerDown={onPointerDown}
       >
         <Indicator row={r} />

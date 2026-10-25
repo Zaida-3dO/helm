@@ -135,6 +135,12 @@ test('empty projects never show, with no row to bring them back; a finished proj
   const rows = [row('h1', 'held'), row('o1', 'open', { archived: true }), row('d1', 'doneRows')];
   const hidden = shape(buildList(projects, rows, opts));
   assert.deepEqual(hidden, ['H0:pinned', 'H0:donePinned', '--', 'H0:full', 'H0:held', 'C0:h1', 'H0:parent', 'H1:kid', 'H0:live', 'H0:done', 'H0:doneRows', 'C0:d1', 'H0:doneShell', 'H1:doneKid']);
+  // A project's header and its chats are one block: first and last mark where the tint's corners round.
+  assert.deepEqual(
+    buildList(projects, rows, opts).map((i) => i.block ?? '-'),
+    ['only', 'only', '-', 'only', 'first', 'last', 'only', 'only', 'only', 'only', 'first', 'last', 'only', 'only'],
+  );
+  assert.ok(buildList(projects, rows, { ...opts, view: 'activity' }).every((i) => i.block === undefined), 'activity rows stay separate');
   // The open chat's group shows even when it holds nothing else (here its chat is archived).
   assert.ok(shape(buildList(projects, rows, { ...opts, selectedChatId: 'o1' })).includes('H0:open'));
   // A shown finished project says so under its name; a stale one still reads as gone.

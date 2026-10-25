@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MIN_TITLE_ROOM, UNFOLD_SLACK, shouldFold, titleRoom } from './fold.ts';
+import { MIN_TITLE_ROOM, UNFOLD_SLACK, shouldFold, titleRoom, topBarTier } from './fold.ts';
 
 test('the title room is the breadcrumb width, less any overflow of the bar', () => {
   assert.equal(titleRoom(225, 1120, 1120), 225);
@@ -25,4 +25,9 @@ test('a folded row unfolds only when the inline buttons fit with slack to spare'
 
 test('a folded row whose inline width was never measured stays folded', () => {
   assert.equal(shouldFold(true, 5000, 0, 90), true);
+});
+
+test('the bar sheds its optional parts as its width shrinks', () => {
+  const tiers = [1440, 900, 899, 640, 639, 544, 440, 439, 320].map(topBarTier);
+  assert.deepEqual(tiers, ['wide', 'wide', 'mid', 'mid', 'narrow', 'narrow', 'narrow', 'tight', 'tight']);
 });
