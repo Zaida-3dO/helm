@@ -7,6 +7,8 @@
 
 export { Button, Checkbox, Chip, ChoiceTiles, Icon, Segmented, SettingRow, TextArea, TextInput } from './controls.tsx';
 export type { ButtonProps, ButtonVariant, CheckboxProps, SegmentedOption, TextInputProps } from './controls.tsx';
+export { ConfirmDialog } from './Confirm.tsx';
+export type { ConfirmSpec } from './Confirm.tsx';
 export { AnchoredDialog, Dialog } from './Dialog.tsx';
 export type { AnchoredDialogProps, DialogProps } from './Dialog.tsx';
 export { ContextMenu } from './Menu.tsx';

@@ -5,13 +5,13 @@
 import { useMemo, useState } from 'react';
 import { projectOps, type ProjectNode, type SidebarRow } from '../api/projects.ts';
 import { useShell } from '../shell/context.ts';
-import { ContextMenu, toast, type MenuItem } from '../ui/index.ts';
+import { ConfirmDialog, ContextMenu, toast, type ConfirmSpec, type MenuItem } from '../ui/index.ts';
 import { SidebarActions, compactChat } from './actions.ts';
 import { SidebarData } from './data.ts';
 import { chatMenuItems } from './menus.ts';
 import { withChatIcons } from './menuIcons.tsx';
 import { IconMore } from '../ui/icons.tsx';
-import { PromptDialog, type Prompt } from './Sidebar.tsx';
+import { deleteChatConfirm, PromptDialog, type Prompt } from './Sidebar.tsx';
 import { sidebarUndo } from './undo.ts';
 
 // Errors go to the shell's toast slot, where the user sees them.
@@ -23,6 +23,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
   const data = useMemo(() => new SidebarData(pops), [pops]);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
   const act = useMemo(
     () => new SidebarActions({ api: shell.api, pops, ops: shell.ops, data, undo: sidebarUndo, onError: showError }),
     [shell.api, shell.ops, pops, data],
@@ -58,7 +59,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
           mute: (m) => void act.mute(row, m),
           archive: () => void act.archive(row),
           restore: () => void act.restore(row),
-          remove: () => void act.remove(row),
+          remove: () => setConfirm(deleteChatConfirm(row, () => act.remove(row))),
         },
       ).filter((i) => i.id !== 'children'));
       setMenu({ x, y, items });
@@ -85,6 +86,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
       </button>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} label="Chat options" onClose={() => setMenu(null)} testId="chat-menu-list" />}
       {prompt && <PromptDialog prompt={prompt} onClose={() => setPrompt(null)} />}
+      {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
     </>
   );
 }

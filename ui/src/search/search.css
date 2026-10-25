@@ -9,6 +9,17 @@
   align-items: center;
   gap: 10px;
   padding: 4px 0 8px;
+  border-bottom: 2px solid transparent;
+  transition: border-color var(--motion-button-colour, 110ms) ease;
+}
+
+/* The field has no box, so focus shows as an accent line under it. */
+.search-field:focus-within {
+  border-bottom-color: var(--accent);
+}
+
+.search-field:focus-within .search-field-icon {
+  color: var(--text);
 }
 
 .search-field-icon {

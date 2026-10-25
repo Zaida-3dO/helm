@@ -119,6 +119,7 @@ export class SidebarActions {
         await this.d.data.refetch([row.chatId]);
       },
     });
+    this.archivedToast(row.title || 'Untitled chat');
   }
 
   async restore(row: SidebarRow): Promise<void> {
@@ -213,6 +214,12 @@ export class SidebarActions {
         await this.d.data.loadProjects();
       },
     });
+    this.archivedToast(p.name);
+  }
+
+  /** "Archived <title> · Undo": the undo entry just pushed is the one the button undoes. */
+  private archivedToast(title: string): void {
+    toast.show({ kind: 'undo', text: `Archived “${title}”`, action: { label: 'Undo', hint: 'Ctrl+Z', run: () => void this.undo() } });
   }
 
   async restoreProject(p: ProjectNode): Promise<void> {

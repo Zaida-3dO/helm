@@ -15,7 +15,7 @@ import { SETTINGS_DIALOG } from '../settings/index.ts';
 import { SEARCH_DIALOG } from '../search/index.ts';
 import { AttentionInbox, inboxRows, nextAttention } from '../attention/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
-import { Button, ContextMenu, Dialog, TextInput, useBinding, type MenuItem } from '../ui/index.ts';
+import { Button, ConfirmDialog, ContextMenu, Dialog, TextInput, useBinding, type ConfirmSpec, type MenuItem } from '../ui/index.ts';
 import { SidebarActions, compactChat } from './actions.ts';
 import { SidebarData, errorText } from './data.ts';
 import { dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
@@ -113,6 +113,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const [compact, setCompact] = useState(false);
   const [menu, setMenu] = useState<Menu | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
@@ -253,7 +254,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         mute: (m) => void act.mute(row, m),
         archive: () => void act.archive(row),
         restore: () => void act.restore(row),
-        remove: () => void act.remove(row),
+        remove: () => setConfirm(deleteChatConfirm(row, () => act.remove(row))),
       },
     ));
     // The chip hides while the row is hovered, so the menu is where a keyboard or pointer user opens the linked item.
@@ -275,7 +276,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         }),
       nestUnder: (id) => void act.nestProject(p, id),
       topLevel: () => void act.nestProject(p, null),
-      archive: () => void act.archiveProject(p),
+      archive: () => setConfirm(archiveProjectConfirm(p, () => act.archiveProject(p))),
       restore: () => void act.restoreProject(p),
       colour: (c) => void act.updateProject(p, { colour: c }),
     }), p);
@@ -572,6 +573,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       </div>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} label={menu.label} onClose={() => setMenu(null)} testId="sidebar-menu" />}
       {prompt && <PromptDialog prompt={prompt} onClose={() => setPrompt(null)} />}
+      {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
       {inboxOpen && <AttentionInbox summary={snap.attention} ops={ops} onOpen={onSelect} onClose={() => setInboxOpen(false)} />}
       <ItemPickerHost />
       {preview && !menu && !drag && (
@@ -964,6 +966,26 @@ function ChatRow({
       </span>
     </div>
   );
+}
+
+/** The questions asked before the two actions the sidebar cannot undo or that move a whole project. */
+export function deleteChatConfirm(row: SidebarRow, onConfirm: () => void | Promise<unknown>): ConfirmSpec {
+  return {
+    title: 'Delete chat permanently?',
+    body: `“${row.title || 'Untitled chat'}” and its history are removed from this PC. This cannot be undone.`,
+    confirm: 'Delete permanently',
+    danger: true,
+    onConfirm,
+  };
+}
+
+export function archiveProjectConfirm(p: ProjectNode, onConfirm: () => void | Promise<unknown>): ConfirmSpec {
+  return {
+    title: 'Archive project?',
+    body: `“${p.name}” leaves the sidebar and its chats go with it. Restore it from Archived chats, or press Ctrl+Z right after.`,
+    confirm: 'Archive project',
+    onConfirm,
+  };
 }
 
 export function PromptDialog({ prompt, onClose }: { prompt: Prompt; onClose: () => void }) {

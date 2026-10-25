@@ -115,6 +115,7 @@ export function PickerPopover<T extends string>({
   useLayoutEffect(() => {
     pop.current?.querySelector('.ui-picker-option.active')?.scrollIntoView?.({ block: 'nearest' });
   }, [active]);
+  const choices = shown.filter((o) => !o.disabled).length;
   const pick = (o: PickerOption<T> | undefined) => {
     if (o && !o.disabled) onPick(o.value);
   };
@@ -184,7 +185,7 @@ export function PickerPopover<T extends string>({
         {footer}
         <div className="ui-picker-hints">
           <span>
-            {shown.length} {shown.length === 1 ? 'option' : 'options'} · ↑ ↓ navigate
+            {choices} {choices === 1 ? 'option' : 'options'} · ↑ ↓ navigate
           </span>
           {extraHint}
           <span>↵ select</span>

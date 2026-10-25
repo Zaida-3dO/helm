@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ProjectNode, SidebarRow } from '../api/projects.ts';
+import { toast } from '../ui/toasts.ts';
 import { SidebarActions, type ActionDeps } from './actions.ts';
+import { UndoStack } from './undo.ts';
 import { buildList, chatAncestors, headerSubtitle, HEIGHTS, nestRows, stepChat, visibleChatOrder, type ListItem } from './model.ts';
 import { loadMore, readBudget, type PageResult } from './paging.ts';
 import { age, rowAttention, trailingIndicator } from './status.ts';
@@ -350,4 +352,24 @@ test('dialog saves wait for the host and answer with why they failed', async () 
   assert.equal(await bad.renameChat(row, 'New'), 'The host refused');
   assert.equal(await bad.editProject(project('p1'), { name: 'x' }), 'The host refused');
   assert.deepEqual(seen, ['p1', 'reload']);
+});
+
+test('archiving a chat or a project shows an Undo toast whose button undoes it', async () => {
+  const log: string[] = [];
+  const act = new SidebarActions({
+    undo: new UndoStack(),
+    onError: (m: string) => log.push(`error ${m}`),
+    ops: { archive: async (id: string) => void log.push(`archive ${id}`), restore: async (id: string) => void log.push(`restore ${id}`) },
+    pops: { archive: async (id: string) => void log.push(`archive-project ${id}`), restore: async (id: string) => void log.push(`restore-project ${id}`) },
+    data: { refetch: async () => undefined, loadProjects: async () => undefined, invalidatePaging: () => undefined },
+  } as unknown as ActionDeps);
+  await act.archive({ chatId: 'c1', title: 'Plans' } as SidebarRow);
+  assert.equal(toast.current()?.kind, 'undo');
+  assert.equal(toast.current()?.text, 'Archived “Plans”');
+  toast.current()!.action!.run();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(log, ['archive c1', 'restore c1']);
+  await act.archiveProject(project('p1', { name: 'Atlas' }));
+  assert.equal(toast.current()?.text, 'Archived “Atlas”');
+  toast.dismiss(toast.current()!.id);
 });

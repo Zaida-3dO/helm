@@ -387,6 +387,12 @@ button.ui-chip-main:hover {
 .ui-dialog-body.padded {
   padding: calc(4 * var(--ui-unit)) calc(20 * var(--ui-unit)) calc(16 * var(--ui-unit));
 }
+.ui-confirm-body {
+  margin: 0;
+  font-size: calc(12 * var(--ui-unit));
+  line-height: 1.6;
+  color: var(--secondary);
+}
 .ui-dialog-foot {
   flex: none;
   display: flex;
