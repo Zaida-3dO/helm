@@ -8,8 +8,14 @@
 //! Claude Code reports cost as a running total for the whole process, subagents included, and a
 //! process that resumes a session starts from that session's saved total. So a turn's share is the
 //! running total minus the one seen after the previous turn of the same session (kept in
-//! `chat_turn_usage.running`, so it survives a worker restart). When the running total goes down,
-//! it started over (a `/clear`, or a resume that restored nothing), and the whole of it is new.
+//! `chat_turn_usage.running`, so it survives a worker restart). The running totals started over
+//! (a `/clear`, or a resume that restored nothing), and the whole of them is new, when they went
+//! down, or when the difference is smaller than the turn's own main-conversation tokens, which
+//! it always contains: a fresh process whose first turn happens to pass the saved totals.
+//!
+//! What cannot be told apart: a hard-killed process may have saved older totals than Helm last
+//! saw, and a resume then restores those. The drop reads as a fresh start, so that first turn can
+//! count part of the earlier spend again.
 
 use crate::types::Usage;
 use rusqlite::{OptionalExtension, Transaction};
@@ -45,14 +51,18 @@ fn tokens(u: &Usage) -> i64 {
 }
 
 /// The turn's share of `running`, measured from `base` (the running totals after the session's
-/// previous turn). `main` is the turn's own token count for the main conversation, used when the
-/// running totals carry no token counts.
+/// previous turn). `main` is the turn's own token count for the main conversation: a share
+/// always holds at least that much, and it stands in when the running totals carry no token counts.
 pub fn share(base: &Usage, running: &Usage, main: &Usage) -> Usage {
+    let counted = tokens(running) > 0;
+    // Every count grew, and by at least the main conversation's tokens in all (compared as one
+    // sum, so a count the two reports file differently cannot trip it).
     let grew = running.cost_usd + 1e-12 >= base.cost_usd
         && running.input_tokens >= base.input_tokens
         && running.output_tokens >= base.output_tokens
         && running.cache_read_tokens >= base.cache_read_tokens
-        && running.cache_write_tokens >= base.cache_write_tokens;
+        && running.cache_write_tokens >= base.cache_write_tokens
+        && (!counted || tokens(running) - tokens(base) >= tokens(main));
     let mut d = if grew {
         Usage {
             input_tokens: running.input_tokens - base.input_tokens,
@@ -64,7 +74,7 @@ pub fn share(base: &Usage, running: &Usage, main: &Usage) -> Usage {
     } else {
         running.clone()
     };
-    if tokens(running) == 0 {
+    if !counted {
         d.input_tokens = main.input_tokens;
         d.output_tokens = main.output_tokens;
         d.cache_read_tokens = main.cache_read_tokens;

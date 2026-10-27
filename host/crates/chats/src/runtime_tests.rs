@@ -1093,14 +1093,28 @@ async fn a_restart_continuation_is_sent_once_with_the_native_session() {
         w.no_command_for(Duration::from_millis(200)).await.is_none(),
         "once"
     );
-    // Turn shares: measured from the restored totals; then the totals start over (a /clear), so
-    // all of them are new; then a result with no running totals counts its own tokens only.
+    // Turn shares: measured from the restored totals; then totals above the saved ones in every
+    // field but grown by fewer tokens than the turn's own, so a fresh start (nothing was restored)
+    // and all of them are new; then the totals drop (a /clear), so all of them are new; then a
+    // result with no running totals counts its own tokens only.
     let main =
         json!({"inputTokens": 1, "outputTokens": 2, "cacheReadTokens": 3, "cacheWriteTokens": 4});
-    for running in [
-        json!({"inputTokens": 150, "outputTokens": 30, "cacheReadTokens": 1500, "cacheWriteTokens": 20, "costUsd": 1.25}),
-        json!({"inputTokens": 5, "outputTokens": 5, "cacheReadTokens": 5, "cacheWriteTokens": 5, "costUsd": 0.1}),
-        json!(null),
+    let mut big = main.clone();
+    big["inputTokens"] = json!(20);
+    for (running, main) in [
+        (
+            json!({"inputTokens": 150, "outputTokens": 30, "cacheReadTokens": 1500, "cacheWriteTokens": 20, "costUsd": 1.25}),
+            &main,
+        ),
+        (
+            json!({"inputTokens": 160, "outputTokens": 32, "cacheReadTokens": 1505, "cacheWriteTokens": 22, "costUsd": 1.3}),
+            &big,
+        ),
+        (
+            json!({"inputTokens": 5, "outputTokens": 5, "cacheReadTokens": 5, "cacheWriteTokens": 5, "costUsd": 0.1}),
+            &main,
+        ),
+        (json!(null), &main),
     ] {
         let mut e = main.clone();
         e["type"] = json!("usage");
@@ -1114,11 +1128,16 @@ async fn a_restart_continuation_is_sent_once_with_the_native_session() {
          FROM chat_turn_usage WHERE chat_id = '{chat}' AND entry_id != 's:old' ORDER BY timestamp, rowid"
     ))
     };
-    h.until("three turns recorded", |h| shares(h).len() == 3)
+    h.until("four turns recorded", |h| shares(h).len() == 4)
         .await;
     assert_eq!(
         shares(&h),
-        ["50/20/500/10/0.25", "5/5/5/5/0.1", "1/2/3/4/0.0"]
+        [
+            "50/20/500/10/0.25",
+            "160/32/1505/22/1.3",
+            "5/5/5/5/0.1",
+            "1/2/3/4/0.0"
+        ]
     );
     let origin = h.col("SELECT origin FROM submission_meta");
     assert_eq!(
