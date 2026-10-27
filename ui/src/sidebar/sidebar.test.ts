@@ -117,12 +117,19 @@ test('a collapsed group totals the running and unread chats inside it and its ne
   assert.equal(header(buildList([project('b', { collapsed: true, chatCount: 1 })], [row('x', 'b')], opts), 'b').marks, null, 'nothing going on, no marks');
 });
 
-test('a missing parent draws at the top level and a collapsed group hides its contents', () => {
+test('a missing parent draws at the top level and a collapsed group hides its contents, even the open chat', () => {
   const projects = [project('a', { parentId: 'gone', chatCount: 1 }), project('b', { collapsed: true }), project('c', { parentId: 'b', chatCount: 1 })];
-  const rows = [row('x', 'b')];
+  const rows = [row('x', 'b', { status: 'running' }), row('y', 'c')];
   assert.deepEqual(shape(buildList(projects, rows, opts)), ['H0:a', 'H0:b']);
-  // The open chat's group stays expanded.
-  assert.deepEqual(shape(buildList(projects, rows, { ...opts, selectedChatId: 'x' })), ['H0:a', 'H0:b', 'H1:c', 'C0:x']);
+  // The user's collapse wins over the open chat: its project stays shut and its header keeps the collapsed marks.
+  const shut = buildList(projects, rows, { ...opts, selectedChatId: 'x' });
+  assert.deepEqual(shape(shut), ['H0:a', 'H0:b']);
+  const head = shut[1] as Extract<ListItem, { kind: 'header' }>;
+  assert.deepEqual([head.collapsed, head.marks], [true, { running: 1, unread: 0 }]);
+  // A chat just opened (from search, a link or a notification) shows its project and the projects it sits in.
+  assert.deepEqual(shape(buildList(projects, rows, { ...opts, selectedChatId: 'x', revealOpenChat: true })), ['H0:a', 'H0:b', 'H1:c', 'C0:y', 'C0:x']);
+  const deep = [...projects.slice(0, 2), project('c', { parentId: 'b', chatCount: 1, collapsed: true })];
+  assert.deepEqual(shape(buildList(deep, rows, { ...opts, selectedChatId: 'y', revealOpenChat: true })), ['H0:a', 'H0:b', 'H1:c', 'C0:y', 'C0:x']);
 });
 
 test('empty projects never show, with no row to bring them back; a finished project shows while it holds chats', () => {

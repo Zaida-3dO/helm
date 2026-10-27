@@ -59,6 +59,10 @@ export interface BuildOptions {
   expandedChats: ReadonlySet<string>;
   /** The open chat: its group and ancestors stay visible. */
   selectedChatId: string | null;
+  /** Draw the open chat's project, and the projects it sits in, expanded even where they were left
+   *  collapsed, so a chat opened from search, a link or a notification can be seen. The sidebar
+   *  turns this off once the user collapses one of them: their collapse always wins. */
+  revealOpenChat?: boolean;
   /** Item links: the item each chat shows, and the item folders the user collapsed. */
   itemLinks?: { refs: ReadonlyMap<string, ItemRef>; collapsed: ReadonlySet<string> };
 }
@@ -168,6 +172,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
   const selectedGroup = o.selectedChatId ? rows.find((r) => r.chatId === o.selectedChatId)?.groupProjectId : undefined;
   const { roots, kids } = projectChildren(projects);
   const byId = new Map(projects.map((p) => [p.id, p]));
+  const revealed = o.revealOpenChat ? projectsHolding(byId, selectedGroup) : new Set<string>();
 
   // Which groups to draw: in the archived view only those holding an archived chat (or archived
   // themselves, or with such a descendant). A stale board group with no chats is dropped. In the
@@ -213,7 +218,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
   const out: ListItem[] = [];
   const emitGroup = (p: ProjectNode, depth: number, path: Set<string>) => {
     if (path.has(p.id) || !visible(p)) return;
-    const collapsed = p.collapsed && p.id !== selectedGroup;
+    const collapsed = p.collapsed && !revealed.has(p.id);
     const subtitle = headerSubtitle(p, byId);
     out.push({
       kind: 'header',
@@ -272,6 +277,13 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     }
   }
   markBlocks(out);
+  return out;
+}
+
+/** A project and every project it sits in. */
+export function projectsHolding(byId: ReadonlyMap<string, ProjectNode>, projectId: string | undefined): Set<string> {
+  const out = new Set<string>();
+  for (let id = projectId; id && !out.has(id); id = byId.get(id)?.parentId ?? undefined) out.add(id);
   return out;
 }
 

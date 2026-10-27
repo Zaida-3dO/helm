@@ -21,7 +21,7 @@ import { SidebarActions, compactChat, rollOverChat, rollOverConfirm } from './ac
 import { SidebarData, errorText } from './data.ts';
 import { canSitUnder, dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
 import { chatMenuItems, projectMenuItems } from './menus.ts';
-import { buildList, chatAncestors, visibleChatOrder, type ListItem } from './model.ts';
+import { buildList, chatAncestors, projectsHolding, visibleChatOrder, type ListItem } from './model.ts';
 import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
 import { ItemChip, ItemFolderRow, ItemOpenButton, ItemPickerHost, useItemRefs, useOpenItem } from '../itemlinks/ItemUi.tsx'; // item links
@@ -175,6 +175,12 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     if (up.some((id) => !expanded.has(id))) setExpanded((s) => new Set([...s, ...up]));
   }, [selected, snap.rows, expanded]);
 
+  // The open chat's project, and the projects it sits in, draw expanded even where they were left
+  // collapsed, so a chat opened from search, a link or a notification can be seen. Once the user
+  // collapses one of them that collapse wins, until another chat is opened.
+  const [revealOff, setRevealOff] = useState<string | null>(null);
+  useEffect(() => setRevealOff(null), [selected]);
+
   const openItem = useOpenItem();
   const itemRefs = useItemRefs(useMemo(() => snap.rows.map((r) => r.chatId), [snap.rows]));
   const items = useMemo(
@@ -184,9 +190,10 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         compact,
         expandedChats: expanded,
         selectedChatId: selected,
+        revealOpenChat: revealOff !== selected,
         itemLinks: view === 'activity' ? undefined : { refs: itemRefs, collapsed: collapsedItems },
       }),
-    [snap.projects, snap.rows, view, compact, expanded, selected, itemRefs, collapsedItems],
+    [snap.projects, snap.rows, view, compact, expanded, selected, revealOff, itemRefs, collapsedItems],
   );
   useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
   const projectsById = useMemo(() => new Map(snap.projects.map((p) => [p.id, p])), [snap.projects]);
@@ -673,7 +680,10 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           current={selected ? data.row(selected)?.groupProjectId === p.id : false}
           onToggle={() => {
             if (suppressClick.current) return;
-            void act.updateProject(p, { collapsed: !it.collapsed });
+            const collapse = !it.collapsed;
+            // Drawn open only because it holds the open chat: stop doing that, so the collapse shows.
+            if (collapse && selected && projectsHolding(projectsById, selectedRow?.groupProjectId).has(p.id)) setRevealOff(selected);
+            if (p.collapsed !== collapse) void act.updateProject(p, { collapsed: collapse });
           }}
           onPin={() => void act.updateProject(p, { pinned: !p.pinned })}
           onMove={(dir) => moveProject(p, dir)}
