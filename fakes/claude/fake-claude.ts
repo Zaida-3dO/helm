@@ -298,6 +298,14 @@ process.stdin.on("end", () => {
 
 const se = (event: Json, parent: unknown = null) => ({ type: "stream_event", event, parent_tool_use_id: parent, session_id: SESSION });
 
+// Usage as the real CLI reports it. Each request's usage is the API's (snake_case): input and cache
+// counts on message_start, the output count on message_delta. A result's usage is that turn's main
+// conversation only, while total_cost_usd and modelUsage are running totals for the whole process.
+const REQUEST_USAGE = { input_tokens: 10, output_tokens: 1, cache_read_input_tokens: 2, cache_creation_input_tokens: 1 };
+const TURN_COST_USD = 0.001;
+let running = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0 };
+const start = (id: string) => se({ type: "message_start", message: { id, model: "claude-fake", content: [], usage: REQUEST_USAGE } });
+
 function endTurn(rec: Json): void {
   out(rec);
   const done = readThisTurn;
@@ -324,20 +332,20 @@ function shorthand(step: Step): boolean {
       out({ type: "assistant", message: { id, model: "claude-fake", content: [{ type: "text", text }] }, parent_tool_use_id: step.parent, session_id: SESSION });
       return true;
     }
-    out(se({ type: "message_start", message: { id, model: "claude-fake", content: [] } }));
+    out(start(id));
     out(se({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }));
     out(se({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }));
     out(se({ type: "content_block_stop", index: 0 }));
     out(se({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 3 } }));
     out(se({ type: "message_stop" }));
-    out({ type: "assistant", message: { id, model: "claude-fake", content: [{ type: "text", text }] }, parent_tool_use_id: null, session_id: SESSION });
+    out({ type: "assistant", message: { id, model: "claude-fake", content: [{ type: "text", text }], usage: REQUEST_USAGE }, parent_tool_use_id: null, session_id: SESSION });
     return true;
   }
   if (step.tool) {
     const t = fill(step.tool) as Json;
     const id = `msg_fake_${++msgSeq}`;
     const parent = t.parent ?? null;
-    if (!parent) out(se({ type: "message_start", message: { id, model: "claude-fake", content: [] } }));
+    if (!parent) out(start(id));
     out({ type: "assistant", message: { id, model: "claude-fake", content: [{ type: "tool_use", id: t.id, name: t.name, input: t.input ?? {} }] }, parent_tool_use_id: parent, session_id: SESSION });
     if (!parent) out(se({ type: "message_stop" }));
     return true;
@@ -378,14 +386,23 @@ function shorthand(step: Step): boolean {
   }
   if (typeof step.result === "string") {
     const isError = step.isError === true;
+    const turn = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+    running = {
+      inputTokens: running.inputTokens + turn.input_tokens,
+      outputTokens: running.outputTokens + turn.output_tokens,
+      cacheReadInputTokens: running.cacheReadInputTokens + turn.cache_read_input_tokens,
+      cacheCreationInputTokens: running.cacheCreationInputTokens + turn.cache_creation_input_tokens,
+      costUSD: Math.round((running.costUSD + TURN_COST_USD) * 1e6) / 1e6,
+    };
     endTurn({
       type: "result",
       subtype: typeof step.subtype === "string" ? step.subtype : isError ? "error_during_execution" : "success",
       is_error: isError,
       result: fill(step.result),
       session_id: SESSION,
-      usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
-      total_cost_usd: 0.001,
+      usage: turn,
+      total_cost_usd: running.costUSD,
+      modelUsage: { "claude-fake": running },
       duration_ms: 5,
       num_turns: 1,
     });

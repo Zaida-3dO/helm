@@ -23,4 +23,12 @@ chats: Array<ChatCost>,
 /**
  * How many of those chats are archived (they are counted).
  */
-archivedChats: number, };
+archivedChats: number, 
+/**
+ * Some reply in here is older than the first turn Helm recorded, so it is not counted.
+ */
+uncountedReplies: boolean, 
+/**
+ * When Helm recorded its first turn; `None` when it has recorded none yet.
+ */
+countingSince?: number, };

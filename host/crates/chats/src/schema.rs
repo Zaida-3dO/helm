@@ -19,6 +19,7 @@
 //! | `fork_carry` | a message fork's carried history, sent once with its first prompt ([`crate::fork`]) |
 //! | `chat_file_cleanup` | files a hard delete left behind, removed after commit and retried at startup ([`crate::delete`]) |
 //! | `submission_context` | the panel-context block a composer send carried |
+//! | `chat_turn_usage` | per turn: the tokens and cost it used, projected from the session log's `usage` entries ([`crate::turn_usage`]) |
 //! | view `chat_search_source` | the searchable message text the search crate indexes ([`crate::search_source`]) |
 //!
 //! Recovery, inside the one startup transaction:
@@ -150,6 +151,20 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              submission_id  TEXT PRIMARY KEY REFERENCES submissions(id) ON DELETE CASCADE,
              text           TEXT NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS chat_turn_usage (
+             chat_id             TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+             entry_id            TEXT NOT NULL,
+             timestamp           INTEGER NOT NULL,
+             native_session      TEXT,
+             input_tokens        INTEGER NOT NULL,
+             output_tokens       INTEGER NOT NULL,
+             cache_read_tokens   INTEGER NOT NULL,
+             cache_write_tokens  INTEGER NOT NULL,
+             cost_usd            REAL NOT NULL,
+             running             TEXT NOT NULL,
+             PRIMARY KEY (chat_id, entry_id)
+         );
+         CREATE INDEX IF NOT EXISTS chat_turn_usage_session ON chat_turn_usage(native_session, timestamp);
          CREATE VIEW IF NOT EXISTS chat_search_source AS
              SELECT m.id AS message_id, m.chat_id AS chat_id, m.role AS role, m.text AS text,
                     m.timestamp AS timestamp, c.archived AS archived

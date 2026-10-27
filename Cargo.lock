@@ -2148,6 +2148,7 @@ name = "helm-usage"
 version = "0.3.0"
 dependencies = [
  "chrono",
+ "helm-chats",
  "helm-core",
  "helm-hosttools",
  "helm-ipc",

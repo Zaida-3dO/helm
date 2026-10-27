@@ -25,6 +25,7 @@ message row's `source_key`, which is what makes projection idempotent.
 | `message` | `u:<submissionId>` for a user row, `m:<messageId>` for an assistant row | `timestamp, role, text, thinking, status, details` | the worker ends the message (`message_end`) |
 | `tool` | `t:<toolCallId>` | `timestamp, toolCallId, toolName, args, result, isError, startedAt, endedAt` | the tool call ends; start and end are merged into one entry |
 | `context` | `c:<uuid>` | `timestamp, kind, text`; `kind` is `compaction`, `model_change`, `effort_change`, `notice` or `restart` | the host records a context row |
+| `usage` | `s:<uuid>` | `timestamp, nativeSession, usage, running`: the turn's tokens (subagents included) and reported cost, and Claude Code's running totals after it | the worker reports a turn's result; projected into `chat_turn_usage`, not `messages` (see `src/turn_usage.rs`) |
 
 Reserved and not written: `fork`, `harness_switch`, `rewind`, `subagent_name`. A reader keeps an
 entry of a kind it does not know in the chain, so its children still resolve, but does not project
@@ -37,7 +38,7 @@ until its `message_end`, and then the logged entry replaces it under the same ke
 
 The host appends an entry, then projects it in one database transaction:
 - into `entries` (`chat_id, entry_id, parent_id, kind, raw`), insert-or-ignore;
-- into `messages`, upserted by `(chat_id, source_key)`.
+- into `messages`, upserted by `(chat_id, source_key)` (a `usage` entry goes into `chat_turn_usage` instead, insert-or-ignore).
 
 If the app dies between the two, startup `reconcile` projects every log entry missing from
 `entries`. Running it again changes nothing.

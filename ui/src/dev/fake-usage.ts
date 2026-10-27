@@ -152,7 +152,8 @@ export function usageFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   return { prefixes: ['usage_', 'request_modes', 'feedback_'], handler };
 }
 
-// `usage_cost`: sample numbers, the same for any chat; a project lists four chats, one archived.
+// `usage_cost`: sample numbers, the same for any chat; a project lists four chats, one archived,
+// and has replies from before cost was recorded.
 function costReport(a: Record<string, unknown>, t0: number): CostReport {
   const totals = (input: number, output: number, read: number, write: number, cost: number): CostTotals => ({
     inputTokens: input,
@@ -168,7 +169,7 @@ function costReport(a: Record<string, unknown>, t0: number): CostReport {
   const chat = (chatId: string, title: string, archived: boolean, t: CostTotals, week: number) => ({ chatId, title, archived, totals: t, weekCostUsd: week, weeklyPct: (week / helm) * weekPct });
   if (typeof a.chatId === 'string') {
     const t = totals(18_420, 96_310, 4_812_550, 402_118, 12.84);
-    return { scope: 'chat', name: 'Fix the flaky sidebar test', totals: t, weekly: weekly(9.31), chats: [chat(a.chatId, 'Fix the flaky sidebar test', false, t, 9.31)], archivedChats: 0 };
+    return { scope: 'chat', name: 'Fix the flaky sidebar test', totals: t, weekly: weekly(9.31), chats: [chat(a.chatId, 'Fix the flaky sidebar test', false, t, 9.31)], archivedChats: 0, uncountedReplies: false, countingSince: t0 - 6 * 24 * HOUR };
   }
   const chats = [
     chat('c-1', 'Build the cost dialog', false, totals(31_200, 151_000, 9_120_400, 640_210, 23.18), 23.18),
@@ -177,5 +178,5 @@ function costReport(a: Record<string, unknown>, t0: number): CostReport {
     chat('c-4', 'Quick question about tokens', false, totals(1_200, 2_400, 38_000, 9_100, 0.12), 0.12),
   ];
   const sum = chats.reduce((s, c) => totals(s.inputTokens + c.totals.inputTokens, s.outputTokens + c.totals.outputTokens, s.cacheReadTokens + c.totals.cacheReadTokens, s.cacheWriteTokens + c.totals.cacheWriteTokens, s.costUsd + c.totals.costUsd), totals(0, 0, 0, 0, 0));
-  return { scope: 'project', name: 'Helm', totals: sum, weekly: weekly(chats.reduce((s, c) => s + c.weekCostUsd, 0)), chats, archivedChats: 1 };
+  return { scope: 'project', name: 'Helm', totals: sum, weekly: weekly(chats.reduce((s, c) => s + c.weekCostUsd, 0)), chats, archivedChats: 1, uncountedReplies: true, countingSince: t0 - 6 * 24 * HOUR };
 }

@@ -1,10 +1,12 @@
 //! `app_usage_summary`: a bounded, read-only digest of this machine's own usage records.
 //!
-//! The records are the token counts and reported cost already stored on each assistant message,
-//! so this reads Helm's database and nothing else: no plan percentage, no reset time (the meter
-//! owns those) and no network. Cost is what the binary reported, never an estimate. A message's
-//! model is its chat's current model, since the rows themselves do not record one. A fork's copied
-//! history counts for the chat it came from only (see [`OWN_USAGE`]).
+//! The records are the per-turn token counts and reported cost the chats crate keeps in
+//! `chat_turn_usage` (subagents included), so this reads Helm's database and nothing else: no plan
+//! percentage, no reset time (the meter owns those) and no network. Cost is what the binary
+//! reported, never an estimate. A turn's model is its chat's current model, since the rows
+//! themselves do not record one. A fork's copied history counts for the chat it came from only
+//! (see [`OWN_USAGE`]). Turns from before Helm recorded them are not there at all; a cost report
+//! says so ([`CostReport::uncounted_replies`]).
 //!
 //! `usage_cost` ([`cost_report`]) reads the same records for one chat or project, and adds an
 //! estimated share of the plan's weekly window from the meter's last reading.
@@ -25,7 +27,7 @@ const DAY_MS: i64 = 86_400_000;
 
 #[derive(Default, Clone, Copy)]
 struct Sums {
-    requests: i64,
+    turns: i64,
     input: i64,
     output: i64,
     cache_read: i64,
@@ -35,7 +37,7 @@ struct Sums {
 
 impl Sums {
     fn add(&mut self, o: &Sums) {
-        self.requests += o.requests;
+        self.turns += o.turns;
         self.input += o.input;
         self.output += o.output;
         self.cache_read += o.cache_read;
@@ -45,7 +47,7 @@ impl Sums {
 
     fn json(&self) -> Map<String, Value> {
         let mut m = Map::new();
-        m.insert("requests".into(), json!(self.requests));
+        m.insert("turns".into(), json!(self.turns));
         m.insert("inputTokens".into(), json!(self.input));
         m.insert("outputTokens".into(), json!(self.output));
         m.insert("cacheReadTokens".into(), json!(self.cache_read));
@@ -130,21 +132,14 @@ fn read_rows(
     chat: Option<&str>,
 ) -> Result<Vec<Row>, ToolError> {
     db.snapshot(|tx| {
-        let mut st = tx.prepare(
-            "SELECT c.id, c.title, COALESCE(c.model, 'default'), m.timestamp / 86400000,
-                    COUNT(*),
-                    SUM(COALESCE(json_extract(m.details, '$.usage.inputTokens'), 0)),
-                    SUM(COALESCE(json_extract(m.details, '$.usage.outputTokens'), 0)),
-                    SUM(COALESCE(json_extract(m.details, '$.usage.cacheReadTokens'), 0)),
-                    SUM(COALESCE(json_extract(m.details, '$.usage.cacheWriteTokens'), 0)),
-                    SUM(COALESCE(json_extract(m.details, '$.usage.costUsd'), 0.0))
-             FROM messages m JOIN chats c ON c.id = m.chat_id
-             WHERE m.role = 'assistant' AND m.details IS NOT NULL AND json_valid(m.details)
-               AND json_extract(m.details, '$.usage') IS NOT NULL AND m.timestamp >= c.created_at
-               AND m.timestamp >= ?1 AND m.timestamp < ?2
-               AND (?3 IS NULL OR c.id = ?3)
-             GROUP BY c.id, 3, 4",
-        )?;
+        let mut st = tx.prepare(&format!(
+            "SELECT c.id, c.title, COALESCE(c.model, 'default'), u.timestamp / 86400000,
+                        COUNT(*), {SUMS}
+                 FROM chat_turn_usage u JOIN chats c ON c.id = u.chat_id
+                 WHERE {OWN_USAGE} AND u.timestamp >= ?1 AND u.timestamp < ?2
+                   AND (?3 IS NULL OR c.id = ?3)
+                 GROUP BY c.id, 3, 4"
+        ))?;
         let it = st.query_map(rusqlite::params![since, until, chat], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -152,7 +147,7 @@ fn read_rows(
                 r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)?,
                 Sums {
-                    requests: r.get(4)?,
+                    turns: r.get(4)?,
                     input: r.get(5)?,
                     output: r.get(6)?,
                     cache_read: r.get(7)?,
@@ -235,7 +230,7 @@ pub fn digest(db: &Database, a: &Value, now: i64) -> ToolResult {
         "byDay": days,
         "topChats": chats,
         "chatsWithUsage": chats_total,
-        "notes": "Local records only: token counts and the cost the binary reported. A model is the chat's current model. No plan percentage or reset time.",
+        "notes": "Local records only: each turn's token counts (subagents included) and the cost the binary reported. A model is the chat's current model. No plan percentage or reset time.",
     });
     // Bounded: drop the tails of the longest lists first if the answer is over the size bound.
     for key in ["topChats", "byDay"] {
@@ -252,11 +247,14 @@ pub fn digest(db: &Database, a: &Value, now: i64) -> ToolResult {
 
 const WEEK_MS: i64 = 7 * DAY_MS;
 
-/// A message counts for its chat only if it is newer than the chat. A fork's log starts with copies
-/// of its source's messages (usage included) under their original times, so this leaves the
+/// A turn counts for its chat only if it is newer than the chat. A fork's log starts with copies
+/// of its source's entries (turn usage included) under their original times, so this leaves the
 /// inherited history with the chat it came from and nothing is counted twice.
-const OWN_USAGE: &str = "m.role = 'assistant' AND m.details IS NOT NULL AND json_valid(m.details)
-     AND json_extract(m.details, '$.usage') IS NOT NULL AND m.timestamp >= c.created_at";
+const OWN_USAGE: &str = "u.timestamp >= c.created_at";
+
+/// The token and cost sums over `chat_turn_usage u`.
+const SUMS: &str = "SUM(u.input_tokens), SUM(u.output_tokens), SUM(u.cache_read_tokens),
+     SUM(u.cache_write_tokens), SUM(u.cost_usd)";
 
 fn totals(s: &Sums) -> CostTotals {
     CostTotals {
@@ -309,15 +307,9 @@ pub fn cost_report(
             }
         };
         let mut st = tx.prepare(&format!(
-            "SELECT c.id, c.title, c.archived, COUNT(*),
-                    SUM(COALESCE(json_extract(m.details, '$.usage.inputTokens'), 0)),
-                    SUM(COALESCE(json_extract(m.details, '$.usage.outputTokens'), 0)),
-                    SUM(COALESCE(json_extract(m.details, '$.usage.cacheReadTokens'), 0)),
-                    SUM(COALESCE(json_extract(m.details, '$.usage.cacheWriteTokens'), 0)),
-                    SUM(COALESCE(json_extract(m.details, '$.usage.costUsd'), 0.0)),
-                    SUM(CASE WHEN m.timestamp >= ?2
-                        THEN COALESCE(json_extract(m.details, '$.usage.costUsd'), 0.0) ELSE 0.0 END)
-             FROM messages m JOIN chats c ON c.id = m.chat_id
+            "SELECT c.id, c.title, c.archived, COUNT(*), {SUMS},
+                    SUM(CASE WHEN u.timestamp >= ?2 THEN u.cost_usd ELSE 0.0 END)
+             FROM chat_turn_usage u JOIN chats c ON c.id = u.chat_id
              WHERE {chats} AND {OWN_USAGE}
              GROUP BY c.id"
         ))?;
@@ -328,7 +320,7 @@ pub fn cost_report(
                     r.get::<_, String>(1)?,
                     r.get::<_, bool>(2)?,
                     Sums {
-                        requests: r.get(3)?,
+                        turns: r.get(3)?,
                         input: r.get(4)?,
                         output: r.get(5)?,
                         cache_read: r.get(6)?,
@@ -341,16 +333,28 @@ pub fn cost_report(
             .collect::<rusqlite::Result<Vec<Line>>>()?;
         let helm: f64 = tx.query_row(
             &format!(
-                "SELECT COALESCE(SUM(COALESCE(json_extract(m.details, '$.usage.costUsd'), 0.0)), 0.0)
-                 FROM messages m JOIN chats c ON c.id = m.chat_id
-                 WHERE m.timestamp >= ?1 AND {OWN_USAGE}"
+                "SELECT COALESCE(SUM(u.cost_usd), 0.0)
+                 FROM chat_turn_usage u JOIN chats c ON c.id = u.chat_id
+                 WHERE u.timestamp >= ?1 AND {OWN_USAGE}"
             ),
             [since],
             |r| r.get(0),
         )?;
-        Ok::<_, rusqlite::Error>(Some((name, lines, helm)))
+        // Replies here from before Helm recorded its first turn were never counted.
+        let first: Option<i64> =
+            tx.query_row("SELECT MIN(timestamp) FROM chat_turn_usage", [], |r| r.get(0))?;
+        let uncounted: bool = tx.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM messages m JOIN chats c ON c.id = m.chat_id
+                 WHERE {chats} AND m.role = 'assistant' AND m.timestamp >= c.created_at
+                   AND m.timestamp < ?2)"
+            ),
+            rusqlite::params![id, first.unwrap_or(now)],
+            |r| r.get(0),
+        )?;
+        Ok::<_, rusqlite::Error>(Some((name, lines, helm, first, uncounted)))
     });
-    let (name, mut lines, helm) = read
+    let (name, mut lines, helm, counting_since, uncounted_replies) = read
         .map_err(|e| format!("The usage records could not be read: {e}"))?
         .ok_or_else(|| match scope {
             CostScope::Chat => "There is no such chat.".to_owned(),
@@ -395,6 +399,8 @@ pub fn cost_report(
         }),
         chats,
         archived_chats,
+        uncounted_replies,
+        counting_since,
     })
 }
 
@@ -402,7 +408,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_usage_summary",
-            "A digest of this machine's own usage records: tokens, requests and the cost the binary reported, totalled and split by model, day and chat (the ten heaviest). Read-only and local; it has no plan percentage or reset time. Use range (today, 24h, 7d, 30d, all; default 7d) or since/until (YYYY-MM-DD or an RFC 3339 time), and chatId to look at one chat. Answers are at most 8 KiB.",
+            "A digest of this machine's own usage records: tokens, turns (subagents included) and the cost the binary reported, totalled and split by model, day and chat (the ten heaviest). Read-only and local; it has no plan percentage or reset time. Use range (today, 24h, 7d, 30d, all; default 7d) or since/until (YYYY-MM-DD or an RFC 3339 time), and chatId to look at one chat. Answers are at most 8 KiB.",
             json!({
                 "type": "object",
                 "properties": {
@@ -432,16 +438,27 @@ mod tests {
     #[test]
     fn the_digest_sums_by_model_day_and_chat_within_the_window() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(&dir.path().join("t.sqlite3"), &MigrationRegistry::new()).unwrap();
+        let mut reg = MigrationRegistry::new();
+        helm_chats::register_migrations(&mut reg);
+        let db = Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap();
         let now = 10 * DAY_MS + 5_000;
-        let usage = |i: i64, o: i64, c: f64| {
-            json!({"usage": {"inputTokens": i, "outputTokens": o, "cacheReadTokens": 1,
-                             "cacheWriteTokens": 2, "costUsd": c}})
-            .to_string()
+        // A turn as the chats crate records it: a `usage` entry in the session log, projected.
+        let turn = |tx: &rusqlite::Transaction<'_>,
+                    chat: &str,
+                    key: &str,
+                    ts: i64,
+                    i: i64,
+                    o: i64,
+                    c: f64| {
+            let usage = json!({"inputTokens": i, "outputTokens": o, "cacheReadTokens": 1,
+                               "cacheWriteTokens": 2, "costUsd": c});
+            let raw = json!({"type": "usage", "id": key, "timestamp": ts, "nativeSession": "s",
+                             "usage": usage, "running": usage});
+            helm_chats::session_log::project(tx, dir.path(), chat, raw.as_object().unwrap(), 1)
         };
         db.write(|tx| {
-            // Project q is nested in p (the projects crate's table, made here by hand); its
-            // archived chat f is a fork made at day 9.5, so its day-9 row is inherited history.
+            // Project q is nested in p; its archived chat f is a fork made at day 9.5, so its day-9
+            // turn is inherited history.
             tx.execute_batch(
                 "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1), ('q', 'Q', 1);
                  CREATE TABLE project_parents(project_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL);
@@ -458,40 +475,21 @@ mod tests {
                     rusqlite::params![id, project, model, created, archived],
                 )?;
             }
-            // (chat, key, role, timestamp, details)
-            let rows = [
-                (
-                    "a",
-                    "m1",
-                    "assistant",
-                    10 * DAY_MS,
-                    Some(usage(100, 10, 0.5)),
-                ),
-                ("a", "m2", "assistant", 9 * DAY_MS, Some(usage(50, 5, 0.25))),
-                ("b", "m3", "assistant", 9 * DAY_MS, Some(usage(7, 1, 0.01))),
-                ("a", "m4", "user", 10 * DAY_MS, Some(usage(999, 999, 9.0))),
-                ("a", "m5", "assistant", 10 * DAY_MS, None),
-                (
-                    "a",
-                    "m6",
-                    "assistant",
-                    2 * DAY_MS,
-                    Some(usage(1000, 1000, 1.0)),
-                ),
-                ("f", "m7", "assistant", 9 * DAY_MS, Some(usage(50, 5, 0.25))),
-                (
-                    "f",
-                    "m8",
-                    "assistant",
-                    10 * DAY_MS,
-                    Some(usage(10, 1, 0.24)),
-                ),
-            ];
-            for (chat, key, role, ts, details) in rows {
+            turn(tx, "a", "s:1", 10 * DAY_MS, 100, 10, 0.5)?;
+            turn(tx, "a", "s:2", 9 * DAY_MS, 50, 5, 0.25)?;
+            turn(tx, "b", "s:3", 9 * DAY_MS, 7, 1, 0.01)?;
+            turn(tx, "a", "s:6", 2 * DAY_MS, 1000, 1000, 1.0)?;
+            turn(tx, "f", "s:7", 9 * DAY_MS, 50, 5, 0.25)?;
+            turn(tx, "f", "s:8", 10 * DAY_MS, 10, 1, 0.24)?;
+            // Projecting the same entry again records nothing new.
+            turn(tx, "f", "s:8", 10 * DAY_MS, 10, 1, 0.24)?;
+            // Replies are not what is counted, whatever usage they carry: chat a has one from
+            // before Helm's first recorded turn (day 2), chat b none.
+            for (chat, key, ts) in [("a", "m:old", DAY_MS), ("b", "m:new", 9 * DAY_MS)] {
                 tx.execute(
                     "INSERT INTO messages(chat_id, source_key, role, timestamp, details)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    rusqlite::params![chat, key, role, ts, details],
+                     VALUES (?1, ?2, 'assistant', ?3, ?4)",
+                    rusqlite::params![chat, key, ts, json!({"usage": {"inputTokens": 999, "costUsd": 9.0}}).to_string()],
                 )?;
             }
             Ok::<(), rusqlite::Error>(())
@@ -499,9 +497,8 @@ mod tests {
         .unwrap();
 
         let all = digest(&db, &json!({"range": "7d"}), now).unwrap();
-        // m6 is outside seven days; the user row and the row with no usage are not requests; the
-        // fork's inherited m7 is its source's.
-        assert_eq!(all["total"]["requests"], 4);
+        // s:6 is outside seven days; the fork's inherited s:7 is its source's.
+        assert_eq!(all["total"]["turns"], 4);
         assert_eq!(all["total"]["inputTokens"], 167);
         assert_eq!(all["total"]["costUsd"], 1.0);
         assert_eq!(all["byModel"][0]["model"], "opus");
@@ -510,14 +507,14 @@ mod tests {
         assert_eq!(all["chatsWithUsage"], 3);
         assert_eq!(all["topChats"][0]["chatId"], "a");
         let one = digest(&db, &json!({"range": "all", "chatId": "b"}), now).unwrap();
-        assert_eq!(one["total"]["requests"], 1);
+        assert_eq!(one["total"]["turns"], 1);
         let custom = digest(
             &db,
             &json!({"since": "1970-01-10", "until": 10 * DAY_MS}),
             now,
         )
         .unwrap();
-        assert_eq!(custom["total"]["requests"], 2);
+        assert_eq!(custom["total"]["turns"], 2);
 
         // Cost reports. The weekly window began at day 5: a, b and f cost 1.00 in it, and the
         // plan's 40% is shared out in proportion.
@@ -533,6 +530,12 @@ mod tests {
         close(w.helm_cost_usd, 1.0);
         close(w.cost_usd, 0.75);
         close(w.share_pct, 30.0);
+        assert_eq!(
+            (a.uncounted_replies, a.counting_since),
+            (true, Some(2 * DAY_MS))
+        );
+        let b = cost_report(&db, CostScope::Chat, "b", week, now).unwrap();
+        assert!(!b.uncounted_replies);
         let f = cost_report(&db, CostScope::Chat, "f", week, now).unwrap();
         assert_eq!((f.totals.input_tokens, f.archived_chats), (10, 1));
         // A project counts its sub-projects and archived chats, costliest chat first.

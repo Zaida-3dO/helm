@@ -46,10 +46,10 @@ suppressed in `HostChannel` and logged to stderr.
 | `agent_start` | — |
 | `message_start` | `message {id, role, content:[], model?}` |
 | `message_update` | `messageId, index, delta {type: text_delta \| thinking_delta \| toolcall_delta, text}` |
-| `message_end` | `message {id, role, content, model?, stopReason?, usage?, status: complete \| error \| interrupted, errorMessage?, submissionId? (user rows)}` |
+| `message_end` | `message {id, role, content, model?, stopReason?, usage?, status: complete \| error \| interrupted, errorMessage?, submissionId? (user rows)}`; `usage` is the request's own, in the API's spelling (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`): input and cache counts from `message_start`, the output count from `message_delta` |
 | `tool_execution_start` | `toolCallId, toolName, args` |
 | `tool_execution_end` | `toolCallId, toolName, result {text, content?}, isError` |
-| `usage` | `inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd, durationMs, numTurns` |
+| `usage` | `inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd, durationMs, numTurns, running?`. The token counts are the result line's `usage`: this turn's main conversation only. `costUsd` is `total_cost_usd`, a running total for the whole process. `running {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd}` is the process's running totals, subagents included (`total_cost_usd` and the sum of `modelUsage`); a resumed session starts from its saved totals, and a `/clear` starts them over. The host records each turn's share of them |
 | `auto_retry_start` | `attempt, maxAttempts, delayMs, errorStatus, errorMessage, waiting:false` |
 | `auto_retry_end` | `state: recovered \| retried \| cancelled \| failed, attempt` |
 | `agent_settled` | `outcome: complete \| error \| stopped \| interrupted, error?, sessionId?` |

@@ -116,6 +116,25 @@ export function convertContent(content: unknown): ContentBlock[] {
   return out;
 }
 
+/**
+ * The CLI's running totals on a result line: `total_cost_usd` and the per-model counts in
+ * `modelUsage` cover the whole process so far (subagents included), unlike `usage`, which is this
+ * turn's main conversation only. The host turns them into each turn's share.
+ */
+function runningTotals(rec: Json): Json | undefined {
+  const cost = num(rec.total_cost_usd);
+  if (cost === undefined) return undefined;
+  const models = Object.values(obj(rec.modelUsage)).map(obj);
+  const sum = (k: string) => models.reduce((n, m) => n + (num(m[k]) ?? 0), 0);
+  return {
+    inputTokens: sum("inputTokens"),
+    outputTokens: sum("outputTokens"),
+    cacheReadTokens: sum("cacheReadInputTokens"),
+    cacheWriteTokens: sum("cacheCreationInputTokens"),
+    costUsd: cost,
+  };
+}
+
 function resultText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -190,7 +209,9 @@ export class StreamTranslator {
         const id = String(m.id ?? `live-${Date.now()}`);
         this.closeLive("interrupted"); // a new message while one is open: the old one never finished
         this.resolveRetry("recovered");
-        this.live = { id, model: typeof m.model === "string" ? m.model : undefined, content: [], toolJson: new Map() };
+        // The request's input and cache counts arrive here; message_delta adds the real output count.
+        const usage = m.usage && typeof m.usage === "object" ? { ...obj(m.usage) } : undefined;
+        this.live = { id, model: typeof m.model === "string" ? m.model : undefined, content: [], toolJson: new Map(), usage };
         this.streamed.add(id);
         this.h.emit({ type: "message_start", message: { id, role: "assistant", content: [], model: this.live.model } });
         return;
@@ -532,7 +553,7 @@ export class StreamTranslator {
     this.endForegroundSubagents(stopping ? "stopped" : "failed", stopping ? "Stopped by the user." : "The turn ended before this agent finished.");
     this.closeOpenTools(stopping ? "Stopped by the user." : "The turn ended before this tool finished.");
     const u = obj(rec.usage);
-    this.h.emit({
+    const e: Json = {
       type: "usage",
       inputTokens: u.input_tokens ?? 0,
       outputTokens: u.output_tokens ?? 0,
@@ -541,7 +562,10 @@ export class StreamTranslator {
       costUsd: rec.total_cost_usd ?? null,
       durationMs: rec.duration_ms ?? null,
       numTurns: rec.num_turns ?? null,
-    });
+    };
+    const running = runningTotals(rec);
+    if (running) e.running = running;
+    this.h.emit(e);
     // A host-requested abort that the harness reports as an error is a cancel.
     if (stopping) return "stopped";
     return isError ? "error" : "complete";

@@ -6,7 +6,7 @@
 //! append and the projection is repaired by [`reconcile`] at startup. Torn lines are
 //! passed over on read and quarantined to `<chat>.jsonl.torn`; more than [`MAX_TORN`] fail the read.
 
-use crate::types::{ContextKind, MessageDetails, MessageRole, MessageStatus};
+use crate::types::{ContextKind, MessageDetails, MessageRole, MessageStatus, Usage};
 use helm_core::db::Database;
 use rusqlite::{OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,24 @@ pub struct ContextEntry {
     pub text: String,
 }
 
+/// What one turn used, written when Claude Code reports the turn's result. `id` is `s:<uuid>`.
+/// It has no message row: it is projected into `chat_turn_usage` only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageEntry {
+    pub id: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    pub timestamp: i64,
+    /// The Claude Code session the turn ran in.
+    #[serde(default)]
+    pub native_session: Option<String>,
+    /// The turn's own share: tokens of every request it made (subagents included) and its cost.
+    pub usage: Usage,
+    /// Claude Code's running totals after the turn, which the next turn's share is measured from.
+    pub running: Usage,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Entry {
@@ -88,6 +106,7 @@ pub enum Entry {
     Message(Box<MessageEntry>),
     Tool(ToolEntry),
     Context(ContextEntry),
+    Usage(UsageEntry),
 }
 
 impl Entry {
@@ -100,6 +119,7 @@ impl Entry {
             Entry::Message(e) => &e.id,
             Entry::Tool(e) => &e.id,
             Entry::Context(e) => &e.id,
+            Entry::Usage(e) => &e.id,
         }
     }
     fn set_parent(&mut self, parent: Option<String>) {
@@ -107,6 +127,7 @@ impl Entry {
             Entry::Message(e) => e.parent_id = parent,
             Entry::Tool(e) => e.parent_id = parent,
             Entry::Context(e) => e.parent_id = parent,
+            Entry::Usage(e) => e.parent_id = parent,
         }
     }
     pub fn kind(&self) -> &'static str {
@@ -114,6 +135,7 @@ impl Entry {
             Entry::Message(_) => "message",
             Entry::Tool(_) => "tool",
             Entry::Context(_) => "context",
+            Entry::Usage(_) => "usage",
         }
     }
 }
@@ -493,8 +515,9 @@ pub fn status_str(s: MessageStatus) -> &'static str {
 }
 
 impl RowWrite {
-    pub fn from_entry(e: &Entry) -> Self {
-        match e {
+    /// The entry's message row; a usage entry has none.
+    pub fn from_entry(e: &Entry) -> Option<Self> {
+        Some(match e {
             Entry::Message(m) => RowWrite {
                 source_key: m.id.clone(),
                 role: role_str(m.role),
@@ -544,7 +567,8 @@ impl RowWrite {
                 entry_id: Some(c.id.clone()),
                 parent_id: c.parent_id.clone(),
             },
-        }
+            Entry::Usage(_) => return None,
+        })
     }
 }
 
@@ -688,14 +712,33 @@ pub fn project(
         "INSERT OR IGNORE INTO entries(chat_id, entry_id, parent_id, kind, raw) VALUES (?1, ?2, ?3, ?4, ?5)",
         (chat_id, id, parent, kind, Value::Object(raw.clone()).to_string()),
     )? > 0;
-    if let Ok(entry) = serde_json::from_value::<Entry>(Value::Object(raw.clone())) {
-        upsert_row(
-            tx,
-            artifacts,
-            chat_id,
-            &RowWrite::from_entry(&entry),
-            revision,
-        )?;
+    match serde_json::from_value::<Entry>(Value::Object(raw.clone())) {
+        Ok(Entry::Usage(u)) => {
+            let t = &u.usage;
+            tx.execute(
+                "INSERT OR IGNORE INTO chat_turn_usage(chat_id, entry_id, timestamp, native_session,
+                     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, running)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    chat_id,
+                    u.id,
+                    u.timestamp,
+                    u.native_session,
+                    t.input_tokens,
+                    t.output_tokens,
+                    t.cache_read_tokens,
+                    t.cache_write_tokens,
+                    t.cost_usd,
+                    serde_json::to_string(&u.running).unwrap_or_default(),
+                ],
+            )?;
+        }
+        Ok(entry) => {
+            if let Some(row) = RowWrite::from_entry(&entry) {
+                upsert_row(tx, artifacts, chat_id, &row, revision)?;
+            }
+        }
+        Err(_) => {}
     }
     Ok(inserted)
 }

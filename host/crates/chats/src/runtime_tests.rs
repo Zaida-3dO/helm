@@ -347,7 +347,9 @@ async fn reply(h: &H, w: &FakeWorker, mid: &str, text: &str) {
     .await;
     w.emit(json!({"type": "message_update", "messageId": mid, "index": 0, "delta": {"type": "text_delta", "text": &text[text.len() / 2..]}}))
         .await;
-    w.emit(json!({"type": "message_end", "message": {"id": mid, "role": "assistant", "content": [{"type": "text", "text": text}], "status": "complete"}}))
+    // Usage as the API spells it, which is what the worker passes on.
+    let usage = json!({"input_tokens": 12, "output_tokens": 30, "cache_read_input_tokens": 400, "cache_creation_input_tokens": 50});
+    w.emit(json!({"type": "message_end", "message": {"id": mid, "role": "assistant", "content": [{"type": "text", "text": text}], "usage": usage, "status": "complete"}}))
         .await;
 }
 
@@ -392,10 +394,23 @@ async fn a_turn_streams_and_settles() {
     w.emit(json!({"type": "submission_delivered", "submissionId": sid}))
         .await;
     reply(&h, &w, "msg_1", "Hello there!").await;
+    // The turn's result: its own tokens, and Claude Code's running totals (subagents included).
+    w.emit(json!({"type": "usage", "inputTokens": 12, "outputTokens": 30, "cacheReadTokens": 400, "cacheWriteTokens": 50, "costUsd": 0.05,
+        "running": {"inputTokens": 20, "outputTokens": 40, "cacheReadTokens": 500, "cacheWriteTokens": 60, "costUsd": 0.05}}))
+        .await;
     w.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-1"}))
         .await;
     h.until("chat idle", |h| h.status(&chat) == "idle").await;
     assert_eq!(h.state(&sid), "complete");
+    // The reply keeps its own request's tokens; the turn's tokens and cost are recorded once.
+    assert_eq!(
+        h.col("SELECT json_extract(details, '$.usage.inputTokens') || '/' || json_extract(details, '$.usage.cacheReadTokens') FROM messages WHERE role = 'assistant'"),
+        ["12/400"]
+    );
+    assert_eq!(
+        h.col("SELECT input_tokens || '/' || output_tokens || '/' || cache_read_tokens || '/' || cache_write_tokens || '/' || cost_usd FROM chat_turn_usage"),
+        ["20/40/500/60/0.05"]
+    );
     let streamed = h
         .events("message")
         .iter()
@@ -412,7 +427,7 @@ async fn a_turn_streams_and_settles() {
     // The session log holds both, and the binding has the native session.
     let sessions = h.profile.path("sessions");
     let log = crate::session_log::read(&crate::session_log::log_path(&sessions, &chat)).unwrap();
-    assert_eq!(log.entries.len(), 2);
+    assert_eq!(log.entries.len(), 3, "user, reply and the turn's usage");
     h.until("binding saved", |_| {
         crate::session_log::ClaudeBinding::load(&sessions, &chat).is_some()
     })
@@ -1058,6 +1073,17 @@ async fn a_restart_continuation_is_sent_once_with_the_native_session() {
         .unwrap();
     h.rt.start_continuations();
     h.rt.start_continuations();
+    // The session's last recorded running totals: a resumed Claude Code starts from them.
+    h.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO chat_turn_usage(chat_id, entry_id, timestamp, native_session, input_tokens, output_tokens,
+                 cache_read_tokens, cache_write_tokens, cost_usd, running)
+             VALUES (?1, 's:old', 1, 'native-7', 0, 0, 0, 0, 1.0,
+                 '{\"inputTokens\":100,\"outputTokens\":10,\"cacheReadTokens\":1000,\"cacheWriteTokens\":10,\"costUsd\":1.0}')",
+            [&chat],
+        )
+    })
+    .unwrap();
     let mut w = h.worker().await;
     assert_eq!(w.req.resume_session_id.as_deref(), Some("native-7"));
     w.ready().await;
@@ -1066,6 +1092,33 @@ async fn a_restart_continuation_is_sent_once_with_the_native_session() {
     assert!(
         w.no_command_for(Duration::from_millis(200)).await.is_none(),
         "once"
+    );
+    // Turn shares: measured from the restored totals; then the totals start over (a /clear), so
+    // all of them are new; then a result with no running totals counts its own tokens only.
+    let main =
+        json!({"inputTokens": 1, "outputTokens": 2, "cacheReadTokens": 3, "cacheWriteTokens": 4});
+    for running in [
+        json!({"inputTokens": 150, "outputTokens": 30, "cacheReadTokens": 1500, "cacheWriteTokens": 20, "costUsd": 1.25}),
+        json!({"inputTokens": 5, "outputTokens": 5, "cacheReadTokens": 5, "cacheWriteTokens": 5, "costUsd": 0.1}),
+        json!(null),
+    ] {
+        let mut e = main.clone();
+        e["type"] = json!("usage");
+        e["costUsd"] = json!(9.0);
+        e["running"] = running;
+        w.emit(e).await;
+    }
+    let shares = |h: &H| {
+        h.col(&format!(
+        "SELECT input_tokens || '/' || output_tokens || '/' || cache_read_tokens || '/' || cache_write_tokens || '/' || cost_usd
+         FROM chat_turn_usage WHERE chat_id = '{chat}' AND entry_id != 's:old' ORDER BY timestamp, rowid"
+    ))
+    };
+    h.until("three turns recorded", |h| shares(h).len() == 3)
+        .await;
+    assert_eq!(
+        shares(&h),
+        ["50/20/500/10/0.25", "5/5/5/5/0.1", "1/2/3/4/0.0"]
     );
     let origin = h.col("SELECT origin FROM submission_meta");
     assert_eq!(

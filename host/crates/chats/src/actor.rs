@@ -176,6 +176,9 @@ struct Actor {
     worker_error: Option<String>,
     last_error_row: Option<String>,
     native_session: Option<String>,
+    /// Claude Code's running usage totals after the last turn this worker reported (at launch:
+    /// what the resumed session last reached), which the next turn's share is measured from.
+    cost_base: Usage,
     shutdown_replies: Vec<oneshot::Sender<()>>,
     /// Host-tool calls still running, by request id (`chat_cancel` aborts them).
     host_calls: HashMap<String, tokio::task::AbortHandle>,
@@ -266,6 +269,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         worker_error: None,
         last_error_row: None,
         native_session: None,
+        cost_base: Usage::default(),
         shutdown_replies: Vec::new(),
         host_calls: HashMap::new(),
         retiring: false,
@@ -571,7 +575,9 @@ impl Actor {
         if let Some(obj) = raw.as_object() {
             self.write(|t| session_log::project(t, &artifacts, &id, obj, rev));
         }
-        self.emit_rows(&[key]);
+        if !matches!(entry, Entry::Usage(_)) {
+            self.emit_rows(&[key]);
+        }
     }
 
     /// Ask the AFK policy about one interaction. Returns true when AFK answered it (so it is not
@@ -646,6 +652,17 @@ impl Actor {
         self.native_session = own.clone();
         let fork_session = fork_of.is_some();
         let resume = own.or(fork_of);
+        // A resumed session's cost starts from its saved total, which earlier turns already counted.
+        self.cost_base = resume
+            .as_deref()
+            .and_then(|s| {
+                self.sh
+                    .db
+                    .snapshot(|t| crate::turn_usage::baseline(t, s))
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or_default();
         let sb = self.live.lock().unwrap().thread.send_behavior;
         self.launched_long = Some(sb.long_commands);
         self.relaunch_on_idle = false;
@@ -1775,6 +1792,7 @@ impl Actor {
                 }
             }
             "message_end" => self.on_message_end(&v),
+            "usage" => self.on_turn_usage(&v),
             "tool_execution_start" => {
                 let id = str_of(&v, "toolCallId").unwrap_or_default();
                 let name = str_of(&v, "toolName").unwrap_or_default();
@@ -2222,6 +2240,34 @@ impl Actor {
         self.emit_rows(&[key]);
     }
 
+    /// The turn's result: record what it used as a `usage` entry (see [`crate::turn_usage`]).
+    fn on_turn_usage(&mut self, v: &Value) {
+        let main = crate::turn_usage::parse(v).unwrap_or_default();
+        let turn = match v.get("running").and_then(crate::turn_usage::parse) {
+            Some(running) => {
+                let turn = crate::turn_usage::share(&self.cost_base, &running, &main);
+                self.cost_base = running;
+                turn
+            }
+            // No running totals: the main conversation's tokens, and no cost.
+            None => Usage {
+                cost_usd: 0.0,
+                ..main
+            },
+        };
+        if crate::turn_usage::is_empty(&turn) {
+            return;
+        }
+        self.record(Entry::Usage(crate::session_log::UsageEntry {
+            id: format!("s:{}", uuid::Uuid::new_v4()),
+            parent_id: None,
+            timestamp: now(),
+            native_session: self.native_session.clone(),
+            usage: turn,
+            running: self.cost_base.clone(),
+        }));
+    }
+
     fn on_message_end(&mut self, v: &Value) {
         let msg = v.get("message").cloned().unwrap_or_default();
         let role = str_of(&msg, "role").unwrap_or_default();
@@ -2258,21 +2304,9 @@ impl Actor {
             Some("interrupted") => MessageStatus::Interrupted,
             _ => MessageStatus::Complete,
         };
-        let usage = msg.get("usage").and_then(|u| {
-            Some(Usage {
-                input_tokens: u.get("inputTokens")?.as_i64().unwrap_or(0),
-                output_tokens: u.get("outputTokens").and_then(Value::as_i64).unwrap_or(0),
-                cache_read_tokens: u
-                    .get("cacheReadTokens")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0),
-                cache_write_tokens: u
-                    .get("cacheWriteTokens")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0),
-                cost_usd: u.get("costUsd").and_then(Value::as_f64).unwrap_or(0.0),
-            })
-        });
+        // The request's own tokens, as the API reports them; the turn's cost is recorded apart
+        // ([`Self::on_turn_usage`]).
+        let usage = msg.get("usage").and_then(crate::turn_usage::parse);
         if role == "user" {
             // The worker's echo of one of our submissions (id = submission id).
             let sid = str_of(&msg, "submissionId").unwrap_or(mid);

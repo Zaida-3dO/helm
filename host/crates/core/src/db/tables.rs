@@ -49,6 +49,7 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("chat_attention", Data),
     ("chat_triage", Data),
     ("chat_flags", Data),
+    ("chat_turn_usage", Data),
     ("agent_waits", Data),
     (
         "chat_mutes",

@@ -20,3 +20,4 @@ ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] 
 
 [dev-dependencies]
 tempfile.workspace = true
+helm-chats.workspace = true

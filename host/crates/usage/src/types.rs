@@ -204,4 +204,10 @@ pub struct CostReport {
     pub chats: Vec<ChatCost>,
     /// How many of those chats are archived (they are counted).
     pub archived_chats: u32,
+    /// Some reply in here is older than the first turn Helm recorded, so it is not counted.
+    pub uncounted_replies: bool,
+    /// When Helm recorded its first turn; `None` when it has recorded none yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub counting_since: Option<i64>,
 }

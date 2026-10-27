@@ -81,6 +81,7 @@ mod timeline;
 pub mod titles;
 pub mod tools;
 pub mod triage;
+pub mod turn_usage;
 pub mod types;
 
 pub use hostcalls::HostSeam;

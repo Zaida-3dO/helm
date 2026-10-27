@@ -153,10 +153,15 @@ describe("turns and transcript events", () => {
       assert.equal(asst.length, 1, "the whole-message record does not duplicate the streamed one");
       assert.equal(asst[0].status, "complete");
       assert.deepEqual(asst[0].content, [{ type: "thinking", thinking: "Pondering" }, { type: "text", text: "Hello world" }]);
+      // The reply's usage is the API's own (snake_case): input and cache from message_start, the
+      // real output count from message_delta.
+      assert.deepEqual(asst[0].usage, { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 2, cache_creation_input_tokens: 1 });
       const usage = s.host.ofType("usage")[0];
       assert.equal(usage.inputTokens, 10);
       assert.equal(usage.outputTokens, 5);
       assert.equal(usage.cacheReadTokens, 2);
+      // The running totals the host measures each turn's share from (modelUsage, subagents included).
+      assert.deepEqual(usage.running, { inputTokens: 30, outputTokens: 15, cacheReadTokens: 6, cacheWriteTokens: 3, costUsd: 0.001 });
       assert.equal(s.host.ofType("permission_mode")[0]?.mode, "default");
       assert.equal(s.host.ofType("native_session")[0]?.sessionId, "fake-session");
     } finally {

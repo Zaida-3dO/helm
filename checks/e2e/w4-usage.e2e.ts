@@ -91,6 +91,12 @@ describe("the plan-usage meter, Settings → Usage and item links", { timeout: 1
       assert.equal(await page().locator(tid("item-folder")).count(), 0, "one chat: a chip and no folder");
       const open1 = (await api(page(), "item_open", { itemId: ITEM })) as { chatId?: string };
       assert.equal(open1.chatId, one);
+      // The turn's tokens and reported cost are recorded, from usage shaped as the real CLI sends it.
+      const cost = await until("the turn's cost", async () => {
+        const r = (await api(page(), "usage_cost", { chatId: one })) as { totals: { costUsd: number; inputTokens: number; outputTokens: number } };
+        return r.totals.costUsd > 0 ? r.totals : undefined;
+      });
+      assert.deepEqual([cost.costUsd, cost.inputTokens, cost.outputTokens], [0.001, 10, 5]);
 
       const two = await newChat(page(), work);
       await sendMessage("link this chat too");

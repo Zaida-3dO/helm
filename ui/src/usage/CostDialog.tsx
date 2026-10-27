@@ -1,5 +1,5 @@
 // The Cost dialog: what a chat, or every chat in a folder or project, has used. Tokens and the
-// cost come from Helm's own records of each reply; the weekly share is an estimate the host works
+// cost come from Helm's own records of each turn (subagents included); the weekly share is an estimate the host works
 // out from the meter's weekly reading (`usage_cost`).
 
 import { useEffect, useMemo, useState } from 'react';
@@ -92,6 +92,12 @@ export function CostDialog({ api, target, onClose }: { api: Api; target: CostTar
               </p>
             ) : (
               <p>There is no current weekly reading from the plan meter, so there is no weekly share. Refresh the meter in the top bar and open this again.</p>
+            )}
+            {report.uncountedReplies && (
+              <p data-testid="cost-uncounted">
+                Helm began recording what each turn costs {report.countingSince === undefined ? 'with this version' : `on ${day(report.countingSince)}`}, so replies {chat ? 'in this chat' : 'in these chats'} from
+                before then are not included.
+              </p>
             )}
             <p>
               A forked chat counts only what it used after the fork, not the history it copied.
