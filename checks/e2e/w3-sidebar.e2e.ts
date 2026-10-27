@@ -95,20 +95,26 @@ describe("sidebar: Agent Standup sync, groups and nesting", { timeout: 10 * 60_0
       const first = await newChat(page(), folder);
       const second = await newChat(page(), folder);
       const row = (id: string) => page().locator(tid("chat-item", `[data-chat-id="${id}"]`));
-      const h = await row(first).evaluate((e) => Math.round(e.getBoundingClientRect().height));
+      // The newer chat is listed first and fills a whole 36 px slot; the older one is the last of its
+      // block, whose slot is 4 px shorter (the gap to the next block).
+      const h = await row(second).evaluate((e) => Math.round(e.getBoundingClientRect().height));
       assert.equal(h, 36);
-      const src = await row(second).boundingBox();
-      const dst = await row(first).boundingBox();
+      const last = await row(first).evaluate((e) => Math.round(e.getBoundingClientRect().height));
+      assert.equal(last, 32);
+      // Drag the lower (older) chat onto the lower half of the one above it, so nothing above the
+      // target moves while it is dragged.
+      const src = await row(first).boundingBox();
+      const dst = await row(second).boundingBox();
       assert.ok(src && dst);
       await page().mouse.move(src.x + 40, src.y + src.height / 2);
       await page().mouse.down();
       await page().mouse.move(src.x + 40, src.y + src.height / 2 + 8, { steps: 4 });
       await page().mouse.move(dst.x + 60, dst.y + dst.height - 4, { steps: 8 });
       await page().mouse.up();
-      await page().waitForSelector(tid("chat-item", `[data-chat-id="${second}"][data-depth="1"]`), { timeout: 15_000 });
+      await page().waitForSelector(tid("chat-item", `[data-chat-id="${first}"][data-depth="1"]`), { timeout: 15_000 });
       // Collapsing the parent hides it.
-      await page().click(`.sb-chat-wrap[data-chat-id="${first}"] .sb-children`);
-      await page().waitForSelector(tid("chat-item", `[data-chat-id="${second}"]`), { state: "detached", timeout: 10_000 });
+      await page().click(`.sb-chat-wrap[data-chat-id="${second}"] .sb-children`);
+      await page().waitForSelector(tid("chat-item", `[data-chat-id="${first}"]`), { state: "detached", timeout: 10_000 });
       assert.deepEqual(await app!.cspViolations(), []);
     } finally {
       await shot(page(), OUT, "S3");
