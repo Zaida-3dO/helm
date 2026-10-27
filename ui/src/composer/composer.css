@@ -587,6 +587,29 @@
   height: 56px;
   border-radius: 5px;
 }
+/* The picture and its name open the image viewer; the corner button only removes. */
+.attachment-thumb-open {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: var(--cursor-pointer);
+}
+.attachment-thumb-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.attachment-thumb:has(.attachment-thumb-open:hover) {
+  border-color: var(--line-strong);
+}
 .attachment-thumb-name {
   width: 100%;
   overflow: hidden;

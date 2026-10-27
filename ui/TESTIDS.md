@@ -32,7 +32,8 @@ breaks those checks, so change them only together with the checks. Everything el
 | `transcript-row` | One message row | `data-status` (`saved` `streaming` `complete` `error` `interrupted`), `data-role` (`user` `assistant` `toolResult` `context`), `data-row-id` |
 | `peer-card` | A user row that another chat sent (origin `other_chat`): the "From <chat>" card with the sender's link, the body and a note that the user did not write it | `data-from` (the sending chat's id) |
 | `row-origin` | Above a user bubble that did not come from the composer: "Telegram" for a message from the hub's bot (the bubble hides the note for the agent) | `data-origin` (`telegram`) |
-| `message-images` / `message-image` | The thumbnails in a user bubble, and one of them (`message-image-viewer` is the full-size dialog, `message-image-full` the image in it: `data-state` `loading` `ready` `failed`) | `message-image`: `data-state` (`loading` `ready` `failed`); a `ready` one is a button |
+| `message-images` / `message-image` | The thumbnails in a user bubble, and one of them (`message-image-viewer` is the image viewer opened from it, `message-image-full` the image in it: `data-state` `loading` `ready` `failed`) | `message-image`: `data-state` (`loading` `ready` `failed`); a `ready` one is a button |
+| `image-viewer-count` / `image-viewer-prev` / `image-viewer-next` / `image-viewer-facts` | In the image viewer (attached or sent images): "2 of 3" and the Previous and Next buttons (shown only for several images; the arrow keys step too), and the size and pixel dimensions line | |
 | `work-fold` | "Worked for …" row of a settled turn; click to unfold | |
 | `tool-card` | One tool card | `data-tool` (tool name), `data-status` (`running` `complete` `failed` `interrupted`) |
 | `tool-stop` | Stop on a running tool card (only when supported) | |
@@ -66,6 +67,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `effort-picker` | The effort row in that popover's footer: `[role="radio"]` stops | |
 | `permission-chip` | Permission-mode chip (wraps `permission-picker`, the picker trigger) | `data-mode` = the live mode, empty when none reported; `data-picked` = a pick not yet live |
 | `attach-files` / `attach-folder` | The composer's Attach files (native multi-file dialog) and Attach a folder buttons | disabled at 20 attachments |
+| `attachment-thumb` | An attached image's thumbnail in the composer: a button (click, Enter or Space) that opens the image viewer, `attachment-viewer` (its image is `image-viewer-image`); the corner button only removes | |
 | `composer-refs` | The tray of file, folder and chat chips in the composer box; each chip is `.composer-ref` | `data-kind` = `file`, `folder` or `chat` |
 | `composer-setup` / `composer-setup-details` / `composer-setup-open` | The setup card above the box while Claude Code cannot be found (Send is disabled), its details toggle and its Set up button | |
 | `composer-context-status` | The "Side panel context on." line inside the box | |

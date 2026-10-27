@@ -54,10 +54,14 @@ export interface DialogProps {
   /** Give the body the same side inset as the header and footer (for a dialog whose content has none of its own). */
   padded?: boolean;
   testId?: string;
+  /** Extra classes on the dialog panel, for a dialog that sizes itself (an image viewer). */
+  className?: string;
+  /** Keys pressed anywhere in the dialog (for in-dialog navigation such as stepping through images). */
+  onKeyDown?: (e: React.KeyboardEvent<HTMLDivElement>) => void;
   children?: ReactNode;
 }
 
-export function Dialog({ title, onClose, wide, busy, intro, footer, headerActions, padded, testId, children }: DialogProps) {
+export function Dialog({ title, onClose, wide, busy, intro, footer, headerActions, padded, testId, className, onKeyDown, children }: DialogProps) {
   const panel = useRef<HTMLDivElement>(null);
   useFocusTrap(panel);
   useLayer('dialog', true, () => {
@@ -71,7 +75,16 @@ export function Dialog({ title, onClose, wide, busy, intro, footer, headerAction
         if (e.target === e.currentTarget && !busy) onClose();
       }}
     >
-      <div ref={panel} className={`ui-dialog${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-label={title} aria-busy={busy || undefined} data-testid={testId}>
+      <div
+        ref={panel}
+        className={`ui-dialog${wide ? ' wide' : ''}${className ? ` ${className}` : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        aria-busy={busy || undefined}
+        data-testid={testId}
+        onKeyDown={onKeyDown}
+      >
         <header className="ui-dialog-head">
           <h2>{title}</h2>
           <div className="ui-dialog-head-actions">

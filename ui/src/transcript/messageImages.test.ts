@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { THUMB_MAX_HEIGHT, THUMB_MAX_WIDTH, THUMB_MIN_SIDE, UrlCache, bytesFromBase64, imageLabel, thumbSize } from './messageImages.ts';
+import { THUMB_MAX_HEIGHT, THUMB_MAX_WIDTH, THUMB_MIN_SIDE, UrlCache, bytesFromBase64, fitImage, imageFacts, imageLabel, stepImage, thumbSize } from './messageImages.ts';
 
 test('a small image is shown at its own size, never scaled up', () => {
   assert.deepEqual(thumbSize(100, 60), { width: 100, height: 60 });
@@ -76,4 +76,36 @@ test('two users fetching the same image share the first URL and each release cou
   cache.release('a');
   assert.deepEqual(revoked, ['blob:first']);
   assert.equal(cache.peek('a'), undefined);
+});
+
+test('the image viewer fits a picture to the window, steps through a set and states its size', () => {
+  // Fitted at its own aspect ratio, never scaled up.
+  for (const [w, h, maxW, maxH, want] of [
+    [800, 600, 1200, 900, { width: 800, height: 600 }],
+    [4000, 1000, 1000, 800, { width: 1000, height: 250 }],
+    [1000, 4000, 1000, 800, { width: 200, height: 800 }],
+    [3000, 2000, 900, 900, { width: 900, height: 600 }],
+  ] as const) {
+    assert.deepEqual(fitImage(w, h, maxW, maxH), want, `${w}x${h} in ${maxW}x${maxH}`);
+  }
+  // The arrow keys wrap at either end; a single image stays put.
+  for (const [index, count, delta, want] of [
+    [0, 3, 1, 1],
+    [2, 3, 1, 0],
+    [0, 3, -1, 2],
+    [0, 1, 1, 0],
+    [0, 1, -1, 0],
+  ] as const) {
+    assert.equal(stepImage(index, count, delta), want, `${index} of ${count} by ${delta}`);
+  }
+  // Size and pixel dimensions, whichever are known.
+  for (const [facts, want] of [
+    [{ size: 812, width: 0, height: 0 }, '812 bytes'],
+    [{ size: 48 * 1024 + 100, width: 640, height: 480 }, '48 KB · 640 × 480 px'],
+    [{ size: 2.4 * 1024 * 1024 }, '2.4 MB'],
+    [{ width: 1920, height: 1080 }, '1920 × 1080 px'],
+    [{}, ''],
+  ] as const) {
+    assert.equal(imageFacts(facts), want);
+  }
 });

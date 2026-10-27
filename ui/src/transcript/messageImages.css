@@ -49,17 +49,63 @@ button.msg-image:hover {
   padding: 4px;
 }
 
-.msg-image-full {
-  display: block;
-  max-width: 100%;
-  max-height: 70vh;
-  margin: 0 auto;
-  object-fit: contain;
+/* The image viewer (ImageViewer.tsx): the dialog sizes itself to the picture it shows. */
+.ui-dialog.image-viewer {
+  width: auto;
+  min-width: min(340px, 100%);
 }
 
-/* The thumbnail stands in until the full image arrives. */
-.msg-image-full-pending {
+.image-viewer-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 0 20px 14px;
+}
+
+.image-viewer-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  min-height: 120px;
+}
+
+.image-viewer-img {
+  display: block;
+  max-width: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+  background: var(--surface-alt);
+}
+
+/* Until its size is known the picture is kept within the window by CSS alone. */
+.image-viewer-unsized {
+  max-height: 60vh;
+}
+
+/* A thumbnail stands in until the full image arrives. */
+.image-viewer-pending {
   opacity: 0.7;
+}
+
+.image-viewer-missing {
+  color: var(--secondary);
+  font-size: calc(12 * var(--ui-unit, 1px));
+}
+
+.image-viewer-facts {
+  color: var(--secondary);
+  font-size: calc(12 * var(--ui-unit, 1px));
+  font-variant-numeric: tabular-nums;
+}
+
+.image-viewer-count {
+  margin-right: 4px;
+  color: var(--secondary);
+  font-size: calc(12 * var(--ui-unit, 1px));
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* Files, folders and chats attached by reference, in the user's bubble. */

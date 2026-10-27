@@ -102,3 +102,33 @@ export class UrlCache {
     return this.entries.size;
   }
 }
+
+/** The image `delta` steps from `index` in a set of `count`, wrapping at either end. */
+export function stepImage(index: number, count: number, delta: 1 | -1): number {
+  if (count <= 0) return 0;
+  return (((index + delta) % count) + count) % count;
+}
+
+/** A byte count as Windows Explorer writes it (1024-based): "812 bytes", "48 KB", "2.4 MB". */
+export function imageBytes(n: number): string {
+  if (n < 1024) return `${n} bytes`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** The viewer's line under the picture: size and pixel dimensions, whichever are known. */
+export function imageFacts(f: { size?: number; width?: number; height?: number }): string {
+  const parts: string[] = [];
+  if (f.size !== undefined && f.size >= 0) parts.push(imageBytes(f.size));
+  if (f.width && f.width > 0 && f.height && f.height > 0) parts.push(`${f.width} × ${f.height} px`);
+  return parts.join(' · ');
+}
+
+/**
+ * The size the viewer draws a picture at: its own aspect ratio, scaled down to fit the room the
+ * window leaves and never scaled up (a small screenshot stays sharp at its real size).
+ */
+export function fitImage(width: number, height: number, maxWidth: number, maxHeight: number): { width: number; height: number } {
+  const scale = Math.min(1, Math.max(1, maxWidth) / width, Math.max(1, maxHeight) / height);
+  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+}

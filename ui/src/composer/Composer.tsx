@@ -22,6 +22,7 @@ import { PermissionChip } from './PermissionChip.tsx';
 import { orderPending, itemState } from './queue.ts';
 import { bytesToBase64, forgetDelivered, forgetSent, isAnimated, refusal, stashSent, type Attached, type SentAttachments } from './attachments.ts';
 import { Recall } from './recall.ts';
+import { ImageViewer } from '../transcript/ImageViewer.tsx';
 import { commandWithArgs, helmCommand, moveActive, SCOPE_LABEL, skillMenu, skillQuery, withHelmCommands, type Skill } from './skills.ts';
 import { rollOverChat } from '../sidebar/actions.ts';
 import { toast } from '../ui/index.ts';
@@ -272,6 +273,11 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addRefs, chat.id]);
+
+  // The attached image open in the viewer, by id, so a removal or a send closes it cleanly.
+  const [viewing, setViewing] = useState<string | null>(null);
+  const viewingAt = viewing === null ? -1 : attached.findIndex((a) => a.id === viewing);
+  const viewerImages = useMemo(() => attached.map((a) => ({ key: a.id, name: a.name, size: a.size })), [attached]);
 
   const removeAttached = (id: string) =>
     setAttached((list) => {
@@ -576,14 +582,26 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
           <div className="composer-attachments" data-testid="composer-attachments">
             {attached.map((a) => (
               <span key={a.id} className="attachment-thumb" title={a.name}>
-                <img src={a.url} alt={a.name} />
-                <span className="attachment-thumb-name">{a.name}</span>
+                <button type="button" className="attachment-thumb-open" aria-label={`Preview ${a.name}`} data-testid="attachment-thumb" onClick={() => setViewing(a.id)}>
+                  <img src={a.url} alt="" draggable={false} />
+                  <span className="attachment-thumb-name">{a.name}</span>
+                </button>
                 <button type="button" className="attachment-thumb-x" aria-label={`Remove ${a.name}`} onClick={() => removeAttached(a.id)}>
                   <IconX size={11} strokeWidth={2.4} />
                 </button>
               </span>
             ))}
           </div>
+        )}
+        {viewingAt >= 0 && (
+          <ImageViewer
+            images={viewerImages}
+            index={viewingAt}
+            onIndex={(i) => setViewing(attached[i]?.id ?? null)}
+            onClose={() => setViewing(null)}
+            src={attached[viewingAt]!.url}
+            testId="attachment-viewer"
+          />
         )}
         {refs.length > 0 && (
           <div className="composer-refs" data-testid="composer-refs">
