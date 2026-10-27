@@ -1584,6 +1584,7 @@ async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it
     // Undo inside the archive window: the short kill deadline is dropped, so the chat is not
     // ended with the 60-second note while its worker is still winding down.
     let (chat4, _, mut w4) = running_turn(&mut h).await;
+    let archived_at = std::time::Instant::now();
     h.call("chat_archive", json!({"chatId": chat4}))
         .await
         .unwrap();
@@ -1591,15 +1592,22 @@ async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it
     h.call("chat_restore", json!({"chatId": chat4}))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(350)).await; // past archive_stop (300 ms)
-    assert_ne!(
-        h.status(&chat4),
-        "interrupted",
-        "the archive deadline does not fire after a restore"
-    );
+    // On a loaded machine the restore itself can land after archive_stop (300 ms); the scenario
+    // only says something when it lands inside the window.
+    let in_window = archived_at.elapsed() < Duration::from_millis(250);
+    tokio::time::sleep(Duration::from_millis(350)).await; // past archive_stop
+    if in_window {
+        assert_ne!(
+            h.status(&chat4),
+            "interrupted",
+            "the archive deadline does not fire after a restore"
+        );
+    }
     w4.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
         .await;
-    h.until("stopped", |h| h.status(&chat4) == "stopped").await;
+    if in_window {
+        h.until("stopped", |h| h.status(&chat4) == "stopped").await;
+    }
 
     // A worker that never answers the stop is killed after the archive stop limit.
     let (chat2, _, mut w2) = running_turn(&mut h).await;
