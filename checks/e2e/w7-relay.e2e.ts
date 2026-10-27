@@ -157,6 +157,16 @@ describe("the hub line, forwarding and the Telegram bot", { timeout: 10 * 60_000
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
       "base64",
     );
+    // Let the chat finish R4's turn first: a picture sent into a turn that is still starting is
+    // steered in, and its row only shows once Claude reads it (a slow start would time this out).
+    await until(
+      "the Telegram chat to finish its first turn",
+      async () => {
+        const all = (await api(app!.page, "chat_list", {})) as Json[];
+        return all.some((c) => String(c.title).startsWith("Telegram ") && c.status === "idle") || undefined;
+      },
+      90_000,
+    );
     tg!.picture(ALLOWED_USER, png, { caption: "what colour is this?", as: "file", mime: "image/png" });
     const telegramChat = await until("the Telegram chat", async () => {
       const all = (await api(app!.page, "chat_list", {})) as Json[];
