@@ -176,10 +176,11 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   }, [selected, snap.rows, expanded]);
 
   // The open chat's project, and the projects it sits in, draw expanded even where they were left
-  // collapsed, so a chat opened from search, a link or a notification can be seen. Once the user
-  // collapses one of them that collapse wins, until another chat is opened.
-  const [revealOff, setRevealOff] = useState<string | null>(null);
-  useEffect(() => setRevealOff(null), [selected]);
+  // collapsed, so a chat opened from search, a link or a notification can be seen. A project the
+  // user collapses stays collapsed (only that one, not the projects around it) until another chat
+  // is opened.
+  const [keptShut, setKeptShut] = useState<{ chat: string | null; ids: ReadonlySet<string> }>({ chat: null, ids: new Set() });
+  useEffect(() => setKeptShut({ chat: null, ids: new Set() }), [selected]);
 
   const openItem = useOpenItem();
   const itemRefs = useItemRefs(useMemo(() => snap.rows.map((r) => r.chatId), [snap.rows]));
@@ -190,10 +191,10 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         compact,
         expandedChats: expanded,
         selectedChatId: selected,
-        revealOpenChat: revealOff !== selected,
+        keptShut: keptShut.chat === selected ? keptShut.ids : undefined,
         itemLinks: view === 'activity' ? undefined : { refs: itemRefs, collapsed: collapsedItems },
       }),
-    [snap.projects, snap.rows, view, compact, expanded, selected, revealOff, itemRefs, collapsedItems],
+    [snap.projects, snap.rows, view, compact, expanded, selected, keptShut, itemRefs, collapsedItems],
   );
   useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
   const projectsById = useMemo(() => new Map(snap.projects.map((p) => [p.id, p])), [snap.projects]);
@@ -682,7 +683,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
             if (suppressClick.current) return;
             const collapse = !it.collapsed;
             // Drawn open only because it holds the open chat: stop doing that, so the collapse shows.
-            if (collapse && selected && projectsHolding(projectsById, selectedRow?.groupProjectId).has(p.id)) setRevealOff(selected);
+            if (collapse && selected && projectsHolding(projectsById, selectedRow?.groupProjectId).has(p.id)) {
+              setKeptShut((k) => ({ chat: selected, ids: new Set(k.chat === selected ? k.ids : []).add(p.id) }));
+            }
             if (p.collapsed !== collapse) void act.updateProject(p, { collapsed: collapse });
           }}
           onPin={() => void act.updateProject(p, { pinned: !p.pinned })}
