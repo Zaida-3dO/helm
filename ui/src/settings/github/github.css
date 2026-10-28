@@ -1,0 +1,28 @@
+/* Settings → GitHub. Design-system tokens only. */
+
+.github-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.github-viewer {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+/* The avatar's initial: remote images are not loaded. */
+.github-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface-alt);
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+}

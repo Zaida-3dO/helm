@@ -1795,6 +1795,7 @@ dependencies = [
  "helm-chats",
  "helm-consent",
  "helm-core",
+ "helm-github",
  "helm-governor",
  "helm-hosttools",
  "helm-ipc",
@@ -1881,6 +1882,21 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "helm-github"
+version = "0.3.1"
+dependencies = [
+ "helm-core",
+ "helm-ipc",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "ureq",
 ]
 
 [[package]]

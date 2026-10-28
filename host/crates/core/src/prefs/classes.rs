@@ -137,6 +137,11 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         "sendBehavior",
         UserOnly("Changes how your own messages reach a running agent, so only you set it."),
     ),
+    // The pull request view: whether Helm reads and writes GitHub for you.
+    (
+        "githubPrView",
+        UserOnly("Whether Helm reads and writes GitHub for you is yours to choose."),
+    ),
 ];
 
 /// Dynamic keys under fixed prefixes: all internal.

@@ -21,6 +21,7 @@ import './settings/usage/index.tsx';
 import './settings/schedules/index.tsx';
 import './settings/orchestrator/index.tsx';
 import './settings/runtime/index.tsx';
+import './settings/github/index.tsx';
 import './orchestrator/index.ts'; // the composer's Orchestrator switch
 import { AfkPresence } from './afk/index.tsx'; // Settings → AFK and presence
 import { GLOBAL_HOTKEY_BINDING, shellOps } from './api/shell.ts';
