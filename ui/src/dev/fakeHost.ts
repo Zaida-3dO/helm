@@ -20,6 +20,7 @@ import { HOME_SEND_BEHAVIOR } from '../api/types.ts';
 import { fakeThumb } from './fakeThumb.ts';
 import { leafFakeOps } from './fake-leaf.ts';
 import { projectsFakeOps } from './fake-projects.ts';
+import { boardFakeOps } from './fake-board.ts';
 import { panelFakeOps } from './fake-panel.ts';
 import { shellFakeOps } from './fake-shell.ts';
 import { mcpFakeOps } from './fake-mcp.ts';
@@ -57,6 +58,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 }
 
 { const leaf = leafFakeOps(); registerFakeOps(leaf.prefixes, leaf.handler); }
+{ const bd = boardFakeOps(); registerFakeOps(bd.prefixes, bd.handler); } // before the projects fake, whose board_ prefix would catch these
 { const sb = projectsFakeOps(); registerFakeOps(sb.prefixes, sb.handler); }
 { const panel = panelFakeOps(); registerFakeOps(panel.prefixes, panel.handler); }
 { const sh = shellFakeOps(); registerFakeOps(sh.prefixes, sh.handler); }

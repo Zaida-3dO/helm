@@ -37,6 +37,9 @@ export function itemLinksFakeOps(): { prefixes: string[]; handler: FakeOpHandler
         }
       case 'item_links_for_item':
         return { links: [] };
+      case 'item_link_add':
+        ctx.emit({ kind: 'item_links', itemIds: [String(a.itemId)] });
+        return { links: [] };
       case 'item_link_set_main': {
         mainA = (a.chatId as string) === String((ctx.call('chat_list', {}) as { id: string }[])[0]?.id) ? 0 : 1;
         ctx.emit({ kind: 'item_links', itemIds: [ITEM_A] });

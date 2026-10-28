@@ -1,0 +1,282 @@
+/* The Tasks view in the side panel. Design-system tokens only. */
+
+.tk-root {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  color: var(--text);
+}
+
+.tk-status {
+  padding: 10px 16px;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+
+.tk-stale {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--warning-text);
+  background: var(--surface-alt);
+  border-bottom: 1px solid var(--line);
+}
+
+.tk-body {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tk-rail {
+  flex: none;
+  width: 190px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+}
+
+.tk-rail .tk-check {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 4px 0;
+}
+
+.tk-root .tk-proj {
+  width: 100%;
+  padding: 8px;
+  border-radius: 6px;
+  text-align: left;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.tk-proj:hover,
+.tk-proj[data-active='true'] {
+  background: var(--hover);
+}
+
+.tk-proj[data-active='true'] {
+  color: var(--accent);
+}
+
+.tk-board {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(175px, 1fr));
+  gap: 12px;
+  padding: 12px;
+  overflow: auto;
+  align-items: start;
+}
+
+.tk-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tk-col-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tk-col-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tk-count,
+.tk-muted,
+.tk-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.tk-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  font-size: 12px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.tk-root .tk-card {
+  align-items: flex-start;
+  text-align: left;
+}
+
+.tk-card:hover,
+.tk-card[data-selected='true'] {
+  background: var(--hover);
+}
+
+.tk-card-title {
+  font-weight: 600;
+}
+
+.tk-holder {
+  font-size: 11px;
+  color: var(--secondary);
+}
+
+.tk-checkpoint {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--secondary);
+}
+
+.tk-error {
+  font-size: 12px;
+  color: var(--error);
+}
+
+.tk-foot {
+  padding: 8px 16px;
+  font-size: 11px;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+}
+
+.tk-drawer {
+  flex: none;
+  width: 370px;
+  padding: 16px;
+  overflow-y: auto;
+  border-left: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.tk-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tk-drawer-head h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.tk-actions {
+  margin: 10px 0;
+}
+
+.tk-split {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.tk-split > .ui-btn {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.tk-split-more {
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  border-left: none;
+  border-radius: 0 6px 6px 0;
+  background: var(--surface);
+}
+
+.tk-split-more:hover {
+  background: var(--hover);
+}
+
+.tk-body-text {
+  margin: 10px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-size: 12px;
+}
+
+.tk-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 12px;
+}
+
+.tk-link {
+  color: var(--link-color);
+}
+
+.tk-link-inert {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.tk-section {
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.tk-section h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tk-entry {
+  margin: 12px 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.tk-entry-body {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  color: var(--secondary);
+}
+
+@media (max-width: 1000px) {
+  .tk-rail {
+    width: 150px;
+  }
+  .tk-drawer {
+    width: 310px;
+  }
+}
+
+@media (max-width: 760px) {
+  .tk-rail {
+    width: 125px;
+  }
+  .tk-drawer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    background: var(--surface);
+  }
+}

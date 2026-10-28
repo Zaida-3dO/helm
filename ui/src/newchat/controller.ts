@@ -10,6 +10,7 @@ import { ApiError, type Api } from '../api/client.ts';
 import type { ChatOps, SendExtras } from '../api/ops.ts';
 import type { ProjectNode } from '../api/projects.ts';
 import type { ChatRecord, SendAction, Submission } from '../api/types.ts';
+import { appendBlock, withItemContext } from '../tasks/context.ts';
 import { discardUntouched } from './api.ts';
 import { folderProjectFor, pushRecent, readRecents, resolveFolder, type ResolvedFolder } from './places.ts';
 
@@ -18,6 +19,12 @@ export interface NewChatOptions {
   projectId?: string;
   /** Start in this folder. */
   folder?: string;
+  /** Text to add to the draft (after anything already typed); never sent by itself. */
+  text?: string;
+  /** The task-board item this chat is for: the chat is linked to it once its first message is sent. */
+  itemId?: string;
+  /** The item's title, kept with the link so the sidebar can name it. */
+  itemTitle?: string;
 }
 
 export interface LocalImage {
@@ -39,6 +46,8 @@ export interface Draft {
   effort: string | null;
   images: Map<string, LocalImage>;
   createdAt: number;
+  /** The board item this chat is for (see `NewChatOptions.itemId`). */
+  item?: { id: string; title?: string };
 }
 
 /** What the controller needs from the app. `NewChatHost` builds it from the shell. */
@@ -167,6 +176,23 @@ export class NewChatController {
       this.draft.folder = null;
     }
     if (explicit) this.move(opts.projectId ?? this.projectForFolder(opts.folder) ?? null, opts.folder ?? null, false);
+    if (opts.itemId) {
+      const title = opts.itemTitle ?? (this.draft.item?.id === opts.itemId ? this.draft.item.title : undefined);
+      this.draft.item = { id: opts.itemId, ...(title ? { title } : {}) };
+    }
+    // Task details go in once: a draft that already holds the item's id is left as it is.
+    if (opts.text && this.draft) {
+      const next = opts.itemId ? withItemContext(this.draft.text, opts.itemId, opts.text) : appendBlock(this.draft.text, opts.text);
+      if (next !== this.draft.text) {
+        this.draft.text = next;
+        this.draft.revision += 1;
+        try {
+          env.storage.setItem(DRAFT_TEXT_KEY, next);
+        } catch {
+          // Storage full or off: the draft still lives in memory.
+        }
+      }
+    }
     this.open = true;
     this.lastSelected = null;
     if (from) env.select(null);
@@ -369,6 +395,9 @@ export class NewChatController {
     const result = await env.ops.send(chat.id, submissionId, text, action, 0, { ...extras, attachments: ids });
     env.storage.setItem(LAST_PROJECT_KEY, d.projectId ?? chat.projectId);
     pushRecent(env.storage, folder);
+    // A chat made for a board item is linked to it here, in Helm only. A failure here is not the
+    // send's failure: the chat exists and was sent.
+    if (d.item) await env.api('item_link_add', { itemId: d.item.id, chatId: chat.id, ...(d.item.title ? { title: d.item.title } : {}) }).catch(() => undefined);
     this.draft = null;
     this.made = null;
     this.open = false;

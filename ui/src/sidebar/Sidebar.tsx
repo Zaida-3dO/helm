@@ -15,6 +15,7 @@ import { SETTINGS_DIALOG } from '../settings/index.ts';
 import { SEARCH_DIALOG } from '../search/index.ts';
 import { AttentionInbox, inboxRows, nextAttention } from '../attention/index.ts';
 import { SchedulesEntry } from '../schedules/SchedulesEntry.tsx';
+import { TasksEntry } from '../tasks/TasksEntry.tsx';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, ConfirmDialog, ContextMenu, Dialog, TextInput, useBinding, type ConfirmSpec, type MenuItem } from '../ui/index.ts';
 import { SidebarActions, compactChat, rollOverChat, rollOverConfirm } from './actions.ts';
@@ -611,6 +612,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           <IconArchive />
           <span>{view === 'archived' ? 'Back to projects' : 'Archived chats'}</span>
         </button>
+        <TasksEntry api={api} bus={bus} />
         {openSettings && <SchedulesEntry api={api} bus={bus} openSettings={openSettings} onOpenChat={onSelect} />}
         {openSettings && (
           <button type="button" className="sb-foot" onClick={openSettings}>

@@ -102,7 +102,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `quick-replies` / `quick-reply` | Continue, Yes and No chips above the composer | `quick-reply`: `data-reply` = `continue` `yes` `no` |
 | `option-buttons` / `option-button` / `option-amend` | Inline Option 1, Option A, ... under the latest reply, and the pencil that drafts the answer | `option-button`: `data-option` = the label |
 | `explain-plainly` | The Explain plainly message action | |
-| `search-dialog` / `search-input` / `search-status` / `search-results` / `search-group` / `search-hit` | Mod+K search: dialog, query box, live status line, result list, a group, a row | `search-group`, `search-hit`: `data-group` = `chats` `files`; `search-status`: `data-state` |
+| `search-dialog` / `search-input` / `search-status` / `search-results` / `search-group` / `search-hit` | Mod+K search: dialog, query box, live status line, result list, a group, a row | `search-group`, `search-hit`: `data-group` = `chats` `files` `board`; `search-status`: `data-state` |
 
 Keys (Windows): Send `Ctrl+Enter` (or `Enter` with the Enter send shortcut), Steer `Ctrl+Shift+Enter`,
 Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
@@ -133,3 +133,15 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 | `workflow-other-waiting` | A task that is not the chat's current one and has a change waiting on you; its changes appear as `workflow-waiting` rows inside it, with the same buttons | `data-run-id`, `data-status` |
 | `workflow-other-task` / `workflow-other-reopen` | A non-current task's line in the detail, and its Reopen button (parked or handed-off tasks) | `data-run-id`, `data-status` |
 | `workflow-toggle` / `workflow-body` / `workflow-change` | The title that opens the detail, the detail, one change in it | `workflow-change`: `data-state`, `data-branch` |
+
+## Tasks
+
+| Hook | Element | Attributes |
+|---|---|---|
+| `nav-tasks` | The sidebar footer's Tasks entry (drawn only once a board address and token are saved) | |
+| `tasks-view` / `tasks-status` / `tasks-stale` / `tasks-error` / `tasks-refresh` | The Tasks tab, its status line, the out-of-date banner, a failed first read, and the Refresh button in the panel header | `tasks-view`: `data-connection` (`unknown` `ready` `missing`), `data-loaded` |
+| `tasks-rail` / `tasks-project-all` / `tasks-project` | The project list, its All projects button, one project | `tasks-project`: `data-project-id`; `data-active` on both buttons |
+| `tasks-board` / `tasks-column` / `tasks-column-count` / `tasks-column-more` | The columns, one column, its count ("30 / 41"), its Load more | `tasks-column`: `data-column` (`backlog` `in_progress` `waiting` `completed`) |
+| `tasks-card` / `tasks-card-checkpoint` | A card, and the latest checkpoint line under it (read when the card scrolls into view) | `tasks-card`: `data-item-id`, `data-selected` |
+| `tasks-drawer` / `tasks-drawer-close` / `tasks-drawer-body` / `tasks-drawer-section` | The item drawer, its close button, the description, and a paged section | `tasks-drawer`: `data-item-id`; `tasks-drawer-section`: `data-section` (the heading) |
+| `tasks-open-chat` / `tasks-chat-menu` / `tasks-chat-menu-list` | The drawer's Open chat button (disabled while no chat is linked), its chevron, and the menu with New chat in this task | |
