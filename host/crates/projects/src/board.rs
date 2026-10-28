@@ -82,7 +82,7 @@ impl helm_chats::seams::ProjectGate for Gate {
     }
 }
 
-fn credentials(profile: &Profile, platform: &Platform) -> CredentialStore {
+pub(crate) fn credentials(profile: &Profile, platform: &Platform) -> CredentialStore {
     CredentialStore::new(
         &profile.path("credentials"),
         &profile.hash,
@@ -90,7 +90,7 @@ fn credentials(profile: &Profile, platform: &Platform) -> CredentialStore {
     )
 }
 
-fn ctx_credentials(ctx: &OpCtx) -> Result<CredentialStore, ApiError> {
+pub(crate) fn ctx_credentials(ctx: &OpCtx) -> Result<CredentialStore, ApiError> {
     let profile = ctx.services.need::<Profile>()?;
     let platform = ctx.services.need::<Platform>()?;
     Ok(credentials(&profile, &platform))
@@ -125,7 +125,7 @@ fn stored_token(creds: &CredentialStore) -> Option<Token> {
 }
 
 /// The client for the current connection, or `NotConfigured`.
-fn resolve(db: &Database, creds: &CredentialStore) -> Result<Client, StandupError> {
+pub(crate) fn resolve(db: &Database, creds: &CredentialStore) -> Result<Client, StandupError> {
     let (url, token) = match test_override() {
         Some((u, t)) => (u, t),
         None => (stored_url(db), stored_token(creds)),

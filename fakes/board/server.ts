@@ -1,6 +1,7 @@
-// A fake Agent Standup read server. It serves the one
-// route Helm's read-only client calls, `GET /api/projects` (paged by `limit` and `cursor`, the
-// live response shape), behind a made-up bearer token. Every non-GET request is answered 405 and
+// A fake Agent Standup read server. It serves the routes Helm's read-only client calls, in the
+// live response shapes: projects (paged by `limit` and `cursor`), the four board columns, items
+// (summary, detail, history, evidence, open loops), the fleet, readiness and search, behind a
+// made-up bearer token (`/api/ready` needs none). Every non-GET request is answered 405 and
 // recorded as a violation, so a test fails on any write. `GET /__fake/requests` returns the log.
 //
 // CLI: `node fakes/board/server.ts [--port N] [--token T]` prints
@@ -29,6 +30,19 @@ export interface BoardProjectFixture {
   finished?: number;
 }
 
+export interface BoardItemFixture {
+  id: string;
+  projectId: string;
+  title: string;
+  state: string;
+  priority: string;
+  headline: string | null;
+  checkpoint: string | null;
+  body: string;
+  holders: { holderId: string; holderType: string; displayName: string; role: string; machine: string }[];
+  links: { key: string; url: string }[];
+}
+
 export interface LoggedRequest {
   method: string;
   path: string;
@@ -43,6 +57,8 @@ export interface FakeBoard {
   violations: LoggedRequest[];
   /** Replace the projects the board serves (to test re-syncs). */
   setProjects(p: BoardProjectFixture[]): void;
+  /** Replace the items the board serves. */
+  setItems(i: BoardItemFixture[]): void;
   close(): Promise<void>;
 }
 
@@ -51,6 +67,41 @@ export function fixtureProjects(): BoardProjectFixture[] {
   return (JSON.parse(readFileSync(file, 'utf8')) as { projects: BoardProjectFixture[] }).projects;
 }
 
+/** The fixture items plus 32 generated backlog items, so the Backlog column needs a second page. */
+export function fixtureItems(): BoardItemFixture[] {
+  const file = fileURLToPath(new URL('./fixtures/items.json', import.meta.url));
+  const base = (JSON.parse(readFileSync(file, 'utf8')) as { items: BoardItemFixture[] }).items;
+  const filler: BoardItemFixture[] = Array.from({ length: 32 }, (_, i) => ({
+    id: `b${String(i).padStart(7, '0')}-1111-4222-8333-444455556666`,
+    projectId: i % 2 === 0 ? 'fb-desktop' : 'fb-website',
+    title: `Backlog idea ${i + 1}`,
+    state: i % 3 === 0 ? 'someday' : 'on_deck',
+    priority: 'P3',
+    headline: null,
+    checkpoint: null,
+    body: '',
+    holders: [],
+    links: [],
+  }));
+  return [...base, ...filler];
+}
+
+const COLUMN_OF: Record<string, string> = {
+  someday: 'backlog',
+  on_deck: 'backlog',
+  planning: 'in_progress',
+  plan_review: 'in_progress',
+  executing: 'in_progress',
+  in_review: 'in_progress',
+  paused: 'waiting',
+  blocked: 'waiting',
+  merged: 'completed',
+  research_done: 'completed',
+  wont_do: 'completed',
+  cancelled: 'completed',
+};
+const COLUMNS = ['backlog', 'in_progress', 'waiting', 'completed'];
+
 function rollup(p: BoardProjectFixture) {
   // The live response carries per-state counts and crew too; the client reads only the fields above.
   const total = p.total ?? 0;
@@ -58,9 +109,44 @@ function rollup(p: BoardProjectFixture) {
   return { ...p, total, merged: finished, finished, counts: {}, progress: total > 0 ? finished / total : null, childless: total === 0, assignments: [] };
 }
 
-export async function startFakeBoard(opts: { port?: number; token?: string; projects?: BoardProjectFixture[] } = {}): Promise<FakeBoard> {
+const slimAssignment = (h: BoardItemFixture['holders'][number]) => ({
+  holderId: h.holderId,
+  holderType: h.holderType,
+  displayName: h.displayName,
+  role: h.role,
+  roleCustom: null,
+  liveness: 'live',
+  lastActive: '2026-10-28T09:00:00.000Z',
+});
+
+const slimItem = (i: BoardItemFixture) => ({
+  id: i.id,
+  title: i.title,
+  state: i.state,
+  headline: i.headline,
+  kind: 'task',
+  priority: i.priority,
+  area: 'desktop-app',
+  repo: null,
+  blockedReason: null,
+  blockedOnType: null,
+  blockedOnPersonId: null,
+  pauseReason: null,
+  originType: 'person',
+  links: i.links,
+});
+
+/** A page of `list` after the entry whose key is `cursor`. */
+function pageOf<T>(list: T[], limit: number, cursor: string | null, key: (x: T) => string): { part: T[]; next: string | null } {
+  const start = cursor ? list.findIndex((x) => key(x) === cursor) + 1 : 0;
+  const part = list.slice(start, start + limit);
+  return { part, next: start + limit < list.length ? key(part[part.length - 1]!) : null };
+}
+
+export async function startFakeBoard(opts: { port?: number; token?: string; projects?: BoardProjectFixture[]; items?: BoardItemFixture[] } = {}): Promise<FakeBoard> {
   const token = opts.token ?? DEFAULT_TOKEN;
   let projects = opts.projects ?? fixtureProjects();
+  let items = opts.items ?? fixtureItems();
   const requests: LoggedRequest[] = [];
   const violations: LoggedRequest[] = [];
 
@@ -68,6 +154,27 @@ export async function startFakeBoard(opts: { port?: number; token?: string; proj
     res.writeHead(status, { 'content-type': 'application/json' });
     res.end(JSON.stringify(body));
   };
+  const notFound = (res: ServerResponse) => send(res, 404, { error: { code: 'not_found', message: 'No such route or item.' } });
+  const resolve = (ref: string) => items.find((i) => i.id === ref) ?? (ref.length >= 8 ? items.find((i) => i.id.startsWith(ref.toLowerCase())) : undefined);
+
+  const history = (i: BoardItemFixture) =>
+    Array.from({ length: 25 }, (_, k) => ({
+      id: String(1000 - k),
+      ts: new Date(Date.UTC(2026, 9, 28, 12 - Math.floor(k / 3), 0, 0)).toISOString(),
+      type: k % 3 === 0 ? 'checkpoint' : 'state_changed',
+      actorType: 'agent',
+      actorId: 'builder-one',
+      sessionId: null,
+      headline: k % 3 === 0 ? `Checkpoint ${i.title} #${25 - k}` : null,
+      body: k % 3 === 0 ? 'Progress noted.' : null,
+      payload: null,
+    }));
+  const artifacts = (i: BoardItemFixture) =>
+    i.holders.length === 0
+      ? []
+      : [{ id: 'art-1', seq: '1', kind: 'review', verdict: 'lgtm', reviewRound: 1, commitSha: null, ref: i.links[0]?.url ?? null, followUpItemId: null, createdByType: 'agent', createdById: 'reviewer-one', createdAt: '2026-10-28T10:00:00.000Z', bodyChars: 400, bodyPreview: 'Looks right to me.', bodyTruncated: true, body: 'Looks right to me. '.repeat(20), findings: null }];
+  const loops = (i: BoardItemFixture) =>
+    i.holders.length === 0 ? [] : [{ loopId: 'loop-1', kind: 'work', status: 'open', openedAt: '2026-10-28T09:30:00.000Z', editedAt: null, closedAt: null, text: 'Check the lock order on Windows.', textTruncated: true }];
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', 'http://fake');
@@ -79,17 +186,87 @@ export async function startFakeBoard(opts: { port?: number; token?: string; proj
       violations.push(entry);
       return send(res, 405, { error: { code: 'method_not_allowed', message: 'The fake board is read-only.' } });
     }
+    const q = url.searchParams;
+    const limitOf = (max: number, dflt: number) => Math.min(max, Math.max(1, Number(q.get('limit') ?? dflt)));
+    if (url.pathname === '/api/ready') return send(res, 200, { ready: true, database: true, migrationsApplied: 1, migrationsPending: 0 });
     if (!authorized) return send(res, 401, { error: { code: 'unauthorized', message: 'Missing or wrong token.' } });
-    if (url.pathname !== '/api/projects') return send(res, 404, { error: { code: 'not_found', message: 'No such route.' } });
-    const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit') ?? 50)));
-    const cursor = url.searchParams.get('cursor');
-    const start = cursor ? projects.findIndex((p) => p.id === cursor) + 1 : 0;
-    const page = projects.slice(start, start + limit);
-    const more = start + limit < projects.length;
-    send(res, 200, { projects: page.map(rollup), childlessCount: page.length, nextCursor: more ? page[page.length - 1]!.id : null });
+
+    if (url.pathname === '/api/projects') {
+      const limit = limitOf(200, 50);
+      const cursor = q.get('cursor');
+      const start = cursor ? projects.findIndex((p) => p.id === cursor) + 1 : 0;
+      const page = projects.slice(start, start + limit);
+      const more = start + limit < projects.length;
+      return send(res, 200, { projects: page.map(rollup), childlessCount: page.length, nextCursor: more ? page[page.length - 1]!.id : null });
+    }
+
+    if (url.pathname === '/api/board') {
+      const column = q.get('column');
+      if (!column || !COLUMNS.includes(column)) return send(res, 400, { error: { code: 'invalid_input', message: 'column is required here.', fields: ['column'] } });
+      const project = q.get('project');
+      const mine = items.filter((i) => COLUMN_OF[i.state] === column && (!project || i.projectId === project));
+      const { part, next } = pageOf(mine, limitOf(200, 25), q.get('cursor'), (i) => i.id);
+      const withheld = (c: string) => ({ entries: [], total: items.filter((i) => COLUMN_OF[i.state] === c && (!project || i.projectId === project)).length, nextCursor: null, withheld: true, revealedBy: `GET /api/board?column=${c}` });
+      const columns = Object.fromEntries(
+        COLUMNS.map((c) => [
+          c,
+          c === column
+            ? { entries: part.map((i) => ({ item: slimItem(i), column: c, assignments: i.holders.map(slimAssignment), trust: null, subtasks: null })), total: mine.length, nextCursor: next, withheld: false, revealedBy: null }
+            : withheld(c),
+        ]),
+      );
+      return send(res, 200, { board: { columns, notice: null } });
+    }
+
+    if (url.pathname === '/api/fleet') {
+      const rows = items.flatMap((i) =>
+        i.holders.map((h) => ({ ...slimAssignment(h), id: `asg-${i.id}-${h.holderId}`, machine: h.machine, branch: 'work', worktree: null, model: null, effort: null, sessionId: 's', rootSessionId: 's', pid: null, claimedAt: '2026-10-28T08:00:00.000Z', releasedAt: null, itemId: i.id, itemTitle: i.title, itemKind: 'task', itemState: i.state })),
+      );
+      const { part, next } = pageOf(rows, limitOf(500, 50), q.get('cursor'), (r) => r.id);
+      return send(res, 200, { assignments: part, nextCursor: next });
+    }
+
+    if (url.pathname === '/api/search') {
+      const text = (q.get('q') ?? q.get('query') ?? '').trim().toLowerCase();
+      if (text.length < 2) return send(res, 400, { error: { code: 'invalid_input', message: 'query must be at least 2 characters.', fields: ['query'] } });
+      const found = items.filter((i) => [i.title, i.headline ?? '', i.body, ...i.links.map((l) => l.url)].some((f) => f.toLowerCase().includes(text)));
+      const matches = found.slice(0, limitOf(200, 20)).map((i) => ({ id: i.id, title: i.title, state: i.state, headline: i.headline, matchedIn: 'title', score: 1, excerpt: null }));
+      return send(res, 200, { matches, loopMatches: [], considered: items.length, truncated: false, notice: '' });
+    }
+
+    const m = /^\/api\/items\/([^/]+)(?:\/(detail|history|artifacts|loops)(?:\/([^/]+))?)?$/.exec(url.pathname);
+    if (m) {
+      const item = resolve(decodeURIComponent(m[1]!));
+      if (!item) return notFound(res);
+      const [, , sub, loopId] = m;
+      const record = { ...slimItem(item), parentId: item.projectId, body: item.body, depth: 1 };
+      if (!sub) return send(res, 200, { item: { id: item.id, title: item.title, state: item.state, headline: item.headline, checkpointHeadline: item.checkpoint } });
+      if (sub === 'detail') {
+        const hl = limitOf(500, 100);
+        return send(res, 200, { detail: { item: record, column: COLUMN_OF[item.state], subtasks: [], artifacts: artifacts(item).slice(0, Number(q.get('artifactLimit') ?? 100)), artifactsTruncated: false, history: history(item).slice(0, Number(q.get('historyLimit') ?? hl)), historyTruncated: true, summary: null, buildStatus: null, assignments: item.holders.map(slimAssignment), previousHolders: [] } });
+      }
+      if (sub === 'history') {
+        const all = history(item);
+        const { part, next } = pageOf(all, limitOf(200, 50), q.get('cursor'), (e) => e.id);
+        return send(res, 200, { entries: part, total: all.length, nextCursor: next });
+      }
+      if (sub === 'artifacts') {
+        const all = artifacts(item);
+        const { part, next } = pageOf(all, limitOf(200, 20), q.get('cursor'), (a) => a.seq);
+        return send(res, 200, { artifacts: part, total: all.length, nextCursor: next });
+      }
+      if (loopId) {
+        const l = loops(item).find((x) => x.loopId === loopId);
+        return l ? send(res, 200, { ...l, itemId: item.id, text: 'Check the lock order on Windows. The full note is longer than the preview and mentions the second queue.' }) : notFound(res);
+      }
+      const all = loops(item);
+      const { part, next } = pageOf(all, limitOf(200, 50), q.get('cursor'), (l) => l.loopId);
+      return send(res, 200, { loops: part, nextCursor: next, total: all.length, nonWorkExcluded: 0 });
+    }
+    return notFound(res);
   });
 
-  await new Promise<void>((resolve) => server.listen(opts.port ?? 0, '127.0.0.1', resolve));
+  await new Promise<void>((resolveListen) => server.listen(opts.port ?? 0, '127.0.0.1', resolveListen));
   const { port } = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${port}`,
@@ -99,7 +276,10 @@ export async function startFakeBoard(opts: { port?: number; token?: string; proj
     setProjects: (p) => {
       projects = p;
     },
-    close: () => new Promise((resolve) => server.close(() => resolve())),
+    setItems: (i) => {
+      items = i;
+    },
+    close: () => new Promise((resolveClose) => server.close(() => resolveClose())),
   };
 }
 

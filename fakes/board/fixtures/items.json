@@ -1,0 +1,52 @@
+{
+  "items": [
+    {
+      "id": "5c9e2a41-0f0b-4d6e-9d1f-0a7c1e3b9a10",
+      "projectId": "fb-desktop",
+      "title": "Fix the merge queue",
+      "state": "executing",
+      "priority": "P1",
+      "headline": "Queue stalls when two changes land together",
+      "checkpoint": "Reproduced the stall; fixing the lock order",
+      "body": "The merge queue stops when two changes land at the same moment.\n\nSteps: land two pull requests together and watch the queue.",
+      "holders": [{ "holderId": "builder-one", "holderType": "agent", "displayName": "builder-one", "role": "builder", "machine": "workbench" }],
+      "links": [{ "key": "pr", "url": "https://github.com/example/desktop/pull/12" }, { "key": "notes", "url": "javascript:alert(1)" }]
+    },
+    {
+      "id": "7d3b1f90-2a44-4c1e-8f6b-91e0c2d5a7b3",
+      "projectId": "fb-desktop",
+      "title": "Usage meter on the home screen",
+      "state": "planning",
+      "priority": "P2",
+      "headline": null,
+      "checkpoint": null,
+      "body": "",
+      "holders": [],
+      "links": []
+    },
+    {
+      "id": "a1c4e7d2-6b58-4f0a-9c33-5e8d1b2f4a66",
+      "projectId": "fb-website",
+      "title": "Waiting on the logo files",
+      "state": "blocked",
+      "priority": "P3",
+      "headline": "Needs the final logo",
+      "checkpoint": "Asked for the files",
+      "body": "Blocked until the designer sends the final logo.",
+      "holders": [],
+      "links": []
+    },
+    {
+      "id": "c8e2b5a3-9d17-4e6c-a0b4-3f7d6e1c8a29",
+      "projectId": "fb-website",
+      "title": "Ship the contact form",
+      "state": "merged",
+      "priority": "P2",
+      "headline": "Live on the site",
+      "checkpoint": "Merged and deployed",
+      "body": "The contact form is live.",
+      "holders": [],
+      "links": []
+    }
+  ]
+}
