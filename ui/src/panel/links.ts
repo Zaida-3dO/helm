@@ -219,13 +219,33 @@ export function registerLinkRoute(kind: 'file' | 'vault' | 'path' | 'chat', rout
   };
 }
 
+interface WebRoute {
+  match: (url: string) => unknown;
+  open: (matched: unknown, ctx: LinkContext) => Promise<boolean> | boolean;
+}
+const webRoutes: WebRoute[] = [];
+
+/**
+ * A web address may open inside the app instead of the browser. `match` reads the address (null
+ * means not mine); `open` shows it and answers false when it could not, so the address falls
+ * through to the browser. Routes are asked in the order they registered.
+ */
+export function registerWebRoute<T>(match: (url: string) => T | null, open: (matched: T, ctx: LinkContext) => Promise<boolean> | boolean): () => void {
+  const route: WebRoute = { match, open: open as WebRoute['open'] };
+  webRoutes.push(route);
+  return () => {
+    const i = webRoutes.indexOf(route);
+    if (i >= 0) webRoutes.splice(i, 1);
+  };
+}
+
 const NOT_AVAILABLE = 'This kind of link cannot be opened in this version of Helm yet.';
 
 /**
  * The gate itself: validate, then act. Never navigates the webview. A refusal shows a notice and
  * changes nothing else.
  */
-export async function handleLink(target: LinkTarget, ctx: LinkContext): Promise<LinkOutcome> {
+export async function handleLink(target: LinkTarget, ctx: LinkContext, opts: { skipWebRoutes?: boolean } = {}): Promise<LinkOutcome> {
   const gate = gateTarget(target);
   const fail = (reason: string): LinkOutcome => {
     deps.notify(reason);
@@ -236,6 +256,12 @@ export async function handleLink(target: LinkTarget, ctx: LinkContext): Promise<
       case 'refuse':
         return fail(gate.reason);
       case 'external':
+        if (!opts.skipWebRoutes && gate.url.startsWith('http')) {
+          for (const r of webRoutes) {
+            const m = r.match(gate.url);
+            if (m !== null && (await r.open(m, ctx))) return { ok: true, action: 'external' };
+          }
+        }
         await deps.openExternal(gate.url);
         return { ok: true, action: 'external' };
       case 'file': {

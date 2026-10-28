@@ -137,6 +137,9 @@ class PanelStore {
 
 export const panelStore = new PanelStore();
 
+/** The window width kept for the chat beside the panel (the panel's own limit). */
+const PREFERRED_WIDTH_RESERVE = 321;
+
 /** Registers (or replaces) a kind. Returns a function that unregisters it. */
 export function registerPanelKind(kind: PanelKind): () => void {
   panelStore.kinds.set(kind.kind, kind);
@@ -172,6 +175,15 @@ export function openInPanel(
   opts: { intent: Intent; chatId?: string | null },
 ): boolean {
   const tab = panelStore.update((m) => m.open(kind, key, data, opts, panelStore.current));
+  const want = panelStore.kinds.get(kind)?.preferredWidth;
+  if (tab && want && opts.intent === 'user' && panelStore.width < want) {
+    // A kind that likes room: widen the panel when the window has it, else fill the window.
+    const sidebar = typeof document === 'undefined' ? 0 : (document.querySelector<HTMLElement>('.shell-sidebar:not([hidden])')?.offsetWidth ?? 0);
+    const room = typeof window === 'undefined' ? want : window.innerWidth - PREFERRED_WIDTH_RESERVE - sidebar;
+    if (room >= want) panelStore.width = want;
+    else panelStore.model.maximized = true;
+    panelStore.changed();
+  }
   return tab !== null;
 }
 

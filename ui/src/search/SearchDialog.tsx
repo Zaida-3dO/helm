@@ -9,6 +9,8 @@ import { useDialog, useShell } from '../shell/context.ts';
 import { Checkbox, Dialog, Icon, Picker, useBinding, useLayer, type PickerOption } from '../ui/index.ts';
 import { flatRows, moveHighlight, movePage, statusLine, UniversalSearch } from './controller.ts';
 import { chatsSource, filesSource } from './defaultSources.ts';
+import { prsSource } from './prSource.ts';
+import { openPrTab } from '../pr/route.ts';
 import { GROUP_LABEL, groupOrder, type SourceId } from './sources.ts';
 import './search.css';
 
@@ -71,6 +73,13 @@ function SearchBody({ close }: { close: () => void }) {
           },
           openFile: (path) => {
             void handleLink({ kind: 'url', href: path }, { chatId: shell.selection.chatId });
+            close();
+          },
+        }),
+        prsSource({
+          api: shell.api,
+          open: (ref) => {
+            openPrTab({ ...ref, view: 'conversation' }, shell.selection.chatId);
             close();
           },
         }),

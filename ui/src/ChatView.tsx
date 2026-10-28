@@ -28,6 +28,7 @@ import { IconFork } from './ui/icons.tsx';
 import { accessoriesAt } from './composer/slots.ts';
 import { recallPrompts } from './composer/recall.ts';
 import { SelectionToolbar } from './transcript/SelectionToolbar.tsx';
+import { useMentionRepo } from './pr/mentionRepo.ts';
 import { FindBar } from './transcript/FindBar.tsx';
 import { TimelineRail } from './transcript/TimelineRail.tsx';
 import { useWholeChat } from './transcript/useWholeChat.ts';
@@ -147,9 +148,11 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   );
   const latestAssistantId = useMemo(() => [...view.rows].reverse().find((r) => r.role === 'assistant')?.id ?? null, [view.rows]);
   const interactionOpen = (thread?.interactions.length ?? 0) > 0;
+  const mentionRepo = useMentionRepo(shell.api, chat?.cwd);
   const ctx: RowContext = useMemo(
     () => ({
       chatId,
+      mentionRepo,
       latestAssistantId,
       running: busy,
       interactionOpen,
@@ -174,7 +177,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       // shows any refusal in the shell's toast slot itself.
       onLink: (t: LinkTarget) => void handleLink(t, { chatId }),
     }),
-    [behavior.toolStop, thread?.capabilities.stopTool, stopTool, chatId, latestAssistantId, busy, interactionOpen, editing, ops, elements],
+    [behavior.toolStop, thread?.capabilities.stopTool, stopTool, chatId, latestAssistantId, busy, interactionOpen, editing, ops, elements, mentionRepo],
   );
 
   // Escape while the chat works stops the turn and lets the queue continue. It is the lowest

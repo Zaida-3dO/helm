@@ -18,6 +18,8 @@ export interface NewChatOptions {
   projectId?: string;
   /** Start in this folder. */
   folder?: string;
+  /** Put this text in the draft (after a blank line when the draft already has text). Never sent. */
+  text?: string;
 }
 
 export interface LocalImage {
@@ -167,6 +169,16 @@ export class NewChatController {
       this.draft.folder = null;
     }
     if (explicit) this.move(opts.projectId ?? this.projectForFolder(opts.folder) ?? null, opts.folder ?? null, false);
+    if (opts.text && this.draft) {
+      const d = this.draft;
+      d.text = d.text.trim() ? [d.text.replace(/\s+$/, ''), opts.text].join('\n\n') : opts.text;
+      d.revision = Math.max(d.revision + 1, env.now());
+      try {
+        env.storage.setItem(DRAFT_TEXT_KEY, d.text);
+      } catch {
+        // Storage full or off: the draft still lives in memory.
+      }
+    }
     this.open = true;
     this.lastSelected = null;
     if (from) env.select(null);
