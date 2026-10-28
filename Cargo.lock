@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "helm-github"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "helm-core",
  "helm-ipc",
