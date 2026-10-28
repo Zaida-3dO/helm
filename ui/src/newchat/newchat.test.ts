@@ -531,3 +531,24 @@ test('typed text survives a restart, and a sent or emptied draft leaves none beh
   third.show();
   assert.equal(third.draft!.text, '');
 });
+
+test('a chat made for a board item gets its details in the draft once, and is linked after the first send', async () => {
+  const h = harness();
+  h.ctl.show({ projectId: 'helm', text: 'Task block id-1', itemId: 'id-1', itemTitle: 'Fix it' });
+  assert.equal(h.ctl.draft!.text, 'Task block id-1\n');
+  assert.equal(h.ctl.record()!.draftRevision, 1, 'the composer is told the draft changed');
+  // Asking again for the same item adds nothing; other typed text stays, with the block after it.
+  h.ctl.show({ text: 'Task block id-1', itemId: 'id-1' });
+  assert.equal(h.ctl.draft!.text, 'Task block id-1\n');
+  const other = harness();
+  other.ctl.show({ projectId: 'helm' });
+  await draftOps(other.env.ops, other.ctl).saveDraft('x', 'typed first', 3);
+  other.ctl.show({ text: 'Block id-2', itemId: 'id-2' });
+  assert.equal(other.ctl.draft!.text, 'typed first\n\nBlock id-2\n');
+
+  const ops = draftOps(h.env.ops, h.ctl);
+  await ops.send(h.ctl.draft!.id, 'sub-1', 'go', 'default', 3);
+  const chatId = h.calls.find((c) => c.op === 'chat_create') && (h.calls.find((c) => c.op === 'storeChat')!.args[0] as string);
+  assert.deepEqual(h.calls.map((c) => c.op), ['chat_create', 'storeChat', 'send', 'item_link_add', 'select']);
+  assert.deepEqual(h.calls.find((c) => c.op === 'item_link_add')!.args[0], { itemId: 'id-1', chatId, title: 'Fix it' });
+});

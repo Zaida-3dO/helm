@@ -8,6 +8,8 @@ import { handleLink } from '../panel/index.ts';
 import { useDialog, useShell } from '../shell/context.ts';
 import { Checkbox, Dialog, Icon, Picker, useBinding, useLayer, type PickerOption } from '../ui/index.ts';
 import { flatRows, moveHighlight, movePage, statusLine, UniversalSearch } from './controller.ts';
+import { openTasks, tasksStoreFor } from '../tasks/index.ts';
+import { boardSource } from './boardSource.ts';
 import { chatsSource, filesSource } from './defaultSources.ts';
 import { GROUP_LABEL, groupOrder, type SourceId } from './sources.ts';
 import './search.css';
@@ -50,6 +52,7 @@ function SearchBody({ close }: { close: () => void }) {
   const filters = useRef({ projectId, archived });
   filters.current = { projectId, archived };
 
+  const availability = useRef<Promise<boolean> | null>(null);
   const search = useMemo(
     () =>
       new UniversalSearch([
@@ -73,6 +76,13 @@ function SearchBody({ close }: { close: () => void }) {
             void handleLink({ kind: 'url', href: path }, { chatId: shell.selection.chatId });
             close();
           },
+        }),
+        boardSource({
+          reader: tasksStoreFor(shell.api).reader,
+          // One look at the saved connection per dialog, not one per keystroke.
+          available: () => (availability.current ??= tasksStoreFor(shell.api).checkConnection()),
+          openTasks: (itemId) => void openTasks(shell.api, itemId),
+          close,
         }),
       ]),
     [shell, close],

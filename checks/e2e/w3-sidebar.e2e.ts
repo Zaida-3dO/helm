@@ -1,6 +1,7 @@
 // The sidebar end to end in the real debug app: one read-only sync from fakes/board, board groups
 // in the board's order, a three-level local tree, a local rename that survives a second sync, a
-// chat nested by drag, geometry, and no write ever sent to the board.
+// chat nested by drag, geometry, the read-only Tasks tab (columns, a card, its drawer, Ctrl+K and a
+// new chat for a task), and no write ever sent to the board.
 //
 // Run: `npm run build:debug` at the root, then `npm run e2e -w checks`.
 
@@ -118,6 +119,54 @@ describe("sidebar: Agent Standup sync, groups and nesting", { timeout: 10 * 60_0
       assert.deepEqual(await app!.cspViolations(), []);
     } finally {
       await shot(page(), OUT, "S3");
+    }
+  });
+
+  test("S4: Tasks reads the board in the side panel; a card opens its drawer; Ctrl+K finds the task; a new chat for it starts with its details", async () => {
+    const MERGE = "5c9e2a41-0f0b-4d6e-9d1f-0a7c1e3b9a10";
+    try {
+      await page().click(tid("nav-tasks"));
+      await page().waitForSelector(tid("tasks-view", '[data-loaded="true"]'), { timeout: 30_000 });
+      const counts = () => page().$$eval(tid("tasks-column-count"), (els) => els.map((e) => e.textContent));
+      assert.deepEqual(await counts(), ["30 / 32", "2 / 2", "1 / 1", "1 / 1"]);
+      await page().click(tid("tasks-column-more"));
+      await page().waitForFunction(() => document.querySelector('[data-testid="tasks-column"][data-column="backlog"] [data-testid="tasks-column-count"]')?.textContent === "32 / 32", null, { timeout: 15_000 });
+
+      // The card names its holder (matched against the fleet) and, once in view, its checkpoint.
+      const card = tid("tasks-card", `[data-item-id="${MERGE}"]`);
+      await page().waitForSelector(`${card} ${tid("tasks-card-checkpoint")}`, { timeout: 15_000 });
+      const text = (await page().textContent(card)) ?? "";
+      assert.ok(text.includes("builder: builder-one · workbench") && text.includes("Reproduced the stall"), text);
+
+      // The drawer: description, one safe link and one inert, 20 of the 25 history entries.
+      await page().click(card);
+      await page().waitForSelector(tid("tasks-drawer", `[data-item-id="${MERGE}"]`), { timeout: 15_000 });
+      await page().waitForFunction(() => document.querySelector('[data-testid="tasks-drawer-body"]')?.textContent?.includes("merge queue stops"), null, { timeout: 15_000 });
+      assert.equal(await page().locator(`${tid("tasks-drawer")} a.tk-link`).count(), 1);
+      assert.ok(((await page().textContent(`${tid("tasks-drawer")} .tk-link-inert`)) ?? "").includes("javascript:alert(1)"));
+      await page().waitForFunction(() => [...document.querySelectorAll('[data-testid="tasks-drawer-section"] h4')].some((h) => h.textContent?.includes("20 of 25")), null, { timeout: 15_000 });
+
+      // Ctrl+K: the Board group finds the task and choosing it opens its drawer.
+      await page().click(tid("tasks-drawer-close"));
+      await page().keyboard.press("Control+K");
+      await page().waitForSelector(tid("search-dialog"), { timeout: 10_000 });
+      await page().fill(tid("search-input"), "merge queue");
+      await page().waitForSelector(tid("search-hit", '[data-group="board"]'), { timeout: 15_000 });
+      await page().keyboard.press("Enter");
+      await page().waitForSelector(tid("tasks-drawer", `[data-item-id="${MERGE}"]`), { timeout: 15_000 });
+
+      // New chat in this task: the draft carries the details, and nothing is sent.
+      await page().click(tid("tasks-chat-menu"));
+      await page().getByText("New chat in this task").click();
+      await page().waitForFunction((id) => document.querySelector('[data-testid="composer"]')?.textContent?.includes(id), MERGE, { timeout: 15_000 });
+      const draft = (await page().textContent(tid("composer"))) ?? "";
+      assert.ok(draft.includes("Task board item") && draft.includes("Fix the merge queue"), draft);
+
+      assert.deepEqual(board!.violations, [], "no request but GET reached the board");
+      assert.ok(board!.requests.every((r) => r.authorized || r.path === "/api/ready"), "every request but readiness carried the token");
+      assert.deepEqual(await app!.cspViolations(), []);
+    } finally {
+      await shot(page(), OUT, "S4");
     }
   });
 });

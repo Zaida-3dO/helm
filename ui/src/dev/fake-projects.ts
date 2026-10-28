@@ -17,7 +17,8 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
   const chats = new Map<string, { chat: ChatRecord; group: string | null; parent: string | null; pinned: boolean; archived: boolean; position: number | null }>();
   let rev = 1;
   let url = 'https://standup.example';
-  let hasToken = false;
+  // `?board=1` starts with a saved connection, so Tasks shows.
+  let hasToken = typeof location !== 'undefined' && new URLSearchParams(location.search).get('board') === '1';
   let sync: BoardSyncState = { configured: false, syncing: false, lastSyncAt: null, error: null, projectCount: 0 };
 
   const node = (id: string, name: string, over: Partial<ProjectNode> = {}): ProjectNode => ({
