@@ -383,6 +383,13 @@ fn landing(v: Option<Value>, d: &Landing) -> Result<Landing, String> {
         ("squash", MergeMethod::Squash),
         ("rebase", MergeMethod::Rebase),
     ];
+    // A fast-forward moves the base branch itself, so only a repository's own rule may pick it.
+    const RULE_METHODS: [(&str, MergeMethod); 4] = [
+        ("merge", MergeMethod::Merge),
+        ("squash", MergeMethod::Squash),
+        ("rebase", MergeMethod::Rebase),
+        ("fast_forward", MergeMethod::FastForward),
+    ];
     let default = o.word("default", d.default, &MODES)?;
     let method = o.word("method", d.method, &METHODS)?;
     let repos = match o.take("repos") {
@@ -419,7 +426,7 @@ fn landing(v: Option<Value>, d: &Landing) -> Result<Landing, String> {
                             path: path.clone(),
                             map: Map::from_iter([("method".to_owned(), v)]),
                         };
-                        Some(tmp.word("method", MergeMethod::Merge, &METHODS)?)
+                        Some(tmp.word("method", MergeMethod::Merge, &RULE_METHODS)?)
                     }
                 };
                 r.done()?;
@@ -669,7 +676,13 @@ mod tests {
             mode: LandMode::Merge,
             method: Some(MergeMethod::Rebase),
         });
+        s.landing.repos.push(RepoRule {
+            repo: "github.com/o/ff".into(),
+            mode: LandMode::Merge,
+            method: Some(MergeMethod::FastForward),
+        });
         let stored = stored_form(&s);
+        assert_eq!(stored["landing"]["repos"][1]["method"], "fast_forward");
         assert_eq!(stored["moveFast"], true);
         assert_eq!(stored["newChats"], "never");
         assert_eq!(validate(stored).unwrap(), s);
@@ -740,6 +753,8 @@ mod tests {
             json!({"enabled": "yes"}),
             json!({"landing": {"repos": [{"repo": "github.com/o/r", "mode": "draft", "method": "squash"}]}}),
             json!({"landing": {"repos": [{"repo": "o/r", "mode": "merge"}]}}),
+            json!({"landing": {"method": "fast_forward"}}),
+            json!({"landing": {"repos": [{"repo": "github.com/o/r", "mode": "draft", "method": "fast_forward"}]}}),
             json!({"landing": {"repos": [{"repo": "github.com/o/r", "mode": "merge"}, {"repo": "GitHub.com/O/R", "mode": "draft"}]}}),
             json!({"landing": {"protectedBranches": ["ma in"]}}),
             json!({"landing": {"protectedBranches": ["../x"]}}),

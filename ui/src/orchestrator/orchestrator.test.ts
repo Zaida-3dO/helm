@@ -49,6 +49,7 @@ test('repository rules: parsed, printed back, and a draft rule with a method is 
   assert.ok('error' in rulesFromText('github.com/o/b draft squash'));
   assert.ok('error' in rulesFromText('github.com/o/b'));
   assert.ok('error' in rulesFromText('github.com/o/b merge fast'));
+  assert.deepEqual(rulesFromText('github.com/o/c merge fast_forward'), { rules: [{ repo: 'github.com/o/c', mode: 'merge', method: 'fast_forward' }] });
 });
 
 test('assemble round-trips untouched settings and applies edited texts', () => {

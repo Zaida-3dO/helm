@@ -22,6 +22,8 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
     ChatModeSetArgs::export_all_to(dir).map_err(|e| e.to_string())?;
     ChatModeSetResult::export_all_to(dir).map_err(|e| e.to_string())?;
     RunView::export_all_to(dir).map_err(|e| e.to_string())?;
+    PrLandInfo::export_all_to(dir).map_err(|e| e.to_string())?;
+    PrWriteResult::export_all_to(dir).map_err(|e| e.to_string())?;
     let mut names = vec![
         StageUse::ident(),
         PlanStage::ident(),
@@ -48,6 +50,11 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         RunChangeView::ident(),
         OtherTaskView::ident(),
         GuardNoteView::ident(),
+        PrLandInfo::ident(),
+        PrRule::ident(),
+        PrTracked::ident(),
+        PrOutcome::ident(),
+        PrWriteResult::ident(),
     ];
     names.sort();
     let mut index = String::from(

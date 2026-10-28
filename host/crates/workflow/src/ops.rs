@@ -10,6 +10,16 @@
 //! | `workflow_change_action` | maintenance | `{runId, repo, branch, action}` with action merge, retry, drop or decline (the user's, main window only) to `{state}` |
 //! | `workflow_change_ready` | blocking | `{runId, repo, branch}`: Ready for review on a handed-off change (the user's, main window only) to `{state}`. It asks GitHub, so it holds no global lock ([`crate::land::ready`]) |
 //! | `workflow_task_action` | maintenance | `{runId, action, planId?, stage?, n?}` with action signOff, skip, allowMore, park, reopen, visual, notVisual or end (the user's, main window only); see [`crate::user`] |
+//! | `pr_land_info` | blocking | `{owner, repo, number, headBranch?}` to [`PrLandInfo`]; reads no GitHub (`headBranch` only when the PR's head is in the same repository) |
+//! | `pr_merge` | blocking | `{owner, repo, number, sha, anyway?}` to [`PrWriteResult`] (`routed`, `merged` or `accepted`) |
+//! | `pr_ready` | blocking | `{owner, repo, number, anyway?}` to [`PrWriteResult`] (`routed`, `ready` or `alreadyReady`) |
+//! | `pr_draft` | blocking | `{owner, repo, number}` to [`PrWriteResult`] (`converted`, `tracked` or `alreadyDraft`) |
+//!
+//! The `pr_*` ops are the PR view's (main window only, [`crate::prview`]). They ask GitHub, so
+//! they hold no global lock. A refusal is a `conflict` whose message starts with its class in
+//! brackets: `[Invalid]`, `[GitHub]`, `[Closed]`, `[HeadMoved]`, `[Draft]`, `[DraftRule]`,
+//! `[NotFastForward]`, `[Refused]`, `[Uncertain]` (it may have gone through), `[Tracked]` (the
+//! page may repeat it with `anyway`), `[TrackedBusy]` and `[TrackedUnknown]` (no override).
 //!
 //! The user's ops are never host tools, so no agent reaches them; agents take the consented
 //! subset through `app_workflow` with the user's words or an Allow grant.
@@ -66,7 +76,97 @@ pub fn register_ops(reg: &mut OpRegistry) {
             change_action,
         )
         .blocking("workflow_change_ready", OpClass::Blocking, change_ready)
-        .blocking("workflow_task_action", OpClass::Maintenance, task_action);
+        .blocking("workflow_task_action", OpClass::Maintenance, task_action)
+        .blocking("pr_land_info", OpClass::Blocking, pr_land_info)
+        .blocking("pr_merge", OpClass::Blocking, pr_merge)
+        .blocking("pr_ready", OpClass::Blocking, pr_ready)
+        .blocking("pr_draft", OpClass::Blocking, pr_draft);
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PrArgs {
+    owner: String,
+    repo: String,
+    number: u64,
+    #[serde(default)]
+    head_branch: Option<String>,
+    #[serde(default)]
+    sha: Option<String>,
+    #[serde(default)]
+    anyway: bool,
+}
+
+/// Which optional fields each `pr_*` op takes.
+fn pr_args(args: Value, extra: &[&str]) -> Result<(PrArgs, crate::prview::PrRef), ApiError> {
+    if let Some(o) = args.as_object() {
+        for k in ["headBranch", "sha", "anyway"] {
+            if o.contains_key(k) && !extra.contains(&k) {
+                return Err(ApiError::bad_args(format!("unknown field `{k}`")));
+            }
+        }
+    }
+    let a: PrArgs = parse(args)?;
+    let pr = crate::prview::PrRef::new(&a.owner, &a.repo, a.number).map_err(ApiError::bad_args)?;
+    Ok((a, pr))
+}
+
+fn pr_land_info(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let (a, pr) = pr_args(args, &["headBranch"])?;
+    let db = ctx.services.need::<Database>()?;
+    let info = crate::prview::info(&db, &crate::land::flight(), &pr, a.head_branch.as_deref())
+        .map_err(ApiError::conflict)?;
+    to_value(&info)
+}
+
+fn pr_merge(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    pr_write(ctx, args, &["sha", "anyway"], &crate::gh::GhCli)
+}
+
+fn pr_ready(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    pr_write(ctx, args, &["anyway"], &crate::gh::GhCli)
+}
+
+fn pr_draft(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    pr_write(ctx, args, &[], &crate::gh::GhCli)
+}
+
+/// The three PR view writes; which one is told by the fields it takes.
+fn pr_write(
+    ctx: &OpCtx,
+    args: Value,
+    extra: &[&str],
+    gh: &dyn crate::gh::Gh,
+) -> Result<Value, ApiError> {
+    let (a, pr) = pr_args(args, extra)?;
+    let db = ctx.services.need::<Database>()?;
+    let flight = crate::land::flight();
+    let cx = crate::prview::Ctx {
+        db: &db,
+        gh,
+        flight: &flight,
+        pause: crate::prview::READBACK_PAUSE,
+        now: helm_core::now_ms(),
+    };
+    let _ = crate::notes::take_pending();
+    let out = if extra.contains(&"sha") {
+        let sha = a
+            .sha
+            .as_deref()
+            .ok_or_else(|| ApiError::bad_args("missing field `sha`"))?;
+        crate::prview::merge(&cx, &pr, sha, a.anyway)
+    } else if extra.contains(&"anyway") {
+        crate::prview::ready(&cx, &pr, a.anyway)
+    } else {
+        crate::prview::draft(&cx, &pr)
+    };
+    // A routed or recorded write changes a task: tell the UI, and write the task chat's note.
+    crate::store::emit_touched(&*ctx.events);
+    let notes = crate::notes::take_pending();
+    if let Some(rt) = ctx.services.get::<helm_chats::ChatRuntime>() {
+        crate::notes::deliver_pending(&db, &rt, notes);
+    }
+    to_value(&out.map_err(ApiError::conflict)?)
 }
 
 /// A Claude Code chat whose turn is starting, running or stopping.

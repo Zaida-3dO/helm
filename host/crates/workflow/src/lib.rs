@@ -36,6 +36,7 @@
 //! | land step | `gh` merge pinned to the approved head, readback must say MERGED; draft land |
 //! | op `workflow_run_get`, event `workflow_run` | the workflow panel's live read |
 //! | ops `workflow_change_action`, `workflow_change_ready`, `workflow_task_action` | the user's buttons and task menu ([`user`]); Ready for review is its own non-maintenance op because it asks GitHub |
+//! | ops `pr_land_info`, `pr_merge`, `pr_ready`, `pr_draft` | the pull request view's merge box, Ready for review and Convert to draft ([`prview`]): routed through a task that tracks the PR, or one checked write by the repository's landing rule |
 //!
 //! Events: `workflow_settings {}`, `workflow_chat_mode {chatId}` and `workflow_run {chatId}` tell the
 //! UI to re-read. `workflow_run` follows every write of a task, change or event row, whoever made it
@@ -65,6 +66,7 @@ mod ops;
 pub mod outage_rules;
 pub mod overrides;
 pub mod postland;
+pub mod prview;
 pub mod reports;
 pub mod rules;
 pub mod sa_outbox;
