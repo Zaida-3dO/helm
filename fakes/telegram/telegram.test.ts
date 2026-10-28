@@ -67,11 +67,17 @@ test('voice notes download and transcribe; buttons are tapped, answered and remo
   try {
     tg.picture(42, new Uint8Array([1, 2, 3]), { caption: 'look' });
     tg.voice(42, new Uint8Array([79, 103, 103, 83]));
+    tg.file(42, new Uint8Array([37, 80, 68, 70]), { name: 'report.pdf', mime: 'application/pdf', group: 'g1' });
     const keyboard = { inline_keyboard: [[{ text: 'Allow', callback_data: 'a:0123456789abcdef:0' }]] };
     const ask = await call(tg.url, DEFAULT_TOKEN, 'sendMessage', { chat_id: 42, text: 'Run it?', reply_markup: keyboard });
     tg.tap(42, ask.body.result.message_id, 'a:0123456789abcdef:0');
-    const [pic, note, tap] = (await call(tg.url, DEFAULT_TOKEN, 'getUpdates', { offset: 0 })).body.result as any[];
+    const [pic, note, doc, tap] = (await call(tg.url, DEFAULT_TOKEN, 'getUpdates', { offset: 0 })).body.result as any[];
     assert.equal(pic.message.caption, 'look');
+    assert.equal(doc.message.document.file_name, 'report.pdf');
+    assert.equal(doc.message.media_group_id, 'g1');
+    const docInfo = (await call(tg.url, DEFAULT_TOKEN, 'getFile', { file_id: doc.message.document.file_id })).body.result;
+    const docBytes = await fetch(`${tg.url}/file/bot${DEFAULT_TOKEN}/${docInfo.file_path}`);
+    assert.deepEqual(new Uint8Array(await docBytes.arrayBuffer()), new Uint8Array([37, 80, 68, 70]));
     const best = pic.message.photo.at(-1);
     const info = (await call(tg.url, DEFAULT_TOKEN, 'getFile', { file_id: best.file_id })).body.result;
     const photoBytes = await fetch(`${tg.url}/file/bot${DEFAULT_TOKEN}/${info.file_path}`);

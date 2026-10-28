@@ -1,6 +1,6 @@
 //! The Telegram bridge against a recording fake Bot API: the allow-list (trust-boundary item
-//! a), the offline queue (f), the live status message, voice notes, quoted replies and the
-//! approval buttons.
+//! a), the offline queue (f), the live status message, files, pictures and recordings, quoted
+//! replies and the approval buttons.
 
 use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderMap, Request, StatusCode};
@@ -10,10 +10,10 @@ use helm_hub::relay::{Line, Upstream, OFFLINE};
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
 use helm_hub::telegram::{
-    now_ms, parse_allowed, parse_receive, ApiError, ApiFuture, Bridge, Files, Handled, HttpFiles,
-    HttpVoice, Receive, SttConfig, TelegramApi, TelegramConfig, Voice, VoiceFuture, HELLO,
-    IMAGES_OFF, IMAGE_FAILED, POLL_SECONDS, QUEUED, TAP_OFFLINE, TAP_SENT, TAP_STALE, TEXT_ONLY,
-    VOICE_OFF, VOICE_TOO_BIG,
+    now_ms, parse_allowed, parse_receive, size_text, ApiError, ApiFuture, Bridge, Files, Handled,
+    HttpFiles, HttpVoice, Receive, SttConfig, TelegramApi, TelegramConfig, Voice, VoiceFuture,
+    FILES_OFF, HELLO, IMAGE_FAILED, POLL_SECONDS, QUEUED, STT_DOWN, STT_DOWN_AFTER, TAP_OFFLINE,
+    TAP_SENT, TAP_STALE, TEXT_ONLY, VOICE_OFF,
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
@@ -79,6 +79,10 @@ impl TelegramApi for FakeApi {
                 Some(id) if id.starts_with("img-") => {
                     json!({ "file_id": id, "file_size": 1234, "file_path": format!("photos/{id}") })
                 }
+                // A file id with a dot in it is served under that name.
+                Some(id) if id.contains('.') => {
+                    json!({ "file_id": id, "file_size": 1234, "file_path": format!("files/{id}") })
+                }
                 _ => json!({ "file_id": body["file_id"], "file_size": 1234,
                              "file_path": "voice/file_7.oga" }),
             }),
@@ -136,7 +140,8 @@ impl Voice for FakeVoice {
     }
 }
 
-/// Hands out the picture stored under a file id (`photos/<id>`), once the gate lets it.
+/// Hands out the file stored under a file id (`photos/<id>` or `files/<id>`), once the gate lets
+/// it.
 struct FakeFiles {
     files: Vec<(&'static str, Vec<u8>)>,
     gate: tokio::sync::Semaphore,
@@ -146,7 +151,7 @@ impl Files for FakeFiles {
     fn download<'a>(&'a self, file_path: &'a str) -> VoiceFuture<'a, Vec<u8>> {
         Box::pin(async move {
             self.gate.acquire().await.unwrap().forget();
-            let id = file_path.strip_prefix("photos/").unwrap_or(file_path);
+            let id = file_path.rsplit('/').next().unwrap_or(file_path);
             match self.files.iter().find(|(f, _)| *f == id) {
                 Some((_, bytes)) => Ok(bytes.clone()),
                 None => Err("the download from Telegram failed (HTTP 404)".into()),
@@ -203,6 +208,10 @@ fn env() -> Env {
 }
 
 fn env_with(voice: Option<Arc<FakeVoice>>) -> Env {
+    env_of(voice, None)
+}
+
+fn env_of(voice: Option<Arc<FakeVoice>>, files: Option<Arc<FakeFiles>>) -> Env {
     let api = Arc::new(FakeApi::default());
     let (line, _up) = Line::new();
     let line = Arc::new(line);
@@ -210,27 +219,33 @@ fn env_with(voice: Option<Arc<FakeVoice>>) -> Env {
     if let Some(v) = voice {
         bridge = bridge.with_voice(v);
     }
+    if let Some(f) = files {
+        bridge = bridge.with_files(f);
+    }
     let bridge = Arc::new(bridge);
     Env { api, line, bridge }
 }
 
-fn env_with_files(files: Vec<(&'static str, Vec<u8>)>, open: bool) -> (Env, Arc<FakeFiles>) {
-    let api = Arc::new(FakeApi::default());
-    let (line, _up) = Line::new();
-    let line = Arc::new(line);
-    let files = Arc::new(FakeFiles {
+fn fake_files(files: Vec<(&'static str, Vec<u8>)>, open: bool) -> Arc<FakeFiles> {
+    Arc::new(FakeFiles {
         files,
         gate: tokio::sync::Semaphore::new(if open { 100 } else { 0 }),
-    });
-    let bridge = Bridge::new(api.clone(), line.clone(), &cfg()).with_files(files.clone());
-    let bridge = Arc::new(bridge);
-    (Env { api, line, bridge }, files)
+    })
 }
 
-/// Let spawned work (a voice note's transcription) run to its end.
+fn env_with_files(files: Vec<(&'static str, Vec<u8>)>, open: bool) -> (Env, Arc<FakeFiles>) {
+    let files = fake_files(files, open);
+    (env_of(None, Some(files.clone())), files)
+}
+
+/// Let spawned work (a file's fetch, a recording's transcription) run to its end, including the
+/// encoding on the blocking pool.
 async fn settle() {
-    for _ in 0..50 {
-        tokio::task::yield_now().await;
+    for _ in 0..3 {
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
     }
 }
 
@@ -780,14 +795,55 @@ async fn an_unacknowledged_message_is_resent_on_the_same_line_until_it_expires()
     assert_eq!(e.bridge.flush(T0 + 42 * MIN).await, 0);
 }
 
-const FAILED: &str = "The voice note could not be transcribed, so nothing was sent to Helm: ";
+/// A file as it went down the line: (name, type, bytes).
+type Down = (String, String, Vec<u8>);
+
+/// The `telegram` frames that went down: (text, its pictures, its plain files).
+fn attached_down(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<(String, Vec<Down>, Vec<Down>)> {
+    use base64::Engine as _;
+    let list = |v: &Value| -> Vec<Down> {
+        let items = v.as_array().cloned().unwrap_or_default();
+        items
+            .iter()
+            .map(|i| {
+                let data = base64::engine::general_purpose::STANDARD
+                    .decode(i["data"].as_str().unwrap())
+                    .unwrap();
+                (
+                    i["name"].as_str().unwrap().to_owned(),
+                    i["mediaType"].as_str().unwrap().to_owned(),
+                    data,
+                )
+            })
+            .collect()
+    };
+    frames(rx)
+        .iter()
+        .filter(|f| f["type"] == "telegram")
+        .map(|f| {
+            (
+                f["text"].as_str().unwrap().to_owned(),
+                list(&f["images"]),
+                list(&f["files"]),
+            )
+        })
+        .collect()
+}
+
+/// A file as the tests expect it down the line.
+fn file(name: &str, mime: &str, bytes: &[u8]) -> Down {
+    (name.to_owned(), mime.to_owned(), bytes.to_vec())
+}
+
+const TOO_LARGE: &str = "it is larger than 20 MB, the most a Telegram bot can download";
 
 #[tokio::test]
-async fn voice_notes_are_transcribed_and_then_handled_like_text() {
+async fn recordings_go_with_their_transcript_and_the_recording_attached() {
     let note = json!({ "file_id": "f1", "mime_type": "audio/ogg", "file_size": 1234 });
     let big = json!({ "file_id": "f2", "mime_type": "audio/ogg", "file_size": 21 * 1024 * 1024 });
-    // Refused at once: voice notes off, or a file above the Bot API's download limit.
-    for (on, note, said) in [(false, &note, VOICE_OFF), (true, &big, VOICE_TOO_BIG)] {
+    // Refused at once: nothing fetches files on this hub, or a file above the Bot API's limit.
+    let too_big = format!("That recording was not sent to Helm: {TOO_LARGE}");
+    for (on, note, said) in [(false, &note, FILES_OFF), (true, &big, too_big.as_str())] {
         let e = env_with(on.then(|| FakeVoice::new(Ok("hi"))));
         let mut rx = line_up(&e);
         let m = owner_message(json!({ "voice": note }));
@@ -797,31 +853,80 @@ async fn voice_notes_are_transcribed_and_then_handled_like_text() {
             (vec![said.to_owned()], vec![])
         );
     }
-    // Transcribed: forwarded like text, or the user is told why not and nothing reaches Helm.
+    // Transcribed or not, the recording goes as a file beside its text; a server that is down or
+    // errs gets a plain reply. (fields, what the server hears, the text, the reply)
     const HTTP_500: &str = "the speech-to-text server answered HTTP 500: model not loaded";
-    let failed = |why: &str| -> Result<&'static str, String> { Err(format!("{FAILED}{why}")) };
-    let reply_to = json!({ "audio": note, "reply_to_message": { "message_id": 3, "text": "Go?" } });
-    for (fields, heard, want) in [
+    const DOWN: &str = "the speech-to-text server could not be reached: Connection refused";
+    let unheard = "[Voice note] (not transcribed: transcription was unavailable)";
+    let down_reply = |why: &str| format!("{STT_DOWN}{why}{STT_DOWN_AFTER}");
+    let memo = json!({ "file_id": "f3", "file_name": "memo.mp3", "mime_type": "audio/mpeg" });
+    let reply_to = json!({ "audio": memo, "reply_to_message": { "message_id": 3, "text": "Go?" } });
+    let markers = "part one [gap: 00:10-00:12] part two [truncated: past 60 min]";
+    let ogg = file("file_7.oga", "audio/ogg", b"OggS");
+    for (fields, heard, text, reply, attached) in [
         (
             json!({ "voice": { "file_id": "huge" } }),
             Ok("hi"),
-            failed("it is larger than 20 MB"),
-        ),
-        (json!({ "voice": note }), Err(HTTP_500), failed(HTTP_500)),
-        (
-            json!({ "voice": note }),
-            Ok(" "),
-            failed("the speech-to-text server returned no text"),
+            None,
+            Some(too_big.clone()),
+            None,
         ),
         (
             json!({ "voice": note }),
             Ok(" hello there "),
-            Ok("[Voice note] hello there"),
+            Some("[Voice note] hello there".to_owned()),
+            None,
+            Some(ogg.clone()),
+        ),
+        (
+            json!({ "voice": note }),
+            Ok(markers),
+            Some(format!("[Voice note] {markers}")),
+            None,
+            Some(ogg.clone()),
+        ),
+        (
+            json!({ "voice": note }),
+            Err(DOWN),
+            Some(unheard.to_owned()),
+            Some(down_reply(DOWN)),
+            Some(ogg.clone()),
+        ),
+        (
+            json!({ "voice": note }),
+            Err(HTTP_500),
+            Some(unheard.to_owned()),
+            Some(down_reply(HTTP_500)),
+            Some(ogg.clone()),
+        ),
+        (
+            json!({ "voice": note }),
+            Ok(" "),
+            Some("[Voice note] (no speech was heard)".to_owned()),
+            None,
+            Some(ogg.clone()),
         ),
         (
             reply_to,
             Ok("yes"),
-            Ok("Replying to: \"Go?\"\n[Voice note] yes"),
+            Some("Replying to: \"Go?\"\n[Audio] memo.mp3, 4 bytes\nTranscript: yes".to_owned()),
+            None,
+            Some(file("memo.mp3", "audio/mpeg", b"OggS")),
+        ),
+        // A video note the server cannot transcribe just goes as a file, without a reply.
+        (
+            json!({ "video_note": { "file_id": "round.mp4", "file_size": 4 } }),
+            Ok("hi"),
+            Some("[Video note] round.mp4, 4 bytes\nTranscript: hi".to_owned()),
+            None,
+            Some(file("round.mp4", "application/octet-stream", b"OggS")),
+        ),
+        (
+            json!({ "video_note": { "file_id": "round.mp4", "mime_type": "video/mp4" } }),
+            Err(HTTP_500),
+            Some("[Video note] round.mp4, 4 bytes".to_owned()),
+            None,
+            Some(file("round.mp4", "video/mp4", b"OggS")),
         ),
     ] {
         let voice = FakeVoice::new(heard);
@@ -830,17 +935,15 @@ async fn voice_notes_are_transcribed_and_then_handled_like_text() {
         let m = owner_message(fields);
         assert_eq!(e.bridge.on_update(&m, now_ms()).await, Handled::Voice);
         settle().await;
-        let got = (down(&mut rx), e.api.sent_texts());
-        match &want {
-            Ok(text) => assert_eq!(got, (vec![text.to_string()], vec![]), "{m}"),
-            Err(why) => assert_eq!(got, (vec![], vec![why.clone()]), "{m}"),
-        }
-        assert_eq!(
-            e.bridge.queued_len(),
-            usize::from(want.is_ok()),
-            "held until acknowledged"
-        );
-        if want.is_ok() {
+        let got = attached_down(&mut rx);
+        let want: Vec<_> = text
+            .iter()
+            .map(|t| (t.clone(), vec![], Vec::from_iter(attached.clone())))
+            .collect();
+        assert_eq!(got, want, "{m}");
+        assert_eq!(e.api.sent_texts(), Vec::from_iter(reply), "{m}");
+        assert_eq!(e.bridge.queued_len(), want.len(), "held until acknowledged");
+        if m.to_string().contains("hello there") {
             let seen = voice.seen.lock().unwrap().clone();
             assert_eq!(
                 seen,
@@ -851,6 +954,24 @@ async fn voice_notes_are_transcribed_and_then_handled_like_text() {
             );
         }
     }
+    // No speech-to-text server: the recording still goes, and the user is told it has no text.
+    let e = env_of(
+        None,
+        Some(fake_files(vec![("rec.ogg", b"OggS".to_vec())], true)),
+    );
+    let mut rx = line_up(&e);
+    let m = owner_message(json!({ "voice": { "file_id": "rec.ogg", "mime_type": "audio/ogg" } }));
+    assert_eq!(e.bridge.on_update(&m, now_ms()).await, Handled::Voice);
+    settle().await;
+    assert_eq!(
+        attached_down(&mut rx),
+        [(
+            "[Voice note] (not transcribed: this hub has no speech-to-text server)".to_owned(),
+            vec![],
+            vec![file("rec.ogg", "audio/ogg", b"OggS")]
+        )]
+    );
+    assert_eq!(e.api.sent_texts(), [VOICE_OFF]);
     // Offline: transcribed anyway, queued with the usual reply, delivered on reconnect.
     let e = env_with(Some(FakeVoice::new(Ok("later"))));
     let m = owner_message(json!({ "voice": note }));
@@ -877,8 +998,8 @@ async fn voice_notes_are_transcribed_and_then_handled_like_text() {
     voice.gate.add_permits(1);
     settle().await;
     assert_eq!(down(&mut rx), ["[Voice note] first", "second"]);
-    // A failed note frees its place too.
-    let voice = FakeVoice::held(Err("the speech-to-text server could not be reached"));
+    // A note whose transcription fails still goes first, marked, and the user is told.
+    let voice = FakeVoice::held(Err(DOWN));
     let e = env_with(Some(voice.clone()));
     let mut rx = line_up(&e);
     e.bridge
@@ -889,93 +1010,97 @@ async fn voice_notes_are_transcribed_and_then_handled_like_text() {
         .await;
     voice.gate.add_permits(1);
     settle().await;
-    assert_eq!(down(&mut rx), ["after"]);
-    assert_eq!(
-        e.api.sent_texts(),
-        [format!(
-            "{FAILED}the speech-to-text server could not be reached"
-        )]
-    );
-}
-
-/// A picture as it went down the line: (name, type, bytes).
-type Down = (String, String, Vec<u8>);
-
-/// The `telegram` frames that went down: (text, its pictures).
-fn pictures_down(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<(String, Vec<Down>)> {
-    use base64::Engine as _;
-    frames(rx)
-        .iter()
-        .filter(|f| f["type"] == "telegram")
-        .map(|f| {
-            let images = f["images"].as_array().cloned().unwrap_or_default();
-            let images = images.iter().map(|i| {
-                let data = base64::engine::general_purpose::STANDARD
-                    .decode(i["data"].as_str().unwrap())
-                    .unwrap();
-                (
-                    i["name"].as_str().unwrap().to_owned(),
-                    i["mediaType"].as_str().unwrap().to_owned(),
-                    data,
-                )
-            });
-            (f["text"].as_str().unwrap().to_owned(), images.collect())
-        })
-        .collect()
+    assert_eq!(down(&mut rx), [unheard, "after"]);
+    assert_eq!(e.api.sent_texts(), [down_reply(DOWN)]);
 }
 
 #[tokio::test]
-async fn pictures_reach_helm_as_attachments_and_the_unreadable_are_refused_in_plain_words() {
+async fn pictures_reach_helm_as_images_and_the_ones_it_cannot_show_as_plain_files() {
     let photo = |id: &str, w: u32, h: u32| json!({ "file_id": id, "width": w, "height": h });
     let sizes = json!([
         photo("img-s", 90, 90),
         photo("img-l", 1280, 1280),
         photo("img-xl", 6000, 6000)
     ]);
-    let doc = |mime: &str, id: &str| json!({ "file_id": id, "mime_type": mime, "file_name": "shot.png", "file_size": 1234 });
+    let doc = |mime: &str, id: &str, name: &str| json!({ "file_id": id, "mime_type": mime, "file_name": name, "file_size": 1234 });
     let (still, moving) = (png(64, 48, false), png(64, 48, true));
+    let gif = b"GIF89a\x40\x00\x30\x00".to_vec();
+    let heic = b"\0\0\0\x18ftypheic".to_vec();
+    let wide = png(8000, 4000, false);
+    let junk = b"this is not a picture at all".to_vec();
     let files = vec![
         ("img-l", jpeg(1280, 960)),
+        ("img-xl", jpeg(6000, 6000)),
         ("img-png", still.clone()),
-        ("img-apng", moving),
-        ("img-gif", b"GIF89a\x40\x00\x30\x00".to_vec()),
-        ("img-wide", png(8000, 4000, false)),
-        ("img-junk", b"this is not a picture at all".to_vec()),
+        ("img-apng", moving.clone()),
+        ("img-gif", gif.clone()),
+        ("img-heic", heic.clone()),
+        ("img-wide", wide.clone()),
+        ("img-junk", junk.clone()),
     ];
     let (e, _files) = env_with_files(files.clone(), true);
     let mut rx = line_up(&e);
     let reply_to = json!({ "message_id": 3, "text": "Is this right?" });
 
-    // Forwarded: the largest size that fits (the 36 MP one is over the limit), its caption as the
-    // text, "[Photo]" without one, a file's own name, and a quoted reply.
-    for (fields, text, name, mime, bytes) in [
+    // Shown in the chat: the largest size Helm can show (the 36 MP one is over the limit), its
+    // caption as the text, "[Photo]" without one, a file's own name, and a quoted reply. Not
+    // shown, but passed on as a plain file: a GIF, HEIC, an animated or too large picture, or
+    // bytes that are not a picture at all, whatever the message claims.
+    let image = |name: &str, mime: &str, bytes: &[u8]| (vec![file(name, mime, bytes)], vec![]);
+    let plain = |name: &str, mime: &str, bytes: &[u8]| (vec![], vec![file(name, mime, bytes)]);
+    for (fields, text, (images, files)) in [
         (
             json!({ "photo": sizes, "caption": "what is this?" }),
-            "what is this?",
-            "photo.jpg",
-            "image/jpeg",
-            jpeg(1280, 960),
+            "what is this?".to_owned(),
+            image("photo.jpg", "image/jpeg", &jpeg(1280, 960)),
         ),
         (
             json!({ "photo": sizes }),
-            "[Photo]",
-            "photo.jpg",
-            "image/jpeg",
-            jpeg(1280, 960),
+            "[Photo]".to_owned(),
+            image("photo.jpg", "image/jpeg", &jpeg(1280, 960)),
         ),
         (
-            json!({ "document": doc("image/png", "img-png"), "caption": "/helm look" }),
-            "look",
-            "shot.png",
-            "image/png",
-            still.clone(),
+            json!({ "document": doc("image/png", "img-png", "shot.png"), "caption": "/helm look" }),
+            "look".to_owned(),
+            image("shot.png", "image/png", &still),
         ),
         (
-            json!({ "document": doc("image/png", "img-png"), "reply_to_message": reply_to }),
-            "Replying to: \"Is this right?\"\n[Image]",
-            "shot.png",
-            "image/png",
-            still,
+            json!({ "document": doc("image/png", "img-png", "shot.png"), "reply_to_message": reply_to }),
+            "Replying to: \"Is this right?\"\n[Image]".to_owned(),
+            image("shot.png", "image/png", &still),
+        ),
+        (
+            json!({ "document": doc("image/gif", "img-gif", "dance.gif") }),
+            format!("[File] dance.gif, {}", size_text(gif.len())),
+            plain("dance.gif", "image/gif", &gif),
+        ),
+        (
+            json!({ "document": doc("image/heic", "img-heic", "IMG_1.HEIC"), "caption": "from my phone" }),
+            format!(
+                "from my phone\n[File] IMG_1.HEIC, {}",
+                size_text(heic.len())
+            ),
+            plain("IMG_1.HEIC", "image/heic", &heic),
+        ),
+        (
+            json!({ "document": doc("image/png", "img-apng", "moving.png") }),
+            format!("[File] moving.png, {}", size_text(moving.len())),
+            plain("moving.png", "image/png", &moving),
+        ),
+        (
+            json!({ "document": doc("image/png", "img-wide", "wide.png") }),
+            format!("[File] wide.png, {}", size_text(wide.len())),
+            plain("wide.png", "image/png", &wide),
+        ),
+        (
+            json!({ "document": doc("image/png", "img-junk", "junk.png") }),
+            format!("[File] junk.png, {}", size_text(junk.len())),
+            plain("junk.png", "image/png", &junk),
+        ),
+        (
+            json!({ "photo": [photo("img-xl", 6000, 6000)] }),
+            format!("[File] img-xl, {}", size_text(jpeg(6000, 6000).len())),
+            plain("img-xl", "image/jpeg", &jpeg(6000, 6000)),
         ),
     ] {
         let m = owner_message(fields);
@@ -985,72 +1110,28 @@ async fn pictures_reach_helm_as_attachments_and_the_unreadable_are_refused_in_pl
             "{m}"
         );
         settle().await;
-        assert_eq!(
-            pictures_down(&mut rx),
-            [(
-                text.to_owned(),
-                vec![(name.to_owned(), mime.to_owned(), bytes)]
-            )],
-            "{m}"
-        );
+        assert_eq!(attached_down(&mut rx), [(text, images, files)], "{m}");
         assert!(e.api.sent_texts().is_empty(), "{:?}", e.api.sent_texts());
     }
-    assert_eq!(e.bridge.queued_len(), 4, "held until acknowledged");
+    assert_eq!(e.bridge.queued_len(), 10, "held until acknowledged");
 
     // Refused with a reason and nothing sent to Helm: at once from what the message says, or
-    // after the fetch from the picture's own bytes.
-    let too_big = "it is larger than 20 MB";
-    let only = "Helm reads only still PNG, JPEG and WebP pictures";
+    // after the fetch.
     for (fields, at_once, why) in [
-        (
-            json!({ "document": doc("image/gif", "x") }),
-            true,
-            format!("{only}, and this is a GIF"),
-        ),
-        (
-            json!({ "document": doc("image/heic", "x") }),
-            true,
-            format!("{only}, and this is image/heic"),
-        ),
-        (
-            json!({ "photo": [photo("img-xl", 6000, 6000)] }),
-            true,
-            "it is larger than 20 MB or 20 megapixels".into(),
-        ),
         (
             json!({ "document": { "file_id": "x", "mime_type": "image/png", "file_size": 21 << 20 } }),
             true,
-            too_big.into(),
+            TOO_LARGE,
         ),
         (
             json!({ "photo": [photo("img-huge", 640, 480)] }),
             false,
-            too_big.into(),
+            TOO_LARGE,
         ),
         (
-            json!({ "document": doc("image/png", "img-gif") }),
+            json!({ "document": doc("image/png", "img-gone", "gone.png") }),
             false,
-            format!("{only}, and this is a GIF"),
-        ),
-        (
-            json!({ "document": doc("image/png", "img-apng") }),
-            false,
-            format!("{only}, and this one is animated"),
-        ),
-        (
-            json!({ "document": doc("image/png", "img-wide") }),
-            false,
-            "it is larger than 20 megapixels".into(),
-        ),
-        (
-            json!({ "document": doc("image/png", "img-junk") }),
-            false,
-            format!("{only}, and this is not one of those"),
-        ),
-        (
-            json!({ "document": doc("image/png", "img-gone") }),
-            false,
-            "the download from Telegram failed (HTTP 404)".into(),
+            "the download from Telegram failed (HTTP 404)",
         ),
     ] {
         e.api.clear();
@@ -1063,17 +1144,17 @@ async fn pictures_reach_helm_as_attachments_and_the_unreadable_are_refused_in_pl
         assert_eq!(e.bridge.on_update(&m, now_ms()).await, want, "{m}");
         settle().await;
         assert_eq!(e.api.sent_texts(), [format!("{IMAGE_FAILED}{why}")], "{m}");
-        assert!(pictures_down(&mut rx).is_empty(), "{m}");
+        assert!(attached_down(&mut rx).is_empty(), "{m}");
     }
-    // Something that is not a picture is still text-only, and pictures can be switched off.
+    // A message with no file and no text (a location) is not passed on, and files can be off.
     e.api.clear();
-    let pdf = owner_message(json!({ "document": doc("application/pdf", "x") }));
-    assert_eq!(e.bridge.on_update(&pdf, now_ms()).await, Handled::Command);
+    let here = owner_message(json!({ "location": { "latitude": 51.5, "longitude": 0.1 } }));
+    assert_eq!(e.bridge.on_update(&here, now_ms()).await, Handled::Command);
     assert_eq!(e.api.sent_texts(), [TEXT_ONLY]);
     let off = env();
     let m = owner_message(json!({ "photo": sizes }));
     off.bridge.on_update(&m, now_ms()).await;
-    assert_eq!(off.api.sent_texts(), [IMAGES_OFF]);
+    assert_eq!(off.api.sent_texts(), [FILES_OFF]);
 
     // The picture keeps its place: a message sent after it waits, then both go in order. Offline,
     // it is queued with the usual reply and goes with its picture on reconnect.
@@ -1089,12 +1170,159 @@ async fn pictures_reach_helm_as_attachments_and_the_unreadable_are_refused_in_pl
     settle().await;
     let mut rx = line_up(&e);
     e.bridge.flush(now_ms()).await;
-    let got = pictures_down(&mut rx);
+    let got = attached_down(&mut rx);
     assert_eq!(
         got.iter()
-            .map(|(t, i)| (t.as_str(), i.len()))
+            .map(|(t, i, _)| (t.as_str(), i.len()))
             .collect::<Vec<_>>(),
         [("first", 1), ("second", 0)]
+    );
+}
+
+#[tokio::test]
+async fn every_file_reaches_helm_and_an_album_goes_as_one_message() {
+    let report = vec![7u8; 1_258_291];
+    let small = |n: u8| vec![n; 5];
+    let files = vec![
+        ("report.pdf", report.clone()),
+        ("notes.txt", small(1)),
+        ("clip.mp4", small(2)),
+        ("anim.mp4", small(3)),
+        ("song.mp3", small(4)),
+        ("img-l", jpeg(1280, 960)),
+    ];
+    let (e, _files) = env_with_files(files.clone(), true);
+    let mut rx = line_up(&e);
+    let doc = |id: &str, mime: &str| json!({ "file_id": id, "file_name": id, "mime_type": mime });
+    let pdf = doc("report.pdf", "application/pdf");
+    // (fields, how it is handled, the text, the file)
+    for (fields, handled, text, sent) in [
+        (
+            json!({ "document": pdf, "caption": "please summarise" }),
+            Handled::File,
+            "please summarise\n[File] report.pdf, 1.2 MB",
+            file("report.pdf", "application/pdf", &report),
+        ),
+        (
+            json!({ "document": doc("notes.txt", "text/plain") }),
+            Handled::File,
+            "[File] notes.txt, 5 bytes",
+            file("notes.txt", "text/plain", &small(1)),
+        ),
+        (
+            json!({ "video": { "file_id": "clip.mp4", "mime_type": "video/mp4" }, "caption": "look" }),
+            Handled::File,
+            "look\n[Video] clip.mp4, 5 bytes",
+            file("clip.mp4", "video/mp4", &small(2)),
+        ),
+        (
+            json!({ "animation": { "file_id": "anim.mp4", "mime_type": "video/mp4" },
+                    "document": { "file_id": "anim.mp4", "mime_type": "video/mp4" } }),
+            Handled::File,
+            "[Animation] anim.mp4, 5 bytes",
+            file("anim.mp4", "video/mp4", &small(3)),
+        ),
+        // With no speech-to-text server an audio file is just a file, without a reply.
+        (
+            json!({ "audio": doc("song.mp3", "audio/mpeg") }),
+            Handled::Voice,
+            "[Audio] song.mp3, 5 bytes",
+            file("song.mp3", "audio/mpeg", &small(4)),
+        ),
+    ] {
+        let m = owner_message(fields);
+        assert_eq!(e.bridge.on_update(&m, now_ms()).await, handled, "{m}");
+        settle().await;
+        assert_eq!(
+            attached_down(&mut rx),
+            [(text.to_owned(), vec![], vec![sent])],
+            "{m}"
+        );
+        assert!(e.api.sent_texts().is_empty(), "{:?}", e.api.sent_texts());
+    }
+    // Too large to download: a plain reply naming the file, and nothing sent.
+    let big = json!({ "document": { "file_id": "big.zip", "file_name": "big.zip", "file_size": 21 << 20 } });
+    assert_eq!(
+        e.bridge.on_update(&owner_message(big), now_ms()).await,
+        Handled::Command
+    );
+    assert_eq!(
+        e.api.sent_texts(),
+        [format!("big.zip was not sent to Helm: {TOO_LARGE}")]
+    );
+
+    // An album: the files sent together go as one message once the window after the last one
+    // has passed, in the order sent, with the caption one of them carried.
+    e.api.clear();
+    let now = now_ms();
+    let album = |fields: Value, group: &str| {
+        let mut m = owner_message(fields);
+        m["message"]["media_group_id"] = json!(group);
+        m
+    };
+    let photo = json!([{ "file_id": "img-l", "width": 1280, "height": 960 }]);
+    for fields in [
+        json!({ "photo": photo }),
+        json!({ "document": pdf, "caption": "the trip" }),
+        json!({ "video": { "file_id": "clip.mp4", "mime_type": "video/mp4" } }),
+    ] {
+        e.bridge.on_update(&album(fields, "g1"), now).await;
+    }
+    settle().await;
+    assert!(
+        attached_down(&mut rx).is_empty(),
+        "the album window is open"
+    );
+    e.bridge.flush(now + 1000).await;
+    assert!(attached_down(&mut rx).is_empty(), "still open");
+    e.bridge.flush(now + 2000).await;
+    assert_eq!(
+        attached_down(&mut rx),
+        [(
+            "the trip\n[File] report.pdf, 1.2 MB\n[Video] clip.mp4, 5 bytes".to_owned(),
+            vec![file("photo.jpg", "image/jpeg", &jpeg(1280, 960))],
+            vec![
+                file("report.pdf", "application/pdf", &report),
+                file("clip.mp4", "video/mp4", &small(2))
+            ]
+        )]
+    );
+    assert!(e.api.sent_texts().is_empty(), "{:?}", e.api.sent_texts());
+    // At most ten files in one message: the eleventh is left out, and the user is told.
+    for _ in 0..11 {
+        let m = album(json!({ "document": doc("notes.txt", "text/plain") }), "g2");
+        e.bridge.on_update(&m, now).await;
+    }
+    settle().await;
+    e.bridge.flush(now + 2000).await;
+    let got = attached_down(&mut rx);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].2.len(), 10);
+    assert_eq!(got[0].0.lines().count(), 10, "{}", got[0].0);
+    assert_eq!(
+        e.api.sent_texts(),
+        ["notes.txt was left out: a message to Helm carries at most 10 files."]
+    );
+    // And at most 50 MB of files: the third 20 MB file is left out.
+    let (e, _files) = env_with_files(vec![("big.bin", vec![0u8; 20 << 20])], true);
+    let mut rx = line_up(&e);
+    for _ in 0..3 {
+        let fields = json!({ "document": { "file_id": "big.bin", "file_name": "big.bin" } });
+        e.bridge.on_update(&album(fields, "g3"), now).await;
+    }
+    let mut got = vec![];
+    for _ in 0..500 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        e.bridge.flush(now + 2000).await;
+        got = attached_down(&mut rx);
+        if !got.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(got.iter().map(|g| g.2.len()).collect::<Vec<_>>(), [2]);
+    assert_eq!(
+        e.api.sent_texts(),
+        ["big.bin was left out: a message to Helm carries at most 50.0 MB of files."]
     );
 }
 
@@ -1339,6 +1567,13 @@ async fn http_voice_downloads_the_file_and_posts_a_multipart_form() {
             ),
         )
         .route(
+            "/slow",
+            axum::routing::post(|| async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                "too late"
+            }),
+        )
+        .route(
             "/stt",
             axum::routing::post(move |headers: HeaderMap, body: Bytes| async move {
                 let kind = headers[header::CONTENT_TYPE].to_str().unwrap().to_owned();
@@ -1354,6 +1589,7 @@ async fn http_voice_downloads_the_file_and_posts_a_multipart_form() {
         url,
         model: "large-v3-turbo".into(),
         language: "en".into(),
+        timeout: Duration::from_secs(60),
     };
     let voice = HttpVoice::new(&base, TOKEN, &stt(format!("{base}/stt")));
 
@@ -1371,6 +1607,12 @@ async fn http_voice_downloads_the_file_and_posts_a_multipart_form() {
     for (status, body, want) in [
         (200, "hello there\n", Ok("hello there")),
         (200, "{\"text\": \" hi \"}", Ok("hi")),
+        // The server's own markers in a long recording are passed on as written.
+        (
+            200,
+            "one [gap: 00:10-00:12] two [truncated: past 60 min]\n",
+            Ok("one [gap: 00:10-00:12] two [truncated: past 60 min]"),
+        ),
         (
             500,
             "model not loaded",
@@ -1421,6 +1663,18 @@ async fn http_voice_downloads_the_file_and_posts_a_multipart_form() {
         );
     }
     assert!(body.ends_with(&format!("--{boundary}--\r\n")), "{body:?}");
+    // A server that takes longer than its timeout is said to have run out of time.
+    let slow = SttConfig {
+        timeout: Duration::from_secs(1),
+        ..stt(format!("{base}/slow"))
+    };
+    let late = HttpVoice::new(&base, TOKEN, &slow)
+        .transcribe(vec![1], "file_1.oga", "audio/ogg")
+        .await;
+    assert_eq!(
+        late,
+        Err("the speech-to-text server did not finish within 1 minute".into())
+    );
 
     let files = HttpFiles::new(&base, TOKEN);
     assert_eq!(

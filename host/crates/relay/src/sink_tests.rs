@@ -207,6 +207,7 @@ fn env() -> Env {
 fn msg(id: &str, text: &str) -> TelegramMessage {
     TelegramMessage {
         images: vec![],
+        files: vec![],
         id: id.into(),
         text: text.into(),
         sent_at: 0,
@@ -364,7 +365,7 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
             b.extend(chunk(b"acTL", &[0; 8]));
         }
         b.extend(chunk(b"IDAT", &[0; 4]));
-        crate::client::TelegramImage {
+        crate::client::TelegramFile {
             name: "photo.png".into(),
             media_type: "image/png".into(),
             data: base64::engine::general_purpose::STANDARD.encode(b),
@@ -397,6 +398,58 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
             animated,
             "{id}: {text}"
         );
+    }
+    // Any other file is saved where the agent can read it, under a name every Windows folder
+    // takes, and listed for the agent beside the prompt.
+    let file = |name: &str, bytes: &[u8]| crate::client::TelegramFile {
+        name: name.into(),
+        media_type: "application/octet-stream".into(),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    };
+    let long = format!("{}.tar.gz", "x".repeat(300));
+    let names = [
+        ("report.pdf", "report.pdf".to_owned()),
+        ("nul.txt", "_nul.txt".to_owned()),
+        ("CON", "_CON".to_owned()),
+        ("com1.log", "_com1.log".to_owned()),
+        ("a/b\\c:d?.txt", "a_b_c_d_.txt".to_owned()),
+        ("  trailing. . ", "trailing".to_owned()),
+        ("..", "file".to_owned()),
+        (long.as_str(), format!("{}.gz", "x".repeat(97))),
+    ];
+    let m = TelegramMessage {
+        files: names.iter().map(|(n, _)| file(n, n.as_bytes())).collect(),
+        ..msg("hub-6", "[File] report.pdf, 4 bytes")
+    };
+    place_async(&e.ctx, m).await.unwrap();
+    let sid = telegram::submission_id("hub-6");
+    let (saved, context): (Vec<(String, String)>, String) =
+        e.db.snapshot(|tx| {
+            let mut st = tx.prepare(
+                "SELECT name, target FROM chat_attachment_refs
+                 WHERE submission_id = ?1 AND kind = 'file' ORDER BY rowid",
+            )?;
+            let rows = st
+                .query_map([&sid], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let context = tx.query_row(
+                "SELECT text FROM submission_context WHERE submission_id = ?1",
+                [&sid],
+                |r| r.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((rows, context))
+        })
+        .unwrap();
+    assert_eq!(
+        saved.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        names.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>()
+    );
+    for ((sent, _), (name, target)) in names.iter().zip(&saved) {
+        let path = std::path::Path::new(target);
+        assert!(path.is_absolute(), "{target}");
+        assert_eq!(path.file_name().unwrap().to_str(), Some(name.as_str()));
+        assert_eq!(std::fs::read(path).unwrap(), sent.as_bytes(), "{target}");
+        assert!(context.contains(target.as_str()), "{context}");
     }
     drop(e.dir);
 }

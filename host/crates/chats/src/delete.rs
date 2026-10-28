@@ -109,6 +109,18 @@ pub fn delete_in_tx(
         }
     }
     {
+        // Files saved for the chat from the phone, each in its own folder.
+        let mut st = tx.prepare(
+            "SELECT target FROM chat_attachment_refs WHERE chat_id = ?1 AND kind = 'file'",
+        )?;
+        let targets = st.query_map([chat_id], |r| r.get::<_, String>(0))?;
+        for t in targets {
+            if let Some(rel) = crate::attachments::saved_folder(&t?) {
+                rels.push(rel);
+            }
+        }
+    }
+    {
         let mut st = tx.prepare("SELECT id FROM chat_attachments WHERE chat_id = ?1")?;
         let ids = st.query_map([chat_id], |r| r.get::<_, String>(0))?;
         for id in ids {
@@ -151,7 +163,10 @@ pub fn run_cleanup(db: &Database, profile_root: &Path) -> usize {
                 continue;
             }
             let path = profile_root.join(rel);
-            let r = if rel.starts_with("workers/") {
+            // A saved file's folder is a real folder (never a link) under attachments/.
+            let folder = rel.starts_with("attachments/")
+                && std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
+            let r = if rel.starts_with("workers/") || folder {
                 std::fs::remove_dir_all(&path)
             } else {
                 std::fs::remove_file(&path)
@@ -288,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_chat_removes_its_images_and_their_thumbnails() {
+    fn deleting_a_chat_removes_its_images_their_thumbnails_and_its_saved_files() {
         let (d, db) = temp_db();
         let root = d.path().to_path_buf();
         let chat = db
@@ -309,12 +324,28 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, "x").unwrap();
         }
+        // A file saved from the phone goes with its folder.
+        let dir = root.join("attachments");
+        let mine = std::fs::read_dir(&dir).unwrap().count();
+        let saved = db
+            .write(|tx| {
+                tx.execute("UPDATE chats SET archived = 0 WHERE id = ?1", [&chat])?;
+                let r = crate::attachments::put_file(tx, &dir, &chat, "report.pdf", b"%PDF", 1)?;
+                tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [&chat])?;
+                Ok::<_, rusqlite::Error>(r)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read(&saved.target).unwrap(), b"%PDF");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), mine + 1);
         db.write(|tx| delete_in_tx(tx, &chat, DeleteRule::Archived, 2))
             .unwrap()
             .unwrap();
         run_cleanup(&db, &root);
         assert!(!root.join(format!("attachments/{id}")).exists());
         assert!(!root.join(format!("thumbs/{id}")).exists());
+        assert!(!Path::new(&saved.target).exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
     }
 
     #[test]
