@@ -170,8 +170,7 @@ function LineBox({ entry, file, rows, from, to, head, onClose }: { entry: PrEntr
             done: () => {
               onClose();
               void entry.loadThreads();
-              void entry.loadConversation(true);
-              void entry.poll();
+              void entry.afterPublish();
             },
             uncertain: () => {
               void entry.loadThreads();

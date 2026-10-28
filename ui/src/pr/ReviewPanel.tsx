@@ -139,8 +139,7 @@ export function ReviewPanel({ entry }: { entry: PrEntry }) {
               ui.open = false;
               toast.show({ kind: 'info', text: 'Review submitted.' });
               void entry.loadThreads();
-              void entry.loadConversation(true);
-              void entry.poll();
+              void entry.afterPublish();
             },
             uncertain: () => {
               void entry.loadThreads();
