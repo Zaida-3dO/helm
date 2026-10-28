@@ -7,6 +7,7 @@ import './context/register.tsx';
 import './turns/register.tsx';
 import '../tasks/register.tsx';
 import '../settings/vaults/index.tsx';
+import '../pr/register.tsx';
 export { SidePanel } from './SidePanel.tsx';
 export type { SidePanelProps } from './SidePanel.tsx';
 export {
@@ -20,5 +21,5 @@ export {
 } from './registry.ts';
 export type { PanelKind, PanelSlot, TabContext } from './registry.ts';
 export type { CloseReason, Intent, PanelTab, SlotId } from './model.ts';
-export { gateTarget, handleLink, registerLinkRoute } from './links.ts';
+export { gateTarget, handleLink, registerLinkRoute, registerWebRoute } from './links.ts';
 export type { GateResult, LinkContext, LinkOutcome } from './links.ts';

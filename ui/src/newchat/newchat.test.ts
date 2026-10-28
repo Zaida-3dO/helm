@@ -211,6 +211,17 @@ test('an untouched draft is discarded on leaving; a typed one is kept and reused
   assert.equal(draft()?.id, second);
   assert.equal(h.ctl.record()?.draft, 'fix the build');
   assert.ok(!h.calls.some((c) => c.op === 'chat_create'), 'nothing was created on the host');
+
+  // Text handed to New chat goes into the draft, after a blank line when the draft already has text,
+  // with a newer revision so an open composer takes it. Nothing is sent.
+  h.ctl.show({ text: 'from a pull request' });
+  assert.equal(draft()?.text, 'fix the build\n\nfrom a pull request');
+  assert.ok((draft()?.revision ?? 0) > 5);
+  h.ctl.leave();
+  draft()!.text = '';
+  h.ctl.show({ text: 'only this' });
+  assert.equal(draft()?.text, 'only this');
+  assert.ok(!h.calls.some((c) => c.op === 'send'));
 });
 
 test('opening any chat leaves the page', () => {

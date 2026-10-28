@@ -25,10 +25,12 @@ export interface RenderOptions {
    * plain links, so embedding stays one level deep.
    */
   nested?: boolean;
+  /** `owner/repo` of the chat's GitHub repository: a bare `#12` becomes a pull request link only when this is set. */
+  mentionRepo?: string;
 }
 
 /** Set for the duration of one synchronous render. */
-let ctx: Required<RenderOptions> = { streaming: false, interactive: false, nested: false };
+let ctx: Required<RenderOptions> = { streaming: false, interactive: false, nested: false, mentionRepo: '' };
 
 function attrString(attrs: Array<[string, string]>): string {
   return attrs.map(([k, v]) => ` ${k}="${escapeAttr(v)}"`).join('');
@@ -189,8 +191,53 @@ const mathBlock: TokenizerAndRendererExtension = {
 
 const md = new Marked({ gfm: true, breaks: false, async: false });
 
+/** `owner/repo#12` (and a bare `#12` when the chat's repository is known) become links to the pull request page. */
+const PR_MENTION = /^(?:([A-Za-z0-9._-]{1,100})\/([A-Za-z0-9._-]{1,100}))?#([1-9][0-9]{0,8})(?![A-Za-z0-9_-])/;
+
+function mentionAt(src: string): { owner: string; repo: string; number: string; raw: string } | null {
+  const m = PR_MENTION.exec(src);
+  if (!m) return null;
+  let owner = m[1];
+  let repo = m[2];
+  if (!owner || !repo) {
+    const known = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/.exec(ctx.mentionRepo);
+    if (!known) return null;
+    owner = known[1];
+    repo = known[2];
+  }
+  if (!owner || !repo || owner === '.' || owner === '..' || repo === '.' || repo === '..') return null;
+  return { owner, repo, number: m[3] as string, raw: m[0] };
+}
+
+/** A bracket is not a boundary here: `[#12](url)` is a link, not a mention. */
+const MENTION_LEAD = /[\s("']/;
+
+const prMention: TokenizerAndRendererExtension = {
+  name: 'prMention',
+  level: 'inline',
+  start(src: string) {
+    // A candidate sits after whitespace, an opening parenthesis or a quote. (marked passes the text after its first character.)
+    const re = /[\s("'](?=[A-Za-z0-9._#-])/g;
+    for (let m = re.exec(src); m; m = re.exec(src)) if (mentionAt(src.slice(m.index + 1))) return m.index;
+    return undefined;
+  },
+  tokenizer(src: string) {
+    if ((this as unknown as { lexer: { state: { inLink: boolean } } }).lexer.state.inLink) return undefined;
+    const lead = src.length > 0 && MENTION_LEAD.test(src.charAt(0)) ? src.charAt(0) : '';
+    const hit = mentionAt(src.slice(lead.length));
+    if (!hit) return undefined;
+    return { type: 'prMention', lead, ...hit, raw: lead + hit.raw };
+  },
+  renderer(token) {
+    const t = token as unknown as { lead: string; owner: string; repo: string; number: string; raw: string };
+    const text = t.raw.slice(t.lead.length);
+    const href = `https://github.com/${t.owner}/${t.repo}/pull/${t.number}`;
+    return `${escapeHtml(t.lead)}${anchor({ kind: 'url', href }, escapeHtml(text), 'md-pr')}`;
+  },
+};
+
 md.use({
-  extensions: [wikilink, pathref, mathBlock, mathInline],
+  extensions: [wikilink, pathref, prMention, mathBlock, mathInline],
   renderer: {
     // Raw HTML becomes an inert marker. <br> is the one tag agents lean on in table cells.
     html(token: Tokens.HTML | Tokens.Tag) {
@@ -302,6 +349,7 @@ export function renderToHtml(text: string, options: RenderOptions = {}): string 
     streaming: options.streaming ?? false,
     interactive: options.interactive ?? false,
     nested: options.nested ?? false,
+    mentionRepo: options.mentionRepo ?? '',
   };
   try {
     const normalised = text.replace(/\r\n?/g, '\n');
@@ -342,6 +390,7 @@ export function renderTokens(tokens: Token[], links: LinkDefs, options: RenderOp
     streaming: options.streaming ?? false,
     interactive: options.interactive ?? false,
     nested: options.nested ?? false,
+    mentionRepo: options.mentionRepo ?? '',
   };
   try {
     const list = Object.assign([...tokens], { links }) as TokensList;

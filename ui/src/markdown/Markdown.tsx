@@ -16,6 +16,8 @@ export interface MarkdownProps {
   streaming?: boolean;
   /** Enables Mermaid diagrams. Off for previews. */
   interactive?: boolean;
+  /** `owner/repo` of the chat's GitHub repository, so a bare `#12` links to its pull request. */
+  mentionRepo?: string;
   /** A vault or url link was clicked. Without a handler, clicks do nothing (they never navigate). */
   onLink?: (target: LinkTarget) => void;
   /**
@@ -28,10 +30,10 @@ export interface MarkdownProps {
 }
 
 function useRenderedHtml(text: string, options: RenderOptions): string {
-  const { streaming, interactive, nested } = options;
+  const { streaming, interactive, nested, mentionRepo } = options;
   const stable = useMemo<RenderOptions>(
-    () => ({ streaming, interactive, nested }),
-    [streaming, interactive, nested],
+    () => ({ streaming, interactive, nested, mentionRepo }),
+    [streaming, interactive, nested, mentionRepo],
   );
   const long = text.length > LONG_TEXT_CHARS;
   const off = sharedOffloader();
@@ -266,6 +268,7 @@ function useIncremental(
   streaming: boolean,
   interactive: boolean,
   resolveEmbed: MarkdownProps['resolveEmbed'],
+  mentionRepo?: string,
 ): void {
   const state = useRef<{ blocks: StreamBlocks; tail: ChildNode[]; tailHtml: string; tailHydrated: boolean; cancelled: boolean } | null>(null);
   const embeds = useRef(resolveEmbed);
@@ -275,7 +278,7 @@ function useIncremental(
     const root = ref.current;
     if (!incremental || !root) return;
     const st = (state.current ??= { blocks: new StreamBlocks(), tail: [], tailHtml: '', tailHydrated: false, cancelled: false });
-    const u = st.blocks.update(text, { streaming: true, interactive }, !streaming);
+    const u = st.blocks.update(text, { streaming: true, interactive, mentionRepo }, !streaming);
     if (u.reset) {
       root.replaceChildren();
       st.tail = [];
@@ -307,7 +310,7 @@ function useIncremental(
     st.tailHtml = u.tail;
     st.tailHydrated = hydrateTail;
     root.append(tail);
-  }, [incremental, ref, text, streaming, interactive]);
+  }, [incremental, ref, text, streaming, interactive, mentionRepo]);
 
   useEffect(() => {
     // Development's StrictMode replays the mount: undo the replayed unmount's cancel.
@@ -322,6 +325,7 @@ export function Markdown({
   text,
   streaming = false,
   interactive = false,
+  mentionRepo,
   onLink,
   resolveEmbed,
   className,
@@ -329,9 +333,9 @@ export function Markdown({
   // A text that is streaming when it mounts is rendered incrementally for the life of this
   // instance; everything else renders whole, through the shared cache (and the worker when long).
   const [incremental] = useState(streaming);
-  const html = useRenderedHtml(incremental ? '' : text, { streaming, interactive });
+  const html = useRenderedHtml(incremental ? '' : text, { streaming, interactive, mentionRepo });
   const ref = useRef<HTMLDivElement>(null);
-  useIncremental(incremental, ref, text, streaming, interactive, resolveEmbed);
+  useIncremental(incremental, ref, text, streaming, interactive, resolveEmbed, mentionRepo);
 
   useEffect(() => {
     const root = ref.current;

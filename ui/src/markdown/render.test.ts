@@ -468,3 +468,23 @@ test('a local picture is marked with its path and drawn later; other image targe
   assert.match(html, /<img class="md-image md-image-local" data-md-local-src="C:\/Users\/me\/shot\.png" alt="the shot">/);
   assert.ok(!html.includes(' src='), 'no src until the host answers');
 });
+
+test('pull request mentions become links; bare numbers need the chat\'s repository; code, links and name characters stay text', () => {
+  const links = (text: string, mentionRepo?: string) => [...renderToHtml(text, { mentionRepo }).matchAll(/data-md-href="([^"]+)"/g)].map((m) => m[1]);
+  const base = 'https://github.com/';
+  const rows: [string, string | undefined, string[]][] = [
+    ['see other/repo#7 now', undefined, [`${base}other/repo/pull/7`]],
+    ['see #12', undefined, []],
+    ['see #12 and (#13).', 'me/app', [`${base}me/app/pull/12`, `${base}me/app/pull/13`]],
+    ['#12 starts the line', 'me/app', [`${base}me/app/pull/12`]],
+    ['C#1, a/b#1x, #0, #012, x&#35;', 'me/app', []],
+    ['`#12` in code', 'me/app', []],
+    ['```\n#13\n```', 'me/app', []],
+    ['[#12](https://example.com/x)', 'me/app', []],
+    ['https://example.com/p#12', 'me/app', []],
+  ];
+  for (const [text, repo, want] of rows) {
+    const got = links(text, repo).filter((h) => h?.startsWith(base));
+    assert.deepEqual(got, want, text);
+  }
+});

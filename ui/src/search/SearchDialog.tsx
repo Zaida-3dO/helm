@@ -11,6 +11,8 @@ import { flatRows, moveHighlight, movePage, statusLine, UniversalSearch } from '
 import { openTasks, tasksStoreFor } from '../tasks/index.ts';
 import { boardSource } from './boardSource.ts';
 import { chatsSource, filesSource } from './defaultSources.ts';
+import { prsSource } from './prSource.ts';
+import { openPrTab } from '../pr/route.ts';
 import { GROUP_LABEL, groupOrder, type SourceId } from './sources.ts';
 import './search.css';
 
@@ -83,6 +85,13 @@ function SearchBody({ close }: { close: () => void }) {
           available: () => (availability.current ??= tasksStoreFor(shell.api).checkConnection()),
           openTasks: (itemId) => void openTasks(shell.api, itemId),
           close,
+        }),
+        prsSource({
+          api: shell.api,
+          open: (ref) => {
+            openPrTab({ ...ref, view: 'conversation' }, shell.selection.chatId);
+            close();
+          },
         }),
       ]),
     [shell, close],

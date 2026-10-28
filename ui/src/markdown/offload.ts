@@ -44,7 +44,7 @@ export interface RenderResponse {
 
 export function cacheKey(text: string, options: RenderOptions): string {
   const flags = `${options.streaming ? 's' : '-'}${options.interactive ? 'i' : '-'}${options.nested ? 'n' : '-'}`;
-  return `${flags}\u0000${text}`;
+  return `${flags}${options.mentionRepo ?? ''}\u0000${text}`;
 }
 
 export class RenderOffloader {

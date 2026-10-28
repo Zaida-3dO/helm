@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { configureLinks, gateTarget, handleLink, REFUSED, registerLinkRoute } from './links.ts';
+import { configureLinks, gateTarget, handleLink, REFUSED, registerLinkRoute, registerWebRoute } from './links.ts';
 
 const r = String.raw;
 const url = (href: string) => ({ kind: 'url' as const, href });
@@ -160,4 +160,27 @@ test('written paths: drives open directly, everything else is resolved by the ho
     assert.deepEqual(p(bad), { action: 'refuse', reason: REFUSED.share }, bad);
   }
   assert.equal(p('').action, 'refuse');
+});
+
+test('a web route may open an address in the app; a route that declines, an unmatched address and skipWebRoutes go to the browser', async () => {
+  const outside: string[] = [];
+  configureLinks({ openExternal: (u) => void outside.push(u) as unknown as Promise<unknown>, notify: () => undefined });
+  const seen: string[] = [];
+  let accept = true;
+  const off = registerWebRoute(
+    (u) => (u.startsWith('https://example.com/app/') ? u.slice('https://example.com/app/'.length) : null),
+    (rest) => (seen.push(rest), accept),
+  );
+  const click = (href: string, skip = false) => handleLink(url(href), { chatId: null }, skip ? { skipWebRoutes: true } : {});
+  assert.deepEqual(await click('https://example.com/app/one'), { ok: true, action: 'external' });
+  assert.deepEqual([seen, outside], [['one'], []], 'opened in the app, not outside');
+  accept = false;
+  await click('https://example.com/app/two');
+  await click('https://example.com/other');
+  await click('https://example.com/app/three', true);
+  assert.deepEqual(seen, ['one', 'two'], 'a declined route, an unmatched address and a skipped route never reach the route again');
+  assert.deepEqual(outside, ['https://example.com/app/two', 'https://example.com/other', 'https://example.com/app/three']);
+  off();
+  await click('https://example.com/app/four');
+  assert.equal(seen.length, 2);
 });

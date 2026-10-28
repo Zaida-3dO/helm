@@ -21,6 +21,8 @@ export interface RowContext {
   canStopTool: (row: MessageRow) => boolean;
   onStopTool: (toolCallId: string) => void;
   onLink: (target: LinkTarget) => void;
+  /** `owner/repo` of the chat's GitHub repository, so a bare `#12` in a reply links to its pull request. */
+  mentionRepo?: string;
   /** For the transcript slots (slots.ts). */
   chatId: string;
   latestAssistantId: number | null;
@@ -103,7 +105,7 @@ function AssistantBody({ row, ctx, hideThinking }: { row: MessageRow; ctx: RowCo
   return (
     <>
       <Thinking text={hideThinking ? '' : row.thinking} streaming={streaming} onLink={ctx.onLink} />
-      {text && <Markdown text={text} streaming={streaming} interactive onLink={ctx.onLink} />}
+      {text && <Markdown text={text} streaming={streaming} interactive mentionRepo={ctx.mentionRepo} onLink={ctx.onLink} />}
     </>
   );
 }
