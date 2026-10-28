@@ -104,7 +104,7 @@ const COLS: &str = "id, chat_id, target, note, memory, created_at, expires_at";
 pub fn open(tx: &Transaction<'_>, chat: Option<&str>) -> rusqlite::Result<Vec<Wait>> {
     let mut st = tx.prepare(&format!(
         "SELECT {COLS} FROM agent_waits WHERE state = 'open' AND (?1 IS NULL OR chat_id = ?1)
-         ORDER BY created_at, id"
+         ORDER BY created_at, rowid"
     ))?;
     let rows = st.query_map([chat], read)?;
     Ok(rows
@@ -150,7 +150,7 @@ pub fn cancel(
 pub fn undelivered(tx: &Transaction<'_>) -> rusqlite::Result<Vec<(Wait, Outcome)>> {
     let mut st = tx.prepare(&format!(
         "SELECT {COLS}, outcome, detail FROM agent_waits
-         WHERE state = 'fired' AND delivered = 0 ORDER BY settled_at, id"
+         WHERE state = 'fired' AND delivered = 0 ORDER BY settled_at, rowid"
     ))?;
     let rows = st.query_map([], |r| {
         let w = read(r)?;

@@ -1617,14 +1617,17 @@ async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it
     h.call("chat_restore", json!({"chatId": chat4}))
         .await
         .unwrap();
+    let restored_at = std::time::Instant::now();
     // On a loaded machine the restore itself can land after archive_stop (300 ms); the scenario
     // only says something when it lands inside the window.
     let in_window = archived_at.elapsed() < Duration::from_millis(250);
     tokio::time::sleep(Duration::from_millis(350)).await; // past archive_stop
-    if in_window {
+    let status = h.status(&chat4);
+    // The restore swaps in the ordinary stop deadline (400 ms), which may fire once the sleep
+    // overruns; only a reading taken before it says anything.
+    if in_window && restored_at.elapsed() < Duration::from_millis(400) {
         assert_ne!(
-            h.status(&chat4),
-            "interrupted",
+            status, "interrupted",
             "the archive deadline does not fire after a restore"
         );
     }

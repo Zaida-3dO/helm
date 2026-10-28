@@ -93,6 +93,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_wait_for", Class::Denied(LOCAL)),
     ("app_workflow", Class::Denied(CONSENT)),
     ("app_workflow_consent", Class::Denied(CONSENT)),
+    ("app_workflow_gate", Class::Denied(CONSENT)),
     ("app_workflow_report", Class::Denied(CONSENT)),
     ("app_workflow_take_over", Class::Denied(CONSENT)),
 ];
