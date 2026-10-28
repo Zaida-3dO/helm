@@ -126,7 +126,10 @@ export function prClient(api: Api) {
   const gql = async <T = unknown>(id: string, variables: Record<string, unknown>): Promise<Answer<T>> => {
     const a = await api<Answer<T>>('github_graphql', { id, variables });
     const msgs = (a.errors ?? []).map((x) => x.message).filter(Boolean);
-    if (msgs.length > 0) throw new PrError('GitHub', msgs.slice(0, 3).join('; '));
+    // Errors next to usable data (one field GitHub could not resolve) keep the data.
+    const d = a.data as unknown;
+    const partial = d !== null && typeof d === 'object' && Object.values(d as object).some((v) => v !== null && v !== undefined);
+    if (msgs.length > 0 && !partial) throw new PrError('GitHub', msgs.slice(0, 3).join('; '));
     return a;
   };
 
@@ -185,6 +188,7 @@ export function prClient(api: Api) {
     },
 
     // settings and search
+    viewer: () => api<Answer<{ login?: string }>>('github_viewer', {}),
     settings: () => api<{ enabled: boolean; revision: number }>('github_settings_get', {}),
     search: (query: string) => api<Answer<unknown>>('github_search_prs', { query }),
   };

@@ -64,6 +64,8 @@ export class PrEntry {
   convError: string | null = null;
   convLoading = false;
   convStale = false;
+  /** The last round started (good, cut short or failed): nothing re-triggers a round on its own after one. */
+  convAttemptAt = 0;
   convUpdatedAt = '';
   threads: Loaded<Thread[]> | null = null;
   commits: Loaded<Commit[]> | null = null;
@@ -152,6 +154,8 @@ export class PrEntry {
         const [pull, sum] = await Promise.all([this.client.pull(this.ref), this.client.summary(this.ref)]);
         if (this.closed) return;
         const s = parseSummary(pull.data, sum.data);
+        if (!s.viewer) s.viewer = await ensureViewer(this.client);
+        if (this.closed) return;
         const rev: Revision = { headSha: s.headSha, baseSha: s.baseSha, updatedAt: s.updatedAt };
         const prev = this.revision;
         this.summary = s;
@@ -183,6 +187,12 @@ export class PrEntry {
   loadConversation(force = false): Promise<void> {
     return this.once('conv', async () => {
       if (!force && this.conv && !this.convStale) return;
+      // Rounds run only while the tab is shown and focused; a round that is cut short stores nothing.
+      if (!this.live('conversation')) {
+        if (this.conv) this.convStale = true;
+        return;
+      }
+      this.convAttemptAt = Date.now();
       this.convLoading = true;
       this.convError = null;
       this.changed();
@@ -223,7 +233,7 @@ export class PrEntry {
       if (i > 0 && !this.live('conversation')) return null;
       const a = await this.client.timeline(this.ref, after);
       const conn = gqlPr(a.data).timelineItems;
-      items.push(...parseTimelineEvents(conn));
+      items.push(...parseTimelineEvents(conn, items.length));
       const p = pageInfo(conn);
       if (!p.hasNext) return { items, truncated: false };
       after = p.end;
@@ -296,11 +306,18 @@ export class PrEntry {
     this.changed();
   }
 
+  /** The head branch name, only when it lives in this repository (a fork's branch name means nothing here). */
+  private ownBranch(): string | undefined {
+    const s = this.summary;
+    if (!s || !s.headRef) return undefined;
+    return s.headRepo.toLowerCase() === `${this.ref.owner}/${this.ref.repo}`.toLowerCase() ? s.headRef : undefined;
+  }
+
   loadLandInfo(): Promise<void> {
     return this.once('land', async () => {
       if (this.summary?.state !== 'OPEN') return;
       try {
-        this.land = await this.client.landInfo(this.ref, this.summary?.headRef);
+        this.land = await this.client.landInfo(this.ref, this.ownBranch());
         this.landError = null;
       } catch (e) {
         this.landError = errorText(e);
@@ -477,6 +494,22 @@ export class PrEntry {
 }
 
 const entries = new Map<string, PrEntry>();
+
+// The signed-in login, asked once: the summary document does not carry it.
+let viewerLogin: string | null = null;
+let viewerAsk: Promise<string | null> | null = null;
+
+function ensureViewer(client: PrClient): Promise<string | null> {
+  if (viewerLogin) return Promise.resolve(viewerLogin);
+  viewerAsk ??= client
+    .viewer()
+    .then((a) => (viewerLogin = a.data?.login || null))
+    .catch(() => null)
+    .finally(() => {
+      viewerAsk = null;
+    });
+  return viewerAsk;
+}
 
 export function getEntry(ref: PrRef, api: Api): PrEntry {
   const key = prKey(ref);

@@ -154,7 +154,7 @@ export default function PrTab({ tab, ctx }: { tab: PanelTab; ctx: TabContext }) 
       )}
       <div className="pr-body">
         {data.view === 'conversation' && (
-          <ConversationView entry={entry} anchor={data.anchor} clearAnchor={() => ctx.setData({ owner: data.owner, repo: data.repo, number: data.number, view: data.view })} />
+          <ConversationView entry={entry} focused={ctx.focused} anchor={data.anchor} clearAnchor={() => ctx.setData({ owner: data.owner, repo: data.repo, number: data.number, view: data.view })} />
         )}
         {data.view === 'commits' && <CommitsView entry={entry} />}
         {data.view === 'checks' && <ChecksView entry={entry} focused={ctx.focused} />}

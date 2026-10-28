@@ -61,7 +61,9 @@ export function parseSummary(rest: unknown, summary: unknown): PrSummary {
   const gp = gqlPr(summary);
   const merged = r.merged === true || Boolean(r.merged_at);
   const state: PrState = merged ? 'MERGED' : str(r.state).toLowerCase() === 'closed' ? 'CLOSED' : 'OPEN';
-  const rollup = obj(obj(obj(arr(obj(gp.commits).nodes)[0]).commit).statusCheckRollup ?? gp.statusCheckRollup);
+  // The rollup sits under the `lastCommit` alias; the older `commits(last: 1)` shape is read too.
+  const lastNode = obj(arr(obj(gp.lastCommit).nodes)[0] ?? arr(obj(gp.commits).nodes)[0]);
+  const rollup = obj(obj(lastNode.commit).statusCheckRollup ?? gp.statusCheckRollup);
   const decision = str(gp.reviewDecision);
   const cs = str(rollup.state);
   const head = obj(r.head);
@@ -78,6 +80,7 @@ export function parseSummary(rest: unknown, summary: unknown): PrSummary {
     headRef: str(head.ref),
     baseSha: str(base.sha),
     headSha: str(head.sha),
+    headRepo: str(obj(head.repo).full_name),
     commits: num(r.commits),
     comments: num(r.comments) + num(r.review_comments),
     changedFiles: num(r.changed_files),
@@ -127,6 +130,7 @@ export function parseReviews(list: unknown): Extract<TimelineItem, { type: 'revi
       type: 'review' as const,
       key: `r${num(o.id)}`,
       id: num(o.id),
+      nodeId: str(o.node_id),
       at: str(o.submitted_at) || str(o.created_at),
       author: login(o.user),
       association: str(o.author_association),
@@ -146,7 +150,7 @@ function threadComment(c: unknown): ThreadComment {
     authorAssociation: str(o.authorAssociation),
     body: str(o.body),
     createdAt: str(o.createdAt),
-    reviewId: o.pullRequestReview ? num(obj(o.pullRequestReview).databaseId) || null : null,
+    reviewNodeId: o.pullRequestReview ? str(obj(o.pullRequestReview).id) || null : null,
   };
 }
 
@@ -180,7 +184,7 @@ const EVENTS: Record<string, (n: Obj) => string | null> = {
   UnlabeledEvent: (n) => `removed the ${str(obj(n.label).name)} label`,
   ClosedEvent: () => 'closed this',
   ReopenedEvent: () => 'reopened this',
-  MergedEvent: (n) => `merged commit ${abbrev(obj(n.commit).oid)} into ${str(n.mergeRefName) || 'the base branch'}`,
+  MergedEvent: (n) => `merged commit ${str(obj(n.commit).abbreviatedOid) || abbrev(obj(n.commit).oid)} into ${str(n.mergeRefName) || 'the base branch'}`,
   ConvertToDraftEvent: () => 'marked this pull request as draft',
   ReadyForReviewEvent: () => 'marked this pull request as ready for review',
   AssignedEvent: (n) => `assigned ${login(n.assignee)}`,
@@ -198,16 +202,18 @@ const EVENTS: Record<string, (n: Obj) => string | null> = {
   },
 };
 
-export function parseTimelineEvents(conn: unknown): TimelineItem[] {
+/** `offset` is how many nodes earlier pages held, so keys stay unique across pages. */
+export function parseTimelineEvents(conn: unknown, offset = 0): TimelineItem[] {
   const out: TimelineItem[] = [];
-  nodes(conn).forEach((raw, i) => {
+  nodes(conn).forEach((raw, k) => {
+    const i = offset + k;
     const n = obj(raw);
     const t = str(n.__typename);
     if (t === 'PullRequestCommit') {
       const c = obj(n.commit);
       out.push({
         type: 'commit',
-        key: `k${str(c.oid) || i}`,
+        key: `k${str(c.oid)}-${i}`,
         at: str(c.committedDate) || str(c.authoredDate),
         sha: str(c.oid),
         headline: str(c.messageHeadline),
@@ -229,15 +235,15 @@ export function buildTimeline(parts: {
   events: TimelineItem[];
   threads: Thread[];
 }): TimelineItem[] {
-  const byReview = new Map<number, Thread[]>();
+  const byReview = new Map<string, Thread[]>();
   const loose: Thread[] = [];
-  const reviewIds = new Set(parts.reviews.map((r) => r.id));
+  const reviewIds = new Set(parts.reviews.map((r) => r.nodeId).filter(Boolean));
   for (const t of parts.threads) {
-    const rid = t.comments[0]?.reviewId ?? null;
+    const rid = t.comments[0]?.reviewNodeId ?? null;
     if (rid !== null && reviewIds.has(rid)) byReview.set(rid, [...(byReview.get(rid) ?? []), t]);
     else loose.push(t);
   }
-  const reviews = parts.reviews.map((r) => ({ ...r, threads: byReview.get(r.id) ?? [] }));
+  const reviews = parts.reviews.map((r) => ({ ...r, threads: byReview.get(r.nodeId) ?? [] }));
   const threadItems: TimelineItem[] = loose.map((t) => ({ type: 'thread', key: `t${t.id}`, at: t.comments[0]?.createdAt ?? '', thread: t }));
   const all = [...parts.events, ...parts.comments, ...reviews, ...threadItems];
   return all.map((x, i) => ({ x, i })).sort((a, b) => (a.x.at < b.x.at ? -1 : a.x.at > b.x.at ? 1 : a.i - b.i)).map((e) => e.x);

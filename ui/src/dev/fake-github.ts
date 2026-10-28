@@ -101,7 +101,7 @@ function initial(number: number): State {
     { id: 9002, user: user('sam'), author_association: 'OWNER', body: 'Added in the second commit. See `formatReset`.', created_at: iso(120), updated_at: iso(100) },
   ];
   const reviews: J[] = [
-    { id: 7001, user: user('dana'), author_association: 'MEMBER', state: 'CHANGES_REQUESTED', body: 'A couple of small things before this lands.', submitted_at: iso(200) },
+    { id: 7001, node_id: 'RV7001', user: user('dana'), author_association: 'MEMBER', state: 'CHANGES_REQUESTED', body: 'A couple of small things before this lands.', submitted_at: iso(200) },
   ];
   const mk = (id: string, db: number, path: string, line: number, side: string, resolved: boolean, outdated: boolean, text: string, hunk: string): J => ({
     id,
@@ -115,7 +115,7 @@ function initial(number: number): State {
     diffSide: side,
     comments: {
       nodes: [
-        { id: `${id}-c1`, databaseId: db, body: text, createdAt: iso(190), author: user('dana'), authorAssociation: 'MEMBER', diffHunk: hunk, pullRequestReview: { databaseId: 7001 } },
+        { id: `${id}-c1`, databaseId: db, body: text, createdAt: iso(190), author: user('dana'), authorAssociation: 'MEMBER', diffHunk: hunk, pullRequestReview: { id: 'RV7001', state: 'COMMENTED' } },
         ...(resolved ? [{ id: `${id}-c2`, databaseId: db + 1, body: 'Fixed.', createdAt: iso(150), author: user('sam'), authorAssociation: 'OWNER', diffHunk: hunk, pullRequestReview: null }] : []),
       ],
     },
@@ -155,7 +155,7 @@ export function githubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } 
       draft: s.draft,
       user: user('sam'),
       author_association: 'OWNER',
-      head: { ref: 'usage-meter', sha: SHA },
+      head: { ref: 'usage-meter', sha: SHA, repo: { full_name: 'd/h' } },
       base: { ref: 'main', sha: BASE },
       commits: 3,
       comments: s.issueComments.length,
@@ -182,7 +182,7 @@ export function githubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } 
         enabled = (a.enabled as boolean) ?? enabled;
         return { enabled, revision: 2 };
       case 'github_viewer':
-        return { login: 'sam', avatarUrl: '' };
+        return answer({ login: 'sam', name: 'Sam', avatarUrl: '' });
       case 'github_rest': {
         const path = String(a.path);
         const q = (a.query ?? {}) as J;
@@ -207,12 +207,11 @@ export function githubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } 
               status: 200,
               rateLimit: { remaining: 4800 },
               data: {
-                viewer: { login: 'sam' },
                 repository: {
                   pullRequest: {
                     id: 'PR_node_42',
                     reviewDecision: s.merged ? 'APPROVED' : 'REVIEW_REQUIRED',
-                    commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING', contexts: { totalCount: 4 } } } }] },
+                    lastCommit: { nodes: [{ commit: { oid: SHA, statusCheckRollup: { state: 'PENDING' } } }] },
                   },
                 },
               },
@@ -318,8 +317,9 @@ export function githubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } 
           { number: 42, title: 'Add the usage meter to the status bar', repo: 'demo/helm', state: 'open' },
           { number: 43, title: 'Draft: show the reset time in the meter', repo: 'demo/helm', state: 'open' },
           { number: 44, title: 'Fix the meter rounding', repo: 'demo/helm', state: 'merged' },
-        ].filter((r) => r.title.toLowerCase().includes(q.replace(/^is:pr involves:@me\s*/, '').trim()));
-        return answer({ items: rows.map((r) => ({ number: r.number, title: r.title, state: r.state, repository_url: `https://api.github.com/repos/${r.repo}`, updated_at: iso(5) })) });
+        ].filter((r) => r.title.toLowerCase().includes(q.trim()));
+        // The host's search document: data.search.nodes.
+        return answer({ search: { issueCount: rows.length, nodes: rows.map((r) => ({ __typename: 'PullRequest', number: r.number, title: r.title, state: r.state.toUpperCase(), repository: { nameWithOwner: r.repo } })) } });
       }
       case 'pr_land_info': {
         // 45: a task awaits the merge and takes it; 46: a task blocks it (needs the override).

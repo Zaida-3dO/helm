@@ -11,14 +11,17 @@ import { CommentBody, ThreadCard } from './Threads.tsx';
 import type { PrAnchor, PrSummary, TimelineItem } from './types.ts';
 import { AssociationBadge, Avatar, ErrorBlock, fullDate, relTime, useEntry } from './util.tsx';
 
-export function ConversationView({ entry, anchor, clearAnchor }: { entry: PrEntry; anchor?: PrAnchor; clearAnchor: () => void }) {
+export function ConversationView({ entry, anchor, clearAnchor, focused }: { entry: PrEntry; anchor?: PrAnchor; clearAnchor: () => void; focused: boolean }) {
   useEntry(entry);
   const pr = entry.summary;
 
+  // A round starts when the view is shown and focused: the first time, or when the data went stale
+  // while it was hidden. A round that was cut short or failed is never started again from here (the
+  // effect does not watch the result); Retry, Refresh and the next show do that.
   useEffect(() => {
-    if (!entry.conv && !entry.convLoading && !entry.convError) void entry.loadConversation();
-    else if (entry.convStale && !entry.convLoading) void entry.loadConversation();
-  }, [entry, entry.conv, entry.convStale, entry.convError, entry.convLoading]);
+    if (!focused) return;
+    if (!entry.conv || entry.convStale) void entry.loadConversation();
+  }, [entry, focused]);
 
   // An anchored comment scrolls into view and is highlighted for two seconds, then the anchor clears.
   const settled = Boolean(entry.conv) || Boolean(entry.convError);

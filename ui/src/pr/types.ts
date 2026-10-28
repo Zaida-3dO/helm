@@ -44,6 +44,8 @@ export interface PrSummary {
   headRef: string;
   baseSha: string;
   headSha: string;
+  /** `owner/repo` the head branch lives in (differs from the base for a fork). */
+  headRepo: string;
   commits: number;
   comments: number;
   changedFiles: number;
@@ -77,7 +79,8 @@ export interface ThreadComment {
   authorAssociation: string;
   body: string;
   createdAt: string;
-  reviewId: number | null;
+  /** The global id of the review this comment belongs to. */
+  reviewNodeId: string | null;
 }
 
 export type Side = 'LEFT' | 'RIGHT';
@@ -105,6 +108,7 @@ export type TimelineItem =
       type: 'review';
       key: string;
       id: number;
+      nodeId: string;
       at: string;
       author: string;
       association: string;

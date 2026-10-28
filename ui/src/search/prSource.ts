@@ -13,16 +13,15 @@ export interface PrsDeps {
   open: (ref: PrRef) => void;
 }
 
-/** `owner/repo` from a search item: its repository address, or a `repository.nameWithOwner`. */
+/** `owner/repo` from a search node's `repository.nameWithOwner`. */
 function repoOf(item: Record<string, unknown>): { owner: string; repo: string } | null {
-  const url = str(item.repository_url);
-  const m = /\/repos\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/.exec(url) ?? /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/.exec(str(obj(item.repository).nameWithOwner));
+  const m = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/.exec(str(obj(item.repository).nameWithOwner));
   return m ? { owner: m[1] as string, repo: m[2] as string } : null;
 }
 
 export function parsePrSearch(data: unknown): { ref: PrRef; title: string; state: string }[] {
-  const d = obj(data);
-  const list = arr(d.items).length ? arr(d.items) : arr(data);
+  // The host answers GitHub's search: `data: { search: { issueCount, nodes: [...] } }`.
+  const list = arr(obj(obj(data).search).nodes);
   const out: { ref: PrRef; title: string; state: string }[] = [];
   for (const raw of list) {
     const it = obj(raw);
@@ -43,7 +42,7 @@ export function prsSource(d: PrsDeps): SearchSource {
     timeoutMs: 10_000,
     run: async (query, signal) => {
       if (!(await prViewEnabled())) return [];
-      const a = await client.search(`is:pr involves:@me ${query}`);
+      const a = await client.search(query);
       if (signal.aborted) return [];
       return parsePrSearch(a.data).map(
         (h): Row => ({
