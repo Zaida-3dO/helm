@@ -190,12 +190,10 @@ function CommentBox({ entry }: { entry: PrEntry }) {
             done: () => {
               entry.ui.commentOpen = false;
               entry.ui.note = 'Comment posted.';
-              if (entry.conv) void entry.loadConversation(true);
-              void entry.poll();
+              void entry.afterPublish();
             },
             uncertain: () => {
-              if (entry.conv) void entry.loadConversation(true);
-              void entry.poll();
+              void entry.afterPublish();
             },
           },
         ]}

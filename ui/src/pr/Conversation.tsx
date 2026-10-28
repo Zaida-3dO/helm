@@ -367,8 +367,7 @@ function MergeBox({ entry, pr }: { entry: PrEntry; pr: PrSummary }) {
           setConfirm(false);
           setAnyway(null);
           setMsg(mergeText(r.value));
-          void entry.poll();
-          void entry.loadConversation(true);
+          void entry.afterPublish();
         } else if (r.cls === 'Tracked') {
           setConfirm(false);
           setAnyway(r.message);

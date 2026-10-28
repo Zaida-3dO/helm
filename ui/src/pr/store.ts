@@ -173,6 +173,11 @@ export class PrEntry {
     });
   }
 
+  /** After a write that changes the conversation: poll first, so the reload takes the new revision as its baseline. */
+  afterPublish(): Promise<void> {
+    return this.poll().then(() => (this.conv ? this.loadConversation(true) : undefined));
+  }
+
   // ---- Conversation ----
 
   loadConversation(force = false): Promise<void> {
