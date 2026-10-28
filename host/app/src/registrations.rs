@@ -28,6 +28,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_governor::register_ops(reg);
     helm_relay::register_ops(reg);
     helm_updates::register_ops(reg);
+    helm_github::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -67,6 +68,7 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_governor::register_services(services, events);
     helm_relay::register_services(services, events);
     helm_updates::register_services(services, events);
+    helm_github::register_services(services, events);
     services.insert(Arc::new(host_tools()));
     // Settings that live outside the preference table but that chats read and change.
     let mut extensions = vec![helm_workflow::settings_extension()];
