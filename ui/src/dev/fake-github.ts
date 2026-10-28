@@ -211,7 +211,7 @@ export function githubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } 
                   pullRequest: {
                     id: 'PR_node_42',
                     reviewDecision: s.merged ? 'APPROVED' : 'REVIEW_REQUIRED',
-                    lastCommit: { nodes: [{ commit: { oid: SHA, statusCheckRollup: { state: 'PENDING' } } }] },
+                    lastCommit: { nodes: [{ commit: { oid: SHA, statusCheckRollup: { state: 'PENDING', contexts: { totalCount: 4 } } } }] },
                   },
                 },
               },

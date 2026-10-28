@@ -79,7 +79,7 @@ pub const DOCS: &[Doc] = &[
       assignees(first: 20) { nodes { login } }
       reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } }
       latestReviews(first: 20) { nodes { author { login } state submittedAt } }
-      lastCommit: commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
+      lastCommit: commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 1) { totalCount } } } } }
     }
   }
 }"#,

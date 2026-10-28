@@ -81,9 +81,9 @@ test('mentions: owner/repo#N always, bare #N only with a known repository, never
 test('answers read into plain shapes: summary, checks, commits, files, threads and the timeline', () => {
   const s = parseSummary(
     { title: 'T', state: 'open', merged: false, draft: true, user: { login: 'u' }, head: { ref: 'h', sha: 'a1' }, base: { ref: 'b', sha: 'b1' }, comments: 2, review_comments: 3, labels: [{ name: 'x', color: 'zzz' }, { name: 'y', color: 'A1B2C3' }], requested_reviewers: [{ login: 'r' }], mergeable_state: 'dirty', merged_at: null },
-    { data: { repository: { pullRequest: { id: 'N1', reviewDecision: 'APPROVED', lastCommit: { nodes: [{ commit: { statusCheckRollup: { state: 'FAILURE' } } }] } } } } },
+    { data: { repository: { pullRequest: { id: 'N1', reviewDecision: 'APPROVED', lastCommit: { nodes: [{ commit: { statusCheckRollup: { state: 'FAILURE', contexts: { totalCount: 5 } } } }] } } } } },
   );
-  assert.deepEqual([s.state, s.draft, s.comments, s.nodeId, s.viewer, s.reviewDecision, s.checksState, s.checksTotal, s.mergeableState], ['OPEN', true, 5, 'N1', null, 'APPROVED', 'FAILURE', 0, 'dirty']);
+  assert.deepEqual([s.state, s.draft, s.comments, s.nodeId, s.viewer, s.reviewDecision, s.checksState, s.checksTotal, s.mergeableState], ['OPEN', true, 5, 'N1', null, 'APPROVED', 'FAILURE', 5, 'dirty']);
   assert.deepEqual(s.labels, [{ name: 'x', color: null }, { name: 'y', color: '#a1b2c3' }]);
   assert.equal(parseSummary({ merged: true, state: 'closed' }, {}).state, 'MERGED');
   assert.equal(parseSummary(null, null).title, '');
