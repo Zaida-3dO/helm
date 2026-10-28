@@ -9,7 +9,7 @@ import { appendToDraft, clean, excerpt, fenceFor, fileBlock, linesBlock, prBlock
 import { PrError, attempt, clickFrom, parseLandInfo, prClient, toPrError } from './client.ts';
 import { NO_FILTER, filterFiles, groupByDir, isTestFile, sortFiles, statBlocks, withoutTests } from './files.ts';
 import { findMentions, mergeOpen, parsePrUrl, prKey, repoFromRemote } from './links.ts';
-import { buildTimeline, formatDuration, groupChecks, parseChecks, parseCommits, parseFiles, parseSummary, parseThreads } from './parse.ts';
+import { buildTimeline, formatDuration, parseTimelineEvents, groupChecks, parseChecks, parseCommits, parseFiles, parseSummary, parseThreads } from './parse.ts';
 import { mentionRepoFor } from './mentionRepo.ts';
 import { PrEntry } from './store.ts';
 import type { PrFile } from './types.ts';
@@ -81,9 +81,9 @@ test('mentions: owner/repo#N always, bare #N only with a known repository, never
 test('answers read into plain shapes: summary, checks, commits, files, threads and the timeline', () => {
   const s = parseSummary(
     { title: 'T', state: 'open', merged: false, draft: true, user: { login: 'u' }, head: { ref: 'h', sha: 'a1' }, base: { ref: 'b', sha: 'b1' }, comments: 2, review_comments: 3, labels: [{ name: 'x', color: 'zzz' }, { name: 'y', color: 'A1B2C3' }], requested_reviewers: [{ login: 'r' }], mergeable_state: 'dirty', merged_at: null },
-    { data: { viewer: { login: 'me' }, repository: { pullRequest: { id: 'N1', reviewDecision: 'APPROVED', commits: { nodes: [{ commit: { statusCheckRollup: { state: 'FAILURE', contexts: { totalCount: 5 } } } }] } } } } },
+    { data: { repository: { pullRequest: { id: 'N1', reviewDecision: 'APPROVED', lastCommit: { nodes: [{ commit: { statusCheckRollup: { state: 'FAILURE' } } }] } } } } },
   );
-  assert.deepEqual([s.state, s.draft, s.comments, s.nodeId, s.viewer, s.reviewDecision, s.checksState, s.checksTotal, s.mergeableState], ['OPEN', true, 5, 'N1', 'me', 'APPROVED', 'FAILURE', 5, 'dirty']);
+  assert.deepEqual([s.state, s.draft, s.comments, s.nodeId, s.viewer, s.reviewDecision, s.checksState, s.checksTotal, s.mergeableState], ['OPEN', true, 5, 'N1', null, 'APPROVED', 'FAILURE', 0, 'dirty']);
   assert.deepEqual(s.labels, [{ name: 'x', color: null }, { name: 'y', color: '#a1b2c3' }]);
   assert.equal(parseSummary({ merged: true, state: 'closed' }, {}).state, 'MERGED');
   assert.equal(parseSummary(null, null).title, '');
@@ -111,13 +111,13 @@ test('answers read into plain shapes: summary, checks, commits, files, threads a
 
   // every thread appears exactly once: under its review when it has one, else on its own
   const threads = parseThreads({ nodes: [
-    { id: 'T1', path: 'p', line: 3, diffSide: 'RIGHT', comments: { nodes: [{ id: 'c1', databaseId: 1, body: 'x', createdAt: '2026-01-01T02:00:00Z', pullRequestReview: { databaseId: 10 } }] } },
+    { id: 'T1', path: 'p', line: 3, diffSide: 'RIGHT', comments: { nodes: [{ id: 'c1', databaseId: 1, body: 'x', createdAt: '2026-01-01T02:00:00Z', pullRequestReview: { id: 'RV10', state: 'COMMENTED' } }] } },
     { id: 'T2', path: 'p', line: null, originalLine: 9, isOutdated: true, comments: { nodes: [{ id: 'c2', databaseId: 2, createdAt: '2026-01-01T03:00:00Z' }] } },
   ] });
   assert.deepEqual(threads.map((t) => [t.line, t.outdated]), [[3, false], [9, true]]);
   const tl = buildTimeline({
     comments: [{ type: 'comment', key: 'c1', id: 1, at: '2026-01-01T01:00:00Z', author: 'a', association: '', body: '', edited: false }],
-    reviews: [{ type: 'review', key: 'r10', id: 10, at: '2026-01-01T02:00:00Z', author: 'a', association: '', state: 'COMMENTED', body: '', threads: [] }],
+    reviews: [{ type: 'review', key: 'r10', id: 10, nodeId: 'RV10', at: '2026-01-01T02:00:00Z', author: 'a', association: '', state: 'COMMENTED', body: '', threads: [] }],
     events: [{ type: 'event', key: 'e', at: '2026-01-01T00:30:00Z', actor: 'a', text: 'x' }],
     threads,
   });
@@ -213,7 +213,10 @@ test('errors keep their class; only an uncertain write may have gone through; ev
   assert.equal(clickFrom(null), null);
   const info = parseLandInfo({ rule: { mode: 'draft', method: 'squash' }, tracked: { title: 'T', state: 'awaiting_merge', blocking: false, busy: false, routes: 'merge' } });
   assert.deepEqual([info.rule, info.method, info.tracked?.routes, parseLandInfo(null).tracked], ['draft', 'squash', 'merge', null]);
-  assert.deepEqual(parsePrSearch({ items: [{ number: 3, title: 'T', state: 'OPEN', repository_url: 'https://api.github.com/repos/o/r' }, { number: 0, title: 'bad' }, { number: 4, repository: { nameWithOwner: 'a/b' } }] }).map((r) => `${r.ref.owner}/${r.ref.repo}#${r.ref.number}`), ['o/r#3', 'a/b#4']);
+  assert.deepEqual(parsePrSearch({ search: { issueCount: 3, nodes: [{ number: 3, title: 'T', state: 'OPEN', repository: { nameWithOwner: 'o/r' } }, { number: 0, title: 'bad' }, { number: 4, repository: { nameWithOwner: 'a/b' } }, {}] } }).map((r) => `${r.ref.owner}/${r.ref.repo}#${r.ref.number}`), ['o/r#3', 'a/b#4']);
+  // timeline keys stay unique across pages
+  const k = (off: number) => parseTimelineEvents({ nodes: [{ __typename: 'ClosedEvent', createdAt: 'x' }, { __typename: 'PullRequestCommit', commit: { oid: 'a' } }] }, off).map((i) => i.key);
+  assert.equal(new Set([...k(0), ...k(2)]).size, 4);
 });
 
 // ---- the cache entry, over the dev fake (which follows the host's op shapes) ----
@@ -259,15 +262,30 @@ test('a PR entry polls, loads each view through the fake, pages only while shown
   assert.equal(e.files!.data.viewed.get('docs/usage.md'), 'VIEWED');
   assert.equal(e.files!.data.headSha, e.summary!.headSha);
 
-  // a hidden tab makes no further page requests and stores nothing
-  const hidden = new PrEntry({ owner: 'd', repo: 'h', number: 50 }, fakeApi().api);
-  hidden.setShown(true, true, 'conversation');
-  await hidden.poll();
-  const before = hidden.conv;
-  hidden.setShown(false, false, 'conversation');
-  hidden.client.timeline = (async () => ({ status: 200, data: { repository: { pullRequest: { timelineItems: { nodes: [], pageInfo: { hasNextPage: true, endCursor: 'x' } } } } } })) as never;
-  await hidden.loadConversation();
-  assert.equal(hidden.conv, before, 'an interrupted round stores nothing');
+  // a round cut short (the tab hides after the first page) stores nothing, and nothing starts it again by itself
+  const cut = new PrEntry({ owner: 'd', repo: 'h', number: 50 }, fakeApi().api);
+  cut.setShown(true, true, 'conversation');
+  await cut.poll();
+  let pages = 0;
+  cut.client.timeline = (async () => {
+    pages++;
+    cut.setShown(false, false, 'conversation');
+    return { status: 200, data: { repository: { pullRequest: { timelineItems: { nodes: [], pageInfo: { hasNextPage: true, endCursor: 'x' } } } } } };
+  }) as never;
+  await cut.loadConversation();
+  assert.equal(cut.conv, null, 'an interrupted round stores nothing');
+  assert.equal(cut.convLoading, false);
+  await cut.loadConversation();
+  assert.equal(pages, 1, 'a hidden tab starts no round');
+  // a failed round sets the error once and is not repeated without a user action
+  const bad = new PrEntry({ owner: 'd', repo: 'h', number: 51 }, fakeApi().api);
+  bad.setShown(true, true, 'conversation');
+  await bad.poll();
+  let tries = 0;
+  bad.client.timeline = (async () => (tries++, Promise.reject(new Error('[Network] down')))) as never;
+  await bad.loadConversation();
+  assert.ok(bad.convError);
+  assert.equal(tries, 1);
 
   // writes run one at a time, in the order given
   const order: string[] = [];
