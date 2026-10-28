@@ -96,6 +96,9 @@ pub const MAX_FILES: usize = 10;
 pub const MAX_MESSAGE_BYTES: usize = 50 * 1024 * 1024;
 /// The most file bytes held for Helm at once (waiting to go, or sent and not yet acknowledged).
 pub const MAX_QUEUED_BYTES: usize = 150 * 1024 * 1024;
+/// How many files are fetched (and transcribed) at once, so the bytes held while fetching stay
+/// bounded too.
+pub const MAX_DOWNLOADS: usize = 2;
 /// How long after the last file of an album more may join it.
 pub const ALBUM_WINDOW: Duration = Duration::from_millis(1500);
 /// How long a connection may take to open, and a file download from Telegram in all.
@@ -324,8 +327,14 @@ struct Queued {
 }
 
 impl Queued {
-    /// The bytes it holds, for the cap on what is held.
+    /// The bytes it holds, or has set aside for files still being fetched, for the cap on what is
+    /// held.
     fn held(&self) -> usize {
+        let reserved = self.gather.as_ref().map_or(0, |g| g.reserved);
+        reserved + self.parts_held()
+    }
+
+    fn parts_held(&self) -> usize {
         let parts = self
             .gather
             .iter()
@@ -432,6 +441,8 @@ struct Job {
     /// The file's own name, when it has one.
     name: Option<String>,
     mime: Option<String>,
+    /// The size the message gives for it (0 when it gives none), set aside before the fetch.
+    size: usize,
     /// Why it cannot be fetched at all, judged from the message alone.
     problem: Option<String>,
 }
@@ -466,6 +477,8 @@ struct Gather {
     group: Option<String>,
     /// Fetches not yet ended.
     pending: usize,
+    /// The sizes the message gives for those fetches, set aside under the caps.
+    reserved: usize,
     /// More files of the album may join until then.
     open_until_ms: i64,
     next_index: usize,
@@ -551,6 +564,8 @@ pub struct Bridge {
     state: Mutex<State>,
     /// Serialises Telegram sends, so a status edit and the final answer never interleave.
     ops: tokio::sync::Mutex<()>,
+    /// Turns to fetch a file: at most [`MAX_DOWNLOADS`] at once.
+    downloads: tokio::sync::Semaphore,
 }
 
 pub fn now_ms() -> i64 {
@@ -623,6 +638,7 @@ fn media_of(msg: &Value) -> Option<Job> {
             file_id,
             name: str_of(v, "file_name"),
             mime: str_of(v, "mime_type"),
+            size: v.get("file_size").and_then(Value::as_u64).unwrap_or(0) as usize,
         }
     };
     if let Some(sizes) = msg.get("photo").and_then(Value::as_array) {
@@ -743,6 +759,22 @@ fn compose(g: &Gather, parts: &[Part]) -> String {
     with_quote(g.quote.as_deref(), &lines.join("\n"))
 }
 
+/// The reply when a file would take its message past [`MAX_MESSAGE_BYTES`].
+fn message_full_note(name: &str) -> String {
+    format!(
+        "{name} was left out: a message to Helm carries at most {} of files.",
+        size_text(MAX_MESSAGE_BYTES)
+    )
+}
+
+/// The reply when a file would take what waits for Helm past [`MAX_QUEUED_BYTES`].
+fn queue_full_note(name: &str) -> String {
+    format!(
+        "{name} was left out: too many files are already waiting to reach Helm. Try again in a \
+         moment."
+    )
+}
+
 /// The reply when a file is not passed on.
 fn not_sent(job: &Job, why: &str) -> String {
     match job.name.as_deref().and_then(clean_name) {
@@ -781,6 +813,7 @@ impl Bridge {
             files: None,
             state: Mutex::new(State::default()),
             ops: tokio::sync::Mutex::new(()),
+            downloads: tokio::sync::Semaphore::new(MAX_DOWNLOADS),
         }
     }
 
@@ -1001,6 +1034,18 @@ impl Bridge {
             .and_then(Value::as_str)
             .map(str::to_owned);
         let window = ALBUM_WINDOW.as_millis() as i64;
+        let label = job.name.as_deref().and_then(clean_name);
+        let label = label.as_deref().unwrap_or(job.media.noun());
+        // The sizes the message gives are judged before anything is downloaded, so what is held
+        // stays under the caps while files are fetched; what arrives is checked again.
+        let queue_full = {
+            let st = self.st();
+            st.queue.iter().map(Queued::held).sum::<usize>() + job.size > MAX_QUEUED_BYTES
+        };
+        if queue_full {
+            self.reply(chat, &queue_full_note(label)).await;
+            return Handled::Command;
+        }
         // A later file of an album joins the message its first file started, while that message
         // still gathers its files.
         let joined = group.as_ref().and_then(|group| {
@@ -1011,25 +1056,28 @@ impl Bridge {
                     .is_some_and(|g| g.group.as_ref() == Some(group))
             })?;
             let id = q.id.clone();
+            let mine = q.held();
             let g = q.gather.as_mut()?;
             if g.pending + g.parts.len() >= MAX_FILES {
-                return Some(None);
+                return Some(Err(format!(
+                    "{label} was left out: a message to Helm carries at most {MAX_FILES} files."
+                )));
+            }
+            if mine + job.size > MAX_MESSAGE_BYTES {
+                return Some(Err(message_full_note(label)));
             }
             g.pending += 1;
+            g.reserved += job.size;
             g.open_until_ms = now + window;
             g.next_index += 1;
             if g.caption.is_empty() {
                 g.caption = caption.clone();
             }
-            Some(Some((id, g.next_index - 1)))
+            Some(Ok((id, g.next_index - 1)))
         });
         let (slot, index) = match joined {
-            Some(Some(at)) => at,
-            Some(None) => {
-                let said = format!(
-                    "{} was left out: a message to Helm carries at most {MAX_FILES} files.",
-                    job.name.as_deref().unwrap_or(job.media.noun())
-                );
+            Some(Ok(at)) => at,
+            Some(Err(said)) => {
                 self.reply(chat, &said).await;
                 return Handled::Command;
             }
@@ -1047,6 +1095,7 @@ impl Bridge {
                         open_until_ms: if group.is_some() { now + window } else { 0 },
                         group,
                         pending: 1,
+                        reserved: job.size,
                         next_index: 1,
                         parts: vec![],
                         notes: vec![],
@@ -1076,6 +1125,12 @@ impl Bridge {
     /// `getFile`, the download, then a look at the bytes (is it a picture Helm shows?) and, for a
     /// recording, the speech-to-text server.
     async fn fetch_part(&self, job: &Job) -> Result<Part, String> {
+        // A few at a time, so only those few files' bytes are in memory while they are fetched.
+        let _turn = self
+            .downloads
+            .acquire()
+            .await
+            .map_err(|_| "the hub is shutting down".to_owned())?;
         let file_id = job
             .file_id
             .as_deref()
@@ -1156,7 +1211,9 @@ impl Bridge {
     async fn part_done(&self, slot: &str, index: usize, job: &Job, got: Result<Part, String>) {
         {
             let mut st = self.st();
-            let held: usize = st.queue.iter().map(Queued::held).sum();
+            // What is held besides this file, whose share set aside is given back now.
+            let held = st.queue.iter().map(Queued::held).sum::<usize>();
+            let held = held.saturating_sub(job.size);
             let Some(g) = st
                 .queue
                 .iter_mut()
@@ -1166,21 +1223,17 @@ impl Bridge {
                 return;
             };
             g.pending = g.pending.saturating_sub(1);
+            g.reserved = g.reserved.saturating_sub(job.size);
             match got {
                 Err(why) => g.notes.push(not_sent(job, &why)),
                 Ok(part) => {
                     let name = part.blob.name.clone();
                     let mine: usize = g.parts.iter().map(|(_, p)| p.blob.len).sum();
+                    let mine = mine + g.reserved;
                     if mine + part.blob.len > MAX_MESSAGE_BYTES {
-                        g.notes.push(format!(
-                            "{name} was left out: a message to Helm carries at most {} of files.",
-                            size_text(MAX_MESSAGE_BYTES)
-                        ));
+                        g.notes.push(message_full_note(&name));
                     } else if held + part.blob.len > MAX_QUEUED_BYTES {
-                        g.notes.push(format!(
-                            "{name} was left out: too many files are already waiting to reach \
-                             Helm. Try again in a moment."
-                        ));
+                        g.notes.push(queue_full_note(&name));
                     } else {
                         match (&part.heard, part.media) {
                             (Some(Heard::Off), Media::Voice) => g.notes.push(VOICE_OFF.into()),

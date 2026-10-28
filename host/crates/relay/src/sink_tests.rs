@@ -407,6 +407,7 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
         data: base64::engine::general_purpose::STANDARD.encode(bytes),
     };
     let long = format!("{}.tar.gz", "x".repeat(300));
+    let dotted = format!("{}{}.pdf", "y".repeat(94), ".".repeat(6));
     let names = [
         ("report.pdf", "report.pdf".to_owned()),
         ("nul.txt", "_nul.txt".to_owned()),
@@ -416,6 +417,8 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
         ("  trailing. . ", "trailing".to_owned()),
         ("..", "file".to_owned()),
         (long.as_str(), format!("{}.gz", "x".repeat(97))),
+        // Cut inside a run of dots: the dots go too, never left before the extension.
+        (dotted.as_str(), format!("{}.pdf", "y".repeat(94))),
     ];
     let m = TelegramMessage {
         files: names.iter().map(|(n, _)| file(n, n.as_bytes())).collect(),

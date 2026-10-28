@@ -108,14 +108,20 @@ pub fn delete_in_tx(
             rels.push(format!("artifacts/{}", n?));
         }
     }
+    // Files saved for the chat from the phone, each in its own folder in the profile's
+    // attachments folder (the database sits at the profile's root).
+    if let Some(dir) = tx
+        .path()
+        .and_then(|p| Path::new(p).parent())
+        .map(|p| p.join("attachments"))
     {
-        // Files saved for the chat from the phone, each in its own folder.
         let mut st = tx.prepare(
-            "SELECT target FROM chat_attachment_refs WHERE chat_id = ?1 AND kind = 'file'",
+            "SELECT id, target FROM chat_attachment_refs WHERE chat_id = ?1 AND kind = 'file'",
         )?;
-        let targets = st.query_map([chat_id], |r| r.get::<_, String>(0))?;
-        for t in targets {
-            if let Some(rel) = crate::attachments::saved_folder(&t?) {
+        let refs = st.query_map([chat_id], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))?;
+        for r in refs {
+            let (id, target): (String, String) = r?;
+            if let Some(rel) = crate::attachments::saved_folder(&id, &target, &dir) {
                 rels.push(rel);
             }
         }
@@ -338,6 +344,40 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read(&saved.target).unwrap(), b"%PDF");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), mine + 1);
+        // Never removed by deleting another chat: that file attached there by path, or a reference
+        // shaped like a saved file whose folder is in another profile, even under its own id.
+        let other = d.path().join("other");
+        let foreign = uuid::Uuid::new_v4().to_string();
+        let foreign_target = other.join("attachments").join(&foreign).join("x.txt");
+        let lookalike = root.join("attachments").join(&foreign);
+        std::fs::create_dir_all(&lookalike).unwrap();
+        let b = db
+            .write(|tx| {
+                let b = store::create_chat(tx, "C:/w", None, None, 1)?;
+                crate::attachments::put_ref(tx, &b, "path", &saved.target, None, 1)?.unwrap();
+                tx.execute(
+                    "INSERT INTO chat_attachment_refs(id, chat_id, kind, target, name, created_at)
+                     VALUES (?1, ?2, 'file', ?3, 'x.txt', 1)",
+                    params![foreign, b, foreign_target.to_string_lossy()],
+                )?;
+                tx.execute("UPDATE chats SET archived = 1 WHERE id = ?1", [&b])?;
+                Ok::<_, rusqlite::Error>(b)
+            })
+            .unwrap();
+        db.write(|tx| delete_in_tx(tx, &b, DeleteRule::Archived, 2))
+            .unwrap()
+            .unwrap();
+        run_cleanup(&db, &root);
+        assert!(
+            Path::new(&saved.target).exists(),
+            "the other chat's file stays"
+        );
+        assert!(
+            lookalike.exists(),
+            "a folder this profile's chat never saved stays"
+        );
+        std::fs::remove_dir(&lookalike).unwrap();
+        // Deleting the chat that saved it removes the file with its folder.
         db.write(|tx| delete_in_tx(tx, &chat, DeleteRule::Archived, 2))
             .unwrap()
             .unwrap();

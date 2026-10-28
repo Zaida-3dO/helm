@@ -70,7 +70,12 @@ approval.
 | `HUB_TELEGRAM_STT_URL` | An OpenAI-compatible speech-to-text endpoint for voice notes, e.g. `http://<host>:<port>/v1/audio/transcriptions`. Unset: recordings go without a transcript. Not an `http://` or `https://` URL: the hub refuses to start |
 | `HUB_TELEGRAM_STT_MODEL` | The model the server is asked for (default `large-v3-turbo`) |
 | `HUB_TELEGRAM_STT_LANGUAGE` | The language of the voice notes (default `en`) |
-| `HUB_TELEGRAM_STT_TIMEOUT_MINUTES` | How long one transcription may take, 1-60 (default 10). A long recording is split up by the server and can take minutes |
+| `HUB_TELEGRAM_STT_TIMEOUT_MINUTES` | How long one transcription may take, 1-60 (default 10). A long recording is split up by the server and can take minutes. Optional |
+
+**Upgrading to a hub that forwards files:** install the matching Helm on the PC first, then
+redeploy the hub. An older Helm drops any frame over 32 MB (a message with files can be up to
+about 67 MB as base64) and ignores the `files` list, so files would be lost or stall the line.
+`HUB_TELEGRAM_STT_TIMEOUT_MINUTES` is new and optional; nothing else in the env file changes.
 
 - A sender not on the allow-list gets nothing: no forward and no reply.
 - While Helm is offline a message is queued in order and the sender is told at once. On reconnect
@@ -98,7 +103,9 @@ approval.
   was not sent to Helm: ...") and is left out. Several files sent together (an album) are gathered
   for 1.5 s after the last one and go as one message, its caption the one the album carries. One
   message carries at most 10 files and 50 MB; about 150 MB may wait for Helm at once. A file over
-  any of these is left out with a reply. A message keeps its place in the queue while its files
+  any of these is left out with a reply, judged from the sizes the message gives before anything is
+  downloaded and again once it has arrived. Two files are fetched at a time. A message keeps its
+  place in the queue while its files
   are fetched, so a message sent after it waits for it. File bytes are never logged. Helm makes
   each name safe for its disk and saves the file where the chat's agent can read it.
 - **Recordings.** With `HUB_TELEGRAM_STT_URL` set, a voice note, an audio file or a video note is

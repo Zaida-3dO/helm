@@ -145,10 +145,13 @@ impl Voice for FakeVoice {
 struct FakeFiles {
     files: Vec<(&'static str, Vec<u8>)>,
     gate: tokio::sync::Semaphore,
+    /// How many downloads have started.
+    started: AtomicI64,
 }
 
 impl Files for FakeFiles {
     fn download<'a>(&'a self, file_path: &'a str) -> VoiceFuture<'a, Vec<u8>> {
+        self.started.fetch_add(1, Ordering::Relaxed);
         Box::pin(async move {
             self.gate.acquire().await.unwrap().forget();
             let id = file_path.rsplit('/').next().unwrap_or(file_path);
@@ -230,6 +233,7 @@ fn fake_files(files: Vec<(&'static str, Vec<u8>)>, open: bool) -> Arc<FakeFiles>
     Arc::new(FakeFiles {
         files,
         gate: tokio::sync::Semaphore::new(if open { 100 } else { 0 }),
+        started: AtomicI64::new(0),
     })
 }
 
@@ -1303,7 +1307,38 @@ async fn every_file_reaches_helm_and_an_album_goes_as_one_message() {
         e.api.sent_texts(),
         ["notes.txt was left out: a message to Helm carries at most 10 files."]
     );
-    // And at most 50 MB of files: the third 20 MB file is left out.
+    // The sizes the message gives are judged before anything is downloaded: a third file said to
+    // be 20 MB is left out at once.
+    e.api.clear();
+    for want in [Handled::File, Handled::File, Handled::Command] {
+        let doc =
+            json!({ "file_id": "notes.txt", "file_name": "notes.txt", "file_size": 20 << 20 });
+        let m = album(json!({ "document": doc }), "g4");
+        assert_eq!(e.bridge.on_update(&m, now).await, want);
+    }
+    settle().await;
+    e.bridge.flush(now + 2000).await;
+    assert_eq!(attached_down(&mut rx)[0].2.len(), 2);
+    assert_eq!(
+        e.api.sent_texts(),
+        ["notes.txt was left out: a message to Helm carries at most 50.0 MB of files."]
+    );
+    // Only two files are fetched at once; the rest wait their turn.
+    let (e, files) = env_with_files(vec![("notes.txt", small(1))], false);
+    let mut rx = line_up(&e);
+    for _ in 0..5 {
+        let m = album(json!({ "document": doc("notes.txt", "text/plain") }), "g5");
+        e.bridge.on_update(&m, now).await;
+    }
+    settle().await;
+    assert_eq!(files.started.load(Ordering::Relaxed), 2);
+    files.gate.add_permits(100);
+    settle().await;
+    assert_eq!(files.started.load(Ordering::Relaxed), 5);
+    e.bridge.flush(now + 2000).await;
+    assert_eq!(attached_down(&mut rx)[0].2.len(), 5);
+    // And at most 50 MB of what arrives, when the message gives no sizes: the third 20 MB file
+    // is left out.
     let (e, _files) = env_with_files(vec![("big.bin", vec![0u8; 20 << 20])], true);
     let mut rx = line_up(&e);
     for _ in 0..3 {

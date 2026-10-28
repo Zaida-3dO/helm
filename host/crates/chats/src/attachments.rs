@@ -519,13 +519,8 @@ pub fn safe_file_name(name: &str) -> String {
             _ => String::new(),
         };
         let keep = SAVED_NAME_CHARS - ext.chars().count();
-        n = n
-            .chars()
-            .take(keep)
-            .collect::<String>()
-            .trim_end()
-            .to_owned()
-            + &ext;
+        let stem: String = n.chars().take(keep).collect();
+        n = stem.trim_end_matches(['.', ' ']).to_owned() + &ext;
     }
     let stem = n
         .split('.')
@@ -615,14 +610,33 @@ pub fn put_file(
 }
 
 /// The folder a file saved by [`put_file`] lives in, as a path under the profile
-/// (`attachments/<id>`); `None` for any other reference.
-pub fn saved_folder(target: &str) -> Option<String> {
-    let p = Path::new(target);
-    let folder = p.parent()?;
-    let id = folder.file_name()?.to_str()?;
-    let is_id = uuid::Uuid::parse_str(id).is_ok_and(|u| u.to_string() == id);
-    let under = folder.parent()?.file_name()? == "attachments";
-    (is_id && under).then(|| format!("attachments/{id}"))
+/// (`attachments/<id>`). Only the reference [`put_file`] made owns it: the folder must be named by
+/// that reference's own id and sit in this profile's `attachments` folder (`dir`). `None` for any
+/// other reference, such as another chat's saved file attached here by path.
+pub fn saved_folder(ref_id: &str, target: &str, dir: &Path) -> Option<String> {
+    let folder = Path::new(target).parent()?;
+    if folder.file_name()?.to_str()? != ref_id || !is_uuid(ref_id) {
+        return None;
+    }
+    (comparable(folder.parent()?) == comparable(dir)).then(|| format!("attachments/{ref_id}"))
+}
+
+fn is_uuid(s: &str) -> bool {
+    uuid::Uuid::parse_str(s).is_ok_and(|u| u.to_string() == s)
+}
+
+/// A folder's path for comparison: absolute, without the `\\?\` prefix, and on Windows without
+/// regard to case or slash direction.
+fn comparable(p: &Path) -> String {
+    let p = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let s = p.to_string_lossy();
+    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    let s = s.trim_end_matches(['/', '\\']);
+    if cfg!(windows) {
+        s.replace('/', "\\").to_lowercase()
+    } else {
+        s.to_owned()
+    }
 }
 
 /// The `attachment_ref` op (maintenance).
