@@ -323,6 +323,7 @@ fn attach_only_answers_not_started_without_a_connection() {
 fn the_client_has_no_write_method() {
     let src = concat!(include_str!("lib.rs"), include_str!("tests.rs"));
     let lib = include_str!("lib.rs");
+    let reads = include_str!("reads.rs");
     // The one request builder in the crate.
     assert_eq!(
         lib.matches(".agent\n            .get(").count() + lib.matches("self.agent.get(").count(),
@@ -350,11 +351,21 @@ fn the_client_has_no_write_method() {
         "fn update",
         "fn write",
     ] {
-        // Only this test's own list may mention them.
+        // Only this test's own list may mention them. The reads module is held to the same rule.
+        for (name, text) in [("lib.rs", lib), ("reads.rs", reads)] {
+            assert_eq!(
+                text.matches(forbidden).count(),
+                0,
+                "{name} must not contain {forbidden:?}"
+            );
+        }
+    }
+    // The reads module builds paths and calls `get_json`; it never makes a request itself.
+    for own in ["ureq", "agent", "ransport"] {
         assert_eq!(
-            lib.matches(forbidden).count(),
+            reads.matches(own).count(),
             0,
-            "lib.rs must not contain {forbidden:?}"
+            "reads.rs must not touch {own:?}"
         );
     }
     assert!(src.contains("fn get(&self, url: &str, bearer: &str, timeout: Duration)"));
@@ -395,4 +406,94 @@ fn the_captured_log_never_holds_the_token() {
     );
     assert!(!logs.contains(SENTINEL), "token in the log: {logs}");
     assert!(!format!("{e:?}").contains(SENTINEL));
+}
+
+/// The Tasks view's reads: each one fixed GET route, parameters checked before anything is sent.
+#[test]
+fn the_tasks_reads_use_fixed_routes_and_check_their_parameters() {
+    let server = FakeServer::start(Arc::new(|_, path, _| match path {
+        p if p.starts_with("/api/fleet") && p.contains("cursor=a2") => (
+            200,
+            vec![],
+            r#"{"assignments":[{"id":"a3"}],"nextCursor":null}"#.into(),
+        ),
+        p if p.starts_with("/api/fleet") => (
+            200,
+            vec![],
+            r#"{"assignments":[{"id":"a1"},{"id":"a2"}],"nextCursor":"a2"}"#.into(),
+        ),
+        "/api/ready" => (503, vec![], String::new()),
+        _ => (200, vec![], r#"{"ok":true}"#.into()),
+    }));
+    let c = Client::new(&server.base, token()).unwrap();
+    let id = "5c9e2a41-0f0b-4d6e-9d1f-0a7c1e3b9a10";
+    c.board_page("in_progress", None, 30, None).unwrap();
+    c.board_page("completed", Some(id), 999, Some("cur sor"))
+        .unwrap();
+    c.item("5c9e2a41").unwrap();
+    c.item_detail(id, 20, 20).unwrap();
+    c.history(id, 20, Some("1234")).unwrap();
+    c.artifacts(id, 20, None).unwrap();
+    c.loops(id, 20, Some("loop-1"), true).unwrap();
+    c.loop_text(id, "loop-1").unwrap();
+    c.search_items("  two   words ", 10).unwrap();
+    let paths: Vec<String> = server.requests().into_iter().map(|r| r.1).collect();
+    assert_eq!(
+        paths,
+        [
+            "/api/board?column=in_progress&level=exclude%3A0&limit=30".to_owned(),
+            format!("/api/board?column=completed&level=exclude%3A0&limit=200&project={id}&cursor=cur%20sor"),
+            "/api/items/5c9e2a41".to_owned(),
+            format!("/api/items/{id}/detail?historyLimit=20&artifactLimit=20"),
+            format!("/api/items/{id}/history?full=true&limit=20&cursor=1234"),
+            format!("/api/items/{id}/artifacts?full=true&limit=20"),
+            format!("/api/items/{id}/loops?limit=20&includeClosed=true&cursor=loop-1"),
+            format!("/api/items/{id}/loops/loop-1"),
+            "/api/search?q=two%20words&limit=10".to_owned(),
+        ]
+    );
+
+    // Refused before sending: nothing reaches the board.
+    let before = server.requests().len();
+    let long = "a".repeat(513);
+    let refused = [
+        c.board_page("done", None, 30, None),
+        c.board_page("backlog", Some("../x"), 30, None),
+        c.item(""),
+        c.item(".."),
+        c.item("a/b"),
+        c.item(&long),
+        c.item_detail("a b", 1, 1),
+        c.history(id, 20, Some("12a")),
+        c.artifacts(id, 20, Some("")),
+        c.loops(id, 20, Some("bad\ncursor"), false),
+        c.loop_text(id, "x/y"),
+        c.search_items(" a ", 5),
+    ];
+    for r in refused {
+        assert!(matches!(r, Err(StandupError::Invalid(_))), "{r:?}");
+    }
+    assert_eq!(server.requests().len(), before);
+
+    // The fleet drains page by page and says so when it is whole; a board that is not ready is
+    // an answer.
+    let fleet = c.fleet().unwrap();
+    assert!(fleet.complete);
+    assert_eq!(fleet.assignments.len(), 3);
+    assert_eq!(c.ready().unwrap(), serde_json::json!({"ready": false}));
+
+    // A board that repeats a cursor ends the drain as partial instead of looping.
+    let looping = FakeServer::start(Arc::new(|_, _, _| {
+        (
+            200,
+            vec![],
+            r#"{"assignments":[{"id":"a"}],"nextCursor":"same"}"#.into(),
+        )
+    }));
+    let f = Client::new(&looping.base, token())
+        .unwrap()
+        .fleet()
+        .unwrap();
+    assert!(!f.complete);
+    assert_eq!(f.assignments.len(), 2);
 }

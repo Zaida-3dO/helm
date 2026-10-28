@@ -13,6 +13,7 @@
 //! | [`ops`] | the `api` ops |
 //! | [`note`] | the shared project context note and its ops |
 //! | [`board`] | the Agent Standup connection, the read-only sync and the mirror; the project gate |
+//! | [`tasks`] | the Tasks view's read-only board reads (`board_read`, `board_cancel`) |
 //! | [`repos`], [`repo_ops`], [`guard`] | the repository list, its ops and worktree status, and the git stand-in launch contributor |
 //! | [`bindings`] | `ui/src/api/generated/projects/` |
 
@@ -25,6 +26,7 @@ pub mod repo_ops;
 pub mod repos;
 pub mod schema;
 pub mod store;
+pub mod tasks;
 pub mod types;
 
 #[cfg(test)]

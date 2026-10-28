@@ -13,6 +13,9 @@
 //! - redirects are never followed;
 //! - responses are capped at 2 MiB;
 //! - the token is never logged, never in an error, and scrubbed from anything the board echoes.
+//!
+//! The reads for the Tasks view (columns, items, history, evidence, loops, fleet, readiness) live
+//! in [`reads`]; they go through the same `get_json`, so every rule above covers them too.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -76,6 +79,8 @@ pub enum StandupError {
     TooLarge,
     Status(u16),
     BadResponse(String),
+    /// A read Helm refused to send because an id, cursor or limit was not in the allowed form.
+    Invalid(String),
 }
 
 impl fmt::Display for StandupError {
@@ -90,6 +95,7 @@ impl fmt::Display for StandupError {
             Self::TooLarge => f.write_str("Agent Standup sent more than Helm reads at once (2 MiB)."),
             Self::Status(s) => write!(f, "Agent Standup answered with an error ({s}); showing the last sync."),
             Self::BadResponse(m) => write!(f, "Agent Standup sent something Helm could not read: {m}"),
+            Self::Invalid(m) => write!(f, "That Agent Standup request was not sent: {m}"),
         }
     }
 }
@@ -438,6 +444,9 @@ impl BoardLink {
             .ok_or(StandupError::NotStarted)
     }
 }
+
+mod reads;
+pub use reads::FleetSnapshot;
 
 #[cfg(test)]
 mod tests;
