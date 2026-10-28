@@ -138,12 +138,15 @@ describe("sidebar: Agent Standup sync, groups and nesting", { timeout: 10 * 60_0
       const text = (await page().textContent(card)) ?? "";
       assert.ok(text.includes("builder: builder-one · workbench") && text.includes("Reproduced the stall"), text);
 
-      // The drawer: description, one safe link and one inert, 20 of the 25 history entries.
+      // The drawer: description, one safe link and one inert, 20 of the 25 history entries. Only the
+      // item's own link row is counted: an evidence entry with a web reference is a link too.
       await page().click(card);
       await page().waitForSelector(tid("tasks-drawer", `[data-item-id="${MERGE}"]`), { timeout: 15_000 });
       await page().waitForFunction(() => document.querySelector('[data-testid="tasks-drawer-body"]')?.textContent?.includes("merge queue stops"), null, { timeout: 15_000 });
-      assert.equal(await page().locator(`${tid("tasks-drawer")} a.tk-link`).count(), 1);
-      assert.ok(((await page().textContent(`${tid("tasks-drawer")} .tk-link-inert`)) ?? "").includes("javascript:alert(1)"));
+      const links = `${tid("tasks-drawer")} .tk-links`;
+      assert.deepEqual(await page().$$eval(`${links} a.tk-link`, (els) => els.map((e) => e.getAttribute("href"))), ["https://github.com/example/desktop/pull/12"]);
+      assert.ok(((await page().textContent(`${links} .tk-link-inert`)) ?? "").includes("javascript:alert(1)"));
+      assert.equal(await page().locator(`${links} .tk-link-inert a, ${tid("tasks-drawer")} a[href^="javascript:"]`).count(), 0);
       await page().waitForFunction(() => [...document.querySelectorAll('[data-testid="tasks-drawer-section"] h4')].some((h) => h.textContent?.includes("20 of 25")), null, { timeout: 15_000 });
 
       // Ctrl+K: the Board group finds the task and choosing it opens its drawer.

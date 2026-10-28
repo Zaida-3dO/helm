@@ -1,11 +1,13 @@
 /* The completion stack, bottom-right. Opaque like every floating notice. */
 /* Top right of the chat column, under the top bar: at the bottom it sat over the composer's Send and
-   attach buttons, and anchored to the window it would sit over the side panel's actions. */
+   attach buttons, and anchored to the window it would sit over the side panel's actions. It sits
+   below menus and dialogs (not on the toast layer): a notice left over from a background chat must
+   not cover an open dialog such as Settings, and it is still there once the dialog closes. */
 .notice-stack {
   position: absolute;
   right: 18px;
   top: 58px;
-  z-index: var(--z-toast);
+  z-index: var(--z-notice);
   display: flex;
   flex-direction: column;
   gap: 8px;
