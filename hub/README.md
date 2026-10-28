@@ -67,9 +67,15 @@ approval.
 | `HUB_TELEGRAM_QUEUE_MINUTES` | How long a message waits while Helm is offline (default 120) |
 | `HUB_TELEGRAM_QUEUE_MAX` | How many messages wait (default 50) |
 | `HUB_TELEGRAM_RECEIVE` | `poll` (default) or `off`, below. Anything else: the hub refuses to start |
-| `HUB_TELEGRAM_STT_URL` | An OpenAI-compatible speech-to-text endpoint for voice notes, e.g. `http://<host>:<port>/v1/audio/transcriptions`. Unset: voice notes are off. Not an `http://` or `https://` URL: the hub refuses to start |
+| `HUB_TELEGRAM_STT_URL` | An OpenAI-compatible speech-to-text endpoint for voice notes, e.g. `http://<host>:<port>/v1/audio/transcriptions`. Unset: recordings go without a transcript. Not an `http://` or `https://` URL: the hub refuses to start |
 | `HUB_TELEGRAM_STT_MODEL` | The model the server is asked for (default `large-v3-turbo`) |
 | `HUB_TELEGRAM_STT_LANGUAGE` | The language of the voice notes (default `en`) |
+| `HUB_TELEGRAM_STT_TIMEOUT_MINUTES` | How long one transcription may take, 1-60 (default 10). A long recording is split up by the server and can take minutes. Optional |
+
+**Upgrading to a hub that forwards files:** install the matching Helm on the PC first, then
+redeploy the hub. An older Helm drops any frame over 32 MB (a message with files can be up to
+about 67 MB as base64) and ignores the `files` list, so files would be lost or stall the line.
+`HUB_TELEGRAM_STT_TIMEOUT_MINUTES` is new and optional; nothing else in the env file changes.
 
 - A sender not on the allow-list gets nothing: no forward and no reply.
 - While Helm is offline a message is queued in order and the sender is told at once. On reconnect
@@ -86,29 +92,35 @@ approval.
 - Helm can also speak first (`telegram_notify`: a chat telling the user its work is finished, or
   an alert while the user is away). That arrives as a new message too, and leaves a live status
   message where it is.
-- **Voice notes.** With `HUB_TELEGRAM_STT_URL` set, a voice note (or an audio file) is fetched
-  with `getFile` and sent to the speech-to-text server as a multipart form (`file` as uploaded,
-  Telegram's OGG/Opus is fine; `model`; `language`; `response_format=text`; no auth). Its plain
-  text answer goes to Helm as `[Voice note] <transcript>`, by the same queueing, offline and
-  duplicate rules as text. A file above 20 MB (the Bot API's download limit) is refused. A server
-  that cannot be reached (5 s to connect, about 100 s in all), answers anything but 200, returns
-  no text or returns a JSON error is a failure: the user is told why and nothing reaches Helm.
-  The transcription runs beside the poll loop, and the note keeps its place in the queue, so a
-  message sent after it waits for it. With voice notes off, the bot answers "Voice notes are off
-  on this hub."
-- **Pictures.** A photo, or an image sent as a file, is fetched with `getFile` and goes down the
-  line as a `telegram` frame with an `images` list (`name`, `mediaType`, base64 `data`); its
-  caption is the text, and `[Photo]` or `[Image]` stands in when it has none. Of a photo's sizes
-  the largest that fits the limits is taken. Only still PNG, JPEG and WebP are passed on, judged by
-  the file's own bytes, up to 20 MB (the Bot API's download limit) and 20 megapixels. A GIF, an
-  animated image, another type, or a file that is too large gets a plain reply ("That picture was
-  not sent to Helm: ...") and nothing reaches Helm. Like a voice note, the picture keeps its place
-  in the queue while it is fetched. About 100 MB of pictures may wait for Helm at once; the next one
-  is refused with a reply until some arrive. Picture bytes are never logged. Helm checks the same
-  limits again when the message arrives.
+- **Files.** Every message that carries a file is fetched with `getFile` and goes down the line
+  as one `telegram` frame with the file attached: a document of any type, a photo, a video, an
+  animation, a video note, an audio file or a voice note. Pictures Helm shows (still PNG, JPEG and
+  WebP up to 20 megapixels, judged by the file's own bytes; of a photo's sizes the largest that
+  fits) go in an `images` list, anything else (a GIF or HEIC picture included) in a `files` list,
+  both of `name`, `mediaType` and base64 `data`. The caption is the text, and a line says what
+  came in (`[File] report.pdf, 1.2 MB`; `[Photo]` or `[Image]` for a picture with no caption).
+  The Bot API lets a bot download at most 20 MB, so a larger file gets a plain reply ("report.pdf
+  was not sent to Helm: ...") and is left out. Several files sent together (an album) are gathered
+  for 1.5 s after the last one and go as one message, its caption the one the album carries. One
+  message carries at most 10 files and 50 MB; about 150 MB may wait for Helm at once. A file over
+  any of these is left out with a reply, judged from the sizes the message gives before anything is
+  downloaded and again once it has arrived. Two files are fetched at a time. A message keeps its
+  place in the queue while its files
+  are fetched, so a message sent after it waits for it. File bytes are never logged. Helm makes
+  each name safe for its disk and saves the file where the chat's agent can read it.
+- **Recordings.** With `HUB_TELEGRAM_STT_URL` set, a voice note, an audio file or a video note is
+  also sent to the speech-to-text server as a multipart form (`file` as uploaded, Telegram's
+  OGG/Opus is fine; `model`; `language`; `response_format=text`; no auth). The transcript goes
+  beside the attached recording: `[Voice note] <transcript>`, or a `Transcript:` line under an
+  audio file or video note, with any markers the server writes (`[gap: ...]`, `[truncated: ...]`)
+  as they are. The server has 5 s to accept the connection and `HUB_TELEGRAM_STT_TIMEOUT_MINUTES`
+  to answer. One that cannot be reached, runs out of time, answers anything but 200 or returns a
+  JSON error gets a plain reply ("Transcription is unavailable right now: ..."), and the recording
+  still goes, marked as not transcribed; a video note it cannot transcribe just goes as a file.
+  Without a server the recordings go untranscribed, and a voice note gets a reply saying so.
 - **Quoted replies.** A message that replies to another, or quotes part of one, reaches Helm with
   `Replying to: "<quoted text>"` on its own first line: the quoted part if there is one, else the
-  replied-to message's text or caption, on one line and cut to 300 characters. Voice notes too.
+  replied-to message's text or caption, on one line and cut to 300 characters. Files and recordings too.
 - **Approval buttons.** Helm sends `telegram_ask {id, text, options}` and the bot posts a new
   message with one inline button per option (at most 4, each cut to 40 characters). A tap from an
   allowed user in a private chat goes to Helm once, as `telegram_answer {id, index}`, and the
@@ -140,9 +152,10 @@ Content-Type: application/json
 ```
 
 The answer is `200 {"ok":true,"handled":[...]}`, one entry per update: `forwarded`, `queued`,
-`command`, `voice` (a voice note now being transcribed; it is forwarded or queued once it has its
-text), `image` (a picture now being fetched, likewise), `button` (a tap on one of Helm's buttons), `ignored` (not a private message or tap from an
-allowed user) or `duplicate`. No token or an
+`command`, `voice` (a recording now being fetched and transcribed; it is forwarded or queued once
+it has its text), `image` (a picture now being fetched, likewise), `file` (any other file, likewise),
+`button` (a tap on one of Helm's buttons), `ignored` (not a private message or tap from an allowed
+user) or `duplicate`. No token or an
 unknown one: 401; any other scope: 403; the bot off on this hub: 503; a body that is not an
 Update or an array of them: 400. The endpoint exists in both modes.
 

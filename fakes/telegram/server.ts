@@ -3,7 +3,8 @@
 // getMe, getUpdates (long poll with offset and timeout), sendMessage, editMessageText,
 // editMessageReplyMarkup, deleteMessage, answerCallbackQuery and getFile, plus file downloads
 // under `/file/bot<token>/<file_path>`. A wrong token is answered 401 like the real API. Tests
-// inject incoming messages, voice notes and button taps, and read back everything the bot sent:
+// inject incoming messages, voice notes, pictures, any other file (alone or in an album) and
+// button taps, and read back everything the bot sent:
 //
 //   POST /__fake/message  {from, text, chatId?}  queue an incoming message (an update)
 //   GET  /__fake/sent                            every send, edit, delete and tap answer, in order
@@ -59,6 +60,11 @@ export interface FakeTelegram {
    * as a document of type `mime`. getFile and the file download then serve `bytes`.
    */
   picture(from: number, bytes: Uint8Array, opts?: { caption?: string; as?: 'photo' | 'file'; mime?: string; chatId?: number }): void;
+  /**
+   * Queue a message carrying a file of `kind` (a `document`, `video`, `audio`, ...) named `name`;
+   * `group` makes it part of an album (one `media_group_id`). getFile and the download serve `bytes`.
+   */
+  file(from: number, bytes: Uint8Array, opts: FileOpts): void;
   /** Queue a tap on a button (`data`, its callback data) of the bot's message `messageId`. */
   tap(from: number, messageId: number, data: string, chatId?: number): void;
   sent: SentCall[];
@@ -70,6 +76,15 @@ export interface FakeTelegram {
 }
 
 type Json = Record<string, unknown>;
+
+export interface FileOpts {
+  kind?: 'document' | 'video' | 'animation' | 'video_note' | 'audio' | 'voice';
+  name: string;
+  mime?: string;
+  caption?: string;
+  group?: string;
+  chatId?: number;
+}
 
 export async function startFakeTelegram(opts: { port?: number; token?: string } = {}): Promise<FakeTelegram> {
   const token = opts.token ?? DEFAULT_TOKEN;
@@ -150,6 +165,17 @@ export async function startFakeTelegram(opts: { port?: number; token?: string } 
         : { document: { file_id: fileId, file_unique_id: `u${n}`, file_name: `picture_${n}`, mime_type: mime, file_size: bytes.length } };
     files.set(`${fileId}-small`, { path: `photos/file_${n}_small`, bytes });
     push({ message: incoming(from, chatId, { ...kind, ...(caption === undefined ? {} : { caption }) }) });
+  };
+
+  const injectFile = (from: number, bytes: Uint8Array, { kind = 'document', name, mime, caption, group, chatId = from }: FileOpts) => {
+    const n = nextFile++;
+    const fileId = `fake-file-${n}`;
+    files.set(fileId, { path: `documents/file_${n}`, bytes });
+    const file = { file_id: fileId, file_unique_id: `u${n}`, file_name: name, mime_type: mime, file_size: bytes.length };
+    const fields: Json = { [kind]: file };
+    if (caption !== undefined) fields.caption = caption;
+    if (group !== undefined) fields.media_group_id = group;
+    push({ message: incoming(from, chatId, fields) });
   };
 
   const injectTap = (from: number, messageId: number, data: string, chatId = from) => {
@@ -291,6 +317,7 @@ export async function startFakeTelegram(opts: { port?: number; token?: string } 
     message: (from, text, chatId) => inject(from, text, chatId),
     voice: (from, bytes, chatId) => injectVoice(from, bytes, chatId),
     picture: (from, bytes, opts) => injectPicture(from, bytes, opts),
+    file: (from, bytes, opts) => injectFile(from, bytes, opts),
     tap: (from, messageId, data, chatId) => injectTap(from, messageId, data, chatId),
     sent,
     chat: (id) => chatOf(id).map((x) => ({ ...x })),

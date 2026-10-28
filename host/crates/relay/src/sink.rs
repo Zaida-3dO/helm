@@ -33,7 +33,8 @@ use crate::client::{BoxFut, LineHandle, TelegramMessage, TelegramSink};
 use crate::exec::AppExecutor;
 use crate::telegram::{self, ChatFacts, ChatPort, TagPolicy, TELEGRAM_ORIGIN};
 use helm_chats::submit::{
-    host_send, host_send_with_images, HostImage, HostSend, HostSendMode, IMAGE_REFUSED,
+    host_send, host_send_with_attachments, HostFile, HostImage, HostSend, HostSendMode,
+    FILE_REFUSED, IMAGE_REFUSED,
 };
 use helm_chats::types::{ChatStatus, InteractionAttention, InteractionMethod};
 use helm_chats::ChatRuntime;
@@ -424,8 +425,9 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
     let (chat, _created) =
         telegram::active_chat(&c.tag_path, &port, &c.policy, msg.bot.as_deref(), now)?;
     let baseline = max_row(&c.db, &chat);
-    // A picture is never an answer to a question: the message goes in as an ordinary one.
-    let question = answerable(&c.rt, &chat).filter(|_| msg.images.is_empty());
+    // A picture or file is never an answer to a question: the message goes in as an ordinary one.
+    let question =
+        answerable(&c.rt, &chat).filter(|_| msg.images.is_empty() && msg.files.is_empty());
     if let Some(q) = question {
         let value = match q.method {
             InteractionMethod::Select => {
@@ -452,20 +454,26 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
     }
     let sent = telegram::load_sent(&c.sent_path);
     let text = telegram::delivered_text(&msg.text, msg.age_minutes, &sent);
-    // The pictures go in as the composer's do, checked by the same rules. One the chat will not
-    // take does not hold the message back: the text goes alone, saying so.
-    let (pictures, mut unreadable) = decode_images(&msg.images);
+    // The pictures go in as the composer's do, checked by the same rules; other files are saved
+    // where the agent can read them and attached by reference. One the chat will not take does not
+    // hold the message back: the text goes without it, saying so.
+    let (pictures, mut unreadable) = decode(&msg.images);
+    let (files, mut unsaved) = decode(&msg.files);
     let mut with_pictures = !pictures.is_empty();
+    let mut with_files = !files.is_empty();
     let started = std::time::Instant::now();
     loop {
-        let shown = match unreadable.as_deref() {
-            Some(why) => format!(
-                "{text}
-
-(A picture came with this message but could not be attached. {why})"
-            ),
-            None => text.clone(),
-        };
+        let mut shown = text.clone();
+        if let Some(why) = unreadable.as_deref() {
+            shown.push_str(&format!(
+                "\n\n(A picture came with this message but could not be attached. {why})"
+            ));
+        }
+        if let Some(why) = unsaved.as_deref() {
+            shown.push_str(&format!(
+                "\n\n(A file came with this message but could not be attached. {why})"
+            ));
+        }
         let attach: Vec<HostImage> = if with_pictures {
             pictures
                 .iter()
@@ -474,7 +482,15 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         } else {
             vec![]
         };
-        let r = host_send_with_images(
+        let saved: Vec<HostFile> = if with_files {
+            files
+                .iter()
+                .map(|(name, _, bytes)| HostFile { name, bytes })
+                .collect()
+        } else {
+            vec![]
+        };
+        let r = host_send_with_attachments(
             &c.rt,
             HostSend {
                 chat_id: &chat,
@@ -486,11 +502,16 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
                 gated: false,
             },
             &attach,
+            &saved,
         );
         match r {
             Err(e) if e.code == IMAGE_REFUSED && with_pictures => {
                 with_pictures = false;
                 unreadable = Some(e.message);
+            }
+            Err(e) if e.code == FILE_REFUSED && with_files => {
+                with_files = false;
+                unsaved = Some(e.message);
             }
             Ok(_) => {
                 if !sent.is_empty() && telegram::clear_sent(&c.sent_path).is_err() {
@@ -509,11 +530,11 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
     }
 }
 
-/// A picture ready for the chat: its name, type and bytes.
+/// A picture or file ready for the chat: its name, type and bytes.
 type Decoded = (String, String, Vec<u8>);
 
-/// The pictures of a message, and why one could not be read at all.
-fn decode_images(images: &[crate::client::TelegramImage]) -> (Vec<Decoded>, Option<String>) {
+/// The pictures or files of a message, and why one could not be read at all.
+fn decode(images: &[crate::client::TelegramFile]) -> (Vec<Decoded>, Option<String>) {
     use base64::Engine as _;
     let mut out = vec![];
     let mut why = None;
