@@ -277,7 +277,10 @@ pub(crate) fn publish(sh: &Shared) {
         .emit(ChatEvent::Attention { summary: s }.to_app_event());
 }
 
-/// The current summary, for `attention_get`.
+/// The current summary, for `attention_get`. A read that finds a change nobody has published yet
+/// publishes it too: it becomes the last summary, so the writer's own publish right after would
+/// see nothing new, and event-only listeners (the taskbar badge, keep-awake) would never hear of
+/// it.
 pub(crate) fn current(sh: &Shared) -> rusqlite::Result<AttentionSummary> {
     let mut last = sh.attention.lock().unwrap();
     let needs = live_needs(sh);
@@ -287,6 +290,9 @@ pub(crate) fn current(sh: &Shared) -> rusqlite::Result<AttentionSummary> {
         _ => {
             s.revision = sh.clock.next();
             *last = Some(s.clone());
+            drop(last);
+            sh.events
+                .emit(ChatEvent::Attention { summary: s.clone() }.to_app_event());
         }
     }
     Ok(s)

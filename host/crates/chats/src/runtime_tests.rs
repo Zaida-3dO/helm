@@ -1509,11 +1509,13 @@ async fn a_clean_turn_leaves_one_unread_completion() {
     let _ = k;
 }
 
-/// Acknowledging the completion takes the chat off the badge.
+/// Acknowledging the completion takes the chat off the badge, also when a summary read lands
+/// between the write and the writer's own publish (the read must publish what it found, or the
+/// event-only listeners such as the taskbar badge never hear of it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acknowledging_the_completion_clears_the_badge() {
     let mut h = harness();
-    let (chat, _, w) = running_turn(&mut h).await;
+    let (chat, _, mut w) = running_turn(&mut h).await;
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
         .await;
     h.until("completion", |h| !h.events("completion").is_empty())
@@ -1531,6 +1533,28 @@ async fn acknowledging_the_completion_clears_the_badge() {
             .is_some_and(|e| e["summary"]["badge"] == 0)
     })
     .await;
+    // A second finish, marked read behind the publisher's back, then read through attention_get.
+    h.send(&chat, "again", "default").await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("badge 1", |h| {
+        h.events("attention")
+            .last()
+            .is_some_and(|e| e["summary"]["badge"] == 1)
+    })
+    .await;
+    h.db.write(|tx| tx.execute("UPDATE chat_completions SET read = 1", []))
+        .unwrap();
+    let a = h.call("attention_get", json!({})).await.unwrap();
+    assert_eq!(a["badge"], 0);
+    let last = h.events("attention").last().cloned().unwrap();
+    assert_eq!(
+        (&last["summary"]["badge"], &last["summary"]["revision"]),
+        (&json!(0), &a["revision"]),
+        "the read published the change it found"
+    );
 }
 
 /// Archiving a running chat is immediate: the row is archived at once, the turn is stopped in the
