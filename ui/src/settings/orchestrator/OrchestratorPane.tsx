@@ -302,7 +302,7 @@ export function OrchestratorPane() {
           ]}
         />
       </SettingRow>
-      <SettingRow title="Repository rules" description="One per line: host/owner/name draft, or host/owner/name merge [merge|squash|rebase]. A repository may appear once." testId="orch-rules-row">
+      <SettingRow title="Repository rules" description="One per line: host/owner/name draft, or host/owner/name merge [merge|squash|rebase|fast_forward]. fast_forward moves the base branch to the PR's head without a merge commit, and only when the base is an ancestor of the head. A repository may appear once." testId="orch-rules-row">
         <TextArea aria-label="Repository rules" rows={3} value={texts.rules} onChange={(e) => text('rules')(e.target.value)} />
       </SettingRow>
       <SettingRow title="Draft labels" description="Up to 8, separated by commas. Added to a PR at draft hand-off." testId="orch-labels-row">

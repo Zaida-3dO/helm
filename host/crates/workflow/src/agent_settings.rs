@@ -177,7 +177,7 @@ fn options() -> Value {
                 "fields": {
                     "default": word(&["draft", "merge"]),
                     "method": word(&["merge", "squash", "rebase"]),
-                    "repos": {"type": "list", "items": {"repo": "host/owner/name", "mode": word(&["draft", "merge"]), "method": "merge, squash or rebase; only on a merge rule"}, "maxItems": settings::MAX_REPOS},
+                    "repos": {"type": "list", "items": {"repo": "host/owner/name", "mode": word(&["draft", "merge"]), "method": "merge, squash, rebase or fast_forward; only on a merge rule"}, "maxItems": settings::MAX_REPOS},
                     "draftLabels": {"type": "list", "items": {"type": "string"}, "maxItems": settings::MAX_LABELS},
                     "flipLabel": {"type": "string or null"},
                     "protectedBranches": {"type": "list", "items": {"type": "string"}, "maxItems": settings::MAX_PROTECTED},

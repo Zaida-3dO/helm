@@ -85,6 +85,10 @@ pub enum MergeMethod {
     Merge,
     Squash,
     Rebase,
+    /// Move the base branch to the PR's head through the API, refused unless the base is an
+    /// ancestor of the head. GitHub then marks the PR merged and writes no commit of its own.
+    /// Only a repository rule may pick it, never `landing.method`.
+    FastForward,
 }
 
 /// One per-repository land rule. `method` only on a merge rule.
@@ -241,7 +245,7 @@ pub struct RunView {
 pub struct GuardNoteView {
     /// Let through by an override (else refused).
     pub overridden: bool,
-    /// `bash` or `mcp`.
+    /// `bash` or `mcp`, or `pr` for a Merge anyway / Mark ready anyway from the PR view.
     pub gate: String,
     /// The guard's rule: `task_repo`, `containment`, `untracked`, `draft_rule`, `fail_closed`.
     pub rule: String,
@@ -317,4 +321,104 @@ pub struct OtherTaskView {
     /// Its changes that wait on the user (awaiting a Merge, land failed, or a draft for review),
     /// so the panel can offer the same buttons as for the current task.
     pub waiting: Vec<RunChangeView>,
+}
+
+/// What the PR view's merge box needs from the host for one pull request (`pr_land_info`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PrLandInfo {
+    /// `github.com/owner/name`, lowercased.
+    pub repo: String,
+    /// Settings → Orchestrator's master switch. While it is off no task holds a PR back.
+    pub workflow_on: bool,
+    pub rule: PrRule,
+    /// The task that tracks the PR, if any.
+    pub tracked: Option<PrTracked>,
+}
+
+/// How a merge from the PR view lands this repository.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PrRule {
+    /// `draft` only when the repository has its own draft rule: then Helm never merges it and
+    /// the merge box says it is merged by hand.
+    pub mode: LandMode,
+    /// The method a merge uses: the repository rule's, else `landing.method`.
+    pub method: MergeMethod,
+    /// The repository has a rule of its own. Without one the page confirms before merging.
+    pub explicit: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PrTracked {
+    pub run_id: String,
+    pub chat_id: String,
+    /// The task's title (control characters stripped, at most 80 characters).
+    pub title: String,
+    /// The task's status (`active`, `parked`, `handed_off`, ...).
+    pub status: String,
+    pub repo: String,
+    pub branch: String,
+    /// The change's state, as in [`RunChangeView::state`].
+    pub state: String,
+    pub approved_tip: Option<String>,
+    /// The change holds the PR back: Merge and Ready either go through the task or need
+    /// "anyway".
+    pub blocking: bool,
+    /// The land step is working on it right now: no button applies until it finishes.
+    pub busy: bool,
+    /// `merge` when Merge goes through the task (it awaits the user's Merge), `ready` when Ready
+    /// for review does (it was handed off as a draft).
+    pub routes: Option<String>,
+}
+
+/// What `pr_merge`, `pr_ready` and `pr_draft` did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum PrOutcome {
+    /// Handed to the task: its land step merges it, or it marked the PR ready.
+    Routed,
+    /// GitHub reads the PR back as merged.
+    Merged,
+    /// GitHub took the merge but does not show it merged yet (a merge queue, or lag).
+    Accepted,
+    Ready,
+    AlreadyReady,
+    Converted,
+    AlreadyDraft,
+    /// Converted to draft while a task tracks it; its land step marks it ready again if it lands it.
+    Tracked,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PrWriteResult {
+    pub outcome: PrOutcome,
+    /// The method a merge used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub method: Option<MergeMethod>,
+    /// The commit the base now points at, when GitHub reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub merged_sha: Option<String>,
+    /// The task's change, for `routed` and for an override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub branch: Option<String>,
+    /// The change's state afterwards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub state: Option<String>,
+    /// The write went past a task that held the PR ("anyway") and is recorded on it.
+    #[serde(default)]
+    pub overridden: bool,
+    /// GitHub wrote, but recording it on the task failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub record_error: Option<String>,
 }

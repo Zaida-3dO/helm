@@ -60,9 +60,10 @@ export function listToText(list: string[]): string {
 }
 
 const MODES: LandMode[] = ['draft', 'merge'];
-const METHODS: MergeMethod[] = ['merge', 'squash', 'rebase'];
+/** A rule may also fast-forward (the base moves to the head; GitHub writes no commit). */
+const METHODS: MergeMethod[] = ['merge', 'squash', 'rebase', 'fast_forward'];
 
-/** One repository rule per line: `host/owner/name draft|merge [merge|squash|rebase]`. */
+/** One repository rule per line: `host/owner/name draft|merge [merge|squash|rebase|fast_forward]`. */
 export function rulesFromText(text: string): { rules: RepoRule[] } | { error: string } {
   const rules: RepoRule[] = [];
   for (const raw of text.split('\n')) {
@@ -73,7 +74,7 @@ export function rulesFromText(text: string): { rules: RepoRule[] } | { error: st
       return { error: `"${line}": write it as host/owner/name draft or host/owner/name merge [method].` };
     }
     if (extra.length > 0 || (method !== undefined && !METHODS.includes(method as MergeMethod))) {
-      return { error: `"${line}": the method is merge, squash or rebase.` };
+      return { error: `"${line}": the method is merge, squash, rebase or fast_forward.` };
     }
     if (mode === 'draft' && method) return { error: `"${line}": a draft rule takes no method.` };
     rules.push(method ? { repo, mode: mode as LandMode, method: method as MergeMethod } : { repo, mode: mode as LandMode });

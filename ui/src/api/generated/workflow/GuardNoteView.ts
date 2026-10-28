@@ -9,7 +9,7 @@ export type GuardNoteView = {
  */
 overridden: boolean, 
 /**
- * `bash` or `mcp`.
+ * `bash` or `mcp`, or `pr` for a Merge anyway / Mark ready anyway from the PR view.
  */
 gate: string, 
 /**

@@ -685,8 +685,9 @@ fn mcp(db: &Database, chat: &str, c: &Check, f: &InForce, now: i64) -> rusqlite:
 
 // ---- the panel's Needs you ------------------------------------------------------------------
 
-/// The guard's overrides and refusals since the user last typed in this chat, newest first (at
-/// most 8): the workflow panel lists them under Needs you.
+/// The guard's overrides and refusals, and the PR view's Merge anyway / Mark ready anyway, since
+/// the user last typed in this chat, newest first (at most 8): the workflow panel lists them
+/// under Needs you.
 pub fn needs_you(
     tx: &Transaction<'_>,
     chat: &str,
@@ -702,7 +703,7 @@ pub fn needs_you(
         .unwrap_or(0);
     let mut st = tx.prepare(
         "SELECT kind, verdict, body FROM workflow_events
-         WHERE chat_id = ?1 AND kind IN ('guard_override', 'gate_denied') AND created_at > ?2
+         WHERE chat_id = ?1 AND kind IN ('guard_override', 'gate_denied', 'pr_view_override') AND created_at > ?2
          ORDER BY id DESC LIMIT 8",
     )?;
     let rows = st.query_map(params![chat, since], |r| {
@@ -720,7 +721,7 @@ pub fn needs_you(
             .and_then(|b| serde_json::from_str(b).ok())
             .unwrap_or(Value::Null);
         let gate = body.get("gate").and_then(Value::as_str).unwrap_or("");
-        if !matches!(gate, "bash" | "mcp") {
+        if !matches!(gate, "bash" | "mcp" | "pr") {
             continue;
         }
         let command: String = body
@@ -731,7 +732,7 @@ pub fn needs_you(
             .take(120)
             .collect();
         out.push(crate::types::GuardNoteView {
-            overridden: kind == "guard_override",
+            overridden: kind != "gate_denied",
             gate: gate.to_owned(),
             rule: verdict.unwrap_or_default(),
             command,

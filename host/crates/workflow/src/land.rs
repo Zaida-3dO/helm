@@ -7,7 +7,9 @@
 //!   mergeability the change waits (every 10 s for 2 min, then every minute up to 15 min, then
 //!   "Awaiting your Merge"). A draft is marked ready first. The merge is pinned with
 //!   `--match-head-commit`, and it counts only when the PR then reads back MERGED into a
-//!   protected branch.
+//!   protected branch. A repository rule may pick `fast_forward` instead: the base branch is
+//!   moved to the approved head by a non-forced ref update ([`fast_forward`]), so GitHub writes
+//!   no commit, and the same MERGED read-back decides.
 //! - **Draft rule**: the PR must be open at the approved tip; draft labels are added (a label
 //!   the repository lacks is skipped); a PR already ready for review is left alone.
 //! - **One land per change at a time** (the flight set), and a merge in flight when Helm quit is
@@ -47,18 +49,32 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
 pub struct Flight(Mutex<HashSet<String>>);
 
 impl Flight {
-    fn take(&self, key: &str) -> bool {
+    /// Hold a change (`run|repo|branch`); false when someone already holds it.
+    pub(crate) fn take(&self, key: &str) -> bool {
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(key.to_owned())
     }
-    fn give(&self, key: &str) {
+    pub(crate) fn give(&self, key: &str) {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
+    pub(crate) fn holds(&self, key: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(key)
     }
 }
 
 static KICK: OnceLock<Arc<tokio::sync::Notify>> = OnceLock::new();
+static FLIGHT: OnceLock<Arc<Flight>> = OnceLock::new();
+
+/// The app's one hold set, shared by the land driver and the PR view's buttons, so a click never
+/// writes to a PR while the land step is acting on its change.
+pub fn flight() -> Arc<Flight> {
+    FLIGHT.get_or_init(|| Arc::new(Flight::default())).clone()
+}
 
 /// Wake the land driver now (after a hand-off or a user action).
 pub fn kick() {
@@ -77,7 +93,7 @@ pub enum Step {
     Awaiting(String),
 }
 
-fn key(c: &Change) -> String {
+pub(crate) fn key(c: &Change) -> String {
     format!("{}|{}|{}", c.run_id, c.repo, c.branch)
 }
 
@@ -189,21 +205,35 @@ pub fn merge_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Step {
         }
     }
     let (_, method) = crate::settings::land_mode(st, &c.repo);
-    let flag = match method {
-        MergeMethod::Merge => "--merge",
-        MergeMethod::Squash => "--squash",
-        MergeMethod::Rebase => "--rebase",
+    let merged = match method_flag(method) {
+        Some(flag) => gh.run(&a(&[
+            "pr",
+            "merge",
+            &n,
+            "--repo",
+            &repo,
+            flag,
+            "--match-head-commit",
+            tip,
+        ])),
+        None => match fast_forward(gh, &repo, &base, tip) {
+            Ok(()) => Ok(crate::gh::Out {
+                ok: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+            Err(Ff::NotAncestor) => return fail(format!(
+                "{base} has commits the approved head does not contain, so it cannot be fast-forwarded: rebase the branch, get it reviewed again, or Drop change"
+            )),
+            Err(Ff::Unreadable(why)) => return Step::Wait(why),
+            Err(Ff::Refused(e)) => Ok(crate::gh::Out {
+                ok: false,
+                stdout: String::new(),
+                stderr: e,
+            }),
+            Err(Ff::Gh(e)) => Err(e),
+        },
     };
-    let merged = gh.run(&a(&[
-        "pr",
-        "merge",
-        &n,
-        "--repo",
-        &repo,
-        flag,
-        "--match-head-commit",
-        tip,
-    ]));
     let transient = match &merged {
         Ok(o) if o.ok => false,
         Ok(o) => {
@@ -239,12 +269,102 @@ pub fn merge_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Step {
         }
         Ok(_) => fail(match merged {
             Ok(o) => format!(
-                "gh pr merge failed: {}",
+                "the merge failed: {}",
                 o.stderr.trim().chars().take(300).collect::<String>()
             ),
-            Err(e) => format!("gh pr merge failed: {e:?}"),
+            Err(e) => format!("the merge failed: {e:?}"),
         }),
         Err(step) => step,
+    }
+}
+
+/// The `gh pr merge` flag of a method; `None` for a fast-forward, which is a ref update instead.
+pub fn method_flag(m: MergeMethod) -> Option<&'static str> {
+    match m {
+        MergeMethod::Merge => Some("--merge"),
+        MergeMethod::Squash => Some("--squash"),
+        MergeMethod::Rebase => Some("--rebase"),
+        MergeMethod::FastForward => None,
+    }
+}
+
+/// Why a fast-forward did not happen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ff {
+    /// The base is not an ancestor of the head (or GitHub said the update is not a
+    /// fast-forward). Nothing was written.
+    NotAncestor,
+    /// The comparison could not be read; nothing was written.
+    Unreadable(&'static str),
+    /// GitHub refused the ref update (branch protection, permissions); nothing was written.
+    Refused(String),
+    /// `gh` timed out or could not start during the update: it may have gone through.
+    Gh(GhError),
+}
+
+/// A branch name safe to put into a ref path: what git allows, minus anything that could
+/// change the meaning of the API path.
+fn plain_branch(b: &str) -> bool {
+    !b.is_empty()
+        && b.len() <= 255
+        && !b.contains("..")
+        && !b.starts_with('/')
+        && !b.ends_with('/')
+        && b.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'/'))
+}
+
+/// Fast-forward `base` of `owner/name` to `head`: first ask GitHub whether `base` is an ancestor
+/// of `head` (refused before any write when it is not), then a **non-forced** ref update. GitHub
+/// itself refuses an update that is not a fast-forward too, so the base can never be rewound or
+/// rewritten. The caller reads the PR back to see it merged.
+pub fn fast_forward(gh: &dyn Gh, repo: &str, base: &str, head: &str) -> Result<(), Ff> {
+    let hex = head.len() == 40 && head.bytes().all(|b| b.is_ascii_hexdigit());
+    if !plain_branch(base) || !hex {
+        return Err(Ff::Refused(format!(
+            "Helm does not fast-forward the branch {base:?}"
+        )));
+    }
+    let a = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let compare = gh.run(&a(&[
+        "api",
+        &format!("repos/{repo}/compare/{base}...{head}"),
+        "--jq",
+        ".status",
+    ]));
+    match compare {
+        Ok(o) if o.ok => match o.stdout.trim() {
+            "ahead" | "identical" => {}
+            "behind" | "diverged" => return Err(Ff::NotAncestor),
+            _ => return Err(Ff::Unreadable("GitHub gave an unreadable comparison")),
+        },
+        Ok(_) => return Err(Ff::Unreadable("GitHub could not compare the branches")),
+        Err(GhError::Timeout) => return Err(Ff::Unreadable("gh timed out")),
+        Err(e) => return Err(Ff::Gh(e)),
+    }
+    let sha = format!("sha={head}");
+    match gh.run(&a(&[
+        "api",
+        "-X",
+        "PATCH",
+        &format!("repos/{repo}/git/refs/heads/{base}"),
+        "-f",
+        &sha,
+        "-F",
+        "force=false",
+    ])) {
+        Ok(o) if o.ok => Ok(()),
+        Ok(o) => {
+            let e = format!("{} {}", o.stderr, o.stdout);
+            if e.to_lowercase().contains("fast forward")
+                || e.to_lowercase().contains("fast-forward")
+            {
+                Err(Ff::NotAncestor)
+            } else {
+                Err(Ff::Refused(e.trim().chars().take(300).collect()))
+            }
+        }
+        Err(e) => Err(Ff::Gh(e)),
     }
 }
 
@@ -302,7 +422,7 @@ fn wait_row(tx: &Transaction<'_>, c: &Change) -> rusqlite::Result<Option<(i64, i
     .optional()
 }
 
-fn clear_wait(tx: &Transaction<'_>, c: &Change) -> rusqlite::Result<()> {
+pub(crate) fn clear_wait(tx: &Transaction<'_>, c: &Change) -> rusqlite::Result<()> {
     tx.execute(
         "DELETE FROM workflow_land_waits WHERE run_id = ?1 AND repo = ?2 AND branch = ?3",
         params![c.run_id, c.repo, c.branch],
@@ -543,7 +663,7 @@ pub fn start_driver(handle: &tokio::runtime::Handle, ctx: &helm_ipc::OpCtx) {
         {
             store::emit_chats(&*events, chats);
         }
-        let flight = Arc::new(Flight::default());
+        let flight = flight();
         loop {
             let (d, f) = (db.clone(), flight.clone());
             let rt = services.get::<helm_chats::ChatRuntime>();
