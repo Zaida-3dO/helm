@@ -80,7 +80,8 @@ pub fn read_plan(cwd: Option<&Path>, path: &str) -> Result<String, String> {
     std::fs::read_to_string(&full).map_err(|_| "The plan file is not UTF-8 text.".into())
 }
 
-/// One `app_workflow` call. `caller_is_child` refuses sub-agents.
+/// One `app_workflow` call without the live runtime: every chat counts as possibly running
+/// agents, so a take-over always needs the user. The tool handler uses [`workflow_call_with`].
 pub fn workflow_call(
     db: &Database,
     kinds: &AllowKinds,
@@ -88,6 +89,21 @@ pub fn workflow_call(
     is_child: bool,
     args: &Value,
     now: i64,
+) -> Result<Value, ToolError> {
+    workflow_call_with(db, kinds, chat, is_child, args, now, &|_| true)
+}
+
+/// One `app_workflow` call. `is_child` refuses sub-agents. `agents_running` tells, from the live
+/// runtime, whether a chat's sub-agents or background tasks are running; it is asked before the
+/// transaction, and only for a take-over's holders.
+pub fn workflow_call_with(
+    db: &Database,
+    kinds: &AllowKinds,
+    chat: &str,
+    is_child: bool,
+    args: &Value,
+    now: i64,
+    agents_running: &dyn Fn(&str) -> bool,
 ) -> Result<Value, ToolError> {
     if is_child {
         return Err(ToolError::refused(
@@ -133,6 +149,14 @@ pub fn workflow_call(
     } else {
         (None, None, None)
     };
+    let agents_live: Vec<String> = if action == "take_over" {
+        crate::claims::holder_chats(db, args)
+            .into_iter()
+            .filter(|c| agents_running(c))
+            .collect()
+    } else {
+        Vec::new()
+    };
     db.write(|tx| {
         let s = settings::load(tx)?;
         if !mode::in_effect(tx, chat, &s)? {
@@ -151,7 +175,7 @@ pub fn workflow_call(
             "finish" => handoff::finish(tx, &x),
             "allowMore" => actions::allow_more(tx, &x, args),
             "land" => land_consented(tx, &x, args),
-            "take_over" => crate::claims::take_over(tx, &x, args),
+            "take_over" => crate::claims::take_over(tx, &x, args, &agents_live),
             "allow_edit" => crate::gates::allow_edit(tx, &x, args, edit_file.as_deref(), edit_repo.as_deref(), cwd_repo.as_deref()),
             _ => Ok(Err("action must be start, plan, status, update, skip, park, drop, hand_off, finish, allowMore, land, take_over or allow_edit.".into())),
         }
@@ -224,13 +248,22 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 .services
                 .get::<Database>()
                 .ok_or_else(|| ToolError::refused(OFF))?;
-            let out = workflow_call(
+            let rt = ctx.services.get::<helm_chats::ChatRuntime>();
+            // Without the runtime nothing is known, so every holder counts as running agents.
+            let agents = |c: &str| {
+                rt.as_ref().is_none_or(|rt| {
+                    rt.live_thread(c)
+                        .is_some_and(|t| t.subagents_running > 0 || !t.background_tasks.is_empty())
+                })
+            };
+            let out = workflow_call_with(
                 &db,
                 &kinds_of(ctx),
                 &ctx.caller_chat_id,
                 ctx.is_child,
                 &args,
                 helm_core::now_ms(),
+                &agents,
             );
             if out.is_err() {
                 // A refused call delivers nothing it may have queued.

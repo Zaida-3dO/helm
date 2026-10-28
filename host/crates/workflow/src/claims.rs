@@ -40,6 +40,9 @@ pub struct Holder {
     pub chat_title: String,
     pub archived: bool,
     pub busy: bool,
+    /// Sub-agents or background tasks of the holder's chat are running (read from the live
+    /// runtime before the transaction; only a take-over fills it in).
+    pub agents_running: bool,
     /// The later of the change's last write and the chat's.
     pub touched_at: i64,
 }
@@ -47,7 +50,10 @@ pub struct Holder {
 impl Holder {
     /// Stopped: the holder's own work has gone quiet, so nobody needs to be asked.
     pub fn stopped(&self, now: i64) -> Option<&'static str> {
-        if self.archived {
+        if self.agents_running {
+            // Work is still running there, whatever the clock says.
+            None
+        } else if self.archived {
             Some("its chat is archived")
         } else if self.run.status == "parked" {
             Some("its task is parked")
@@ -113,6 +119,7 @@ pub fn holders(tx: &Transaction<'_>, repo: &str, branch: &str) -> rusqlite::Resu
             chat_title,
             archived,
             busy: matches!(status.as_str(), "starting" | "running" | "stopping"),
+            agents_running: false,
             touched_at,
         });
     }
@@ -150,7 +157,7 @@ pub fn open_refusal(
 fn take_over_hint(h: &Holder, now: i64) -> String {
     match h.stopped(now) {
         Some(why) => format!(
-            "Take it over with take_over {{repo, branch, reason}}: {why}, so it goes through without the user."
+            "Take it over with take_over {{repo, branch, reason}}: {why}, so it should go through without the user (unless agents are still running there)."
         ),
         None => "Taking it over (take_over {repo, branch, reason}) needs the user while that chat is active: ask them, or let that chat drop the change.".into(),
     }
@@ -287,8 +294,20 @@ fn blocked_by(h: &Holder) -> Option<String> {
     }
 }
 
-/// `take_over {repo, branch, reason, check?, userQuote?, grant?}`.
-pub fn take_over(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
+/// The chats holding `repo` `branch` per the arguments of a `take_over`, read before its
+/// transaction so the caller can ask the live runtime which of them still run agents.
+pub fn holder_chats(db: &helm_core::db::Database, a: &Value) -> Vec<String> {
+    let Ok((repo, branch)) = target(a) else {
+        return Vec::new();
+    };
+    db.snapshot(|tx| holders(tx, &repo, &branch))
+        .map(|hs| hs.into_iter().map(|h| h.run.chat_id).collect())
+        .unwrap_or_default()
+}
+
+/// `take_over {repo, branch, reason, check?, userQuote?, grant?}`. `agents_live` lists the
+/// holder chats whose sub-agents or background tasks are running: they never count as stopped.
+pub fn take_over(tx: &Transaction<'_>, x: &Act<'_>, a: &Value, agents_live: &[String]) -> Out {
     let (repo, branch) = match target(a) {
         Ok(t) => t,
         Err(e) => return Ok(Err(e)),
@@ -320,6 +339,10 @@ pub fn take_over(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
     let others: Vec<Holder> = all
         .into_iter()
         .filter(|h| h.run.chat_id != x.chat_id)
+        .map(|mut h| {
+            h.agents_running = agents_live.contains(&h.run.chat_id);
+            h
+        })
         .collect();
     let Some(h) = others.first() else {
         return Ok(Err(format!(

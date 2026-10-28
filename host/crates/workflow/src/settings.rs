@@ -54,7 +54,9 @@ impl Default for WorkflowSettings {
                 build: BuildStage {
                     agent: "coder".into(),
                     start_agents: vec!["coder".into(), "worker".into(), "general-purpose".into()],
-                    build_exempt: Vec::new(),
+                    // Claude Code's read-only research agent (`Explore`) writes no code. Names are
+                    // lowercase; the gate matches agent types ignoring case.
+                    build_exempt: vec!["explore".into()],
                 },
                 review: r(StageUse::Required, "reviewer"),
                 cleanup: s(StageUse::Required, "pr-cleanup"),

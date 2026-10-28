@@ -74,9 +74,13 @@ pub fn lexical_abs(cwd: Option<&Path>, file: &str) -> Option<PathBuf> {
     (out.is_absolute() && out.to_string_lossy().chars().count() <= MAX_FILE).then_some(out)
 }
 
-/// A grant's key: the leading 16 hex digits of the SHA-256 of the path, slashes made forward.
+/// A grant's key: the leading 16 hex digits of the SHA-256 of the path, slashes made forward
+/// and, on Windows (whose paths ignore case), case folded.
 pub fn path_key(p: &Path) -> String {
-    let s = p.to_string_lossy().replace('\\', "/");
+    let mut s = p.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        s = s.to_lowercase();
+    }
     hex::encode(Sha256::digest(s.as_bytes()))[..16].to_owned()
 }
 
@@ -297,7 +301,12 @@ pub fn spawn_refusal(
         }
         // A build: the build stage's agent, or any spawn that is not build-exempt.
         _ => {
-            if s.stages.build.build_exempt.iter().any(|a| a == base) {
+            if s.stages
+                .build
+                .build_exempt
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(base))
+            {
                 return Ok(None);
             }
             let exempt_hint = if stage.is_none() {

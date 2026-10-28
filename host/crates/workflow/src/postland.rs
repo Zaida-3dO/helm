@@ -232,13 +232,14 @@ fn norm(p: &Path) -> String {
     }
 }
 
-/// Whether a chat that is not archived works in `wt` (its folder is it, or inside it).
+/// Whether any chat, archived or not, lives in `wt` (its folder is it, or inside it). `None`
+/// when that can't be read, which keeps the worktree.
 fn in_use(db: &Database, wt: &Path) -> Option<bool> {
     let paths: Vec<String> = db
         .snapshot(|tx| {
             let mut st = tx.prepare(
                 "SELECT DISTINCT p.path FROM chats c JOIN projects p ON p.id = c.project_id
-                 WHERE c.archived = 0 AND p.path IS NOT NULL",
+                 WHERE p.path IS NOT NULL",
             )?;
             let rows = st.query_map([], |r| r.get::<_, String>(0))?;
             rows.collect::<Result<Vec<_>, _>>()

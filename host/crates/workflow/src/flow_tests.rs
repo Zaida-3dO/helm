@@ -370,8 +370,16 @@ impl T {
             })
             .unwrap();
     }
+    /// A call where no chat runs sub-agents or background tasks.
     fn wf_in(&self, chat: &str, args: Value, now: i64) -> Result<Value, String> {
-        workflow_call(&self.db, &self.kinds, chat, false, &args, now).map_err(|e| e.text())
+        self.wf_live(chat, args, now, &[])
+    }
+    /// A call where the chats in `live` still run sub-agents or background tasks.
+    fn wf_live(&self, chat: &str, args: Value, now: i64, live: &[&str]) -> Result<Value, String> {
+        crate::wftools::workflow_call_with(&self.db, &self.kinds, chat, false, &args, now, &|c| {
+            live.contains(&c)
+        })
+        .map_err(|e| e.text())
     }
     fn sql(&self, q: &str) {
         self.db
@@ -468,8 +476,25 @@ fn one_task_holds_a_change_and_take_over_moves_it_from_a_stopped_chat() {
         "{e}"
     );
     let _ = crate::notes::take_pending();
-    // Idle for 30 minutes: the holder counts as stopped, so no words are needed.
-    let out = t.wf_in("d", take.clone(), 10 + 31 * MIN).unwrap();
+    // Idle for 30 minutes but with agents still running there (or with no runtime to ask): the
+    // holder is not stopped, so the user is still needed.
+    let later = 10 + 31 * MIN;
+    for live in [true, false] {
+        let chk = json!({"action": "take_over", "repo": REPO, "branch": "feat-x", "check": true});
+        let got = if live {
+            t.wf_live("d", chk, later, &["c"]).unwrap()
+        } else {
+            workflow_call(&t.db, &t.kinds, "d", false, &chk, later).unwrap()
+        };
+        assert_eq!(got["needsUser"], true, "live={live}: {got}");
+    }
+    assert!(t
+        .wf_live("d", take.clone(), later, &["c"])
+        .unwrap_err()
+        .contains("Take over feat-x."));
+    let _ = crate::notes::take_pending();
+    // Idle for 30 minutes with nothing running: the holder counts as stopped, so no words needed.
+    let out = t.wf_in("d", take.clone(), later).unwrap();
     assert_eq!(out["takenOver"], true);
     assert_eq!(out["withUser"], false);
     let notes = crate::notes::take_pending();
@@ -566,10 +591,12 @@ fn the_gates_act_only_with_orchestrator_on_and_a_task_active() {
         ("Agent", json!({}), false, Some("Build-exempt")),
         (
             "Task",
-            json!({"subagent_type": "Explore"}),
+            json!({"subagent_type": "researcher"}),
             false,
             Some("Build-exempt"),
         ),
+        // Claude Code's read-only research agent is build-exempt by default.
+        ("Task", json!({"subagent_type": "Explore"}), false, None),
         (
             "Agent",
             json!({"subagent_type": "plan-reviewer"}),
@@ -628,6 +655,11 @@ fn the_gates_act_only_with_orchestrator_on_and_a_task_active() {
         .unwrap();
     assert_eq!(g["granted"], true);
     assert_eq!(t.gate("Write", json!({"file_path": f}), false), allow);
+    if cfg!(windows) {
+        // Windows paths ignore case, and so does the grant.
+        let shouted = f.to_uppercase();
+        assert_eq!(t.gate("Write", json!({"file_path": shouted}), false), allow);
+    }
     let other = repo.join("b.rs").to_string_lossy().to_string();
     deny(
         t.gate("Write", json!({"file_path": other}), false),
