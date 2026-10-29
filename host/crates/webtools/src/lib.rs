@@ -8,7 +8,7 @@
 //! | `settings` | the `webSearchInClaudeChats` key of `app_get_settings` / `app_update_settings` |
 //! | `ops` | the ops behind Settings > Web search |
 //!
-//! **Who gets the tool.** A launch lists `app_web_search` only when [`WebSearch::offered`] says
+//! **Who gets the tool.** A launch lists `app_web_search` only when [`WebToolsSource::offered`] says
 //! so: a key is set, and either the chat runs on a local model (which has no web search of its
 //! own) or the user switched on "Offer in Claude chats" (off by default). The call checks the same
 //! rules again, so a running chat whose tool list is older than the setting cannot go on searching.

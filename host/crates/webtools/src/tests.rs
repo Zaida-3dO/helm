@@ -30,8 +30,11 @@ const RESULTS: &str = r#"{"web":{"results":[
 /// target and token header.
 struct Stub {
     url: String,
-    seen: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    seen: Arc<Mutex<Vec<Seen>>>,
 }
+
+/// One request the stand-in saw: its target and its token header.
+type Seen = (String, Option<String>);
 
 fn stub() -> Stub {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
