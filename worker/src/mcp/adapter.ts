@@ -98,10 +98,12 @@ export function nativeFromInit(init: Json): NativeServer[] {
 }
 
 /** Why a call to Claude Code's own MCP tool `toolName` (`mcp__<server>__<tool>`) is refused: the
- * same server is configured in Helm, and Helm's copy takes precedence. Undefined allows it. */
-export function duplicateMcpRefusal(toolName: string, bridge: Pick<McpBridge, "shadowing"> | undefined): string | undefined {
+ * same server is configured in Helm, and Helm's copy takes precedence. Undefined allows it.
+ * A sub-agent's call is always allowed: the redirect names Helm's tools, which a sub-agent is not
+ * given, so refusing it would leave the sub-agent with no way to reach the server. */
+export function duplicateMcpRefusal(toolName: string, bridge: Pick<McpBridge, "shadowing"> | undefined, fromSubagent = false): string | undefined {
   const m = /^mcp__(.+?)__./.exec(toolName);
-  if (!m || !bridge || normName(m[1]!) === "helm") return undefined;
+  if (fromSubagent || !m || !bridge || normName(m[1]!) === "helm") return undefined;
   const s = bridge.shadowing(m[1]!);
   if (!s) return undefined;
   return `${s.name} is also set up in Helm, and Helm's copy is the one to use: find this tool with app_mcp_tools (server "${s.id}") and call it with app_mcp_call.`;

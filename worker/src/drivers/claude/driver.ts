@@ -747,7 +747,9 @@ export class ClaudeDriver implements Driver {
       return;
     }
     if (req.callback_id === DUPLICATE_MCP_HOOK_ID) {
-      const reason = duplicateMcpRefusal(String(input.tool_name ?? ""), this.mcp);
+      const id = String(req.tool_use_id ?? input.tool_use_id ?? "");
+      const child = (typeof input.agent_id === "string" && input.agent_id !== "") || this.subagentTools.has(id);
+      const reason = duplicateMcpRefusal(String(input.tool_name ?? ""), this.mcp, child);
       return this.controlReply(requestId, reason ? { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } } : {});
     }
     if (req.callback_id === SHELL_CHANGES_HOOK_ID) {
