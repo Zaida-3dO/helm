@@ -188,6 +188,31 @@ impl WorkerLink for ProcessLink {
     }
 }
 
+/// What a chat on a local model server changes in its launch: the model it asks for, where the
+/// server is and the thinking budget, and the server's key in the worker's environment (never in
+/// `launch.json`). The chat's effort stays in the launch: the worker turns it into a thinking
+/// budget itself, and leaves the `--effort` switch off for a local model.
+pub(crate) fn apply_local_launch(
+    claude: &mut helm_workers::launch::ClaudeLaunch,
+    env: &mut helm_workers::env::EnvMap,
+    l: &LocalSpawn,
+) -> Result<(), String> {
+    let server = l
+        .server
+        .as_ref()
+        .ok_or("The local model server was not resolved for this start.")?;
+    claude.model = Some(l.model.clone());
+    claude.local = Some(helm_workers::launch::LocalSpec {
+        base_url: server.base_url.clone(),
+        model: l.model.clone(),
+        context_tokens: server.context_tokens,
+        max_output_tokens: server.max_output_tokens,
+        thinking_tokens: l.thinking_tokens,
+    });
+    env.set(helm_workers::launch::LOCAL_KEY_ENV, server.key.clone());
+    Ok(())
+}
+
 /// The real spawner: stage `worker/src`, resolve Node on the worker's PATH, write `launch.json`,
 /// and start `node <main.ts> <launch.json>` in a Job Object.
 pub struct ProcessSpawner {
@@ -266,21 +291,7 @@ impl Spawner for ProcessSpawner {
         );
         claude.append_system_prompt = contrib::system_prompt(&extras);
         if let Some(l) = &req.local {
-            let server = l
-                .server
-                .as_ref()
-                .ok_or("The local model server was not resolved for this start.")?;
-            claude.model = Some(l.model.clone());
-            // A local model has no effort levels: the thinking budget stands in for it.
-            claude.effort = None;
-            claude.local = Some(helm_workers::launch::LocalSpec {
-                base_url: server.base_url.clone(),
-                model: l.model.clone(),
-                context_tokens: server.context_tokens,
-                max_output_tokens: server.max_output_tokens,
-                thinking_tokens: l.thinking_tokens,
-            });
-            env.set(helm_workers::launch::LOCAL_KEY_ENV, server.key.clone());
+            apply_local_launch(&mut claude, &mut env, l)?;
         }
         if extras.orchestrator_on {
             claude.subagent_soft_turns = runtime.subagent_turns(true);

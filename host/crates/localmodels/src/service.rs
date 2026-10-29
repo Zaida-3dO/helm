@@ -738,10 +738,11 @@ impl LocalService {
                 )
             })?;
         // The worker keeps asking for the variant it was launched with; a new worker takes the
-        // variant for the context size set now.
+        // variant for the context size set now. A launched variant of another model (the chat's
+        // model was just changed and its worker is still closing) is not the one to prepare.
         let target = match &turn.launched {
-            Some(l) => l.clone(),
-            None => srv::variant_name(&turn.model, st.ollama_context),
+            Some(l) if srv::norm(srv::variant_base(l)) == srv::norm(&turn.model) => l.clone(),
+            _ => srv::variant_name(&turn.model, st.ollama_context),
         };
         let ctx = srv::variant_context(&target).unwrap_or(st.ollama_context);
         if !tags
@@ -813,6 +814,13 @@ impl LocalService {
 impl LocalModels for LocalService {
     fn knows(&self, server_id: &str) -> bool {
         self.settings().servers.iter().any(|s| s.id == server_id)
+    }
+
+    fn available(&self, server_id: &str) -> bool {
+        self.settings()
+            .servers
+            .iter()
+            .any(|s| s.id == server_id && s.enabled)
     }
 
     fn server(&self, server_id: &str, model: &str) -> Result<LocalServer, String> {

@@ -318,6 +318,21 @@ pub(crate) fn check_local_model(ctx: &OpCtx, model: Option<&str>) -> Result<(), 
     Ok(())
 }
 
+/// Whether a default model can be used for a new chat: a Claude model always, a local one when its
+/// server is set up and switched on.
+fn default_usable(ctx: &OpCtx, model: &str) -> bool {
+    if !model.starts_with(crate::local::PREFIX) {
+        return true;
+    }
+    let Some((server, _)) = crate::local::split(model) else {
+        return false;
+    };
+    ctx.services
+        .get::<ChatRuntime>()
+        .and_then(|rt| rt.local_models())
+        .is_none_or(|l| l.available(server))
+}
+
 /// Why `chat_create` made nothing.
 enum CreateRefusal {
     Archived,
@@ -348,7 +363,12 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .snapshot(|tx| Ok::<_, rusqlite::Error>(crate::runtime_settings::new_chat_defaults(tx)))
         .map_err(sql)?;
     let effort = a.effort.unwrap_or(default_effort);
-    let model = a.model.clone().or(default_model);
+    let mut model = a.model.clone().or(default_model);
+    // The new-chat default names a local model whose server is gone or switched off: a chat that
+    // asked for no particular model starts on Claude's own default instead of being refused.
+    if a.model.is_none() && model.as_deref().is_some_and(|m| !default_usable(ctx, m)) {
+        model = None;
+    }
     check_local_model(ctx, model.as_deref())?;
     let clock = ctx.services.need::<Clock>()?;
     let id = db

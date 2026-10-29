@@ -129,6 +129,11 @@ pub trait LocalModels: Send + Sync {
     /// Whether a server with this id is set up (a chat may be created on it).
     fn knows(&self, server_id: &str) -> bool;
 
+    /// Whether the server is set up and switched on, so a new chat can rely on it by default.
+    fn available(&self, server_id: &str) -> bool {
+        self.knows(server_id)
+    }
+
     /// The server's address, key and limits for a worker launching with `model`. An `Err` is a
     /// sentence for the chat.
     fn server(&self, server_id: &str, model: &str) -> Result<LocalServer, String>;

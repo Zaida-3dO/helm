@@ -495,6 +495,12 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     );
     assert!(load.body.get("prompt").is_none(), "loading sends no prompt");
 
+    // 1b. A launched variant of another model (the chat's model was just changed, its worker is
+    //     still closing) is not the one to prepare: this model gets its own variant.
+    let mut t = turn("ollama", "qwen3:8b");
+    t.launched = Some("llama3-helm-64k".into());
+    assert_eq!(r.svc.prepare(&t, &progress).unwrap(), "qwen3:8b-helm-64k");
+
     // 2. Already loaded: no line, no check, only the keep-alive timer is set again. A variant a
     //    worker still uses is never removed.
     lines.lock().unwrap().clear();

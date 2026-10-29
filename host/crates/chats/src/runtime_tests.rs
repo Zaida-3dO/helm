@@ -3835,6 +3835,24 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         )),
         ["ollama|qwen3:8b"]
     );
+    // A new-chat default that names a server which is gone starts Claude's own default instead of
+    // refusing every chat that asked for no model; an explicit local pick is still refused.
+    h.call("runtime_settings_save", json!({"model": "local/gone/x"}))
+        .await
+        .unwrap();
+    let fallback = h.call("chat_create", json!({"cwd": cwd})).await.unwrap();
+    assert_eq!(fallback["model"], Value::Null);
+    h.call(
+        "runtime_settings_save",
+        json!({"model": "local/ollama/qwen3:8b"}),
+    )
+    .await
+    .unwrap();
+    let default_local = h.call("chat_create", json!({"cwd": cwd})).await.unwrap();
+    assert_eq!(default_local["model"], "local/ollama/qwen3:8b");
+    h.call("runtime_settings_save", json!({"model": ""}))
+        .await
+        .unwrap();
     let cat = h
         .call("model_catalogue", json!({"harness": "claude"}))
         .await
@@ -3882,6 +3900,27 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         !format!("{:?}", w.req).contains("sk-fake-local-key"),
         "a request never prints the key"
     );
+    // What the real spawner writes: the chat's effort stays in launch.json (the worker maps it to
+    // the thinking budget), the model and server are set, and the key goes to the environment only.
+    assert_eq!(w.req.effort.as_deref(), Some("xhigh"));
+    let rt = helm_workers::launch::ClaudeRuntime::default();
+    let mut claude = helm_workers::launch::claude_launch(
+        &rt,
+        None,
+        w.req.model.clone(),
+        w.req.effort.clone(),
+        None,
+    );
+    let mut env = helm_workers::env::EnvMap::default();
+    apply_local_launch(&mut claude, &mut env, w.req.local.as_ref().unwrap()).unwrap();
+    assert_eq!(claude.effort.as_deref(), Some("xhigh"));
+    assert_eq!(claude.model.as_deref(), Some("qwen3:8b-helm-64k"));
+    assert_eq!(
+        env.get(helm_workers::launch::LOCAL_KEY_ENV),
+        Some("sk-fake-local-key")
+    );
+    let file = serde_json::to_string(&claude).unwrap();
+    assert!(file.contains(r#""effort":"xhigh""#) && !file.contains("sk-fake-local-key"));
     w.ready().await;
     let p = w.expect("prompt").await;
     assert_eq!(p["submissionId"], sid.as_str());
