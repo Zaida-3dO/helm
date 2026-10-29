@@ -787,6 +787,41 @@ pub struct ModelCatalogue {
     pub efforts: Vec<String>,
     pub default_effort: String,
     pub source: CatalogueSource,
+    /// Models on the local model servers configured in Helm, listed after the Claude models.
+    #[serde(default)]
+    pub local: Vec<LocalModelInfo>,
+}
+
+/// Which kind of local model server a model lives on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalServerKind {
+    Strata,
+    Ollama,
+}
+
+/// One model on a local model server. Its `id` is `local/<serverId>/<model>`: the model part may
+/// itself hold `/` and `:`, so split on the first two `/` only. A chat on it stores the server id
+/// in `provider` and the model part in `model`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModelInfo {
+    pub id: String,
+    pub name: String,
+    /// The server's display name.
+    pub server: String,
+    pub kind: LocalServerKind,
+    #[ts(optional, type = "number")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+    #[ts(optional, type = "number")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded: Option<bool>,
+    /// False when the server did not answer; the picker greys the row.
+    pub reachable: bool,
 }
 
 // ---------------------------------------------------------------------------------------------

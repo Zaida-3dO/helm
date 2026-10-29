@@ -14,6 +14,7 @@ const cat: ModelCatalogue = {
   efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   defaultEffort: 'xhigh',
   source: 'fallback',
+  local: [],
 };
 
 test('the unified trigger reads "Model · Effort" with friendly effort names', () => {

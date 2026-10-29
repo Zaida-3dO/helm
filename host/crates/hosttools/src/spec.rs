@@ -212,6 +212,10 @@ pub struct LaunchKeys {
     pub mcp_enabled: bool,
     /// A restricted chat lists nothing here; its posture decides at the gate.
     pub restricted: bool,
+    /// The chat runs on a local model server configured in Helm, not on Claude.
+    pub local_chat: bool,
+    /// Helm's own web search is offered to this launch (see [`WebToolsGate`]).
+    pub web_tools: bool,
 }
 
 impl LaunchKeys {
@@ -243,6 +247,16 @@ pub struct McpLaunch {
 pub trait McpLaunchSource: Send + Sync {
     fn for_launch(&self, chat_id: &str, cwd: &std::path::Path) -> McpLaunch;
 }
+
+/// The web tools' side of the launch: whether Helm's own web search is offered to a chat.
+/// Registered as the [`WebToolsGate`] service by the crate that owns web search.
+pub trait WebToolsSource: Send + Sync {
+    fn offered(&self, local_chat: bool) -> bool;
+}
+
+/// The service wrapper for [`WebToolsSource`]. With none registered, web search is not offered.
+#[derive(Clone)]
+pub struct WebToolsGate(pub std::sync::Arc<dyn WebToolsSource>);
 
 /// The service wrapper for [`McpLaunchSource`]. With none registered, native MCP stays on and
 /// nothing is disabled (the default).

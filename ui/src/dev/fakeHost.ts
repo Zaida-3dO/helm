@@ -654,6 +654,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
       defaultEffort: 'xhigh',
       source: 'fallback',
+      local: [],
     }),
     tool_stop: () => ({ stopped: true }),
     // Settings → Runtime.

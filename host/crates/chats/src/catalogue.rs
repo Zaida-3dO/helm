@@ -57,6 +57,7 @@ fn catalogue(models: Vec<ModelInfo>, source: CatalogueSource) -> ModelCatalogue 
         efforts: EFFORTS.iter().map(|s| s.to_string()).collect(),
         default_effort: DEFAULT_EFFORT.into(),
         source,
+        local: Vec::new(),
     }
 }
 

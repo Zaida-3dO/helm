@@ -133,8 +133,14 @@ pub(crate) fn launch(
             native: true,
             ..Default::default()
         });
+    let web_tools = seam
+        .ctx
+        .services
+        .get::<helm_hosttools::WebToolsGate>()
+        .is_some_and(|g| g.0.offered(keys.local_chat));
     let keys = helm_hosttools::LaunchKeys {
         mcp_enabled: mcp.helm_servers,
+        web_tools,
         ..keys
     };
     let tools = serde_json::to_value(seam.tools.registry().for_launch(&keys)).ok()?;
