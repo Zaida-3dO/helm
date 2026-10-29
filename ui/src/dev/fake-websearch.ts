@@ -5,7 +5,7 @@ import { ApiError } from '../api/client.ts';
 import type { WebSearchView } from '../settings/websearch/api.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
 
-const DEFAULT_PATH = 'C:\Users\you\.openclaw\openclaw.json';
+const DEFAULT_PATH = 'C:/openclaw/openclaw.json';
 
 export function webSearchFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   const state = { hasKey: false, offer: false, importPath: null as string | null };
