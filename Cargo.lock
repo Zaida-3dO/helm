@@ -1812,6 +1812,7 @@ dependencies = [
  "helm-updates",
  "helm-usage",
  "helm-waits",
+ "helm-webtools",
  "helm-workers",
  "helm-workflow",
  "log",
@@ -2194,6 +2195,22 @@ dependencies = [
  "tokio",
  "uuid",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "helm-webtools"
+version = "0.5.0"
+dependencies = [
+ "helm-core",
+ "helm-hosttools",
+ "helm-ipc",
+ "helm-platform",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
 ]
 
 [[package]]

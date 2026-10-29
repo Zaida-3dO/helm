@@ -324,6 +324,10 @@ mod tests {
                     .large()
                     .when(Condition::ProjectsModeAndAllSettings),
                 ok,
+            )
+            .blocking(
+                ToolSpec::read("app_web_search", "W.", obj()).when(Condition::WebTools),
+                ok,
             );
         let names = |k: LaunchKeys| {
             r.for_launch(&k)
@@ -346,8 +350,20 @@ mod tests {
             names(all),
             ["app_list_projects", "app_repo_locations", "app_update_repo"]
         );
+        // Web search is listed on its own switch, whatever the other keys say.
+        let web = LaunchKeys {
+            web_tools: true,
+            ..Default::default()
+        };
+        assert_eq!(names(web), ["app_list_projects", "app_web_search"]);
+        let local_only = LaunchKeys {
+            local_chat: true,
+            ..Default::default()
+        };
+        assert_eq!(names(local_only), ["app_list_projects"]);
         let restricted = LaunchKeys {
             restricted: true,
+            web_tools: true,
             ..all
         };
         assert!(names(restricted).is_empty());

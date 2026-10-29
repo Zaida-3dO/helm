@@ -1,0 +1,21 @@
+[package]
+name = "helm-webtools"
+description = "Helm's own web search for agents: the Brave search key, the app_web_search tool, the Settings > Web search ops and the setting that offers it to Claude chats."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+helm-platform.workspace = true
+helm-hosttools = { path = "../hosttools" }
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+log.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+tempfile.workspace = true
