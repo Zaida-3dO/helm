@@ -115,6 +115,14 @@ function applyLocal(out: Record<string, string>, local: LocalLaunch, key: string
   if (typeof local.contextTokens === "number" && local.contextTokens > 0) out.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(Math.floor(local.contextTokens));
   if (typeof local.maxOutputTokens === "number" && local.maxOutputTokens > 0) out.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(Math.floor(local.maxOutputTokens));
   out.MAX_THINKING_TOKENS = String(localThinkingTokens(local, effort));
+  // Gateway mode: Claude Code treats the base URL as a third-party gateway. Without it the requests
+  // carry Anthropic-only fields a local server may not know (adaptive thinking with an effort,
+  // context management, ten beta flags) and the thinking budget above is never sent; with it the
+  // request is a plain Messages call with `thinking: {type: "enabled", budget_tokens}`.
+  out.CLAUDE_CODE_USE_GATEWAY = "1";
+  // Claude Code defers some of its own tools (WebFetch among them) behind a search tool whose
+  // results a local server cannot expand; with it off, every tool is offered up front.
+  out.ENABLE_TOOL_SEARCH = "false";
   // A proxy variable in the user's environment must not carry loopback traffic (and the key) to a proxy.
   const loopback = ["127.0.0.1", "localhost", "::1"];
   const existing = Object.keys(out).find((k) => k.toUpperCase() === "NO_PROXY");

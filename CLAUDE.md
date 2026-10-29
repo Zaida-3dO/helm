@@ -40,7 +40,7 @@ and `host/crates/usage/NOTES.md` (what the plan-usage meter reads).
 | Rust host | `cargo build --workspace` | `cargo test --workspace` (+ `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`). After changing a type in `host/crates/chats/src/types.rs`, regenerate the UI bindings: `HELM_UPDATE_BINDINGS=1 cargo test -p helm-chats bindings_are_current` |
 | UI | `npm run build -w ui`; to look at it without Tauri: `npx vite --port <free port>` in `ui/` opens against the dev fake host (`?seed=250` preloads a long chat; prompts containing "approve", "question", "plan" or "long" script those cards). Stable e2e hooks: `ui/TESTIDS.md` | `npm test -w ui` (+ `npm run typecheck -w ui`) |
 | Tauri app (dev run) | `npm run dev` (Vite on 127.0.0.1:1420 + `cargo run`); production-CSP debug exe: `npm run build:debug` → `target/debug/helm.exe`; set `HELM_PROFILE_DIR` to a scratch folder to keep `%LOCALAPPDATA%\Helm` untouched | — |
-| Worker + fakes | none: Node runs the TypeScript directly | `npm test` in `worker/` and in `fakes/`; live smoke (spends plan usage, once per checkpoint): `HELM_LIVE_CLAUDE=1 npm run test:live` in `worker/` |
+| Worker + fakes | none: Node runs the TypeScript directly | `npm test` in `worker/` and in `fakes/`; live smoke (spends plan usage, once per checkpoint): `HELM_LIVE_CLAUDE=1 npm run test:live` in `worker/`. Chats on a local model use `fakes/local-model/` (one fake server for the Messages route and both servers' control routes, on an ephemeral port); a test never contacts a real model server |
 | Side panel (host `helm-panel`, `ui/src/panel`, `ui/src/markdown`) | part of the Rust host and UI builds | `cargo test -p helm-panel` (staging tests need git on `PATH`); `node --test "src/panel/**/*.test.ts" "src/markdown/*.test.ts"` in `ui/`; e2e `checks/e2e/w3-panel.e2e.ts`. `HELM_TEST_OBSIDIAN_CONFIG=<obsidian.json>` (debug builds only) points the vault list at a test registry |
 | End-to-end (fake claude) | `npm run build:debug` first (the check drives `target/debug/helm.exe`) | `npm run e2e -w checks`: E1–E8 over WebView2's DevTools port with playwright-core, scratch profile, `HELM_TEST_CLAUDE`; not part of `npm test`. `HELM_E2E_OUT=<dir>` keeps screenshots, `HELM_E2E_KEEP=1` the profile |
 | Hub (`hub/`, its own Cargo workspace, not in `--workspace`) + relay (`host/crates/relay`, `fakes/telegram`) | `cd hub && cargo build`; image: `docker build -t helm-hub:latest .` in `hub/` (built on the server that runs it; the dev machine needs no Docker) | `cd hub && cargo test` (+ `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`); `cargo test -p helm-relay`; `node --test "telegram/*.test.ts"` in `fakes/`; e2e `checks/e2e/w7-relay.e2e.ts` (needs `npm run build:debug` and `cargo build` in `hub/`); details in `hub/README.md` |
@@ -71,7 +71,12 @@ adds to every run, locally and in CI, and slows everyone down.
    `api.anthropic.com/api/oauth/*`. Claude is used only through the unmodified `claude` binary under
    the user's own sign-in. The worker strips `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
    `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDECODE` from the claude child's
-   environment unless API-key mode is on.
+   environment unless API-key mode is on, or the chat runs on a local model server configured in
+   Helm on this machine. Then, and only then, it sets the base URL to that server's loopback
+   address (plain http to `127.0.0.1`, `localhost` or `::1`; anything else is refused) and the token
+   to that server's own key, handed over in `HELM_LOCAL_MODEL_KEY` and removed from the worker's
+   environment once read. It never passes the user's sign-in or an Anthropic key in that case, and
+   the key is never logged or given to MCP servers.
 2. **Windows hazards.**
    - Never `rm -rf` or `git worktree remove` a directory containing a `node_modules` junction:
      `rmdir` the junction first.

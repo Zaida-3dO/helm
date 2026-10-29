@@ -96,6 +96,8 @@ const ENV_ECHO = [
   "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
   "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
   "MAX_THINKING_TOKENS",
+  "CLAUDE_CODE_USE_GATEWAY",
+  "ENABLE_TOOL_SEARCH",
   "NO_PROXY",
 ];
 const env = Object.fromEntries(ENV_ECHO.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]]));

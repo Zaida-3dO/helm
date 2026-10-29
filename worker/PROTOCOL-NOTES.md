@@ -126,12 +126,72 @@ steering and tool control" for why it is delivery and not the acknowledgement.
   `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDECODE` are removed from the claude child's environment unless
   `claude.apiKeyMode` is true (compared case-insensitively, as Windows does). `CLAUDE_CODE_ENTRYPOINT`
   and `CLAUDE_CODE_SSE_PORT` are always removed. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and
-  `DISABLE_AUTOUPDATER=1` are always set.
+  `DISABLE_AUTOUPDATER=1` are always set. The one exception is a chat on a local model server
+  (next section): it gets that server's address and key instead, never the user's sign-in.
 - **Finding claude:** it is resolved as `HELM_CLAUDE_PATH`, then `claude.exe` on PATH, then
   `~/.local/bin/claude.exe`, then the newest `~/.vscode/extensions/anthropic.claude-code-*`
   native binary. Wrapper scripts (`.cmd`, `.bat`, `.ps1`, ...) are refused, including an explicit
   `claude.command` in `launch.json`. The CLI's process tree is ended with `taskkill /T /F` on
   Windows (a process group kill on Linux); the host's Job Object is the backstop.
+
+## Chats on a local model server
+
+A launch with `claude.local` `{baseUrl, model, contextTokens?, maxOutputTokens?, thinkingTokens?}` runs
+Claude Code against a model server on this machine. Claude Code is still the harness: the same flags,
+tools, hooks and stream-json, with a different place to send its requests.
+
+- **The key** comes in the worker's environment as `HELM_LOCAL_MODEL_KEY` (never in `launch.json`).
+  `main.ts` reads it once, removes it from the worker's own environment, and passes it on only as
+  the claude child's `ANTHROPIC_AUTH_TOKEN`. It is stripped from every other child under its own
+  name (claude, MCP servers). A launch with no key gets the token `local`, so Claude Code never
+  falls back to the user's sign-in. Nothing logs it.
+- **The address** must be plain `http` to `127.0.0.1`, `localhost` or `::1`, with no user or password
+  in it. Anything else makes `get_state` fail before claude is started, so the key and the prompts
+  cannot be sent to another host.
+- **What the child gets**, with the Anthropic credential variables, `ANTHROPIC_CUSTOM_HEADERS` and every
+  `CLAUDE_CODE_USE_*` of the user's removed (API-key mode or not): `ANTHROPIC_BASE_URL`,
+  `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` and
+  `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` (all the local model, so the small-model jobs and
+  sub-agents stay local), `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` when
+  known, `MAX_THINKING_TOKENS`, `CLAUDE_CODE_USE_GATEWAY=1`, `ENABLE_TOOL_SEARCH=false`, and the
+  loopback names added to `NO_PROXY`, so a proxy variable never carries local traffic (or the key) off
+  the machine. `--model` is the server's model name, and `--settings` gains `skipWebFetchPreflight`.
+- **Effort is a thinking budget.** No `--effort` flag, and `get_state` still reports the chat's
+  effort. The budget is `low` 0 (thinking off), `medium` 4096, `high` 8192, `xhigh` 16384, `max` 32768
+  (`LOCAL_THINKING_TOKENS` in `protocol/types.ts`); the launch's own `thinkingTokens` is used only
+  when the launch carries no effort. `set_thinking_level` on a local chat sends `set_max_thinking_tokens`
+  instead of `apply_flag_settings`; it applies from the next request.
+- **Tools.** `WebSearch` is disallowed (it is a server-side tool of Anthropic's API). `WebFetch` stays: it
+  fetches on this machine and its summary goes to the small model, which is the local model.
+
+What Claude Code 2.1.289 actually sent, read off the fake local server with the real binary (a scratch
+profile, the fake as base URL, `HTTPS_PROXY` pointed at a sink that records and refuses connections;
+nothing left the machine, and no real model or server was involved):
+
+| Launch | `thinking` | other body fields | `anthropic-beta` |
+|---|---|---|---|
+| base URL + token + model only, `MAX_THINKING_TOKENS=8192` | `{type:"adaptive", display:"updates"}`; the number is never sent | `output_config:{effort:"high"}` (a default: no `--effort` was passed), `context_management`, `safeguards` | ten flags (context management, effort, thinking display, ...) |
+| the same with `MAX_THINKING_TOKENS=0` | none | `output_config` still there | fewer |
+| **plus `CLAUDE_CODE_USE_GATEWAY=1`** | `{type:"enabled", budget_tokens:N}`: N is the variable, at least 1024, at most `max_tokens - 1`; none at 0 | no `output_config`, no `context_management` | `interleaved-thinking-2025-05-14` and three Claude Code flags |
+
+- So the thinking budget only means something in gateway mode, and gateway mode also leaves out the
+  Anthropic-only fields a local server may not know. That is why local launches set it.
+- `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING` and the `ANTHROPIC_DEFAULT_*_MODEL_SUPPORTED_CAPABILITIES`
+  variables changed nothing outside gateway mode.
+- Gateway mode alone defers `WebFetch`, `NotebookEdit`, `SendMessage` and `TaskStop` behind a
+  `ToolSearch` tool, whose results the API server expands (a local server does not).
+  `ENABLE_TOOL_SEARCH=false` puts them all back in the list.
+- Through the worker: effort `high` sent budget 8192; after `set_thinking_level low` the next request
+  carried no `thinking`; after `max` it carried 31999 (the default 32000 `max_tokens`, less one). A tool
+  call streamed by the fake (a `tool_use` block, then a plain text answer to the tool result) ran as it
+  does on Anthropic's API. Requests are plain `POST /v1/messages` with `Authorization: Bearer <local key>`
+  and `anthropic-version: 2023-06-01`; no `x-api-key`, no other path, and no call to Anthropic.
+- `total_cost_usd` in the result line is a non-zero estimate for a model Claude Code does not know;
+  the host ignores it for local chats.
+- Not observed (needs a long chat or a real server): what `CLAUDE_CODE_MAX_CONTEXT_TOKENS` does to
+  auto-compaction, and WebFetch end to end (it upgrades `http` URLs to `https`, so a plain-http fake
+  page cannot serve it). Without `skipWebFetchPreflight`, WebFetch asks `api.anthropic.com` whether each
+  site may be fetched (no credentials, but the site's name is in the query); a local chat skips that call.
 
 ## Observed CLI behaviour (claude.exe 2.1.289, 2026-10-17)
 

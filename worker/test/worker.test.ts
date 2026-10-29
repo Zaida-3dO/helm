@@ -106,6 +106,8 @@ describe("launch and handshake", () => {
         CLAUDE_CODE_MAX_CONTEXT_TOKENS: "65536",
         CLAUDE_CODE_MAX_OUTPUT_TOKENS: "8192",
         MAX_THINKING_TOKENS: "8192",
+        CLAUDE_CODE_USE_GATEWAY: "1",
+        ENABLE_TOOL_SEARCH: "false",
         NO_PROXY: "intranet,127.0.0.1,localhost,::1",
       });
       const argv = start?.argv as string[];

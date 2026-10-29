@@ -66,6 +66,8 @@ test("a local launch: loopback http only, every model slot local, the effort as 
   assert.deepEqual([env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_BASE_URL, env.ANTHROPIC_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL], ["k", "http://127.0.0.1:18731", "qwen:8b", "qwen:8b"]);
   assert.deepEqual(["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDECODE", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"].filter((k) => k in env), [], "not even in API-key mode");
   assert.equal(env.no_proxy, "a,127.0.0.1,localhost,::1");
+  assert.equal(env.CLAUDE_CODE_USE_GATEWAY, "1", "the base URL is treated as a gateway, so the thinking budget is what is sent");
+  assert.equal(env.ENABLE_TOOL_SEARCH, "false", "no tool is deferred behind a search a local server cannot answer");
   assert.equal(buildClaudeEnv({}, { local, effort: "low" }).ANTHROPIC_AUTH_TOKEN, "local", "a keyless server still gets a token of its own");
   assert.throws(() => buildClaudeEnv({}, { local: { ...local, baseUrl: "http://example.com" } }));
   assert.throws(() => buildClaudeEnv({}, { local: { ...local, model: " " } }));
