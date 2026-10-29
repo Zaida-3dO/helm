@@ -66,6 +66,8 @@ export interface LoggedRequest {
   /** `Authorization` and `x-api-key` as received (made-up test values). */
   authorization?: string;
   xApiKey?: string;
+  /** The other request headers, lower-cased (`anthropic-beta`, `user-agent`...). */
+  headers: Record<string, string>;
   /** The parsed JSON body, when there was one. */
   body?: Json;
   /** The status the fake answered. */
@@ -169,7 +171,15 @@ export async function startFakeLocalModel(opts: FakeLocalModelOptions = {}): Pro
       const method = req.method ?? "GET";
       if (down) return void req.socket.destroy();
       const body = await readBody(req);
-      const entry: LoggedRequest = { method, path, authorization: header(req, "authorization"), xApiKey: header(req, "x-api-key"), status: 0 };
+      const others = Object.entries(req.headers).filter(([k]) => k !== "authorization" && k !== "x-api-key");
+      const entry: LoggedRequest = {
+        method,
+        path,
+        authorization: header(req, "authorization"),
+        xApiKey: header(req, "x-api-key"),
+        headers: Object.fromEntries(others.map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : String(v)])),
+        status: 0,
+      };
       if (body) entry.body = body;
       if (!path.startsWith("/__fake/")) requests.push(entry);
 

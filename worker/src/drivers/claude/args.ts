@@ -3,9 +3,9 @@
 
 import { DEFAULT_EFFORT, isEffort, type ClaudeLaunch } from "../../protocol/types.ts";
 
-/** Haiku models take no effort setting. */
-export function modelTakesEffort(model: string | undefined): boolean {
-  return !model || !/haiku/i.test(model);
+/** Haiku models take no effort setting, and neither does a local model: its effort is a thinking budget instead. */
+export function modelTakesEffort(model: string | undefined, local = false): boolean {
+  return !local && (!model || !/haiku/i.test(model));
 }
 
 /**
@@ -13,6 +13,9 @@ export function modelTakesEffort(model: string | undefined): boolean {
  * app's schedules, folders to its worktrees. Names read from claude 2.1.289's init tool list.
  */
 export const DISALLOWED_TOOLS = ["CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "RemoteTrigger", "EnterWorktree", "ExitWorktree"] as const;
+
+/** Claude Code's web search runs on Anthropic's servers, which a local model server cannot do; Helm's own search tool takes its place. */
+const LOCAL_DISALLOWED_TOOLS = ["WebSearch"];
 
 /** Claude Code's own worktree tools; kept off unless the user lets them through. */
 const WORKTREE_TOOLS = ["EnterWorktree", "ExitWorktree"];
@@ -28,7 +31,8 @@ const SCHEDULE_TOOLS = ["CronCreate", "CronDelete", "CronList", "ScheduleWakeup"
 export function disallowedTools(c: ClaudeLaunch, env: Record<string, string | undefined> = process.env): string[] {
   const allowWorktrees = c.worktreeTools === true && !env.HELM_WORKTREE_OFF_LIST;
   const allowSchedules = c.scheduleTools === true;
-  return DISALLOWED_TOOLS.filter((t) => !(allowWorktrees && WORKTREE_TOOLS.includes(t)) && !(allowSchedules && SCHEDULE_TOOLS.includes(t)));
+  const off = DISALLOWED_TOOLS.filter((t) => !(allowWorktrees && WORKTREE_TOOLS.includes(t)) && !(allowSchedules && SCHEDULE_TOOLS.includes(t)));
+  return c.local ? [...off, ...LOCAL_DISALLOWED_TOOLS] : off;
 }
 
 export interface ArgOptions {
@@ -65,7 +69,7 @@ export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[
   if (c.strictMcpConfig === true) args.push("--strict-mcp-config");
   if (c.model) args.push("--model", c.model);
   const effort = isEffort(c.effort) ? c.effort : DEFAULT_EFFORT;
-  if (modelTakesEffort(c.model)) args.push("--effort", effort);
+  if (modelTakesEffort(c.model, c.local !== undefined)) args.push("--effort", effort);
   if (c.skipPermissions) args.push("--permission-mode", "bypassPermissions", "--allow-dangerously-skip-permissions");
   if (c.resumeSessionId) args.push("--resume", c.resumeSessionId);
   if (c.resumeSessionId && c.forkSession === true) args.push("--fork-session");
@@ -77,7 +81,10 @@ export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[
   // Held repository servers are also switched off for the CLI's .mcp.json loader.
   const held = (c.disabledMcpServers ?? []).filter((n) => /^[A-Za-z0-9_-]{1,64}$/.test(n) && n !== "helm");
   const extra = held.length > 0 ? { disabledMcpjsonServers: held } : {};
-  args.push("--settings", JSON.stringify({ ...custom, ...extra, fastMode: c.fastMode === true }));
+  // WebFetch checks each domain with a call to Anthropic's servers first; a local chat does not
+  // send the sites it reads there (and the fetch would fail whenever that check cannot be reached).
+  const localSettings = c.local ? { skipWebFetchPreflight: true } : {};
+  args.push("--settings", JSON.stringify({ ...custom, ...extra, ...localSettings, fastMode: c.fastMode === true }));
   if (c.extraArgs) args.push(...c.extraArgs);
   return args;
 }

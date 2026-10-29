@@ -8,6 +8,7 @@ import { serve } from "./protocol/server.ts";
 import { markLaunch } from "./protocol/timing.ts";
 import type { Launch } from "./protocol/types.ts";
 import { ClaudeDriver } from "./drivers/claude/driver.ts";
+import { takeLocalKey } from "./drivers/claude/env.ts";
 
 const STDERR_CAP = 16 * 1024;
 let stderrUsed = 0;
@@ -53,7 +54,10 @@ function main(): void {
     exiting = true;
     void channel.flush().then(() => process.exit(code));
   };
-  const driver = new ClaudeDriver(launch, channel, { env: process.env, diag, onFatal: exit });
+  // A local model server's key arrives in the environment; take it out of there before anything
+  // else is started, so no child (claude, MCP servers, hooks) inherits it under that name.
+  const localKey = takeLocalKey(process.env);
+  const driver = new ClaudeDriver(launch, channel, { env: process.env, localKey, diag, onFatal: exit });
   serve({ input: process.stdin, channel, driver, diag, exit, maxRecordBytes: limit });
 }
 

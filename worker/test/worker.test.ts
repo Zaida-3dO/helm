@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { startFakeLocalModel } from "../../fakes/local-model/server.ts";
 import { isAlive } from "../src/process/kill.ts";
 import { prompt, sleep, startWithFixture, uuid, waitReceived } from "./helpers.ts";
 
@@ -69,6 +70,84 @@ describe("launch and handshake", () => {
       assert.ok(keys.includes("CLAUDECODE"));
     } finally {
       await s.done();
+    }
+  });
+
+  test("a local-model launch gives Claude Code the local server, its key and models, a thinking budget, and nothing of the user's sign-in", async () => {
+    const KEY = "fake-local-key";
+    const fake = await startFakeLocalModel({ key: KEY, reply: "from the local model" });
+    const s = startWithFixture("local-model", {
+      claude: { model: "fake-flash", effort: "high", local: { baseUrl: fake.url, model: "fake-flash", contextTokens: 65536, maxOutputTokens: 8192, thinkingTokens: 1 } },
+      env: {
+        HELM_LOCAL_MODEL_KEY: KEY,
+        ANTHROPIC_API_KEY: "sk-user",
+        ANTHROPIC_AUTH_TOKEN: "user-token",
+        ANTHROPIC_BASE_URL: "https://api.anthropic.com",
+        CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+        CLAUDE_CODE_USE_BEDROCK: "1",
+        NO_PROXY: "intranet",
+      },
+    });
+    try {
+      const ready = await s.host.ready();
+      assert.equal(ready.success, true);
+      assert.equal((ready.data as Record<string, unknown>).effort, "high", "a local chat still reports its effort: it sets the thinking budget");
+      const start = s.fakeStart();
+      const keys = (start?.envKeys as string[]).map((k) => k.toUpperCase());
+      for (const k of ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "HELM_LOCAL_MODEL_KEY"]) assert.equal(keys.includes(k), false, `${k} must not reach claude`);
+      assert.ok(keys.includes("ANTHROPIC_AUTH_TOKEN"), "the local key arrives as the auth token");
+      assert.deepEqual(start?.env, {
+        ANTHROPIC_BASE_URL: fake.url,
+        ANTHROPIC_MODEL: "fake-flash",
+        ANTHROPIC_SMALL_FAST_MODEL: "fake-flash",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "fake-flash",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: "fake-flash",
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: "fake-flash",
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS: "65536",
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS: "8192",
+        MAX_THINKING_TOKENS: "8192",
+        NO_PROXY: "intranet,127.0.0.1,localhost,::1",
+      });
+      const argv = start?.argv as string[];
+      assert.equal(argv.includes("--effort"), false, "no effort flag for a local model");
+      assert.equal(argv[argv.indexOf("--model") + 1], "fake-flash");
+      assert.deepEqual(["WebSearch", "WebFetch"].map((t) => argv[argv.indexOf("--disallowedTools") + 1]!.split(",").includes(t)), [true, false]);
+      assert.equal(JSON.parse(argv[argv.indexOf("--settings") + 1]!).skipWebFetchPreflight, true);
+
+      // The fake claude calls the fake server the way Claude Code would: the request it logs shows
+      // the key as a Bearer token (never an x-api-key), the local model, and the thinking budget.
+      await prompt(s.host, "hi");
+      await s.host.waitForType("agent_settled", 5000, 0);
+      const said = s.host.ofType("message_end").map((e) => e.message as { role: string; content: { text?: string }[] }).find((m) => m.role === "assistant");
+      assert.equal(said?.content.map((c) => c.text).join(""), "from the local model");
+      const [call, ...more] = fake.messages();
+      assert.equal(more.length, 0);
+      assert.deepEqual([call!.authorization, call!.xApiKey, call!.status], [`Bearer ${KEY}`, undefined, 200]);
+      assert.deepEqual([call!.body?.model, call!.body?.thinking], ["fake-flash", { type: "enabled", budget_tokens: 8192 }]);
+
+      // A new effort is a new thinking budget, sent to the running process (low turns thinking off).
+      const low = await s.host.request({ type: "set_thinking_level", level: "low" });
+      assert.deepEqual(low.data, { effort: "low", applies: "next_turn" });
+      const sent = s.received().find(ctl("set_max_thinking_tokens"));
+      assert.equal((sent?.request as Record<string, unknown>).max_thinking_tokens, 0);
+      assert.equal(s.received().some(ctl("apply_flag_settings")), false);
+    } finally {
+      await s.done();
+      await fake.close();
+    }
+  });
+
+  test("a local-model launch to a host that is not on this machine is refused before claude starts", async () => {
+    for (const baseUrl of ["http://192.168.1.20:18731", "https://127.0.0.1:18731", "http://127.0.0.1@example.com:18731", "not a url"]) {
+      const s = startWithFixture("streaming", { claude: { local: { baseUrl, model: "m" } }, env: { HELM_LOCAL_MODEL_KEY: "fake-local-key" } });
+      try {
+        const r = await s.host.ready();
+        assert.equal(r.success, false, baseUrl);
+        assert.match(String(r.error), /this machine|valid URL/);
+        assert.equal(s.fakeStart(), undefined, "nothing was spawned");
+      } finally {
+        await s.done();
+      }
     }
   });
 

@@ -10,7 +10,7 @@ import { markLaunch, markPrompt } from "../../protocol/timing.ts";
 import { DEFAULT_EFFORT, isEffort, type Json, type Launch, type UiResponse } from "../../protocol/types.ts";
 import { isAlive, treeKill } from "../../process/kill.ts";
 import { buildClaudeArgs, modelTakesEffort } from "./args.ts";
-import { buildClaudeEnv } from "./env.ts";
+import { buildClaudeEnv, localThinkingTokens } from "./env.ts";
 import { Interactions } from "./interactions.ts";
 import { BUDGET_HOOK_ID, SubagentBudget, subagentRule } from "./limits.ts";
 import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE } from "./longcmd.ts";
@@ -101,6 +101,8 @@ interface PendingControl {
 
 export interface DriverDeps {
   env: Record<string, string | undefined>;
+  /** The local model server's key, taken from the worker's environment at start-up (never logged). */
+  localKey?: string;
   diag: (msg: string) => void;
   /** Called after a fatal error has been reported; the worker should exit with this code. */
   onFatal: (code: number) => void;
@@ -128,6 +130,8 @@ export class ClaudeDriver implements Driver {
   private sessionId: string | undefined;
   private model: string | undefined;
   private effort: string;
+  /** The chat runs on a local model server. */
+  private readonly isLocal: boolean;
   private pendingModel: string | undefined;
   private pendingEffort: string | undefined;
   /** The composer's permission-mode pick, waiting for the turn to end. */
@@ -169,6 +173,7 @@ export class ClaudeDriver implements Driver {
     const c = launch.claude ?? {};
     this.model = c.model;
     this.effort = isEffort(c.effort) ? c.effort : DEFAULT_EFFORT;
+    this.isLocal = c.local !== undefined;
     this.budget = new SubagentBudget({ softTurns: typeof c.subagentSoftTurns === "number" && c.subagentSoftTurns > 0 ? c.subagentSoftTurns : 0, hardStop: c.subagentHardStop === true });
     if (c.shellChanges === true) this.shellChanges = new ShellChangeCapture();
     const level = launch.sendBehavior?.longCommands;
@@ -225,7 +230,7 @@ export class ClaudeDriver implements Driver {
       ...(c.commandArgs ?? []),
       ...buildClaudeArgs(c, { promptRule: this.promptRule(), mcpConfig: this.hostTools ? sdkMcpConfig() : undefined }),
     ];
-    const env = buildClaudeEnv(this.deps.env, { apiKeyMode: c.apiKeyMode === true, chatId: this.launch.chatId });
+    const env = buildClaudeEnv(this.deps.env, { apiKeyMode: c.apiKeyMode === true, chatId: this.launch.chatId, local: c.local, localKey: this.deps.localKey, effort: this.effort });
     const child = spawn(command, args, {
       cwd: this.launch.cwd ?? process.cwd(),
       env,
@@ -291,7 +296,8 @@ export class ClaudeDriver implements Driver {
       executableSource: this.resolved.source,
       cliVersion,
       model: this.model ?? null,
-      effort: modelTakesEffort(this.model) ? this.effort : null,
+      // A local model has no effort setting, but its effort still sets the thinking budget.
+      effort: this.isLocal || modelTakesEffort(this.model) ? this.effort : null,
       models,
       // The CLI's own commands and skills, invoked as "/name" at the start of a message.
       skills: Array.isArray(init.commands)
@@ -1065,6 +1071,11 @@ export class ClaudeDriver implements Driver {
   private async applyEffort(level: string): Promise<void> {
     this.effort = level;
     this.pendingEffort = undefined;
+    if (this.launch.claude?.local) {
+      // No effort setting on a local model: the effort is the thinking budget.
+      await this.control({ subtype: "set_max_thinking_tokens", max_thinking_tokens: localThinkingTokens(this.launch.claude.local, level) }, this.limits.modelAckMs);
+      return;
+    }
     if (!modelTakesEffort(this.model)) return; // remembered for when the model changes
     await this.control({ subtype: "apply_flag_settings", settings: { effortLevel: level } }, this.limits.modelAckMs);
   }
