@@ -16,8 +16,13 @@
 .lm-section-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
+  margin-bottom: 6px;
+}
+
+.lm-section-head h3 {
+  margin: 0;
+  margin-right: auto;
 }
 
 .lm-checking {

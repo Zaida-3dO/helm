@@ -101,25 +101,54 @@ export function buildClaudeEnv(
   return out;
 }
 
-function applyLocal(out: Record<string, string>, local: LocalLaunch, key: string | undefined, effort: string | undefined): void {
+/** The other ways Claude Code can be pointed at a provider; a local chat has none of them on. */
+const OTHER_PROVIDERS = [
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+  "CLAUDE_CODE_USE_MANTLE",
+  "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+  "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+] as const;
+
+/**
+ * What decides where a local chat's requests go and which model they name, without the key. It is
+ * set in the process environment and also pinned in the launch's `--settings`, because Claude Code
+ * applies the `env` block of a user or project settings file on top of the process environment: a
+ * file there could otherwise send the chat (and its key) elsewhere, or switch another provider on.
+ * The token is never in it: a settings argument is on the command line.
+ */
+export function localPinnedEnv(local: LocalLaunch): Record<string, string> {
   const model = typeof local.model === "string" ? local.model.trim() : "";
   if (!model) throw new Error("a local chat needs the server's model name");
-  out.ANTHROPIC_BASE_URL = assertLoopbackHttp(local.baseUrl);
+  return {
+    ANTHROPIC_BASE_URL: assertLoopbackHttp(local.baseUrl),
+    CLAUDE_CODE_USE_GATEWAY: "1",
+    // Every model slot is the local model, so the small-model jobs and sub-agents stay on it too
+    // (a sub-agent model the user set for Claude would be a name the local server does not have).
+    ANTHROPIC_MODEL: model,
+    ANTHROPIC_SMALL_FAST_MODEL: model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+    CLAUDE_CODE_SUBAGENT_MODEL: model,
+    ...Object.fromEntries(OTHER_PROVIDERS.map((k) => [k, "0"])),
+  };
+}
+
+function applyLocal(out: Record<string, string>, local: LocalLaunch, key: string | undefined, effort: string | undefined): void {
+  // The process environment carries the address and models; the switches for other providers are
+  // simply absent there (the user's own are stripped above) and only pinned off in the settings.
+  for (const [k, v] of Object.entries(localPinnedEnv(local))) if (!(OTHER_PROVIDERS as readonly string[]).includes(k)) out[k] = v;
   out.ANTHROPIC_AUTH_TOKEN = key || LOCAL_KEY_PLACEHOLDER;
-  // Every model slot is the local model, so the small-model jobs and sub-agents stay on it too.
-  out.ANTHROPIC_MODEL = model;
-  out.ANTHROPIC_SMALL_FAST_MODEL = model;
-  out.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
-  out.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
-  out.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
   if (typeof local.contextTokens === "number" && local.contextTokens > 0) out.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(Math.floor(local.contextTokens));
   if (typeof local.maxOutputTokens === "number" && local.maxOutputTokens > 0) out.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(Math.floor(local.maxOutputTokens));
   out.MAX_THINKING_TOKENS = String(localThinkingTokens(local, effort));
-  // Gateway mode: Claude Code treats the base URL as a third-party gateway. Without it the requests
-  // carry Anthropic-only fields a local server may not know (adaptive thinking with an effort,
-  // context management, ten beta flags) and the thinking budget above is never sent; with it the
-  // request is a plain Messages call with `thinking: {type: "enabled", budget_tokens}`.
-  out.CLAUDE_CODE_USE_GATEWAY = "1";
+  // Gateway mode (CLAUDE_CODE_USE_GATEWAY, set above): Claude Code treats the base URL as a
+  // third-party gateway. Without it the requests carry Anthropic-only fields a local server may not
+  // know (adaptive thinking with an effort, context management, ten beta flags) and the thinking
+  // budget is never sent; with it the request is a plain Messages call with
+  // `thinking: {type: "enabled", budget_tokens}`.
   // Claude Code defers some of its own tools (WebFetch among them) behind a search tool whose
   // results a local server cannot expand; with it off, every tool is offered up front.
   out.ENABLE_TOOL_SEARCH = "false";

@@ -1,6 +1,7 @@
 // Settings → Local models: the model servers on this machine (Strata, Ollama), their keys, and how
-// chats on local models run. Helm reaches a server only when asked: this pane asks once when it
-// opens, and again for Test. A key is write-only (set, replace, forget; it is never shown).
+// chats on local models run. Helm reaches a server only when asked: this pane shows what Helm
+// already holds when it opens, and contacts a server only for Test or "Check servers". A key is
+// write-only (set, replace, forget; it is never shown).
 // Server fields are drafts until Save; the settings below the list save as they change.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -55,22 +56,12 @@ export function LocalModelsPane() {
 
   useEffect(() => {
     let live = true;
-    // Show what Helm holds at once, then ask the servers once: nothing is asked before the pane opens.
+    // Opening shows what Helm holds, and asks no server anything.
     void ops
       .state()
       .then((s) => live && adopt(s))
-      .catch((e: unknown) => live && setError(errorText(e)))
-      .then(() => {
-        if (!live) return;
-        setChecking(true);
-        return ops
-          .refresh()
-          .then(() => ops.state())
-          .then((s) => live && adopt(s))
-          .catch(() => undefined)
-          .finally(() => live && setChecking(false));
-      });
-    // Other changes (an agent's settings tool, another window) refresh the view without asking the servers again.
+      .catch((e: unknown) => live && setError(errorText(e)));
+    // Other changes (an agent's settings tool, another window) refresh the view without asking the servers.
     const off = shell.bus.on('local_models', () => void ops.state().then((s) => live && adopt(s)).catch(() => undefined));
     return () => {
       live = false;
@@ -132,6 +123,21 @@ export function LocalModelsPane() {
     }
   };
 
+  /** Asks every enabled server what it has; the one thing besides Test that contacts them. */
+  const checkServers = async () => {
+    setChecking(true);
+    setError(null);
+    setNote(null);
+    try {
+      await ops.refresh();
+      adopt(await ops.state());
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setChecking(false);
+    }
+  };
+
   const remove = (key: string) => setDrafts((list) => list.filter((d) => d.key !== key));
 
   const s = state;
@@ -145,10 +151,13 @@ export function LocalModelsPane() {
               Checking the servers…
             </span>
           )}
+          <Button variant="secondary" data-testid="localmodels-check" disabled={checking || !s || s.servers.length === 0} onClick={() => void checkServers()}>
+            Check servers
+          </Button>
         </div>
         <p className="lm-help">
-          Local models run on this machine, behind a model server. Helm only talks to a server when you ask: when this page opens, when you open the model picker, on Test, and when a local chat sends a message. A
-          server must be on this machine (127.0.0.1, localhost or ::1) and use plain http.
+          Local models run on this machine, behind a model server. Helm only talks to a server when you ask: with Check servers (here or in the model picker), with Test, and when a local chat sends a message. Opening this
+          page or the picker asks nothing. A server must be on this machine (127.0.0.1, localhost or ::1) and use plain http.
         </p>
         {drafts.length === 0 && s && <p className="lm-help">No servers yet. Add one below.</p>}
         {drafts.map((d) => {

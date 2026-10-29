@@ -103,6 +103,7 @@ describe("launch and handshake", () => {
         ANTHROPIC_DEFAULT_OPUS_MODEL: "fake-flash",
         ANTHROPIC_DEFAULT_SONNET_MODEL: "fake-flash",
         ANTHROPIC_DEFAULT_HAIKU_MODEL: "fake-flash",
+        CLAUDE_CODE_SUBAGENT_MODEL: "fake-flash",
         CLAUDE_CODE_MAX_CONTEXT_TOKENS: "65536",
         CLAUDE_CODE_MAX_OUTPUT_TOKENS: "8192",
         MAX_THINKING_TOKENS: "8192",
