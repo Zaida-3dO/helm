@@ -49,7 +49,7 @@ export interface FakeModel {
 }
 
 /** What a scripted reply says; a plain string is `{text}`. */
-export interface ReplySpec {
+export interface ReplyScript {
   /** Streamed in a few deltas. */
   text?: string;
   /** A thinking block before the text (what Claude Code shows as reasoning). */
@@ -81,7 +81,7 @@ export interface FakeLocalModelOptions {
   loadDelayMs?: number;
   models?: Partial<FakeModel>[];
   /** Answer to every Messages request unless `reply` is a function. */
-  reply?: string | ReplySpec | ((request: Json) => string | ReplySpec);
+  reply?: string | ReplyScript | ((request: Json) => string | ReplyScript);
   /** Where the Strata model list lives: "/v1/models" (default), "/models", or "none" (404 both). */
   modelsPath?: "/v1/models" | "/models" | "none";
 }
@@ -209,11 +209,11 @@ export async function startFakeLocalModel(opts: FakeLocalModelOptions = {}): Pro
         const m = find(name);
         if (!m) return anthropicError(res, entry, 404, "not_found_error", `model: ${name}`);
         await load(m);
-        const spec = (() => {
+        const script = (() => {
           const r = typeof reply === "function" ? reply(body ?? {}) : reply;
           return typeof r === "string" ? { text: r } : r;
         })();
-        return body?.stream === true ? streamMessage(res, entry, name, spec) : send(res, entry, 200, plainMessage(name, spec));
+        return body?.stream === true ? streamMessage(res, entry, name, script) : send(res, entry, 200, plainMessage(name, script));
       }
 
       // ---- Strata
@@ -287,32 +287,32 @@ export async function startFakeLocalModel(opts: FakeLocalModelOptions = {}): Pro
   });
 
   // ---- message bodies
-  const usageOf = (spec: ReplySpec) => ({ input_tokens: spec.inputTokens ?? 12, output_tokens: spec.outputTokens ?? 7 });
-  function blocks(spec: ReplySpec): Json[] {
+  const usageOf = (script: ReplyScript) => ({ input_tokens: script.inputTokens ?? 12, output_tokens: script.outputTokens ?? 7 });
+  function blocks(script: ReplyScript): Json[] {
     const out: Json[] = [];
-    if (spec.thinking) out.push({ type: "thinking", thinking: spec.thinking, signature: "fake-signature" });
-    if (spec.text) out.push({ type: "text", text: spec.text });
-    if (spec.toolUse) out.push({ type: "tool_use", id: `toolu_fake_${++msgSeq}`, name: spec.toolUse.name, input: spec.toolUse.input });
+    if (script.thinking) out.push({ type: "thinking", thinking: script.thinking, signature: "fake-signature" });
+    if (script.text) out.push({ type: "text", text: script.text });
+    if (script.toolUse) out.push({ type: "tool_use", id: `toolu_fake_${++msgSeq}`, name: script.toolUse.name, input: script.toolUse.input });
     return out;
   }
-  const plainMessage = (model: string, spec: ReplySpec): Json => ({
+  const plainMessage = (model: string, script: ReplyScript): Json => ({
     id: `msg_fake_${++msgSeq}`,
     type: "message",
     role: "assistant",
     model,
-    content: blocks(spec),
-    stop_reason: spec.toolUse ? "tool_use" : "end_turn",
+    content: blocks(script),
+    stop_reason: script.toolUse ? "tool_use" : "end_turn",
     stop_sequence: null,
-    usage: usageOf(spec),
+    usage: usageOf(script),
   });
 
-  function streamMessage(res: ServerResponse, entry: LoggedRequest, model: string, spec: ReplySpec): void {
+  function streamMessage(res: ServerResponse, entry: LoggedRequest, model: string, script: ReplyScript): void {
     entry.status = 200;
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
     const ev = (event: string, data: Json) => res.write(`event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`);
-    const usage = usageOf(spec);
+    const usage = usageOf(script);
     ev("message_start", { message: { id: `msg_fake_${++msgSeq}`, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: usage.input_tokens, output_tokens: 1 } } });
-    const list = blocks(spec);
+    const list = blocks(script);
     list.forEach((b, index) => {
       if (b.type === "thinking") {
         ev("content_block_start", { index, content_block: { type: "thinking", thinking: "" } });
@@ -330,7 +330,7 @@ export async function startFakeLocalModel(opts: FakeLocalModelOptions = {}): Pro
       }
       ev("content_block_stop", { index });
     });
-    ev("message_delta", { delta: { stop_reason: spec.toolUse ? "tool_use" : "end_turn", stop_sequence: null }, usage: { output_tokens: usage.output_tokens } });
+    ev("message_delta", { delta: { stop_reason: script.toolUse ? "tool_use" : "end_turn", stop_sequence: null }, usage: { output_tokens: usage.output_tokens } });
     ev("message_stop", {});
     res.end();
   }
@@ -366,8 +366,8 @@ export async function startFakeLocalModel(opts: FakeLocalModelOptions = {}): Pro
 
 // ---- command line
 
-function parseModels(spec: string): Partial<FakeModel>[] {
-  return spec.split(",").filter(Boolean).map((part) => {
+function parseModels(script: string): Partial<FakeModel>[] {
+  return script.split(",").filter(Boolean).map((part) => {
     // "@" separates the fields because Ollama names hold colons and slashes ("name:3b").
     const [name, ctx, size] = part.split("@");
     return { name, ...(ctx ? { contextTokens: Number(ctx) } : {}), ...(size ? { sizeBytes: Number(size) } : {}) };

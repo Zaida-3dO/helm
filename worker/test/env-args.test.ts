@@ -42,8 +42,8 @@ test("non-essential traffic and auto-update are off", () => {
 
 test("a local launch: loopback http only, every model slot local, the effort as a thinking budget, the key from the hand-over", () => {
   // Where the base URL may point.
-  for (const ok of ["http://127.0.0.1:18731", "http://localhost:11434/", "http://[::1]:8080"]) assert.doesNotThrow(() => assertLoopbackHttp(ok), ok);
-  assert.equal(assertLoopbackHttp("http://localhost:11434/"), "http://localhost:11434");
+  for (const ok of ["http://127.0.0.1:40731", "http://localhost:40434/", "http://[::1]:8080"]) assert.doesNotThrow(() => assertLoopbackHttp(ok), ok);
+  assert.equal(assertLoopbackHttp("http://localhost:40434/"), "http://localhost:40434");
   for (const bad of ["https://127.0.0.1:1", "http://10.0.0.5:1", "http://127.0.0.1.evil.com:1", "http://127.0.0.1@evil.com:1", "http://user:pw@127.0.0.1:1", "ftp://127.0.0.1", "127.0.0.1:1", ""]) {
     assert.throws(() => assertLoopbackHttp(bad), undefined, bad);
   }
@@ -55,7 +55,7 @@ test("a local launch: loopback http only, every model slot local, the effort as 
   assert.equal(takeLocalKey({ HELM_LOCAL_MODEL_KEY: "" }), undefined);
 
   // Efforts become thinking budgets; low is off; no effort uses the launch's own figure.
-  const local = { baseUrl: "http://127.0.0.1:18731", model: "qwen:8b", thinkingTokens: 777 };
+  const local = { baseUrl: "http://127.0.0.1:40731", model: "qwen:8b", thinkingTokens: 777 };
   const budget = (effort?: string) => buildClaudeEnv({}, { local, localKey: "k", effort }).MAX_THINKING_TOKENS;
   assert.deepEqual(["low", "medium", "high", "xhigh", "max"].map(budget), ["0", "4096", "8192", "16384", "32768"]);
   assert.equal(budget(undefined), "777");
@@ -63,7 +63,7 @@ test("a local launch: loopback http only, every model slot local, the effort as 
 
   // Optional limits are set only when known; the token is the key, or a placeholder, never the user's.
   const env = buildClaudeEnv({ ...base, ANTHROPIC_CUSTOM_HEADERS: "x-auth: secret", CLAUDE_CODE_USE_VERTEX: "1", no_proxy: "a" }, { apiKeyMode: true, local, localKey: "k", effort: "low" });
-  assert.deepEqual([env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_BASE_URL, env.ANTHROPIC_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL], ["k", "http://127.0.0.1:18731", "qwen:8b", "qwen:8b"]);
+  assert.deepEqual([env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_BASE_URL, env.ANTHROPIC_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL], ["k", "http://127.0.0.1:40731", "qwen:8b", "qwen:8b"]);
   assert.deepEqual(["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDECODE", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"].filter((k) => k in env), [], "not even in API-key mode");
   assert.equal(env.no_proxy, "a,127.0.0.1,localhost,::1");
   assert.equal(env.CLAUDE_CODE_USE_GATEWAY, "1", "the base URL is treated as a gateway, so the thinking budget is what is sent");

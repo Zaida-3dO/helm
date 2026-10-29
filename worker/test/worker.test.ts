@@ -140,7 +140,7 @@ describe("launch and handshake", () => {
   });
 
   test("a local-model launch to a host that is not on this machine is refused before claude starts", async () => {
-    for (const baseUrl of ["http://192.168.1.20:18731", "https://127.0.0.1:18731", "http://127.0.0.1@example.com:18731", "not a url"]) {
+    for (const baseUrl of ["http://192.168.1.20:40731", "https://127.0.0.1:40731", "http://127.0.0.1@example.com:40731", "not a url"]) {
       const s = startWithFixture("streaming", { claude: { local: { baseUrl, model: "m" } }, env: { HELM_LOCAL_MODEL_KEY: "fake-local-key" } });
       try {
         const r = await s.host.ready();
