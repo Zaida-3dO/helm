@@ -30,6 +30,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         crate::modes::RequestModes::ident(),
         CostTotals::ident(),
         ChatCost::ident(),
+        LocalTrack::ident(),
         WeeklyShare::ident(),
         CostScope::ident(),
         CostReport::ident(),

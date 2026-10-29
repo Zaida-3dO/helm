@@ -4,6 +4,7 @@ export type { ChatCost } from './ChatCost.ts';
 export type { CostReport } from './CostReport.ts';
 export type { CostScope } from './CostScope.ts';
 export type { CostTotals } from './CostTotals.ts';
+export type { LocalTrack } from './LocalTrack.ts';
 export type { ModelUsage } from './ModelUsage.ts';
 export type { PlanUsageReading } from './PlanUsageReading.ts';
 export type { ReadinessState } from './ReadinessState.ts';

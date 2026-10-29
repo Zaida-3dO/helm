@@ -147,7 +147,37 @@ pub struct CostTotals {
     pub cost_usd: f64,
 }
 
-/// One chat's line in a cost report.
+/// What chats on local models used, kept apart from Claude's figures: their tokens cost nothing and
+/// never count toward the plan, so the cost beside them is what the same tokens would have cost on
+/// a Claude model (an estimate at published API prices, not a bill).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalTrack {
+    #[ts(type = "number")]
+    pub turns: i64,
+    #[ts(type = "number")]
+    pub input_tokens: i64,
+    #[ts(type = "number")]
+    pub output_tokens: i64,
+    #[ts(type = "number")]
+    pub cache_read_tokens: i64,
+    #[ts(type = "number")]
+    pub cache_write_tokens: i64,
+    /// The four counts added up.
+    #[ts(type = "number")]
+    pub total_tokens: i64,
+    /// What those tokens would have cost on `compared_with`, in US dollars.
+    pub would_cost_usd: f64,
+    /// The Claude model compared with, as the setting names it (`opus`, `sonnet` or `haiku`), and
+    /// its display name.
+    pub compared_with: String,
+    pub compared_name: String,
+    /// When the prices used were read (a date, `YYYY-MM-DD`).
+    pub prices_read: String,
+}
+
+/// One chat's line in a cost report. For a chat on a local model `totals` and the weekly figures
+/// are zero, and its use is in `local`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatCost {
@@ -161,6 +191,10 @@ pub struct ChatCost {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub weekly_pct: Option<f64>,
+    /// Present for a chat on a local model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub local: Option<LocalTrack>,
 }
 
 /// How a report's weekly share was worked out.
@@ -200,8 +234,13 @@ pub struct CostReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub weekly: Option<WeeklyShare>,
-    /// Every chat that used anything, the costliest first (one line for a chat report).
+    /// Every chat that used anything, the costliest first (one line for a chat report), local
+    /// chats after the Claude ones.
     pub chats: Vec<ChatCost>,
+    /// What the local chats in here used, apart from `totals`; absent when none is local.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub local: Option<LocalTrack>,
     /// How many of those chats are archived (they are counted).
     pub archived_chats: u32,
     /// Some reply in here is older than the first turn Helm recorded, so it is not counted.

@@ -54,8 +54,9 @@ fn usage_cost(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         Some((w.pct?, w.resets_at?))
     });
     let db = ctx.services.need::<Database>()?;
-    let report =
-        cost_report(&db, scope, &id, weekly, now).map_err(|e| ApiError::new("refused", e))?;
+    let compare = crate::prices::compare_key(&ctx.services);
+    let report = cost_report(&db, scope, &id, weekly, &compare, now)
+        .map_err(|e| ApiError::new("refused", e))?;
     to_value(&report)
 }
 

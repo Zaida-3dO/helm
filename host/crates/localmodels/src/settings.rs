@@ -501,13 +501,13 @@ mod tests {
     #[test]
     fn the_address_rule_keeps_servers_on_this_machine() {
         for (raw, want) in [
-            ("http://127.0.0.1:18731", Ok("http://127.0.0.1:18731")),
-            ("http://127.0.0.1:18731/", Ok("http://127.0.0.1:18731")),
-            ("  HTTP://LocalHost:11434  ", Ok("http://localhost:11434")),
+            ("http://127.0.0.1:9101", Ok("http://127.0.0.1:9101")),
+            ("http://127.0.0.1:9101/", Ok("http://127.0.0.1:9101")),
+            ("  HTTP://LocalHost:9102  ", Ok("http://localhost:9102")),
             ("http://[::1]:8080", Ok("http://[::1]:8080")),
             ("http://127.0.0.1", Ok("http://127.0.0.1:80")),
             ("https://127.0.0.1:1", Err("http://")),
-            ("http://192.168.1.5:11434", Err("not on this machine")),
+            ("http://192.168.1.5:9102", Err("not on this machine")),
             ("http://localhost.evil.test:1", Err("not on this machine")),
             ("http://127.0.0.1:1@evil.test:2", Err("parts")),
             ("http://user@127.0.0.1:1", Err("parts")),
@@ -665,8 +665,10 @@ mod tests {
         reg.initializer("local-models", init);
         let db = helm_core::db::Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap();
         assert_eq!(db.snapshot(load).unwrap(), LocalSettings::default());
-        let mut s = LocalSettings::default();
-        s.ollama_context = 32_768;
+        let mut s = LocalSettings {
+            ollama_context: 32_768,
+            ..Default::default()
+        };
         s.servers[1].enabled = false;
         db.write(|tx| store(tx, &s)).unwrap();
         assert_eq!(db.snapshot(load).unwrap(), s);

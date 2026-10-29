@@ -78,5 +78,10 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
     if let Some(rt) = services.get::<ChatRuntime>() {
         rt.set_local_models(svc.clone());
     }
+    // The cost report prices local tokens against the model chosen here.
+    let chosen = svc.clone();
+    services.insert(Arc::new(helm_usage::CompareChoice(Arc::new(move || {
+        chosen.settings().compare_with.key().to_owned()
+    }))));
     services.insert(svc);
 }

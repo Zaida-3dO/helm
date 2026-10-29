@@ -2,6 +2,7 @@
 import type { ChatCost } from "./ChatCost";
 import type { CostScope } from "./CostScope";
 import type { CostTotals } from "./CostTotals";
+import type { LocalTrack } from "./LocalTrack";
 import type { WeeklyShare } from "./WeeklyShare";
 
 /**
@@ -17,9 +18,14 @@ name: string, totals: CostTotals,
  */
 weekly?: WeeklyShare, 
 /**
- * Every chat that used anything, the costliest first (one line for a chat report).
+ * Every chat that used anything, the costliest first (one line for a chat report), local
+ * chats after the Claude ones.
  */
 chats: Array<ChatCost>, 
+/**
+ * What the local chats in here used, apart from `totals`; absent when none is local.
+ */
+local?: LocalTrack, 
 /**
  * How many of those chats are archived (they are counted).
  */

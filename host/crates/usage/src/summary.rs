@@ -10,8 +10,14 @@
 //!
 //! `usage_cost` ([`cost_report`]) reads the same records for one chat or project, and adds an
 //! estimated share of the plan's weekly window from the meter's last reading.
+//!
+//! **Chats on local models are kept apart.** Their turns cost nothing and never count toward the
+//! plan, so the totals, models, days and weekly shares here are Claude's alone. What the local
+//! chats used is a separate `local` block, with what the same tokens would have cost on a Claude
+//! model ([`crate::prices`]).
 
-use crate::types::{ChatCost, CostReport, CostScope, CostTotals, WeeklyShare};
+use crate::prices::{price, would_cost, Price, PRICES_READ};
+use crate::types::{ChatCost, CostReport, CostScope, CostTotals, LocalTrack, WeeklyShare};
 use helm_core::db::Database;
 use helm_hosttools::{HostToolRegistry, ToolCtx, ToolError, ToolResult, ToolSpec};
 use serde_json::{json, Map, Value};
@@ -61,6 +67,22 @@ impl Sums {
 
     fn total(&self) -> i64 {
         self.input + self.output + self.cache_read + self.cache_write
+    }
+}
+
+/// A local chat's (or a group's) use, priced against `p`.
+fn track(s: &Sums, p: &Price) -> LocalTrack {
+    LocalTrack {
+        turns: s.turns,
+        input_tokens: s.input,
+        output_tokens: s.output,
+        cache_read_tokens: s.cache_read,
+        cache_write_tokens: s.cache_write,
+        total_tokens: s.total(),
+        would_cost_usd: would_cost(p, s.input, s.output, s.cache_read, s.cache_write),
+        compared_with: p.key.to_owned(),
+        compared_name: p.name.to_owned(),
+        prices_read: PRICES_READ.to_owned(),
     }
 }
 
@@ -123,7 +145,8 @@ fn window(a: &Value, now: i64) -> Result<(i64, i64, String), ToolError> {
     Ok((since, now + 1, range.into()))
 }
 
-type Row = (String, String, String, i64, Sums);
+/// A chat, its title, model, day and sums, and whether the chat runs on a local model.
+type Row = (String, String, String, i64, Sums, bool);
 
 fn read_rows(
     db: &Database,
@@ -134,7 +157,7 @@ fn read_rows(
     db.snapshot(|tx| {
         let mut st = tx.prepare(&format!(
             "SELECT c.id, c.title, COALESCE(c.model, 'default'), u.timestamp / 86400000,
-                        COUNT(*), {SUMS}
+                        COUNT(*), {SUMS}, c.provider IS NOT NULL
                  FROM chat_turn_usage u JOIN chats c ON c.id = u.chat_id
                  WHERE {OWN_USAGE} AND u.timestamp >= ?1 AND u.timestamp < ?2
                    AND (?3 IS NULL OR c.id = ?3)
@@ -154,6 +177,7 @@ fn read_rows(
                     cache_write: r.get(8)?,
                     cost: r.get(9)?,
                 },
+                r.get::<_, bool>(10)?,
             ))
         })?;
         it.collect::<rusqlite::Result<Vec<Row>>>()
@@ -162,15 +186,29 @@ fn read_rows(
 }
 
 /// Build the digest. `now` is a parameter so a test can pin the window.
-pub fn digest(db: &Database, a: &Value, now: i64) -> ToolResult {
+pub fn digest(db: &Database, a: &Value, compare: &str, now: i64) -> ToolResult {
     let (since, until, label) = window(a, now)?;
     let rows = read_rows(db, since, until, a.get("chatId").and_then(Value::as_str))?;
+    let p = price(compare);
+    let mut local = Sums::default();
+    let mut local_models: BTreeMap<String, Sums> = BTreeMap::new();
+    let mut local_chats: BTreeMap<String, (String, Sums)> = BTreeMap::new();
 
     let mut total = Sums::default();
     let mut by_model: BTreeMap<String, Sums> = BTreeMap::new();
     let mut by_day: BTreeMap<i64, Sums> = BTreeMap::new();
     let mut by_chat: BTreeMap<String, (String, Sums)> = BTreeMap::new();
-    for (id, title, model, day, s) in &rows {
+    for (id, title, model, day, s, is_local) in &rows {
+        if *is_local {
+            local.add(s);
+            local_models.entry(model.clone()).or_default().add(s);
+            local_chats
+                .entry(id.clone())
+                .or_insert_with(|| (title.clone(), Sums::default()))
+                .1
+                .add(s);
+            continue;
+        }
         total.add(s);
         by_model.entry(model.clone()).or_default().add(s);
         by_day.entry(*day).or_default().add(s);
@@ -230,8 +268,11 @@ pub fn digest(db: &Database, a: &Value, now: i64) -> ToolResult {
         "byDay": days,
         "topChats": chats,
         "chatsWithUsage": chats_total,
-        "notes": "Local records only: each turn's token counts (subagents included) and the cost the binary reported. A model is the chat's current model. No plan percentage or reset time.",
+        "notes": "Local records only: each turn's token counts (subagents included) and the cost the binary reported. A model is the chat's current model. No plan percentage or reset time. Chats on local models are not in these figures; see local.",
     });
+    if local.turns > 0 {
+        out["local"] = local_block(&local, &local_models, local_chats, &p);
+    }
     // Bounded: drop the tails of the longest lists first if the answer is over the size bound.
     for key in ["topChats", "byDay"] {
         while serde_json::to_vec(&out).map(|v| v.len()).unwrap_or(0) > MAX_BYTES {
@@ -244,6 +285,50 @@ pub fn digest(db: &Database, a: &Value, now: i64) -> ToolResult {
     }
     Ok(out)
 }
+
+/// The `local` block of the digest: what chats on local models used, with what it would have cost
+/// on Claude. The models and chats listed are the heaviest few.
+fn local_block(
+    total: &Sums,
+    models: &BTreeMap<String, Sums>,
+    chats: BTreeMap<String, (String, Sums)>,
+    p: &Price,
+) -> Value {
+    let mut block = serde_json::to_value(track(total, p)).unwrap_or(Value::Null);
+    block["costUsd"] = json!(0);
+    let mut by_model: Vec<(&String, &Sums)> = models.iter().collect();
+    by_model.sort_by_key(|(_, s)| std::cmp::Reverse(s.total()));
+    block["byModel"] = Value::Array(
+        by_model
+            .into_iter()
+            .take(TOP_LOCAL)
+            .map(|(name, s)| {
+                let mut v = serde_json::to_value(track(s, p)).unwrap_or(Value::Null);
+                v["model"] = json!(name);
+                v
+            })
+            .collect(),
+    );
+    let mut by_chat: Vec<(String, (String, Sums))> = chats.into_iter().collect();
+    by_chat.sort_by_key(|(_, (_, s))| std::cmp::Reverse(s.total()));
+    block["chats"] = Value::Array(
+        by_chat
+            .into_iter()
+            .take(TOP_LOCAL)
+            .map(|(id, (title, s))| {
+                let mut v = serde_json::to_value(track(&s, p)).unwrap_or(Value::Null);
+                v["chatId"] = json!(id);
+                v["title"] = json!(title.chars().take(80).collect::<String>());
+                v
+            })
+            .collect(),
+    );
+    block["notes"] = json!("Chats on local models cost nothing and are not in the plan's figures or in the totals above. wouldCostUsd is an estimate of what the same tokens would have cost on the Claude model named in comparedWith at published API prices read on pricesRead; it is not a bill.");
+    block
+}
+
+/// Models and chats listed in the digest's local block.
+const TOP_LOCAL: usize = 5;
 
 const WEEK_MS: i64 = 7 * DAY_MS;
 
@@ -280,11 +365,15 @@ pub fn cost_report(
     scope: CostScope,
     id: &str,
     weekly: Option<(f64, i64)>,
+    compare: &str,
     now: i64,
 ) -> Result<CostReport, String> {
     let window = weekly.filter(|(_, resets)| *resets > now);
     let since = window.map_or(i64::MAX, |(_, r)| r - WEEK_MS);
-    type Line = (String, String, bool, Sums, f64);
+    let p = price(compare);
+    // A chat, its title, whether it is archived, its sums, its cost in the weekly window and
+    // whether it runs on a local model.
+    type Line = (String, String, bool, Sums, f64, bool);
     let read = db.snapshot(|tx| {
         let name: Option<String> = match scope {
             CostScope::Chat => tx.query_row("SELECT title FROM chats WHERE id = ?1", [id], |r| r.get(0)),
@@ -308,7 +397,8 @@ pub fn cost_report(
         };
         let mut st = tx.prepare(&format!(
             "SELECT c.id, c.title, c.archived, COUNT(*), {SUMS},
-                    SUM(CASE WHEN u.timestamp >= ?2 THEN u.cost_usd ELSE 0.0 END)
+                    SUM(CASE WHEN u.timestamp >= ?2 THEN u.cost_usd ELSE 0.0 END),
+                    c.provider IS NOT NULL
              FROM chat_turn_usage u JOIN chats c ON c.id = u.chat_id
              WHERE {chats} AND {OWN_USAGE}
              GROUP BY c.id"
@@ -328,6 +418,7 @@ pub fn cost_report(
                         cost: r.get(8)?,
                     },
                     r.get::<_, f64>(9)?,
+                    r.get::<_, bool>(10)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<Line>>>()?;
@@ -335,7 +426,7 @@ pub fn cost_report(
             &format!(
                 "SELECT COALESCE(SUM(u.cost_usd), 0.0)
                  FROM chat_turn_usage u JOIN chats c ON c.id = u.chat_id
-                 WHERE u.timestamp >= ?1 AND {OWN_USAGE}"
+                 WHERE u.timestamp >= ?1 AND {OWN_USAGE} AND c.provider IS NULL"
             ),
             [since],
             |r| r.get(0),
@@ -354,24 +445,29 @@ pub fn cost_report(
         )?;
         Ok::<_, rusqlite::Error>(Some((name, lines, helm, first, uncounted)))
     });
-    let (name, mut lines, helm, counting_since, uncounted_replies) = read
+    let (name, lines, helm, counting_since, uncounted_replies) = read
         .map_err(|e| format!("The usage records could not be read: {e}"))?
         .ok_or_else(|| match scope {
             CostScope::Chat => "There is no such chat.".to_owned(),
             CostScope::Project => "There is no such project.".to_owned(),
         })?;
+    // Chats on local models are reported apart: Claude's chats first, costliest first, then the
+    // local ones, heaviest first.
+    let (mut lines, mut local_lines): (Vec<Line>, Vec<Line>) =
+        lines.into_iter().partition(|l| !l.5);
     lines.sort_by(|a, b| {
         b.3.cost
             .total_cmp(&a.3.cost)
             .then(b.3.total().cmp(&a.3.total()))
     });
+    local_lines.sort_by_key(|l| std::cmp::Reverse(l.3.total()));
     let share = |cost: f64| window.map(|(pct, _)| if helm > 0.0 { cost / helm * pct } else { 0.0 });
     let mut sum = Sums::default();
     let mut week_cost = 0.0;
     let mut archived_chats = 0;
     let chats = lines
         .into_iter()
-        .map(|(chat_id, title, archived, s, week)| {
+        .map(|(chat_id, title, archived, s, week, _)| {
             sum.add(&s);
             week_cost += week;
             archived_chats += u32::from(archived);
@@ -382,9 +478,25 @@ pub fn cost_report(
                 totals: totals(&s),
                 week_cost_usd: week,
                 weekly_pct: share(week),
+                local: None,
             }
         })
-        .collect();
+        .collect::<Vec<ChatCost>>();
+    let mut local_sum = Sums::default();
+    let mut chats = chats;
+    for (chat_id, title, archived, s, _, _) in local_lines {
+        local_sum.add(&s);
+        archived_chats += u32::from(archived);
+        chats.push(ChatCost {
+            chat_id,
+            title,
+            archived,
+            totals: CostTotals::default(),
+            week_cost_usd: 0.0,
+            weekly_pct: None,
+            local: Some(track(&s, &p)),
+        });
+    }
     Ok(CostReport {
         scope,
         name,
@@ -398,6 +510,7 @@ pub fn cost_report(
             share_pct: share(week_cost).unwrap_or(0.0),
         }),
         chats,
+        local: (local_sum.turns > 0).then(|| track(&local_sum, &p)),
         archived_chats,
         uncounted_replies,
         counting_since,
@@ -408,7 +521,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_usage_summary",
-            "A digest of this machine's own usage records: tokens, turns (subagents included) and the cost the binary reported, totalled and split by model, day and chat (the ten heaviest). Read-only and local; it has no plan percentage or reset time. Use range (today, 24h, 7d, 30d, all; default 7d) or since/until (YYYY-MM-DD or an RFC 3339 time), and chatId to look at one chat. Answers are at most 8 KiB.",
+            "A digest of this machine's own usage records: tokens, turns (subagents included) and the cost the binary reported, totalled and split by model, day and chat (the ten heaviest). Read-only and local; it has no plan percentage or reset time. Use range (today, 24h, 7d, 30d, all; default 7d) or since/until (YYYY-MM-DD or an RFC 3339 time), and chatId to look at one chat. Chats on local models are not in those figures: they have their own local block (tokens, which cost nothing, and what the same tokens would have cost on a Claude model, as an estimate). Answers are at most 8 KiB.",
             json!({
                 "type": "object",
                 "properties": {
@@ -425,7 +538,8 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 .services
                 .get::<Database>()
                 .ok_or_else(|| refuse("The usage records are not available."))?;
-            digest(&db, &a, helm_core::now_ms())
+            let compare = crate::prices::compare_key(&ctx.services);
+            digest(&db, &a, &compare, helm_core::now_ms())
         },
     );
 }
@@ -475,6 +589,14 @@ mod tests {
                     rusqlite::params![id, project, model, created, archived],
                 )?;
             }
+            // A chat on a local model in project p: a million tokens in, a hundred thousand out,
+            // and a cost Claude Code made up for a model it does not know (which is not recorded).
+            tx.execute(
+                "INSERT INTO chats(id, project_id, title, provider, model, created_at, updated_at)
+                 VALUES ('loc', 'p', 'Local one', 'ollama', 'qwen3:8b', 1, 1)",
+                [],
+            )?;
+            turn(tx, "loc", "s:9", 10 * DAY_MS, 1_000_000, 100_000, 0.0)?;
             turn(tx, "a", "s:1", 10 * DAY_MS, 100, 10, 0.5)?;
             turn(tx, "a", "s:2", 9 * DAY_MS, 50, 5, 0.25)?;
             turn(tx, "b", "s:3", 9 * DAY_MS, 7, 1, 0.01)?;
@@ -496,7 +618,7 @@ mod tests {
         })
         .unwrap();
 
-        let all = digest(&db, &json!({"range": "7d"}), now).unwrap();
+        let all = digest(&db, &json!({"range": "7d"}), "sonnet", now).unwrap();
         // s:6 is outside seven days; the fork's inherited s:7 is its source's.
         assert_eq!(all["total"]["turns"], 4);
         assert_eq!(all["total"]["inputTokens"], 167);
@@ -504,13 +626,37 @@ mod tests {
         assert_eq!(all["byModel"][0]["model"], "opus");
         assert_eq!(all["byModel"][1]["model"], "default");
         assert_eq!(all["byDay"].as_array().unwrap().len(), 2);
-        assert_eq!(all["chatsWithUsage"], 3);
+        assert_eq!(
+            all["chatsWithUsage"], 3,
+            "a local chat is not among Claude's"
+        );
+        // The local chat is its own block, priced against the comparison model.
+        let l = &all["local"];
+        assert_eq!(
+            (l["turns"].as_i64(), l["totalTokens"].as_i64()),
+            (Some(1), Some(1_100_003))
+        );
+        assert_eq!(
+            (l["costUsd"].as_i64(), l["comparedWith"].as_str()),
+            (Some(0), Some("sonnet"))
+        );
+        assert!(
+            (l["wouldCostUsd"].as_f64().unwrap() - 3.000_005_2).abs() < 1e-9,
+            "{l}"
+        );
+        assert_eq!(l["byModel"][0]["model"], "qwen3:8b");
+        assert_eq!(l["chats"][0]["title"], "Local one");
+        let haiku = digest(&db, &json!({"range": "7d"}), "haiku", now).unwrap();
+        assert_eq!(haiku["local"]["comparedName"], "Haiku");
+        assert!((haiku["local"]["wouldCostUsd"].as_f64().unwrap() - 1.500_002_6).abs() < 1e-9);
+        assert!(one_has_no_local(&db, now));
         assert_eq!(all["topChats"][0]["chatId"], "a");
-        let one = digest(&db, &json!({"range": "all", "chatId": "b"}), now).unwrap();
+        let one = digest(&db, &json!({"range": "all", "chatId": "b"}), "sonnet", now).unwrap();
         assert_eq!(one["total"]["turns"], 1);
         let custom = digest(
             &db,
             &json!({"since": "1970-01-10", "until": 10 * DAY_MS}),
+            "sonnet",
             now,
         )
         .unwrap();
@@ -520,7 +666,7 @@ mod tests {
         // plan's 40% is shared out in proportion.
         let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-9, "{a} != {b}");
         let week = Some((40.0, now + 2 * DAY_MS));
-        let a = cost_report(&db, CostScope::Chat, "a", week, now).unwrap();
+        let a = cost_report(&db, CostScope::Chat, "a", week, "sonnet", now).unwrap();
         assert_eq!(a.name, "a");
         assert_eq!(a.totals.input_tokens, 1150);
         assert_eq!(a.totals.total_tokens, 1150 + 1015 + 3 + 6);
@@ -534,25 +680,64 @@ mod tests {
             (a.uncounted_replies, a.counting_since),
             (true, Some(2 * DAY_MS))
         );
-        let b = cost_report(&db, CostScope::Chat, "b", week, now).unwrap();
+        assert!(a.local.is_none(), "a Claude chat has no local figures");
+        let loc = cost_report(&db, CostScope::Chat, "loc", week, "opus", now).unwrap();
+        assert_eq!((loc.totals.total_tokens, loc.totals.cost_usd), (0, 0.0));
+        let w = loc.weekly.as_ref().unwrap();
+        assert_eq!(
+            (w.cost_usd, w.share_pct),
+            (0.0, 0.0),
+            "no share of the plan"
+        );
+        assert_eq!(loc.local.as_ref().unwrap().compared_with, "opus");
+        assert!((loc.local.unwrap().would_cost_usd - 6.000_010_2).abs() < 1e-9);
+        let b = cost_report(&db, CostScope::Chat, "b", week, "sonnet", now).unwrap();
         assert!(!b.uncounted_replies);
-        let f = cost_report(&db, CostScope::Chat, "f", week, now).unwrap();
+        let f = cost_report(&db, CostScope::Chat, "f", week, "sonnet", now).unwrap();
         assert_eq!((f.totals.input_tokens, f.archived_chats), (10, 1));
         // A project counts its sub-projects and archived chats, costliest chat first.
-        let p = cost_report(&db, CostScope::Project, "p", week, now).unwrap();
+        let p = cost_report(&db, CostScope::Project, "p", week, "sonnet", now).unwrap();
         let ids: Vec<&str> = p.chats.iter().map(|c| c.chat_id.as_str()).collect();
-        assert_eq!(ids, ["a", "f", "b"]);
+        assert_eq!(
+            ids,
+            ["a", "f", "b", "loc"],
+            "local chats come after Claude's"
+        );
+        assert_eq!(
+            p.chats[3].totals,
+            CostTotals::default(),
+            "nothing of it is Claude's"
+        );
+        let track = p.chats[3].local.as_ref().unwrap();
+        assert_eq!(
+            (track.total_tokens, track.compared_name.as_str()),
+            (1_100_003, "Sonnet")
+        );
+        assert_eq!(p.local.as_ref().unwrap().total_tokens, 1_100_003);
+        assert_eq!(
+            p.local.as_ref().unwrap().prices_read,
+            crate::prices::PRICES_READ
+        );
+        assert!(p.chats[..3].iter().all(|c| c.local.is_none()));
         assert_eq!(p.archived_chats, 1);
         close(p.totals.cost_usd, 2.0);
         close(p.weekly.as_ref().unwrap().share_pct, 40.0);
         close(p.chats[1].weekly_pct.unwrap(), 9.6);
-        let q = cost_report(&db, CostScope::Project, "q", week, now).unwrap();
+        let q = cost_report(&db, CostScope::Project, "q", week, "sonnet", now).unwrap();
         assert_eq!(q.chats.len(), 1);
         // A weekly window that has already reset gives no share; unknown ids are refused.
-        let old = cost_report(&db, CostScope::Chat, "a", Some((40.0, now - 1)), now).unwrap();
+        let old = cost_report(
+            &db,
+            CostScope::Chat,
+            "a",
+            Some((40.0, now - 1)),
+            "sonnet",
+            now,
+        )
+        .unwrap();
         assert!(old.weekly.is_none() && old.chats[0].weekly_pct.is_none());
-        assert!(cost_report(&db, CostScope::Chat, "zz", week, now).is_err());
-        assert!(cost_report(&db, CostScope::Project, "zz", None, now).is_err());
+        assert!(cost_report(&db, CostScope::Chat, "zz", week, "sonnet", now).is_err());
+        assert!(cost_report(&db, CostScope::Project, "zz", None, "sonnet", now).is_err());
         // Bad input is refused with nothing read.
         for bad in [
             json!({"range": "year"}),
@@ -560,7 +745,12 @@ mod tests {
             json!({"since": 5, "until": 5}),
             json!({"since": "yesterday"}),
         ] {
-            assert!(digest(&db, &bad, now).is_err(), "{bad}");
+            assert!(digest(&db, &bad, "sonnet", now).is_err(), "{bad}");
         }
+    }
+
+    fn one_has_no_local(db: &Database, now: i64) -> bool {
+        let one = digest(db, &json!({"range": "all", "chatId": "b"}), "sonnet", now).unwrap();
+        one.get("local").is_none()
     }
 }
