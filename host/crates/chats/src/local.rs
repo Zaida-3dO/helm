@@ -57,6 +57,19 @@ pub(crate) use model_id_sql;
 /// [`model_id_sql!`] as a value, for queries built at run time.
 pub const MODEL_ID_SQL: &str = model_id_sql!();
 
+/// SQL for "this chat has started" (`c` is the chat): its first turn ran, or it was forked from a
+/// chat that did and carries that session on. From then on its model can't cross between Claude
+/// and local models, or between local servers; the picker and `chat_set_model` both read this.
+macro_rules! started_sql {
+    () => {
+        "(EXISTS(SELECT 1 FROM runs r WHERE r.chat_id = c.id) OR EXISTS(SELECT 1 FROM chat_forks f WHERE f.chat_id = c.id))"
+    };
+}
+pub(crate) use started_sql;
+
+/// [`started_sql!`] as a value, for queries built at run time.
+pub const STARTED_SQL: &str = started_sql!();
+
 /// Thinking budget for a local model, from the chat's effort. A local model has no effort levels;
 /// Claude Code is told how many tokens it may think with instead.
 pub fn thinking_tokens(effort: Option<&str>) -> u32 {
@@ -138,12 +151,6 @@ pub const NOT_AVAILABLE: &str = "Local models are not available in this build of
 
 pub type SharedLocal = Arc<dyn LocalModels>;
 
-/// Whether the chat has had a session: its first turn ran, or it was forked from one that did.
-pub(crate) fn has_session(sessions: &std::path::Path, chat_id: &str) -> bool {
-    crate::session_log::ClaudeBinding::load(sessions, chat_id)
-        .is_some_and(|b| b.native_session_id.is_some() || b.fork_of.is_some())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,7 +163,10 @@ mod tests {
                 "local/ollama/hf.co/user/model:Q4_K_M",
                 Some(("ollama", "hf.co/user/model:Q4_K_M")),
             ),
-            ("local/strata/qwen-3.8-flash", Some(("strata", "qwen-3.8-flash"))),
+            (
+                "local/strata/qwen-3.8-flash",
+                Some(("strata", "qwen-3.8-flash")),
+            ),
             ("local//m", None),
             ("local/s/", None),
             ("local/s", None),
@@ -168,7 +178,10 @@ mod tests {
             }
         }
         assert_eq!(columns(None), Ok((None, None)));
-        assert_eq!(columns(Some("opus[1m]")), Ok((None, Some("opus[1m]".into()))));
+        assert_eq!(
+            columns(Some("opus[1m]")),
+            Ok((None, Some("opus[1m]".into())))
+        );
         assert_eq!(
             columns(Some("local/a/b/c")),
             Ok((Some("a".into()), Some("b/c".into())))
@@ -176,8 +189,15 @@ mod tests {
         assert!(columns(Some("local/a")).is_err());
         assert!(columns(Some("local/")).is_err());
         assert_eq!(
-            [Some("low"), Some("medium"), Some("high"), Some("xhigh"), Some("max"), None]
-                .map(thinking_tokens),
+            [
+                Some("low"),
+                Some("medium"),
+                Some("high"),
+                Some("xhigh"),
+                Some("max"),
+                None
+            ]
+            .map(thinking_tokens),
             [0, 4096, 8192, 16384, 32768, 16384]
         );
     }

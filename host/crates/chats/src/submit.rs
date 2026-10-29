@@ -775,7 +775,7 @@ pub fn submission_action(
     Ok(SubmissionActionResult { submission })
 }
 
-/// The model is fixed once a chat has had a session: a chat that began on Claude stays on Claude
+/// The model is fixed once a chat has started: a chat that began on Claude stays on Claude
 /// models, and a chat on a local server stays on that server (another model on it is fine). Before
 /// the first turn any model may be picked. `before` is the chat's model id now, `to` the server
 /// the new model lives on (`None` for a Claude model).
@@ -786,7 +786,23 @@ fn refuse_model_crossing(
     to: Option<&str>,
 ) -> Result<(), ApiError> {
     let from = before.and_then(crate::local::split).map(|(s, _)| s);
-    if from == to || !crate::local::has_session(&rt.sh.cfg.sessions(), chat_id) {
+    if from == to {
+        return Ok(());
+    }
+    let started = rt
+        .db()
+        .snapshot(|t| {
+            t.query_row(
+                &format!(
+                    "SELECT {} FROM chats c WHERE c.id = ?1",
+                    crate::local::STARTED_SQL
+                ),
+                [chat_id],
+                |r| r.get::<_, bool>(0),
+            )
+        })
+        .map_err(sql)?;
+    if !started {
         return Ok(());
     }
     let why = match (from, to) {
@@ -837,7 +853,12 @@ pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecor
         }
     }
     if model.is_some() {
-        refuse_model_crossing(rt, &a.chat_id, before.model.as_deref(), new_provider.as_deref())?;
+        refuse_model_crossing(
+            rt,
+            &a.chat_id,
+            before.model.as_deref(),
+            new_provider.as_deref(),
+        )?;
     }
     let now = helm_core::now_ms();
     let artifacts = rt.sh.cfg.artifacts();
@@ -862,11 +883,9 @@ pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecor
             for (kind, text) in [
                 (
                     model.as_ref().map(|_| ContextKind::ModelChange),
-                    model.as_ref().map(|m| {
-                        match crate::local::split(m) {
-                            Some((_, name)) => format!("Model changed to {name} (local)"),
-                            None => format!("Model changed to {m}"),
-                        }
+                    model.as_ref().map(|m| match crate::local::split(m) {
+                        Some((_, name)) => format!("Model changed to {name} (local)"),
+                        None => format!("Model changed to {m}"),
                     }),
                 ),
                 (

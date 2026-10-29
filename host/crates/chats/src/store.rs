@@ -19,7 +19,8 @@ const CHAT_COLUMNS: &str = concat!(
      (SELECT k.id FROM chat_completions k WHERE k.chat_id = c.id AND k.read = 0), \
      EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id), \
      MAX(c.updated_at, COALESCE(a.last_activity_at, 0)), \
-     CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN COALESCE(a.stalled, 0) ELSE 0 END"
+     CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN COALESCE(a.stalled, 0) ELSE 0 END, ",
+    crate::local::started_sql!()
 );
 
 /// The joins [`CHAT_COLUMNS`] needs, after `FROM chats c`.
@@ -55,6 +56,7 @@ fn chat_from_row(r: &Row<'_>, revision: i64) -> rusqlite::Result<ChatRecord> {
         muted: r.get(19)?,
         last_activity_at: r.get(20)?,
         stalled: r.get(21)?,
+        started: r.get(22)?,
     })
 }
 
@@ -131,8 +133,8 @@ pub fn create_chat_in(
 ) -> rusqlite::Result<String> {
     let id = uuid::Uuid::new_v4().to_string();
     // A local model id is stored as the server (`provider`) and the server's own model name.
-    let (provider, model) = crate::local::columns(model)
-        .map_err(rusqlite::Error::InvalidParameterName)?;
+    let (provider, model) =
+        crate::local::columns(model).map_err(rusqlite::Error::InvalidParameterName)?;
     tx.execute(
         "INSERT INTO chats(id, project_id, title, status, harness, provider, model, thinking, created_at, updated_at)
          VALUES (?1, ?2, ?3, 'idle', 'claude', ?4, ?5, ?6, ?7, ?7)",

@@ -26,4 +26,10 @@ lastActivityAt: number,
  * A running chat with no worker output for `stallMinutes` (default 5). Stop still works; the
  * flag clears on the next output or when the turn ends.
  */
-stalled: boolean, };
+stalled: boolean, 
+/**
+ * The chat's first turn has run (or it was forked from one that did). From then on its model
+ * can switch among Claude models, or among models on the same local server, but not between
+ * Claude and local models or between local servers.
+ */
+started: boolean, };

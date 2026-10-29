@@ -54,7 +54,9 @@ pub fn override_from(raw: Option<&str>, debug: bool) -> Option<Override> {
     match settings::check_base_url(raw) {
         Ok(u) => Some(Override::Url(u)),
         Err(e) => {
-            log::error!("{TEST_ENV} is not a loopback address ({e}); no local server will be contacted");
+            log::error!(
+                "{TEST_ENV} is not a loopback address ({e}); no local server will be contacted"
+            );
             Some(Override::Off)
         }
     }
@@ -62,7 +64,10 @@ pub fn override_from(raw: Option<&str>, debug: bool) -> Option<Override> {
 
 /// The override in effect.
 pub fn test_override() -> Option<Override> {
-    override_from(std::env::var(TEST_ENV).ok().as_deref(), cfg!(debug_assertions))
+    override_from(
+        std::env::var(TEST_ENV).ok().as_deref(),
+        cfg!(debug_assertions),
+    )
 }
 
 /// The address to use for `s`: the override, or the saved address checked again.
@@ -228,7 +233,11 @@ impl LocalService {
     pub fn view(&self) -> LocalModelsState {
         let s = self.settings();
         let seen = self.seen();
-        let range = |lo, hi, default| Range { min: lo, max: hi, default };
+        let range = |lo, hi, default| Range {
+            min: lo,
+            max: hi,
+            default,
+        };
         LocalModelsState {
             servers: s
                 .servers
@@ -249,11 +258,23 @@ impl LocalService {
                 })
                 .collect(),
             ollama_context: s.ollama_context,
-            ollama_context_range: range(settings::MIN_CONTEXT, settings::MAX_CONTEXT, settings::DEFAULT_CONTEXT),
+            ollama_context_range: range(
+                settings::MIN_CONTEXT,
+                settings::MAX_CONTEXT,
+                settings::DEFAULT_CONTEXT,
+            ),
             keep_alive_minutes: s.keep_alive_minutes,
-            keep_alive_range: range(settings::MIN_KEEP_ALIVE, settings::MAX_KEEP_ALIVE, settings::DEFAULT_KEEP_ALIVE),
+            keep_alive_range: range(
+                settings::MIN_KEEP_ALIVE,
+                settings::MAX_KEEP_ALIVE,
+                settings::DEFAULT_KEEP_ALIVE,
+            ),
             strata_need_gb: s.strata_need_gb,
-            strata_need_range: range(settings::MIN_STRATA_GB, settings::MAX_STRATA_GB, settings::DEFAULT_STRATA_GB),
+            strata_need_range: range(
+                settings::MIN_STRATA_GB,
+                settings::MAX_STRATA_GB,
+                settings::DEFAULT_STRATA_GB,
+            ),
             tools: s.tools,
             compare_with: s.compare_with,
         }
@@ -272,7 +293,11 @@ impl LocalService {
                 }
             })
             .map_err(|e| format!("The settings could not be saved: {e}"))??;
-        for gone in before.servers.iter().filter(|b| !after.servers.iter().any(|a| a.id == b.id)) {
+        for gone in before
+            .servers
+            .iter()
+            .filter(|b| !after.servers.iter().any(|a| a.id == b.id))
+        {
             let _ = self.creds.forget(&Self::key_name(&gone.id));
         }
         self.forget_unlisted(&after);
@@ -283,7 +308,8 @@ impl LocalService {
     fn forget_unlisted(&self, s: &LocalSettings) {
         let mut guard = lock(&self.seen);
         if let Some(seen) = guard.as_mut() {
-            seen.servers.retain(|id, _| s.servers.iter().any(|x| &x.id == id));
+            seen.servers
+                .retain(|id, _| s.servers.iter().any(|x| &x.id == id));
             self.write_cache(seen);
         }
     }
@@ -302,7 +328,9 @@ impl LocalService {
     }
 
     fn write_cache(&self, seen: &Seen) {
-        let Some(dir) = self.cache_file.parent() else { return };
+        let Some(dir) = self.cache_file.parent() else {
+            return;
+        };
         let write = || -> std::io::Result<()> {
             helm_core::privfs::create_private_dir_all(dir)?;
             let bytes = serde_json::to_vec(seen).map_err(std::io::Error::other)?;
@@ -333,7 +361,8 @@ impl LocalService {
 
     /// The server's connection, or the sentence to show when it can't be reached.
     fn conn_or_say(&self, s: &Server) -> Result<Conn, String> {
-        self.conn(s).map_err(|e| format!("{} can't be used: {e}", s.name))
+        self.conn(s)
+            .map_err(|e| format!("{} can't be used: {e}", s.name))
     }
 
     // ---- the catalogue ----------------------------------------------------------------------
@@ -371,7 +400,15 @@ impl LocalService {
             // The models last seen stay listed, greyed, so the picker still shows them.
             models: prev
                 .as_ref()
-                .map(|p| p.models.iter().map(|m| SeenModel { loaded: None, ..m.clone() }).collect())
+                .map(|p| {
+                    p.models
+                        .iter()
+                        .map(|m| SeenModel {
+                            loaded: None,
+                            ..m.clone()
+                        })
+                        .collect()
+                })
                 .unwrap_or_default(),
         };
         let conn = match self.conn_or_say(s) {
@@ -388,7 +425,8 @@ impl LocalService {
                 if let Some(ps) = &resident {
                     self.note_memory(ps);
                 }
-                let base: Vec<&srv::Installed> = tags.iter().filter(|t| !srv::is_variant(&t.name)).collect();
+                let base: Vec<&srv::Installed> =
+                    tags.iter().filter(|t| !srv::is_variant(&t.name)).collect();
                 let natives = self.natives(s, &conn, &base);
                 let models = base
                     .iter()
@@ -402,11 +440,17 @@ impl LocalService {
                         }),
                         size_bytes: (t.size > 0).then_some(t.size),
                         loaded: resident.as_ref().map(|ps| {
-                            ps.iter().any(|r| srv::norm(srv::variant_base(&r.name)) == srv::norm(&t.name))
+                            ps.iter().any(|r| {
+                                srv::norm(srv::variant_base(&r.name)) == srv::norm(&t.name)
+                            })
                         }),
                     })
                     .collect();
-                SeenServer { reachable: true, note: None, models }
+                SeenServer {
+                    reachable: true,
+                    note: None,
+                    models,
+                }
             }
             LocalServerKind::Strata => {
                 let loaded = match srv::strata_loaded(&self.http, &conn) {
@@ -414,7 +458,12 @@ impl LocalService {
                     Err(e) => return down(e.say(&s.name, &s.base_url)),
                 };
                 let listed = srv::strata_models(&self.http, &conn).or_else(|| {
-                    s.model.clone().map(|m| vec![srv::Listed { id: m, context: None }])
+                    s.model.clone().map(|m| {
+                        vec![srv::Listed {
+                            id: m,
+                            context: None,
+                        }]
+                    })
                 });
                 let Some(listed) = listed else {
                     return SeenServer {
@@ -435,7 +484,11 @@ impl LocalService {
                         size_bytes: None,
                     })
                     .collect();
-                SeenServer { reachable: true, note: None, models }
+                SeenServer {
+                    reachable: true,
+                    note: None,
+                    models,
+                }
             }
         }
     }
@@ -452,7 +505,14 @@ impl LocalService {
             let found: Vec<(usize, Option<u64>)> = std::thread::scope(|sc| {
                 chunk
                     .iter()
-                    .map(|&i| (i, sc.spawn(move || srv::ollama_context(&self.http, conn, &models[i].name))))
+                    .map(|&i| {
+                        (
+                            i,
+                            sc.spawn(move || {
+                                srv::ollama_context(&self.http, conn, &models[i].name)
+                            }),
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .into_iter()
                     .map(|(i, h)| (i, h.join().ok().flatten()))
@@ -469,7 +529,10 @@ impl LocalService {
     fn note_memory(&self, ps: &[srv::Resident]) {
         let mut v = lock(&self.vram);
         for r in ps.iter().filter(|r| r.size_vram > 0) {
-            v.insert(srv::norm(srv::variant_base(&r.name)).to_owned(), r.size_vram);
+            v.insert(
+                srv::norm(srv::variant_base(&r.name)).to_owned(),
+                r.size_vram,
+            );
         }
     }
 
@@ -480,16 +543,18 @@ impl LocalService {
             .flat_map(|s| {
                 let last = seen.servers.get(&s.id);
                 let reachable = last.is_some_and(|l| l.reachable);
-                last.into_iter().flat_map(move |l| l.models.iter()).map(move |m| LocalModelInfo {
-                    id: helm_chats::local::id(&s.id, &m.model),
-                    name: m.model.clone(),
-                    server: s.name.clone(),
-                    kind: s.kind,
-                    context_tokens: m.context_tokens,
-                    size_bytes: m.size_bytes,
-                    loaded: m.loaded,
-                    reachable,
-                })
+                last.into_iter()
+                    .flat_map(move |l| l.models.iter())
+                    .map(move |m| LocalModelInfo {
+                        id: helm_chats::local::id(&s.id, &m.model),
+                        name: m.model.clone(),
+                        server: s.name.clone(),
+                        kind: s.kind,
+                        context_tokens: m.context_tokens,
+                        size_bytes: m.size_bytes,
+                        loaded: m.loaded,
+                        reachable,
+                    })
             })
             .collect()
     }
@@ -510,14 +575,23 @@ impl LocalService {
                 LocalServerKind::Ollama => srv::ollama_tags(&self.http, &conn)
                     .map(|t| {
                         let n = t.iter().filter(|m| !srv::is_variant(&m.name)).count() as u32;
-                        (format!("{} answered: {n} model{} installed.", s.name, if n == 1 { "" } else { "s" }), Some(n))
+                        (
+                            format!(
+                                "{} answered: {n} model{} installed.",
+                                s.name,
+                                if n == 1 { "" } else { "s" }
+                            ),
+                            Some(n),
+                        )
                     })
                     .map_err(|e| e.say(&s.name, &s.base_url)),
                 LocalServerKind::Strata => srv::strata_loaded(&self.http, &conn)
                     .map(|l| {
                         let msg = match l.iter().find(|x| x.as_str() != "*") {
                             Some(m) => format!("{} answered: {m} is loaded.", s.name),
-                            None if l.is_empty() => format!("{} answered: nothing is loaded.", s.name),
+                            None if l.is_empty() => {
+                                format!("{} answered: nothing is loaded.", s.name)
+                            }
                             None => format!("{} answered: a model is loaded.", s.name),
                         };
                         (msg, None)
@@ -534,11 +608,20 @@ impl LocalService {
             SeenServer {
                 reachable: ok,
                 note: (!ok).then(|| message.clone()),
-                models: self.seen().servers.get(&s.id).map(|x| x.models.clone()).unwrap_or_default(),
+                models: self
+                    .seen()
+                    .servers
+                    .get(&s.id)
+                    .map(|x| x.models.clone())
+                    .unwrap_or_default(),
             },
         )]);
         self.emit();
-        Ok(TestResult { ok, message, models })
+        Ok(TestResult {
+            ok,
+            message,
+            models,
+        })
     }
 
     // ---- before and after a turn --------------------------------------------------------------
@@ -607,7 +690,11 @@ impl LocalService {
                     LocalServerKind::Strata => srv::strata_unload(&self.http, &conn),
                 };
                 if let Err(e) = done {
-                    log::warn!("could not unload {name} on {}: {}", other.name, e.say(&other.name, &other.base_url));
+                    log::warn!(
+                        "could not unload {name} on {}: {}",
+                        other.name,
+                        e.say(&other.name, &other.base_url)
+                    );
                 }
             }
         }
@@ -657,12 +744,17 @@ impl LocalService {
             None => srv::variant_name(&turn.model, st.ollama_context),
         };
         let ctx = srv::variant_context(&target).unwrap_or(st.ollama_context);
-        if !tags.iter().any(|t| srv::norm(&t.name) == srv::norm(&target)) {
+        if !tags
+            .iter()
+            .any(|t| srv::norm(&t.name) == srv::norm(&target))
+        {
             srv::ollama_create(&self.http, conn, &target, &base.name, ctx).map_err(who)?;
         }
         let resident = srv::ollama_ps(&self.http, conn).map_err(who)?;
         self.note_memory(&resident);
-        let loaded = resident.iter().any(|r| srv::norm(&r.name) == srv::norm(&target));
+        let loaded = resident
+            .iter()
+            .any(|r| srv::norm(&r.name) == srv::norm(&target));
         let _one_at_a_time;
         if !loaded {
             _one_at_a_time = lock(&self.loading);
@@ -680,10 +772,17 @@ impl LocalService {
             srv::is_variant(&t.name)
                 && srv::norm(srv::variant_base(&t.name)) == srv::norm(&turn.model)
                 && srv::norm(&t.name) != srv::norm(&target)
-                && !turn.in_use.iter().any(|u| srv::norm(u) == srv::norm(&t.name))
+                && !turn
+                    .in_use
+                    .iter()
+                    .any(|u| srv::norm(u) == srv::norm(&t.name))
         }) {
             if let Err(e) = srv::ollama_delete(&self.http, conn, &old.name) {
-                log::warn!("could not remove the older variant {}: {}", old.name, who(e));
+                log::warn!(
+                    "could not remove the older variant {}: {}",
+                    old.name,
+                    who(e)
+                );
             }
         }
         Ok(target)
@@ -724,16 +823,22 @@ impl LocalModels for LocalService {
             .find(|s| s.id == server_id)
             .ok_or("That local model server is not set up any more. Pick another model or add it in Settings > Local models.")?;
         if !s.enabled {
-            return Err(format!("{} is switched off in Settings > Local models.", s.name));
+            return Err(format!(
+                "{} is switched off in Settings > Local models.",
+                s.name
+            ));
         }
         let conn = self.conn_or_say(s)?;
         if conn.base == net::OFF {
-            return Err(format!("{} can't be used: local model servers are switched off for this run.", s.name));
+            return Err(format!(
+                "{} can't be used: local model servers are switched off for this run.",
+                s.name
+            ));
         }
         let context = match s.kind {
-            LocalServerKind::Ollama => {
-                Some(u64::from(srv::variant_context(model).unwrap_or(st.ollama_context)))
-            }
+            LocalServerKind::Ollama => Some(u64::from(
+                srv::variant_context(model).unwrap_or(st.ollama_context),
+            )),
             LocalServerKind::Strata => self
                 .seen()
                 .servers
@@ -759,7 +864,10 @@ impl LocalModels for LocalService {
             .find(|s| s.id == turn.server_id)
             .ok_or("That local model server is not set up any more. Pick another model or add it in Settings > Local models.")?;
         if !server.enabled {
-            return Err(format!("{} is switched off in Settings > Local models.", server.name));
+            return Err(format!(
+                "{} is switched off in Settings > Local models.",
+                server.name
+            ));
         }
         let conn = self.conn_or_say(server)?;
         let out = match server.kind {
@@ -793,7 +901,9 @@ impl LocalModels for LocalService {
         // Claude Code's own requests leave Ollama's default timer behind; put Helm's back. Off this
         // thread, and only for a model that is still loaded (this never loads one).
         std::thread::spawn(move || {
-            let Ok(ps) = srv::ollama_ps(&me.http, &conn) else { return };
+            let Ok(ps) = srv::ollama_ps(&me.http, &conn) else {
+                return;
+            };
             if ps.iter().any(|r| srv::norm(&r.name) == srv::norm(&model)) {
                 let _ = srv::ollama_load(&me.http, &conn, &model, minutes);
             }
@@ -816,6 +926,8 @@ struct Handle {
 
 impl LocalService {
     fn handle(&self) -> Handle {
-        Handle { http: Http::default() }
+        Handle {
+            http: Http::default(),
+        }
     }
 }

@@ -145,7 +145,9 @@ impl Default for LocalSettings {
 
 /// The address in its plain form (`http://127.0.0.1:18731`, no path), or why it is refused.
 pub fn check_base_url(raw: &str) -> Result<String, String> {
-    let refuse = |why: &str| Err(format!("{why} A local server's address must be http:// followed by 127.0.0.1, localhost or [::1], and a port."));
+    let refuse = |why: &str| {
+        Err(format!("{why} A local server's address must be http:// followed by 127.0.0.1, localhost or [::1], and a port."))
+    };
     let raw = raw.trim();
     let Some(rest) = raw
         .get(..7)
@@ -311,7 +313,10 @@ pub fn read_lenient(v: &Value) -> LocalSettings {
     {
         s.strata_need_gb = n;
     }
-    if let Some(t) = o.get("tools").and_then(|v| serde_json::from_value(v.clone()).ok()) {
+    if let Some(t) = o
+        .get("tools")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+    {
         s.tools = t;
     }
     if let Some(c) = o
@@ -394,13 +399,17 @@ pub fn apply_changes(current: &LocalSettings, changes: &Changes) -> Result<Local
         for (i, e) in list.iter().enumerate() {
             let n = i + 1;
             if !plain_text(&e.name, 60) {
-                return Err(format!("Server {n}: the name must be 1 to 60 characters, on one line."));
+                return Err(format!(
+                    "Server {n}: the name must be 1 to 60 characters, on one line."
+                ));
             }
             let base_url = check_base_url(&e.base_url).map_err(|m| format!("Server {n}: {m}"))?;
             let id = match e.id.as_deref().filter(|i| !i.is_empty()) {
                 Some(id) => {
                     if !id_ok(id) {
-                        return Err(format!("Server {n}: the id may hold a-z, 0-9 and -, up to 32 characters."));
+                        return Err(format!(
+                            "Server {n}: the id may hold a-z, 0-9 and -, up to 32 characters."
+                        ));
                     }
                     id.to_owned()
                 }
@@ -416,7 +425,9 @@ pub fn apply_changes(current: &LocalSettings, changes: &Changes) -> Result<Local
             // The kind of a server that already exists does not change: chats are tied to it.
             if let Some(old) = current.servers.iter().find(|x| x.id == id) {
                 if old.kind != e.kind {
-                    return Err(format!("Server {n}: the kind of {id} can't change. Add a new server instead."));
+                    return Err(format!(
+                        "Server {n}: the kind of {id} can't change. Add a new server instead."
+                    ));
                 }
             }
             let model = match e.model.as_deref().map(str::trim) {
@@ -437,19 +448,31 @@ pub fn apply_changes(current: &LocalSettings, changes: &Changes) -> Result<Local
     }
     if let Some(n) = changes.ollama_context {
         if !(MIN_CONTEXT..=MAX_CONTEXT).contains(&n) {
-            return Err(range_err("The Ollama context size", MIN_CONTEXT, MAX_CONTEXT));
+            return Err(range_err(
+                "The Ollama context size",
+                MIN_CONTEXT,
+                MAX_CONTEXT,
+            ));
         }
         s.ollama_context = n;
     }
     if let Some(n) = changes.keep_alive_minutes {
         if !(MIN_KEEP_ALIVE..=MAX_KEEP_ALIVE).contains(&n) {
-            return Err(range_err("The keep-alive time (minutes)", MIN_KEEP_ALIVE, MAX_KEEP_ALIVE));
+            return Err(range_err(
+                "The keep-alive time (minutes)",
+                MIN_KEEP_ALIVE,
+                MAX_KEEP_ALIVE,
+            ));
         }
         s.keep_alive_minutes = n;
     }
     if let Some(n) = changes.strata_need_gb {
         if !(MIN_STRATA_GB..=MAX_STRATA_GB).contains(&n) {
-            return Err(range_err("The Strata memory figure (GB)", MIN_STRATA_GB, MAX_STRATA_GB));
+            return Err(range_err(
+                "The Strata memory figure (GB)",
+                MIN_STRATA_GB,
+                MAX_STRATA_GB,
+            ));
         }
         s.strata_need_gb = n;
     }
@@ -516,10 +539,18 @@ mod tests {
             "ollamaContext": 100, "keepAliveMinutes": 30, "tools": "full", "compareWith": "haiku"
         }));
         assert_eq!(s.servers.len(), 1);
-        assert_eq!(s.servers[0].base_url, STRATA_URL, "a foreign address falls back");
+        assert_eq!(
+            s.servers[0].base_url, STRATA_URL,
+            "a foreign address falls back"
+        );
         assert!(!s.servers[0].enabled);
         assert_eq!(
-            (s.ollama_context, s.keep_alive_minutes, s.tools, s.compare_with),
+            (
+                s.ollama_context,
+                s.keep_alive_minutes,
+                s.tools,
+                s.compare_with
+            ),
             (DEFAULT_CONTEXT, 30, ToolsSetup::Full, CompareModel::Haiku)
         );
         assert_eq!(read_lenient(&json!("junk")), LocalSettings::default());
@@ -551,27 +582,80 @@ mod tests {
                 model: None,
             })
             .collect();
-        servers.push(input("My Ollama", LocalServerKind::Ollama, "http://localhost:11500"));
-        let next = apply_changes(&cur, &Changes { servers: Some(servers.clone()), ..Default::default() }).unwrap();
+        servers.push(input(
+            "My Ollama",
+            LocalServerKind::Ollama,
+            "http://localhost:11500",
+        ));
+        let next = apply_changes(
+            &cur,
+            &Changes {
+                servers: Some(servers.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(next.servers[2].id, "my-ollama");
         assert_eq!(next.servers[2].base_url, "http://localhost:11500");
         for (changes, why) in [
-            (Changes { ollama_context: Some(100), ..Default::default() }, "8192"),
-            (Changes { keep_alive_minutes: Some(0), ..Default::default() }, "keep-alive"),
-            (Changes { strata_need_gb: Some(999), ..Default::default() }, "Strata"),
+            (
+                Changes {
+                    ollama_context: Some(100),
+                    ..Default::default()
+                },
+                "8192",
+            ),
+            (
+                Changes {
+                    keep_alive_minutes: Some(0),
+                    ..Default::default()
+                },
+                "keep-alive",
+            ),
+            (
+                Changes {
+                    strata_need_gb: Some(999),
+                    ..Default::default()
+                },
+                "Strata",
+            ),
         ] {
             let e = apply_changes(&cur, &changes).unwrap_err();
             assert!(e.contains(why), "{e}");
         }
         let mut bad = servers.clone();
         bad[2].base_url = "http://example.com:1".into();
-        assert!(apply_changes(&cur, &Changes { servers: Some(bad), ..Default::default() }).unwrap_err().contains("Server 3"));
+        assert!(apply_changes(
+            &cur,
+            &Changes {
+                servers: Some(bad),
+                ..Default::default()
+            }
+        )
+        .unwrap_err()
+        .contains("Server 3"));
         let mut swapped = servers.clone();
         swapped[0].kind = LocalServerKind::Ollama;
-        assert!(apply_changes(&cur, &Changes { servers: Some(swapped), ..Default::default() }).unwrap_err().contains("can't change"));
+        assert!(apply_changes(
+            &cur,
+            &Changes {
+                servers: Some(swapped),
+                ..Default::default()
+            }
+        )
+        .unwrap_err()
+        .contains("can't change"));
         let mut twice = servers;
         twice[2].id = Some("strata".into());
-        assert!(apply_changes(&cur, &Changes { servers: Some(twice), ..Default::default() }).unwrap_err().contains("twice"));
+        assert!(apply_changes(
+            &cur,
+            &Changes {
+                servers: Some(twice),
+                ..Default::default()
+            }
+        )
+        .unwrap_err()
+        .contains("twice"));
     }
 
     #[test]

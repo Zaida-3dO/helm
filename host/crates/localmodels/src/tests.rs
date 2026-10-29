@@ -122,7 +122,12 @@ struct OllamaState {
 fn fake_ollama(state: Arc<Mutex<OllamaState>>) -> Fake {
     Fake::start(move |r| {
         let mut st = state.lock().unwrap();
-        let name = r.body.get("model").and_then(Value::as_str).unwrap_or("").to_owned();
+        let name = r
+            .body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
         match (r.method.as_str(), r.path.as_str()) {
             ("GET", "/api/tags") => (
                 200,
@@ -133,8 +138,15 @@ fn fake_ollama(state: Arc<Mutex<OllamaState>>) -> Fake {
                 json!({"models": st.loaded.iter().map(|n| json!({"name": n, "size_vram": 5 * GB})).collect::<Vec<_>>()}),
             ),
             ("POST", "/api/show") => {
-                let ctx = if name.starts_with("llama3") { 131_072 } else { 40_960 };
-                (200, json!({"model_info": {"general.architecture": "x", "x.context_length": ctx}}))
+                let ctx = if name.starts_with("llama3") {
+                    131_072
+                } else {
+                    40_960
+                };
+                (
+                    200,
+                    json!({"model_info": {"general.architecture": "x", "x.context_length": ctx}}),
+                )
             }
             ("POST", "/api/create") => {
                 st.installed.push((name, 5 * GB));
@@ -170,7 +182,10 @@ fn fake_strata(state: Arc<Mutex<StrataState>>, free: Arc<AtomicU64>) -> Fake {
         let mut st = state.lock().unwrap();
         match (r.method.as_str(), r.path.as_str()) {
             ("GET", "/health") => (200, json!({"status": "ok", "loaded": st.loaded})),
-            ("GET", "/v1/models") => (200, json!({"data": [{"id": "qwen-flash", "max_model_len": 262_144}]})),
+            ("GET", "/v1/models") => (
+                200,
+                json!({"data": [{"id": "qwen-flash", "max_model_len": 262_144}]}),
+            ),
             ("POST", "/unload") => {
                 if st.loaded.take().is_some() {
                     free.fetch_add(12 * GB, Ordering::SeqCst);
@@ -204,7 +219,11 @@ fn rig() -> Rig {
     helm_chats::register_migrations(&mut reg);
     crate::register_migrations(&mut reg);
     let db = Arc::new(Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap());
-    let creds = CredentialStore::new(&dir.path().join("credentials"), "p", Arc::new(MemoryKeychain::default()));
+    let creds = CredentialStore::new(
+        &dir.path().join("credentials"),
+        "p",
+        Arc::new(MemoryKeychain::default()),
+    );
     let free = Arc::new(AtomicU64::new(4 * GB));
     let sink = Arc::new(RecordingSink::default());
     let events: Arc<dyn EventSink> = sink.clone();
@@ -219,7 +238,13 @@ fn rig() -> Rig {
         memory_wait: Duration::from_millis(200),
         memory_poll: Duration::from_millis(20),
     });
-    Rig { _dir: dir, svc, db, free, sink }
+    Rig {
+        _dir: dir,
+        svc,
+        db,
+        free,
+        sink,
+    }
 }
 
 fn servers(strata: &str, ollama: &str) -> Changes {
@@ -284,30 +309,58 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
         ],
         loaded: vec!["llama3:latest".into()],
     }));
-    let strata = Arc::new(Mutex::new(StrataState { loaded: Some("qwen-flash".into()) }));
-    let (o, s) = (fake_ollama(ollama.clone()), fake_strata(strata, r.free.clone()));
+    let strata = Arc::new(Mutex::new(StrataState {
+        loaded: Some("qwen-flash".into()),
+    }));
+    let (o, s) = (
+        fake_ollama(ollama.clone()),
+        fake_strata(strata, r.free.clone()),
+    );
     r.svc.save(&servers(&s.base, &o.base)).unwrap();
 
     // Reading the catalogue, the state and the settings contacts nobody.
     assert!(r.svc.catalogue(false).is_empty());
     let state = r.svc.view();
     assert_eq!(state.servers.len(), 2);
-    assert_eq!((o.total(), s.total()), (0, 0), "nothing is asked until someone asks");
+    assert_eq!(
+        (o.total(), s.total()),
+        (0, 0),
+        "nothing is asked until someone asks"
+    );
 
     // Without the key Strata refuses; the picker still gets Ollama's models.
     let rows = r.svc.catalogue(true);
     let names: Vec<&str> = rows.iter().map(|m| m.name.as_str()).collect();
-    assert_eq!(names, ["qwen3:8b", "llama3:latest"], "Helm's own variants are hidden");
+    assert_eq!(
+        names,
+        ["qwen3:8b", "llama3:latest"],
+        "Helm's own variants are hidden"
+    );
     let q = &rows[0];
     assert_eq!(q.id, "local/ollama/qwen3:8b");
     assert_eq!(q.server, "Ollama");
-    assert_eq!(q.context_tokens, Some(40_960), "the model's own limit, under the setting");
-    assert_eq!((q.loaded, q.reachable, q.size_bytes), (Some(false), true, Some(5 * GB)));
-    assert_eq!(rows[1].context_tokens, Some(65_536), "the setting, under the model's limit");
+    assert_eq!(
+        q.context_tokens,
+        Some(40_960),
+        "the model's own limit, under the setting"
+    );
+    assert_eq!(
+        (q.loaded, q.reachable, q.size_bytes),
+        (Some(false), true, Some(5 * GB))
+    );
+    assert_eq!(
+        rows[1].context_tokens,
+        Some(65_536),
+        "the setting, under the model's limit"
+    );
     assert_eq!(rows[1].loaded, Some(true));
     let view = r.svc.view();
     assert_eq!(view.servers[0].reachable, Some(false));
-    assert!(view.servers[0].note.as_deref().unwrap().contains("refused the key"));
+    assert!(view.servers[0]
+        .note
+        .as_deref()
+        .unwrap()
+        .contains("refused the key"));
     assert!(!view.servers[0].has_key);
 
     // The key goes to Strata as a bearer token and to nobody else; no result carries it.
@@ -315,10 +368,23 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     assert!(r.svc.set_key("nope", "x").is_err());
     assert!(r.svc.set_key("strata", "two\nlines").is_err());
     let rows = r.svc.catalogue(true);
-    let strata_row = rows.iter().find(|m| m.kind == LocalServerKind::Strata).unwrap();
+    let strata_row = rows
+        .iter()
+        .find(|m| m.kind == LocalServerKind::Strata)
+        .unwrap();
     assert_eq!(strata_row.id, "local/strata/qwen-flash");
-    assert_eq!((strata_row.context_tokens, strata_row.loaded, strata_row.reachable), (Some(262_144), Some(true), true));
-    assert!(o.log.lock().unwrap().iter().all(|q| q.auth.is_empty()), "Ollama never sees Strata's key");
+    assert_eq!(
+        (
+            strata_row.context_tokens,
+            strata_row.loaded,
+            strata_row.reachable
+        ),
+        (Some(262_144), Some(true), true)
+    );
+    assert!(
+        o.log.lock().unwrap().iter().all(|q| q.auth.is_empty()),
+        "Ollama never sees Strata's key"
+    );
     let shown = serde_json::to_string(&r.svc.view()).unwrap();
     assert!(!shown.contains(KEY) && r.svc.view().servers[0].has_key);
     // The cache is on disk and survives a restart.
@@ -327,7 +393,10 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
 
     // Test reports a sentence either way.
     let t = r.svc.test("ollama").unwrap();
-    assert!(t.ok && t.message.contains("2 models") && t.models == Some(2), "{t:?}");
+    assert!(
+        t.ok && t.message.contains("2 models") && t.models == Some(2),
+        "{t:?}"
+    );
     r.svc.forget_key("strata").unwrap();
     assert!(!r.svc.test("strata").unwrap().ok);
     assert!(r.svc.test("nope").is_err());
@@ -337,12 +406,20 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     let rows = r.svc.catalogue(true);
     let gone = rows.iter().find(|m| m.name == "qwen3:8b").unwrap();
     assert!(!gone.reachable && gone.loaded.is_none());
-    assert!(r.svc.view().servers[1].note.as_deref().unwrap().contains("did not answer"));
+    assert!(r.svc.view().servers[1]
+        .note
+        .as_deref()
+        .unwrap()
+        .contains("did not answer"));
     // Switching a server off hides its models; removing one also removes its key.
     let mut off = servers(&s.base, &o.base);
     off.servers.as_mut().unwrap()[1].enabled = false;
     r.svc.save(&off).unwrap();
-    assert!(r.svc.catalogue(false).iter().all(|m| m.kind == LocalServerKind::Strata));
+    assert!(r
+        .svc
+        .catalogue(false)
+        .iter()
+        .all(|m| m.kind == LocalServerKind::Strata));
     assert!(r.sink.kinds().iter().any(|k| k == "local_models"));
 
     // The test override: release builds ignore it; `off` and a bad address contact nobody.
@@ -350,14 +427,23 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
         (None, true, None),
         (Some("off"), false, None),
         (Some("off"), true, Some(Override::Off)),
-        (Some("http://127.0.0.1:9"), true, Some(Override::Url("http://127.0.0.1:9".into()))),
+        (
+            Some("http://127.0.0.1:9"),
+            true,
+            Some(Override::Url("http://127.0.0.1:9".into())),
+        ),
         (Some("http://example.com:9"), true, Some(Override::Off)),
         (Some(" "), true, None),
     ] {
         assert_eq!(override_from(raw, debug), want, "{raw:?} {debug}");
     }
-    let conn = crate::net::Conn { base: crate::net::OFF.into(), key: None };
-    let err = crate::net::Http::default().get(&conn, "/health", crate::net::QUICK).unwrap_err();
+    let conn = crate::net::Conn {
+        base: crate::net::OFF.into(),
+        key: None,
+    };
+    let err = crate::net::Http::default()
+        .get(&conn, "/health", crate::net::QUICK)
+        .unwrap_err();
     assert!(matches!(err, crate::net::NetError::Unreachable(_)));
 }
 
@@ -365,11 +451,19 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
 fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     let r = rig();
     let ollama = Arc::new(Mutex::new(OllamaState {
-        installed: vec![("qwen3:8b".into(), 5 * GB), ("qwen3:8b-helm-32k".into(), 5 * GB)],
+        installed: vec![
+            ("qwen3:8b".into(), 5 * GB),
+            ("qwen3:8b-helm-32k".into(), 5 * GB),
+        ],
         loaded: vec![],
     }));
-    let strata = Arc::new(Mutex::new(StrataState { loaded: Some("qwen-flash".into()) }));
-    let (o, s) = (fake_ollama(ollama.clone()), fake_strata(strata.clone(), r.free.clone()));
+    let strata = Arc::new(Mutex::new(StrataState {
+        loaded: Some("qwen-flash".into()),
+    }));
+    let (o, s) = (
+        fake_ollama(ollama.clone()),
+        fake_strata(strata.clone(), r.free.clone()),
+    );
     r.svc.save(&servers(&s.base, &o.base)).unwrap();
     r.svc.set_key("strata", KEY).unwrap();
     let lines = Mutex::new(Vec::<String>::new());
@@ -384,24 +478,41 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     assert_eq!(lines.lock().unwrap().as_slice(), ["Loading qwen3:8b…"]);
     assert_eq!(s.calls("POST", "/unload").len(), 1);
     let made = o.calls("POST", "/api/create");
-    assert_eq!(made[0].body, json!({"model": "qwen3:8b-helm-64k", "from": "qwen3:8b", "parameters": {"num_ctx": 65_536}, "stream": false}));
+    assert_eq!(
+        made[0].body,
+        json!({"model": "qwen3:8b-helm-64k", "from": "qwen3:8b", "parameters": {"num_ctx": 65_536}, "stream": false})
+    );
     let removed = o.calls("DELETE", "/api/delete");
     assert_eq!(removed.len(), 1);
     assert_eq!(removed[0].body, json!({"model": "qwen3:8b-helm-32k"}));
     let load = &o.calls("POST", "/api/generate")[0];
-    assert_eq!((load.body["model"].as_str(), load.body["keep_alive"].as_str()), (Some("qwen3:8b-helm-64k"), Some("15m")));
+    assert_eq!(
+        (
+            load.body["model"].as_str(),
+            load.body["keep_alive"].as_str()
+        ),
+        (Some("qwen3:8b-helm-64k"), Some("15m"))
+    );
     assert!(load.body.get("prompt").is_none(), "loading sends no prompt");
 
     // 2. Already loaded: no line, no check, only the keep-alive timer is set again. A variant a
     //    worker still uses is never removed.
     lines.lock().unwrap().clear();
-    ollama.lock().unwrap().installed.push(("qwen3:8b-helm-16k".into(), 5 * GB));
+    ollama
+        .lock()
+        .unwrap()
+        .installed
+        .push(("qwen3:8b-helm-16k".into(), 5 * GB));
     let mut t = turn("ollama", "qwen3:8b");
     t.launched = Some("qwen3:8b-helm-64k".into());
     t.in_use = vec!["qwen3:8b-helm-16k".into()];
     assert_eq!(r.svc.prepare(&t, &progress).unwrap(), "qwen3:8b-helm-64k");
     assert!(lines.lock().unwrap().is_empty());
-    assert_eq!(o.calls("DELETE", "/api/delete").len(), 1, "the variant in use stays");
+    assert_eq!(
+        o.calls("DELETE", "/api/delete").len(),
+        1,
+        "the variant in use stays"
+    );
     assert_eq!(s.calls("POST", "/unload").len(), 1);
 
     // 3. Strata's model is mid-reply in another chat: no turn, and nothing of Strata's is unloaded.
@@ -410,12 +521,19 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     r.free.store(4 * GB, Ordering::SeqCst);
     busy_chat(&r.db, "c-busy", "Refactor parser", "strata", "qwen-flash");
     let loads_before = o.calls("POST", "/api/generate").len();
-    let why = r.svc.prepare(&turn("ollama", "qwen3:8b"), &progress).unwrap_err();
+    let why = r
+        .svc
+        .prepare(&turn("ollama", "qwen3:8b"), &progress)
+        .unwrap_err();
     assert_eq!(
         why,
         "qwen3:8b can't load while Strata is answering in Refactor parser. Send again when it finishes."
     );
-    assert_eq!(s.calls("POST", "/unload").len(), 1, "a model that is answering is left alone");
+    assert_eq!(
+        s.calls("POST", "/unload").len(),
+        1,
+        "a model that is answering is left alone"
+    );
     assert_eq!(o.calls("POST", "/api/generate").len(), loads_before);
 
     // 4. Strata: its model loads on the first request, so only the line and the check happen.
@@ -430,35 +548,70 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     assert_eq!(lines.lock().unwrap().as_slice(), ["Loading qwen-flash…"]);
 
     // 5. After a turn the timer is set again, but only for a model that is still loaded.
-    ollama.lock().unwrap().loaded.push("qwen3:8b-helm-64k".into());
+    ollama
+        .lock()
+        .unwrap()
+        .loaded
+        .push("qwen3:8b-helm-64k".into());
     let before = o.calls("POST", "/api/generate").len();
     r.svc.finished("ollama", "qwen3:8b-helm-64k");
-    wait_for("the keep-alive reset", || o.calls("POST", "/api/generate").len() > before);
+    wait_for("the keep-alive reset", || {
+        o.calls("POST", "/api/generate").len() > before
+    });
     ollama.lock().unwrap().loaded.clear();
     let before = o.calls("POST", "/api/generate").len();
     r.svc.finished("ollama", "qwen3:8b-helm-64k");
     std::thread::sleep(Duration::from_millis(150));
-    assert_eq!(o.calls("POST", "/api/generate").len(), before, "an unloaded model is not loaded again");
+    assert_eq!(
+        o.calls("POST", "/api/generate").len(),
+        before,
+        "an unloaded model is not loaded again"
+    );
 
     // 6. Problems read as sentences, and a server that is off or gone starts no turn.
-    assert!(r.svc.prepare(&turn("ollama", "missing:1b"), &progress).unwrap_err().contains("not installed"));
-    assert!(r.svc.prepare(&turn("nope", "x"), &progress).unwrap_err().contains("not set up"));
+    assert!(r
+        .svc
+        .prepare(&turn("ollama", "missing:1b"), &progress)
+        .unwrap_err()
+        .contains("not installed"));
+    assert!(r
+        .svc
+        .prepare(&turn("nope", "x"), &progress)
+        .unwrap_err()
+        .contains("not set up"));
     r.svc.save(&servers(&s.base, &dead_url())).unwrap();
-    assert!(r.svc.prepare(&turn("ollama", "qwen3:8b"), &progress).unwrap_err().contains("did not answer"));
+    assert!(r
+        .svc
+        .prepare(&turn("ollama", "qwen3:8b"), &progress)
+        .unwrap_err()
+        .contains("did not answer"));
 
     // 7. What a worker is launched with: the key (or a stand-in), the window and lean tools.
     r.svc.save(&servers(&s.base, &o.base)).unwrap();
     let launch = r.svc.server("ollama", "qwen3:8b-helm-64k").unwrap();
-    assert_eq!((launch.base_url.as_str(), launch.key.as_str()), (o.base.as_str(), "local"));
-    assert_eq!((launch.context_tokens, launch.max_output_tokens, launch.lean), (Some(65_536), Some(16_384), true));
+    assert_eq!(
+        (launch.base_url.as_str(), launch.key.as_str()),
+        (o.base.as_str(), "local")
+    );
+    assert_eq!(
+        (launch.context_tokens, launch.max_output_tokens, launch.lean),
+        (Some(65_536), Some(16_384), true)
+    );
     let launch = r.svc.server("strata", "qwen-flash").unwrap();
     assert_eq!(launch.key, KEY);
-    assert!(!format!("{launch:?}").contains(KEY), "a launch never prints its key");
+    assert!(
+        !format!("{launch:?}").contains(KEY),
+        "a launch never prints its key"
+    );
     assert!(r.svc.knows("strata") && !r.svc.knows("other"));
     let mut off = servers(&s.base, &o.base);
     off.servers.as_mut().unwrap()[0].enabled = false;
     r.svc.save(&off).unwrap();
-    assert!(r.svc.server("strata", "qwen-flash").unwrap_err().contains("switched off"));
+    assert!(r
+        .svc
+        .server("strata", "qwen-flash")
+        .unwrap_err()
+        .contains("switched off"));
     let none = settings::LocalSettings::default();
     assert_eq!(none.compare_with.key(), "sonnet");
 }

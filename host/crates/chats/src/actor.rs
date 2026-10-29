@@ -840,7 +840,8 @@ impl Actor {
             live.skills = skills;
         }
         // A chat on a local model lists that server's models, not Claude's: never cache them.
-        let models = crate::catalogue::from_get_state(&data).filter(|_| self.launched_local.is_none());
+        let models =
+            crate::catalogue::from_get_state(&data).filter(|_| self.launched_local.is_none());
         if let Some(models) = models {
             if crate::catalogue::store(&self.sh.cfg.profile_dir, models).is_ok() {
                 self.emit(ChatEvent::Catalogue {
@@ -1731,7 +1732,11 @@ impl Actor {
     fn set_loading(&mut self, text: String) {
         {
             let mut live = self.live.lock().unwrap();
-            let since = live.thread.loading.as_ref().map_or_else(now, |l| l.started_at);
+            let since = live
+                .thread
+                .loading
+                .as_ref()
+                .map_or_else(now, |l| l.started_at);
             live.thread.loading = Some(LocalLoading {
                 text,
                 started_at: since,
@@ -1762,7 +1767,10 @@ impl Actor {
                     )
                     .optional()?;
                 if let Some(text) = text {
-                    t.execute("UPDATE submissions SET state = 'rejected' WHERE id = ?1", [id])?;
+                    t.execute(
+                        "UPDATE submissions SET state = 'rejected' WHERE id = ?1",
+                        [id],
+                    )?;
                     crate::submit::text_to_draft(t, &chat, &text)?;
                 }
             }
@@ -1793,19 +1801,22 @@ impl Actor {
         });
         // The chat shows as starting while its model is made ready; Stop works as usual.
         self.set_status(ChatStatus::Starting, None);
+        // Read one at a time: the guard of this chat's own live state is among those taken below.
+        let launched = self.live.lock().unwrap().local_model.clone();
+        let in_use: Vec<String> = self
+            .sh
+            .actors
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|h| h.live.lock().unwrap().local_model.clone())
+            .collect();
         let turn = crate::local::LocalTurn {
             chat_id: self.chat_id.clone(),
             server_id,
             model,
-            launched: self.live.lock().unwrap().local_model.clone(),
-            in_use: self
-                .sh
-                .actors
-                .lock()
-                .unwrap()
-                .values()
-                .filter_map(|h| h.live.lock().unwrap().local_model.clone())
-                .collect(),
+            launched,
+            in_use,
         };
         let weak = self.me.clone();
         self.sh.handle.spawn(async move {

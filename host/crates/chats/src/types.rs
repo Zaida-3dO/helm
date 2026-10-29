@@ -98,6 +98,10 @@ pub struct ChatRecord {
     /// A running chat with no worker output for `stallMinutes` (default 5). Stop still works; the
     /// flag clears on the next output or when the turn ends.
     pub stalled: bool,
+    /// The chat's first turn has run (or it was forked from one that did). From then on its model
+    /// can switch among Claude models, or among models on the same local server, but not between
+    /// Claude and local models or between local servers.
+    pub started: bool,
 }
 
 /// Where the chat's title came from. A manual rename always wins.

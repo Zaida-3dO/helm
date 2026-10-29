@@ -66,7 +66,10 @@ fn change(key: &str, cur: &LocalSettings, value: &Value) -> Result<Changes, Stri
                 servers: cur
                     .servers
                     .iter()
-                    .map(|s| settings::Server { enabled: true, ..s.clone() })
+                    .map(|s| settings::Server {
+                        enabled: true,
+                        ..s.clone()
+                    })
                     .collect(),
                 ..cur.clone()
             }))
@@ -79,18 +82,26 @@ fn change(key: &str, cur: &LocalSettings, value: &Value) -> Result<Changes, Stri
     let mut c = Changes::default();
     match key {
         CONTEXT => {
-            c.ollama_context = Some(
-                v.as_u64()
-                    .and_then(|n| u32::try_from(n).ok())
-                    .ok_or_else(|| format!("{key} is a whole number of tokens from {} to {}.", settings::MIN_CONTEXT, settings::MAX_CONTEXT))?,
-            )
+            c.ollama_context = Some(v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(
+                || {
+                    format!(
+                        "{key} is a whole number of tokens from {} to {}.",
+                        settings::MIN_CONTEXT,
+                        settings::MAX_CONTEXT
+                    )
+                },
+            )?)
         }
         KEEP_ALIVE => {
-            c.keep_alive_minutes = Some(
-                v.as_u64()
-                    .and_then(|n| u32::try_from(n).ok())
-                    .ok_or_else(|| format!("{key} is a whole number of minutes from {} to {}.", settings::MIN_KEEP_ALIVE, settings::MAX_KEEP_ALIVE))?,
-            )
+            c.keep_alive_minutes = Some(v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(
+                || {
+                    format!(
+                        "{key} is a whole number of minutes from {} to {}.",
+                        settings::MIN_KEEP_ALIVE,
+                        settings::MAX_KEEP_ALIVE
+                    )
+                },
+            )?)
         }
         TOOLS => {
             c.tools = Some(
@@ -124,7 +135,10 @@ fn change(key: &str, cur: &LocalSettings, value: &Value) -> Result<Changes, Stri
                     model: s.model.clone(),
                 });
             }
-            if let Some(unknown) = map.keys().find(|k| !cur.servers.iter().any(|s| &s.id == *k)) {
+            if let Some(unknown) = map
+                .keys()
+                .find(|k| !cur.servers.iter().any(|s| &s.id == *k))
+            {
                 let ids: Vec<&str> = cur.servers.iter().map(|s| s.id.as_str()).collect();
                 return Err(format!(
                     "{key}.{unknown}: there is no such server. The servers are {}. Adding or changing one is the user's, in {PAGE}.",
@@ -138,7 +152,11 @@ fn change(key: &str, cur: &LocalSettings, value: &Value) -> Result<Changes, Stri
     Ok(c)
 }
 
-fn put(tx: &Transaction<'_>, key: &str, value: &Value) -> Result<(LocalSettings, LocalSettings), String> {
+fn put(
+    tx: &Transaction<'_>,
+    key: &str,
+    value: &Value,
+) -> Result<(LocalSettings, LocalSettings), String> {
     let before = settings::load(tx).map_err(sql)?;
     let after = settings::apply_changes(&before, &change(key, &before, value)?)?;
     settings::store(tx, &after).map_err(sql)?;
@@ -194,7 +212,12 @@ impl SettingsExtension for LocalKeys {
         value_of(&settings::load(tx).unwrap_or_default(), key)
     }
 
-    fn apply(&self, tx: &Transaction<'_>, key: &str, value: &Value) -> Result<(Value, Value), String> {
+    fn apply(
+        &self,
+        tx: &Transaction<'_>,
+        key: &str,
+        value: &Value,
+    ) -> Result<(Value, Value), String> {
         let (before, after) = put(tx, key, value)?;
         Ok((value_of(&before, key), value_of(&after, key)))
     }
@@ -220,8 +243,14 @@ mod tests {
         reg.initializer("local-models", settings::init);
         let db = Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap();
         let ext = LocalKeys;
-        let apply = |key: &str, v: Value| db.write(|tx| Ok::<_, rusqlite::Error>(ext.apply(tx, key, &v))).unwrap();
-        let read = |key: &str| db.snapshot(|tx| Ok::<_, rusqlite::Error>(ext.read(tx, key))).unwrap();
+        let apply = |key: &str, v: Value| {
+            db.write(|tx| Ok::<_, rusqlite::Error>(ext.apply(tx, key, &v)))
+                .unwrap()
+        };
+        let read = |key: &str| {
+            db.snapshot(|tx| Ok::<_, rusqlite::Error>(ext.read(tx, key)))
+                .unwrap()
+        };
         // The keys, their descriptions and their defaults.
         assert_eq!(ext.keys().len(), 5);
         for k in ext.keys() {
@@ -237,8 +266,12 @@ mod tests {
         let (before, after) = apply(CONTEXT, json!(32_768)).unwrap();
         assert_eq!((before, after), (json!(65_536), json!(32_768)));
         assert!(apply(CONTEXT, json!(1000)).unwrap_err().contains("8192"));
-        assert!(apply(CONTEXT, json!("big")).unwrap_err().contains("whole number"));
-        assert!(apply(KEEP_ALIVE, json!(0)).unwrap_err().contains("keep-alive"));
+        assert!(apply(CONTEXT, json!("big"))
+            .unwrap_err()
+            .contains("whole number"));
+        assert!(apply(KEEP_ALIVE, json!(0))
+            .unwrap_err()
+            .contains("keep-alive"));
         apply(KEEP_ALIVE, json!(60)).unwrap();
         apply(TOOLS, json!("full")).unwrap();
         assert!(apply(TOOLS, json!("heavy")).unwrap_err().contains("lean"));
@@ -246,12 +279,25 @@ mod tests {
         // Servers: only enabled flags, by id, merged; others are the user's.
         let (_, after) = apply(ENABLED, json!({"ollama": false})).unwrap();
         assert_eq!(after, json!({"strata": true, "ollama": false}));
-        assert!(apply(ENABLED, json!({"rogue": true})).unwrap_err().contains("no such server"));
-        assert!(apply(ENABLED, json!({"strata": "yes"})).unwrap_err().contains("true or false"));
+        assert!(apply(ENABLED, json!({"rogue": true}))
+            .unwrap_err()
+            .contains("no such server"));
+        assert!(apply(ENABLED, json!({"strata": "yes"}))
+            .unwrap_err()
+            .contains("true or false"));
         let s = db.snapshot(settings::load).unwrap();
-        assert_eq!(s.servers[1].base_url, settings::OLLAMA_URL, "an address never changes here");
         assert_eq!(
-            (s.ollama_context, s.keep_alive_minutes, s.tools, s.compare_with),
+            s.servers[1].base_url,
+            settings::OLLAMA_URL,
+            "an address never changes here"
+        );
+        assert_eq!(
+            (
+                s.ollama_context,
+                s.keep_alive_minutes,
+                s.tools,
+                s.compare_with
+            ),
             (32_768, 60, ToolsSetup::Full, CompareModel::Haiku)
         );
         // null resets one setting; Undo restores the value from before.
@@ -260,7 +306,9 @@ mod tests {
         apply(CONTEXT, Value::Null).unwrap();
         assert_eq!(read(CONTEXT), json!(65_536));
         let (before, _) = apply(KEEP_ALIVE, json!(5)).unwrap();
-        db.write(|tx| Ok::<_, rusqlite::Error>(ext.restore(tx, KEEP_ALIVE, &before))).unwrap().unwrap();
+        db.write(|tx| Ok::<_, rusqlite::Error>(ext.restore(tx, KEEP_ALIVE, &before)))
+            .unwrap()
+            .unwrap();
         assert_eq!(read(KEEP_ALIVE), json!(60));
         assert_eq!(ext.changed_event(CONTEXT).kind, "local_models");
     }

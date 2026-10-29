@@ -48,18 +48,23 @@ pub fn register_ops(reg: &mut OpRegistry) {
     })
     .blocking("local_server_key_set", OpClass::Maintenance, |ctx, args| {
         // A bad argument must not echo the key back in its message.
-        let a: KeyArgs = serde_json::from_value(args)
-            .map_err(|_| ApiError::bad_args("local_server_key_set takes {serverId, key}, both text."))?;
+        let a: KeyArgs = serde_json::from_value(args).map_err(|_| {
+            ApiError::bad_args("local_server_key_set takes {serverId, key}, both text.")
+        })?;
         let s = svc(ctx)?;
         s.set_key(&a.server_id, &a.key).map_err(refused)?;
         to_value(&s.view())
     })
-    .blocking("local_server_key_forget", OpClass::Maintenance, |ctx, args| {
-        let a: ServerIdArgs = parse(args, "local_server_key_forget")?;
-        let s = svc(ctx)?;
-        s.forget_key(&a.server_id).map_err(refused)?;
-        to_value(&s.view())
-    })
+    .blocking(
+        "local_server_key_forget",
+        OpClass::Maintenance,
+        |ctx, args| {
+            let a: ServerIdArgs = parse(args, "local_server_key_forget")?;
+            let s = svc(ctx)?;
+            s.forget_key(&a.server_id).map_err(refused)?;
+            to_value(&s.view())
+        },
+    )
     .blocking("local_server_test", OpClass::Blocking, |ctx, args| {
         let a: ServerIdArgs = parse(args, "local_server_test")?;
         to_value(&svc(ctx)?.test(&a.server_id).map_err(refused)?)

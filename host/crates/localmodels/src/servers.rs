@@ -29,7 +29,9 @@ impl CallError {
     pub fn say(&self, who: &str, url: &str) -> String {
         match self {
             Self::Unreachable(_) => format!("{who} did not answer at {url}. Is it running?"),
-            Self::Refused => format!("{who} refused the key. Set it again in Settings > Local models."),
+            Self::Refused => {
+                format!("{who} refused the key. Set it again in Settings > Local models.")
+            }
             Self::Status(s, m) if m.is_empty() => format!("{who} answered with an error ({s})."),
             Self::Status(s, m) => format!("{who} answered with an error ({s}): {m}"),
             Self::Shape(m) => format!("{who} sent an answer Helm could not read: {m}"),
@@ -57,15 +59,19 @@ fn good(r: Reply) -> Result<Reply, CallError> {
     let msg = r
         .json()
         .and_then(|v| {
-            v.get("error")
-                .and_then(|e| e.as_str().map(str::to_owned).or_else(|| e.get("message")?.as_str().map(str::to_owned)))
+            v.get("error").and_then(|e| {
+                e.as_str()
+                    .map(str::to_owned)
+                    .or_else(|| e.get("message")?.as_str().map(str::to_owned))
+            })
         })
         .unwrap_or_default();
     Err(CallError::Status(r.status, msg.chars().take(200).collect()))
 }
 
 fn num(v: &Value) -> Option<u64> {
-    v.as_u64().or_else(|| v.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64))
+    v.as_u64()
+        .or_else(|| v.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64))
 }
 
 // ---- names ----------------------------------------------------------------------------------
@@ -116,14 +122,20 @@ pub struct Resident {
 
 pub fn ollama_tags(h: &Http, c: &Conn) -> Result<Vec<Installed>, CallError> {
     let r = good(h.get(c, "/api/tags", net::QUICK)?)?;
-    let v = r.json().ok_or_else(|| CallError::Shape("not JSON".into()))?;
+    let v = r
+        .json()
+        .ok_or_else(|| CallError::Shape("not JSON".into()))?;
     Ok(v.get("models")
         .and_then(Value::as_array)
         .map(|a| {
             a.iter()
                 .filter_map(|m| {
                     Some(Installed {
-                        name: m.get("name").or_else(|| m.get("model"))?.as_str()?.to_owned(),
+                        name: m
+                            .get("name")
+                            .or_else(|| m.get("model"))?
+                            .as_str()?
+                            .to_owned(),
                         size: m.get("size").and_then(num).unwrap_or(0),
                     })
                 })
@@ -134,14 +146,20 @@ pub fn ollama_tags(h: &Http, c: &Conn) -> Result<Vec<Installed>, CallError> {
 
 pub fn ollama_ps(h: &Http, c: &Conn) -> Result<Vec<Resident>, CallError> {
     let r = good(h.get(c, "/api/ps", net::QUICK)?)?;
-    let v = r.json().ok_or_else(|| CallError::Shape("not JSON".into()))?;
+    let v = r
+        .json()
+        .ok_or_else(|| CallError::Shape("not JSON".into()))?;
     Ok(v.get("models")
         .and_then(Value::as_array)
         .map(|a| {
             a.iter()
                 .filter_map(|m| {
                     Some(Resident {
-                        name: m.get("name").or_else(|| m.get("model"))?.as_str()?.to_owned(),
+                        name: m
+                            .get("name")
+                            .or_else(|| m.get("model"))?
+                            .as_str()?
+                            .to_owned(),
                         size_vram: m
                             .get("size_vram")
                             .and_then(num)
@@ -170,7 +188,13 @@ pub fn ollama_context(h: &Http, c: &Conn, model: &str) -> Option<u64> {
 
 /// Make `variant` from `from` with a `num_ctx` window. The weights are shared, so it takes no
 /// extra disk.
-pub fn ollama_create(h: &Http, c: &Conn, variant: &str, from: &str, num_ctx: u32) -> Result<(), CallError> {
+pub fn ollama_create(
+    h: &Http,
+    c: &Conn,
+    variant: &str,
+    from: &str,
+    num_ctx: u32,
+) -> Result<(), CallError> {
     let body = json!({"model": variant, "from": from, "parameters": {"num_ctx": num_ctx}, "stream": false});
     good(h.post(c, "/api/create", &body, net::CREATE)?).map(|_| ())
 }
@@ -198,7 +222,18 @@ pub fn ollama_unload(h: &Http, c: &Conn, model: &str) -> Result<(), CallError> {
 pub fn strata_loaded(h: &Http, c: &Conn) -> Result<Vec<String>, CallError> {
     let r = good(h.get(c, "/health", net::QUICK)?)?;
     let v = r.json().unwrap_or(Value::Null);
-    Ok(loaded_names(v.get("loaded")))
+    let mut names = loaded_names(v.get("loaded"));
+    // `{"loaded": true, "model": "name"}`: the flag says something is loaded, `model` says what.
+    if names == ["*"] {
+        if let Some(m) = v
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty())
+        {
+            names = vec![m.to_owned()];
+        }
+    }
+    Ok(names)
 }
 
 fn loaded_names(v: Option<&Value>) -> Vec<String> {
@@ -234,7 +269,9 @@ pub struct Listed {
 /// Strata's model list: `/v1/models`, then `/models`. `None` when neither gives one.
 pub fn strata_models(h: &Http, c: &Conn) -> Option<Vec<Listed>> {
     for path in ["/v1/models", "/models"] {
-        let Ok(r) = h.get(c, path, net::QUICK) else { continue };
+        let Ok(r) = h.get(c, path, net::QUICK) else {
+            continue;
+        };
         if !r.ok() {
             continue;
         }
@@ -253,15 +290,26 @@ fn parse_model_list(v: &Value) -> Option<Vec<Listed>> {
     let list: Vec<Listed> = arr
         .iter()
         .filter_map(|e| match e {
-            Value::String(s) => Some(Listed { id: s.clone(), context: None }),
+            Value::String(s) => Some(Listed {
+                id: s.clone(),
+                context: None,
+            }),
             Value::Object(o) => {
                 let id = ["id", "name", "model"]
                     .iter()
                     .find_map(|k| o.get(*k).and_then(Value::as_str))?;
-                let context = ["context_length", "max_model_len", "context_window", "max_context"]
-                    .iter()
-                    .find_map(|k| o.get(*k).and_then(num));
-                Some(Listed { id: id.to_owned(), context })
+                let context = [
+                    "context_length",
+                    "max_model_len",
+                    "context_window",
+                    "max_context",
+                ]
+                .iter()
+                .find_map(|k| o.get(*k).and_then(num));
+                Some(Listed {
+                    id: id.to_owned(),
+                    context,
+                })
             }
             _ => None,
         })
@@ -312,8 +360,22 @@ mod tests {
             assert_eq!(loaded_names(Some(&v)), want, "{v}");
         }
         assert_eq!(loaded_names(None), Vec::<String>::new());
-        let l = parse_model_list(&json!({"data": [{"id": "m1", "max_model_len": 262144}, "m2", 5]})).unwrap();
-        assert_eq!(l, vec![Listed { id: "m1".into(), context: Some(262_144) }, Listed { id: "m2".into(), context: None }]);
+        let l =
+            parse_model_list(&json!({"data": [{"id": "m1", "max_model_len": 262144}, "m2", 5]}))
+                .unwrap();
+        assert_eq!(
+            l,
+            vec![
+                Listed {
+                    id: "m1".into(),
+                    context: Some(262_144)
+                },
+                Listed {
+                    id: "m2".into(),
+                    context: None
+                }
+            ]
+        );
         assert_eq!(parse_model_list(&json!(["a"])).unwrap().len(), 1);
         assert!(parse_model_list(&json!({"data": []})).is_none());
         assert!(parse_model_list(&json!("x")).is_none());

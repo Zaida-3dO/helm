@@ -3723,3 +3723,323 @@ async fn roll_over_hands_the_work_to_a_successor_and_archives_the_old_chat() {
         ["1"]
     );
 }
+
+/// A local model server that records how it was used and can hold a preparation until released.
+struct FakeLocal {
+    turns: Mutex<Vec<crate::local::LocalTurn>>,
+    outcome: Mutex<Result<String, String>>,
+    gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    finished: Mutex<Vec<(String, String)>>,
+    refreshed: Mutex<Vec<bool>>,
+}
+
+impl crate::local::LocalModels for FakeLocal {
+    fn knows(&self, server_id: &str) -> bool {
+        matches!(server_id, "ollama" | "strata")
+    }
+
+    fn server(&self, _server_id: &str, _model: &str) -> Result<crate::local::LocalServer, String> {
+        Ok(crate::local::LocalServer {
+            base_url: "http://127.0.0.1:9".into(),
+            key: "sk-fake-local-key".into(),
+            context_tokens: Some(65_536),
+            max_output_tokens: Some(16_384),
+            lean: true,
+        })
+    }
+
+    fn prepare(
+        &self,
+        turn: &crate::local::LocalTurn,
+        progress: &dyn Fn(&str),
+    ) -> Result<String, String> {
+        self.turns.lock().unwrap().push(turn.clone());
+        progress(&format!("Loading {}…", turn.model));
+        let gate = self.gate.lock().unwrap().take();
+        if let Some(g) = gate {
+            let _ = g.recv_timeout(Duration::from_secs(5));
+        }
+        self.outcome.lock().unwrap().clone()
+    }
+
+    fn finished(&self, server_id: &str, model: &str) {
+        self.finished
+            .lock()
+            .unwrap()
+            .push((server_id.into(), model.into()));
+    }
+
+    fn catalogue(&self, refresh: bool) -> Vec<crate::types::LocalModelInfo> {
+        self.refreshed.lock().unwrap().push(refresh);
+        vec![crate::types::LocalModelInfo {
+            id: "local/ollama/qwen3:8b".into(),
+            name: "qwen3:8b".into(),
+            server: "Ollama".into(),
+            kind: crate::types::LocalServerKind::Ollama,
+            context_tokens: Some(65_536),
+            size_bytes: None,
+            loaded: Some(false),
+            reachable: true,
+        }]
+    }
+}
+
+/// The live thread's loading line, if it shows one.
+fn loading_text(h: &H) -> Option<String> {
+    h.events("thread")
+        .last()
+        .and_then(|e| e["thread"]["loading"]["text"].as_str().map(str::to_owned))
+}
+
+/// A chat on a local model: the id maps to the chat's two columns and back, its model is made
+/// ready before the worker starts (with the loading line up until the first words), a refusal
+/// gives the text back, its turns cost nothing, and its model stays on its server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
+    let mut h = harness();
+    let (open, gate) = std::sync::mpsc::channel();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("qwen3:8b-helm-64k".into())),
+        gate: Mutex::new(Some(gate)),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+    });
+    h.rt.set_local_models(local.clone());
+    let cwd = h.work.to_string_lossy().into_owned();
+
+    // The one id maps to provider + model on create, and comes back whole.
+    for (model, why) in [
+        ("local/nope/x", "not set up"),
+        ("local/ollama", "not valid"),
+    ] {
+        let e = h
+            .call("chat_create", json!({"cwd": cwd, "model": model}))
+            .await
+            .unwrap_err();
+        assert!(e.message.contains(why), "{model}: {}", e.message);
+    }
+    let made = h
+        .call(
+            "chat_create",
+            json!({"cwd": cwd, "model": "local/ollama/qwen3:8b"}),
+        )
+        .await
+        .unwrap();
+    let chat = made["id"].as_str().unwrap().to_owned();
+    assert_eq!(made["model"], "local/ollama/qwen3:8b");
+    assert_eq!(made["started"], false, "nothing has run yet");
+    assert_eq!(
+        h.col(&format!(
+            "SELECT provider || '|' || model FROM chats WHERE id = '{chat}'"
+        )),
+        ["ollama|qwen3:8b"]
+    );
+    let cat = h
+        .call("model_catalogue", json!({"harness": "claude"}))
+        .await
+        .unwrap();
+    assert_eq!(cat["local"][0]["id"], "local/ollama/qwen3:8b");
+    h.call(
+        "model_catalogue",
+        json!({"harness": "claude", "refresh": true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        *local.refreshed.lock().unwrap(),
+        [false, true],
+        "only a refresh asks the servers"
+    );
+
+    // A send waits for its model: the chat shows as starting with the loading line, a second
+    // send waits behind it, and no worker exists yet.
+    let (sid, _) = h.send(&chat, "hello", "default").await;
+    h.until("the loading line", |h| {
+        loading_text(h) == Some("Loading qwen3:8b…".into())
+    })
+    .await;
+    assert_eq!(h.status(&chat), "starting");
+    let (second, _) = h.send(&chat, "and this", "default").await;
+    assert!(
+        h.workers.try_recv().is_err(),
+        "no worker before the model is ready"
+    );
+    open.send(()).unwrap();
+    let mut w = h.worker().await;
+    let l = w.req.local.clone().expect("a local launch");
+    assert_eq!(
+        (l.server_id.as_str(), l.model.as_str(), l.thinking_tokens),
+        ("ollama", "qwen3:8b-helm-64k", 16_384),
+        "the worker asks for the name preparation answered, with the effort as a thinking budget"
+    );
+    let server = l.server.expect("the server was looked up before the start");
+    assert_eq!(
+        (server.key.as_str(), server.lean),
+        ("sk-fake-local-key", true)
+    );
+    assert!(
+        !format!("{:?}", w.req).contains("sk-fake-local-key"),
+        "a request never prints the key"
+    );
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert_eq!(p["submissionId"], sid.as_str());
+    let steer = w.expect("prompt").await;
+    assert_eq!(
+        (
+            steer["submissionId"].as_str(),
+            steer["streamingBehavior"].as_str()
+        ),
+        (Some(second.as_str()), Some("steer"))
+    );
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    echo(&w, &sid).await;
+    assert!(
+        loading_text(&h).is_some(),
+        "the line stays up until the model's first words"
+    );
+    reply(&h, &w, "msg_1", "Hi from the local model").await;
+    h.until("the line is gone", |h| loading_text(h).is_none())
+        .await;
+
+    // Whatever cost Claude Code worked out is not real: tokens are kept, the cost is nothing.
+    w.emit(json!({"type": "usage", "inputTokens": 12, "outputTokens": 30, "cacheReadTokens": 0, "cacheWriteTokens": 0, "costUsd": 0.05,
+        "running": {"inputTokens": 12, "outputTokens": 30, "cacheReadTokens": 0, "cacheWriteTokens": 0, "costUsd": 0.05}}))
+        .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-local"}))
+        .await;
+    h.until("chat idle", |h| h.status(&chat) == "idle").await;
+    assert_eq!(
+        h.col(
+            "SELECT input_tokens || '/' || output_tokens || '/' || cost_usd FROM chat_turn_usage"
+        ),
+        ["12/30/0.0"]
+    );
+    h.until("the keep-alive is set again", |_| {
+        !local.finished.lock().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(
+        *local.finished.lock().unwrap(),
+        [("ollama".to_owned(), "qwen3:8b-helm-64k".to_owned())]
+    );
+    let turns = local.turns.lock().unwrap().clone();
+    assert_eq!(turns.len(), 1, "one preparation covered both sends");
+    assert_eq!(
+        (turns[0].server_id.as_str(), turns[0].launched.clone()),
+        ("ollama", None)
+    );
+    h.until("session saved", |h| {
+        crate::session_log::ClaudeBinding::load(&h.profile.path("sessions"), &chat)
+            .is_some_and(|b| b.native_session_id.is_some())
+    })
+    .await;
+    let got = h.call("chat_get", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(got["chat"]["started"], true, "its first turn ran");
+
+    // The model is fixed once the chat has started: not Claude, not another server; another model
+    // on the same server is fine and starts a new worker.
+    for (to, why) in [
+        ("opus", "running on a local model"),
+        ("local/strata/qwen", "another"),
+    ] {
+        let e = h
+            .call("chat_set_model", json!({"chatId": chat, "model": to}))
+            .await
+            .unwrap_err();
+        assert!(e.message.contains(why), "{to}: {}", e.message);
+    }
+    let moved = h
+        .call(
+            "chat_set_model",
+            json!({"chatId": chat, "model": "local/ollama/llama3:8b"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(moved["model"], "local/ollama/llama3:8b");
+    w.expect("shutdown").await;
+    w.exit().await;
+    h.until("the old worker is gone", |h| {
+        h.events("thread")
+            .last()
+            .is_some_and(|e| e["thread"]["status"] == "idle")
+    })
+    .await;
+
+    // A refusal starts no turn: the chat is idle, says why in the transcript and the text is
+    // back in the draft.
+    *local.outcome.lock().unwrap() =
+        Err("llama3:8b can't load while Strata is answering in Notes.".into());
+    let (refused, _) = h.send(&chat, "try again please", "default").await;
+    h.until("the refusal", |h| h.state(&refused) == "rejected")
+        .await;
+    h.until("idle again", |h| h.status(&chat) == "idle").await;
+    assert_eq!(
+        h.col(&format!("SELECT draft FROM chats WHERE id = '{chat}'")),
+        ["try again please"]
+    );
+    assert!(texts(&h, &chat)
+        .iter()
+        .any(|t| t == "context:llama3:8b can't load while Strata is answering in Notes."));
+
+    // Stop while the model is being made ready: nothing was sent, the text goes back to the draft.
+    let (open, gate) = std::sync::mpsc::channel();
+    *local.gate.lock().unwrap() = Some(gate);
+    *local.outcome.lock().unwrap() = Ok("llama3:8b".into());
+    let (held, _) = h.send(&chat, "never mind", "default").await;
+    h.until("the line", |h| {
+        loading_text(h) == Some("Loading llama3:8b…".into())
+    })
+    .await;
+    h.call("chat_stop", json!({"chatId": chat, "continueQueue": false}))
+        .await
+        .unwrap();
+    open.send(()).unwrap();
+    h.until("stopped", |h| h.state(&held) == "rejected").await;
+    assert_eq!(
+        h.col(&format!("SELECT draft FROM chats WHERE id = '{chat}'")),
+        ["try again please\n\nnever mind"]
+    );
+    assert_eq!(h.status(&chat), "stopped");
+
+    // A Claude chat can't move to a local model once it has a session, but may before.
+    let claude = h.create().await;
+    h.call(
+        "chat_set_model",
+        json!({"chatId": claude, "model": "local/ollama/qwen3:8b"}),
+    )
+    .await
+    .unwrap();
+    h.call("chat_set_model", json!({"chatId": claude, "model": "opus"}))
+        .await
+        .unwrap();
+    h.send(&claude, "first", "default").await;
+    let mut cw = h.worker().await;
+    cw.ready().await;
+    let p = cw.expect("prompt").await;
+    ack(&cw, &p).await;
+    echo(&cw, p["submissionId"].as_str().unwrap()).await;
+    cw.emit(json!({"type": "agent_start"})).await;
+    cw.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-claude"}))
+        .await;
+    h.until("session saved", |h| {
+        crate::session_log::ClaudeBinding::load(&h.profile.path("sessions"), &claude)
+            .is_some_and(|b| b.native_session_id.is_some())
+    })
+    .await;
+    let e = h
+        .call(
+            "chat_set_model",
+            json!({"chatId": claude, "model": "local/ollama/qwen3:8b"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        e.message.contains("already started on a Claude model"),
+        "{}",
+        e.message
+    );
+    cw.exit().await;
+}
