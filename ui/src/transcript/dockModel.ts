@@ -17,7 +17,7 @@ export function dockShown(live: boolean, thread: Pick<ThreadState, 'backgroundTa
 }
 
 export interface DockState {
-  key: 'starting' | 'stopping' | 'compacting' | 'waiting' | 'working' | 'subagents' | 'background';
+  key: 'loading' | 'starting' | 'stopping' | 'compacting' | 'waiting' | 'working' | 'subagents' | 'background';
   /** Line 1's state. */
   label: string;
   /** What follows it, when there is something to say. */
@@ -27,8 +27,10 @@ export interface DockState {
 /** Line 1 of the dock: what the chat is doing now. */
 export function dockState(
   status: string,
-  thread: Pick<ThreadState, 'compacting' | 'interactions' | 'liveTools' | 'subagentsRunning'>,
+  thread: Pick<ThreadState, 'compacting' | 'interactions' | 'liveTools' | 'subagentsRunning'> & { loading?: ThreadState['loading'] },
 ): DockState {
+  // A local model being made ready for the turn ("Loading qwen3:8b…"): the host clears it on the first output.
+  if (thread.loading && (status === 'starting' || status === 'running')) return { key: 'loading', label: thread.loading.text, detail: null };
   if (status === 'starting') return { key: 'starting', label: 'Starting agent', detail: 'Preparing your session' };
   if (status === 'stopping') return { key: 'stopping', label: 'Stopping safely', detail: null };
   if (status === 'running') {

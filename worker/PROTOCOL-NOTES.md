@@ -186,6 +186,10 @@ nothing left the machine, and no real model or server was involved):
   call streamed by the fake (a `tool_use` block, then a plain text answer to the tool result) ran as it
   does on Anthropic's API. Requests are plain `POST /v1/messages` with `Authorization: Bearer <local key>`
   and `anthropic-version: 2023-06-01`; no `x-api-key`, no other path, and no call to Anthropic.
+- **A slow first token does not time out.** With the fake holding the response for 130 s (a model being
+  loaded), Claude Code waited and completed the turn from a single request. Its API timeout defaults to
+  ten minutes, so local launches leave `API_TIMEOUT_MS` alone; a model that takes longer than that to load
+  would fail the turn, and Claude Code would retry it.
 - `total_cost_usd` in the result line is a non-zero estimate for a model Claude Code does not know;
   the host ignores it for local chats.
 - Not observed (needs a long chat or a real server): what `CLAUDE_CODE_MAX_CONTEXT_TOKENS` does to

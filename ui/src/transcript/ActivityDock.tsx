@@ -91,6 +91,7 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
   }
   const canStop = Boolean(latest && thread.sendBehavior.toolStop && thread.capabilities.stopTool && latest.stoppable);
   const state = dockState(chat.status, thread);
+  const loading = state.key === 'loading' ? thread.loading : undefined;
   const working = live || (thread.subagentsRunning ?? 0) > 0;
   const narration = state.key === 'working' ? (activity?.narration ?? state.detail) : state.detail;
 
@@ -110,7 +111,12 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
             {narration && <span className="ad-preview">{narration}</span>}
           </div>
           <div className="ad-line2">
-            {latest ? (
+            {loading ? (
+              <span className="ad-phase" data-phase="loading" data-testid="dock-loading">
+                <span>Waiting for the model server</span>
+                <span className="ad-tool-time">{formatElapsed(Math.max(0, now - loading.startedAt))}</span>
+              </span>
+            ) : latest ? (
               <span className="ad-tool">
                 <ToolIcon name={latest.name} />
                 <span className="ad-tool-name">{toolLabel(latest.name)}</span>

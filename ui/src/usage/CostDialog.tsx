@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Api } from '../api/client.ts';
 import { usageOps, type CostReport } from '../api/usage.ts';
 import { Button, Dialog } from '../ui/index.ts';
-import { percentText, shareText, tokensText, usdText } from './model.ts';
+import { compactTokensText, localText, percentText, shareText, tokensText, usdText } from './model.ts';
 import './usage.css';
 
 export type CostTarget = { chatId: string } | { projectId: string };
@@ -34,24 +34,40 @@ export function CostDialog({ api, target, onClose }: { api: Api; target: CostTar
 
   const chat = 'chatId' in target;
   const title = report ? `Cost · ${report.name || (chat ? 'Untitled chat' : 'Untitled')}` : 'Cost';
-  const t = report?.totals;
   const w = report?.weekly;
+  // A report with nothing but local use: the Claude figures are zero, so the local ones take their place.
+  const local = report?.local;
+  const localOnly = !!local && (report?.totals.totalTokens ?? 0) === 0;
+  const t = localOnly && local ? { inputTokens: local.inputTokens, outputTokens: local.outputTokens, cacheReadTokens: local.cacheReadTokens, cacheWriteTokens: local.cacheWriteTokens, totalTokens: local.totalTokens, costUsd: local.wouldCostUsd } : report?.totals;
   return (
     <Dialog title={title} onClose={onClose} wide={!chat} padded testId="cost-dialog" footer={<Button onClick={onClose}>Close</Button>}>
       {error && <p className="cost-error">{error}</p>}
       {!report && !error && <p className="cost-note">Adding it up…</p>}
       {report && t && (
         <div className="cost-body">
-          <div className="cost-headline">
-            <div className="cost-figure" data-testid="cost-usd">
-              <span className="cost-big">{usdText(t.costUsd)}</span>
-              <span className="cost-caption">estimated cost</span>
+          {localOnly && local ? (
+            <div className="cost-headline" data-testid="cost-local-headline">
+              <div className="cost-figure" data-testid="cost-local-tokens">
+                <span className="cost-big">{compactTokensText(local.totalTokens)} tokens</span>
+                <span className="cost-caption">on local models</span>
+              </div>
+              <div className="cost-figure" data-testid="cost-local-usd">
+                <span className="cost-big">about {usdText(local.wouldCostUsd)}</span>
+                <span className="cost-caption">on {local.comparedName}, an estimate</span>
+              </div>
             </div>
-            <div className="cost-figure" data-testid="cost-weekly">
-              <span className="cost-big">{w ? shareText(w.sharePct) : '—'}</span>
-              <span className="cost-caption">of the weekly limit</span>
+          ) : (
+            <div className="cost-headline">
+              <div className="cost-figure" data-testid="cost-usd">
+                <span className="cost-big">{usdText(t.costUsd)}</span>
+                <span className="cost-caption">estimated cost</span>
+              </div>
+              <div className="cost-figure" data-testid="cost-weekly">
+                <span className="cost-big">{w ? shareText(w.sharePct) : '—'}</span>
+                <span className="cost-caption">of the weekly limit</span>
+              </div>
             </div>
-          </div>
+          )}
           <table className="cost-tokens">
             <tbody>
               <tr><th>Input</th><td>{tokensText(t.inputTokens)}</td></tr>
@@ -61,6 +77,11 @@ export function CostDialog({ api, target, onClose }: { api: Api; target: CostTar
               <tr className="cost-total"><th>Total tokens</th><td>{tokensText(t.totalTokens)}</td></tr>
             </tbody>
           </table>
+          {local && !localOnly && (
+            <p className="cost-local" data-testid="cost-local">
+              {localText(local)}
+            </p>
+          )}
           {!chat && report.chats.length > 0 && (
             <table className="cost-chats" data-testid="cost-chats">
               <thead>
@@ -73,9 +94,17 @@ export function CostDialog({ api, target, onClose }: { api: Api; target: CostTar
                       {c.title || 'Untitled chat'}
                       {c.archived && <span className="cost-tag">archived</span>}
                     </td>
-                    <td>{usdText(c.totals.costUsd)}</td>
-                    <td>{shareText(t.costUsd > 0 ? (c.totals.costUsd / t.costUsd) * 100 : 0)}</td>
-                    <td>{c.weeklyPct === undefined ? '—' : shareText(c.weeklyPct)}</td>
+                    {c.local ? (
+                      <td colSpan={3} className="cost-local-cell" data-testid="cost-chat-local">
+                        {localText(c.local)}
+                      </td>
+                    ) : (
+                      <>
+                        <td>{usdText(c.totals.costUsd)}</td>
+                        <td>{shareText(report.totals.costUsd > 0 ? (c.totals.costUsd / report.totals.costUsd) * 100 : 0)}</td>
+                        <td>{c.weeklyPct === undefined ? '—' : shareText(c.weeklyPct)}</td>
+                      </>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -83,8 +112,21 @@ export function CostDialog({ api, target, onClose }: { api: Api; target: CostTar
           )}
           {!chat && report.chats.length === 0 && <p className="cost-note">No chat in here has used anything yet.</p>}
           <div className="cost-notes">
-            <p>The dollar figure is Claude Code’s estimate of what this would cost at API prices. It is not what your plan bills you.</p>
-            {w ? (
+            {localOnly ? (
+              <p data-testid="cost-local-note">
+                {chat ? 'This chat ran' : 'These chats ran'} on a model on this machine, so {chat ? 'it cost' : 'they cost'} nothing and {chat ? 'does' : 'do'} not count toward your plan or its weekly limit. The dollar figure is what the same
+                tokens would have cost on {local?.comparedName} at API prices (prices read {local?.pricesRead}): an estimate for comparison, not a bill.
+              </p>
+            ) : (
+              <p>The dollar figure is Claude Code’s estimate of what this would cost at API prices. It is not what your plan bills you.</p>
+            )}
+            {local && !localOnly && (
+              <p data-testid="cost-local-note">
+                Local chats cost nothing and do not count toward the plan or the weekly limit, so they are left out of the figures above. The local figure is what their tokens would have cost on {local.comparedName} at API
+                prices (prices read {local.pricesRead}): an estimate for comparison, not a bill.
+              </p>
+            )}
+            {localOnly ? null : w ? (
               <p>
                 The weekly share is an estimate. The plan reports one figure for everything ({percentText(w.weekPct)} of this week used so far), so Helm shares it out by
                 cost since the window began on {day(w.windowStart)}: {chat ? 'this chat' : 'these chats'} cost {usdText(w.costUsd)} of the {usdText(w.helmCostUsd)} all

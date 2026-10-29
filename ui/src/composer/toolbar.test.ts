@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { commitPatch, effortLabel, filterRows, formatContext, isLocalModel, localModelChoices, localServerId, modelRows, shortName, stepEffort, thinkingLabel, triggerLabel } from './modelEffort.ts';
+import { commitPatch, effortLabel, filterRows, formatContext, isLocalModel, localModelChoices, localModelName, localServerId, modelRows, shortName, stepEffort, thinkingLabel, triggerLabel } from './modelEffort.ts';
 import { afterTurn, newPick, permissionTooltip, pickedMode, setPickedMode, shownMode } from './permission.ts';
 import { sendLabel } from './keymap.ts';
 import type { ModelCatalogue } from '../api/types.ts';
@@ -100,6 +100,8 @@ test('local models: their own group with server and context, greyed when the ser
   // A chat on a model the lists no longer hold still shows it (disabled), under its own group.
   const gone = modelRows(localCat, 'local/strata/old', true);
   assert.deepEqual([gone.at(-1)!.id, gone.at(-1)!.group, gone.at(-1)!.disabled], ['local/strata/old', 'Local', true]);
+  assert.equal(gone.at(-1)!.title, 'old', 'before the servers have been asked, a local model reads as its own name');
+  assert.equal(localModelName('local/ollama/org/llama:3b'), 'org/llama:3b');
   // Settings → Runtime's plain list gets the same models, with the server in the description.
   assert.deepEqual(localModelChoices(localCat.local).map((c) => [c.name, c.description]).slice(0, 2), [['Qwen Flash', 'Strata · 256k · loaded'], ['Qwen Coder', 'Strata · 128k']]);
   assert.deepEqual(localModelChoices(undefined), []);

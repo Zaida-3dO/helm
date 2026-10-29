@@ -340,6 +340,19 @@
   white-space: nowrap;
 }
 
+.cost-local {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-chats td.cost-local-cell {
+  color: var(--secondary);
+}
+
 .cost-tag {
   margin-left: 6px;
   padding: 0 5px;

@@ -163,11 +163,15 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
     );
   }
   if (row.role === 'context') {
-    const label = CONTEXT_LABEL[row.details?.contextKind ?? 'notice'] ?? 'Notice';
+    const kind = row.details?.contextKind ?? 'notice';
+    const label = CONTEXT_LABEL[kind] ?? 'Notice';
+    // A notice says why something did not happen (a local model that cannot load, say): its words are
+    // plain text, not the muted side note the other context rows are.
+    const notice = kind === 'notice';
     return (
-      <div className={`row row-context${place}`} {...common}>
+      <div className={`row row-context${notice ? ' row-notice' : ''}${place}`} {...common} role={notice ? 'status' : undefined}>
         <span className="context-label">{label}</span>
-        {row.text && <span className="muted"> · {row.text}</span>}
+        {row.text && <span className={notice ? 'context-notice-text' : 'muted'}> · {row.text}</span>}
       </div>
     );
   }

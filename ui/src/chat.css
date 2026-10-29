@@ -332,6 +332,14 @@ button.danger {
   color: var(--text);
 }
 
+/* A notice's sentence (why a send did not start) reads as text, not as a side note. */
+.row-notice {
+  line-height: 1.5;
+}
+.context-notice-text {
+  color: var(--text);
+}
+
 .retry-row {
   font-size: 13px;
   margin-top: 4px;

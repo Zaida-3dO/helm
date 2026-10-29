@@ -5,6 +5,7 @@ import type { ChatFindResult } from './generated/index.ts';
 import type {
   AttentionSummary,
   ChatRecord,
+  LocalModelInfo,
   ModelCatalogue,
   SendAction,
   SendOrigin,
@@ -70,6 +71,8 @@ export function chatOps(api: Api) {
     /** The composer's permission-mode pick; applies from the next turn. */
     setPermissionMode: (chatId: string, mode: string) => api<{ mode: string }>('chat_set_permission_mode', { chatId, mode }),
     catalogue: (refresh = false) => api<ModelCatalogue>('model_catalogue', { harness: 'claude', refresh }),
+    /** Asks the local model servers what they have (the catalogue never does); the model picker asks once each time it opens. */
+    refreshLocalModels: () => api<{ models: LocalModelInfo[] }>('local_models_refresh', {}),
     stopTool: (chatId: string, toolCallId: string) => api<{ stopped: boolean }>('tool_stop', { chatId, toolCallId }),
     compact: (chatId: string) => api<null>('chat_compact', { chatId }),
     /** Ask the agent for a hand-off, start a successor chat with it and archive this one. */

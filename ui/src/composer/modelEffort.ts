@@ -41,6 +41,13 @@ export function localServerId(id: string | null | undefined): string | null {
   return at > 0 ? rest.slice(0, at) : null;
 }
 
+/** The model's own name inside a local model id (`local/<server>/<model>`). */
+export function localModelName(id: string): string {
+  const rest = id.slice(LOCAL_PREFIX.length);
+  const at = rest.indexOf('/');
+  return at >= 0 ? rest.slice(at + 1) : rest;
+}
+
 /** A context size as people write it: 262144 → "256k", 1000000 → "1M". */
 export function formatContext(tokens: number | undefined): string {
   if (!tokens || tokens <= 0) return '';
@@ -113,7 +120,8 @@ export function modelRows(catalogue: ModelCatalogue | null, current: string | nu
   const local = (catalogue?.local ?? []).map(localRow);
   if (current && ![...claude, ...local].some((r) => r.id === current)) {
     const orphan: ModelRow = { id: current, title: current, detail: 'Not in the current model list', disabled: true };
-    if (isLocalModel(current)) local.push({ ...orphan, group: 'Local' });
+    // A local model not listed (yet: the servers are only asked when the picker opens) reads as its own name.
+    if (isLocalModel(current)) local.push({ ...orphan, title: localModelName(current), group: 'Local' });
     else claude.push({ ...orphan, group: 'Claude' });
   }
   if (fixed) {

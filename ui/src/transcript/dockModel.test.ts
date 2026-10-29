@@ -28,6 +28,12 @@ test("line 1 names what the chat is doing", async () => {
   assert.equal(dockState('running', { ...t, compacting: { retrying: true } as never }).label, 'Compacting conversation');
   assert.equal(dockState('idle', { ...t, subagentsRunning: 1 }).key, 'subagents');
   assert.equal(dockState('idle', t).key, 'background');
+  // A local model being loaded takes line 1 until the host clears it, and only while the turn is starting or running.
+  const loading = { text: 'Loading qwen3:8b…', startedAt: 1 };
+  assert.deepEqual([dockState('starting', { ...t, loading }).key, dockState('starting', { ...t, loading }).label], ['loading', 'Loading qwen3:8b…']);
+  assert.equal(dockState('running', { ...t, loading }).key, 'loading');
+  assert.equal(dockState('stopping', { ...t, loading }).key, 'stopping');
+  assert.equal(dockState('running', { ...t, loading: undefined }).label, 'Working');
 });
 
 test('the settled line comes from the last turn when it ended with a reply', async () => {

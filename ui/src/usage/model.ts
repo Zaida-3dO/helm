@@ -1,7 +1,7 @@
 // What the top-bar meter and Settings → Usage show, as plain data. Kept free of
 // React so the rules are tested under node:test.
 
-import type { UsageSnapshot, UsageWindow } from '../api/usage.ts';
+import type { LocalTrack, UsageSnapshot, UsageWindow } from '../api/usage.ts';
 
 export type BarId = 'five_hour' | 'weekly';
 
@@ -122,6 +122,18 @@ export function rangeOf(id: RangeId, now: number): { since: number; until: numbe
 /** "1,234,567". */
 export function tokensText(n: number): string {
   return Math.round(n).toLocaleString('en-US');
+}
+
+/** A token count in a few characters: "950", "12.3k", "1.2M". */
+export function compactTokensText(n: number): string {
+  if (n >= 1_000_000) return `${Math.round(n / 100_000) / 10}M`;
+  if (n >= 1_000) return `${Math.round(n / 100) / 10}k`;
+  return String(Math.round(n));
+}
+
+/** What chats on local models used, beside the Claude figures: "Local: 1.2M tokens, about $4.10 on Sonnet". */
+export function localText(l: Pick<LocalTrack, 'totalTokens' | 'wouldCostUsd' | 'comparedName'>): string {
+  return `Local: ${compactTokensText(l.totalTokens)} tokens, about ${usdText(l.wouldCostUsd)} on ${l.comparedName}`;
 }
 
 /** "$1.23", "$0.004" under a cent, "$0.00" for nothing. */

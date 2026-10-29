@@ -640,8 +640,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
         />
         <div className="composer-bar">
           <div className="composer-selects">
-            {/* Once a message has been sent the chat's model is fixed between Claude and local. */}
-            <ModelPicker chat={chat} ops={ops} started={recall.length > 0 || isBusy(chat.status)} />
+            <ModelPicker chat={chat} ops={ops} />
             <DefaultStar chat={chat} />
             <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} busy={busy} ops={ops} />
             {toolbarStart.map((a) => (

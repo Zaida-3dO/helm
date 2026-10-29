@@ -31,6 +31,7 @@ import { itemLinksFakeOps } from './fake-itemlinks.ts';
 import { hubFakeOps } from './fake-hub.ts';
 import { githubFakeOps } from './fake-github.ts';
 import { webSearchFakeOps } from './fake-websearch.ts';
+import { localModelsFakeOps } from './fake-localmodels.ts';
 import { holdForSlot, isSlotWaitPrompt, slotsFakeOps } from './fake-slots.ts';
 import { orchestratorFakeOps } from './fake-orchestrator.ts';
 import { newChatFakeOps } from '../newchat/fake.ts';
@@ -75,6 +76,9 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const sl = slotsFakeOps(); registerFakeOps(sl.prefixes, sl.handler); }
 { const gh = githubFakeOps(); registerFakeOps(gh.prefixes, gh.handler); }
 { const ws = webSearchFakeOps(); registerFakeOps(ws.prefixes, ws.handler); }
+// Local models: the catalogue holds nothing until a refresh asks the (made-up) servers, as in the real host.
+const localModels = localModelsFakeOps();
+registerFakeOps(localModels.prefixes, localModels.handler);
 
 export function fakeOpFor(op: string): FakeOpHandler | undefined {
   return extraOps.find((r) => r.prefixes.some((p) => op.startsWith(p)))?.handler;
@@ -184,7 +188,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     return next;
   }
 
-  function newChat(cwd: string): FakeChat {
+  function newChat(cwd: string, model = 'claude-opus-5-5', effort = 'xhigh'): FakeChat {
     const id = uid();
     const t = now();
     const c: FakeChat = {
@@ -196,8 +200,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         status: 'idle',
         error: null,
         harness: 'claude',
-        model: 'claude-opus-5-5',
-        effort: 'xhigh',
+        model,
+        effort,
         draft: '',
         draftRevision: 0,
         createdAt: t,
@@ -212,6 +216,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         muted: false,
         lastActivityAt: t,
         stalled: false,
+        started: false,
       },
       thread: {
         chatId: id,
@@ -237,6 +242,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
 
   function seed(c: FakeChat, n: number) {
     const base = now() - n * 60_000;
+    if (n > 0) c.chat = { ...c.chat, started: true };
     for (let i = 0; i < n; i++) {
       const id = rowId++;
       const user = i % 3 === 0;
@@ -332,11 +338,32 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     emitQueue(c);
   }
 
+  const isLocal = (c: FakeChat) => !!c.chat.model?.startsWith('local/');
+
   async function runTurn(c: FakeChat, text: string) {
     let stopped = false;
     const cancelled = () => stopped;
     c.turn = { cancel: () => (stopped = true) };
     flags.delete(c.chat.id);
+    c.chat = { ...c.chat, started: true };
+    // "[loading]" on a local model: the host's "Loading <model>…" line while the server brings it up.
+    if (isLocal(c) && /\[loading\]/i.test(text)) {
+      setStatus(c, 'starting');
+      c.thread = { ...c.thread, loading: { text: `Loading ${c.chat.model?.split('/').slice(2).join('/')}…`, startedAt: now() } };
+      emitThread(c);
+      try {
+        await sleep(step * 14, cancelled);
+      } catch {
+        setStatus(c, 'stopped');
+        c.turn = null;
+        return;
+      } finally {
+        const { loading: _gone, ...rest } = c.thread;
+        void _gone;
+        c.thread = rest;
+        emitThread(c);
+      }
+    }
     if (/flag/i.test(text)) flags.set(c.chat.id, `You asked for "${text.slice(0, 40)}" and the last reply stopped before the tests were run. It looks unfinished: nobody has confirmed the change works.`);
     setStatus(c, 'running');
     try {
@@ -493,7 +520,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   const ops: Record<string, (a: Record<string, unknown>) => unknown> = {
     app_info: () => ({ name: 'Helm', edition: 'desktop', version: 'dev', schemaVersion: 1, profileDir: '(fake host)' }),
     quit_request: () => null,
-    chat_create: (a) => newChat(String(a.cwd)).chat,
+    chat_create: (a) => newChat(String(a.cwd), typeof a.model === 'string' ? a.model : undefined, typeof a.effort === 'string' ? a.effort : undefined).chat,
     chat_list: () => [...chats.values()].map((c) => c.chat).filter((c) => !c.archived && !c.sideSourceId).sort((x, y) => y.createdAt - x.createdAt),
     chat_get: (a) => {
       const c = find(a.chatId);
@@ -536,6 +563,14 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         createdAt: now(),
       };
       if (c.chat.title === 'New chat') c.chat = { ...c.chat, title: text.slice(0, 40) };
+      if (!busy && isLocal(c) && /\[fit\]/i.test(text)) {
+        // The host's fit check refusing a turn: no turn runs, a notice says why, and the text comes back to the draft.
+        const name = c.chat.model?.split('/').slice(2).join('/') ?? 'The model';
+        addRow(c, { role: 'context', text: `${name} can't load while Strata is answering in Refactor parser. Send again when it finishes.`, details: { contextKind: 'notice' } });
+        c.chat = { ...c.chat, draft: text, draftRevision: Math.max(now(), c.chat.draftRevision + 1) };
+        emitChat(c);
+        return { submission: { ...s, state: 'rejected' as const }, chat: c.chat };
+      }
       if (!busy && isSlotWaitPrompt(text)) {
         // A send held for a free run slot: saved, not yet delivered.
         s.state = 'saved';
@@ -656,13 +691,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
       defaultEffort: 'xhigh',
       source: 'fallback',
-      // Local models, to see the picker's Local group: two servers answer, one does not.
-      local: [
-        { id: 'local/strata/qwen3.8-flash', name: 'Qwen 3.8 Flash', server: 'Strata', kind: 'strata', contextTokens: 262144, loaded: true, reachable: true },
-        { id: 'local/strata/qwen3.8-coder', name: 'Qwen 3.8 Coder', server: 'Strata', kind: 'strata', contextTokens: 131072, loaded: false, reachable: true },
-        { id: 'local/ollama/llama3.2:3b', name: 'Llama 3.2 3B', server: 'Ollama', kind: 'ollama', contextTokens: 131072, sizeBytes: 2_000_000_000, loaded: false, reachable: true },
-        { id: 'local/office/qwen3:30b-a3b', name: 'Qwen3 30B A3B', server: 'Ollama (office)', kind: 'ollama', contextTokens: 40960, reachable: false },
-      ],
+      // Empty until the picker or Settings → Local models asks the servers (fake-localmodels.ts).
+      local: localModels.catalogue.local(),
     }),
     tool_stop: () => ({ stopped: true }),
     // Settings → Runtime.

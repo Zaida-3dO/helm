@@ -23,11 +23,12 @@ import { commitPatch, effortLabel, FALLBACK_EFFORTS, isLocalModel, modelRows, st
 
 let cached: Promise<ModelCatalogue> | null = null;
 
-/** `started`: the chat has had its first turn, so its model can no longer move between Claude and local, or between servers. */
-export function ModelPicker({ chat, ops, started = false }: { chat: ChatRecord; ops: ChatOps; started?: boolean }) {
+/** Once the chat has started (`chat.started`), its model can no longer move between Claude and local, or between servers. */
+export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
   const [catalogue, setCatalogue] = useState<ModelCatalogue | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  const [checking, setChecking] = useState(false);
   const [effortDraft, setEffortDraft] = useState('');
   const trigger = useRef<HTMLButtonElement>(null);
 
@@ -45,7 +46,7 @@ export function ModelPicker({ chat, ops, started = false }: { chat: ChatRecord; 
   const efforts = catalogue?.efforts?.length ? catalogue.efforts : FALLBACK_EFFORTS;
   const model = chat.model ?? catalogue?.models[0]?.id ?? '';
   const effort = chat.effort ?? catalogue?.defaultEffort ?? 'xhigh';
-  const rows = useMemo(() => modelRows(catalogue, model || null, started), [catalogue, model, started]);
+  const rows = useMemo(() => modelRows(catalogue, model || null, chat.started), [catalogue, model, chat.started]);
   const options: PickerOption<string>[] = useMemo(
     () => rows.map((r) => ({ value: r.id, title: r.title, text: `${r.title} ${r.id} ${r.detail}`, subtitle: r.detail, disabled: r.disabled, group: r.group, hint: r.hint })),
     [rows],
@@ -63,13 +64,17 @@ export function ModelPicker({ chat, ops, started = false }: { chat: ChatRecord; 
   const openPicker = () => {
     setEffortDraft(effort);
     setOpen(true);
-    // A local server that did not answer earlier may be up now; asking again is the user's own action.
-    if (catalogue?.local?.some((m) => !m.reachable)) {
-      cached = ops.catalogue(true);
-      cached.then(setCatalogue).catch(() => {
-        cached = null;
-      });
-    }
+    // The catalogue only holds what the local servers said the last time they were asked; opening the
+    // picker asks them once (not on a timer), so what is loaded, and who answers, is current.
+    setChecking(true);
+    ops
+      .refreshLocalModels()
+      .then(({ models }) => {
+        cached = (cached ?? ops.catalogue()).then((c) => ({ ...c, local: models }));
+        return cached.then(setCatalogue);
+      })
+      .catch(() => undefined)
+      .finally(() => setChecking(false));
   };
 
   const commit = (id: string | undefined, chosenEffort = effortDraft) => {
@@ -136,7 +141,7 @@ export function ModelPicker({ chat, ops, started = false }: { chat: ChatRecord; 
           testId="model-picker-pop"
           onClose={() => close()}
           onPick={(id) => commit(id)}
-          extraHint={<span>← → {local ? 'thinking' : 'effort'}</span>}
+          extraHint={<span>{checking ? 'checking local servers…' : `← → ${local ? 'thinking' : 'effort'}`}</span>}
           footer={
             <div className="model-picker-effort" data-testid="effort-picker">
               <span className="model-picker-caption">

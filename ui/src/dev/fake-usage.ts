@@ -178,5 +178,8 @@ function costReport(a: Record<string, unknown>, t0: number): CostReport {
     chat('c-4', 'Quick question about tokens', false, totals(1_200, 2_400, 38_000, 9_100, 0.12), 0.12),
   ];
   const sum = chats.reduce((s, c) => totals(s.inputTokens + c.totals.inputTokens, s.outputTokens + c.totals.outputTokens, s.cacheReadTokens + c.totals.cacheReadTokens, s.cacheWriteTokens + c.totals.cacheWriteTokens, s.costUsd + c.totals.costUsd), totals(0, 0, 0, 0, 0));
-  return { scope: 'project', name: 'Helm', totals: sum, weekly: weekly(chats.reduce((s, c) => s + c.weekCostUsd, 0)), chats, archivedChats: 1, uncountedReplies: true, countingSince: t0 - 6 * 24 * HOUR };
+  // A chat on a local model: its Claude figures are zero and its use is in `local`, priced as if on Sonnet.
+  const track = { turns: 14, inputTokens: 912_000, outputTokens: 188_000, cacheReadTokens: 96_000, cacheWriteTokens: 4_000, totalTokens: 1_200_000, wouldCostUsd: 4.1, comparedWith: 'sonnet', comparedName: 'Sonnet', pricesRead: '2026-10-29' };
+  const localChat = { chatId: 'c-5', title: 'Tidy the notes (Qwen 3.8 Flash)', archived: false, totals: totals(0, 0, 0, 0, 0), weekCostUsd: 0, local: track };
+  return { scope: 'project', name: 'Helm', totals: sum, weekly: weekly(chats.reduce((s, c) => s + c.weekCostUsd, 0)), chats: [...chats, localChat], local: track, archivedChats: 1, uncountedReplies: true, countingSince: t0 - 6 * 24 * HOUR };
 }

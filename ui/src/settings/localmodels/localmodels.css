@@ -1,0 +1,153 @@
+/* Settings → Local models. Design-system tokens only. */
+
+.lm-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  color: var(--text);
+}
+
+.lm-section h3 {
+  margin: 0 0 6px;
+  font-size: calc(12 * var(--ui-unit));
+  font-weight: 600;
+}
+
+.lm-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lm-checking {
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.lm-help {
+  margin: 0 0 8px;
+  font-size: calc(11 * var(--ui-unit));
+  line-height: 1.6;
+  color: var(--secondary);
+}
+
+.lm-server {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.lm-server-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.lm-server-head .lm-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.lm-kind {
+  flex: none;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: calc(10 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.lm-field label,
+.lm-key {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lm-label {
+  flex: none;
+  width: 90px;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.lm-field .ui-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.lm-key {
+  flex-wrap: wrap;
+}
+
+.lm-key .ui-input {
+  flex: 0 1 260px;
+}
+
+.lm-key-state {
+  flex-basis: 100%;
+  padding-left: 98px;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.lm-server-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.lm-reach {
+  margin-right: auto;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+.lm-reach-ok {
+  color: var(--text);
+}
+
+.lm-reach-bad {
+  color: var(--error);
+}
+
+.lm-result {
+  font-size: calc(11 * var(--ui-unit));
+  max-width: 320px;
+  color: var(--secondary);
+}
+
+.lm-result-ok {
+  color: var(--text);
+}
+
+.lm-result-bad {
+  color: var(--error);
+}
+
+.lm-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lm-spacer {
+  flex: 1;
+}
+
+.lm-number {
+  width: 110px;
+  text-align: right;
+}
+
+.lm-unit {
+  margin-left: 6px;
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}

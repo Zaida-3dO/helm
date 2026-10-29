@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventBus } from '../api/events.ts';
 import type { UsageSnapshot, UsageWindow } from '../api/usage.ts';
-import { asOf, bars, type BarModel, emptyTitle, percentText, rangeOf, relativeFuture, shareText, tokensText, usdText } from './model.ts';
+import { asOf, bars, type BarModel, compactTokensText, emptyTitle, localText, percentText, rangeOf, relativeFuture, shareText, tokensText, usdText } from './model.ts';
 import { POLL_MS, UsageStore } from './store.ts';
 
 const NOW = Date.parse('2026-10-18T12:00:00Z');
@@ -48,6 +48,10 @@ test('relative times and ranges', () => {
   // The Cost dialog's numbers.
   const cases: [string, string][] = [
     [tokensText(1234567.4), '1,234,567'],
+    [compactTokensText(950), '950'],
+    [compactTokensText(12_345), '12.3k'],
+    [compactTokensText(1_234_567), '1.2M'],
+    [localText({ totalTokens: 1_200_000, wouldCostUsd: 4.1, comparedName: 'Sonnet' }), 'Local: 1.2M tokens, about $4.10 on Sonnet'],
     [usdText(0), '$0.00'],
     [usdText(0.004), '$0.004'],
     [usdText(1234.5), '$1,234.50'],

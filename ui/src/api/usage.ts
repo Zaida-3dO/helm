@@ -9,6 +9,7 @@ export type {
   CostReport,
   CostScope,
   CostTotals,
+  LocalTrack,
   WeeklyShare,
   ModelUsage,
   PlanUsageReading,
