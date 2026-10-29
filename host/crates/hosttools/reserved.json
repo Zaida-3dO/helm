@@ -58,6 +58,7 @@
     "app_update_settings",
     "app_usage_summary",
     "app_wait_for",
+    "app_web_search",
     "app_workflow",
     "app_workflow_consent",
     "app_workflow_gate",

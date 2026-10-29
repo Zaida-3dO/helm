@@ -71,6 +71,7 @@ export interface LaunchOptions {
   fake?: boolean;
   /** Written to claude-runtime.json on first launch. Default false, for the approval scenarios. */
   skipPermissions?: boolean;
+  /** Extra environment for helm.exe; wins over the defaults above (for example HELM_TEST_LOCAL_SERVERS). */
   env?: Record<string, string>;
 }
 
@@ -88,6 +89,9 @@ export async function launchApp(profileDir: string, opts: LaunchOptions = {}): P
     HELM_PROFILE_DIR: profileDir,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
     HELM_TEST_CONFIRM: "ok",
+    // No local model server is ever contacted from a check: each shows as unreachable. A check that
+    // wants one points this at the fake in fakes/local-model through `opts.env`.
+    HELM_TEST_LOCAL_SERVERS: "off",
     ...(fake ? { HELM_TEST_CLAUDE: JSON.stringify({ command: process.execPath, args: [FAKE_CLAUDE, E2E_FIXTURE] }), FAKE_CLAUDE_LOG: path.join(profileDir, "fake-claude.log") } : {}),
     ...(opts.env ?? {}),
   });

@@ -30,6 +30,7 @@ import { updatesFakeOps } from './fake-updates.ts';
 import { itemLinksFakeOps } from './fake-itemlinks.ts';
 import { hubFakeOps } from './fake-hub.ts';
 import { githubFakeOps } from './fake-github.ts';
+import { webSearchFakeOps } from './fake-websearch.ts';
 import { holdForSlot, isSlotWaitPrompt, slotsFakeOps } from './fake-slots.ts';
 import { orchestratorFakeOps } from './fake-orchestrator.ts';
 import { newChatFakeOps } from '../newchat/fake.ts';
@@ -73,6 +74,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const hub = hubFakeOps(); registerFakeOps(hub.prefixes, hub.handler); }
 { const sl = slotsFakeOps(); registerFakeOps(sl.prefixes, sl.handler); }
 { const gh = githubFakeOps(); registerFakeOps(gh.prefixes, gh.handler); }
+{ const ws = webSearchFakeOps(); registerFakeOps(ws.prefixes, ws.handler); }
 
 export function fakeOpFor(op: string): FakeOpHandler | undefined {
   return extraOps.find((r) => r.prefixes.some((p) => op.startsWith(p)))?.handler;
@@ -654,7 +656,13 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
       defaultEffort: 'xhigh',
       source: 'fallback',
-      local: [],
+      // Local models, to see the picker's Local group: two servers answer, one does not.
+      local: [
+        { id: 'local/strata/qwen3.8-flash', name: 'Qwen 3.8 Flash', server: 'Strata', kind: 'strata', contextTokens: 262144, loaded: true, reachable: true },
+        { id: 'local/strata/qwen3.8-coder', name: 'Qwen 3.8 Coder', server: 'Strata', kind: 'strata', contextTokens: 131072, loaded: false, reachable: true },
+        { id: 'local/ollama/llama3.2:3b', name: 'Llama 3.2 3B', server: 'Ollama', kind: 'ollama', contextTokens: 131072, sizeBytes: 2_000_000_000, loaded: false, reachable: true },
+        { id: 'local/office/qwen3:30b-a3b', name: 'Qwen3 30B A3B', server: 'Ollama (office)', kind: 'ollama', contextTokens: 40960, reachable: false },
+      ],
     }),
     tool_stop: () => ({ stopped: true }),
     // Settings → Runtime.

@@ -156,6 +156,9 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
         "run_slot_settings",
         UserOnly("Run slots decide when automated messages start, so only you set them."),
     ),
+    // Web search: the Claude-chats switch (agents may change it through the settings tools) and
+    // the last settings file imported from. The Brave key is in the credential store, not here.
+    ("web_search_settings", Tool),
 ];
 
 /// The class of a table, or None when it is unclassified.

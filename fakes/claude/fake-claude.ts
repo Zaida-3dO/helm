@@ -49,6 +49,10 @@
 //        when "agent" is set. The client's answer is saved under "as". No registration: nothing
 //        is sent and "as" is saved as {"none": true}.
 //   { "result": s, "isError"?: bool, "subtype"?: s }          end the turn
+//   { "modelCall": { "prompt"?: s }, "as"?: name }
+//        what Claude Code does on a local-model launch: one streaming Anthropic Messages request to
+//        $ANTHROPIC_BASE_URL (model $ANTHROPIC_MODEL, the token as a Bearer header, a thinking budget
+//        from $MAX_THINKING_TOKENS), then the streamed text as an assistant message. Saves {status, text}.
 //   { "mcp": { "server"?: s, "message": <JSON-RPC>, "hook"?: { "toolUseId", "agent"? } }, "as"?: name }
 //        an `mcp_message` control request to an SDK MCP server (default "helm"); with "hook", a
 //        PreToolUse hook_callback for the tool (`mcp__<server>__<params.name>`) goes first, to the
@@ -80,7 +84,24 @@ const SESSION = fixture.sessionId ?? "fake-session";
 function log(entry: Json): void {
   if (logPath) fs.appendFileSync(logPath, JSON.stringify(entry) + "\n");
 }
-log({ kind: "start", argv: flags, envKeys: Object.keys(process.env).sort(), pid: process.pid });
+// The variables a local-model launch sets, logged with their values (none of them is a secret; the
+// token is only ever sent to the server, which logs what it received).
+const ENV_ECHO = [
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+  "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+  "MAX_THINKING_TOKENS",
+  "CLAUDE_CODE_USE_GATEWAY",
+  "ENABLE_TOOL_SEARCH",
+  "NO_PROXY",
+];
+const env = Object.fromEntries(ENV_ECHO.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]]));
+log({ kind: "start", argv: flags, envKeys: Object.keys(process.env).sort(), env, pid: process.pid });
 
 const replay = fixture.replay !== false && flags.includes("--replay-user-messages");
 const lifecycle = replay && fixture.lifecycle !== false;
@@ -215,6 +236,7 @@ function autoAnswer(rec: Json): void {
     case "get_binary_version":
       return ok({ version: "0.0.0-fake" });
     case "set_model":
+    case "set_max_thinking_tokens":
     case "apply_flag_settings":
     case "set_permission_mode":
       return ok({});
@@ -439,6 +461,33 @@ function cond(c: Json): boolean {
 
 let hookSeq = 0;
 
+/** One streaming Messages request as a client on a local-model launch makes it; returns the text it assembled. */
+async function modelCall(prompt: string): Promise<{ status: number; text: string }> {
+  const base = process.env.ANTHROPIC_BASE_URL;
+  if (!base) return { status: 0, text: "" };
+  const headers: Record<string, string> = { "content-type": "application/json", "anthropic-version": "2023-06-01" };
+  if (process.env.ANTHROPIC_AUTH_TOKEN) headers.authorization = `Bearer ${process.env.ANTHROPIC_AUTH_TOKEN}`;
+  else if (process.env.ANTHROPIC_API_KEY) headers["x-api-key"] = process.env.ANTHROPIC_API_KEY;
+  const budget = Number(process.env.MAX_THINKING_TOKENS ?? 0);
+  const res = await fetch(`${base}/v1/messages`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: process.env.ANTHROPIC_MODEL ?? "claude-fake",
+      max_tokens: Number(process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS ?? 32_000),
+      stream: true,
+      messages: [{ role: "user", content: prompt }],
+      ...(budget > 0 ? { thinking: { type: "enabled", budget_tokens: budget } } : {}),
+    }),
+  });
+  let text = "";
+  for (const m of (await res.text()).matchAll(/^data: (.*)$/gm)) {
+    const e = JSON.parse(m[1]!) as { type?: string; delta?: { type?: string; text?: string } };
+    if (e.type === "content_block_delta" && e.delta?.type === "text_delta") text += e.delta.text ?? "";
+  }
+  return { status: res.status, text };
+}
+
 /** Runs steps; resolves false when the script must stop (exit or hang). */
 async function run(steps: Step[]): Promise<boolean> {
   for (const step of steps) {
@@ -523,6 +572,11 @@ async function run(steps: Step[]): Promise<boolean> {
         },
       });
       saved[as] = await awaitRecord({ type: "control_response", response: { request_id } }, Number(step.timeoutMs ?? 10_000));
+    } else if (step.modelCall) {
+      const m = fill(step.modelCall) as Json;
+      const done = await modelCall(typeof m.prompt === "string" ? m.prompt : "hello");
+      saved[typeof step.as === "string" ? step.as : "model"] = done;
+      shorthand({ text: done.status === 200 ? done.text : `model call failed: ${done.status}` });
     } else if (step.if) {
       const branch = cond(step.if as Json) ? step.then : step.else;
       if (Array.isArray(branch) && !(await run(branch as Step[]))) return false;

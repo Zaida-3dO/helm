@@ -8,7 +8,7 @@
 // above the hints, like the effort stops) uses `PickerPopover` directly; `Picker` is the plain
 // trigger-plus-popover pairing.
 
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { Fragment, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from './controls.tsx';
 import { useLayer } from './hooks.ts';
@@ -21,6 +21,10 @@ export interface PickerOption<T extends string> {
   text?: string;
   subtitle?: ReactNode;
   disabled?: boolean;
+  /** A heading drawn before the first of a run of options that share it (the list stays in order). */
+  group?: string;
+  /** The option's tooltip, for saying why it is disabled. */
+  hint?: string;
 }
 
 export interface PickerProps<T extends string> {
@@ -187,22 +191,29 @@ export function PickerPopover<T extends string>({
         <div className="ui-picker-list" role="listbox" aria-label={label} tabIndex={searchable ? -1 : 0}>
           {shown.length === 0 && <div className="ui-picker-empty">No matches</div>}
           {shown.map((o, i) => (
-            <div
-              key={o.value}
-              role="option"
-              aria-selected={o.value === value}
-              aria-disabled={o.disabled || undefined}
-              className={`ui-picker-option${i === active ? ' active' : ''}${o === extra ? ' extra' : ''}`}
-              data-value={o.value}
-              onMouseEnter={() => setActive(i)}
-              onClick={() => pick(o)}
-            >
-              <div className="ui-picker-text">
-                <div className="ui-picker-title">{o.title}</div>
-                {o.subtitle && <div className="ui-picker-sub">{o.subtitle}</div>}
+            <Fragment key={o.value}>
+              {o.group && o.group !== shown[i - 1]?.group && (
+                <div className="ui-picker-group" role="presentation">
+                  {o.group}
+                </div>
+              )}
+              <div
+                role="option"
+                aria-selected={o.value === value}
+                aria-disabled={o.disabled || undefined}
+                className={`ui-picker-option${i === active ? ' active' : ''}${o === extra ? ' extra' : ''}`}
+                data-value={o.value}
+                title={o.hint}
+                onMouseEnter={() => setActive(i)}
+                onClick={() => pick(o)}
+              >
+                <div className="ui-picker-text">
+                  <div className="ui-picker-title">{o.title}</div>
+                  {o.subtitle && <div className="ui-picker-sub">{o.subtitle}</div>}
+                </div>
+                {o.value === value && <Icon name="check" />}
               </div>
-              {o.value === value && <Icon name="check" />}
-            </div>
+            </Fragment>
           ))}
         </div>
         {footer}

@@ -10,7 +10,7 @@ import { McpError, type Json, type ResolvedServer } from "./types.ts";
 import type { Transport } from "./session.ts";
 
 /** Never handed to an MCP server (as for the claude child). */
-const STRIPPED_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDECODE"];
+const STRIPPED_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDECODE", "HELM_LOCAL_MODEL_KEY"];
 
 /** Raw stderr kept for the exit message; redacted as a whole, then only the tail is shown. */
 const STDERR_KEEP = 8192;

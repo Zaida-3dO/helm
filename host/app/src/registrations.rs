@@ -30,6 +30,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_relay::register_ops(reg);
     helm_updates::register_ops(reg);
     helm_github::register_ops(reg);
+    helm_webtools::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -49,6 +50,7 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_governor::register_migrations(reg);
     helm_localmodels::register_migrations(reg);
     helm_waits::register_migrations(reg);
+    helm_webtools::register_migrations(reg);
 }
 
 /// Shared services a crate adds for op handlers (`ctx.services.need::<T>()`), called once at
@@ -72,6 +74,8 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_relay::register_services(services, events);
     helm_updates::register_services(services, events);
     helm_github::register_services(services, events);
+    // The Brave key and the gate that tells launches whether to list web search.
+    helm_webtools::register_services(services, events);
     services.insert(Arc::new(host_tools()));
     // Settings that live outside the preference table but that chats read and change.
     let mut extensions = vec![
@@ -80,6 +84,9 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     ];
     if let Some(rt) = services.get::<helm_chats::ChatRuntime>() {
         extensions.push(helm_chats::slot_settings::extension((*rt).clone()));
+    }
+    if let Some(web) = services.get::<helm_webtools::WebSearch>() {
+        extensions.push(helm_webtools::settings_extension(web));
     }
     services.insert(Arc::new(helm_hosttools::SettingsExtensions(extensions)));
     services.insert(Arc::new(worker_lines()));
@@ -146,6 +153,7 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_relay::register_host_tools(&mut reg);
     helm_waits::register_host_tools(&mut reg);
     helm_usage::register_host_tools(&mut reg);
+    helm_webtools::register_host_tools(&mut reg);
     reg
 }
 
@@ -461,8 +469,22 @@ mod host_tool_tests {
             delta(mcp).is_empty(),
             "app_mcp_tools is the worker's, not the host's"
         );
+        let web = helm_hosttools::LaunchKeys {
+            web_tools: true,
+            ..Default::default()
+        };
+        assert_eq!(delta(web), ["app_web_search"]);
+        let local_without_key = helm_hosttools::LaunchKeys {
+            local_chat: true,
+            ..Default::default()
+        };
+        assert!(
+            delta(local_without_key).is_empty(),
+            "a local chat is offered web search only when the launch says a key is set"
+        );
         let restricted = helm_hosttools::LaunchKeys {
             restricted: true,
+            web_tools: true,
             ..both
         };
         assert!(names(restricted).is_empty());

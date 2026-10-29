@@ -6,6 +6,12 @@
 // error beside the trigger.
 //
 // Built on the kit's shared picker popover, with the effort row in its footer slot.
+//
+// Claude's models come first, then the local models under their own heading, each with its server
+// and context size. A server that did not answer greys its rows. After the chat's first turn its
+// model is fixed: rows that would cross between Claude and local, or between servers, are disabled
+// with a tooltip saying so. A local model has no effort setting, so the same stops are labelled as
+// thinking.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatOps } from '../api/ops.ts';
@@ -13,11 +19,12 @@ import type { ChatRecord, ModelCatalogue } from '../api/types.ts';
 import { useBinding } from '../ui/hooks.ts';
 import { IconChevronDown } from '../ui/icons.tsx';
 import { PickerPopover, type PickerOption } from '../ui/Picker.tsx';
-import { commitPatch, effortLabel, FALLBACK_EFFORTS, modelRows, stepEffort, triggerLabel } from './modelEffort.ts';
+import { commitPatch, effortLabel, FALLBACK_EFFORTS, isLocalModel, modelRows, stepEffort, thinkingLabel, triggerLabel } from './modelEffort.ts';
 
 let cached: Promise<ModelCatalogue> | null = null;
 
-export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
+/** `started`: the chat has had its first turn, so its model can no longer move between Claude and local, or between servers. */
+export function ModelPicker({ chat, ops, started = false }: { chat: ChatRecord; ops: ChatOps; started?: boolean }) {
   const [catalogue, setCatalogue] = useState<ModelCatalogue | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
@@ -38,13 +45,16 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
   const efforts = catalogue?.efforts?.length ? catalogue.efforts : FALLBACK_EFFORTS;
   const model = chat.model ?? catalogue?.models[0]?.id ?? '';
   const effort = chat.effort ?? catalogue?.defaultEffort ?? 'xhigh';
-  const rows = useMemo(() => modelRows(catalogue, model || null), [catalogue, model]);
+  const rows = useMemo(() => modelRows(catalogue, model || null, started), [catalogue, model, started]);
   const options: PickerOption<string>[] = useMemo(
-    () => rows.map((r) => ({ value: r.id, title: r.title, text: `${r.title} ${r.id} ${r.detail}`, subtitle: r.detail, disabled: r.disabled })),
+    () => rows.map((r) => ({ value: r.id, title: r.title, text: `${r.title} ${r.id} ${r.detail}`, subtitle: r.detail, disabled: r.disabled, group: r.group, hint: r.hint })),
     [rows],
   );
   const current = rows.find((r) => r.id === model);
-  const label = triggerLabel(current?.title ?? (model || 'Default'), effort);
+  // The chat's effort is a thinking level when the model is a local one.
+  const local = isLocalModel(model);
+  const stopLabel = local ? thinkingLabel : effortLabel;
+  const label = triggerLabel(current?.title ?? (model || 'Default'), effort, local);
 
   const close = (focus = true) => {
     setOpen(false);
@@ -53,6 +63,13 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
   const openPicker = () => {
     setEffortDraft(effort);
     setOpen(true);
+    // A local server that did not answer earlier may be up now; asking again is the user's own action.
+    if (catalogue?.local?.some((m) => !m.reachable)) {
+      cached = ops.catalogue(true);
+      cached.then(setCatalogue).catch(() => {
+        cached = null;
+      });
+    }
   };
 
   const commit = (id: string | undefined, chosenEffort = effortDraft) => {
@@ -86,7 +103,7 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={`Model and effort: ${label}`}
-        title={`${label} · Claude Code · Ctrl+Shift+M`}
+        title={`${label} · ${local ? 'Local model' : 'Claude Code'} · Ctrl+Shift+M`}
         data-testid="model-picker"
         onClick={() => (open ? close() : openPicker())}
         onKeyDown={(e) => {
@@ -119,13 +136,13 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
           testId="model-picker-pop"
           onClose={() => close()}
           onPick={(id) => commit(id)}
-          extraHint={<span>← → effort</span>}
+          extraHint={<span>← → {local ? 'thinking' : 'effort'}</span>}
           footer={
             <div className="model-picker-effort" data-testid="effort-picker">
               <span className="model-picker-caption">
-                Effort <kbd>←</kbd> <kbd>→</kbd>
+                {local ? 'Thinking' : 'Effort'} <kbd>←</kbd> <kbd>→</kbd>
               </span>
-              <span className="model-picker-stops" role="radiogroup" aria-label="Effort">
+              <span className="model-picker-stops" role="radiogroup" aria-label={local ? 'Thinking' : 'Effort'}>
                 {efforts.map((x, i) => {
                   const at = efforts.indexOf(effortDraft || effort);
                   return (
@@ -134,8 +151,8 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
                       type="button"
                       role="radio"
                       aria-checked={i === at}
-                      aria-label={effortLabel(x)}
-                      title={effortLabel(x)}
+                      aria-label={stopLabel(x)}
+                      title={stopLabel(x)}
                       className={`model-picker-stop${i <= at ? ' lit' : ''}${i === at ? ' on' : ''}`}
                       onClick={() => commit(model, x)}
                     >
@@ -144,7 +161,7 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
                   );
                 })}
               </span>
-              <span className="model-picker-effort-value">{effortLabel(effortDraft || effort)}</span>
+              <span className="model-picker-effort-value">{stopLabel(effortDraft || effort)}</span>
             </div>
           }
         />

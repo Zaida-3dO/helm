@@ -706,6 +706,15 @@ button.ui-chip-main:hover {
   opacity: 0.38;
   cursor: var(--cursor-default);
 }
+/* A heading over a run of options (the model picker's "Claude" and "Local"). */
+.ui-picker-group {
+  padding: calc(8 * var(--ui-unit)) calc(12 * var(--ui-unit)) calc(2 * var(--ui-unit));
+  font-size: calc(10 * var(--ui-unit));
+  font-weight: 590;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
 .ui-picker-text {
   flex: 1;
   min-width: 0;
