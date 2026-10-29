@@ -30,6 +30,7 @@ import { updatesFakeOps } from './fake-updates.ts';
 import { itemLinksFakeOps } from './fake-itemlinks.ts';
 import { hubFakeOps } from './fake-hub.ts';
 import { githubFakeOps } from './fake-github.ts';
+import { webSearchFakeOps } from './fake-websearch.ts';
 import { holdForSlot, isSlotWaitPrompt, slotsFakeOps } from './fake-slots.ts';
 import { orchestratorFakeOps } from './fake-orchestrator.ts';
 import { newChatFakeOps } from '../newchat/fake.ts';
@@ -73,6 +74,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const hub = hubFakeOps(); registerFakeOps(hub.prefixes, hub.handler); }
 { const sl = slotsFakeOps(); registerFakeOps(sl.prefixes, sl.handler); }
 { const gh = githubFakeOps(); registerFakeOps(gh.prefixes, gh.handler); }
+{ const ws = webSearchFakeOps(); registerFakeOps(ws.prefixes, ws.handler); }
 
 export function fakeOpFor(op: string): FakeOpHandler | undefined {
   return extraOps.find((r) => r.prefixes.some((p) => op.startsWith(p)))?.handler;
