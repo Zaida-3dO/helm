@@ -27,6 +27,7 @@
 //! | [`fork`] | forks and side-chat creation |
 //! | [`manage`] | archive, restore, delete, unread marks and completion acks |
 //! | [`seams`] | traits other crates implement (panel context, project gate) |
+//! | [`local`] | chats on local model servers: the model id, the thinking budget and the server seam |
 //! | [`search_source`] | the searchable message text the search crate indexes |
 //! | `timeline` | one log line per turn-opening send, from saved to first output |
 //! | [`runtime_settings`] | Settings → Runtime: Node/Claude status, launch options, new-chat defaults |
@@ -57,6 +58,7 @@ pub mod fork;
 pub mod hostcalls;
 #[cfg(test)]
 mod latency_tests;
+pub mod local;
 pub mod manage;
 pub mod message_images;
 pub mod ops;

@@ -413,10 +413,25 @@ pub struct ThreadState {
     /// otherwise idle.
     pub subagents_running: u32,
     pub compacting: Option<Compacting>,
+    /// A chat on a local model: what Helm is doing before the model's first words, until they
+    /// arrive ("Loading <model>…"). Absent for a Claude chat and once the reply has started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub loading: Option<LocalLoading>,
     pub capabilities: Capabilities,
     pub send_behavior: SendBehavior,
     #[ts(type = "number")]
     pub revision: i64,
+}
+
+/// The line shown while a local model is made ready for a turn, with when it began.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalLoading {
+    /// For example "Loading qwen3:8b…".
+    pub text: String,
+    #[ts(type = "number")]
+    pub started_at: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

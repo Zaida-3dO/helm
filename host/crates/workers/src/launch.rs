@@ -56,7 +56,29 @@ pub struct ClaudeLaunch {
     /// The worker compares the checkout before and after each Bash call, to list the files a
     /// shell command changed on the turn's change card.
     pub shell_changes: bool,
+    /// The chat runs on a model server on this machine instead of Claude. Absent for a Claude
+    /// chat. The server's key is never in this file: it reaches the worker in its environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local: Option<LocalSpec>,
 }
+
+/// Where a local chat's model lives and how far it may think. `baseUrl` is a loopback address;
+/// the worker checks that again before it uses it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSpec {
+    pub base_url: String,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+    pub thinking_tokens: u32,
+}
+
+/// The worker's environment variable that carries a local server's key. The worker reads it once
+/// and removes it from its own environment.
+pub const LOCAL_KEY_ENV: &str = "HELM_LOCAL_MODEL_KEY";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -273,6 +295,7 @@ pub fn claude_launch(
         tool_output_cap: runtime.tool_output_cap,
         schedule_tools: runtime.schedule_tools,
         shell_changes: runtime.shell_changes,
+        local: None,
     };
     if let Some(t) = test {
         c.command = Some(t.command.clone());

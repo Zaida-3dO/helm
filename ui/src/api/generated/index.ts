@@ -42,6 +42,7 @@ export type { InteractionAttention } from './InteractionAttention.ts';
 export type { InteractionContext } from './InteractionContext.ts';
 export type { InteractionMethod } from './InteractionMethod.ts';
 export type { LiveTool } from './LiveTool.ts';
+export type { LocalLoading } from './LocalLoading.ts';
 export type { LocalModelInfo } from './LocalModelInfo.ts';
 export type { LocalServerKind } from './LocalServerKind.ts';
 export type { LongCommands } from './LongCommands.ts';

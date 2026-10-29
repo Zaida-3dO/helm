@@ -145,6 +145,11 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
         "governor_settings",
         UserOnly("The usage governor can stop your chats, so only you set it."),
     ),
+    // Local model servers: the addresses, switches and numbers around them.
+    (
+        "local_model_settings",
+        UserOnly("Which local model servers Helm uses is yours to set; chats may change only a few of its switches."),
+    ),
     // The run-slot queue.
     ("slot_waits", Data),
     (

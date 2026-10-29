@@ -280,6 +280,7 @@ pub fn fork(
         title: String,
         cwd: String,
         project: String,
+        provider: Option<String>,
         model: Option<String>,
         effort: Option<String>,
         draft: String,
@@ -292,7 +293,7 @@ pub fn fork(
         .snapshot(|tx| {
             tx.query_row(
                 "SELECT c.title, COALESCE(p.path, ''), c.project_id, c.model, c.thinking, c.draft,
-                        c.side_source_id, c.position, c.pinned, c.archived
+                        c.side_source_id, c.position, c.pinned, c.archived, c.provider
                  FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
                 [req.source],
                 |r| {
@@ -307,6 +308,7 @@ pub fn fork(
                         position: r.get(7)?,
                         pinned: r.get(8)?,
                         archived: r.get(9)?,
+                        provider: r.get(10)?,
                     })
                 },
             )
@@ -500,8 +502,8 @@ pub fn fork(
             return Ok(Err(refuse("Restore this chat before forking it.")));
         }
         tx.execute(
-            "INSERT INTO chats(id, project_id, title, status, harness, model, thinking, created_at, updated_at, draft, draft_revision, side_source_id)
-             VALUES (?1, ?2, ?3, 'idle', 'claude', ?4, ?5, ?6, ?6, ?7, ?8, ?9)",
+            "INSERT INTO chats(id, project_id, title, status, harness, model, thinking, created_at, updated_at, draft, draft_revision, side_source_id, provider)
+             VALUES (?1, ?2, ?3, 'idle', 'claude', ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10)",
             params![
                 fork_id_chat,
                 src.project,
@@ -511,7 +513,8 @@ pub fn fork(
                 now,
                 draft,
                 if draft.is_empty() { 0 } else { now },
-                req.side.then_some(req.source)
+                req.side.then_some(req.source),
+                src.provider
             ],
         )?;
         tx.execute(

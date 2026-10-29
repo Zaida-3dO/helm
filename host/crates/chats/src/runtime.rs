@@ -110,6 +110,29 @@ pub struct SpawnRequest {
     pub send_behavior: SendBehavior,
     /// Host tools for this launch; `None` when the host-tool seam is not attached (tests).
     pub host: Option<HostLaunch>,
+    /// The chat runs on a local model server: what to start it with.
+    pub local: Option<LocalSpawn>,
+}
+
+/// A local chat's launch: the server and model (the name the worker asks the server for), and how
+/// far it may think. `server` is filled in when the worker is started, off the chat's task.
+#[derive(Clone)]
+pub struct LocalSpawn {
+    pub server_id: String,
+    pub model: String,
+    pub thinking_tokens: u32,
+    pub server: Option<crate::local::LocalServer>,
+}
+
+impl std::fmt::Debug for LocalSpawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalSpawn")
+            .field("server_id", &self.server_id)
+            .field("model", &self.model)
+            .field("thinking_tokens", &self.thinking_tokens)
+            .field("server", &self.server)
+            .finish()
+    }
 }
 
 /// The host-tool and MCP part of one launch.
@@ -242,6 +265,23 @@ impl Spawner for ProcessSpawner {
             req.resume_session_id.clone(),
         );
         claude.append_system_prompt = contrib::system_prompt(&extras);
+        if let Some(l) = &req.local {
+            let server = l
+                .server
+                .as_ref()
+                .ok_or("The local model server was not resolved for this start.")?;
+            claude.model = Some(l.model.clone());
+            // A local model has no effort levels: the thinking budget stands in for it.
+            claude.effort = None;
+            claude.local = Some(helm_workers::launch::LocalSpec {
+                base_url: server.base_url.clone(),
+                model: l.model.clone(),
+                context_tokens: server.context_tokens,
+                max_output_tokens: server.max_output_tokens,
+                thinking_tokens: l.thinking_tokens,
+            });
+            env.set(helm_workers::launch::LOCAL_KEY_ENV, server.key.clone());
+        }
         if extras.orchestrator_on {
             claude.subagent_soft_turns = runtime.subagent_turns(true);
         }
@@ -251,7 +291,12 @@ impl Spawner for ProcessSpawner {
             .join(&req.chat_id);
         let (host_tools, chat_tools_directory) = match &req.host {
             Some(h) => {
-                claude.strict_mcp_config = h.strict_mcp;
+                claude.strict_mcp_config = h.strict_mcp
+                    || req
+                        .local
+                        .as_ref()
+                        .and_then(|l| l.server.as_ref())
+                        .is_some_and(|s| s.lean);
                 claude.disabled_mcp_servers = h.disabled_mcp_servers.clone();
                 let dir = worker_dir.join("tools");
                 helm_core::privfs::create_private_dir_all(&dir)
@@ -378,6 +423,9 @@ pub(crate) struct Live {
     pub skills: Vec<SkillInfo>,
     /// The panel-context generation: bumped on each worker launch and compaction.
     pub context_gen: u64,
+    /// The model name a local chat's running worker was launched with (Ollama's variant of the
+    /// model, for one); `None` for a Claude chat or when no worker runs.
+    pub local_model: Option<String>,
 }
 
 #[derive(Clone)]
@@ -406,6 +454,8 @@ pub(crate) struct Shared {
     pub run_slots: crate::runslots::Slots,
     /// AFK's say over interactions and turns ([`crate::seams::AfkPolicy`]), installed once.
     pub afk: std::sync::OnceLock<Arc<dyn crate::seams::AfkPolicy>>,
+    /// The local model servers ([`crate::local::LocalModels`]), installed once.
+    pub local: std::sync::OnceLock<crate::local::SharedLocal>,
 }
 
 /// The runtime service.
@@ -443,6 +493,7 @@ impl ChatRuntime {
                 host: std::sync::OnceLock::new(),
                 run_slots: Default::default(),
                 afk: std::sync::OnceLock::new(),
+                local: std::sync::OnceLock::new(),
             }),
         };
         rt.start_tick();
@@ -456,6 +507,19 @@ impl ChatRuntime {
         if self.sh.host.set(seam).is_err() {
             log::warn!("host tools attached twice; keeping the first");
         }
+    }
+
+    /// Install the local model servers (once, at startup). Without them a chat on a local model
+    /// cannot start.
+    pub fn set_local_models(&self, local: crate::local::SharedLocal) {
+        if self.sh.local.set(local).is_err() {
+            log::warn!("local models installed twice; keeping the first");
+        }
+    }
+
+    /// The local model servers, if installed.
+    pub fn local_models(&self) -> Option<crate::local::SharedLocal> {
+        self.sh.local.get().cloned()
     }
 
     /// The maintenance tick (every `limits.tick`): ask busy actors to check for a stall, and
@@ -512,13 +576,17 @@ impl ChatRuntime {
     /// `model_catalogue {refresh: true}`: ask a chat with a live worker to re-read `get_state`.
     /// Answers false when no worker is running (the cached catalogue stands).
     pub async fn refresh_catalogue(&self) -> bool {
+        // A chat on a local model reports that server's models, not Claude's: never ask one.
         let live: Option<String> = self
             .sh
             .actors
             .lock()
             .unwrap()
             .iter()
-            .find(|(_, h)| h.live.lock().unwrap().has_worker)
+            .find(|(_, h)| {
+                let l = h.live.lock().unwrap();
+                l.has_worker && l.local_model.is_none()
+            })
             .map(|(id, _)| id.clone());
         let Some(chat) = live else { return false };
         self.ask(

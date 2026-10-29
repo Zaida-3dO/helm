@@ -81,10 +81,13 @@ fn chat_id_arg(a: &Value) -> Result<String, ToolError> {
 /// One chat as the tools describe it.
 fn chat_meta(tx: &rusqlite::Connection, id: &str) -> rusqlite::Result<Option<Value>> {
     tx.query_row(
-        "SELECT c.id, c.title, c.project_id, p.name, c.archived, c.status, c.created_at,
-                c.updated_at, c.harness, c.model, c.thinking, c.parent_chat_id, c.pinned,
-                c.side_source_id
-         FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
+        &format!(
+            "SELECT c.id, c.title, c.project_id, p.name, c.archived, c.status, c.created_at,
+                    c.updated_at, c.harness, {}, c.thinking, c.parent_chat_id, c.pinned,
+                    c.side_source_id
+             FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
+            crate::local::MODEL_ID_SQL
+        ),
         [id],
         |r| {
             let id = r.get::<_, String>(0)?;

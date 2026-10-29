@@ -775,6 +775,34 @@ pub fn submission_action(
     Ok(SubmissionActionResult { submission })
 }
 
+/// The model is fixed once a chat has had a session: a chat that began on Claude stays on Claude
+/// models, and a chat on a local server stays on that server (another model on it is fine). Before
+/// the first turn any model may be picked. `before` is the chat's model id now, `to` the server
+/// the new model lives on (`None` for a Claude model).
+fn refuse_model_crossing(
+    rt: &ChatRuntime,
+    chat_id: &str,
+    before: Option<&str>,
+    to: Option<&str>,
+) -> Result<(), ApiError> {
+    let from = before.and_then(crate::local::split).map(|(s, _)| s);
+    if from == to || !crate::local::has_session(&rt.sh.cfg.sessions(), chat_id) {
+        return Ok(());
+    }
+    let why = match (from, to) {
+        (None, _) => {
+            "This chat has already started on a Claude model, so it can't move to a local model. Start a new chat to use one."
+        }
+        (Some(_), None) => {
+            "This chat is running on a local model, so it can't move to a Claude model. Start a new chat to use one."
+        }
+        (Some(_), Some(_)) => {
+            "This chat is running on one local model server, so it can't move to another. Start a new chat to use that one."
+        }
+    };
+    Err(ApiError::new("refused", why))
+}
+
 /// `chat_set_model`: store the choice, note it in the transcript, drop any pending restart
 /// continuation (the chat changed), and apply it from the next turn.
 pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecord, ApiError> {
@@ -798,14 +826,27 @@ pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecor
     if model.is_none() && effort.is_none() {
         return Ok(before);
     }
+    // A local model id is stored as the server and the server's own model name.
+    let (new_provider, new_name) =
+        crate::local::columns(model.as_deref()).map_err(ApiError::bad_args)?;
+    if let Some(server) = &new_provider {
+        if rt.local_models().is_some_and(|l| !l.knows(server)) {
+            return Err(ApiError::bad_args(
+                "That local model server is not set up. Add it in Settings > Local models.",
+            ));
+        }
+    }
+    if model.is_some() {
+        refuse_model_crossing(rt, &a.chat_id, before.model.as_deref(), new_provider.as_deref())?;
+    }
     let now = helm_core::now_ms();
     let artifacts = rt.sh.cfg.artifacts();
     rt.db()
         .write(|tx| {
-            if let Some(m) = &model {
+            if let Some(m) = &new_name {
                 tx.execute(
-                    "UPDATE chats SET model = ?1, updated_at = ?2 WHERE id = ?3",
-                    params![m, now, a.chat_id],
+                    "UPDATE chats SET model = ?1, provider = ?2, updated_at = ?3 WHERE id = ?4",
+                    params![m, new_provider, now, a.chat_id],
                 )?;
             }
             if let Some(e) = &effort {
@@ -821,7 +862,12 @@ pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecor
             for (kind, text) in [
                 (
                     model.as_ref().map(|_| ContextKind::ModelChange),
-                    model.as_ref().map(|m| format!("Model changed to {m}")),
+                    model.as_ref().map(|m| {
+                        match crate::local::split(m) {
+                            Some((_, name)) => format!("Model changed to {name} (local)"),
+                            None => format!("Model changed to {m}"),
+                        }
+                    }),
                 ),
                 (
                     effort.as_ref().map(|_| ContextKind::EffortChange),

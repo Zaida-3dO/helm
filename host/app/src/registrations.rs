@@ -26,6 +26,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_workflow::register_ops(reg);
     helm_afk::register_ops(reg);
     helm_governor::register_ops(reg);
+    helm_localmodels::register_ops(reg);
     helm_relay::register_ops(reg);
     helm_updates::register_ops(reg);
     helm_github::register_ops(reg);
@@ -46,6 +47,7 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_workflow::register_migrations(reg);
     helm_afk::register_migrations(reg);
     helm_governor::register_migrations(reg);
+    helm_localmodels::register_migrations(reg);
     helm_waits::register_migrations(reg);
 }
 
@@ -66,12 +68,16 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     // After usage, which the governor reads.
     helm_afk::register_services(services, events);
     helm_governor::register_services(services, events);
+    helm_localmodels::register_services(services, events);
     helm_relay::register_services(services, events);
     helm_updates::register_services(services, events);
     helm_github::register_services(services, events);
     services.insert(Arc::new(host_tools()));
     // Settings that live outside the preference table but that chats read and change.
-    let mut extensions = vec![helm_workflow::settings_extension()];
+    let mut extensions = vec![
+        helm_workflow::settings_extension(),
+        helm_localmodels::settings_extension(),
+    ];
     if let Some(rt) = services.get::<helm_chats::ChatRuntime>() {
         extensions.push(helm_chats::slot_settings::extension((*rt).clone()));
     }

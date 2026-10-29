@@ -88,6 +88,14 @@ pub(crate) enum Cmd {
     Prewarm,
     /// AFK just turned on: run the interactions already waiting past the AFK policy.
     AfkSweep,
+    /// A local chat's model is being made ready for the turn `token` names: a line to show.
+    LocalNote { token: u64, text: String },
+    /// That preparation finished: the name the worker should ask the server for, or why no turn
+    /// starts.
+    LocalPrepared {
+        token: u64,
+        result: Result<String, String>,
+    },
 }
 
 pub(crate) const STOP_TIMEOUT_ERROR: &str =
@@ -204,6 +212,33 @@ struct Actor {
     timeline: Option<crate::timeline::SendTimeline>,
     /// The last worker start that failed: pre-warm waits [`PREWARM_RETRY`] before trying again.
     spawn_failed_at: Option<Instant>,
+    /// This actor's own channel, held weakly, for work it hands to another thread.
+    me: mpsc::WeakSender<Cmd>,
+    /// A local chat's turn waiting for its model to be made ready.
+    prepare: Option<Prepare>,
+    prepare_count: u64,
+    /// The submission that is opening its turn now that its preparation is done.
+    opening: Option<String>,
+    /// The model name the last preparation answered, for the worker started next.
+    prepared: Option<String>,
+    /// The server and model name the running worker was launched for; `None` for a Claude chat.
+    launched_local: Option<(String, String)>,
+}
+
+/// A local chat's turn that is waiting for its model: the submission that opens the turn and any
+/// later sends held behind it.
+struct Prepare {
+    token: u64,
+    sid: String,
+    held: Vec<String>,
+}
+
+/// The server and model name of a chat on a local model, if it is one.
+fn local_of(chat: &ChatRecord) -> Option<(String, String)> {
+    chat.model
+        .as_deref()
+        .and_then(crate::local::split)
+        .map(|(s, m)| (s.to_owned(), m.to_owned()))
 }
 
 /// After a failed worker start, typing does not start another for this long (sends still do).
@@ -236,6 +271,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
             subagents: vec![],
             subagents_running: 0,
             compacting: None,
+            loading: None,
             capabilities: Capabilities::default(),
             send_behavior: crate::send_behavior::HOME_DEFAULTS,
             revision: 0,
@@ -247,6 +283,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         stalled: false,
         skills: Vec::new(),
         context_gen: 0,
+        local_model: None,
     }));
     let actor = Actor {
         sh: sh.clone(),
@@ -283,6 +320,12 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         evicted: Vec::new(),
         timeline: None,
         spawn_failed_at: None,
+        me: tx.downgrade(),
+        prepare: None,
+        prepare_count: 0,
+        opening: None,
+        prepared: None,
+        launched_local: None,
     };
     sh.handle.spawn(actor.run(rx));
     ActorHandle { tx, live }
@@ -666,6 +709,17 @@ impl Actor {
         let sb = self.live.lock().unwrap().thread.send_behavior;
         self.launched_long = Some(sb.long_commands);
         self.relaunch_on_idle = false;
+        // A chat on a local model starts the worker for the name its preparation answered (for
+        // Ollama, Helm's variant of the model).
+        let local = local_of(&chat).map(|(server_id, model)| crate::runtime::LocalSpawn {
+            server_id,
+            model: self.prepared.take().unwrap_or(model),
+            thinking_tokens: crate::local::thinking_tokens(chat.effort.as_deref()),
+            server: None,
+        });
+        self.launched_local = local
+            .as_ref()
+            .map(|l| (l.server_id.clone(), l.model.clone()));
         let req = SpawnRequest {
             chat_id: self.chat_id.clone(),
             cwd: chat.cwd.clone(),
@@ -674,7 +728,8 @@ impl Actor {
             resume_session_id: resume,
             fork_session,
             send_behavior: sb,
-            host: crate::hostcalls::launch(&self.sh, &self.chat_id, &chat.cwd),
+            host: crate::hostcalls::launch(&self.sh, &self.chat_id, &chat.cwd, local.is_some()),
+            local,
         };
         if let Some(t) = self.timeline.as_mut() {
             t.spawn = Some(now());
@@ -689,6 +744,7 @@ impl Actor {
             let mut live = self.live.lock().unwrap();
             live.has_worker = true;
             live.context_gen += 1;
+            live.local_model = self.launched_local.as_ref().map(|(_, m)| m.clone());
         }
         // get_state goes out first, ahead of anything deferred.
         let id = self.new_id();
@@ -708,7 +764,12 @@ impl Actor {
         self.out = None;
         self.ready = false;
         self.deferred.clear();
-        self.live.lock().unwrap().has_worker = false;
+        self.launched_local = None;
+        {
+            let mut live = self.live.lock().unwrap();
+            live.has_worker = false;
+            live.local_model = None;
+        }
         for (_, p) in std::mem::take(&mut self.pending) {
             match p {
                 Pending::Prompt { submission_id } => {
@@ -778,7 +839,9 @@ impl Actor {
             live.thread.capabilities = caps;
             live.skills = skills;
         }
-        if let Some(models) = crate::catalogue::from_get_state(&data) {
+        // A chat on a local model lists that server's models, not Claude's: never cache them.
+        let models = crate::catalogue::from_get_state(&data).filter(|_| self.launched_local.is_none());
+        if let Some(models) = models {
             if crate::catalogue::store(&self.sh.cfg.profile_dir, models).is_ok() {
                 self.emit(ChatEvent::Catalogue {
                     harness: Harness::Claude,
@@ -801,7 +864,12 @@ impl Actor {
         self.out = None;
         self.ready = false;
         self.deferred.clear();
-        self.live.lock().unwrap().has_worker = false;
+        self.launched_local = None;
+        {
+            let mut live = self.live.lock().unwrap();
+            live.has_worker = false;
+            live.local_model = None;
+        }
         let pending: Vec<Pending> = self.pending.drain().map(|(_, p)| p).collect();
         for p in pending {
             match p {
@@ -978,6 +1046,7 @@ impl Actor {
             let mut live = self.live.lock().unwrap();
             live.thread.interactions.clear();
             live.thread.compacting = None;
+            live.thread.loading = None;
         }
         self.set_status(status, error);
         self.save_binding();
@@ -1220,6 +1289,21 @@ impl Actor {
                 if self.link.is_none() {
                     return; // the next launch carries it
                 }
+                if self.launched_local.is_some()
+                    || model
+                        .as_deref()
+                        .is_some_and(|m| crate::local::split(m).is_some())
+                {
+                    // A local chat's model and thinking budget are part of its launch, and a worker
+                    // started for Claude cannot become a local one: start a new worker, now when
+                    // nothing runs and otherwise at the next idle point.
+                    if self.status().is_busy() || self.agents_running() {
+                        self.relaunch_on_idle = true;
+                    } else {
+                        self.relaunch_worker();
+                    }
+                    return;
+                }
                 if let Some(m) = model {
                     let id = self.request(json!({"type": "set_model", "model": m}), Pending::Model);
                     let lim = self.sh.cfg.limits.model_ack;
@@ -1254,6 +1338,14 @@ impl Actor {
             Cmd::Compact { reply } => {
                 if self.status().is_busy() {
                     let _ = reply.send(Err("Compaction waits until the turn has finished.".into()));
+                    return;
+                }
+                if self.link.is_none() && self.is_local_chat() {
+                    // Compacting asks the model, which is only made ready when a turn opens.
+                    let _ = reply.send(Err(
+                        "Send a message first: Helm gets the local model ready when a turn starts, and compaction needs it."
+                            .into(),
+                    ));
                     return;
                 }
                 if !self.ensure_worker() {
@@ -1355,7 +1447,13 @@ impl Actor {
                 let backing_off = self
                     .spawn_failed_at
                     .is_some_and(|t| t.elapsed() < PREWARM_RETRY);
-                if self.link.is_none() && !self.status().is_busy() && !quitting && !backing_off {
+                // A local chat's worker waits for its first send: the model is made ready then.
+                if self.link.is_none()
+                    && !self.status().is_busy()
+                    && !quitting
+                    && !backing_off
+                    && !self.is_local_chat()
+                {
                     self.ensure_worker();
                 }
             }
@@ -1365,6 +1463,12 @@ impl Actor {
                     self.set_stalled(true);
                 }
             }
+            Cmd::LocalNote { token, text } => {
+                if self.prepare.as_ref().is_some_and(|p| p.token == token) {
+                    self.set_loading(text);
+                }
+            }
+            Cmd::LocalPrepared { token, result } => self.on_prepared(token, result),
             Cmd::Archived => self.on_archived(),
             Cmd::Restored => {
                 self.archived = false;
@@ -1445,7 +1549,22 @@ impl Actor {
             .ok()
             .flatten()
             .flatten();
-        let busy = self.status().is_busy();
+        if let Some(p) = self.prepare.as_mut() {
+            // The model of the turn that is opening is still being made ready: this send waits
+            // behind it.
+            if p.sid != sid && !p.held.iter().any(|h| h == sid) {
+                p.held.push(sid.to_owned());
+            }
+            return;
+        }
+        let opening = self.opening.as_deref() == Some(sid);
+        if opening {
+            self.opening = None;
+        }
+        let busy = !opening && self.status().is_busy();
+        if !busy && !opening && self.begin_prepare(sid) {
+            return;
+        }
         if !busy {
             let mut t = crate::timeline::SendTimeline::new(sid, sub.created_at, now());
             t.warm = self.ready;
@@ -1603,11 +1722,154 @@ impl Actor {
         self.emit_queue();
     }
 
+    // ------------------------------------------------------------------ local models
+
+    fn is_local_chat(&self) -> bool {
+        self.chat().is_some_and(|c| local_of(&c).is_some())
+    }
+
+    fn set_loading(&mut self, text: String) {
+        {
+            let mut live = self.live.lock().unwrap();
+            let since = live.thread.loading.as_ref().map_or_else(now, |l| l.started_at);
+            live.thread.loading = Some(LocalLoading {
+                text,
+                started_at: since,
+            });
+        }
+        self.emit_thread();
+    }
+
+    /// The model's first words have arrived (or the turn ended): the loading line goes.
+    fn clear_loading(&mut self) {
+        let had = self.live.lock().unwrap().thread.loading.take().is_some();
+        if had {
+            self.emit_thread();
+        }
+    }
+
+    /// Put the text of submissions that were never sent back in the draft.
+    fn give_back(&mut self, ids: Vec<String>) {
+        let chat = self.chat_id.clone();
+        self.write(|t| {
+            use rusqlite::OptionalExtension;
+            for id in &ids {
+                let text: Option<String> = t
+                    .query_row(
+                        "SELECT text FROM submissions WHERE id = ?1 AND state = 'saved'",
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(text) = text {
+                    t.execute("UPDATE submissions SET state = 'rejected' WHERE id = ?1", [id])?;
+                    crate::submit::text_to_draft(t, &chat, &text)?;
+                }
+            }
+            Ok(())
+        });
+    }
+
+    /// A chat on a local model gets its model made ready before each turn it opens (the memory
+    /// check, the load, Ollama's variant). Starts that on the blocking pool and answers true;
+    /// the turn goes ahead, or is refused, when it reports back.
+    fn begin_prepare(&mut self, sid: &str) -> bool {
+        let Some(chat) = self.chat() else {
+            return false;
+        };
+        let Some((server_id, model)) = local_of(&chat) else {
+            return false;
+        };
+        let Some(seam) = self.sh.local.get().cloned() else {
+            self.refuse_local(&[sid.to_owned()], crate::local::NOT_AVAILABLE);
+            return true;
+        };
+        self.prepare_count += 1;
+        let token = self.prepare_count;
+        self.prepare = Some(Prepare {
+            token,
+            sid: sid.to_owned(),
+            held: Vec::new(),
+        });
+        // The chat shows as starting while its model is made ready; Stop works as usual.
+        self.set_status(ChatStatus::Starting, None);
+        let turn = crate::local::LocalTurn {
+            chat_id: self.chat_id.clone(),
+            server_id,
+            model,
+            launched: self.live.lock().unwrap().local_model.clone(),
+            in_use: self
+                .sh
+                .actors
+                .lock()
+                .unwrap()
+                .values()
+                .filter_map(|h| h.live.lock().unwrap().local_model.clone())
+                .collect(),
+        };
+        let weak = self.me.clone();
+        self.sh.handle.spawn(async move {
+            let notes = weak.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let note = |text: &str| {
+                    if let Some(tx) = notes.upgrade() {
+                        let _ = tx.try_send(Cmd::LocalNote {
+                            token,
+                            text: text.to_owned(),
+                        });
+                    }
+                };
+                seam.prepare(&turn, &note)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("Helm could not get the local model ready: {e}")));
+            if let Some(tx) = weak.upgrade() {
+                let _ = tx.send(Cmd::LocalPrepared { token, result }).await;
+            }
+        });
+        true
+    }
+
+    fn on_prepared(&mut self, token: u64, result: Result<String, String>) {
+        let Some(p) = self.prepare.take_if(|p| p.token == token) else {
+            return; // stopped or replaced meanwhile
+        };
+        match result {
+            Ok(name) => {
+                self.prepared = Some(name);
+                self.opening = Some(p.sid.clone());
+                self.dispatch(&p.sid);
+                for held in p.held {
+                    self.dispatch(&held);
+                }
+            }
+            Err(why) => {
+                let ids = std::iter::once(p.sid).chain(p.held).collect::<Vec<_>>();
+                self.refuse_local(&ids, &why);
+            }
+        }
+    }
+
+    /// No turn starts: say why in the transcript, put the typed text back in the draft and leave
+    /// the chat idle.
+    fn refuse_local(&mut self, ids: &[String], why: &str) {
+        self.give_back(ids.to_vec());
+        self.context_row(ContextKind::Notice, why);
+        self.end_run(ChatStatus::Idle, None, "refused");
+        self.emit_queue();
+    }
+
     fn stop(&mut self, continue_queue: bool, reply: oneshot::Sender<ChatStatus>) {
         let status = self.status();
         if !status.is_busy() {
             let _ = reply.send(status);
             return;
+        }
+        if let Some(p) = self.prepare.take() {
+            // Stopped while the model was being made ready: nothing was sent, so what was typed
+            // goes back to the draft.
+            self.give_back(std::iter::once(p.sid).chain(p.held).collect());
+            self.clear_loading();
         }
         if let Some(s) = self.stopping.as_mut() {
             s.continue_queue = continue_queue;
@@ -1749,6 +2011,7 @@ impl Actor {
         let v = Value::Object(r.clone());
         let kind = r.get("type").and_then(Value::as_str).unwrap_or_default();
         if matches!(kind, "message_update" | "tool_execution_start") {
+            self.clear_loading();
             crate::timeline::finish(
                 &mut self.timeline,
                 &self.sh.cfg.profile_dir,
@@ -2289,8 +2552,14 @@ impl Actor {
     /// The turn's result: record what it used as a `usage` entry (see [`crate::turn_usage`]).
     fn on_turn_usage(&mut self, v: &Value) {
         let main = crate::turn_usage::parse(v).unwrap_or_default();
+        let local = self.launched_local.is_some();
         let turn = match v.get("running").and_then(crate::turn_usage::parse) {
-            Some(running) => {
+            Some(mut running) => {
+                // Whatever cost Claude Code works out for a model it does not know is not real:
+                // a local turn costs nothing, and its tokens are counted apart from the plan's.
+                if local {
+                    running.cost_usd = 0.0;
+                }
                 let turn = crate::turn_usage::share(&self.cost_base, &running, &main);
                 self.cost_base = running;
                 turn
@@ -2300,6 +2569,14 @@ impl Actor {
                 cost_usd: 0.0,
                 ..main
             },
+        };
+        let turn = if local {
+            Usage {
+                cost_usd: 0.0,
+                ..turn
+            }
+        } else {
+            turn
         };
         if crate::turn_usage::is_empty(&turn) {
             return;
@@ -2535,7 +2812,9 @@ impl Actor {
             Pending::Ready => self.on_ready(&r),
             Pending::Catalogue { reply } => {
                 let mut stored = false;
-                if let Some(models) = crate::catalogue::from_get_state(&data) {
+                let models = crate::catalogue::from_get_state(&data)
+                    .filter(|_| self.launched_local.is_none());
+                if let Some(models) = models {
                     if crate::catalogue::store(&self.sh.cfg.profile_dir, models).is_ok() {
                         stored = true;
                         self.emit(ChatEvent::Catalogue {
@@ -2759,6 +3038,13 @@ impl Actor {
                 if status == ChatStatus::Idle {
                     self.complete_turn();
                 }
+            }
+        }
+        if matches!(outcome, "complete" | "stopped") {
+            if let (Some((server, model)), Some(local)) =
+                (self.launched_local.as_ref(), self.sh.local.get())
+            {
+                local.finished(server, model);
             }
         }
         if !self.status().is_busy() {

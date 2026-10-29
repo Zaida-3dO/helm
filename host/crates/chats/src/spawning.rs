@@ -83,9 +83,20 @@ pub(crate) fn spawn_off_actor(sh: &Shared, req: SpawnRequest) -> Spawned {
     let pending = Arc::new(PendingLink::new());
     let (tx, rx) = mpsc::channel(256);
     let spawner = sh.spawner.clone();
+    let local = sh.local.get().cloned();
     let link = pending.clone();
     sh.handle.spawn(async move {
-        match tokio::task::spawn_blocking(move || spawner.spawn(&req)).await {
+        let start = move || {
+            let mut req = req;
+            // A chat on a local model server: its address and key are looked up here, off the
+            // chat's task, since the key comes out of the credential store.
+            if let Some(l) = req.local.as_mut() {
+                let seam = local.ok_or_else(|| crate::local::NOT_AVAILABLE.to_owned())?;
+                l.server = Some(seam.server(&l.server_id, &l.model)?);
+            }
+            spawner.spawn(&req)
+        };
+        match tokio::task::spawn_blocking(start).await {
             Ok(Ok((real, mut out))) => {
                 link.running(real);
                 while let Some(o) = out.recv().await {

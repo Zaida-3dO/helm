@@ -1800,6 +1800,7 @@ dependencies = [
  "helm-hosttools",
  "helm-ipc",
  "helm-itemlinks",
+ "helm-localmodels",
  "helm-mcp",
  "helm-panel",
  "helm-platform",
@@ -1966,6 +1967,26 @@ dependencies = [
  "serde_json",
  "tempfile",
  "ts-rs",
+]
+
+[[package]]
+name = "helm-localmodels"
+version = "0.5.0"
+dependencies = [
+ "helm-chats",
+ "helm-core",
+ "helm-hosttools",
+ "helm-ipc",
+ "helm-platform",
+ "helm-usage",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "ts-rs",
+ "ureq",
 ]
 
 [[package]]

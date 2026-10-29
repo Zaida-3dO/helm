@@ -11,12 +11,16 @@ pub const DEFAULT_TITLE: &str = "New chat";
 /// The fallback title's length.
 pub const FALLBACK_TITLE_CHARS: usize = 72;
 
-const CHAT_COLUMNS: &str = "c.id, c.project_id, COALESCE(p.path, ''), c.title, c.status, c.error, \
-     c.model, c.thinking, c.draft, c.draft_revision, c.created_at, c.updated_at, c.pinned, \
+const CHAT_COLUMNS: &str = concat!(
+    "c.id, c.project_id, COALESCE(p.path, ''), c.title, c.status, c.error, ",
+    crate::local::model_id_sql!(),
+    ", c.thinking, c.draft, c.draft_revision, c.created_at, c.updated_at, c.pinned, \
      c.archived, c.parent_chat_id, c.side_source_id, COALESCE(t.state, 'fallback'), u.token, \
      (SELECT k.id FROM chat_completions k WHERE k.chat_id = c.id AND k.read = 0), \
      EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id), \
-     MAX(c.updated_at, COALESCE(a.last_activity_at, 0)),      CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN COALESCE(a.stalled, 0) ELSE 0 END";
+     MAX(c.updated_at, COALESCE(a.last_activity_at, 0)), \
+     CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN COALESCE(a.stalled, 0) ELSE 0 END"
+);
 
 /// The joins [`CHAT_COLUMNS`] needs, after `FROM chats c`.
 pub(crate) const CHAT_JOINS: &str = "JOIN projects p ON p.id = c.project_id \
@@ -126,10 +130,13 @@ pub fn create_chat_in(
     now: i64,
 ) -> rusqlite::Result<String> {
     let id = uuid::Uuid::new_v4().to_string();
+    // A local model id is stored as the server (`provider`) and the server's own model name.
+    let (provider, model) = crate::local::columns(model)
+        .map_err(rusqlite::Error::InvalidParameterName)?;
     tx.execute(
-        "INSERT INTO chats(id, project_id, title, status, harness, model, thinking, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'idle', 'claude', ?4, ?5, ?6, ?6)",
-        params![id, project_id, DEFAULT_TITLE, model, effort, now],
+        "INSERT INTO chats(id, project_id, title, status, harness, provider, model, thinking, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'idle', 'claude', ?4, ?5, ?6, ?7, ?7)",
+        params![id, project_id, DEFAULT_TITLE, provider, model, effort, now],
     )?;
     Ok(id)
 }

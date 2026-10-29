@@ -5,6 +5,7 @@ import type { ChatStatus } from "./ChatStatus";
 import type { Compacting } from "./Compacting";
 import type { Interaction } from "./Interaction";
 import type { LiveTool } from "./LiveTool";
+import type { LocalLoading } from "./LocalLoading";
 import type { SendBehavior } from "./SendBehavior";
 import type { Subagent } from "./Subagent";
 
@@ -17,4 +18,9 @@ subagents: Array<Subagent>,
  * How many of `subagents` are running: the sidebar's "working" signal for a chat that is
  * otherwise idle.
  */
-subagentsRunning: number, compacting: Compacting | null, capabilities: Capabilities, sendBehavior: SendBehavior, revision: number, };
+subagentsRunning: number, compacting: Compacting | null, 
+/**
+ * A chat on a local model: what Helm is doing before the model's first words, until they
+ * arrive ("Loading <model>…"). Absent for a Claude chat and once the reply has started.
+ */
+loading?: LocalLoading, capabilities: Capabilities, sendBehavior: SendBehavior, revision: number, };

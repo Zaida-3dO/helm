@@ -12,7 +12,7 @@
 //!   apart, so the spend is small and bounded; the Needs attention dialog says so and holds the
 //!   switch.
 //! - **Which chats** ([`decide`], one table-driven test): idle, stopped or interrupted; not
-//!   archived, not a side chat, not muted; not already listed by the host (a pending request, an
+//!   archived, not on a local model (its words stay off Claude), not a side chat, not muted; not already listed by the host (a pending request, an
 //!   unread result or mark); not set aside (addressed or snoozed since the last activity); has a
 //!   message from you; quiet for at least the delay and no longer than [`WINDOW_MS`] (so turning
 //!   it on never walks old history); and not yet checked for this stretch of quiet. The stretch
@@ -110,6 +110,9 @@ pub struct Cand {
     /// Addressed or snoozed since the last activity.
     pub quiet: bool,
     pub has_request: bool,
+    /// The chat runs on a local model. The check sends the end of the chat to Claude's small
+    /// model, so a local chat's words never go there.
+    pub local: bool,
     /// The later of the chat's last update and its last worker output.
     pub stamp: i64,
     /// The stamp of the last check.
@@ -121,6 +124,7 @@ pub enum Skip {
     Disabled,
     Held,
     Archived,
+    Local,
     Side,
     Busy,
     Muted,
@@ -142,6 +146,8 @@ pub fn decide(c: &Cand, s: &Settings, held: bool, now: i64) -> Result<(), Skip> 
         Err(Skip::Held)
     } else if c.archived {
         Err(Skip::Archived)
+    } else if c.local {
+        Err(Skip::Local)
     } else if c.side {
         Err(Skip::Side)
     } else if c.status.is_busy() {
@@ -176,7 +182,7 @@ fn candidates(tx: &Transaction<'_>, needs: &Needs, now: i64) -> rusqlite::Result
                   OR EXISTS(SELECT 1 FROM chat_completions k WHERE k.chat_id = c.id AND k.read = 0), ",
         crate::quiet_sql!(),
         ", EXISTS(SELECT 1 FROM messages x WHERE x.chat_id = c.id AND x.role = 'user' AND x.active = 1 AND x.text <> ''), \
-           MAX(c.updated_at, COALESCE(a.last_activity_at, 0)), t.stamp \
+           MAX(c.updated_at, COALESCE(a.last_activity_at, 0)), t.stamp, c.provider IS NOT NULL \
          FROM chats c LEFT JOIN chat_activity a ON a.chat_id = c.id \
                       LEFT JOIN chat_triage t ON t.chat_id = c.id \
          WHERE MAX(c.updated_at, COALESCE(a.last_activity_at, 0)) > ?1 - ?2 \
@@ -198,6 +204,7 @@ fn candidates(tx: &Transaction<'_>, needs: &Needs, now: i64) -> rusqlite::Result
             has_request: r.get(8)?,
             stamp: r.get(9)?,
             checked_stamp: r.get(10)?,
+            local: r.get(11)?,
         })
     })?;
     rows.collect()
@@ -356,6 +363,7 @@ mod tests {
             unread: false,
             quiet: false,
             has_request: true,
+            local: false,
             stamp: 1_000_000_000,
             checked_stamp: None,
         }
@@ -385,6 +393,11 @@ mod tests {
                 Err(Skip::Busy),
             ),
             ("archived", |c| c.archived = true, Err(Skip::Archived)),
+            (
+                "a local chat stays off Claude",
+                |c| c.local = true,
+                Err(Skip::Local),
+            ),
             ("side chat", |c| c.side = true, Err(Skip::Side)),
             ("muted", |c| c.muted = true, Err(Skip::Muted)),
             (

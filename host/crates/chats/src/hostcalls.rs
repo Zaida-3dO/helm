@@ -118,12 +118,14 @@ pub(crate) fn launch(
     sh: &Arc<Shared>,
     chat_id: &str,
     cwd: &str,
+    local_chat: bool,
 ) -> Option<crate::runtime::HostLaunch> {
     let seam = sh.host.get()?;
     let keys = sh
         .db
         .snapshot(|tx| Ok::<_, rusqlite::Error>(launch_keys(tx)))
         .unwrap_or_default();
+    let keys = helm_hosttools::LaunchKeys { local_chat, ..keys };
     let mcp = seam
         .ctx
         .services

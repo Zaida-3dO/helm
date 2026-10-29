@@ -299,6 +299,25 @@ pub(crate) fn not_found() -> ApiError {
     ApiError::new("not_found", "That chat does not exist.")
 }
 
+/// A model id that names a local model must be well formed and, once the servers are installed,
+/// name a server that is set up.
+pub(crate) fn check_local_model(ctx: &OpCtx, model: Option<&str>) -> Result<(), ApiError> {
+    let (provider, _) = crate::local::columns(model).map_err(ApiError::bad_args)?;
+    let Some(server) = provider else {
+        return Ok(());
+    };
+    let seam = ctx
+        .services
+        .get::<ChatRuntime>()
+        .and_then(|rt| rt.local_models());
+    if seam.is_some_and(|l| !l.knows(&server)) {
+        return Err(ApiError::bad_args(
+            "That local model server is not set up. Add it in Settings > Local models.",
+        ));
+    }
+    Ok(())
+}
+
 /// Why `chat_create` made nothing.
 enum CreateRefusal {
     Archived,
@@ -330,6 +349,7 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .map_err(sql)?;
     let effort = a.effort.unwrap_or(default_effort);
     let model = a.model.clone().or(default_model);
+    check_local_model(ctx, model.as_deref())?;
     let clock = ctx.services.need::<Clock>()?;
     let id = db
         .write(|tx| {
@@ -395,6 +415,7 @@ pub fn stored_thread(
         subagents: Vec::new(),
         subagents_running: 0,
         compacting: None,
+        loading: None,
         capabilities: Capabilities::default(),
         send_behavior: sb,
         revision,
@@ -503,6 +524,15 @@ fn model_catalogue(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         }
     }
     let mut cat = catalogue::load(&profile.path(""));
+    // Local models as last seen; `refresh` asks the servers. Nothing else ever does, so the
+    // servers are never contacted just because the catalogue was read.
+    if let Some(local) = ctx
+        .services
+        .get::<ChatRuntime>()
+        .and_then(|rt| rt.local_models())
+    {
+        cat.local = local.catalogue(a.refresh == Some(true));
+    }
     // The effort a new chat starts with is Settings → Runtime's default.
     if let Some(db) = ctx.services.get::<Database>() {
         if let Ok((_, effort)) = db
