@@ -19,7 +19,7 @@ import type { ChatRecord, ModelCatalogue } from '../api/types.ts';
 import { useBinding } from '../ui/hooks.ts';
 import { IconChevronDown } from '../ui/icons.tsx';
 import { PickerPopover, type PickerOption } from '../ui/Picker.tsx';
-import { commitPatch, effortLabel, FALLBACK_EFFORTS, isLocalModel, modelRows, stepEffort, thinkingLabel, triggerLabel } from './modelEffort.ts';
+import { commitPatch, effortLabel, FALLBACK_EFFORTS, isLocalModel, localHint, modelRows, stepEffort, thinkingLabel, triggerLabel } from './modelEffort.ts';
 
 let cached: Promise<ModelCatalogue> | null = null;
 
@@ -29,6 +29,7 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [checked, setChecked] = useState(false);
   const [effortDraft, setEffortDraft] = useState('');
   const trigger = useRef<HTMLButtonElement>(null);
 
@@ -64,16 +65,23 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
   const openPicker = () => {
     setEffortDraft(effort);
     setOpen(true);
-    // The catalogue only holds what the local servers said the last time they were asked; opening the
-    // picker asks them once (not on a timer), so what is loaded, and who answers, is current.
+  };
+
+  /**
+   * The only thing here that contacts the local servers, once per click: opening the picker never
+   * does. The list shows what they said the last time they were asked.
+   */
+  const checkServers = () => {
     setChecking(true);
+    setError(null);
     ops
       .refreshLocalModels()
       .then(({ models }) => {
+        setChecked(true);
         cached = (cached ?? ops.catalogue()).then((c) => ({ ...c, local: models }));
         return cached.then(setCatalogue);
       })
-      .catch(() => undefined)
+      .catch((e: unknown) => setError(String((e as Error).message ?? e)))
       .finally(() => setChecking(false));
   };
 
@@ -130,6 +138,8 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
       )}
       {open && (
         <PickerPopover
+          // Placed once when it mounts: a list that grows after a check (more rows) must be placed again.
+          key={options.length}
           anchor={trigger}
           value={model}
           options={options}
@@ -141,8 +151,17 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
           testId="model-picker-pop"
           onClose={() => close()}
           onPick={(id) => commit(id)}
-          extraHint={<span>{checking ? 'checking local servers…' : `← → ${local ? 'thinking' : 'effort'}`}</span>}
+          extraHint={<span>← → {local ? 'thinking' : 'effort'}</span>}
           footer={
+            <>
+            <div className="model-picker-local" data-testid="local-check">
+              <span className="model-picker-local-hint" data-testid="local-hint">
+                {localHint(catalogue, checked)}
+              </span>
+              <button type="button" className="model-picker-link" data-testid="check-servers" disabled={checking} onClick={checkServers}>
+                {checking ? 'Checking…' : 'Check servers'}
+              </button>
+            </div>
             <div className="model-picker-effort" data-testid="effort-picker">
               <span className="model-picker-caption">
                 {local ? 'Thinking' : 'Effort'} <kbd>←</kbd> <kbd>→</kbd>
@@ -168,6 +187,7 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
               </span>
               <span className="model-picker-effort-value">{stopLabel(effortDraft || effort)}</span>
             </div>
+            </>
           }
         />
       )}

@@ -40,13 +40,15 @@ test('server drafts: what is refused before asking the host, what changed, and w
   assert.equal(rangeText(range, ' tokens'), 'Between 8,192 tokens and 262,144 tokens (default 65,536 tokens)');
 });
 
-test('the pane\'s flow against the dev host: nothing is asked until the pane asks; keys are write-only; saves are refused with a plain message', async () => {
+test('the pane\'s flow against the dev host: opening asks no server, only Check servers and Test do; keys are write-only; saves are refused with a plain message', async () => {
   const fake = localModelsFakeOps();
   const events: unknown[] = [];
   const api = async <T,>(op: string, args: unknown = {}): Promise<T> => fake.handler(op, args as Record<string, unknown>, { emit: (e: unknown) => events.push(e) } as never) as T;
   const ops = localModelsOps(api);
 
-  // Opening: the state holds no answer from any server and the catalogue holds no models; the refresh fills both.
+  // Opening reads the state, however often: no server has answered and the catalogue holds no models.
+  // Only "Check servers" (the refresh) fills them in.
+  for (let i = 0; i < 3; i++) await ops.state();
   const first = await ops.state();
   assert.equal(first.servers.some((s) => s.reachable !== undefined), false);
   assert.deepEqual(fake.catalogue.local(), []);

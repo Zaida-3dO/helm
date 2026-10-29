@@ -78,7 +78,9 @@ adds to every run, locally and in CI, and slows everyone down.
    address (plain http to `127.0.0.1`, `localhost` or `::1`; anything else is refused) and the token
    to that server's own key, handed over in `HELM_LOCAL_MODEL_KEY` and removed from the worker's
    environment once read. It never passes the user's sign-in or an Anthropic key in that case, and
-   the key is never logged or given to MCP servers.
+   never logs the key. Helm's own MCP client never gives it to MCP servers, but the claude child
+   holds it as `ANTHROPIC_AUTH_TOKEN`, so its hooks, its Bash commands and (with tools set to Full)
+   its own native MCP servers inherit it. It is only ever the key to a server on this machine.
 2. **Windows hazards.**
    - Never `rm -rf` or `git worktree remove` a directory containing a `node_modules` junction:
      `rmdir` the junction first.

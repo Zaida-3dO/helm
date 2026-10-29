@@ -2,6 +2,7 @@
 // add theirs here rather than scattering them.
 
 import { DEFAULT_EFFORT, isEffort, type ClaudeLaunch } from "../../protocol/types.ts";
+import { localPinnedEnv } from "./env.ts";
 
 /** Haiku models take no effort setting, and neither does a local model: its effort is a thinking budget instead. */
 export function modelTakesEffort(model: string | undefined, local = false): boolean {
@@ -83,7 +84,10 @@ export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[
   const extra = held.length > 0 ? { disabledMcpjsonServers: held } : {};
   // WebFetch checks each domain with a call to Anthropic's servers first; a local chat does not
   // send the sites it reads there (and the fetch would fail whenever that check cannot be reached).
-  const localSettings = c.local ? { skipWebFetchPreflight: true } : {};
+  // Its `env` block pins where the requests go (address, gateway mode, every model slot, other
+  // providers off) over anything a user or project settings file sets; the token is not in it.
+  const customEnv = custom.env && typeof custom.env === "object" && !Array.isArray(custom.env) ? custom.env : {};
+  const localSettings = c.local ? { skipWebFetchPreflight: true, env: { ...customEnv, ...localPinnedEnv(c.local) } } : {};
   args.push("--settings", JSON.stringify({ ...custom, ...extra, ...localSettings, fastMode: c.fastMode === true }));
   if (c.extraArgs) args.push(...c.extraArgs);
   return args;

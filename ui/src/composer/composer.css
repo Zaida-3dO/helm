@@ -216,6 +216,35 @@
   border-radius: 4px;
   padding: 0 4px;
 }
+.model-picker-local {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 14px;
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+}
+.model-picker-local-hint {
+  color: var(--muted);
+}
+/* A link-style button: the picker's "Check servers". */
+.model-picker-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  cursor: var(--cursor-pointer);
+}
+.model-picker-link:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.model-picker-link:disabled {
+  color: var(--muted);
+  cursor: var(--cursor-default);
+}
 .model-picker-effort {
   display: flex;
   align-items: center;

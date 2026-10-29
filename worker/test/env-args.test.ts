@@ -62,10 +62,11 @@ test("a local launch: loopback http only, every model slot local, the effort as 
   assert.equal(buildClaudeEnv({}, { local: { ...local, thinkingTokens: undefined }, localKey: "k" }).MAX_THINKING_TOKENS, "16384");
 
   // Optional limits are set only when known; the token is the key, or a placeholder, never the user's.
-  const env = buildClaudeEnv({ ...base, ANTHROPIC_CUSTOM_HEADERS: "x-auth: secret", CLAUDE_CODE_USE_VERTEX: "1", no_proxy: "a" }, { apiKeyMode: true, local, localKey: "k", effort: "low" });
+  const env = buildClaudeEnv({ ...base, ANTHROPIC_CUSTOM_HEADERS: "x-auth: secret", CLAUDE_CODE_USE_VERTEX: "1", CLAUDE_CODE_SUBAGENT_MODEL: "claude-opus-x", no_proxy: "a" }, { apiKeyMode: true, local, localKey: "k", effort: "low" });
   assert.deepEqual([env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_BASE_URL, env.ANTHROPIC_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL], ["k", "http://127.0.0.1:40731", "qwen:8b", "qwen:8b"]);
   assert.deepEqual(["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDECODE", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"].filter((k) => k in env), [], "not even in API-key mode");
   assert.equal(env.no_proxy, "a,127.0.0.1,localhost,::1");
+  assert.equal(env.CLAUDE_CODE_SUBAGENT_MODEL, "qwen:8b", "sub-agents stay on the local model, whatever the user set for Claude");
   assert.equal(env.CLAUDE_CODE_USE_GATEWAY, "1", "the base URL is treated as a gateway, so the thinking budget is what is sent");
   assert.equal(env.ENABLE_TOOL_SEARCH, "false", "no tool is deferred behind a search a local server cannot answer");
   assert.equal(buildClaudeEnv({}, { local, effort: "low" }).ANTHROPIC_AUTH_TOKEN, "local", "a keyless server still gets a token of its own");
@@ -82,6 +83,30 @@ test("a local launch: loopback http only, every model slot local, the effort as 
   assert.deepEqual(disallowedTools({ local }, {}).filter((t) => /^Web/.test(t)), ["WebSearch"]);
   assert.equal(disallowedTools({}, {}).includes("WebSearch"), false, "Claude chats keep it");
   assert.equal(JSON.parse(flag(a, "--settings") ?? "null").skipWebFetchPreflight, true);
+  // A user or project settings file can set `env` on top of the process environment, so the launch pins
+  // the address, gateway mode, every model slot and the other providers off in its own settings, over any
+  // `env` the launch's customizations hold. The key is never in them: it would be on the command line.
+  const pinned = JSON.parse(flag(buildClaudeArgs({ model: "qwen:8b", local, settings: { env: { KEEP: "1", ANTHROPIC_BASE_URL: "http://evil.example" } } }), "--settings") ?? "null").env;
+  assert.deepEqual(pinned, {
+    KEEP: "1",
+    ANTHROPIC_BASE_URL: "http://127.0.0.1:40731",
+    CLAUDE_CODE_USE_GATEWAY: "1",
+    ANTHROPIC_MODEL: "qwen:8b",
+    ANTHROPIC_SMALL_FAST_MODEL: "qwen:8b",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "qwen:8b",
+    ANTHROPIC_DEFAULT_SONNET_MODEL: "qwen:8b",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: "qwen:8b",
+    CLAUDE_CODE_SUBAGENT_MODEL: "qwen:8b",
+    CLAUDE_CODE_USE_BEDROCK: "0",
+    CLAUDE_CODE_USE_VERTEX: "0",
+    CLAUDE_CODE_USE_FOUNDRY: "0",
+    CLAUDE_CODE_USE_MANTLE: "0",
+    CLAUDE_CODE_USE_ANTHROPIC_AWS: "0",
+    CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: "0",
+  });
+  assert.equal(a.join(" ").includes("ANTHROPIC_AUTH_TOKEN"), false, "no token on the command line");
+  assert.equal("env" in JSON.parse(flag(buildClaudeArgs({ settings: { env: { KEEP: "1" } } }), "--settings") ?? "null"), true, "a Claude chat keeps its own env block untouched");
+  assert.throws(() => buildClaudeArgs({ local: { ...local, baseUrl: "http://example.com" } }));
   assert.equal("skipWebFetchPreflight" in JSON.parse(flag(buildClaudeArgs({}), "--settings") ?? "null"), false);
 });
 

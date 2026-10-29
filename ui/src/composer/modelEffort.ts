@@ -41,6 +41,15 @@ export function localServerId(id: string | null | undefined): string | null {
   return at > 0 ? rest.slice(0, at) : null;
 }
 
+/**
+ * The line beside the picker's "Check servers" button. Helm asks the local servers only when the
+ * user does, so the list shows what they said last time; `checked` is whether this picker has asked.
+ */
+export function localHint(catalogue: ModelCatalogue | null, checked: boolean): string {
+  if ((catalogue?.local?.length ?? 0) > 0) return 'Local models';
+  return checked ? 'Local models: none found' : 'Local models: not checked yet';
+}
+
 /** The model's own name inside a local model id (`local/<server>/<model>`). */
 export function localModelName(id: string): string {
   const rest = id.slice(LOCAL_PREFIX.length);

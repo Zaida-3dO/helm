@@ -142,20 +142,32 @@ tools, hooks and stream-json, with a different place to send its requests.
 
 - **The key** comes in the worker's environment as `HELM_LOCAL_MODEL_KEY` (never in `launch.json`).
   `main.ts` reads it once, removes it from the worker's own environment, and passes it on only as
-  the claude child's `ANTHROPIC_AUTH_TOKEN`. It is stripped from every other child under its own
-  name (claude, MCP servers). A launch with no key gets the token `local`, so Claude Code never
-  falls back to the user's sign-in. Nothing logs it.
+  the claude child's `ANTHROPIC_AUTH_TOKEN` (never on the command line). Helm's own MCP client never
+  gives it to the MCP servers it starts, but the claude child holds it, so Claude Code's hooks, its
+  Bash commands and, with tools set to Full, its own native MCP servers inherit it. It is the key to
+  a server on this machine and nothing else. A launch with no key gets the token `local`, so Claude
+  Code never falls back to the user's sign-in. Nothing logs it.
 - **The address** must be plain `http` to `127.0.0.1`, `localhost` or `::1`, with no user or password
   in it. Anything else makes `get_state` fail before claude is started, so the key and the prompts
   cannot be sent to another host.
 - **What the child gets**, with the Anthropic credential variables, `ANTHROPIC_CUSTOM_HEADERS` and every
   `CLAUDE_CODE_USE_*` of the user's removed (API-key mode or not): `ANTHROPIC_BASE_URL`,
   `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` and
-  `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` (all the local model, so the small-model jobs and
-  sub-agents stay local), `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` when
+  `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL` (all the local model,
+  so the small-model jobs and sub-agents stay local, whatever the user set for Claude), `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` when
   known, `MAX_THINKING_TOKENS`, `CLAUDE_CODE_USE_GATEWAY=1`, `ENABLE_TOOL_SEARCH=false`, and the
   loopback names added to `NO_PROXY`, so a proxy variable never carries local traffic (or the key) off
-  the machine. `--model` is the server's model name, and `--settings` gains `skipWebFetchPreflight`.
+  the machine. `--model` is the server's model name, and `--settings` gains `skipWebFetchPreflight` and
+  an `env` block (below).
+- **The address is pinned in `--settings` too.** Claude Code applies the `env` block of a user settings
+  file on top of the process environment. Observed with the real binary: a user `settings.json` setting
+  `ANTHROPIC_BASE_URL` to a dead address sent every request there (the fake received none and Claude
+  Code retried for minutes), and the same launch with the pin reached the fake. A project settings file's
+  `env` did not override in print mode, but the pin covers both. The block holds the base URL, gateway
+  mode, every model slot (the `ANTHROPIC_*MODEL` names and `CLAUDE_CODE_SUBAGENT_MODEL`) and the switches for
+  the other providers (`CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`, `_MANTLE`, `_ANTHROPIC_AWS`,
+  `_ANTHROPIC_GOOGLE_CLOUD`) set to `0`, over any `env` in the launch's own customizations. The token is
+  never in it.
 - **Effort is a thinking budget.** No `--effort` flag, and `get_state` still reports the chat's
   effort. The budget is `low` 0 (thinking off), `medium` 4096, `high` 8192, `xhigh` 16384, `max` 32768
   (`LOCAL_THINKING_TOKENS` in `protocol/types.ts`); the launch's own `thinkingTokens` is used only
