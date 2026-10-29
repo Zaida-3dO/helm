@@ -3,6 +3,8 @@
 // (`runtime_settings_save`); the executable saves with its button.
 
 import { useCallback, useEffect, useState } from 'react';
+import type { LocalModelInfo } from '../../api/types.ts';
+import { localModelChoices } from '../../composer/modelEffort.ts';
 import { useShell } from '../../shell/context.ts';
 import { Button, Checkbox, Picker, SettingRow, TextInput, toast } from '../../ui/index.ts';
 import {
@@ -73,8 +75,8 @@ export function RuntimePane() {
       .then((r) => setRepos(r.entries))
       .catch(() => setRepos([]));
     void shell
-      .api<{ models: { id: string; name: string; description?: string }[] }>('model_catalogue', { harness: 'claude' })
-      .then((c) => setModels(c.models))
+      .api<{ models: { id: string; name: string; description?: string }[]; local?: LocalModelInfo[] }>('model_catalogue', { harness: 'claude' })
+      .then((c) => setModels([...c.models, ...localModelChoices(c.local)]))
       .catch(() => undefined);
   }, [shell, check]);
 

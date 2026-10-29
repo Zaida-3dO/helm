@@ -17,6 +17,8 @@ export type {
   ContextKind,
   Interaction,
   LiveTool,
+  LocalModelInfo,
+  LocalServerKind,
   MessageDetails,
   MessageRole,
   MessageRow,
