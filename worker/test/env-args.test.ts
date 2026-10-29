@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildClaudeArgs, disallowedTools } from "../src/drivers/claude/args.ts";
 import { cronTiming, NATIVE_SCHEDULE_TOOLS, scheduleRedirect } from "../src/drivers/claude/schedulecalls.ts";
-import { buildClaudeEnv, STRIPPED_UNLESS_API_KEY_MODE } from "../src/drivers/claude/env.ts";
+import { assertLoopbackHttp, buildClaudeEnv, STRIPPED_UNLESS_API_KEY_MODE, takeLocalKey } from "../src/drivers/claude/env.ts";
 
 const base = {
   PATH: "/bin",
@@ -38,6 +38,51 @@ test("non-essential traffic and auto-update are off", () => {
   assert.equal(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, "1");
   assert.equal(env.DISABLE_AUTOUPDATER, "1");
   assert.equal(env.HELM_CHAT_ID, "c1");
+});
+
+test("a local launch: loopback http only, every model slot local, the effort as a thinking budget, the key from the hand-over", () => {
+  // Where the base URL may point.
+  for (const ok of ["http://127.0.0.1:40731", "http://localhost:40434/", "http://[::1]:8080"]) assert.doesNotThrow(() => assertLoopbackHttp(ok), ok);
+  assert.equal(assertLoopbackHttp("http://localhost:40434/"), "http://localhost:40434");
+  for (const bad of ["https://127.0.0.1:1", "http://10.0.0.5:1", "http://127.0.0.1.evil.com:1", "http://127.0.0.1@evil.com:1", "http://user:pw@127.0.0.1:1", "ftp://127.0.0.1", "127.0.0.1:1", ""]) {
+    assert.throws(() => assertLoopbackHttp(bad), undefined, bad);
+  }
+
+  // The key is taken out of the environment it came in, whatever the case of its name.
+  const handed: Record<string, string | undefined> = { Helm_Local_Model_Key: "k-1", KEEP: "x" };
+  assert.equal(takeLocalKey(handed), "k-1");
+  assert.deepEqual(handed, { KEEP: "x" });
+  assert.equal(takeLocalKey({ HELM_LOCAL_MODEL_KEY: "" }), undefined);
+
+  // Efforts become thinking budgets; low is off; no effort uses the launch's own figure.
+  const local = { baseUrl: "http://127.0.0.1:40731", model: "qwen:8b", thinkingTokens: 777 };
+  const budget = (effort?: string) => buildClaudeEnv({}, { local, localKey: "k", effort }).MAX_THINKING_TOKENS;
+  assert.deepEqual(["low", "medium", "high", "xhigh", "max"].map(budget), ["0", "4096", "8192", "16384", "32768"]);
+  assert.equal(budget(undefined), "777");
+  assert.equal(buildClaudeEnv({}, { local: { ...local, thinkingTokens: undefined }, localKey: "k" }).MAX_THINKING_TOKENS, "16384");
+
+  // Optional limits are set only when known; the token is the key, or a placeholder, never the user's.
+  const env = buildClaudeEnv({ ...base, ANTHROPIC_CUSTOM_HEADERS: "x-auth: secret", CLAUDE_CODE_USE_VERTEX: "1", no_proxy: "a" }, { apiKeyMode: true, local, localKey: "k", effort: "low" });
+  assert.deepEqual([env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_BASE_URL, env.ANTHROPIC_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL], ["k", "http://127.0.0.1:40731", "qwen:8b", "qwen:8b"]);
+  assert.deepEqual(["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDECODE", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"].filter((k) => k in env), [], "not even in API-key mode");
+  assert.equal(env.no_proxy, "a,127.0.0.1,localhost,::1");
+  assert.equal(env.CLAUDE_CODE_USE_GATEWAY, "1", "the base URL is treated as a gateway, so the thinking budget is what is sent");
+  assert.equal(env.ENABLE_TOOL_SEARCH, "false", "no tool is deferred behind a search a local server cannot answer");
+  assert.equal(buildClaudeEnv({}, { local, effort: "low" }).ANTHROPIC_AUTH_TOKEN, "local", "a keyless server still gets a token of its own");
+  assert.throws(() => buildClaudeEnv({}, { local: { ...local, baseUrl: "http://example.com" } }));
+  assert.throws(() => buildClaudeEnv({}, { local: { ...local, model: " " } }));
+  // Without a local launch nothing of this applies.
+  assert.equal("MAX_THINKING_TOKENS" in buildClaudeEnv({ HELM_LOCAL_MODEL_KEY: "k" }, {}), false);
+  assert.equal("HELM_LOCAL_MODEL_KEY" in buildClaudeEnv({ HELM_LOCAL_MODEL_KEY: "k" }, { local, localKey: "k" }), false, "the hand-over name never reaches claude");
+
+  // The flags: no effort flag, no WebSearch (WebFetch stays), and the domain pre-check off.
+  const a = buildClaudeArgs({ model: "qwen:8b", effort: "high", local });
+  assert.equal(a.includes("--effort"), false);
+  assert.equal(flag(a, "--model"), "qwen:8b");
+  assert.deepEqual(disallowedTools({ local }, {}).filter((t) => /^Web/.test(t)), ["WebSearch"]);
+  assert.equal(disallowedTools({}, {}).includes("WebSearch"), false, "Claude chats keep it");
+  assert.equal(JSON.parse(flag(a, "--settings") ?? "null").skipWebFetchPreflight, true);
+  assert.equal("skipWebFetchPreflight" in JSON.parse(flag(buildClaudeArgs({}), "--settings") ?? "null"), false);
 });
 
 function flag(args: string[], name: string): string | undefined {

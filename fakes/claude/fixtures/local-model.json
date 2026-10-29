@@ -1,0 +1,13 @@
+{
+  "description": "A chat on a local model server: each turn makes one Messages request to the base URL the launch set, as Claude Code does, and answers with the streamed text.",
+  "steps": [
+    {
+      "repeat": [
+        { "await": { "type": "user" }, "as": "p", "timeoutMs": 3600000 },
+        { "init": {} },
+        { "modelCall": { "prompt": "{{p.message.content}}" }, "as": "m" },
+        { "result": "done" }
+      ]
+    }
+  ]
+}

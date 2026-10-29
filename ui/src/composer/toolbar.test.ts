@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { commitPatch, effortLabel, filterRows, modelRows, shortName, stepEffort, triggerLabel } from './modelEffort.ts';
+import { commitPatch, effortLabel, filterRows, formatContext, isLocalModel, localModelChoices, localServerId, modelRows, shortName, stepEffort, thinkingLabel, triggerLabel } from './modelEffort.ts';
 import { afterTurn, newPick, permissionTooltip, pickedMode, setPickedMode, shownMode } from './permission.ts';
 import { sendLabel } from './keymap.ts';
 import type { ModelCatalogue } from '../api/types.ts';
@@ -52,6 +52,57 @@ test('rows: the catalogue, then the chat model as a disabled row when it is not 
     ['haiku'],
   );
   assert.equal(filterRows(rows, '  ').length, 2);
+});
+
+const localCat: ModelCatalogue = {
+  ...cat,
+  local: [
+    { id: 'local/strata/qwen-flash', name: 'Qwen Flash', server: 'Strata', kind: 'strata', contextTokens: 262144, loaded: true, reachable: true },
+    { id: 'local/strata/qwen-coder', name: 'Qwen Coder', server: 'Strata', kind: 'strata', contextTokens: 131072, reachable: true },
+    { id: 'local/ollama/org/llama:3b', name: 'Llama 3B', server: 'Ollama', kind: 'ollama', contextTokens: 8192, reachable: true },
+    { id: 'local/office/big:30b', name: 'Big 30B', server: 'Ollama (office)', kind: 'ollama', reachable: false },
+  ],
+};
+
+test('local models: their own group with server and context, greyed when the server did not answer, fixed after the first turn', () => {
+  // The id splits on the first two slashes only, the context reads like people write it, and effort reads as thinking.
+  assert.deepEqual([isLocalModel('local/ollama/org/llama:3b'), isLocalModel('opus'), isLocalModel(null)], [true, false, false]);
+  assert.deepEqual([localServerId('local/ollama/org/llama:3b'), localServerId('opus'), localServerId('local/x')], ['ollama', null, null]);
+  assert.deepEqual([262144, 131072, 8192, 1_000_000, 512, undefined].map(formatContext), ['256k', '128k', '8k', '1M', '512', '']);
+  assert.equal(triggerLabel('Qwen Flash', 'high', true), 'Qwen Flash · High thinking');
+  assert.equal(triggerLabel('Qwen Flash', 'low', true), 'Qwen Flash · No thinking');
+  assert.equal(thinkingLabel('xhigh'), 'Extra high thinking');
+
+  // Before the first turn: every reachable row can be picked; the group headings only exist with local models.
+  const open = modelRows(localCat, 'opus');
+  assert.deepEqual(
+    open.map((r) => [r.id, r.group, r.detail, r.disabled]),
+    [
+      ['opus', 'Claude', 'Claude Code · Most capable', false],
+      ['haiku', 'Claude', 'Claude Code', false],
+      ['local/strata/qwen-flash', 'Local', 'Strata · 256k · loaded', false],
+      ['local/strata/qwen-coder', 'Local', 'Strata · 128k', false],
+      ['local/ollama/org/llama:3b', 'Local', 'Ollama · 8k', false],
+      ['local/office/big:30b', 'Local', 'Ollama (office) · not answering', true],
+    ],
+  );
+  assert.match(open[5]!.hint ?? '', /Ollama \(office\) did not answer/);
+  assert.equal(modelRows(cat, 'opus').some((r) => r.group), false);
+  assert.deepEqual(filterRows(open, 'strata').map((r) => r.id), ['local/strata/qwen-flash', 'local/strata/qwen-coder']);
+
+  // After the first turn: a Claude chat keeps Claude models, a local chat keeps its server.
+  const enabled = (cur: string) => modelRows(localCat, cur, true).filter((r) => !r.disabled).map((r) => r.id);
+  assert.deepEqual(enabled('opus'), ['opus', 'haiku']);
+  assert.deepEqual(enabled('local/strata/qwen-flash'), ['local/strata/qwen-flash', 'local/strata/qwen-coder']);
+  assert.deepEqual(enabled('local/ollama/org/llama:3b'), ['local/ollama/org/llama:3b']);
+  assert.match(modelRows(localCat, 'opus', true)[2]!.hint ?? '', /fixed for this chat: it started on Claude/);
+  assert.match(modelRows(localCat, 'local/strata/qwen-flash', true)[0]!.hint ?? '', /started on Strata/);
+  // A chat on a model the lists no longer hold still shows it (disabled), under its own group.
+  const gone = modelRows(localCat, 'local/strata/old', true);
+  assert.deepEqual([gone.at(-1)!.id, gone.at(-1)!.group, gone.at(-1)!.disabled], ['local/strata/old', 'Local', true]);
+  // Settings → Runtime's plain list gets the same models, with the server in the description.
+  assert.deepEqual(localModelChoices(localCat.local).map((c) => [c.name, c.description]).slice(0, 2), [['Qwen Flash', 'Strata · 256k · loaded'], ['Qwen Coder', 'Strata · 128k']]);
+  assert.deepEqual(localModelChoices(undefined), []);
 });
 
 test('a commit sends only what changed, and nothing when nothing did', () => {

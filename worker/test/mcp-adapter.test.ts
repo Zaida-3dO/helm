@@ -71,4 +71,5 @@ test("a call to Claude Code's copy of a Helm server is refused and pointed at He
   assert.equal(duplicateMcpRefusal("mcp__helm__app_mcp_call", { shadowing: () => ({ id: "x", name: "x" }) }), undefined, "Helm's own tools");
   assert.equal(duplicateMcpRefusal("Bash", bridge), undefined);
   assert.equal(duplicateMcpRefusal("mcp__agent-standup__list_items", undefined), undefined, "no MCP client");
+  assert.equal(duplicateMcpRefusal("mcp__agent-standup__list_items", bridge, true), undefined, "a sub-agent has no Helm tools to be redirected to");
 });

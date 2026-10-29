@@ -656,7 +656,13 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
       defaultEffort: 'xhigh',
       source: 'fallback',
-      local: [],
+      // Local models, to see the picker's Local group: two servers answer, one does not.
+      local: [
+        { id: 'local/strata/qwen3.8-flash', name: 'Qwen 3.8 Flash', server: 'Strata', kind: 'strata', contextTokens: 262144, loaded: true, reachable: true },
+        { id: 'local/strata/qwen3.8-coder', name: 'Qwen 3.8 Coder', server: 'Strata', kind: 'strata', contextTokens: 131072, loaded: false, reachable: true },
+        { id: 'local/ollama/llama3.2:3b', name: 'Llama 3.2 3B', server: 'Ollama', kind: 'ollama', contextTokens: 131072, sizeBytes: 2_000_000_000, loaded: false, reachable: true },
+        { id: 'local/office/qwen3:30b-a3b', name: 'Qwen3 30B A3B', server: 'Ollama (office)', kind: 'ollama', contextTokens: 40960, reachable: false },
+      ],
     }),
     tool_stop: () => ({ stopped: true }),
     // Settings → Runtime.

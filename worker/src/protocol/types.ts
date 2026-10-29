@@ -2,6 +2,21 @@
 
 export type Json = Record<string, unknown>;
 
+/**
+ * A chat that runs on a local model server instead of Anthropic's. The key is not here: the host
+ * hands it to the worker in HELM_LOCAL_MODEL_KEY, which the worker reads once and removes.
+ */
+export interface LocalLaunch {
+  /** The server's address; must be plain http on this machine (loopback), or the worker refuses to start. */
+  baseUrl: string;
+  /** The server's own name for the model. Every Claude Code model slot (main, small, sub-agents) uses it. */
+  model: string;
+  contextTokens?: number;
+  maxOutputTokens?: number;
+  /** The thinking budget when the launch carries no effort; otherwise the effort sets it. */
+  thinkingTokens?: number;
+}
+
 export interface ClaudeLaunch {
   /** Explicit executable. When absent, the resolver runs (HELM_CLAUDE_PATH, PATH, ...). */
   command?: string;
@@ -38,6 +53,8 @@ export interface ClaudeLaunch {
   scheduleTools?: boolean;
   /** Record which files each Bash call changed (compares the checkout before and after). Absent: off. */
   shellChanges?: boolean;
+  /** Run on a local model server. Absent: a normal Claude chat. */
+  local?: LocalLaunch;
 }
 
 export interface LaunchLimits {
@@ -77,6 +94,13 @@ export const DEFAULT_EFFORT: Effort = "xhigh";
 export function isEffort(v: unknown): v is Effort {
   return typeof v === "string" && (EFFORTS as readonly string[]).includes(v);
 }
+
+/**
+ * What each effort means on a local model, which has no effort setting: a thinking budget in
+ * tokens. Low turns thinking off. Claude Code is given the number as MAX_THINKING_TOKENS (and, to
+ * change it mid-chat, set_max_thinking_tokens).
+ */
+export const LOCAL_THINKING_TOKENS: Readonly<Record<Effort, number>> = { low: 0, medium: 4096, high: 8192, xhigh: 16384, max: 32768 };
 
 /** Interaction request. */
 export interface UiRequest {
