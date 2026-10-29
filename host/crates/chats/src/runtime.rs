@@ -291,12 +291,7 @@ impl Spawner for ProcessSpawner {
             .join(&req.chat_id);
         let (host_tools, chat_tools_directory) = match &req.host {
             Some(h) => {
-                claude.strict_mcp_config = h.strict_mcp
-                    || req
-                        .local
-                        .as_ref()
-                        .and_then(|l| l.server.as_ref())
-                        .is_some_and(|s| s.lean);
+                claude.strict_mcp_config = h.strict_mcp;
                 claude.disabled_mcp_servers = h.disabled_mcp_servers.clone();
                 let dir = worker_dir.join("tools");
                 helm_core::privfs::create_private_dir_all(&dir)
@@ -308,6 +303,16 @@ impl Spawner for ProcessSpawner {
             }
             None => (None, None),
         };
+        // Lean tools for a local chat: Claude Code's own MCP servers stay off (Helm's own tools
+        // are not among them).
+        if req
+            .local
+            .as_ref()
+            .and_then(|l| l.server.as_ref())
+            .is_some_and(|s| s.lean)
+        {
+            claude.strict_mcp_config = true;
+        }
         let launch = Launch {
             chat_id: req.chat_id.clone(),
             harness: "claude",

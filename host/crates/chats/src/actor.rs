@@ -1799,7 +1799,9 @@ impl Actor {
             sid: sid.to_owned(),
             held: Vec::new(),
         });
-        // The chat shows as starting while its model is made ready; Stop works as usual.
+        // The chat shows as starting while its model is made ready; Stop works as usual. The wait
+        // is not silence: the stall flag counts from here, not from the chat's last output.
+        self.last_output = Instant::now();
         self.set_status(ChatStatus::Starting, None);
         // Read one at a time: the guard of this chat's own live state is among those taken below.
         let launched = self.live.lock().unwrap().local_model.clone();

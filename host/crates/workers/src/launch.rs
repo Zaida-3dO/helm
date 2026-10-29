@@ -468,5 +468,22 @@ mod tests {
             !v.to_string().contains("appendSystemPrompt"),
             "absent unless a contributor adds a fragment"
         );
+        // A chat on a local model server: where it is and how far it may think, and no key.
+        assert!(v.get("local").is_none(), "absent for a Claude chat");
+        let mut local = claude_launch(&rt, None, None, None, None);
+        local.local = Some(LocalSpec {
+            base_url: "http://127.0.0.1:9101".into(),
+            model: "qwen3:8b-helm-64k".into(),
+            context_tokens: Some(65_536),
+            max_output_tokens: None,
+            thinking_tokens: 8192,
+        });
+        let v = serde_json::to_value(&local).unwrap();
+        assert_eq!(
+            v["local"],
+            serde_json::json!({"baseUrl": "http://127.0.0.1:9101", "model": "qwen3:8b-helm-64k",
+                               "contextTokens": 65536, "thinkingTokens": 8192})
+        );
+        assert!(!v.to_string().to_lowercase().contains("key"));
     }
 }
