@@ -8,14 +8,17 @@
 //! | [`servers`] | what Helm asks of Ollama and of Strata |
 //! | [`gpu`] | free graphics memory from `nvidia-smi` |
 //! | [`service`] | the service: keys, catalogue, test, the check and loading before a turn |
+//! | [`starter`] | starting a Strata install that is not running, when its settings allow it |
 //! | `ops` | the `local_*` ops for Settings > Local models |
 //! | [`ext`] | the settings chats may change through `app_update_settings` |
 //! | [`types`], [`bindings`] | the shapes the UI sees |
 //!
 //! **Helm never reaches a local server on its own.** There is no probe at start-up and no timer:
-//! a server is asked only for a catalogue refresh, a Test, or a local chat's turn. In debug builds
-//! `HELM_TEST_LOCAL_SERVERS` is `off` (no server is ever contacted) or a loopback address that
-//! every server uses instead (a fake); release builds ignore it.
+//! a server is asked only for a catalogue refresh, a Test, or a local chat's turn — and a Strata
+//! that is set to be started when needed is launched only at one of those moments, never at
+//! start-up. In debug builds `HELM_TEST_LOCAL_SERVERS` is `off` (no server is ever contacted) or a
+//! loopback address that every server uses instead (a fake); release builds ignore it, and with it
+//! in effect no real Strata is ever launched.
 //!
 //! A server's address must be on this machine, and its key lives in the credential store and goes
 //! to nothing but that server and the chat worker it launches.
@@ -28,6 +31,7 @@ mod ops;
 pub mod servers;
 pub mod service;
 pub mod settings;
+pub mod starter;
 #[cfg(test)]
 mod tests;
 pub mod types;
@@ -68,13 +72,16 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
         &profile.hash,
         platform.keychain.clone(),
     );
-    let svc = Arc::new(LocalService::new(
-        db,
-        creds,
-        events.clone(),
-        Arc::new(gpu::NvidiaSmi),
-        profile.path("catalogue").join("local.json"),
-    ));
+    let svc = Arc::new(
+        LocalService::new(
+            db,
+            creds,
+            events.clone(),
+            Arc::new(gpu::NvidiaSmi),
+            profile.path("catalogue").join("local.json"),
+        )
+        .with_starter(std::sync::Arc::new(starter::ProcessStarter)),
+    );
     if let Some(rt) = services.get::<ChatRuntime>() {
         rt.set_local_models(svc.clone());
     }

@@ -70,8 +70,10 @@ pub fn register_ops(reg: &mut OpRegistry) {
         to_value(&svc(ctx)?.test(&a.server_id).map_err(refused)?)
     })
     .blocking("local_models_refresh", OpClass::Blocking, |ctx, _| {
+        let s = svc(ctx)?;
         to_value(&RefreshResult {
-            models: svc(ctx)?.refresh(),
+            models: s.refresh(),
+            notes: s.notes(),
         })
     });
 }

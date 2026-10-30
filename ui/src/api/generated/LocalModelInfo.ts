@@ -14,4 +14,9 @@ server: string, kind: LocalServerKind, contextTokens?: number, sizeBytes?: numbe
 /**
  * False when the server did not answer; the picker greys the row.
  */
-reachable: boolean, };
+reachable: boolean, 
+/**
+ * True when the server did not answer but Helm can start it when a chat uses it: the picker
+ * keeps the row choosable.
+ */
+startable: boolean, };

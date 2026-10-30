@@ -7,7 +7,19 @@ export type ServerView = { id: string, name: string, kind: 'strata' | 'ollama', 
 /**
  * The model to offer when a Strata server does not list its models.
  */
-model?: string, hasKey: boolean, 
+model?: string, 
+/**
+ * Strata only: Helm may start the server itself when one of its chats needs it.
+ */
+autoStart: boolean, 
+/**
+ * Strata only: the install folder to start from; absent means the standard one.
+ */
+folder?: string, 
+/**
+ * Strata only: the preset to launch with; absent means the default.
+ */
+preset?: string, hasKey: boolean, 
 /**
  * Whether the server answered the last time Helm asked (a refresh or a test). Absent until
  * it has been asked; Helm never asks at start-up.

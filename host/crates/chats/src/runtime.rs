@@ -783,6 +783,36 @@ impl ChatRuntime {
         let _ = enqueue(&self.actor(chat_id).tx, Cmd::Prewarm);
     }
 
+    /// Warm a local chat's model while the user types (the draft's first keystroke): the chat's
+    /// actor decides whether a warm-up fits (local chat, idle, not recently warmed) and runs the
+    /// same preparation a send would make, without opening a turn. Best effort and silent.
+    pub fn warm(&self, chat_id: &str) {
+        use rusqlite::OptionalExtension;
+        if self.sh.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        let eligible = self
+            .sh
+            .db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT archived = 0 AND side_source_id IS NULL
+                            AND status NOT IN ('starting', 'running', 'stopping')
+                     FROM chats WHERE id = ?1",
+                    [chat_id],
+                    |r| r.get::<_, bool>(0),
+                )
+                .optional()
+            })
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+        if !eligible {
+            return;
+        }
+        let _ = enqueue(&self.actor(chat_id).tx, Cmd::Warm);
+    }
+
     /// Install AFK's policy (once). Without it no chat answers or defers anything on its own.
     pub fn set_afk_policy(&self, p: Arc<dyn crate::seams::AfkPolicy>) {
         if self.sh.afk.set(p).is_err() {

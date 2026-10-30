@@ -16,6 +16,7 @@
 //! | `model_catalogue` | blocking | [`ModelCatalogueArgs`] → [`ModelCatalogue`] |
 //! | `tool_stop` | async | [`ToolStopArgs`] → [`ToolStopResult`] |
 //! | `chat_compact` | maintenance | [`ChatIdArgs`] → `null` |
+//! | `chat_warm` | blocking | [`ChatIdArgs`] → `null` |
 //! | `chat_roll_over` | async | [`ChatIdArgs`] → `{started}` (see [`crate::rollover`]) |
 //! | `attention_get` | blocking | `{}` → [`AttentionSummary`] |
 //!
@@ -59,6 +60,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("model_catalogue", OpClass::Blocking, model_catalogue)
         .async_op("tool_stop", tool_stop)
         .blocking("chat_compact", OpClass::Maintenance, chat_compact)
+        .blocking("chat_warm", OpClass::Blocking, chat_warm)
         .blocking("attention_get", OpClass::Blocking, attention_get)
         .blocking("chat_rename", OpClass::Maintenance, chat_rename)
         .async_op("title_suggest", title_suggest)
@@ -273,6 +275,16 @@ async fn tool_stop(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
         Ok(stopped) => to_value(&ToolStopResult { stopped }),
         Err(e) => Err(ApiError::new("refused", e)),
     }
+}
+
+/// A local chat's first keystroke warms its model for the turn the message will open. Silent
+/// best effort: the actor itself decides whether a warm-up fits. Nothing answers, nothing opens.
+fn chat_warm(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatIdArgs = parse_args(args)?;
+    if let Some(rt) = ctx.services.get::<ChatRuntime>() {
+        rt.warm(&a.chat_id);
+    }
+    Ok(Value::Null)
 }
 
 fn chat_compact(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -638,6 +650,7 @@ pub(crate) mod tests {
             ("model_catalogue", OpClass::Blocking),
             ("tool_stop", OpClass::Async),
             ("chat_compact", OpClass::Maintenance),
+            ("chat_warm", OpClass::Blocking),
             ("chat_roll_over", OpClass::Async),
             ("attention_get", OpClass::Blocking),
             ("chat_rename", OpClass::Maintenance),

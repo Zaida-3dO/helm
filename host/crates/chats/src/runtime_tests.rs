@@ -3780,6 +3780,7 @@ impl crate::local::LocalModels for FakeLocal {
             size_bytes: None,
             loaded: Some(false),
             reachable: true,
+            startable: false,
         }]
     }
 }
@@ -3870,14 +3871,29 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         "only a refresh asks the servers"
     );
 
-    // A send waits for its model: the chat shows as starting with the loading line, a second
-    // send waits behind it, and no worker exists yet.
-    let (sid, _) = h.send(&chat, "hello", "default").await;
-    h.until("the loading line", |h| {
+    // Typing warms the model: the same preparation the send will use, but no turn opens. The
+    // loading line shows while it runs, and one typing burst prepares only once.
+    h.call("chat_warm", json!({"chatId": chat})).await.unwrap();
+    h.until("the warm-up's loading line", |h| {
         loading_text(h) == Some("Loading qwen3:8b…".into())
     })
     .await;
-    assert_eq!(h.status(&chat), "starting");
+    assert_eq!(h.status(&chat), "idle", "a warm-up opens no turn");
+    assert_eq!(local.turns.lock().unwrap().len(), 1);
+    h.call("chat_warm", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(
+        local.turns.lock().unwrap().len(),
+        1,
+        "once until a turn starts"
+    );
+
+    // The send joins the warm-up that is still running behind the gate: it shows as starting
+    // from now, a second send waits behind the same preparation, and no worker exists yet.
+    let (sid, _) = h.send(&chat, "hello", "default").await;
+    h.until("the send takes the warm-up over", |h| {
+        h.status(&chat) == "starting"
+    })
+    .await;
     let (second, _) = h.send(&chat, "and this", "default").await;
     assert!(
         h.workers.try_recv().is_err(),
@@ -3965,7 +3981,11 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         [("ollama".to_owned(), "qwen3:8b-helm-64k".to_owned())]
     );
     let turns = local.turns.lock().unwrap().clone();
-    assert_eq!(turns.len(), 1, "one preparation covered both sends");
+    assert_eq!(
+        turns.len(),
+        1,
+        "one preparation covered the warm-up and both sends"
+    );
     assert_eq!(
         (turns[0].server_id.as_str(), turns[0].launched.clone()),
         ("ollama", None)

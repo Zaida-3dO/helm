@@ -29,6 +29,12 @@ pub const MIN_STRATA_GB: u32 = 1;
 pub const MAX_STRATA_GB: u32 = 256;
 pub const DEFAULT_STRATA_GB: u32 = 12;
 
+/// The longest a Strata folder path or a preset name may be.
+pub const MAX_FOLDER: usize = 500;
+pub const MAX_PRESET: usize = 60;
+/// The preset Strata is started with when the settings name none.
+pub const DEFAULT_PRESET: &str = "Solo";
+
 /// Which tools a local chat is offered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +86,15 @@ pub struct Server {
     /// The model to offer when a Strata server does not list its models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Strata only: Helm may start the server itself when a chat needs it and it is not running.
+    #[serde(default = "yes")]
+    pub auto_start: bool,
+    /// Strata only: the install folder to start from. None is the standard one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    /// Strata only: the preset to launch with. None is [`DEFAULT_PRESET`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +139,9 @@ pub fn default_servers() -> Vec<Server> {
             base_url: default_url(kind).to_owned(),
             enabled: true,
             model: None,
+            auto_start: true,
+            folder: None,
+            preset: None,
         })
         .collect()
 }
@@ -291,6 +309,17 @@ pub fn read_lenient(v: &Value) -> LocalSettings {
                     .and_then(Value::as_str)
                     .filter(|m| plain_text(m, 200))
                     .map(str::to_owned),
+                auto_start: e.get("autoStart").and_then(Value::as_bool).unwrap_or(true),
+                folder: e
+                    .get("folder")
+                    .and_then(Value::as_str)
+                    .filter(|f| plain_text(f, MAX_FOLDER))
+                    .map(str::to_owned),
+                preset: e
+                    .get("preset")
+                    .and_then(Value::as_str)
+                    .filter(|p| plain_text(p, MAX_PRESET))
+                    .map(str::to_owned),
             });
         }
         s.servers = seen;
@@ -342,6 +371,12 @@ pub struct ServerInput {
     pub enabled: bool,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default = "yes")]
+    pub auto_start: bool,
+    #[serde(default)]
+    pub folder: Option<String>,
+    #[serde(default)]
+    pub preset: Option<String>,
 }
 
 fn yes() -> bool {
@@ -435,6 +470,16 @@ pub fn apply_changes(current: &LocalSettings, changes: &Changes) -> Result<Local
                 Some(m) if plain_text(m, 200) => Some(m.to_owned()),
                 Some(_) => return Err(format!("Server {n}: the model name is not valid.")),
             };
+            let folder = match e.folder.as_deref().map(str::trim) {
+                None | Some("") => None,
+                Some(f) if plain_text(f, MAX_FOLDER) => Some(f.to_owned()),
+                Some(_) => return Err(format!("Server {n}: the Strata folder is not valid.")),
+            };
+            let preset = match e.preset.as_deref().map(str::trim) {
+                None | Some("") => None,
+                Some(p) if plain_text(p, MAX_PRESET) => Some(p.to_owned()),
+                Some(_) => return Err(format!("Server {n}: the preset name is not valid.")),
+            };
             out.push(Server {
                 id,
                 name: e.name.trim().to_owned(),
@@ -442,6 +487,9 @@ pub fn apply_changes(current: &LocalSettings, changes: &Changes) -> Result<Local
                 base_url,
                 enabled: e.enabled,
                 model,
+                auto_start: e.auto_start,
+                folder,
+                preset,
             });
         }
         s.servers = out;
@@ -532,13 +580,33 @@ mod tests {
         // A stored record with a bad field keeps the good ones; a foreign address is replaced.
         let s = read_lenient(&json!({
             "servers": [
-                {"id": "strata", "name": "Strata", "kind": "strata", "baseUrl": "http://10.0.0.5:1", "enabled": false},
+                {"id": "strata", "name": "Strata", "kind": "strata", "baseUrl": "http://10.0.0.5:1", "enabled": false,
+                 "autoStart": false, "folder": "C:/Strata/terminal/current", "preset": "Fast"},
+                {"id": "ollama", "name": "Ollama", "kind": "ollama", "baseUrl": "http://127.0.0.1:1", "folder": "x".repeat(600), "preset": "ok"},
                 {"id": "Bad Id", "name": "x", "kind": "ollama", "baseUrl": "http://127.0.0.1:1"},
                 {"id": "strata", "name": "twice", "kind": "strata", "baseUrl": "http://127.0.0.1:1"},
             ],
             "ollamaContext": 100, "keepAliveMinutes": 30, "tools": "full", "compareWith": "haiku"
         }));
-        assert_eq!(s.servers.len(), 1);
+        assert_eq!(s.servers.len(), 2);
+        assert_eq!(
+            (
+                s.servers[0].auto_start,
+                s.servers[0].folder.as_deref(),
+                s.servers[0].preset.as_deref()
+            ),
+            (false, Some("C:/Strata/terminal/current"), Some("Fast")),
+            "the start-when-needed fields read back"
+        );
+        assert_eq!(
+            (
+                s.servers[1].auto_start,
+                s.servers[1].folder.as_deref(),
+                s.servers[1].preset.as_deref()
+            ),
+            (true, None, Some("ok")),
+            "missing autoStart means yes; an over-long folder drops"
+        );
         assert_eq!(
             s.servers[0].base_url, STRATA_URL,
             "a foreign address falls back"
@@ -569,6 +637,9 @@ mod tests {
             base_url: url.into(),
             enabled: true,
             model: None,
+            auto_start: true,
+            folder: None,
+            preset: None,
         };
         let mut servers: Vec<ServerInput> = cur
             .servers
@@ -580,6 +651,9 @@ mod tests {
                 base_url: x.base_url.clone(),
                 enabled: x.enabled,
                 model: None,
+                auto_start: x.auto_start,
+                folder: x.folder.clone(),
+                preset: x.preset.clone(),
             })
             .collect();
         servers.push(input(
@@ -597,6 +671,60 @@ mod tests {
         .unwrap();
         assert_eq!(next.servers[2].id, "my-ollama");
         assert_eq!(next.servers[2].base_url, "http://localhost:11500");
+
+        // The start-when-needed fields save and clear; a blank or over-long folder is refused.
+        let mut tuned = servers.clone();
+        tuned[0].auto_start = false;
+        tuned[0].folder = Some(" D:/Strata/current ".into());
+        tuned[0].preset = Some("Fast".into());
+        let next = apply_changes(
+            &next,
+            &Changes {
+                servers: Some(tuned.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                next.servers[0].auto_start,
+                next.servers[0].folder.as_deref(),
+                next.servers[0].preset.as_deref()
+            ),
+            (false, Some("D:/Strata/current"), Some("Fast")),
+            "trimmed on the way in"
+        );
+        tuned[0].auto_start = true;
+        tuned[0].folder = Some("".into());
+        tuned[0].preset = Some("  ".into());
+        let next = apply_changes(
+            &next,
+            &Changes {
+                servers: Some(tuned.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                next.servers[0].auto_start,
+                next.servers[0].folder.as_deref(),
+                next.servers[0].preset.as_deref()
+            ),
+            (true, None, None),
+            "blank means the standard folder and preset"
+        );
+        tuned[0].folder = Some("x".repeat(MAX_FOLDER + 1));
+        assert!(apply_changes(
+            &next,
+            &Changes {
+                servers: Some(tuned.clone()),
+                ..Default::default()
+            }
+        )
+        .unwrap_err()
+        .contains("Strata folder"));
+
         for (changes, why) in [
             (
                 Changes {

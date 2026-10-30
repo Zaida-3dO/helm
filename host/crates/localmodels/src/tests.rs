@@ -29,67 +29,95 @@ struct Req {
 }
 
 /// A tiny HTTP server on a loopback port that answers by `route` and records every request.
+/// `bind` takes the port but stays silent until something takes the listener and starts
+/// serving it — which is how a server that only comes up when Helm starts it is staged.
 struct Fake {
     base: String,
     log: Arc<Mutex<Vec<Req>>>,
+    listener: Option<TcpListener>,
 }
 
-impl Fake {
-    fn start(route: impl Fn(&Req) -> (u16, Value) + Send + Sync + 'static) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let log: Arc<Mutex<Vec<Req>>> = Arc::default();
-        let route = Arc::new(route);
-        let log2 = log.clone();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let (route, log) = (route.clone(), log2.clone());
-                std::thread::spawn(move || {
-                    let mut reader = BufReader::new(stream.try_clone().unwrap());
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).is_err() {
-                        return;
+/// Answers on `listener` by `route`, recording every request in `log`.
+fn serve(
+    listener: TcpListener,
+    route: impl Fn(&Req) -> (u16, Value) + Send + Sync + 'static,
+    log: Arc<Mutex<Vec<Req>>>,
+) {
+    let route = Arc::new(route);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let (route, log) = (route.clone(), log.clone());
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    return;
+                }
+                let mut parts = line.split_whitespace();
+                let (method, path) = (
+                    parts.next().unwrap_or("").to_owned(),
+                    parts.next().unwrap_or("").to_owned(),
+                );
+                let (mut auth, mut len) = (String::new(), 0usize);
+                loop {
+                    let mut h = String::new();
+                    if reader.read_line(&mut h).is_err() || h == "\r\n" || h.is_empty() {
+                        break;
                     }
-                    let mut parts = line.split_whitespace();
-                    let (method, path) = (
-                        parts.next().unwrap_or("").to_owned(),
-                        parts.next().unwrap_or("").to_owned(),
-                    );
-                    let (mut auth, mut len) = (String::new(), 0usize);
-                    loop {
-                        let mut h = String::new();
-                        if reader.read_line(&mut h).is_err() || h == "\r\n" || h.is_empty() {
-                            break;
-                        }
-                        let lower = h.to_ascii_lowercase();
-                        if lower.starts_with("authorization:") {
-                            auth = h[14..].trim().to_owned();
-                        }
-                        if lower.starts_with("content-length:") {
-                            len = h[15..].trim().parse().unwrap_or(0);
-                        }
+                    let lower = h.to_ascii_lowercase();
+                    if lower.starts_with("authorization:") {
+                        auth = h[14..].trim().to_owned();
                     }
-                    let mut raw = vec![0u8; len];
-                    let _ = reader.read_exact(&mut raw);
-                    let req = Req {
-                        method,
-                        path,
-                        auth,
-                        body: serde_json::from_slice(&raw).unwrap_or(Value::Null),
-                    };
-                    log.lock().unwrap().push(req.clone());
-                    let (status, body) = route(&req);
-                    let body = body.to_string();
-                    let out = format!(
+                    if lower.starts_with("content-length:") {
+                        len = h[15..].trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut raw = vec![0u8; len];
+                let _ = reader.read_exact(&mut raw);
+                let req = Req {
+                    method,
+                    path,
+                    auth,
+                    body: serde_json::from_slice(&raw).unwrap_or(Value::Null),
+                };
+                log.lock().unwrap().push(req.clone());
+                let (status, body) = route(&req);
+                let body = body.to_string();
+                let out = format!(
                         "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
-                    let _ = stream.write_all(out.as_bytes());
-                });
-            }
-        });
-        Self { base, log }
+                let _ = stream.write_all(out.as_bytes());
+            });
+        }
+    });
+}
+
+impl Fake {
+    /// Takes the port now but answers nothing: until `arm` hands the listener to `serve`,
+    /// connections are refused. That is how a server that only comes up when it is started
+    /// is staged, on the very address the settings will hold.
+    fn bind() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        Self {
+            base,
+            log: Arc::default(),
+            listener: Some(listener),
+        }
+    }
+
+    /// Start answering on the bound port.
+    fn arm(&mut self, route: impl Fn(&Req) -> (u16, Value) + Send + Sync + 'static) {
+        let listener = self.listener.take().expect("a fake is armed once");
+        serve(listener, route, self.log.clone());
+    }
+
+    fn start(route: impl Fn(&Req) -> (u16, Value) + Send + Sync + 'static) -> Self {
+        let mut f = Self::bind();
+        f.arm(route);
+        f
     }
 
     fn calls(&self, method: &str, path: &str) -> Vec<Req> {
@@ -173,9 +201,13 @@ struct StrataState {
     loaded: Option<String>,
 }
 
-/// Strata wants the key; unloading hands 12 GB back to `free`.
-fn fake_strata(state: Arc<Mutex<StrataState>>, free: Arc<AtomicU64>) -> Fake {
-    Fake::start(move |r| {
+/// Strata's routing: it wants the key; unloading hands 12 GB back to `free`. Extracted so a
+/// staged fake (bound, then armed by a start) can answer exactly like a running one.
+fn strata_route(
+    state: Arc<Mutex<StrataState>>,
+    free: Arc<AtomicU64>,
+) -> impl Fn(&Req) -> (u16, Value) + Send + Sync + 'static {
+    move |r| {
         if r.auth != format!("Bearer {KEY}") {
             return (401, json!({"error": "bad key"}));
         }
@@ -194,7 +226,45 @@ fn fake_strata(state: Arc<Mutex<StrataState>>, free: Arc<AtomicU64>) -> Fake {
             }
             _ => (404, json!({})),
         }
-    })
+    }
+}
+
+fn fake_strata(state: Arc<Mutex<StrataState>>, free: Arc<AtomicU64>) -> Fake {
+    Fake::start(strata_route(state, free))
+}
+
+/// The stand-in starter: it never launches a process. It records what it was asked to start
+/// (server, folder, preset) and, when the test has armed one, runs that — usually taking a
+/// staged fake's listener and bringing the "server" up on the address the settings hold.
+#[derive(Default)]
+struct TestStarter {
+    calls: Mutex<Vec<(String, Option<String>, Option<String>)>>,
+    armed: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl TestStarter {
+    fn arm_once(&self, f: impl FnOnce() + Send + 'static) {
+        *self.armed.lock().unwrap() = Some(Box::new(f));
+    }
+    fn calls(&self) -> Vec<(String, Option<String>, Option<String>)> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl crate::starter::StrataStarter for TestStarter {
+    fn start(&self, s: &crate::settings::Server) -> Result<(), String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((s.id.clone(), s.folder.clone(), s.preset.clone()));
+        match self.armed.lock().unwrap().take() {
+            Some(f) => {
+                f();
+                Ok(())
+            }
+            None => Err("nothing was armed to start in this test".into()),
+        }
+    }
 }
 
 struct FakeGpu(Arc<AtomicU64>);
@@ -211,6 +281,7 @@ struct Rig {
     db: Arc<Database>,
     free: Arc<AtomicU64>,
     sink: Arc<RecordingSink>,
+    starter: Arc<TestStarter>,
 }
 
 fn rig() -> Rig {
@@ -227,6 +298,7 @@ fn rig() -> Rig {
     let free = Arc::new(AtomicU64::new(4 * GB));
     let sink = Arc::new(RecordingSink::default());
     let events: Arc<dyn EventSink> = sink.clone();
+    let starter = Arc::new(TestStarter::default());
     let svc = LocalService::new(
         db.clone(),
         creds,
@@ -237,13 +309,17 @@ fn rig() -> Rig {
     .with_timings(Timings {
         memory_wait: Duration::from_millis(200),
         memory_poll: Duration::from_millis(20),
-    });
+        start_wait: Duration::from_secs(2),
+        start_poll: Duration::from_millis(20),
+    })
+    .with_starter(starter.clone());
     Rig {
         _dir: dir,
         svc,
         db,
         free,
         sink,
+        starter,
     }
 }
 
@@ -255,6 +331,9 @@ fn servers(strata: &str, ollama: &str) -> Changes {
         base_url: url.into(),
         enabled: true,
         model: None,
+        auto_start: true,
+        folder: None,
+        preset: None,
     };
     Changes {
         servers: Some(vec![
@@ -406,11 +485,96 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     let rows = r.svc.catalogue(true);
     let gone = rows.iter().find(|m| m.name == "qwen3:8b").unwrap();
     assert!(!gone.reachable && gone.loaded.is_none());
+    assert!(!gone.startable, "Ollama is never started by Helm");
     assert!(r.svc.view().servers[1]
         .note
         .as_deref()
         .unwrap()
         .contains("did not answer"));
+
+    // A Strata that is down but allowed to be started stays choosable in the picker, and a
+    // refresh starts it. First nothing is armed to start it, and that comes through plainly.
+    let mut staged = Fake::bind();
+    let (staged_log, staged_listener) = (staged.log.clone(), staged.listener.take().unwrap());
+    r.svc.save(&servers(&staged.base, &o.base)).unwrap();
+    r.svc.set_key("strata", KEY).unwrap();
+    let rows = r.svc.catalogue(true);
+    let q = rows.iter().find(|m| m.name == "qwen-flash").unwrap();
+    assert!(!q.reachable && q.startable, "down, but it starts when used");
+    let calls = r.starter.calls();
+    assert_eq!(calls.len(), 1, "the refresh asked to start it once");
+    assert_eq!(calls[0], ("strata".into(), None, None));
+    assert!(r.svc.view().servers[0]
+        .note
+        .as_deref()
+        .unwrap()
+        .contains("could not be started"));
+    // Arm the starter: it brings the fake up on the very address the settings hold, and the
+    // folder and preset saved with the server reach it.
+    let staged_log2 = staged_log.clone();
+    let free2 = r.free.clone();
+    r.starter.arm_once(move || {
+        serve(
+            staged_listener,
+            strata_route(Arc::new(Mutex::new(StrataState { loaded: None })), free2),
+            staged_log2,
+        )
+    });
+    let mut tuned = servers(&staged.base, &o.base);
+    let si = &mut tuned.servers.as_mut().unwrap()[0];
+    si.folder = Some("C:/strata-test".into());
+    si.preset = Some("Fast".into());
+    r.svc.save(&tuned).unwrap();
+    let rows = r.svc.catalogue(true);
+    let q = rows.iter().find(|m| m.name == "qwen-flash").unwrap();
+    assert!(
+        q.reachable && q.loaded == Some(false) && !q.startable,
+        "started and answering, nothing loaded: {q:?}"
+    );
+    assert_eq!(
+        r.starter.calls().last().unwrap(),
+        &(
+            "strata".into(),
+            Some("C:/strata-test".into()),
+            Some("Fast".into())
+        ),
+        "the starter is told which folder and preset to use"
+    );
+    assert!(staged_log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|q| q.method == "GET" && q.path == "/health"));
+    // With start switched off a down Strata just reports: no picker row to start and no launch.
+    let started = r.starter.calls().len();
+    let mut no_start = servers(&dead_url(), &o.base);
+    no_start.servers.as_mut().unwrap()[0].auto_start = false;
+    r.svc.save(&no_start).unwrap();
+    let rows = r.svc.catalogue(true);
+    let gone = rows.iter().find(|m| m.name == "qwen-flash").unwrap();
+    assert!(!gone.reachable && !gone.startable);
+    assert!(r.svc.view().servers[0]
+        .note
+        .as_deref()
+        .unwrap()
+        .contains("did not answer"));
+    assert_eq!(r.starter.calls().len(), started, "nothing was launched");
+    // Test starts it too, and reports what the server says about itself.
+    let mut staged2 = Fake::bind();
+    let (staged2_log, staged2_listener) = (staged2.log.clone(), staged2.listener.take().unwrap());
+    let free3 = r.free.clone();
+    r.starter.arm_once(move || {
+        serve(
+            staged2_listener,
+            strata_route(Arc::new(Mutex::new(StrataState { loaded: None })), free3),
+            staged2_log,
+        )
+    });
+    r.svc.save(&servers(&staged2.base, &o.base)).unwrap();
+    let t = r.svc.test("strata").unwrap();
+    assert!(t.ok && t.message.contains("nothing is loaded"), "{t:?}");
+    assert_eq!(r.starter.calls().len(), started + 1, "Test started it");
+    r.svc.save(&servers(&s.base, &o.base)).unwrap();
     // Switching a server off hides its models; removing one also removes its key.
     let mut off = servers(&s.base, &o.base);
     off.servers.as_mut().unwrap()[1].enabled = false;
@@ -552,6 +716,44 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     strata.lock().unwrap().loaded = None;
     assert_eq!(r.svc.prepare(&mine, &progress).unwrap(), "qwen-flash");
     assert_eq!(lines.lock().unwrap().as_slice(), ["Loading qwen-flash…"]);
+
+    // 4b. A Strata that is not running at all is started for the turn, on the address the
+    //     settings hold; the loading line appears just as it does when a loaded model waits.
+    let mut staged = Fake::bind();
+    let (staged_log, staged_listener) = (staged.log.clone(), staged.listener.take().unwrap());
+    let staged_log2 = staged_log.clone();
+    let free2 = r.free.clone();
+    let started = r.starter.calls().len();
+    r.starter.arm_once(move || {
+        serve(
+            staged_listener,
+            strata_route(Arc::new(Mutex::new(StrataState { loaded: None })), free2),
+            staged_log2,
+        )
+    });
+    r.svc.save(&servers(&staged.base, &o.base)).unwrap();
+    lines.lock().unwrap().clear();
+    let got = r
+        .svc
+        .prepare(&turn("strata", "qwen-flash"), &progress)
+        .unwrap();
+    assert_eq!(got, "qwen-flash");
+    assert_eq!(
+        r.starter.calls().len(),
+        started + 1,
+        "the turn started the server first"
+    );
+    assert!(staged_log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|q| q.path == "/health"));
+    assert_eq!(
+        lines.lock().unwrap().as_slice(),
+        ["Loading qwen-flash…"],
+        "the turn then proceeded as an ordinary Strata turn"
+    );
+    r.svc.save(&servers(&s.base, &o.base)).unwrap();
 
     // 5. After a turn the timer is set again, but only for a model that is still loaded.
     ollama

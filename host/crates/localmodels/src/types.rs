@@ -18,6 +18,16 @@ pub struct ServerView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub model: Option<String>,
+    /// Strata only: Helm may start the server itself when one of its chats needs it.
+    pub auto_start: bool,
+    /// Strata only: the install folder to start from; absent means the standard one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub folder: Option<String>,
+    /// Strata only: the preset to launch with; absent means the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub preset: Option<String>,
     pub has_key: bool,
     /// Whether the server answered the last time Helm asked (a refresh or a test). Absent until
     /// it has been asked; Helm never asks at start-up.
@@ -74,6 +84,8 @@ pub struct TestResult {
 pub struct RefreshResult {
     #[ts(type = "Array<import('../LocalModelInfo.ts').LocalModelInfo>")]
     pub models: Vec<helm_chats::types::LocalModelInfo>,
+    /// Sentences a server that answered has for the user (for example it lists no models).
+    pub notes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

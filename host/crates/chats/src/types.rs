@@ -841,6 +841,9 @@ pub struct LocalModelInfo {
     pub loaded: Option<bool>,
     /// False when the server did not answer; the picker greys the row.
     pub reachable: bool,
+    /// True when the server did not answer but Helm can start it when a chat uses it: the picker
+    /// keeps the row choosable.
+    pub startable: bool,
 }
 
 // ---------------------------------------------------------------------------------------------

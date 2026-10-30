@@ -133,6 +133,9 @@ fn change(key: &str, cur: &LocalSettings, value: &Value) -> Result<Changes, Stri
                     base_url: s.base_url.clone(),
                     enabled,
                     model: s.model.clone(),
+                    auto_start: s.auto_start,
+                    folder: s.folder.clone(),
+                    preset: s.preset.clone(),
                 });
             }
             if let Some(unknown) = map

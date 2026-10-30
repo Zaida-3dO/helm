@@ -3,7 +3,9 @@
 //!
 //! **Nothing here runs on its own.** Helm reaches a server only when asked: a catalogue refresh
 //! (the picker or Settings opened), a Test, or a local chat's send. There is no start-up probe and
-//! no timer.
+//! no timer. A Strata server whose settings allow it is *launched* at one of those same moments,
+//! and only when a check finds it not answering — see [`starter`]. Nothing here ever stops,
+//! restarts or unloads a running server beyond what the memory check does to idle models.
 //!
 //! **Before a turn** ([`LocalService::prepare`]): if the model is already loaded, go. If not, the
 //! free graphics memory is read; when the model will not fit, idle models on the *other* servers
@@ -16,6 +18,7 @@ use crate::gpu::Gpu;
 use crate::net::{self, Conn, Http};
 use crate::servers::{self as srv, CallError};
 use crate::settings::{self, LocalSettings, Server, ToolsSetup};
+use crate::starter::StrataStarter;
 use crate::types::{LocalModelsState, Range, ServerView, TestResult};
 use helm_chats::local::{LocalModels, LocalServer, LocalTurn};
 use helm_chats::types::{LocalModelInfo, LocalServerKind};
@@ -106,11 +109,14 @@ struct SeenModel {
     loaded: Option<bool>,
 }
 
-/// How long the service waits for memory to come free after an unload, and how often it looks.
+/// How long the service waits for memory to come free after an unload, and how often it looks;
+/// and how long a started Strata gets to answer its health check, and how often it is asked.
 #[derive(Clone, Copy, Debug)]
 pub struct Timings {
     pub memory_wait: Duration,
     pub memory_poll: Duration,
+    pub start_wait: Duration,
+    pub start_poll: Duration,
 }
 
 impl Default for Timings {
@@ -118,6 +124,8 @@ impl Default for Timings {
         Self {
             memory_wait: Duration::from_secs(8),
             memory_poll: Duration::from_millis(500),
+            start_wait: Duration::from_secs(90),
+            start_poll: Duration::from_secs(2),
         }
     }
 }
@@ -137,6 +145,11 @@ pub struct LocalService {
     native: Mutex<HashMap<String, Option<u64>>>,
     /// One model is made ready at a time, so two chats cannot both count on the same free memory.
     loading: Mutex<()>,
+    /// None means this service never launches a server: a stand-in can be installed for tests.
+    starter: Option<Arc<dyn StrataStarter>>,
+    /// One server is started at a time; anyone else who needs it waits on this and then finds it
+    /// already answering.
+    starting: Mutex<()>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -163,11 +176,20 @@ impl LocalService {
             vram: Mutex::new(HashMap::new()),
             native: Mutex::new(HashMap::new()),
             loading: Mutex::new(()),
+            starter: None,
+            starting: Mutex::new(()),
         }
     }
 
     pub fn with_timings(mut self, t: Timings) -> Self {
         self.timings = t;
+        self
+    }
+
+    /// Lets this service launch a Strata server that its settings allow and a check found down.
+    /// Without this, a down server simply stays down.
+    pub fn with_starter(mut self, starter: Arc<dyn StrataStarter>) -> Self {
+        self.starter = Some(starter);
         self
     }
 
@@ -251,6 +273,9 @@ impl LocalService {
                         base_url: x.base_url.clone(),
                         enabled: x.enabled,
                         model: x.model.clone(),
+                        auto_start: x.auto_start,
+                        folder: x.folder.clone(),
+                        preset: x.preset.clone(),
                         has_key: self.has_key(&x.id),
                         reachable: last.map(|l| l.reachable),
                         note: last.and_then(|l| l.note.clone()),
@@ -365,6 +390,68 @@ impl LocalService {
             .map_err(|e| format!("{} can't be used: {e}", s.name))
     }
 
+    // ---- starting a server that is down -------------------------------------------------------
+
+    /// Whether this service may launch `s`: a Strata whose settings allow it, a starter installed,
+    /// and no test override — with one in effect the run points at fakes and the real starter must
+    /// never spawn.
+    fn can_start(&self, s: &Server) -> bool {
+        s.kind == LocalServerKind::Strata
+            && s.auto_start
+            && self.starter.is_some()
+            && test_override().is_none()
+    }
+
+    /// Ask a Strata if it is up, starting it first when it is set up for that and is not there.
+    fn strata_probe(&self, s: &Server, conn: &Conn) -> Result<Vec<String>, String> {
+        match srv::strata_loaded(&self.http, conn) {
+            Ok(l) => Ok(l),
+            Err(CallError::Unreachable(_)) if self.can_start(s) => {
+                self.start_up(s).and_then(|()| {
+                    srv::strata_loaded(&self.http, conn).map_err(|e| e.say(&s.name, &s.base_url))
+                })
+            }
+            Err(e) => Err(e.say(&s.name, &s.base_url)),
+        }
+    }
+
+    /// Launch the install and wait for the server to answer. One start at a time: anyone else
+    /// waiting here finds the server answering (or fails the same way) rather than launching a
+    /// second one. Any HTTP answer means it is up — a key refusal included, which the caller then
+    /// reports as its own problem.
+    fn start_up(&self, s: &Server) -> Result<(), String> {
+        let _single = lock(&self.starting);
+        let conn = self.conn(s)?;
+        match srv::strata_loaded(&self.http, &conn) {
+            Ok(_) => return Ok(()),
+            Err(CallError::Unreachable(_)) => {}
+            Err(_) => return Ok(()), // answering, just not about models: the caller's problem
+        }
+        let starter = self
+            .starter
+            .as_ref()
+            .ok_or("Helm cannot start servers: none is set up.")?;
+        starter
+            .start(s)
+            .map_err(|e| format!("{} could not be started: {e}", s.name))?;
+        let deadline = Instant::now() + self.timings.start_wait;
+        loop {
+            std::thread::sleep(self.timings.start_poll);
+            match srv::strata_loaded(&self.http, &conn) {
+                Ok(_) => return Ok(()),
+                Err(CallError::Unreachable(_)) => {}
+                Err(_) => return Ok(()), // up; its key or shape problem surfaces in the caller
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "{} was started but did not answer within {} seconds.",
+                    s.name,
+                    self.timings.start_wait.as_secs()
+                ));
+            }
+        }
+    }
+
     // ---- the catalogue ----------------------------------------------------------------------
 
     /// Ask every enabled server what it has, remember the answers and say so. Servers are asked
@@ -453,9 +540,9 @@ impl LocalService {
                 }
             }
             LocalServerKind::Strata => {
-                let loaded = match srv::strata_loaded(&self.http, &conn) {
+                let loaded = match self.strata_probe(s, &conn) {
                     Ok(l) => l,
-                    Err(e) => return down(e.say(&s.name, &s.base_url)),
+                    Err(e) => return down(e),
                 };
                 let listed = srv::strata_models(&self.http, &conn).or_else(|| {
                     s.model.clone().map(|m| {
@@ -554,7 +641,26 @@ impl LocalService {
                         size_bytes: m.size_bytes,
                         loaded: m.loaded,
                         reachable,
+                        // A Strata that did not answer but starts when used: the picker can offer it.
+                        startable: !reachable && s.kind == LocalServerKind::Strata && s.auto_start,
                     })
+            })
+            .collect()
+    }
+
+    /// Sentences worth showing under the model list: servers that answered but have something to
+    /// say (for example they did not list their models).
+    pub fn notes(&self) -> Vec<String> {
+        let st = self.settings();
+        let seen = self.seen();
+        st.servers
+            .iter()
+            .filter(|s| s.enabled)
+            .filter_map(|s| {
+                seen.servers
+                    .get(&s.id)
+                    .filter(|l| l.reachable)
+                    .and_then(|l| l.note.clone())
             })
             .collect()
     }
@@ -585,18 +691,16 @@ impl LocalService {
                         )
                     })
                     .map_err(|e| e.say(&s.name, &s.base_url)),
-                LocalServerKind::Strata => srv::strata_loaded(&self.http, &conn)
-                    .map(|l| {
-                        let msg = match l.iter().find(|x| x.as_str() != "*") {
-                            Some(m) => format!("{} answered: {m} is loaded.", s.name),
-                            None if l.is_empty() => {
-                                format!("{} answered: nothing is loaded.", s.name)
-                            }
-                            None => format!("{} answered: a model is loaded.", s.name),
-                        };
-                        (msg, None)
-                    })
-                    .map_err(|e| e.say(&s.name, &s.base_url)),
+                LocalServerKind::Strata => self.strata_probe(s, &conn).map(|l| {
+                    let msg = match l.iter().find(|x| x.as_str() != "*") {
+                        Some(m) => format!("{} answered: {m} is loaded.", s.name),
+                        None if l.is_empty() => {
+                            format!("{} answered: nothing is loaded.", s.name)
+                        }
+                        None => format!("{} answered: a model is loaded.", s.name),
+                    };
+                    (msg, None)
+                }),
             },
         };
         let (ok, message, models) = match result {
@@ -797,8 +901,7 @@ impl LocalService {
         turn: &LocalTurn,
         progress: &dyn Fn(&str),
     ) -> Result<String, String> {
-        let loaded = srv::strata_loaded(&self.http, conn)
-            .map_err(|e| e.say(&server.name, &server.base_url))?;
+        let loaded = self.strata_probe(server, conn)?;
         if !loaded.iter().any(|l| l == "*" || l == &turn.model) {
             let _one_at_a_time = lock(&self.loading);
             // The model loads when the first request reaches the server; this line stays up until

@@ -86,6 +86,10 @@ pub(crate) enum Cmd {
     /// Start the worker ahead of the first send ([`crate::runtime::ChatRuntime::prewarm`]):
     /// `get_state` only, so Claude Code's start-up runs while the user types.
     Prewarm,
+    /// Prepare this local chat's model for its next turn while the user types
+    /// ([`crate::runtime::ChatRuntime::warm`]): the same preparation a send makes, but no turn
+    /// opens and no worker starts. A send that comes while it runs joins it.
+    Warm,
     /// AFK just turned on: run the interactions already waiting past the AFK policy.
     AfkSweep,
     /// A local chat's model is being made ready for the turn `token` names: a line to show.
@@ -223,13 +227,21 @@ struct Actor {
     prepared: Option<String>,
     /// The server and model name the running worker was launched for; `None` for a Claude chat.
     launched_local: Option<(String, String)>,
+    /// A model warm-up ran (or was attempted) since this chat's last turn started; typing does
+    /// not start another until one does.
+    warmed: bool,
+    /// When the last warm-up was attempted, for the gap between attempts.
+    last_warm: Option<Instant>,
 }
 
 /// A local chat's turn that is waiting for its model: the submission that opens the turn and any
-/// later sends held behind it.
+/// later sends held behind it. `sid` is `None` while a warm-up runs with no send yet: the first
+/// send to arrive takes it over.
 struct Prepare {
     token: u64,
-    sid: String,
+    sid: Option<String>,
+    /// The preparation has shown its loading line, so its end should clear it.
+    line: bool,
     held: Vec<String>,
 }
 
@@ -243,6 +255,8 @@ fn local_of(chat: &ChatRecord) -> Option<(String, String)> {
 
 /// After a failed worker start, typing does not start another for this long (sends still do).
 const PREWARM_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+/// Typing does not start a second model warm-up within this long of the last one.
+const WARM_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
     let (tx, rx) = mpsc::channel(64);
@@ -326,6 +340,8 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         opening: None,
         prepared: None,
         launched_local: None,
+        warmed: false,
+        last_warm: None,
     };
     sh.handle.spawn(actor.run(rx));
     ActorHandle { tx, live }
@@ -1244,7 +1260,7 @@ impl Actor {
                     self.emit_queue();
                     return;
                 }
-                Cmd::Prewarm | Cmd::DeliverNow { .. } => return,
+                Cmd::Prewarm | Cmd::Warm | Cmd::DeliverNow { .. } => return,
                 _ => {}
             }
         }
@@ -1458,6 +1474,7 @@ impl Actor {
                     self.ensure_worker();
                 }
             }
+            Cmd::Warm => self.warm_now(),
             Cmd::StallCheck { after } => {
                 let stalled = self.live.lock().unwrap().stalled;
                 if self.status().is_busy() && !stalled && self.last_output.elapsed() >= after {
@@ -1466,6 +1483,10 @@ impl Actor {
             }
             Cmd::LocalNote { token, text } => {
                 if self.prepare.as_ref().is_some_and(|p| p.token == token) {
+                    // Remember that a line is up: its preparation's end is what clears it.
+                    if let Some(p) = self.prepare.as_mut() {
+                        p.line = true;
+                    }
                     self.set_loading(text);
                 }
             }
@@ -1551,10 +1572,20 @@ impl Actor {
             .flatten()
             .flatten();
         if let Some(p) = self.prepare.as_mut() {
-            // The model of the turn that is opening is still being made ready: this send waits
-            // behind it.
-            if p.sid != sid && !p.held.iter().any(|h| h == sid) {
+            // A warm-up for this chat's next turn is running with no send yet: this send takes it
+            // over instead of starting a second preparation, and the answer dispatches it as if
+            // the preparation had been made for it. Only now does the chat show a turn opening.
+            let takeover = p.sid.is_none();
+            if takeover {
+                p.sid = Some(sid.to_owned());
+            } else if p.sid.as_deref() != Some(sid) && !p.held.iter().any(|h| h == sid) {
+                // The model of the turn that is opening is still being made ready: this send
+                // waits behind it.
                 p.held.push(sid.to_owned());
+            }
+            if takeover {
+                self.last_output = Instant::now();
+                self.set_status(ChatStatus::Starting, None);
             }
             return;
         }
@@ -1712,6 +1743,8 @@ impl Actor {
         if busy && priority.as_deref() == Some("now") {
             cmd["priority"] = json!("now");
         }
+        // A turn is opening: typing may warm the model again for the one after it.
+        self.warmed = false;
         let id = self.request(
             cmd,
             Pending::Prompt {
@@ -1792,17 +1825,60 @@ impl Actor {
             self.refuse_local(&[sid.to_owned()], crate::local::NOT_AVAILABLE);
             return true;
         };
-        self.prepare_count += 1;
-        let token = self.prepare_count;
-        self.prepare = Some(Prepare {
-            token,
-            sid: sid.to_owned(),
-            held: Vec::new(),
-        });
         // The chat shows as starting while its model is made ready; Stop works as usual. The wait
         // is not silence: the stall flag counts from here, not from the chat's last output.
         self.last_output = Instant::now();
         self.set_status(ChatStatus::Starting, None);
+        self.prepare_start(seam, server_id, model, Some(sid.to_owned()));
+        true
+    }
+
+    /// The first keystroke of a draft in an idle local chat: make its model ready now, so the
+    /// turn the message opens rides on this preparation instead of waiting for it. Nothing else
+    /// happens: no turn opens, no worker starts, no status changes. A warm-up runs at most once
+    /// between turns and never more often than [`WARM_MIN_GAP`] apart; a failed one stays quiet
+    /// — the send path reports in its own words when the message goes.
+    fn warm_now(&mut self) {
+        if !self.is_local_chat() || self.prepare.is_some() || self.warmed || self.status().is_busy()
+        {
+            return;
+        }
+        // A worker still booting warms itself; a local chat with no worker is the usual case.
+        if self.link.is_some() && !self.ready {
+            return;
+        }
+        if self.last_warm.is_some_and(|t| t.elapsed() < WARM_MIN_GAP) {
+            return;
+        }
+        let Some(chat) = self.chat() else { return };
+        let Some((server_id, model)) = local_of(&chat) else {
+            return;
+        };
+        let Some(seam) = self.sh.local.get().cloned() else {
+            return; // a send would be refused the same way; stay quiet for now
+        };
+        self.last_warm = Some(Instant::now());
+        self.warmed = true;
+        self.prepare_start(seam, server_id, model, None);
+    }
+
+    /// The preparation itself: [`Prepare`] for `sid` (`None` = a warm-up no send has claimed
+    /// yet), the live-state reads, and the seam call on the blocking pool.
+    fn prepare_start(
+        &mut self,
+        seam: crate::local::SharedLocal,
+        server_id: String,
+        model: String,
+        sid: Option<String>,
+    ) {
+        self.prepare_count += 1;
+        let token = self.prepare_count;
+        self.prepare = Some(Prepare {
+            token,
+            sid,
+            line: false,
+            held: Vec::new(),
+        });
         // Read one at a time: the guard of this chat's own live state is among those taken below.
         let launched = self.live.lock().unwrap().local_model.clone();
         let in_use: Vec<String> = self
@@ -1840,26 +1916,34 @@ impl Actor {
                 let _ = tx.send(Cmd::LocalPrepared { token, result }).await;
             }
         });
-        true
     }
 
     fn on_prepared(&mut self, token: u64, result: Result<String, String>) {
         let Some(p) = self.prepare.take_if(|p| p.token == token) else {
             return; // stopped or replaced meanwhile
         };
-        match result {
-            Ok(name) => {
+        match (result, p.sid) {
+            (Ok(name), Some(sid)) => {
                 self.prepared = Some(name);
-                self.opening = Some(p.sid.clone());
-                self.dispatch(&p.sid);
+                self.opening = Some(sid.clone());
+                self.dispatch(&sid);
                 for held in p.held {
                     self.dispatch(&held);
                 }
             }
-            Err(why) => {
-                let ids = std::iter::once(p.sid).chain(p.held).collect::<Vec<_>>();
+            (Ok(name), None) => {
+                // A warm-up: no turn opens. The next worker launched for this chat asks the
+                // server for this model by name, and the loading line it showed, if any, goes.
+                self.prepared = Some(name);
+                if p.line {
+                    self.clear_loading();
+                }
+            }
+            (Err(why), Some(sid)) => {
+                let ids = std::iter::once(sid).chain(p.held).collect::<Vec<_>>();
                 self.refuse_local(&ids, &why);
             }
+            (Err(_), None) => {} // a warm-up's failure stays quiet; the send reports afresh
         }
     }
 
@@ -1880,8 +1964,9 @@ impl Actor {
         }
         if let Some(p) = self.prepare.take() {
             // Stopped while the model was being made ready: nothing was sent, so what was typed
-            // goes back to the draft.
-            self.give_back(std::iter::once(p.sid).chain(p.held).collect());
+            // goes back to the draft. (A warm-up no send had claimed is never stopped here: the
+            // chat is idle, and the stop returns before this.)
+            self.give_back(p.sid.into_iter().chain(p.held).collect());
             self.clear_loading();
         }
         if let Some(s) = self.stopping.as_mut() {
