@@ -43,9 +43,12 @@ export function localServerId(id: string | null | undefined): string | null {
 
 /**
  * The line beside the picker's "Check servers" button. Helm asks the local servers only when the
- * user does, so the list shows what they said last time; `checked` is whether this picker has asked.
+ * user does, so the list shows what they said last time; `checked` is whether this picker has
+ * asked. A server that answered but has something to say (it lists no models, say) says it here.
  */
-export function localHint(catalogue: ModelCatalogue | null, checked: boolean): string {
+export function localHint(catalogue: ModelCatalogue | null, checked: boolean, notes: readonly string[] = []): string {
+  const note = notes.find((n) => n.trim());
+  if (note) return note;
   if ((catalogue?.local?.length ?? 0) > 0) return 'Local models';
   return checked ? 'Local models: none found' : 'Local models: not checked yet';
 }
@@ -95,13 +98,21 @@ export interface ModelRow {
 
 function localRow(m: LocalModelInfo): ModelRow {
   const parts = [m.server, formatContext(m.contextTokens)].filter(Boolean);
-  if (m.loaded === true && m.reachable) parts.push('loaded');
+  let hint: string | undefined;
+  if (!m.reachable) {
+    // A Strata Helm can start is choosable even while down: using it starts it.
+    if (m.startable) parts.push('not running, starts when you use it');
+    else {
+      parts.push('not answering');
+      hint = `${m.server} did not answer. Check that it is running, or look in Settings → Local models.`;
+    }
+  } else if (m.loaded === true) parts.push('loaded');
   return {
     id: m.id,
     title: m.name,
-    detail: m.reachable ? parts.join(' · ') : `${m.server} · not answering`,
-    disabled: !m.reachable,
-    hint: m.reachable ? undefined : `${m.server} did not answer. Check that it is running, or look in Settings → Local models.`,
+    detail: parts.join(' · '),
+    disabled: !m.reachable && !m.startable,
+    hint,
     group: 'Local',
   };
 }

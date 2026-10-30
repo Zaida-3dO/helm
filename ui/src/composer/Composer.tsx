@@ -17,6 +17,7 @@ import { ContextStatus } from './ContextStatus.tsx';
 import { useShell } from '../shell/context.ts';
 import { addRef, dropLandsIn, parseFileDrop, roomLeft, type AttachedRef } from './refs.ts';
 import { ModelPicker } from './ModelPicker.tsx';
+import { isLocalModel } from './modelEffort.ts';
 import { DefaultStar } from './DefaultStar.tsx';
 import { PermissionChip } from './PermissionChip.tsx';
 import { orderPending, itemState } from './queue.ts';
@@ -64,6 +65,9 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   const mine = useRef(new Set<string>());
   // True while a send is on its way to the host: a second press does not send the message twice.
   const sendingRef = useRef(false);
+  // The draft as the composer last saw it: the empty→non-empty step is the first keystroke, which
+  // warms a local chat's model so the first send is not held up loading it.
+  const prevText = useRef(chat.draft ?? '');
   const [sending, setSending] = useState(false);
   const behavior = thread?.sendBehavior ?? HOME_SEND_BEHAVIOR;
   const busy = isBusy(chat.status);
@@ -308,6 +312,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
           if (await rollOverChat(ops, chat.id, (m) => toast.show({ kind: 'error', text: m }))) {
             editor.current?.setText('');
             setEmpty(true);
+            prevText.current = '';
           }
         } finally {
           sendingRef.current = false;
@@ -339,6 +344,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
         if (saver.sent(token, (editor.current?.getText() ?? '') === text)) {
           editor.current?.setText('');
           setEmpty(true);
+          prevText.current = '';
         }
       } catch (e) {
         // Refused: the text stays in the draft.
@@ -487,11 +493,17 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
 
   const onChange = useCallback(
     (text: string) => {
+      // The first keystroke in a local chat starts loading its model now (host-side rules keep
+      // this to once between turns, at most once every five minutes); a later send joins it.
+      if (!prevText.current.trim() && text.trim() && isLocalModel(chat.model)) {
+        void ops.warm(chat.id).catch(() => undefined);
+      }
+      prevText.current = text;
       setEmpty(!text);
       saver.edit(text);
       setDraftText(text);
     },
-    [saver],
+    [saver, chat.id, chat.model, ops],
   );
 
   const actx: AccessoryContext = { chat, thread, busy, draftEmpty: empty };

@@ -193,19 +193,55 @@ export function LocalModelsPane() {
                 </label>
               </div>
               {d.kind === 'strata' && (
-                <div className="lm-field">
-                  <label>
-                    <span className="lm-label">Model name</span>
-                    <TextInput
-                      aria-label="Model name"
-                      data-testid="localmodels-model"
-                      spellCheck={false}
-                      placeholder="Used when the server does not list its models"
-                      value={d.model}
-                      onChange={(e) => patchDraft(d.key, { model: e.target.value })}
+                <>
+                  <div className="lm-field">
+                    <label>
+                      <span className="lm-label">Model name</span>
+                      <TextInput
+                        aria-label="Model name"
+                        data-testid="localmodels-model"
+                        spellCheck={false}
+                        placeholder="Used when the server does not list its models"
+                        value={d.model}
+                        onChange={(e) => patchDraft(d.key, { model: e.target.value })}
+                      />
+                    </label>
+                  </div>
+                  <div className="lm-field">
+                    <Checkbox
+                      label="Start Strata when needed"
+                      checked={d.autoStart}
+                      data-testid="localmodels-autostart"
+                      onChange={(on) => patchDraft(d.key, { autoStart: on })}
                     />
-                  </label>
-                </div>
+                  </div>
+                  {d.autoStart && (
+                    <div className="lm-field">
+                      <label>
+                        <span className="lm-label">Strata folder</span>
+                        <TextInput
+                          aria-label="Strata folder"
+                          data-testid="localmodels-folder"
+                          spellCheck={false}
+                          placeholder="%LOCALAPPDATA%\Strata\terminal\current"
+                          value={d.folder}
+                          onChange={(e) => patchDraft(d.key, { folder: e.target.value })}
+                        />
+                      </label>
+                      <label>
+                        <span className="lm-label">Preset</span>
+                        <TextInput
+                          aria-label="Preset"
+                          data-testid="localmodels-preset"
+                          spellCheck={false}
+                          placeholder="Solo"
+                          value={d.preset}
+                          onChange={(e) => patchDraft(d.key, { preset: e.target.value })}
+                        />
+                      </label>
+                    </div>
+                  )}
+                </>
               )}
               {(d.kind === 'strata' || view?.hasKey) && (
                 <div className="lm-field lm-key">

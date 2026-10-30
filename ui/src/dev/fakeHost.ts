@@ -829,6 +829,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       return c.chat;
     },
     chat_compact: () => null,
+    chat_warm: () => null,
     chat_roll_over: () => ({ started: true }),
     preference_get: (a) => (a.key === 'sendBehavior' ? sendBehavior : (prefs.get(String(a.key)) ?? null)),
     preference: (a) => {

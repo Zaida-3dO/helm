@@ -4,12 +4,13 @@ import { localModelsFakeOps } from '../../dev/fake-localmodels.ts';
 import { localModelsOps } from './api.ts';
 import { clampTo, draftProblem, newDraft, rangeText, reachText, sameDrafts, savePayload, toDraft, type ServerView } from './model.ts';
 
-const view = (p: Partial<ServerView> = {}): ServerView => ({ id: 's1', name: 'Strata', kind: 'strata', baseUrl: 'http://127.0.0.1:8081', enabled: true, hasKey: false, ...p });
+const view = (p: Partial<ServerView> = {}): ServerView => ({ id: 's1', name: 'Strata', kind: 'strata', baseUrl: 'http://127.0.0.1:8081', enabled: true, autoStart: true, hasKey: false, ...p });
 
 test('server drafts: what is refused before asking the host, what changed, and what is saved', () => {
   // An address must be plain http to this machine; the host refuses the same on save.
   const ok = toDraft(view());
   assert.equal(draftProblem(ok), null);
+  assert.deepEqual([ok.autoStart, ok.folder, ok.preset], [true, '', ''], 'start-on-use is on by default, folder and preset fall back to the standards');
   const problems: [Partial<typeof ok>, RegExp][] = [
     [{ name: ' ' }, /name/],
     [{ baseUrl: '' }, /address/],
@@ -26,10 +27,10 @@ test('server drafts: what is refused before asking the host, what changed, and w
   assert.equal(sameDrafts([ok], [{ ...ok, key: 'other' }]), true);
   assert.equal(sameDrafts([ok], [{ ...ok, enabled: false }]), false);
   assert.equal(sameDrafts([ok], []), false);
-  // The save replaces the list: trimmed, the model only for Strata and only when given.
-  assert.deepEqual(savePayload([{ ...ok, name: ' Strata ', baseUrl: ' http://127.0.0.1:8081 ', model: ' qwen ' }, { ...added, name: 'Ollama', baseUrl: 'http://localhost:9000', model: 'ignored' }]), [
-    { id: 's1', name: 'Strata', kind: 'strata', baseUrl: 'http://127.0.0.1:8081', enabled: true, model: 'qwen' },
-    { id: '', name: 'Ollama', kind: 'ollama', baseUrl: 'http://localhost:9000', enabled: true },
+  // The save replaces the list: trimmed, the model, folder and preset only for Strata and only when given.
+  assert.deepEqual(savePayload([{ ...ok, name: ' Strata ', baseUrl: ' http://127.0.0.1:8081 ', model: ' qwen ', folder: ' D:/Strata ', preset: ' Fast ' }, { ...added, name: 'Ollama', baseUrl: 'http://localhost:9000', model: 'ignored', folder: 'ignored', preset: 'ignored', autoStart: false }]), [
+    { id: 's1', name: 'Strata', kind: 'strata', baseUrl: 'http://127.0.0.1:8081', enabled: true, autoStart: true, model: 'qwen', folder: 'D:/Strata', preset: 'Fast' },
+    { id: '', name: 'Ollama', kind: 'ollama', baseUrl: 'http://localhost:9000', enabled: true, autoStart: false },
   ]);
   // What a card says about the server, and numbers kept inside their range.
   assert.deepEqual(reachText(view()), { text: 'Not checked yet', tone: 'idle' });

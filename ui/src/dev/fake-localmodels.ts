@@ -11,7 +11,7 @@ import type { FakeOpHandler } from './fakeHost.ts';
 type Server = Omit<ServerView, 'reachable' | 'note'>;
 
 /** What each made-up server lists, and whether it answers. The "office" one never does. */
-const SHELF: Record<string, { answers: boolean; models: Omit<LocalModelInfo, 'server' | 'kind' | 'reachable'>[] }> = {
+const SHELF: Record<string, { answers: boolean; models: Omit<LocalModelInfo, 'server' | 'kind' | 'reachable' | 'startable'>[] }> = {
   strata: {
     answers: true,
     models: [
@@ -32,9 +32,9 @@ export interface LocalCatalogue {
 
 export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandler; catalogue: LocalCatalogue } {
   const servers: Server[] = [
-    { id: 'strata', name: 'Strata', kind: 'strata', baseUrl: 'http://127.0.0.1:8081', enabled: true, model: 'qwen3.8-flash', hasKey: false },
-    { id: 'ollama', name: 'Ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:8082', enabled: true, hasKey: false },
-    { id: 'office', name: 'Ollama (office)', kind: 'ollama', baseUrl: 'http://127.0.0.1:8083', enabled: true, hasKey: false },
+    { id: 'strata', name: 'Strata', kind: 'strata', baseUrl: 'http://127.0.0.1:8081', enabled: true, model: 'qwen3.8-flash', autoStart: true, hasKey: false },
+    { id: 'ollama', name: 'Ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:8082', enabled: true, autoStart: true, hasKey: false },
+    { id: 'office', name: 'Ollama (office)', kind: 'ollama', baseUrl: 'http://127.0.0.1:8083', enabled: true, autoStart: true, hasKey: false },
   ];
   const settings = { ollamaContext: 65536, keepAliveMinutes: 15, strataNeedGb: 12, tools: 'lean' as const, compareWith: 'sonnet' as 'opus' | 'sonnet' | 'haiku' };
   const ranges = {
@@ -59,7 +59,14 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
     servers
       .filter((s) => s.enabled)
       .flatMap((s) =>
-        (SHELF[s.id]?.models ?? []).map((m) => ({ ...m, server: s.name, kind: s.kind, reachable: SHELF[s.id]?.answers === true })),
+        (SHELF[s.id]?.models ?? []).map((m) => ({
+          ...m,
+          server: s.name,
+          kind: s.kind,
+          reachable: SHELF[s.id]?.answers === true,
+          // A Strata set to be started keeps its rows choosable while it is down.
+          startable: s.kind === 'strata' && s.autoStart && SHELF[s.id]?.answers !== true,
+        })),
       );
 
   const handler: FakeOpHandler = (op, a, ctx) => {
@@ -70,7 +77,7 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
       case 'local_models_refresh':
         for (const s of servers) if (s.enabled) asked.set(s.id, SHELF[s.id]?.answers === true);
         cached = rows();
-        return { models: cached };
+        return { models: cached, notes: [] };
       case 'local_models_save': {
         if (Array.isArray(a.servers)) {
           const next: Server[] = [];
@@ -80,7 +87,18 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
             if (!String(x.name ?? '').trim()) throw new ApiError('refused', 'Every server needs a name.');
             if (!here(String(x.baseUrl ?? ''))) throw new ApiError('refused', 'A local model server must be on this machine and use plain http (127.0.0.1, localhost or ::1).');
             const id = old?.id ?? String(x.name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + (servers.some((s) => s.id === String(x.name).toLowerCase()) ? '-2' : '');
-            next.push({ id, name: String(x.name).trim(), kind: x.kind ?? 'ollama', baseUrl: String(x.baseUrl).trim(), enabled: x.enabled !== false, hasKey: old?.hasKey ?? false, ...(x.model ? { model: x.model } : {}) });
+            next.push({
+              id,
+              name: String(x.name).trim(),
+              kind: x.kind ?? 'ollama',
+              baseUrl: String(x.baseUrl).trim(),
+              enabled: x.enabled !== false,
+              autoStart: x.autoStart !== false,
+              hasKey: old?.hasKey ?? false,
+              ...(x.model ? { model: x.model } : {}),
+              ...('folder' in x && x.folder ? { folder: x.folder } : {}),
+              ...('preset' in x && x.preset ? { preset: x.preset } : {}),
+            });
           }
           servers.splice(0, servers.length, ...next);
           for (const id of [...asked.keys()]) if (!servers.some((s) => s.id === id)) asked.delete(id);

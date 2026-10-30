@@ -30,6 +30,7 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
   const [open, setOpen] = useState(false);
   const [checking, setChecking] = useState(false);
   const [checked, setChecked] = useState(false);
+  const [notes, setNotes] = useState<string[]>([]);
   const [effortDraft, setEffortDraft] = useState('');
   const trigger = useRef<HTMLButtonElement>(null);
 
@@ -76,8 +77,9 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
     setError(null);
     ops
       .refreshLocalModels()
-      .then(({ models }) => {
+      .then(({ models, notes: seen }) => {
         setChecked(true);
+        setNotes(seen ?? []);
         cached = (cached ?? ops.catalogue()).then((c) => ({ ...c, local: models }));
         return cached.then(setCatalogue);
       })
@@ -156,7 +158,7 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
             <>
             <div className="model-picker-local" data-testid="local-check">
               <span className="model-picker-local-hint" data-testid="local-hint">
-                {localHint(catalogue, checked)}
+                {localHint(catalogue, checked, notes)}
               </span>
               <button type="button" className="model-picker-link" data-testid="check-servers" disabled={checking} onClick={checkServers}>
                 {checking ? 'Checking…' : 'Check servers'}

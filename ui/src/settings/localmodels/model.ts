@@ -29,20 +29,37 @@ export interface ServerDraft {
   enabled: boolean;
   /** Strata only: the model to offer when the server does not list its models. */
   model: string;
+  /** Strata only: start the install when a chat needs it and it is not running. */
+  autoStart: boolean;
+  /** Strata only: the install folder; empty means the standard place. */
+  folder: string;
+  /** Strata only: the launch preset; empty means the default. */
+  preset: string;
 }
 
 export function toDraft(s: ServerView): ServerDraft {
-  return { key: s.id, id: s.id, name: s.name, kind: s.kind, baseUrl: s.baseUrl, enabled: s.enabled, model: s.model ?? '' };
+  return {
+    key: s.id,
+    id: s.id,
+    name: s.name,
+    kind: s.kind,
+    baseUrl: s.baseUrl,
+    enabled: s.enabled,
+    model: s.model ?? '',
+    autoStart: s.autoStart ?? true,
+    folder: s.folder ?? '',
+    preset: s.preset ?? '',
+  };
 }
 
 let fresh = 0;
 /** A server the user is adding: no id until the host saves it, and no address (the host refuses anything but this machine). */
 export function newDraft(kind: ServerDraft['kind']): ServerDraft {
   fresh += 1;
-  return { key: `new-${fresh}`, id: '', name: kind === 'strata' ? 'Strata' : 'Ollama', kind, baseUrl: '', enabled: true, model: '' };
+  return { key: `new-${fresh}`, id: '', name: kind === 'strata' ? 'Strata' : 'Ollama', kind, baseUrl: '', enabled: true, model: '', autoStart: true, folder: '', preset: '' };
 }
 
-const FIELDS = ['id', 'name', 'kind', 'baseUrl', 'enabled', 'model'] as const;
+const FIELDS = ['id', 'name', 'kind', 'baseUrl', 'enabled', 'model', 'autoStart', 'folder', 'preset'] as const;
 
 /** Whether two lists would save the same servers (the cards' keys do not count). */
 export function sameDrafts(a: readonly ServerDraft[], b: readonly ServerDraft[]): boolean {
@@ -50,14 +67,17 @@ export function sameDrafts(a: readonly ServerDraft[], b: readonly ServerDraft[])
 }
 
 /** What `local_models_save` takes for the server list; it replaces the whole list. */
-export function savePayload(drafts: readonly ServerDraft[]): { id: string; name: string; kind: ServerDraft['kind']; baseUrl: string; enabled: boolean; model?: string }[] {
+export function savePayload(drafts: readonly ServerDraft[]): { id: string; name: string; kind: ServerDraft['kind']; baseUrl: string; enabled: boolean; model?: string; autoStart: boolean; folder?: string; preset?: string }[] {
   return drafts.map((d) => ({
     id: d.id,
     name: d.name.trim(),
     kind: d.kind,
     baseUrl: d.baseUrl.trim(),
     enabled: d.enabled,
+    autoStart: d.autoStart,
     ...(d.kind === 'strata' && d.model.trim() ? { model: d.model.trim() } : {}),
+    ...(d.kind === 'strata' && d.folder.trim() ? { folder: d.folder.trim() } : {}),
+    ...(d.kind === 'strata' && d.preset.trim() ? { preset: d.preset.trim() } : {}),
   }));
 }
 

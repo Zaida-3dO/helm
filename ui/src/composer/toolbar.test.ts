@@ -57,10 +57,12 @@ test('rows: the catalogue, then the chat model as a disabled row when it is not 
 const localCat: ModelCatalogue = {
   ...cat,
   local: [
-    { id: 'local/strata/qwen-flash', name: 'Qwen Flash', server: 'Strata', kind: 'strata', contextTokens: 262144, loaded: true, reachable: true },
-    { id: 'local/strata/qwen-coder', name: 'Qwen Coder', server: 'Strata', kind: 'strata', contextTokens: 131072, reachable: true },
-    { id: 'local/ollama/org/llama:3b', name: 'Llama 3B', server: 'Ollama', kind: 'ollama', contextTokens: 8192, reachable: true },
-    { id: 'local/office/big:30b', name: 'Big 30B', server: 'Ollama (office)', kind: 'ollama', reachable: false },
+    { id: 'local/strata/qwen-flash', name: 'Qwen Flash', server: 'Strata', kind: 'strata', contextTokens: 262144, loaded: true, reachable: true, startable: false },
+    { id: 'local/strata/qwen-coder', name: 'Qwen Coder', server: 'Strata', kind: 'strata', contextTokens: 131072, reachable: true, startable: false },
+    // Down, but Helm can start this Strata: the row stays choosable.
+    { id: 'local/strata/down:14b', name: 'Qwen 14B', server: 'Strata', kind: 'strata', contextTokens: 131072, reachable: false, startable: true },
+    { id: 'local/ollama/org/llama:3b', name: 'Llama 3B', server: 'Ollama', kind: 'ollama', contextTokens: 8192, reachable: true, startable: false },
+    { id: 'local/office/big:30b', name: 'Big 30B', server: 'Ollama (office)', kind: 'ollama', reachable: false, startable: false },
   ],
 };
 
@@ -82,18 +84,20 @@ test('local models: their own group with server and context, greyed when the ser
       ['haiku', 'Claude', 'Claude Code', false],
       ['local/strata/qwen-flash', 'Local', 'Strata · 256k · loaded', false],
       ['local/strata/qwen-coder', 'Local', 'Strata · 128k', false],
+      ['local/strata/down:14b', 'Local', 'Strata · 128k · not running, starts when you use it', false],
       ['local/ollama/org/llama:3b', 'Local', 'Ollama · 8k', false],
       ['local/office/big:30b', 'Local', 'Ollama (office) · not answering', true],
     ],
   );
-  assert.match(open[5]!.hint ?? '', /Ollama \(office\) did not answer/);
+  assert.match(open[6]!.hint ?? '', /Ollama \(office\) did not answer/);
+  assert.equal(open[4]!.hint, undefined, 'a Strata that can be started needs no warning tooltip');
   assert.equal(modelRows(cat, 'opus').some((r) => r.group), false);
-  assert.deepEqual(filterRows(open, 'strata').map((r) => r.id), ['local/strata/qwen-flash', 'local/strata/qwen-coder']);
+  assert.deepEqual(filterRows(open, 'strata').map((r) => r.id), ['local/strata/qwen-flash', 'local/strata/qwen-coder', 'local/strata/down:14b']);
 
   // After the first turn: a Claude chat keeps Claude models, a local chat keeps its server.
   const enabled = (cur: string) => modelRows(localCat, cur, true).filter((r) => !r.disabled).map((r) => r.id);
   assert.deepEqual(enabled('opus'), ['opus', 'haiku']);
-  assert.deepEqual(enabled('local/strata/qwen-flash'), ['local/strata/qwen-flash', 'local/strata/qwen-coder']);
+  assert.deepEqual(enabled('local/strata/qwen-flash'), ['local/strata/qwen-flash', 'local/strata/qwen-coder', 'local/strata/down:14b']);
   assert.deepEqual(enabled('local/ollama/org/llama:3b'), ['local/ollama/org/llama:3b']);
   assert.match(modelRows(localCat, 'opus', true)[2]!.hint ?? '', /fixed for this chat: it started on Claude/);
   assert.match(modelRows(localCat, 'local/strata/qwen-flash', true)[0]!.hint ?? '', /started on Strata/);
@@ -105,6 +109,9 @@ test('local models: their own group with server and context, greyed when the ser
   // The servers are only asked on "Check servers": until then the picker says so, and says if the check found nothing.
   assert.deepEqual([localHint(cat, false), localHint(cat, true), localHint(localCat, false)], ['Local models: not checked yet', 'Local models: none found', 'Local models']);
   assert.equal(localHint(null, false), 'Local models: not checked yet');
+  // A server that answered but has something to report says it in the footer instead.
+  assert.equal(localHint(localCat, true, ['Strata answered but listed no models.']), 'Strata answered but listed no models.');
+  assert.equal(localHint(localCat, false, ['', '  ', 'Strata could not be started.']), 'Strata could not be started.', 'the first real note wins');
   // Settings → Runtime's plain list gets the same models, with the server in the description.
   assert.deepEqual(localModelChoices(localCat.local).map((c) => [c.name, c.description]).slice(0, 2), [['Qwen Flash', 'Strata · 256k · loaded'], ['Qwen Coder', 'Strata · 128k']]);
   assert.deepEqual(localModelChoices(undefined), []);

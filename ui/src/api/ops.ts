@@ -72,7 +72,9 @@ export function chatOps(api: Api) {
     setPermissionMode: (chatId: string, mode: string) => api<{ mode: string }>('chat_set_permission_mode', { chatId, mode }),
     catalogue: (refresh = false) => api<ModelCatalogue>('model_catalogue', { harness: 'claude', refresh }),
     /** Asks the local model servers what they have (the catalogue never does); the model picker asks once each time it opens. */
-    refreshLocalModels: () => api<{ models: LocalModelInfo[] }>('local_models_refresh', {}),
+    refreshLocalModels: () => api<{ models: LocalModelInfo[]; notes: string[] }>('local_models_refresh', {}),
+    /** Prepares a local chat's model the moment the user starts typing, so the first send is not held up. */
+    warm: (chatId: string) => api<null>('chat_warm', { chatId }),
     stopTool: (chatId: string, toolCallId: string) => api<{ stopped: boolean }>('tool_stop', { chatId, toolCallId }),
     compact: (chatId: string) => api<null>('chat_compact', { chatId }),
     /** Ask the agent for a hand-off, start a successor chat with it and archive this one. */
