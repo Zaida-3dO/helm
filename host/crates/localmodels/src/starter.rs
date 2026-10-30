@@ -15,9 +15,10 @@ use crate::settings::{Server, DEFAULT_PRESET};
 use std::path::{Path, PathBuf};
 
 /// What the service asks when a Strata server it needs is not answering. An `Ok` means the
-/// launch was started; the caller then waits for the server to answer its health check.
+/// launch was started; the caller then waits for the server to answer its health check. The
+/// handle (where one exists) lets that wait notice a launcher that died at once.
 pub trait StrataStarter: Send + Sync {
-    fn start(&self, server: &Server) -> Result<(), String>;
+    fn start(&self, server: &Server) -> Result<Option<std::process::Child>, String>;
 }
 
 /// The standard install folder: the terminal install's current version.
@@ -90,7 +91,7 @@ pub fn launch_plan(python: &Path, folder: &Path, preset: &str) -> (PathBuf, Vec<
 pub struct ProcessStarter;
 
 impl StrataStarter for ProcessStarter {
-    fn start(&self, server: &Server) -> Result<(), String> {
+    fn start(&self, server: &Server) -> Result<Option<std::process::Child>, String> {
         let folder = folder_for(server)
             .ok_or("the Strata folder is not set and the standard one cannot be found")?;
         let python = python_in(&folder)
@@ -111,7 +112,7 @@ impl StrataStarter for ProcessStarter {
             cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
         }
         cmd.spawn()
-            .map(|_| ())
+            .map(Some)
             .map_err(|e| format!("Strata could not be started: {e}"))
     }
 }

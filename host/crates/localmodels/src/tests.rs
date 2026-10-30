@@ -236,9 +236,12 @@ fn fake_strata(state: Arc<Mutex<StrataState>>, free: Arc<AtomicU64>) -> Fake {
 /// The stand-in starter: it never launches a process. It records what it was asked to start
 /// (server, folder, preset) and, when the test has armed one, runs that — usually taking a
 /// staged fake's listener and bringing the "server" up on the address the settings hold.
+/// What a start was asked for: the server, and the folder and preset it should launch with.
+type StartCall = (String, Option<String>, Option<String>);
+
 #[derive(Default)]
 struct TestStarter {
-    calls: Mutex<Vec<(String, Option<String>, Option<String>)>>,
+    calls: Mutex<Vec<StartCall>>,
     armed: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
@@ -246,13 +249,13 @@ impl TestStarter {
     fn arm_once(&self, f: impl FnOnce() + Send + 'static) {
         *self.armed.lock().unwrap() = Some(Box::new(f));
     }
-    fn calls(&self) -> Vec<(String, Option<String>, Option<String>)> {
+    fn calls(&self) -> Vec<StartCall> {
         self.calls.lock().unwrap().clone()
     }
 }
 
 impl crate::starter::StrataStarter for TestStarter {
-    fn start(&self, s: &crate::settings::Server) -> Result<(), String> {
+    fn start(&self, s: &crate::settings::Server) -> Result<Option<std::process::Child>, String> {
         self.calls
             .lock()
             .unwrap()
@@ -260,7 +263,7 @@ impl crate::starter::StrataStarter for TestStarter {
         match self.armed.lock().unwrap().take() {
             Some(f) => {
                 f();
-                Ok(())
+                Ok(None)
             }
             None => Err("nothing was armed to start in this test".into()),
         }
@@ -750,8 +753,8 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
         .any(|q| q.path == "/health"));
     assert_eq!(
         lines.lock().unwrap().as_slice(),
-        ["Loading qwen-flash…"],
-        "the turn then proceeded as an ordinary Strata turn"
+        ["Starting Strata…", "Loading qwen-flash…"],
+        "the turn was told a start was happening, then proceeded as an ordinary Strata turn"
     );
     r.svc.save(&servers(&s.base, &o.base)).unwrap();
 

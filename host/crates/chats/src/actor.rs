@@ -243,6 +243,9 @@ struct Prepare {
     /// The preparation has shown its loading line, so its end should clear it.
     line: bool,
     held: Vec<String>,
+    /// The server and model this preparation is making ready. A warm-up whose chat has since been
+    /// pointed at another model is out of date and must not answer for the send.
+    target: (String, String),
 }
 
 /// The server and model name of a chat on a local model, if it is one.
@@ -1303,6 +1306,18 @@ impl Actor {
                 self.emit_thread();
             }
             Cmd::ApplyModel { model, effort } => {
+                if model.is_some() {
+                    // The model changed: anything made ready for the old one — a running warm-up
+                    // or an answered one — does not carry over to the new.
+                    if matches!(&self.prepare, Some(p) if p.sid.is_none()) {
+                        let had_line = self.prepare.as_ref().is_some_and(|p| p.line);
+                        self.prepare = None;
+                        if had_line {
+                            self.clear_loading();
+                        }
+                    }
+                    self.prepared = None;
+                }
                 if self.link.is_none() {
                     return; // the next launch carries it
                 }
@@ -1571,6 +1586,18 @@ impl Actor {
             .ok()
             .flatten()
             .flatten();
+        // A warm-up started for the model the chat has since left cannot answer for this send:
+        // drop it first (its late answers are ignored by token) and prepare the current model.
+        let stale = self.prepare.as_ref().is_some_and(|p| {
+            p.sid.is_none() && self.chat().and_then(|c| local_of(&c)) != Some(p.target.clone())
+        });
+        if stale {
+            let had_line = self.prepare.as_ref().is_some_and(|p| p.line);
+            self.prepare = None;
+            if had_line {
+                self.clear_loading();
+            }
+        }
         if let Some(p) = self.prepare.as_mut() {
             // A warm-up for this chat's next turn is running with no send yet: this send takes it
             // over instead of starting a second preparation, and the answer dispatches it as if
@@ -1878,6 +1905,7 @@ impl Actor {
             sid,
             line: false,
             held: Vec::new(),
+            target: (server_id.clone(), model.clone()),
         });
         // Read one at a time: the guard of this chat's own live state is among those taken below.
         let launched = self.live.lock().unwrap().local_model.clone();
@@ -1943,7 +1971,13 @@ impl Actor {
                 let ids = std::iter::once(sid).chain(p.held).collect::<Vec<_>>();
                 self.refuse_local(&ids, &why);
             }
-            (Err(_), None) => {} // a warm-up's failure stays quiet; the send reports afresh
+            (Err(_), None) => {
+                // A warm-up's failure stays quiet — but quiet is not a stuck line: what it
+                // showed goes, and the send reports afresh in its own words.
+                if p.line {
+                    self.clear_loading();
+                }
+            }
         }
     }
 

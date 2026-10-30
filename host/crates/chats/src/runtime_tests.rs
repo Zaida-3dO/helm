@@ -4063,6 +4063,133 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
     );
     assert_eq!(h.status(&chat), "stopped");
 
+    // The once-between-turns rule does not lean on a preparation still being in flight: a finished
+    // warm-up is still not followed by another one until a turn starts.
+    let n = |id: &str| {
+        local
+            .turns
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|t| t.chat_id == id)
+            .count()
+    };
+    let created = h
+        .call(
+            "chat_create",
+            json!({"cwd": cwd, "model": "local/ollama/qwen3:8b"}),
+        )
+        .await
+        .unwrap();
+    let warmed_chat = created["id"].as_str().unwrap().to_owned();
+    h.call("chat_warm", json!({"chatId": &warmed_chat}))
+        .await
+        .unwrap();
+    h.until("the warm-up ran and answered", |_| n(&warmed_chat) == 1)
+        .await;
+    h.until("its line is gone with it", |h| loading_text(h).is_none())
+        .await;
+    h.call("chat_warm", json!({"chatId": &warmed_chat}))
+        .await
+        .unwrap();
+    assert_eq!(
+        n(&warmed_chat),
+        1,
+        "typing does not prepare twice between turns"
+    );
+    assert_eq!(
+        h.status(&warmed_chat),
+        "idle",
+        "and a warm-up opens no turn"
+    );
+
+    // Type, pick another model, then send: a warm-up no send has taken over does not answer for
+    // the new model — the send prepares that one instead.
+    *local.outcome.lock().unwrap() = Ok("llama3:8b".into());
+    let (open2, gate2) = std::sync::mpsc::channel();
+    *local.gate.lock().unwrap() = Some(gate2);
+    let changed = h
+        .call(
+            "chat_create",
+            json!({"cwd": cwd, "model": "local/ollama/qwen3:8b"}),
+        )
+        .await
+        .unwrap();
+    let changed_chat = changed["id"].as_str().unwrap().to_owned();
+    h.call("chat_warm", json!({"chatId": &changed_chat}))
+        .await
+        .unwrap();
+    h.until("the first warm-up waits behind the gate", |h| {
+        loading_text(h) == Some("Loading qwen3:8b…".into())
+    })
+    .await;
+    h.call(
+        "chat_set_model",
+        json!({"chatId": &changed_chat, "model": "local/ollama/llama3:8b"}),
+    )
+    .await
+    .unwrap();
+    h.until("the model change took the warm-up down with it", |h| {
+        loading_text(h).is_none()
+    })
+    .await;
+    let (moved_sid, _) = h.send(&changed_chat, "hello", "default").await;
+    h.until("the new model gets its own preparation", |_| {
+        n(&changed_chat) == 2
+    })
+    .await;
+    open2.send(()).unwrap();
+    let w2 = h.worker().await;
+    assert_eq!(
+        w2.req
+            .local
+            .as_ref()
+            .expect("a local launch")
+            .model
+            .as_str(),
+        "llama3:8b",
+        "the worker is launched for the model chosen now, not the one first warmed"
+    );
+    assert_eq!(
+        local
+            .turns
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|t| t.chat_id == changed_chat)
+            .map(|t| t.model.as_str())
+            .collect::<Vec<_>>(),
+        ["qwen3:8b", "llama3:8b"],
+        "the dropped warm-up finished, but never answered for the send"
+    );
+
+    // A warm-up that fails stays quiet: no refusal, no turn — and no line left up in an idle chat.
+    *local.outcome.lock().unwrap() = Err("no room on the server for that".into());
+    let failed = h
+        .call(
+            "chat_create",
+            json!({"cwd": cwd, "model": "local/ollama/qwen3:8b"}),
+        )
+        .await
+        .unwrap();
+    let failed_chat = failed["id"].as_str().unwrap().to_owned();
+    h.call("chat_warm", json!({"chatId": &failed_chat}))
+        .await
+        .unwrap();
+    h.until("the attempt ran", |_| n(&failed_chat) == 1).await;
+    h.until("nothing is left showing", |h| loading_text(h).is_none())
+        .await;
+    assert_eq!(
+        h.status(&failed_chat),
+        "idle",
+        "a failed warm-up starts nothing"
+    );
+    assert_ne!(
+        h.state(&moved_sid),
+        "rejected",
+        "the send that replaced the warm-up was never refused"
+    );
+
     // A Claude chat can't move to a local model once it has a session, but may before.
     let claude = h.create().await;
     h.call(

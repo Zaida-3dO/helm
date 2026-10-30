@@ -265,6 +265,13 @@ fn plain_text(s: &str, max: usize) -> bool {
     !s.trim().is_empty() && s.chars().count() <= max && !s.chars().any(char::is_control)
 }
 
+/// An absolute path on this machine (`C:\...` or `C:/...`). A relative folder would mean whatever
+/// folder the launcher happens to start in, and a network path is not a local install.
+fn full_local_path(f: &str) -> bool {
+    let b = f.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/')
+}
+
 fn int_in(v: &Value, lo: u32, hi: u32) -> Option<u32> {
     let n = v.as_u64()?;
     (n >= u64::from(lo) && n <= u64::from(hi)).then_some(n as u32)
@@ -472,12 +479,22 @@ pub fn apply_changes(current: &LocalSettings, changes: &Changes) -> Result<Local
             };
             let folder = match e.folder.as_deref().map(str::trim) {
                 None | Some("") => None,
-                Some(f) if plain_text(f, MAX_FOLDER) => Some(f.to_owned()),
-                Some(_) => return Err(format!("Server {n}: the Strata folder is not valid.")),
+                Some(f) if plain_text(f, MAX_FOLDER) && full_local_path(f) => Some(f.to_owned()),
+                Some(_) => return Err(format!(
+                    "Server {n}: the Strata folder must be a full path on this machine, like C:\\Strata\\terminal\\current."
+                )),
             };
             let preset = match e.preset.as_deref().map(str::trim) {
                 None | Some("") => None,
-                Some(p) if plain_text(p, MAX_PRESET) => Some(p.to_owned()),
+                Some(p) if plain_text(p, MAX_PRESET) => {
+                    // A name starting with "-" would reach the launcher as an option, not a preset.
+                    if p.starts_with('-') {
+                        return Err(format!(
+                            "Server {n}: the preset name cannot start with \"-\"."
+                        ));
+                    }
+                    Some(p.to_owned())
+                }
                 Some(_) => return Err(format!("Server {n}: the preset name is not valid.")),
             };
             out.push(Server {
@@ -714,7 +731,28 @@ mod tests {
             (true, None, None),
             "blank means the standard folder and preset"
         );
-        tuned[0].folder = Some("x".repeat(MAX_FOLDER + 1));
+        // A folder must be a full path on this machine; a preset must not read as an option.
+        for bad in [
+            "x".repeat(MAX_FOLDER + 1),
+            "Strata/terminal/current".to_string(),
+            "\\\\server\\share\\Strata".to_string(),
+        ] {
+            tuned[0].folder = Some(bad.clone());
+            assert!(
+                apply_changes(
+                    &next,
+                    &Changes {
+                        servers: Some(tuned.clone()),
+                        ..Default::default()
+                    }
+                )
+                .unwrap_err()
+                .contains("Strata folder"),
+                "{bad}"
+            );
+        }
+        tuned[0].folder = Some("D:/Strata/current".into());
+        tuned[0].preset = Some("-danger".into());
         assert!(apply_changes(
             &next,
             &Changes {
@@ -723,7 +761,16 @@ mod tests {
             }
         )
         .unwrap_err()
-        .contains("Strata folder"));
+        .contains("cannot start"));
+        tuned[0].preset = Some("Fast".into());
+        assert!(apply_changes(
+            &next,
+            &Changes {
+                servers: Some(tuned.clone()),
+                ..Default::default()
+            }
+        )
+        .is_ok());
 
         for (changes, why) in [
             (

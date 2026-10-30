@@ -403,11 +403,18 @@ impl LocalService {
     }
 
     /// Ask a Strata if it is up, starting it first when it is set up for that and is not there.
-    fn strata_probe(&self, s: &Server, conn: &Conn) -> Result<Vec<String>, String> {
+    /// `note` is what a waiting turn's progress line gets: a start is slow, and silence is not
+    /// the answer for the chat that is watching.
+    fn strata_probe(
+        &self,
+        s: &Server,
+        conn: &Conn,
+        note: &dyn Fn(&str),
+    ) -> Result<Vec<String>, String> {
         match srv::strata_loaded(&self.http, conn) {
             Ok(l) => Ok(l),
             Err(CallError::Unreachable(_)) if self.can_start(s) => {
-                self.start_up(s).and_then(|()| {
+                self.start_up(s, note).and_then(|()| {
                     srv::strata_loaded(&self.http, conn).map_err(|e| e.say(&s.name, &s.base_url))
                 })
             }
@@ -419,7 +426,7 @@ impl LocalService {
     /// waiting here finds the server answering (or fails the same way) rather than launching a
     /// second one. Any HTTP answer means it is up — a key refusal included, which the caller then
     /// reports as its own problem.
-    fn start_up(&self, s: &Server) -> Result<(), String> {
+    fn start_up(&self, s: &Server, note: &dyn Fn(&str)) -> Result<(), String> {
         let _single = lock(&self.starting);
         let conn = self.conn(s)?;
         match srv::strata_loaded(&self.http, &conn) {
@@ -431,7 +438,8 @@ impl LocalService {
             .starter
             .as_ref()
             .ok_or("Helm cannot start servers: none is set up.")?;
-        starter
+        note(&format!("Starting {}…", s.name));
+        let mut child = starter
             .start(s)
             .map_err(|e| format!("{} could not be started: {e}", s.name))?;
         let deadline = Instant::now() + self.timings.start_wait;
@@ -441,6 +449,22 @@ impl LocalService {
                 Ok(_) => return Ok(()),
                 Err(CallError::Unreachable(_)) => {}
                 Err(_) => return Ok(()), // up; its key or shape problem surfaces in the caller
+            }
+            // A launcher that died at once (a bad preset, an install that is not there) should not
+            // make the user wait the whole wait to hear about it.
+            if let Some(ch) = child.as_mut() {
+                if let Ok(Some(status)) = ch.try_wait() {
+                    if !status.success() {
+                        let how = match status.code() {
+                            Some(c) => format!("exited with code {c}"),
+                            None => "did not finish normally".to_owned(),
+                        };
+                        return Err(format!(
+                            "{} could not be started: the launcher {how}.",
+                            s.name
+                        ));
+                    }
+                }
             }
             if Instant::now() >= deadline {
                 return Err(format!(
@@ -540,7 +564,7 @@ impl LocalService {
                 }
             }
             LocalServerKind::Strata => {
-                let loaded = match self.strata_probe(s, &conn) {
+                let loaded = match self.strata_probe(s, &conn, &|_| {}) {
                     Ok(l) => l,
                     Err(e) => return down(e),
                 };
@@ -642,7 +666,7 @@ impl LocalService {
                         loaded: m.loaded,
                         reachable,
                         // A Strata that did not answer but starts when used: the picker can offer it.
-                        startable: !reachable && s.kind == LocalServerKind::Strata && s.auto_start,
+                        startable: !reachable && self.can_start(s),
                     })
             })
             .collect()
@@ -691,7 +715,7 @@ impl LocalService {
                         )
                     })
                     .map_err(|e| e.say(&s.name, &s.base_url)),
-                LocalServerKind::Strata => self.strata_probe(s, &conn).map(|l| {
+                LocalServerKind::Strata => self.strata_probe(s, &conn, &|_| {}).map(|l| {
                     let msg = match l.iter().find(|x| x.as_str() != "*") {
                         Some(m) => format!("{} answered: {m} is loaded.", s.name),
                         None if l.is_empty() => {
@@ -901,7 +925,7 @@ impl LocalService {
         turn: &LocalTurn,
         progress: &dyn Fn(&str),
     ) -> Result<String, String> {
-        let loaded = self.strata_probe(server, conn)?;
+        let loaded = self.strata_probe(server, conn, progress)?;
         if !loaded.iter().any(|l| l == "*" || l == &turn.model) {
             let _one_at_a_time = lock(&self.loading);
             // The model loads when the first request reaches the server; this line stays up until
