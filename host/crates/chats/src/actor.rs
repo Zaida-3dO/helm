@@ -169,6 +169,10 @@ struct Actor {
     chat_id: String,
     live: Arc<Mutex<Live>>,
     link: Option<Arc<dyn WorkerLink>>,
+    /// The running worker has been told to shut down (a relaunch, an edit, a retirement or a
+    /// quit) and has not exited yet: it is closing and must not be handed new work. A send that
+    /// finds it starts a fresh worker instead.
+    link_closing: bool,
     out: Option<mpsc::Receiver<WorkerOutput>>,
     ready: bool,
     deferred: Vec<Value>,
@@ -310,6 +314,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         chat_id,
         live: live.clone(),
         link: None,
+        link_closing: false,
         out: None,
         ready: false,
         deferred: Vec::new(),
@@ -734,6 +739,25 @@ impl Actor {
     // ------------------------------------------------------------------ worker lifecycle
 
     fn ensure_worker(&mut self) -> bool {
+        // A worker that was told to shut down is winding down: its stdin closes and a prompt
+        // handed to it would be lost with it. Drop the closing link (the process is already
+        // ending itself) and start a fresh one below, so a send that lands in the gap between a
+        // relaunch and the old worker's exit is never left uncertain.
+        if self.link_closing {
+            self.link = None;
+            self.out = None;
+            self.link_closing = false;
+            self.ready = false;
+            self.deferred.clear();
+            if !self
+                .sh
+                .shutting_down
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                // A retirement the send overtook is off: the chat is working again.
+                self.retiring = false;
+            }
+        }
         if self.link.is_some() {
             return true;
         }
@@ -817,6 +841,7 @@ impl Actor {
         log::error!("chat {}: {error}", self.chat_id);
         self.spawn_failed_at = Some(Instant::now());
         self.link = None;
+        self.link_closing = false;
         self.out = None;
         self.ready = false;
         self.deferred.clear();
@@ -918,6 +943,7 @@ impl Actor {
 
     fn on_exit(&mut self, reason: String) {
         self.link = None;
+        self.link_closing = false;
         self.out = None;
         self.ready = false;
         self.deferred.clear();
@@ -947,6 +973,13 @@ impl Actor {
         }
         self.timers.clear();
         if self.status().is_busy() {
+            // A turn that was still waiting on its local model to be made ready dies with the
+            // run: nothing reached the server, so what was typed goes back to the draft, and an
+            // answer arriving later must not reopen the turn that just ended.
+            if let Some(p) = self.prepare.take() {
+                self.give_back(p.sid.into_iter().chain(p.held).collect());
+                self.clear_loading();
+            }
             let error = if self
                 .sh
                 .shutting_down
@@ -1113,6 +1146,7 @@ impl Actor {
     fn relaunch_worker(&mut self) {
         self.relaunch_on_idle = false;
         if let Some(l) = &self.link {
+            self.link_closing = true;
             l.send(&json!({"type": "shutdown"}));
         }
     }
@@ -1460,15 +1494,19 @@ impl Actor {
                 if self.link.is_none() {
                     return; // the next launch carries it
                 }
-                if self.launched_local.is_some()
-                    || model
-                        .as_deref()
-                        .is_some_and(|m| crate::local::split(m).is_some())
+                if model.is_some()
+                    && (self.launched_local.is_some()
+                        || model
+                            .as_deref()
+                            .is_some_and(|m| crate::local::split(m).is_some()))
                 {
-                    // A local chat's model and thinking budget are part of its launch, and a worker
-                    // started for one provider cannot simply be retold to use the other: start a
-                    // new worker, which resumes the same session binding so the conversation
-                    // carries over — now when nothing runs, otherwise at the next idle point.
+                    // A local chat's model is part of its launch, and a worker started for one
+                    // provider cannot simply be retold to use the other: start a new worker,
+                    // which resumes the same session binding so the conversation carries
+                    // over — now when nothing runs, otherwise at the next idle point. An
+                    // effort-only change is not a provider change: it falls through to the
+                    // live retelling below, where the worker turns the new effort into the
+                    // local model's thinking budget without a respawn.
                     if self.status().is_busy() || self.agents_running() {
                         self.relaunch_on_idle = true;
                     } else {
@@ -1555,6 +1593,7 @@ impl Actor {
                 self.shutdown_replies.push(reply);
                 self.flush_rows(true);
                 if let Some(l) = &self.link {
+                    self.link_closing = true;
                     l.send(&json!({"type": "shutdown"}));
                 }
             }
@@ -1605,6 +1644,7 @@ impl Actor {
                     // Phase two needs the worker closed: shut it down and apply on exit.
                     self.edit_waiting = true;
                     if let Some(l) = &self.link {
+                        self.link_closing = true;
                         l.send(&json!({"type": "shutdown"}));
                     }
                 } else {
@@ -1676,6 +1716,7 @@ impl Actor {
                 } else if !self.status().is_busy() {
                     self.retiring = true;
                     if let Some(l) = &self.link {
+                        self.link_closing = true;
                         l.send(&json!({"type": "shutdown"}));
                     }
                 }

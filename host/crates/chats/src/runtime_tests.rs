@@ -4204,6 +4204,170 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
     assert!(wl.req.local.is_some(), "launched against the local server");
 }
 
+/// A send that lands while the previous worker is still winding down (a relaunch from any
+/// cause) is never handed to the closing worker: the closing link is set aside and a fresh
+/// worker starts, so the prompt reaches a worker that can answer and is not left uncertain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_during_a_worker_shutdown_starts_a_fresh_worker() {
+    let mut h = harness();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("qwen3:8b".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+    let claude = h.create().await;
+    let mut cw = first_turn(&mut h, &claude).await; // live idle worker, nothing has exited
+    h.call(
+        "chat_set_model",
+        json!({"chatId": claude, "model": "local/ollama/qwen3:8b"}),
+    )
+    .await
+    .unwrap();
+    cw.expect("shutdown").await;
+    // The old worker has not exited yet when the next send arrives, right after the switch.
+    let (sid, _) = h.send(&claude, "carry on", "default").await;
+    let mut wl = h.worker().await;
+    assert!(
+        wl.req.local.is_some(),
+        "the fresh worker launches on the local server"
+    );
+    wl.ready().await;
+    let p = wl.expect("prompt").await;
+    assert_eq!(p["submissionId"], sid.as_str(), "the prompt reaches it");
+    ack(&wl, &p).await;
+    h.until("accepted", |h| h.state(&sid) == "accepted").await;
+    assert!(
+        cw.no_command_for(Duration::from_millis(150)).await.is_none(),
+        "the closing worker is not handed the send"
+    );
+}
+
+/// An effort-only change on a local chat is retold to the live worker (which maps the effort
+/// to the local model's thinking budget) instead of respawning it: no shutdown goes out and
+/// no second worker starts. A model change still relaunches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_effort_change_on_a_local_chat_reaches_the_live_worker() {
+    let mut h = harness();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("qwen3:8b".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+    let cwd = h.work.to_string_lossy().into_owned();
+    let chat = h
+        .call(
+            "chat_create",
+            json!({"cwd": cwd, "model": "local/ollama/qwen3:8b"}),
+        )
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    h.send(&chat, "first", "default").await;
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    echo(&w, p["submissionId"].as_str().unwrap()).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-lm"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    let rec = h
+        .call("chat_set_model", json!({"chatId": &chat, "effort": "low"}))
+        .await
+        .unwrap();
+    assert_eq!(rec["effort"], "low");
+    let st = w.expect("set_thinking_level").await;
+    assert_eq!(st["level"], "low", "the effort goes to the live worker");
+    w.respond(&st, json!({})).await;
+    assert!(
+        w.no_command_for(Duration::from_millis(150)).await.is_none(),
+        "no shutdown: the worker is kept, not respawned"
+    );
+    assert!(
+        h.workers.try_recv().is_err(),
+        "an effort-only change does not start a second worker"
+    );
+    assert_eq!(h.status(&chat), "idle");
+    // A model change on the same local chat still relaunches: the model is part of the launch.
+    h.call(
+        "chat_set_model",
+        json!({"chatId": &chat, "model": "local/ollama/llama3:8b"}),
+    )
+    .await
+    .unwrap();
+    w.expect("shutdown").await;
+}
+
+/// A worker that exits while the chat's model is still being made ready ends the run
+/// interrupted and gives the typed text back: the preparation's later answer must not open a
+/// turn on the run that has already ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worker_exit_during_preparation_does_not_reopen_the_turn() {
+    let mut h = harness();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("qwen3:8b".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+    let cwd = h.work.to_string_lossy().into_owned();
+    let chat = h
+        .call(
+            "chat_create",
+            json!({"cwd": cwd, "model": "local/ollama/qwen3:8b"}),
+        )
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    h.send(&chat, "first", "default").await;
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    echo(&w, p["submissionId"].as_str().unwrap()).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-lm"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    // The next send is making its model ready when the worker exits behind it.
+    let (open, gate) = std::sync::mpsc::channel();
+    *local.gate.lock().unwrap() = Some(gate);
+    let (sid, _) = h.send(&chat, "second", "default").await;
+    h.until("the preparation", |h| h.status(&chat) == "starting")
+        .await;
+    w.exit().await;
+    h.until("interrupted", |h| h.status(&chat) == "interrupted")
+        .await;
+    assert_eq!(h.state(&sid), "rejected", "nothing reached the model");
+    assert_eq!(
+        h.col(&format!("SELECT draft FROM chats WHERE id = '{chat}'")),
+        ["second"],
+        "the unsent text goes back to the draft"
+    );
+    // The preparation now answers: no turn reopens on the ended run, and no worker starts.
+    open.send(()).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(h.status(&chat), "interrupted", "the ended run stays ended");
+    assert!(
+        h.workers.try_recv().is_err(),
+        "no worker is started for the send that ended"
+    );
+}
+
 /// One whole turn played out to a settled end without the streaming and ordering checks the
 /// dedicated tests make: the echo, one reply written whole, the running totals, and the settle
 /// naming `session` (which is what the next worker resumes from). Answers with the worker, still
