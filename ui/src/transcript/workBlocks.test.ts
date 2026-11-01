@@ -31,7 +31,8 @@ test('a turn with no tool call and no thinking does not fold, however long it to
     row({ id: 2, role: 'assistant', text: '', timestamp: 30_000 }),
     row({ id: 3, role: 'assistant', text: 'Hi! What are we building?', timestamp: 31_000 }),
   ];
-  assert.deepEqual(shape(layout(rows, false)), [1, 2, 3]);
+  // The empty assistant message in between is not drawn: an empty row would just be a gap.
+  assert.deepEqual(shape(layout(rows, false)), [1, 3]);
 });
 
 test('thinking alone is work: the turn folds, timed from its first output', () => {
@@ -94,9 +95,45 @@ test('live, nothing folds until there is visible work to fold (no "Worked for 0s
     row({ id: 2, role: 'assistant', text: '', timestamp: 1000 }),
     row({ id: 3, role: 'toolResult', toolName: 'Bash', status: 'streaming', timestamp: 1000 }),
   ];
-  assert.deepEqual(shape(layout(rows, true)), [1, 2, 3]);
+  // The empty message above the running call is not drawn, so the call sits under the prompt
+  // with no gap; once real work can fold, it folds as usual.
+  assert.deepEqual(shape(layout(rows, true)), [1, 3]);
   const second = [...rows, row({ id: 4, role: 'assistant', text: '', timestamp: 2000 }), row({ id: 5, role: 'toolResult', toolName: 'Bash', status: 'streaming', timestamp: 2000 })];
   assert.deepEqual(shape(layout(second, true)), [1, 'fold[2,3,4]', 5]);
+});
+
+test('rows with nothing to show are never drawn, so hidden tool activity leaves no empty gap', () => {
+  const rows = [
+    row({ id: 1, role: 'user', timestamp: 0 }),
+    // The empty messages the host saves the two tool calls under.
+    row({ id: 2, role: 'assistant', text: '', timestamp: 1000 }),
+    row({ id: 3, role: 'toolResult', toolName: 'Bash', timestamp: 2000 }),
+    row({ id: 4, role: 'assistant', text: 'let me check', timestamp: 3000 }),
+    row({ id: 5, role: 'assistant', text: '', timestamp: 4000 }),
+    row({ id: 6, role: 'toolResult', toolName: 'Read', timestamp: 5000 }),
+    row({ id: 7, role: 'assistant', text: 'done', timestamp: 6000 }),
+  ];
+  // Closed: the calls and their empty messages fold behind one compact row; the step count is
+  // the two calls, not each call counted twice.
+  const closed = layout(rows, false);
+  assert.deepEqual(shape(closed), [1, 'fold[2,3,5,6]', 4, 7]);
+  const fold = closed.find((i) => i.kind === 'fold');
+  assert.equal(fold?.kind === 'fold' && fold.steps, 2);
+  // Opened: the calls are listed, the empty messages take no room between them, and the note
+  // still tightens above the call that follows it across its empty message.
+  const opened = layout(rows, false, new Set(['k1']));
+  assert.deepEqual(shape(opened), [1, 'fold[2,3,5,6]', 3, 4, 6, 7]);
+  const note = opened.find((i) => i.kind === 'row' && i.row.id === 4);
+  assert.equal(note?.kind === 'row' && note.beforeTool, true, 'note id4 is followed by empty id5 then tool id6');
+  // Live, before anything real can fold, the running call sits under the prompt with no empty row.
+  const live = [
+    rows[0]!,
+    { ...rows[1]!, status: 'streaming' as const },
+    { ...rows[2]!, status: 'streaming' as const },
+  ];
+  assert.deepEqual(shape(layout(live, true)), [1, 3]);
+  // A turn whose whole reply is empty messages shows the prompt and draws nothing else.
+  assert.deepEqual(shape(layout([row({ id: 1, role: 'user', timestamp: 0 }), row({ id: 2, role: 'assistant', text: '', thinking: '  ', timestamp: 1000 })], false)), [1]);
 });
 
 test('a live turn that only thought folds its thinking behind the newest row', () => {

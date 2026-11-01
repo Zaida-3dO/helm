@@ -8,6 +8,9 @@
 // A live turn folds as it goes: only its newest activity stays open, either the running tool or the
 // text written since the last tool, so at settle nothing but that last piece folds and the
 // transcript does not jump.
+//
+// A row with nothing to show — the empty message each tool call is saved under — is never drawn at
+// all, closed or opened: hidden tool activity takes no space rather than leaving an empty gap.
 
 import type { MessageRow } from '../api/types.ts';
 import { isAgentRow } from './subagents/model.ts';
@@ -65,6 +68,15 @@ function isBlank(r: MessageRow): boolean {
   return r.role === 'assistant' && !r.text.trim() && !r.thinking.trim();
 }
 
+/**
+ * A row the transcript never draws. A blank assistant row has no content once its tool call or
+ * thinking sits behind the fold, and an empty row would only stand between the messages as a
+ * tall gap; rows that speak for themselves (an error, a retry, a stop) still show.
+ */
+function undrawn(r: MessageRow): boolean {
+  return isBlank(r) && !alwaysShown(r);
+}
+
 function alwaysShown(r: MessageRow): boolean {
   if (r.role === 'user') return true;
   if (r.status === 'error' || r.status === 'interrupted') return true;
@@ -103,8 +115,12 @@ function groupAgents(items: Item[]): Item[] {
 export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<string> = new Set()): Item[] {
   const items: Item[] = [];
   let i = 0;
-  // Rows before the first user row (a page that starts mid-turn) are shown as they are.
-  while (i < rows.length && !opensTurn(rows[i]!)) items.push({ kind: 'row', row: rows[i++]! });
+  // Rows before the first user row (a page that starts mid-turn) are shown as they are,
+  // except the empty ones, which are never drawn.
+  while (i < rows.length && !opensTurn(rows[i]!)) {
+    const r = rows[i++]!;
+    if (!undrawn(r)) items.push({ kind: 'row', row: r });
+  }
   while (i < rows.length) {
     const user = rows[i++]!;
     items.push({ kind: 'row', row: user });
@@ -138,9 +154,16 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
       openFrom = lastTool < 0 ? work.length - 1 : lastTool === work.length - 1 ? lastTool : lastTool + 1;
     }
     const open = (j: number) => (settled ? j === reply : j >= openFrom);
+    // The next row that will actually be drawn, skipping the blank messages tool calls hide under.
+    const nextDrawn = (j: number) => {
+      for (let k = j + 1; k < work.length; k++) if (!undrawn(work[k]!)) return work[k]!;
+      return undefined;
+    };
     const push = (r: MessageRow, j: number, indent: boolean, hideThinking = false) => {
+      if (undrawn(r)) return;
       const prev = j > 0 ? work[j - 1] : user;
       const last = items[items.length - 1];
+      const next = isOpen ? nextDrawn(j) : undefined;
       items.push({
         kind: 'row',
         row: r,
@@ -151,7 +174,7 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
         indent,
         afterFold: last?.kind === 'fold' && !last.open,
         hideThinking,
-        beforeTool: isOpen && work[j + 1]?.role === 'toolResult' && !isAgentRow(work[j + 1]!),
+        beforeTool: next !== undefined && next.role === 'toolResult' && !isAgentRow(next),
       });
     };
     // Nothing to fold away: the turn is empty, or did no work beyond replying.
@@ -182,7 +205,9 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
         key: `fold:${turnKey}`,
         turnKey,
         rows: [...foldedIdx, ...thoughtIdx].sort((a, b) => a - b).map((j) => work[j]!),
-        steps: foldedIdx.length + thoughtIdx.filter((j) => j !== reply).length,
+        // A reader hears this count: the empty message a tool call is saved under is the same
+        // step as the call, so it is not counted twice.
+        steps: foldedIdx.filter((j) => !isBlank(work[j]!)).length + thoughtIdx.filter((j) => j !== reply).length,
         elapsedMs: Math.max(0, last.timestamp - first.timestamp),
         failed: foldedIdx.filter((j) => toolStatus(work[j]!) === 'failed' && work[j]!.role === 'toolResult').length,
         open: isOpen,
