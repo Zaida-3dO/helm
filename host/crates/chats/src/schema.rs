@@ -8,7 +8,7 @@
 //! | `unread_marks` | manual unread marks with their token |
 //! | `chat_completions` | the current completion per chat |
 //! | `chat_mutes` | muted chats (user-only) |
-//! | `chat_activity` | per chat: the last worker output time and the stalled flag |
+//! | `chat_activity` | per chat: the last worker output time, the stalled flag, and how many local chats stand ahead in the model server's queue while this chat's turn waits on it |
 //! | `chat_attention` | per chat: when its attention was marked addressed, and a snooze |
 //! | `chat_triage` | per chat: the idle check's last verdict, and the activity it was made for |
 //! | `chat_flags` | per chat: the question its agent flagged for the user ([`crate::flags`]) |
@@ -27,7 +27,8 @@
 //!   `running` gets a continuation row. `stopping` chats are excluded: the user asked them to stop.
 //! - **after**: retry
 //!   states left `retrying` or `waiting` on a message become `cancelled`; every
-//!   persisted stalled flag is cleared, since no turn survives a restart.
+//!   persisted stalled flag and stored queue position is cleared, since no turn survives a
+//!   restart.
 
 use helm_core::db::MigrationRegistry;
 use rusqlite::Transaction;
@@ -38,6 +39,7 @@ pub fn register(reg: &mut MigrationRegistry) {
     reg.initializer("chats-side-tables", init)
         .initializer("chats-attachment-refs", crate::attachments::init)
         .initializer("chats-flags", crate::flags::init)
+        .initializer("chats-activity-queue", activity_queue)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)
@@ -223,13 +225,29 @@ fn capture_continuations(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// A stalled flag belongs to the turn that went quiet; after a restart no turn is running, and the
-/// actor's in-memory flag starts clear, so a stored one would never be cleared.
+/// A stalled flag or a stored queue position belongs to the turn that went quiet; after a restart
+/// no turn is running, and the actor's in-memory copy starts clear, so a stored one would never
+/// be cleared.
 fn reset_stalls(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute(
-        "UPDATE chat_activity SET stalled = 0 WHERE stalled <> 0",
+        "UPDATE chat_activity SET stalled = 0, local_ahead = NULL
+         WHERE stalled <> 0 OR local_ahead IS NOT NULL",
         [],
     )?;
+    Ok(())
+}
+
+/// `chat_activity` gained the queue-position column after the first tables were written; older
+/// databases get it here.
+fn activity_queue(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let has: bool = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('chat_activity') WHERE name = 'local_ahead'",
+        [],
+        |r| r.get::<_, i64>(0).map(|n| n > 0),
+    )?;
+    if !has {
+        tx.execute("ALTER TABLE chat_activity ADD COLUMN local_ahead INTEGER", [])?;
+    }
     Ok(())
 }
 

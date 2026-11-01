@@ -288,6 +288,7 @@ export class NewChatController {
       muted: false,
       lastActivityAt: d.createdAt,
       stalled: false,
+      localAhead: null,
       started: false,
     };
   }

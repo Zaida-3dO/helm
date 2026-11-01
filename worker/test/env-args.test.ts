@@ -103,6 +103,9 @@ test("a local launch: loopback http only, every model slot local, the effort as 
     CLAUDE_CODE_USE_MANTLE: "0",
     CLAUDE_CODE_USE_ANTHROPIC_AWS: "0",
     CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: "0",
+    // The request clock outlasts a wait at a server that answers one request at a time.
+    API_TIMEOUT_MS: "3600000",
+    API_MAX_RETRIES: "6",
   });
   assert.equal(a.join(" ").includes("ANTHROPIC_AUTH_TOKEN"), false, "no token on the command line");
   assert.equal("env" in JSON.parse(flag(buildClaudeArgs({ settings: { env: { KEEP: "1" } } }), "--settings") ?? "null"), true, "a Claude chat keeps its own env block untouched");

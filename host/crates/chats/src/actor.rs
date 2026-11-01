@@ -256,6 +256,8 @@ fn local_of(chat: &ChatRecord) -> Option<(String, String)> {
 
 /// After a failed worker start, typing does not start another for this long (sends still do).
 const PREWARM_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+/// A local server's queue answer is read at most this often while a turn is open against it.
+const QUEUE_STALE: std::time::Duration = std::time::Duration::from_secs(10);
 /// Typing does not start a second model warm-up within this long of the last one.
 const WARM_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(300);
 
@@ -299,6 +301,9 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         skills: Vec::new(),
         context_gen: 0,
         local_model: None,
+        server_id: None,
+        turn_opened_ms: None,
+        local_ahead: None,
     }));
     let actor = Actor {
         sh: sh.clone(),
@@ -542,7 +547,38 @@ impl Actor {
 
     /// The in-memory and event half of a status change, run after the write has committed.
     fn after_status(&self, status: ChatStatus) {
-        self.live.lock().unwrap().thread.status = status;
+        let busy = status.is_busy();
+        let server = if busy {
+            self.chat().and_then(|c| local_of(&c)).map(|(s, _)| s)
+        } else {
+            None
+        };
+        let waited = {
+            let mut live = self.live.lock().unwrap();
+            live.thread.status = status;
+            if busy {
+                if live.turn_opened_ms.is_none() {
+                    // The turn opened: when, and which server its request is bound for, so other
+                    // chats on the same server can count how many of us would be answered first.
+                    live.turn_opened_ms = Some(now());
+                    live.server_id = server;
+                }
+            } else {
+                live.turn_opened_ms = None;
+                live.server_id = None;
+                // The waiting flag belongs to the turn; it is gone with it.
+                live.local_ahead.take()
+            }
+        };
+        if waited.is_some() {
+            let id = self.chat_id.clone();
+            self.write(|t| {
+                t.execute(
+                    "UPDATE chat_activity SET local_ahead = NULL WHERE chat_id = ?1",
+                    [&id],
+                )
+            });
+        }
         if !status.is_busy() && self.live.lock().unwrap().stalled {
             // A turn that ends is no longer stalled.
             self.set_stalled(false);
@@ -1121,6 +1157,8 @@ impl Actor {
         if self.live.lock().unwrap().stalled {
             self.set_stalled(false);
         }
+        // The model is answering this chat now: its first words end any wait.
+        self.set_local_ahead(None);
         let due = self
             .activity_written
             .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(15));
@@ -1149,6 +1187,121 @@ impl Actor {
         });
         self.emit_chat();
         crate::attention::publish(&self.sh);
+    }
+
+    /// Store and announce how many chats stand ahead of this one at its model server (the chat
+    /// record's `localAhead`; `set_stalled` above is the same shape). The header, the sidebar and
+    /// the dock all read it from the record. `None` means not waiting.
+    fn set_local_ahead(&self, on: Option<i64>) {
+        {
+            let mut live = self.live.lock().unwrap();
+            if live.local_ahead == on {
+                return;
+            }
+            live.local_ahead = on;
+        }
+        let id = self.chat_id.clone();
+        self.write(|t| {
+            t.execute(
+                "INSERT INTO chat_activity(chat_id, last_activity_at, local_ahead) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(chat_id) DO UPDATE SET local_ahead = excluded.local_ahead",
+                rusqlite::params![id, now(), on],
+            )
+        });
+        self.emit_chat();
+    }
+
+    /// The maintenance tick's other question about a busy chat: is its turn waiting on a local
+    /// model that answers one request at a time? Says so on the record when it is. Only asks the
+    /// server while a turn of ours is open against it, and only every [`QUEUE_STALE`].
+    fn check_local_wait(&self) {
+        let Some((server, _)) = self.chat().and_then(|c| local_of(&c)) else {
+            self.set_local_ahead(None);
+            return;
+        };
+        // While the model is still being made ready (loading, starting), the loading line already
+        // says what is happening; no request of ours is at the server yet to wait behind others.
+        if self.prepare.is_some()
+            || !self.status().is_busy()
+            || self.last_output.elapsed() < self.sh.cfg.limits.stall_unit
+        {
+            self.set_local_ahead(None);
+            return;
+        }
+        // A tool call in flight: the silence is the tool's, not the queue's.
+        if !self.tools.is_empty() {
+            self.set_local_ahead(None);
+            return;
+        }
+        let mine = self.live.lock().unwrap().turn_opened_ms;
+        let ahead = self.chats_ahead_on(&server, mine);
+        let seen = self.server_queue(&server);
+        let waiting = ahead > 0 || seen.is_some_and(|q| q.busy || q.queued.unwrap_or(0) > 0);
+        self.set_local_ahead(if waiting { Some(ahead as i64) } else { None });
+    }
+
+    /// How many other chats of ours have an open turn on this server whose request got there
+    /// before this chat's. Counts Helm's own chats only: the server cannot tell whose request is
+    /// whose. An unorderable pair is not counted (under-count beats a wrong number).
+    fn chats_ahead_on(&self, server: &str, mine: Option<i64>) -> usize {
+        let handles: Vec<crate::runtime::ActorHandle> = self
+            .sh
+            .actors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| **id != self.chat_id)
+            .map(|(_, h)| h.clone())
+            .collect();
+        let mut n = 0;
+        for h in handles {
+            let l = h.live.lock().unwrap();
+            if !l.thread.status.is_busy() || l.server_id.as_deref() != Some(server) {
+                continue;
+            }
+            if matches!((mine, l.turn_opened_ms), (Some(m), Some(o)) if o < m) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// What the server says about requests waiting on it, from the cache; starts a read on the
+    /// blocking pool when the cache has aged out. Reachability is not touched either way — this
+    /// read says nothing about a server being up.
+    fn server_queue(&self, server: &str) -> Option<crate::local::QueueInfo> {
+        let seam = self.sh.local_models()?;
+        let mut fetch = false;
+        let last = {
+            let mut map = self.sh.local_queue.lock().unwrap();
+            let e = map.entry(server.to_owned()).or_insert(crate::runtime::QueueSeen {
+                at: Instant::now() - QUEUE_STALE,
+                info: None,
+                fetching: false,
+            });
+            if e.at.elapsed() >= QUEUE_STALE && !e.fetching {
+                e.fetching = true;
+                fetch = true;
+            }
+            e.info
+        };
+        if fetch {
+            let sh = self.sh.clone();
+            let id = server.to_owned();
+            self.sh.handle.spawn_blocking(move || {
+                let info = seam.queue(&id);
+                let mut map = sh.local_queue.lock().unwrap();
+                let e = map.entry(id).or_insert(crate::runtime::QueueSeen {
+                    at: Instant::now(),
+                    info: None,
+                    fetching: false,
+                });
+                e.info = info;
+                e.at = Instant::now();
+                e.fetching = false;
+            });
+        }
+        last
     }
 
     /// A clean finish: write the completion, announce it once, refresh the chat and attention.
@@ -1476,8 +1629,12 @@ impl Actor {
             }
             Cmd::Warm => self.warm_now(),
             Cmd::StallCheck { after } => {
+                self.check_local_wait();
                 let stalled = self.live.lock().unwrap().stalled;
-                if self.status().is_busy() && !stalled && self.last_output.elapsed() >= after {
+                let waiting = self.live.lock().unwrap().local_ahead.is_some();
+                // A chat waiting at the model server is explained: waiting time is not "may be
+                // stuck" time, so the stall flag waits until the model starts answering.
+                if self.status().is_busy() && !stalled && !waiting && self.last_output.elapsed() >= after {
                     self.set_stalled(true);
                 }
             }

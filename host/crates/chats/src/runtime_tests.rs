@@ -3703,6 +3703,7 @@ struct FakeLocal {
     gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     finished: Mutex<Vec<(String, String)>>,
     refreshed: Mutex<Vec<bool>>,
+    queue: Mutex<Option<crate::local::QueueInfo>>,
 }
 
 impl crate::local::LocalModels for FakeLocal {
@@ -3741,6 +3742,10 @@ impl crate::local::LocalModels for FakeLocal {
             .push((server_id.into(), model.into()));
     }
 
+    fn queue(&self, _server_id: &str) -> Option<crate::local::QueueInfo> {
+        *self.queue.lock().unwrap()
+    }
+
     fn catalogue(&self, refresh: bool) -> Vec<crate::types::LocalModelInfo> {
         self.refreshed.lock().unwrap().push(refresh);
         vec![crate::types::LocalModelInfo {
@@ -3777,6 +3782,7 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         gate: Mutex::new(Some(gate)),
         finished: Mutex::new(Vec::new()),
         refreshed: Mutex::new(Vec::new()),
+        queue: Mutex::new(None),
     });
     h.rt.set_local_models(local.clone());
     let cwd = h.work.to_string_lossy().into_owned();
@@ -4198,4 +4204,145 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         e.message
     );
     cw.exit().await;
+}
+
+/// The model server answers one request at a time. Two of Helm's chats open turns on it in turn:
+/// the later one says how many would be answered before it, the first one says the server is busy
+/// without a number, and neither counts as stalled while it waits. Its first words end the wait
+/// (silence starts it again); a turn that ends takes the flag with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_chats_say_who_the_model_server_is_busy_with() {
+    // The wait check runs on the maintenance tick, so the test speeds the tick up.
+    let mut h = harness_with(Limits {
+        tick: Duration::from_millis(50),
+        ..limits()
+    });
+    // The server says it is working on a request. How many of Helm's own chats would be answered
+    // first is Helm's own count: the server cannot tell whose request is whose.
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("alpha-model".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        queue: Mutex::new(Some(crate::local::QueueInfo {
+            busy: true,
+            queued: None,
+        })),
+    });
+    h.rt.set_local_models(local.clone());
+    let cwd = h.work.to_string_lossy().into_owned();
+    let ahead = |h: &H, id: &str| {
+        h.col(&format!(
+            "SELECT local_ahead FROM chat_activity WHERE chat_id = '{id}'"
+        ))
+    };
+
+    let one = h
+        .call("chat_create", json!({"cwd": &cwd, "model": "local/strata/alpha"}))
+        .await
+        .unwrap();
+    let first = one["id"].as_str().unwrap().to_owned();
+    let two = h
+        .call("chat_create", json!({"cwd": &cwd, "model": "local/strata/beta"}))
+        .await
+        .unwrap();
+    let second = two["id"].as_str().unwrap().to_owned();
+
+    // The first chat's turn opens and stays quiet while the server works. Nothing of Helm's is
+    // ahead of it, so the wait shows without a count — which also covers a request from outside
+    // Helm holding the server, the shape of the real complaint.
+    let _ = h.send(&first, "first job", "default").await;
+    let mut w1 = h.worker().await;
+    w1.ready().await;
+    let p1 = w1.expect("prompt").await;
+    ack(&w1, &p1).await;
+    w1.emit(json!({"type": "agent_start"})).await;
+    h.until("the quiet chat shows the wait", |h| {
+        ahead(h, &first) == ["0"]
+    })
+    .await;
+    let got = h
+        .call("chat_get", json!({"chatId": &first}))
+        .await
+        .unwrap();
+    assert_eq!(got["chat"]["localAhead"], 0, "the record carries it");
+
+    // The second chat's turn opens afterwards on the same server: one of ours stands ahead of it.
+    let _ = h.send(&second, "second job", "default").await;
+    let mut w2 = h.worker().await;
+    w2.ready().await;
+    let p2 = w2.expect("prompt").await;
+    ack(&w2, &p2).await;
+    w2.emit(json!({"type": "agent_start"})).await;
+    h.until("the later chat counts one ahead", |h| {
+        ahead(h, &second) == ["1"]
+    })
+    .await;
+    assert_eq!(ahead(h, &first), ["0"], "the first stays without a count");
+    let got = h
+        .call("chat_get", json!({"chatId": &second}))
+        .await
+        .unwrap();
+    assert_eq!(got["chat"]["localAhead"], 1);
+
+    // Neither is a stall: standing at the model server has an explanation, so the "may be stuck"
+    // flag (five units of quiet) is not set for a waiting chat.
+    tokio::time::sleep(Duration::from_millis(650)).await;
+    for id in [&first, &second] {
+        assert_eq!(
+            h.col(&format!(
+                "SELECT stalled FROM chat_activity WHERE chat_id = '{id}'"
+            )),
+            ["0"],
+            "the wait is not a stall"
+        );
+    }
+
+    // The model's first words end the wait for that chat…
+    w2.emit(json!({"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}}))
+        .await;
+    h.until("the wait ends at the first words", |h| {
+        ahead(h, &second) == ["NULL"]
+    })
+    .await;
+    // …and a unit of quiet starts it again: the answer stopped with the first chat still
+    // unanswered ahead of it.
+    h.until("a fresh wait counts the first chat again", |h| {
+        ahead(h, &second) == ["1"]
+    })
+    .await;
+
+    // A turn that ends takes the flag with it.
+    w1.emit(json!({"type": "message_start", "message": {"id": "m0", "role": "assistant", "content": []}}))
+        .await;
+    w1.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-a"}))
+        .await;
+    h.until("the first chat is idle and not waiting", |h| {
+        h.status(&first) == "idle" && ahead(h, &first) == ["NULL"]
+    })
+    .await;
+    // The second chat: nothing of Helm's is ahead now, but the server's own answer (read at most
+    // every ten seconds, so still the last one) says it is working: a wait without a count.
+    h.until("the second chat waits without a count", |h| {
+        ahead(h, &second) == ["0"]
+    })
+    .await;
+    w2.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-b"}))
+        .await;
+    h.until("the second turn ends", |h| {
+        h.status(&second) == "idle" && ahead(h, &second) == ["NULL"]
+    })
+    .await;
+    let got = h
+        .call("chat_get", json!({"chatId": &second}))
+        .await
+        .unwrap();
+    assert_eq!(
+        got["chat"]["localAhead"],
+        Value::Null,
+        "an idle chat carries no flag"
+    );
+    w1.exit().await;
+    w2.exit().await;
 }

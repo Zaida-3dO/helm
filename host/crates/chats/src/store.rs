@@ -19,7 +19,8 @@ const CHAT_COLUMNS: &str = concat!(
      (SELECT k.id FROM chat_completions k WHERE k.chat_id = c.id AND k.read = 0), \
      EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id), \
      MAX(c.updated_at, COALESCE(a.last_activity_at, 0)), \
-     CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN COALESCE(a.stalled, 0) ELSE 0 END, ",
+     CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN COALESCE(a.stalled, 0) ELSE 0 END, \
+     CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN a.local_ahead ELSE NULL END, ",
     crate::local::started_sql!()
 );
 
@@ -56,7 +57,8 @@ fn chat_from_row(r: &Row<'_>, revision: i64) -> rusqlite::Result<ChatRecord> {
         muted: r.get(19)?,
         last_activity_at: r.get(20)?,
         stalled: r.get(21)?,
-        started: r.get(22)?,
+        local_ahead: r.get(22)?,
+        started: r.get(23)?,
     })
 }
 

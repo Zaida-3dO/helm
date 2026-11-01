@@ -111,6 +111,9 @@ describe("launch and handshake", () => {
         CLAUDE_CODE_USE_GATEWAY: "1",
         ENABLE_TOOL_SEARCH: "false",
         NO_PROXY: "intranet,127.0.0.1,localhost,::1",
+        // The request clock must outlast a wait at a one-at-a-time server, not just the answer.
+        API_TIMEOUT_MS: "3600000",
+        API_MAX_RETRIES: "6",
       });
       const argv = start?.argv as string[];
       assert.equal(argv.includes("--effort"), false, "no effort flag for a local model");

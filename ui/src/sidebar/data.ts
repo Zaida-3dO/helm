@@ -3,6 +3,7 @@
 // React reads it through useSyncExternalStore; every change replaces `snapshot`.
 
 import type { EventBus } from '../api/events.ts';
+import { isLocalModelId } from '../state/localModel.ts';
 import type { ProjectNode, ProjectOps, SidebarRow, SidebarView, BoardSyncState } from '../api/projects.ts';
 import type { AttentionSummary, ChatRecord } from '../api/types.ts';
 import { rowAttention } from './status.ts';
@@ -134,6 +135,8 @@ export class SidebarData {
       unread,
       muted: c.muted,
       stalled: c.stalled,
+      local: isLocalModelId(c.model),
+      localAhead: c.localAhead,
       hasDraft: c.draft.trim() !== '',
       lastActivityAt: c.lastActivityAt,
     };

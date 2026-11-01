@@ -100,6 +100,8 @@ const ENV_ECHO = [
   "CLAUDE_CODE_USE_GATEWAY",
   "ENABLE_TOOL_SEARCH",
   "NO_PROXY",
+  "API_TIMEOUT_MS",
+  "API_MAX_RETRIES",
 ];
 const env = Object.fromEntries(ENV_ECHO.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]]));
 log({ kind: "start", argv: flags, envKeys: Object.keys(process.env).sort(), env, pid: process.pid });

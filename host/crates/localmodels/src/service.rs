@@ -2,8 +2,10 @@
 //! before and after each turn of a local chat.
 //!
 //! **Nothing here runs on its own.** Helm reaches a server only when asked: a catalogue refresh
-//! (the picker or Settings opened), a Test, or a local chat's send. There is no start-up probe and
-//! no timer. A Strata server whose settings allow it is *launched* at one of those same moments,
+//! (the picker or Settings opened), a Test, a local chat's send, or that chat's queue check — a
+//! server that answers one request at a time is asked about its waiting requests only while a
+//! request of ours is open against it, and not more than every few seconds. There is no start-up
+//! probe and no timer. A Strata server whose settings allow it is *launched* at one of those same moments,
 //! and only when a check finds it not answering — see [`starter`]. Nothing here ever stops,
 //! restarts or unloads a running server beyond what the memory check does to idle models.
 //!
@@ -20,7 +22,7 @@ use crate::servers::{self as srv, CallError};
 use crate::settings::{self, LocalSettings, Server, ToolsSetup};
 use crate::starter::StrataStarter;
 use crate::types::{LocalModelsState, Range, ServerView, TestResult};
-use helm_chats::local::{LocalModels, LocalServer, LocalTurn};
+use helm_chats::local::{LocalModels, LocalServer, LocalTurn, QueueInfo};
 use helm_chats::types::{LocalModelInfo, LocalServerKind};
 use helm_core::credentials::CredentialStore;
 use helm_core::db::Database;
@@ -1051,6 +1053,25 @@ impl LocalModels for LocalService {
         } else {
             self.rows(&self.settings(), &self.seen())
         }
+    }
+
+    fn queue(&self, server_id: &str) -> Option<QueueInfo> {
+        // Only Strata answers one request at a time and reports its slots; Ollama serves several
+        // at once. A failed or empty answer says nothing, and says nothing about reachability:
+        // this read never marks a server reachable or unreachable either way.
+        let st = self.settings();
+        let s = st
+            .servers
+            .iter()
+            .find(|s| s.id == server_id && s.kind == LocalServerKind::Strata)?;
+        if !s.enabled {
+            return None;
+        }
+        let conn = self.conn(s).ok()?;
+        if conn.base == net::OFF {
+            return None;
+        }
+        srv::strata_queue(&self.http, &conn)
     }
 }
 

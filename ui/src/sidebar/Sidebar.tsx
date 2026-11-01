@@ -48,7 +48,8 @@ import {
 import { withChatIcons, withProjectIcons } from './menuIcons.tsx';
 import { StarMark, WheelMark } from '../ui/status/index.ts';
 import { openNewChat } from '../newchat/index.ts';
-import { ATTENTION_LABEL, age, needsYouLabel, trailingIndicator } from './status.ts';
+import { ATTENTION_LABEL, age, needsYouLabel, rowStatusLabel, trailingIndicator } from './status.ts';
+import { localWaitLabel } from '../state/localModel.ts';
 import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
 import { startSyncTriggers, syncDisplay, type SyncHost } from './sync.ts';
 import { sidebarUndo } from './undo.ts';
@@ -903,12 +904,14 @@ function GroupHeader({
 function Indicator({ row }: { row: SidebarRow }) {
   const a = row.attention;
   if (!a) return <span className="sb-ind" aria-hidden="true" />;
-  const label = a === 'running' && row.stalled ? 'Running, no output for a while' : ATTENTION_LABEL[a];
+  const label = a === 'running' ? rowStatusLabel(row) : ATTENTION_LABEL[a];
   return (
     <span
       className={`sb-ind sb-ind-${a}`}
       data-state={a}
       data-stalled={row.stalled ? 'true' : undefined}
+      data-local={a === 'running' && row.local ? 'true' : undefined}
+      data-ahead={a === 'running' && row.local && row.localAhead !== null ? String(row.localAhead) : undefined}
       role="img"
       aria-label={label}
       title={label}
@@ -1011,6 +1014,8 @@ function ChatRow({
         data-group={r.groupProjectId}
         data-muted={r.muted ? 'true' : undefined}
         data-stalled={r.stalled ? 'true' : undefined}
+        data-local={r.local ? 'true' : undefined}
+        data-ahead={r.local && r.localAhead !== null ? String(r.localAhead) : undefined}
         aria-current={selected ? 'true' : undefined}
         onClick={onOpen}
         onDoubleClick={onRename}
@@ -1190,9 +1195,11 @@ function PreviewCard({
   }, [r.chatId, r.revision, r.status, r.updatedAt]);
   const mine = got?.chatId === r.chatId ? got : null;
   const step = live ? mine?.preview?.step : null;
-  const state = r.stalled
-    ? 'Running, no output for a while'
-    : live
+  const state = r.local && r.localAhead !== null
+    ? localWaitLabel(r.localAhead)
+    : r.stalled
+      ? 'Running, no output for a while'
+      : live
       ? (step ?? 'Running')
       : r.status === 'interrupted'
         ? 'Interrupted'

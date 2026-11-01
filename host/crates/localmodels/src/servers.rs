@@ -5,13 +5,17 @@
 //! `delete`), and loading or unloading through `generate` with no prompt.
 //!
 //! **Strata** (an Anthropic-style model server): `/health` says what is loaded, a model list at
-//! `/v1/models` (or `/models`), and `/unload` frees its memory. The model loads when a request
-//! for it arrives, so Helm never loads one itself.
+//! `/v1/models` (or `/models`), `/unload` frees its memory, and `/slots` says whether it is
+//! answering a request now and how many more it is holding. It answers one request at a time, so
+//! the rest wait; Helm reads `/slots` only while one of its chats has a request open there, to
+//! tell a chat waiting for its turn from one whose model is working on it. The model loads when a
+//! request for it arrives, so Helm never loads one itself.
 //!
 //! Every answer is read leniently: a field that is missing or shaped differently is skipped, not an
 //! error, since these servers differ in small ways between versions.
 
 use crate::net::{self, Conn, Http, NetError, Reply};
+use helm_chats::local::QueueInfo;
 use serde_json::{json, Value};
 
 /// Why a call to a server gave no usable answer.
@@ -321,6 +325,87 @@ pub fn strata_unload(h: &Http, c: &Conn) -> Result<(), CallError> {
     good(h.post(c, "/unload", &json!({}), net::MANAGE)?).map(|_| ())
 }
 
+/// Strata's own picture of its one-at-a-time request handling: `/slots`. A short read like the
+/// health check, so a busy or paused server costs nothing. `None` when the answer says nothing
+/// usable.
+pub fn strata_queue(h: &Http, c: &Conn) -> Option<QueueInfo> {
+    let r = h.get(c, "/slots", net::QUICK).ok()?;
+    if !r.ok() {
+        return None;
+    }
+    read_queue(&r.json()?)
+}
+
+/// A JSON value read as yes or no: a boolean, a non-zero number, a non-empty list or object, or
+/// the usual words. `None` when it says nothing either way.
+fn truthy(v: Option<&Value>) -> Option<bool> {
+    match v? {
+        Value::Bool(b) => Some(*b),
+        Value::Number(n) => n.as_f64().map(|f| f != 0.0),
+        Value::String(s) => match s.to_ascii_lowercase().as_str() {
+            "true" | "yes" | "on" | "busy" | "serving" | "active" => Some(true),
+            "false" | "no" | "off" | "idle" | "free" | "empty" => Some(false),
+            _ => None,
+        },
+        Value::Array(a) => Some(!a.is_empty()),
+        Value::Object(o) => Some(!o.is_empty()),
+        Value::Null => None,
+    }
+}
+
+/// One entry of a slot list: busy when it says so, by a flag or by a state word.
+fn slot_busy(s: &Value) -> bool {
+    truthy(s.get("busy").or_else(|| s.get("active")))
+        .unwrap_or_else(|| {
+            s.get("state")
+                .or_else(|| s.get("status"))
+                .and_then(Value::as_str)
+                .is_some_and(|w| {
+                    matches!(
+                        w.to_ascii_lowercase().as_str(),
+                        "busy" | "serving" | "active" | "working" | "generating"
+                    )
+                })
+        })
+}
+
+/// A `/slots` answer to queue facts, lenient like every other read: several spellings of the
+/// busy flag, a queue given as a number or as a list, or a bare list of slots.
+fn read_queue(v: &Value) -> Option<QueueInfo> {
+    let (busy, queued) = match v {
+        Value::Object(o) => {
+            let busy = ["busy", "serving", "active", "occupied"]
+                .iter()
+                .find_map(|k| truthy(o.get(*k)))
+                .or_else(|| truthy(o.get("idle")).map(|idle| !idle));
+            let busy = busy.or_else(|| {
+                o.get("slots")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().any(slot_busy))
+            });
+            let queued = ["queued", "waiting", "pending"]
+                .iter()
+                .find_map(|k| o.get(*k).and_then(num))
+                .or_else(|| {
+                    ["queued", "waiting", "pending", "queue"]
+                        .iter()
+                        .find_map(|k| o.get(*k).and_then(Value::as_array).map(|a| a.len() as u64))
+                });
+            (busy, queued)
+        }
+        Value::Array(a) => (Some(a.iter().any(slot_busy)), Some(a.len() as u64)),
+        _ => (None, None),
+    };
+    // No busy word anywhere: a queue count still says something is holding or waiting. Where both
+    // answers exist they add up: a server that calls itself free but lists two waiting requests is
+    // about to be busy.
+    let busy = match (busy, queued.map(|q| q > 0)) {
+        (Some(b), Some(waits)) => Some(b || waits),
+        (b, w) => b.or(w),
+    }?;
+    Some(QueueInfo { busy, queued })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +464,20 @@ mod tests {
         assert_eq!(parse_model_list(&json!(["a"])).unwrap().len(), 1);
         assert!(parse_model_list(&json!({"data": []})).is_none());
         assert!(parse_model_list(&json!("x")).is_none());
+        // `/slots` queue facts, read the same lenient way.
+        for (v, want) in [
+            (json!({"busy": true, "queued": 2}), Some(QueueInfo { busy: true, queued: Some(2) })),
+            (json!({"serving": "yes"}), Some(QueueInfo { busy: true, queued: None })),
+            (json!({"active": 1, "pending": "3"}), Some(QueueInfo { busy: true, queued: None })),
+            (json!({"busy": false, "queue": ["a", "b"]}), Some(QueueInfo { busy: true, queued: Some(2) })),
+            (json!({"idle": true}), Some(QueueInfo { busy: false, queued: None })),
+            (json!({"slots": [{"id": "a", "state": "idle"}, {"id": "b", "state": "generating"}]}), Some(QueueInfo { busy: true, queued: None })),
+            (json!([{"state": "serving"}]), Some(QueueInfo { busy: true, queued: Some(1) })),
+            (json!({"queued": 4}), Some(QueueInfo { busy: true, queued: Some(4) })),
+            (json!({}), None),
+            (json!("waiting"), None),
+        ] {
+            assert_eq!(read_queue(&v), want, "{v}");
+        }
     }
 }

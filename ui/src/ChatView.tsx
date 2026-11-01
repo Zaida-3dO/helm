@@ -9,6 +9,7 @@ import { FlagNote } from './attention/index.ts';
 import { Composer, isBusy } from './composer/Composer.tsx';
 import type { SendShortcut } from './composer/keymap.ts';
 import { QueueList } from './composer/QueueList.tsx';
+import { LOCAL_WORKING_LABEL, isLocalModelId, localWaitLabel } from './state/localModel.ts';
 import type { Flushers } from './shell/quit.ts';
 import type { ChatStore } from './state/store.ts';
 import { ActivityDock } from './transcript/ActivityDock.tsx';
@@ -264,6 +265,13 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       <span className="visually-hidden" data-testid="chat-status">
         {chat.status}
       </span>
+      {/* A local chat's work reads as queue state, not just "running": what the header and the
+          dock say, kept as text here for assistive tech and the e2e hook. */}
+      {busy && isLocalModelId(chat.model) && (
+        <span className="visually-hidden" data-testid="chat-local-status" data-ahead={chat.localAhead != null ? String(chat.localAhead) : undefined}>
+          {chat.localAhead != null ? localWaitLabel(chat.localAhead) : LOCAL_WORKING_LABEL}
+        </span>
+      )}
       {notice && (
         <div className="notice" role="status">
           {notice}

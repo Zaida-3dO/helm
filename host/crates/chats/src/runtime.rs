@@ -442,6 +442,28 @@ pub(crate) struct Live {
     /// The model name a local chat's running worker was launched with (Ollama's variant of the
     /// model, for one); `None` for a Claude chat or when no worker runs.
     pub local_model: Option<String>,
+    /// The local server this chat's open turn has a request against; `None` for a Claude chat or
+    /// when no turn is open. Lets one chat count the others waiting on the same server.
+    pub server_id: Option<String>,
+    /// Unix ms when this chat's current turn opened; `None` while no turn is open. Turns on one
+    /// server are answered in the order their requests arrived, which this approximates.
+    pub turn_opened_ms: Option<i64>,
+    /// This chat is open and silent while the model server is answering something else:
+    /// how many of Helm's own local chats would be answered first, or 0 when the count is not
+    /// known. The mirror of the chat record's `localAhead` (the [`crate::store`] read); set and
+    /// cleared by the maintenance tick's check, the first output, and the turn's end.
+    pub local_ahead: Option<i64>,
+}
+
+/// What a local server last said about requests waiting on it, and when. Filled only while some
+/// chat has a request open against that server — never at start-up, never on a plain timer.
+pub(crate) struct QueueSeen {
+    /// When the server last answered (or failed to).
+    pub at: Instant,
+    /// The server's answer; `None` when it reports no such thing or did not answer.
+    pub info: Option<crate::local::QueueInfo>,
+    /// A read of the server is already on its way.
+    pub fetching: bool,
 }
 
 #[derive(Clone)]
@@ -470,6 +492,8 @@ pub(crate) struct Shared {
     pub afk: std::sync::OnceLock<Arc<dyn crate::seams::AfkPolicy>>,
     /// The local model servers ([`crate::local::LocalModels`]), installed once.
     pub local: std::sync::OnceLock<crate::local::SharedLocal>,
+    /// Per local server: what it last said about requests waiting on it ([`QueueSeen`]).
+    pub local_queue: Mutex<HashMap<String, QueueSeen>>,
 }
 
 /// The runtime service.
@@ -507,6 +531,7 @@ impl ChatRuntime {
                 host: std::sync::OnceLock::new(),
                 afk: std::sync::OnceLock::new(),
                 local: std::sync::OnceLock::new(),
+                local_queue: Mutex::new(HashMap::new()),
             }),
         };
         rt.start_tick();

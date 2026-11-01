@@ -614,6 +614,55 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     assert!(matches!(err, crate::net::NetError::Unreachable(_)));
 }
 
+/// Whether the model server is working on something, and how many requests wait on it, is read
+/// from the single-slot server only: Ollama answers several requests at once and is never asked.
+/// A server without that answer simply says nothing.
+#[test]
+fn only_the_single_slot_server_is_asked_what_it_is_busy_with() {
+    let r = rig();
+    let strata = Fake::start(|req| {
+        if req.auth != format!("Bearer {KEY}") {
+            return (401, json!({"error": "bad key"}));
+        }
+        match (req.method.as_str(), req.path.as_str()) {
+            ("GET", "/health") => (200, json!({"status": "ok", "loaded": null})),
+            ("GET", "/v1/models") => (200, json!({"data": []})),
+            ("GET", "/slots") => (200, json!({"busy": true, "queued": 2})),
+            _ => (404, json!({})),
+        }
+    });
+    let ollama = fake_ollama(Arc::new(Mutex::new(OllamaState::default())));
+    r.svc.save(&servers(&strata.base, &ollama.base)).unwrap();
+    r.svc.set_key("strata", KEY).unwrap();
+
+    let q = r.svc.queue("strata").expect("the slot answer arrives");
+    assert!(q.busy, "one request is being answered");
+    assert_eq!(q.queued, Some(2), "and two wait behind it");
+    assert_eq!(strata.calls("GET", "/slots").len(), 1);
+
+    // Ollama answers several requests at once: never asked, and says nothing.
+    assert_eq!(r.svc.queue("ollama"), None);
+    assert!(ollama.calls("GET", "/slots").is_empty());
+    // A server the settings do not know says nothing either.
+    assert_eq!(r.svc.queue("nope"), None);
+
+    // A server with no slot answer (an older build) says nothing — and a failed read changes
+    // nothing about its standing: it is still up, and still listed.
+    let plain = Fake::start(strata_route(
+        Arc::new(Mutex::new(StrataState { loaded: None })),
+        r.free.clone(),
+    ));
+    r.svc.save(&servers(&plain.base, &ollama.base)).unwrap();
+    assert_eq!(r.svc.queue("strata"), None, "no route: no answer");
+    assert!(
+        r.svc
+            .catalogue(true)
+            .iter()
+            .any(|m| m.kind == LocalServerKind::Strata && m.reachable),
+        "the missing slot answer says nothing about reachability"
+    );
+}
+
 #[test]
 fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     let r = rig();

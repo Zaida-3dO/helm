@@ -83,14 +83,14 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
   }, [details]);
   const latest = thread.liveTools.at(-1);
   // With no tool running, say what the turn is doing instead: thinking, writing, waiting.
-  const activity = shown && !latest && live && chat.status === 'running' && rows ? dockActivity(rows, thread, turnStartedAt) : null;
+  const activity = shown && !latest && live && chat.status === 'running' && rows ? dockActivity(rows, thread, turnStartedAt, chat.localAhead) : null;
   const phaseSince = usePhaseSince(activity?.label ?? null, activity?.since ?? null);
   if (!shown) {
     const done = chat.status === 'idle' && rows ? finishedTurn(rows) : null;
     return done ? <FinishedLine turn={done} /> : null;
   }
   const canStop = Boolean(latest && thread.sendBehavior.toolStop && thread.capabilities.stopTool && latest.stoppable);
-  const state = dockState(chat.status, thread);
+  const state = dockState(chat.status, thread, { model: chat.model, localAhead: chat.localAhead });
   const loading = state.key === 'loading' ? thread.loading : undefined;
   const working = live || (thread.subagentsRunning ?? 0) > 0;
   const narration = state.key === 'working' ? (activity?.narration ?? state.detail) : state.detail;

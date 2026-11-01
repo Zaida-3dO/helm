@@ -29,6 +29,17 @@ muted: boolean,
  */
 stalled: boolean, 
 /**
+ * The chat runs on a local model server (a `local/…` model id).
+ */
+local: boolean, 
+/**
+ * The local server answers one request at a time and this chat's turn is open and silent
+ * behind other work: how many of Helm's own chats would be answered first, or 0 when the
+ * server is busy but the count is not known; `null` when the chat is not waiting. Only ever
+ * set for a local chat.
+ */
+localAhead: number | null, 
+/**
  * The chat holds an unsent draft: drawn as a small pencil before the age.
  */
 hasDraft: boolean, lastActivityAt: number, archived: boolean, position: number | null, createdAt: number, updatedAt: number, revision: number, 

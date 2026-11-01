@@ -1,6 +1,7 @@
 // The activity dock's counts. Pure, so it is tested.
 
 import type { MessageRow, ThreadState } from '../api/types.ts';
+import { LOCAL_WORKING_LABEL, isLocalModelId, localWaitLabel } from '../state/localModel.ts';
 import { toolKind, toolStatus, toolTarget } from './toolKinds.ts';
 
 /**
@@ -17,27 +18,39 @@ export function dockShown(live: boolean, thread: Pick<ThreadState, 'backgroundTa
 }
 
 export interface DockState {
-  key: 'loading' | 'starting' | 'stopping' | 'compacting' | 'waiting' | 'working' | 'subagents' | 'background';
+  key: 'loading' | 'starting' | 'stopping' | 'compacting' | 'waiting' | 'model-waiting' | 'working' | 'subagents' | 'background';
   /** Line 1's state. */
   label: string;
   /** What follows it, when there is something to say. */
   detail: string | null;
 }
 
-/** Line 1 of the dock: what the chat is doing now. */
+/** The chat's own record, only what the dock needs about local model work. */
+export interface DockLocal {
+  model: string | null;
+  /** Set by the host while the turn waits queued at the model server; null when it does not. */
+  localAhead: number | null;
+}
+
+/** Line 1 of the dock: what the chat is doing now. `local` (the chat's model id and queue state)
+ * lets a local chat say it is waiting behind other work, or that the model is on it now. */
 export function dockState(
   status: string,
   thread: Pick<ThreadState, 'compacting' | 'interactions' | 'liveTools' | 'subagentsRunning'> & { loading?: ThreadState['loading'] },
+  local?: DockLocal,
 ): DockState {
   // A local model being made ready for the turn ("Loading qwen3:8b…"): the host clears it on the first output.
   if (thread.loading && (status === 'starting' || status === 'running')) return { key: 'loading', label: thread.loading.text, detail: null };
+  const onLocal = local !== undefined && isLocalModelId(local.model);
   if (status === 'starting') return { key: 'starting', label: 'Starting agent', detail: 'Preparing your session' };
   if (status === 'stopping') return { key: 'stopping', label: 'Stopping safely', detail: null };
   if (status === 'running') {
     if (thread.compacting) return { key: 'compacting', label: 'Compacting conversation', detail: thread.compacting.retrying ? 'Retrying' : null };
     if (thread.interactions.length) return { key: 'waiting', label: 'Waiting for you', detail: 'Answer the card below to carry on' };
+    // The model server answers one request at a time: say when this chat is the one waiting.
+    if (onLocal && local.localAhead != null) return { key: 'model-waiting', label: localWaitLabel(local.localAhead), detail: null };
     const n = thread.subagentsRunning ?? 0;
-    return { key: 'working', label: 'Working', detail: n > 0 ? `${n} subagent${n === 1 ? '' : 's'} working` : null };
+    return { key: 'working', label: onLocal ? LOCAL_WORKING_LABEL : 'Working', detail: n > 0 ? `${n} subagent${n === 1 ? '' : 's'} working` : null };
   }
   if ((thread.subagentsRunning ?? 0) > 0) return { key: 'subagents', label: 'Subagents working', detail: 'The turn has ended; its agents carry on' };
   return { key: 'background', label: 'Background work', detail: 'The agent continues when each one exits' };
@@ -109,6 +122,9 @@ export function dockActivity(
   rows: readonly MessageRow[],
   thread: Pick<ThreadState, 'subagents' | 'subagentsRunning'>,
   turnStartedAt: number | null,
+  /** The host's queue note for a local chat (the chat record's `localAhead`); null or absent
+   * when the chat is not waiting at its model server. */
+  localAhead?: number | null,
 ): DockActivity {
   const last = rows[rows.length - 1];
   if (last && last.role === 'assistant' && last.status === 'streaming') {
@@ -121,7 +137,9 @@ export function dockActivity(
     const since = running.length > 0 ? Math.min(...running.map((s) => s.startedAt)) : (last?.timestamp ?? turnStartedAt ?? 0);
     return { phase: 'subagents', label: `Waiting on ${n} ${n === 1 ? 'subagent' : 'subagents'}`, since, narration: null };
   }
-  // Between steps: a tool just finished, or nothing has come back yet.
+  // Between steps: a tool just finished, or nothing has come back yet. A local chat the host
+  // flagged as queued says so with its place in line, instead of the plain "waiting" sentence.
   const since = last && last.status !== 'streaming' && last.role !== 'user' ? last.timestamp : (turnStartedAt ?? last?.timestamp ?? 0);
+  if (localAhead != null) return { phase: 'model', label: localWaitLabel(localAhead), since, narration: null };
   return { phase: 'model', label: last?.role === 'toolResult' ? 'Thinking about the result' : 'Waiting for the model', since, narration: null };
 }

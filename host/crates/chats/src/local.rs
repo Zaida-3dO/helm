@@ -123,6 +123,18 @@ pub struct LocalTurn {
     pub in_use: Vec<String>,
 }
 
+/// What a server says about its own request handling, read while a chat has a request open
+/// against it. A server that answers one request at a time keeps the rest waiting; this is how
+/// Helm can tell a chat waiting for its turn from a chat whose model is working on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueueInfo {
+    /// The server is answering a request right now (this chat's, another chat's, or something
+    /// outside Helm).
+    pub busy: bool,
+    /// How many requests it is holding, waiting. `None` when the server does not say.
+    pub queued: Option<u64>,
+}
+
 /// The local model servers, as the chats crate uses them. Calls marked blocking are made off the
 /// chat's task, on the blocking pool.
 pub trait LocalModels: Send + Sync {
@@ -149,6 +161,13 @@ pub trait LocalModels: Send + Sync {
 
     /// The models on the servers as last seen. With `refresh`, asks the servers first.
     fn catalogue(&self, refresh: bool) -> Vec<LocalModelInfo>;
+
+    /// Blocking. What the server says about requests waiting on it. Ask only while at least one
+    /// chat has a request open against that server — never at start-up, never on a plain timer.
+    /// `None` when the server reports no such thing, or does not answer.
+    fn queue(&self, _server_id: &str) -> Option<QueueInfo> {
+        None
+    }
 }
 
 /// The refusal for a local chat when no server list is installed.

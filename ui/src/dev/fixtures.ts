@@ -51,6 +51,7 @@ export function chat(p: Partial<ChatRecord> = {}): ChatRecord {
     muted: false,
     lastActivityAt: 0,
     stalled: false,
+    localAhead: null,
     started: false,
     ...p,
   };

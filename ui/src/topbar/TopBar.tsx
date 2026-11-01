@@ -19,6 +19,8 @@ import { SidebarData } from '../sidebar/data.ts';
 import { sidebarUndo } from '../sidebar/undo.ts';
 import { UpdatePill } from '../updates/UpdatePill.tsx';
 import { UsageMeter } from '../usage/UsageMeter.tsx';
+import { isBusy } from '../sidebar/status.ts';
+import { LOCAL_WORKING_LABEL, isLocalModelId, localWaitLabel } from '../state/localModel.ts';
 import { CaptionButtons, dragHandlers } from './caption.tsx';
 import { topBarTier, type TopBarTier } from './fold.ts';
 import { folderLabel, RenameEdit } from './label.ts';
@@ -143,6 +145,17 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
             >
               {chat?.title ?? (chatId ? '' : 'New chat')}
             </button>
+          )}
+          {/* A busy chat on a local model server says which half of its wait it is in: queued
+              behind other work, or being answered. The model server answers one request at a time. */}
+          {chat && isBusy(chat.status) && isLocalModelId(chat.model) && (
+            <span
+              className="crumb-status muted"
+              data-testid="topbar-local-status"
+              data-ahead={chat.localAhead != null ? String(chat.localAhead) : undefined}
+            >
+              {chat.localAhead != null ? localWaitLabel(chat.localAhead) : LOCAL_WORKING_LABEL}
+            </span>
           )}
         </nav>
         <div className="topbar-actions">

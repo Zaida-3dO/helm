@@ -10,7 +10,7 @@ const chatActs: ChatMenuActions = { fork: noop, rename: noop, compact: noop, rol
 const projActs: ProjectMenuActions = { newChat: noop, pin: noop, rename: noop, changeIcon: noop, cost: noop, nestUnder: noop, topLevel: noop, archive: noop, restore: noop, colour: noop, customColour: noop };
 
 function row(chatId: string, over: Partial<SidebarRow> = {}): SidebarRow {
-  return { chatId, title: chatId, groupProjectId: 'g', folderProjectId: 'g', folderPath: 'C:/w', depth: 0, parentChatId: null, hasChildren: false, status: 'idle', attention: null, pinned: false, unread: false, muted: false, stalled: false, hasDraft: false, lastActivityAt: 1, archived: false, position: null, createdAt: 1, updatedAt: 1, revision: 1, ...over };
+  return { chatId, title: chatId, groupProjectId: 'g', folderProjectId: 'g', folderPath: 'C:/w', depth: 0, parentChatId: null, hasChildren: false, status: 'idle', attention: null, pinned: false, unread: false, muted: false, stalled: false, local: false, localAhead: null, hasDraft: false, lastActivityAt: 1, archived: false, position: null, createdAt: 1, updatedAt: 1, revision: 1, ...over };
 }
 
 function project(id: string, over: Partial<ProjectNode> = {}): ProjectNode {

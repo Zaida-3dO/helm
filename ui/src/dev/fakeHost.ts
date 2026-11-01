@@ -214,6 +214,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         muted: false,
         lastActivityAt: t,
         stalled: false,
+        localAhead: null,
         started: false,
       },
       thread: {

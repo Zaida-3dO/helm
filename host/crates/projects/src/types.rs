@@ -154,6 +154,14 @@ pub struct SidebarRow {
     pub muted: bool,
     /// Running with no worker output for a while.
     pub stalled: bool,
+    /// The chat runs on a local model server (a `local/…` model id).
+    pub local: bool,
+    /// The local server answers one request at a time and this chat's turn is open and silent
+    /// behind other work: how many of Helm's own chats would be answered first, or 0 when the
+    /// server is busy but the count is not known; `null` when the chat is not waiting. Only ever
+    /// set for a local chat.
+    #[ts(type = "number | null")]
+    pub local_ahead: Option<i64>,
     /// The chat holds an unsent draft: drawn as a small pencil before the age.
     pub has_draft: bool,
     #[ts(type = "number")]

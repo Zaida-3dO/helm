@@ -133,6 +133,13 @@ export function localPinnedEnv(local: LocalLaunch): Record<string, string> {
     ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
     CLAUDE_CODE_SUBAGENT_MODEL: model,
     ...Object.fromEntries(OTHER_PROVIDERS.map((k) => [k, "0"])),
+    // A local server that answers one request at a time can hold a request queued (unanswered)
+    // for many minutes while it finishes other work. The child's own request clock must outlast
+    // that wait, not just the answer: each attempt gets an hour, and a dropped attempt is retried
+    // a few times before the turn fails. Without this the default ten-minute clock ends the turn
+    // while the chat is only standing in line.
+    API_TIMEOUT_MS: "3600000",
+    API_MAX_RETRIES: "6",
   };
 }
 

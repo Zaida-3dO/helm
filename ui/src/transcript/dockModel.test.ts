@@ -34,6 +34,16 @@ test("line 1 names what the chat is doing", async () => {
   assert.equal(dockState('running', { ...t, loading }).key, 'loading');
   assert.equal(dockState('stopping', { ...t, loading }).key, 'stopping');
   assert.equal(dockState('running', { ...t, loading: undefined }).label, 'Working');
+  // A local chat's line speaks in halves of the wait: standing at the model server, or being
+  // answered by it now. The server answers one request at a time.
+  const local = { model: 'local/strata/qwen', localAhead: 1 };
+  assert.deepEqual([dockState('running', t, local).key, dockState('running', t, local).label], ['model-waiting', 'Waiting for the local model (1 ahead)']);
+  assert.equal(dockState('running', t, { ...local, localAhead: 0 }).label, 'Waiting for the local model');
+  assert.equal(dockState('running', t, { ...local, localAhead: null }).label, 'Using the local model');
+  // A Claude chat is none of this; a card that needs you and a loading line still come first.
+  assert.equal(dockState('running', t, { model: 'opus', localAhead: 2 }).label, 'Working');
+  assert.equal(dockState('running', { ...t, interactions: [{} as never] }, local).label, 'Waiting for you');
+  assert.equal(dockState('running', { ...t, loading }, local).key, 'loading');
 });
 
 test('the settled line comes from the last turn when it ended with a reply', async () => {
@@ -79,5 +89,12 @@ test('with no tool running the dock says what the turn is doing, and since when'
     const a = dockActivity(rows, thread, 700);
     assert.deepEqual([a.label, a.narration, a.since], [label, narration, since], name);
   }
+  // A local chat the host flags as queued at the model server says so with its place in line,
+  // from wherever in the turn the silence sits; without the flag the plain sentence stays.
+  const queued = [user, row({ id: 2, role: 'toolResult', toolName: 'Read', timestamp: 6000 })];
+  assert.deepEqual(dockActivity([user], none, 700, 2), { phase: 'model', label: 'Waiting for the local model (2 ahead)', since: 700, narration: null });
+  assert.deepEqual([dockActivity(queued, none, 700, 1).label, dockActivity(queued, none, 700, 1).since], ['Waiting for the local model (1 ahead)', 6000]);
+  assert.equal(dockActivity([user], none, 700, 0).label, 'Waiting for the local model');
+  assert.equal(dockActivity(queued, none, 700, null).label, 'Thinking about the result');
   assert.equal(lastLine('1. First\n\n## Second line  \n'), 'Second line');
 });

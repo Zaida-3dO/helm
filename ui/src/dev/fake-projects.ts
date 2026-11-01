@@ -80,6 +80,8 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
       unread: c.chat.unread.markToken !== null || c.chat.unread.completionId !== null,
       muted: c.chat.muted,
       stalled: c.chat.stalled,
+      local: (c.chat.model ?? '').startsWith('local/'),
+      localAhead: c.chat.localAhead,
       hasDraft: c.chat.draft.trim() !== '',
       lastActivityAt: c.chat.lastActivityAt,
       archived: c.archived,

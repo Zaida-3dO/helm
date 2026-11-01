@@ -5,6 +5,7 @@
 import type { ChatStatus } from '../api/types.ts';
 import type { RowAttention } from '../api/projects.ts';
 import type { AttentionKind } from '../api/generated/AttentionKind.ts';
+import { LOCAL_WORKING_LABEL, localWaitLabel } from '../state/localModel.ts';
 
 export interface RowSignals {
   status: ChatStatus;
@@ -49,6 +50,15 @@ export const ATTENTION_LABEL: Record<RowAttention, string> = {
   interrupted: 'Interrupted',
   pinned: 'Pinned',
 };
+
+/** The running mark's wording: a local chat says whether the model is queued behind other work
+ * (`localAhead` set) or answering it now; a stalled Claude chat warns as before. */
+export function rowStatusLabel(row: { stalled: boolean; local: boolean; localAhead: number | null }): string {
+  if (row.local && row.localAhead !== null) return localWaitLabel(row.localAhead);
+  if (row.stalled) return 'Running, no output for a while';
+  if (row.local) return LOCAL_WORKING_LABEL;
+  return ATTENTION_LABEL.running;
+}
 
 /** The flag on a chat waiting on you: a question, plan or permission asks to be answered. */
 export function needsYouLabel(kind: AttentionKind | undefined): string {

@@ -28,6 +28,14 @@ lastActivityAt: number,
  */
 stalled: boolean, 
 /**
+ * A local chat whose turn is open but has said nothing, while the model server (which
+ * answers one request at a time) is busy with something else: how many of Helm's own local
+ * chats would be answered first, or 0 when the server is busy but the count is not known.
+ * `null` when the chat is not waiting — which begins the moment its first words arrive or
+ * its turn ends.
+ */
+localAhead: number | null, 
+/**
  * The chat's first turn has run (or it was forked from one that did). From then on its model
  * can switch among Claude models, or among models on the same local server, but not between
  * Claude and local models or between local servers.

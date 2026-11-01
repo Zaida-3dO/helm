@@ -6,7 +6,7 @@ import { SidebarActions, type ActionDeps } from './actions.ts';
 import { UndoStack } from './undo.ts';
 import { buildList, chatAncestors, headerSubtitle, HEIGHTS, nestRows, stepChat, visibleChatOrder, type ListItem } from './model.ts';
 import { loadMore, readBudget, type PageResult } from './paging.ts';
-import { age, needsYouLabel, rowAttention, trailingIndicator } from './status.ts';
+import { age, needsYouLabel, rowAttention, rowStatusLabel, trailingIndicator } from './status.ts';
 import { layout, visibleRange } from './virtual.ts';
 
 function project(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
@@ -48,6 +48,8 @@ function row(chatId: string, group: string, over: Partial<SidebarRow> = {}): Sid
     unread: false,
     muted: false,
     stalled: false,
+    local: false,
+    localAhead: null,
     hasDraft: false,
     lastActivityAt: 1,
     archived: false,
@@ -87,6 +89,13 @@ test('status priority: running > unread > lingering > interrupted > pinned', () 
   assert.equal(trailingIndicator('interrupted'), false);
   // The flag on a chat waiting on an answer says so.
   assert.deepEqual(['question', 'plan', 'approval', 'triage', undefined].map((k) => needsYouLabel(k as never)), ['Answer question', 'Answer question', 'Answer question', 'Needs you', 'Needs you']);
+  // A running local chat's wording speaks in halves of the wait at the model server (which
+  // answers one request at a time); every other running chat reads as before.
+  assert.equal(rowStatusLabel({ stalled: false, local: true, localAhead: 1 }), 'Waiting for the local model (1 ahead)');
+  assert.equal(rowStatusLabel({ stalled: true, local: true, localAhead: 0 }), 'Waiting for the local model');
+  assert.equal(rowStatusLabel({ stalled: false, local: true, localAhead: null }), 'Using the local model');
+  assert.equal(rowStatusLabel({ stalled: true, local: false, localAhead: null }), 'Running, no output for a while');
+  assert.equal(rowStatusLabel({ stalled: false, local: false, localAhead: null }), 'Task running');
 });
 
 test('age is relative: now, minutes, hours, days', () => {

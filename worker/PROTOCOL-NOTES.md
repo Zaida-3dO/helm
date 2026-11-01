@@ -155,7 +155,8 @@ tools, hooks and stream-json, with a different place to send its requests.
   `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` and
   `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL` (all the local model,
   so the small-model jobs and sub-agents stay local, whatever the user set for Claude), `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` when
-  known, `MAX_THINKING_TOKENS`, `CLAUDE_CODE_USE_GATEWAY=1`, `ENABLE_TOOL_SEARCH=false`, and the
+  known, `MAX_THINKING_TOKENS`, `CLAUDE_CODE_USE_GATEWAY=1`, `ENABLE_TOOL_SEARCH=false`,
+  `API_TIMEOUT_MS=3600000` and `API_MAX_RETRIES=6` (below, under queueing), and the
   loopback names added to `NO_PROXY`, so a proxy variable never carries local traffic (or the key) off
   the machine. `--model` is the server's model name, and `--settings` gains `skipWebFetchPreflight` and
   an `env` block (below).
@@ -200,8 +201,14 @@ nothing left the machine, and no real model or server was involved):
   and `anthropic-version: 2023-06-01`; no `x-api-key`, no other path, and no call to Anthropic.
 - **A slow first token does not time out.** With the fake holding the response for 130 s (a model being
   loaded), Claude Code waited and completed the turn from a single request. Its API timeout defaults to
-  ten minutes, so local launches leave `API_TIMEOUT_MS` alone; a model that takes longer than that to load
-  would fail the turn, and Claude Code would retry it.
+  ten minutes and it retries twice (`API_TIMEOUT_MS`, `API_MAX_RETRIES`).
+- **Queueing.** A Strata-type server answers one request at a time: with other work on the machine, a
+  request can sit unanswered at the server for many minutes while the rest of Helm shows the chat
+  waiting there. The default ten-minute clock would end the turn mid-queue (a real long queue was seen
+  to end exactly that way), so local launches pin `API_TIMEOUT_MS=3600000` (one hour per attempt) and
+  `API_MAX_RETRIES=6`. Not yet checked against a real server holding a request that long; the pins are
+  read by the SDK's client, which the fake host exercises only at the default. (The host separately
+  keeps such a chat out of its own "no output for a while" flag while the queue wait lasts.)
 - `total_cost_usd` in the result line is a non-zero estimate for a model Claude Code does not know;
   the host ignores it for local chats.
 - Not observed (needs a long chat or a real server): what `CLAUDE_CODE_MAX_CONTEXT_TOKENS` does to
