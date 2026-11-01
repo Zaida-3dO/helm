@@ -217,7 +217,6 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
           ops={ops}
           flushers={flushers}
           sendShortcut={sendShortcut}
-          onMove={() => undefined}
           registerSetText={() => undefined}
         />
       </div>

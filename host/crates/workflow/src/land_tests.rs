@@ -203,7 +203,7 @@ fn a_wrong_base_or_a_conflict_fails_but_a_moved_head_lands_with_a_note() {
         note.contains("head moved") && note.contains("Has this been reviewed?"),
         "{note:?}"
     );
-    let merge = gh.calls().iter().find(|l| l.starts_with("pr merge")).unwrap();
+    let merge = gh.calls().into_iter().find(|l| l.starts_with("pr merge")).unwrap();
     assert!(
         merge.contains(&format!("--match-head-commit {SHA}")),
         "pinned to the head GitHub showed: {merge}"

@@ -183,7 +183,7 @@ test('context, retry and interrupted rows stay visible', () => {
   assert.deepEqual(shape(layout(rows, false)), [1, 'fold[4]', 2, 3, 8, 5]);
 });
 
-test('only the newest notice is a live region, and only while it is the transcript's last row', () => {
+test("only the newest notice is a live region, and only while it is the transcript's last row", () => {
   const live = (items: Item[]) => items.flatMap((i) => (i.kind === 'row' && i.noticeLive ? [i.row.id] : []));
   const notice = (id: number) => row({ id, role: 'context', text: 'Model could not load' });
   // The transcript ends on the notice: it is the live one.
