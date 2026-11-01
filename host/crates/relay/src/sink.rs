@@ -498,8 +498,6 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
                 text: &shown,
                 mode: HostSendMode::Steer,
                 origin: TELEGRAM_ORIGIN,
-                // The user's own message, typed on the phone: it never waits for a run slot.
-                gated: false,
             },
             &attach,
             &saved,
@@ -853,7 +851,6 @@ impl TelegramSink for ChatSink {
                         text: &note,
                         mode: HostSendMode::Steer,
                         origin: helm_chats::types::SubmissionOrigin::App,
-                        gated: false,
                     },
                 );
                 match sent {

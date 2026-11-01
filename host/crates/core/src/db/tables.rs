@@ -150,12 +150,6 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
         "local_model_settings",
         UserOnly("Which local model servers Helm uses is yours to set; chats may change only a few of its switches."),
     ),
-    // The run-slot queue.
-    ("slot_waits", Data),
-    (
-        "run_slot_settings",
-        UserOnly("Run slots decide when automated messages start, so only you set them."),
-    ),
     // Web search: the Claude-chats switch (agents may change it through the settings tools) and
     // the last settings file imported from. The Brave key is in the credential store, not here.
     ("web_search_settings", Tool),

@@ -5,7 +5,7 @@
 //! [`crate::timing`]). A due run for a busy chat is left unclaimed and tried again next tick.
 //!
 //! **The send path.** Scheduled prompts go through [`helm_chats::submit::host_send`] with origin
-//! [`SubmissionOrigin::Schedule`] and `gated: true`, never through the `chat_send` op: that op
+//! [`SubmissionOrigin::Schedule`], never through the `chat_send` op: that op
 //! records its sends as the user's own, which would let a timer type for the user, follow their
 //! send behaviour and count towards consent. Each slot has a fixed submission id
 //! ([`crate::store::submission_id`]), so a retry or a second claim of the same slot is the same
@@ -34,7 +34,7 @@ pub trait Sender: Send + Sync {
     fn send(&self, chat_id: &str, submission_id: &str, text: &str) -> Result<(), ApiError>;
 }
 
-/// The one way a scheduled prompt is sent: a schedule-origin, gated, queue-behind-the-turn send
+/// The one way a scheduled prompt is sent: a schedule-origin, queue-behind-the-turn send
 /// under the slot's own id.
 pub(crate) fn request<'a>(chat_id: &'a str, submission_id: &'a str, text: &'a str) -> HostSend<'a> {
     HostSend {
@@ -45,7 +45,6 @@ pub(crate) fn request<'a>(chat_id: &'a str, submission_id: &'a str, text: &'a st
         // prompt waits behind it rather than steering it.
         mode: HostSendMode::Queue,
         origin: SubmissionOrigin::Schedule,
-        gated: true,
     }
 }
 

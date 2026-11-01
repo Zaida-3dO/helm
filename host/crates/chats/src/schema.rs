@@ -36,7 +36,6 @@ pub const MAX_CONTINUATIONS: i64 = 100;
 
 pub fn register(reg: &mut MigrationRegistry) {
     reg.initializer("chats-side-tables", init)
-        .initializer("chats-run-slots", crate::runslots::init)
         .initializer("chats-attachment-refs", crate::attachments::init)
         .initializer("chats-flags", crate::flags::init)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
@@ -58,6 +57,10 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              created_at  INTEGER NOT NULL
          );
          DROP TABLE IF EXISTS chat_queue_holds;
+         -- Messages no longer wait behind other chats: the wait queue and its settings table go,
+         -- there is nothing worth keeping in them.
+         DROP TABLE IF EXISTS slot_waits;
+         DROP TABLE IF EXISTS run_slot_settings;
          CREATE INDEX IF NOT EXISTS messages_chat_order ON messages(chat_id, active, timestamp, id);
          CREATE TABLE IF NOT EXISTS chat_titles (
              chat_id  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,

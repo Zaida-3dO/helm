@@ -10,9 +10,7 @@
 //! | [`service`] | the 30 s loop and what each band does |
 //! | `ops` | `governor_state`, `governor_settings` (UI-only) and the `governor` event |
 //!
-//! The run-slot hook: [`start`] installs a hold on the chat runtime, so automated starts
-//! wait while the band is wind-down or stop ([`service::holds`]). Not built: proposing backlog
-//! items in surplus.
+//! Not built: proposing backlog items in surplus.
 
 pub mod bands;
 pub mod service;
@@ -67,7 +65,7 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
     )));
 }
 
-/// The app's chat controls: wrap-up notes through `host_send` (origin App, steered, never gated)
+/// The app's chat controls: wrap-up notes through `host_send` (origin App, steered)
 /// and stops through the `chat_stop` op.
 struct RuntimeControl {
     rt: ChatRuntime,
@@ -101,7 +99,6 @@ impl ChatControl for RuntimeControl {
                 text,
                 mode: helm_chats::submit::HostSendMode::Steer,
                 origin: helm_chats::types::SubmissionOrigin::App,
-                gated: false,
             },
         )
         .map(|_| ())
@@ -130,12 +127,6 @@ pub fn start(runtime: &ChatRuntime, dispatcher: &Arc<helm_ipc::Dispatcher>) {
     gov.attach(Arc::new(RuntimeControl {
         rt: runtime.clone(),
         dispatcher: dispatcher.clone(),
-    }));
-    // The run-slot hook: near the limit, nothing new starts on its own.
-    let hold = gov.clone();
-    runtime.set_slot_hold(Arc::new(move |now| {
-        service::holds(hold.band(now))
-            .then(|| "Plan usage is near its limit, so automated starts wait.".to_owned())
     }));
     runtime.handle().spawn(async move {
         let mut every = tokio::time::interval(std::time::Duration::from_secs(30));

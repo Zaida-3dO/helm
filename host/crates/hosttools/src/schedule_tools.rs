@@ -8,7 +8,7 @@
 //! - A create carries a request id taken from the tool call, so a retried call returns the saved
 //!   schedule instead of making a second one.
 //! - The prompt a schedule sends later is framed as not typed by the user, and goes in as a
-//!   schedule-origin, gated send (see the schedules crate); it cannot spend the user's consent.
+//!   schedule-origin send (see the schedules crate); it cannot spend the user's consent.
 
 use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::spec::ToolSpec;

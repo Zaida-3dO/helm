@@ -5,7 +5,7 @@
 //!   **restricted** caller named `external:<client>`: the restricted gate is default-deny and
 //!   lists only these five, and the dispatcher re-checks sizes, timeouts and the result limit.
 //! - **`app_send_message`** is Helm's own send with the gate's frame ("sent by another agent,
-//!   not approval"), origin `other_chat`, gated like any cross-chat message. The caller cannot
+//!   not approval"), origin `other_chat`, like any cross-chat message. The caller cannot
 //!   word the frame. Sends are rate-limited per outside caller.
 //!   Each outside caller also gets the chats crate's per-target limit (the same count and window
 //!   as one chat messaging another), and a send counts against either limit only once it is
@@ -161,25 +161,19 @@ impl AppExecutor {
                 text: &text,
                 mode,
                 origin: SubmissionOrigin::OtherChat,
-                gated: true,
             },
         )
         .map_err(|e| refused(e.message))?;
         // Counted only once it is stored: a refused send never uses up the allowance.
         Self::record_send(&mut log, caller, to, now);
         drop(log);
-        let mut out = json!({
+        Ok(json!({
             "delivered": sent.delivered,
             "queued": sent.queued,
             "mode": args["mode"],
             "chatId": to,
             "title": title,
-        });
-        if let Some(p) = sent.waiting {
-            out["waitingForSlot"] = json!(true);
-            out["position"] = json!(p);
-        }
-        Ok(out)
+        }))
     }
 
     async fn dispatch(

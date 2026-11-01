@@ -137,7 +137,6 @@ async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
             text: REQUEST,
             mode: HostSendMode::Queue,
             origin: SubmissionOrigin::App,
-            gated: false,
         },
     )?;
     let handle = rt.handle().clone();

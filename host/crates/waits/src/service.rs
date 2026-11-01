@@ -219,7 +219,7 @@ impl WaitsService {
     }
 }
 
-/// Delivery through the chat runtime: a gated app message that starts a turn if the chat is
+/// Delivery through the chat runtime: an app message that starts a turn if the chat is
 /// idle and queues behind the running turn if it is busy.
 pub struct RuntimeSink(pub helm_chats::ChatRuntime);
 
@@ -234,7 +234,6 @@ impl Deliver for RuntimeSink {
                 text,
                 mode: HostSendMode::Queue,
                 origin: helm_chats::types::SubmissionOrigin::App,
-                gated: true,
             },
         );
         match sent {
@@ -467,16 +466,16 @@ mod tests {
         let open: Vec<String> = svc.list(None).unwrap().into_iter().map(|w| w.id).collect();
         assert!(open.contains(&"e1".to_string()) && open.contains(&"p1".to_string()));
 
-        // A message waiting for a run slot counts as queued, so the chat is not yet idle.
+        // A message queued behind the running turn counts as queued, so the chat is not yet idle.
         let real = crate::probes::RealProbes { db: db.clone() };
         assert!(!real.chat("c7").unwrap().unwrap().queued);
         db.write(|tx| {
             tx.execute(
-                "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('s1', 'c7', 'hi', 'saved', 1)",
+                "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('s1', 'c7', 'hi', 'queued', 1)",
                 [],
             )?;
             tx.execute(
-                "INSERT INTO slot_waits(submission_id, chat_id, since) VALUES ('s1', 'c7', 1)",
+                "INSERT INTO queued_submissions(submission_id, chat_id, position) VALUES ('s1', 'c7', 0)",
                 [],
             )
         })

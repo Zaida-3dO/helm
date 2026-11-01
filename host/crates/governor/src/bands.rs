@@ -15,7 +15,7 @@ pub enum Band {
     Unknown,
     /// Room to spare.
     Surplus,
-    /// Getting used up: only the user's own work and replies should start (the run-slot hook).
+    /// Getting used up: the governor does nothing at this band yet.
     Selective,
     /// Close to the limit: running agents are told to wrap up.
     WindDown,

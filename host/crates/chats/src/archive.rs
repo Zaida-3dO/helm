@@ -36,9 +36,8 @@ impl From<Refusal> for helm_ipc::ApiError {
 }
 
 /// Archive one chat, busy or not; archiving an archived chat changes nothing and answers
-/// `Ok(false)` (idempotent). Nothing queued for the chat sends afterwards: a message waiting for a
-/// run slot is cancelled (it reads Not sent) and every message still queued reads Not delivered,
-/// so its text can be taken back after a restore.
+/// `Ok(false)` (idempotent). Nothing queued for the chat sends afterwards: every message still
+/// queued reads Not delivered, so its text can be taken back after a restore.
 pub fn archive_in_tx(
     tx: &Transaction<'_>,
     chat_id: &str,
@@ -59,12 +58,6 @@ pub fn archive_in_tx(
         "UPDATE chats SET archived = 1, updated_at = ?1 WHERE id = ?2",
         params![now, chat_id],
     )?;
-    tx.execute(
-        "UPDATE submissions SET state = 'rejected' WHERE state = 'saved'
-         AND id IN (SELECT submission_id FROM slot_waits WHERE chat_id = ?1)",
-        [chat_id],
-    )?;
-    tx.execute("DELETE FROM slot_waits WHERE chat_id = ?1", [chat_id])?;
     tx.execute(
         "UPDATE submissions SET state = 'uncertain' WHERE chat_id = ?1 AND state = 'queued'",
         [chat_id],
@@ -118,21 +111,15 @@ mod tests {
             .unwrap();
         db.write(|tx| store::set_status(tx, &c, ChatStatus::Running, None, 2))
             .unwrap();
-        // A queued follow-up and a message waiting for a run slot stay unsent.
+        // A queued follow-up stays unsent.
         db.write(|tx| {
-            for (id, state) in [("s1", "queued"), ("s2", "saved")] {
-                tx.execute(
-                    "INSERT INTO submissions(id, chat_id, text, state, created_at)
-                     VALUES (?1, ?2, 'hi', ?3, 1)",
-                    params![id, c, state],
-                )?;
-            }
             tx.execute(
-                "INSERT INTO queued_submissions(submission_id, chat_id, position) VALUES ('s1', ?1, 0)",
+                "INSERT INTO submissions(id, chat_id, text, state, created_at)
+                 VALUES ('s1', ?1, 'hi', 'queued', 1)",
                 [&c],
             )?;
             tx.execute(
-                "INSERT INTO slot_waits(submission_id, chat_id, since, head) VALUES ('s2', ?1, 1, 0)",
+                "INSERT INTO queued_submissions(submission_id, chat_id, position) VALUES ('s1', ?1, 0)",
                 [&c],
             )
         })
@@ -147,10 +134,9 @@ mod tests {
             .unwrap()
         };
         assert_eq!(col("SELECT status FROM chats"), ["running"]);
-        assert!(col("SELECT submission_id FROM slot_waits").is_empty());
         assert_eq!(
             col("SELECT state FROM submissions ORDER BY id"),
-            ["uncertain", "rejected"]
+            ["uncertain"]
         );
         db.write(|tx| store::set_status(tx, &c, ChatStatus::Idle, None, 4))
             .unwrap();

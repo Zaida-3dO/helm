@@ -18,8 +18,7 @@
 //!   it on never walks old history); and not yet checked for this stretch of quiet. The stretch
 //!   is the chat's activity stamp: the later of its last update and its last worker output, so
 //!   new activity ends the stretch and clears the flag.
-//! - **Limits:** nothing runs while the usage governor holds automated starts (wind-down or
-//!   stop), one check at a time, one chat per pass, a pass per maintenance tick.
+//! - **Limits:** one check at a time, one chat per pass, a pass per maintenance tick.
 //! - **A check** is claimed first (the row is written as failed), so a crash or a timeout never
 //!   replays it; the verdict is written only if the chat's stamp is still the one it was made
 //!   for and triage is still on. A helper failure leaves the claim: no retry until the chat has
@@ -27,7 +26,7 @@
 //! - The conversation is data: triage never sends a prompt to a chat and never changes read state.
 
 use crate::attention::{live_needs, Needs};
-use crate::runtime::{ChatRuntime, Shared};
+use crate::runtime::Shared;
 use crate::types::*;
 use rusqlite::{params, Transaction};
 use serde_json::{json, Value};
@@ -122,7 +121,6 @@ pub struct Cand {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Skip {
     Disabled,
-    Held,
     Archived,
     Local,
     Side,
@@ -138,12 +136,10 @@ pub enum Skip {
 }
 
 /// Whether the chat should be checked now.
-pub fn decide(c: &Cand, s: &Settings, held: bool, now: i64) -> Result<(), Skip> {
+pub fn decide(c: &Cand, s: &Settings, now: i64) -> Result<(), Skip> {
     let age = now - c.stamp;
     if !s.enabled {
         Err(Skip::Disabled)
-    } else if held {
-        Err(Skip::Held)
     } else if c.archived {
         Err(Skip::Archived)
     } else if c.local {
@@ -254,7 +250,6 @@ fn turns(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Vec<Value>> {
 /// One maintenance-tick pass: claim the next chat that is due, if any, and check it in the
 /// background.
 pub(crate) fn pass(sh: &Arc<Shared>) {
-    let rt = ChatRuntime { sh: sh.clone() };
     let now = helm_core::now_ms();
     {
         let mut g = sh.triage.lock().unwrap_or_else(|p| p.into_inner());
@@ -262,16 +257,15 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
             return;
         }
     }
-    let held = rt.slot_hold(now).is_some();
     let needs = live_needs(sh);
     let claimed = sh.db.write(|tx| {
         let s = settings(tx);
-        if !s.enabled || held {
+        if !s.enabled {
             return Ok(None);
         }
         let Some(c) = candidates(tx, &needs, now)?
             .into_iter()
-            .find(|c| decide(c, &s, held, now).is_ok())
+            .find(|c| decide(c, &s, now).is_ok())
         else {
             return Ok(None);
         };
@@ -449,7 +443,7 @@ mod tests {
         for (name, edit, want) in cases {
             let mut c = cand();
             edit(&mut c);
-            assert_eq!(decide(&c, &s, false, now), want, "{name}");
+            assert_eq!(decide(&c, &s, now), want, "{name}");
         }
         let c = cand();
         assert_eq!(
@@ -459,15 +453,9 @@ mod tests {
                     enabled: false,
                     ..s
                 },
-                false,
                 now
             ),
             Err(Skip::Disabled)
-        );
-        assert_eq!(
-            decide(&c, &s, true, now),
-            Err(Skip::Held),
-            "the usage governor holds"
         );
         let mut gate = Gate::default();
         assert!(gate.may_start(1_000_000));
@@ -491,7 +479,7 @@ mod tests {
         );
         let eager = Settings { delay_ms: 0, ..s };
         assert_eq!(
-            decide(&c, &eager, false, c.stamp),
+            decide(&c, &eager, c.stamp),
             Ok(()),
             "a zero delay checks at once"
         );

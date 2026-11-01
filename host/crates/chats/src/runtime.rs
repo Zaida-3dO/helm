@@ -466,8 +466,6 @@ pub(crate) struct Shared {
     pub autocomplete: Mutex<crate::autocomplete::AutocompleteGate>,
     /// Host tools and the worker-message registry, attached once the app's services exist.
     pub host: std::sync::OnceLock<crate::hostcalls::HostSeam>,
-    /// The run-slot queue's hold and pump wake ([`crate::runslots`]).
-    pub run_slots: crate::runslots::Slots,
     /// AFK's say over interactions and turns ([`crate::seams::AfkPolicy`]), installed once.
     pub afk: std::sync::OnceLock<Arc<dyn crate::seams::AfkPolicy>>,
     /// The local model servers ([`crate::local::LocalModels`]), installed once.
@@ -507,13 +505,11 @@ impl ChatRuntime {
                 triage: Mutex::new(Default::default()),
                 autocomplete: Mutex::new(Default::default()),
                 host: std::sync::OnceLock::new(),
-                run_slots: Default::default(),
                 afk: std::sync::OnceLock::new(),
                 local: std::sync::OnceLock::new(),
             }),
         };
         rt.start_tick();
-        crate::runslots::start(&rt);
         rt
     }
 

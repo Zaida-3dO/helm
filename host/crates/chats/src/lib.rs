@@ -64,7 +64,6 @@ pub mod message_images;
 pub mod ops;
 pub mod output_save;
 pub mod rollover;
-pub mod runslots;
 pub mod runtime;
 pub mod runtime_settings;
 #[cfg(test)]
@@ -74,7 +73,6 @@ pub mod seams;
 pub mod search_source;
 pub mod send_behavior;
 pub mod session_log;
-pub mod slot_settings;
 mod spawning;
 pub mod store;
 pub mod submit;

@@ -43,8 +43,8 @@ pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
     reg.initializer("afk", store::init);
 }
 
-/// Digests go through the chats crate's host-send path: origin App, admission Exempt (a digest
-/// never waits for a run slot); on a running turn it is handed in at the next tool boundary.
+/// Digests go through the chats crate's host-send path: origin App; on a running turn it is
+/// handed in at the next tool boundary.
 struct RuntimeSender(ChatRuntime);
 
 impl DigestSender for RuntimeSender {
@@ -62,7 +62,6 @@ impl DigestSender for RuntimeSender {
                 text,
                 mode: helm_chats::submit::HostSendMode::Queue,
                 origin: helm_chats::types::SubmissionOrigin::App,
-                gated: false,
             },
         )
         .map(|s| s.queued)
@@ -105,7 +104,6 @@ impl AfkHooks for RuntimeHooks {
                 text,
                 mode: helm_chats::submit::HostSendMode::Steer,
                 origin: helm_chats::types::SubmissionOrigin::App,
-                gated: false,
             },
         )
         .map(|_| ())

@@ -3,15 +3,12 @@
 //!
 //! - **Wind down** (and **stop** when `atStop` is `wrapUp`): each running chat is told once per
 //!   episode to finish what it is doing, commit, and stop starting new work. The note is an app
-//!   message steered into the running turn (origin App, never gated, never consent).
+//!   message steered into the running turn (origin App, never consent).
 //! - **Stop**: each running chat is stopped once per episode. A chat the user starts again
 //!   afterwards is left alone: that is the user's own call.
 //! - An **episode** starts when usage rises into wind-down or stop from below, and ends only when
 //!   it falls below wind-down again; moving between wind-down and stop, or through a stale
 //!   reading, stays in the same episode.
-//! - **Automated starts** (the run-slot queue's gated sends: schedules, cross-chat messages, an
-//!   agent's new chat) wait while the band is wind-down or stop: nothing new starts
-//!   ([`crate::start`] installs the hold).
 //! - **Unknown** (no reading, a stale one, or expired windows): nothing happens. While enabled and
 //!   without a usable reading, it asks the meter for a fresh read at most every 10 minutes.
 
@@ -100,11 +97,6 @@ pub fn wrap_up_id(episode: i64, chat_id: &str) -> String {
     uuid::Uuid::new_v8(b).to_string()
 }
 
-/// Whether automated starts wait in this band (the run-slot hold): wind-down and stop.
-pub fn holds(b: Band) -> bool {
-    near_limit(b)
-}
-
 fn near_limit(b: Band) -> bool {
     matches!(b, Band::WindDown | Band::Stop)
 }
@@ -137,7 +129,7 @@ impl Governor {
         self.db.snapshot(store::load).unwrap_or_default()
     }
 
-    /// The band now, for other crates (the run-slot hook reads this). Unknown while off.
+    /// The band now, for other crates. Unknown while off.
     pub fn band(&self, now: i64) -> Band {
         let s = self.settings();
         if !s.enabled {
@@ -505,14 +497,14 @@ mod tests {
     }
 
     #[test]
-    fn automated_starts_are_held_at_wind_down_and_stop_only() {
+    fn the_band_only_tells_chats_near_the_limit() {
         let (_d, usage, _chats, g) = setup();
         g.save(&json!({"enabled": true}), 0).unwrap();
-        for (pct, held) in [(10.0, false), (70.0, false), (86.0, true), (99.0, true)] {
+        for (pct, near) in [(10.0, false), (70.0, false), (86.0, true), (99.0, true)] {
             *usage.pct.lock().unwrap() = Some(pct);
-            assert_eq!(holds(g.band(0)), held, "{pct}%");
+            assert_eq!(near_limit(g.band(0)), near, "{pct}%");
         }
         *usage.pct.lock().unwrap() = None;
-        assert!(!holds(g.band(0)), "no reading holds nothing");
+        assert!(!near_limit(g.band(0)), "no reading is nowhere near the limit");
     }
 }

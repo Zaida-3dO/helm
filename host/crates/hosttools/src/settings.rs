@@ -105,7 +105,7 @@ fn get_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
             "settings": settings,
             "options": options,
             "unavailable": unavailable,
-            "note": "null means the default is in use: options.<key>.default says what that is, and sending null in app_update_settings restores it. options.<key> gives the type and the allowed values or limits. An option with hasEffect false is stored but nothing in Helm reads it yet, so changing it changes nothing. details.<key> holds read-only facts about a key, such as the wait queue behind the run-slot limit.",
+            "note": "null means the default is in use: options.<key>.default says what that is, and sending null in app_update_settings restores it. options.<key> gives the type and the allowed values or limits. An option with hasEffect false is stored but nothing in Helm reads it yet, so changing it changes nothing. details.<key> holds read-only facts about a key.",
         });
         if !details.is_empty() {
             out["details"] = Value::Object(details);

@@ -6,7 +6,7 @@
 //! - **Idle chat**: retire its worker (`ChatRuntime::retire`, a no-op while a turn runs). The next
 //!   send relaunches it, and the `workflow` prompt section carries the new state.
 //! - **Running turn**: queue a framed **app note** behind the turn through
-//!   `helm_chats::submit::host_send`: origin App, `gated: false` (Exempt), one fixed submission id
+//!   `helm_chats::submit::host_send`: origin App, one fixed submission id
 //!   per change, so a retry never delivers it twice. When the state turns on, the note carries the
 //!   Workflow rules themselves, so they apply from the next turn without a relaunch.
 //!
@@ -91,7 +91,6 @@ pub fn deliver(rt: &helm_chats::ChatRuntime, chat_id: &str, d: Delivery) {
                     text: &text,
                     mode: helm_chats::submit::HostSendMode::Queue,
                     origin: helm_chats::types::SubmissionOrigin::App,
-                    gated: false,
                 },
             );
             if let Err(e) = sent {

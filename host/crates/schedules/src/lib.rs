@@ -5,7 +5,7 @@
 //! - A busy chat makes the run wait; it is claimed once the chat is idle.
 //! - A prompt goes to an existing chat or to a fresh chat started in a project for each run. A
 //!   reminder sends nothing: it posts a note the user sees in the app and dismisses.
-//! - They are sent through `helm_chats::submit::host_send` with origin `schedule`, gated, under a
+//! - They are sent through `helm_chats::submit::host_send` with origin `schedule`, under a
 //!   fixed submission id per (schedule, slot). Never through `chat_send`: that records the send as
 //!   the user's own.
 //!
@@ -18,8 +18,6 @@
 //! | [`templates`] | the 30-minute check-in and the noon digest, off until enabled |
 //! | `ops` | `schedule_list`, `schedule_runs`, `schedule_create`, `schedule_update`, `schedule_cancel`, `reminder_list`, `reminder_dismiss` |
 //! | [`bindings`] | generated TypeScript in `ui/src/api/generated/schedules/` |
-//!
-//! Not built here (follow-up): run-slot waiting.
 
 pub mod bindings;
 mod ops;

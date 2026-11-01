@@ -197,8 +197,6 @@ pub fn stage(
                 state: SubmissionState::Saved,
                 origin: SubmissionOrigin::Typed,
                 priority: None,
-                admission: crate::submit::AdmissionClass::Exempt,
-                attachments: &[],
                 now,
             },
         )?;

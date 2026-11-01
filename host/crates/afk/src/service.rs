@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// How a digest reaches its chat. The app's sender is `helm_chats::submit::host_send` with origin
-/// App and the Exempt admission class; tests supply their own.
+/// App; tests supply their own.
 pub trait DigestSender: Send + Sync {
     /// `Ok(true)` when it was queued behind a running turn, `Ok(false)` when handed over now.
     /// `Err((code, message))` otherwise.

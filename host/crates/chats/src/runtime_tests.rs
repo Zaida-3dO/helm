@@ -3186,7 +3186,6 @@ async fn a_host_send_repeated_under_one_submission_id_is_delivered_once() {
                 text: "[Helm] The user allowed it.",
                 mode: HostSendMode::Queue,
                 origin: crate::types::SubmissionOrigin::App,
-                gated: false,
             },
         )
     };
@@ -3576,11 +3575,6 @@ async fn chat_find_searches_the_whole_history_in_steps() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_idle_check_flags_a_quiet_chat_once_and_new_activity_clears_it() {
     let h = harness();
-    let held = Arc::new(AtomicBool::new(true));
-    let hold = held.clone();
-    h.rt.set_slot_hold(Arc::new(move |_| {
-        hold.load(Ordering::SeqCst).then(|| "wind-down".to_owned())
-    }));
     let chat = h.create().await;
     let quiet_since = helm_core::now_ms() - 20 * 60_000;
     h.db.write(|tx| {
@@ -3605,11 +3599,6 @@ async fn the_idle_check_flags_a_quiet_chat_once_and_new_activity_clears_it() {
         panic!("expected {want} flagged chats");
     };
 
-    // Held by the usage governor: nothing runs.
-    crate::triage::pass(&h.rt.sh);
-    assert_eq!(jobs(), 0);
-
-    held.store(false, Ordering::SeqCst);
     crate::triage::pass(&h.rt.sh);
     wait_for(1).await;
     let s = h.rt.attention().unwrap();

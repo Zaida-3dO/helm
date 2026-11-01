@@ -1,4 +1,5 @@
-//! Admission: sends, the queue's actions, model changes and the restart continuation.
+//! The send paths: chat sends, host sends for automated prompts, the queue's actions, model
+//! changes and the restart continuation. Every send starts a turn or joins one at once.
 //!
 //! These run on the blocking pool (most under `maintenance`), write the database, then hand the
 //! actor a command. The draft is never touched by a refused send.
@@ -40,21 +41,7 @@ fn chat_status(
     .optional()
 }
 
-/// How a send is admitted. A `Gated` send to an idle chat may wait for a
-/// run slot ([`crate::runslots`]); the class is a required argument of the one internal send path
-/// so every caller has to say so (the caller table is checked by a test).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AdmissionClass {
-    /// Starts at once (the user's own sends, the restart continuation).
-    Exempt,
-    /// Waits for a run slot (automated sends); carries no attachments.
-    Gated,
-    /// A gated send being re-admitted.
-    Readmit,
-}
-
-/// One new submission for [`insert_submission`]: every field is required, the admission class
-/// included.
+/// One new submission for [`insert_submission`]: every field is required.
 pub(crate) struct NewSubmission<'a> {
     pub id: &'a str,
     pub chat_id: &'a str,
@@ -63,8 +50,6 @@ pub(crate) struct NewSubmission<'a> {
     pub state: SubmissionState,
     pub origin: SubmissionOrigin,
     pub priority: Option<&'a str>,
-    pub admission: AdmissionClass,
-    pub attachments: &'a [String],
     pub now: i64,
 }
 
@@ -73,11 +58,6 @@ pub(crate) fn insert_submission(
     tx: &Transaction<'_>,
     s: &NewSubmission<'_>,
 ) -> rusqlite::Result<()> {
-    if s.admission == AdmissionClass::Gated && !s.attachments.is_empty() {
-        return Err(rusqlite::Error::InvalidParameterName(
-            "a gated send carries no attachments".into(),
-        ));
-    }
     let NewSubmission {
         id,
         chat_id,
@@ -276,8 +256,6 @@ pub fn chat_send(
                     state,
                     origin: origin.into(),
                     priority,
-                    admission: AdmissionClass::Exempt,
-                    attachments: &attachments,
                     now,
                 },
             )?;
@@ -386,17 +364,14 @@ pub enum HostSendMode {
 }
 
 /// A send made by the host for something other than the user's own typing: a cross-chat message
-/// (origin `other_chat`, admission Gated) or an app note (origin `app`). Never counts as consent
-/// and never follows the user's send behaviour. Idempotent per `submission_id`.
+/// (origin `other_chat`) or an app note (origin `app`). Never counts as consent and never
+/// follows the user's send behaviour. Idempotent per `submission_id`.
 pub struct HostSend<'a> {
     pub chat_id: &'a str,
     pub submission_id: &'a str,
     pub text: &'a str,
     pub mode: HostSendMode,
     pub origin: SubmissionOrigin,
-    /// Gated (waits for a run slot, no attachments) for automated sends such as cross-chat
-    /// messages; otherwise Exempt (app notes the agent is owed).
-    pub gated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -406,8 +381,6 @@ pub struct HostSent {
     /// Always false: a message no longer waits in Helm behind the running turn. Kept so the
     /// shape of the tool replies does not change.
     pub queued: bool,
-    /// Saved, waiting for a run slot: its 1-based place in the queue ([`crate::runslots`]).
-    pub waiting: Option<usize>,
 }
 
 /// One picture sent with a host send (a photo from the phone): checked and stored exactly like an
@@ -456,7 +429,7 @@ pub fn host_send(rt: &ChatRuntime, s: HostSend<'_>) -> Result<HostSent, ApiError
     host_send_with_images(rt, s, &[])
 }
 
-/// [`host_send`] with pictures attached. Only an ungated send carries them.
+/// [`host_send`] with pictures attached.
 pub fn host_send_with_images(
     rt: &ChatRuntime,
     s: HostSend<'_>,
@@ -465,17 +438,14 @@ pub fn host_send_with_images(
     host_send_with_attachments(rt, s, images, &[])
 }
 
-/// [`host_send`] with pictures and files attached. Only an ungated send carries them. The files
-/// are listed for the agent as the composer's file references are.
+/// [`host_send`] with pictures and files attached. The files are listed for the agent as the
+/// composer's file references are.
 pub fn host_send_with_attachments(
     rt: &ChatRuntime,
     s: HostSend<'_>,
     images: &[HostImage<'_>],
     files: &[HostFile<'_>],
 ) -> Result<HostSent, ApiError> {
-    if s.gated && !(images.is_empty() && files.is_empty()) {
-        return Err(ApiError::bad_args("A gated send carries no attachments."));
-    }
     if s.text.trim().is_empty() {
         return Err(ApiError::bad_args("The message is empty."));
     }
@@ -484,23 +454,11 @@ pub fn host_send_with_attachments(
     }
     let now = helm_core::now_ms();
     let limits = rt.limits().clone();
-    // Only a gated send asks the hold (the usage governor): nothing else can wait.
-    let held = s.gated && rt.slot_hold(now).is_some();
-    let reserved = if s.gated {
-        rt.sh.run_slots.reserved()
-    } else {
-        vec![]
-    };
     let out = rt
         .db()
         .write(|tx| {
             if let Some(existing) = store::get_submission(tx, s.submission_id)? {
-                let waiting = crate::runslots::position(tx, s.submission_id)?;
-                return Ok(Ok((
-                    existing.state != SubmissionState::Queued && waiting.is_none(),
-                    false,
-                    waiting,
-                )));
+                return Ok(Ok((existing.state != SubmissionState::Queued, false)));
             }
             let Some((status, archived)) = chat_status(tx, s.chat_id)? else {
                 return Ok(Err(crate::ops::not_found()));
@@ -512,15 +470,7 @@ pub fn host_send_with_attachments(
                 return Ok(Err(ApiError::new("busy", "That chat is stopping; try again in a moment.")));
             }
             let busy = status.is_busy();
-            // A gated start of an idle chat may wait for a run slot (a running chat's message
-            // joins its turn as before).
-            let wait_head = if s.gated && !busy {
-                let head = crate::runslots::is_head(tx, s.chat_id, s.text)?;
-                crate::runslots::must_wait(tx, s.chat_id, head, held, &reserved)?.then_some(head)
-            } else {
-                None
-            };
-            if !busy && wait_head.is_none() {
+            if !busy {
                 let active: i64 = tx.query_row(
                     "SELECT count(*) FROM chats WHERE status IN ('starting', 'running', 'stopping')",
                     [],
@@ -570,8 +520,6 @@ pub fn host_send_with_attachments(
                     state,
                     origin: s.origin,
                     priority: None,
-                    admission: if s.gated { AdmissionClass::Gated } else { AdmissionClass::Exempt },
-                    attachments: &ids,
                     now,
                 },
             )?;
@@ -591,29 +539,20 @@ pub fn host_send_with_attachments(
                 )?;
             }
             tx.execute("UPDATE chats SET updated_at = ?1 WHERE id = ?2", params![now, s.chat_id])?;
-            if let Some(head) = wait_head {
-                crate::runslots::insert_wait(tx, s.submission_id, s.chat_id, now, head)?;
-                let pos = crate::runslots::position(tx, s.submission_id)?;
-                return Ok(Ok((false, true, pos)));
-            }
-            Ok(Ok((state != SubmissionState::Queued, true, None)))
+            Ok(Ok((state != SubmissionState::Queued, true)))
         })
         .map_err(sql)??;
-    let (dispatch, fresh, waiting) = out;
+    let (dispatch, fresh) = out;
     if fresh && dispatch {
         rt.command(s.chat_id, Cmd::Dispatch(s.submission_id.to_owned()))?;
     }
     if fresh {
         emit_queue(rt, s.chat_id);
         emit_chat(rt, s.chat_id);
-        if waiting.is_some() {
-            rt.wake_slots();
-        }
     }
     Ok(HostSent {
         delivered: dispatch,
-        queued: !dispatch && waiting.is_none(),
-        waiting,
+        queued: !dispatch,
     })
 }
 
@@ -646,8 +585,6 @@ pub fn continuation(rt: &ChatRuntime, chat_id: &str) -> Result<(), ApiError> {
                     state,
                     origin: SubmissionOrigin::App,
                     priority: None,
-                    admission: AdmissionClass::Exempt,
-                    attachments: &[],
                     now,
                 },
             )?;
@@ -1075,77 +1012,4 @@ pub fn chat_set_permission_mode(
         rt.command(&a.chat_id, Cmd::WorkerLine(permission_mode_line(&a.mode)))?;
     }
     Ok(json!({"mode": a.mode}))
-}
-
-#[cfg(test)]
-mod admission_tests {
-    use super::*;
-
-    /// The caller table: every call of the one internal send path, and the class it passes. A new
-    /// caller fails this test until it is added here with its class.
-    const CALLERS: &[(&str, &str)] = &[
-        ("chat_send", "AdmissionClass::Exempt"),
-        (
-            "host_send",
-            "if s.gated { AdmissionClass::Gated } else { AdmissionClass::Exempt }",
-        ),
-        ("continuation", "AdmissionClass::Exempt"),
-    ];
-
-    #[test]
-    fn every_caller_of_the_send_path_states_its_admission_class() {
-        let src = include_str!("submit.rs");
-        let body = src.split("mod admission_tests").next().unwrap();
-        // Every `insert_submission(` that is not its own definition.
-        let calls: Vec<&str> = body
-            .match_indices("insert_submission(")
-            .filter(|(i, _)| !body[..*i].ends_with("fn "))
-            .map(|(i, _)| &body[i..])
-            .collect();
-        assert_eq!(
-            calls.len(),
-            CALLERS.len(),
-            "a caller is missing from the table"
-        );
-        for (call, (name, class)) in calls.iter().zip(CALLERS) {
-            let args = call.split(")?;").next().unwrap();
-            assert!(
-                args.contains(&format!("admission: {class}")),
-                "{name} must pass {class}"
-            );
-        }
-        for (name, _) in CALLERS {
-            assert!(
-                body.contains(&format!("pub fn {name}(")),
-                "{name} is a send path caller"
-            );
-        }
-    }
-
-    #[test]
-    fn a_gated_send_refuses_attachments() {
-        let (_d, db) = crate::schema::tests::temp_db();
-        let chat = db
-            .write(|tx| store::create_chat(tx, "C:/w", None, None, 1))
-            .unwrap();
-        let att = vec!["a1".to_owned()];
-        let r = db.write(|tx| {
-            insert_submission(
-                tx,
-                &NewSubmission {
-                    id: "00000000-0000-4000-8000-000000000001",
-                    chat_id: &chat,
-                    text: "x",
-                    mode: SubmissionMode::Prompt,
-                    state: SubmissionState::Saved,
-                    origin: SubmissionOrigin::Schedule,
-                    priority: None,
-                    admission: AdmissionClass::Gated,
-                    attachments: &att,
-                    now: 1,
-                },
-            )
-        });
-        assert!(r.is_err());
-    }
 }

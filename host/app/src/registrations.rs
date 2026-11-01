@@ -82,9 +82,6 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
         helm_workflow::settings_extension(),
         helm_localmodels::settings_extension(),
     ];
-    if let Some(rt) = services.get::<helm_chats::ChatRuntime>() {
-        extensions.push(helm_chats::slot_settings::extension((*rt).clone()));
-    }
     if let Some(web) = services.get::<helm_webtools::WebSearch>() {
         extensions.push(helm_webtools::settings_extension(web));
     }
@@ -246,7 +243,6 @@ fn consent_tick(
                 text: &d.text,
                 mode: helm_chats::submit::HostSendMode::Queue,
                 origin: helm_chats::types::SubmissionOrigin::App,
-                gated: false,
             },
         );
         match sent {

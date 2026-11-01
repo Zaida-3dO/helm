@@ -37,7 +37,6 @@ impl Probes for RealProbes {
                 tx.query_row(
                     "SELECT archived, status, error,
                             EXISTS(SELECT 1 FROM queued_submissions q WHERE q.chat_id = chats.id)
-                         OR EXISTS(SELECT 1 FROM slot_waits s WHERE s.chat_id = chats.id)
                      FROM chats WHERE id = ?1",
                     [chat_id],
                     |r| {

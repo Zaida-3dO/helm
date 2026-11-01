@@ -2,7 +2,7 @@
 //!
 //! Reads go straight to the database; changes go through the chats crate's own `api` ops (each
 //! takes its own lock, so the tools are `self_locking`), and cross-chat messages through the one
-//! internal send path with origin `other_chat` and admission Gated ([`crate::submit::host_send`]).
+//! internal send path with origin `other_chat` ([`crate::submit::host_send`]).
 //! The calling chat always comes from the worker ([`ToolCtx::caller_chat_id`]); no tool takes
 //! the caller from its arguments.
 
@@ -380,30 +380,6 @@ fn message_arg(a: &Value) -> Result<String, ToolError> {
     Ok(m.to_owned())
 }
 
-/// Whether the calling chat is acting on a message the user sent from Telegram: its current turn
-/// is running and the last message its agent received has origin `telegram`. Only Helm's
-/// Telegram bridge stores that origin, so no other chat can claim it.
-fn serving_telegram(ctx: &ToolCtx) -> bool {
-    db(ctx).is_ok_and(|db| serving_telegram_in(&db, &ctx.caller_chat_id))
-}
-
-fn serving_telegram_in(db: &Database, chat: &str) -> bool {
-    db.snapshot(|tx| {
-        tx.query_row(
-            "SELECT c.status IN ('starting', 'running')
-                    AND COALESCE((SELECT m.origin FROM submissions s
-                         LEFT JOIN submission_meta m ON m.submission_id = s.id
-                         WHERE s.chat_id = c.id
-                           AND s.state IN ('dispatching', 'accepted', 'delivered')
-                         ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1), '') = 'telegram'
-             FROM chats c WHERE c.id = ?1",
-            [chat],
-            |r| r.get::<_, bool>(0),
-        )
-    })
-    .unwrap_or(false)
-}
-
 fn send_framed(
     ctx: &ToolCtx,
     to: &str,
@@ -425,9 +401,6 @@ fn send_framed(
             text: &text,
             mode,
             origin: SubmissionOrigin::OtherChat,
-            // Passing on what the user asked for from Telegram is the user's own request, so it
-            // does not wait for a run slot; any other relayed send does.
-            gated: !serving_telegram(ctx),
         },
     )
     .map_err(|e| ToolError::refused(e.message))
@@ -451,20 +424,14 @@ fn send_message(ctx: &ToolCtx, a: Value, limits: &SendLimits) -> ToolResult {
     limits.admit(&ctx.caller_chat_id, Some(&to), Instant::now())?;
     let sent = send_framed(ctx, &to, &body, mode)?;
     let (title, _) = cut_bytes(target["title"].as_str().unwrap_or(""), 512);
-    let mut out = json!({
+    Ok(json!({
         "delivered": sent.delivered,
         "queued": sent.queued,
         "mode": a["mode"],
         "chatId": to,
         "link": chat_link(&to, None),
         "title": title,
-    });
-    // Waiting for a run slot: the agent is told not to poll or re-send.
-    if let Some(p) = sent.waiting {
-        out["waitingForSlot"] = json!(true);
-        out["position"] = json!(p);
-    }
-    Ok(out)
+    }))
 }
 
 /// How deep `id` already is: 0 for a top-level chat.
@@ -564,21 +531,13 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
         ctx.op("chat_rename", json!({"chatId": id, "title": t}))
             .await?;
     }
-    let sent = match send_framed(&ctx, &id, &body, HostSendMode::Queue) {
-        Ok(s) => s,
-        Err(e) => {
-            // The first message failed: discard the untouched chat.
-            let _ = ctx.op("chat_archive", json!({"chatId": id})).await;
-            let _ = ctx.op("chat_delete", json!({"chatId": id})).await;
-            return Err(e);
-        }
-    };
-    let mut out = meta(&ctx, &id)?;
-    if let Some(p) = sent.waiting {
-        out["waitingForSlot"] = json!(true);
-        out["position"] = json!(p);
+    if let Err(e) = send_framed(&ctx, &id, &body, HostSendMode::Queue) {
+        // The first message failed: discard the untouched chat.
+        let _ = ctx.op("chat_archive", json!({"chatId": id})).await;
+        let _ = ctx.op("chat_delete", json!({"chatId": id})).await;
+        return Err(e);
     }
-    Ok(out)
+    Ok(meta(&ctx, &id)?)
 }
 
 async fn fork_chat(ctx: ToolCtx, a: Value) -> ToolResult {
@@ -817,7 +776,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::write(
             "app_send_message",
-            format!("Send a message to another Helm chat. Helm adds a header naming this chat and a note that the user did not write it. mode is required: steer or queue, which both deliver it into the chat's running turn at the next safe point (queue is the older name for the same thing; nothing waits for the turn to end); an idle chat starts at once either way, unless too many chats are running: then waitingForSlot is true with a position, and it starts by itself when a slot frees, so do not re-send it; end your turn or carry on with other work. delivered means Helm accepted it, not that the other agent acted; do not poll for a reply.{REPORT_BACK}{EXPLICIT}"),
+            format!("Send a message to another Helm chat. Helm adds a header naming this chat and a note that the user did not write it. mode is required: steer or queue, which both deliver it into the chat's running turn at the next safe point (queue is the older name for the same thing; nothing waits for the turn to end); an idle chat starts at once either way; end your turn or carry on with other work. delivered means Helm accepted it, not that the other agent acted; do not poll for a reply.{REPORT_BACK}{EXPLICIT}"),
             obj(
                 json!({
                     "chatId": id,
@@ -833,7 +792,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::write(
             "app_create_chat",
-            format!("Start a new chat in a project and send it a first message (framed like app_send_message). Pass parentChatId to nest it under a chat (at most two levels). Omitted model and effort use the new-chat defaults. waitingForSlot with a position means the first message waits for a run slot and starts by itself: do not poll or re-send.{REPORT_BACK}{LINKS}{EXPLICIT}"),
+            format!("Start a new chat in a project and send it a first message (framed like app_send_message). Pass parentChatId to nest it under a chat (at most two levels). Omitted model and effort use the new-chat defaults.{REPORT_BACK}{LINKS}{EXPLICIT}"),
             obj(
                 json!({
                     "projectId": {"type": "string"},
@@ -1067,38 +1026,6 @@ mod tests {
             "SELECT m.origin FROM submissions s JOIN submission_meta m ON m.submission_id = s.id WHERE s.chat_id = '{b}'"
         ));
         assert_eq!(origins, ["other_chat"]);
-        // A chat passing on what the user asked from Telegram is not gated; only a running turn
-        // whose last delivered message came from Telegram counts. (status, origin, state, want)
-        let c = h.create().await;
-        for (i, (status, origin, state, want)) in [
-            ("running", "telegram", "delivered", true),
-            ("running", "telegram", "queued", false),
-            ("running", "typed", "delivered", false),
-            ("running", "other_chat", "delivered", false),
-            ("idle", "telegram", "complete", false),
-            // A turn the agent started by itself after the Telegram one had settled.
-            ("running", "telegram", "complete", false),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            h.db.write(|tx| {
-                tx.execute("DELETE FROM submissions WHERE chat_id = ?1", [&c])?;
-                tx.execute("UPDATE chats SET status = ?2 WHERE id = ?1", [&c, status])?;
-                tx.execute(
-                    "INSERT INTO submissions(id, chat_id, text, state, created_at)
-                     VALUES ('s-tg', ?1, 'hi', ?2, 1)",
-                    [&c, state],
-                )?;
-                tx.execute(
-                    "INSERT INTO submission_meta(submission_id, origin) VALUES ('s-tg', ?1)",
-                    [origin],
-                )
-                .map(|_| ())
-            })
-            .unwrap();
-            assert_eq!(serving_telegram_in(&h.db, &c), want, "case {i}");
-        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
