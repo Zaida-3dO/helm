@@ -2,6 +2,9 @@
 //!
 //! - **Off by default.** The `autocomplete` preference (`{enabled}`) turns it on; while off, a
 //!   request answers an empty completion and starts nothing.
+//! - **Claude chats only.** A chat on a local model server answers an empty completion and starts
+//!   nothing: the completion is written by a Claude helper, not by the chat's own model, so a local
+//!   chat's draft is never sent to it.
 //! - `autocomplete_suggest {chatId, requestId, draft}` answers `{completion, retryAfterMs?}`. The
 //!   draft is 4–8,000 characters after trimming; the request id is a UUID.
 //! - **Budget per chat**, persisted under `autocompleteBudget:<chat>` and updated in one
@@ -69,6 +72,16 @@ pub fn take_slot(
     Ok(Ok(()))
 }
 
+/// Whether this chat's draft may be completed: the chat is open, and its answers come from Claude
+/// rather than a local model server (a local chat keeps its server id in `provider`).
+pub fn suggestable(tx: &rusqlite::Transaction<'_>, chat_id: &str) -> rusqlite::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1 AND archived = 0 AND provider IS NULL)",
+        [chat_id],
+        |r| r.get(0),
+    )
+}
+
 /// The recent turns sent with the draft.
 pub fn context(tx: &rusqlite::Transaction<'_>, chat_id: &str) -> rusqlite::Result<Vec<Value>> {
     let pick = |role: &str, n: i64| -> rusqlite::Result<Vec<(i64, i64, String)>> {
@@ -118,12 +131,7 @@ pub async fn suggest(
     let prep = rt
         .db()
         .write(|tx| {
-            let open: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1 AND archived = 0)",
-                [&a.chat_id],
-                |r| r.get(0),
-            )?;
-            if !open || !enabled(tx) {
+            if !suggestable(tx, &a.chat_id)? || !enabled(tx) {
                 return Ok(Err(None));
             }
             if let Err(wait) = take_slot(tx, &a.chat_id, now)? {
@@ -204,6 +212,29 @@ mod tests {
         assert_eq!(take(161_000), Ok(()), "the oldest has aged out");
         // Another chat has its own budget.
         assert_eq!(db.write(|tx| take_slot(tx, "c2", 101_000)).unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn only_a_chat_on_claude_is_suggestable() {
+        let (_d, db) = temp_db();
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO chats(id, project_id, created_at, updated_at) VALUES ('claude', 'p', 0, 0), ('put_away', 'p', 0, 0)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO chats(id, project_id, created_at, updated_at, provider, model) VALUES ('local', 'p', 0, 0, 'ollama', 'qwen3:8b')",
+                [],
+            )?;
+            tx.execute("UPDATE chats SET archived = 1 WHERE id = 'put_away'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        // A chat whose model lives on a local server gets nothing: the completion would be written
+        // by a Claude helper, not by that model.
+        for (id, want) in [("claude", true), ("local", false), ("put_away", false), ("missing", false)] {
+            assert_eq!(db.snapshot(|tx| suggestable(tx, id)).unwrap(), want, "{id}");
+        }
     }
 
     #[test]

@@ -395,14 +395,15 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     editor.current?.focus();
   };
 
-  // Autocomplete: 350 ms after typing pauses, only with the window in front and no
-  // skill menu open; the host owns the 10-per-minute budget. Tab accepts while the draft is
+  // Autocomplete: 350 ms after typing pauses, only with the window in front, no skill menu open,
+  // and not for a chat on a local model (the completion is written by a Claude helper, not by the
+  // chat's model); the host owns the 10-per-minute budget. Tab accepts while the draft is
   // unchanged; Escape or any edit drops the suggestion.
   const [ghost, setGhost] = useState<{ base: string; completion: string } | null>(null);
   const asked = useRef<string>('');
   useEffect(() => {
     setGhost((g) => (g && g.base === draftText ? g : null));
-    if (!autocomplete || skillPrefix !== null || draftText.trim().length < 4 || asked.current === draftText) return;
+    if (!autocomplete || isLocalModel(chat.model) || skillPrefix !== null || draftText.trim().length < 4 || asked.current === draftText) return;
     const t = setTimeout(() => {
       if (document.visibilityState !== 'visible' || !document.hasFocus()) return;
       asked.current = draftText;
@@ -415,7 +416,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
         .catch(() => undefined);
     }, 350);
     return () => clearTimeout(t);
-  }, [autocomplete, draftText, skillPrefix, ops, chat.id]);
+  }, [autocomplete, chat.model, draftText, skillPrefix, ops, chat.id]);
   const showText = (t: string) => {
     editor.current?.setText(t);
     saver.edit(t);
