@@ -13,6 +13,9 @@
 //!   records a file or folder (an absolute local path, never its contents) or another chat, and
 //!   answers `{attachmentId, kind: file|folder|chat, name}`. They share the per-message count with
 //!   images; on send the agent gets a section listing them as data ([`refs_section`]).
+//! - A file the host attaches for the user (one sent from the phone) is saved under
+//!   `attachments/<id>/<name>`, its name made safe for Windows ([`safe_file_name`]), and goes in as
+//!   a file reference to that copy ([`put_file`]). A hard delete removes the folder with the chat.
 
 use crate::archive::Refusal;
 use helm_core::db::Database;
@@ -26,6 +29,11 @@ pub const MAX_IMAGE_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_IMAGE_TOTAL: usize = 60 * 1024 * 1024;
 pub const MAX_PIXELS: u64 = 20_000_000;
 pub const MAX_NAME_BYTES: usize = 255;
+/// The most bytes of one file the host saves for a message.
+pub const MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
+/// A saved file's name is cut to this many characters (its extension kept), to stay well inside
+/// Windows' path limit.
+const SAVED_NAME_CHARS: usize = 100;
 pub const MAX_PATH_BYTES: usize = 4096;
 
 /// Width and height from an image header, for the formats Claude accepts.
@@ -489,6 +497,146 @@ pub fn refs_section(refs: &[Ref]) -> Option<String> {
         out.push(s);
     }
     (!out.is_empty()).then(|| out.join("\n\n"))
+}
+
+/// `name` as a file name every Windows folder takes: no path separators or characters Windows
+/// refuses, no control characters, no trailing dots or spaces, never a reserved device name (`nul`,
+/// `con`, `com1`, ..., with or without an extension), cut to [`SAVED_NAME_CHARS`] with its
+/// extension kept. Empty: `file`.
+pub fn safe_file_name(name: &str) -> String {
+    let mut n: String = name
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    n = n.trim().trim_end_matches(['.', ' ']).to_owned();
+    if n.chars().count() > SAVED_NAME_CHARS {
+        let ext: String = match n.rfind('.') {
+            Some(i) if n.len() - i <= 16 => n[i..].to_owned(),
+            _ => String::new(),
+        };
+        let keep = SAVED_NAME_CHARS - ext.chars().count();
+        let stem: String = n.chars().take(keep).collect();
+        n = stem.trim_end_matches(['.', ' ']).to_owned() + &ext;
+    }
+    let stem = n
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_lowercase();
+    let chars: Vec<char> = stem.chars().collect();
+    let numbered = chars.len() == 4
+        && (stem.starts_with("com") || stem.starts_with("lpt"))
+        && (chars[3].is_ascii_digit() || "\u{b9}\u{b2}\u{b3}".contains(chars[3]));
+    let reserved = numbered
+        || matches!(
+            stem.as_str(),
+            "con" | "prn" | "aux" | "nul" | "conin$" | "conout$"
+        );
+    if reserved {
+        n.insert(0, '_');
+    }
+    if n.is_empty() || n.chars().all(|c| c == '.') {
+        n = "file".to_owned();
+    }
+    n
+}
+
+/// Save a file the host attaches for the user (one sent from the phone) where the chat's agent can
+/// read it, `dir/<id>/<safe name>`, and record it as a file reference for the chat's next message.
+pub fn put_file(
+    tx: &Transaction<'_>,
+    dir: &Path,
+    chat_id: &str,
+    name: &str,
+    bytes: &[u8],
+    now: i64,
+) -> rusqlite::Result<Result<Ref, Refusal>> {
+    let open: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1 AND archived = 0)",
+        [chat_id],
+        |r| r.get(0),
+    )?;
+    if !open {
+        return Ok(Err(Refusal::new(
+            "not_found",
+            "That chat does not exist or is archived.",
+        )));
+    }
+    if bytes.len() > MAX_FILE_BYTES {
+        return Ok(Err(Refusal::new(
+            "too_large",
+            "A file can be at most 25 MB.",
+        )));
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let name = safe_file_name(name);
+    let folder = std::path::absolute(dir.join(&id)).unwrap_or_else(|_| dir.join(&id));
+    let path = folder.join(&name);
+    let write = || -> std::io::Result<()> {
+        helm_core::privfs::create_private_dir_all(&folder)?;
+        helm_core::privfs::write_atomic(&path, bytes)
+    };
+    if let Err(e) = write() {
+        let _ = std::fs::remove_dir_all(&folder);
+        return Ok(Err(Refusal::new(
+            "internal",
+            format!("The file could not be saved: {e}"),
+        )));
+    }
+    let shown = path.to_string_lossy();
+    let target = shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_owned();
+    tx.execute(
+        "INSERT INTO chat_attachment_refs(id, chat_id, kind, target, name, created_at)
+         VALUES (?1, ?2, 'file', ?3, ?4, ?5)",
+        params![
+            id,
+            chat_id,
+            target,
+            cut_to_bytes(&name, MAX_NAME_BYTES),
+            now
+        ],
+    )?;
+    Ok(Ok(Ref {
+        id,
+        kind: "file".to_owned(),
+        target,
+        name,
+    }))
+}
+
+/// The folder a file saved by [`put_file`] lives in, as a path under the profile
+/// (`attachments/<id>`). Only the reference [`put_file`] made owns it: the folder must be named by
+/// that reference's own id and sit in this profile's `attachments` folder (`dir`). `None` for any
+/// other reference, such as another chat's saved file attached here by path.
+pub fn saved_folder(ref_id: &str, target: &str, dir: &Path) -> Option<String> {
+    let folder = Path::new(target).parent()?;
+    if folder.file_name()?.to_str()? != ref_id || !is_uuid(ref_id) {
+        return None;
+    }
+    (comparable(folder.parent()?) == comparable(dir)).then(|| format!("attachments/{ref_id}"))
+}
+
+fn is_uuid(s: &str) -> bool {
+    uuid::Uuid::parse_str(s).is_ok_and(|u| u.to_string() == s)
+}
+
+/// A folder's path for comparison: absolute, without the `\\?\` prefix, and on Windows without
+/// regard to case or slash direction.
+fn comparable(p: &Path) -> String {
+    let p = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let s = p.to_string_lossy();
+    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    let s = s.trim_end_matches(['/', '\\']);
+    if cfg!(windows) {
+        s.replace('/', "\\").to_lowercase()
+    } else {
+        s.to_owned()
+    }
 }
 
 /// The `attachment_ref` op (maintenance).

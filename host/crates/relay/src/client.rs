@@ -43,20 +43,20 @@ pub trait Executor: Send + Sync {
     ) -> BoxFut<'a, Result<Value, ToolFailure>>;
 }
 
-/// A picture that came with a Telegram message: base64, as the hub sent it. It prints as its name
-/// and size only, so no log line can carry the picture.
+/// A picture or file that came with a Telegram message: base64, as the hub sent it. It prints as
+/// its name and size only, so no log line can carry its bytes.
 #[derive(Clone, PartialEq)]
-pub struct TelegramImage {
+pub struct TelegramFile {
     pub name: String,
     pub media_type: String,
     pub data: String,
 }
 
-impl std::fmt::Debug for TelegramImage {
+impl std::fmt::Debug for TelegramFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "TelegramImage({}, {}, {} chars)",
+            "TelegramFile({}, {}, {} chars)",
             self.name,
             self.media_type,
             self.data.len()
@@ -69,8 +69,11 @@ impl std::fmt::Debug for TelegramImage {
 pub struct TelegramMessage {
     pub id: String,
     pub text: String,
-    /// Pictures sent with it (a photo, or an image sent as a file).
-    pub images: Vec<TelegramImage>,
+    /// Pictures sent with it that the chat shows (a photo, or an image sent as a file).
+    pub images: Vec<TelegramFile>,
+    /// Any other files sent with it (a document, a video, a recording, a picture the chat cannot
+    /// show).
+    pub files: Vec<TelegramFile>,
     pub sent_at: i64,
     pub age_minutes: Option<i64>,
     pub bot: Option<String>,
@@ -176,15 +179,15 @@ pub struct Client {
     pub reconfigured: tokio::sync::Notify,
 }
 
-/// The most pictures taken from one message.
-const MAX_IMAGES: usize = 10;
+/// The most pictures, and the most other files, taken from one message.
+const MAX_FILES: usize = 10;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// The hub pings every 30 s; a line silent for 100 s is treated as gone.
 const SILENCE: Duration = Duration::from_secs(100);
-/// The most one frame from the hub may hold: a Telegram message can carry a picture of up to 20 MB,
-/// which is a third larger as base64.
-const MAX_FRAME: usize = 32 * 1024 * 1024;
+/// The most one frame from the hub may hold: a Telegram message can carry up to 50 MB of files,
+/// which is a third larger as base64, plus its text.
+const MAX_FRAME: usize = 80 * 1024 * 1024;
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -357,26 +360,29 @@ impl Client {
                 {
                     return;
                 }
-                let msg = TelegramMessage {
-                    id: id.clone(),
-                    text,
-                    images: v
-                        .get("images")
+                let list = |key: &str| -> Vec<TelegramFile> {
+                    v.get(key)
                         .and_then(Value::as_array)
                         .map(|a| {
                             a.iter()
                                 .filter_map(|i| {
                                     let f = |k: &str| i.get(k).and_then(Value::as_str);
-                                    Some(TelegramImage {
+                                    Some(TelegramFile {
                                         name: f("name")?.to_owned(),
                                         media_type: f("mediaType")?.to_owned(),
                                         data: f("data")?.to_owned(),
                                     })
                                 })
-                                .take(MAX_IMAGES)
+                                .take(MAX_FILES)
                                 .collect()
                         })
-                        .unwrap_or_default(),
+                        .unwrap_or_default()
+                };
+                let msg = TelegramMessage {
+                    id: id.clone(),
+                    text,
+                    images: list("images"),
+                    files: list("files"),
                     sent_at: v.get("sentAt").and_then(Value::as_i64).unwrap_or(0),
                     age_minutes: v.get("ageMinutes").and_then(Value::as_i64),
                     bot: s("bot"),
@@ -590,11 +596,14 @@ mod tests {
         let ack = next(&mut ws).await;
         assert_eq!(ack, json!({"type": "telegram_ack", "id": "m1"}));
         assert_eq!(sink.got.lock().unwrap()[0].age_minutes, Some(3));
-        // A message with a picture far larger than any other frame still arrives, picture and all.
+        // A message with files far larger than any other frame still arrives, files and all (50 MB
+        // of them as base64, the most the hub sends).
         let big = "A".repeat(1_000_000);
+        let pdf = "B".repeat(50 * 1024 * 1024 / 3 * 4);
         ws.send(Message::Text(
             json!({"type": "telegram", "id": "m2", "text": "look",
-            "images": [{"name": "photo.jpg", "mediaType": "image/jpeg", "data": big}]})
+            "images": [{"name": "photo.jpg", "mediaType": "image/jpeg", "data": big}],
+            "files": [{"name": "report.pdf", "mediaType": "application/pdf", "data": pdf}]})
             .to_string()
             .into(),
         ))
@@ -609,6 +618,14 @@ mod tests {
         assert_eq!(
             (got[0].media_type.as_str(), got[0].data.len()),
             ("image/jpeg", 1_000_000)
+        );
+        let files = sink.got.lock().unwrap()[1].files.clone();
+        assert_eq!(
+            files
+                .iter()
+                .map(|f| (f.name.as_str(), f.data.len()))
+                .collect::<Vec<_>>(),
+            [("report.pdf", pdf.len())]
         );
         assert!(
             !format!("{got:?}").contains("AAAA"),

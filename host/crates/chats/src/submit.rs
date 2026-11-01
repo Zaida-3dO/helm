@@ -422,7 +422,18 @@ pub struct HostImage<'a> {
 /// caller can send the message again without it.
 pub const IMAGE_REFUSED: &str = "image_refused";
 
-/// Forget pictures stored for a send that is not made after all.
+/// One file sent with a host send (a document or recording from the phone): saved where the chat's
+/// agent can read it, and attached by reference like a file the user attaches in the composer.
+pub struct HostFile<'a> {
+    pub name: &'a str,
+    pub bytes: &'a [u8],
+}
+
+/// Code of the error a host send answers when a file cannot be saved (its text says why), so the
+/// caller can send the message again without its files.
+pub const FILE_REFUSED: &str = "file_refused";
+
+/// Forget pictures and files stored for a send that is not made after all.
 fn drop_stored(
     tx: &Transaction<'_>,
     dir: &std::path::Path,
@@ -430,7 +441,13 @@ fn drop_stored(
 ) -> rusqlite::Result<()> {
     for id in ids {
         tx.execute("DELETE FROM chat_attachments WHERE id = ?1", [id])?;
-        let _ = std::fs::remove_file(dir.join(id));
+        tx.execute("DELETE FROM chat_attachment_refs WHERE id = ?1", [id])?;
+        let path = dir.join(id);
+        let _ = if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
     }
     Ok(())
 }
@@ -445,7 +462,18 @@ pub fn host_send_with_images(
     s: HostSend<'_>,
     images: &[HostImage<'_>],
 ) -> Result<HostSent, ApiError> {
-    if s.gated && !images.is_empty() {
+    host_send_with_attachments(rt, s, images, &[])
+}
+
+/// [`host_send`] with pictures and files attached. Only an ungated send carries them. The files
+/// are listed for the agent as the composer's file references are.
+pub fn host_send_with_attachments(
+    rt: &ChatRuntime,
+    s: HostSend<'_>,
+    images: &[HostImage<'_>],
+    files: &[HostFile<'_>],
+) -> Result<HostSent, ApiError> {
+    if s.gated && !(images.is_empty() && files.is_empty()) {
         return Err(ApiError::bad_args("A gated send carries no attachments."));
     }
     if s.text.trim().is_empty() {
@@ -519,6 +547,19 @@ pub fn host_send_with_images(
                     }
                 }
             }
+            let mut refs = Vec::new();
+            for f in files {
+                match crate::attachments::put_file(tx, &dir, s.chat_id, f.name, f.bytes, now)? {
+                    Ok(r) => {
+                        ids.push(r.id.clone());
+                        refs.push(r);
+                    }
+                    Err(r) => {
+                        drop_stored(tx, &dir, &ids)?;
+                        return Ok(Err(ApiError::new(FILE_REFUSED, r.message)));
+                    }
+                }
+            }
             insert_submission(
                 tx,
                 &NewSubmission {
@@ -538,8 +579,16 @@ pub fn host_send_with_images(
                 if let Err(r) = crate::attachments::link(tx, s.chat_id, s.submission_id, &ids)? {
                     tx.execute("DELETE FROM submissions WHERE id = ?1", [s.submission_id])?;
                     drop_stored(tx, &dir, &ids)?;
-                    return Ok(Err(ApiError::new(IMAGE_REFUSED, r.message)));
+                    let code = if refs.is_empty() { IMAGE_REFUSED } else { FILE_REFUSED };
+                    return Ok(Err(ApiError::new(code, r.message)));
                 }
+            }
+            // The files are listed for the agent beside the prompt, as data.
+            if let Some(section) = crate::attachments::refs_section(&refs) {
+                tx.execute(
+                    "INSERT INTO submission_context(submission_id, text) VALUES (?1, ?2)",
+                    params![s.submission_id, section],
+                )?;
             }
             tx.execute("UPDATE chats SET updated_at = ?1 WHERE id = ?2", params![now, s.chat_id])?;
             if let Some(head) = wait_head {

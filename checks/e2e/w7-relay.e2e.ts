@@ -6,8 +6,9 @@
 //       tool off the hub's list never run;
 // - R3  app_send_message lands in the chat framed as another agent's, never as the user's;
 // - R4  the allowed Telegram user is forwarded (no offline reply); a stranger gets nothing;
-// - R4b a photo with a caption reaches the Telegram chat as an image the chat can see, and a
-//       picture Helm cannot read (a GIF) is refused on Telegram in plain words;
+// - R4b a photo with a caption reaches the Telegram chat as an image the chat can see; an album
+//       of other files (a PDF and a GIF) arrives as one message with both saved where the agent
+//       can read them; a file over the Bot API's 20 MB download limit is refused in plain words;
 // - R5  with Helm gone, a call answers "Helm offline, nothing sent or changed".
 //
 // Run: `npm run build:debug` at the root and `cargo build` in hub/, then
@@ -18,6 +19,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import path from "node:path";
+import fs from "node:fs";
 import { after, before, describe, test } from "node:test";
 import { startFakeTelegram, type FakeTelegram } from "../../fakes/telegram/server.ts";
 import { api, dispose, launchApp, newChat, openChat, REPO, scratchDir, tid, waitText, type App } from "./harness.ts";
@@ -151,22 +153,24 @@ describe("the hub line, forwarding and the Telegram bot", { timeout: 10 * 60_000
     assert.ok(landed.id, "a Telegram chat holds it");
   });
 
-  test("R4b: a photo arrives as an image in the Telegram chat; a GIF is refused on Telegram", async () => {
+  test("R4b: a photo arrives as an image, an album of files as one message; too large is refused", async () => {
     // A real 1x1 PNG: the chat shows a thumbnail of what arrived.
     const png = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
       "base64",
     );
-    // Let the chat finish R4's turn first: a picture sent into a turn that is still starting is
+    // Let the chat finish its turn first: a message sent into a turn that is still starting is
     // steered in, and its row only shows once Claude reads it (a slow start would time this out).
-    await until(
-      "the Telegram chat to finish its first turn",
-      async () => {
-        const all = (await api(app!.page, "chat_list", {})) as Json[];
-        return all.some((c) => String(c.title).startsWith("Telegram ") && c.status === "idle") || undefined;
-      },
-      90_000,
-    );
+    const idle = (what: string) =>
+      until(
+        what,
+        async () => {
+          const all = (await api(app!.page, "chat_list", {})) as Json[];
+          return all.some((c) => String(c.title).startsWith("Telegram ") && c.status === "idle") || undefined;
+        },
+        90_000,
+      );
+    await idle("the Telegram chat to finish its first turn");
     tg!.picture(ALLOWED_USER, png, { caption: "what colour is this?", as: "file", mime: "image/png" });
     const telegramChat = await until("the Telegram chat", async () => {
       const all = (await api(app!.page, "chat_list", {})) as Json[];
@@ -175,12 +179,30 @@ describe("the hub line, forwarding and the Telegram bot", { timeout: 10 * 60_000
     await openChat(app!.page, String(telegramChat.id));
     await waitText(app!.page, "what colour is this?");
     await app!.page.locator(tid("message-image")).first().waitFor({ timeout: 20_000 });
-    // A GIF is not passed on: the user is told why, in plain words, and Helm hears nothing.
-    tg!.picture(ALLOWED_USER, Buffer.concat([Buffer.from("GIF89a"), Buffer.from([1, 0, 1, 0])]), { as: "file", mime: "image/gif" });
+    // An album: a PDF and a GIF sent together arrive as one message, both saved under their own
+    // names where the agent can read them.
+    await idle("the Telegram chat to finish the picture's turn");
+    const pdf = Buffer.from("%PDF-1.4 e2e");
+    const gif = Buffer.concat([Buffer.from("GIF89a"), Buffer.from([1, 0, 1, 0])]);
+    tg!.file(ALLOWED_USER, pdf, { name: "report.pdf", mime: "application/pdf", caption: "the e2e album", group: "e2e-album" });
+    tg!.file(ALLOWED_USER, gif, { name: "dance.gif", mime: "image/gif", group: "e2e-album" });
+    await waitText(app!.page, "the e2e album", 30_000);
+    await waitText(app!.page, `[File] report.pdf, ${pdf.length} bytes`);
+    await waitText(app!.page, `[File] dance.gif, ${gif.length} bytes`);
+    const saved = (name: string) =>
+      fs
+        .readdirSync(path.join(profile, "attachments"))
+        .map((d) => path.join(profile, "attachments", d, name))
+        .find((f) => fs.existsSync(f));
+    assert.deepEqual(fs.readFileSync(saved("report.pdf")!), pdf);
+    assert.deepEqual(fs.readFileSync(saved("dance.gif")!), gif);
+    // Over the Bot API's download limit: the user is told why, in plain words, and Helm hears
+    // nothing.
+    tg!.file(ALLOWED_USER, Buffer.alloc(21 * 1024 * 1024), { name: "big.zip", mime: "application/zip" });
     const told = await until("the refusal on Telegram", () =>
-      tg!.chat(ALLOWED_USER).find((m) => m.text.startsWith("That picture was not sent to Helm: ")),
+      tg!.chat(ALLOWED_USER).find((m) => m.text.startsWith("big.zip was not sent to Helm: ")),
     );
-    assert.match(told.text, /only still PNG, JPEG and WebP pictures, and this is a GIF/);
+    assert.match(told.text, /larger than 20 MB, the most a Telegram bot can download/);
   });
 
   test("R5: with Helm gone, a call answers offline and nothing is sent", async () => {

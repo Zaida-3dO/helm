@@ -31,9 +31,11 @@ ENVIRONMENT:
                               them to /telegram/update with a telegram-scope token
   HUB_TELEGRAM_STT_URL        an OpenAI-compatible speech-to-text endpoint for voice
                               notes, e.g. http://<host>:<port>/v1/audio/transcriptions;
-                              unset: voice notes are off
+                              unset: recordings go without a transcript
   HUB_TELEGRAM_STT_MODEL      the model it is asked for (default large-v3-turbo)
-  HUB_TELEGRAM_STT_LANGUAGE   the language of the voice notes (default en)";
+  HUB_TELEGRAM_STT_LANGUAGE   the language of the voice notes (default en)
+  HUB_TELEGRAM_STT_TIMEOUT_MINUTES
+                              how long one transcription may take (1-60, default 10)";
 
 fn db_path() -> PathBuf {
     std::env::var_os("HUB_DB")
@@ -201,7 +203,7 @@ fn serve() -> ExitCode {
         };
         if let Some(bridge) = bridge {
             eprintln!(
-                "telegram: on, {} allowed user(s), {}; voice notes {}",
+                "telegram: on, {} allowed user(s), {}; transcription {}",
                 telegram.allowed.len(),
                 match telegram.receive {
                     Receive::Poll => "polling for updates",
