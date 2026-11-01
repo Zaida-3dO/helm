@@ -70,6 +70,42 @@ test("Claude Code reaches host tools through the helm MCP server, attributed per
   }
 });
 
+test("the duplicate-server hook keeps the redirect for the chat's own agent and lets a sub-agent's native call through", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-dup-mcp-"));
+  const s = startWithFixture("duplicate-mcp", { launch: { hostTools: [], chatToolsDirectory: dir } });
+  try {
+    await s.host.ready();
+    // Helm has both of these; Claude Code loaded its own copy of each under the same name.
+    s.host.send({
+      type: "mcp_config",
+      revision: "r1",
+      servers: [
+        { id: "agent_standup", name: "Agent Standup", transport: "stdio" },
+        { id: "memory", name: "Memory", transport: "stdio" },
+      ],
+    });
+    assert.equal((await prompt(s.host, "go")).success, true);
+    await s.host.waitForType("agent_settled");
+    const answers = s
+      .received()
+      .filter((r) => r.type === "control_response" && String((r.response as Json)?.request_id ?? "").startsWith("fake-hook-"))
+      .map((r) => (((r.response as Json).response as Json) ?? {}) as Json);
+    assert.equal(answers.length, 6, "one answer per native MCP call");
+    assert.deepEqual(
+      answers.map((a) => (a.hookSpecificOutput as Json | undefined)?.permissionDecision ?? "allow"),
+      ["deny", "allow", "allow", "deny", "allow", "allow"],
+      "only the chat's own agent is refused: a sub-agent's call (by its agent id, and by a tool call id recorded from its stream) goes through, on every duplicated server; a server only Claude Code has is untouched",
+    );
+    const reason = (answers[0].hookSpecificOutput as Json).permissionDecisionReason as string;
+    assert.match(reason, /Agent Standup is also set up in Helm/);
+    assert.match(reason, /app_mcp_tools \(server "agent_standup"\).*app_mcp_call/, "the redirect names Helm's copy");
+    assert.match((answers[3].hookSpecificOutput as Json).permissionDecisionReason as string, /\(server "memory"\)/, "the rule is not limited to one server");
+  } finally {
+    await s.done();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("without hostTools the launch is unchanged: no helm server, no hook", async () => {
   const s = startWithFixture("tool-call");
   try {

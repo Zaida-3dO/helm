@@ -1,0 +1,15 @@
+{
+  "description": "Native MCP calls while a server Helm also has is configured: the chat's own agent is refused and redirected to Helm's copy, a sub-agent's call is let through (once by its agent id, once by a tool call id recorded from its stream), a duplicate of a different server behaves the same, and a server only Claude Code has is never touched. The sub-agent's tool call id is recorded by the assistant record that carries its parent.",
+  "steps": [
+    { "await": { "type": "user" }, "as": "p" },
+    { "init": {} },
+    { "hook": { "toolUseId": "d1", "tool": "mcp__agent-standup__list_items", "input": {}, "callback": "helm-duplicate-mcp" }, "as": "root_standup" },
+    { "hook": { "toolUseId": "d2", "tool": "mcp__agent-standup__list_items", "input": {}, "callback": "helm-duplicate-mcp", "agent": "sub-1" }, "as": "child_by_agent_id" },
+    { "tool": { "id": "d3", "name": "mcp__agent-standup__record", "input": { "itemId": "x" }, "parent": "sa_1" } },
+    { "hook": { "toolUseId": "d3", "tool": "mcp__agent-standup__record", "input": { "itemId": "x" }, "callback": "helm-duplicate-mcp" }, "as": "child_by_tool_id" },
+    { "hook": { "toolUseId": "d4", "tool": "mcp__memory__search", "input": {}, "callback": "helm-duplicate-mcp" }, "as": "root_other_server" },
+    { "hook": { "toolUseId": "d5", "tool": "mcp__memory__search", "input": {}, "callback": "helm-duplicate-mcp", "agent": "sub-1" }, "as": "child_other_server" },
+    { "hook": { "toolUseId": "d6", "tool": "mcp__github__search", "input": {}, "callback": "helm-duplicate-mcp" }, "as": "native_only" },
+    { "result": "done" }
+  ]
+}
