@@ -110,7 +110,7 @@ function AssistantBody({ row, ctx, hideThinking }: { row: MessageRow; ctx: RowCo
   );
 }
 
-export const Row = memo(function Row({ row, ctx, final, afterTool, indent, afterFold, hideThinking, beforeTool, turnMs }: { row: MessageRow; ctx: RowContext; turnMs?: number } & RowFlags) {
+export const Row = memo(function Row({ row, ctx, final, afterTool, indent, afterFold, hideThinking, beforeTool, noticeLive, turnMs }: { row: MessageRow; ctx: RowContext; turnMs?: number } & RowFlags) {
   const retry = row.details?.retry;
   const common = { 'data-testid': 'transcript-row', 'data-status': row.status, 'data-role': row.role, 'data-row-id': row.id };
   const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}${afterFold ? ' after-fold' : ''}${beforeTool ? ' before-tool' : ''}`;
@@ -169,7 +169,10 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
     // plain text, not the muted side note the other context rows are.
     const notice = kind === 'notice';
     return (
-      <div className={`row row-context${notice ? ' row-notice' : ''}${place}`} {...common} role={notice ? 'status' : undefined}>
+      // Only the newest notice is a live region (noticeLive, set by the layout): the list mounts rows
+      // as the reader scrolls, and a live region is announced when it appears, so marking every old
+      // notice would re-read the chat's history of refusals each time a row scrolls into view.
+      <div className={`row row-context${notice ? ' row-notice' : ''}${place}`} {...common} role={notice && noticeLive ? 'status' : undefined}>
         <span className="context-label">{label}</span>
         {row.text && <span className={notice ? 'context-notice-text' : 'muted'}> · {row.text}</span>}
       </div>

@@ -146,6 +146,18 @@ test('context, retry and interrupted rows stay visible', () => {
   assert.deepEqual(shape(layout(rows, false)), [1, 'fold[4]', 2, 3, 8, 5]);
 });
 
+test('only the newest notice is a live region, and only while it is the transcript's last row', () => {
+  const live = (items: Item[]) => items.flatMap((i) => (i.kind === 'row' && i.noticeLive ? [i.row.id] : []));
+  const notice = (id: number) => row({ id, role: 'context', text: 'Model could not load' });
+  // The transcript ends on the notice: it is the live one.
+  assert.deepEqual(live(layout([row({ id: 1, role: 'user' }), notice(2)], false)), [2]);
+  // Once anything follows it, it is just history: no live region anywhere.
+  assert.deepEqual(live(layout([row({ id: 1, role: 'user' }), notice(2), row({ id: 3, role: 'assistant', text: 'reply' })], false)), []);
+  assert.deepEqual(live(layout([notice(1), row({ id: 2, role: 'user' }), notice(3), row({ id: 4, role: 'user' })], false)), []);
+  // Other context rows are never live regions, even at the end.
+  assert.deepEqual(live(layout([row({ id: 1, role: 'user' }), row({ id: 2, role: 'context', text: 'switched model', details: { contextKind: 'modelChange' } })], false)), []);
+});
+
 test('formatElapsed', () => {
   assert.equal(formatElapsed(4_400), '4s');
   assert.equal(formatElapsed(65_000), '1m 5s');

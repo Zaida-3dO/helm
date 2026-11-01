@@ -28,6 +28,8 @@ export interface RowFlags {
   hideThinking?: boolean;
   /** In an opened turn, a note straight above a tool row: its bottom padding is tightened. */
   beforeTool?: boolean;
+  /** The newest notice, and the transcript's last row: the only notice row that is a live region. */
+  noticeLive?: boolean;
 }
 
 export type Item =
@@ -51,6 +53,11 @@ export type Item =
 /** A steer read mid-turn belongs to the running turn; only other user rows open a new turn. */
 function opensTurn(r: MessageRow): boolean {
   return r.role === 'user' && r.details?.mode !== 'steer';
+}
+
+/** A notice row: what a refusal or a give-back leaves in the transcript (the default kind). */
+function isNoticeRow(r: MessageRow): boolean {
+  return r.role === 'context' && (r.details?.contextKind ?? 'notice') === 'notice';
 }
 
 /** An assistant row with nothing to show (the host saves each tool call's message as one). */
@@ -189,7 +196,14 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
       shownIdx.forEach((j) => push(work[j]!, j, false, hidden.has(j)));
     }
   }
-  return groupAgents(items);
+  const laid = groupAgents(items);
+  // Only the newest notice is a live region for screen readers, and only while it is still the
+  // transcript's last row. The list mounts rows as the reader scrolls, and a live region is read
+  // out when it is inserted: making every old notice live would announce the chat's whole history
+  // of refusals over again.
+  const last = laid[laid.length - 1];
+  if (last?.kind === 'row' && isNoticeRow(last.row)) last.noticeLive = true;
+  return laid;
 }
 
 export function formatElapsed(ms: number): string {
