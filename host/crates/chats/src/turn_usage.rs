@@ -101,3 +101,52 @@ pub fn baseline(tx: &Transaction<'_>, session: &str) -> rusqlite::Result<Option<
         .optional()?;
     Ok(raw.and_then(|r| serde_json::from_str(&r).ok()))
 }
+
+/// What the chat's conversation now holds in its context, and when it was measured: the input,
+/// cache-read and cache-write counts Claude Code reported as running totals after the chat's
+/// newest turn (a local chat's turns report them the same way), with that turn's time. `None`
+/// when no turn of the chat has reported usage. This is the same reading the token chip, the
+/// context bar and the model-switch capacity check use, so an answer from a tool never
+/// disagrees with what the chat shows.
+pub fn context_reported_at(tx: &Transaction<'_>, chat_id: &str) -> Option<(u64, i64)> {
+    let row: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT running, timestamp FROM chat_turn_usage WHERE chat_id = ?1
+             ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+            [chat_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .ok()?;
+    let (raw, at) = row?;
+    let u: Value = serde_json::from_str(&raw).ok()?;
+    let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Some((n("inputTokens") + n("cacheReadTokens") + n("cacheWriteTokens"), at))
+}
+
+/// The context window a Claude model id gets: the ids that name the longer window take it
+/// (a million tokens), everything else the standard two hundred thousand. Helm's own working
+/// figure — a size rule only ever needs a close enough bound, and the binary's model names are
+/// not asked for their windows.
+pub fn claude_window(model_id: &str) -> u64 {
+    if model_id.to_ascii_lowercase().contains("[1m]") {
+        1_000_000
+    } else {
+        200_000
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_working_window_rule_reads_the_model_id() {
+        assert_eq!(claude_window("claude-fable-5.5[1m]"), 1_000_000);
+        assert_eq!(claude_window("Claude-Opus-9.9[1M]"), 1_000_000);
+        assert_eq!(claude_window("claude-fable-5.5"), 200_000);
+        // Nothing to switch on, and the picker's placeholder.
+        assert_eq!(claude_window(""), 200_000);
+        assert_eq!(claude_window("default"), 200_000);
+    }
+}

@@ -78,7 +78,28 @@ impl ProcessReader {
 
 impl PlanReader for ProcessReader {
     fn read(&self) -> ControlAnswer {
-        let mut job = json!({ "kind": "plan", "timeoutMs": HELPER_TIMEOUT_MS });
+        self.read_job(HELPER_TIMEOUT_MS, HOST_TIMEOUT)
+    }
+
+    /// A read for a caller with its own deadline: the helper's own cutoff drops to `at_most` less
+    /// the node start-up it does not count, and the host waits a little longer still, so a helper
+    /// that stays up past its cutoff is the one cut off, not the caller.
+    fn read_within(&self, at_most: Duration) -> ControlAnswer {
+        let helper_ms = (at_most.as_millis() as u64)
+            .saturating_sub(STARTUP_SLACK_MS)
+            .max(3_000)
+            .min(HELPER_TIMEOUT_MS);
+        self.read_job(helper_ms, at_most + Duration::from_secs(2))
+    }
+}
+
+/// Time the helper's own start-up (node loading the script) takes over the binary answer the job's
+/// `timeoutMs` measures.
+const STARTUP_SLACK_MS: u64 = 4_000;
+
+impl ProcessReader {
+    fn read_job(&self, helper_timeout_ms: u64, host_wait: Duration) -> ControlAnswer {
+        let mut job = json!({ "kind": "plan", "timeoutMs": helper_timeout_ms });
         let (runtime, _) = ClaudeRuntime::load(&self.profile_dir);
         if let Some(t) = test_claude(
             self.debug,
@@ -89,7 +110,7 @@ impl PlanReader for ProcessReader {
         } else if !runtime.executable.is_empty() {
             job["command"] = Value::String(runtime.executable);
         }
-        match self.run_job(&job, HOST_TIMEOUT) {
+        match self.run_job(&job, host_wait) {
             Ok(v) => parse_answer(&v),
             Err(e) => failed("error", e),
         }

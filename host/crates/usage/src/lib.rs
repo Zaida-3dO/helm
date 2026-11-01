@@ -11,7 +11,7 @@
 //! | [`service`] | the cadence (launch, 10 min while visible, Refresh; 60 s floor) and readiness |
 //! | [`helper`] | starting `helpers/usage` |
 //! | [`modes`] | Request modes: Fast / Standard / unknown counts from Helm's native transcripts |
-//! | [`summary`] | the `app_usage_summary` host tool: tokens and cost by model, day and chat |
+//! | [`summary`] | the `app_usage_summary` host tool: tokens and cost by model, day and chat, the meter's plan windows, and one chat's share, context size and tree |
 //! | [`prices`] | what local tokens would have cost on Claude, in one small price table |
 //! | [`lines`] | the `plan_usage` worker line, through the host-tools registry |
 //! | `ops` | `usage_get`, `usage_refresh` and `request_modes` |

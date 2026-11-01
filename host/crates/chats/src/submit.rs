@@ -703,9 +703,15 @@ fn check_model_capacity(
         Some(w) => w,
         None => return Ok(()), // nothing trustworthy to compare against: no size rule applies
     };
-    let here = match conversation_tokens(rt, chat_id) {
-        Some(n) => n,
-        None => return Ok(()), // no turn has reported usage: nothing measured to refuse over
+    let here = match rt
+        .db()
+        .snapshot::<_, rusqlite::Error>(|t| Ok(crate::turn_usage::context_reported_at(t, chat_id)))
+        .ok()
+        .flatten()
+    {
+        Some((n, _)) => n,
+        // No turn has reported usage: nothing measured to refuse over.
+        None => return Ok(()),
     };
     if here <= window {
         return Ok(());
@@ -719,42 +725,16 @@ fn check_model_capacity(
 }
 
 /// The context window the chosen model gets. A local model's is the figure its server reports;
-/// nothing else to go by, `None` when the server does not say. A Claude model: the ids that name
-/// the longer window take it, everything else the standard one (Helm's own working figure —
-/// a size rule only ever needs a close enough bound).
+/// nothing else to go by, `None` when the server does not say. A Claude model: Helm's own working
+/// figure ([`crate::turn_usage::claude_window`]).
 fn target_window(rt: &ChatRuntime, model_id: &str) -> Option<u64> {
     match crate::local::split(model_id) {
         Some(_) => rt
             .local_models()
             .and_then(|l| l.catalogue(false).into_iter().find(|m| m.id == model_id))
             .and_then(|m| m.context_tokens),
-        None => Some(if model_id.to_ascii_lowercase().contains("[1m]") {
-            1_000_000
-        } else {
-            200_000
-        }),
+        None => Some(crate::turn_usage::claude_window(model_id)),
     }
-}
-
-/// How much context the chat's conversation now holds: what Claude Code reported as its running
-/// totals after the newest turn (a local chat's turns report them the same way). `None` when no
-/// turn has reported usage.
-fn conversation_tokens(rt: &ChatRuntime, chat_id: &str) -> Option<u64> {
-    let raw: Option<String> = rt
-        .db()
-        .snapshot(|t| {
-            t.query_row(
-                "SELECT running FROM chat_turn_usage WHERE chat_id = ?1
-                 ORDER BY timestamp DESC, rowid DESC LIMIT 1",
-                [chat_id],
-                |r| r.get(0),
-            )
-            .optional()
-        })
-        .ok()?;
-    let u = raw.and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())?;
-    let n = |k: &str| u.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-    Some(n("inputTokens") + n("cacheReadTokens") + n("cacheWriteTokens"))
 }
 
 /// `chat_set_model`: store the choice, note it in the transcript (with the agent's stated reason

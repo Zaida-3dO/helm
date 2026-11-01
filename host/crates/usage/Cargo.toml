@@ -11,13 +11,13 @@ helm-core.workspace = true
 helm-ipc.workspace = true
 helm-workers.workspace = true
 helm-hosttools = { path = "../hosttools" }
+helm-chats.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
 log.workspace = true
-chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-helm-chats.workspace = true

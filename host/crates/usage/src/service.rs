@@ -48,6 +48,26 @@ pub enum ControlAnswer {
 /// Runs one control read. The app's reader starts the helper; tests supply their own.
 pub trait PlanReader: Send + Sync {
     fn read(&self) -> ControlAnswer;
+
+    /// One control read cut off at `at_most`, for a caller with its own deadline (the agent tool's
+    /// fresh reading). The default ignores the deadline and runs the ordinary read.
+    fn read_within(&self, at_most: std::time::Duration) -> ControlAnswer {
+        let _ = at_most;
+        self.read()
+    }
+}
+
+/// What asking for a fresh reading on the spot came down to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FreshOutcome {
+    /// A control read ran there and answered.
+    Read,
+    /// The read ran but the binary did not give numbers; the snapshot's readiness says why.
+    Failed,
+    /// One was running already, so nothing new was started.
+    InProgress,
+    /// The 60 s floor forbade another read yet; the snapshot may be seconds old.
+    TooSoon,
 }
 
 fn window(v: &Value) -> Option<(Option<f64>, Option<i64>)> {
@@ -229,6 +249,49 @@ impl UsageService {
     pub fn refresh(self: &Arc<Self>, now: i64) -> UsageSnapshot {
         self.start_read(now, true);
         self.snapshot(now)
+    }
+
+    /// Ask the binary for a reading now, on the calling thread, and answer with the snapshot that
+    /// results (and what the ask came down to). The floor still holds and two reads never overlap;
+    /// the reader is asked with `at_most` so a helper that cannot answer in time is cut off and the
+    /// caller keeps its own deadline.
+    pub fn fresh_read(
+        self: &Arc<Self>,
+        now: i64,
+        at_most: std::time::Duration,
+    ) -> (UsageSnapshot, FreshOutcome) {
+        if !self.claim(now) {
+            let st = self.lock();
+            let outcome = if st.running {
+                FreshOutcome::InProgress
+            } else {
+                FreshOutcome::TooSoon
+            };
+            return (snapshot_of(&st, now), outcome);
+        }
+        let answer = self.reader.read_within(at_most);
+        let failed = matches!(answer, ControlAnswer::Failed { .. });
+        self.finish_control(answer, now);
+        let outcome = if failed {
+            FreshOutcome::Failed
+        } else {
+            FreshOutcome::Read
+        };
+        (self.snapshot(now), outcome)
+    }
+
+    /// Take the slot for one floor-checked read: true when none runs and the floor allows, marking
+    /// the attempt so the next one waits.
+    fn claim(&self, now: i64) -> bool {
+        let mut st = self.lock();
+        let due = st.last_attempt.is_none_or(|t| now - t >= MIN_GAP_MS);
+        if st.running || !due {
+            false
+        } else {
+            st.running = true;
+            st.last_attempt = Some(now);
+            true
+        }
     }
 
     /// Start a read unless one is running (and, for `floor`, unless the 60 s floor forbids it).
@@ -504,6 +567,56 @@ mod tests {
                 .as_ref()
                 .is_some_and(|r| r.five_hour.as_ref().unwrap().pct == Some(9.0))
         });
+        assert_eq!(reader.calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// The agent tool's `fresh` ask: one read on the spot, the floor it sets applies to the meter
+    /// as well, and inside the floor the ask answers with what is on hand instead of reading.
+    #[test]
+    fn a_fresh_read_answers_on_the_spot_and_keeps_the_floor() {
+        let (svc, reader, _sink, _d) = service(vec![reading(7.0), reading(9.0)]);
+        let t0 = 1_000_000;
+        let budget = std::time::Duration::from_secs(1);
+        let (snap, outcome) = svc.fresh_read(t0, budget);
+        assert_eq!(outcome, FreshOutcome::Read);
+        assert_eq!(
+            snap.reading
+                .as_ref()
+                .unwrap()
+                .five_hour
+                .as_ref()
+                .unwrap()
+                .pct,
+            Some(7.0),
+            "the answer arrives in the call, not later as an event"
+        );
+        assert!(!snap.refreshing);
+        assert_eq!(reader.calls.load(Ordering::SeqCst), 1);
+        // Inside the floor a second ask reads nothing and says so, with the numbers it has.
+        let (snap2, outcome2) = svc.fresh_read(t0 + 1, budget);
+        assert_eq!(outcome2, FreshOutcome::TooSoon);
+        assert_eq!(reader.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            snap2
+                .reading
+                .as_ref()
+                .unwrap()
+                .five_hour
+                .as_ref()
+                .unwrap()
+                .pct,
+            Some(7.0)
+        );
+        assert_eq!(snap2.next_refresh_at, Some(t0 + MIN_GAP_MS));
+        // The tool's read moved the meter's floor too: the UI's Refresh is refused inside it.
+        assert!(!svc.refresh(t0 + MIN_GAP_MS - 1).refreshing);
+        // Past the floor it reads again.
+        let (snap3, outcome3) = svc.fresh_read(t0 + MIN_GAP_MS, budget);
+        assert_eq!(outcome3, FreshOutcome::Read);
+        assert_eq!(
+            snap3.reading.unwrap().five_hour.unwrap().pct,
+            Some(9.0)
+        );
         assert_eq!(reader.calls.load(Ordering::SeqCst), 2);
     }
 
