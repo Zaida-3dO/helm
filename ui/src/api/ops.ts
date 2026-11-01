@@ -59,9 +59,9 @@ export function chatOps(api: Api) {
         ...(extras.attachments?.length ? { attachments: extras.attachments } : {}),
         ...(extras.context !== undefined ? { context: extras.context } : {}),
       }),
-    stop: (chatId: string, continueQueue: boolean) => api<{ status: string }>('chat_stop', { chatId, continueQueue }),
-    submissionAction: (submissionId: string, action: SubmissionAction, position?: number) =>
-      api<{ submission: Submission }>('submission_action', { submissionId, action, position }),
+    stop: (chatId: string) => api<{ status: string }>('chat_stop', { chatId }),
+    submissionAction: (submissionId: string, action: SubmissionAction) =>
+      api<{ submission: Submission }>('submission_action', { submissionId, action }),
     answer: (chatId: string, requestId: string, a: InteractionAnswer) =>
       api<null>('interaction_answer', { chatId, requestId, ...a }),
     saveDraft: (chatId: string, text: string, revision: number) =>

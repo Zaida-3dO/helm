@@ -16,7 +16,7 @@
 
 use crate::actor::Cmd;
 use crate::runtime::ChatRuntime;
-use crate::submit::{HostSend, HostSendMode};
+use crate::submit::HostSend;
 use crate::types::*;
 use helm_ipc::{ApiError, AppEvent, OpCtx, OpRegistry};
 use rusqlite::OptionalExtension;
@@ -135,7 +135,6 @@ async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
             chat_id: &chat.id,
             submission_id: &uuid::Uuid::new_v4().to_string(),
             text: REQUEST,
-            mode: HostSendMode::Queue,
             origin: SubmissionOrigin::App,
         },
     )?;
@@ -217,10 +216,7 @@ async fn finish(ctx: &OpCtx, rt: &ChatRuntime, chat: &ChatRecord, mark: i64) -> 
         let _ = rt
             .ask(
                 &chat.id,
-                |reply| Cmd::Stop {
-                    continue_queue: false,
-                    reply,
-                },
+                |reply| Cmd::Stop { reply },
                 rt.limits().stop + Duration::from_secs(5),
             )
             .await;

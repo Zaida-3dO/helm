@@ -33,7 +33,7 @@ use crate::client::{BoxFut, LineHandle, TelegramMessage, TelegramSink};
 use crate::exec::AppExecutor;
 use crate::telegram::{self, ChatFacts, ChatPort, TagPolicy, TELEGRAM_ORIGIN};
 use helm_chats::submit::{
-    host_send, host_send_with_attachments, HostFile, HostImage, HostSend, HostSendMode,
+    host_send, host_send_with_attachments, HostFile, HostImage, HostSend,
     FILE_REFUSED, IMAGE_REFUSED,
 };
 use helm_chats::types::{ChatStatus, InteractionAttention, InteractionMethod};
@@ -94,8 +94,6 @@ pub struct Snap {
     pub final_text: Option<String>,
     /// The highest transcript row id now.
     pub max_id: i64,
-    /// Another Telegram message is queued behind this turn.
-    pub queued: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -159,19 +157,12 @@ impl Mirror {
             // Settled: seen idle twice in a row, so the last streamed row is flushed.
             self.idle_seen += 1;
             if self.idle_seen >= 2 {
+                // Nothing is ever held behind the turn: an idle chat with two settled
+                // samples has no more of this exchange to show.
                 out.push(Up::Final(telegram::render_final(s.final_text.as_deref())));
-                if s.queued {
-                    // The next Telegram message runs as its own turn: mirror that one too.
-                    self.baseline = s.max_id;
-                    self.began = now;
-                    self.started = false;
-                    self.idle_seen = 0;
-                    self.last_status = None;
-                } else {
-                    self.done = true;
-                }
+                self.done = true;
             }
-        } else if !s.queued && now - self.began >= START_WAIT_MS {
+        } else if now - self.began >= START_WAIT_MS {
             out.push(Up::Final(
                 "Helm has not started a turn for that message yet; it is saved in the Telegram chat."
                     .into(),
@@ -382,7 +373,7 @@ pub struct Ctx {
 pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String> {
     let sid = telegram::submission_id(&msg.id);
     // Already stored (a resend): its chat, whether a turn runs there now, and the row the turn
-    // starts after (its user row, or the end of the chat while it still waits in the queue).
+    // starts after (its user row, or the end of the chat while it is on its way).
     let stored: Option<(String, Option<String>, Option<i64>)> =
         c.db.snapshot(|tx| {
             tx.query_row(
@@ -496,7 +487,6 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
                 chat_id: &chat,
                 submission_id: &sid,
                 text: &shown,
-                mode: HostSendMode::Steer,
                 origin: TELEGRAM_ORIGIN,
             },
             &attach,
@@ -581,17 +571,10 @@ pub fn snapshot(
                 [chat],
                 |r| r.get(0),
             )?;
-            let queued: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM queued_submissions q
-                   JOIN submission_meta m ON m.submission_id = q.submission_id
-                   WHERE q.chat_id = ?1 AND m.origin = ?2)",
-                rusqlite::params![chat, TELEGRAM_ORIGIN.as_str()],
-                |r| r.get(0),
-            )?;
-            Ok::<_, rusqlite::Error>((status, recent, final_text, max_id, queued))
+            Ok::<_, rusqlite::Error>((status, recent, final_text, max_id))
         })
         .unwrap_or_default();
-    let (status, recent, final_text, max_id, queued) = row;
+    let (status, recent, final_text, max_id) = row;
     let busy = status
         .map(|s| {
             matches!(
@@ -630,11 +613,10 @@ pub fn snapshot(
         blocked,
         final_text,
         max_id,
-        queued,
     }
 }
 
-/// Watch a chat until its Telegram turn (and any queued behind it) has ended.
+/// Watch a chat until its Telegram turn has ended.
 pub async fn mirror(
     rt: ChatRuntime,
     db: Arc<Database>,
@@ -716,12 +698,12 @@ impl ChatSink {
         let w = self
             .exec
             .wiring()
-            .ok_or("Helm is still starting; the message stays queued.")?;
+            .ok_or("Helm is still starting; the message will be delivered when Helm is ready.")?;
         let ops = self
             .ops
             .get()
             .cloned()
-            .ok_or("Helm is still starting; the message stays queued.")?;
+            .ok_or("Helm is still starting; the message will be delivered when Helm is ready.")?;
         let rt = w
             .services
             .get::<ChatRuntime>()
@@ -808,7 +790,7 @@ impl TelegramSink for ChatSink {
                 .ops
                 .invoke(
                     "chat_stop",
-                    json!({ "chatId": tag.chat_id, "continueQueue": false }),
+                    json!({ "chatId": tag.chat_id }),
                 )
                 .await
             {
@@ -849,7 +831,6 @@ impl TelegramSink for ChatSink {
                         chat_id: &ask.chat_id,
                         submission_id: &sid,
                         text: &note,
-                        mode: HostSendMode::Steer,
                         origin: helm_chats::types::SubmissionOrigin::App,
                     },
                 );

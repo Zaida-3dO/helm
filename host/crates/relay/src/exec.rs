@@ -14,7 +14,7 @@
 
 use crate::client::{BoxFut, Executor, ToolFailure};
 use crate::gate::{self, Admitted};
-use helm_chats::submit::{host_send, HostSend, HostSendMode};
+use helm_chats::submit::{host_send, HostSend};
 use helm_chats::types::SubmissionOrigin;
 use helm_hosttools::{Caller, CallerBinding, ChatRequest, HostTools};
 use helm_ipc::{EventSink, Services};
@@ -118,10 +118,7 @@ impl AppExecutor {
         if uuid::Uuid::parse_str(to).is_err() || to.len() != 36 {
             return Err(refused("chatId must be a chat's exact 36-character id."));
         }
-        let mode = match args["mode"].as_str() {
-            Some("steer") => HostSendMode::Steer,
-            _ => HostSendMode::Queue,
-        };
+        // `mode` comes from older phone builds; whatever it says, the message is delivered now.
         let db = w
             .services
             .get::<helm_core::db::Database>()
@@ -159,7 +156,6 @@ impl AppExecutor {
                 chat_id: to,
                 submission_id: &sid,
                 text: &text,
-                mode,
                 origin: SubmissionOrigin::OtherChat,
             },
         )
@@ -169,7 +165,6 @@ impl AppExecutor {
         drop(log);
         Ok(json!({
             "delivered": sent.delivered,
-            "queued": sent.queued,
             "mode": args["mode"],
             "chatId": to,
             "title": title,

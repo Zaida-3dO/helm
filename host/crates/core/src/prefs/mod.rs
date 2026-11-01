@@ -330,7 +330,7 @@ fn validate_name_list(
     }
 }
 
-/// `sendBehavior` holds a subset of its six keys; unknown keys are refused.
+/// `sendBehavior` holds a subset of its five keys; unknown keys are refused.
 fn validate_send_behavior(value: &Value) -> Result<(), PrefError> {
     let bad = |why: &'static str| PrefError::Invalid {
         key: "sendBehavior",
@@ -344,7 +344,7 @@ fn validate_send_behavior(value: &Value) -> Result<(), PrefError> {
             // "queue" is a retired choice; it is still accepted so an old stored value is not an error
             // (it reads as "asap").
             "mode" => matches!(v.as_str(), Some("queue" | "asap" | "interrupt")),
-            "showChoices" | "stopSendsWaiting" | "toolStop" => v.is_boolean(),
+            "showChoices" | "toolStop" => v.is_boolean(),
             "waitLimitSeconds" => {
                 v.is_null() || v.as_u64().is_some_and(|n| (5..=3600).contains(&n))
             }

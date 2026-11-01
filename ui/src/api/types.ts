@@ -46,7 +46,6 @@ export type {
 export const HOME_SEND_BEHAVIOR: SendBehavior = {
   mode: 'asap',
   showChoices: true,
-  stopSendsWaiting: false,
   waitLimitSeconds: 30,
   toolStop: true,
   longCommands: 'redirect',

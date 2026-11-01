@@ -396,7 +396,7 @@ pub fn land_complete(tx: &Transaction<'_>, run_id: &str, now: i64) -> rusqlite::
             wrapped.join("; ")
         }
     );
-    crate::notes::queue(
+    crate::notes::add(
         &run.chat_id,
         text,
         true,

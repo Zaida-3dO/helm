@@ -13,7 +13,7 @@
 //! | [`clock`] | the revision clock for UI events |
 //! | [`runtime`] | the runtime service, the worker spawner seam, quit drain |
 //! | `actor` | one task per chat: worker, streaming, tools, interactions, Stop, timers |
-//! | [`submit`] | sends, queue actions, model changes, restart continuation |
+//! | [`submit`] | sends, in-flight actions, model changes, restart continuation |
 //! | [`titles`] | automatic titles through `helpers/titles`, renames, suggestions |
 //! | [`autocomplete`] | composer autocomplete through `helpers/autocomplete` |
 //! | [`attachments`] | image attachments and their limits |

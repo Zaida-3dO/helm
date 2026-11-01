@@ -16,7 +16,6 @@ use serde_json::{Map, Value};
 pub const HOME_DEFAULTS: SendBehavior = SendBehavior {
     mode: SendMode::Asap,
     show_choices: true,
-    stop_sends_waiting: false,
     wait_limit_seconds: Some(30),
     tool_stop: true,
     long_commands: LongCommands::Redirect,
@@ -38,9 +37,6 @@ pub fn resolve(stored: Option<&Value>) -> SendBehavior {
     }
     if let Some(v) = m.get("showChoices").and_then(Value::as_bool) {
         out.show_choices = v;
-    }
-    if let Some(v) = m.get("stopSendsWaiting").and_then(Value::as_bool) {
-        out.stop_sends_waiting = v;
     }
     match m.get("waitLimitSeconds") {
         Some(Value::Null) => out.wait_limit_seconds = None,
@@ -96,7 +92,6 @@ mod tests {
         assert_eq!(sb.long_commands, LongCommands::Redirect);
         assert!(sb.tool_stop);
         assert!(sb.show_choices);
-        assert!(!sb.stop_sends_waiting);
         assert!(!opt_in(&sb));
         assert_eq!(diff(&sb), json!({}));
     }
@@ -116,8 +111,8 @@ mod tests {
         );
     }
 
-    /// "Queue it" is gone: a message sent mid-turn always goes straight to Claude. A profile that
-    /// stored it reads as the default (send soon) and loses the stale value on its next save.
+    /// A message sent mid-turn always goes straight to Claude. A profile that stored the older
+    /// "queue" choice reads as the default (send soon) and loses the stale value on its next save.
     #[test]
     fn a_stored_queue_choice_reads_as_the_default() {
         let sb = resolve(Some(&json!({"mode": "queue", "toolStop": false})));
@@ -131,7 +126,6 @@ mod tests {
         let sb = SendBehavior {
             mode: SendMode::Interrupt,
             show_choices: false,
-            stop_sends_waiting: true,
             wait_limit_seconds: None,
             tool_stop: false,
             long_commands: LongCommands::Off,

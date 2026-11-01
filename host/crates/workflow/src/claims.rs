@@ -450,7 +450,7 @@ pub fn take_over(tx: &Transaction<'_>, x: &Act<'_>, a: &Value, agents_live: &[St
             },
             x.now,
         )?;
-        crate::notes::queue(
+        crate::notes::add(
             &h.run.chat_id,
             format!(
                 "Workflow: {label} ({repo}) was taken over by chat \"{}\" and dropped from task \"{}\". This chat no longer holds it; do not push to it from here. Reason: {reason}",
@@ -498,7 +498,7 @@ pub fn take_over(tx: &Transaction<'_>, x: &Act<'_>, a: &Value, agents_live: &[St
         },
         x.now,
     )?;
-    crate::notes::queue(
+    crate::notes::add(
         x.chat_id,
         format!("Workflow: took over {label} ({repo}) into task \"{}\". {body}. It starts fresh: build, review and approval happen again here.", crate::mode::tooltip_reason(&run.title)),
         false,

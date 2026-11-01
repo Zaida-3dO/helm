@@ -152,20 +152,21 @@ describe("core scenarios end to end with the fake claude", { timeout: 15 * 60_00
     });
   });
 
-  test("E7: Stop leaves the chat stopped and the unread message not delivered; Esc sends it again", async () => {
+  test("E7: Stop hands the unread message to the next turn at once, by button and by Esc", async () => {
     await failShot("E7", async () => {
       await newChat(page(), folder());
       await send(page(), "[E7] wait a while");
       await page().waitForSelector(tid("tool-card", '[data-status="running"]'), { timeout: 20_000 });
-      // Sent mid-turn it goes to Claude at once and waits there, unread, as pending.
+      // Sent mid-turn it goes to Claude at once and sits there unread.
       await send(page(), "unread after stop");
       await page().waitForSelector(tid("queue-item", '[data-state="pending"]'), { timeout: 10_000 });
       await page().click(tid("stop"));
-      await waitStatus(page(), "stopped", 30_000);
-      await page().waitForSelector(tid("queue-item", '[data-state="uncertain"]'), { timeout: 10_000 });
-      await shot(page(), OUT, "E7-stopped");
+      // Nothing is kept behind the turn: the unread message opens the next one right away.
+      await waitText(page(), "You said: unread after stop", 30_000);
+      await shot(page(), OUT, "E7-redelivered");
+      await waitStatus(page(), "idle", 30_000);
 
-      // Esc: Stop that sends the unread message again.
+      // Esc stops the same way and hands it over the same way.
       await send(page(), "[E7] wait again");
       await page().waitForSelector(tid("tool-card", '[data-status="running"]'), { timeout: 20_000 });
       await send(page(), "after esc");
@@ -173,6 +174,7 @@ describe("core scenarios end to end with the fake claude", { timeout: 15 * 60_00
       await page().locator(tid("composer")).click();
       await page().keyboard.press("Escape");
       await waitText(page(), "You said: after esc", 30_000);
+      await waitStatus(page(), "idle", 30_000);
     });
   });
 
@@ -293,7 +295,7 @@ describe("core scenarios end to end with the fake claude", { timeout: 15 * 60_00
     });
   });
 
-  test("U11: transcript, composer, approval card and queue are laid out and readable in the real exe", async () => {
+  test("U11: transcript, composer, approval card and in-flight message are laid out and readable in the real exe", async () => {
     await failShot("U11", async () => {
       await newChat(page(), folder());
       await send(page(), "[E2] tidy the folder");
@@ -312,7 +314,7 @@ describe("core scenarios end to end with the fake claude", { timeout: 15 * 60_00
       await send(page(), "[E4] look around");
       await page().waitForSelector(tid("tool-card", '[data-status="running"]'), { timeout: 20_000 });
       report.toolCard = await assertShown(page(), tid("tool-card", '[data-status="running"]'));
-      await send(page(), "queued for layout");
+      await send(page(), "mid-turn for layout");
       await page().waitForSelector(tid("queue-item", '[data-state="pending"]'), { timeout: 10_000 });
       report.queueItem = await assertShown(page(), tid("queue-item"));
       report.stop = await assertShown(page(), tid("stop"));

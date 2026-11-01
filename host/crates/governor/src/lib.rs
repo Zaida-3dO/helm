@@ -97,7 +97,6 @@ impl ChatControl for RuntimeControl {
                 chat_id,
                 submission_id,
                 text,
-                mode: helm_chats::submit::HostSendMode::Steer,
                 origin: helm_chats::types::SubmissionOrigin::App,
             },
         )
@@ -110,7 +109,7 @@ impl ChatControl for RuntimeControl {
         let id = chat_id.to_owned();
         self.rt.handle().spawn(async move {
             if let Err(e) = d
-                .call_host("chat_stop", json!({"chatId": id, "continueQueue": false}))
+                .call_host("chat_stop", json!({"chatId": id}))
                 .await
             {
                 log::warn!("usage governor: stop of {id} failed: {}", e.message);

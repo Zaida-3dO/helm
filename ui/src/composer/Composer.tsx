@@ -20,7 +20,7 @@ import { ModelPicker } from './ModelPicker.tsx';
 import { isLocalModel } from './modelEffort.ts';
 import { DefaultStar } from './DefaultStar.tsx';
 import { PermissionChip } from './PermissionChip.tsx';
-import { orderPending, itemState } from './queue.ts';
+import { orderInFlight } from './inFlight.ts';
 import { bytesToBase64, forgetDelivered, forgetSent, isAnimated, refusal, stashSent, type Attached, type SentAttachments } from './attachments.ts';
 import { Recall } from './recall.ts';
 import { ImageViewer } from '../transcript/ImageViewer.tsx';
@@ -40,8 +40,6 @@ export interface ComposerProps {
   ops: ChatOps;
   flushers: Flushers;
   sendShortcut: SendShortcut;
-  /** Alt+Up/Down on the composer reorders the newest queued message. */
-  onMove: (delta: -1 | 1) => void;
   /** A recovered or withdrawn text lands here. */
   registerSetText: (f: (text: string) => void) => void;
   /** This chat's earlier prompts, newest first, for Up/Down recall. */
@@ -56,7 +54,7 @@ export function isBusy(status: ChatRecord['status']): boolean {
   return status === 'running' || status === 'starting' || status === 'stopping';
 }
 
-export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, onMove, registerSetText, recall = [], autocomplete = false }: ComposerProps) {
+export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, registerSetText, recall = [], autocomplete = false }: ComposerProps) {
   const editor = useRef<EditorHandle>(null);
   const [error, setError] = useState<string | null>(null);
   const [empty, setEmpty] = useState(!chat.draft);
@@ -121,7 +119,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   }, [registerSetText, saver, chat.id]);
 
   useEffect(() => {
-    const waiting = new Set(orderPending(pending).map((s) => s.id));
+    const waiting = new Set(orderInFlight(pending).map((s) => s.id));
     forgetDelivered(mine.current, waiting);
     // Check again after the grace period so a send that was delivered quietly is let go too.
     const t = setTimeout(() => forgetDelivered(mine.current, waiting), 5500);
@@ -134,8 +132,6 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
     },
     [],
   );
-
-  const newestQueued = () => orderPending(pending).filter((s) => itemState(s) === 'queued').at(-1);
 
   // Attached images: stored on add, sent by id, thumbnails as blob: URLs.
   const [attached, setAttached] = useState<Attached[]>([]);
@@ -296,13 +292,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
       const sentRefs = refsRef.current;
       if (blockedRef.current) return;
       setError(null);
-      if (!text.trim() && images.length === 0 && sentRefs.length === 0) {
-        // Empty-composer shortcuts: steer or send now the newest queued message.
-        const q = newestQueued();
-        if (q && action === 'steer') await ops.submissionAction(q.id, 'steerNow').catch(() => undefined);
-        if (q && action === 'now') await ops.submissionAction(q.id, 'sendNow').catch(() => undefined);
-        return;
-      }
+      if (!text.trim() && images.length === 0 && sentRefs.length === 0) return;
       if (sendingRef.current) return;
       // A Helm command is run here, not sent to Claude; the draft clears only once it has started.
       if (helmCommand(text)?.name === 'rollover') {
@@ -359,12 +349,12 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
   );
 
   const stop = useCallback(
-    async (continueQueue: boolean) => {
+    async () => {
       // Stop requests are de-duplicated.
       if (stopping.current) return;
       stopping.current = true;
       try {
-        await ops.stop(chat.id, continueQueue);
+        await ops.stop(chat.id);
       } catch (e) {
         setError(e instanceof ApiError ? e.message : String(e));
       } finally {
@@ -435,10 +425,6 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
 
   const onKey = useCallback(
     (e: KeyboardEvent): boolean => {
-      if (e.altKey && !e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
-        onMove(e.key === 'ArrowUp' ? -1 : 1);
-        return true;
-      }
       const plain = !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.isComposing;
       if (menu && e.key === 'Escape') {
         setMenuShut(editor.current?.getText() ?? '');
@@ -480,15 +466,15 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
         void send(r.action);
         return true;
       }
-      if (r.kind === 'stop-continue') {
+      if (r.kind === 'stop') {
         if (!busy) return false;
-        void stop(true);
+        void stop();
         return true;
       }
       return false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [ctx, send, stop, busy, onMove, recall, ghost, menu, active],
+    [ctx, send, stop, busy, recall, ghost, menu, active],
   );
 
   const onChange = useCallback(
@@ -678,8 +664,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, o
                 variant="stop"
                 label="Stop"
                 data-testid="stop"
-                title={stopTooltip(behavior.stopSendsWaiting, behavior.showChoices)}
-                onClick={() => void stop(false)}
+                title={stopTooltip(behavior.showChoices)}
+                onClick={() => void stop()}
               />
             )}
             <Button

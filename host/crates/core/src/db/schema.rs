@@ -65,18 +65,6 @@ CREATE TABLE submissions (
 );
 CREATE INDEX submissions_chat ON submissions(chat_id);
 
-CREATE TABLE queued_submissions (
-    submission_id  TEXT PRIMARY KEY REFERENCES submissions(id) ON DELETE CASCADE,
-    chat_id        TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-    position       INTEGER NOT NULL
-);
-
-CREATE TABLE draft_queue_slots (
-    chat_id   TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
-    position  INTEGER NOT NULL,
-    revision  INTEGER NOT NULL
-);
-
 CREATE TABLE runs (
     id          TEXT PRIMARY KEY,
     chat_id     TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,

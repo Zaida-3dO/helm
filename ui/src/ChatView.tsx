@@ -1,4 +1,4 @@
-// One chat: transcript, interaction cards, queue, activity dock and composer.
+// One chat: transcript, interaction cards, in-flight messages, activity dock and composer.
 
 import { flushSync } from 'react-dom';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
@@ -8,7 +8,6 @@ import { HOME_SEND_BEHAVIOR } from './api/types.ts';
 import { FlagNote } from './attention/index.ts';
 import { Composer, isBusy } from './composer/Composer.tsx';
 import type { SendShortcut } from './composer/keymap.ts';
-import { movePosition, orderPending, itemState } from './composer/queue.ts';
 import { QueueList } from './composer/QueueList.tsx';
 import type { Flushers } from './shell/quit.ts';
 import type { ChatStore } from './state/store.ts';
@@ -180,13 +179,14 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
     [behavior.toolStop, thread?.capabilities.stopTool, stopTool, chatId, latestAssistantId, busy, interactionOpen, editing, ops, elements, mentionRepo],
   );
 
-  // Escape while the chat works stops the turn and lets the queue continue. It is the lowest
-  // layer of the shell's Escape stack (menus, popovers, search, dialogs and panels go first).
+  // Escape while the chat works stops the turn; whatever it had not read goes back to it at
+  // once. It is the lowest layer of the shell's Escape stack (menus, popovers, search, dialogs
+  // and panels go first).
   useLayer(
     'composer',
     busy,
     () => {
-      void ops.stop(chatId, true).catch(() => undefined);
+      void ops.stop(chatId).catch(() => undefined);
     },
     () => busy,
   );
@@ -252,16 +252,6 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
     });
   }, [ops, chatId, view.chat?.sideSourceId]);
 
-  const onMove = useCallback(
-    (delta: -1 | 1) => {
-      const q = orderPending(view.pending).filter((s) => itemState(s) === 'queued').at(-1);
-      if (!q) return;
-      const pos = movePosition(view.pending, q.id, delta);
-      if (pos !== null) void ops.submissionAction(q.id, 'move', pos).catch(() => undefined);
-    },
-    [view.pending, ops],
-  );
-
   if (!chat) return <div className="chat-loading muted">{notice ?? 'Loading the chat…'}</div>;
 
   const lastUser = [...view.rows].reverse().find((r) => r.role === 'user');
@@ -308,7 +298,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         <InteractionCard key={i.id} interaction={i} onAnswer={(id, a) => void ops.answer(chatId, id, a).catch(() => undefined)} />
       ))}
       {/* The composer dock: banners, then other areas' dock items (the
-          review tray), then the queue, in one capped, scrolling live region above the box. */}
+          review tray), then the in-flight list, in one capped, scrolling live region above the box. */}
       <div className="composer-dock" role="region" aria-label="Composer" aria-live="polite" data-testid="composer-dock">
       <div className="composer-dock-stack">
       {chat.status === 'interrupted' && (
@@ -339,9 +329,9 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         </div>
       ))}
       {!chat.sideSourceId && <FlagNote chatId={chatId} ops={ops} />}
-      <QueueList pending={view.pending} thread={thread} running={busy} ops={ops} chatId={chatId} />
+      <QueueList pending={view.pending} thread={thread} ops={ops} chatId={chatId} />
       </div>
-      {/* The activity line sits directly on the box, below the waiting and queued messages. */}
+      {/* The activity line sits directly on the box, below the in-flight messages. */}
       {thread && <ActivityDock chat={chat} thread={thread} turnStartedAt={turnStartedAt} onStopTool={stopTool} rows={view.hasNewer ? undefined : view.rows} />}
       <Composer
         recall={recallPrompts(view.rows)}
@@ -352,7 +342,6 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         ops={ops}
         flushers={flushers}
         sendShortcut={sendShortcut}
-        onMove={onMove}
         registerSetText={(f) => {
           setTextRef.current = f;
         }}

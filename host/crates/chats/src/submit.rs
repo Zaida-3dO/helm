@@ -1,4 +1,4 @@
-//! The send paths: chat sends, host sends for automated prompts, the queue's actions, model
+//! The send paths: chat sends, host sends for automated prompts, the in-flight actions, model
 //! changes and the restart continuation. Every send starts a turn or joins one at once.
 //!
 //! These run on the blocking pool (most under `maintenance`), write the database, then hand the
@@ -81,17 +81,6 @@ pub(crate) fn insert_submission(
     if matches!(origin, SubmissionOrigin::Typed | SubmissionOrigin::Answer) {
         crate::flags::clear(tx, chat_id)?;
     }
-    if state == SubmissionState::Queued {
-        let pos: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(position) + 1, 0) FROM queued_submissions WHERE chat_id = ?1",
-            [chat_id],
-            |r| r.get(0),
-        )?;
-        tx.execute(
-            "INSERT INTO queued_submissions(submission_id, chat_id, position) VALUES (?1, ?2, ?3)",
-            params![id, chat_id, pos],
-        )?;
-    }
     Ok(())
 }
 
@@ -133,11 +122,13 @@ pub(crate) fn emit_chat(rt: &ChatRuntime, chat_id: &str) -> Option<ChatRecord> {
     Some(chat)
 }
 
-pub(crate) fn emit_queue(rt: &ChatRuntime, chat_id: &str) {
+/// Tell the UI what is in flight for this chat: sent but not yet read by Claude, or left over
+/// and recoverable.
+pub(crate) fn emit_pending(rt: &ChatRuntime, chat_id: &str) {
     let rev = rt.clock().next();
     if let Ok(pending) = rt.db().snapshot(|t| store::pending(t, chat_id)) {
         rt.sh.events.emit(
-            ChatEvent::Queue {
+            ChatEvent::Pending {
                 chat_id: chat_id.to_owned(),
                 revision: rev,
                 pending,
@@ -331,7 +322,7 @@ pub fn chat_send(
                             Ok::<_, rusqlite::Error>(())
                         });
                         emit_chat(&rt, &chat);
-                        emit_queue(&rt, &chat);
+                        emit_pending(&rt, &chat);
                     }
                 };
                 let later = undo.clone();
@@ -342,7 +333,7 @@ pub fn chat_send(
                     return Err(e);
                 }
             }
-            emit_queue(rt, &a.chat_id);
+            emit_pending(rt, &a.chat_id);
             if let Some(forked) = title_job {
                 crate::titles::start(rt, &a.chat_id, crate::titles::job(&s.text, None, forked));
             }
@@ -353,24 +344,15 @@ pub fn chat_send(
     Ok(ChatSendResult { submission, chat })
 }
 
-/// How a host send lands on a busy chat (cross-chat messages). Both go to Claude at once and are
-/// read at the next tool boundary of the running turn (never cancelling running tools); nothing
-/// waits in Helm for the turn to end. `Queue` is the older name, kept so existing callers and
-/// stored settings keep working.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostSendMode {
-    Steer,
-    Queue,
-}
-
 /// A send made by the host for something other than the user's own typing: a cross-chat message
 /// (origin `other_chat`) or an app note (origin `app`). Never counts as consent and never
-/// follows the user's send behaviour. Idempotent per `submission_id`.
+/// follows the user's send behaviour. Idempotent per `submission_id`. The message goes to Claude
+/// at once: an idle chat starts a turn with it; a working chat takes it in at the running turn's
+/// next tool boundary.
 pub struct HostSend<'a> {
     pub chat_id: &'a str,
     pub submission_id: &'a str,
     pub text: &'a str,
-    pub mode: HostSendMode,
     pub origin: SubmissionOrigin,
 }
 
@@ -378,9 +360,6 @@ pub struct HostSend<'a> {
 pub struct HostSent {
     /// Saved, and handed to the chat now (idle: a prompt; busy: a steer).
     pub delivered: bool,
-    /// Always false: a message no longer waits in Helm behind the running turn. Kept so the
-    /// shape of the tool replies does not change.
-    pub queued: bool,
 }
 
 /// One picture sent with a host send (a photo from the phone): checked and stored exactly like an
@@ -458,7 +437,8 @@ pub fn host_send_with_attachments(
         .db()
         .write(|tx| {
             if let Some(existing) = store::get_submission(tx, s.submission_id)? {
-                return Ok(Ok((existing.state != SubmissionState::Queued, false)));
+                // Already recorded: say whether it has been handed to Claude yet.
+                return Ok(Ok((existing.state != SubmissionState::Saved, false)));
             }
             let Some((status, archived)) = chat_status(tx, s.chat_id)? else {
                 return Ok(Err(crate::ops::not_found()));
@@ -480,11 +460,10 @@ pub fn host_send_with_attachments(
                     return Ok(Err(ApiError::new("capacity", "Too many chats are already working.")));
                 }
             }
-            let (mode, state) = match (busy, s.mode) {
-                (false, _) => (SubmissionMode::Prompt, SubmissionState::Saved),
-                (true, HostSendMode::Steer | HostSendMode::Queue) => {
-                    (SubmissionMode::Steer, SubmissionState::Saved)
-                }
+            let (mode, state) = if busy {
+                (SubmissionMode::Steer, SubmissionState::Saved)
+            } else {
+                (SubmissionMode::Prompt, SubmissionState::Saved)
             };
             let dir = rt.sh.cfg.profile_dir.join("attachments");
             let mut ids = Vec::new();
@@ -539,21 +518,16 @@ pub fn host_send_with_attachments(
                 )?;
             }
             tx.execute("UPDATE chats SET updated_at = ?1 WHERE id = ?2", params![now, s.chat_id])?;
-            Ok(Ok((state != SubmissionState::Queued, true)))
+            Ok(Ok((true, true)))
         })
         .map_err(sql)??;
     let (dispatch, fresh) = out;
-    if fresh && dispatch {
-        rt.command(s.chat_id, Cmd::Dispatch(s.submission_id.to_owned()))?;
-    }
     if fresh {
-        emit_queue(rt, s.chat_id);
+        rt.command(s.chat_id, Cmd::Dispatch(s.submission_id.to_owned()))?;
+        emit_pending(rt, s.chat_id);
         emit_chat(rt, s.chat_id);
     }
-    Ok(HostSent {
-        delivered: dispatch,
-        queued: !dispatch,
-    })
+    Ok(HostSent { delivered: dispatch })
 }
 
 /// Send the restart continuation (origin `harness`, a plain prompt: it never interrupts and never
@@ -634,10 +608,6 @@ pub fn submission_action(
                     "UPDATE submissions SET state = 'withdrawn' WHERE id = ?1",
                     [&sub.id],
                 )?;
-                tx.execute(
-                    "DELETE FROM queued_submissions WHERE submission_id = ?1",
-                    [&sub.id],
-                )?;
                 text_to_draft(tx, &chat, &sub.text).map(|_| ())
             })
             .map_err(sql)?;
@@ -645,7 +615,6 @@ pub fn submission_action(
         Ok(())
     };
     match (a.action, sub.state) {
-        (SubmissionActionKind::Withdraw, SubmissionState::Queued) => take_to_draft(rt)?,
         (SubmissionActionKind::Withdraw, SubmissionState::Accepted) => {
             if !caps.withdraw {
                 return Err(ApiError::new(
@@ -674,77 +643,8 @@ pub fn submission_action(
         }
         (
             SubmissionActionKind::Recover,
-            SubmissionState::Uncertain | SubmissionState::Rejected | SubmissionState::Queued,
+            SubmissionState::Uncertain | SubmissionState::Rejected,
         ) => take_to_draft(rt)?,
-        (
-            SubmissionActionKind::SteerNow | SubmissionActionKind::SendNow,
-            SubmissionState::Queued,
-        ) => {
-            let busy = rt
-                .db()
-                .snapshot(|t| chat_status(t, &chat))
-                .map_err(sql)?
-                .is_some_and(|(s, _)| s.is_busy());
-            let now_send = a.action == SubmissionActionKind::SendNow;
-            rt.db()
-                .write(|tx| {
-                    tx.execute(
-                        "DELETE FROM queued_submissions WHERE submission_id = ?1",
-                        [&sub.id],
-                    )?;
-                    tx.execute(
-                        "UPDATE submissions SET state = 'saved', mode = ?1 WHERE id = ?2",
-                        params![if now_send || !busy { "prompt" } else { "steer" }, sub.id],
-                    )?;
-                    tx.execute(
-                        "UPDATE submission_meta SET priority = ?1 WHERE submission_id = ?2",
-                        params![if now_send && busy { Some("now") } else { None }, sub.id],
-                    )
-                })
-                .map_err(sql)?;
-            rt.command(&chat, Cmd::Dispatch(sub.id.clone()))?;
-        }
-        (SubmissionActionKind::SendNow, SubmissionState::Accepted) => {
-            if !caps.deliver_now {
-                return Err(ApiError::new(
-                    "unsupported",
-                    "This chat cannot deliver a waiting message early.",
-                ));
-            }
-            rt.command(
-                &chat,
-                Cmd::DeliverNow {
-                    submission_id: sub.id.clone(),
-                    reason: "send_now",
-                },
-            )?;
-        }
-        (SubmissionActionKind::Move, SubmissionState::Queued) => {
-            let to = a
-                .position
-                .ok_or_else(|| ApiError::bad_args("move needs a position"))?;
-            rt.db()
-                .write(|tx| {
-                    let mut ids: Vec<String> = {
-                        let mut st = tx.prepare(
-                            "SELECT submission_id FROM queued_submissions WHERE chat_id = ?1 ORDER BY position",
-                        )?;
-                        let rows = st.query_map([&chat], |r| r.get(0))?;
-                        rows.collect::<rusqlite::Result<_>>()?
-                    };
-                    ids.retain(|i| i != &sub.id);
-                    let at = (to.max(0) as usize).min(ids.len());
-                    ids.insert(at, sub.id.clone());
-                    for (i, id) in ids.iter().enumerate() {
-                        tx.execute(
-                            "UPDATE queued_submissions SET position = ?1 WHERE submission_id = ?2",
-                            params![i as i64, id],
-                        )?;
-                    }
-                    Ok(())
-                })
-                .map_err(sql)?;
-        }
         _ => {
             return Err(ApiError::new(
                 "conflict",
@@ -752,7 +652,7 @@ pub fn submission_action(
             ))
         }
     }
-    emit_queue(rt, &chat);
+    emit_pending(rt, &chat);
     let submission = rt
         .db()
         .snapshot(|t| store::get_submission(t, &a.submission_id))

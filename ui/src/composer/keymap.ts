@@ -25,8 +25,7 @@ export interface KeyContext {
 
 export type KeyResult =
   | { kind: 'send'; action: SendAction }
-  | { kind: 'stop-continue' }
-  | { kind: 'move'; delta: -1 | 1 }
+  | { kind: 'stop' }
   | { kind: 'none' };
 
 /** The alternate send actions that are live in a mode. */
@@ -57,7 +56,7 @@ export function chordLabel(c: string): string {
 
 export function resolveKey(k: KeyShape, ctx: KeyContext): KeyResult {
   const c = chord(k);
-  if (c === 'Escape') return { kind: 'stop-continue' };
+  if (c === 'Escape') return { kind: 'stop' };
   if (k.key !== 'Enter') return { kind: 'none' };
 
   const live = ctx.showChoices ? alternates(ctx.mode) : [];
@@ -84,10 +83,10 @@ function verb(a: SendAction): string {
   return a === 'steer' ? 'steer' : a === 'now' ? 'send now' : 'send';
 }
 
-/** The Stop button's tooltip. */
-export function stopTooltip(stopSendsWaiting: boolean, showChoices: boolean): string {
-  const base = stopSendsWaiting ? 'Stop task and send waiting messages' : 'Stop task and keep waiting messages unsent';
-  return showChoices ? `${base} · Esc interrupts and sends waiting messages` : base;
+/** The Stop button's tooltip. One Stop: whatever Claude has not read is sent to it again right away. */
+export function stopTooltip(showChoices: boolean): string {
+  const base = 'Stop task · whatever has not been read is sent again right away';
+  return showChoices ? `${base} · Esc stops the same way` : base;
 }
 
 /** What Send does now, for its accessible name (the button is an icon). */

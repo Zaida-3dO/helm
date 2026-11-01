@@ -36,8 +36,8 @@ impl From<Refusal> for helm_ipc::ApiError {
 }
 
 /// Archive one chat, busy or not; archiving an archived chat changes nothing and answers
-/// `Ok(false)` (idempotent). Nothing queued for the chat sends afterwards: every message still
-/// queued reads Not delivered, so its text can be taken back after a restore.
+/// `Ok(false)` (idempotent). Nothing is sent for the chat afterwards: every message that had
+/// not been handed over reads Not sent, so its text can be taken back after a restore.
 pub fn archive_in_tx(
     tx: &Transaction<'_>,
     chat_id: &str,
@@ -59,7 +59,7 @@ pub fn archive_in_tx(
         params![now, chat_id],
     )?;
     tx.execute(
-        "UPDATE submissions SET state = 'uncertain' WHERE chat_id = ?1 AND state = 'queued'",
+        "UPDATE submissions SET state = 'uncertain' WHERE chat_id = ?1 AND state IN ('saved', 'queued')",
         [chat_id],
     )?;
     Ok(Ok(true))
@@ -111,15 +111,11 @@ mod tests {
             .unwrap();
         db.write(|tx| store::set_status(tx, &c, ChatStatus::Running, None, 2))
             .unwrap();
-        // A queued follow-up stays unsent.
+        // A message not yet handed over becomes recoverable, not sent.
         db.write(|tx| {
             tx.execute(
                 "INSERT INTO submissions(id, chat_id, text, state, created_at)
-                 VALUES ('s1', ?1, 'hi', 'queued', 1)",
-                [&c],
-            )?;
-            tx.execute(
-                "INSERT INTO queued_submissions(submission_id, chat_id, position) VALUES ('s1', ?1, 0)",
+                 VALUES ('s1', ?1, 'hi', 'saved', 1)",
                 [&c],
             )
         })

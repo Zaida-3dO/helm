@@ -128,9 +128,6 @@ function ChatPane() {
           onChange={(v) => setSendBehavior({ waitLimitSeconds: v === 'null' ? null : Number(v) })}
         />
       </SettingRow>
-      <SettingRow title="Stop sends waiting messages" description="Stopping a task also sends the messages Claude had not read yet, instead of handing them back to you." testId="setting-stop-sends">
-        <Checkbox checked={sb.stopSendsWaiting} onChange={(stopSendsWaiting) => setSendBehavior({ stopSendsWaiting })} />
-      </SettingRow>
       <SettingRow title="Long commands" description="What happens when Claude starts a build, a test run, a server or a long sleep in the foreground." testId="setting-long-commands">
         <Picker<LongCommands>
           settings

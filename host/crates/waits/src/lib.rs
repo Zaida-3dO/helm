@@ -3,7 +3,8 @@
 //! An agent that would otherwise sleep and poll declares what it is waiting on with
 //! `app_wait_for` and ends its turn. A fixed watcher in the host (no model) looks at the target
 //! and, when it finishes, changes, dies or times out, sends the waiting chat exactly one message
-//! that starts a turn if the chat is idle and queues behind the running turn if it is busy.
+//! that starts a turn if the chat is idle and is read by the running turn at its next tool
+//! boundary if it is busy.
 //!
 //! | Module | What |
 //! |---|---|

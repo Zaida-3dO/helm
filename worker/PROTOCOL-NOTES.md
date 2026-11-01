@@ -29,7 +29,7 @@ shapes, the choices behind them, and what was observed of the real CLI.
 | `get_state` | `{id}`. Answered once the CLI's `initialize` control request has been acknowledged. `data`: `{harness, executable, executableSource, model, effort, models:[{id,name,description}]}`. Local ready timeout: the control timeout, 60 s. |
 | `prompt` | `{id, submissionId (UUID, required), text, images?:[{data (base64), mimeType}], streamingBehavior?, priority?}`. Refused before `get_state` has been answered. Text over 2 MiB (UTF-8 bytes) is refused. `data` on success: `{submissionId, state:"accepted"}`. |
 | `steer` | Same fields as `prompt`; treated as a prompt with `streamingBehavior: "steer"`. Claude queues it natively and merges it after running tool calls. |
-| `abort` | `{id?, continueQueue?, userOnly?}`. The two flags are host-side queue policy; the worker echoes them in `data` and always interrupts. `data.state` is `"idle"` (nothing to stop) or `"stopping"`. |
+| `abort` | `{id?}`. The worker always interrupts. `data.state` is `"idle"` (nothing to stop) or `"stopping"`. (Older host builds also sent `continueQueue`/`userOnly`; the worker echoes any it receives and ignores them.) |
 | `set_model` | `{id, model}`. `data: {model, applies:"next_turn"}`. |
 | `set_thinking_level` | `{id, level}`; `level` is one of `low medium high xhigh max`. `data: {effort, applies:"next_turn"}`. |
 | `extension_ui_response` | `{id, value?, confirmed?, cancelled?, goto?}`; no response. An unknown or stale `id` is ignored. |
@@ -284,7 +284,7 @@ registers the PreToolUse hook in `initialize`.
 | Command | Shape and answer |
 |---|---|
 | `get_state` | `data` adds `capabilities {withdraw, deliverNow, stopTool, compact}` (all `true` for Claude Code 2.1.289) and `cliVersion` (the CLI's `get_binary_version` answer; `null` if it does not answer within 3 s). |
-| `abort` | Before the interrupt, any foreground tasks are moved to the background (otherwise the interrupt waits for the shell). The interrupt is sent with `cancel_queued:true`; `data` adds `cancelledSubmissionIds`: our submissions the CLI dropped, which the host returns to the front of its queue. |
+| `abort` | Before the interrupt, any foreground tasks are moved to the background (otherwise the interrupt waits for the shell). The interrupt is sent with `cancel_queued:true`; `data` adds `cancelledSubmissionIds`: our submissions the CLI dropped, which the host sends to it again at once, as the next turn. |
 | `withdraw` | `{id, submissionId}` → `data {withdrawn}`; `false` when Claude has already read it (or it is unknown). Uses `cancel_async_message`. |
 | `deliver_now` | `{id, submissionId, reason:"wait_limit"\|"send_now", minRunMs}` → `data {result, moved?}`. `stopped`: no turn is running. `nothing_waiting`: that submission is no longer unread. `waiting`: an approval, question or plan is open, or no foreground Bash or subagent call has run for `minRunMs` yet. `unblocked` with `moved:[toolCallId...]`: those calls were moved to the background. It never ends the turn. With `reason:"send_now"` and nothing to move, a plain interrupt is sent instead and the answer is `delivering`. |
 | `stop_tool` | `{id, toolCallId, sentAtMs}` → `data {stopped}`. A missing or more than 5 s old `sentAtMs` is refused (`success:false`). A call that is not a stoppable foreground Bash task or a running subagent's Agent call answers `stopped:false`. Uses `stop_task`. |

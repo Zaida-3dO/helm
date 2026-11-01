@@ -78,10 +78,9 @@ export function submission(p: Partial<Submission> & Pick<Submission, 'id'>): Sub
   return {
     chatId: 'c1',
     text: 'hello',
-    mode: 'followUp',
-    state: 'queued',
+    mode: 'steer',
+    state: 'accepted',
     origin: 'typed',
-    position: null,
     createdAt: 0,
     ...p,
   };

@@ -419,7 +419,7 @@ pub fn allow_edit(
         },
         x.now,
     )?;
-    crate::notes::queue(
+    crate::notes::add(
         x.chat_id,
         format!("Orchestrator edit of {file}: the edit gate lets it through until the task ends, on the agent's reason: {reason}"),
         false,

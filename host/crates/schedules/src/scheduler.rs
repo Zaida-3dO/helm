@@ -17,7 +17,7 @@ use crate::types::RunStatus;
 use helm_chats::clock::Clock;
 use helm_chats::delete::{delete_in_tx, DeleteRule};
 use helm_chats::seams::ProjectGates;
-use helm_chats::submit::{host_send, HostSend, HostSendMode};
+use helm_chats::submit::{host_send, HostSend};
 use helm_chats::types::{ChatEvent, SubmissionOrigin};
 use helm_chats::ChatRuntime;
 use helm_core::db::Database;
@@ -34,16 +34,14 @@ pub trait Sender: Send + Sync {
     fn send(&self, chat_id: &str, submission_id: &str, text: &str) -> Result<(), ApiError>;
 }
 
-/// The one way a scheduled prompt is sent: a schedule-origin, queue-behind-the-turn send
-/// under the slot's own id.
+/// The one way a scheduled prompt is sent: a schedule-origin send under the slot's own id.
 pub(crate) fn request<'a>(chat_id: &'a str, submission_id: &'a str, text: &'a str) -> HostSend<'a> {
     HostSend {
         chat_id,
         submission_id,
         text,
         // The chat was idle when the run was claimed; if the user started a turn in the gap, the
-        // prompt waits behind it rather than steering it.
-        mode: HostSendMode::Queue,
+        // prompt goes to Claude at its next tool boundary.
         origin: SubmissionOrigin::Schedule,
     }
 }

@@ -8,9 +8,9 @@
 //! Rules it enforces:
 //! - `get_state` is answered before anything else is written to the worker; commands wait.
 //! - A prompt not answered within the ack limit becomes `uncertain` and is never resent.
-//! - Stop sends `abort`; a clean settle is `stopped`, anything else `interrupted`. Stop makes
-//!   the remaining queue `uncertain`; Esc lets it continue. Steers the CLI dropped come back to
-//!   the front of the queue. No settle within the stop limit closes the worker.
+//! - Stop sends `abort`; a clean settle is `stopped`, anything else `interrupted`. Messages
+//!   Claude had not read when the Stop landed are handed over again at once, as the next turn;
+//!   they are never held and never dropped. No settle within the stop limit closes the worker.
 //! - Streaming rows are flushed every 80 ms while dirty with one `message` event per flush; tool
 //!   start and end are written as they happen.
 //! - A model or effort change not acknowledged within 10 s fails the run.
@@ -35,7 +35,6 @@ pub(crate) enum Cmd {
     /// Send this saved submission to the worker now.
     Dispatch(String),
     Stop {
-        continue_queue: bool,
         reply: oneshot::Sender<ChatStatus>,
     },
     /// An `extension_ui_response` (fields without `type`).
@@ -107,7 +106,7 @@ pub(crate) const STOP_TIMEOUT_ERROR: &str =
 /// Why a turn was stopped when its chat was archived.
 pub(crate) const ARCHIVE_STOP_NOTE: &str = "Stopped because the chat was archived.";
 pub(crate) const ACK_TIMEOUT_ERROR: &str =
-    "Claude Code did not confirm the message in time. It was not sent again; recover it from the queue if it is missing.";
+    "Claude Code did not confirm the message in time. It was not sent again; recover it if it is missing.";
 pub(crate) const MODEL_ACK_ERROR: &str =
     "Claude Code did not confirm the model or effort change within 10 seconds.";
 
@@ -162,7 +161,6 @@ struct LiveToolRec {
 }
 
 struct StopState {
-    continue_queue: bool,
     replies: Vec<oneshot::Sender<ChatStatus>>,
 }
 
@@ -196,7 +194,7 @@ struct Actor {
     host_calls: HashMap<String, tokio::task::AbortHandle>,
     retiring: bool,
     /// The chat is archived: a late event from the dying worker changes nothing the user sees
-    /// (no completion, no unread mark) and nothing queued is sent.
+    /// (no completion, no unread mark) and nothing is sent.
     archived: bool,
     finished: bool,
     /// The last worker output (or turn start).
@@ -445,10 +443,12 @@ impl Actor {
         }
     }
 
-    fn emit_queue(&self) {
+    /// Tell the UI what is in flight for this chat: sent but not yet read by Claude, or left
+    /// over and recoverable.
+    fn emit_pending(&self) {
         let rev = self.sh.clock.next();
         if let Ok(pending) = self.sh.db.snapshot(|t| store::pending(t, &self.chat_id)) {
-            self.emit(ChatEvent::Queue {
+            self.emit(ChatEvent::Pending {
                 chat_id: self.chat_id.clone(),
                 revision: rev,
                 pending,
@@ -934,9 +934,9 @@ impl Actor {
             } else {
                 self.end_run(ChatStatus::Interrupted, Some(&error), "interrupted");
             }
-            self.emit_queue();
+            self.emit_pending();
             if let Some(s) = self.stopping.take() {
-                self.settle_dropped(s.continue_queue);
+                self.settle_dropped();
                 for r in s.replies {
                     let _ = r.send(ChatStatus::Interrupted);
                 }
@@ -973,7 +973,7 @@ impl Actor {
         if self.status().is_busy() {
             self.end_run(ChatStatus::Interrupted, Some(error), "failed");
         }
-        self.emit_queue();
+        self.emit_pending();
     }
 
     // ------------------------------------------------------------------ runs
@@ -1091,7 +1091,7 @@ impl Actor {
                 self.emit(ChatEvent::Refresh {
                     chat_id: self.chat_id.clone(),
                 });
-                self.emit_queue();
+                self.emit_pending();
                 self.emit_chat();
                 self.dispatch(&sid);
             }
@@ -1108,9 +1108,9 @@ impl Actor {
                 });
                 self.context_row(
                     ContextKind::Notice,
-                    "The edit could not be applied; your message is kept in the queue to recover.",
+                    "The edit could not be applied; your message is kept so you can recover it.",
                 );
-                self.emit_queue();
+                self.emit_pending();
             }
         }
     }
@@ -1185,29 +1185,22 @@ impl Actor {
         }
     }
 
-    /// After a Stop: the steers the CLI dropped are sent again as the next turn (the Stop asked
-    /// to continue), or become "not delivered" so their text can be taken back.
-    fn settle_dropped(&mut self, continue_queue: bool) {
+    /// After a Stop: everything Claude had not read goes to it again right away — the first
+    /// message opens the next turn, the rest are steered in at its first boundary. Nothing is
+    /// held and nothing is dropped.
+    fn settle_dropped(&mut self) {
         let chat = self.chat_id.clone();
-        if !continue_queue || self.archived {
-            // An archived chat sends nothing, whatever the Stop asked: what Claude had not read
-            // reads "not delivered", so the text can be taken back after a restore. On an
-            // ordinary Stop a message saved a moment ago is still on its way and stays so.
-            let states = if self.archived {
-                "'queued', 'accepted', 'saved'"
-            } else {
-                "'queued', 'accepted'"
-            };
+        if self.archived {
+            // An archived chat sends nothing: what Claude had not read reads "not sent", so the
+            // text can be taken back after a restore.
             self.write(|t| {
                 t.execute(
-                    &format!(
-                        "UPDATE submissions SET state = 'uncertain'
-                         WHERE chat_id = ?1 AND state IN ({states})"
-                    ),
+                    "UPDATE submissions SET state = 'uncertain'
+                     WHERE chat_id = ?1 AND state IN ('saved', 'accepted')",
                     [&chat],
                 )
             });
-            self.emit_queue();
+            self.emit_pending();
             return;
         }
         let quitting = self
@@ -1222,8 +1215,8 @@ impl Actor {
             .db
             .snapshot(|t| {
                 let mut st = t.prepare(
-                    "SELECT s.id FROM queued_submissions q JOIN submissions s ON s.id = q.submission_id
-                     WHERE q.chat_id = ?1 AND s.state = 'queued' ORDER BY q.position, s.created_at",
+                    "SELECT id FROM submissions
+                     WHERE chat_id = ?1 AND state = 'saved' ORDER BY created_at, id LIMIT 100",
                 )?;
                 let rows = st.query_map([&chat], |r| r.get(0))?;
                 rows.collect::<rusqlite::Result<_>>()
@@ -1234,11 +1227,7 @@ impl Actor {
             let mode = if i == 0 { "prompt" } else { "steer" };
             self.write(|t| {
                 t.execute(
-                    "DELETE FROM queued_submissions WHERE submission_id = ?1",
-                    [sid],
-                )?;
-                t.execute(
-                    "UPDATE submissions SET state = 'saved', mode = ?1 WHERE id = ?2",
+                    "UPDATE submissions SET mode = ?1 WHERE id = ?2",
                     rusqlite::params![mode, sid],
                 )
             });
@@ -1259,7 +1248,7 @@ impl Actor {
                 // Nothing starts or sends for an archived chat.
                 Cmd::Dispatch(sid) => {
                     self.set_submission(sid, SubmissionState::Rejected);
-                    self.emit_queue();
+                    self.emit_pending();
                     return;
                 }
                 Cmd::Prewarm | Cmd::Warm | Cmd::DeliverNow { .. } => return,
@@ -1284,10 +1273,7 @@ impl Actor {
                 }
                 self.emit_thread();
             }
-            Cmd::Stop {
-                continue_queue,
-                reply,
-            } => self.stop(continue_queue, reply),
+            Cmd::Stop { reply } => self.stop(reply),
             Cmd::Answer(mut fields) => {
                 let rid = fields
                     .get("id")
@@ -1548,7 +1534,7 @@ impl Actor {
         }
         self.retiring = true;
         let (reply, _) = oneshot::channel();
-        self.stop(false, reply);
+        self.stop(reply);
         if self.stopping.is_some() {
             self.clear_timer(|t| matches!(t, Timer::StopDeadline));
             let lim = self.sh.cfg.limits.archive_stop;
@@ -1779,7 +1765,7 @@ impl Actor {
         );
         let lim = self.sh.cfg.limits.ack;
         self.add_timer(lim, Timer::Ack(id));
-        self.emit_queue();
+        self.emit_pending();
     }
 
     // ------------------------------------------------------------------ local models
@@ -1986,10 +1972,10 @@ impl Actor {
         self.give_back(ids.to_vec());
         self.context_row(ContextKind::Notice, why);
         self.end_run(ChatStatus::Idle, None, "refused");
-        self.emit_queue();
+        self.emit_pending();
     }
 
-    fn stop(&mut self, continue_queue: bool, reply: oneshot::Sender<ChatStatus>) {
+    fn stop(&mut self, reply: oneshot::Sender<ChatStatus>) {
         let status = self.status();
         if !status.is_busy() {
             let _ = reply.send(status);
@@ -2003,12 +1989,10 @@ impl Actor {
             self.clear_loading();
         }
         if let Some(s) = self.stopping.as_mut() {
-            s.continue_queue = continue_queue;
             s.replies.push(reply);
             return;
         }
         self.stopping = Some(StopState {
-            continue_queue,
             replies: vec![reply],
         });
         self.set_status(ChatStatus::Stopping, None);
@@ -2019,10 +2003,7 @@ impl Actor {
             self.settle("stopped", None);
             return;
         }
-        self.request(
-            json!({"type": "abort", "continueQueue": continue_queue}),
-            Pending::Abort,
-        );
+        self.request(json!({"type": "abort"}), Pending::Abort);
     }
 
     fn deliver_now(&mut self, sid: &str, reason: &'static str) {
@@ -2069,7 +2050,7 @@ impl Actor {
                                 "failed",
                             );
                         }
-                        self.emit_queue();
+                        self.emit_pending();
                     }
                 }
                 Timer::ModelAck(id) => {
@@ -2363,7 +2344,7 @@ impl Actor {
                     if accepted {
                         self.set_submission(&sid, SubmissionState::Delivered);
                         self.clear_timer(|t| *t == Timer::WaitLimit(sid.clone()));
-                        self.emit_queue();
+                        self.emit_pending();
                     }
                 }
             }
@@ -2991,7 +2972,7 @@ impl Actor {
                     self.emit_rows(&[key]);
                     self.end_run(ChatStatus::Interrupted, Some(&err), "failed");
                 }
-                self.emit_queue();
+                self.emit_pending();
             }
             Pending::Abort => {
                 let cancelled: Vec<String> = data
@@ -2999,7 +2980,7 @@ impl Actor {
                     .and_then(|c| serde_json::from_value(c.clone()).ok())
                     .unwrap_or_default();
                 if !cancelled.is_empty() {
-                    self.requeue_front(&cancelled);
+                    self.return_unread(&cancelled);
                 }
                 if data.get("state").and_then(Value::as_str) == Some("idle") {
                     self.settle("stopped", None);
@@ -3072,36 +3053,24 @@ impl Actor {
         );
     }
 
-    /// Steers the CLI dropped on an interrupt wait here (state `queued`) until the stop settles:
-    /// then they are sent again or handed back, as the Stop asked.
-    fn requeue_front(&mut self, ids: &[String]) {
+    /// Steers the CLI gave back unread on an interrupt: they were never read, so they go back to
+    /// the sendable state. When the stop settles they are handed to Claude again at once.
+    fn return_unread(&mut self, ids: &[String]) {
         let chat = self.chat_id.clone();
         self.write(|t| {
-            let min: i64 = t.query_row(
-                "SELECT COALESCE(MIN(position), 0) FROM queued_submissions WHERE chat_id = ?1",
-                [&chat],
-                |r| r.get(0),
-            )?;
-            for (i, sid) in ids.iter().enumerate() {
-                let pos = min - (ids.len() - i) as i64;
-                let n = t.execute(
-                    "UPDATE submissions SET state = 'queued', mode = 'followUp' WHERE id = ?1 AND chat_id = ?2",
+            for sid in ids {
+                t.execute(
+                    "UPDATE submissions SET state = 'saved' WHERE id = ?1 AND chat_id = ?2
+                     AND state IN ('accepted', 'dispatching')",
                     [sid, &chat],
                 )?;
-                if n > 0 {
-                    t.execute(
-                        "INSERT INTO queued_submissions(submission_id, chat_id, position) VALUES (?1, ?2, ?3)
-                         ON CONFLICT(submission_id) DO UPDATE SET position = excluded.position",
-                        rusqlite::params![sid, chat, pos],
-                    )?;
-                }
             }
             Ok(())
         });
         for sid in ids {
             self.clear_timer(|t| *t == Timer::WaitLimit(sid.clone()));
         }
-        self.emit_queue();
+        self.emit_pending();
     }
 
     /// The turn is over (`agent_settled`, or a forced end).
@@ -3141,8 +3110,8 @@ impl Actor {
                     None
                 };
                 self.end_run(status, err.as_deref(), outcome);
-                self.settle_dropped(stop.continue_queue);
-                self.emit_queue();
+                self.settle_dropped();
+                self.emit_pending();
                 let final_status = self.status();
                 for r in stop.replies {
                     let _ = r.send(final_status);
@@ -3165,7 +3134,7 @@ impl Actor {
                     ),
                 };
                 self.end_run(status, err.as_deref(), outcome);
-                self.emit_queue();
+                self.emit_pending();
                 if status == ChatStatus::Idle {
                     self.complete_turn();
                 }

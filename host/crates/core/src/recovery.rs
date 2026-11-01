@@ -14,8 +14,8 @@
 //! 6. every registered feature recovery step runs (finishing or rolling back its intents).
 //!
 //! Submission states: `dispatching` and `accepted`
-//! count as in flight. `queued` submissions stay queued, because the follow-up queue is durable by
-//! design.
+//! count as in flight. `saved` submissions stay saved: a message that was never handed over is
+//! delivered at the next start.
 
 use crate::db::{Database, MigrationRegistry};
 
@@ -87,7 +87,7 @@ mod tests {
                  INSERT INTO runs(id, chat_id, status, started_at, ended_at) VALUES
                    ('r-open', 'run', 'running', 0, NULL), ('r-done', 'idle', 'completed', 0, 5);
                  INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES
-                   ('s-fly', 'run', 't', 'dispatching', 0), ('s-q', 'idle', 't', 'queued', 0),
+                   ('s-fly', 'run', 't', 'dispatching', 0), ('s-q', 'idle', 't', 'saved', 0),
                    ('s-ok', 'idle', 't', 'accepted', 0);
                  INSERT INTO messages(chat_id, source_key, role, status, timestamp) VALUES
                    ('run', 'm1', 'assistant', 'streaming', 0), ('idle', 'm2', 'assistant', 'complete', 0);
@@ -136,7 +136,7 @@ mod tests {
                 &db,
                 "SELECT id || '=' || state FROM submissions ORDER BY id"
             ),
-            ["s-fly=uncertain", "s-ok=uncertain", "s-q=queued"]
+            ["s-fly=uncertain", "s-ok=uncertain", "s-q=saved"]
         );
         assert_eq!(
             col(&db, "SELECT id || '=' || status FROM runs ORDER BY id"),

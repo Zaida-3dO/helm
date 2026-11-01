@@ -489,7 +489,7 @@ describe("visual sweep", { timeout: 20 * 60_000 }, () => {
     await audit("empty", { focus: true, chrome: true });
   });
 
-  test("a chat: transcript, tools, approval card, composer, queue", async () => {
+  test("a chat: transcript, tools, approval card, composer, in-flight message", async () => {
     await newChat(page(), repo);
     await send(page(), "[E4] look around");
     await waitStatus(page(), "idle", 30_000);
@@ -527,12 +527,12 @@ describe("visual sweep", { timeout: 20 * 60_000 }, () => {
     await forceMotion("auto");
   });
 
-  test("queued messages, menus and pickers", async () => {
+  test("in-flight messages, menus and pickers", async () => {
     // The chat from the Reduce Motion test is still working: what is sent now goes to Claude and shows as pending until it is read.
-    await send(page(), "queued one");
-    await send(page(), "queued two");
+    await send(page(), "pending one");
+    await send(page(), "pending two");
     await page().waitForSelector(tid("queue-item"), { timeout: 20_000 });
-    await audit("queue", { focus: true });
+    await audit("in-flight", { focus: true });
     // A chat row's menu, then the model and effort picker and the permission-mode picker.
     await page().click(`${tid("chat-item")}`, { button: "right" });
     await page().waitForSelector('[role="menu"]', { timeout: 5_000 });

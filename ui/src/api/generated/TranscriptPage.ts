@@ -9,6 +9,6 @@ export type TranscriptPage = { chatId: string,
  */
 messages: Array<MessageRow>, hasOlder: boolean, hasNewer: boolean, olderCursor: string | null, newerCursor: string | null, runs: Array<RunSummary>, 
 /**
- * At most 100 submissions not yet delivered, in queue order.
+ * At most 100 messages sent but not yet read or settled, oldest first.
  */
 pending: Array<Submission>, revision: number, };

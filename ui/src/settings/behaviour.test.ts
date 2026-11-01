@@ -13,8 +13,9 @@ test('send behaviour reads a stored difference and writes back only what differs
   assert.equal(custom.mode, 'interrupt');
   assert.equal(custom.waitLimitSeconds, null);
   assert.deepEqual(sendBehaviorDiff(custom), { mode: 'interrupt', waitLimitSeconds: null, toolStop: false });
-  // "Queue it" is gone: a stored queue choice reads as the default and is dropped on the next save.
-  const old = parseSendBehavior({ mode: 'queue', toolStop: false });
+  // Retired choices read as the default and drop out on the next save: the "queue" send mode
+  // and the stop-sends-waiting switch.
+  const old = parseSendBehavior({ mode: 'queue', stopSendsWaiting: true, toolStop: false });
   assert.deepEqual(sendBehaviorDiff(old), { toolStop: false });
   assert.deepEqual(sendBehaviorDiff(HOME_SEND_BEHAVIOR), {});
   assert.equal(waitLimitLabel(null), 'No limit');

@@ -2,10 +2,10 @@
 //
 // - R1: the main window's content process dies (a CDP Page.crash): the host notices the page has
 //   stopped answering, writes a diagnostic line and reloads it; the saved draft is still there.
-// - R2: a hard kill with one chat running and a follow-up queued behind it, and a draft in another
-//   chat: after relaunch the running chat gets exactly one restart continuation (crash
-//   and quit alike), its queued follow-up is sent once after that (a continued chat's queue is not
-//   held), the interrupted prompt is never resent, and the draft is intact.
+// - R2: a hard kill with one chat running and a follow-up it had not read yet, and a draft in
+//   another chat: after relaunch the running chat gets exactly one restart continuation (crash
+//   and quit alike), the follow-up the CLI had taken but not read reads as not delivered and is
+//   not resent on its own, the interrupted prompt is never resent, and the draft is intact.
 //
 // Run: `npm run build:debug` at the root, then `npm run e2e -w checks`.
 

@@ -7,7 +7,7 @@
 //! the caller from its arguments.
 
 use crate::runtime::ChatRuntime;
-use crate::submit::{host_send, HostSend, HostSendMode};
+use crate::submit::{host_send, HostSend};
 use crate::types::{ChatStatus, SubmissionOrigin};
 use helm_core::db::Database;
 use helm_hosttools::{HostToolRegistry, ToolCtx, ToolError, ToolResult, ToolSpec};
@@ -384,7 +384,6 @@ fn send_framed(
     ctx: &ToolCtx,
     to: &str,
     body: &str,
-    mode: HostSendMode,
 ) -> Result<crate::submit::HostSent, ToolError> {
     let sender = meta(ctx, &ctx.caller_chat_id)?;
     let text = frame(
@@ -399,7 +398,6 @@ fn send_framed(
             chat_id: to,
             submission_id: &sid,
             text: &text,
-            mode,
             origin: SubmissionOrigin::OtherChat,
         },
     )
@@ -409,11 +407,12 @@ fn send_framed(
 fn send_message(ctx: &ToolCtx, a: Value, limits: &SendLimits) -> ToolResult {
     let to = chat_id_arg(&a)?;
     let body = message_arg(&a)?;
-    let mode = match str_arg(&a, "mode") {
-        Some("steer") => HostSendMode::Steer,
-        Some("queue") => HostSendMode::Queue,
-        _ => return Err(refuse("mode is required: steer or queue.")),
-    };
+    // `mode` must be present. "steer" is the mode; "queue" is a retired value, still accepted
+    // and meaning exactly the same.
+    match str_arg(&a, "mode") {
+        Some("steer") | Some("queue") => {}
+        _ => return Err(refuse("mode is required: steer.")),
+    }
     if to == ctx.caller_chat_id {
         return Err(refuse("A chat cannot message itself."));
     }
@@ -422,11 +421,10 @@ fn send_message(ctx: &ToolCtx, a: Value, limits: &SendLimits) -> ToolResult {
         return Err(refuse("That chat is archived."));
     }
     limits.admit(&ctx.caller_chat_id, Some(&to), Instant::now())?;
-    let sent = send_framed(ctx, &to, &body, mode)?;
+    let sent = send_framed(ctx, &to, &body)?;
     let (title, _) = cut_bytes(target["title"].as_str().unwrap_or(""), 512);
     Ok(json!({
         "delivered": sent.delivered,
-        "queued": sent.queued,
         "mode": a["mode"],
         "chatId": to,
         "link": chat_link(&to, None),
@@ -531,7 +529,7 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
         ctx.op("chat_rename", json!({"chatId": id, "title": t}))
             .await?;
     }
-    if let Err(e) = send_framed(&ctx, &id, &body, HostSendMode::Queue) {
+    if let Err(e) = send_framed(&ctx, &id, &body) {
         // The first message failed: discard the untouched chat.
         let _ = ctx.op("chat_archive", json!({"chatId": id})).await;
         let _ = ctx.op("chat_delete", json!({"chatId": id})).await;
@@ -675,7 +673,7 @@ async fn stop_chat(ctx: ToolCtx, a: Value) -> ToolResult {
         return Err(refuse("A chat cannot stop itself with this tool."));
     }
     meta(&ctx, &id)?;
-    ctx.op("chat_stop", json!({"chatId": id, "continueQueue": false}))
+    ctx.op("chat_stop", json!({"chatId": id}))
         .await?;
     let stopped = wait_idle(&ctx, &id, Duration::from_secs(10)).await?;
     Ok(json!({ "stopped": stopped }))
@@ -776,12 +774,12 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::write(
             "app_send_message",
-            format!("Send a message to another Helm chat. Helm adds a header naming this chat and a note that the user did not write it. mode is required: steer or queue, which both deliver it into the chat's running turn at the next safe point (queue is the older name for the same thing; nothing waits for the turn to end); an idle chat starts at once either way; end your turn or carry on with other work. delivered means Helm accepted it, not that the other agent acted; do not poll for a reply.{REPORT_BACK}{EXPLICIT}"),
+            format!("Send a message to another Helm chat. Helm adds a header naming this chat and a note that the user did not write it. mode is required: steer, which delivers it into the chat's running turn at the next safe point; a message never waits for the turn to end, and an idle chat starts at once; end your turn or carry on with other work. delivered means Helm accepted it, not that the other agent acted; do not poll for a reply.{REPORT_BACK}{EXPLICIT}"),
             obj(
                 json!({
                     "chatId": id,
                     "message": {"type": "string", "minLength": 1, "maxLength": 16384},
-                    "mode": {"type": "string", "enum": ["steer", "queue"]}
+                    "mode": {"type": "string", "enum": ["steer"]}
                 }),
                 &["chatId", "message", "mode"],
             ),

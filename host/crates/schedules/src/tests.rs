@@ -526,11 +526,10 @@ fn the_prompt_names_the_schedule_and_carries_the_message() {
 }
 
 #[test]
-fn the_send_is_schedule_origin_and_never_steers() {
+fn the_send_is_schedule_origin() {
     let r = scheduler::request("c", "s", "t");
     assert_eq!(r.origin, helm_chats::types::SubmissionOrigin::Schedule);
     assert!(!r.origin.is_users_own(), "a timer never types for the user");
-    assert_eq!(r.mode, helm_chats::submit::HostSendMode::Queue);
     assert_eq!((r.chat_id, r.submission_id, r.text), ("c", "s", "t"));
 }
 

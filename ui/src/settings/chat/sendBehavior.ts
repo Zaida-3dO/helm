@@ -19,7 +19,7 @@ export function parseSendBehavior(v: unknown): SendBehavior {
   const m = v as Record<string, unknown>;
   if (SEND_MODES.includes(m.mode as SendMode)) out.mode = m.mode as SendMode;
   if (LONG_COMMANDS.includes(m.longCommands as LongCommands)) out.longCommands = m.longCommands as LongCommands;
-  for (const k of ['showChoices', 'stopSendsWaiting', 'toolStop'] as const) if (typeof m[k] === 'boolean') out[k] = m[k] as boolean;
+  for (const k of ['showChoices', 'toolStop'] as const) if (typeof m[k] === 'boolean') out[k] = m[k] as boolean;
   if (m.waitLimitSeconds === null) out.waitLimitSeconds = null;
   else if (typeof m.waitLimitSeconds === 'number' && m.waitLimitSeconds >= 5 && m.waitLimitSeconds <= 3600) out.waitLimitSeconds = m.waitLimitSeconds;
   return out;

@@ -102,8 +102,8 @@ every host source file and allows only `prefs/store.rs`).
   status left unconstrained, retry markers in `chat_retry_markers`.
 - **Intent tables**: owned by each feature as side tables, finished through recovery steps.
 - **Global revision counter key**: `counters.revision`.
-- **Recovery and `queued`**: only `dispatching` submissions become `uncertain`; queued ones stay
-  queued.
+- **Recovery and unsent messages**: only `dispatching` or `accepted` submissions become
+  `uncertain`; a message never handed to Claude stays `saved` and is sent again at the next start.
 - **Database file name**: `helm.sqlite3`.
 - **Credential envelope**: `HCE1` magic, version byte, 96-bit nonce, ciphertext and tag; AAD =
   `helm-credential\0` + profile hash + `\0` + identity. The Credential Manager entry is filed under

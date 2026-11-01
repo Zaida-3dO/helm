@@ -1,8 +1,8 @@
 // One chat's in-memory view, and the pure rules that update it from pages and host events.
 //
-// - Stale revisions are dropped: a chat, thread, queue or message row whose revision
+// - Stale revisions are dropped: a chat, thread, in-flight list or message row whose revision
 //   is not newer than the one held is ignored. `refresh` and `catalogue` carry no revision and
-//   always apply. The queue list is replaced whole each time.
+//   always apply. The in-flight list is replaced whole each time.
 // - A thread holds at most MAX_ROWS rows. Rows past the cap are dropped from the end the
 //   reader is not looking at, and the paging flag on that side is set again so they can be re-read.
 
@@ -20,8 +20,8 @@ export interface ThreadView {
   olderCursor: string | null;
   newerCursor: string | null;
   pending: Submission[];
-  /** Revision of the last `queue` event applied; a page read resets it. */
-  queueRevision: number;
+  /** Revision of the last `pending` event applied; a page read resets it. */
+  pendingRevision: number;
   /** Bumped by a `refresh` event so the view knows to re-read its page. */
   refreshes: number;
 }
@@ -37,7 +37,7 @@ export function emptyView(chatId: string): ThreadView {
     olderCursor: null,
     newerCursor: null,
     pending: [],
-    queueRevision: 0,
+    pendingRevision: 0,
     refreshes: 0,
   };
 }
@@ -90,7 +90,7 @@ export function applyPage(view: ThreadView, page: TranscriptPage, how: 'replace'
       olderCursor: page.olderCursor,
       newerCursor: page.newerCursor,
       pending: page.pending,
-      queueRevision: 0,
+      pendingRevision: 0,
     };
     const next = applyRows(base, page.messages, 'newest');
     return next === base ? base : next;
@@ -115,7 +115,7 @@ export function applyThread(view: ThreadView, thread: ThreadState): ThreadView {
   return { ...view, thread };
 }
 
-export function applyQueue(view: ThreadView, pending: Submission[], revision: number): ThreadView {
-  if (revision <= view.queueRevision) return view;
-  return { ...view, pending, queueRevision: revision };
+export function applyPending(view: ThreadView, pending: Submission[], revision: number): ThreadView {
+  if (revision <= view.pendingRevision) return view;
+  return { ...view, pending, pendingRevision: revision };
 }

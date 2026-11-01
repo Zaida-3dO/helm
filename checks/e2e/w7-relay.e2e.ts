@@ -130,7 +130,7 @@ describe("the hub line, forwarding and the Telegram bot", { timeout: 10 * 60_000
   });
 
   test("R3: a message from outside arrives framed as another agent's, not the user's", async () => {
-    const r = await mcp("app_send_message", { chatId: chat, message: "E2E relay hello", mode: "queue" });
+    const r = await mcp("app_send_message", { chatId: chat, message: "E2E relay hello", mode: "steer" });
     assert.notEqual(r.isError, true, text(r));
     await waitText(app!.page, "E2E relay hello");
     await waitText(app!.page, "Message from another agent");
@@ -209,7 +209,7 @@ describe("the hub line, forwarding and the Telegram bot", { timeout: 10 * 60_000
     await dispose(app);
     app = undefined;
     await until("the line to drop", () => (hubLog.includes("relay: line down") ? true : undefined));
-    const r = await mcp("app_send_message", { chatId: chat, message: "should not arrive", mode: "queue" });
+    const r = await mcp("app_send_message", { chatId: chat, message: "should not arrive", mode: "steer" });
     assert.equal(r.isError, true);
     assert.equal(text(r), "Helm offline, nothing sent or changed.");
   });

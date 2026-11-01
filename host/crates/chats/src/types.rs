@@ -396,7 +396,6 @@ pub enum LongCommands {
 pub struct SendBehavior {
     pub mode: SendMode,
     pub show_choices: bool,
-    pub stop_sends_waiting: bool,
     pub wait_limit_seconds: Option<u32>,
     pub tool_stop: bool,
     pub long_commands: LongCommands,
@@ -653,7 +652,6 @@ pub struct MessageRow {
 pub enum SubmissionMode {
     Prompt,
     Steer,
-    FollowUp,
 }
 
 /// Submission states.
@@ -661,7 +659,6 @@ pub enum SubmissionMode {
 #[serde(rename_all = "camelCase")]
 pub enum SubmissionState {
     Saved,
-    Queued,
     Dispatching,
     Accepted,
     Delivered,
@@ -747,9 +744,6 @@ pub struct Submission {
     pub mode: SubmissionMode,
     pub state: SubmissionState,
     pub origin: SubmissionOrigin,
-    /// Queue position for a queued follow-up; `null` otherwise.
-    #[ts(type = "number | null")]
-    pub position: Option<i64>,
     #[ts(type = "number")]
     pub created_at: i64,
 }
@@ -776,7 +770,7 @@ pub struct TranscriptPage {
     pub older_cursor: Option<String>,
     pub newer_cursor: Option<String>,
     pub runs: Vec<RunSummary>,
-    /// At most 100 submissions not yet delivered, in queue order.
+    /// At most 100 messages sent but not yet read or settled, oldest first.
     pub pending: Vec<Submission>,
     #[ts(type = "number")]
     pub revision: i64,
@@ -996,8 +990,6 @@ pub struct ChatSendResult {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatStopArgs {
     pub chat_id: String,
-    /// `false` is Stop (the queue becomes uncertain); `true` is Esc (the queue continues).
-    pub continue_queue: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -1010,10 +1002,7 @@ pub struct ChatStopResult {
 #[serde(rename_all = "camelCase")]
 pub enum SubmissionActionKind {
     Withdraw,
-    SteerNow,
-    SendNow,
     Recover,
-    Move,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -1021,11 +1010,6 @@ pub enum SubmissionActionKind {
 pub struct SubmissionActionArgs {
     pub submission_id: String,
     pub action: SubmissionActionKind,
-    /// For `move`: the new 0-based queue position.
-    #[serde(default)]
-    #[ts(type = "number")]
-    #[ts(optional)]
-    pub position: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -1270,7 +1254,7 @@ pub struct CompletionAckArgs {
 // ---------------------------------------------------------------------------------------------
 // Events, on the one `app-event` channel, tagged by `kind`.
 //
-// Ordering rule for the UI: `chat`, `thread`, `message` and `queue` carry a `revision` and the UI
+// Ordering rule for the UI: `chat`, `thread`, `message` and `pending` carry a `revision` and the UI
 // drops one that is not newer than what it holds for that chat. `refresh` and `catalogue` carry
 // none and always apply: both only ask the UI to re-read.
 // ---------------------------------------------------------------------------------------------
@@ -1296,8 +1280,8 @@ pub enum ChatEvent {
         revision: i64,
         rows: Vec<MessageRow>,
     },
-    /// The full pending list after any submission state or position change.
-    Queue {
+    /// The full in-flight and not-yet-delivered list after any submission state change.
+    Pending {
         chat_id: String,
         #[ts(type = "number")]
         revision: i64,
@@ -1341,14 +1325,14 @@ mod tests {
 
     #[test]
     fn events_keep_the_kind_tag_and_camel_case_fields() {
-        let e = ChatEvent::Queue {
+        let e = ChatEvent::Pending {
             chat_id: "c1".into(),
             revision: 7,
             pending: vec![],
         };
         assert_eq!(
             e.to_app_event().to_value(),
-            json!({"kind": "queue", "chatId": "c1", "revision": 7, "pending": []})
+            json!({"kind": "pending", "chatId": "c1", "revision": 7, "pending": []})
         );
         assert_eq!(
             ChatEvent::Refresh {
@@ -1362,11 +1346,10 @@ mod tests {
 
     #[test]
     fn op_args_refuse_unknown_fields() {
-        let ok: Result<ChatStopArgs, _> =
-            serde_json::from_value(json!({"chatId": "c", "continueQueue": true}));
+        let ok: Result<ChatStopArgs, _> = serde_json::from_value(json!({"chatId": "c"}));
         assert!(ok.is_ok());
         let bad: Result<ChatStopArgs, _> =
-            serde_json::from_value(json!({"chatId": "c", "continueQueue": true, "x": 1}));
+            serde_json::from_value(json!({"chatId": "c", "x": 1}));
         assert!(bad.is_err());
     }
 

@@ -11,11 +11,11 @@
 //!     whose parent is the edited message's parent (a new branch just before it); mark the edited
 //!     message and everything after it inactive (the old branch stays in the log and the
 //!     database, out of the transcript and search); mark submissions whose rows went inactive as
-//!     superseded and take them out of the queue; drop the queue slot and the completion; and
+//!     superseded, including any not yet handed over; drop the completion; and
 //!     drop the Claude session binding, since Claude's own session cannot be cut there. The
 //!     resent prompt then carries the history before the edit point once, like a message fork.
 //!   - **Recovery:** a `pending_edits` row left by a crash is applied at startup
-//!     ([`recover_all`]); its submission is left `rejected`, so the queue offers Recover rather
+//!     ([`recover_all`]); its submission is left `rejected`, so the chat offers Recover rather
 //!     than sending it unseen.
 //! - **Images.** The resent message keeps the edited message's images: the new submission gets its
 //!   own copy of each (see [`crate::message_images`]), so the new bubble shows them and they ride
@@ -303,12 +303,12 @@ pub fn apply(
                AND ('u:' || id) IN (SELECT source_key FROM messages WHERE chat_id = ?1 AND active = 0)",
             params![chat_id, sid],
         )?;
-        tx.execute("DELETE FROM queued_submissions WHERE chat_id = ?1", [chat_id])?;
+        // A message not yet handed over is taken out of the running flow the same way:
+        // superseded, except the resent prompt this edit is about to send.
         tx.execute(
-            "UPDATE submissions SET state = 'superseded' WHERE chat_id = ?1 AND state = 'queued'",
-            [chat_id],
+            "UPDATE submissions SET state = 'superseded' WHERE chat_id = ?1 AND id != ?2 AND state = 'saved'",
+            params![chat_id, sid],
         )?;
-        tx.execute("DELETE FROM draft_queue_slots WHERE chat_id = ?1", [chat_id])?;
         crate::manage::drop_completion(tx, chat_id)?;
         tx.execute("DELETE FROM fork_carry WHERE chat_id = ?1", [chat_id])?;
         if let Some(c) = &carry {

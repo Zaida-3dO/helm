@@ -182,8 +182,9 @@ pub fn admit(tool: &str, args: &Value) -> Result<Admitted, String> {
         if m.trim().is_empty() || m.len() > MAX_MESSAGE {
             return Err("message must be 1-16384 bytes and not blank.".into());
         }
+        // "queue" is a retired value an older phone build may still send; it means the same.
         if !matches!(s("mode"), Some("steer") | Some("queue")) {
-            return Err("mode is required: steer or queue.".into());
+            return Err("mode is required: steer.".into());
         }
     }
     Ok(Admitted {

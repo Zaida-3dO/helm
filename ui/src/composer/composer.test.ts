@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveKey, sendTooltip, stopTooltip, type KeyContext, type KeyShape } from './keymap.ts';
 import { DRAFT_DEBOUNCE_MS, DraftSaver, nextRevision, type Timers } from './drafts.ts';
-import { dropPosition, movePosition, queueView } from './queue.ts';
+import { inFlightView } from './inFlight.ts';
 import { submission } from '../dev/fixtures.ts';
 import { liveRuns, wrapMarker } from './markup.ts';
 import { permissionLabel } from './permission.ts';
@@ -17,7 +17,7 @@ test('send keys follow the mode: asap has send now as its alternate', () => {
   // Steer is the default in asap, so its key is not an alternate there.
   assert.deepEqual(resolveKey(key('Enter', { ctrl: true, shift: true }), asap), { kind: 'send', action: 'default' });
   assert.deepEqual(resolveKey(key('Enter'), asap), { kind: 'none' }, 'plain Enter is a newline by default');
-  assert.deepEqual(resolveKey(key('Escape'), asap), { kind: 'stop-continue' });
+  assert.deepEqual(resolveKey(key('Escape'), asap), { kind: 'stop' });
 });
 
 test('interrupt mode offers steer', () => {
@@ -40,8 +40,8 @@ test('the Enter shortcut sends on plain Enter, Shift+Enter is a newline', () => 
 test('tooltips name what Send and Stop do', () => {
   assert.match(sendTooltip(asap, true), /^Steer into the running task · Ctrl\+Enter · Ctrl\+Alt\+Enter to send now$/);
   assert.equal(sendTooltip(asap, false), 'Send · Ctrl+Enter');
-  assert.equal(stopTooltip(false, true), 'Stop task and keep waiting messages unsent · Esc interrupts and sends waiting messages');
-  assert.equal(stopTooltip(true, false), 'Stop task and send waiting messages');
+  assert.equal(stopTooltip(true), 'Stop task · whatever has not been read is sent again right away · Esc stops the same way');
+  assert.equal(stopTooltip(false), 'Stop task · whatever has not been read is sent again right away');
 });
 
 function fakeTimers(start = 1000) {
@@ -112,38 +112,32 @@ test('a send clears the draft unless a newer revision was written since it began
   assert.equal(d.sent(token3, true), true);
 });
 
-test('queue: an accepted steer is Pending with Withdraw; queued follow-ups reorder', () => {
+test('in flight: order, states, labels, tones and actions in one list', () => {
+  const caps = { withdraw: true, deliverNow: true, stopTool: false, compact: false };
   const pending = [
-    submission({ id: 'q2', position: 2, createdAt: 1 }),
-    submission({ id: 's1', mode: 'steer', state: 'accepted', createdAt: 5 }),
-    submission({ id: 'q1', position: 1, createdAt: 2 }),
-    submission({ id: 'u1', state: 'uncertain', position: 3, createdAt: 3 }),
+    submission({ id: 'u1', state: 'uncertain', createdAt: 1 }),
+    submission({ id: 's1', mode: 'steer', state: 'accepted', createdAt: 2 }),
+    submission({ id: 'g1', mode: 'steer', state: 'saved', createdAt: 3 }),
+    submission({ id: 'p1', mode: 'prompt', state: 'dispatching', createdAt: 4 }),
+    submission({ id: 'r1', state: 'rejected', createdAt: 5 }),
+    submission({ id: 'x1', state: 'withdrawn', createdAt: 6 }),
+    submission({ id: 'o1', state: 'complete', createdAt: 7 }),
   ];
-  const ctx = { running: true, showChoices: true, capabilities: { withdraw: true, deliverNow: true, stopTool: false, compact: false } };
-  const v = queueView(pending, ctx);
+  const v = inFlightView(pending, { capabilities: caps });
+  // In the order they were sent; settled rows are gone; nothing waits behind a turn.
   assert.deepEqual(
-    v.map((i) => [i.submission.id, i.state, i.label]),
+    v.map((i) => [i.submission.id, i.state, i.label, i.tone, i.actions]),
     [
-      ['s1', 'pending', 'Pending'],
-      ['q1', 'queued', 'Queued'],
-      ['q2', 'queued', 'Queued'],
-      ['u1', 'uncertain', 'Not sent'],
+      ['u1', 'uncertain', 'Not sent', 'amber', ['recover']],
+      ['s1', 'pending', 'Pending', 'muted', ['withdraw']],
+      ['g1', 'pending', 'Pending', 'muted', []],
+      ['p1', 'sending', 'Sending', 'amber', []],
+      ['r1', 'failed', 'Not delivered', 'error', ['recover']],
     ],
   );
-  assert.deepEqual(v[0]!.actions, ['withdraw']);
-  assert.deepEqual(v[1]!.actions, ['edit', 'steerNow', 'sendNow', 'move_down']);
-  assert.deepEqual(v[2]!.actions, ['edit', 'steerNow', 'sendNow', 'move_up']);
-  assert.deepEqual(v[3]!.actions, ['recover']);
-  assert.equal(movePosition(pending, 'q2', -1), 1);
-  assert.equal(movePosition(pending, 'q1', -1), null);
-});
-
-test('queue: Withdraw is hidden when the worker cannot withdraw; idle offers no reorder', () => {
-  const pending = [submission({ id: 's1', mode: 'steer', state: 'accepted' }), submission({ id: 'q1' }), submission({ id: 'q2' })];
-  const ctx = { running: false, showChoices: true, capabilities: { withdraw: false, deliverNow: true, stopTool: false, compact: false } };
-  const v = queueView(pending, ctx);
-  assert.deepEqual(v[0]!.actions, []);
-  assert.deepEqual(v[1]!.actions, ['edit']);
+  // Withdraw is hidden when the worker cannot withdraw.
+  const v2 = inFlightView([submission({ id: 's2', mode: 'steer', state: 'accepted' })], { capabilities: { ...caps, withdraw: false } });
+  assert.deepEqual(v2[0]!.actions, []);
 });
 
 test('formatting keys wrap, unwrap, and leave the caret between empty markers', () => {
@@ -156,28 +150,6 @@ test('the permission chip shows bypass until a live mode is reported', () => {
   assert.equal(permissionLabel(null), 'Bypass permissions');
   assert.equal(permissionLabel('default'), 'Asks permission');
   assert.equal(permissionLabel('plan'), 'Plan mode');
-});
-
-test('queue pills: tone follows the state', () => {
-  const pending = [
-    submission({ id: 's1', mode: 'steer', state: 'accepted', createdAt: 5 }),
-    submission({ id: 'q1', position: 1, createdAt: 2 }),
-    submission({ id: 'r1', state: 'rejected', position: 2, createdAt: 3 }),
-    submission({ id: 'd1', state: 'saved', position: null, createdAt: 4 }),
-  ];
-  const caps = { withdraw: true, deliverNow: true, stopTool: false, compact: false };
-  const view = queueView(pending, { running: true, showChoices: true, capabilities: caps });
-  assert.deepEqual(view.map((i) => [i.submission.id, i.label, i.tone]), [['s1', 'Pending', 'muted'], ['q1', 'Queued', 'amber'], ['r1', 'Not delivered', 'error'], ['d1', 'Sending', 'amber']]);
-  assert.deepEqual(view[1]!.actions, ['edit', 'steerNow', 'sendNow']);
-  assert.deepEqual(view[3]!.actions, [], 'a send already handed over offers nothing');
-});
-
-test('queue: dropping on another queued message lands on that message position', () => {
-  const pending = [submission({ id: 'q1', position: 1 }), submission({ id: 'q2', position: 2 }), submission({ id: 'q3', position: 3 })];
-  assert.equal(dropPosition(pending, 'q1', 'q3'), 3);
-  assert.equal(dropPosition(pending, 'q3', 'q1'), 1);
-  assert.equal(dropPosition(pending, 'q2', 'q2'), null);
-  assert.equal(dropPosition(pending, 'q2', 'nope'), null);
 });
 
 test('live styling keeps every character and styles the Markdown it finds', () => {

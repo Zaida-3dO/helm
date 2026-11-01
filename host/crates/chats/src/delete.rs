@@ -2,7 +2,7 @@
 //!
 //! One transaction checks the chat, queues the files it leaves behind in `chat_file_cleanup`, and
 //! deletes the row: every table hanging off `chats` cascades (messages and their search rows,
-//! submissions, queue, runs, entries, marks, completions, titles, queue holds). After it commits,
+//! submissions, runs, entries, marks, completions, titles). After it commits,
 //! [`run_cleanup`] removes the queued files in batches of [`BATCH`], deleting each batch's rows in
 //! one transaction once its files are gone; whatever fails stays queued and is retried at the next
 //! startup ([`crate::reconcile_all`]).

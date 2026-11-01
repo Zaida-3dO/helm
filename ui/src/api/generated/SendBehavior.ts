@@ -6,4 +6,4 @@ import type { SendMode } from "./SendMode";
  * The resolved send behaviour (settings-schema `sendBehavior`): always the full
  * object, with the defaults ([`crate::send_behavior::HOME_DEFAULTS`]) filled in.
  */
-export type SendBehavior = { mode: SendMode, showChoices: boolean, stopSendsWaiting: boolean, waitLimitSeconds: number | null, toolStop: boolean, longCommands: LongCommands, };
+export type SendBehavior = { mode: SendMode, showChoices: boolean, waitLimitSeconds: number | null, toolStop: boolean, longCommands: LongCommands, };

@@ -80,22 +80,19 @@ fn a_question_goes_up_once_with_numbered_options_and_no_status_meanwhile() {
 }
 
 #[test]
-fn a_queued_telegram_message_keeps_the_mirror_for_its_own_turn() {
+fn a_second_message_in_the_same_exchange_is_mirrored_within_the_running_turn() {
+    // A phone message that joins a running turn keeps it busy (Claude reads it at a tool
+    // boundary), so one mirror carries both answers and ends when the exchange settles.
     let mut m = Mirror::new(0, T0);
     m.step(&busy(&[], &[]), T0);
-    let mut s = idle(Some("First."));
-    s.queued = true;
-    m.step(&s, T0 + 1_000);
-    assert_eq!(m.step(&s, T0 + 1_500), vec![Up::Final("First.".into())]);
-    assert!(!m.done);
-    assert_eq!(m.baseline, 9, "the next answer is read after this one");
-    m.step(&busy(&[], &[]), T0 + 2_000);
-    m.step(&idle(Some("Second.")), T0 + 3_000);
+    m.step(&busy(&[], &["Thinking."]), T0 + 1_000);
+    assert_eq!(m.step(&idle(Some("First.")), T0 + 2_000), vec![]);
+    assert!(!m.done, "the first idle sample only starts the settle");
     assert_eq!(
-        m.step(&idle(Some("Second.")), T0 + 3_500),
+        m.step(&idle(Some("Second.")), T0 + 2_500),
         vec![Up::Final("Second.".into())]
     );
-    assert!(m.done);
+    assert!(m.done, "nothing waits behind the turn, so one Final closes the exchange");
 }
 
 #[test]

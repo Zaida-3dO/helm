@@ -28,8 +28,8 @@ breaks those checks, so change them only together with the checks. Everything el
 | `chat-view` | The open chat | `data-chat-id`, `data-chat-status` |
 | `chat-status` | The chat's status, a visually hidden span (screen readers and tests; not a visible pill) | text = the status |
 | `composer` | The editable message box (Lexical `contenteditable`) | |
-| `send` | Send button (reads Send, Steer, Queue or Interrupt) | `disabled` while the draft is empty |
-| `stop` | Stop button, shown only while a turn runs (Stop; waiting messages follow the setting) | |
+| `send` | Send button (reads Send, Steer or Interrupt) | `disabled` while the draft is empty |
+| `stop` | Stop button, shown only while a turn runs (Stop; whatever Claude had not read is sent again right away) | |
 | `transcript` | The transcript scroller | |
 | `transcript-row` | One message row | `data-status` (`saved` `streaming` `complete` `error` `interrupted`), `data-role` (`user` `assistant` `toolResult` `context`), `data-row-id` |
 | `peer-card` | A user row that another chat sent (origin `other_chat`): the "From <chat>" card with the sender's link, the body and a note that the user did not write it | `data-from` (the sending chat's id) |
@@ -44,17 +44,16 @@ breaks those checks, so change them only together with the checks. Everything el
 | `work-failed` | The "N failed" count on a "Worked for" row | |
 | `tool-status` / `tool-box` / `result-grid` | A tool row's trailing status, its opened output or diff box, and the key/value grid for host and MCP results | `tool-card` also carries `data-source` (`host` `mcp` `native`) |
 | `thinking` | The Thinking disclosure of a reply | |
-| `queue-grip` | Drag handle of a queued message (Alt+Up/Down moves it one place) | `queue-item` also carries `data-tone` (`amber` `steer` `muted` `error`) |
 | `interaction-card` | An approval, question or plan card | `data-attention` (`approval` `question` `plan`) |
 | `approval-button` | One approval option | `data-option` = the option text (`Allow once`, `Allow for this session`, `Deny`, `Stop turn`) |
 | `question-button` | One question option, or the free-text Answer button | `data-option` = the option text, or `(other)` |
 | `question-other` | Free-text input of a question | |
 | `question-back` / `question-cancel` | Back to the previous step / skip the question | |
 | `plan-button` | Plan approval option | `data-option` = `Approve plan` or `Keep planning` |
-| `queue-item` | One pending or queued message under the transcript | `data-state` (`pending` `queued` `sending` `uncertain` `failed`), `data-submission` |
+| `queue-item` | One in-flight message under the transcript | `data-state` (`pending` `sending` `uncertain` `failed`), `data-tone` (`amber` `muted` `error`), `data-submission` |
 | `queue-pending` | The "Pending" label of an unread asap steer | |
 | `queue-withdraw` | Withdraw on a pending steer (only when the worker can withdraw) | |
-| `queue-edit` / `queue-steer-now` / `queue-send-now` / `queue-recover` | Queue item actions | |
+| `queue-recover` | Recover an unsent message back to the composer | |
 | `background-chip` | Background-tasks chip in the activity dock | `data-count` = number of tasks |
 | `activity-dock` | The live activity dock | |
 | `dock-loading` | The activity dock's second line while a local model is being loaded (its first line is the host's "Loading <model>…"); `data-phase` is `loading` | |

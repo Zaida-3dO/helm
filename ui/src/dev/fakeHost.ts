@@ -127,8 +127,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   function emitRows(c: FakeChat, rows: MessageRow[]) {
     emit({ kind: 'message', chatId: c.chat.id, revision, rows });
   }
-  function emitQueue(c: FakeChat) {
-    emit({ kind: 'queue', chatId: c.chat.id, revision: rev(), pending: c.pending });
+  function emitPending(c: FakeChat) {
+    emit({ kind: 'pending', chatId: c.chat.id, revision: rev(), pending: c.pending });
   }
   function setStatus(c: FakeChat, status: ChatRecord['status']) {
     const dropCompletion = status !== 'idle' && status !== 'interrupted';
@@ -333,7 +333,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     if (!steers.length) return;
     for (const s of steers) addRow(c, { role: 'user', text: s.text, sourceKey: s.id, details: { submissionId: s.id, mode: 'steer' } });
     c.pending = c.pending.filter((s) => !steers.includes(s));
-    emitQueue(c);
+    emitPending(c);
   }
 
   const isLocal = (c: FakeChat) => !!c.chat.model?.startsWith('local/');
@@ -440,10 +440,10 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   }
 
   function startNext(c: FakeChat) {
-    const next = c.pending.find((s) => s.state === 'queued');
+    const next = c.pending.find((s) => s.mode === 'prompt');
     if (!next) return;
     c.pending = c.pending.filter((s) => s !== next);
-    emitQueue(c);
+    emitPending(c);
     addRow(c, { role: 'user', text: next.text, sourceKey: next.id, details: { submissionId: next.id, ...sentExtras.get(next.id) } });
     void runTurn(c, next.text);
   }
@@ -566,7 +566,6 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         mode: 'prompt',
         state: 'accepted',
         origin: a.origin === 'action' || a.origin === 'notification' ? a.origin : 'typed',
-        position: null,
         createdAt: now(),
       };
       if (c.chat.title === 'New chat') c.chat = { ...c.chat, title: text.slice(0, 40) };
@@ -584,13 +583,11 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       } else if (mode === 'asap' || mode === 'steer') {
         s.mode = 'steer';
         c.pending = [...c.pending, s];
-        emitQueue(c);
+        emitPending(c);
       } else {
-        s.state = 'queued';
-        s.mode = 'followUp';
-        s.position = -1;
-        c.pending = [s, ...c.pending];
-        emitQueue(c);
+        // Interrupt: the running turn stops, and this message opens the next one as soon as it has.
+        c.pending = [...c.pending, s];
+        emitPending(c);
         c.turn?.cancel();
         setTimeout(() => startNext(c), step * 3);
       }
@@ -604,12 +601,10 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       if (!c.turn) return { status: c.chat.status };
       setStatus(c, 'stopping');
       c.turn.cancel();
-      if (a.continueQueue) {
-        setTimeout(() => startNext(c), step * 3);
-      } else {
-        c.pending = c.pending.map((s) => ({ ...s, state: 'uncertain' as const }));
-        emitQueue(c);
-      }
+      // One Stop: whatever Claude had not read goes back to it at once, the oldest opening the next turn.
+      const firstUnread = c.pending.find((s) => s.state === 'accepted' && s.mode === 'steer');
+      if (firstUnread) c.pending = c.pending.map((s) => (s === firstUnread ? { ...s, mode: 'prompt' as const } : s));
+      setTimeout(() => startNext(c), step * 3);
       return { status: 'stopping' };
     },
     submission_action: (a) => {
@@ -622,20 +617,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
           c.pending = c.pending.filter((x) => x.id !== s.id);
           c.chat = { ...c.chat, draft: s.text, draftRevision: Math.max(now(), c.chat.draftRevision + 1) };
           emitChat(c);
-        } else if (a.action === 'steerNow') {
-          out = { ...s, mode: 'steer', state: 'accepted' };
-          c.pending = c.pending.map((x) => (x.id === s.id ? out : x));
-        } else if (a.action === 'sendNow') {
-          c.pending = [{ ...s, position: -1 }, ...c.pending.filter((x) => x.id !== s.id)];
-          c.turn?.cancel();
-          setTimeout(() => startNext(c), step * 3);
-        } else if (a.action === 'move') {
-          const pos = Number(a.position);
-          c.pending = c.pending.map((x) =>
-            x.id === s.id ? { ...x, position: pos } : x.position === pos ? { ...x, position: s.position } : x,
-          );
         }
-        emitQueue(c);
+        emitPending(c);
         return { submission: out };
       }
       throw { code: 'not_found', message: 'No such submission.' };

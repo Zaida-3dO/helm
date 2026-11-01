@@ -84,8 +84,6 @@ pub struct ChatObs {
     pub stopped: bool,
     /// The last turn's error, when it ended in one.
     pub error: Option<String>,
-    /// Messages are queued behind the current turn.
-    pub queued: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,14 +208,11 @@ fn judge_chat(w: &mut Wait, c: Option<&ChatObs>, now: i64) -> Option<Outcome> {
     if c.stopped {
         return out("stopped", "The chat was stopped.");
     }
-    if c.queued {
-        return None;
-    }
     let seen_busy = w.state["seenBusy"].as_bool().unwrap_or(false);
     if seen_busy {
         return match &c.error {
             Some(e) => out("errored", format!("Its turn ended in an error: {e}")),
-            None => out("finished", "Its turn ended and nothing is queued."),
+            None => out("finished", "Its turn ended."),
         };
     }
     // Idle and never seen working: give a just-sent message time to start a turn.
@@ -360,7 +355,6 @@ mod tests {
             busy,
             stopped: false,
             error: None,
-            queued: false,
         }))
     }
 
@@ -403,7 +397,6 @@ mod tests {
                 busy: false,
                 stopped: false,
                 error: err.map(str::to_owned),
-                queued: false,
             }))
         };
         let url = || "https://github.com/o/r/pull/1".to_owned();
@@ -456,7 +449,6 @@ mod tests {
                         busy: false,
                         stopped: true,
                         error: None,
-                        queued: false,
                     })),
                 )],
                 Some("stopped"),
@@ -466,24 +458,6 @@ mod tests {
                 chat_id(),
                 vec![(2_000, Observation::Chat(None))],
                 Some("gone"),
-            ),
-            (
-                "queued messages keep it going",
-                chat_id(),
-                vec![
-                    (2_000, chat(true)),
-                    (
-                        4_000,
-                        Observation::Chat(Some(ChatObs {
-                            archived: false,
-                            busy: false,
-                            stopped: false,
-                            error: None,
-                            queued: true,
-                        })),
-                    ),
-                ],
-                None,
             ),
             // A process.
             (

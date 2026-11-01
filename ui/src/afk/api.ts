@@ -32,7 +32,7 @@ export interface AfkSpan {
 export interface AfkDigest {
   chatId: string;
   title: string;
-  state: 'pending' | 'queued' | 'sent' | 'failed' | 'dismissed';
+  state: 'pending' | 'sent' | 'failed' | 'dismissed';
   attempts: number;
   error: string | null;
 }

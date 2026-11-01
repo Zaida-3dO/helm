@@ -176,10 +176,7 @@ async fn chat_stop(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
     let status = rt
         .ask(
             &a.chat_id,
-            |reply| Cmd::Stop {
-                continue_queue: a.continue_queue,
-                reply,
-            },
+            |reply| Cmd::Stop { reply },
             rt.limits().stop + std::time::Duration::from_secs(5),
         )
         .await?;

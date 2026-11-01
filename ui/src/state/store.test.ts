@@ -19,10 +19,10 @@ test('host events reach the store, and stale ones are dropped', () => {
   bus.dispatch({ kind: 'thread', chatId: 'c1', thread: thread({ revision: 4, status: 'idle' }) });
   assert.equal(store.view('c1').thread?.status, 'running');
 
-  bus.dispatch({ kind: 'queue', chatId: 'c1', revision: 7, pending: [submission({ id: 's' })] });
-  bus.dispatch({ kind: 'queue', chatId: 'c1', revision: 6, pending: [] });
-  assert.equal(store.view('c1').pending.length, 1, 'a stale queue event is dropped');
-  bus.dispatch({ kind: 'queue', chatId: 'c1', revision: 8, pending: [] });
+  bus.dispatch({ kind: 'pending', chatId: 'c1', revision: 7, pending: [submission({ id: 's' })] });
+  bus.dispatch({ kind: 'pending', chatId: 'c1', revision: 6, pending: [] });
+  assert.equal(store.view('c1').pending.length, 1, 'a stale pending event is dropped');
+  bus.dispatch({ kind: 'pending', chatId: 'c1', revision: 8, pending: [] });
   assert.deepEqual(store.view('c1').pending, []);
 
   bus.dispatch({ kind: 'chat', chat: chat({ revision: 2, title: 'T' }) });

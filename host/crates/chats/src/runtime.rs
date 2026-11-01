@@ -969,19 +969,20 @@ impl ChatRuntime {
                 Err(e) => log::error!("chat {chat_id}: restart continuation not sent: {e}"),
             }
         }
-        self.send_left_waiting(&continued);
+        self.deliver_left_unsent(&continued);
     }
 
-    /// Hand over messages still in the old `queued` state, oldest queue position first, one chat's
-    /// messages in order. `continued` are chats whose continuation prompt is already on its way.
-    fn send_left_waiting(&self, continued: &[String]) {
+    /// At start, hand over everything a shutdown left unsent, oldest first, one chat's messages
+    /// in order: the first opens the chat's turn, the rest are steered in. Rows still in the
+    /// retired `queued` state (left by an older version) count too and are read as saved.
+    /// `continued` are chats whose continuation prompt is already on its way.
+    fn deliver_left_unsent(&self, continued: &[String]) {
         let sends = self.sh.db.write(|tx| {
             let mut st = tx.prepare(
-                "SELECT q.chat_id, s.id FROM queued_submissions q
-                 JOIN submissions s ON s.id = q.submission_id
-                 JOIN chats c ON c.id = q.chat_id
-                 WHERE s.state = 'queued' AND c.archived = 0
-                 ORDER BY q.chat_id, q.position, s.created_at",
+                "SELECT s.chat_id, s.id FROM submissions s
+                 JOIN chats c ON c.id = s.chat_id
+                 WHERE s.state IN ('saved', 'queued') AND c.archived = 0
+                 ORDER BY s.chat_id, s.created_at, s.id",
             )?;
             let rows =
                 st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
@@ -999,10 +1000,6 @@ impl ChatRuntime {
                     "steer"
                 };
                 tx.execute(
-                    "DELETE FROM queued_submissions WHERE submission_id = ?1",
-                    [sid],
-                )?;
-                tx.execute(
                     "UPDATE submissions SET state = 'saved', mode = ?1 WHERE id = ?2",
                     rusqlite::params![mode, sid],
                 )?;
@@ -1012,7 +1009,7 @@ impl ChatRuntime {
         let Ok(sends) = sends else { return };
         for (chat, sid) in sends {
             if let Err(e) = self.command(&chat, Cmd::Dispatch(sid)) {
-                log::error!("chat {chat}: a waiting message was not sent: {e}");
+                log::error!("chat {chat}: an unsent message was not delivered: {e}");
             }
         }
     }

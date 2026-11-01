@@ -3,4 +3,4 @@
 /**
  * Submission states.
  */
-export type SubmissionState = "saved" | "queued" | "dispatching" | "accepted" | "delivered" | "complete" | "rejected" | "uncertain" | "withdrawn" | "superseded";
+export type SubmissionState = "saved" | "dispatching" | "accepted" | "delivered" | "complete" | "rejected" | "uncertain" | "withdrawn" | "superseded";

@@ -35,9 +35,7 @@ impl Probes for RealProbes {
         self.db
             .snapshot(|tx| {
                 tx.query_row(
-                    "SELECT archived, status, error,
-                            EXISTS(SELECT 1 FROM queued_submissions q WHERE q.chat_id = chats.id)
-                     FROM chats WHERE id = ?1",
+                    "SELECT archived, status, error FROM chats WHERE id = ?1",
                     [chat_id],
                     |r| {
                         let status: String = r.get(1)?;
@@ -46,7 +44,6 @@ impl Probes for RealProbes {
                             busy: matches!(status.as_str(), "starting" | "running" | "stopping"),
                             stopped: status == "stopped",
                             error: r.get(2)?,
-                            queued: r.get(3)?,
                         })
                     },
                 )

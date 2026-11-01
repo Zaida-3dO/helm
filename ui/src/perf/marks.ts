@@ -20,7 +20,7 @@ export interface PerfMark {
 /** One send's timeline, in performance.now() milliseconds. Unknown steps are null. */
 export interface SendTimeline {
   chatId: string;
-  /** The send click or key; null when the row arrived without one (a queued or scheduled send). */
+  /** The send click or key; null when the row arrived without one (a steered or scheduled send). */
   send: number | null;
   rowArrived: number;
   rowPainted: number | null;

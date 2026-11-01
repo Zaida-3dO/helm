@@ -53,18 +53,17 @@ impl DigestSender for RuntimeSender {
         chat_id: &str,
         submission_id: &str,
         text: &str,
-    ) -> Result<bool, (String, String)> {
+    ) -> Result<(), (String, String)> {
         helm_chats::submit::host_send(
             &self.0,
             helm_chats::submit::HostSend {
                 chat_id,
                 submission_id,
                 text,
-                mode: helm_chats::submit::HostSendMode::Queue,
                 origin: helm_chats::types::SubmissionOrigin::App,
             },
         )
-        .map(|s| s.queued)
+        .map(|_| ())
         .map_err(|e| (e.code.to_string(), e.message))
     }
 }
@@ -102,7 +101,6 @@ impl AfkHooks for RuntimeHooks {
                 chat_id,
                 submission_id,
                 text,
-                mode: helm_chats::submit::HostSendMode::Steer,
                 origin: helm_chats::types::SubmissionOrigin::App,
             },
         )

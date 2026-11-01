@@ -153,7 +153,6 @@ pub enum Step {
 
 /// Decide a row's next step from its current submission's state.
 pub fn step(
-    state: &str,
     attempts: u32,
     next_attempt_at: Option<i64>,
     submission: Option<&str>,
@@ -161,14 +160,9 @@ pub fn step(
 ) -> Step {
     match submission {
         Some("accepted" | "delivered" | "complete") => return Step::Mark("sent", None),
-        Some("queued") => {
-            return if state == "queued" {
-                Step::Wait
-            } else {
-                Step::Mark("queued", None)
-            }
-        }
-        Some("dispatching" | "saved") => return Step::Wait,
+        // `queued` is a retired submission state an older version left behind; it reads the
+        // same way as `saved`.
+        Some("dispatching" | "saved" | "queued") => return Step::Wait,
         Some("withdrawn" | "superseded") => return Step::Mark("dismissed", None),
         Some("uncertain") => {
             return Step::Mark(
@@ -239,43 +233,40 @@ mod tests {
 
     #[test]
     fn delivery_steps() {
-        assert_eq!(step("pending", 0, None, None, 0), Step::Send { attempt: 1 });
+        assert_eq!(step(0, None, None, 0), Step::Send { attempt: 1 });
         assert_eq!(
-            step("pending", 1, None, Some("delivered"), 0),
+            step(1, None, Some("delivered"), 0),
             Step::Mark("sent", None)
         );
+        // A row an older version left in the retired `queued` state reads as still in flight.
+        assert_eq!(step(1, None, Some("queued"), 0), Step::Wait);
         assert_eq!(
-            step("pending", 1, None, Some("queued"), 0),
-            Step::Mark("queued", None)
-        );
-        assert_eq!(step("queued", 1, None, Some("queued"), 0), Step::Wait);
-        assert_eq!(
-            step("queued", 1, None, Some("complete"), 0),
+            step(1, None, Some("complete"), 0),
             Step::Mark("sent", None)
         );
-        assert_eq!(step("pending", 1, None, Some("dispatching"), 0), Step::Wait);
+        assert_eq!(step(1, None, Some("dispatching"), 0), Step::Wait);
         assert_eq!(
-            step("pending", 1, None, Some("withdrawn"), 0),
+            step(1, None, Some("withdrawn"), 0),
             Step::Mark("dismissed", None)
         );
         assert!(matches!(
-            step("pending", 1, None, Some("uncertain"), 0),
+            step(1, None, Some("uncertain"), 0),
             Step::Mark("failed", Some(_))
         ));
         assert_eq!(
-            step("pending", 2, None, Some("rejected"), 0),
+            step(2, None, Some("rejected"), 0),
             Step::Send { attempt: 3 }
         );
-        assert_eq!(step("pending", 2, Some(10), None, 9), Step::Wait);
+        assert_eq!(step(2, Some(10), None, 9), Step::Wait);
         assert_eq!(
-            step("pending", 2, Some(10), None, 10),
+            step(2, Some(10), None, 10),
             Step::Send { attempt: 3 }
         );
         assert_eq!(
-            step("pending", 5, None, None, 0),
+            step(5, None, None, 0),
             Step::Mark("failed", Some("Gave up after 5 tries."))
         );
-        assert_eq!(step("pending", 4, None, None, 0), Step::Send { attempt: 5 });
+        assert_eq!(step(4, None, None, 0), Step::Send { attempt: 5 });
     }
 
     #[test]

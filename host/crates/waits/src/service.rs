@@ -220,19 +220,18 @@ impl WaitsService {
 }
 
 /// Delivery through the chat runtime: an app message that starts a turn if the chat is
-/// idle and queues behind the running turn if it is busy.
+/// idle and is read by the running turn at its next tool boundary if it is busy.
 pub struct RuntimeSink(pub helm_chats::ChatRuntime);
 
 impl Deliver for RuntimeSink {
     fn deliver(&self, chat_id: &str, submission_id: &str, text: &str) -> Delivery {
-        use helm_chats::submit::{host_send, HostSend, HostSendMode};
+        use helm_chats::submit::{host_send, HostSend};
         let sent = host_send(
             &self.0,
             HostSend {
                 chat_id,
                 submission_id,
                 text,
-                mode: HostSendMode::Queue,
                 origin: helm_chats::types::SubmissionOrigin::App,
             },
         );
@@ -263,7 +262,6 @@ mod tests {
             busy: false,
             stopped: false,
             error: None,
-            queued: false,
         }
     }
 
@@ -466,21 +464,9 @@ mod tests {
         let open: Vec<String> = svc.list(None).unwrap().into_iter().map(|w| w.id).collect();
         assert!(open.contains(&"e1".to_string()) && open.contains(&"p1".to_string()));
 
-        // A message queued behind the running turn counts as queued, so the chat is not yet idle.
+        // A running chat reads as busy while its turn lasts; messages never hold it open.
         let real = crate::probes::RealProbes { db: db.clone() };
-        assert!(!real.chat("c7").unwrap().unwrap().queued);
-        db.write(|tx| {
-            tx.execute(
-                "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('s1', 'c7', 'hi', 'queued', 1)",
-                [],
-            )?;
-            tx.execute(
-                "INSERT INTO queued_submissions(submission_id, chat_id, position) VALUES ('s1', 'c7', 0)",
-                [],
-            )
-        })
-        .unwrap();
-        assert!(real.chat("c7").unwrap().unwrap().queued);
+        assert!(!real.chat("c7").unwrap().unwrap().busy);
         assert!(real.chat("nope").unwrap().is_none());
     }
 }

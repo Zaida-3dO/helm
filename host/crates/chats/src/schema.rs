@@ -61,6 +61,11 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
          -- there is nothing worth keeping in them.
          DROP TABLE IF EXISTS slot_waits;
          DROP TABLE IF EXISTS run_slot_settings;
+         -- A message never waits for a turn to end: the table that held messages waiting for
+         -- their turn, and the table that remembered where in that hold each one sat, go; the
+         -- rows that mattered stay in `submissions` and are handed to Claude at once.
+         DROP TABLE IF EXISTS queued_submissions;
+         DROP TABLE IF EXISTS draft_queue_slots;
          CREATE INDEX IF NOT EXISTS messages_chat_order ON messages(chat_id, active, timestamp, id);
          CREATE TABLE IF NOT EXISTS chat_titles (
              chat_id  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
@@ -267,7 +272,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn recovery_captures_running_chats_keeps_queued_messages_and_cancels_retries() {
+    fn recovery_captures_running_chats_keeps_unsent_messages_and_cancels_retries() {
         let (_d, db) = temp_db();
         db.write(|tx| {
             tx.execute_batch(
@@ -277,8 +282,6 @@ pub(crate) mod tests {
                    ('idle', 'p', 'idle', 0, 0);
                  INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES
                    ('q-run', 'run', 't', 'queued', 0), ('q-stop', 'stop', 't', 'queued', 0);
-                 INSERT INTO queued_submissions(submission_id, chat_id, position) VALUES
-                   ('q-run', 'run', 0), ('q-stop', 'stop', 0);
                  INSERT INTO messages(chat_id, source_key, role, status, timestamp, details) VALUES
                    ('run', 'm1', 'assistant', 'error', 0, '{\"retry\":{\"state\":\"retrying\",\"attempt\":1}}'),
                    ('run', 'm2', 'assistant', 'error', 0, '{\"retry\":{\"state\":\"failed\",\"attempt\":2}}');",

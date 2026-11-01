@@ -19,14 +19,15 @@ use std::sync::{Arc, Mutex};
 /// How a digest reaches its chat. The app's sender is `helm_chats::submit::host_send` with origin
 /// App; tests supply their own.
 pub trait DigestSender: Send + Sync {
-    /// `Ok(true)` when it was queued behind a running turn, `Ok(false)` when handed over now.
-    /// `Err((code, message))` otherwise.
+    /// The digest is always handed to the chat at once: an idle chat starts a turn with it, a
+    /// working chat reads it at the running turn's next tool boundary.
+    /// `Err((code, message))` when the chat refuses it.
     fn send(
         &self,
         chat_id: &str,
         submission_id: &str,
         text: &str,
-    ) -> Result<bool, (String, String)>;
+    ) -> Result<(), (String, String)>;
 }
 
 /// How AFK reaches the running agents and the orchestrator. The app installs the real thing;
@@ -503,7 +504,6 @@ impl AfkService {
                 .is_ok()
         };
         match digest::step(
-            &row.state,
             row.attempts,
             row.next_attempt_at,
             sub_state.as_deref(),
@@ -537,8 +537,8 @@ impl AfkService {
                     &deferred,
                 );
                 match self.sender.send(&row.chat_id, &id, &text) {
-                    Ok(true) => mark("queued", None),
-                    Ok(false) => true,
+                    // Handed over: the digest row stays owned until the chat's turn reads it.
+                    Ok(()) => true,
                     Err((code, msg)) if code == "not_found" || code == "refused" => {
                         log::info!("AFK digest for {} not deliverable: {msg}", row.chat_id);
                         mark(
@@ -577,10 +577,9 @@ mod tests {
     struct Sent {
         calls: M<Vec<(String, String, String)>>,
         fail: M<Option<(String, String)>>,
-        queue: M<bool>,
     }
     impl DigestSender for Sent {
-        fn send(&self, chat: &str, id: &str, text: &str) -> Result<bool, (String, String)> {
+        fn send(&self, chat: &str, id: &str, text: &str) -> Result<(), (String, String)> {
             self.calls
                 .lock()
                 .unwrap()
@@ -588,7 +587,7 @@ mod tests {
             if let Some(e) = self.fail.lock().unwrap().clone() {
                 return Err(e);
             }
-            Ok(*self.queue.lock().unwrap())
+            Ok(())
         }
     }
 
@@ -771,18 +770,17 @@ mod tests {
     }
 
     #[test]
-    fn queued_digest_turns_sent_when_its_submission_runs() {
+    fn a_digest_is_sent_once_and_becomes_sent_when_the_chat_reads_it() {
         let (_d, db, sent, _a, svc) = setup();
         svc.save_settings(&json!({"enabled": true}), 0).unwrap();
         svc.set(true, 0).unwrap();
         run(&db, "c1", 1, None);
-        *sent.queue.lock().unwrap() = true;
         svc.set(false, 10 * MIN).unwrap();
-        assert_eq!(digest_states(&db)[0].1, "queued");
+        // Handed over at once; the row stays owned until the chat's turn has read it.
         let id = sent.calls.lock().unwrap()[0].1.clone();
-        sub_state(&db, &id, "c1", "queued");
+        sub_state(&db, &id, "c1", "saved");
         svc.deliver(11 * MIN);
-        assert_eq!(digest_states(&db)[0].1, "queued");
+        assert_eq!(digest_states(&db)[0].1, "pending");
         sub_state(&db, &id, "c1", "complete");
         svc.deliver(12 * MIN);
         assert_eq!(digest_states(&db)[0].1, "sent");

@@ -555,7 +555,7 @@ fn record(
             ))
         };
         if let Some(text) = note {
-            crate::notes::queue(
+            crate::notes::add(
                 &run.chat_id,
                 text,
                 false,

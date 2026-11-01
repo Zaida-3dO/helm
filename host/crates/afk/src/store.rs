@@ -30,7 +30,7 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              chat_id          TEXT NOT NULL,
              submission_id    TEXT,
              state            TEXT NOT NULL
-                 CHECK (state IN ('pending', 'queued', 'sent', 'failed', 'dismissed')),
+                 CHECK (state IN ('pending', 'sent', 'failed', 'dismissed')),
              attempts         INTEGER NOT NULL DEFAULT 0,
              error            TEXT,
              next_attempt_at  INTEGER,
@@ -47,7 +47,10 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              at        INTEGER NOT NULL
          );
          CREATE INDEX IF NOT EXISTS afk_events_span ON afk_events(span_id, chat_id);",
-    )
+    )?;
+    // A retired digest state: an older version marked a handed-over digest `queued`. Those rows
+    // are simply owned again until the chat's turn reads them.
+    tx.execute("UPDATE afk_digests SET state = 'pending' WHERE state = 'queued'", [])
 }
 
 pub fn load_settings(tx: &Transaction<'_>) -> rusqlite::Result<AfkSettings> {
@@ -192,11 +195,12 @@ pub struct DigestRow {
     pub next_attempt_at: Option<i64>,
 }
 
-/// Rows the delivery loop still owns: pending (due or not) and queued.
+/// Rows the delivery loop still owns: pending, due or not (a handed-over digest stays owned
+/// until the chat's turn has read it).
 pub fn live_digests(tx: &Transaction<'_>) -> rusqlite::Result<Vec<DigestRow>> {
     let mut st = tx.prepare(
         "SELECT span_id, chat_id, submission_id, state, attempts, next_attempt_at
-         FROM afk_digests WHERE state IN ('pending', 'queued') ORDER BY created_at, chat_id",
+         FROM afk_digests WHERE state = 'pending' ORDER BY created_at, chat_id",
     )?;
     let rows = st.query_map([], |r| {
         Ok(DigestRow {

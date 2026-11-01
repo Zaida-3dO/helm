@@ -340,7 +340,6 @@ mod tests {
                 busy: true,
                 stopped: false,
                 error: None,
-                queued: false,
             },
         );
         let svc = Arc::new(WaitsService::new(

@@ -241,7 +241,6 @@ fn consent_tick(
                 chat_id: &d.chat_id,
                 submission_id: &d.submission_id,
                 text: &d.text,
-                mode: helm_chats::submit::HostSendMode::Queue,
                 origin: helm_chats::types::SubmissionOrigin::App,
             },
         );

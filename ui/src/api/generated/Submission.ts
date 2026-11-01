@@ -3,8 +3,4 @@ import type { SubmissionMode } from "./SubmissionMode";
 import type { SubmissionOrigin } from "./SubmissionOrigin";
 import type { SubmissionState } from "./SubmissionState";
 
-export type Submission = { id: string, chatId: string, text: string, mode: SubmissionMode, state: SubmissionState, origin: SubmissionOrigin, 
-/**
- * Queue position for a queued follow-up; `null` otherwise.
- */
-position: number | null, createdAt: number, };
+export type Submission = { id: string, chatId: string, text: string, mode: SubmissionMode, state: SubmissionState, origin: SubmissionOrigin, createdAt: number, };

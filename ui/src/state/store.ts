@@ -9,7 +9,7 @@ import { perf } from '../perf/perf.ts';
 import {
   applyChat,
   applyPage,
-  applyQueue,
+  applyPending,
   applyRows,
   applyThread,
   emptyView,
@@ -142,8 +142,8 @@ export class ChatStore {
     timeRows(chatId, rows, before);
   }
 
-  queue(chatId: string, pending: Submission[], revision: number): void {
-    this.update(chatId, (v) => applyQueue(v, pending, revision));
+  pending(chatId: string, items: Submission[], revision: number): void {
+    this.update(chatId, (v) => applyPending(v, items, revision));
   }
 
   /** The chat is gone (`chat_removed`): forget it. */
@@ -164,7 +164,7 @@ export class ChatStore {
       bus.on('chat', (e) => this.chat(e.chat as ChatRecord)),
       bus.on('thread', (e) => this.thread(e.thread as ThreadState)),
       bus.on('message', (e) => this.rows(e.chatId as string, e.rows as MessageRow[])),
-      bus.on('queue', (e) => this.queue(e.chatId as string, e.pending as Submission[], Number(e.revision ?? 0))),
+      bus.on('pending', (e) => this.pending(e.chatId as string, e.pending as Submission[], Number(e.revision ?? 0))),
       bus.on('refresh', (e) => this.refresh(e.chatId as string)),
       bus.on('chat_removed', (e) => this.deleted(e.chatId as string)),
     ];

@@ -511,11 +511,6 @@ async fn a_busy_send_goes_to_claude_at_once() {
     let p2 = w.expect("prompt").await;
     assert_eq!(p2["submissionId"], second.as_str());
     assert_eq!(p2["streamingBehavior"], "steer");
-    assert!(
-        h.col("SELECT submission_id FROM queued_submissions")
-            .is_empty(),
-        "nothing waits in Helm"
-    );
     let gone = h
         .api
         .call(
@@ -538,10 +533,12 @@ async fn a_busy_send_goes_to_claude_at_once() {
     assert!(w.no_command_for(Duration::from_millis(100)).await.is_none());
 }
 
-/// Stop sends abort; a clean settle is `stopped`; the steers Claude had not read yet are dropped
-/// and come back as "not delivered", in the order they were sent, with nothing sent afterwards.
+/// Stop sends a plain abort; a clean settle is `stopped`; everything Claude had not read — the
+/// steers it cancelled and anything not yet handed over — goes back to it at once as the next
+/// turn, oldest first: the first opens it and the rest are read at its tool boundaries. Nothing
+/// is held and nothing is dropped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stop_hands_back_the_steers_nobody_read() {
+async fn stop_hands_the_unread_messages_to_the_next_turn_at_once() {
     let mut h = harness();
     let (chat, _, mut w) = running_turn(&mut h).await;
     let (first, _) = h.send(&chat, "one", "steer").await;
@@ -562,15 +559,13 @@ async fn stop_hands_back_the_steers_nobody_read() {
     let api = h.api.clone();
     let c2 = chat.clone();
     let stop = tokio::spawn(async move {
-        api.call(
-            &main(),
-            "chat_stop",
-            json!({"chatId": c2, "continueQueue": false}),
-        )
-        .await
+        api.call(&main(), "chat_stop", json!({"chatId": c2})).await
     });
     let abort = w.expect("abort").await;
-    assert_eq!(abort["continueQueue"], false);
+    assert!(
+        abort.get("continueQueue").is_none(),
+        "Stop is one thing: it never asks whether to keep sending"
+    );
     w.respond(
         &abort,
         json!({"state": "stopping", "cancelledSubmissionIds": [first, second]}),
@@ -581,65 +576,21 @@ async fn stop_hands_back_the_steers_nobody_read() {
     let r = stop.await.unwrap().unwrap();
     assert_eq!(r["status"], "stopped");
     assert_eq!(h.status(&chat), "stopped");
-    assert_eq!(h.state(&first), "uncertain");
-    assert_eq!(h.state(&second), "uncertain");
-    let order = h.col(&format!(
-        "SELECT submission_id FROM queued_submissions WHERE chat_id = '{chat}' ORDER BY position"
-    ));
-    assert_eq!(order, [first.clone(), second.clone()]);
-    assert!(
-        w.no_command_for(Duration::from_millis(150)).await.is_none(),
-        "nothing sent after Stop"
-    );
-    assert_eq!(
-        h.state("late"),
-        "saved",
-        "a message saved a moment before a plain Stop is still on its way"
-    );
-}
-
-/// Esc (or "Stop sends waiting messages") sends the dropped steers again: the first opens the
-/// next turn and the second is read as it works, in order.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn esc_sends_the_dropped_steers_again() {
-    let mut h = harness();
-    let (chat, _, mut w) = running_turn(&mut h).await;
-    let (first, _) = h.send(&chat, "one", "steer").await;
+    // All three are unsent now; the settle sends them again in the order they were sent.
     let p = w.expect("prompt").await;
+    assert_eq!(p["submissionId"], "late");
+    assert!(p.get("streamingBehavior").is_none(), "it opens the turn");
     ack(&w, &p).await;
-    let (second, _) = h.send(&chat, "two", "steer").await;
-    let p = w.expect("prompt").await;
-    ack(&w, &p).await;
-    h.until("accepted", |h| h.state(&second) == "accepted")
-        .await;
-    let api = h.api.clone();
-    let c2 = chat.clone();
-    tokio::spawn(async move {
-        api.call(
-            &main(),
-            "chat_stop",
-            json!({"chatId": c2, "continueQueue": true}),
-        )
-        .await
-    });
-    let abort = w.expect("abort").await;
-    w.respond(
-        &abort,
-        json!({"state": "stopping", "cancelledSubmissionIds": [first, second]}),
-    )
-    .await;
-    w.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
-        .await;
     let p = w.expect("prompt").await;
     assert_eq!(p["submissionId"], first.as_str());
-    assert!(p.get("streamingBehavior").is_none(), "it opens the turn");
+    assert_eq!(p["streamingBehavior"], "steer");
     let p = w.expect("prompt").await;
     assert_eq!(p["submissionId"], second.as_str());
     assert_eq!(p["streamingBehavior"], "steer");
 }
 
-/// A failed turn holds nothing back: the chat is simply interrupted, there is no pause to
-/// release, and the next message starts a turn at once.
+/// A failed turn holds nothing back: the chat is simply interrupted, and the next message
+/// starts a turn at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_turn_leaves_nothing_held() {
     let mut h = harness();
@@ -648,17 +599,6 @@ async fn a_failed_turn_leaves_nothing_held() {
         .await;
     h.until("interrupted", |h| h.status(&chat) == "interrupted")
         .await;
-    let got = h
-        .api
-        .call(&main(), "chat_get", json!({"chatId": chat}))
-        .await
-        .unwrap();
-    assert!(got["thread"].get("queueHeld").is_none());
-    assert!(h
-        .api
-        .call(&main(), "queue_resume", json!({"chatId": chat}))
-        .await
-        .is_err());
     let (next, _) = h.send(&chat, "try again", "default").await;
     let p = w.expect("prompt").await;
     assert_eq!(p["submissionId"], next.as_str());
@@ -672,12 +612,7 @@ async fn a_stop_that_never_settles_closes_the_worker() {
     let api = h.api.clone();
     let c2 = chat.clone();
     let stop = tokio::spawn(async move {
-        api.call(
-            &main(),
-            "chat_stop",
-            json!({"chatId": c2, "continueQueue": false}),
-        )
-        .await
+        api.call(&main(), "chat_stop", json!({"chatId": c2})).await
     });
     let _abort = w.expect("abort").await;
     let r = stop.await.unwrap().unwrap();
@@ -1184,11 +1119,12 @@ async fn a_restart_continuation_is_sent_once_with_the_native_session() {
     );
 }
 
-/// Messages an older version left waiting are handed over after a restart, never held: in a chat
-/// with no continuation the first opens a turn and the rest are read as it works; in a chat that
-/// gets a continuation they all follow it as steers.
+/// Messages an interrupted or closed Helm never handed over are sent at once on the next start,
+/// never held: in a chat with no continuation the first opens a turn and the rest are read as it
+/// works; in a chat that gets a continuation they all follow it as steers. A row an older version
+/// left in its retired waiting state reads the same.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restart_hands_over_what_was_waiting() {
+async fn a_restart_hands_over_what_was_never_sent() {
     let mut h = harness();
     let db = h.db.clone();
     let seed = move |chat: &str, ids: &[&str]| {
@@ -1196,14 +1132,10 @@ async fn a_restart_hands_over_what_was_waiting() {
             for (i, id) in ids.iter().enumerate() {
                 tx.execute(
                     "INSERT INTO submissions(id, chat_id, text, mode, state, created_at)
-                     VALUES (?1, ?2, ?1, 'followUp', 'queued', ?3)",
+                     VALUES (?1, ?2, ?1, 'steer', 'saved', ?3)",
                     rusqlite::params![id, chat, i as i64],
                 )?;
                 tx.execute("INSERT INTO submission_meta(submission_id) VALUES (?1)", [id])?;
-                tx.execute(
-                    "INSERT INTO queued_submissions(submission_id, chat_id, position) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![id, chat, i as i64],
-                )?;
             }
             Ok::<_, rusqlite::Error>(())
         })
@@ -1212,6 +1144,11 @@ async fn a_restart_hands_over_what_was_waiting() {
     // No continuation: the first message starts the turn, the second is read as it works.
     let plain = h.create().await;
     seed(&plain, &["p1", "p2"]);
+    h.db
+        .write(|tx| {
+            tx.execute("UPDATE submissions SET state = 'queued' WHERE id = 'p2'", [])
+        })
+        .unwrap();
     h.rt.start_continuations();
     let mut w = h.worker().await;
     w.ready().await;
@@ -1222,9 +1159,6 @@ async fn a_restart_hands_over_what_was_waiting() {
     let p = w.expect("prompt").await;
     assert_eq!(p["submissionId"], "p2");
     assert_eq!(p["streamingBehavior"], "steer");
-    assert!(h
-        .col("SELECT submission_id FROM queued_submissions")
-        .is_empty());
     // A continuation goes first; what was waiting follows it as steers.
     let resumed = h.create().await;
     seed(&resumed, &["r1"]);
@@ -1559,7 +1493,7 @@ async fn acknowledging_the_completion_clears_the_badge() {
 
 /// Archiving a running chat is immediate: the row is archived at once, the turn is stopped in the
 /// background and the worker killed if it does not settle, a late event from it changes nothing
-/// the user sees, and nothing queued is sent. An idle chat's worker is simply retired.
+/// the user sees, and nothing still waiting is sent. An idle chat's worker is simply retired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it_back() {
     let mut h = harness();
@@ -1584,15 +1518,10 @@ async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it
         .unwrap();
     assert_eq!(archived["archived"], true, "no wait for the stop");
     w.expect("abort").await;
-    // An Esc (stop and send what is waiting) landing together with the archive must not send it.
+    // A Stop landing together with the archive must not send what is waiting.
     let (api, c2) = (h.api.clone(), chat.clone());
     let esc = tokio::spawn(async move {
-        api.call(
-            &main(),
-            "chat_stop",
-            json!({"chatId": c2, "continueQueue": true}),
-        )
-        .await
+        api.call(&main(), "chat_stop", json!({"chatId": c2})).await
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
@@ -3174,7 +3103,7 @@ async fn after_a_worker_crash_the_next_send_relaunches_without_replaying() {
 /// and a repeat of that id never reaches the agent a second time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_host_send_repeated_under_one_submission_id_is_delivered_once() {
-    use crate::submit::{host_send, HostSend, HostSendMode};
+    use crate::submit::{host_send, HostSend};
     let mut h = harness();
     let chat = h.create().await;
     let send = |h: &H| {
@@ -3184,7 +3113,6 @@ async fn a_host_send_repeated_under_one_submission_id_is_delivered_once() {
                 chat_id: &chat,
                 submission_id: "decision-1",
                 text: "[Helm] The user allowed it.",
-                mode: HostSendMode::Queue,
                 origin: crate::types::SubmissionOrigin::App,
             },
         )
@@ -4041,9 +3969,7 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         loading_text(h) == Some("Loading llama3:8b…".into())
     })
     .await;
-    h.call("chat_stop", json!({"chatId": chat, "continueQueue": false}))
-        .await
-        .unwrap();
+    h.call("chat_stop", json!({"chatId": chat})).await.unwrap();
     open.send(()).unwrap();
     h.until("stopped", |h| h.state(&held) == "rejected").await;
     assert_eq!(

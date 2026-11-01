@@ -636,14 +636,12 @@ pub fn mode_str(m: SubmissionMode) -> &'static str {
     match m {
         SubmissionMode::Prompt => "prompt",
         SubmissionMode::Steer => "steer",
-        SubmissionMode::FollowUp => "followUp",
     }
 }
 
 pub fn state_str(s: SubmissionState) -> &'static str {
     match s {
         SubmissionState::Saved => "saved",
-        SubmissionState::Queued => "queued",
         SubmissionState::Dispatching => "dispatching",
         SubmissionState::Accepted => "accepted",
         SubmissionState::Delivered => "delivered",
@@ -658,7 +656,6 @@ pub fn state_str(s: SubmissionState) -> &'static str {
 fn parse_state(s: &str) -> SubmissionState {
     match s {
         "saved" => SubmissionState::Saved,
-        "queued" => SubmissionState::Queued,
         "dispatching" => SubmissionState::Dispatching,
         "accepted" => SubmissionState::Accepted,
         "delivered" => SubmissionState::Delivered,
@@ -673,15 +670,13 @@ fn parse_state(s: &str) -> SubmissionState {
 fn parse_mode(s: &str) -> SubmissionMode {
     match s {
         "steer" => SubmissionMode::Steer,
-        "followUp" => SubmissionMode::FollowUp,
         _ => SubmissionMode::Prompt,
     }
 }
 
 const SUBMISSION_SELECT: &str = "SELECT s.id, s.chat_id, s.text, s.mode, s.state, \
-     COALESCE(m.origin, 'typed'), q.position, s.created_at, m.priority \
-     FROM submissions s LEFT JOIN submission_meta m ON m.submission_id = s.id \
-     LEFT JOIN queued_submissions q ON q.submission_id = s.id";
+     COALESCE(m.origin, 'typed'), s.created_at, m.priority \
+     FROM submissions s LEFT JOIN submission_meta m ON m.submission_id = s.id";
 
 fn submission_from_row(r: &Row<'_>) -> rusqlite::Result<Submission> {
     Ok(Submission {
@@ -691,8 +686,7 @@ fn submission_from_row(r: &Row<'_>) -> rusqlite::Result<Submission> {
         mode: parse_mode(&r.get::<_, String>(3)?),
         state: parse_state(&r.get::<_, String>(4)?),
         origin: SubmissionOrigin::parse(&r.get::<_, String>(5)?),
-        position: r.get(6)?,
-        created_at: r.get(7)?,
+        created_at: r.get(6)?,
     })
 }
 
@@ -705,14 +699,14 @@ pub fn get_submission(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option
     .optional()
 }
 
-/// Submissions not yet delivered, queue order first, then creation time; at most 100. This
-/// includes `uncertain` ones awaiting recovery and `rejected` ones ("saved but could not start"),
-/// so the queue UI can offer Recover; both leave the list once recovered.
+/// Messages sent but not yet read or settled, oldest first; at most 100. This includes
+/// `uncertain` ones ("not sent") and `rejected` ones ("not delivered"), whose text the user can
+/// take back to the composer; both leave the list once taken back.
 pub fn pending(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Vec<Submission>> {
     let mut st = tx.prepare(&format!(
         "{SUBMISSION_SELECT} WHERE s.chat_id = ?1
-           AND s.state IN ('saved', 'queued', 'dispatching', 'accepted', 'uncertain', 'rejected')
-         ORDER BY q.position IS NULL, q.position, s.created_at, s.id LIMIT 100"
+           AND s.state IN ('saved', 'dispatching', 'accepted', 'uncertain', 'rejected')
+         ORDER BY s.created_at, s.id LIMIT 100"
     ))?;
     let rows = st.query_map([chat_id], submission_from_row)?;
     rows.collect()

@@ -5,8 +5,9 @@
 //!
 //! - **Idle chat**: retire its worker (`ChatRuntime::retire`, a no-op while a turn runs). The next
 //!   send relaunches it, and the `workflow` prompt section carries the new state.
-//! - **Running turn**: queue a framed **app note** behind the turn through
-//!   `helm_chats::submit::host_send`: origin App, one fixed submission id
+//! - **Running turn**: hand a framed **app note** to the running turn through
+//!   `helm_chats::submit::host_send`, where Claude reads it at the turn's next tool boundary:
+//!   origin App, one fixed submission id
 //!   per change, so a retry never delivers it twice. When the state turns on, the note carries the
 //!   Workflow rules themselves, so they apply from the next turn without a relaunch.
 //!
@@ -24,7 +25,7 @@ pub const FRAME: &str =
 pub enum Delivery {
     /// Retire the idle worker so it relaunches with the new state.
     Retire,
-    /// Queue this app note behind the running turn.
+    /// Hand this app note to the running turn; Claude reads it at the next tool boundary.
     Note { submission_id: String, text: String },
 }
 
@@ -89,7 +90,6 @@ pub fn deliver(rt: &helm_chats::ChatRuntime, chat_id: &str, d: Delivery) {
                     chat_id,
                     submission_id: &submission_id,
                     text: &text,
-                    mode: helm_chats::submit::HostSendMode::Queue,
                     origin: helm_chats::types::SubmissionOrigin::App,
                 },
             );
@@ -112,14 +112,14 @@ thread_local! {
 pub struct Pending {
     pub chat_id: String,
     pub text: String,
-    /// Also queue it as an app note to the chat's agent, but only while a turn runs: an idle chat
+    /// Also send it as an app note to the chat's agent, but only while a turn runs: an idle chat
     /// is never woken by a note.
     pub steer: bool,
     /// The note's fixed submission id, so a retry never sends it twice.
     pub id: String,
 }
 
-pub fn queue(chat_id: &str, text: String, steer: bool, id: String) {
+pub fn add(chat_id: &str, text: String, steer: bool, id: String) {
     PENDING.with(|p| {
         p.borrow_mut().push(Pending {
             chat_id: chat_id.to_owned(),
@@ -130,13 +130,13 @@ pub fn queue(chat_id: &str, text: String, steer: bool, id: String) {
     });
 }
 
-/// Drain the notes this thread queued. A refused call may leave some behind; draining before a
+/// Drain the notes this thread collected. A refused call may leave some behind; draining before a
 /// call starts keeps them from leaking into the next one.
 pub fn take_pending() -> Vec<Pending> {
     PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()))
 }
 
-/// Write each note as a transcript row, and queue the steering ones behind a running turn.
+/// Write each note as a transcript row, and hand the steering ones to a running turn.
 pub fn deliver_pending(
     db: &helm_core::db::Database,
     rt: &helm_chats::ChatRuntime,
