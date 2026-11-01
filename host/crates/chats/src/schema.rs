@@ -246,7 +246,10 @@ fn activity_queue(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         |r| r.get::<_, i64>(0).map(|n| n > 0),
     )?;
     if !has {
-        tx.execute("ALTER TABLE chat_activity ADD COLUMN local_ahead INTEGER", [])?;
+        tx.execute(
+            "ALTER TABLE chat_activity ADD COLUMN local_ahead INTEGER",
+            [],
+        )?;
     }
     Ok(())
 }

@@ -137,6 +137,7 @@ mod tests {
         let b = sent.0.lock().unwrap();
         assert_eq!(b.len(), 1);
         assert_eq!(b[0]["type"], "mcp_config");
+        drop(b);
 
         // A per-server change (a second server added, the first disabled) reaches every running
         // worker as a fresh line carrying only the servers still enabled: the worker reconfigures

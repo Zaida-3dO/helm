@@ -17,29 +17,50 @@ fn one_table_says_what_each_call_is_doing() {
             json!({"command": "ls", "description": "  Spaced   out   words  "}),
             "Spaced out words",
         ),
-        ("Agent", json!({"description": "Audit the upload flow"}), "Audit the upload flow"),
-        ("Task", json!({"description": "Map the queue paths"}), "Map the queue paths"),
+        (
+            "Agent",
+            json!({"description": "Audit the upload flow"}),
+            "Audit the upload flow",
+        ),
+        (
+            "Task",
+            json!({"description": "Map the queue paths"}),
+            "Map the queue paths",
+        ),
         (
             "mcp__home_assistant__turn_on",
             json!({"entity_id": "light.kitchen", "description": "Dim the kitchen lights"}),
             "Dim the kitchen lights",
         ),
-        // Shell without a description: the command, first line only.
-        ("Bash", json!({"command": "git status"}), "git status"),
+        // Shell without a description: a fixed phrase, never the command line, which could
+        // carry a secret.
         (
             "Bash",
-            json!({"command": "docker logs app-01\ndocker logs web-01"}),
-            "docker logs app-01",
+            json!({"command": "git status"}),
+            "Running a command",
         ),
-        ("Bash", json!({"command": "   git commit -m fix   "}), "git commit -m fix"),
-        ("Bash", json!({}), "Bash"),
+        (
+            "Bash",
+            json!({"command": "curl -H 'Authorization: Bearer sk-live-1' https://x\nls"}),
+            "Running a command",
+        ),
+        (
+            "PowerShell",
+            json!({"cmd": "$env:TOKEN='abc'; Invoke-WebRequest"}),
+            "Running a command",
+        ),
+        ("Bash", json!({}), "Running a command"),
         // File tools: the file's name, not the path.
         (
             "Read",
             json!({"file_path": "C:/notes/house/summer.md", "offset": 10}),
             "Reading summer.md",
         ),
-        ("Read", json!({"file_path": "D:\\notes\\house.md"}), "Reading house.md"),
+        (
+            "Read",
+            json!({"file_path": "D:\\notes\\house.md"}),
+            "Reading house.md",
+        ),
         ("Read", json!({}), "Read"),
         (
             "Write",
@@ -51,12 +72,28 @@ fn one_table_says_what_each_call_is_doing() {
             json!({"file_path": "worker/src/driver.ts", "old_string": "a", "new_string": "b"}),
             "Editing driver.ts",
         ),
-        ("MultiEdit", json!({"file_path": "C:\\x\\panel.rs"}), "Editing panel.rs"),
-        ("NotebookEdit", json!({"notebook_path": "D:/nb/plan.ipynb"}), "Editing plan.ipynb"),
-        ("LS", json!({"path": "C:/work/projects"}), "Listing projects"),
+        (
+            "MultiEdit",
+            json!({"file_path": "C:\\x\\panel.rs"}),
+            "Editing panel.rs",
+        ),
+        (
+            "NotebookEdit",
+            json!({"notebook_path": "D:/nb/plan.ipynb"}),
+            "Editing plan.ipynb",
+        ),
+        (
+            "LS",
+            json!({"path": "C:/work/projects"}),
+            "Listing projects",
+        ),
         ("LS", json!({"path": "/home/user/repos/"}), "Listing repos"),
         // Patterns and queries.
-        ("Grep", json!({"pattern": "HVAC.*filter"}), "Searching HVAC.*filter"),
+        (
+            "Grep",
+            json!({"pattern": "HVAC.*filter"}),
+            "Searching HVAC.*filter",
+        ),
         ("Glob", json!({"pattern": "**/*.md"}), "Searching **/*.md"),
         ("Grep", json!({}), "Grep"),
         (
@@ -76,7 +113,11 @@ fn one_table_says_what_each_call_is_doing() {
             json!({"url": "http://www.build.example.org:8080/logs"}),
             "Reading build.example.org/logs",
         ),
-        ("WebFetch", json!({"url": "example.com"}), "Reading example.com"),
+        (
+            "WebFetch",
+            json!({"url": "example.com"}),
+            "Reading example.com",
+        ),
         ("WebFetch", json!({"url": ""}), "Web Fetch"),
         // MCP calls: never the raw dotted name.
         (
@@ -89,7 +130,11 @@ fn one_table_says_what_each_call_is_doing() {
             json!({"entity_id": "climate.bedroom"}),
             "Home Assistant · Get state",
         ),
-        ("mcp__gmail__search_threads", json!({}), "Gmail · Search threads"),
+        (
+            "mcp__gmail__search_threads",
+            json!({}),
+            "Gmail · Search threads",
+        ),
         ("mcp__helm__app_list_chats", json!({}), "Helm · List chats"),
         ("mcp__weird", json!({}), "Weird"),
         // Unknown tools: the name, spoken plainly.

@@ -642,7 +642,10 @@ mod tests {
         assert_eq!(
             render_status(
                 &["Checking the nightly backup".into()],
-                &["Searching HVAC filter".into(), "Reading winter bills.md".into()],
+                &[
+                    "Searching HVAC filter".into(),
+                    "Reading winter bills.md".into()
+                ],
             ),
             "Working…\nRunning: Checking the nightly backup\nRecent: Searching HVAC filter, \
              Reading winter bills.md"

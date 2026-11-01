@@ -380,11 +380,7 @@ fn message_arg(a: &Value) -> Result<String, ToolError> {
     Ok(m.to_owned())
 }
 
-fn send_framed(
-    ctx: &ToolCtx,
-    to: &str,
-    body: &str,
-) -> Result<crate::submit::HostSent, ToolError> {
+fn send_framed(ctx: &ToolCtx, to: &str, body: &str) -> Result<crate::submit::HostSent, ToolError> {
     let sender = meta(ctx, &ctx.caller_chat_id)?;
     let text = frame(
         sender["title"].as_str().unwrap_or(""),
@@ -535,7 +531,7 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
         let _ = ctx.op("chat_delete", json!({"chatId": id})).await;
         return Err(e);
     }
-    Ok(meta(&ctx, &id)?)
+    meta(&ctx, &id)
 }
 
 async fn fork_chat(ctx: ToolCtx, a: Value) -> ToolResult {
@@ -673,8 +669,7 @@ async fn stop_chat(ctx: ToolCtx, a: Value) -> ToolResult {
         return Err(refuse("A chat cannot stop itself with this tool."));
     }
     meta(&ctx, &id)?;
-    ctx.op("chat_stop", json!({"chatId": id}))
-        .await?;
+    ctx.op("chat_stop", json!({"chatId": id})).await?;
     let stopped = wait_idle(&ctx, &id, Duration::from_secs(10)).await?;
     Ok(json!({ "stopped": stopped }))
 }

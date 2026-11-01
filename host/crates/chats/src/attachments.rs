@@ -298,10 +298,7 @@ pub fn unlink(tx: &Transaction<'_>, submission_id: &str) -> rusqlite::Result<usi
 /// The chat's attachments not sent yet: what the composer stages again when the chat reopens.
 /// Images first (each `attachment_get`-able by its own chat, sent or not), then references, each
 /// in the order it was added.
-fn unstaged(
-    tx: &Transaction<'_>,
-    chat_id: &str,
-) -> rusqlite::Result<(Vec<Value>, Vec<Value>)> {
+fn unstaged(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<(Vec<Value>, Vec<Value>)> {
     let images = {
         let mut st = tx.prepare(
             "SELECT id, name, mime, bytes, width, height FROM chat_attachments
@@ -800,8 +797,7 @@ fn attachment_recover(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 continue;
             }
             made.borrow_mut().push(new.clone());
-            if crate::message_images::insert_unsent_copy(tx, &old, &a.chat_id, &new, &a.chat_id)?
-            {
+            if crate::message_images::insert_unsent_copy(tx, &old, &a.chat_id, &new, &a.chat_id)? {
                 images += 1;
             } else {
                 let _ = std::fs::remove_file(dir.join(&new));
@@ -816,7 +812,8 @@ fn attachment_recover(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             if !matches!(kind, "file" | "folder" | "chat") || target.is_empty() {
                 continue;
             }
-            // One the chat is already waiting to send (same kind and target) stands as it is.
+            // One the chat is already waiting to send (same kind and target) stands as it is,
+            // and is not counted: nothing new was put back.
             let held: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM chat_attachment_refs
                  WHERE chat_id = ?1 AND kind = ?2 AND target = ?3 AND submission_id IS NULL)",
@@ -824,7 +821,6 @@ fn attachment_recover(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 |r| r.get(0),
             )?;
             if held {
-                refs += 1;
                 continue;
             }
             tx.execute(

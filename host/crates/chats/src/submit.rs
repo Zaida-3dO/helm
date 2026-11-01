@@ -537,7 +537,9 @@ pub fn host_send_with_attachments(
         emit_pending(rt, s.chat_id);
         emit_chat(rt, s.chat_id);
     }
-    Ok(HostSent { delivered: dispatch })
+    Ok(HostSent {
+        delivered: dispatch,
+    })
 }
 
 /// Send the restart continuation (origin `harness`, a plain prompt: it never interrupts and never
@@ -653,10 +655,9 @@ pub fn submission_action(
                 Err(e) => return Err(ApiError::new("refused", e)),
             }
         }
-        (
-            SubmissionActionKind::Recover,
-            SubmissionState::Uncertain | SubmissionState::Rejected,
-        ) => take_to_draft(rt)?,
+        (SubmissionActionKind::Recover, SubmissionState::Uncertain | SubmissionState::Rejected) => {
+            take_to_draft(rt)?
+        }
         _ => {
             return Err(ApiError::new(
                 "conflict",
@@ -678,11 +679,7 @@ pub fn submission_action(
 /// messages, replies, tool calls and their results — carries over. What still has to be said is
 /// when the conversation plainly will not fit the target's window: the answer is a roll over into
 /// a summary, not a turn that will be cut off. `to` is the new model's one-string id.
-fn check_model_capacity(
-    rt: &ChatRuntime,
-    chat_id: &str,
-    to: &str,
-) -> Result<(), ApiError> {
+fn check_model_capacity(rt: &ChatRuntime, chat_id: &str, to: &str) -> Result<(), ApiError> {
     let started = rt
         .db()
         .snapshot(|t| {
@@ -718,7 +715,7 @@ fn check_model_capacity(
     }
     Err(ApiError::new(
         "too_large",
-        &format!(
+        format!(
             "About {here} tokens are in this chat's context, more than {to} can take into its {window}-token window. Roll this chat over instead: a fresh chat on that model carries on from a hand-off summary."
         ),
     ))
@@ -812,10 +809,7 @@ pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecor
                 }
             });
             for (kind, text) in [
-                (
-                    model.as_ref().map(|_| ContextKind::ModelChange),
-                    model_text,
-                ),
+                (model.as_ref().map(|_| ContextKind::ModelChange), model_text),
                 (
                     effort.as_ref().map(|_| ContextKind::EffortChange),
                     effort.as_ref().map(|e| format!("Effort changed to {e}")),

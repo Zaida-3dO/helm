@@ -50,7 +50,10 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     )?;
     // A retired digest state: an older version marked a handed-over digest `queued`. Those rows
     // are simply owned again until the chat's turn reads them.
-    tx.execute("UPDATE afk_digests SET state = 'pending' WHERE state = 'queued'", [])?;
+    tx.execute(
+        "UPDATE afk_digests SET state = 'pending' WHERE state = 'queued'",
+        [],
+    )?;
     Ok(())
 }
 

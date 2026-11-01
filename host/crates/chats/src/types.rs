@@ -1378,8 +1378,7 @@ mod tests {
     fn op_args_refuse_unknown_fields() {
         let ok: Result<ChatStopArgs, _> = serde_json::from_value(json!({"chatId": "c"}));
         assert!(ok.is_ok());
-        let bad: Result<ChatStopArgs, _> =
-            serde_json::from_value(json!({"chatId": "c", "x": 1}));
+        let bad: Result<ChatStopArgs, _> = serde_json::from_value(json!({"chatId": "c", "x": 1}));
         assert!(bad.is_err());
     }
 

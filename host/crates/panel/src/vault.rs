@@ -405,13 +405,26 @@ pub fn resolve_across(
     let same = |a: &VaultInfo, b: &VaultInfo| a.path.to_lowercase() == b.path.to_lowercase();
     let mut hits: Vec<NoteCandidate> = Vec::new();
     for v in vaults.iter().filter(|v| !same(v, chosen)) {
-        hits.extend(hits_in(v, note, None).into_iter().map(|path| NoteCandidate {
-            vault: v.name.clone(),
-            path,
-        }));
+        hits.extend(
+            hits_in(v, note, None)
+                .into_iter()
+                .map(|path| NoteCandidate {
+                    vault: v.name.clone(),
+                    path,
+                }),
+        );
     }
     if hits.is_empty() {
-        return Err(format!("No note named \"{rel}\" was found in any known vault."));
+        return Err(format!(
+            "No note named \"{rel}\" was found in any known vault."
+        ));
+    }
+    if hits.len() == 1 {
+        let hit = hits.remove(0);
+        return Ok(Resolution::Found {
+            vault: hit.vault,
+            path: hit.path,
+        });
     }
     hits.sort_by(|a, b| (&a.vault, &a.path).cmp(&(&b.vault, &b.path)));
     hits.truncate(50);
@@ -664,7 +677,10 @@ mod tests {
             vi(name, &root.to_string_lossy(), name == "Alpha")
         };
         let vs = vec![
-            mk("Alpha", &["Inbox.md", "Projects/Helm.md", "Archive/Helm.md"]),
+            mk(
+                "Alpha",
+                &["Inbox.md", "Projects/Helm.md", "Archive/Helm.md"],
+            ),
             mk("Beta", &["Roadmap.md", "Deep/Nested.md", "Helm.md"]),
             mk("Gamma", &["Roadmap.md", "Scoped.md"]),
         ];

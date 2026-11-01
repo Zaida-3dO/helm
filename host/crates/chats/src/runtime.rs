@@ -984,6 +984,10 @@ impl ChatRuntime {
                 rows.collect::<rusqlite::Result<Vec<String>>>()
             })
             .unwrap_or_default();
+        // What the last run left unsent is read before any continuation is written: a
+        // continuation is saved and handed over in one step, and must not be sent a second time
+        // as if a shutdown had left it behind.
+        let left = self.left_unsent();
         let mut continued: Vec<String> = Vec::new();
         for chat_id in &ids {
             match crate::submit::continuation(self, chat_id) {
@@ -994,25 +998,33 @@ impl ChatRuntime {
                 Err(e) => log::error!("chat {chat_id}: restart continuation not sent: {e}"),
             }
         }
-        self.deliver_left_unsent(&continued);
+        self.deliver_left_unsent(left, &continued);
     }
 
-    /// At start, hand over everything a shutdown left unsent, oldest first, one chat's messages
-    /// in order: the first opens the chat's turn, the rest are steered in. Rows still in the
-    /// retired `queued` state (left by an older version) count too and are read as saved.
-    /// `continued` are chats whose continuation prompt is already on its way.
-    fn deliver_left_unsent(&self, continued: &[String]) {
+    /// Every message a shutdown left unsent, oldest first, one chat's messages together. Rows
+    /// still in the retired `queued` state (left by an older version) count too.
+    fn left_unsent(&self) -> Vec<(String, String)> {
+        self.sh
+            .db
+            .snapshot(|tx| {
+                let mut st = tx.prepare(
+                    "SELECT s.chat_id, s.id FROM submissions s
+                     JOIN chats c ON c.id = s.chat_id
+                     WHERE s.state IN ('saved', 'queued') AND c.archived = 0
+                     ORDER BY s.chat_id, s.created_at, s.id",
+                )?;
+                let rows =
+                    st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                rows.collect::<rusqlite::Result<Vec<(String, String)>>>()
+            })
+            .unwrap_or_default()
+    }
+
+    /// At start, hand over everything a shutdown left unsent ([`Self::left_unsent`]), in order:
+    /// the first of a chat's messages opens its turn, the rest are steered in. `continued` are
+    /// chats whose continuation prompt is already on its way and opens the turn instead.
+    fn deliver_left_unsent(&self, rows: Vec<(String, String)>, continued: &[String]) {
         let sends = self.sh.db.write(|tx| {
-            let mut st = tx.prepare(
-                "SELECT s.chat_id, s.id FROM submissions s
-                 JOIN chats c ON c.id = s.chat_id
-                 WHERE s.state IN ('saved', 'queued') AND c.archived = 0
-                 ORDER BY s.chat_id, s.created_at, s.id",
-            )?;
-            let rows =
-                st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-            let rows = rows.collect::<rusqlite::Result<Vec<(String, String)>>>()?;
-            drop(st);
             let mut seen: Vec<&str> = Vec::new();
             for (chat, sid) in &rows {
                 let first = !seen.contains(&chat.as_str());
@@ -1025,7 +1037,8 @@ impl ChatRuntime {
                     "steer"
                 };
                 tx.execute(
-                    "UPDATE submissions SET state = 'saved', mode = ?1 WHERE id = ?2",
+                    "UPDATE submissions SET state = 'saved', mode = ?1
+                     WHERE id = ?2 AND state IN ('saved', 'queued')",
                     rusqlite::params![mode, sid],
                 )?;
             }

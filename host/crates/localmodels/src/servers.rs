@@ -355,18 +355,17 @@ fn truthy(v: Option<&Value>) -> Option<bool> {
 
 /// One entry of a slot list: busy when it says so, by a flag or by a state word.
 fn slot_busy(s: &Value) -> bool {
-    truthy(s.get("busy").or_else(|| s.get("active")))
-        .unwrap_or_else(|| {
-            s.get("state")
-                .or_else(|| s.get("status"))
-                .and_then(Value::as_str)
-                .is_some_and(|w| {
-                    matches!(
-                        w.to_ascii_lowercase().as_str(),
-                        "busy" | "serving" | "active" | "working" | "generating"
-                    )
-                })
-        })
+    truthy(s.get("busy").or_else(|| s.get("active"))).unwrap_or_else(|| {
+        s.get("state")
+            .or_else(|| s.get("status"))
+            .and_then(Value::as_str)
+            .is_some_and(|w| {
+                matches!(
+                    w.to_ascii_lowercase().as_str(),
+                    "busy" | "serving" | "active" | "working" | "generating"
+                )
+            })
+    })
 }
 
 /// A `/slots` answer to queue facts, lenient like every other read: several spellings of the
@@ -466,14 +465,62 @@ mod tests {
         assert!(parse_model_list(&json!("x")).is_none());
         // `/slots` queue facts, read the same lenient way.
         for (v, want) in [
-            (json!({"busy": true, "queued": 2}), Some(QueueInfo { busy: true, queued: Some(2) })),
-            (json!({"serving": "yes"}), Some(QueueInfo { busy: true, queued: None })),
-            (json!({"active": 1, "pending": "3"}), Some(QueueInfo { busy: true, queued: None })),
-            (json!({"busy": false, "queue": ["a", "b"]}), Some(QueueInfo { busy: true, queued: Some(2) })),
-            (json!({"idle": true}), Some(QueueInfo { busy: false, queued: None })),
-            (json!({"slots": [{"id": "a", "state": "idle"}, {"id": "b", "state": "generating"}]}), Some(QueueInfo { busy: true, queued: None })),
-            (json!([{"state": "serving"}]), Some(QueueInfo { busy: true, queued: Some(1) })),
-            (json!({"queued": 4}), Some(QueueInfo { busy: true, queued: Some(4) })),
+            (
+                json!({"busy": true, "queued": 2}),
+                Some(QueueInfo {
+                    busy: true,
+                    queued: Some(2),
+                }),
+            ),
+            (
+                json!({"serving": "yes"}),
+                Some(QueueInfo {
+                    busy: true,
+                    queued: None,
+                }),
+            ),
+            (
+                json!({"active": 1, "pending": "3"}),
+                Some(QueueInfo {
+                    busy: true,
+                    queued: None,
+                }),
+            ),
+            (
+                json!({"busy": false, "queue": ["a", "b"]}),
+                Some(QueueInfo {
+                    busy: true,
+                    queued: Some(2),
+                }),
+            ),
+            (
+                json!({"idle": true}),
+                Some(QueueInfo {
+                    busy: false,
+                    queued: None,
+                }),
+            ),
+            (
+                json!({"slots": [{"id": "a", "state": "idle"}, {"id": "b", "state": "generating"}]}),
+                Some(QueueInfo {
+                    busy: true,
+                    queued: None,
+                }),
+            ),
+            (
+                json!([{"state": "serving"}]),
+                Some(QueueInfo {
+                    busy: true,
+                    queued: Some(1),
+                }),
+            ),
+            (
+                json!({"queued": 4}),
+                Some(QueueInfo {
+                    busy: true,
+                    queued: Some(4),
+                }),
+            ),
             (json!({}), None),
             (json!("waiting"), None),
         ] {

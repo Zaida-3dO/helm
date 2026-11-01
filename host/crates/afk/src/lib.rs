@@ -48,12 +48,7 @@ pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
 struct RuntimeSender(ChatRuntime);
 
 impl DigestSender for RuntimeSender {
-    fn send(
-        &self,
-        chat_id: &str,
-        submission_id: &str,
-        text: &str,
-    ) -> Result<(), (String, String)> {
+    fn send(&self, chat_id: &str, submission_id: &str, text: &str) -> Result<(), (String, String)> {
         helm_chats::submit::host_send(
             &self.0,
             helm_chats::submit::HostSend {

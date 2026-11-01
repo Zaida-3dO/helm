@@ -505,6 +505,9 @@ mod tests {
             assert_eq!(near_limit(g.band(0)), near, "{pct}%");
         }
         *usage.pct.lock().unwrap() = None;
-        assert!(!near_limit(g.band(0)), "no reading is nowhere near the limit");
+        assert!(
+            !near_limit(g.band(0)),
+            "no reading is nowhere near the limit"
+        );
     }
 }

@@ -36,8 +36,8 @@ use crate::client::{BoxFut, LineHandle, TelegramMessage, TelegramSink};
 use crate::exec::AppExecutor;
 use crate::telegram::{self, ChatFacts, ChatPort, TagPolicy, TELEGRAM_ORIGIN};
 use helm_chats::submit::{
-    host_send, host_send_with_attachments, HostFile, HostImage, HostSend,
-    FILE_REFUSED, IMAGE_REFUSED,
+    host_send, host_send_with_attachments, HostFile, HostImage, HostSend, FILE_REFUSED,
+    IMAGE_REFUSED,
 };
 use helm_chats::types::{ChatStatus, InteractionAttention, InteractionMethod};
 use helm_chats::ChatRuntime;
@@ -829,11 +829,10 @@ impl ChatSink {
             .exec
             .wiring()
             .ok_or("Helm is still starting; the message will be delivered when Helm is ready.")?;
-        let ops = self
-            .ops
-            .get()
-            .cloned()
-            .ok_or("Helm is still starting; the message will be delivered when Helm is ready.")?;
+        let ops =
+            self.ops.get().cloned().ok_or(
+                "Helm is still starting; the message will be delivered when Helm is ready.",
+            )?;
         let rt = w
             .services
             .get::<ChatRuntime>()
@@ -918,10 +917,7 @@ impl TelegramSink for ChatSink {
             };
             if let Err(e) = c
                 .ops
-                .invoke(
-                    "chat_stop",
-                    json!({ "chatId": tag.chat_id }),
-                )
+                .invoke("chat_stop", json!({ "chatId": tag.chat_id }))
                 .await
             {
                 log::warn!("relay: /stop from Telegram failed: {}", e.message);

@@ -108,10 +108,7 @@ impl ChatControl for RuntimeControl {
         let d = self.dispatcher.clone();
         let id = chat_id.to_owned();
         self.rt.handle().spawn(async move {
-            if let Err(e) = d
-                .call_host("chat_stop", json!({"chatId": id}))
-                .await
-            {
+            if let Err(e) = d.call_host("chat_stop", json!({"chatId": id})).await {
                 log::warn!("usage governor: stop of {id} failed: {}", e.message);
             }
         });

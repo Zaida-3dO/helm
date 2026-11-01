@@ -74,13 +74,6 @@ pub fn register_ops(reg: &mut OpRegistry) {
     crate::runtime_settings::register_ops(reg); // Settings → Runtime
 }
 
-fn str_field(args: &Value, k: &str) -> Result<String, ApiError> {
-    args.get(k)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| ApiError::bad_args(format!("{k} is required.")))
-}
-
 /// `skills_list`: what the chat's worker reported; empty until it has run once.
 fn skills_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatIdArgs = parse_args(args)?;

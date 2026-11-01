@@ -203,19 +203,22 @@ fn a_wrong_base_or_a_conflict_fails_but_a_moved_head_lands_with_a_note() {
         note.contains("head moved") && note.contains("Has this been reviewed?"),
         "{note:?}"
     );
-    let merge = gh.calls().into_iter().find(|l| l.starts_with("pr merge")).unwrap();
+    let merge = gh
+        .calls()
+        .into_iter()
+        .find(|l| l.starts_with("pr merge"))
+        .unwrap();
     assert!(
         merge.contains(&format!("--match-head-commit {SHA}")),
         "pinned to the head GitHub showed: {merge}"
     );
     // No reviewed commit recorded at all: the change still lands, with the same question.
     let t = setup(true, LandMode::Merge, "pending_land");
-    t.db
-        .write::<_, rusqlite::Error>(|tx| {
-            tx.execute("UPDATE workflow_changes SET approved_tip = NULL", [])?;
-            Ok(())
-        })
-        .unwrap();
+    t.db.write::<_, rusqlite::Error>(|tx| {
+        tx.execute("UPDATE workflow_changes SET approved_tip = NULL", [])?;
+        Ok(())
+    })
+    .unwrap();
     let gh = Script::default();
     gh.say(
         "pr view",

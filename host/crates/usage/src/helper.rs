@@ -87,8 +87,7 @@ impl PlanReader for ProcessReader {
     fn read_within(&self, at_most: Duration) -> ControlAnswer {
         let helper_ms = (at_most.as_millis() as u64)
             .saturating_sub(STARTUP_SLACK_MS)
-            .max(3_000)
-            .min(HELPER_TIMEOUT_MS);
+            .clamp(3_000, HELPER_TIMEOUT_MS);
         self.read_job(helper_ms, at_most + Duration::from_secs(2))
     }
 }

@@ -103,25 +103,26 @@ pub fn baseline(tx: &Transaction<'_>, session: &str) -> rusqlite::Result<Option<
 }
 
 /// What the chat's conversation now holds in its context, and when it was measured: the input,
-/// cache-read and cache-write counts Claude Code reported as running totals after the chat's
-/// newest turn (a local chat's turns report them the same way), with that turn's time. `None`
-/// when no turn of the chat has reported usage. This is the same reading the token chip, the
-/// context bar and the model-switch capacity check use, so an answer from a tool never
-/// disagrees with what the chat shows.
+/// cache-read and cache-write counts of the chat's newest turn — that turn's own request, which
+/// is the whole conversation as the model last saw it — with that turn's time. The session's
+/// running totals are not it: they add every turn's reading together, so a chat of a few turns
+/// would read as several times its real size. `None` when no turn of the chat has reported
+/// usage. This is the same reading the token chip, the context bar and the model-switch
+/// capacity check use, so an answer from a tool never disagrees with what the chat shows.
 pub fn context_reported_at(tx: &Transaction<'_>, chat_id: &str) -> Option<(u64, i64)> {
-    let row: Option<(String, i64)> = tx
+    let row: Option<(i64, i64, i64, i64)> = tx
         .query_row(
-            "SELECT running, timestamp FROM chat_turn_usage WHERE chat_id = ?1
+            "SELECT input_tokens, cache_read_tokens, cache_write_tokens, timestamp
+             FROM chat_turn_usage WHERE chat_id = ?1
              ORDER BY timestamp DESC, rowid DESC LIMIT 1",
             [chat_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .ok()?;
-    let (raw, at) = row?;
-    let u: Value = serde_json::from_str(&raw).ok()?;
-    let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
-    Some((n("inputTokens") + n("cacheReadTokens") + n("cacheWriteTokens"), at))
+    let (input, read, write, at) = row?;
+    let n = |v: i64| u64::try_from(v).unwrap_or(0);
+    Some((n(input) + n(read) + n(write), at))
 }
 
 /// The context window a Claude model id gets: the ids that name the longer window take it

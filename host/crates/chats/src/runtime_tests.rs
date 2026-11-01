@@ -310,9 +310,10 @@ impl H {
             .unwrap()
     }
 
-    /// Poll until `f` holds (the actor runs on its own task).
+    /// Poll until `f` holds (the actor runs on its own task). The wait is generous: under a whole
+    /// workspace's test load a tick-driven step can take well over a second.
     pub async fn until(&self, what: &str, f: impl Fn(&H) -> bool) {
-        for _ in 0..200 {
+        for _ in 0..500 {
             if f(self) {
                 return;
             }
@@ -558,9 +559,8 @@ async fn stop_hands_the_unread_messages_to_the_next_turn_at_once() {
     .unwrap();
     let api = h.api.clone();
     let c2 = chat.clone();
-    let stop = tokio::spawn(async move {
-        api.call(&main(), "chat_stop", json!({"chatId": c2})).await
-    });
+    let stop =
+        tokio::spawn(async move { api.call(&main(), "chat_stop", json!({"chatId": c2})).await });
     let abort = w.expect("abort").await;
     assert!(
         abort.get("continueQueue").is_none(),
@@ -575,8 +575,15 @@ async fn stop_hands_the_unread_messages_to_the_next_turn_at_once() {
         .await;
     let r = stop.await.unwrap().unwrap();
     assert_eq!(r["status"], "stopped");
-    assert_eq!(h.status(&chat), "stopped");
-    // All three are unsent now; the settle sends them again in the order they were sent.
+    assert_eq!(
+        h.col(&format!(
+            "SELECT status FROM runs WHERE chat_id = '{chat}' ORDER BY started_at, rowid"
+        ))[0],
+        "stopped",
+        "the stopped run is closed as such"
+    );
+    // All three are unsent now; the settle sends them again in the order they were sent, which
+    // opens the next turn at once.
     let p = w.expect("prompt").await;
     assert_eq!(p["submissionId"], "late");
     assert!(p.get("streamingBehavior").is_none(), "it opens the turn");
@@ -611,9 +618,8 @@ async fn a_stop_that_never_settles_closes_the_worker() {
     let (chat, _, mut w) = running_turn(&mut h).await;
     let api = h.api.clone();
     let c2 = chat.clone();
-    let stop = tokio::spawn(async move {
-        api.call(&main(), "chat_stop", json!({"chatId": c2})).await
-    });
+    let stop =
+        tokio::spawn(async move { api.call(&main(), "chat_stop", json!({"chatId": c2})).await });
     let _abort = w.expect("abort").await;
     let r = stop.await.unwrap().unwrap();
     assert_eq!(r["status"], "interrupted");
@@ -744,8 +750,10 @@ async fn tools_are_written_at_start_and_end() {
     })
     .await;
     assert_eq!(
-        h.rt.live_thread(&chat).unwrap().live_tools[0].summary.as_deref(),
-        Some("ls"),
+        h.rt.live_thread(&chat).unwrap().live_tools[0]
+            .summary
+            .as_deref(),
+        Some("Running a command"),
         "the live tool carries a few plain words about the call"
     );
     w.emit(json!({"type": "tool_execution_end", "toolCallId": "tc1", "toolName": "Bash", "result": {"text": "a.txt"}, "isError": false}))
@@ -972,7 +980,10 @@ async fn a_withdrawn_steer_returns_as_a_newer_draft() {
         .unwrap();
     let img = put["attachmentId"].as_str().unwrap().to_owned();
     // It waits in the chat's unstaged set until the steer takes it.
-    let staged = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    let staged = h
+        .call("attachment_list", json!({"chatId": chat}))
+        .await
+        .unwrap();
     assert_eq!(staged["images"][0]["id"], img.as_str());
     let steer = uuid::Uuid::new_v4().to_string();
     h.call(
@@ -987,7 +998,10 @@ async fn a_withdrawn_steer_returns_as_a_newer_draft() {
     h.until("accepted", |h| h.state(&steer) == "accepted").await;
     // A waiting bubble shows its picture, and the accepted send has taken it out of the
     // unstaged set.
-    let page = h.call("transcript_page", json!({"chatId": chat})).await.unwrap();
+    let page = h
+        .call("transcript_page", json!({"chatId": chat}))
+        .await
+        .unwrap();
     let entry = page["pending"]
         .as_array()
         .unwrap()
@@ -996,7 +1010,9 @@ async fn a_withdrawn_steer_returns_as_a_newer_draft() {
         .expect("the steer waits in the list");
     assert_eq!(entry["images"][0]["id"], img.as_str());
     assert!(
-        h.call("attachment_list", json!({"chatId": chat})).await.unwrap()["images"]
+        h.call("attachment_list", json!({"chatId": chat}))
+            .await
+            .unwrap()["images"]
             .as_array()
             .unwrap()
             .is_empty(),
@@ -1037,7 +1053,10 @@ async fn a_withdrawn_steer_returns_as_a_newer_draft() {
     assert_eq!(draft, "take me back");
     assert!(rev > before);
     // The picture comes back with the text and waits unstaged for a new send.
-    let list = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    let list = h
+        .call("attachment_list", json!({"chatId": chat}))
+        .await
+        .unwrap();
     assert_eq!(
         list["images"][0]["id"],
         img.as_str(),
@@ -1107,9 +1126,15 @@ async fn a_send_that_could_not_start_stays_recoverable() {
         ["lost?"]
     );
     // Both attachments wait unstaged again, so the recovered draft can carry them.
-    let list = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    let list = h
+        .call("attachment_list", json!({"chatId": chat}))
+        .await
+        .unwrap();
     assert_eq!(list["images"][0]["id"], img.as_str());
-    assert_eq!(list["refs"][0]["target"], note.to_string_lossy().to_string().as_str());
+    assert_eq!(
+        list["refs"][0]["target"],
+        note.to_string_lossy().to_string().as_str()
+    );
     // A send with the same ids is accepted again (the spawner still fails, so it is rejected
     // the same way, but the ids are not refused as already sent).
     let sid2 = uuid::Uuid::new_v4().to_string();
@@ -1120,9 +1145,12 @@ async fn a_send_that_could_not_start_stays_recoverable() {
     )
     .await
     .unwrap();
-    h.until("rejected again", |h| h.state(&sid2) == "rejected").await;
+    h.until("rejected again", |h| h.state(&sid2) == "rejected")
+        .await;
     assert!(
-        h.call("attachment_list", json!({"chatId": chat})).await.unwrap()["images"]
+        h.call("attachment_list", json!({"chatId": chat}))
+            .await
+            .unwrap()["images"]
             .as_array()
             .unwrap()
             .is_empty(),
@@ -1259,7 +1287,10 @@ async fn a_restart_hands_over_what_was_never_sent() {
                      VALUES (?1, ?2, ?1, 'steer', 'saved', ?3)",
                     rusqlite::params![id, chat, i as i64],
                 )?;
-                tx.execute("INSERT INTO submission_meta(submission_id) VALUES (?1)", [id])?;
+                tx.execute(
+                    "INSERT INTO submission_meta(submission_id) VALUES (?1)",
+                    [id],
+                )?;
             }
             Ok::<_, rusqlite::Error>(())
         })
@@ -1268,11 +1299,13 @@ async fn a_restart_hands_over_what_was_never_sent() {
     // No continuation: the first message starts the turn, the second is read as it works.
     let plain = h.create().await;
     seed(&plain, &["p1", "p2"]);
-    h.db
-        .write(|tx| {
-            tx.execute("UPDATE submissions SET state = 'queued' WHERE id = 'p2'", [])
-        })
-        .unwrap();
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE submissions SET state = 'queued' WHERE id = 'p2'",
+            [],
+        )
+    })
+    .unwrap();
     h.rt.start_continuations();
     let mut w = h.worker().await;
     w.ready().await;
@@ -1644,9 +1677,8 @@ async fn archive_takes_a_running_chat_at_once_and_a_dying_worker_cannot_bring_it
     w.expect("abort").await;
     // A Stop landing together with the archive must not send what is waiting.
     let (api, c2) = (h.api.clone(), chat.clone());
-    let esc = tokio::spawn(async move {
-        api.call(&main(), "chat_stop", json!({"chatId": c2})).await
-    });
+    let esc =
+        tokio::spawn(async move { api.call(&main(), "chat_stop", json!({"chatId": c2})).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
         .await;
@@ -2386,7 +2418,10 @@ async fn attached_images_ride_the_prompt() {
         .unwrap();
     let id = put["attachmentId"].as_str().unwrap().to_owned();
     // It waits in the chat's unstaged set until a send takes it.
-    let staged = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    let staged = h
+        .call("attachment_list", json!({"chatId": chat}))
+        .await
+        .unwrap();
     assert_eq!(staged["images"][0]["id"], id.as_str());
     assert_eq!(staged["images"][0]["name"], "shot.png");
     h.call(
@@ -2398,14 +2433,18 @@ async fn attached_images_ride_the_prompt() {
     .unwrap();
     // A waiting bubble shows the picture from the moment the send is accepted, and the image
     // has left the unstaged set.
-    let page = h.call("transcript_page", json!({"chatId": chat})).await.unwrap();
+    let page = h
+        .call("transcript_page", json!({"chatId": chat}))
+        .await
+        .unwrap();
     assert_eq!(page["pending"][0]["images"][0]["id"], id.as_str());
-    assert!(
-        h.call("attachment_list", json!({"chatId": chat})).await.unwrap()["images"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(h
+        .call("attachment_list", json!({"chatId": chat}))
+        .await
+        .unwrap()["images"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     let mut w = h.worker().await;
     w.ready().await;
     let p = w.expect("prompt").await;
@@ -2530,13 +2569,18 @@ async fn a_bubble_thumbnail_is_small_and_cached() {
     assert_eq!(staged["mime"], "image/png");
     assert_eq!(
         staged["bytes"],
-        base64::engine::general_purpose::STANDARD.encode(&big).as_str()
+        base64::engine::general_purpose::STANDARD
+            .encode(&big)
+            .as_str()
     );
     assert_eq!(
-        h.call("attachment_get", json!({"chatId": "another-chat", "attachmentId": id}))
-            .await
-            .unwrap_err()
-            .code,
+        h.call(
+            "attachment_get",
+            json!({"chatId": "another-chat", "attachmentId": id})
+        )
+        .await
+        .unwrap_err()
+        .code,
         "not_found"
     );
     h.call(
@@ -2875,9 +2919,16 @@ async fn an_edited_message_keeps_its_references_too() {
         )) == ["complete"]
     })
     .await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
     let first = user_row(&h, &chat, "first");
     let o = h
-        .call("message_edit_open", json!({"chatId": chat, "messageId": first}))
+        .call(
+            "message_edit_open",
+            json!({"chatId": chat, "messageId": first}),
+        )
         .await
         .unwrap();
     let sid2 = uuid::Uuid::new_v4().to_string();
@@ -2966,36 +3017,65 @@ async fn a_recovered_draft_gets_fresh_copies_of_its_attachments() {
     ack(&w, &p).await;
     echo(&w, &sid1).await;
     h.until("the first row", |h| {
-        h.col(&format!("SELECT status FROM messages WHERE chat_id = '{chat}' AND role = 'user'")) == ["complete"]
+        h.col(&format!(
+            "SELECT status FROM messages WHERE chat_id = '{chat}' AND role = 'user'"
+        )) == ["complete"]
     })
     .await;
     w.emit(json!({"type": "agent_start"})).await;
-    w.emit(json!({"type": "agent_settled", "outcome": "complete"})).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
     h.until("idle", |h| h.status(&chat) == "idle").await;
     let first = user_row(&h, &chat, "first");
     let r = h
-        .call("attachment_recover", json!({"chatId": chat, "messageId": first}))
+        .call(
+            "attachment_recover",
+            json!({"chatId": chat, "messageId": first}),
+        )
         .await
         .unwrap();
-    assert_eq!((r["images"].as_i64(), r["refs"].as_i64()), (Some(1), Some(1)));
+    assert_eq!(
+        (r["images"].as_i64(), r["refs"].as_i64()),
+        (Some(1), Some(1))
+    );
     // Asking again copies the picture once more but not the file: an unstaged reference to
     // the same target already waits.
     let r = h
-        .call("attachment_recover", json!({"chatId": chat, "messageId": first}))
+        .call(
+            "attachment_recover",
+            json!({"chatId": chat, "messageId": first}),
+        )
         .await
         .unwrap();
-    assert_eq!((r["images"].as_i64(), r["refs"].as_i64()), (Some(1), Some(0)));
-    let list = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(
+        (r["images"].as_i64(), r["refs"].as_i64()),
+        (Some(1), Some(0))
+    );
+    let list = h
+        .call("attachment_list", json!({"chatId": chat}))
+        .await
+        .unwrap();
     let copies: Vec<String> = list["images"]
         .as_array()
         .unwrap()
         .iter()
         .map(|x| x["id"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(copies.len(), 2, "two fresh copies, the sent one is not in the pool");
+    assert_eq!(
+        copies.len(),
+        2,
+        "two fresh copies, the sent one is not in the pool"
+    );
     assert!(!copies.contains(&img));
-    assert_eq!(list["refs"].as_array().unwrap().len(), 1, "one unstaged reference");
-    assert_eq!(list["refs"][0]["target"], file.to_string_lossy().to_string());
+    assert_eq!(
+        list["refs"].as_array().unwrap().len(),
+        1,
+        "one unstaged reference"
+    );
+    assert_eq!(
+        list["refs"][0]["target"],
+        file.to_string_lossy().to_string()
+    );
     // The copies ride a new send: the prompt carries the picture bytes and names the file.
     let sid2 = uuid::Uuid::new_v4().to_string();
     let copy_ref = list["refs"][0]["id"].as_str().unwrap().to_owned();
@@ -3020,7 +3100,9 @@ async fn a_recovered_draft_gets_fresh_copies_of_its_attachments() {
     ack(&w, &p2).await;
     echo(&w, &sid2).await;
     h.until("the second row", |h| {
-        h.col(&format!("SELECT status FROM messages WHERE chat_id = '{chat}' AND text = 'again'")) == ["complete"]
+        h.col(&format!(
+            "SELECT status FROM messages WHERE chat_id = '{chat}' AND text = 'again'"
+        )) == ["complete"]
     })
     .await;
     let d: serde_json::Value = serde_json::from_str(
@@ -3029,17 +3111,30 @@ async fn a_recovered_draft_gets_fresh_copies_of_its_attachments() {
         ))[0],
     )
     .unwrap();
-    assert_eq!(d["images"].as_array().unwrap().len(), 2, "the new bubble shows the copies");
+    assert_eq!(
+        d["images"].as_array().unwrap().len(),
+        2,
+        "the new bubble shows the copies"
+    );
     assert_eq!(d["refs"][0]["name"], "notes.md");
-    let list = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
-    assert!(list["images"].as_array().unwrap().is_empty() && list["refs"].as_array().unwrap().is_empty());
+    let list = h
+        .call("attachment_list", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    assert!(
+        list["images"].as_array().unwrap().is_empty()
+            && list["refs"].as_array().unwrap().is_empty()
+    );
     // The sent message keeps reading its own image, and a message that is not there is refused.
     assert_eq!(image_bytes(&h, &chat, &img).await.unwrap(), want);
     assert_eq!(
-        h.call("attachment_recover", json!({"chatId": chat, "messageId": 999999}))
-            .await
-            .unwrap_err()
-            .code,
+        h.call(
+            "attachment_recover",
+            json!({"chatId": chat, "messageId": 999999})
+        )
+        .await
+        .unwrap_err()
+        .code,
         "not_found"
     );
 }
@@ -3332,9 +3427,10 @@ async fn a_web_search_change_restarts_a_running_chat_at_its_next_turn() {
     });
     let lists_search = |w: &FakeWorker| {
         w.req.host.as_ref().is_some_and(|host| {
-            host.tools
-                .as_array()
-                .is_some_and(|a| a.iter().any(|t| t["name"].as_str() == Some("app_web_search")))
+            host.tools.as_array().is_some_and(|a| {
+                a.iter()
+                    .any(|t| t["name"].as_str() == Some("app_web_search"))
+            })
         })
     };
     // Not offered: the first worker lists no search tool and settles with a session.
@@ -3374,9 +3470,13 @@ async fn a_web_search_change_restarts_a_running_chat_at_its_next_turn() {
     assert_eq!(p3["streamingBehavior"], "steer");
     ack(&w2, &p3).await;
     assert!(
-        w2.no_command_for(Duration::from_millis(200)).await.is_none(),
+        w2.no_command_for(Duration::from_millis(200))
+            .await
+            .is_none(),
         "no shutdown mid-turn"
     );
+    w2.emit(json!({"type": "submission_delivered", "submissionId": p3["submissionId"]}))
+        .await;
     w2.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-w2"}))
         .await;
     w2.expect("shutdown").await;
@@ -3600,15 +3700,14 @@ async fn a_host_send_retry_hands_over_a_saved_row_the_first_hand_off_missed() {
     use crate::submit::{host_send, HostSend};
     let mut h = harness();
     let chat = h.create().await;
-    h.db
-        .write(|tx| {
-            tx.execute(
-                "INSERT INTO submissions(id, chat_id, text, mode, state, created_at)
+    h.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO submissions(id, chat_id, text, mode, state, created_at)
                  VALUES ('heal-1', ?1, '[Helm] A wait finished.', 'prompt', 'saved', 9)",
-                [&chat],
-            )
-        })
-        .unwrap();
+            [&chat],
+        )
+    })
+    .unwrap();
     let sent = host_send(
         &h.rt,
         HostSend {
@@ -3619,7 +3718,10 @@ async fn a_host_send_retry_hands_over_a_saved_row_the_first_hand_off_missed() {
         },
     )
     .unwrap();
-    assert!(sent.delivered, "the chat takes the row it had already saved");
+    assert!(
+        sent.delivered,
+        "the chat takes the row it had already saved"
+    );
     let mut w = h.worker().await;
     w.ready().await;
     let p = w.expect("prompt").await;
@@ -3830,7 +3932,10 @@ async fn references_ride_the_prompt_as_a_data_section() {
     let sid = uuid::Uuid::new_v4().to_string();
     let ids = json!([f["attachmentId"], d["attachmentId"], c["attachmentId"]]);
     // They wait in the chat's unstaged set, in the order they were added, until a send takes them.
-    let staged = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    let staged = h
+        .call("attachment_list", json!({"chatId": chat}))
+        .await
+        .unwrap();
     assert_eq!(staged["refs"][0]["id"], f["attachmentId"]);
     assert_eq!(staged["refs"][2]["id"], c["attachmentId"]);
     h.call(
@@ -3841,14 +3946,18 @@ async fn references_ride_the_prompt_as_a_data_section() {
     .await
     .unwrap();
     // The waiting bubble shows them, and they have left the unstaged set.
-    let page = h.call("transcript_page", json!({"chatId": chat})).await.unwrap();
+    let page = h
+        .call("transcript_page", json!({"chatId": chat}))
+        .await
+        .unwrap();
     assert_eq!(page["pending"][0]["refs"].as_array().unwrap().len(), 3);
-    assert!(
-        h.call("attachment_list", json!({"chatId": chat})).await.unwrap()["refs"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(h
+        .call("attachment_list", json!({"chatId": chat}))
+        .await
+        .unwrap()["refs"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     let mut w = h.worker().await;
     w.ready().await;
     let p = w.expect("prompt").await;
@@ -4708,7 +4817,9 @@ async fn a_send_during_a_worker_shutdown_starts_a_fresh_worker() {
     ack(&wl, &p).await;
     h.until("accepted", |h| h.state(&sid) == "accepted").await;
     assert!(
-        cw.no_command_for(Duration::from_millis(150)).await.is_none(),
+        cw.no_command_for(Duration::from_millis(150))
+            .await
+            .is_none(),
         "the closing worker is not handed the send"
     );
 }
@@ -4847,7 +4958,10 @@ async fn a_worker_exit_during_preparation_does_not_reopen_the_turn() {
         ["second"],
         "the unsent text goes back to the draft"
     );
-    let list = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    let list = h
+        .call("attachment_list", json!({"chatId": chat}))
+        .await
+        .unwrap();
     assert_eq!(
         list["images"][0]["id"],
         img.as_str(),
@@ -4897,7 +5011,8 @@ async fn settled_turn(
     .await;
     w.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": session}))
         .await;
-    h.until("the turn settled", |h| h.status(chat) == "idle").await;
+    h.until("the turn settled", |h| h.status(chat) == "idle")
+        .await;
     // The binding is on disk before anything resumes from it.
     h.until("the session is saved", |h| {
         crate::session_log::ClaudeBinding::load(&h.profile.path("sessions"), chat)
@@ -4928,7 +5043,16 @@ async fn a_started_chat_moves_between_local_and_claude_in_both_directions() {
         .unwrap();
     let small = json!({"inputTokens": 20, "outputTokens": 40, "cacheReadTokens": 500,
                        "cacheWriteTokens": 60, "costUsd": 0.05});
-    let mut cw = settled_turn(&mut h, &chat, "first on Claude", "m-1", "working on it", small.clone(), "native-0").await;
+    let mut cw = settled_turn(
+        &mut h,
+        &chat,
+        "first on Claude",
+        "m-1",
+        "working on it",
+        small.clone(),
+        "native-0",
+    )
+    .await;
     // (move to, the notice row it must write, the worker launches on the local server, the
     //  session the next worker resumes, and the session that turn settles as)
     for (model, notice, on_local, resumes, session) in [
@@ -5008,10 +5132,28 @@ async fn a_model_change_too_large_for_the_target_offers_a_roll_over() {
     h.call("chat_set_model", json!({"chatId": &chat, "model": "opus"}))
         .await
         .unwrap();
-    // The session's running totals after the turn: far more than the small local window.
+    // The session's running totals after the turn add every turn's reading together; what
+    // counts is the newest turn's own request, set below.
     let big = json!({"inputTokens": 100, "outputTokens": 900, "cacheReadTokens": 150_000,
                      "cacheWriteTokens": 2_000, "costUsd": 0.5});
-    let mut w = settled_turn(&mut h, &chat, "a long job", "m-1", "deep into it", big, "native-1").await;
+    let mut w = settled_turn(
+        &mut h,
+        &chat,
+        "a long job",
+        "m-1",
+        "deep into it",
+        big,
+        "native-1",
+    )
+    .await;
+    // The newest turn's own request: far more than the small local window.
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE chat_turn_usage SET cache_read_tokens = 150000 WHERE chat_id = ?1",
+            [&chat],
+        )
+    })
+    .unwrap();
     let e = h
         .call(
             "chat_set_model",
@@ -5027,13 +5169,18 @@ async fn a_model_change_too_large_for_the_target_offers_a_roll_over() {
     );
     // A move to a model the conversation still fits goes through: the guard only speaks where
     // the numbers say it must.
-    h.call("chat_set_model", json!({"chatId": &chat, "model": "opus[1m]"}))
-        .await
-        .unwrap();
+    h.call(
+        "chat_set_model",
+        json!({"chatId": &chat, "model": "opus[1m]"}),
+    )
+    .await
+    .unwrap();
 
-    // Take the offer. The move to the wider Claude model took the idle worker down; the hand-off
-    // the roll over asks for runs on the worker the next send starts.
-    w.expect("shutdown").await;
+    // Take the offer. A move between two Claude models is told to the running worker live; it
+    // then goes away here, so the hand-off the roll over asks for runs on the worker the next
+    // send starts.
+    let sm = w.expect("set_model").await;
+    w.respond(&sm, json!({})).await;
     w.exit().await;
     let started = h
         .call(
@@ -5122,14 +5269,28 @@ async fn local_chats_say_who_the_model_server_is_busy_with() {
             "SELECT local_ahead FROM chat_activity WHERE chat_id = '{id}'"
         ))
     };
+    // The chat record's own reading of it (what the header, sidebar and dock show), read the
+    // way the chat ops read it; polled, since the tick that sets it runs on its own task.
+    let record = |h: &H, id: &str| -> Option<i64> {
+        h.db.snapshot(|tx| crate::store::get_chat(tx, id, 0))
+            .unwrap()
+            .unwrap()
+            .local_ahead
+    };
 
     let one = h
-        .call("chat_create", json!({"cwd": &cwd, "model": "local/strata/alpha"}))
+        .call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/alpha"}),
+        )
         .await
         .unwrap();
     let first = one["id"].as_str().unwrap().to_owned();
     let two = h
-        .call("chat_create", json!({"cwd": &cwd, "model": "local/strata/beta"}))
+        .call(
+            "chat_create",
+            json!({"cwd": &cwd, "model": "local/strata/beta"}),
+        )
         .await
         .unwrap();
     let second = two["id"].as_str().unwrap().to_owned();
@@ -5147,11 +5308,8 @@ async fn local_chats_say_who_the_model_server_is_busy_with() {
         ahead(h, &first) == ["0"]
     })
     .await;
-    let got = h
-        .call("chat_get", json!({"chatId": &first}))
-        .await
-        .unwrap();
-    assert_eq!(got["chat"]["localAhead"], 0, "the record carries it");
+    h.until("the record carries it", |h| record(h, &first) == Some(0))
+        .await;
 
     // The second chat's turn opens afterwards on the same server: one of ours stands ahead of it.
     let _ = h.send(&second, "second job", "default").await;
@@ -5165,11 +5323,10 @@ async fn local_chats_say_who_the_model_server_is_busy_with() {
     })
     .await;
     assert_eq!(ahead(&h, &first), ["0"], "the first stays without a count");
-    let got = h
-        .call("chat_get", json!({"chatId": &second}))
-        .await
-        .unwrap();
-    assert_eq!(got["chat"]["localAhead"], 1);
+    h.until("the later chat's record counts one ahead", |h| {
+        record(h, &second) == Some(1)
+    })
+    .await;
 
     // Neither is a stall: standing at the model server has an explanation, so the "may be stuck"
     // flag (five units of quiet) is not set for a waiting chat.
@@ -5219,15 +5376,7 @@ async fn local_chats_say_who_the_model_server_is_busy_with() {
         h.status(&second) == "idle" && ahead(h, &second) == ["NULL"]
     })
     .await;
-    let got = h
-        .call("chat_get", json!({"chatId": &second}))
-        .await
-        .unwrap();
-    assert_eq!(
-        got["chat"]["localAhead"],
-        Value::Null,
-        "an idle chat carries no flag"
-    );
+    assert_eq!(record(&h, &second), None, "an idle chat carries no flag");
     w1.exit().await;
     w2.exit().await;
 }

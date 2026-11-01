@@ -219,6 +219,10 @@ mod tests {
         let (_d, db) = temp_db();
         db.write(|tx| {
             tx.execute(
+                "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 0)",
+                [],
+            )?;
+            tx.execute(
                 "INSERT INTO chats(id, project_id, created_at, updated_at) VALUES ('claude', 'p', 0, 0), ('put_away', 'p', 0, 0)",
                 [],
             )?;
@@ -232,7 +236,12 @@ mod tests {
         .unwrap();
         // A chat whose model lives on a local server gets nothing: the completion would be written
         // by a Claude helper, not by that model.
-        for (id, want) in [("claude", true), ("local", false), ("put_away", false), ("missing", false)] {
+        for (id, want) in [
+            ("claude", true),
+            ("local", false),
+            ("put_away", false),
+            ("missing", false),
+        ] {
             assert_eq!(db.snapshot(|tx| suggestable(tx, id)).unwrap(), want, "{id}");
         }
     }

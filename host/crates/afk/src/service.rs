@@ -22,12 +22,7 @@ pub trait DigestSender: Send + Sync {
     /// The digest is always handed to the chat at once: an idle chat starts a turn with it, a
     /// working chat reads it at the running turn's next tool boundary.
     /// `Err((code, message))` when the chat refuses it.
-    fn send(
-        &self,
-        chat_id: &str,
-        submission_id: &str,
-        text: &str,
-    ) -> Result<(), (String, String)>;
+    fn send(&self, chat_id: &str, submission_id: &str, text: &str) -> Result<(), (String, String)>;
 }
 
 /// How AFK reaches the running agents and the orchestrator. The app installs the real thing;
@@ -514,12 +509,7 @@ impl AfkService {
                 .map_err(|e| log::warn!("AFK digest update failed: {e}"))
                 .is_ok()
         };
-        match digest::step(
-            row.attempts,
-            row.next_attempt_at,
-            sub_state.as_deref(),
-            now,
-        ) {
+        match digest::step(row.attempts, row.next_attempt_at, sub_state.as_deref(), now) {
             Step::Wait => false,
             Step::Mark(state, err) => mark(state, err),
             Step::Send { attempt } => {
@@ -946,7 +936,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .filter(|n| n.1.contains(":off:"))
+            .filter(|n| n.1 == AfkService::note_id(&span, "off", &n.0))
             .map(|n| n.0.clone())
             .collect();
         assert_eq!(off, ["c2"]);

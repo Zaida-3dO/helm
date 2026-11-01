@@ -54,12 +54,10 @@ pub(crate) enum Cmd {
         submission_id: String,
         reply: oneshot::Sender<Result<bool, String>>,
     },
-    DeliverNow {
-        submission_id: String,
-        reason: &'static str,
-    },
     /// Quit: shut the worker down and answer once it has exited.
-    Shutdown { reply: oneshot::Sender<()> },
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
     /// Quit timed out: end the worker tree now.
     Terminate,
     /// Idle over the cap: shut the worker down.
@@ -70,18 +68,25 @@ pub(crate) enum Cmd {
     /// The chat was restored while a worker was still winding down from its archive.
     Restored,
     /// The maintenance tick: mark the chat stalled if it has had no output for `after`.
-    StallCheck { after: std::time::Duration },
+    StallCheck {
+        after: std::time::Duration,
+    },
     /// Apply the staged edit once the worker has closed, then send its submission.
     ApplyEdit,
     /// The send behaviour changed: a different long-command setting relaunches
     /// the worker, at once when idle and at the next idle point when busy.
     SendBehavior(SendBehavior),
     /// Re-read the model catalogue from the live worker's `get_state`; answers whether it did.
-    RefreshCatalogue { reply: oneshot::Sender<bool> },
+    RefreshCatalogue {
+        reply: oneshot::Sender<bool>,
+    },
     /// A line for the worker from another crate (`WorkerBroadcast`); held until it is ready.
     WorkerLine(Value),
     /// A line for the transcript (a context row), written in order with the chat's own rows.
-    ContextRow { kind: ContextKind, text: String },
+    ContextRow {
+        kind: ContextKind,
+        text: String,
+    },
     /// Start the worker ahead of the first send ([`crate::runtime::ChatRuntime::prewarm`]):
     /// `get_state` only, so Claude Code's start-up runs while the user types.
     Prewarm,
@@ -92,7 +97,10 @@ pub(crate) enum Cmd {
     /// AFK just turned on: run the interactions already waiting past the AFK policy.
     AfkSweep,
     /// A local chat's model is being made ready for the turn `token` names: a line to show.
-    LocalNote { token: u64, text: String },
+    LocalNote {
+        token: u64,
+        text: String,
+    },
     /// That preparation finished: the name the worker should ask the server for, or why no turn
     /// starts.
     LocalPrepared {
@@ -208,6 +216,10 @@ struct Actor {
     activity_written: Option<Instant>,
     /// An edit waits for the worker to close.
     edit_waiting: bool,
+    /// Sends that arrived while a quit or an edit was waiting for the worker to close: they are
+    /// handed over once it has exited (an edit's new turn takes them), or left saved for the
+    /// next start when the app is quitting.
+    held_for_exit: Vec<String>,
     /// The long-command setting the running worker was launched with.
     launched_long: Option<LongCommands>,
     /// Whether Helm's web search was offered to the running worker's launch: the tool list is
@@ -346,6 +358,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         last_output: Instant::now(),
         activity_written: None,
         edit_waiting: false,
+        held_for_exit: Vec::new(),
         launched_long: None,
         launched_web_tools: None,
         relaunch_on_idle: false,
@@ -772,7 +785,12 @@ impl Actor {
         // A worker that was told to shut down is winding down: its stdin closes and a prompt
         // handed to it would be lost with it. Drop the closing link (the process is already
         // ending itself) and start a fresh one below, so a send that lands in the gap between a
-        // relaunch and the old worker's exit is never left uncertain.
+        // relaunch and the old worker's exit is never left uncertain. Not when a quit or an edit
+        // is waiting for that exit: dropping the receiver would lose it, and the quit or the edit
+        // would wait for ever. The send stays saved until the exit arrives.
+        if self.link_closing && (!self.shutdown_replies.is_empty() || self.edit_waiting) {
+            return false;
+        }
         if self.link_closing {
             self.link = None;
             self.out = None;
@@ -1060,6 +1078,18 @@ impl Actor {
         }
         if std::mem::take(&mut self.edit_waiting) {
             self.apply_edit();
+        }
+        // Sends that waited for this exit: handed over now (after an edit, into the turn it
+        // opened), or left saved for the next start when the app is quitting.
+        let held = std::mem::take(&mut self.held_for_exit);
+        if !self
+            .sh
+            .shutting_down
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            for sid in held {
+                self.dispatch(&sid);
+            }
         }
         if self.retiring
             || self
@@ -1350,11 +1380,13 @@ impl Actor {
         let mut fetch = false;
         let last = {
             let mut map = self.sh.local_queue.lock().unwrap();
-            let e = map.entry(server.to_owned()).or_insert(crate::runtime::QueueSeen {
-                at: Instant::now() - QUEUE_STALE,
-                info: None,
-                fetching: false,
-            });
+            let e = map
+                .entry(server.to_owned())
+                .or_insert(crate::runtime::QueueSeen {
+                    at: Instant::now() - QUEUE_STALE,
+                    info: None,
+                    fetching: false,
+                });
             if e.at.elapsed() >= QUEUE_STALE && !e.fetching {
                 e.fetching = true;
                 fetch = true;
@@ -1480,7 +1512,7 @@ impl Actor {
                     self.emit_pending();
                     return;
                 }
-                Cmd::Prewarm | Cmd::Warm | Cmd::DeliverNow { .. } => return,
+                Cmd::Prewarm | Cmd::Warm => return,
                 _ => {}
             }
         }
@@ -1621,10 +1653,6 @@ impl Actor {
                     },
                 );
             }
-            Cmd::DeliverNow {
-                submission_id,
-                reason,
-            } => self.deliver_now(&submission_id, reason),
             Cmd::Shutdown { reply } => {
                 if self.link.is_none() {
                     let _ = reply.send(());
@@ -1717,7 +1745,11 @@ impl Actor {
                 let waiting = self.live.lock().unwrap().local_ahead.is_some();
                 // A chat waiting at the model server is explained: waiting time is not "may be
                 // stuck" time, so the stall flag waits until the model starts answering.
-                if self.status().is_busy() && !stalled && !waiting && self.last_output.elapsed() >= after {
+                if self.status().is_busy()
+                    && !stalled
+                    && !waiting
+                    && self.last_output.elapsed() >= after
+                {
                     self.set_stalled(true);
                 }
             }
@@ -1793,10 +1825,25 @@ impl Actor {
         write_counts::set_last_dispatch(&self.chat_id, write_counts::get(&self.chat_id) - before);
     }
 
+    /// A send that found the worker closing for a quit or an edit waits, still saved, for the
+    /// exit; see `ensure_worker`.
+    fn hold_until_exit(&mut self, sid: &str) {
+        if self.link_closing && !self.held_for_exit.iter().any(|h| h == sid) {
+            self.held_for_exit.push(sid.to_owned());
+        }
+    }
+
     fn dispatch_inner(&mut self, sid: &str) {
         let Some(sub) = self.submission(sid) else {
             return;
         };
+        // Only a message still waiting to be handed over is sent. Every sender saves the row
+        // before asking for a dispatch, and this is where it stops being saved, so a second ask
+        // for the same message (start-up hands over everything unsent, a settle sends what was
+        // returned) never writes a second prompt.
+        if sub.state != SubmissionState::Saved {
+            return;
+        }
         let priority: Option<String> = self
             .sh
             .db
@@ -1858,10 +1905,12 @@ impl Actor {
             // Start the worker first, so it boots on the blocking pool while the
             // turn's writes below go to disk. A chat whose record is gone stops here.
             if !self.ensure_worker() {
+                self.hold_until_exit(sid);
                 return;
             }
         }
         if !self.ensure_worker() {
+            self.hold_until_exit(sid);
             return;
         }
         // The turn's opening writes go in one transaction (one fsync, not four): the status, the
@@ -3363,9 +3412,11 @@ impl Actor {
                     None
                 };
                 self.end_run(status, err.as_deref(), outcome);
+                // The stop's answer is how the turn ended; what Claude had not read is sent
+                // again right after, which may open the next turn at once.
+                let final_status = self.status();
                 self.settle_dropped();
                 self.emit_pending();
-                let final_status = self.status();
                 for r in stop.replies {
                     let _ = r.send(final_status);
                 }

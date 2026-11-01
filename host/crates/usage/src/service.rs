@@ -613,10 +613,7 @@ mod tests {
         // Past the floor it reads again.
         let (snap3, outcome3) = svc.fresh_read(t0 + MIN_GAP_MS, budget);
         assert_eq!(outcome3, FreshOutcome::Read);
-        assert_eq!(
-            snap3.reading.unwrap().five_hour.unwrap().pct,
-            Some(9.0)
-        );
+        assert_eq!(snap3.reading.unwrap().five_hour.unwrap().pct, Some(9.0));
         assert_eq!(reader.calls.load(Ordering::SeqCst), 2);
     }
 

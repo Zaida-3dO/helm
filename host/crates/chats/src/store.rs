@@ -720,7 +720,7 @@ pub fn pending(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Vec<Subm
     // pictures and files it sent, not just the text. The bytes stay on the host: the bubble
     // fetches a thumbnail by id when it is on screen (`attachment_get`).
     for s in &mut rows {
-        let images = crate::message_images::refs_for(&**tx, &s.id)?;
+        let images = crate::message_images::refs_for(tx, &s.id)?;
         let refs = crate::attachments::refs_for(tx, &s.id)?;
         if !images.is_empty() {
             s.images = Some(images);

@@ -186,11 +186,15 @@ fn a_new_commit_voids_the_approval_unless_the_tree_is_identical() {
     let out = t.build("dddddddddddddddddddddddddddddddddddddddd").unwrap();
     assert_eq!(out["treeKnown"], false);
     assert_eq!(out["approved"], false);
-    // A moved head is no longer a hand-off block: a review has run, so the change hands off;
-    // the land step carries that fact as a nudge rather than refusing.
-    let h = t.wf(json!({"action": "hand_off", "summary": "done"})).unwrap();
+    // A moved head is no longer a hand-off block: a review has run, so the change hands off
+    // (by the default draft rule, so toward the draft PR); the land step carries that fact as
+    // a nudge rather than refusing.
+    let h = t
+        .wf(json!({"action": "hand_off", "summary": "done"}))
+        .unwrap();
     assert_eq!(h["taskStatus"], "handed_off");
-    assert_eq!(t.state(), "pending_land");
+    assert_eq!(h["handedOff"][0]["mode"], "draft");
+    assert_eq!(t.state(), "landing_draft");
 }
 
 #[test]

@@ -114,7 +114,10 @@ pub enum Step {
     },
     HandedOff(Option<String>),
     Wait(&'static str),
-    Failed { mode: &'static str, why: String },
+    Failed {
+        mode: &'static str,
+        why: String,
+    },
     Awaiting(String),
 }
 
@@ -193,8 +196,9 @@ pub fn merge_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Step {
             }
         }
         "MERGED" => {
-            return fail("the PR was merged into an unprotected branch, which Helm does not count"
-                .into())
+            return fail(
+                "the PR was merged into an unprotected branch, which Helm does not count".into(),
+            )
         }
         "OPEN" => {}
         other => return fail(format!("the PR is {}", other.to_lowercase())),

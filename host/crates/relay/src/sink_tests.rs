@@ -50,14 +50,18 @@ fn one_status_while_running_debounced_then_the_final_as_a_new_message() {
     assert!(m.step(&busy(&[], &[]), T0 + 5_000).is_empty());
     // Changed, but within the gap of the last update: held back, then sent once due.
     // The lists carry short phrases describing the calls, not bare tool names.
-    let b = busy(&["Checking the nightly backup"], &["Reading winter bills.md"]);
+    let b = busy(
+        &["Checking the nightly backup"],
+        &["Reading winter bills.md"],
+    );
     let mut m = Mirror::new(0, T0);
     m.step(&busy(&[], &[]), T0);
     assert!(m.step(&b, T0 + STATUS_GAP_MS - 1).is_empty());
     assert_eq!(
         m.step(&b, T0 + STATUS_GAP_MS),
         vec![Up::Status(
-            "Working…\nRunning: Checking the nightly backup\nRecent: Reading winter bills.md".into(),
+            "Working…\nRunning: Checking the nightly backup\nRecent: Reading winter bills.md"
+                .into(),
         )]
     );
     // Idle once: wait for the last row to flush; idle twice: the final answer, and once the
@@ -109,7 +113,10 @@ fn a_second_message_in_the_same_exchange_is_mirrored_within_the_running_turn() {
         step_ok(&mut m, &idle(Some("Second.")), T0 + 2_500),
         vec![Up::Final("Second.".into())]
     );
-    assert!(m.done, "nothing waits behind the turn, so one Final closes the exchange");
+    assert!(
+        m.done,
+        "nothing waits behind the turn, so one Final closes the exchange"
+    );
 }
 
 #[test]
@@ -132,20 +139,23 @@ fn an_answer_goes_up_the_moment_its_turn_closes_even_while_the_chat_stays_busy()
     m.ack("First.", true);
     assert!(!m.done, "the chat is still busy: the exchange is not over");
     // Confirmed sent: the same row is not sent up again, and the status line resumes.
-    assert_eq!(
-        m.step(&s, T0 + 2_000),
-        vec![Up::Status("Working…".into())]
-    );
+    assert_eq!(m.step(&s, T0 + 2_000), vec![Up::Status("Working…".into())]);
     // The next turn's answer goes up when its row appears.
     s.turn_done = Some((11, "Second.".into()));
-    assert_eq!(step_ok(&mut m, &s, T0 + 3_000), vec![Up::Final("Second.".into())]);
+    assert_eq!(
+        step_ok(&mut m, &s, T0 + 3_000),
+        vec![Up::Final("Second.".into())]
+    );
     assert!(!m.done);
     // When the exchange finally settles, the close says nothing a second time.
     let mut s = idle(Some("Second."));
     s.turn_done = Some((11, "Second.".into()));
     assert!(step_ok(&mut m, &s, T0 + 4_000).is_empty());
     assert!(step_ok(&mut m, &s, T0 + 4_500).is_empty());
-    assert!(m.done, "the settled samples close an already-answered exchange");
+    assert!(
+        m.done,
+        "the settled samples close an already-answered exchange"
+    );
 }
 
 #[test]
@@ -166,7 +176,10 @@ fn an_owed_answer_is_offered_again_until_it_goes_up_and_the_close_completes_afte
         "the owed answer is offered again, not a second one"
     );
     m.ack("The answer.", false);
-    assert_eq!(m.step(&i, T0 + 1_500), vec![Up::Final("The answer.".into())]);
+    assert_eq!(
+        m.step(&i, T0 + 1_500),
+        vec![Up::Final("The answer.".into())]
+    );
     m.ack("The answer.", true);
     assert!(
         !m.done,
@@ -174,7 +187,10 @@ fn an_owed_answer_is_offered_again_until_it_goes_up_and_the_close_completes_afte
     );
     assert!(step_ok(&mut m, &i, T0 + 2_000).is_empty());
     assert!(step_ok(&mut m, &i, T0 + 2_500).is_empty());
-    assert!(m.done, "settled samples after the send: nothing owed, so the exchange closes quiet");
+    assert!(
+        m.done,
+        "settled samples after the send: nothing owed, so the exchange closes quiet"
+    );
 }
 
 #[test]
@@ -338,14 +354,17 @@ fn chat_of(p: &Placed) -> String {
 
 /// The recent line reads the few words stored with each call, keeps to the last three, and
 /// falls back to the bare name when a call has none. (Invented calls; none is real.)
-#[test]
-fn a_snapshot_lists_the_last_three_calls_in_their_own_words() {
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_lists_the_last_three_calls_in_their_own_words() {
     let e = env();
-    let chat = e
-        .db
-        .write(|tx| helm_chats::store::create_chat(tx, "C:/work", None, None, 1))
-        .unwrap();
-    sql(&e.db, "UPDATE chats SET status = 'running' WHERE id = ?1", &[&chat]);
+    let chat =
+        e.db.write(|tx| helm_chats::store::create_chat(tx, "C:/work", None, None, 1))
+            .unwrap();
+    sql(
+        &e.db,
+        "UPDATE chats SET status = 'running' WHERE id = ?1",
+        &[&chat],
+    );
     let seed = |tx: &rusqlite::Transaction<'_>, key: &str, name: &str, details: Option<&str>| {
         tx.execute(
             "INSERT INTO messages(chat_id, source_key, role, tool_name, tool_call_id,
@@ -355,21 +374,39 @@ fn a_snapshot_lists_the_last_three_calls_in_their_own_words() {
         )
         .map(|_| ())
     };
-    e.db
-        .write(|tx| {
-            seed(tx, "t:a", "Read", None)?;
-            seed(tx, "t:b", "Grep", Some(r#"{"toolSummary":"Searching HVAC filter"}"#))?;
-            seed(tx, "t:c", "Bash", Some(r#"{"toolSummary":"Checking the nightly backup"}"#))?;
-            seed(tx, "t:d", "Read", Some(r#"{"toolSummary":"Reading winter bills.md"}"#))?;
-            seed(tx, "t:e", "Grep", Some("{}"))
-        })
-        .unwrap();
+    e.db.write(|tx| {
+        seed(tx, "t:a", "Read", None)?;
+        seed(
+            tx,
+            "t:b",
+            "Grep",
+            Some(r#"{"toolSummary":"Searching HVAC filter"}"#),
+        )?;
+        seed(
+            tx,
+            "t:c",
+            "Bash",
+            Some(r#"{"toolSummary":"Checking the nightly backup"}"#),
+        )?;
+        seed(
+            tx,
+            "t:d",
+            "Read",
+            Some(r#"{"toolSummary":"Reading winter bills.md"}"#),
+        )?;
+        seed(tx, "t:e", "Grep", Some("{}"))
+    })
+    .unwrap();
     let snap = snapshot(&e.ctx.rt, &e.db, &chat, 0, false);
     assert!(snap.busy, "the chat is running");
     assert!(snap.running.is_empty(), "no worker is live in this test");
     assert_eq!(
         snap.recent,
-        ["Checking the nightly backup", "Reading winter bills.md", "Grep"],
+        [
+            "Checking the nightly backup",
+            "Reading winter bills.md",
+            "Grep"
+        ],
         "the last three, in words, with the bare name as fallback"
     );
 }
@@ -667,10 +704,13 @@ async fn a_telegram_message_through_the_real_send_path_never_counts_as_consent()
         "UPDATE submission_meta SET origin = 'typed' WHERE submission_id = ?1",
         &[&sid],
     );
-    // With the origin flipped the row is read at all: refused now only for the brief note's
-    // extra line, and with the bare words it counts.
+    // With the origin flipped the row is read at all: refused now only for the brief note it
+    // carries (its length, or its extra line), and with the bare words it counts.
     let r = spend(&e.db).unwrap_err();
-    assert!(r.contains("more than one line"), "{r}");
+    assert!(
+        r.contains("longer than") || r.contains("more than one line"),
+        "{r}"
+    );
     sql(
         &e.db,
         "UPDATE submissions SET text = 'Yes. Run the test action alpha.' WHERE id = ?1",

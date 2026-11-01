@@ -143,8 +143,9 @@ fn instant(v: &Value, what: &str) -> Result<i64, ToolError> {
 /// "today" window entirely).
 fn window(a: &Value, now: i64, off: i64) -> Result<(i64, i64, String), ToolError> {
     let explicit = a.get("since").is_some() || a.get("until").is_some();
-    let groups =
-        explicit as u8 + u8::from(a.get("lastHours").is_some()) + u8::from(a.get("range").is_some());
+    let groups = explicit as u8
+        + u8::from(a.get("lastHours").is_some())
+        + u8::from(a.get("range").is_some());
     if groups > 1 {
         return Err(refuse("Give one of range, lastHours or since/until."));
     }
@@ -165,15 +166,13 @@ fn window(a: &Value, now: i64, off: i64) -> Result<(i64, i64, String), ToolError
         return Ok((since, until, "custom".into()));
     }
     if let Some(v) = a.get("lastHours") {
-        let n = v.as_i64().filter(|n| (1..=744).contains(n)).ok_or_else(|| {
-            refuse("lastHours must be a whole number of hours from 1 to 744.")
-        })?;
+        let n = v
+            .as_i64()
+            .filter(|n| (1..=744).contains(n))
+            .ok_or_else(|| refuse("lastHours must be a whole number of hours from 1 to 744."))?;
         return Ok((now - n * HOUR_MS, now + 1, format!("{n}h")));
     }
-    let range = a
-        .get("range")
-        .and_then(Value::as_str)
-        .unwrap_or("7d");
+    let range = a.get("range").and_then(Value::as_str).unwrap_or("7d");
     let local = now + off;
     let local_midnight = local - local.rem_euclid(DAY_MS);
     let day_start = local_midnight - off;
@@ -279,8 +278,11 @@ fn scope_of(db: &Database, a: &Value) -> Result<Option<Scope>, ToolError> {
     let found = db
         .snapshot::<_, rusqlite::Error>(|tx| {
             if let Some(id) = chat_id {
-                let ok: bool =
-                    tx.query_row("SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1)", [id], |r| r.get(0))?;
+                let ok: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1)",
+                    [id],
+                    |r| r.get(0),
+                )?;
                 return Ok(ok.then(|| (id.to_owned(), 1usize)));
             }
             let s = session.unwrap();
@@ -292,8 +294,11 @@ fn scope_of(db: &Database, a: &Value) -> Result<Option<Scope>, ToolError> {
                 .query_map([s], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             if ids.is_empty() {
-                let ok: bool =
-                    tx.query_row("SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1)", [s], |r| r.get(0))?;
+                let ok: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1)",
+                    [s],
+                    |r| r.get(0),
+                )?;
                 if ok {
                     ids.push(s.to_owned());
                 }
@@ -317,7 +322,7 @@ fn scope_of(db: &Database, a: &Value) -> Result<Option<Scope>, ToolError> {
     }
     let ids = if tree {
         let all = db
-            .snapshot(|tx| tree_chats(tx, &[primary.clone()]))
+            .snapshot(|tx| tree_chats(tx, std::slice::from_ref(&primary)))
             .map_err(|e| refuse(format!("The usage records could not be read: {e}")))?;
         if all.len() >= TREE_MAX {
             notes.push(format!(
@@ -347,14 +352,16 @@ fn tree_chats(tx: &rusqlite::Transaction<'_>, from: &[String]) -> rusqlite::Resu
         let mut found: BTreeSet<String> = BTreeSet::new();
         let mut take = |sql: String| -> rusqlite::Result<()> {
             let mut st = tx.prepare(&sql)?;
-            for id in st
-                .query_map(rusqlite::params_from_iter(frontier.iter()), |r| r.get::<_, String>(0))?
-            {
+            for id in st.query_map(rusqlite::params_from_iter(frontier.iter()), |r| {
+                r.get::<_, String>(0)
+            })? {
                 found.insert(id?);
             }
             Ok(())
         };
-        take(format!("SELECT id FROM chats WHERE parent_chat_id IN ({ph})"))?;
+        take(format!(
+            "SELECT id FROM chats WHERE parent_chat_id IN ({ph})"
+        ))?;
         take(format!(
             "SELECT chat_id FROM chat_forks WHERE source_chat_id IN ({ph})"
         ))?;
@@ -492,7 +499,12 @@ pub fn digest(db: &Database, a: &Value, compare: &str, env: &DigestEnv) -> ToolR
 
 /// The `chat` block: what the scoped chats used in the window, and the primary chat's context
 /// size over its model's window.
-fn chat_block(db: &Database, scope: &Scope, rows: &[Row], env: &DigestEnv) -> Result<Value, ToolError> {
+fn chat_block(
+    db: &Database,
+    scope: &Scope,
+    rows: &[Row],
+    env: &DigestEnv,
+) -> Result<Value, ToolError> {
     let mut toks = Sums::default();
     let mut cost = 0.0;
     let mut has_local = false;
@@ -514,7 +526,7 @@ fn chat_block(db: &Database, scope: &Scope, rows: &[Row], env: &DigestEnv) -> Re
         .snapshot::<_, rusqlite::Error>(|tx| {
             let (title, model_id, provider): (String, String, Option<String>) = tx.query_row(
                 &format!(
-                    "SELECT title, COALESCE({}, 'default'), provider FROM chats WHERE id = ?1",
+                    "SELECT title, COALESCE({}, 'default'), provider FROM chats c WHERE c.id = ?1",
                     helm_chats::local::MODEL_ID_SQL
                 ),
                 [&scope.primary],
@@ -541,8 +553,7 @@ fn chat_block(db: &Database, scope: &Scope, rows: &[Row], env: &DigestEnv) -> Re
     };
     let context = match ctx {
         Some((tokens, at)) => {
-            let pct =
-                window.map(|w| (tokens as f64 * 100.0 / w as f64 * 100.0).round() / 100.0);
+            let pct = window.map(|w| (tokens as f64 * 100.0 / w as f64 * 100.0).round() / 100.0);
             json!({
                 "contextTokens": tokens,
                 "measuredAtMs": at,
@@ -592,7 +603,9 @@ fn chat_block(db: &Database, scope: &Scope, rows: &[Row], env: &DigestEnv) -> Re
             );
         }
     } else {
-        notes.push("A chat on a local model costs nothing and takes no share of the plan.".to_owned());
+        notes.push(
+            "A chat on a local model costs nothing and takes no share of the plan.".to_owned(),
+        );
     }
     if scope.ids.len() > 1 {
         notes.push(format!(
@@ -601,7 +614,10 @@ fn chat_block(db: &Database, scope: &Scope, rows: &[Row], env: &DigestEnv) -> Re
         ));
     }
     if has_local {
-        notes.push("A chat on a local model is in the token counts but not the cost or the weekly share.".to_owned());
+        notes.push(
+            "A chat on a local model is in the token counts but not the cost or the weekly share."
+                .to_owned(),
+        );
     }
     if !notes.is_empty() {
         block["notes"] = Value::Array(notes.into_iter().map(Value::String).collect());
@@ -699,9 +715,8 @@ fn trim(out: &mut Value) {
 /// left, reset time, age and source, whether any window is at its limit right now, and — when the
 /// caller asked for a fresh reading — what that came down to. Nothing in here is a key.
 fn plan_block(snap: &UsageSnapshot, now: i64, fresh: Option<FreshOutcome>) -> Value {
-    let at_limit = |w: &UsageWindow| {
-        w.pct.is_some_and(|p| p >= 100.0) && w.resets_at.is_some_and(|t| t > now)
-    };
+    let at_limit =
+        |w: &UsageWindow| w.pct.is_some_and(|p| p >= 100.0) && w.resets_at.is_some_and(|t| t > now);
     let src = |s: UsageSource| match s {
         UsageSource::Control => "a control request to Claude Code",
         UsageSource::RateLimitEvent => "a rate-limit line a chat saw",
@@ -985,9 +1000,7 @@ fn local_offset_ms() -> i64 {
 fn local_windows(services: &helm_ipc::Services) -> impl Fn(&str) -> Option<u64> {
     let rt = services.get::<helm_chats::ChatRuntime>();
     move |model_id| {
-        if helm_chats::local::split(model_id).is_none() {
-            return None;
-        }
+        helm_chats::local::split(model_id)?;
         rt.as_ref()?
             .local_models()?
             .catalogue(false)
@@ -1137,7 +1150,13 @@ mod tests {
                 five["ageMs"].as_i64(),
                 five["atLimit"].as_bool(),
             ),
-            (Some(42.5), Some(57.5), Some(3_600_000), Some(1_000_000), Some(false)),
+            (
+                Some(42.5),
+                Some(57.5),
+                Some(3_600_000),
+                Some(1_000_000),
+                Some(false)
+            ),
         );
         assert_eq!(five["source"], "a control request to Claude Code");
         let week = &out["weekly"];
@@ -1177,7 +1196,10 @@ mod tests {
         let none = plan_block(&empty, 1, Some(FreshOutcome::Failed));
         assert!(none["reading"].is_null());
         assert_eq!(none["meterState"], "inactive");
-        assert!(none["meterReason"].as_str().unwrap().contains("Reading plan usage"));
+        assert!(none["meterReason"]
+            .as_str()
+            .unwrap()
+            .contains("Reading plan usage"));
         assert_eq!(none["fresh"]["outcome"], "failed");
     }
 
@@ -1439,9 +1461,7 @@ mod tests {
             helm_chats::session_log::project(tx, dir.path(), chat, raw.as_object().unwrap(), 1)
         };
         db.write(|tx| {
-            tx.execute_batch(
-                "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1);",
-            )?;
+            tx.execute_batch("INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1);")?;
             for id in ["a", "b", "kid", "frk", "ses"] {
                 tx.execute(
                     "INSERT INTO chats(id, project_id, title, created_at, updated_at)
@@ -1520,7 +1540,13 @@ mod tests {
             weekly: None,
             local_window: &no_window,
         };
-        let west_a = digest(&db, &json!({"range": "30d", "chatId": "a"}), "sonnet", &west).unwrap();
+        let west_a = digest(
+            &db,
+            &json!({"range": "30d", "chatId": "a"}),
+            "sonnet",
+            &west,
+        )
+        .unwrap();
         let days: Vec<&str> = west_a["byDay"]
             .as_array()
             .unwrap()
@@ -1562,13 +1588,7 @@ mod tests {
             .iter()
             .any(|n| n.as_str().unwrap().contains("names 2 chats")));
         // The whole tree at once: the chat, its child, its fork and its session sibling.
-        let t = digest(
-            &db,
-            &json!({"session": "sa", "tree": true}),
-            "sonnet",
-            &env,
-        )
-        .unwrap();
+        let t = digest(&db, &json!({"session": "sa", "tree": true}), "sonnet", &env).unwrap();
         assert_eq!(t["scopeChats"], 4);
         assert_eq!(t["total"]["turns"], 6);
         assert_eq!(t["total"]["costUsd"], 1.55);
@@ -1576,7 +1596,13 @@ mod tests {
         assert_eq!(t["chat"]["title"], "ses");
         // A local chat reports its context over the window its server stated, and takes no part
         // of the plan.
-        let loc = digest(&db, &json!({"range": "all", "chatId": "loc"}), "sonnet", &env).unwrap();
+        let loc = digest(
+            &db,
+            &json!({"range": "all", "chatId": "loc"}),
+            "sonnet",
+            &env,
+        )
+        .unwrap();
         assert_eq!(loc["local"]["totalTokens"], 1_103);
         assert_eq!(loc["chat"]["model"], "local/ollama/qwen3:8b");
         assert_eq!(loc["chat"]["context"]["contextTokens"], 1_003);

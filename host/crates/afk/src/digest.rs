@@ -240,10 +240,7 @@ mod tests {
         );
         // A row an older version left in the retired `queued` state reads as still in flight.
         assert_eq!(step(1, None, Some("queued"), 0), Step::Wait);
-        assert_eq!(
-            step(1, None, Some("complete"), 0),
-            Step::Mark("sent", None)
-        );
+        assert_eq!(step(1, None, Some("complete"), 0), Step::Mark("sent", None));
         assert_eq!(step(1, None, Some("dispatching"), 0), Step::Wait);
         assert_eq!(
             step(1, None, Some("withdrawn"), 0),
@@ -258,10 +255,7 @@ mod tests {
             Step::Send { attempt: 3 }
         );
         assert_eq!(step(2, Some(10), None, 9), Step::Wait);
-        assert_eq!(
-            step(2, Some(10), None, 10),
-            Step::Send { attempt: 3 }
-        );
+        assert_eq!(step(2, Some(10), None, 10), Step::Send { attempt: 3 });
         assert_eq!(
             step(5, None, None, 0),
             Step::Mark("failed", Some("Gave up after 5 tries."))

@@ -43,7 +43,9 @@ fn phrase(s: &str) -> Option<String> {
 
 /// The first of these argument fields that carries real text.
 fn first_str<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    keys.iter().find_map(|k| args.get(*k).and_then(Value::as_str)).filter(|s| !s.trim().is_empty())
+    keys.iter()
+        .find_map(|k| args.get(*k).and_then(Value::as_str))
+        .filter(|s| !s.trim().is_empty())
 }
 
 /// The last segment of a path; either separator is a boundary.
@@ -124,7 +126,13 @@ fn fetch_phrase(url: String) -> String {
 fn web_page(url: &str) -> Option<String> {
     let after = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let authority = after.split(['/', '?', '#']).next().unwrap_or("");
-    let host = authority.rsplit('@').next().unwrap_or(authority).split(':').next().unwrap_or("");
+    let host = authority
+        .rsplit('@')
+        .next()
+        .unwrap_or(authority)
+        .split(':')
+        .next()
+        .unwrap_or("");
     if host.is_empty() {
         return None;
     }
@@ -199,17 +207,21 @@ pub(crate) fn tool_summary(name: &str, args: &Value) -> String {
     }
     let known: Option<String> = match name {
         "Read" => first_str(args, &["file_path"]).map(|p| format!("Reading {}", file_name(p))),
-        "LS" => first_str(args, &["path", "file_path"])
-            .map(|p| format!("Listing {}", file_name(p))),
+        "LS" => {
+            first_str(args, &["path", "file_path"]).map(|p| format!("Listing {}", file_name(p)))
+        }
         "Write" => first_str(args, &["file_path"]).map(|p| format!("Writing {}", file_name(p))),
         "Edit" | "MultiEdit" | "NotebookEdit" => first_str(args, &["file_path", "notebook_path"])
             .map(|p| format!("Editing {}", file_name(p))),
         "Grep" | "Glob" => first_str(args, &["pattern"]).map(|p| format!("Searching {}", p.trim())),
-        "Bash" | "PowerShell" => first_str(args, &["command", "cmd"])
-            .and_then(|c| c.lines().find(|l| !l.trim().is_empty()))
-            .and_then(|c| phrase(c.trim())),
+        // A shell call with no description gets a fixed phrase, never the command itself: the
+        // command line can carry a token or a password, and a summary travels further than the
+        // transcript (a Telegram progress line, for one).
+        "Bash" | "PowerShell" => Some("Running a command".to_owned()),
         "WebSearch" => first_str(args, &["query"]).map(|q| format!("Web search: {}", q.trim())),
-        "WebFetch" => first_str(args, &["url"]).and_then(web_page).map(fetch_phrase),
+        "WebFetch" => first_str(args, &["url"])
+            .and_then(web_page)
+            .map(fetch_phrase),
         "TodoWrite" => Some("Updating the plan".to_owned()),
         _ => None,
     };
