@@ -23,8 +23,8 @@ is not supported.
   vaults, and quick open. A terminal dock sits under the transcript.
 - **Host tools and MCP.** Tools Helm offers the agent, each behind a consent step, and an MCP
   client for the user's own servers.
-- **Running unattended.** Schedules that send a prompt into a chat, an away mode, a usage governor
-  and a run-slot queue.
+- **Running unattended.** Schedules that send a prompt into a chat, an away mode and a usage
+  governor.
 - **An orchestrator workflow.** A per-chat switch and a workflow panel for a chat that coordinates
   other agents through plan, build, review and landing.
 - **The hub** (optional, `hub/`): a small always-on service for a home server. It holds a shared

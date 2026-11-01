@@ -1016,8 +1016,7 @@
   color: var(--att-triage, var(--sb-secondary));
 }
 
-.sb-muted,
-.sb-wait {
+.sb-muted {
   flex: none;
   display: inline-flex;
   margin: 0 3px;
@@ -1025,8 +1024,6 @@
 }
 
 .sb-chat-wrap:hover .sb-muted,
-.sb-chat-wrap:hover .sb-wait,
-.sb-chat-wrap:focus-within .sb-wait,
 .sb-chat-wrap:focus-within .sb-muted {
   display: none;
 }

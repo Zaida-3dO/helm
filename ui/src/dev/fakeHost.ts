@@ -32,7 +32,6 @@ import { hubFakeOps } from './fake-hub.ts';
 import { githubFakeOps } from './fake-github.ts';
 import { webSearchFakeOps } from './fake-websearch.ts';
 import { localModelsFakeOps } from './fake-localmodels.ts';
-import { holdForSlot, isSlotWaitPrompt, slotsFakeOps } from './fake-slots.ts';
 import { orchestratorFakeOps } from './fake-orchestrator.ts';
 import { newChatFakeOps } from '../newchat/fake.ts';
 import { runFakeSubagents } from '../transcript/subagents/fake.ts';
@@ -73,7 +72,6 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const oc = orchestratorFakeOps(); registerFakeOps(oc.prefixes, oc.handler); }
 { const nc = newChatFakeOps(); registerFakeOps(nc.prefixes, nc.handler); }
 { const hub = hubFakeOps(); registerFakeOps(hub.prefixes, hub.handler); }
-{ const sl = slotsFakeOps(); registerFakeOps(sl.prefixes, sl.handler); }
 { const gh = githubFakeOps(); registerFakeOps(gh.prefixes, gh.handler); }
 { const ws = webSearchFakeOps(); registerFakeOps(ws.prefixes, ws.handler); }
 // Local models: the catalogue holds nothing until a refresh asks the (made-up) servers, as in the real host.
@@ -517,9 +515,18 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     seed(c, opts.seedRows);
   }
 
+  // Settings → Usage governor: a calm stand-in. Save updates the settings and echoes them back.
+  let governor = { enabled: true, selectivePct: 70, windDownPct: 85, stopPct: 95, atStop: 'stop' as 'stop' | 'wrapUp' };
+  const governorView = () => ({ settings: governor, defaults: governor, band: 'surplus', usedPct: 20, since: null, told: 0, stopped: 0 });
+
   const ops: Record<string, (a: Record<string, unknown>) => unknown> = {
     app_info: () => ({ name: 'Helm', edition: 'desktop', version: 'dev', schemaVersion: 1, profileDir: '(fake host)' }),
     quit_request: () => null,
+    governor_state: () => governorView(),
+    governor_settings: (a) => {
+      governor = { ...governor, ...(a.settings as object) } as typeof governor;
+      return governorView();
+    },
     chat_create: (a) => newChat(String(a.cwd), typeof a.model === 'string' ? a.model : undefined, typeof a.effort === 'string' ? a.effort : undefined).chat,
     chat_list: () => [...chats.values()].map((c) => c.chat).filter((c) => !c.archived && !c.sideSourceId).sort((x, y) => y.createdAt - x.createdAt),
     chat_get: (a) => {
@@ -571,13 +578,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         emitChat(c);
         return { submission: { ...s, state: 'rejected' as const }, chat: c.chat };
       }
-      if (!busy && isSlotWaitPrompt(text)) {
-        // A send held for a free run slot: saved, not yet delivered.
-        s.state = 'saved';
-        c.pending = [...c.pending, s];
-        emitQueue(c);
-        holdForSlot(c.chat.id, s.id);
-      } else if (!busy) {
+      if (!busy) {
         addRow(c, { role: 'user', text, sourceKey: s.id, details: { submissionId: s.id, ...(sentImages.length ? { images: sentImages } : {}), ...(sentRefs.length ? { refs: sentRefs } : {}) } });
         void runTurn(c, text);
       } else if (mode === 'asap' || mode === 'steer') {
@@ -610,22 +611,6 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         emitQueue(c);
       }
       return { status: 'stopping' };
-    },
-    // Dev-only: the slot queue's Start now (run the held send) and Cancel (mark it not delivered).
-    dev_release_wait: (a) => {
-      const c = find(a.chatId);
-      const s = c.pending.find((x) => x.id === a.submissionId);
-      if (!s) return null;
-      c.pending = c.pending.filter((x) => x.id !== s.id);
-      if (a.start) {
-        emitQueue(c);
-        addRow(c, { role: 'user', text: s.text, sourceKey: s.id, details: { submissionId: s.id } });
-        void runTurn(c, s.text);
-      } else {
-        c.pending = [{ ...s, state: 'rejected' as const }, ...c.pending];
-        emitQueue(c);
-      }
-      return null;
     },
     submission_action: (a) => {
       for (const c of chats.values()) {

@@ -3,30 +3,26 @@
 
 import type { Capabilities, Submission } from '../api/types.ts';
 
-export type QueueItemState = 'pending' | 'queued' | 'sending' | 'waiting' | 'uncertain' | 'failed';
+export type QueueItemState = 'pending' | 'queued' | 'sending' | 'uncertain' | 'failed';
 
 export interface QueueItemView {
   submission: Submission;
   /** The stable data-state hook value and the label's basis. */
   state: QueueItemState;
   label: string;
-  /** The quieter second part of the pill: why a message is waiting and where it stands. */
-  note?: string;
-  /** The pill's colour family: amber waits, steer is purple, muted is a plain pending steer, error failed. */
+  /** The pill's colour family: amber is a queued or sending message, steer is purple, muted is a plain pending steer, error failed. */
   tone: QueueTone;
   actions: QueueActionName[];
 }
 
 export type QueueTone = 'amber' | 'steer' | 'muted' | 'error';
 
-export type QueueActionName = 'withdraw' | 'edit' | 'steerNow' | 'sendNow' | 'startNow' | 'cancelWait' | 'recover' | 'move_up' | 'move_down';
+export type QueueActionName = 'withdraw' | 'edit' | 'steerNow' | 'sendNow' | 'recover' | 'move_up' | 'move_down';
 
 export interface QueueContext {
   running: boolean;
   capabilities: Capabilities;
   showChoices: boolean;
-  /** Messages waiting for a free run slot: submission id to the note shown beside the label. */
-  waits?: ReadonlyMap<string, string>;
 }
 
 /** In-flight steers first (in creation order), then queued follow-ups in queue order. */
@@ -51,7 +47,6 @@ const LABELS: Record<QueueItemState, string> = {
   pending: 'Pending',
   queued: 'Queued',
   sending: 'Sending',
-  waiting: 'Waiting for a free slot',
   uncertain: 'Not sent',
   failed: 'Not delivered',
 };
@@ -63,12 +58,10 @@ function toneOf(state: QueueItemState): QueueTone {
 
 export function queueView(pending: Submission[], ctx: QueueContext): QueueItemView[] {
   const ordered = orderPending(pending);
-  const stateOf = (s: Submission): QueueItemState => (ctx.waits?.has(s.id) ? 'waiting' : itemState(s));
-  const queuedIds = ordered.filter((s) => stateOf(s) === 'queued').map((s) => s.id);
+  const queuedIds = ordered.filter((s) => itemState(s) === 'queued').map((s) => s.id);
   return ordered.map((s) => {
-    const state = stateOf(s);
+    const state = itemState(s);
     const actions: QueueActionName[] = [];
-    if (state === 'waiting') actions.push('startNow', 'cancelWait');
     if (state === 'pending' && s.state === 'accepted' && ctx.capabilities.withdraw) actions.push('withdraw');
     if (state === 'queued') {
       // Edit pulls the text (and its attachments) back into the draft.
@@ -79,7 +72,7 @@ export function queueView(pending: Submission[], ctx: QueueContext): QueueItemVi
       if (ctx.running && i >= 0 && i < queuedIds.length - 1) actions.push('move_down');
     }
     if (state === 'uncertain' || state === 'failed') actions.push('recover');
-    return { submission: s, state, label: LABELS[state], note: ctx.waits?.get(s.id), tone: toneOf(state), actions };
+    return { submission: s, state, label: LABELS[state], tone: toneOf(state), actions };
   });
 }
 

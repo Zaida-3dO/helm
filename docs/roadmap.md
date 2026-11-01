@@ -13,7 +13,7 @@ is **v1.0**.
 - The side panel (files, Changes with diffs and review comments, vault notes, quick open), the
   terminal dock, action buttons and quick replies, and Mod+K search.
 - Host tools with consent, the MCP client and the plan-usage meter.
-- Schedules, away mode, the usage governor and the run-slot queue.
+- Schedules, away mode and the usage governor.
 - The orchestrator's workflow panel and its per-chat switch.
 - The hub: shared memory, the relay line and a Telegram bot (its own, or a bot another service
   already runs), connected in Settings → Hub. Messages from Telegram carry a badge in the chat.
@@ -21,7 +21,7 @@ is **v1.0**.
 
 ## Next (0.3): finish what is half-built
 
-- **The waiting bar** for a send waiting on a run slot, and the remaining schedules work.
+- The remaining schedules work.
 - **An updater or a dev channel**, so trying a new build does not mean running a setup file.
 - **Loose ends** in the new-chat page and the composer, and the contrast of muted labels and the
   composer's focus state.

@@ -1,20 +1,15 @@
 // The list below the transcript: Pending steers (sent to Claude, not read yet) with Withdraw,
 // Recover to draft for unsent ones, and any message still in the old queued state with Steer now,
-// Send now and reorder. A message waiting for a free run slot shows an hourglass, why it waits, Start now and
-// Cancel.
+// Send now and reorder.
 
 import { useState, type DragEvent, type KeyboardEvent } from 'react';
 import type { ChatOps } from '../api/ops.ts';
 import type { Submission, ThreadState } from '../api/types.ts';
 import { HOME_SEND_BEHAVIOR } from '../api/types.ts';
 import { Glyph } from '../transcript/icons.tsx';
-import { IconHourglass } from '../ui/icons.tsx';
 import { dropPosition, movePosition, queueView } from './queue.ts';
 import { takeSent } from './attachments.ts';
 import { composerApi } from './slots.ts';
-import { slotQueueOps, waitNotes } from './slotQueue.ts';
-import { useSlotQueue } from './useSlotQueue.ts';
-import { useShell } from '../shell/context.ts';
 
 export interface QueueListProps {
   pending: Submission[];
@@ -28,13 +23,10 @@ const DEFAULT_CAPS = { withdraw: false, deliverNow: false, stopTool: false, comp
 
 export function QueueList({ pending, thread, running, ops, chatId }: QueueListProps) {
   const [drag, setDrag] = useState<{ id: string; over: string | null } | null>(null);
-  const shell = useShell();
-  const { view: slots, store: slotStore } = useSlotQueue();
   const items = queueView(pending, {
     running,
     capabilities: thread?.capabilities ?? DEFAULT_CAPS,
     showChoices: (thread?.sendBehavior ?? HOME_SEND_BEHAVIOR).showChoices,
-    waits: waitNotes(slots),
   });
   if (!items.length) return null;
 
@@ -50,12 +42,6 @@ export function QueueList({ pending, thread, running, ops, chatId }: QueueListPr
         if (sent) composerApi(chatId).restore(sent);
       })
       .catch(() => undefined);
-
-  // Start now begins the wait over the limit; Cancel ends it and leaves the message to recover.
-  const slotAct = (s: Submission, action: 'startNow' | 'cancelWait') => {
-    const ops = slotQueueOps(shell.api);
-    (action === 'startNow' ? ops.startNow(chatId, s.id) : ops.cancel(s.id)).then((v) => slotStore.adopt(v), () => undefined);
-  };
 
   const move = (s: Submission, delta: -1 | 1) => {
     const pos = movePosition(pending, s.id, delta);
@@ -85,7 +71,7 @@ export function QueueList({ pending, thread, running, ops, chatId }: QueueListPr
 
   return (
     <div className="queue" data-testid="queue">
-      {items.map(({ submission: s, state, label, note, tone, actions }) => {
+      {items.map(({ submission: s, state, label, tone, actions }) => {
         const movable = actions.includes('move_up') || actions.includes('move_down');
         const dropTarget = drag !== null && movable && drag.id !== s.id;
         return (
@@ -114,25 +100,10 @@ export function QueueList({ pending, thread, running, ops, chatId }: QueueListPr
             }
           >
             <div className="queue-pill">
-              {state === 'waiting' ? <IconHourglass size={12} /> : <Glyph name={tone === 'error' ? 'alert' : 'clock'} size={12} />}
-              <span className="queue-label" data-testid={state === 'pending' ? 'queue-pending' : state === 'waiting' ? 'queue-waiting' : undefined}>
+              <Glyph name={tone === 'error' ? 'alert' : 'clock'} size={12} />
+              <span className="queue-label" data-testid={state === 'pending' ? 'queue-pending' : undefined}>
                 {label}
               </span>
-              {note && (
-                <span className="queue-note" data-testid="queue-wait-note">
-                  {note}
-                </span>
-              )}
-              {actions.includes('startNow') && (
-                <button type="button" className="pill-btn" data-testid="queue-start-now" title="Start this message now, even though every slot is in use" onMouseDown={(e) => e.preventDefault()} onClick={() => slotAct(s, 'startNow')}>
-                  Start now
-                </button>
-              )}
-              {actions.includes('cancelWait') && (
-                <button type="button" className="pill-btn" data-testid="queue-cancel-wait" title="Stop waiting; the message can be taken back into the draft" onMouseDown={(e) => e.preventDefault()} onClick={() => slotAct(s, 'cancelWait')}>
-                  Cancel
-                </button>
-              )}
               {actions.includes('withdraw') && (
                 <button type="button" className="pill-btn" data-testid="queue-withdraw" onMouseDown={(e) => e.preventDefault()} onClick={() => void act(s, 'withdraw')}>
                   Withdraw
