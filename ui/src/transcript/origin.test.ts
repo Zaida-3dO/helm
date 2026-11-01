@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { MessageRow } from '../api/types.ts';
 import { bubbleText, fromTelegram, peerMessage } from './origin.ts';
 
-const NOTE = '[Sent from Telegram: answer briefly in plain text, with no tables or long code. Offer choices as a numbered list. The user can reply "more" for detail.]';
+const NOTE = '[Sent from Telegram: answer briefly in plain text, with no tables or long code. Offer choices as a numbered list. Only the final message of each turn reaches the user\'s phone, so make that message stand on its own. The user can reply "more" for detail.]';
 
 function row(text: string, origin?: MessageRow['details']['origin']): MessageRow {
   return {

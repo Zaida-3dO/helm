@@ -344,7 +344,8 @@ pub fn submission_id(hub_id: &str) -> String {
 /// a phone can show. It is guidance only: the message's origin, not this text, is what keeps it
 /// from ever counting as consent.
 pub const BRIEF_NOTE: &str = "[Sent from Telegram: answer briefly in plain text, with no tables \
-or long code. Offer choices as a numbered list. The user can reply \"more\" for detail.]";
+or long code. Offer choices as a numbered list. Only the final message of each turn reaches the \
+user's phone, so make that message stand on its own. The user can reply \"more\" for detail.]";
 
 /// The note that tells the agent what other chats sent the user since the last message: one
 /// bracketed line, so the bubble can hide it like the brief note.

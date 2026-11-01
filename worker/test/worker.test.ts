@@ -1,6 +1,7 @@
 // End-to-end worker tests: fake host <-> worker <-> fake claude, one fixture each.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { describe, test } from "node:test";
 import { startFakeLocalModel } from "../../fakes/local-model/server.ts";
 import { isAlive } from "../src/process/kill.ts";
@@ -376,12 +377,21 @@ describe("submissions", () => {
     }
   });
 
-  test("a submission id that is not a UUID is refused", async () => {
+  test("a submission id that is not a UUID is refused; a key-derived one is taken", async () => {
     const s = startWithFixture("streaming");
     try {
       await s.host.ready();
       const r = await s.host.request({ type: "prompt", submissionId: "not-a-uuid", text: "x" });
       assert.equal(r.success, false);
+      // The host turns its own message keys into submission ids this way (a hash shaped as a
+      // UUID v5), so an id built that exact way must pass the worker's shape check.
+      const b = createHash("sha256").update("helm-wait/w1").digest().subarray(0, 16);
+      b[6] = (b[6] & 0x0f) | 0x50;
+      b[8] = (b[8] & 0x3f) | 0x80;
+      const hex = Buffer.from(b).toString("hex");
+      const derived = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+      const ok = await prompt(s.host, "hello?", {}, derived);
+      assert.equal(ok.success, true, `the derived id ${derived} is taken`);
     } finally {
       await s.done();
     }

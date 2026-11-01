@@ -3138,6 +3138,61 @@ async fn a_host_send_repeated_under_one_submission_id_is_delivered_once() {
     );
 }
 
+/// A saved submission the hand-off never ran for (the host stopped first): a retry under the
+/// same id hands it to the chat then, instead of reporting "saved" forever and leaving the
+/// caller to retry an impossible send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_send_retry_hands_over_a_saved_row_the_first_hand_off_missed() {
+    use crate::submit::{host_send, HostSend};
+    let mut h = harness();
+    let chat = h.create().await;
+    h.db
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO submissions(id, chat_id, text, mode, state, created_at)
+                 VALUES ('heal-1', ?1, '[Helm] A wait finished.', 'prompt', 'saved', 9)",
+                [&chat],
+            )
+        })
+        .unwrap();
+    let sent = host_send(
+        &h.rt,
+        HostSend {
+            chat_id: &chat,
+            submission_id: "heal-1",
+            text: "[Helm] A wait finished.",
+            origin: crate::types::SubmissionOrigin::App,
+        },
+    )
+    .unwrap();
+    assert!(sent.delivered, "the chat takes the row it had already saved");
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert_eq!(p["submissionId"], "heal-1", "the saved row reaches Claude");
+    assert_eq!(p["text"], "[Helm] A wait finished.");
+    // A second retry while it is already on its way must not send it again.
+    ack(&w, &p).await;
+    let again = host_send(
+        &h.rt,
+        HostSend {
+            chat_id: &chat,
+            submission_id: "heal-1",
+            text: "[Helm] A wait finished.",
+            origin: crate::types::SubmissionOrigin::App,
+        },
+    )
+    .unwrap();
+    assert!(again.delivered);
+    assert!(
+        w.no_command_for(Duration::from_millis(300))
+            .await
+            .filter(|c| c["type"] == "prompt")
+            .is_none(),
+        "a row further than saved is never sent twice"
+    );
+}
+
 // ---- Unattended reliability ----
 
 /// A stalled flag the host died with is cleared by startup recovery, so the next turn's

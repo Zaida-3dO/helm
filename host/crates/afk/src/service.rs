@@ -204,6 +204,17 @@ impl AfkService {
         }
     }
 
+    /// A note's submission id: one per (span, phase, chat), so a retry never sends it twice.
+    /// Chat workers take only UUIDs as message ids, so it is a name-based UUID (version 8, from
+    /// a SHA-256 of the key), like the digests' ids.
+    fn note_id(span_id: &str, phase: &str, chat_id: &str) -> String {
+        use sha2::Digest;
+        let h = sha2::Sha256::digest(format!("helm-afk-note/{span_id}/{phase}/{chat_id}"));
+        let mut b = [0u8; 16];
+        b.copy_from_slice(&h[..16]);
+        uuid::Uuid::new_v8(b).to_string()
+    }
+
     fn announce_on(&self, span: &Span, now: i64) {
         let (Some(hooks), Some(active)) = (self.hooks(), self.active()) else {
             return;
@@ -211,7 +222,7 @@ impl AfkService {
         let approve = active.settings.plan_approval == settings::PlanApproval::Approve;
         let text = texts::on_note(span.started_at, approve);
         for chat in hooks.busy_chats() {
-            let id = format!("afk-note:{}:on:{chat}", span.id);
+            let id = Self::note_id(&span.id, "on", &chat);
             if let Err((code, msg)) = hooks.note(&chat, &id, &text) {
                 log::info!("AFK note to {chat} not delivered ({code}): {msg}");
             }
@@ -239,7 +250,7 @@ impl AfkService {
             if digested.contains(&chat) {
                 continue;
             }
-            let id = format!("afk-note:{span_id}:off:{chat}");
+            let id = Self::note_id(span_id, "off", &chat);
             if let Err((code, msg)) = hooks.note(&chat, &id, &text) {
                 log::info!("AFK note to {chat} not delivered ({code}): {msg}");
             }
@@ -872,7 +883,18 @@ mod tests {
             assert!(
                 notes[0].2.contains("AFK is on") && notes[0].2.contains("approved automatically")
             );
-            assert!(notes[0].1.starts_with("afk-note:") && notes[0].1.ends_with(":on:c1"));
+            // Chat workers take only UUIDs as message ids; the note's id is fixed per
+            // (span, phase, chat), so a retry of the same note is the same submission.
+            assert_eq!(
+                notes[0].1,
+                AfkService::note_id(&v_span(&db), "on", "c1"),
+                "stable per span and chat"
+            );
+            assert!(
+                uuid::Uuid::parse_str(&notes[0].1).is_ok(),
+                "the worker takes the id: {}",
+                notes[0].1
+            );
         }
         assert_eq!(
             (*hooks.sweeps.lock().unwrap(), *hooks.signed.lock().unwrap()),

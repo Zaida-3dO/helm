@@ -75,6 +75,17 @@ pub fn record_row(rt: &helm_chats::ChatRuntime, chat_id: &str, c: &Changed) {
     );
 }
 
+/// Turn a note's readable key (the change or event it records) into the submission id the chat
+/// takes: the chat worker only accepts ids shaped as UUIDs. The key is hashed, so the same change
+/// always maps to the same id and a retry is never delivered twice.
+pub fn delivery_id(key: &str) -> String {
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(format!("helm-workflow-note/{key}").as_bytes());
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&h[..16]);
+    uuid::Uuid::new_v8(b).to_string()
+}
+
 /// Carry out a [`Delivery`]. A note that cannot be delivered is logged, never retried here: the
 /// next launch carries the state anyway.
 pub fn deliver(rt: &helm_chats::ChatRuntime, chat_id: &str, d: Delivery) {
@@ -84,11 +95,12 @@ pub fn deliver(rt: &helm_chats::ChatRuntime, chat_id: &str, d: Delivery) {
             submission_id,
             text,
         } => {
+            let sid = delivery_id(&submission_id);
             let sent = helm_chats::submit::host_send(
                 rt,
                 helm_chats::submit::HostSend {
                     chat_id,
-                    submission_id: &submission_id,
+                    submission_id: &sid,
                     text: &text,
                     origin: helm_chats::types::SubmissionOrigin::App,
                 },
@@ -205,6 +217,14 @@ mod tests {
         assert!(text.contains(rules::HEADING), "the note carries the rules");
         // The same change always has the same id, so a retry is the same submission.
         assert_eq!(submission_id, super::submission_id("a", 9));
+        // The chat worker only takes UUID-shaped ids, whatever the readable key looks like.
+        let id = delivery_id(&submission_id);
+        assert_eq!(id, delivery_id("wf-mode-a-9"), "stable per key");
+        assert_ne!(id, delivery_id("wf-mode-b-9"), "different keys differ");
+        assert!(
+            uuid::Uuid::parse_str(&id).is_ok(),
+            "the id reaches the chat: {id}"
+        );
     }
 
     #[test]

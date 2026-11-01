@@ -23,11 +23,14 @@
 //!
 //! **Out.** While a Telegram turn runs, a mirror task watches the chat (its stored status, the
 //! live tools and the transcript) and sends ONE status line up the line, only when it changes and
-//! at most every [`STATUS_GAP_MS`]; the hub edits a single Telegram message in place. When the
-//! turn ends, the final answer goes up as a new message (the hub then deletes the status). A
-//! question goes up as a new message with numbered options; an approval, plan or trust prompt
-//! goes up once as a note that it waits in Helm's window. The mirror is harness-level: the agent
-//! never has to remember to reply.
+//! at most every [`STATUS_GAP_MS`]; the hub edits a single Telegram message in place. A turn's
+//! answer goes up as soon as its end-of-turn row is in the transcript (the hub then deletes the
+//! status) — waiting only for the chat to look idle is not enough, since a message the user
+//! queued opens the next turn before that happens. An answer the line will not take is offered
+//! again, and the chat is told inside its transcript that the user never saw it, so the agent can
+//! send it again. A question goes up as a new message with numbered options; an approval, plan or
+//! trust prompt goes up once as a note that it waits in Helm's window. The mirror is
+//! harness-level: the agent never has to remember to reply.
 
 use crate::client::{BoxFut, LineHandle, TelegramMessage, TelegramSink};
 use crate::exec::AppExecutor;
@@ -59,7 +62,9 @@ const BUSY_RETRY: Duration = Duration::from_secs(20);
 /// Where the status and final answer go: the line in the app, a recorder in tests.
 pub trait Upstream: Send + Sync {
     fn status(&self, text: &str);
-    fn final_answer(&self, text: &str);
+    /// The turn's answer, as a new message. `false` when it was not sent (the line is down);
+    /// the mirror then tries it again and tells the chat, so the agent can act on it.
+    fn final_answer(&self, text: &str) -> bool;
     /// A note to the phone that leaves the live status alone.
     fn notify(&self, _text: &str) {}
 }
@@ -68,7 +73,7 @@ impl Upstream for LineHandle {
     fn status(&self, text: &str) {
         self.telegram_status(text)
     }
-    fn final_answer(&self, text: &str) {
+    fn final_answer(&self, text: &str) -> bool {
         self.telegram_final(text)
     }
     fn notify(&self, text: &str) {
@@ -92,6 +97,10 @@ pub struct Snap {
     pub blocked: Option<(String, String)>,
     /// The last assistant text since the turn's baseline.
     pub final_text: Option<String>,
+    /// The last transcript row since the baseline that closed a turn (the end-of-turn stop
+    /// reason): its id and text. The chat stays busy while a message the user queued opens the
+    /// next turn, so this — not an idle sample — is how the mirror knows an answer is ready.
+    pub turn_done: Option<(i64, String)>,
     /// The highest transcript row id now.
     pub max_id: i64,
 }
@@ -112,6 +121,16 @@ pub struct Mirror {
     last_status: Option<String>,
     last_at: Option<i64>,
     asked: HashSet<String>,
+    /// The transcript row of the last answer that reached the phone.
+    sent_through: i64,
+    /// An answer that had not been confirmed sent yet: its transcript row (if it is a turn's
+    /// answer) and its text. The mirror offers it again on every step until [`Self::ack`] says
+    /// it went up.
+    pending: Option<(Option<i64>, String)>,
+    /// Whether an answer of this exchange has gone up, so a close says nothing twice.
+    answered: bool,
+    /// The pending answer is the exchange's close: once it is sent, the mirror is done.
+    closing: bool,
     pub done: bool,
 }
 
@@ -125,7 +144,32 @@ impl Mirror {
             last_status: None,
             last_at: None,
             asked: HashSet::new(),
+            sent_through: 0,
+            pending: None,
+            answered: false,
+            closing: false,
             done: false,
+        }
+    }
+
+    /// Report whether an [`Up::Final`] reached the phone. One that did marks its row delivered
+    /// (it is never sent up twice); one that did not stays offered. When the exchange is closed
+    /// out, the mirror finishes with the send that carried the last word, not the sample that
+    /// found the chat idle.
+    pub fn ack(&mut self, text: &str, ok: bool) {
+        if self.pending.as_ref().is_none_or(|p| p.1 != text) {
+            return;
+        }
+        if ok {
+            if let Some(p) = self.pending.take() {
+                if let Some(id) = p.0 {
+                    self.sent_through = self.sent_through.max(id);
+                }
+                self.answered = true;
+            }
+            if self.closing {
+                self.done = true;
+            }
         }
     }
 
@@ -134,9 +178,26 @@ impl Mirror {
         if self.done {
             return out;
         }
+        if let Some(p) = self.pending.clone() {
+            // A previous answer is owed to the phone: offer it again before anything new.
+            out.push(Up::Final(p.1));
+            return out;
+        }
         if s.busy {
             self.started = true;
             self.idle_seen = 0;
+            if let Some((id, text)) = &s.turn_done {
+                if *id > self.sent_through {
+                    // The turn's answer exists. Hand it up now instead of waiting for an idle
+                    // sample: a message the user queued is read at the turn's first boundary
+                    // and opens the next one, so the chat may never show idle between the
+                    // turns and an answer held for a settled sample would never go out.
+                    let t = telegram::render_final(Some(text.as_str()));
+                    self.pending = Some((Some(*id), t.clone()));
+                    out.push(Up::Final(t));
+                    return out;
+                }
+            }
             if let Some((id, text)) = s.question.as_ref().or(s.blocked.as_ref()) {
                 if self.asked.insert(id.clone()) {
                     // A new message, so the phone notifies; the hub removes the status.
@@ -159,10 +220,27 @@ impl Mirror {
             if self.idle_seen >= 2 {
                 // Nothing is ever held behind the turn: an idle chat with two settled
                 // samples has no more of this exchange to show.
-                out.push(Up::Final(telegram::render_final(s.final_text.as_deref())));
-                self.done = true;
+                let due = match (&s.turn_done, &s.final_text) {
+                    // Its answer went up while the chat was still busy: the exchange just
+                    // closes, and says nothing a second time.
+                    (Some((id, _)), _) if *id <= self.sent_through => None,
+                    (Some((_, text)), _) => Some(telegram::render_final(Some(text.as_str()))),
+                    (None, Some(text)) => Some(telegram::render_final(Some(text.as_str()))),
+                    (None, None) if self.answered => None,
+                    (None, None) => Some(telegram::render_final(None)),
+                };
+                match due {
+                    Some(t) => {
+                        self.pending = Some((s.turn_done.as_ref().map(|(id, _)| *id), t.clone()));
+                        self.closing = true;
+                        out.push(Up::Final(t));
+                    }
+                    None => self.done = true,
+                }
             }
         } else if now - self.began >= START_WAIT_MS {
+            // A turn that never started: say so once and finish. The message itself is saved
+            // in the chat, so this note is the extra word, not the only path to the answer.
             out.push(Up::Final(
                 "Helm has not started a turn for that message yet; it is saved in the Telegram chat."
                     .into(),
@@ -566,15 +644,27 @@ pub fn snapshot(
                     |r| r.get(0),
                 )
                 .optional()?;
+            // The last row that ended a turn: its stop reason says the exchange's answer is
+            // complete, which is knowable while the chat is still busy (a queued message opens
+            // the next turn before an idle sample can come).
+            let turn_done: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT id, text FROM messages WHERE chat_id = ?1 AND id > ?2 AND role = 'assistant'
+                     AND active = 1 AND text != '' AND json_valid(details)
+                     AND json_extract(details, '$.stopReason') = 'end_turn' ORDER BY id DESC LIMIT 1",
+                    rusqlite::params![chat, baseline],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
             let max_id: i64 = tx.query_row(
                 "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?1",
                 [chat],
                 |r| r.get(0),
             )?;
-            Ok::<_, rusqlite::Error>((status, recent, final_text, max_id))
+            Ok::<_, rusqlite::Error>((status, recent, final_text, turn_done, max_id))
         })
         .unwrap_or_default();
-    let (status, recent, final_text, max_id) = row;
+    let (status, recent, final_text, turn_done, max_id) = row;
     let busy = status
         .map(|s| {
             matches!(
@@ -612,6 +702,7 @@ pub fn snapshot(
         question,
         blocked,
         final_text,
+        turn_done,
         max_id,
     }
 }
@@ -626,6 +717,9 @@ pub async fn mirror(
     policy: PathBuf,
 ) {
     let mut m = Mirror::new(baseline, helm_core::now_ms());
+    // Whether the chat has been told its answer could not reach the phone. Once per exchange:
+    // the message has a fixed id, so it is stored once however often failures come after it.
+    let mut told = false;
     while !m.done {
         tokio::time::sleep(POLL).await;
         let (rt2, db2, chat2, base) = (rt.clone(), db.clone(), chat.clone(), m.baseline);
@@ -641,7 +735,28 @@ pub async fn mirror(
         for out in m.step(&s, helm_core::now_ms()) {
             match out {
                 Up::Status(t) => up.status(&t),
-                Up::Final(t) => up.final_answer(&t),
+                Up::Final(t) => {
+                    let ok = up.final_answer(&t);
+                    m.ack(&t, ok);
+                    if ok || told {
+                        continue;
+                    }
+                    // The user cannot see an answer the line would not take. Say so inside the
+                    // chat, where the agent can act on it: it can send the answer again, and
+                    // until it does the user simply has no reply.
+                    told = true;
+                    let note = "[Helm] Your last reply did not reach the user's phone: the Telegram line was down. Only the final message of each turn reaches them. While the user has not answered, send your reply again as your final message.";
+                    let sid = telegram::submission_id(&format!("undelivered/{chat}/{baseline}"));
+                    let _ = host_send(
+                        &rt,
+                        HostSend {
+                            chat_id: &chat,
+                            submission_id: &sid,
+                            text: note,
+                            origin: helm_chats::types::SubmissionOrigin::App,
+                        },
+                    );
+                }
             }
         }
     }

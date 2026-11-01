@@ -208,7 +208,7 @@ impl WaitsService {
         let owed = self.db.snapshot(store::undelivered).unwrap_or_default();
         for (w, o) in owed {
             let text = model::framed(&w, &o);
-            let sid = format!("wait-{}", w.id);
+            let sid = delivery_id(&w.id);
             match sink.deliver(&w.chat_id, &sid, &text) {
                 Delivery::Sent | Delivery::Gone => {
                     let _ = self.db.write(|tx| store::mark_delivered(tx, &w.id));
@@ -217,6 +217,20 @@ impl WaitsService {
             }
         }
     }
+}
+
+/// The submission id for a fired wait's message: the same wait always maps to the same id, so
+/// a retry can never deliver the message twice. Chat workers take only UUIDs as message ids,
+/// so it is a name-based UUID (version 5, from a SHA-256 of the wait id), like the ids the
+/// scheduler and the other automated senders derive for themselves.
+pub fn delivery_id(wait_id: &str) -> String {
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(format!("helm-wait/{wait_id}").as_bytes());
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&h[..16]);
+    b[6] = (b[6] & 0x0f) | 0x50;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(b).to_string()
 }
 
 /// Delivery through the chat runtime: an app message that starts a turn if the chat is
@@ -236,7 +250,10 @@ impl Deliver for RuntimeSink {
             },
         );
         match sent {
-            Ok(_) => Delivery::Sent,
+            // Only an accepted hand-over counts: the wait stays owed until the chat has the
+            // message, so a send that died before handing it over is tried again.
+            Ok(s) if s.delivered => Delivery::Sent,
+            Ok(_) => Delivery::Retry,
             Err(e) if e.code == "not_found" || e.code == "refused" => {
                 log::info!("wait message for {chat_id} not deliverable: {}", e.message);
                 Delivery::Gone
@@ -263,6 +280,27 @@ mod tests {
             stopped: false,
             error: None,
         }
+    }
+
+    /// The same shape check the chat worker applies to every message id: eight groups of hex
+    /// digits in 8-4-4-4-12 order. A submission id that is not this shape is dropped there.
+    fn worker_shape(s: &str) -> bool {
+        let hex = |c: char| c.is_ascii_hexdigit();
+        let g = s.split('-').collect::<Vec<_>>();
+        g.len() == 5
+            && [8, 4, 4, 4, 12]
+                .iter()
+                .zip(&g)
+                .all(|(n, part)| part.len() == *n && part.chars().all(hex))
+    }
+
+    #[test]
+    fn delivery_ids_are_stable_worker_shape_uuids() {
+        let a = delivery_id("a1");
+        assert_eq!(a, delivery_id("a1"), "a retry stays the same submission");
+        assert_ne!(a, delivery_id("a2"));
+        assert!(worker_shape(&a), "{a} must pass the worker's id check");
+        assert_eq!(uuid::Uuid::parse_str(&a).unwrap().get_version_num(), 5);
     }
 
     fn wait(id: &str, chat: &str, target: Target, now: i64, secs: i64) -> Wait {
@@ -367,7 +405,8 @@ mod tests {
             let sent = sink.sent.lock().unwrap();
             assert_eq!(sent.len(), 1);
             assert_eq!(sent[0].0, "c0");
-            assert_eq!(sent[0].1, "wait-a1");
+            assert_eq!(sent[0].1, delivery_id("a1"));
+            assert!(worker_shape(&sent[0].1), "the worker takes the id");
             assert!(sent[0].2.contains("process 101: exited"));
         }
         assert_eq!(
@@ -404,7 +443,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .any(|m| m.1 == "wait-w1" && m.2.contains("finished")));
+            .any(|m| m.1 == delivery_id("w1") && m.2.contains("finished")));
 
         // A timeout, and a deleted waiting chat taking its waits with it.
         svc.declare(&wait("t1", "c3", proc(300), t0, 60))
@@ -419,7 +458,7 @@ mod tests {
         let sent = sink.sent.lock().unwrap().clone();
         assert!(sent
             .iter()
-            .any(|m| m.1 == "wait-t1" && m.2.contains("timeout")));
+            .any(|m| m.1 == delivery_id("t1") && m.2.contains("timeout")));
         assert!(svc.list(None).unwrap().iter().all(|w| w.id != "d1"));
 
         // Pull requests are polled when due, then backed off; a failed poll never fires.

@@ -26,6 +26,19 @@ fn idle(text: Option<&str>) -> Snap {
     }
 }
 
+/// A step where every answer it offered reached the phone — what the real mirror reports back
+/// through [`Mirror::ack`]. Tests that watch an exchange close use it; a test of a failed send
+/// calls `ack` itself.
+fn step_ok(m: &mut Mirror, s: &Snap, now: i64) -> Vec<Up> {
+    let out = m.step(s, now);
+    for o in &out {
+        if let Up::Final(t) = o {
+            m.ack(t, true);
+        }
+    }
+    out
+}
+
 #[test]
 fn one_status_while_running_debounced_then_the_final_as_a_new_message() {
     let mut m = Mirror::new(0, T0);
@@ -44,10 +57,11 @@ fn one_status_while_running_debounced_then_the_final_as_a_new_message() {
         m.step(&b, T0 + STATUS_GAP_MS),
         vec![Up::Status("Working…\nRunning: Bash\nRecent: Read".into())]
     );
-    // Idle once: wait for the last row to flush; idle twice: the final answer, and done.
+    // Idle once: wait for the last row to flush; idle twice: the final answer, and once the
+    // phone has it, done.
     assert!(m.step(&idle(Some("The answer.")), T0 + 9_000).is_empty());
     assert_eq!(
-        m.step(&idle(Some("The answer.")), T0 + 9_500),
+        step_ok(&mut m, &idle(Some("The answer.")), T0 + 9_500),
         vec![Up::Final("The answer.".into())]
     );
     assert!(m.done);
@@ -89,10 +103,75 @@ fn a_second_message_in_the_same_exchange_is_mirrored_within_the_running_turn() {
     assert_eq!(m.step(&idle(Some("First.")), T0 + 2_000), vec![]);
     assert!(!m.done, "the first idle sample only starts the settle");
     assert_eq!(
-        m.step(&idle(Some("Second.")), T0 + 2_500),
+        step_ok(&mut m, &idle(Some("Second.")), T0 + 2_500),
         vec![Up::Final("Second.".into())]
     );
     assert!(m.done, "nothing waits behind the turn, so one Final closes the exchange");
+}
+
+#[test]
+fn an_answer_goes_up_the_moment_its_turn_closes_even_while_the_chat_stays_busy() {
+    // After the earlier delivery fix a message the user queued is read at the turn's first
+    // boundary and opens the next turn, so the chat may never show idle between the turns of an
+    // exchange. The row that ended the turn is the sign the answer is ready: it goes up then,
+    // once, and the next turn's answer goes up the same way.
+    let mut m = Mirror::new(0, T0);
+    let mut s = busy(&[], &[]);
+    s.turn_done = Some((7, "First.".into()));
+    assert_eq!(
+        m.step(&s, T0),
+        vec![Up::Final("First.".into())],
+        "the answer waits for no idle sample"
+    );
+    // The line was down: the same answer is offered again, and goes when the line does.
+    m.ack("First.", false);
+    assert_eq!(m.step(&s, T0 + 1_000), vec![Up::Final("First.".into())]);
+    m.ack("First.", true);
+    assert!(!m.done, "the chat is still busy: the exchange is not over");
+    // Confirmed sent: the same row is not sent up again, and the status line resumes.
+    assert_eq!(
+        m.step(&s, T0 + 2_000),
+        vec![Up::Status("Working…".into())]
+    );
+    // The next turn's answer goes up when its row appears.
+    s.turn_done = Some((11, "Second.".into()));
+    assert_eq!(step_ok(&mut m, &s, T0 + 3_000), vec![Up::Final("Second.".into())]);
+    assert!(!m.done);
+    // When the exchange finally settles, the close says nothing a second time.
+    let mut s = idle(Some("Second."));
+    s.turn_done = Some((11, "Second.".into()));
+    assert!(step_ok(&mut m, &s, T0 + 4_000).is_empty());
+    assert!(step_ok(&mut m, &s, T0 + 4_500).is_empty());
+    assert!(m.done, "the settled samples close an already-answered exchange");
+}
+
+#[test]
+fn an_owed_answer_is_offered_again_until_it_goes_up_and_the_close_completes_after_it() {
+    // The line was down the moment the turn closed; the chat settles before it recovers. The
+    // owed answer comes first on every step; the exchange closes after the send that carried
+    // it, not before.
+    let mut m = Mirror::new(0, T0);
+    let mut s = busy(&[], &[]);
+    s.turn_done = Some((5, "The answer.".into()));
+    assert_eq!(m.step(&s, T0), vec![Up::Final("The answer.".into())]);
+    m.ack("The answer.", false);
+    let mut i = idle(Some("The answer."));
+    i.turn_done = Some((5, "The answer.".into()));
+    assert_eq!(
+        m.step(&i, T0 + 1_000),
+        vec![Up::Final("The answer.".into())],
+        "the owed answer is offered again, not a second one"
+    );
+    m.ack("The answer.", false);
+    assert_eq!(m.step(&i, T0 + 1_500), vec![Up::Final("The answer.".into())]);
+    m.ack("The answer.", true);
+    assert!(
+        !m.done,
+        "the answer reached the phone while the chat was idle, but the settled samples close it"
+    );
+    assert!(step_ok(&mut m, &i, T0 + 2_000).is_empty());
+    assert!(step_ok(&mut m, &i, T0 + 2_500).is_empty());
+    assert!(m.done, "settled samples after the send: nothing owed, so the exchange closes quiet");
 }
 
 #[test]

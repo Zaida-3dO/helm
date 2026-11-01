@@ -159,10 +159,13 @@ impl LineHandle {
             .send(json!({ "type": "telegram_ask_done", "id": id, "text": text }));
     }
     /// The turn's answer, sent by the hub as a new message; the status message goes.
-    pub fn telegram_final(&self, text: &str) {
-        let _ = self
-            .up
-            .send(json!({ "type": "telegram_final", "text": text }));
+    /// `false` when the line is down and it was not sent, so the mirror can try again.
+    pub fn telegram_final(&self, text: &str) -> bool {
+        self.state() == LineState::Online
+            && self
+                .up
+                .send(json!({ "type": "telegram_final", "text": text }))
+                .is_ok()
     }
 }
 

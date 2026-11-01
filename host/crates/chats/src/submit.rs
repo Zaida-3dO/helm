@@ -437,8 +437,16 @@ pub fn host_send_with_attachments(
         .db()
         .write(|tx| {
             if let Some(existing) = store::get_submission(tx, s.submission_id)? {
-                // Already recorded: say whether it has been handed to Claude yet.
-                return Ok(Ok((existing.state != SubmissionState::Saved, false)));
+                // Already recorded: say whether it has been handed to Claude yet. A row still
+                // unsent (the hand-off never ran, e.g. the host stopped first) is handed over
+                // now, so a caller retrying under one id heals instead of staying stuck; but not
+                // for an archived or stopping chat, where nothing is started or sent.
+                let hand_off = existing.state == SubmissionState::Saved
+                    && matches!(
+                        chat_status(tx, s.chat_id)?,
+                        Some((status, archived)) if !archived && status != ChatStatus::Stopping
+                    );
+                return Ok(Ok((hand_off || existing.state != SubmissionState::Saved, hand_off)));
             }
             let Some((status, archived)) = chat_status(tx, s.chat_id)? else {
                 return Ok(Err(crate::ops::not_found()));

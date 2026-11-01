@@ -894,11 +894,10 @@ export class ClaudeDriver implements Driver {
     return result;
   }
 
-  async abort(cmd: Json): Promise<ResponseBody> {
-    const data = { continueQueue: cmd.continueQueue === true, userOnly: cmd.userOnly === true };
-    if (this.dead || !this.child) return { success: true, data: { ...data, state: "idle", cancelledSubmissionIds: [] } };
+  async abort(_cmd: Json): Promise<ResponseBody> {
+    if (this.dead || !this.child) return { success: true, data: { state: "idle", cancelledSubmissionIds: [] } };
     const inFlight = [...this.subs.values()].some((s) => s.state === "dispatching");
-    if (!this.turnOpen && !inFlight) return { success: true, data: { ...data, state: "idle", cancelledSubmissionIds: [] } };
+    if (!this.turnOpen && !inFlight) return { success: true, data: { state: "idle", cancelledSubmissionIds: [] } };
     this.markStopping();
     // An interrupt waits for a running foreground shell (observed live); move those out of the way
     // first by sending running shells to the background.
@@ -921,7 +920,7 @@ export class ClaudeDriver implements Driver {
     } catch (e) {
       this.deps.diag(`interrupt failed: ${(e as Error).message}`);
     }
-    return { success: true, data: { ...data, state: "stopping", cancelledSubmissionIds } };
+    return { success: true, data: { state: "stopping", cancelledSubmissionIds } };
   }
 
   private sendNowInterrupt(): void {
