@@ -5,7 +5,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { panelOps } from '../../api/panel.ts';
-import type { VaultDoc } from '../../api/vault.ts';
+import type { VaultDoc, VaultNote } from '../../api/vault.ts';
 import { vaultOps } from '../../api/vault.ts';
 import { Markdown } from '../../markdown/index.ts';
 import type { LinkTarget } from '../../markdown/index.ts';
@@ -25,8 +25,8 @@ interface DocData {
   vault: string;
   path?: string;
   heading?: string;
-  /** An ambiguous link: the notes it could mean. */
-  candidates?: string[];
+  /** An ambiguous link: the notes it could mean, each naming its vault. */
+  candidates?: VaultNote[];
   note?: string;
 }
 
@@ -139,14 +139,18 @@ function DocBody({ tab, ctx }: { tab: PanelTab; ctx: TabContext }) {
   );
 
   if (data.candidates) {
+    const vaults = [...new Set(data.candidates.map((c) => c.vault))];
+    const nameVaults = vaults.length > 1;
     return (
       <div className="vd-root" data-testid="vault-candidates">
         <div className="vd-title">Which note did you mean?</div>
-        <div className="ch-hint">&ldquo;{data.note}&rdquo; matches more than one note in {data.vault}.</div>
+        <div className="ch-hint">
+          &ldquo;{data.note}&rdquo; {nameVaults ? 'matches notes in more than one vault.' : `matches more than one note in ${vaults[0] ?? data.vault}.`}
+        </div>
         {data.candidates.map((c) => (
-          <button key={c} type="button" className="fv-entry" onClick={() => open({ vault: data.vault, path: c }, chatId)}>
+          <button key={`${c.vault}/${c.path}`} type="button" className="fv-entry" onClick={() => open({ vault: c.vault, path: c.path }, chatId)}>
             <NoteIcon size={15} />
-            <span className="fv-entry-name">{c}</span>
+            <span className="fv-entry-name">{nameVaults ? `${c.vault} — ${c.path}` : c.path}</span>
           </button>
         ))}
       </div>

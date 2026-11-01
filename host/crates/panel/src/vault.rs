@@ -6,7 +6,10 @@
 //!   checks; release builds ignore it.
 //! - **Resolution** follows Obsidian's own rule: an exact path first, then a unique file name. An
 //!   `obsidian://` link names its vault; otherwise the vault containing the chat's folder, else the
-//!   default vault, else the first. An ambiguous name returns the candidates.
+//!   default vault, else the first. An ambiguous name returns the candidates. A plain link the
+//!   chosen vault does not have is searched in every known vault: one hit opens it; hits in several
+//!   vaults come back as candidates, each naming its vault. A link that names its vault is looked
+//!   for in that vault alone.
 //! - **Reads** are confined to the vault folder: the joined path passes the lexical gate, no links
 //!   along it, private roots, and must stay under the vault root. Notes up to 512 KiB, images up to
 //!   8 MiB (for embeds). The file-name index skips `.obsidian`, `.git`, `node_modules` and `.trash`,
@@ -270,6 +273,13 @@ pub fn index(root: &Path) -> Arc<Vec<String>> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteCandidate {
+    pub vault: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", untagged)]
 pub enum Resolution {
     Found {
@@ -277,8 +287,9 @@ pub enum Resolution {
         path: String,
     },
     Candidates {
+        /// The vault the link was resolved from; each candidate names the vault it actually lives in.
         vault: String,
-        candidates: Vec<String>,
+        candidates: Vec<NoteCandidate>,
     },
 }
 
@@ -321,27 +332,92 @@ pub fn resolve_in(
     Ok(hits)
 }
 
+/// The folder of `from_path`, for a link clicked inside another note.
+fn from_dir_of(from_path: Option<&str>) -> Option<String> {
+    from_path.and_then(|p| {
+        p.replace('\\', "/")
+            .rsplit_once('/')
+            .map(|(d, _)| d.to_owned())
+    })
+}
+
+/// The note's hits inside one vault; empty when that vault does not have it.
+fn hits_in(vault: &VaultInfo, note: &str, from_dir: Option<&str>) -> Vec<String> {
+    resolve_in(&index(Path::new(&vault.path)), note, from_dir).unwrap_or_default()
+}
+
+fn found(vault: &VaultInfo, path: String) -> Resolution {
+    Resolution::Found {
+        vault: vault.name.clone(),
+        path,
+    }
+}
+
+fn candidates(vault: &VaultInfo, mut paths: Vec<String>) -> Resolution {
+    paths.sort();
+    paths.truncate(50);
+    Resolution::Candidates {
+        vault: vault.name.clone(),
+        candidates: paths
+            .into_iter()
+            .map(|path| NoteCandidate {
+                vault: vault.name.clone(),
+                path,
+            })
+            .collect(),
+    }
+}
+
+/// One vault, strictly: an invalid name or no match is an error.
 pub fn resolve(
     vault: &VaultInfo,
     note: &str,
     from_path: Option<&str>,
 ) -> Result<Resolution, String> {
-    let files = index(Path::new(&vault.path));
-    let from_dir = from_path.and_then(|p| {
-        p.replace('\\', "/")
-            .rsplit_once('/')
-            .map(|(d, _)| d.to_owned())
-    });
-    let hits = resolve_in(&files, note, from_dir.as_deref())?;
+    let hits = resolve_in(
+        &index(Path::new(&vault.path)),
+        note,
+        from_dir_of(from_path).as_deref(),
+    )?;
     if hits.len() == 1 {
-        return Ok(Resolution::Found {
-            vault: vault.name.clone(),
-            path: hits[0].clone(),
-        });
+        return Ok(found(vault, hits[0].clone()));
     }
+    Ok(candidates(vault, hits))
+}
+
+/// A note link across the vaults: the chosen vault first, and when it has no match every other
+/// known vault is searched too. A unique hit anywhere opens; hits in several vaults come back as
+/// candidates naming each vault; nowhere is the usual not-found error.
+pub fn resolve_across(
+    vaults: &[VaultInfo],
+    chosen: &VaultInfo,
+    note: &str,
+    from_path: Option<&str>,
+) -> Result<Resolution, String> {
+    let rel = clean_rel(note)?;
+    let own = hits_in(chosen, note, from_dir_of(from_path).as_deref());
+    if own.len() == 1 {
+        return Ok(found(chosen, own[0].clone()));
+    }
+    if !own.is_empty() {
+        return Ok(candidates(chosen, own));
+    }
+    let same = |a: &VaultInfo, b: &VaultInfo| a.path.to_lowercase() == b.path.to_lowercase();
+    let mut hits: Vec<NoteCandidate> = Vec::new();
+    for v in vaults.iter().filter(|v| !same(v, chosen)) {
+        hits.extend(hits_in(v, note, None).into_iter().map(|path| NoteCandidate {
+            vault: v.name.clone(),
+            path,
+        }));
+    }
+    if hits.is_empty() {
+        return Err(format!("No note named \"{rel}\" was found in any known vault."));
+    }
+    hits.sort_by(|a, b| (&a.vault, &a.path).cmp(&(&b.vault, &b.path)));
+    hits.truncate(50);
     Ok(Resolution::Candidates {
-        vault: vault.name.clone(),
-        candidates: hits.into_iter().take(50).collect(),
+        vault: chosen.name.clone(),
+        candidates: hits,
     })
 }
 
@@ -573,6 +649,90 @@ mod tests {
         for bad in ["../x", "/abs", r"C:\x", "a/../../b", ""] {
             assert!(resolve_in(&files, bad, None).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_plain_note_link_opens_in_whichever_known_vault_has_the_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |name: &str, files: &[&str]| -> VaultInfo {
+            let root = dir.path().join(name);
+            for f in files {
+                let p = root.join(f.replace('/', std::path::MAIN_SEPARATOR_STR));
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, "# note\n").unwrap();
+            }
+            vi(name, &root.to_string_lossy(), name == "Alpha")
+        };
+        let vs = vec![
+            mk("Alpha", &["Inbox.md", "Projects/Helm.md", "Archive/Helm.md"]),
+            mk("Beta", &["Roadmap.md", "Deep/Nested.md", "Helm.md"]),
+            mk("Gamma", &["Roadmap.md", "Scoped.md"]),
+        ];
+        let across = |note: &str, from: Option<&str>| resolve_across(&vs, &vs[0], note, from);
+
+        // the chosen vault answers when it has the note
+        assert_eq!(
+            across("Inbox", None).unwrap(),
+            Resolution::Found {
+                vault: "Alpha".into(),
+                path: "Inbox.md".into()
+            }
+        );
+        // ambiguity inside the chosen vault stays there: Beta also has a Helm.md
+        assert_eq!(
+            across("Helm", None).unwrap(),
+            Resolution::Candidates {
+                vault: "Alpha".into(),
+                candidates: vec![
+                    NoteCandidate {
+                        vault: "Alpha".into(),
+                        path: "Archive/Helm.md".into()
+                    },
+                    NoteCandidate {
+                        vault: "Alpha".into(),
+                        path: "Projects/Helm.md".into()
+                    },
+                ]
+            }
+        );
+        assert_eq!(
+            across("Helm", Some("Projects/Inbox.md")).unwrap(),
+            Resolution::Found {
+                vault: "Alpha".into(),
+                path: "Projects/Helm.md".into()
+            },
+            "beside the note the link sits in still wins"
+        );
+        // the chosen vault has no match: one hit in another vault opens it
+        assert_eq!(
+            across("Scoped", None).unwrap(),
+            Resolution::Found {
+                vault: "Gamma".into(),
+                path: "Scoped.md".into()
+            }
+        );
+        // several vaults have it: the list names every vault
+        assert_eq!(
+            across("Roadmap", None).unwrap(),
+            Resolution::Candidates {
+                vault: "Alpha".into(),
+                candidates: vec![
+                    NoteCandidate {
+                        vault: "Beta".into(),
+                        path: "Roadmap.md".into()
+                    },
+                    NoteCandidate {
+                        vault: "Gamma".into(),
+                        path: "Roadmap.md".into()
+                    },
+                ]
+            }
+        );
+        // nowhere: the usual not-found, worded for the search that was made
+        let miss = across("Missing", None).unwrap_err();
+        assert!(miss.contains("Missing") && miss.contains("vault"), "{miss}");
+        // an invalid name is refused before any vault is searched
+        assert!(across("../escape", None).is_err());
     }
 
     #[test]

@@ -9,7 +9,13 @@ export interface VaultInfo {
   isDefault: boolean;
 }
 
-export type VaultResolution = { vault: string; path: string } | { vault: string; candidates: string[] };
+/** A note one link could mean: which vault it lives in and its path there. */
+export interface VaultNote {
+  vault: string;
+  path: string;
+}
+
+export type VaultResolution = { vault: string; path: string } | { vault: string; candidates: VaultNote[] };
 
 export interface VaultDoc {
   vault: string;

@@ -150,7 +150,7 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         if (exact) return { vault: 'Demo Vault', path: exact };
         const hits = Object.keys(NOTES).filter((k) => k.toLowerCase() === `${note}.md` || k.toLowerCase().endsWith(`/${note}.md`) || k.toLowerCase() === note);
         if (hits.length === 0) throw new ApiError('not_found', `No note named "${String(args.note)}" in this vault.`);
-        return hits.length === 1 ? { vault: 'Demo Vault', path: hits[0] } : { vault: 'Demo Vault', candidates: hits };
+        return hits.length === 1 ? { vault: 'Demo Vault', path: hits[0] } : { vault: 'Demo Vault', candidates: hits.map((path) => ({ vault: 'Demo Vault', path })) };
       }
       case 'vault_read': {
         const path = String(args.path);

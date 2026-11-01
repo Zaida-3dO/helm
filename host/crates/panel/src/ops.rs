@@ -14,7 +14,7 @@
 //! | `changes_stage` / `changes_unstage` | blocking (own try-lock) | `{chatId, path, from?}` → `{changes, noop}` |
 //! | `vault_list` | blocking | `{}` → `VaultInfo[]` (Obsidian's vaults plus the user's) |
 //! | `vault_add` / `vault_remove` / `vault_set_default` | maintenance | `{path}` / `{path}` / `{name}` → `VaultInfo[]` |
-//! | `vault_resolve` | blocking | `{chatId?, note, vault?, fromVault?, fromPath?}` → `{vault, path}` or `{vault, candidates}` |
+//! | `vault_resolve` | blocking | `{chatId?, note, vault?, fromVault?, fromPath?}` → `{vault, path}` or `{vault, candidates: [{vault, path}]}` (a plain link the chosen vault lacks is searched in every vault) |
 //! | `vault_read` | heavy | `{vault, path}` → `{vault, path, title, text?, bytes?, mime?, truncated}` |
 //! | `vault_open_in_obsidian` | maintenance | `{vault, path}` → `null`: the `obsidian://` URL is built here |
 //! | `panel_context_get` / `panel_context_set` | blocking / maintenance | `{chatId}` → `{on}` / `{chatId, on}` → `{on}` (user-only) |
@@ -481,7 +481,13 @@ fn vault_resolve(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     } else {
         None
     };
-    match vault::resolve(v, &a.note, from) {
+    // A link that names its vault looks in that vault alone; a plain link the chosen vault does
+    // not have is searched in every known vault.
+    let r = match named {
+        Some(_) => vault::resolve(v, &a.note, from),
+        None => vault::resolve_across(&list, v, &a.note, from),
+    };
+    match r {
         Ok(r) => serde_json::to_value(r).map_err(|e| ApiError::internal(e.to_string())),
         Err(m) => Err(ApiError::new("not_found", m)),
     }
