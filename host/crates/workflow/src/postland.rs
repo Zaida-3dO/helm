@@ -360,6 +360,12 @@ pub fn land_complete(tx: &Transaction<'_>, run_id: &str, now: i64) -> rusqlite::
         .count();
     let drafts = all.iter().filter(|c| c.state == "handed_off").count();
     let summary = format!("{merged} merged, {drafts} left as drafts for the user");
+    // Review nudges that rode on landings reach the orchestrator here too.
+    let nudges: Vec<String> = all
+        .iter()
+        .filter(|c| matches!(c.state.as_str(), "landed" | "flipped"))
+        .filter_map(|c| c.error.clone().filter(|e| !e.is_empty()))
+        .collect();
     store::event(
         tx,
         &run.chat_id,
@@ -388,12 +394,20 @@ pub fn land_complete(tx: &Transaction<'_>, run_id: &str, now: i64) -> rusqlite::
         |r| r.get(0),
     )?;
     let text = format!(
-        "Workflow: task \"{}\" has finished landing ({summary}). Wrap-up: {}. Follow-ups queued: {queued} (app_workflow status lists them). If the task needs post-land work, such as closing its board item or filing the follow-ups, dispatch an agent for it; it reports with app_workflow_report kind after_land.",
+        "Workflow: task \"{}\" has finished landing ({summary}). Wrap-up: {}.{} Follow-ups queued: {queued} (app_workflow status lists them). If the task needs post-land work, such as closing its board item or filing the follow-ups, dispatch an agent for it; it reports with app_workflow_report kind after_land.",
         crate::mode::tooltip_reason(&run.title),
         if wrapped.is_empty() {
             "no worktree to remove".to_owned()
         } else {
             wrapped.join("; ")
+        },
+        if nudges.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Helm nudges from the landings: {} Judge from them whether a second review was needed.",
+                nudges.join(" / ")
+            )
         }
     );
     crate::notes::add(

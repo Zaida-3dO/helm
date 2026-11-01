@@ -161,7 +161,7 @@ function draftText(kind: 'ready' | 'draft', r: PrWriteResult): string {
   const note = r.recordError ? ` The task could not be updated: ${r.recordError}` : r.overridden ? ' Recorded as your override on the task.' : '';
   switch (r.outcome) {
     case 'routed':
-      return 'The task marked it ready after checking the approved commit.';
+      return 'The task marked it ready for review.';
     case 'alreadyReady':
       return 'It was already ready for review.';
     case 'alreadyDraft':

@@ -9,8 +9,8 @@
 //! - **Tracked PRs.** While Settings → Orchestrator is on, a change of an active, parked or
 //!   handed-off task that records the PR (or works on its head branch, when the head lives in the
 //!   same repository) holds it until its land step has finished:
-//!   - Merge on a change awaiting the user's Merge, at the approved head, is handed to the task's
-//!     own Merge (`routed`); its land step merges it with every check intact.
+//!   - Merge on a change awaiting the user's Merge is handed to the task's own Merge
+//!     (`routed`); its land step merges it with every check intact.
 //!   - Ready for review on a change handed off as a draft runs the task's own Ready for review.
 //!   - Any other state is an overridable `[Tracked]` refusal built from the host's own facts. The
 //!     page may repeat the click with `anyway`.
@@ -307,9 +307,9 @@ fn capital(s: &str) -> String {
     }
 }
 
-/// The overridable refusal, from host facts only.
-fn tracked_text(t: &Tracking, head: &str, why: Option<&str>, anyway: &str) -> String {
-    let approved = t.change.approved_tip.as_deref() == Some(head);
+/// The overridable refusal, from host facts only. Review state at the head is not a reason:
+/// the land step nudges on it, it does not refuse.
+fn tracked_text(t: &Tracking, why: Option<&str>, anyway: &str) -> String {
     let facts = match why {
         Some(w) => format!(
             "the task could not take it: {}",
@@ -319,10 +319,9 @@ fn tracked_text(t: &Tracking, head: &str, why: Option<&str>, anyway: &str) -> St
                 .collect::<String>()
         ),
         None => format!(
-            "its change {} {}, and the head {} the commit review approved",
+            "its change {} {}",
             t.change.branch,
-            state_words(&t.change.state),
-            if approved { "is" } else { "is not" }
+            state_words(&t.change.state)
         ),
     };
     format!(
@@ -719,7 +718,7 @@ pub fn merge(cx: &Ctx<'_>, pr: &PrRef, sha: &str, anyway: bool) -> Result<PrWrit
         capital(NOTHING)
     );
     if !anyway {
-        if t.change.state == "awaiting_merge" && t.change.approved_tip.as_deref() == Some(sha) {
+        if t.change.state == "awaiting_merge" {
             let routed = cx
                 .db
                 .write(|tx| {
@@ -743,10 +742,10 @@ pub fn merge(cx: &Ctx<'_>, pr: &PrRef, sha: &str, anyway: bool) -> Result<PrWrit
                         ..result(PrOutcome::Routed)
                     })
                 }
-                Err(why) => Err(tracked_text(&t, sha, Some(&why), &anyway_words)),
+                Err(why) => Err(tracked_text(&t, Some(&why), &anyway_words)),
             };
         }
-        return Err(tracked_text(&t, sha, None, &anyway_words));
+        return Err(tracked_text(&t, None, &anyway_words));
     }
     under_hold(cx, &t, pr, head_branch, NOTHING, |held| {
         let mut out = direct_merge(cx, pr, &p, sha)?;
@@ -837,10 +836,10 @@ pub fn ready(cx: &Ctx<'_>, pr: &PrRef, anyway: bool) -> Result<PrWriteResult, St
                     state: Some(state),
                     ..result(PrOutcome::Routed)
                 }),
-                Err(why) => Err(tracked_text(&t, &p.head, Some(&why), &anyway_words)),
+                Err(why) => Err(tracked_text(&t, Some(&why), &anyway_words)),
             };
         }
-        return Err(tracked_text(&t, &p.head, None, &anyway_words));
+        return Err(tracked_text(&t, None, &anyway_words));
     }
     under_hold(cx, &t, pr, head_branch, NOTHING, |held| {
         write()?;

@@ -118,7 +118,7 @@ impl T {
 }
 
 #[test]
-fn a_merge_is_pinned_to_the_approved_head_and_counts_only_on_a_merged_readback() {
+fn a_merge_is_pinned_to_the_head_github_showed_and_counts_only_on_a_merged_readback() {
     let t = setup(true, LandMode::Merge, "pending_land");
     let gh = Script::default();
     gh.say(
@@ -149,12 +149,8 @@ fn a_merge_is_pinned_to_the_approved_head_and_counts_only_on_a_merged_readback()
 }
 
 #[test]
-fn a_moved_head_a_wrong_base_or_a_conflict_fails_without_merging() {
+fn a_wrong_base_or_a_conflict_fails_but_a_moved_head_lands_with_a_note() {
     for (json, why) in [
-        (
-            pr_json("OPEN", SHA, "main", "MERGEABLE", false),
-            "head moved",
-        ),
         (
             pr_json("OPEN", TIP, "develop", "MERGEABLE", false),
             "not the approved",
@@ -181,6 +177,65 @@ fn a_moved_head_a_wrong_base_or_a_conflict_fails_without_merging() {
             "nothing merged for {why}"
         );
     }
+    // A head that moved after the review does not hold the land up: the merge is pinned to the
+    // head GitHub showed, and the landing carries the review question as a note on the change.
+    let t = setup(true, LandMode::Merge, "pending_land");
+    let gh = Script::default();
+    gh.say(
+        "pr view",
+        true,
+        &pr_json("OPEN", SHA, "main", "MERGEABLE", false),
+    )
+    .say(
+        "pr view",
+        true,
+        &pr_json("MERGED", SHA, "main", "MERGEABLE", false),
+    );
+    gh.say("pr merge", true, "");
+    t.pass(&gh, 1000);
+    let c = t.change();
+    assert_eq!(
+        (c.state.as_str(), c.landed_sha.as_deref()),
+        ("landed", Some(SHA))
+    );
+    let note = c.error.unwrap_or_default();
+    assert!(
+        note.contains("head moved") && note.contains("Has this been reviewed?"),
+        "{note:?}"
+    );
+    let merge = gh.calls().iter().find(|l| l.starts_with("pr merge")).unwrap();
+    assert!(
+        merge.contains(&format!("--match-head-commit {SHA}")),
+        "pinned to the head GitHub showed: {merge}"
+    );
+    // No reviewed commit recorded at all: the change still lands, with the same question.
+    let t = setup(true, LandMode::Merge, "pending_land");
+    t.db
+        .write::<_, rusqlite::Error>(|tx| {
+            tx.execute("UPDATE workflow_changes SET approved_tip = NULL", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let gh = Script::default();
+    gh.say(
+        "pr view",
+        true,
+        &pr_json("OPEN", TIP, "main", "MERGEABLE", false),
+    )
+    .say(
+        "pr view",
+        true,
+        &pr_json("MERGED", TIP, "main", "MERGEABLE", false),
+    );
+    gh.say("pr merge", true, "");
+    t.pass(&gh, 1000);
+    let c = t.change();
+    assert_eq!(c.state, "landed");
+    let note = c.error.unwrap_or_default();
+    assert!(
+        note.contains("No reviewed commit") && note.contains("Has this been reviewed?"),
+        "{note:?}"
+    );
 }
 
 #[test]
@@ -404,15 +459,22 @@ fn a_pass_that_writes_marks_its_chat_and_a_waiting_pass_does_not() {
         store::take_touched().is_empty(),
         "a wait is not a run write"
     );
-    // A head that moved fails the land: a change write, so the chat is marked.
+    // A head that moved after the review still lands, with the review question as its note:
+    // a change write, so the chat is marked.
     let gh = Script::default();
     gh.say(
         "pr view",
         true,
         &pr_json("OPEN", SHA, "main", "MERGEABLE", false),
+    )
+    .say(
+        "pr view",
+        true,
+        &pr_json("MERGED", SHA, "main", "MERGEABLE", false),
     );
+    gh.say("pr merge", true, "");
     t.pass(&gh, 10 + land::FAST_WAIT_MS);
-    assert_eq!(t.change().state, "land_failed");
+    assert_eq!(t.change().state, "landed");
     assert_eq!(store::take_touched(), ["c"]);
 }
 
@@ -530,14 +592,14 @@ fn the_pr_view_routes_refuses_overrides_and_obeys_the_repository_rule() {
     use crate::prview::{self, PrRef};
     let cases = [
         Case {
-            name: "awaiting the user's Merge at the approved head: handed to the task",
+            name: "awaiting the user's Merge: handed to the task",
             state: "awaiting_merge",
             want: Ok(PrOutcome::Routed),
             change: "landing",
             ..BASE
         },
         Case {
-            name: "awaiting a Merge, but the head is not the approved commit",
+            name: "awaiting a Merge where the head is not the reviewed commit: still handed to the task",
             state: "awaiting_merge",
             click: Click::Merge {
                 n: 7,
@@ -545,7 +607,8 @@ fn the_pr_view_routes_refuses_overrides_and_obeys_the_repository_rule() {
                 anyway: false,
             },
             pr: ("OPEN", SHA, false, None),
-            change: "awaiting_merge",
+            want: Ok(PrOutcome::Routed),
+            change: "landing",
             ..BASE
         },
         Case {

@@ -1,7 +1,9 @@
-//! `hand_off` and `finish`. A hand-off binds each change to its approved commit
-//! (`{tip, tree, base}`, or the latest build's when review is off) and moves it toward the land
-//! step by the mode the **host** computes from its own settings: draft rule → `landing_draft`,
-//! merge rule → `pending_land`. The land step itself is [`crate::land`].
+//! `hand_off` and `finish`. A hand-off binds each change to the commit it carries its review
+//! at (`{tip, tree, base}`, or the latest build's when review is off) and moves it toward the
+//! land step by the mode the **host** computes from its own settings: draft rule →
+//! `landing_draft`, merge rule → `pending_land`. A change whose review ran but no longer binds
+//! at the latest commit still hands off — the land step nudges on that. The land step itself
+//! is [`crate::land`].
 
 use crate::actions::{self, Act, Out};
 use crate::engine;
@@ -128,8 +130,10 @@ pub fn hand_off(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
     for mut c in ready {
         let (mode, method) = crate::settings::land_mode(x.s, &c.repo);
         if x.s.stages.review.use_ == StageUse::Required {
-            if c.approved_tip.as_ref() != c.tip.as_ref() {
-                // The approval holds by tree: bind the tip that carries it.
+            if engine::approval_holds(&c) && c.approved_tip.as_ref() != c.tip.as_ref() {
+                // The approval holds by tree: bind the tip that carries it. When it does not
+                // hold at all (the code moved on since the review), the reviewed commit stays
+                // as it was: the land step nudges from it, it does not claim a new approval.
                 c.approved_tip = c.tip.clone();
             }
         } else {

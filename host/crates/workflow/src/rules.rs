@@ -71,7 +71,7 @@ pub fn workflow_rules(s: &WorkflowSettings) -> String {
         out.push("Code review is off.".into());
     } else {
         out.push(format!(
-            "A fresh {} agent reviews each change at its exact latest commit; an approval holds only for that commit (or a commit with an identical tree). At most {} review rounds per change.",
+            "A fresh {} agent reviews each change at its exact latest commit; an approval is recorded for that commit (or a commit with an identical tree). At most {} review rounds per change. Once a review has run, Helm lands the change even if its head later moves: it nudges you about that instead of blocking, and a second review is your call, with a high bar.",
             agent(&st.review.agent),
             st.review.max_rounds
         ));

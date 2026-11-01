@@ -189,12 +189,11 @@ pub fn missing(s: &WorkflowSettings, run: &Run, c: &Change, all: &[Change]) -> V
         out.push(format!("{name}: no build has been reported yet"));
         return out;
     };
+    // One review that ran is enough to hand off: whether the head moved since is the land
+    // step's nudge, not a block here.
     if s.stages.review.use_ == StageUse::Required {
-        if !approval_holds(c) {
-            out.push(format!(
-                "{name}: no review approval at its latest commit {}",
-                &tip[..7.min(tip.len())]
-            ));
+        if c.review_rounds == 0 {
+            out.push(format!("{name}: no review has run on it yet"));
         }
     } else {
         let build_code = c.build_tip.as_ref() == Some(tip)
@@ -344,9 +343,9 @@ mod tests {
         let mut c = change("a", "t1");
         c.pr = Some("https://github.com/o/r/pull/3".into());
         let m = missing(&s, &run(), &c, &[]);
-        assert!(m.iter().any(|x| x.contains("no review approval")), "{m:?}");
+        assert!(m.iter().any(|x| x.contains("no review has run")), "{m:?}");
         assert!(m.iter().any(|x| x.contains("clean-up")), "{m:?}");
-        c.approved_tip = Some("a".into());
+        c.review_rounds = 1;
         c.cleanup_tip = Some("a".into());
         assert!(missing(&s, &run(), &c, &[]).is_empty());
         let mut r = run();

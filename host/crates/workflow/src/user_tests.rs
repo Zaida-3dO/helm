@@ -107,6 +107,13 @@ impl T {
             .unwrap()
             .state
     }
+    fn change_error(&self, run: &str, branch: &str) -> Option<String> {
+        self.db
+            .snapshot(|tx| store::change(tx, run, REPO, branch))
+            .unwrap()
+            .unwrap()
+            .error
+    }
     fn set_status(&self, run: &str, status: &str) {
         let mut r = self.run(run);
         r.status = status.into();
@@ -371,32 +378,15 @@ fn gh(head: &str, draft: bool, ok: bool) -> Gh1 {
 }
 
 #[test]
-fn ready_for_review_reverifies_the_approved_head_before_it_flips() {
+fn ready_for_review_flips_at_either_head_and_notes_a_head_that_moved_after_the_review() {
     let t = setup(|s| s.landing.flip_label = Some("needs-review".into()));
     t.wf(json!({"action": "start", "title": "T"})).unwrap();
     let run = t.run_id();
-    t.change(&run, "a", "handed_off");
-    // The PR's head moved past the approved commit: not flipped, and the reason is on the change.
-    let moved = gh(&"b".repeat(40), true, true);
-    let e = crate::land::ready(&t.db, &moved, &run, REPO, "a", 10)
-        .unwrap()
-        .unwrap_err();
-    assert!(e.contains("not the approved commit"), "{e}");
-    assert_eq!(t.state_of(&run, "a"), "handed_off");
-    assert_eq!(t.events("flip_verify_failed", None), 1);
-    assert!(
-        !moved
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|l| l.starts_with("pr ready")),
-        "nothing was marked ready"
-    );
-    // At the approved head: marked ready, the flip label removed, then flipped.
+    // Still at the reviewed commit: marked ready, the flip label removed, flipped with no note.
+    t.change(&run, "clean", "handed_off");
     let good = gh(TIP, true, true);
     assert_eq!(
-        crate::land::ready(&t.db, &good, &run, REPO, "a", 11).unwrap(),
+        crate::land::ready(&t.db, &good, &run, REPO, "clean", 11).unwrap(),
         Ok("flipped".into())
     );
     let calls = good.calls.lock().unwrap().clone();
@@ -410,10 +400,26 @@ fn ready_for_review_reverifies_the_approved_head_before_it_flips() {
             .any(|l| l.contains("--remove-label needs-review")),
         "{calls:?}"
     );
-    assert_eq!(t.state_of(&run, "a"), "flipped");
-    assert_eq!(t.events("flipped", None), 1);
+    assert_eq!(t.state_of(&run, "clean"), "flipped");
+    assert_eq!(t.change_error(&run, "clean"), None);
+    // The PR's head moved after the review: it still flips, and the change carries the review
+    // question as its note.
+    t.change(&run, "moved", "handed_off");
+    let moved = gh(&"b".repeat(40), true, true);
+    assert_eq!(
+        crate::land::ready(&t.db, &moved, &run, REPO, "moved", 10).unwrap(),
+        Ok("flipped".into())
+    );
+    assert_eq!(t.state_of(&run, "moved"), "flipped");
+    assert_eq!(t.events("flipped", None), 2);
+    assert_eq!(t.events("flip_verify_failed", None), 0);
+    let note = t.change_error(&run, "moved").unwrap_or_default();
+    assert!(
+        note.contains("head moved") && note.contains("Has this been reviewed?"),
+        "{note:?}"
+    );
     // Only a handed-off change can be flipped.
-    let e = crate::land::ready(&t.db, &good, &run, REPO, "a", 12)
+    let e = crate::land::ready(&t.db, &good, &run, REPO, "moved", 12)
         .unwrap()
         .unwrap_err();
     assert!(e.contains("flipped"), "{e}");

@@ -2,16 +2,19 @@
 //! code lands handed-off changes; agents never do.
 //!
 //! - **Mode** is recomputed from the host's settings at every pass, never read from a worker.
-//! - **Merge rule**: re-read the PR; it must be open, its head the approved tip, its base the
-//!   approved base and a protected branch. A conflict is final. While GitHub is still computing
-//!   mergeability the change waits (every 10 s for 2 min, then every minute up to 15 min, then
-//!   "Awaiting your Merge"). A draft is marked ready first. The merge is pinned with
-//!   `--match-head-commit`, and it counts only when the PR then reads back MERGED into a
+//! - **Merge rule**: re-read the PR; it must be open, and its base the approved base and a
+//!   protected branch. A conflict is final. While GitHub is still computing mergeability the
+//!   change waits (every 10 s for 2 min, then every minute up to 15 min, then "Awaiting your
+//!   Merge"). A draft is marked ready first. The merge is pinned with `--match-head-commit` to
+//!   the head GitHub showed, and it counts only when the PR then reads back MERGED into a
 //!   protected branch. A repository rule may pick `fast_forward` instead: the base branch is
-//!   moved to the approved head by a non-forced ref update ([`fast_forward`]), so GitHub writes
-//!   no commit, and the same MERGED read-back decides.
-//! - **Draft rule**: the PR must be open at the approved tip; draft labels are added (a label
-//!   the repository lacks is skipped); a PR already ready for review is left alone.
+//!   moved to the PR's head by a non-forced ref update ([`fast_forward`]), so GitHub writes no
+//!   commit, and the same MERGED read-back decides.
+//! - **Review never blocks a land.** A change lands whatever its review state at the PR head:
+//!   a moved head, or none recorded, rides along as a nudge on the landing ([`NUDGE`]), and the
+//!   orchestrator judges from it whether a second review is worth it — the bar is high.
+//! - **Draft rule**: the PR must be open; draft labels are added (a label the repository lacks
+//!   is skipped); a PR already ready for review is left alone.
 //! - **One land per change at a time** (the flight set), and a merge in flight when Helm quit is
 //!   a failed land at the next start, never retried silently.
 //! - Nothing runs while the master switch is off.
@@ -83,10 +86,32 @@ pub fn kick() {
     }
 }
 
+/// The question review state raises instead of a refusal. One review that ran is enough to
+/// land; an approval is only the better kind of yes.
+pub const NUDGE: &str = "Has this been reviewed? Yes is enough; an approval is better.";
+
+/// The nudge a landing carries when its review state at the PR head is in doubt: `None` when
+/// the PR still sits at the reviewed commit.
+fn review_warning(c: &Change, head: &str) -> Option<String> {
+    match c.approved_tip.as_deref() {
+        Some(tip) if tip == head => None,
+        Some(_) => Some(format!(
+            "The PR's head moved after the review. {NUDGE} Decide whether a second review is \
+             worth it, with a high bar: usually the reviewer ran and the changes it asked for \
+             were made, and that is the end."
+        )),
+        None => Some(format!("No reviewed commit is recorded. {NUDGE}")),
+    }
+}
+
 /// What one pass decided for a change.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
-    Landed(String),
+    Landed {
+        sha: String,
+        /// A review nudge for the task and the panel; it never stopped the landing.
+        warning: Option<String>,
+    },
     HandedOff(Option<String>),
     Wait(&'static str),
     Failed { mode: &'static str, why: String },
@@ -134,8 +159,8 @@ fn protected(s: &WorkflowSettings, base: &str) -> bool {
 /// One merge-rule pass over a change in `landing`.
 pub fn merge_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Step {
     let fail = |why: String| Step::Failed { mode: "merge", why };
-    let (Some(pr), Some(tip)) = (c.pr.as_deref(), c.approved_tip.as_deref()) else {
-        return fail("the change has no PR or approved commit recorded".into());
+    let Some(pr) = c.pr.as_deref() else {
+        return fail("the change has no PR recorded".into());
     };
     let (Some(repo), Some(n)) = (gh_repo(&c.repo), pr_number(pr)) else {
         return fail("only github.com pull requests are landed".into());
@@ -155,23 +180,27 @@ pub fn merge_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Step {
         Err(step) => return step,
     };
     let base = s(&v, "baseRefName");
+    let head = s(&v, "headRefOid");
     let merged_sha = v
         .get("mergeCommit")
         .map(|m| s(m, "oid"))
         .unwrap_or_default();
     match s(&v, "state").as_str() {
-        "MERGED" if base_ok(&base) && s(&v, "headRefOid") == tip => {
-            return Step::Landed(merged_sha)
+        "MERGED" if base_ok(&base) => {
+            return Step::Landed {
+                sha: merged_sha,
+                warning: review_warning(c, &head),
+            }
         }
         "MERGED" => {
-            return fail("the PR was merged with other code or into an unprotected branch".into())
+            return fail("the PR was merged into an unprotected branch, which Helm does not count"
+                .into())
         }
         "OPEN" => {}
         other => return fail(format!("the PR is {}", other.to_lowercase())),
     }
-    if s(&v, "headRefOid") != tip {
-        return fail("the PR's head moved since the approval; it needs a new review".into());
-    }
+    // Review state at the head is a nudge on the landing, never a refusal.
+    let warning = review_warning(c, &head);
     if let Some(ab) = &c.approved_base {
         if &base != ab {
             return fail(format!("the PR's base is {base}, not the approved {ab}"));
@@ -214,16 +243,16 @@ pub fn merge_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Step {
             &repo,
             flag,
             "--match-head-commit",
-            tip,
+            &head,
         ])),
-        None => match fast_forward(gh, &repo, &base, tip) {
+        None => match fast_forward(gh, &repo, &base, &head) {
             Ok(()) => Ok(crate::gh::Out {
                 ok: true,
                 stdout: String::new(),
                 stderr: String::new(),
             }),
             Err(Ff::NotAncestor) => return fail(format!(
-                "{base} has commits the approved head does not contain, so it cannot be fast-forwarded: rebase the branch, get it reviewed again, or Drop change"
+                "{base} has commits the PR's head does not contain, so it cannot be fast-forwarded: update the branch, then Retry, or Drop change"
             )),
             Err(Ff::Unreadable(why)) => return Step::Wait(why),
             Err(Ff::Refused(e)) => Ok(crate::gh::Out {
@@ -248,14 +277,15 @@ pub fn merge_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Step {
         Ok(after)
             if s(&after, "state") == "MERGED"
                 && base_ok(&s(&after, "baseRefName"))
-                && s(&after, "headRefOid") == tip =>
+                && s(&after, "headRefOid") == head =>
         {
-            Step::Landed(
-                after
+            Step::Landed {
+                sha: after
                     .get("mergeCommit")
                     .map(|m| s(m, "oid"))
                     .unwrap_or_default(),
-            )
+                warning,
+            }
         }
         Ok(after) if s(&after, "state") == "MERGED" => {
             fail("the PR read back merged with other code or into another branch".into())
@@ -387,9 +417,6 @@ pub fn draft_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Step {
     if s(&v, "state") != "OPEN" {
         return fail(format!("the PR is {}", s(&v, "state").to_lowercase()));
     }
-    if Some(s(&v, "headRefOid").as_str()) != c.approved_tip.as_deref() {
-        return fail("the PR's head is not the approved commit".into());
-    }
     if !v.get("isDraft").and_then(Value::as_bool).unwrap_or(false) {
         return Step::HandedOff(Some(
             "the PR was already ready for review, so Helm left it as it is".into(),
@@ -469,9 +496,11 @@ pub fn apply(tx: &Transaction<'_>, before: &Change, step: &Step, now: i64) -> ru
         return Ok(());
     };
     match step {
-        Step::Landed(sha) => {
+        Step::Landed { sha, warning } => {
             c.landed_sha = Some(sha.clone()).filter(|s| !s.is_empty());
-            c.error = None;
+            // The review nudge rides on the landed change: visible in the panel and in the
+            // task's status, though it did not stop the merge.
+            c.error = warning.clone();
             if engine::move_change(tx, &run, &mut c, "landed", false, now)?.is_ok() {
                 clear_wait(tx, &c)?;
                 result_event(
@@ -480,7 +509,7 @@ pub fn apply(tx: &Transaction<'_>, before: &Change, step: &Step, now: i64) -> ru
                     &c,
                     "landed",
                     c.landed_sha.clone().as_deref(),
-                    None,
+                    warning.as_deref(),
                     now,
                 )?;
             }
@@ -631,7 +660,7 @@ pub fn pass(db: &Database, gh: &dyn Gh, flight: &Flight, now: i64) -> rusqlite::
         };
         db.write(|tx| apply(tx, &c, &step, now))?;
         // The wrap-up and the post-land due check, outside the land's own transaction.
-        if matches!(step, Step::Landed(_) | Step::HandedOff(_)) {
+        if matches!(step, Step::Landed { .. } | Step::HandedOff(_)) {
             if let Err(e) = crate::postland::after_step(db, &c, now) {
                 log::warn!("post-land step for {}: {e}", c.branch);
             }
@@ -765,12 +794,13 @@ pub fn user_action(
     Ok(Ok(c.state))
 }
 
-/// One Ready-for-review pass over a handed-off change: the PR must be open at the
-/// approved commit; a draft is marked ready and the flip label removed. `Ok` carries a note for
-/// the change (a label that could not be removed), `Err` why it was not flipped.
+/// One Ready-for-review pass over a handed-off change: the PR must be open; a draft is marked
+/// ready and the flip label removed. Review state at the head never stops the flip: a head
+/// moved since the review is carried as a note asking whether it has been reviewed. `Ok`
+/// carries a note for the change, `Err` why it was not flipped.
 pub fn flip_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Result<Option<String>, String> {
-    let (Some(pr), Some(tip)) = (c.pr.as_deref(), c.approved_tip.as_deref()) else {
-        return Err("the change has no PR or approved commit recorded".into());
+    let Some(pr) = c.pr.as_deref() else {
+        return Err("the change has no PR recorded".into());
     };
     let (Some(repo), Some(n)) = (gh_repo(&c.repo), pr_number(pr)) else {
         return Err("only github.com pull requests are handled".into());
@@ -784,8 +814,11 @@ pub fn flip_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Result<Optio
     if s(&v, "state") != "OPEN" {
         return Err(format!("the PR is {}", s(&v, "state").to_lowercase()));
     }
-    if s(&v, "headRefOid") != tip {
-        return Err("the PR's head is not the approved commit".into());
+    let mut notes = Vec::new();
+    if let Some(tip) = c.approved_tip.as_deref() {
+        if tip != s(&v, "headRefOid") {
+            notes.push(format!("The PR's head moved after the review. {NUDGE}"));
+        }
     }
     let run = |args: &[&str]| {
         let a: Vec<String> = args.iter().map(|x| x.to_string()).collect();
@@ -798,10 +831,10 @@ pub fn flip_pass(gh: &dyn Gh, st: &WorkflowSettings, c: &Change) -> Result<Optio
     }
     if let Some(label) = st.landing.flip_label.as_deref() {
         if !run(&["pr", "edit", &n, "--repo", &repo, "--remove-label", label]) {
-            return Ok(Some(format!("the label {label} could not be removed")));
+            notes.push(format!("the label {label} could not be removed"));
         }
     }
-    Ok(None)
+    Ok((!notes.is_empty()).then(|| notes.join("; ")))
 }
 
 /// The user's Ready for review on a handed-off change. The steps are:

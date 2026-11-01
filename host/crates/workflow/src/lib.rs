@@ -33,7 +33,7 @@
 //! | allow kinds | `land`, `ready`, `skip`, `allowMore`, `drop`, `reopen`, `takeOver` on `helm_consent` |
 //! | worker line `guard_check` → `guard_verdict` | the landing guard on Bash, PowerShell and MCP calls ([`hook`]): only in a chat with Orchestrator on and an active task, while Settings → Orchestrator → Landing guard is on (default on); overrides recorded as `guard_override`, refusals as `gate_denied`, both listed under Needs you |
 //! | table `workflow_standup_outbox` | stage records written to Agent Standup, with an "outcome unknown" read-back before any resend |
-//! | land step | `gh` merge pinned to the approved head, readback must say MERGED; draft land |
+//! | land step | `gh` merge pinned to the head GitHub showed, readback must say MERGED; review state at the head nudges, never blocks; draft land |
 //! | op `workflow_run_get`, event `workflow_run` | the workflow panel's live read |
 //! | ops `workflow_change_action`, `workflow_change_ready`, `workflow_task_action` | the user's buttons and task menu ([`user`]); Ready for review is its own non-maintenance op because it asks GitHub |
 //! | ops `pr_land_info`, `pr_merge`, `pr_ready`, `pr_draft` | the pull request view's merge box, Ready for review and Convert to draft ([`prview`]): routed through a task that tracks the PR, or one checked write by the repository's landing rule |

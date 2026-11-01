@@ -181,13 +181,16 @@ fn a_new_commit_voids_the_approval_unless_the_tree_is_identical() {
     let out = t.build(C).unwrap();
     assert_eq!(out["approved"], false);
     assert_eq!(out["outcome"], "approval_voided");
-    let e = t.wf(json!({"action": "hand_off"})).unwrap_err();
-    assert!(e.contains("no review approval"), "{e}");
     // An unknown tree counts as different.
     t.review(C, "lgtm").unwrap();
     let out = t.build("dddddddddddddddddddddddddddddddddddddddd").unwrap();
     assert_eq!(out["treeKnown"], false);
     assert_eq!(out["approved"], false);
+    // A moved head is no longer a hand-off block: a review has run, so the change hands off;
+    // the land step carries that fact as a nudge rather than refusing.
+    let h = t.wf(json!({"action": "hand_off", "summary": "done"})).unwrap();
+    assert_eq!(h["taskStatus"], "handed_off");
+    assert_eq!(t.state(), "pending_land");
 }
 
 #[test]
@@ -779,7 +782,15 @@ fn a_finished_land_wraps_up_its_worktree_and_queues_follow_ups() {
             .unwrap();
             let mut c = store::change(tx, &run.id, REPO, "feat-x")?.unwrap();
             crate::engine::move_change(tx, &run, &mut c, "landing", false, 20)?.unwrap();
-            crate::land::apply(tx, &c, &crate::land::Step::Landed(B.into()), 20)?;
+            crate::land::apply(
+                tx,
+                &c,
+                &crate::land::Step::Landed {
+                    sha: B.into(),
+                    warning: None,
+                },
+                20,
+            )?;
             Ok(c)
         })
         .unwrap();
