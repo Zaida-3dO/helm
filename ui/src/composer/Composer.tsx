@@ -20,8 +20,8 @@ import { ModelPicker } from './ModelPicker.tsx';
 import { isLocalModel } from './modelEffort.ts';
 import { DefaultStar } from './DefaultStar.tsx';
 import { PermissionChip } from './PermissionChip.tsx';
-import { orderInFlight } from './inFlight.ts';
-import { bytesToBase64, forgetDelivered, forgetSent, isAnimated, refusal, stashSent, type Attached, type SentAttachments } from './attachments.ts';
+import { bytesToBase64, isAnimated, refusal, unstagedOnly, type Attached } from './attachments.ts';
+import { bytesFromBase64 } from '../transcript/messageImages.ts';
 import { Recall } from './recall.ts';
 import { ImageViewer } from '../transcript/ImageViewer.tsx';
 import { commandWithArgs, helmCommand, moveActive, SCOPE_LABEL, skillMenu, skillQuery, withHelmCommands, type Skill } from './skills.ts';
@@ -59,8 +59,6 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const [error, setError] = useState<string | null>(null);
   const [empty, setEmpty] = useState(!chat.draft);
   const stopping = useRef(false);
-  // The sends this composer made whose attachments are kept for taking the message back.
-  const mine = useRef(new Set<string>());
   // True while a send is on its way to the host: a second press does not send the message twice.
   const sendingRef = useRef(false);
   // The draft as the composer last saw it: the empty→non-empty step is the first keystroke, which
@@ -115,23 +113,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     };
     registerSetText(insert);
     // composerApi(chatId).insert(...) reaches this composer (slots.ts).
-    return mountComposer(chat.id, { insert, focus: () => editor.current?.focus(), restore: (s) => restoreRef.current(s) });
+    return mountComposer(chat.id, { insert, focus: () => editor.current?.focus(), restore: () => restoreRef.current() });
   }, [registerSetText, saver, chat.id]);
-
-  useEffect(() => {
-    const waiting = new Set(orderInFlight(pending).map((s) => s.id));
-    forgetDelivered(mine.current, waiting);
-    // Check again after the grace period so a send that was delivered quietly is let go too.
-    const t = setTimeout(() => forgetDelivered(mine.current, waiting), 5500);
-    return () => clearTimeout(t);
-  }, [pending]);
-  useEffect(
-    () => () => {
-      mine.current.forEach(forgetSent);
-      mine.current.clear();
-    },
-    [],
-  );
 
   // Attached images: stored on add, sent by id, thumbnails as blob: URLs.
   const [attached, setAttached] = useState<Attached[]>([]);
@@ -157,7 +140,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
             continue;
           }
           const r = await ops.attach(chat.id, f.name || 'image', f.type, bytesToBase64(bytes));
-          const a: Attached = { id: r.attachmentId, name: f.name || 'image', size: f.size, url: URL.createObjectURL(f), file: f };
+          const a: Attached = { id: r.attachmentId, name: f.name || 'image', size: f.size, url: URL.createObjectURL(f) };
           attachedRef.current = [...attachedRef.current, a];
           setAttached(attachedRef.current);
         } catch (e) {
@@ -208,19 +191,34 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     }
   };
   const full = roomLeft(attached.length, refs.length) === 0;
-  // A taken-back message (withdrawn, recovered or edited) gives its images and files back.
-  const restore = useCallback(
-    (sent: SentAttachments) => {
-      void addFiles(sent.files as File[]);
-      for (const kind of ['path', 'chat'] as const) {
-        const targets = sent.refs.filter((r) => r.kind === kind).map((r) => r.target);
-        if (targets.length) void addRefs(kind, targets);
+  // Stage what the host holds unstaged for this chat: images and files staged before this window
+  // opened (a restart), and the ones a taken-back send (withdrawn, recovered, refused, or never
+  // sent at all) gave back. Ids already shown are left alone, so this never doubles an attachment.
+  const restage = useCallback(async () => {
+    try {
+      const list = await ops.stagedAttachments(chat.id);
+      for (const img of unstagedOnly(list.images, attachedRef.current)) {
+        if (roomLeft(attachedRef.current.length, refsRef.current.length) === 0) break;
+        const t = await ops.thumb(chat.id, img.id);
+        const url = URL.createObjectURL(new Blob([bytesFromBase64(t.bytes)], { type: t.mime }));
+        attachedRef.current = [...attachedRef.current, { id: img.id, name: img.name, size: img.size, url }];
       }
-    },
-    [addFiles, addRefs],
-  );
-  const restoreRef = useRef(restore);
-  restoreRef.current = restore;
+      setAttached(attachedRef.current);
+      for (const r of unstagedOnly(list.refs, refsRef.current)) {
+        if (roomLeft(attachedRef.current.length, refsRef.current.length) === 0) break;
+        refsRef.current = addRef(refsRef.current, { id: r.id, kind: r.kind, name: r.name, target: r.target });
+      }
+      setRefs(refsRef.current);
+    } catch {
+      // The host is not reachable: the composer keeps whatever it already shows.
+    }
+  }, [ops, chat.id]);
+  const restoreRef = useRef<() => void>(() => undefined);
+  restoreRef.current = () => void restage();
+  // A reopened chat stages the attachments it is holding again.
+  useEffect(() => {
+    void restage();
+  }, [restage]);
 
   // Drops: files from Explorer arrive as the host's `file_drop` event
   // with paths; a chat row dragged from the sidebar is read from the sidebar's drag markers.
@@ -321,12 +319,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
           context: extra.context,
           attachments: [...images.map((a) => a.id), ...sentRefs.map((r) => r.id)],
         });
-        // Kept for a while, so taking the message back (withdraw, recover) restores its attachments.
-        mine.current.add(submissionId);
-        stashSent(submissionId, {
-          files: images.flatMap((a) => (a.file ? [a.file] : [])),
-          refs: sentRefs.map((r) => ({ kind: r.kind === 'chat' ? ('chat' as const) : ('path' as const), target: r.target })),
-        });
+        // The host now owns these attachments (linked to the send); if the send ever comes
+        // back unread, it returns them to the chat's unstaged set and `restage` picks them up.
         images.forEach((a) => URL.revokeObjectURL(a.url));
         setAttached((list) => list.filter((a) => !images.includes(a)));
         refsRef.current = refsRef.current.filter((r) => !sentRefs.includes(r));

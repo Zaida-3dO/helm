@@ -935,12 +935,53 @@ async fn sends_beyond_the_active_cap_are_refused_with_the_draft_kept() {
 /// Withdraw: the text comes back as a newer draft revision.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_withdrawn_steer_returns_as_a_newer_draft() {
+    use base64::Engine as _;
     let mut h = harness();
     let (chat, _, mut w) = running_turn(&mut h).await;
-    let (steer, _) = h.send(&chat, "take me back", "steer").await;
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend(10u32.to_be_bytes());
+    png.extend(10u32.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0]);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+    let put = h
+        .call(
+            "attachment_put",
+            json!({"chatId": chat, "name": "back.png", "mime": "image/png", "bytes": b64}),
+        )
+        .await
+        .unwrap();
+    let img = put["attachmentId"].as_str().unwrap().to_owned();
+    // It waits in the chat's unstaged set until the steer takes it.
+    let staged = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(staged["images"][0]["id"], img.as_str());
+    let steer = uuid::Uuid::new_v4().to_string();
+    h.call(
+        "chat_send",
+        json!({"chatId": chat, "submissionId": steer, "text": "take me back", "action": "steer",
+               "draftRevision": 0, "attachments": [img.clone()]}),
+    )
+    .await
+    .unwrap();
     let p = w.expect("prompt").await;
     ack(&w, &p).await;
     h.until("accepted", |h| h.state(&steer) == "accepted").await;
+    // A waiting bubble shows its picture, and the accepted send has taken it out of the
+    // unstaged set.
+    let page = h.call("transcript_page", json!({"chatId": chat})).await.unwrap();
+    let entry = page["pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == steer.as_str())
+        .expect("the steer waits in the list");
+    assert_eq!(entry["images"][0]["id"], img.as_str());
+    assert!(
+        h.call("attachment_list", json!({"chatId": chat})).await.unwrap()["images"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "sent: out of the unstaged set"
+    );
     let before: i64 =
         h.db.snapshot(|t| {
             t.query_row(
@@ -975,16 +1016,54 @@ async fn a_withdrawn_steer_returns_as_a_newer_draft() {
         .unwrap();
     assert_eq!(draft, "take me back");
     assert!(rev > before);
+    // The picture comes back with the text and waits unstaged for a new send.
+    let list = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(
+        list["images"][0]["id"],
+        img.as_str(),
+        "withdrawn: the image returns with the draft"
+    );
 }
 
 /// A send whose worker cannot start is `rejected` and stays in `pending` so the user can recover it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_send_that_could_not_start_stays_recoverable() {
+    use base64::Engine as _;
     let h = harness();
     let chat = h.create().await;
+    let note = h.work.join("lost-note.md");
+    std::fs::write(&note, "x").unwrap();
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend(10u32.to_be_bytes());
+    png.extend(10u32.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0]);
+    let put = h
+        .call(
+            "attachment_put",
+            json!({"chatId": chat, "name": "lost.png", "mime": "image/png",
+                   "bytes": base64::engine::general_purpose::STANDARD.encode(&png)}),
+        )
+        .await
+        .unwrap();
+    let img = put["attachmentId"].as_str().unwrap().to_owned();
+    let rf = h
+        .call(
+            "attachment_ref",
+            json!({"chatId": chat, "kind": "path", "target": note.to_string_lossy()}),
+        )
+        .await
+        .unwrap();
+    let path_ref = rf["attachmentId"].as_str().unwrap().to_owned();
     // The fake spawner fails every start.
     *h.spawner.fail.lock().unwrap() = Some("Node.js was not found.".into());
-    let (sid, _) = h.send(&chat, "lost?", "default").await;
+    let sid = uuid::Uuid::new_v4().to_string();
+    h.call(
+        "chat_send",
+        json!({"chatId": chat, "submissionId": sid, "text": "lost?", "action": "default",
+               "draftRevision": 0, "attachments": [img.clone(), path_ref.clone()]}),
+    )
+    .await
+    .unwrap();
     h.until("rejected", |h| h.state(&sid) == "rejected").await;
     let page = h
         .call("transcript_page", json!({"chatId": chat}))
@@ -992,6 +1071,9 @@ async fn a_send_that_could_not_start_stays_recoverable() {
         .unwrap();
     assert_eq!(page["pending"][0]["id"], sid.as_str());
     assert_eq!(page["pending"][0]["state"], "rejected");
+    // The refused send's bubble still shows its picture and its file.
+    assert_eq!(page["pending"][0]["images"][0]["id"], img.as_str());
+    assert_eq!(page["pending"][0]["refs"][0]["name"], "lost-note.md");
     let r = h
         .call(
             "submission_action",
@@ -1003,6 +1085,28 @@ async fn a_send_that_could_not_start_stays_recoverable() {
     assert_eq!(
         h.col(&format!("SELECT draft FROM chats WHERE id = '{chat}'")),
         ["lost?"]
+    );
+    // Both attachments wait unstaged again, so the recovered draft can carry them.
+    let list = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(list["images"][0]["id"], img.as_str());
+    assert_eq!(list["refs"][0]["target"], note.to_string_lossy().to_string().as_str());
+    // A send with the same ids is accepted again (the spawner still fails, so it is rejected
+    // the same way, but the ids are not refused as already sent).
+    let sid2 = uuid::Uuid::new_v4().to_string();
+    h.call(
+        "chat_send",
+        json!({"chatId": chat, "submissionId": sid2, "text": "lost?", "action": "default",
+               "draftRevision": 0, "attachments": [img, path_ref]}),
+    )
+    .await
+    .unwrap();
+    h.until("rejected again", |h| h.state(&sid2) == "rejected").await;
+    assert!(
+        h.call("attachment_list", json!({"chatId": chat})).await.unwrap()["images"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the re-send took them out again"
     );
 }
 
@@ -2261,13 +2365,27 @@ async fn attached_images_ride_the_prompt() {
         .await
         .unwrap();
     let id = put["attachmentId"].as_str().unwrap().to_owned();
+    // It waits in the chat's unstaged set until a send takes it.
+    let staged = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(staged["images"][0]["id"], id.as_str());
+    assert_eq!(staged["images"][0]["name"], "shot.png");
     h.call(
         "chat_send",
         json!({"chatId": chat, "submissionId": uuid::Uuid::new_v4().to_string(), "text": "",
-               "action": "default", "draftRevision": 0, "attachments": [id]}),
+               "action": "default", "draftRevision": 0, "attachments": [id.clone()]}),
     )
     .await
     .unwrap();
+    // A waiting bubble shows the picture from the moment the send is accepted, and the image
+    // has left the unstaged set.
+    let page = h.call("transcript_page", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(page["pending"][0]["images"][0]["id"], id.as_str());
+    assert!(
+        h.call("attachment_list", json!({"chatId": chat})).await.unwrap()["images"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     let mut w = h.worker().await;
     w.ready().await;
     let p = w.expect("prompt").await;
@@ -2386,9 +2504,19 @@ async fn a_bubble_thumbnail_is_small_and_cached() {
         .unwrap();
     let id = put["attachmentId"].as_str().unwrap().to_owned();
     let ask = |thumb: bool| json!({"chatId": chat, "attachmentId": id, "thumb": thumb});
-    // Not sent yet: neither form is served.
+    // Staged but not sent yet: its own chat already reads it in both forms, so a composer
+    // reopening over a restart can show it again. A foreign chat cannot, sent or staged.
+    let staged = h.call("attachment_get", ask(false)).await.unwrap();
+    assert_eq!(staged["mime"], "image/png");
     assert_eq!(
-        h.call("attachment_get", ask(true)).await.unwrap_err().code,
+        staged["bytes"],
+        base64::engine::general_purpose::STANDARD.encode(&big).as_str()
+    );
+    assert_eq!(
+        h.call("attachment_get", json!({"chatId": "another-chat", "attachmentId": id}))
+            .await
+            .unwrap_err()
+            .code,
         "not_found"
     );
     h.call(
@@ -2682,6 +2810,218 @@ async fn an_edited_message_keeps_its_images() {
     assert_eq!(image_bytes(&h, &chat, &ids[0]).await.unwrap(), want);
     // The first version still has its image (inactive, so out of the transcript).
     assert_eq!(image_bytes(&h, &chat, &id).await.unwrap(), want);
+}
+
+/// An edited message sent again keeps its files, folders and chat references too: the agent
+/// hears about them again, and the new bubble shows the chips.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_edited_message_keeps_its_references_too() {
+    let mut h = harness();
+    let chat = h.create().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("notes.md");
+    std::fs::write(&file, "x").unwrap();
+    let r = h
+        .call(
+            "attachment_ref",
+            json!({"chatId": chat, "kind": "path", "target": file.to_string_lossy()}),
+        )
+        .await
+        .unwrap();
+    let ref_id = r["attachmentId"].as_str().unwrap().to_owned();
+    let sid1 = uuid::Uuid::new_v4().to_string();
+    h.call(
+        "chat_send",
+        json!({"chatId": chat, "submissionId": sid1, "text": "first", "action": "default",
+               "draftRevision": 0, "attachments": [ref_id]}),
+    )
+    .await
+    .unwrap();
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert!(
+        p["context"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("- file `notes.md`: {}", file.to_string_lossy())),
+        "the reference rides the first prompt"
+    );
+    ack(&w, &p).await;
+    echo(&w, &sid1).await;
+    h.until("the first row", |h| {
+        h.col(&format!(
+            "SELECT status FROM messages WHERE chat_id = '{chat}' AND role = 'user'"
+        )) == ["complete"]
+    })
+    .await;
+    let first = user_row(&h, &chat, "first");
+    let o = h
+        .call("message_edit_open", json!({"chatId": chat, "messageId": first}))
+        .await
+        .unwrap();
+    let sid2 = uuid::Uuid::new_v4().to_string();
+    h.call(
+        "message_resend",
+        json!({"chatId": chat, "messageId": first, "revision": o["revision"],
+               "submissionId": sid2, "text": "first, edited"}),
+    )
+    .await
+    .unwrap();
+    w.expect("shutdown").await;
+    w.exit().await;
+    let mut w2 = h.worker().await;
+    w2.ready().await;
+    let p2 = w2.expect("prompt").await;
+    assert_eq!(p2["text"], "first, edited");
+    assert!(
+        p2["context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&format!("- file `notes.md`: {}", file.to_string_lossy())),
+        "the carried reference rides the new prompt"
+    );
+    ack(&w2, &p2).await;
+    echo(&w2, &sid2).await;
+    h.until("the edited row", |h| {
+        h.col(&format!(
+            "SELECT status FROM messages WHERE chat_id = '{chat}' AND text = 'first, edited'"
+        )) == ["complete"]
+    })
+    .await;
+    assert_eq!(
+        user_refs(&h, &chat).await,
+        json!([{"kind": "file", "name": "notes.md", "target": file.to_string_lossy()}]),
+        "the new bubble shows the carried reference"
+    );
+    assert_eq!(
+        h.col("SELECT count(*) FROM chat_attachment_refs WHERE submission_id IS NOT NULL"),
+        ["2"],
+        "the old message keeps its own reference and the new one has its own"
+    );
+}
+
+/// A recovered draft can carry its message's pictures and files again: the sent message keeps
+/// its own, and new copies wait in the unstaged set for the next send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recovered_draft_gets_fresh_copies_of_its_attachments() {
+    use base64::Engine as _;
+    let mut h = harness();
+    let chat = h.create().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("notes.md");
+    std::fs::write(&file, "x").unwrap();
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend(10u32.to_be_bytes());
+    png.extend(10u32.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0]);
+    let want = base64::engine::general_purpose::STANDARD.encode(&png);
+    let put = h
+        .call(
+            "attachment_put",
+            json!({"chatId": chat, "name": "shot.png", "mime": "image/png", "bytes": want.clone()}),
+        )
+        .await
+        .unwrap();
+    let img = put["attachmentId"].as_str().unwrap().to_owned();
+    let rf = h
+        .call(
+            "attachment_ref",
+            json!({"chatId": chat, "kind": "path", "target": file.to_string_lossy()}),
+        )
+        .await
+        .unwrap();
+    let path_ref = rf["attachmentId"].as_str().unwrap().to_owned();
+    let sid1 = uuid::Uuid::new_v4().to_string();
+    h.call(
+        "chat_send",
+        json!({"chatId": chat, "submissionId": sid1, "text": "first", "action": "default",
+               "draftRevision": 0, "attachments": [img.clone(), path_ref]}),
+    )
+    .await
+    .unwrap();
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    echo(&w, &sid1).await;
+    h.until("the first row", |h| {
+        h.col(&format!("SELECT status FROM messages WHERE chat_id = '{chat}' AND role = 'user'")) == ["complete"]
+    })
+    .await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"})).await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    let first = user_row(&h, &chat, "first");
+    let r = h
+        .call("attachment_recover", json!({"chatId": chat, "messageId": first}))
+        .await
+        .unwrap();
+    assert_eq!((r["images"].as_i64(), r["refs"].as_i64()), (Some(1), Some(1)));
+    // Asking again copies the picture once more but not the file: an unstaged reference to
+    // the same target already waits.
+    let r = h
+        .call("attachment_recover", json!({"chatId": chat, "messageId": first}))
+        .await
+        .unwrap();
+    assert_eq!((r["images"].as_i64(), r["refs"].as_i64()), (Some(1), Some(0)));
+    let list = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    let copies: Vec<String> = list["images"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(copies.len(), 2, "two fresh copies, the sent one is not in the pool");
+    assert!(!copies.contains(&img));
+    assert_eq!(list["refs"].as_array().unwrap().len(), 1, "one unstaged reference");
+    assert_eq!(list["refs"][0]["target"], file.to_string_lossy().to_string());
+    // The copies ride a new send: the prompt carries the picture bytes and names the file.
+    let sid2 = uuid::Uuid::new_v4().to_string();
+    let copy_ref = list["refs"][0]["id"].as_str().unwrap().to_owned();
+    h.call(
+        "chat_send",
+        json!({"chatId": chat, "submissionId": sid2, "text": "again", "action": "default",
+               "draftRevision": 0, "attachments": [copies[0].clone(), copies[1].clone(), copy_ref]}),
+    )
+    .await
+    .unwrap();
+    // The chat's worker is still up: the prompt goes straight to it.
+    let p2 = w.expect("prompt").await;
+    assert_eq!(p2["images"].as_array().unwrap().len(), 2);
+    assert_eq!(p2["images"][0]["data"], want.as_str());
+    assert!(
+        p2["context"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("- file `notes.md`: {}", file.to_string_lossy())),
+        "the copied reference rides the prompt"
+    );
+    ack(&w, &p2).await;
+    echo(&w, &sid2).await;
+    h.until("the second row", |h| {
+        h.col(&format!("SELECT status FROM messages WHERE chat_id = '{chat}' AND text = 'again'")) == ["complete"]
+    })
+    .await;
+    let d: serde_json::Value = serde_json::from_str(
+        &h.col(&format!(
+            "SELECT details FROM messages WHERE chat_id = '{chat}' AND text = 'again'"
+        ))[0],
+    )
+    .unwrap();
+    assert_eq!(d["images"].as_array().unwrap().len(), 2, "the new bubble shows the copies");
+    assert_eq!(d["refs"][0]["name"], "notes.md");
+    let list = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    assert!(list["images"].as_array().unwrap().is_empty() && list["refs"].as_array().unwrap().is_empty());
+    // The sent message keeps reading its own image, and a message that is not there is refused.
+    assert_eq!(image_bytes(&h, &chat, &img).await.unwrap(), want);
+    assert_eq!(
+        h.call("attachment_recover", json!({"chatId": chat, "messageId": 999999}))
+            .await
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
 }
 
 fn attachment_files(h: &H) -> usize {
@@ -3375,6 +3715,10 @@ async fn references_ride_the_prompt_as_a_data_section() {
     }
     let sid = uuid::Uuid::new_v4().to_string();
     let ids = json!([f["attachmentId"], d["attachmentId"], c["attachmentId"]]);
+    // They wait in the chat's unstaged set, in the order they were added, until a send takes them.
+    let staged = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(staged["refs"][0]["id"], f["attachmentId"]);
+    assert_eq!(staged["refs"][2]["id"], c["attachmentId"]);
     h.call(
         "chat_send",
         json!({"chatId": chat, "submissionId": sid, "text": "look", "action": "default",
@@ -3382,6 +3726,15 @@ async fn references_ride_the_prompt_as_a_data_section() {
     )
     .await
     .unwrap();
+    // The waiting bubble shows them, and they have left the unstaged set.
+    let page = h.call("transcript_page", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(page["pending"][0]["refs"].as_array().unwrap().len(), 3);
+    assert!(
+        h.call("attachment_list", json!({"chatId": chat})).await.unwrap()["refs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     let mut w = h.worker().await;
     w.ready().await;
     let p = w.expect("prompt").await;
@@ -4346,7 +4699,29 @@ async fn a_worker_exit_during_preparation_does_not_reopen_the_turn() {
     // The next send is making its model ready when the worker exits behind it.
     let (open, gate) = std::sync::mpsc::channel();
     *local.gate.lock().unwrap() = Some(gate);
-    let (sid, _) = h.send(&chat, "second", "default").await;
+    // The second send carries a picture: it must come back to the composer with the text.
+    use base64::Engine as _;
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend(10u32.to_be_bytes());
+    png.extend(10u32.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0]);
+    let put = h
+        .call(
+            "attachment_put",
+            json!({"chatId": chat, "name": "gone.png", "mime": "image/png",
+                   "bytes": base64::engine::general_purpose::STANDARD.encode(&png)}),
+        )
+        .await
+        .unwrap();
+    let img = put["attachmentId"].as_str().unwrap().to_owned();
+    let sid = uuid::Uuid::new_v4().to_string();
+    h.call(
+        "chat_send",
+        json!({"chatId": chat, "submissionId": sid, "text": "second", "action": "default",
+               "draftRevision": 0, "attachments": [img.clone()]}),
+    )
+    .await
+    .unwrap();
     h.until("the preparation", |h| h.status(&chat) == "starting")
         .await;
     w.exit().await;
@@ -4357,6 +4732,12 @@ async fn a_worker_exit_during_preparation_does_not_reopen_the_turn() {
         h.col(&format!("SELECT draft FROM chats WHERE id = '{chat}'")),
         ["second"],
         "the unsent text goes back to the draft"
+    );
+    let list = h.call("attachment_list", json!({"chatId": chat})).await.unwrap();
+    assert_eq!(
+        list["images"][0]["id"],
+        img.as_str(),
+        "the picture waits in the unstaged set with the draft"
     );
     // The preparation now answers: no turn reopens on the ended run, and no worker starts.
     open.send(()).unwrap();

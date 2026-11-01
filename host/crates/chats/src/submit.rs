@@ -317,6 +317,8 @@ pub fn chat_send(
                                 [&id],
                             )?;
                             if n == 1 {
+                                // Its images and files go back to the composer with the text.
+                                crate::attachments::unlink(tx, &id)?;
                                 text_to_draft(tx, &chat, &text)?;
                             }
                             Ok::<_, rusqlite::Error>(())
@@ -616,6 +618,8 @@ pub fn submission_action(
                     "UPDATE submissions SET state = 'withdrawn' WHERE id = ?1",
                     [&sub.id],
                 )?;
+                // Its images and files wait in the composer again with the text.
+                crate::attachments::unlink(tx, &sub.id)?;
                 text_to_draft(tx, &chat, &sub.text).map(|_| ())
             })
             .map_err(sql)?;

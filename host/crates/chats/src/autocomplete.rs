@@ -227,7 +227,7 @@ mod tests {
                 [],
             )?;
             tx.execute("UPDATE chats SET archived = 1 WHERE id = 'put_away'", [])?;
-            Ok(())
+            Ok::<(), rusqlite::Error>(())
         })
         .unwrap();
         // A chat whose model lives on a local server gets nothing: the completion would be written

@@ -689,6 +689,8 @@ fn submission_from_row(r: &Row<'_>) -> rusqlite::Result<Submission> {
         state: parse_state(&r.get::<_, String>(4)?),
         origin: SubmissionOrigin::parse(&r.get::<_, String>(5)?),
         created_at: r.get(6)?,
+        images: None,
+        refs: None,
     })
 }
 
@@ -710,8 +712,32 @@ pub fn pending(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Vec<Subm
            AND s.state IN ('saved', 'dispatching', 'accepted', 'uncertain', 'rejected')
          ORDER BY s.created_at, s.id LIMIT 100"
     ))?;
-    let rows = st.query_map([chat_id], submission_from_row)?;
-    rows.collect()
+    let mut rows = st
+        .query_map([chat_id], submission_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(st);
+    // Each waiting message carries its attachments with it, so the waiting bubble shows the
+    // pictures and files it sent, not just the text. The bytes stay on the host: the bubble
+    // fetches a thumbnail by id when it is on screen (`attachment_get`).
+    for s in &mut rows {
+        let images = crate::message_images::refs_for(&**tx, &s.id)?;
+        let refs = crate::attachments::refs_for(tx, &s.id)?;
+        if !images.is_empty() {
+            s.images = Some(images);
+        }
+        if !refs.is_empty() {
+            s.refs = Some(
+                refs.into_iter()
+                    .map(|r| crate::types::MessageRef {
+                        kind: r.kind,
+                        name: r.name,
+                        target: r.target,
+                    })
+                    .collect(),
+            );
+        }
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]

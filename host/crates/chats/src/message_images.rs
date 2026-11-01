@@ -5,10 +5,11 @@
 //!
 //! - [`for_submission`] lists a submission's images (id, name, mime, size) for the user row's
 //!   `details.images`. The actor writes them when it writes the row, so they survive a restart.
-//! - `attachment_get {chatId, attachmentId, thumb?}` answers `{mime, bytes}` (base64) for one sent
+//! - `attachment_get {chatId, attachmentId, thumb?}` answers `{mime, bytes}` (base64) for one
 //!   image of that chat. With `thumb: true` the bytes are a small cached copy ([`crate::thumbs`])
-//!   for the bubble; without it they are the stored file, for the full-size view. Only images
-//!   already linked to a sent message are served, and only to the chat that owns them.
+//!   for the bubble; without it they are the stored file, for the full-size view. Every image
+//!   belonging to the chat is served, sent or still staged in the composer (a reopened chat
+//!   shows its staged pictures too); no other chat's image ever is.
 //! - A chat that carries a message over from another one (a fork copies the history, an edit sends
 //!   the message again) gets its own copy of the message's images, made by [`copy_file`] and
 //!   [`insert_copy`]: a new attachment row owned by the new chat, and a hard link to the stored file
@@ -132,23 +133,23 @@ pub fn for_submission(db: &Database, submission_id: &str) -> Vec<MessageImage> {
         .unwrap_or_default()
 }
 
-/// The `(id, mime)` of a sent image of the chat; `None` when the chat has no such sent image.
-/// The id is the stored one (a UUID the attachments module generated), never the request's text.
+/// The `(id, mime)` of an image of the chat, sent or still staged in the composer; `None` when
+/// the chat has no such image. The id is the stored one (a UUID the attachments module
+/// generated), never the request's text.
 pub(crate) fn sent_image(
     conn: &Connection,
     chat_id: &str,
     attachment_id: &str,
 ) -> rusqlite::Result<Option<(String, String)>> {
     conn.query_row(
-        "SELECT id, mime FROM chat_attachments
-         WHERE id = ?1 AND chat_id = ?2 AND submission_id IS NOT NULL",
+        "SELECT id, mime FROM chat_attachments WHERE id = ?1 AND chat_id = ?2",
         params![attachment_id, chat_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
     .optional()
 }
 
-/// One sent image's type and bytes, or `None` when the chat has no such sent image.
+/// One image's type and bytes, or `None` when the chat has no such image (sent or staged).
 pub fn read(
     conn: &Connection,
     dir: &Path,
@@ -192,6 +193,25 @@ pub fn insert_copy(
          SELECT ?1, ?2, name, mime, bytes, width, height, ?3, created_at FROM chat_attachments
          WHERE id = ?4 AND chat_id = ?5 AND submission_id IS NOT NULL",
         params![new_id, to_chat, holder, old_id, from_chat],
+    )?;
+    Ok(n > 0)
+}
+
+/// Record `new_id` as `to_chat`'s own unstaged image (composer-staged, not sent), a copy of the
+/// sent image row of `old_id` owned by `from_chat`: what `attachment_recover` gives back to the
+/// composer. Returns whether the source image existed.
+pub fn insert_unsent_copy(
+    tx: &rusqlite::Transaction<'_>,
+    old_id: &str,
+    from_chat: &str,
+    new_id: &str,
+    to_chat: &str,
+) -> rusqlite::Result<bool> {
+    let n = tx.execute(
+        "INSERT INTO chat_attachments(id, chat_id, name, mime, bytes, width, height, created_at)
+         SELECT ?1, ?2, name, mime, bytes, width, height, created_at FROM chat_attachments
+         WHERE id = ?3 AND chat_id = ?4 AND submission_id IS NOT NULL",
+        params![new_id, to_chat, old_id, from_chat],
     )?;
     Ok(n > 0)
 }
@@ -348,11 +368,20 @@ mod tests {
             .unwrap()
             .unwrap()
             .id;
-        // Not sent yet: not listed under any submission, and not served.
-        assert!(db
+        // Not sent yet: not listed under any submission, yet served to its own chat, which is
+        // staging it; another chat cannot read it even then.
+        let (mime0, got0) = db
             .snapshot(|t| read(t, &att, &chat, &id))
             .unwrap()
-            .is_none());
+            .expect("a staged image is served to its own chat");
+        assert_eq!(mime0, "image/png");
+        assert_eq!(got0, bytes);
+        assert!(
+            db.snapshot(|t| read(t, &att, &other, &id))
+                .unwrap()
+                .is_none(),
+            "another chat cannot read it, sent or not"
+        );
         db.write(|tx| {
             tx.execute(
                 "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('s1', ?1, 't', 'saved', 1)",

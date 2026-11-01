@@ -10,6 +10,8 @@
 //! | `message_edit_open` | blocking | [`MessageEditOpenArgs`] → [`MessageEditOpenResult`] |
 //! | `message_resend` | maintenance | [`MessageResendArgs`] → [`ChatSendResult`] (two-phase; see [`crate::edit`]) |
 //! | `attachment_put` | maintenance | [`AttachmentPutArgs`] → [`AttachmentPutResult`] (see [`crate::attachments`]) |
+//! | `attachment_list` | blocking | `{chatId}` → `{images, refs}`: the chat's attachments not sent yet |
+//! | `attachment_recover` | maintenance | `{chatId, messageId}` → `{images, refs}`: a sent message's attachments copied back to that unstaged set |
 //! | `side_chat_resolve` | maintenance | [`SideChatResolveArgs`] → `ChatRecord` (promote) / `null` (discard) |
 //! | `chat_mute` | maintenance | [`ChatMuteArgs`] → [`ChatRecord`] (user-only) |
 //! | `attention_address` | maintenance | [`ChatIdArgs`] → `null` (out of the attention groups until new activity) |

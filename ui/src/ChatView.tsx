@@ -25,7 +25,7 @@ import { ConfirmDialog, useLayer, type ConfirmSpec } from './ui/index.ts';
 import { rollOverChat, rollOverConfirm } from './sidebar/actions.ts';
 import { ContextBar } from './transcript/ContextBar.tsx';
 import { IconFork } from './ui/icons.tsx';
-import { accessoriesAt } from './composer/slots.ts';
+import { accessoriesAt, composerApi } from './composer/slots.ts';
 import { recallPrompts } from './composer/recall.ts';
 import { SelectionToolbar } from './transcript/SelectionToolbar.tsx';
 import { useMentionRepo } from './pr/mentionRepo.ts';
@@ -313,7 +313,22 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         <div className="banner" data-testid="interrupted-banner">
           <span>{chat.error ?? 'This chat was interrupted. Nothing saved was lost; check the chat before continuing.'}</span>
           {lastUser && (
-            <button type="button" className="small" data-testid="recover-draft" onClick={() => setTextRef.current(lastUser.text)}>
+            <button
+              type="button"
+              className="small"
+              data-testid="recover-draft"
+              onClick={() => {
+                setTextRef.current(lastUser.text);
+                // The message's pictures and files are copied into the chat's unstaged set and
+                // staged in the composer, so the recovered draft can carry them again.
+                if (lastUser.details?.images?.length || lastUser.details?.refs?.length) {
+                  void ops
+                    .recoverAttachments(chat.id, lastUser.id)
+                    .then(() => composerApi(chat.id).restore())
+                    .catch(() => undefined);
+                }
+              }}
+            >
               Recover draft
             </button>
           )}

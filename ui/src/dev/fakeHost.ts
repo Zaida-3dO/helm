@@ -109,12 +109,16 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   const rev = () => ++revision;
   const now = () => Date.now();
   const uid = () => (globalThis.crypto?.randomUUID?.() ?? `id-${Math.random().toString(16).slice(2)}`);
-  /** Images put by the composer, kept so a sent message's thumbnail can be read back. */
-  const attachments = new Map<string, { name: string; mime: string; bytes: string }>();
-  /** References made by the composer, kept so the sent message's bubble can show them. */
+  /** Images put by the composer, kept so a sent message's thumbnail can be read back.
+   *  `sent` is the submission it is linked to; null means it waits unstaged. */
+  const attachments = new Map<string, { chatId: string; name: string; mime: string; bytes: string; sent: string | null }>();
+  /** References made by the composer, kept so the sent message's bubble can show them;
+   *  same sent/unstaged rule as images. */
+  const sentRefList = new Map<string, { chatId: string; kind: string; name: string; target: string; sent: string | null }>();
+  /** The attachment ids a send took, so withdrawing or recovering it unstages them again. */
+  const sentIds = new Map<string, string[]>();
   /** The images and references of a send, for the row written when its turn starts. */
   const sentExtras = new Map<string, Pick<MessageDetails, 'images' | 'refs'>>();
-  const sentRefList = new Map<string, { kind: string; name: string; target: string }>();
 
   function emitChat(c: FakeChat) {
     c.chat = { ...c.chat, revision: rev(), updatedAt: now() };
@@ -550,32 +554,61 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     chat_send: (a) => {
       const c = find(a.chatId);
       const text = String(a.text ?? '');
-      const sentImages = ((a.attachments as string[] | undefined) ?? []).flatMap((id) => {
+      const ids = (a.attachments as string[] | undefined) ?? [];
+      const sentImages: { id: string; name: string; mime: string; width: number; height: number }[] = [];
+      const sentRefs: { kind: string; name: string; target: string }[] = [];
+      // Every id must name an unstaged attachment of this chat; one another message already
+      // sent is refused, the same way the real host refuses it.
+      for (const id of ids) {
         const img = attachments.get(id);
-        return img ? [{ id, name: img.name, mime: img.mime, width: 160, height: 120 }] : [];
-      });
-      const sentRefs = ((a.attachments as string[] | undefined) ?? []).flatMap((id) => sentRefList.get(id) ?? []);
+        const ref = sentRefList.get(id);
+        const owner = img ?? ref;
+        if (!owner || owner.chatId !== c.chat.id || owner.sent !== null)
+          throw { code: 'bad_args', message: 'An attachment is missing or already sent; attach it again.' };
+        if (img) sentImages.push({ id, name: img.name, mime: img.mime, width: 160, height: 120 });
+        else if (ref) sentRefs.push({ kind: ref.kind, name: ref.name, target: ref.target });
+      }
       if (!text.trim() && sentImages.length === 0 && sentRefs.length === 0) throw { code: 'refused', message: 'Nothing to send.' };
       const busy = c.chat.status === 'running' || c.chat.status === 'starting';
-      sentExtras.set(String(a.submissionId), { ...(sentImages.length ? { images: sentImages } : {}), ...(sentRefs.length ? { refs: sentRefs } : {}) });
+      const sid = String(a.submissionId);
+      // A send the host accepts takes its attachments out of the unstaged set; a refused one
+      // puts them back (below, in the refusal path).
+      for (const id of ids) {
+        const owner = attachments.get(id) ?? sentRefList.get(id);
+        if (owner) owner.sent = sid;
+      }
+      sentIds.set(sid, ids);
+      sentExtras.set(sid, { ...(sentImages.length ? { images: sentImages } : {}), ...(sentRefs.length ? { refs: sentRefs } : {}) });
       const action = String(a.action);
       const mode = action === 'default' ? sendBehavior.mode : action;
       const s: Submission = {
-        id: String(a.submissionId),
+        id: sid,
         chatId: c.chat.id,
         text,
         mode: 'prompt',
         state: 'accepted',
         origin: a.origin === 'action' || a.origin === 'notification' ? a.origin : 'typed',
         createdAt: now(),
+        // A waiting bubble shows its pictures and files, as a sent bubble does.
+        ...(sentImages.length ? { images: sentImages } : {}),
+        ...(sentRefs.length ? { refs: sentRefs } : {}),
       };
       if (c.chat.title === 'New chat') c.chat = { ...c.chat, title: text.slice(0, 40) };
       if (!busy && isLocal(c) && /\[fit\]/i.test(text)) {
-        // The host's fit check refusing a turn: no turn runs, a notice says why, and the text comes back to the draft.
+        // The host's fit check refusing a turn: no turn runs, a notice says why, and the text
+        // and attachments come back to the composer.
+        const unstage = () => {
+          for (const id of ids) {
+            const owner = attachments.get(id) ?? sentRefList.get(id);
+            if (owner) owner.sent = null;
+          }
+          sentIds.delete(sid);
+        };
         const name = c.chat.model?.split('/').slice(2).join('/') ?? 'The model';
         addRow(c, { role: 'context', text: `${name} can't load while Strata is answering in Refactor parser. Send again when it finishes.`, details: { contextKind: 'notice' } });
         c.chat = { ...c.chat, draft: text, draftRevision: Math.max(now(), c.chat.draftRevision + 1) };
         emitChat(c);
+        unstage();
         return { submission: { ...s, state: 'rejected' as const }, chat: c.chat };
       }
       if (!busy) {
@@ -614,7 +647,16 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         if (!s) continue;
         let out: Submission = s;
         if (a.action === 'withdraw' || a.action === 'recover') {
+          // The message's images and files go back to the unstaged set with its text, so the
+          // composer can stage them again for a new send.
+          for (const id of sentIds.get(s.id) ?? []) {
+            const owner = attachments.get(id) ?? sentRefList.get(id);
+            if (owner) owner.sent = null;
+          }
+          sentIds.delete(s.id);
           out = { ...s, state: a.action === 'withdraw' ? 'withdrawn' : 'superseded' };
+          delete out.images;
+          delete out.refs;
           c.pending = c.pending.filter((x) => x.id !== s.id);
           c.chat = { ...c.chat, draft: s.text, draftRevision: Math.max(now(), c.chat.draftRevision + 1) };
           emitChat(c);
@@ -745,27 +787,67 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     // references and the native file dialog, faked.
     attachment_ref: (a) => {
       const target = String(a.target);
-      const attachmentId = uid();
-      if (a.kind === 'chat') {
-        const name = find(String(target)).chat.title;
-        sentRefList.set(attachmentId, { kind: 'chat', name, target });
-        return { attachmentId, kind: 'chat', name };
+      const chatId = String(a.chatId);
+      const name = a.kind === 'chat' ? find(String(target)).chat.title : target.split(/[\\/]/).filter(Boolean).pop() ?? target;
+      const kind = a.kind === 'chat' ? 'chat' : /\.[a-z0-9]+$/i.test(name) ? 'file' : 'folder';
+      // Attaching the same thing twice stages it once, as the host's does.
+      for (const [id, r] of sentRefList) {
+        if (r.chatId === chatId && r.kind === kind && r.target === target && r.sent === null) return { attachmentId: id, kind: r.kind, name: r.name };
       }
-      const name = target.split(/[\\/]/).filter(Boolean).pop() ?? target;
-      const kind = /\.[a-z0-9]+$/i.test(name) ? 'file' : 'folder';
-      sentRefList.set(attachmentId, { kind, name, target });
+      const attachmentId = uid();
+      sentRefList.set(attachmentId, { chatId, kind, name, target, sent: null });
       return { attachmentId, kind, name };
     },
     files_pick: () => ({ paths: ['C:\\Users\\me\\Documents\\notes.md', 'C:\\Users\\me\\Pictures\\shot.png'] }),
     attachment_put: (a) => {
       const attachmentId = uid();
-      attachments.set(attachmentId, { name: String(a.name), mime: String(a.mime), bytes: String(a.bytes) });
+      attachments.set(attachmentId, { chatId: String(a.chatId), name: String(a.name), mime: String(a.mime), bytes: String(a.bytes), sent: null });
       return { attachmentId };
     },
     attachment_get: (a) => {
       const img = attachments.get(String(a.attachmentId));
       if (!img) throw { code: 'not_found', message: 'No such image.' };
       return a.thumb === true ? fakeThumb(img.mime, img.bytes) : { mime: img.mime, bytes: img.bytes };
+    },
+    // The chat's attachments that are not sent yet: what a reopening composer stages again, and
+    // what a taken-back send's message brings back.
+    attachment_list: (a) => {
+      const chatId = String(a.chatId);
+      const images = [...attachments.entries()]
+        .filter(([, x]) => x.chatId === chatId && x.sent === null)
+        .map(([id, x]) => ({ id, name: x.name, mime: x.mime, size: atob(x.bytes).length, width: 160, height: 120 }));
+      const refs = [...sentRefList.entries()]
+        .filter(([, x]) => x.chatId === chatId && x.sent === null)
+        .map(([id, x]) => ({ id, kind: x.kind, target: x.target, name: x.name }));
+      return { images, refs };
+    },
+    // A recovered draft gets copies of its message's images and file references: the message
+    // keeps its own, and the copies wait unstaged for the next send.
+    attachment_recover: (a) => {
+      const c = find(a.chatId);
+      const row = c.rows.find((r) => r.id === Number(a.messageId) && r.role === 'user');
+      if (!row) throw { code: 'not_found', message: 'No such message.' };
+      let images = 0;
+      let refs = 0;
+      for (const im of row.details?.images ?? []) {
+        const src = attachments.get(String(im.id));
+        if (!src) continue;
+        attachments.set(uid(), { ...src, sent: null });
+        images++;
+      }
+      for (const rf of row.details?.refs ?? []) {
+        let staged = false;
+        for (const r of sentRefList.values()) {
+          if (r.chatId === c.chat.id && r.kind === rf.kind && r.target === rf.target && r.sent === null) {
+            staged = true;
+            break;
+          }
+        }
+        if (staged) continue;
+        sentRefList.set(uid(), { chatId: c.chat.id, kind: rf.kind, name: rf.name, target: rf.target, sent: null });
+        refs++;
+      }
+      return { images, refs };
     },
     skills_list: () => [
       { name: 'review', description: 'Review the current changes' },

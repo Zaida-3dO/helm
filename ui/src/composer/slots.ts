@@ -11,7 +11,6 @@
 
 import type { ReactNode } from 'react';
 import type { ChatRecord, ThreadState } from '../api/types.ts';
-import type { SentAttachments } from './attachments.ts';
 
 export interface AccessoryContext {
   chat: ChatRecord;
@@ -44,8 +43,8 @@ const contributors: SendContributor[] = [];
 interface MountedComposer {
   insert: (text: string) => void;
   focus: () => void;
-  /** Attach again what a taken-back message carried. */
-  restore?: (sent: SentAttachments) => void;
+  /** Stage again the attachments the chat holds unstaged (a taken-back send put them back). */
+  restore?: () => void;
 }
 const mounted = new Map<string, MountedComposer>();
 
@@ -108,11 +107,11 @@ export function composerApi(chatId: string) {
       h.insert(text);
       return true;
     },
-    /** Put a taken-back message's images and files into the composer again. */
-    restore(sent: SentAttachments): boolean {
+    /** Stage a taken-back message's images and files in the composer again, from the host. */
+    restore(): boolean {
       const h = mounted.get(chatId);
       if (!h?.restore) return false;
-      h.restore(sent);
+      h.restore();
       return true;
     },
     focus(): boolean {

@@ -29,6 +29,12 @@ export interface InteractionAnswer {
   goto?: number;
 }
 
+/** What `attachment_list` answers: a chat's attachments that are not sent yet. */
+export interface StagedAttachments {
+  images: Array<{ id: string; name: string; mime: string; size: number; width: number; height: number }>;
+  refs: Array<{ id: string; kind: 'file' | 'folder' | 'chat'; target: string; name: string }>;
+}
+
 /** The optional parts of a send. */
 export interface SendExtras {
   /** Who sent it; only `composer` (the default) clears the draft. */
@@ -120,6 +126,18 @@ export function chatOps(api: Api) {
     /** A file or folder (`path`, absolute) or another chat (`chat`, its id) by reference. */
     attachRef: (chatId: string, kind: 'path' | 'chat', target: string) =>
       api<{ attachmentId: string; kind: 'file' | 'folder' | 'chat'; name: string }>('attachment_ref', { chatId, kind, target }),
+    /** The attachments this chat holds unstaged: what a reopened composer stages again. */
+    stagedAttachments: (chatId: string) =>
+      api<StagedAttachments>('attachment_list', { chatId }),
+    /** A small cached copy of one of this chat's images (sent or staged), for a chip or bubble. */
+    thumb: (chatId: string, attachmentId: string) =>
+      api<{ mime: string; bytes: string }>('attachment_get', { chatId, attachmentId, thumb: true }),
+    /**
+     * Copy a sent message's images and files into the chat's unstaged set, so a recovered
+     * draft can carry them again. The message keeps its own; the copies are new.
+     */
+    recoverAttachments: (chatId: string, messageId: number) =>
+      api<{ images: number; refs: number }>('attachment_recover', { chatId, messageId }),
     /** The native multi-file dialog (helm-shell `files_pick`); empty when cancelled. */
     pickFiles: () => api<{ paths: string[] }>('files_pick', { title: 'Attach files' }),
     /** The native folder dialog (helm-shell `folder_pick`); null when cancelled. */

@@ -13,12 +13,21 @@
 //!   records a file or folder (an absolute local path, never its contents) or another chat, and
 //!   answers `{attachmentId, kind: file|folder|chat, name}`. They share the per-message count with
 //!   images; on send the agent gets a section listing them as data ([`refs_section`]).
+//! - `attachment_list {chatId}` answers the chat's attachments not sent yet — the composer's
+//!   staged set, `{images: […], refs: […]}` — so a reopened chat stages them again.
+//! - When a send comes back without having been read (withdrawn, recovered, refused, or never
+//!   sent at all), [`unlink`] returns its images and references to the chat's unstaged set, so
+//!   they wait in the composer again with the text.
+//! - `attachment_recover {chatId, messageId}` copies a sent message's images and references into
+//!   the chat's unstaged set ("Recover draft": the composer gets them back to send again). The
+//!   sent message keeps its own; the copies are new rows with new ids ([`crate::message_images`]).
 //! - A file the host attaches for the user (one sent from the phone) is saved under
 //!   `attachments/<id>/<name>`, its name made safe for Windows ([`safe_file_name`]), and goes in as
 //!   a file reference to that copy ([`put_file`]). A hard delete removes the folder with the chat.
 
 use crate::archive::Refusal;
 use helm_core::db::Database;
+use helm_core::profile::Profile;
 use helm_ipc::{ApiError, OpClass, OpCtx, OpRegistry};
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
@@ -269,6 +278,63 @@ fn gone() -> Refusal {
         "bad_args",
         "An attachment is missing or already sent; attach it again.",
     )
+}
+
+/// Take one submission's images and references back off it, so they wait in the chat's unstaged
+/// set again: the message came back unread (withdrawn, taken back after a failed send, or
+/// recovered), and its attachments go to the composer with its text. Answers how many went back.
+pub fn unlink(tx: &Transaction<'_>, submission_id: &str) -> rusqlite::Result<usize> {
+    let images = tx.execute(
+        "UPDATE chat_attachments SET submission_id = NULL WHERE submission_id = ?1",
+        [submission_id],
+    )?;
+    let refs = tx.execute(
+        "UPDATE chat_attachment_refs SET submission_id = NULL WHERE submission_id = ?1",
+        [submission_id],
+    )?;
+    Ok(images + refs)
+}
+
+/// The chat's attachments not sent yet: what the composer stages again when the chat reopens.
+/// Images first (each `attachment_get`-able by its own chat, sent or not), then references, each
+/// in the order it was added.
+fn unstaged(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+) -> rusqlite::Result<(Vec<Value>, Vec<Value>)> {
+    let images = {
+        let mut st = tx.prepare(
+            "SELECT id, name, mime, bytes, width, height FROM chat_attachments
+             WHERE chat_id = ?1 AND submission_id IS NULL ORDER BY created_at, id",
+        )?;
+        let rows = st.query_map([chat_id], |r| {
+            Ok(json!({
+                "id": r.get::<_, String>(0)?,
+                "name": r.get::<_, String>(1)?,
+                "mime": r.get::<_, String>(2)?,
+                "size": r.get::<_, i64>(3)?,
+                "width": r.get::<_, i64>(4)?,
+                "height": r.get::<_, i64>(5)?,
+            }))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let refs = {
+        let mut st = tx.prepare(
+            "SELECT id, kind, target, name FROM chat_attachment_refs
+             WHERE chat_id = ?1 AND submission_id IS NULL ORDER BY created_at, rowid",
+        )?;
+        let rows = st.query_map([chat_id], |r| {
+            Ok(json!({
+                "id": r.get::<_, String>(0)?,
+                "kind": r.get::<_, String>(1)?,
+                "target": r.get::<_, String>(2)?,
+                "name": r.get::<_, String>(3)?,
+            }))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    Ok((images, refs))
 }
 
 /// The references table (an initializer; idempotent).
@@ -639,9 +705,16 @@ fn comparable(p: &Path) -> String {
     }
 }
 
-/// The `attachment_ref` op (maintenance).
+/// The reference and unstaged-set ops: `attachment_ref`, `attachment_list` and
+/// `attachment_recover`.
 pub fn register(reg: &mut OpRegistry) {
     reg.blocking("attachment_ref", OpClass::Maintenance, attachment_ref);
+    reg.blocking("attachment_list", OpClass::Blocking, attachment_list);
+    reg.blocking(
+        "attachment_recover",
+        OpClass::Maintenance,
+        attachment_recover,
+    );
 }
 
 #[derive(serde::Deserialize)]
@@ -675,6 +748,111 @@ fn attachment_ref(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .map_err(|e| ApiError::internal(e.to_string()))?
         .map_err(ApiError::from)?;
     Ok(json!({"attachmentId": r.id, "kind": r.kind, "name": r.name}))
+}
+
+fn attachment_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct ChatArgs {
+        chat_id: String,
+    }
+    let a: ChatArgs = crate::ops::parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let (images, refs) = db
+        .snapshot(|t| unstaged(t, &a.chat_id))
+        .map_err(crate::ops::sql)?;
+    Ok(json!({"images": images, "refs": refs}))
+}
+
+fn attachment_recover(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct RecoverArgs {
+        chat_id: String,
+        #[serde(default)]
+        message_id: i64,
+    }
+    let a: RecoverArgs = crate::ops::parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let profile = ctx.services.need::<Profile>()?;
+    let dir = profile.path("attachments");
+    // Files linked for the copies are made inside the transaction; if it rolls back they must go.
+    let made = std::cell::RefCell::new(Vec::<String>::new());
+    let out = db.write(|tx| {
+        let details: Option<String> = tx
+            .query_row(
+                "SELECT details FROM messages WHERE chat_id = ?1 AND id = ?2 AND role = 'user'",
+                params![a.chat_id, a.message_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let details = match details {
+            Some(d) => d,
+            None => return Ok(Err(crate::ops::not_found())),
+        };
+        let details: Value = serde_json::from_str(&details).unwrap_or(Value::Null);
+        let now = helm_core::now_ms();
+        let mut images = 0usize;
+        for old in crate::message_images::ids_in(&details) {
+            let new = uuid::Uuid::new_v4().to_string();
+            if let Err(e) = crate::message_images::copy_file(&dir, &old, &new) {
+                log::warn!("a message's image could not be recovered: {e}");
+                continue;
+            }
+            made.borrow_mut().push(new.clone());
+            if crate::message_images::insert_unsent_copy(tx, &old, &a.chat_id, &new, &a.chat_id)?
+            {
+                images += 1;
+            } else {
+                let _ = std::fs::remove_file(dir.join(&new));
+            }
+        }
+        let mut refs = 0usize;
+        let listed = details.get("refs").and_then(Value::as_array);
+        for r in listed.iter().flat_map(|a| a.iter()) {
+            let kind = r.get("kind").and_then(Value::as_str).unwrap_or("");
+            let target = r.get("target").and_then(Value::as_str).unwrap_or("");
+            let name = r.get("name").and_then(Value::as_str).unwrap_or("");
+            if !matches!(kind, "file" | "folder" | "chat") || target.is_empty() {
+                continue;
+            }
+            // One the chat is already waiting to send (same kind and target) stands as it is.
+            let held: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM chat_attachment_refs
+                 WHERE chat_id = ?1 AND kind = ?2 AND target = ?3 AND submission_id IS NULL)",
+                params![a.chat_id, kind, target],
+                |r| r.get(0),
+            )?;
+            if held {
+                refs += 1;
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO chat_attachment_refs(id, chat_id, kind, target, name, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    a.chat_id,
+                    kind,
+                    target,
+                    cut_to_bytes(name, MAX_NAME_BYTES),
+                    now
+                ],
+            )?;
+            refs += 1;
+        }
+        Ok::<_, rusqlite::Error>(Ok((images, refs)))
+    });
+    let (images, refs) = match out {
+        Ok(r) => r?,
+        Err(e) => {
+            for id in made.borrow().iter() {
+                let _ = std::fs::remove_file(dir.join(id));
+            }
+            return Err(crate::ops::sql(e));
+        }
+    };
+    Ok(json!({"images": images, "refs": refs}))
 }
 
 /// The submission's images as stream-json image blocks: `[{data (base64), mimeType}]`.

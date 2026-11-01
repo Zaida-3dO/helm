@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MAX_IMAGE_BYTES, forgetDelivered, isAnimated, refusal, stashSent, takeSent, toBase64, type Attached } from './attachments.ts';
+import { MAX_IMAGE_BYTES, isAnimated, refusal, toBase64, unstagedOnly, type Attached } from './attachments.ts';
 import { isBlocked } from './runtimeCheck.ts';
 
 const att = (size: number): Attached => ({ id: 'a', name: 'a.png', size, url: 'blob:x' });
@@ -31,30 +31,14 @@ test('a GIF is refused as an image (it goes as a file), and animated PNG and Web
   assert.equal(isAnimated('image/png', new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xff, 0xff, 0xf4, 0x74, 0x45, 0x58, 0x74, 0, 0, 0, 0])), false);
 });
 
-test('what a send carried is given back once, and only the latest few sends are kept', () => {
-  const file = new Blob(['x']);
-  stashSent('s0', { files: [], refs: [] });
-  assert.equal(takeSent('s0'), null, 'nothing to remember for a text-only send');
-  stashSent('s1', { files: [file], refs: [{ kind: 'path', target: 'C:/a.txt' }] });
-  assert.deepEqual(takeSent('s1')?.refs, [{ kind: 'path', target: 'C:/a.txt' }]);
-  assert.equal(takeSent('s1'), null, 'taken once');
-  for (let i = 0; i < 12; i++) stashSent(`n${i}`, { files: [file], refs: [] });
-  assert.equal(takeSent('n0'), null, 'older sends are forgotten');
-  assert.ok(takeSent('n11'));
+test('the composer restages only the attachments the chat still holds unstaged', () => {
+  const pool = [{ id: 'i1' }, { id: 'i2' }, { id: 'i3' }];
+  assert.deepEqual(unstagedOnly(pool, [{ id: 'i2' }]).map((x) => x.id), ['i1', 'i3']);
+  assert.deepEqual(unstagedOnly(pool, pool), [], 'everything already staged: nothing to take');
+  assert.deepEqual(unstagedOnly([], [{ id: 'i1' }]), [], 'an empty pool stages nothing');
 });
 
-test('delivered sends are let go once the grace period passes, and only a missing component blocks sending', () => {
-  const f = new Blob(['x']);
-  stashSent('d1', { files: [f], refs: [] }, 1000);
-  stashSent('d2', { files: [f], refs: [] }, 1000);
-  forgetDelivered(['d1', 'd2'], new Set(['d2']), 2000);
-  assert.ok(takeSent('d2') && true, 'still waiting: kept');
-  stashSent('d3', { files: [f], refs: [] }, 1000);
-  forgetDelivered(['d3'], new Set(), 1500);
-  assert.ok(takeSent('d3'), 'inside the grace period: kept');
-  stashSent('d4', { files: [f], refs: [] }, 1000);
-  forgetDelivered(['d4'], new Set(), 9000);
-  assert.equal(takeSent('d4'), null, 'delivered: forgotten');
+test('only a missing component blocks sending', () => {
   const found = { path: 'x', source: 'PATH', version: null, problem: null };
   const missing = { path: null, source: null, version: null, problem: 'not found' };
   assert.equal(isBlocked({ node: found, claude: { ...found, problem: 'did not answer --version.' } }), false);

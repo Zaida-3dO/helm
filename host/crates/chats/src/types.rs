@@ -753,6 +753,16 @@ pub struct Submission {
     pub origin: SubmissionOrigin,
     #[ts(type = "number")]
     pub created_at: i64,
+    /// Only in the waiting list (`pending`): the images linked to this send, so its bubble can
+    /// show them while it waits. Absent when it carried none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub images: Option<Vec<MessageImage>>,
+    /// Only in the waiting list (`pending`): the files, folders and chats attached to this send
+    /// by reference. Absent when it carried none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub refs: Option<Vec<MessageRef>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

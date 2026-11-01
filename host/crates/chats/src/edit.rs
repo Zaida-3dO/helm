@@ -20,6 +20,9 @@
 //! - **Images.** The resent message keeps the edited message's images: the new submission gets its
 //!   own copy of each (see [`crate::message_images`]), so the new bubble shows them and they ride
 //!   the prompt again. The old message keeps its own.
+//! - **Files, folders and chats by reference.** The new submission gets its own references to the
+//!   same targets, linked at once, and the prompt carries the section naming them again — the
+//!   agent is told about them exactly as it was before the edit.
 //! - The draft is never touched, and project files are not rolled back.
 
 use crate::archive::Refusal;
@@ -141,6 +144,57 @@ fn carry_images(
     Ok(())
 }
 
+/// Give the new submission its own references to the edited message's files, folders and chats:
+/// rows copied from the ones linked to the message's submission (`entry_id` is its source key,
+/// `u:<submission id>`), linked to the new one in the same transaction. Answers the prompt
+/// section naming them, when there were any.
+fn carry_refs(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    entry_id: &str,
+    submission_id: &str,
+    now: i64,
+) -> rusqlite::Result<Option<String>> {
+    let old_sid = match entry_id.strip_prefix("u:") {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    let old: Vec<crate::attachments::Ref> = {
+        let mut st = tx.prepare(
+            "SELECT id, kind, target, name FROM chat_attachment_refs
+             WHERE submission_id = ?1 ORDER BY created_at, rowid",
+        )?;
+        let rows = st.query_map([old_sid], |r| {
+            Ok(crate::attachments::Ref {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                target: r.get(2)?,
+                name: r.get(3)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if old.is_empty() {
+        return Ok(None);
+    }
+    let mut carried = Vec::with_capacity(old.len());
+    for r in old {
+        let id = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO chat_attachment_refs(id, chat_id, kind, target, name, submission_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, chat_id, r.kind, r.target, r.name, submission_id, now],
+        )?;
+        carried.push(crate::attachments::Ref {
+            id,
+            kind: r.kind,
+            target: r.target,
+            name: r.name,
+        });
+    }
+    Ok(crate::attachments::refs_section(&carried))
+}
+
 /// Stage the edit with its submission. Returns the submission.
 pub fn stage(
     db: &Database,
@@ -208,6 +262,12 @@ pub fn stage(
             &sid,
             &mut made.borrow_mut(),
         )?;
+        if let Some(section) = carry_refs(tx, &a.chat_id, &key, &sid, now)? {
+            tx.execute(
+                "INSERT INTO submission_context(submission_id, text) VALUES (?1, ?2)",
+                params![sid, section],
+            )?;
+        }
         tx.execute(
             "INSERT INTO pending_edits(chat_id, submission_id, entry_id, log_len, marker_id, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

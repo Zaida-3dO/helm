@@ -1,12 +1,15 @@
 // The list below the transcript: messages on their way (Sending), messages Claude holds unread
 // (Pending) with Withdraw, and messages known unsent (Not sent / Not delivered) with Recover to
-// the composer. Nothing sits here waiting for a turn to end.
+// the composer. Nothing sits here waiting for a turn to end. Each bubble shows the message's
+// pictures and file references, as a sent bubble does: a message's attachments are visible from
+// the moment it is sent to the moment it settles.
 
 import type { ChatOps } from '../api/ops.ts';
 import type { Submission, ThreadState } from '../api/types.ts';
 import { Glyph } from '../transcript/icons.tsx';
+import { MessageImages } from '../transcript/MessageImages.tsx';
+import { MessageRefs } from '../transcript/MessageRefs.tsx';
 import { inFlightView } from './inFlight.ts';
-import { takeSent } from './attachments.ts';
 import { composerApi } from './slots.ts';
 
 export interface QueueListProps {
@@ -25,14 +28,13 @@ export function QueueList({ pending, thread, ops, chatId }: QueueListProps) {
   if (!items.length) return null;
 
   // Withdraw and Recover: the host moves the text into the stored draft and sends a `chat` event
-  // with the newer draft revision, which the composer picks up.
-  // A taken-back message also gives its images and files back to the composer.
+  // with the newer draft revision, which the composer picks up. The message's images and files
+  // go back to the chat's unstaged set, and restore() stages them in the composer from there.
   const act = (s: Submission, action: 'withdraw' | 'recover') =>
     ops
       .submissionAction(s.id, action)
       .then(() => {
-        const sent = takeSent(s.id);
-        if (sent) composerApi(chatId).restore(sent);
+        composerApi(chatId).restore();
       })
       .catch(() => undefined);
 
@@ -65,6 +67,8 @@ export function QueueList({ pending, thread, ops, chatId }: QueueListProps) {
           </div>
           <div className="queue-bubble">
             <span className="queue-text">{s.text}</span>
+            <MessageImages chatId={chatId} images={s.images} />
+            <MessageRefs refs={s.refs} />
           </div>
         </div>
       ))}

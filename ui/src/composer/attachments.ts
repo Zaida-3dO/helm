@@ -1,6 +1,11 @@
 // Image attachments in the composer: paste or drop images, shown as blob:
 // thumbnails; each is stored with `attachment_put` and its id rides the send. The host checks
 // the same limits again; these checks only save a round trip.
+//
+// The host is the one place an attachment lives: a staged one stays in the chat's unstaged set
+// (`attachment_list`) until it is sent, and comes back to that set when a send is withdrawn,
+// recovered or never got sent. The composer stages from the host, so attachments survive a
+// restart — nothing is kept in renderer memory between opens.
 
 export const MAX_PER_MESSAGE = 20;
 export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -13,8 +18,6 @@ export interface Attached {
   size: number;
   /** A blob: URL for the thumbnail; revoke it when the attachment goes. */
   url: string;
-  /** The picture itself, kept so a send that is taken back can attach it again. */
-  file?: Blob;
 }
 
 export interface Candidate {
@@ -66,45 +69,10 @@ export function bytesToBase64(bytes: Uint8Array): string {
   return btoa(s);
 }
 
-/** What a send carried, kept so taking the message back (withdraw, recover, edit) can restore it. */
-export interface SentAttachments {
-  files: Blob[];
-  /** Files, folders and chats by reference, as the host named them: a path or a chat id. */
-  refs: Array<{ kind: 'path' | 'chat'; target: string }>;
-}
-
-const KEEP_SENDS = 8;
-/** Most bytes of pictures kept for taking sends back; the oldest sends go first. */
-const KEEP_BYTES = 100 * 1024 * 1024;
-const sent = new Map<string, SentAttachments & { at: number }>();
-
-/** Remember a send's attachments under its submission id (only the last few are kept). */
-export function stashSent(submissionId: string, s: SentAttachments, now = Date.now()): void {
-  if (!s.files.length && !s.refs.length) return;
-  sent.set(submissionId, { ...s, at: now });
-  const bytes = () => [...sent.values()].reduce((n, x) => n + x.files.reduce((m, f) => m + f.size, 0), 0);
-  while (sent.size > 1 && (sent.size > KEEP_SENDS || bytes() > KEEP_BYTES)) sent.delete(sent.keys().next().value!);
-}
-
-/** Forget one send's attachments (it was delivered, or its chat closed). */
-export function forgetSent(submissionId: string): void {
-  sent.delete(submissionId);
-}
-
 /**
- * Forget the sends among `ids` that are no longer waiting: not in `waiting` (the chat's unsent
- * submissions) and older than `graceMs`, which covers the moment before the host lists a new send.
+ * The host's unstaged pool entries the composer is not showing yet (matched by id): what a
+ * reopening composer stages, and what a taken-back send's message brings back.
  */
-export function forgetDelivered(ids: Iterable<string>, waiting: ReadonlySet<string>, now = Date.now(), graceMs = 5000): void {
-  for (const id of ids) {
-    const s = sent.get(id);
-    if (s && !waiting.has(id) && now - s.at > graceMs) sent.delete(id);
-  }
-}
-
-/** The attachments of a send, once: null when it carried none or is forgotten. */
-export function takeSent(submissionId: string): SentAttachments | null {
-  const s = sent.get(submissionId) ?? null;
-  sent.delete(submissionId);
-  return s;
+export function unstagedOnly<T extends { id: string }>(pool: readonly T[], staged: readonly { id: string }[]): T[] {
+  return pool.filter((x) => !staged.some((s) => s.id === x.id));
 }

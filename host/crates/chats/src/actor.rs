@@ -1998,7 +1998,8 @@ impl Actor {
         }
     }
 
-    /// Put the text of submissions that were never sent back in the draft.
+    /// Put the text of submissions that were never sent back in the draft, and their images and
+    /// files back in the composer's staged set.
     fn give_back(&mut self, ids: Vec<String>) {
         let chat = self.chat_id.clone();
         self.write(|t| {
@@ -2016,6 +2017,9 @@ impl Actor {
                         "UPDATE submissions SET state = 'rejected' WHERE id = ?1",
                         [id],
                     )?;
+                    // The images and files go back to the chat's unstaged set with the text,
+                    // so the composer can attach them to the next send.
+                    crate::attachments::unlink(t, id)?;
                     crate::submit::text_to_draft(t, &chat, &text)?;
                 }
             }
