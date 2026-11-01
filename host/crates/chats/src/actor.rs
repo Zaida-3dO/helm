@@ -156,6 +156,7 @@ struct LiveMsg {
 struct LiveToolRec {
     name: String,
     args: String,
+    summary: String,
     started_at: i64,
     stoppable: bool,
 }
@@ -491,6 +492,7 @@ impl Actor {
                     .map(|(id, t)| LiveTool {
                         tool_call_id: id.clone(),
                         name: t.name.clone(),
+                        summary: (!t.summary.is_empty()).then(|| t.summary.clone()),
                         started_at: t.started_at,
                         stoppable: t.stoppable,
                     })
@@ -2430,6 +2432,9 @@ impl Actor {
                 let id = str_of(&v, "toolCallId").unwrap_or_default();
                 let name = str_of(&v, "toolName").unwrap_or_default();
                 let args = v.get("args").map(Value::to_string).unwrap_or_default();
+                // A few plain words on what the call is doing, read off its own arguments.
+                let summary =
+                    crate::toolsummary::tool_summary(&name, v.get("args").unwrap_or(&Value::Null));
                 let stoppable = v.get("stoppable").and_then(Value::as_bool).unwrap_or(false);
                 let started = now();
                 let row = RowWrite {
@@ -2447,6 +2452,10 @@ impl Actor {
                         if let Some(src) = v.get("toolSource").filter(|s| s.is_object()) {
                             d["toolSource"] = src.clone();
                         }
+                        // Stored with the row so every later view of this call can show it too.
+                        if !summary.is_empty() {
+                            d["toolSummary"] = json!(&summary);
+                        }
                         d
                     },
                     entry_id: None,
@@ -2458,6 +2467,7 @@ impl Actor {
                     LiveToolRec {
                         name,
                         args,
+                        summary,
                         started_at: started,
                         stoppable,
                     },

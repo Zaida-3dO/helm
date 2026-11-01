@@ -1,6 +1,7 @@
 // The live activity dock: a rounded card in the column
 // above the composer. Left, a 64 x 48 glyph cell (the still ship's wheel, 40 px, while a turn runs; a check
-// once it settles); then two lines (the state, then the latest tool with its elapsed time and, when
+// once it settles); then two lines (the state, then the latest call's few words — its tool name
+// when there are no words to show — with its elapsed time and, when
 // per-tool Stop is on and the call can be stopped, Stop); right, Details › and the counts ("N live",
 // the background-shells chip with its hover list, the subagent roster, the turn's clock). Details
 // opens a list of what is running now.
@@ -119,14 +120,14 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
             ) : latest ? (
               <span className="ad-tool">
                 <ToolIcon name={latest.name} />
-                <span className="ad-tool-name">{toolLabel(latest.name)}</span>
+                <span className="ad-tool-name">{latest.summary || toolLabel(latest.name)}</span>
                 <span className="ad-tool-time">{formatElapsed(now - latest.startedAt)}</span>
                 {canStop && (
                   <button
                     type="button"
                     className="ad-tool-stop"
                     data-testid="dock-tool-stop"
-                    aria-label={`Stop ${toolLabel(latest.name)}`}
+                    aria-label={`Stop ${latest.summary || toolLabel(latest.name)}`}
                     title="Stop this command; the turn carries on"
                     onClick={() => onStopTool(latest.toolCallId)}
                   >
@@ -203,7 +204,7 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
               {thread.liveTools.map((t) => (
                 <li key={t.toolCallId}>
                   <ToolIcon name={t.name} />
-                  <span>{toolLabel(t.name)}</span>
+                  <span>{t.summary || toolLabel(t.name)}</span>
                   <span className="ad-details-status">Live</span>
                   <span className="muted mono">{formatElapsed(now - t.startedAt)}</span>
                 </li>

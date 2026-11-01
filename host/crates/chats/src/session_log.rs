@@ -569,6 +569,14 @@ impl RowWrite {
                     if t.is_error {
                         d["isError"] = json!(true);
                     }
+                    // The same few words the live row carried, rebuilt here so a session read
+                    // back from the log shows them too.
+                    if let Ok(a) = serde_json::from_str::<serde_json::Value>(&t.args) {
+                        let s = crate::toolsummary::tool_summary(&t.tool_name, &a);
+                        if !s.is_empty() {
+                            d["toolSummary"] = json!(s);
+                        }
+                    }
                     d
                 },
                 entry_id: Some(t.id.clone()),

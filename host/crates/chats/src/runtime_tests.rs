@@ -743,6 +743,11 @@ async fn tools_are_written_at_start_and_end() {
             .is_some_and(|t| t.live_tools.first().is_some_and(|x| x.stoppable))
     })
     .await;
+    assert_eq!(
+        h.rt.live_thread(&chat).unwrap().live_tools[0].summary.as_deref(),
+        Some("ls"),
+        "the live tool carries a few plain words about the call"
+    );
     w.emit(json!({"type": "tool_execution_end", "toolCallId": "tc1", "toolName": "Bash", "result": {"text": "a.txt"}, "isError": false}))
         .await;
     h.until("tool done", |h| {
@@ -757,6 +762,21 @@ async fn tools_are_written_at_start_and_end() {
         .col("SELECT json_extract(details, '$.toolArgs') FROM messages WHERE source_key = 't:tc1'");
     assert_eq!(args, [r#"{"command":"ls"}"#], "toolArgs is JSON text");
     assert!(h.rt.live_thread(&chat).unwrap().live_tools.is_empty());
+    // A second call: the few words are stored with the row, so every later view of the call
+    // shows the same phrase.
+    w.emit(json!({"type": "tool_execution_start", "toolCallId": "tc3", "toolName": "Grep", "args": {"pattern": "HVAC.*filter"}, "stoppable": false}))
+        .await;
+    h.until("summary in the row", |h| {
+        !h.col("SELECT json_extract(details, '$.toolSummary') FROM messages WHERE source_key = 't:tc3'")
+            .is_empty()
+    })
+    .await;
+    assert_eq!(
+        h.col("SELECT json_extract(details, '$.toolSummary') FROM messages WHERE source_key = 't:tc3'"),
+        ["Searching HVAC.*filter"]
+    );
+    w.emit(json!({"type": "tool_execution_end", "toolCallId": "tc3", "toolName": "Grep", "result": {"text": "2 files"}, "isError": false}))
+        .await;
     // The files the command changed are kept as an entry of their own, with no row; a line with
     // no usable path is dropped.
     w.emit(json!({"type": "shell_changes", "toolCallId": "tc1", "paths": ["C:/p/a.txt", "", 5]}))
@@ -3313,8 +3333,8 @@ async fn a_web_search_change_restarts_a_running_chat_at_its_next_turn() {
     let lists_search = |w: &FakeWorker| {
         w.req.host.as_ref().is_some_and(|host| {
             host.tools
-                .iter()
-                .any(|t| t["name"].as_str() == Some("app_web_search"))
+                .as_array()
+                .is_some_and(|a| a.iter().any(|t| t["name"].as_str() == Some("app_web_search")))
         })
     };
     // Not offered: the first worker lists no search tool and settles with a session.

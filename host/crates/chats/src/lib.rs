@@ -15,6 +15,7 @@
 //! | `actor` | one task per chat: worker, streaming, tools, interactions, Stop, timers |
 //! | [`submit`] | sends, in-flight actions, model changes, restart continuation |
 //! | [`titles`] | automatic titles through `helpers/titles`, renames, suggestions |
+//! | [`toolsummary`] | the few plain words a running tool call shows in the progress lines |
 //! | [`autocomplete`] | composer autocomplete through `helpers/autocomplete` |
 //! | [`attachments`] | image attachments and their limits |
 //! | [`message_images`], [`thumbs`] | the images in a user's bubble: the row references, `attachment_get`, and the cached thumbnails |
@@ -80,6 +81,9 @@ pub mod thumbs;
 mod timeline;
 pub mod titles;
 pub mod tools;
+mod toolsummary;
+#[cfg(test)]
+mod toolsummary_tests;
 pub mod triage;
 pub mod turn_usage;
 pub mod types;

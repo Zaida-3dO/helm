@@ -317,10 +317,29 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     updateRow(c, r, { status: 'complete' });
   }
 
+  // A stand-in for the host's short phrase, so the browser-only preview shows what the real
+  // app will show on the activity dock and the Details list.
+  function fakeToolSummary(name: string, args: Record<string, unknown>): string | null {
+    const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+    const desc = text(args.description);
+    if (desc) return desc;
+    const file = text(args.file_path) || text(args.notebook_path) || text(args.path);
+    if (file) {
+      const verb = name === 'Read' ? 'Reading' : name === 'Write' ? 'Writing' : name === 'LS' ? 'Listing' : 'Editing';
+      return `${verb} ${file.split(/[\\/]/).pop()}`;
+    }
+    const pattern = text(args.pattern);
+    if (pattern) return `Searching ${pattern}`;
+    const query = text(args.query);
+    if (query) return name === 'WebSearch' ? `Web search: ${query}` : query;
+    return null;
+  }
+
   async function tool(c: FakeChat, name: string, args: Record<string, unknown>, output: string, cancelled: () => boolean, ms = 900) {
     const toolCallId = uid();
-    let r = addRow(c, { role: 'toolResult', toolName: name, toolCallId, status: 'streaming', details: { toolArgs: JSON.stringify(args), stoppable: true } });
-    c.thread = { ...c.thread, liveTools: [...c.thread.liveTools, { toolCallId, name, startedAt: now(), stoppable: name === 'Bash' }] };
+    const summary = fakeToolSummary(name, args);
+    let r = addRow(c, { role: 'toolResult', toolName: name, toolCallId, status: 'streaming', details: { toolArgs: JSON.stringify(args), stoppable: true, ...(summary ? { toolSummary: summary } : {}) } });
+    c.thread = { ...c.thread, liveTools: [...c.thread.liveTools, { toolCallId, name, summary, startedAt: now(), stoppable: name === 'Bash' }] };
     emitThread(c);
     try {
       await sleep(ms, cancelled);

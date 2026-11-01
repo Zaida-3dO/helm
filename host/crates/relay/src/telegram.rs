@@ -638,6 +638,15 @@ mod tests {
             render_status(&["Bash".into()], &["Read".into(), "Edit".into()]),
             "Working…\nRunning: Bash\nRecent: Read, Edit"
         );
+        // The lists carry short phrases describing the calls, not bare tool names.
+        assert_eq!(
+            render_status(
+                &["Checking the nightly backup".into()],
+                &["Searching HVAC filter".into(), "Reading winter bills.md".into()],
+            ),
+            "Working…\nRunning: Checking the nightly backup\nRecent: Searching HVAC filter, \
+             Reading winter bills.md"
+        );
         assert_eq!(render_final(Some("  All done.  ")), "All done.");
         assert_eq!(render_final(None), "Done (no text answer).");
         let long = "x".repeat(MAX_FINAL_CHARS + 1);

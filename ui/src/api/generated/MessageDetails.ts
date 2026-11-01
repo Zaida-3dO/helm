@@ -28,6 +28,11 @@ origin?: SubmissionOrigin, retry?: RetryInfo, contextKind?: ContextKind, textTru
  */
 toolSource?: ToolSource, 
 /**
+ * For a tool row: a few plain words on what the call is doing, read from its own
+ * arguments (see `toolsummary`), so later views of the row can show the same words.
+ */
+toolSummary?: string, 
+/**
  * For a user row: the images sent with the message, shown as thumbnails in the bubble. The
  * bytes are not in the row; `attachment_get` reads them (see `message_images`).
  */

@@ -628,8 +628,12 @@ pub fn snapshot(
                     r.get(0)
                 })
                 .optional()?;
+            // The few words stored with the call when it has them, otherwise the bare name.
             let mut st = tx.prepare(
-                "SELECT tool_name FROM messages WHERE chat_id = ?1 AND id > ?2
+                "SELECT CASE WHEN json_valid(details) THEN \
+                 COALESCE(NULLIF(json_extract(details, '$.toolSummary'), ''), tool_name) \
+                 ELSE tool_name END \
+                 FROM messages WHERE chat_id = ?1 AND id > ?2 \
                  AND tool_name IS NOT NULL ORDER BY id DESC LIMIT 3",
             )?;
             let mut recent: Vec<String> = st
@@ -674,9 +678,20 @@ pub fn snapshot(
         })
         .unwrap_or(false);
     let live = rt.live_thread(chat);
+    // The same few words the dock shows, so the phone and the app describe a call alike.
     let running = live
         .as_ref()
-        .map(|t| t.live_tools.iter().map(|l| l.name.clone()).collect())
+        .map(|t| {
+            t.live_tools
+                .iter()
+                .map(|l| {
+                    l.summary
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| l.name.clone())
+                })
+                .collect()
+        })
         .unwrap_or_default();
     let question = answerable(rt, chat).map(|q| {
         let text = match q.method {

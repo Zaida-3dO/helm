@@ -49,13 +49,16 @@ fn one_status_while_running_debounced_then_the_final_as_a_new_message() {
     // Unchanged: nothing sent.
     assert!(m.step(&busy(&[], &[]), T0 + 5_000).is_empty());
     // Changed, but within the gap of the last update: held back, then sent once due.
-    let b = busy(&["Bash"], &["Read"]);
+    // The lists carry short phrases describing the calls, not bare tool names.
+    let b = busy(&["Checking the nightly backup"], &["Reading winter bills.md"]);
     let mut m = Mirror::new(0, T0);
     m.step(&busy(&[], &[]), T0);
     assert!(m.step(&b, T0 + STATUS_GAP_MS - 1).is_empty());
     assert_eq!(
         m.step(&b, T0 + STATUS_GAP_MS),
-        vec![Up::Status("Working…\nRunning: Bash\nRecent: Read".into())]
+        vec![Up::Status(
+            "Working…\nRunning: Checking the nightly backup\nRecent: Reading winter bills.md".into(),
+        )]
     );
     // Idle once: wait for the last row to flush; idle twice: the final answer, and once the
     // phone has it, done.
@@ -331,6 +334,44 @@ fn chat_of(p: &Placed) -> String {
         Placed::Sent { chat, .. } | Placed::Answered { chat, .. } => chat.clone(),
         Placed::Already => String::new(),
     }
+}
+
+/// The recent line reads the few words stored with each call, keeps to the last three, and
+/// falls back to the bare name when a call has none. (Invented calls; none is real.)
+#[test]
+fn a_snapshot_lists_the_last_three_calls_in_their_own_words() {
+    let e = env();
+    let chat = e
+        .db
+        .write(|tx| helm_chats::store::create_chat(tx, "C:/work", None, None, 1))
+        .unwrap();
+    sql(&e.db, "UPDATE chats SET status = 'running' WHERE id = ?1", &[&chat]);
+    let seed = |tx: &rusqlite::Transaction<'_>, key: &str, name: &str, details: Option<&str>| {
+        tx.execute(
+            "INSERT INTO messages(chat_id, source_key, role, tool_name, tool_call_id,
+                                  status, timestamp, details)
+             VALUES (?1, ?2, 'toolResult', ?3, ?4, 'complete', 1000, ?5)",
+            rusqlite::params![&chat, key, name, key, details],
+        )
+        .map(|_| ())
+    };
+    e.db
+        .write(|tx| {
+            seed(tx, "t:a", "Read", None)?;
+            seed(tx, "t:b", "Grep", Some(r#"{"toolSummary":"Searching HVAC filter"}"#))?;
+            seed(tx, "t:c", "Bash", Some(r#"{"toolSummary":"Checking the nightly backup"}"#))?;
+            seed(tx, "t:d", "Read", Some(r#"{"toolSummary":"Reading winter bills.md"}"#))?;
+            seed(tx, "t:e", "Grep", Some("{}"))
+        })
+        .unwrap();
+    let snap = snapshot(&e.ctx.rt, &e.db, &chat, 0, false);
+    assert!(snap.busy, "the chat is running");
+    assert!(snap.running.is_empty(), "no worker is live in this test");
+    assert_eq!(
+        snap.recent,
+        ["Checking the nightly backup", "Reading winter bills.md", "Grep"],
+        "the last three, in words, with the bare name as fallback"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -211,6 +211,9 @@ pub struct AttentionSummary {
 pub struct LiveTool {
     pub tool_call_id: String,
     pub name: String,
+    /// A few plain words on what the call is doing, read from its own arguments; a call whose
+    /// arguments say nothing usable has none.
+    pub summary: Option<String>,
     #[ts(type = "number")]
     pub started_at: i64,
     pub stoppable: bool,
@@ -578,6 +581,11 @@ pub struct MessageDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub tool_source: Option<ToolSource>,
+    /// For a tool row: a few plain words on what the call is doing, read from its own
+    /// arguments (see `toolsummary`), so later views of the row can show the same words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tool_summary: Option<String>,
     /// For a user row: the images sent with the message, shown as thumbnails in the bubble. The
     /// bytes are not in the row; `attachment_get` reads them (see `message_images`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
