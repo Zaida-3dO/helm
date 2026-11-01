@@ -28,6 +28,18 @@ test("the helm server reaches MCP tools through the adapter, child calls include
   await server.call("app_mcp_tools", { server: "fake", query: "tool error" }, { child: false });
   const te = await server.call("app_mcp_call", { name: generatedName("fake", "tool_error"), arguments: {} }, { child: false });
   assert.deepEqual(te, { ok: false, error: "tool says no", changed: "maybe" });
+
+  // A later mcp_config line reaches this same running worker, no restart: dropping the server
+  // takes its tools away, and re-adding it (an enable after a disable) brings them back.
+  assert.equal(applyConfigLine(h.bridge, { type: "mcp_config", revision: "r2", servers: [] }), true);
+  assert.equal(asHostToolBridge(h.bridge).enabled(), false);
+  const dropped = await server.call("app_mcp_call", { name, arguments: { text: "hi" } }, { child: false });
+  assert.equal(dropped.ok, false, "the dropped server's discovered tool is no longer callable");
+  assert.equal(applyConfigLine(h.bridge, { type: "mcp_config", revision: "r3", servers: [stdioServer("fake", {})] }), true);
+  assert.equal(asHostToolBridge(h.bridge).enabled(), true, "the re-enabled server reaches the live bridge");
+  assert.equal((await server.call("app_mcp_tools", { server: "fake", query: "echo" }, { child: false })).ok, true);
+  const back = await server.call("app_mcp_call", { name, arguments: { text: "back" } }, { child: false });
+  assert.deepEqual(back, { ok: true, result: '{"text":"back"}' });
 });
 
 test("app_mcp_tools without a server searches all of them", async () => {

@@ -2,9 +2,9 @@
 //! read and change through `app_get_settings` and `app_update_settings`.
 //!
 //! The setting is in the base tier: it is bounded (a switch), shows in "Changed by chats" with
-//! Undo, and takes effect only for chats that start afterwards. The Brave key itself is not a
-//! setting here. Only the user enters, imports or forgets it, in Settings > Web search, and
-//! nothing an agent can call reads it.
+//! Undo, and takes effect from the next turn of chats that are already running. The Brave key
+//! itself is not a setting here. Only the user enters, imports or forgets it, in Settings > Web
+//! search, and nothing an agent can call reads it.
 
 use crate::store::{self, Settings};
 use crate::WebSearch;
@@ -43,7 +43,7 @@ impl SettingsExtension for WebSearchKeys {
             json!({
                 "type": "boolean",
                 "default": false,
-                "about": "Settings > Web search, \"Offer in Claude chats\". On: Claude chats get the app_web_search tool (Brave Search) as well, using the user's own Brave key and allowance. Off: only chats running on a local model get it, because they have no web search of their own. It does nothing until the user has entered a Brave key (details says whether one is set), and a chat sees the change from its next start. The key is the user's to enter and is never shown or changed through these tools.",
+                "about": "Settings > Web search, \"Offer in Claude chats\". On: Claude chats get the app_web_search tool (Brave Search) as well, using the user's own Brave key and allowance. Off: only chats running on a local model get it, because they have no web search of their own. It does nothing until the user has entered a Brave key (details says whether one is set), and a chat sees the change at its next turn. The key is the user's to enter and is never shown or changed through these tools.",
             })
         })
     }

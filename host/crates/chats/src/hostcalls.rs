@@ -112,13 +112,27 @@ pub(crate) fn start_lines(sh: &Arc<Shared>, chat_id: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// Whether the current settings offer Helm's web search to a chat's next launch. The rules (key
+/// set, the Claude-chats switch, local-model chats) live with web search; this only reads its
+/// gate. The same call runs at every send while a worker is up: when its answer no longer matches
+/// what the running worker was launched with, the actor closes that worker so the next launch
+/// lists the tools again (see `Actor::ensure_worker`).
+pub(crate) fn web_tools_offered(sh: &Arc<Shared>, local_chat: bool) -> bool {
+    sh.host
+        .get()
+        .and_then(|s| s.ctx.services.get::<helm_hosttools::WebToolsGate>())
+        .is_some_and(|g| g.0.offered(local_chat))
+}
+
 /// The host-tool part of a launch: the catalogue for this chat's launch keys and the MCP gate's
-/// flags. `None` until the seam is attached.
+/// flags. `None` until the seam is attached. `web_tools` is the answer of
+/// [`web_tools_offered`], which the caller records for the running worker as well.
 pub(crate) fn launch(
     sh: &Arc<Shared>,
     chat_id: &str,
     cwd: &str,
     local_chat: bool,
+    web_tools: bool,
 ) -> Option<crate::runtime::HostLaunch> {
     let seam = sh.host.get()?;
     let keys = sh
@@ -135,11 +149,6 @@ pub(crate) fn launch(
             native: true,
             ..Default::default()
         });
-    let web_tools = seam
-        .ctx
-        .services
-        .get::<helm_hosttools::WebToolsGate>()
-        .is_some_and(|g| g.0.offered(keys.local_chat));
     let keys = helm_hosttools::LaunchKeys {
         mcp_enabled: mcp.helm_servers,
         web_tools,

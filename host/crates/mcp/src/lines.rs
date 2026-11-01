@@ -137,5 +137,38 @@ mod tests {
         let b = sent.0.lock().unwrap();
         assert_eq!(b.len(), 1);
         assert_eq!(b[0]["type"], "mcp_config");
+
+        // A per-server change (a second server added, the first disabled) reaches every running
+        // worker as a fresh line carrying only the servers still enabled: the worker reconfigures
+        // live, no worker restart, and the disabled server's secret is no longer sent.
+        let mut board = hub("tok-abcdef");
+        board.id = "board".into();
+        board.name = "Board".into();
+        st.mutate(None, |l| {
+            l.push(board);
+            Ok(())
+        })
+        .unwrap();
+        st.mutate(None, |l| {
+            if let Some(h) = l.iter_mut().find(|s| s.id == "hub") {
+                h.enabled = false;
+            }
+            Ok(())
+        })
+        .unwrap();
+        cell.broadcast();
+        let b = sent.0.lock().unwrap();
+        assert_eq!(b.len(), 2);
+        let ids: Vec<&str> = b[1]["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["board"], "the line holds only the enabled servers");
+        assert!(
+            !b[1].to_string().contains("tok-123456"),
+            "the disabled server's secret is gone from the line"
+        );
     }
 }

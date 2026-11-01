@@ -209,6 +209,11 @@ struct Actor {
     edit_waiting: bool,
     /// The long-command setting the running worker was launched with.
     launched_long: Option<LongCommands>,
+    /// Whether Helm's web search was offered to the running worker's launch: the tool list is
+    /// fixed when a worker starts, so when the user enters or forgets the search key or flips
+    /// "Offer in Claude chats", this no longer matches and the worker is restarted (a changed
+    /// MCP server set reaches a running worker over its own live config line instead).
+    launched_web_tools: Option<bool>,
     /// That setting changed while a turn ran: relaunch at the next idle point.
     relaunch_on_idle: bool,
     /// Running subagents pushed off the live list by a 31st: kept so their end still reaches
@@ -341,6 +346,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         activity_written: None,
         edit_waiting: false,
         launched_long: None,
+        launched_web_tools: None,
         relaunch_on_idle: false,
         evicted: Vec::new(),
         timeline: None,
@@ -739,6 +745,28 @@ impl Actor {
     // ------------------------------------------------------------------ worker lifecycle
 
     fn ensure_worker(&mut self) -> bool {
+        // A running worker lists Helm's web search (only) when its launch was offered it. When
+        // the user enters or forgets the search key, or flips "Offer in Claude chats", that
+        // answer no longer matches the running worker's tool list: close it so the launch below
+        // lists the tools again, resuming the same session so the conversation carries over.
+        // Never mid-turn: while the chat is working or its background agents are running the
+        // relaunch waits for this idle point, so the change lands at the chat's next turn. A
+        // chat with no worker needs nothing: its next launch reads the current setting.
+        if self.link.is_some()
+            && !self.link_closing
+            && self.launched_web_tools
+                != Some(crate::hostcalls::web_tools_offered(
+                    &self.sh,
+                    self.launched_local.is_some(),
+                ))
+        {
+            if self.status().is_busy() || self.agents_running() {
+                self.relaunch_on_idle = true;
+            } else if let Some(l) = &self.link {
+                self.link_closing = true;
+                l.send(&json!({"type": "shutdown"}));
+            }
+        }
         // A worker that was told to shut down is winding down: its stdin closes and a prompt
         // handed to it would be lost with it. Drop the closing link (the process is already
         // ending itself) and start a fresh one below, so a send that lands in the gap between a
@@ -800,6 +828,11 @@ impl Actor {
         self.launched_local = local
             .as_ref()
             .map(|l| (l.server_id.clone(), l.model.clone()));
+        // The launch lists web search on this answer, and the actor remembers it: a send that
+        // finds the setting has since changed restarts the worker (above) so the tool list
+        // follows the user's settings without making them wait for the next chat.
+        let web_tools = crate::hostcalls::web_tools_offered(&self.sh, local.is_some());
+        self.launched_web_tools = Some(web_tools);
         let req = SpawnRequest {
             chat_id: self.chat_id.clone(),
             cwd: chat.cwd.clone(),
@@ -808,7 +841,13 @@ impl Actor {
             resume_session_id: resume,
             fork_session,
             send_behavior: sb,
-            host: crate::hostcalls::launch(&self.sh, &self.chat_id, &chat.cwd, local.is_some()),
+            host: crate::hostcalls::launch(
+                &self.sh,
+                &self.chat_id,
+                &chat.cwd,
+                local.is_some(),
+                web_tools,
+            ),
             local,
         };
         if let Some(t) = self.timeline.as_mut() {

@@ -3274,6 +3274,100 @@ async fn a_long_command_change_relaunches_workers_when_idle() {
     w2.expect("shutdown").await;
 }
 
+/// Entering the web search key, flipping "Offer in Claude chats" or forgetting the key reaches a
+/// chat that is already running at its next turn: an idle worker closes when the next send opens
+/// a turn and the fresh worker lists the tool again, resuming the same session; a working chat is
+/// never interrupted — its worker closes once the turn settles, and the turn after sees the tool
+/// gone again after a second flip. MCP servers need none of this: they reach a running worker
+/// over its live config line (helm_mcp's lines tests).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_web_search_change_restarts_a_running_chat_at_its_next_turn() {
+    struct Flip(AtomicBool);
+    impl helm_hosttools::WebToolsSource for Flip {
+        fn offered(&self, _local_chat: bool) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+    let mut h = harness();
+    let mut reg = helm_hosttools::HostToolRegistry::new();
+    reg.blocking(
+        helm_hosttools::ToolSpec::read("app_list_chats", "List chats.", json!({"type": "object"})),
+        |_, _| Ok(json!({})),
+    )
+    .blocking(
+        helm_hosttools::ToolSpec::read("app_web_search", "Search.", json!({"type": "object"}))
+            .when(helm_hosttools::Condition::WebTools),
+        |_, _| Ok(json!({})),
+    );
+    let flip = Arc::new(Flip(AtomicBool::new(false)));
+    let mut services = Services::new();
+    services.insert(Arc::new(helm_hosttools::WebToolsGate(flip.clone())));
+    h.rt.attach_host(crate::hostcalls::HostSeam {
+        ctx: OpCtx {
+            services: Arc::new(services),
+            events: h.sink.clone(),
+        },
+        tools: Arc::new(helm_hosttools::HostTools::new(Arc::new(reg))),
+        lines: Arc::new(helm_hosttools::WorkerLines::new()),
+    });
+    let lists_search = |w: &FakeWorker| {
+        w.req.host.as_ref().is_some_and(|host| {
+            host.tools
+                .iter()
+                .any(|t| t["name"].as_str() == Some("app_web_search"))
+        })
+    };
+    // Not offered: the first worker lists no search tool and settles with a session.
+    let chat = h.create().await;
+    h.send(&chat, "first", "default").await;
+    let mut w = h.worker().await;
+    assert!(!lists_search(&w));
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-w1"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    // Offered now: the send that opens the next turn closes the idle worker first, and the fresh
+    // worker — which lists the tool and resumes the same session — gets the prompt.
+    flip.0.store(true, Ordering::SeqCst);
+    h.send(&chat, "again", "default").await;
+    w.expect("shutdown").await;
+    let mut w2 = h.worker().await;
+    assert!(lists_search(&w2), "the fresh worker lists the tool");
+    assert_eq!(
+        w2.req.resume_session_id.as_deref(),
+        Some("native-w1"),
+        "the conversation carries over"
+    );
+    w2.ready().await;
+    let p2 = w2.expect("prompt").await;
+    ack(&w2, &p2).await;
+    w2.emit(json!({"type": "agent_start"})).await;
+    h.until("running", |h| h.status(&chat) == "running").await;
+    // Off again mid-turn: the running worker is not interrupted; the turn finishes on it, the
+    // worker closes at the settle, and the turn after that lists the tool no more.
+    flip.0.store(false, Ordering::SeqCst);
+    h.send(&chat, "steer", "default").await;
+    let p3 = w2.expect("prompt").await;
+    assert_eq!(p3["streamingBehavior"], "steer");
+    ack(&w2, &p3).await;
+    assert!(
+        w2.no_command_for(Duration::from_millis(200)).await.is_none(),
+        "no shutdown mid-turn"
+    );
+    w2.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-w2"}))
+        .await;
+    w2.expect("shutdown").await;
+    w2.exit().await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    h.send(&chat, "after", "default").await;
+    let w3 = h.worker().await;
+    assert!(!lists_search(&w3), "the tool is gone again");
+    assert_eq!(w3.req.resume_session_id.as_deref(), Some("native-w2"));
+}
+
 /// Past the idle-worker cap the least recently used idle worker is retired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_least_recently_used_idle_worker_is_retired_past_the_cap() {

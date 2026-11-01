@@ -12,6 +12,10 @@
 //! so: a key is set, and either the chat runs on a local model (which has no web search of its
 //! own) or the user switched on "Offer in Claude chats" (off by default). The call checks the same
 //! rules again, so a running chat whose tool list is older than the setting cannot go on searching.
+//! A running chat is not left on the older list either: before every send the chat runtime compares
+//! these rules with what the worker was launched with, and when they no longer match it closes that
+//! worker at the next safe point (never mid-turn) so the next launch lists the tools again — the new
+//! worker resumes the same Claude session, so the conversation carries over.
 //!
 //! **The key.** It is typed or imported in Settings, sealed in the credential store, and read only
 //! to build the request header. No op, tool result, event, log line or error carries it; the ops
