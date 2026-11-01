@@ -68,6 +68,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `composer-error` | A refused send's message (the draft is kept) | |
 | `model-picker` | The unified "Model · Effort" picker trigger (Ctrl+Shift+M opens it) | |
 | `model-picker-pop` | Its popover: model rows are `[role="option"]` with `data-value` = the model id | |
+| `model-roll-over-offer` | The "Roll over into it" button beside the picker's error, shown when the host says the conversation is larger than the chosen model's window; it runs the roll over after a confirmation | |
 | `effort-picker` | The effort row in that popover's footer: `[role="radio"]` stops | |
 | `local-check`, `local-hint`, `check-servers` | The popover's footer row for local models: "Local models: not checked yet" (or "none found", or just "Local models") and the Check servers button, the only thing in the picker that contacts a local server: opening it asks nothing and the list shows what the servers said last time | |
 | `permission-chip` | Permission-mode chip (wraps `permission-picker`, the picker trigger) | `data-mode` = the live mode, empty when none reported; `data-picked` = a pick not yet live |

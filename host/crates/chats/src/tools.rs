@@ -608,7 +608,7 @@ async fn update_chat(ctx: ToolCtx, a: Value) -> ToolResult {
     }
     if a.get("model").is_some() || a.get("effort").is_some() {
         let mut args = json!({"chatId": id});
-        for k in ["model", "effort"] {
+        for k in ["model", "effort", "reason"] {
             if let Some(v) = str_arg(&a, k) {
                 args[k] = json!(v);
             }
@@ -790,18 +790,21 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::write(
             "app_create_chat",
-            format!("Start a new chat in a project and send it a first message (framed like app_send_message). Pass parentChatId to nest it under a chat (at most two levels). Omitted model and effort use the new-chat defaults.{REPORT_BACK}{LINKS}{EXPLICIT}"),
+            format!("Start a new chat in a project and send it a first message (framed like app_send_message). Pass parentChatId to nest it under a chat (at most two levels). Omitted model and effort use the new-chat defaults. model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>), whichever provider this chat itself runs on.{REPORT_BACK}{LINKS}{EXPLICIT}"),
             obj(
                 json!({
                     "projectId": {"type": "string"},
                     "message": {"type": "string", "minLength": 1, "maxLength": 16384},
                     "title": {"type": "string", "minLength": 1, "maxLength": 512},
                     "parentChatId": id,
-                    "model": {"type": "string"},
+                    "model": {"type": "string", "description": "A Claude model id (sonnet, opus, ...) or a local model id (local/<server>/<model>)."},
                     "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}
                 }),
                 &["projectId", "message"],
             ),
+        )
+        .guidelines(
+            "A helper started with Claude Code's Agent tool always runs on this chat's own model: it cannot be pointed at a model on the other provider. When you need a helper on the other provider — a Claude helper for a chat on a local model server, or a local-model helper for a Claude chat — start it as a chat with app_create_chat and give it the model you want, send it the work, tell it to report back, and read its chat while it runs.",
         )
         .self_locking(),
         move |ctx, a| create_chat(ctx, a, l.clone()),
@@ -821,7 +824,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .async_tool(
         ToolSpec::write(
             "app_update_chat",
-            format!("Rename, pin or unpin a chat, change its model or effort (from its next turn), show it under another project (projectId; where it runs does not change), or nest it under another chat in that project (parentChatId) or make it top level (parentChatId null). Muting, the harness and the provider are the user's to change.{EXPLICIT}"),
+            format!("Rename, pin or unpin a chat, change its model or effort (from its next turn), show it under another project (projectId; where it runs does not change), or nest it under another chat in that project (parentChatId) or make it top level (parentChatId null). model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>): a chat can move between its current provider and the other at any time and the conversation carries over. Say why in one sentence (reason) and it shows in the transcript. Muting, the harness and the provider are the user's to change.{EXPLICIT}"),
             obj(
                 json!({
                     "chatId": id,
@@ -830,11 +833,15 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "projectId": {"type": "string"},
                     "parentChatId": {"type": ["string", "null"], "minLength": 36, "maxLength": 36},
                     "muted": {"type": "boolean"},
-                    "model": {"type": "string"},
-                    "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}
+                    "model": {"type": "string", "description": "A Claude model id (sonnet, opus, ...) or a local model id (local/<server>/<model>)."},
+                    "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 500}
                 }),
                 &["chatId"],
             ),
+        )
+        .guidelines(
+            "You can change your own chat's model, in either direction, between a Claude model and a local model server; give a one-sentence reason and the transcript's model-change row shows it. If Helm answers that the conversation is larger than the target model's window, do not force it: carry on by starting a chat on that model with a hand-off summary as its first message.",
         )
         .self_locking(),
         update_chat,
@@ -1158,6 +1165,11 @@ mod tests {
                 Some(json!({"parentChatId": nil})),
             ),
             (json!({"title": "Renamed"}), "", None),
+            (
+                json!({"model": "opus", "reason": "Trying a faster model."}),
+                "",
+                None,
+            ),
             (json!({"muted": true}), "user's call", None),
             (json!({"harness": "codex"}), "cannot be changed", None),
             (json!({"parentChatId": "short"}), "parentChatId", None),
@@ -1191,6 +1203,18 @@ mod tests {
         assert_eq!(
             h.col(&format!("SELECT title FROM chats WHERE id = '{a}'")),
             ["Renamed"]
+        );
+        // The model row in the transcript carries the agent's reason, so the change reads with
+        // its explanation to anyone looking at the chat.
+        assert_eq!(
+            h.col(&format!("SELECT model FROM chats WHERE id = '{a}'")),
+            ["opus"]
+        );
+        assert_eq!(
+            h.col(&format!(
+                "SELECT text FROM messages WHERE chat_id = '{a}' AND role = 'context'"
+            )),
+            ["Model changed to opus — Trying a faster model."]
         );
     }
 

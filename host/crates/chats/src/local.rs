@@ -58,8 +58,9 @@ pub(crate) use model_id_sql;
 pub const MODEL_ID_SQL: &str = model_id_sql!();
 
 /// SQL for "this chat has started" (`c` is the chat): its first turn ran, or it was forked from a
-/// chat that did and carries that session on. From then on its model can't cross between Claude
-/// and local models, or between local servers; the picker and `chat_set_model` both read this.
+/// chat that did and carries that session on. `chat_set_model` reads this to decide whether a
+/// conversation exists that must fit the new model's window (a started chat can change model in
+/// any direction; the relaunch carries the conversation).
 macro_rules! started_sql {
     () => {
         "(EXISTS(SELECT 1 FROM runs r WHERE r.chat_id = c.id) OR EXISTS(SELECT 1 FROM chat_forks f WHERE f.chat_id = c.id))"

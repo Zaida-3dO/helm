@@ -36,8 +36,8 @@ stalled: boolean,
  */
 localAhead: number | null, 
 /**
- * The chat's first turn has run (or it was forked from one that did). From then on its model
- * can switch among Claude models, or among models on the same local server, but not between
- * Claude and local models or between local servers.
+ * The chat's first turn has run (or it was forked from one that did). The picker uses it to
+ * tell a chat whose conversation exists and will carry across a model change; a started chat
+ * can still move between any models, the relaunch keeps the conversation.
  */
 started: boolean, };

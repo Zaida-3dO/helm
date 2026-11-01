@@ -66,7 +66,7 @@ const localCat: ModelCatalogue = {
   ],
 };
 
-test('local models: their own group with server and context, greyed when the server did not answer, fixed after the first turn', () => {
+test('local models: their own group with server and context, greyed only when the server did not answer', () => {
   // The id splits on the first two slashes only, the context reads like people write it, and effort reads as thinking.
   assert.deepEqual([isLocalModel('local/ollama/org/llama:3b'), isLocalModel('opus'), isLocalModel(null)], [true, false, false]);
   assert.deepEqual([localServerId('local/ollama/org/llama:3b'), localServerId('opus'), localServerId('local/x')], ['ollama', null, null]);
@@ -94,15 +94,15 @@ test('local models: their own group with server and context, greyed when the ser
   assert.equal(modelRows(cat, 'opus').some((r) => r.group), false);
   assert.deepEqual(filterRows(open, 'strata').map((r) => r.id), ['local/strata/qwen-flash', 'local/strata/qwen-coder', 'local/strata/down:14b']);
 
-  // After the first turn: a Claude chat keeps Claude models, a local chat keeps its server.
-  const enabled = (cur: string) => modelRows(localCat, cur, true).filter((r) => !r.disabled).map((r) => r.id);
-  assert.deepEqual(enabled('opus'), ['opus', 'haiku']);
-  assert.deepEqual(enabled('local/strata/qwen-flash'), ['local/strata/qwen-flash', 'local/strata/qwen-coder', 'local/strata/down:14b']);
-  assert.deepEqual(enabled('local/ollama/org/llama:3b'), ['local/ollama/org/llama:3b']);
-  assert.match(modelRows(localCat, 'opus', true)[2]!.hint ?? '', /fixed for this chat: it started on Claude/);
-  assert.match(modelRows(localCat, 'local/strata/qwen-flash', true)[0]!.hint ?? '', /started on Strata/);
+  // A chat at any point can move its model anywhere: crossing between Claude and a local server,
+  // or between servers, greys nothing out — the next turn just runs on the new model, carrying the
+  // conversation. The only greyed rows are servers that did not answer.
+  const disabledIds = (cur: string) => modelRows(localCat, cur).filter((r) => r.disabled).map((r) => r.id);
+  assert.deepEqual(disabledIds('opus'), ['local/office/big:30b']);
+  assert.deepEqual(disabledIds('local/strata/qwen-flash'), ['local/office/big:30b'], 'a local chat keeps every Claude row pickable');
+  assert.deepEqual(disabledIds('local/ollama/org/llama:3b'), ['local/office/big:30b'], 'rows on other servers stay pickable');
   // A chat on a model the lists no longer hold still shows it (disabled), under its own group.
-  const gone = modelRows(localCat, 'local/strata/old', true);
+  const gone = modelRows(localCat, 'local/strata/old');
   assert.deepEqual([gone.at(-1)!.id, gone.at(-1)!.group, gone.at(-1)!.disabled], ['local/strata/old', 'Local', true]);
   assert.equal(gone.at(-1)!.title, 'old', 'before the servers have been asked, a local model reads as its own name');
   assert.equal(localModelName('local/ollama/org/llama:3b'), 'org/llama:3b');

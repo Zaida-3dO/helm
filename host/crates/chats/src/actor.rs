@@ -563,6 +563,7 @@ impl Actor {
                     live.turn_opened_ms = Some(now());
                     live.server_id = server;
                 }
+                None
             } else {
                 live.turn_opened_ms = None;
                 live.server_id = None;
@@ -1270,7 +1271,7 @@ impl Actor {
     /// blocking pool when the cache has aged out. Reachability is not touched either way — this
     /// read says nothing about a server being up.
     fn server_queue(&self, server: &str) -> Option<crate::local::QueueInfo> {
-        let seam = self.sh.local_models()?;
+        let seam = self.sh.local.get().cloned()?;
         let mut fetch = false;
         let last = {
             let mut map = self.sh.local_queue.lock().unwrap();
@@ -1465,8 +1466,9 @@ impl Actor {
                         .is_some_and(|m| crate::local::split(m).is_some())
                 {
                     // A local chat's model and thinking budget are part of its launch, and a worker
-                    // started for Claude cannot become a local one: start a new worker, now when
-                    // nothing runs and otherwise at the next idle point.
+                    // started for one provider cannot simply be retold to use the other: start a
+                    // new worker, which resumes the same session binding so the conversation
+                    // carries over — now when nothing runs, otherwise at the next idle point.
                     if self.status().is_busy() || self.agents_running() {
                         self.relaunch_on_idle = true;
                     } else {

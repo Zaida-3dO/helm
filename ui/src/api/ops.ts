@@ -77,8 +77,11 @@ export function chatOps(api: Api) {
     warm: (chatId: string) => api<null>('chat_warm', { chatId }),
     stopTool: (chatId: string, toolCallId: string) => api<{ stopped: boolean }>('tool_stop', { chatId, toolCallId }),
     compact: (chatId: string) => api<null>('chat_compact', { chatId }),
-    /** Ask the agent for a hand-off, start a successor chat with it and archive this one. */
-    rollOver: (chatId: string) => api<{ started: boolean }>('chat_roll_over', { chatId }),
+    /** Ask the agent for a hand-off, start a successor chat with it and archive this one.
+     *  `model`/`effort` put the successor on a different model (how the model picker rolls a
+     *  chat over into a model its conversation would not otherwise fit). */
+    rollOver: (chatId: string, model?: string, effort?: string) =>
+      api<{ started: boolean }>('chat_roll_over', { chatId, model, effort }),
     attention: () => api<AttentionSummary>('attention_get', {}),
     archive: (chatId: string) => api<ChatRecord>('chat_archive', { chatId }),
     restore: (chatId: string) => api<ChatRecord>('chat_restore', { chatId }),

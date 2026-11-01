@@ -125,11 +125,11 @@ export function localModelChoices(local: readonly LocalModelInfo[] | undefined):
 /**
  * The rows: the Claude models, then the local ones under their own heading, and (when the chat's
  * model is not among them) a disabled row for it, so the current choice is never silently
- * replaced. Once the chat has started (`fixed`) the model cannot cross between Claude and local,
- * or between local servers: those rows are disabled with a tooltip saying so. A local server that
- * did not answer greys its rows with the reason.
+ * replaced. A chat can change its model at any time, in either direction: the conversation carries
+ * over, so no row is greyed for having started. A local server that did not answer greys its rows
+ * with the reason.
  */
-export function modelRows(catalogue: ModelCatalogue | null, current: string | null, fixed = false): ModelRow[] {
+export function modelRows(catalogue: ModelCatalogue | null, current: string | null): ModelRow[] {
   const claude: ModelRow[] = (catalogue?.models ?? []).map((m) => ({
     id: m.id,
     title: shortName(m.name),
@@ -143,17 +143,6 @@ export function modelRows(catalogue: ModelCatalogue | null, current: string | nu
     // A local model not listed (yet: the servers are only asked when the picker opens) reads as its own name.
     if (isLocalModel(current)) local.push({ ...orphan, title: localModelName(current), group: 'Local' });
     else claude.push({ ...orphan, group: 'Claude' });
-  }
-  if (fixed) {
-    const onLocal = isLocalModel(current);
-    const server = localServerId(current);
-    const startedOn = onLocal ? ((catalogue?.local ?? []).find((m) => m.id === current)?.server ?? 'a local model server') : 'Claude';
-    for (const r of [...claude, ...local]) {
-      const crosses = isLocalModel(r.id) !== onLocal || (onLocal && localServerId(r.id) !== server);
-      if (!crosses) continue;
-      r.disabled = true;
-      r.hint = `The model is fixed for this chat: it started on ${startedOn}. Start a new chat to use this one.`;
-    }
   }
   const rows = [...claude, ...local];
   // Headings only help when there is more than one group.

@@ -3771,7 +3771,8 @@ fn loading_text(h: &H) -> Option<String> {
 
 /// A chat on a local model: the id maps to the chat's two columns and back, its model is made
 /// ready before the worker starts (with the loading line up until the first words), a refusal
-/// gives the text back, its turns cost nothing, and its model stays on its server.
+/// gives the text back, its turns cost nothing, and another model on its server starts a new
+/// worker. The cross-provider moves have their own tests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
     let mut h = harness();
@@ -3976,18 +3977,8 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
     let got = h.call("chat_get", json!({"chatId": chat})).await.unwrap();
     assert_eq!(got["chat"]["started"], true, "its first turn ran");
 
-    // The model is fixed once the chat has started: not Claude, not another server; another model
-    // on the same server is fine and starts a new worker.
-    for (to, why) in [
-        ("opus", "running on a local model"),
-        ("local/strata/qwen", "another"),
-    ] {
-        let e = h
-            .call("chat_set_model", json!({"chatId": chat, "model": to}))
-            .await
-            .unwrap_err();
-        assert!(e.message.contains(why), "{to}: {}", e.message);
-    }
+    // A started chat can change its model. Another model on the same server starts a new worker;
+    // a move across providers (to Claude, or to another server) has its own tests below.
     let moved = h
         .call(
             "chat_set_model",
@@ -4166,7 +4157,8 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         "the send that replaced the warm-up was never refused"
     );
 
-    // A Claude chat can't move to a local model once it has a session, but may before.
+    // A chat that has started may still move from Claude to a local model: the next worker
+    // resumes the same native session, so the conversation carries across the switch.
     let claude = h.create().await;
     h.call(
         "chat_set_model",
@@ -4191,19 +4183,253 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
             .is_some_and(|b| b.native_session_id.is_some())
     })
     .await;
-    let e = h
+    let moved = h
         .call(
             "chat_set_model",
             json!({"chatId": claude, "model": "local/ollama/qwen3:8b"}),
         )
         .await
+        .unwrap();
+    assert_eq!(moved["model"], "local/ollama/qwen3:8b");
+    cw.expect("shutdown").await;
+    cw.exit().await;
+    *local.outcome.lock().unwrap() = Ok("qwen3:8b-helm-64k".into());
+    h.send(&claude, "carry on", "default").await;
+    let wl = h.worker().await;
+    assert_eq!(
+        wl.req.resume_session_id.as_deref(),
+        Some("native-claude"),
+        "the local worker resumes the chat's Claude session: the conversation carries over"
+    );
+    assert!(wl.req.local.is_some(), "launched against the local server");
+}
+
+/// One whole turn played out to a settled end without the streaming and ordering checks the
+/// dedicated tests make: the echo, one reply written whole, the running totals, and the settle
+/// naming `session` (which is what the next worker resumes from). Answers with the worker, still
+/// up and now idle.
+async fn settled_turn(
+    h: &mut H,
+    chat: &str,
+    text: &str,
+    mid: &str,
+    answer: &str,
+    running: Value,
+    session: &str,
+) -> FakeWorker {
+    let (sid, _) = h.send(chat, text, "default").await;
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert_eq!(p["submissionId"], sid.as_str());
+    ack(&w, &p).await;
+    echo(&w, sid.as_str()).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "message_start", "message": {"id": mid, "role": "assistant", "content": []}}))
+        .await;
+    w.emit(json!({"type": "message_update", "messageId": mid, "index": 0, "delta": {"type": "text_delta", "text": answer}}))
+        .await;
+    w.emit(json!({"type": "message_end", "message": {"id": mid, "role": "assistant", "content": [{"type": "text", "text": answer}], "usage": {"input_tokens": 12, "output_tokens": 30, "cache_read_input_tokens": 400, "cache_creation_input_tokens": 50}, "status": "complete"}}))
+        .await;
+    w.emit(json!({
+        "type": "usage", "inputTokens": 12, "outputTokens": 30,
+        "cacheReadTokens": 400, "cacheWriteTokens": 50, "costUsd": 0.05, "running": running
+    }))
+    .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": session}))
+        .await;
+    h.until("the turn settled", |h| h.status(chat) == "idle").await;
+    // The binding is on disk before anything resumes from it.
+    h.until("the session is saved", |h| {
+        crate::session_log::ClaudeBinding::load(&h.profile.path("sessions"), chat)
+            .is_some_and(|b| b.native_session_id.as_deref() == Some(session))
+    })
+    .await;
+    w
+}
+
+/// A chat that has started can change its model in either direction between a local model server
+/// and Claude: the next worker resumes the chat's own Claude Code session, so the conversation
+/// carries across the switch, and the transcript's notice row carries the changer's reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_started_chat_moves_between_local_and_claude_in_both_directions() {
+    let mut h = harness();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("alpha-model".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+    let chat = h.create().await;
+    h.call("chat_set_model", json!({"chatId": &chat, "model": "opus"}))
+        .await
+        .unwrap();
+    let small = json!({"inputTokens": 20, "outputTokens": 40, "cacheReadTokens": 500,
+                       "cacheWriteTokens": 60, "costUsd": 0.05});
+    let mut cw = settled_turn(&mut h, &chat, "first on Claude", "m-1", "working on it", small.clone(), "native-0").await;
+    // (move to, the notice row it must write, the worker launches on the local server, the
+    //  session the next worker resumes, and the session that turn settles as)
+    for (model, notice, on_local, resumes, session) in [
+        (
+            "local/strata/alpha",
+            "Model changed to alpha (local) — other provider",
+            true,
+            "native-0",
+            "native-1",
+        ),
+        (
+            "opus[1m]",
+            "Model changed to opus[1m] — other provider",
+            false,
+            "native-1",
+            "native-2",
+        ),
+    ] {
+        let moved = h
+            .call(
+                "chat_set_model",
+                json!({"chatId": &chat, "model": model, "reason": "other provider"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(moved["model"], model, "the chat moved to {model}");
+        // The chat is idle, so the change takes its worker down now; the next send starts a new one.
+        cw.expect("shutdown").await;
+        cw.exit().await;
+        cw = settled_turn(
+            &mut h,
+            &chat,
+            &format!("a turn on {model}"),
+            &format!("m-{session}"),
+            "carried on from the other provider",
+            small.clone(),
+            session,
+        )
+        .await;
+        assert_eq!(
+            cw.req.local.is_some(),
+            on_local,
+            "{model}: the worker launches against the local server, not on Claude"
+        );
+        assert_eq!(
+            cw.req.resume_session_id.as_deref(),
+            Some(resumes),
+            "{model}: the next worker resumes the conversation carried from the other provider"
+        );
+        let notes = h.col(&format!(
+            "SELECT text FROM messages WHERE chat_id = '{chat}' AND role = 'context' ORDER BY id"
+        ));
+        assert!(
+            notes.iter().any(|t| t == notice),
+            "{model}: the transcript notice row is missing; rows are {notes:?}"
+        );
+    }
+    cw.exit().await;
+}
+
+/// A model change whose conversation plainly will not fit the target's window is refused with a
+/// roll over offered instead of a turn that would be cut off; taking the offer rolls the chat over
+/// into a successor that runs on that model, carrying the hand-off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_change_too_large_for_the_target_offers_a_roll_over() {
+    let mut h = harness();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("qwen3:8b-helm-64k".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+    let chat = h.create().await;
+    h.call("chat_set_model", json!({"chatId": &chat, "model": "opus"}))
+        .await
+        .unwrap();
+    // The session's running totals after the turn: far more than the small local window.
+    let big = json!({"inputTokens": 100, "outputTokens": 900, "cacheReadTokens": 150_000,
+                     "cacheWriteTokens": 2_000, "costUsd": 0.5});
+    let mut w = settled_turn(&mut h, &chat, "a long job", "m-1", "deep into it", big, "native-1").await;
+    let e = h
+        .call(
+            "chat_set_model",
+            json!({"chatId": &chat, "model": "local/ollama/qwen3:8b"}),
+        )
+        .await
         .unwrap_err();
+    assert_eq!(e.code, "too_large");
     assert!(
-        e.message.contains("already started on a Claude model"),
+        e.message.contains("65536") && e.message.contains("Roll this chat over instead"),
         "{}",
         e.message
     );
-    cw.exit().await;
+    // A move to a model the conversation still fits goes through: the guard only speaks where
+    // the numbers say it must.
+    h.call("chat_set_model", json!({"chatId": &chat, "model": "opus[1m]"}))
+        .await
+        .unwrap();
+
+    // Take the offer. The move to the wider Claude model took the idle worker down; the hand-off
+    // the roll over asks for runs on the worker the next send starts.
+    w.expect("shutdown").await;
+    w.exit().await;
+    let started = h
+        .call(
+            "chat_roll_over",
+            json!({"chatId": &chat, "model": "local/ollama/qwen3:8b"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started["started"], true);
+    let mut w = h.worker().await;
+    w.ready().await;
+    let p = w.expect("prompt").await;
+    assert!(p["text"].as_str().unwrap().contains("rolled over"));
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_start"})).await;
+    let handoff = "Goal: finish it. Left to do: part two.";
+    w.emit(json!({"type": "message_start", "message": {"id": "m-2", "role": "assistant", "content": []}}))
+        .await;
+    w.emit(json!({"type": "message_end", "message": {"id": "m-2", "role": "assistant", "content": [{"type": "text", "text": handoff}], "status": "complete"}}))
+        .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-2"}))
+        .await;
+    w.exit().await;
+
+    let mut w2 = h.worker().await;
+    assert!(
+        w2.req.local.is_some(),
+        "the successor runs against the local server"
+    );
+    w2.ready().await;
+    let first = w2.expect("prompt").await;
+    let text = first["text"].as_str().unwrap();
+    assert!(
+        text.contains(&chat) && text.contains(handoff),
+        "the successor opens with the hand-off: {text}"
+    );
+    h.until("old chat archived", |h| {
+        h.col(&format!("SELECT archived FROM chats WHERE id = '{chat}'")) == ["1"]
+    })
+    .await;
+    h.until("new chat opened", |h| {
+        !h.events("shell_open_chat").is_empty()
+    })
+    .await;
+    let new = h.events("shell_open_chat")[0]["chatId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        h.col(&format!(
+            "SELECT provider || '|' || model FROM chats WHERE id = '{new}'"
+        )),
+        ["ollama|qwen3:8b"],
+        "the successor runs on the model the old chat wanted"
+    );
 }
 
 /// The model server answers one request at a time. Two of Helm's chats open turns on it in turn:
@@ -4279,7 +4505,7 @@ async fn local_chats_say_who_the_model_server_is_busy_with() {
         ahead(h, &second) == ["1"]
     })
     .await;
-    assert_eq!(ahead(h, &first), ["0"], "the first stays without a count");
+    assert_eq!(ahead(&h, &first), ["0"], "the first stays without a count");
     let got = h
         .call("chat_get", json!({"chatId": &second}))
         .await

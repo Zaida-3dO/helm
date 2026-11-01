@@ -8,14 +8,18 @@
 // Built on the kit's shared picker popover, with the effort row in its footer slot.
 //
 // Claude's models come first, then the local models under their own heading, each with its server
-// and context size. A server that did not answer greys its rows. After the chat's first turn its
-// model is fixed: rows that would cross between Claude and local, or between servers, are disabled
-// with a tooltip saying so. A local model has no effort setting, so the same stops are labelled as
-// thinking.
+// and context size. A server that did not answer greys its rows. A chat can change its model at
+// any time, between Claude and a local server in either direction: the next turn runs on the new
+// model with the conversation carried over. Where the host says the conversation is larger than
+// the chosen model's window, the error comes with a "Roll over into it" offer: a fresh chat on
+// that model starting from a hand-off summary. A local model has no effort setting, so the same
+// stops are labelled as thinking.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatOps } from '../api/ops.ts';
 import type { ChatRecord, ModelCatalogue } from '../api/types.ts';
+import { rollOverChat } from '../sidebar/actions.ts';
+import { ConfirmDialog, type ConfirmSpec } from '../ui/index.ts';
 import { useBinding } from '../ui/hooks.ts';
 import { IconChevronDown } from '../ui/icons.tsx';
 import { PickerPopover, type PickerOption } from '../ui/Picker.tsx';
@@ -23,10 +27,16 @@ import { commitPatch, effortLabel, FALLBACK_EFFORTS, isLocalModel, localHint, mo
 
 let cached: Promise<ModelCatalogue> | null = null;
 
-/** Once the chat has started (`chat.started`), its model can no longer move between Claude and local, or between servers. */
+/** The chat's model and effort picker. A chat can change its model at any time; where the host
+ *  says the conversation will not fit the chosen model's window, the offer beside the error rolls
+ *  the chat over into it. */
 export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
   const [catalogue, setCatalogue] = useState<ModelCatalogue | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // A model change the host refused as too large for the target's window: the id it refused, so
+  // the offer can roll the chat over into that model.
+  const [tooLarge, setTooLarge] = useState<string | null>(null);
+  const [rollSpec, setRollSpec] = useState<ConfirmSpec | null>(null);
   const [open, setOpen] = useState(false);
   const [checking, setChecking] = useState(false);
   const [checked, setChecked] = useState(false);
@@ -48,7 +58,7 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
   const efforts = catalogue?.efforts?.length ? catalogue.efforts : FALLBACK_EFFORTS;
   const model = chat.model ?? catalogue?.models[0]?.id ?? '';
   const effort = chat.effort ?? catalogue?.defaultEffort ?? 'xhigh';
-  const rows = useMemo(() => modelRows(catalogue, model || null, chat.started), [catalogue, model, chat.started]);
+  const rows = useMemo(() => modelRows(catalogue, model || null), [catalogue, model]);
   const options: PickerOption<string>[] = useMemo(
     () => rows.map((r) => ({ value: r.id, title: r.title, text: `${r.title} ${r.id} ${r.detail}`, subtitle: r.detail, disabled: r.disabled, group: r.group, hint: r.hint })),
     [rows],
@@ -94,7 +104,34 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
     const patch = commitPatch({ model, effort }, next);
     if (!patch) return;
     setError(null);
-    ops.setModel(chat.id, patch.model, patch.effort).catch((e: unknown) => setError(String((e as Error).message ?? e)));
+    setTooLarge(null);
+    ops
+      .setModel(chat.id, patch.model, patch.effort)
+      .catch((e: unknown) => {
+        setError(String((e as Error).message ?? e));
+        // The host measured the conversation against the new model's window and refused: offer
+        // the roll over, which starts a fresh chat on that model from a hand-off summary.
+        if ((e as { code?: unknown })?.code === 'too_large' && patch.model) setTooLarge(patch.model);
+      });
+  };
+
+  /** The roll over this chat's too-large refusal points at, confirmed before anything runs. */
+  const offerRollOver = () => {
+    const target = tooLarge;
+    if (!target) return;
+    const name = rows.find((r) => r.id === target)?.title ?? target;
+    setRollSpec({
+      title: 'Roll over into this model?',
+      body:
+        `The conversation is larger than ${name} can take into its window. The agent in “${chat.title || 'Untitled chat'}” ` +
+        'writes a short hand-off, a new chat on the chosen model starts from it, and this chat is archived. ' +
+        'Running work in this chat is not carried over.',
+      confirm: 'Roll over',
+      onConfirm: () =>
+        rollOverChat(ops, chat.id, (m) => setError(m), target).then((ok) => {
+          if (ok) setTooLarge(null);
+        }),
+    });
   };
 
   return (
@@ -138,6 +175,12 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
           {error}
         </span>
       )}
+      {tooLarge && (
+        <button type="button" className="model-picker-link" data-testid="model-roll-over-offer" onClick={offerRollOver}>
+          Roll over into it
+        </button>
+      )}
+      {rollSpec && <ConfirmDialog spec={rollSpec} onClose={() => setRollSpec(null)} />}
       {open && (
         <PickerPopover
           // Placed once when it mounts: a list that grows after a check (more rows) must be placed again.

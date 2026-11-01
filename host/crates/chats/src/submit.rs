@@ -669,20 +669,16 @@ pub fn submission_action(
     Ok(SubmissionActionResult { submission })
 }
 
-/// The model is fixed once a chat has started: a chat that began on Claude stays on Claude
-/// models, and a chat on a local server stays on that server (another model on it is fine). Before
-/// the first turn any model may be picked. `before` is the chat's model id now, `to` the server
-/// the new model lives on (`None` for a Claude model).
-fn refuse_model_crossing(
+/// A chat may change its model at any time, in either direction and between servers: the next
+/// worker resumes the same session log and Claude Code binding, so the conversation — user
+/// messages, replies, tool calls and their results — carries over. What still has to be said is
+/// when the conversation plainly will not fit the target's window: the answer is a roll over into
+/// a summary, not a turn that will be cut off. `to` is the new model's one-string id.
+fn check_model_capacity(
     rt: &ChatRuntime,
     chat_id: &str,
-    before: Option<&str>,
-    to: Option<&str>,
+    to: &str,
 ) -> Result<(), ApiError> {
-    let from = before.and_then(crate::local::split).map(|(s, _)| s);
-    if from == to {
-        return Ok(());
-    }
     let started = rt
         .db()
         .snapshot(|t| {
@@ -699,22 +695,67 @@ fn refuse_model_crossing(
     if !started {
         return Ok(());
     }
-    let why = match (from, to) {
-        (None, _) => {
-            "This chat has already started on a Claude model, so it can't move to a local model. Start a new chat to use one."
-        }
-        (Some(_), None) => {
-            "This chat is running on a local model, so it can't move to a Claude model. Start a new chat to use one."
-        }
-        (Some(_), Some(_)) => {
-            "This chat is running on one local model server, so it can't move to another. Start a new chat to use that one."
-        }
+    let window = match target_window(rt, to) {
+        Some(w) => w,
+        None => return Ok(()), // nothing trustworthy to compare against: no size rule applies
     };
-    Err(ApiError::new("refused", why))
+    let here = match conversation_tokens(rt, chat_id) {
+        Some(n) => n,
+        None => return Ok(()), // no turn has reported usage: nothing measured to refuse over
+    };
+    if here <= window {
+        return Ok(());
+    }
+    Err(ApiError::new(
+        "too_large",
+        &format!(
+            "About {here} tokens are in this chat's context, more than {to} can take into its {window}-token window. Roll this chat over instead: a fresh chat on that model carries on from a hand-off summary."
+        ),
+    ))
 }
 
-/// `chat_set_model`: store the choice, note it in the transcript, drop any pending restart
-/// continuation (the chat changed), and apply it from the next turn.
+/// The context window the chosen model gets. A local model's is the figure its server reports;
+/// nothing else to go by, `None` when the server does not say. A Claude model: the ids that name
+/// the longer window take it, everything else the standard one (Helm's own working figure —
+/// a size rule only ever needs a close enough bound).
+fn target_window(rt: &ChatRuntime, model_id: &str) -> Option<u64> {
+    match crate::local::split(model_id) {
+        Some(_) => rt
+            .local_models()
+            .and_then(|l| l.catalogue(false).into_iter().find(|m| m.id == model_id))
+            .and_then(|m| m.context_tokens),
+        None => Some(if model_id.to_ascii_lowercase().contains("[1m]") {
+            1_000_000
+        } else {
+            200_000
+        }),
+    }
+}
+
+/// How much context the chat's conversation now holds: what Claude Code reported as its running
+/// totals after the newest turn (a local chat's turns report them the same way). `None` when no
+/// turn has reported usage.
+fn conversation_tokens(rt: &ChatRuntime, chat_id: &str) -> Option<u64> {
+    let raw: Option<String> = rt
+        .db()
+        .snapshot(|t| {
+            t.query_row(
+                "SELECT running FROM chat_turn_usage WHERE chat_id = ?1
+                 ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+                [chat_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .ok()?;
+    let u = raw.and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())?;
+    let n = |k: &str| u.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    Some(n("inputTokens") + n("cacheReadTokens") + n("cacheWriteTokens"))
+}
+
+/// `chat_set_model`: store the choice, note it in the transcript (with the agent's stated reason
+/// when an agent changed the model), drop any pending restart continuation (the chat changed), and
+/// apply it from the next turn — across providers the relaunch carries the conversation.
 pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecord, ApiError> {
     if let Some(e) = a.effort.as_deref() {
         if !crate::catalogue::is_effort(e) {
@@ -746,14 +787,15 @@ pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecor
             ));
         }
     }
-    if model.is_some() {
-        refuse_model_crossing(
-            rt,
-            &a.chat_id,
-            before.model.as_deref(),
-            new_provider.as_deref(),
-        )?;
+    if let Some(m) = &model {
+        check_model_capacity(rt, &a.chat_id, m)?;
     }
+    let reason = a
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(|r| r.chars().take(500).collect::<String>());
     let now = helm_core::now_ms();
     let artifacts = rt.sh.cfg.artifacts();
     rt.db()
@@ -774,13 +816,21 @@ pub fn chat_set_model(rt: &ChatRuntime, a: ChatSetModelArgs) -> Result<ChatRecor
                 "DELETE FROM restart_continuations WHERE chat_id = ?1",
                 [&a.chat_id],
             )?;
+            let model_text = model.as_ref().map(|m| {
+                let label = match crate::local::split(m) {
+                    Some((_, name)) => format!("Model changed to {name} (local)"),
+                    None => format!("Model changed to {m}"),
+                };
+                match &reason {
+                    // An agent changed the model and said why: its reason rides on the notice row.
+                    Some(r) => format!("{label} — {r}"),
+                    None => label,
+                }
+            });
             for (kind, text) in [
                 (
                     model.as_ref().map(|_| ContextKind::ModelChange),
-                    model.as_ref().map(|m| match crate::local::split(m) {
-                        Some((_, name)) => format!("Model changed to {name} (local)"),
-                        None => format!("Model changed to {m}"),
-                    }),
+                    model_text,
                 ),
                 (
                     effort.as_ref().map(|_| ContextKind::EffortChange),

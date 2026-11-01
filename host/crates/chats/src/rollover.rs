@@ -2,9 +2,11 @@
 //!
 //! `chat_roll_over {chatId}` asks the chat's own agent for a hand-off (what is done, what is left,
 //! the files and branches that matter, open problems), waits for that turn to end, starts a
-//! successor chat in the same project and folder with the same model and effort, sends it the
-//! hand-off as its first message (with the old chat's title and id so the two can be matched), and
-//! archives the old chat, stopping it first if it is somehow working again.
+//! successor chat in the same project and folder with the same model and effort — or the model and
+//! effort asked for, which is how the app offers a roll over when a conversation has outgrown a
+//! model the chat wants to move to — sends the successor the hand-off as its first message (with
+//! the old chat's title and id so the two can be matched), and archives the old chat, stopping it
+//! first if it is somehow working again.
 //!
 //! The op answers at once with `{started: true}`; the rest runs in the background. When the
 //! successor exists the app opens it (`shell_open_chat`). A failure before the successor is
@@ -101,9 +103,47 @@ fn handoff_after(rt: &ChatRuntime, chat: &str, after: i64) -> rusqlite::Result<O
     })
 }
 
+/// `chat_roll_over {chatId, model?, effort?}:` the successor runs on the chat's own model and
+/// effort unless the caller names a model (a Claude model id or a `local/<server>/<model>` id),
+/// which is how a chat moves to a model its conversation would not otherwise fit.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RollOverArgs {
+    chat_id: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+}
+
 async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
-    let a: ChatIdArgs = crate::ops::parse_args(args)?;
+    let a: RollOverArgs = crate::ops::parse_args(args)?;
     let rt = (*ctx.services.need::<ChatRuntime>()?).clone();
+    // A named model must at least name a server that is set up; the successor's own creation
+    // checks the rest.
+    let target_model = match a.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => {
+            let (server, _) = crate::local::columns(Some(m)).map_err(ApiError::bad_args)?;
+            if let Some(server) = &server {
+                if rt.local_models().is_some_and(|l| !l.knows(server)) {
+                    return Err(ApiError::bad_args(
+                        "That local model server is not set up. Add it in Settings > Local models.",
+                    ));
+                }
+            }
+            Some(m.to_owned())
+        }
+        None => None,
+    };
+    let target_effort = match a.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        Some(e) if crate::catalogue::is_effort(e) => Some(e.to_owned()),
+        Some(_) => {
+            return Err(ApiError::bad_args(
+                "Effort must be low, medium, high, xhigh or max.",
+            ))
+        }
+        None => None,
+    };
     let chat = rt
         .db()
         .snapshot(|tx| crate::store::get_chat(tx, &a.chat_id, 0))
@@ -140,7 +180,7 @@ async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
     )?;
     let handle = rt.handle().clone();
     handle.spawn(async move {
-        if let Err(why) = finish(&ctx, &rt, &chat, mark).await {
+        if let Err(why) = finish(&ctx, &rt, &chat, mark, target_model, target_effort).await {
             log::warn!("roll over of {}: {why}", chat.id);
             ctx.events.emit(
                 AppEvent::new("chat_roll_over_failed")
@@ -152,7 +192,14 @@ async fn chat_roll_over(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
     Ok(json!({"started": true}))
 }
 
-async fn finish(ctx: &OpCtx, rt: &ChatRuntime, chat: &ChatRecord, mark: i64) -> Result<(), String> {
+async fn finish(
+    ctx: &OpCtx,
+    rt: &ChatRuntime,
+    chat: &ChatRecord,
+    mark: i64,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + HANDOFF_WAIT;
     let handoff = loop {
         if tokio::time::Instant::now() >= deadline {
@@ -168,10 +215,11 @@ async fn finish(ctx: &OpCtx, rt: &ChatRuntime, chat: &ChatRecord, mark: i64) -> 
     };
     let message = successor_message(&chat.title, &chat.id, &cut(&handoff, MAX_HANDOFF_BYTES));
     let mut create = json!({"cwd": chat.cwd, "projectId": chat.project_id});
-    if let Some(m) = &chat.model {
+    // The asked-for model and effort win; otherwise the successor keeps the old chat's.
+    if let Some(m) = model.as_ref().or(chat.model.as_ref()) {
         create["model"] = json!(m);
     }
-    if let Some(e) = &chat.effort {
+    if let Some(e) = effort.as_ref().or(chat.effort.as_ref()) {
         create["effort"] = json!(e);
     }
     let ctx2 = ctx.clone();
