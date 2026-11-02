@@ -138,7 +138,8 @@ describe("Telegram messages into chats, and the turn mirrored back", { timeout: 
   test("T3: one live status while running; a steer does not abort; /stop stops", async () => {
     const mark = tg!.sent.length;
     tg!.message(ALLOWED_USER, "[E8-run] start the long one");
-    await until("a status naming the tool", () => (phone().some((t) => t.startsWith("Working") && t.includes("Bash")) ? true : undefined));
+    // A shell call without a description shows a fixed phrase, never the command itself.
+    await until("a status naming the tool call", () => (phone().some((t) => t.startsWith("Working") && t.includes("Running a command")) ? true : undefined));
     const statuses = () => phone().filter((t) => t.startsWith("Working"));
     assert.equal(statuses().length, 1, "one status message");
     tg!.message(ALLOWED_USER, "a steer while it runs");
