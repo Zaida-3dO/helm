@@ -9,7 +9,7 @@ import type { FakeOpHandler } from './fakeHost.ts';
 export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   const set = { lanUrl: false, fallbackUrl: false, token: false };
   let since = 0;
-  const tg: TelegramSettings = { chat: null, maxAgeHours: 24, maxTokens: 400_000, awayAlerts: true, approvals: false };
+  const tg: TelegramSettings = { chat: null, maxAgeHours: 24, maxTokens: 400_000, awayAlerts: true, approvals: false, model: null, effort: null };
   const view = (): HubConnection => ({
     hasAddress: set.lanUrl,
     hasFallback: set.fallbackUrl,
@@ -40,6 +40,9 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         tg.maxTokens = Number(a.maxTokens);
         tg.awayAlerts = a.awayAlerts !== false;
         tg.approvals = a.approvals === true;
+        // Blank or missing counts as unset, as the host reads it.
+        tg.model = typeof a.model === 'string' && a.model.trim() ? a.model.trim() : null;
+        tg.effort = typeof a.effort === 'string' && a.effort.trim() ? a.effort.trim() : null;
         return tg;
       case 'relay_telegram_reset':
         tg.chat = null;

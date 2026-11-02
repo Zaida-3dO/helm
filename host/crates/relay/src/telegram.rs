@@ -8,9 +8,11 @@
 //!   or deleted), Helm starts a new chat named `Telegram <bot name> <date>`. The tag is a small
 //!   file in the profile, `relay/telegram-chat.json`.
 //! - **Queued messages** arrive marked with how long ago they were sent.
-//! - **The limits** (age and tokens) and the away-alerts switch ([`crate::notify`]) are set in
-//!   Settings → Hub and kept beside the tag, in `relay/telegram-policy.json`; Settings can also
-//!   drop the tag so the next message starts fresh.
+//! - **The limits** (age and tokens), the away-alerts switch ([`crate::notify`]) and the model
+//!   and effort new Telegram chats open with are set in Settings → Hub and kept beside the tag,
+//!   in `relay/telegram-policy.json`; Settings can also drop the tag so the next message starts
+//!   fresh. With no model or effort saved, a new Telegram chat opens on the same model and effort
+//!   as any other new chat.
 //! - **Answered questions.** The hub ids of replies that answered a question are kept in
 //!   `relay/telegram-answered.json`, so a resend after a restart is not taken as a new prompt.
 //!
@@ -48,8 +50,9 @@ impl Default for TagPolicy {
     }
 }
 
-/// The limits and the away-alerts switch, as stored and as Settings shows them.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// The limits, the away-alerts switch and the new chats' model and effort, as stored and as
+/// Settings shows them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PolicyFile {
     pub max_age_hours: i64,
@@ -61,6 +64,24 @@ pub struct PolicyFile {
     /// the user turns it on in Settings.
     #[serde(default)]
     pub approvals: bool,
+    /// The model a new Telegram chat opens with. `None` (or blank): the same model as any other
+    /// new chat, from the new-chat settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The effort a new Telegram chat opens with. `None` (or blank): the same effort as any
+    /// other new chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl PolicyFile {
+    /// The model and effort to hand a new Telegram chat, or `None` for each when unset or blank.
+    pub fn new_chat(&self) -> (Option<&str>, Option<&str>) {
+        fn kept(s: &Option<String>) -> Option<&str> {
+            s.as_deref().map(str::trim).filter(|t| !t.is_empty())
+        }
+        (kept(&self.model), kept(&self.effort))
+    }
 }
 
 fn on() -> bool {
@@ -75,13 +96,15 @@ impl Default for PolicyFile {
             max_tokens: p.max_tokens,
             away_alerts: true,
             approvals: false,
+            model: None,
+            effort: None,
         }
     }
 }
 
 impl PolicyFile {
     /// Refuses a value outside the ranges Settings offers.
-    pub fn check(self) -> Result<TagPolicy, String> {
+    pub fn check(&self) -> Result<TagPolicy, String> {
         if !AGE_HOURS.contains(&self.max_age_hours) {
             return Err("The age limit must be 1 to 720 hours.".into());
         }
@@ -680,8 +703,10 @@ mod tests {
             max_tokens: 50_000,
             away_alerts: false,
             approvals: true,
+            model: Some("model-one".into()),
+            effort: Some("medium".into()),
         };
-        save_policy(&p, set).unwrap();
+        save_policy(&p, set.clone()).unwrap();
         assert_eq!(load_file(&p), set);
         assert_eq!(load_policy(&p), set.check().unwrap());
         assert!(!load_away_alerts(&p));
@@ -691,10 +716,50 @@ mod tests {
                 max_tokens: tokens,
                 away_alerts: true,
                 approvals: false,
+                model: None,
+                effort: None,
             };
             assert!(bad.check().is_err(), "{bad:?}");
         }
         assert!(load_approvals(&p), "saved on");
+        // The model and effort round-trip: set comes back, unset (or blank) reads as unset, and
+        // a file saved without the fields at all — from an older Helm — loads as unset.
+        assert_eq!(
+            load_file(&p).new_chat(),
+            (Some("model-one"), Some("medium"))
+        );
+        save_policy(
+            &p,
+            PolicyFile {
+                model: None,
+                effort: Some("  ".into()),
+                ..set.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            load_file(&p).new_chat(),
+            (None, None),
+            "blank counts as unset"
+        );
+        std::fs::write(
+            &p,
+            r#"{"maxAgeHours": 6, "maxTokens": 50000, "awayAlerts": true, "approvals": false}"#,
+        )
+        .unwrap();
+        let old = load_file(&p);
+        assert_eq!(old.model, None);
+        assert_eq!(old.effort, None);
+        assert_eq!(old.new_chat(), (None, None));
+        // An unknown model or effort is not refused here: the chats side answers for it, the
+        // same as for any chat started in the app.
+        assert_eq!(
+            set.check().unwrap(),
+            TagPolicy {
+                max_age_ms: 6 * HOUR_MS,
+                max_tokens: 50_000
+            }
+        );
         let s = sent_path(dir.path());
         for i in 0..=SENT_KEPT {
             remember_sent(&s, "Docs", &format!("n{i}")).unwrap();

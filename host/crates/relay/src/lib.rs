@@ -24,7 +24,8 @@
 //! never a value) and `relay_connection_save` ([`config::RelaySaveArgs`]: absent keeps, empty
 //! clears). For Settings → Hub's Telegram section: `relay_telegram_get` →
 //! [`sink::TelegramView`], `relay_telegram_save` ([`telegram::PolicyFile`]: the limits, the
-//! away-alerts switch and approving from Telegram) and
+//! away-alerts switch, approving from Telegram, and the model and effort a new Telegram chat
+//! opens with) and
 //! `relay_telegram_reset` (drop the tag, so the next message starts a new chat).
 
 pub mod approve;
@@ -171,7 +172,9 @@ fn telegram_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
 
 fn telegram_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let f: telegram::PolicyFile = serde_json::from_value(args).map_err(|_| {
-        ApiError::bad_args("Expected maxAgeHours, maxTokens, awayAlerts and approvals.")
+        ApiError::bad_args(
+            "Expected maxAgeHours, maxTokens, awayAlerts, approvals, and optional model and effort.",
+        )
     })?;
     f.check().map_err(ApiError::bad_args)?;
     let profile = ctx.services.need::<Profile>()?;

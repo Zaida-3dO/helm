@@ -3,10 +3,13 @@
 // each is set, so the fields always start empty and Save sends only what was typed.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { LocalModelInfo } from '../../api/types.ts';
 import { hubOps, type HubConnection, type HubConnectionSave, type LineState, type TelegramSettings } from '../../api/hub.ts';
+import { localModelChoices } from '../../composer/modelEffort.ts';
 import { useShell } from '../../shell/context.ts';
-import { Button, Checkbox, SettingRow, TextInput } from '../../ui/index.ts';
+import { Button, Checkbox, Picker, SettingRow, TextInput } from '../../ui/index.ts';
 import { SETTINGS_DIALOG } from '../SettingsDialog.tsx';
+import { EFFORT_OPTIONS } from '../runtime/model.ts';
 import { compactCount } from '../../transcript/rowMeta.ts';
 import './hub.css';
 
@@ -51,6 +54,36 @@ const FIELDS: { key: Field; title: string; description: string; placeholder: str
   },
 ];
 
+/** Picker options for the model a new Telegram chat opens with: the app default first, then the
+ *  model list (Claude's models and any local ones, as everywhere else). A saved model the list
+ *  no longer carries still shows, so the picker never lies. */
+function modelChoices(
+  models: { id: string; name: string; description?: string }[],
+  saved: string | null,
+): { value: string; title: string; subtitle?: string }[] {
+  const out: { value: string; title: string; subtitle?: string }[] = [
+    { value: '', title: 'App default', subtitle: 'The same model any other new chat starts with' },
+  ];
+  for (const m of models) {
+    if (!m.id || out.some((o) => o.value === m.id)) continue;
+    out.push({ value: m.id, title: m.name || m.id, subtitle: m.description || undefined });
+  }
+  if (saved && !out.some((o) => o.value === saved)) out.push({ value: saved, title: saved });
+  return out;
+}
+
+/** Picker options for the effort a new Telegram chat opens with: app default first, then the
+ *  same levels every other effort picker offers. A saved effort the list no longer carries still
+ *  shows, so the picker never lies (same promise as `modelChoices`). */
+function effortChoices(saved: string | null): { value: string; title: string; subtitle?: string }[] {
+  const out: { value: string; title: string; subtitle?: string }[] = [
+    { value: '', title: 'App default', subtitle: 'The same effort any other new chat starts with' },
+    ...EFFORT_OPTIONS,
+  ];
+  if (saved && !out.some((o) => o.value === saved)) out.push({ value: saved, title: saved });
+  return out;
+}
+
 export function HubPane() {
   const shell = useShell();
   const ops = useMemo(() => hubOps(shell.api), [shell.api]);
@@ -58,6 +91,7 @@ export function HubPane() {
   const [draft, setDraft] = useState<HubConnectionSave>({});
   const [tg, setTg] = useState<TelegramSettings | null>(null);
   const [limits, setLimits] = useState<{ hours: string; ktokens: string } | null>(null);
+  const [models, setModels] = useState<{ id: string; name: string; description?: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -79,11 +113,15 @@ export function HubPane() {
       .telegram()
       .then((t) => live && showTelegram(t))
       .catch((e: unknown) => live && setError(errorText(e)));
+    void shell
+      .api<{ models: { id: string; name: string; description?: string }[]; local?: LocalModelInfo[] }>('model_catalogue', { harness: 'claude' })
+      .then((c) => live && setModels([...c.models, ...localModelChoices(c.local)]))
+      .catch(() => undefined);
     return () => {
       live = false;
       clearInterval(t);
     };
-  }, [ops, showTelegram]);
+  }, [ops, shell, showTelegram]);
 
   const run = async <T,>(p: Promise<T>, then: (v: T) => void) => {
     setBusy(true);
@@ -108,6 +146,13 @@ export function HubPane() {
   const ktokens = Number(limits?.ktokens);
   const limitsValid = Number.isInteger(hours) && hours >= 1 && hours <= 720 && Number.isInteger(ktokens) && ktokens >= 10 && ktokens <= 5000;
   const limitsChanged = tg !== null && (hours !== tg.maxAgeHours || ktokens * 1000 !== tg.maxTokens);
+  const telegramModels = useMemo(() => modelChoices(models, tg?.model ?? null), [models, tg?.model]);
+
+  /** Save one of the new-chat defaults; empty string means back to unset (the app default). */
+  const saveTelegram = (patch: Partial<Pick<TelegramSettings, 'model' | 'effort'>>) => {
+    if (!tg) return;
+    void run(ops.saveTelegram({ ...tg, ...patch }), showTelegram);
+  };
 
   return (
     <div className="hub-pane" data-testid="settings-hub">
@@ -209,6 +254,39 @@ export function HubPane() {
         </SettingRow>
       )}
       {limits && !limitsValid && <div className="ui-field-error">Hours must be 1 to 720, and tokens 10k to 5,000k.</div>}
+      {tg && (
+        <SettingRow
+          title="Model for new Telegram chats"
+          description="The model a new Telegram chat opens with. App default opens it on the same model as any other new chat."
+        >
+          <Picker
+            settings
+            label="Model for new Telegram chats"
+            testId="hub-telegram-model"
+            value={tg.model ?? ''}
+            options={telegramModels}
+            searchable
+            disabled={busy}
+            onChange={(v) => saveTelegram({ model: v || null })}
+          />
+        </SettingRow>
+      )}
+      {tg && (
+        <SettingRow
+          title="Effort for new Telegram chats"
+          description="How hard the agent thinks before answering in a new Telegram chat. App default uses the same effort as any other new chat."
+        >
+          <Picker
+            settings
+            label="Effort for new Telegram chats"
+            testId="hub-telegram-effort"
+            value={tg.effort ?? ''}
+            options={effortChoices(tg.effort)}
+            disabled={busy}
+            onChange={(v) => saveTelegram({ effort: v || null })}
+          />
+        </SettingRow>
+      )}
       {tg && (
         <SettingRow
           testId="hub-away-alerts"

@@ -258,6 +258,10 @@ struct RealPort<'a> {
     ops: &'a dyn OpInvoker,
     handle: &'a tokio::runtime::Handle,
     folder: &'a str,
+    /// The model and effort saved for new Telegram chats; `None` passes neither to the op, so
+    /// the chat opens on the new-chat default as before.
+    new_chat_model: Option<String>,
+    new_chat_effort: Option<String>,
 }
 
 /// Whether the chat is archived and the tokens it has used; `None` when it no longer exists.
@@ -308,6 +312,10 @@ pub struct TelegramView {
     pub away_alerts: bool,
     /// Approval prompts answered with Telegram buttons ([`crate::approve`]).
     pub approvals: bool,
+    /// The model a new Telegram chat opens with; `None`: the same as any other new chat.
+    pub model: Option<String>,
+    /// The effort a new Telegram chat opens with; `None`: the same as any other new chat.
+    pub effort: Option<String>,
 }
 
 pub fn telegram_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> TelegramView {
@@ -339,12 +347,15 @@ pub fn telegram_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> 
             id: tag.chat_id,
         })
     });
+    let (model, effort) = file.new_chat();
     TelegramView {
         chat,
         max_age_hours: file.max_age_hours,
         max_tokens: file.max_tokens,
         away_alerts: file.away_alerts,
         approvals: file.approvals,
+        model: model.map(str::to_owned),
+        effort: effort.map(str::to_owned),
     }
 }
 
@@ -356,13 +367,32 @@ impl ChatPort for RealPort<'_> {
     fn create(&self, title: &str) -> Result<String, String> {
         std::fs::create_dir_all(self.folder)
             .map_err(|_| "The Telegram chats' folder could not be made.".to_owned())?;
-        let chat = self
-            .handle
-            .block_on(
-                self.ops
-                    .invoke("chat_create", json!({ "cwd": self.folder })),
-            )
-            .map_err(|e| e.message)?;
+        // `chat_create` already takes a model and an effort; without them it uses the new-chat
+        // default exactly as before.
+        let mut args = json!({ "cwd": self.folder });
+        if let Some(m) = &self.new_chat_model {
+            args["model"] = json!(m);
+        }
+        if let Some(e) = &self.new_chat_effort {
+            args["effort"] = json!(e);
+        }
+        let asked = self.new_chat_model.is_some() || self.new_chat_effort.is_some();
+        let chat = match self.handle.block_on(self.ops.invoke("chat_create", args)) {
+            Ok(chat) => chat,
+            Err(e) if !asked => return Err(e.message),
+            Err(e) => {
+                // A refused saved model or effort — the model's local server was removed from
+                // this machine, say — must not leave the channel dark: open the chat without
+                // them so it answers on the app default instead.
+                log::warn!("relay: refused the saved Telegram chat settings ({0}); opening on the app default: {0}", e.message);
+                self.handle
+                    .block_on(
+                        self.ops
+                            .invoke("chat_create", json!({ "cwd": self.folder })),
+                    )
+                    .map_err(|e| e.message)?
+            }
+        };
         let id = chat["id"]
             .as_str()
             .ok_or("chat_create answered no id")?
@@ -439,6 +469,9 @@ pub struct Ctx {
     /// The folder new Telegram chats start in.
     pub folder: String,
     pub policy: TagPolicy,
+    /// The model and effort saved for a new Telegram chat; `None` each: the new-chat default.
+    pub new_chat_model: Option<String>,
+    pub new_chat_effort: Option<String>,
     /// Hub ids that answered a question, so a resend does not answer twice (or turn into a
     /// prompt), and the file they are kept in.
     pub answered: Arc<Mutex<VecDeque<String>>>,
@@ -490,6 +523,8 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         ops: &*c.ops,
         handle: &c.handle,
         folder: &c.folder,
+        new_chat_model: c.new_chat_model.clone(),
+        new_chat_effort: c.new_chat_effort.clone(),
     };
     let (chat, _created) =
         telegram::active_chat(&c.tag_path, &port, &c.policy, msg.bot.as_deref(), now)?;
@@ -841,6 +876,9 @@ impl ChatSink {
             .services
             .get::<Database>()
             .ok_or("Helm's database is not available.")?;
+        // Read once per delivery, so a change in Settings applies to the next message.
+        let file = telegram::load_file(&telegram::policy_path(&self.profile_dir));
+        let (model, effort) = file.new_chat();
         Ok(Ctx {
             rt: (*rt).clone(),
             db,
@@ -848,8 +886,9 @@ impl ChatSink {
             handle: tokio::runtime::Handle::current(),
             tag_path: telegram::tag_path(&self.profile_dir),
             folder: plain_path(&self.profile_dir.join("telegram")),
-            // Read per delivery, so a change in Settings applies to the next message.
-            policy: telegram::load_policy(&telegram::policy_path(&self.profile_dir)),
+            policy: file.check().unwrap_or_default(),
+            new_chat_model: model.map(str::to_owned),
+            new_chat_effort: effort.map(str::to_owned),
             answered: self.answered.clone(),
             answered_path: telegram::answered_path(&self.profile_dir),
             sent_path: telegram::sent_path(&self.profile_dir),

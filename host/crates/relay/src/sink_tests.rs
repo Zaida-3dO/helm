@@ -230,6 +230,10 @@ impl helm_chats::runtime::Spawner for NoWorker {
 struct FakeOps {
     db: Arc<Database>,
     calls: Mutex<Vec<(String, Value)>>,
+    /// When set, a `chat_create` that names a model or effort is refused with a bad-args
+    /// error, the way the chats side answers for a local server that is no longer set up —
+    /// so the retry without the names can be proven to succeed.
+    refuse_named: std::sync::atomic::AtomicBool,
 }
 
 impl OpInvoker for FakeOps {
@@ -243,6 +247,14 @@ impl OpInvoker for FakeOps {
             .unwrap()
             .push((op.to_owned(), args.clone()));
         let r = match op {
+            "chat_create"
+                if self.refuse_named.load(std::sync::atomic::Ordering::SeqCst)
+                    && (args.get("model").is_some() || args.get("effort").is_some()) =>
+            {
+                Err(ApiError::bad_args(
+                    "that model's local server is not set up on this machine",
+                ))
+            }
             "chat_create" => {
                 let cwd = args["cwd"].as_str().unwrap_or_default().to_owned();
                 self.db
@@ -283,6 +295,7 @@ fn env() -> Env {
     let ops = Arc::new(FakeOps {
         db: db.clone(),
         calls: Mutex::new(vec![]),
+        refuse_named: std::sync::atomic::AtomicBool::new(false),
     });
     let ctx = Ctx {
         rt,
@@ -292,6 +305,8 @@ fn env() -> Env {
         tag_path: telegram::tag_path(&dir.path().join("prof")),
         folder: plain_path(&dir.path().join("prof").join("telegram")),
         policy: TagPolicy::default(),
+        new_chat_model: None,
+        new_chat_effort: None,
         answered: Arc::new(Mutex::new(VecDeque::new())),
         answered_path: telegram::answered_path(&dir.path().join("prof")),
         sent_path: telegram::sent_path(&dir.path().join("prof")),
@@ -611,6 +626,116 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
     drop(e.dir);
 }
 
+/// The model and effort saved for a new Telegram chat are passed to `chat_create`; when they are
+/// not saved the call omits them, and the chat opens on the new-chat default as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_saved_model_and_effort_reach_the_new_telegram_chat() {
+    for (model, effort) in [
+        (Some("model-a"), Some("medium")),
+        (Some("model-b"), None),
+        (None, Some("high")),
+        (None, None),
+    ] {
+        let e = env();
+        let ctx = Ctx {
+            new_chat_model: model.map(str::to_owned),
+            new_chat_effort: effort.map(str::to_owned),
+            ..e.ctx.clone()
+        };
+        let p = place_async(&ctx, msg("hub-m", "which model?"))
+            .await
+            .unwrap();
+        assert!(matches!(p, Placed::Sent { .. }));
+        let calls = e.ops.calls.lock().unwrap().clone();
+        let (_, args) = calls.iter().find(|(o, _)| o == "chat_create").unwrap();
+        assert_eq!(args.get("model").and_then(Value::as_str), model);
+        assert_eq!(args.get("effort").and_then(Value::as_str), effort);
+    }
+}
+
+/// A saved model the chats side refuses — its local server was removed from this machine, say —
+/// must not leave the channel dark: `create` retries once without the model and effort, so the
+/// chat opens on the app default and the message gets an answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_model_opens_the_chat_on_the_app_default() {
+    let e = env();
+    e.ops
+        .refuse_named
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let ctx = Ctx {
+        new_chat_model: Some("local/strata/gone-model".to_owned()),
+        new_chat_effort: Some("high".to_owned()),
+        ..e.ctx.clone()
+    };
+    let p = place_async(&ctx, msg("hub-m", "still answering?"))
+        .await
+        .unwrap();
+    assert!(matches!(p, Placed::Sent { .. }));
+    let calls = e.ops.calls.lock().unwrap().clone();
+    let creates: Vec<&Value> = calls
+        .iter()
+        .filter(|(o, _)| o == "chat_create")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(creates.len(), 2, "{calls:?}");
+    assert_eq!(
+        creates[0]["model"].as_str(),
+        Some("local/strata/gone-model")
+    );
+    let bare = &creates[1];
+    assert!(bare.get("model").is_none(), "{bare}");
+    assert!(bare.get("effort").is_none(), "{bare}");
+}
+
+/// The round-trip the Settings → Hub pane relies on: what `relay_telegram_save` stored comes back
+/// through the view, so a saved model and effort show in the pickers — and unset, blank, a value
+/// outside the model list untouched, or a file written by an older Helm shows nothing, leaving the
+/// pickers on App default.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_telegram_settings_view_shows_the_saved_model_and_effort() {
+    let e = env();
+    let prof = e.dir.path().join("prof");
+    let path = telegram::policy_path(&prof);
+    let base = telegram::PolicyFile {
+        max_age_hours: 6,
+        max_tokens: 50_000,
+        away_alerts: true,
+        approvals: false,
+        model: None,
+        effort: None,
+    };
+    for (model, effort, shown) in [
+        (
+            Some("model-a"),
+            Some("medium"),
+            (Some("model-a"), Some("medium")),
+        ),
+        (Some("  "), Some("max"), (None, Some("max"))),
+        (None, None, (None, None)),
+    ] {
+        telegram::save_policy(
+            &path,
+            telegram::PolicyFile {
+                model: model.map(str::to_owned),
+                effort: effort.map(str::to_owned),
+                ..base.clone()
+            },
+        )
+        .unwrap();
+        let v = telegram_view(&e.db, &prof, T0);
+        assert_eq!((v.model.as_deref(), v.effort.as_deref()), shown);
+    }
+    // A policy file written by an older Helm, with neither field, reads as unset.
+    std::fs::write(
+        &path,
+        r#"{"maxAgeHours": 6, "maxTokens": 50000, "awayAlerts": true, "approvals": false}"#,
+    )
+    .unwrap();
+    let v = telegram_view(&e.db, &prof, T0);
+    assert_eq!((v.model.as_deref(), v.effort.as_deref()), (None, None));
+    drop(e.dir);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_busy_chat_gets_a_steer_whatever_the_send_mode() {
     let e = env();
@@ -779,7 +904,32 @@ async fn the_sink_delivers_only_once_wired_and_stop_reaches_the_tagged_chat() {
         "no op dispatcher yet"
     );
     sink.attach_ops(e.ops.clone());
+    // The model and effort saved in Settings reach the new chat: the sink reads the saved
+    // settings file per delivery and hands them to `chat_create`.
+    telegram::save_policy(
+        &telegram::policy_path(&e.dir.path().join("prof")),
+        telegram::PolicyFile {
+            max_age_hours: 6,
+            max_tokens: 50_000,
+            away_alerts: true,
+            approvals: false,
+            model: Some("model-a".into()),
+            effort: Some("low".into()),
+        },
+    )
+    .unwrap();
     sink.deliver(msg("m1", "hello")).await.unwrap();
+    let create = e
+        .ops
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(o, _)| o == "chat_create")
+        .map(|(_, a)| a.clone())
+        .unwrap();
+    assert_eq!(create.get("model").and_then(Value::as_str), Some("model-a"));
+    assert_eq!(create.get("effort").and_then(Value::as_str), Some("low"));
     let tag = telegram::load_tag(&e.ctx.tag_path).unwrap();
     assert_eq!(subs(&e.db, &tag.chat_id)[0].1, "telegram");
     sink.stop().await;

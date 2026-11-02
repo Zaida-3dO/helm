@@ -38,6 +38,10 @@ export interface TelegramSettings {
   awayAlerts: boolean;
   /** Permission prompts and plan approvals can be answered with Telegram buttons. */
   approvals: boolean;
+  /** The model a new Telegram chat starts with; `null`: the same as any other new chat. */
+  model: string | null;
+  /** The effort a new Telegram chat starts with; `null`: the same as any other new chat. */
+  effort: string | null;
 }
 
 export function hubOps(api: Api) {
@@ -45,12 +49,16 @@ export function hubOps(api: Api) {
     connection: () => api<HubConnection>('relay_connection_get', {}),
     saveConnection: (a: HubConnectionSave) => api<HubConnection>('relay_connection_save', a),
     telegram: () => api<TelegramSettings>('relay_telegram_get', {}),
-    saveTelegram: (s: Pick<TelegramSettings, 'maxAgeHours' | 'maxTokens' | 'awayAlerts' | 'approvals'>) =>
+    saveTelegram: (
+      s: Pick<TelegramSettings, 'maxAgeHours' | 'maxTokens' | 'awayAlerts' | 'approvals' | 'model' | 'effort'>,
+    ) =>
       api<TelegramSettings>('relay_telegram_save', {
         maxAgeHours: s.maxAgeHours,
         maxTokens: s.maxTokens,
         awayAlerts: s.awayAlerts,
         approvals: s.approvals,
+        model: s.model,
+        effort: s.effort,
       }),
     resetTelegram: () => api<TelegramSettings>('relay_telegram_reset', {}),
   };
