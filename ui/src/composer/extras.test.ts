@@ -101,4 +101,14 @@ test('the / menu stays open with the chosen command while its arguments are type
   assert.equal(moveActive(0, 3, -1), 2);
   assert.equal(moveActive(2, 3, 1), 0);
   assert.equal(moveActive(0, 0, 1), -1);
+  // Hiding matches case-insensitively; one of Helm's own plugin skills also hides on its bare
+  // folder name, the CLI showing it under the plugin prefix.
+  const { matchesHidden } = await import('./skills.ts');
+  const helmSkill = { name: 'helm:review', description: '', scope: 'helm-skill' };
+  assert.equal(matchesHidden(helmSkill, ['Review']), true, 'the bare folder name, any case');
+  assert.equal(matchesHidden(helmSkill, ['helm:review']), true, 'the reported name too');
+  assert.equal(matchesHidden(helmSkill, ['reviewer']), false, 'a different name stays');
+  assert.equal(matchesHidden({ name: 'helm:deploy', description: '', scope: 'plugin' }, ['deploy']), false, 'only Helm’s own drop the prefix');
+  assert.equal(matchesHidden({ name: 'deploy', description: '' }, ['deploy']), true);
+  assert.equal(matchesHidden({ name: 'deploy', description: '' }, [' deploy ']), true, 'spaces round the stored name');
 });

@@ -12,6 +12,7 @@ helm-ipc.workspace = true
 helm-platform.workspace = true
 helm-workers.workspace = true
 helm-hosttools = { path = "../hosttools" }
+helm-skills = { path = "../skills" }
 tokio.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true

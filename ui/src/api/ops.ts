@@ -118,8 +118,9 @@ export function chatOps(api: Api) {
         requestId: globalThis.crypto.randomUUID(),
         draft,
       }),
-    /** The CLI's commands and skills for this chat; empty until it has run. */
-    skills: (chatId: string) => api<{ name: string; description: string }[]>('skills_list', { chatId }),
+    /** The CLI's commands and skills for this chat; empty until it has run. `scope` says where
+     * one comes from when Helm can say (`helm-skill` for one from Helm's own skills folder). */
+    skills: (chatId: string) => api<{ name: string; description: string; scope?: string }[]>('skills_list', { chatId }),
     /** Store one image for the next send; `bytes` is base64. */
     attach: (chatId: string, name: string, mime: string, bytes: string) =>
       api<{ attachmentId: string }>('attachment_put', { chatId, name, mime, bytes }),

@@ -11,7 +11,18 @@ export interface Skill {
   scope?: string;
 }
 
-export const SCOPE_LABEL: Record<string, string> = { personal: 'Personal skill', project: 'Project skill', plugin: 'Plugin skill', builtin: 'Command', helm: 'Helm command' };
+export const SCOPE_LABEL: Record<string, string> = { personal: 'Personal skill', project: 'Project skill', plugin: 'Plugin skill', builtin: 'Command', helm: 'Helm command', 'helm-skill': 'Helm' };
+
+/** Whether the user hid this skill. Names match case-insensitively; one of Helm's own plugin
+ *  skills also matches its bare folder name, the CLI may report it with a prefix. */
+export function matchesHidden(s: Skill, hidden: readonly string[]): boolean {
+  const n = s.name.toLowerCase();
+  const bare = s.scope === 'helm-skill' && n.startsWith('helm:') ? n.slice('helm:'.length) : n;
+  return hidden.some((h) => {
+    const x = h.trim().toLowerCase();
+    return x === n || (bare !== n && x === bare);
+  });
+}
 
 /** Commands Helm runs itself. They lead the `/` menu's list and shadow a CLI skill of the same name. */
 export const HELM_COMMANDS: readonly Skill[] = [

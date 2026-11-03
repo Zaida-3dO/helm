@@ -74,6 +74,8 @@ export function buildClaudeArgs(c: ClaudeLaunch, opts: ArgOptions = {}): string[
   if (c.skipPermissions) args.push("--permission-mode", "bypassPermissions", "--allow-dangerously-skip-permissions");
   if (c.resumeSessionId) args.push("--resume", c.resumeSessionId);
   if (c.resumeSessionId && c.forkSession === true) args.push("--fork-session");
+  // Helm-managed plugin folders (its own skills): loaded whatever the project's setting sources are.
+  for (const dir of c.pluginDirs ?? []) args.push("--plugin-dir", dir);
   const append = [c.appendSystemPrompt, opts.promptRule].filter((x): x is string => typeof x === "string" && x.length > 0).join("\n\n");
   if (append) args.push("--append-system-prompt", append);
   // fastMode is always explicit: the launch's own field is its only owner.

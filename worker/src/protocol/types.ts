@@ -53,6 +53,8 @@ export interface ClaudeLaunch {
   scheduleTools?: boolean;
   /** Record which files each Bash call changed (compares the checkout before and after). Absent: off. */
   shellChanges?: boolean;
+  /** Plugin folders the CLI loads for this launch (`--plugin-dir`, repeatable): Helm's own skills. */
+  pluginDirs?: string[];
   /** Run on a local model server. Absent: a normal Claude chat. */
   local?: LocalLaunch;
 }

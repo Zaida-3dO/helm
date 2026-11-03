@@ -1,0 +1,17 @@
+[package]
+name = "helm-skills"
+description = "Helm's own skills folder: a Claude Code plugin in the profile that every chat loads, plus the Settings > Skills ops that list, add, remove and reveal it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

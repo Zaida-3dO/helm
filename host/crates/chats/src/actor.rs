@@ -408,6 +408,18 @@ fn set_report(s: &mut Subagent, report: Option<&str>, max: usize) {
     s.report_truncated = report.is_some_and(|r| r.len() > max);
 }
 
+/// The scope a reported skill carries: `helm-skill` when it is one of Helm's own (the CLI may
+/// show it under the plugin's own prefix, e.g. `helm:run-tests`), empty for every other source.
+fn helm_skill_scope(own: &[String], name: &str) -> &'static str {
+    let lower = name.to_lowercase();
+    let bare = lower.strip_prefix("helm:").unwrap_or(&lower);
+    if own.iter().any(|o| o == bare || o == &lower) {
+        "helm-skill"
+    } else {
+        ""
+    }
+}
+
 fn str_of(v: &Value, k: &str) -> Option<String> {
     v.get(k).and_then(Value::as_str).map(str::to_owned)
 }
@@ -974,6 +986,16 @@ impl Actor {
             .get("skills")
             .and_then(|s| serde_json::from_value(s.clone()).ok())
             .unwrap_or_default();
+        // Mark the skills that came from Helm's own skills folder (the CLI may show them under a
+        // plugin prefix), so the `/` menu can say so; the marked list is what gets cached too.
+        let own = helm_skills::skill_names(&self.sh.cfg.profile_dir);
+        let skills: Vec<SkillInfo> = skills
+            .into_iter()
+            .map(|mut s| {
+                s.scope = helm_skill_scope(&own, &s.name).to_string();
+                s
+            })
+            .collect();
         {
             let mut live = self.live.lock().unwrap();
             live.thread.capabilities = caps;
