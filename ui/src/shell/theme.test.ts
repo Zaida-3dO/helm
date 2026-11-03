@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FONT_DEFAULTS, SKINS, applyZoom, fontVars, parseFontSizes, parseSkin, parseZoom } from './theme.ts';
-import { sizeOptions, skinOptions, volumeOptions, zoomOptions } from '../settings/generalOptions.ts';
+import { applyTheme, DOPAMINE_DEFAULT, FONT_DEFAULTS, parseDopamine, SKINS, applyZoom, fontVars, parseFontSizes, parseSkin, parseZoom } from './theme.ts';
+import { motionOptions, sizeOptions, skinOptions, volumeOptions, zoomOptions } from '../settings/generalOptions.ts';
 
 test('stored text sizes are kept only when whole and in range; the rest fall back to the defaults', () => {
   assert.deepEqual(parseFontSizes(undefined), FONT_DEFAULTS);
@@ -54,6 +54,37 @@ test('the skin keeps only names styles.css carries; anything else reads as the d
   assert.deepEqual(opts.map((o) => o.value), [...SKINS]);
   assert.equal(opts[0]?.title, 'Default (no skin)');
   assert.equal(opts.find((o) => o.value === 'slack')?.title, 'Slack');
+});
+
+test('the delight level keeps the three names, plain or in a document, and everything else reads as standard', () => {
+  for (const l of ['zen', 'standard', 'brainrot']) assert.equal(parseDopamine(l), l);
+  assert.equal(parseDopamine({ mode: 'zen' }), 'zen');
+  // A custom set has no control editor yet, so it sits at the standard amount.
+  assert.equal(parseDopamine({ mode: 'custom', version: 1 }), 'standard');
+  for (const bad of [undefined, null, 'calm', 7, {}, { mode: 5 }, []]) assert.equal(parseDopamine(bad), DOPAMINE_DEFAULT);
+  const opts = motionOptions();
+  assert.deepEqual(opts.map((o) => o.value), ['zen', 'standard', 'brainrot']);
+  assert.equal(opts.find((o) => o.value === 'standard')?.title, 'Standard (default)');
+});
+
+test('the theme write carries the level, and Zen also asks for the quiet effect set', () => {
+  const g = globalThis as { window?: unknown };
+  g.window = { matchMedia: () => ({ matches: true, addEventListener: () => {}, removeEventListener: () => {} }) };
+  try {
+    const root = { dataset: {} as Record<string, string> } as unknown as HTMLElement;
+    const stop = applyTheme(root, 'system', 'default', 'zen');
+    assert.equal(root.dataset.theme, 'dark');
+    assert.equal(root.dataset.dopamine, 'zen');
+    assert.equal(root.dataset.effects, 'quiet');
+    stop();
+    applyTheme(root, 'light', 'slack', 'brainrot');
+    assert.equal(root.dataset.dopamine, 'brainrot');
+    assert.equal(root.dataset.effects, 'full');
+    applyTheme(root, 'light', 'slack');
+    assert.equal(root.dataset.dopamine, 'standard');
+  } finally {
+    delete g.window;
+  }
 });
 
 test('zoom goes to the host web view and leaves no CSS zoom on the page', () => {

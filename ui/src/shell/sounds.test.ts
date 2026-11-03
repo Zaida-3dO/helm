@@ -119,6 +119,14 @@ test('away cues: completion plays only unfocused, attention only for a chat not 
   handlers.get('completion')!(done('d'));
   assert.equal(fakeCtx.created.length, 0);
 
+  // The quiet delight level silences cues even with sounds switched back on, and raising it sounds again.
+  handlers.get('preferences')!({ changed: { sounds: { enabled: true, volume: 60, themed: true }, dopamine: 'zen' } });
+  handlers.get('completion')!(done('e'));
+  assert.equal(fakeCtx.created.length, 0, 'Zen silences every cue');
+  handlers.get('preferences')!({ changed: { dopamine: 'standard' } });
+  handlers.get('completion')!(done('f'));
+  assert.equal(fakeCtx.created.length, 2, 'the standard level sounds again');
+
   stop();
   assert.ok(!handlers.has('completion') && !handlers.has('attention') && !handlers.has('preferences'));
 });

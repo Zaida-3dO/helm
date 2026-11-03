@@ -43,6 +43,15 @@ export function skinOptions(): SizeOption[] {
   }));
 }
 
+/** The three delight levels Settings offers (a custom per-effect set is not editable yet). */
+export function motionOptions(): SizeOption[] {
+  return [
+    { value: 'zen', title: 'Quiet' },
+    { value: 'standard', title: 'Standard (default)' },
+    { value: 'brainrot', title: 'Maximal' },
+  ];
+}
+
 /** Sound level 0 to 100 in steps of 5, the default marked and 0 named. */
 export function volumeOptions(): SizeOption[] {
   const out: SizeOption[] = [];

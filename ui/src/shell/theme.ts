@@ -36,13 +36,30 @@ export function resolveTheme(appearance: Appearance, prefersDark: boolean): 'lig
   return appearance;
 }
 
-/** Apply the theme attributes; returns a stop function for the OS colour-scheme listener. */
-export function applyTheme(root: HTMLElement, appearance: Appearance, skin: Skin = SKIN_DEFAULT): () => void {
+// How much movement and decoration the interface shows (the `dopamine` preference).
+// A stored value is one of the level ids, or a document whose `mode` names the level;
+// anything unreadable, and a custom set (no control editor yet), reads as standard.
+
+export type Dopamine = 'zen' | 'standard' | 'brainrot';
+export const DOPAMINE_DEFAULT: Dopamine = 'standard';
+
+export function parseDopamine(v: unknown): Dopamine {
+  const mode = typeof v === 'string' ? v : v && typeof v === 'object' ? (v as { mode?: unknown }).mode : undefined;
+  return mode === 'zen' || mode === 'brainrot' ? mode : DOPAMINE_DEFAULT;
+}
+
+/**
+ * Apply the theme attributes; returns a stop function for the OS colour-scheme listener.
+ * The delight level rides along: Zen writes the quiet effects set as well, so the theme and the
+ * level are always consistent however they changed.
+ */
+export function applyTheme(root: HTMLElement, appearance: Appearance, skin: Skin = SKIN_DEFAULT, level: Dopamine = DOPAMINE_DEFAULT): () => void {
   const mq = window.matchMedia('(prefers-color-scheme: dark)');
   const write = () => {
     root.dataset.theme = resolveTheme(appearance, mq.matches);
     root.dataset.skin = skin;
-    root.dataset.effects = 'full';
+    root.dataset.dopamine = level;
+    root.dataset.effects = level === 'zen' ? 'quiet' : 'full';
   };
   write();
   mq.addEventListener('change', write);
@@ -107,16 +124,17 @@ type Bus = { on: (kind: string, h: (e: Record<string, unknown>) => void) => () =
 type ApiFn = <T = unknown>(op: string, args?: unknown) => Promise<T>;
 
 /**
- * Read `appearance`, `interfaceTheme`, `fontSizes` and `zoomLevel`, apply them, and re-apply
- * when a preference changes. Returns a stop function.
+ * Read `appearance`, `interfaceTheme`, `dopamine`, `fontSizes` and `zoomLevel`, apply them, and
+ * re-apply when a preference changes. Returns a stop function.
  */
 export function connectAppearance(api: ApiFn, bus: Bus, root: HTMLElement): () => void {
   let appearance: Appearance = 'system';
   let skin: Skin = SKIN_DEFAULT;
-  let stop = applyTheme(root, appearance, skin);
+  let level: Dopamine = DOPAMINE_DEFAULT;
+  let stop = applyTheme(root, appearance, skin, level);
   const write = () => {
     stop();
-    stop = applyTheme(root, appearance, skin);
+    stop = applyTheme(root, appearance, skin, level);
   };
   const set = (v: unknown) => {
     appearance = parseAppearance(v);
@@ -126,11 +144,18 @@ export function connectAppearance(api: ApiFn, bus: Bus, root: HTMLElement): () =
     skin = parseSkin(v);
     write();
   };
+  const setLevel = (v: unknown) => {
+    level = parseDopamine(v);
+    write();
+  };
   api<unknown>('preference_get', { key: 'appearance' })
     .then(set)
     .catch(() => undefined);
   api<unknown>('preference_get', { key: 'interfaceTheme' })
     .then(setSkin)
+    .catch(() => undefined);
+  api<unknown>('preference_get', { key: 'dopamine' })
+    .then(setLevel)
     .catch(() => undefined);
   api<unknown>('preference_get', { key: 'fontSizes' })
     .then((v) => applyFontSizes(root, parseFontSizes(v)))
@@ -142,6 +167,7 @@ export function connectAppearance(api: ApiFn, bus: Bus, root: HTMLElement): () =
     const changed = (e.changed ?? {}) as Record<string, unknown>;
     if ('appearance' in changed) set(changed.appearance);
     if ('interfaceTheme' in changed) setSkin(changed.interfaceTheme);
+    if ('dopamine' in changed) setLevel(changed.dopamine);
     if ('fontSizes' in changed) applyFontSizes(root, parseFontSizes(changed.fontSizes));
     if ('zoomLevel' in changed) applyZoom(api, root, parseZoom(changed.zoomLevel));
   });

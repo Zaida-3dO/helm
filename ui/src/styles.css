@@ -1033,6 +1033,13 @@ kbd {
   scale: none !important;
 }
 
+/* Maximal: the decorative and working marks burn brighter and more colourful, without
+ * changing what they say. */
+:root[data-dopamine='brainrot'] .ui-star-shimmer,
+:root[data-dopamine='brainrot'] .ui-wheel-working {
+  filter: saturate(1.5) brightness(1.4);
+}
+
 /* ---------------------------------------------------------------------------------------------
  * The app frame: sidebar | main (top bar, chat, terminal dock) | side panel.
  * ------------------------------------------------------------------------------------------- */

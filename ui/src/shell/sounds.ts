@@ -2,6 +2,9 @@
 // is unfocused — a two-note chime when a chat finishes and a shorter pair when a chat turns up
 // needing attention. The tones are synthesised, so nothing ships as an asset and the volume knob
 // is the oscillator's own gain. `themed` picks the chimes; off gives one plain neutral beep.
+// The Zen delight level (the `dopamine` preference) silences every cue, whatever `sounds` says.
+
+import { parseDopamine } from './theme.ts';
 
 export interface Sounds {
   enabled: boolean;
@@ -96,9 +99,16 @@ type ApiFn = <T = unknown>(op: string, args?: unknown) => Promise<T>;
  */
 export function connectSounds(api: ApiFn, bus: Bus, hasFocus: () => boolean = () => document.hasFocus()): () => void {
   let sounds = SOUNDS_DEFAULT;
+  let zen = false; // the quiet delight level silences cues as well
   const seenAttention = new Set<string>();
+  const play = (cue: SoundCue) => {
+    if (!zen) playCue(cue, sounds);
+  };
   api<unknown>('preference_get', { key: 'sounds' })
     .then((v) => (sounds = parseSounds(v)))
+    .catch(() => undefined);
+  api<unknown>('preference_get', { key: 'dopamine' })
+    .then((v) => (zen = parseDopamine(v) === 'zen'))
     .catch(() => undefined);
   // The audio context starts suspended until the page has had one interaction; open it on the
   // first click or key so the next away-from-window cue is heard.
@@ -107,7 +117,7 @@ export function connectSounds(api: ApiFn, bus: Bus, hasFocus: () => boolean = ()
   window.addEventListener('keydown', unlock, { once: true });
   const offC = bus.on('completion', (e) => {
     const c = e.completion as { chatId?: unknown } | undefined;
-    if (c && typeof c.chatId === 'string' && !hasFocus()) playCue('complete', sounds);
+    if (c && typeof c.chatId === 'string' && !hasFocus()) play('complete');
   });
   const offA = bus.on('attention', (e) => {
     const rows = (e.summary as { unread?: { chatId?: unknown }[] } | undefined)?.unread ?? [];
@@ -118,11 +128,12 @@ export function connectSounds(api: ApiFn, bus: Bus, hasFocus: () => boolean = ()
         fresh = true;
       }
     }
-    if (fresh && !hasFocus()) playCue('attention', sounds);
+    if (fresh && !hasFocus()) play('attention');
   });
   const offP = bus.on('preferences', (e) => {
     const changed = (e.changed ?? {}) as Record<string, unknown>;
     if ('sounds' in changed) sounds = parseSounds(changed.sounds);
+    if ('dopamine' in changed) zen = parseDopamine(changed.dopamine) === 'zen';
   });
   return () => {
     offC();

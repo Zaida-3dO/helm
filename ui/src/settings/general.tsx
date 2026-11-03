@@ -3,11 +3,11 @@
 
 import { useEffect, useState } from 'react';
 import { useShell } from '../shell/context.ts';
-import { FONT_DEFAULTS, parseAppearance, parseFontSizes, parseSkin, parseZoom, SKIN_DEFAULT, ZOOM_DEFAULT, type Appearance, type FontSizes, type Skin } from '../shell/theme.ts';
+import { DOPAMINE_DEFAULT, FONT_DEFAULTS, parseAppearance, parseDopamine, parseFontSizes, parseSkin, parseZoom, SKIN_DEFAULT, ZOOM_DEFAULT, type Appearance, type Dopamine, type FontSizes, type Skin } from '../shell/theme.ts';
 import { parseSounds, SOUNDS_DEFAULT, type Sounds } from '../shell/sounds.ts';
 import { Checkbox, ChoiceTiles, Picker, SettingRow, toast } from '../ui/index.ts';
 import { IconMonitor, IconMoon, IconSun } from '../ui/icons.tsx';
-import { sizeOptions, skinOptions, volumeOptions, zoomOptions } from './generalOptions.ts';
+import { motionOptions, sizeOptions, skinOptions, volumeOptions, zoomOptions } from './generalOptions.ts';
 import { registerSettingsPane } from './registry.ts';
 import { ChangedByChats } from './changed/ChangedByChats.tsx';
 import { parseNameList, SIDEBAR_ENTRIES } from './applied.ts';
@@ -17,6 +17,7 @@ function GeneralPane() {
   const shell = useShell();
   const [appearance, setAppearance] = useState<Appearance>('system');
   const [skin, setSkin] = useState<Skin>(SKIN_DEFAULT);
+  const [motion, setMotion] = useState<Dopamine>(DOPAMINE_DEFAULT);
   const [sounds, setSounds] = useState<Sounds>(SOUNDS_DEFAULT);
   const [compact, setCompact] = useState(false);
   const [sizes, setSizes] = useState<FontSizes>(FONT_DEFAULTS);
@@ -39,6 +40,10 @@ function GeneralPane() {
     shell
       .api<unknown>('preference_get', { key: 'interfaceTheme' })
       .then((v) => setSkin(parseSkin(v)))
+      .catch(() => undefined);
+    shell
+      .api<unknown>('preference_get', { key: 'dopamine' })
+      .then((v) => setMotion(parseDopamine(v)))
       .catch(() => undefined);
     shell
       .api<unknown>('preference_get', { key: 'sounds' })
@@ -122,6 +127,25 @@ function GeneralPane() {
             void save('interfaceTheme', v, () => {
               setSkin(before);
               apply('interfaceTheme', before);
+            });
+          }}
+        />
+      </SettingRow>
+      <SettingRow title="Motion and flair" description="How much movement the interface shows. Quiet stills the animations and silences the away-from-window chimes; Maximal leans into them." testId="setting-motion">
+        <Picker<string>
+          settings
+          label="Motion and flair"
+          testId="motion"
+          value={motion}
+          options={motionOptions()}
+          onChange={(v) => {
+            const before = motion;
+            const next = v as Dopamine;
+            setMotion(next);
+            apply('dopamine', next);
+            void save('dopamine', next, () => {
+              setMotion(before);
+              apply('dopamine', before);
             });
           }}
         />
