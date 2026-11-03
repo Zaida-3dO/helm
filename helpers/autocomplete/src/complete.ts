@@ -3,7 +3,8 @@
 // - The model is asked for JSON {partial, candidates (at most 3), completion}; only `completion`
 //   is used. The prompt carries worked examples and treats the conversation and draft as data.
 // - One attempt, no retry, 4 s. The same print-mode call as the titles helper (small model,
-//   credentials stripped, no settings).
+//   credentials stripped, no settings), including its local-server route: when the job carries
+//   a localBaseUrl the model is asked on the chat's own local server, never through the sign-in.
 // - Cleaning: trim the end; nothing over 320 characters or 48 words, no control characters, no
 //   code fence, nothing that starts with the draft; leading space dropped when the draft already
 //   ends in whitespace.
@@ -24,6 +25,12 @@ export interface CompleteJob {
   timeoutMs?: number;
   /** The model the person configured for background jobs; absent keeps the small default. */
   model?: string;
+  /** Set together with `model` when the chat runs on a local model server: the loopback address
+   * and the window sizes when known, exactly as the titles job carries them. The server's key is
+   * not on the job; it is in the helper's environment (HELM_LOCAL_MODEL_KEY). */
+  localBaseUrl?: string;
+  localContextTokens?: number;
+  localMaxOutputTokens?: number;
 }
 
 export const MAX_COMPLETION_CHARS = 320;
@@ -67,7 +74,16 @@ export function cleanCompletion(raw: string, draft: string): string {
 export async function complete(job: CompleteJob): Promise<{ completion: string } | { error: string }> {
   try {
     const raw = await askClaude(
-      { firstRequest: "", command: job.command, commandArgs: job.commandArgs, timeoutMs: job.timeoutMs ?? 4_000, model: job.model },
+      {
+        firstRequest: "",
+        command: job.command,
+        commandArgs: job.commandArgs,
+        timeoutMs: job.timeoutMs ?? 4_000,
+        model: job.model,
+        localBaseUrl: job.localBaseUrl,
+        localContextTokens: job.localContextTokens,
+        localMaxOutputTokens: job.localMaxOutputTokens,
+      },
       buildPrompt(job),
     );
     return { completion: cleanCompletion(raw, job.draft) };

@@ -143,7 +143,9 @@ export function localPinnedEnv(local: LocalLaunch): Record<string, string> {
   };
 }
 
-/** Refusals that say the prompt outgrew the model's window (the server's own wording, matched loosely). */
+/** Refusals that say the prompt outgrew the model's window (the server's own wording, matched loosely).
+ * The renderer matches the same phrasings to pick which banner an interrupted chat shows; keep the two
+ * lists in step (ui/src/transcript/rowMeta.ts). */
 const TOO_LONG_PHRASES = [/prompt is too long/i, /context length exceeded/i, /maximum context length/i, /too many tokens/i];
 
 /** True when the upstream error text is a too-long refusal rather than another fault. */

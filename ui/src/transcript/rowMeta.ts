@@ -20,7 +20,9 @@ export function newTokens(u: Usage): number {
   return u.inputTokens + u.cacheWriteTokens + u.outputTokens;
 }
 
-/** Refusals saying the prompt outgrew the model's window (the server's own wording, matched loosely). */
+/** Refusals saying the prompt outgrew the model's window (the server's own wording, matched loosely).
+ * The worker decides when a turn was refused for this reason; keep the two lists in step
+ * (worker/src/drivers/claude/env.ts). */
 const TOO_LONG_PHRASES = [/prompt is too long/i, /context length exceeded/i, /maximum context length/i, /too many tokens/i];
 
 /**

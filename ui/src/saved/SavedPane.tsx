@@ -165,7 +165,7 @@ function SavedPane() {
                     {p.label}
                   </Button>
                 ))}
-                {due && (
+                {it.remindAt !== null && (
                   <Button variant="text" data-testid="saved-remind-clear" onClick={() => patch(it, { remindAt: null })}>
                     Clear reminder
                   </Button>

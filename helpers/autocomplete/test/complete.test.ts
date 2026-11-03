@@ -42,3 +42,29 @@ test("the entry point answers one JSON line through a stand-in claude", () => {
   });
   assert.deepEqual(JSON.parse(out.stdout.trim()), { completion: "ts" });
 });
+
+test("a job on a local model server is routed there, and a job without one is not", () => {
+  // The stand-in claude reports the model it was named and whether the local base URL reached its
+  // environment; the completion is that report, so the test sees the route, not the key.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-ac-"));
+  const fake = path.join(dir, "report.mjs");
+  fs.writeFileSync(
+    fake,
+    `process.stdin.resume();process.stdin.on("end",()=>{const a=process.argv;const m=a.indexOf("--model")>=0?a[a.indexOf("--model")+1]:"none";const b=process.env.ANTHROPIC_BASE_URL||"none";process.stdout.write(JSON.stringify({type:"result",is_error:false,result:JSON.stringify({completion:m+"|"+b})})+String.fromCharCode(10));});`,
+  );
+  const main = path.resolve(here, "../src/main.ts");
+  const run = (job: Record<string, unknown>, key?: string) =>
+    JSON.parse(
+      spawnSync(process.execPath, [main], {
+        input: JSON.stringify({ draft: "x", ...job, command: process.execPath, commandArgs: [fake] }),
+        encoding: "utf8",
+        env: key ? { ...process.env, HELM_LOCAL_MODEL_KEY: key } : process.env,
+      }).stdout.trim(),
+    ).completion;
+  assert.equal(
+    run({ model: "small-4k", localBaseUrl: "http://127.0.0.1:19999", localContextTokens: 8192 }, "test-server-key"),
+    "small-4k|http://127.0.0.1:19999",
+    "the local name is asked on the chat's own server, not through the sign-in",
+  );
+  assert.equal(run({ model: "haiku" }), "haiku|none", "without a localBaseUrl the sign-in route is kept");
+});
