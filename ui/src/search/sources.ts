@@ -2,13 +2,20 @@
 // Board comes in through the board client's attach-only read, so both are listed here only so the
 // group order and the controller already cope with them.
 
-export type SourceId = 'chats' | 'files' | 'prs' | 'board';
+export type SourceId = 'chats' | 'claudechats' | 'files' | 'prs' | 'board';
 
 /** The most rows a group may show. */
-export const GROUP_LIMIT: Record<SourceId, number> = { chats: 90, files: 20, prs: 10, board: 10 };
+export const GROUP_LIMIT: Record<SourceId, number> = {
+  chats: 90,
+  claudechats: 20,
+  files: 20,
+  prs: 10,
+  board: 10,
+};
 
 export const GROUP_LABEL: Record<SourceId, string> = {
   chats: 'Chats',
+  claudechats: 'Claude Code chats',
   files: 'Files',
   prs: 'Pull requests',
   board: 'Board',
@@ -53,11 +60,13 @@ export function looksLikePath(query: string): boolean {
   return /^[^\s\\/]+\.[A-Za-z0-9]{1,8}$/.test(q);
 }
 
-const BASE_ORDER: SourceId[] = ['chats', 'files', 'prs', 'board'];
+const BASE_ORDER: SourceId[] = ['chats', 'claudechats', 'files', 'prs', 'board'];
 
-/** Chats, Files, Pull requests, Board; Files leads when the query looks like a path. */
+/** Chats, Claude Code chats, Files, Pull requests, Board; Files leads when the query looks like a path. */
 export function groupOrder(query: string, present: readonly SourceId[]): SourceId[] {
-  const order = looksLikePath(query) ? (['files', 'chats', 'prs', 'board'] as SourceId[]) : BASE_ORDER;
+  const order = looksLikePath(query)
+    ? (['files', 'chats', 'claudechats', 'prs', 'board'] as SourceId[])
+    : BASE_ORDER;
   return order.filter((id) => present.includes(id));
 }
 

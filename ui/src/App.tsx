@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore, type CSSProperties 
 import type { Api } from './api/client.ts';
 import type { EventBus } from './api/events.ts';
 import { ActionRow, LeafSlots } from './actions/index.ts';
+import { ClaudeChatViewer } from './claudechats/index.ts';
 import { SearchDialog } from './search/index.ts';
 import { chatOps } from './api/ops.ts';
 import { ChatMenu, ProjectTags, Sidebar } from './sidebar/index.ts';
@@ -192,6 +193,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
       <SettingsToast api={shell.api} bus={shell.bus} onOpenChat={(id) => shell.select(id)} /> {/* settings-change toast */}
       <SettingsDialog />
       <SearchDialog /> {/* Mod+K search */}
+      <ClaudeChatViewer /> {/* one of Claude Code's own chats, read */}
       <LeafSlots /> {/* registers the action slots */}
       <AfkPresence /> {/* AFK presence */}
       <FrameStats /> {/* frame-stats overlay */}

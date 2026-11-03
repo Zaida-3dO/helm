@@ -33,6 +33,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_webtools::register_ops(reg);
     helm_saved::register_ops(reg);
     helm_skills::register_ops(reg);
+    helm_claudechats::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -42,6 +43,7 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_projects::register_migrations(reg);
     helm_panel::register_migrations(reg);
     helm_search::register_migrations(reg);
+    helm_claudechats::register_migrations(reg);
     helm_consent::register_migrations(reg);
     helm_hosttools::register_migrations(reg);
     helm_usage::register_migrations(reg);

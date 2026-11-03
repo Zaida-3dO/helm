@@ -46,6 +46,7 @@ helm-github = { path = "../crates/github" }
 helm-webtools = { path = "../crates/webtools" }
 helm-saved = { path = "../crates/saved" }
 helm-skills = { path = "../crates/skills" }
+helm-claudechats = { path = "../crates/claudechats" }
 serde_json.workspace = true
 tokio.workspace = true
 log.workspace = true

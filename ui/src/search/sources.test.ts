@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Api } from '../api/client.ts';
-import { chatsSource, filesSource } from './defaultSources.ts';
+import { chatsSource, claudeChatsSource, filesSource } from './defaultSources.ts';
 import { absolutePath, baseName, dirName, groupOrder, looksLikePath, rowId, shortFolder } from './sources.ts';
 
 test('a query looks like a path when it has a separator, a ~ or drive start, or is one name.ext word', () => {
@@ -9,11 +9,12 @@ test('a query looks like a path when it has a separator, a ~ or drive start, or 
   for (const q of ['fix login', 'login', 'v1.2 notes', 'a.b.c d', '', '   ', 'what is this.']) assert.equal(looksLikePath(q), false, q);
 });
 
-test('groups are ordered Chats, Files, Pull requests, Board; Files leads for a path', () => {
-  const all = ['chats', 'files', 'prs', 'board'] as const;
-  assert.deepEqual(groupOrder('login', all), ['chats', 'files', 'prs', 'board']);
-  assert.deepEqual(groupOrder('src/a.ts', all), ['files', 'chats', 'prs', 'board']);
+test('groups are ordered Chats, Claude Code chats, Files, Pull requests, Board; Files leads for a path', () => {
+  const all = ['chats', 'claudechats', 'files', 'prs', 'board'] as const;
+  assert.deepEqual(groupOrder('login', all), ['chats', 'claudechats', 'files', 'prs', 'board']);
+  assert.deepEqual(groupOrder('src/a.ts', all), ['files', 'chats', 'claudechats', 'prs', 'board']);
   assert.deepEqual(groupOrder('login', ['files', 'chats']), ['chats', 'files']);
+  assert.equal(claudeChatsSource({ api: (() => undefined) as never, open: () => undefined }).minChars, 2);
 });
 
 test('row ids have no whitespace and carry their source', () => {
@@ -90,6 +91,27 @@ test('the files source searches the chat folder through quick_open and opens an 
   assert.deepEqual(rows.map((r) => [r.title, r.subtitle, r.tag]), [['main.ts', 'src', undefined], ['README.md', undefined, undefined], ['ui', 'src', 'folder']]);
   rows[0]!.open();
   assert.deepEqual(opened, ['C:/work/app/src/main.ts']);
+});
+
+test('the Claude Code source searches the records and opens the viewer on the hit', async () => {
+  const opened: string[] = [];
+  const { api, calls } = fakeApi({
+    claude_chat_search: () => ({
+      hits: [
+        { sessionId: 's-1', title: 'Login work', folder: 'C:/app', updatedAt: 1, messageCount: 4, snippet: 'fix the login', titleOnly: false },
+        { sessionId: 's-2', title: '', folder: '', updatedAt: 2, messageCount: 1, snippet: '', titleOnly: true },
+      ],
+    }),
+  });
+  const src = claudeChatsSource({ api, open: (h) => opened.push(h.sessionId) });
+  const rows = await src.run('login', new AbortController().signal);
+  assert.deepEqual(calls[0], { op: 'claude_chat_search', args: { query: 'login' } });
+  assert.deepEqual(rows.map((r) => [r.id, r.title, r.subtitle, r.tag]), [
+    ['claudechats:s-1', 'Login work', 'C:/app', undefined],
+    ['claudechats:s-2', 'Untitled chat', undefined, 'title'],
+  ]);
+  rows[0]!.open();
+  assert.deepEqual(opened, ['s-1']);
 });
 
 test('the files source gives no rows, and asks nothing, when no chat is open', async () => {

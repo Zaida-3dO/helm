@@ -110,7 +110,8 @@ breaks those checks, so change them only together with the checks. Everything el
 | `quick-replies` / `quick-reply` | Continue, Yes and No chips above the composer | `quick-reply`: `data-reply` = `continue` `yes` `no` |
 | `option-buttons` / `option-button` / `option-amend` | Inline Option 1, Option A, ... under the latest reply, and the pencil that drafts the answer | `option-button`: `data-option` = the label |
 | `explain-plainly` | The Explain plainly message action | |
-| `search-dialog` / `search-input` / `search-status` / `search-results` / `search-group` / `search-hit` | Mod+K search: dialog, query box, live status line, result list, a group, a row | `search-group`, `search-hit`: `data-group` = `chats` `files` `board`; `search-status`: `data-state` |
+| `search-dialog` / `search-input` / `search-status` / `search-results` / `search-group` / `search-hit` | Mod+K search: dialog, query box, live status line, result list, a group, a row | `search-group`, `search-hit`: `data-group` = `chats` `claudechats` `files` `board`; `search-status`: `data-state` |
+| `claude-chat-viewer` / `claude-chat-lines` / `claude-chat-line` / `claude-chat-folder` / `claude-chat-note` / `claude-chat-continue` | The read-only view of one of Claude Code's own chats: the dialog, its line list, one line, the folder line, the status or refusal line, and Continue in Helm | `claude-chat-line`: `data-kind` = `message` `tool` `context` |
 
 Keys (Windows): Send `Ctrl+Enter` (or `Enter` with the Enter send shortcut), Steer `Ctrl+Shift+Enter`,
 Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
