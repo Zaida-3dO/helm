@@ -3837,6 +3837,98 @@ async fn a_host_send_retry_hands_over_a_saved_row_the_first_hand_off_missed() {
     );
 }
 
+/// A retry under one id is answered exactly as a new send to that chat would be when the chat
+/// cannot take it: "busy" while it is stopping, so a retrier like the consent upkeep sends the
+/// decision again at the next tick (and the stop's own carry hands the saved row over); and
+/// "refused" once the chat is archived, so the upkeep stops retrying a chat that is gone and the
+/// row is never carried to a worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_answers_like_a_new_send_when_the_chat_cannot_take_it() {
+    use crate::submit::{host_send, HostSend};
+    let mut h = harness();
+    let (chat, _, mut w) = running_turn(&mut h).await;
+    let decision = |id: &'static str| {
+        host_send(
+            &h.rt,
+            HostSend {
+                chat_id: &chat,
+                submission_id: id,
+                text: "[Helm] The user allowed it.",
+                origin: crate::types::SubmissionOrigin::App,
+            },
+        )
+    };
+    // A saved row whose hand-off never ran, as an upkeep tick leaves it when the host stopped
+    // first: the chat now stops with the row unsent.
+    h.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO submissions(id, chat_id, text, mode, state, created_at)
+                 VALUES ('decision-1', ?1, '[Helm] The user allowed it.', 'prompt', 'saved', 9)",
+            [&chat],
+        )
+    })
+    .unwrap();
+    let api = h.api.clone();
+    let c2 = chat.clone();
+    let stop =
+        tokio::spawn(async move { api.call(&main(), "chat_stop", json!({"chatId": c2})).await });
+    let abort = w.expect("abort").await;
+    h.until("stopping", |h| h.status(&chat) == "stopping").await;
+    let err = decision("decision-1").unwrap_err();
+    assert_eq!(
+        err.code, "busy",
+        "a stopping chat is answered like a new send, not as a delivery: the upkeep retries"
+    );
+    assert!(
+        err.message.contains("stopping"),
+        "and says why: {}",
+        err.message
+    );
+    // The stop's own carry takes the unsent row as the next turn; a later retry of the same id
+    // then reads it as already on its way instead of sending it twice.
+    w.respond(
+        &abort,
+        json!({"state": "stopping", "cancelledSubmissionIds": []}),
+    )
+    .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+        .await;
+    stop.await.unwrap().unwrap();
+    let p = w.expect("prompt").await;
+    assert_eq!(
+        p["submissionId"], "decision-1",
+        "the carry hands the decision over"
+    );
+    ack(&w, &p).await;
+    let sent = decision("decision-1").unwrap();
+    assert!(
+        sent.delivered,
+        "a retry of a row further than saved is a delivery"
+    );
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    // Archived: the permanent answer, and the row is never carried anywhere.
+    h.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO submissions(id, chat_id, text, mode, state, created_at)
+                 VALUES ('decision-2', ?1, '[Helm] The user allowed it.', 'prompt', 'saved', 9)",
+            [&chat],
+        )
+    })
+    .unwrap();
+    h.call("chat_archive", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    let err = decision("decision-2").unwrap_err();
+    assert_eq!(err.code, "refused", "an archived chat never takes the note");
+    assert_eq!(
+        h.state("decision-2"),
+        "uncertain",
+        "archiving marks the unsent row uncertain — never carried, never resent"
+    );
+}
+
 // ---- Unattended reliability ----
 
 /// A stalled flag the host died with is cleared by startup recovery, so the next turn's

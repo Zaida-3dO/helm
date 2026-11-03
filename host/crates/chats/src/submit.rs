@@ -441,13 +441,24 @@ pub fn host_send_with_attachments(
             if let Some(existing) = store::get_submission(tx, s.submission_id)? {
                 // Already recorded: say whether it has been handed to Claude yet. A row still
                 // unsent (the hand-off never ran, e.g. the host stopped first) is handed over
-                // now, so a caller retrying under one id heals instead of staying stuck; but not
-                // for an archived or stopping chat, where nothing is started or sent.
-                let hand_off = existing.state == SubmissionState::Saved
-                    && matches!(
-                        chat_status(tx, s.chat_id)?,
-                        Some((status, archived)) if !archived && status != ChatStatus::Stopping
-                    );
+                // now, so a caller retrying under one id heals instead of staying stuck. An
+                // archived or stopping chat answers exactly as a new send to it would
+                // ("refused" / "busy"): a retrier like the consent upkeep must not read a
+                // retry that handed nothing over as a delivery, or a decision made while the
+                // chat was momentarily stopping is never sent again.
+                let Some((status, archived)) = chat_status(tx, s.chat_id)? else {
+                    return Ok(Err(crate::ops::not_found()));
+                };
+                if archived {
+                    return Ok(Err(ApiError::new("refused", "That chat is archived.")));
+                }
+                if status == ChatStatus::Stopping {
+                    return Ok(Err(ApiError::new(
+                        "busy",
+                        "That chat is stopping; try again in a moment.",
+                    )));
+                }
+                let hand_off = existing.state == SubmissionState::Saved;
                 return Ok(Ok((hand_off || existing.state != SubmissionState::Saved, hand_off)));
             }
             let Some((status, archived)) = chat_status(tx, s.chat_id)? else {
