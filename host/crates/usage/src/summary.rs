@@ -497,6 +497,65 @@ pub fn digest(db: &Database, a: &Value, compare: &str, env: &DigestEnv) -> ToolR
     Ok(out)
 }
 
+/// What the chat's conversation holds now and the window of the model it runs on: the newest
+/// recorded turn's measured context ([`helm_chats::turn_usage::context_reported_at`] — the last
+/// call that reported usage, not a running total) over the model's real window: the standard
+/// figure for a Claude model id, the size the local server last reported for a local id. It comes
+/// with the model id (one string; a local chat's carries its server) and provider. This one
+/// reading backs both the digest's `chat` block and the `chat_context` op that feeds the chat's
+/// context line, so the two never disagree.
+pub fn chat_context(
+    db: &Database,
+    chat_id: &str,
+    local_window: &dyn Fn(&str) -> Option<u64>,
+) -> Result<(String, Option<String>, Value), rusqlite::Error> {
+    let (model_id, provider, ctx) = db.snapshot::<_, rusqlite::Error>(|tx| {
+        let (model_id, provider): (String, Option<String>) = tx.query_row(
+            &format!(
+                "SELECT COALESCE({}, 'default'), provider FROM chats c WHERE c.id = ?1",
+                helm_chats::local::MODEL_ID_SQL
+            ),
+            [chat_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok::<_, rusqlite::Error>((
+            model_id,
+            provider,
+            helm_chats::turn_usage::context_reported_at(tx, chat_id),
+        ))
+    })?;
+    // The context size and its window: the standard figure for a Claude model id, the server's own
+    // last-reported figure for a local model, unknown when the server has not said.
+    let (window, window_source) = match &provider {
+        None => (
+            Some(helm_chats::turn_usage::claude_window(&model_id)),
+            "the standard window for this kind of Claude model id".to_owned(),
+        ),
+        Some(_) => (
+            local_window(&model_id),
+            "the size the local model server last reported".to_owned(),
+        ),
+    };
+    let context = match ctx {
+        Some((tokens, at)) => {
+            let pct = window.map(|w| (tokens as f64 * 100.0 / w as f64 * 100.0).round() / 100.0);
+            json!({
+                "contextTokens": tokens,
+                "measuredAtMs": at,
+                "windowTokens": window,
+                "windowPct": pct,
+                "windowSource": window_source,
+                "notes": "The conversation this chat's newest recorded turn reported in its context: the input, cache-read and cache-write tokens held at that moment, the same reading the chat's token chip shows. windowPct is that over the model's window (over 100 means it no longer fits).",
+            })
+        }
+        None => json!({
+            "contextTokens": null,
+            "notes": "No turn of this chat has reported usage yet, so its context size has not been measured.",
+        }),
+    };
+    Ok((model_id, provider, context))
+}
+
 /// The `chat` block: what the scoped chats used in the window, and the primary chat's context
 /// size over its model's window.
 fn chat_block(
@@ -520,54 +579,20 @@ fn chat_block(
             cost += s.cost;
         }
     }
-    // The model id as one string (a local chat's carries its server), the chat's title, and the
-    // context the newest recorded turn reported.
-    let info = db
+    // The chat's title.
+    let title = db
         .snapshot::<_, rusqlite::Error>(|tx| {
-            let (title, model_id, provider): (String, String, Option<String>) = tx.query_row(
-                &format!(
-                    "SELECT title, COALESCE({}, 'default'), provider FROM chats c WHERE c.id = ?1",
-                    helm_chats::local::MODEL_ID_SQL
-                ),
+            tx.query_row(
+                "SELECT title FROM chats WHERE id = ?1",
                 [&scope.primary],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
-            let ctx = helm_chats::turn_usage::context_reported_at(tx, &scope.primary);
-            Ok::<_, rusqlite::Error>((title, model_id, provider, ctx))
+                |r| r.get::<_, String>(0),
+            )
         })
         .map_err(|e| refuse(format!("The usage records could not be read: {e}")))?;
-    let (title, model_id, provider, ctx) = info;
+    let (model_id, provider, context) = chat_context(db, &scope.primary, env.local_window)
+        .map_err(|e| refuse(format!("The usage records could not be read: {e}")))?;
 
     let mut notes = scope.notes.clone();
-    // The context size and its window: the standard figure for a Claude model id, the server's own
-    // last-reported figure for a local model, unknown when the server has not said.
-    let (window, window_source) = match &provider {
-        None => (
-            Some(helm_chats::turn_usage::claude_window(&model_id)),
-            "the standard window for this kind of Claude model id".to_owned(),
-        ),
-        Some(_) => (
-            (env.local_window)(&model_id),
-            "the size the local model server last reported".to_owned(),
-        ),
-    };
-    let context = match ctx {
-        Some((tokens, at)) => {
-            let pct = window.map(|w| (tokens as f64 * 100.0 / w as f64 * 100.0).round() / 100.0);
-            json!({
-                "contextTokens": tokens,
-                "measuredAtMs": at,
-                "windowTokens": window,
-                "windowPct": pct,
-                "windowSource": window_source,
-                "notes": "The conversation this chat's newest recorded turn reported in its context: the input, cache-read and cache-write tokens held at that moment, the same reading the chat's token chip shows. windowPct is that over the model's window (over 100 means it no longer fits).",
-            })
-        }
-        None => json!({
-            "contextTokens": null,
-            "notes": "No turn of this chat has reported usage yet, so its context size has not been measured.",
-        }),
-    };
 
     let mut block = json!({
         "chatId": scope.primary,
@@ -996,8 +1021,8 @@ fn local_offset_ms() -> i64 {
 }
 
 /// Where to look up a local model's context window by its one-string id: the chat runtime's
-/// configured servers, their last-loaded catalogues (never a request at tool time).
-fn local_windows(services: &helm_ipc::Services) -> impl Fn(&str) -> Option<u64> {
+/// configured servers, their last-loaded catalogues (never a request at tool or op time).
+pub(crate) fn local_windows(services: &helm_ipc::Services) -> impl Fn(&str) -> Option<u64> {
     let rt = services.get::<helm_chats::ChatRuntime>();
     move |model_id| {
         helm_chats::local::split(model_id)?;
@@ -1088,6 +1113,104 @@ mod tests {
     /// A local stub answering for the fixture's one local chat, and nothing for other ids.
     fn stub_window(id: &str) -> Option<u64> {
         (id == "local/ollama/qwen3:8b").then_some(40_960)
+    }
+
+    /// The chat context follows the chat's last measured call (not an older, bigger one, and not
+    /// a running total) over that model's real window (not the Claude figure): a local chat at
+    /// 230k of its server's 262k window reads 87.74% full; over the window says so past 100;
+    /// a server that has not stated a window says no percent; a chat with no turns says nothing.
+    #[test]
+    fn the_chat_context_follows_the_last_measured_call_and_the_real_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = MigrationRegistry::new();
+        helm_chats::register_migrations(&mut reg);
+        let db = Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap();
+        // A turn as the chats crate records it; the context is input + cache reads + cache writes.
+        let turn = |tx: &rusqlite::Transaction<'_>,
+                    chat: &str,
+                    key: &str,
+                    ts: i64,
+                    i: i64,
+                    r: i64,
+                    w: i64| {
+            let usage = json!({"inputTokens": i, "outputTokens": 5, "cacheReadTokens": r,
+                               "cacheWriteTokens": w, "costUsd": 0.0});
+            let raw = json!({"type": "usage", "id": key, "timestamp": ts, "nativeSession": "s",
+                             "usage": usage, "running": usage});
+            helm_chats::session_log::project(tx, dir.path(), chat, raw.as_object().unwrap(), 1)
+        };
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1)",
+                [],
+            )?;
+            for (id, provider, model) in [
+                ("strata", Some("strata"), "qwen"),
+                ("big", Some("strata"), "big"),
+                ("tiny", Some("strata"), "no-size"),
+                ("opus", None, "claude-opus-4-5"),
+                ("lonely", None, "opus"),
+            ] {
+                tx.execute(
+                    "INSERT INTO chats(id, project_id, title, provider, model, created_at, updated_at)
+                     VALUES (?1, 'p', ?1, ?2, ?3, 1, 1)",
+                    rusqlite::params![id, provider, model],
+                )?;
+            }
+            // The strata chat's older turn measured more context than its newest: the reading
+            // must follow the newest measured call, not the biggest one.
+            turn(tx, "strata", "s:old", 9 * DAY_MS, 240_000, 100, 50)?;
+            turn(tx, "strata", "s:new", 10 * DAY_MS, 229_700, 200, 100)?;
+            // Past the window it says so; a server that never stated one says no percent;
+            // a Claude chat takes the standard window for its id.
+            turn(tx, "big", "s:1", 10 * DAY_MS, 299_000, 900, 100)?;
+            turn(tx, "tiny", "s:2", 10 * DAY_MS, 6_000, 1, 1)?;
+            turn(tx, "opus", "s:3", 10 * DAY_MS, 150_000, 10, 10)?;
+            Ok::<(), rusqlite::Error>(())
+        })
+        .unwrap();
+        let window = |id: &str| match id {
+            "local/strata/qwen" | "local/strata/big" => Some(262_144),
+            _ => None,
+        };
+        // (chat, context tokens, window tokens, percent, the model id the reading comes with)
+        let cases = [
+            (
+                "strata",
+                Some(230_000),
+                Some(262_144),
+                Some(87.74),
+                "local/strata/qwen",
+            ),
+            (
+                "big",
+                Some(300_000),
+                Some(262_144),
+                Some(114.44),
+                "local/strata/big",
+            ),
+            ("tiny", Some(6_002), None, None, "local/strata/no-size"),
+            (
+                "opus",
+                Some(150_020),
+                Some(200_000),
+                Some(75.01),
+                "claude-opus-4-5",
+            ),
+            ("lonely", None, None, None, "opus"),
+        ];
+        for (chat, tokens, win, pct, model_id) in cases {
+            let (got_id, _provider, ctx) = chat_context(&db, chat, &window).unwrap();
+            assert_eq!(got_id, model_id, "{chat} model id");
+            assert_eq!(ctx["contextTokens"].as_u64(), tokens, "{chat} context");
+            assert_eq!(ctx["windowTokens"].as_u64(), win, "{chat} window");
+            assert_eq!(ctx["windowPct"].as_f64(), pct, "{chat} percent");
+        }
+        // A chat that does not exist: the op maps this to a plain "no chat with that id" answer.
+        assert!(matches!(
+            chat_context(&db, "nobody", &window),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
     }
 
     fn reading() -> UsageSnapshot {

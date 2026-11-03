@@ -49,6 +49,34 @@ export function contextTokens(rows: MessageRow[]): number | null {
   return null;
 }
 
+/** The host's context reading for a chat (the `chat_context` op): the context the chat's newest
+ * recorded turn measured, and the model's real window. Null fields when nothing was measured or
+ * no server has stated a window. */
+export interface ChatContextReading {
+  contextTokens: number | null;
+  windowTokens: number | null;
+  windowPct?: number | null;
+  measuredAtMs?: number | null;
+}
+
+/**
+ * The context size to show: the newest reply's own reading and the host's last measured turn,
+ * whichever is larger — a turn whose last call was refused measures in the usage table but leaves
+ * no reply row, and a streaming reply measures on the row before the turn's usage entry lands.
+ * With the model's window known, the honest percent comes too (over 100 means it no longer fits).
+ * Null when nothing has been measured.
+ */
+export function contextSize(
+  rows: MessageRow[],
+  host: ChatContextReading | null,
+): { tokens: number; window: number | null; pct: number | null } | null {
+  const tokens = Math.max(contextTokens(rows) ?? 0, host?.contextTokens ?? 0);
+  if (tokens === 0) return null;
+  const window = host?.windowTokens ?? null;
+  const pct = window !== null ? Math.round((tokens / window) * 10000) / 100 : null;
+  return { tokens, window, pct };
+}
+
 /** A compact count: 950, 1.2k, 12k, 3.4M. */
 export function compactCount(n: number): string {
   if (n < 1000) return String(n);

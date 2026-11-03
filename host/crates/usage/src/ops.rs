@@ -6,6 +6,7 @@
 //! | `request_modes` | heavy | `{since, until}` (epoch ms) to [`RequestModes`](crate::modes::RequestModes) |
 //! | `usage_refresh` | blocking | `{}` to the snapshot at once; a read starts when the 60 s floor allows, and its result arrives as the `plan_usage` event (the snapshot's fields) |
 //! | `usage_cost` | blocking | `{chatId}` or `{projectId}` to [`CostReport`](crate::types::CostReport): tokens, the reported cost and the estimated weekly share ([`crate::summary::cost_report`]) |
+//! | `chat_context` | blocking | `{chatId}` to the chat's context reading ([`crate::summary::chat_context`]): the last measured call's context tokens over the model's real window — the chat line's source |
 
 use crate::modes::{ModesArgs, ModesService};
 use crate::service::UsageService;
@@ -26,7 +27,31 @@ pub fn register_ops(reg: &mut OpRegistry) {
     })
     .blocking("usage_refresh", OpClass::Blocking, refresh)
     .blocking("request_modes", OpClass::Heavy, request_modes)
-    .blocking("usage_cost", OpClass::Blocking, usage_cost);
+    .blocking("usage_cost", OpClass::Blocking, usage_cost)
+    .blocking("chat_context", OpClass::Blocking, chat_context_op);
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContextArgs {
+    chat_id: String,
+}
+
+/// The chat's context reading for its context line: the newest recorded turn's measured context
+/// over the model's real window (the same reading the usage digest gives agents).
+fn chat_context_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ContextArgs =
+        serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
+    let db = ctx.services.need::<Database>()?;
+    let lw = crate::summary::local_windows(&ctx.services);
+    let (_model_id, _provider, context) = crate::summary::chat_context(&db, &a.chat_id, &lw)
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => {
+                ApiError::bad_args("There is no chat with that id.")
+            }
+            e => ApiError::internal(e.to_string()),
+        })?;
+    Ok(context)
 }
 
 #[derive(serde::Deserialize)]

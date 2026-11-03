@@ -24,7 +24,7 @@ import { useShell } from './shell/context.ts';
 import { ConfirmDialog, useLayer, type ConfirmSpec } from './ui/index.ts';
 import { rollOverChat, rollOverConfirm } from './sidebar/actions.ts';
 import { ContextBar } from './transcript/ContextBar.tsx';
-import { isTooLargeRefusal } from './transcript/rowMeta.ts';
+import { isTooLargeRefusal, type ChatContextReading } from './transcript/rowMeta.ts';
 import { IconFork } from './ui/icons.tsx';
 import { accessoriesAt, composerApi } from './composer/slots.ts';
 import { recallPrompts } from './composer/recall.ts';
@@ -140,6 +140,22 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   }, [completionId, status, ops, chatId]);
   const behavior = thread?.sendBehavior ?? HOME_SEND_BEHAVIOR;
   const busy = chat ? isBusy(chat.status) : false;
+
+  // The host's context reading for the context line: the chat's last measured call over the model's
+  // real window. Read when the chat opens or its model changes, and once each turn settles — a
+  // reading taken mid-turn is stale by half the turn, and the row's own usage covers the gap.
+  const [ctxRead, setCtxRead] = useState<ChatContextReading | null>(null);
+  useEffect(() => {
+    if (busy) return;
+    let live = true;
+    void shell
+      .api<ChatContextReading>('chat_context', { chatId })
+      .then((c) => live && setCtxRead(c))
+      .catch(() => live && setCtxRead(null));
+    return () => {
+      live = false;
+    };
+  }, [chatId, busy, chat?.model, shell]);
 
   const stopTool = useCallback(
     (toolCallId: string) => {
@@ -350,6 +366,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       <ContextBar
         chat={chat}
         rows={view.rows}
+        host={ctxRead}
         hasNewer={view.hasNewer}
         busy={busy}
         onRollOver={() => setRollConfirm(rollOverConfirm(chat.title, () => rollOverChat(ops, chatId, (m) => setNotice(m))))}

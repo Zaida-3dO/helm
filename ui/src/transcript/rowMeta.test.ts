@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compactCount, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, tokenChip, turnTimes } from './rowMeta.ts';
+import { compactCount, contextSize, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, tokenChip, turnTimes } from './rowMeta.ts';
 
 const usage = { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 40_000, cacheWriteTokens: 500, costUsd: 0 };
 
@@ -54,6 +54,40 @@ test('the context size is the newest reply that reports usage: input plus cache 
   assert.equal(contextTokens(rows), 121_020);
   assert.equal(contextTokens(rows.slice(0, 1)), null);
   assert.equal(contextTokens([]), null);
+});
+
+test('the shown context size follows the last measured call and the model\'s real window', async () => {
+  const { row } = await import('../dev/fixtures.ts');
+  // (rows' own newest reply, host reading, expected tokens/window/percent)
+  const host = (contextTokens: number | null, windowTokens: number | null) => ({ contextTokens, windowTokens });
+  const cases: [number, ReturnType<typeof host> | null, number, number | null, number | null][] = [
+    // The host's last measured turn beats a row that stopped reporting (the feedback case:
+    // a row said 126k while the chat's real last call held 230k of a 262k window).
+    [126_000, host(230_000, 262_144), 230_000, 262_144, 87.74],
+    // A streaming reply measures on its row before the turn's usage entry lands.
+    [240_000, host(230_000, 262_144), 240_000, 262_144, 91.55],
+    // No host reading: the rows' own reading, with no percent claimed.
+    [126_000, null, 126_000, null, null],
+    // A server that has not stated a window: the token count, no percent.
+    [126_000, host(230_000, null), 230_000, null, null],
+    // Over the window is stated as over 100, not clipped.
+    [300_000, host(300_000, 262_144), 300_000, 262_144, 114.44],
+  ];
+  for (const [rowTokens, h, tokens, window, pct] of cases) {
+    const rows = [
+      row({ id: 1, role: 'user' }),
+      row({
+        id: 2,
+        role: 'assistant',
+        details: { usage: { inputTokens: rowTokens, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 5, costUsd: 0 } },
+      }),
+    ];
+    const size = contextSize(rows, h);
+    assert.deepEqual([size?.tokens, size?.window, size?.pct], [tokens, window, pct], JSON.stringify(h));
+  }
+  // Nothing measured anywhere: nothing to show.
+  assert.equal(contextSize([], null), null);
+  assert.equal(contextSize([], host(null, null)), null);
 });
 
 test('a too-large-for-the-window refusal is recognised; other faults and no error are not', () => {
