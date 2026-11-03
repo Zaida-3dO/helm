@@ -7,6 +7,9 @@ use std::time::Duration;
 
 /// A short answer is expected from a catalogue or health request.
 pub const QUICK: Duration = Duration::from_secs(2);
+/// The slot/queue read: cheap in itself, but it is asked precisely while the server is busy
+/// answering someone on loaded hardware, so it needs more room than a quick read.
+pub const SLOT: Duration = Duration::from_secs(5);
 /// An unload or a small management call.
 pub const MANAGE: Duration = Duration::from_secs(15);
 /// Making a variant of a model (a metadata change, but it reads the model).

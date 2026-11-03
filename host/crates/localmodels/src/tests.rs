@@ -627,8 +627,10 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     assert!(matches!(err, crate::net::NetError::Unreachable(_)));
 }
 
-/// Whether the model server is working on something, and how many requests wait on it, is read
-/// from the single-slot server only: Ollama answers several requests at once and is never asked.
+/// Whether the model server is working on something (and, where it names one, how many wait) is
+/// read from the single-slot server only: Ollama answers several requests at once and is never
+/// asked. The fake answers in the shape Strata speaks — a bare list of slots with
+/// `is_processing` — and the slot count is never mistaken for a waiting line.
 /// A server without that answer simply says nothing.
 #[test]
 fn only_the_single_slot_server_is_asked_what_it_is_busy_with() {
@@ -640,7 +642,10 @@ fn only_the_single_slot_server_is_asked_what_it_is_busy_with() {
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/health") => (200, json!({"status": "ok", "loaded": null})),
             ("GET", "/v1/models") => (200, json!({"data": []})),
-            ("GET", "/slots") => (200, json!({"busy": true, "queued": 2})),
+            ("GET", "/slots") => (
+                200,
+                json!([{"id": 0, "index": 0, "is_processing": true, "n_prompt_tokens": 37}]),
+            ),
             _ => (404, json!({})),
         }
     });
@@ -650,7 +655,10 @@ fn only_the_single_slot_server_is_asked_what_it_is_busy_with() {
 
     let q = r.svc.queue("strata").expect("the slot answer arrives");
     assert!(q.busy, "one request is being answered");
-    assert_eq!(q.queued, Some(2), "and two wait behind it");
+    assert_eq!(
+        q.queued, None,
+        "a bare slot list names no waiting line: one slot is not one waiter"
+    );
     assert_eq!(strata.calls("GET", "/slots").len(), 1);
 
     // Ollama answers several requests at once: never asked, and says nothing.

@@ -5,11 +5,11 @@
 //! `delete`), and loading or unloading through `generate` with no prompt.
 //!
 //! **Strata** (an Anthropic-style model server): `/health` says what is loaded, a model list at
-//! `/v1/models` (or `/models`), `/unload` frees its memory, and `/slots` says whether it is
-//! answering a request now and how many more it is holding. It answers one request at a time, so
-//! the rest wait; Helm reads `/slots` only while one of its chats has a request open there, to
-//! tell a chat waiting for its turn from one whose model is working on it. The model loads when a
-//! request for it arrives, so Helm never loads one itself.
+//! `/v1/models` (or `/models`), `/unload` frees its memory, and `/slots` lists its slots and says
+//! which are answering a request now — some builds also name how many more they are holding. It
+//! answers one request at a time, so the rest wait; Helm reads `/slots` only while one of its
+//! chats has a request open there, to tell a chat waiting for its turn from one whose model is
+//! working on it. The model loads when a request for it arrives, so Helm never loads one itself.
 //!
 //! Every answer is read leniently: a field that is missing or shaped differently is skipped, not an
 //! error, since these servers differ in small ways between versions.
@@ -332,11 +332,13 @@ pub fn strata_unload(h: &Http, c: &Conn) -> Result<(), CallError> {
     good(h.post(c, "/unload", &json!({}), net::MANAGE)?).map(|_| ())
 }
 
-/// Strata's own picture of its one-at-a-time request handling: `/slots`. A short read like the
-/// health check, so a busy or paused server costs nothing. `None` when the answer says nothing
-/// usable.
+/// Strata's own picture of its one-at-a-time request handling: `/slots`. It says which of its
+/// slots is answering a request now (and, where it names one, how many more it is holding). The
+/// read is asked exactly when the server is in the middle of someone's request, so it gets its
+/// own, longer than quick, timeout rather than the health check's 2 s. `None` when the answer
+/// says nothing usable.
 pub fn strata_queue(h: &Http, c: &Conn) -> Option<QueueInfo> {
-    let r = h.get(c, "/slots", net::QUICK).ok()?;
+    let r = h.get(c, "/slots", net::SLOT).ok()?;
     if !r.ok() {
         return None;
     }
@@ -361,8 +363,16 @@ fn truthy(v: Option<&Value>) -> Option<bool> {
 }
 
 /// One entry of a slot list: busy when it says so, by a flag or by a state word.
+/// `is_processing` is the flag a llama.cpp-style server (Strata) sets on each of its slots;
+/// it is false when idle, and an idle slot must read as idle — the phantom "queued = number of
+/// slots" is the bug this fixes.
 fn slot_busy(s: &Value) -> bool {
-    truthy(s.get("busy").or_else(|| s.get("active"))).unwrap_or_else(|| {
+    truthy(
+        s.get("is_processing")
+            .or_else(|| s.get("busy"))
+            .or_else(|| s.get("active")),
+    )
+    .unwrap_or_else(|| {
         s.get("state")
             .or_else(|| s.get("status"))
             .and_then(Value::as_str)
@@ -399,7 +409,10 @@ fn read_queue(v: &Value) -> Option<QueueInfo> {
                 });
             (busy, queued)
         }
-        Value::Array(a) => (Some(a.iter().any(slot_busy)), Some(a.len() as u64)),
+        // A bare list is the server's slots, not a waiting line: it says who is answering, never
+        // how many wait. Counting its length as a queue invents a waiter on a single-slot server
+        // that is simply idle.
+        Value::Array(a) => (Some(a.iter().any(slot_busy)), None),
         _ => (None, None),
     };
     // No busy word anywhere: a queue count still says something is holding or waiting. Where both
@@ -518,7 +531,47 @@ mod tests {
                 json!([{"state": "serving"}]),
                 Some(QueueInfo {
                     busy: true,
-                    queued: Some(1),
+                    queued: None,
+                }),
+            ),
+            // The shape a llama.cpp-style server (Strata) actually answers: a bare list of slots,
+            // each with is_processing. The list is slots, not a waiting line: an idle server
+            // reads idle, and only a real queue count says requests are waiting.
+            (
+                json!([{"id": 0, "index": 0, "is_processing": true, "n_prompt_tokens": 37}]),
+                Some(QueueInfo {
+                    busy: true,
+                    queued: None,
+                }),
+            ),
+            (
+                json!([{"id": 0, "index": 0, "is_processing": false, "n_prompt_tokens": 0}]),
+                Some(QueueInfo {
+                    busy: false,
+                    queued: None,
+                }),
+            ),
+            (
+                json!([{"id": 0, "is_processing": false}, {"id": 1, "is_processing": true}]),
+                Some(QueueInfo {
+                    busy: true,
+                    queued: None,
+                }),
+            ),
+            // Slots under a `slots` key, and a busy slot read together with a named waiting
+            // count: the count stands and the server reads about-to-be-busy.
+            (
+                json!({"slots": [{"id": 0, "is_processing": true}]}),
+                Some(QueueInfo {
+                    busy: true,
+                    queued: None,
+                }),
+            ),
+            (
+                json!({"slots": [{"id": 0, "is_processing": false}], "waiting": 2}),
+                Some(QueueInfo {
+                    busy: true,
+                    queued: Some(2),
                 }),
             ),
             (

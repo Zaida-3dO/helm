@@ -1373,8 +1373,9 @@ impl Actor {
     }
 
     /// What the server says about requests waiting on it, from the cache; starts a read on the
-    /// blocking pool when the cache has aged out. Reachability is not touched either way — this
-    /// read says nothing about a server being up.
+    /// blocking pool when the cache has aged out. A read that comes back saying nothing keeps
+    /// the previous answer. Reachability is not touched either way — this read says nothing about
+    /// a server being up.
     fn server_queue(&self, server: &str) -> Option<crate::local::QueueInfo> {
         let seam = self.sh.local.get().cloned()?;
         let mut fetch = false;
@@ -1404,7 +1405,12 @@ impl Actor {
                     info: None,
                     fetching: false,
                 });
-                e.info = info;
+                // A failed or shapeless read says nothing, so it does not erase what the last
+                // good read said. The next good answer replaces it; the read keeps being retried
+                // every QUEUE_STALE while a chat asks.
+                if info.is_some() {
+                    e.info = info;
+                }
                 e.at = Instant::now();
                 e.fetching = false;
             });
