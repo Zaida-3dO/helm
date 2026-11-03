@@ -3,6 +3,7 @@
 export type { AudioInput } from './AudioInput.ts';
 export type { FolderPickArgs } from './FolderPickArgs.ts';
 export type { FolderPickResult } from './FolderPickResult.ts';
+export type { KeepAwake } from './KeepAwake.ts';
 export type { MicChoice } from './MicChoice.ts';
 export type { NotificationMode } from './NotificationMode.ts';
 export type { OpenExternalArgs } from './OpenExternalArgs.ts';

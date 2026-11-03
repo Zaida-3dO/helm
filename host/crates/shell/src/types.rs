@@ -23,6 +23,17 @@ pub enum TerminalShell {
     Gitbash,
 }
 
+/// How long the machine is kept from sleeping: never, while chats run (or a saved schedule is
+/// close to due), or the whole time Helm is open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum KeepAwake {
+    Off,
+    #[default]
+    Busy,
+    Always,
+}
+
 /// The chosen microphone, kept even while the device is unplugged.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -38,7 +49,7 @@ pub struct MicChoice {
 pub struct ShellSettings {
     /// A chord such as "Ctrl+Alt+H"; null when cleared.
     pub global_hotkey: Option<String>,
-    pub keep_awake: bool,
+    pub keep_awake: KeepAwake,
     pub notifications: NotificationMode,
     /// Null (no row) means Automatic: the system's default capture device.
     pub dictation_mic: Option<MicChoice>,
@@ -51,7 +62,7 @@ impl Default for ShellSettings {
     fn default() -> Self {
         Self {
             global_hotkey: Some(DEFAULT_HOTKEY.to_owned()),
-            keep_awake: true,
+            keep_awake: KeepAwake::Busy,
             notifications: NotificationMode::InApp,
             dictation_mic: None,
             terminal_shell: TerminalShell::Pwsh,

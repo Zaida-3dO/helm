@@ -1,7 +1,7 @@
 //! The tray menu as data: a pure function of the attention summary,
 //! the capture devices and the settings. The app turns it into a native menu; the probe records it.
 
-use crate::types::{NotificationMode, ShellSettings};
+use crate::types::{KeepAwake, NotificationMode, ShellSettings};
 use helm_chats::types::{AttentionRow, AttentionSummary};
 use helm_platform::CaptureDevice;
 use serde::Serialize;
@@ -16,7 +16,10 @@ pub const TITLE_MAX: usize = 60;
 pub struct TrayMenu {
     pub groups: Vec<TrayGroup>,
     pub mics: Vec<MicEntry>,
+    /// Whether some mode is on (the check item's tick).
     pub keep_awake: bool,
+    /// What the check item says, so it names the mode that is on.
+    pub keep_awake_label: String,
     pub notifications: NotificationMode,
 }
 
@@ -136,10 +139,16 @@ pub fn menu_model(
             .collect()
         })
         .unwrap_or_default();
+    let keep_awake_label = match settings.keep_awake {
+        KeepAwake::Off => "Keep awake",
+        KeepAwake::Busy => "Keep awake while chats run",
+        KeepAwake::Always => "Keep awake while Helm is open",
+    };
     TrayMenu {
         groups,
         mics: mic_entries(devices, settings),
-        keep_awake: settings.keep_awake,
+        keep_awake: settings.keep_awake != KeepAwake::Off,
+        keep_awake_label: keep_awake_label.to_owned(),
         notifications: settings.notifications,
     }
 }
@@ -226,6 +235,31 @@ mod tests {
         let m = mic_entries(&[dev("m1", "USB mic", false)], &s);
         assert!(!m[0].checked);
         assert!(m[1].checked);
+    }
+
+    #[test]
+    fn the_keep_awake_row_names_the_mode() {
+        let row = |mode| {
+            let s = ShellSettings {
+                keep_awake: mode,
+                ..Default::default()
+            };
+            let m = menu_model(None, &[], &s);
+            (m.keep_awake, m.keep_awake_label)
+        };
+        assert_eq!(
+            row(KeepAwake::Off),
+            (false, "Keep awake".to_owned()),
+            "off is unticked and the plain click restores a mode"
+        );
+        assert_eq!(
+            row(KeepAwake::Busy),
+            (true, "Keep awake while chats run".to_owned())
+        );
+        assert_eq!(
+            row(KeepAwake::Always),
+            (true, "Keep awake while Helm is open".to_owned())
+        );
     }
 
     #[test]
