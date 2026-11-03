@@ -1,0 +1,20 @@
+[package]
+name = "helm-backup"
+description = "Back up Helm's profile folder as a plain readable archive, queue a restore of one safely, and export a chat as Markdown."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
+
+[dev-dependencies]
+tempfile.workspace = true
