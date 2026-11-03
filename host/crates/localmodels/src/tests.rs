@@ -705,6 +705,28 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     r.svc.set_key("strata", KEY).unwrap();
     let lines = Mutex::new(Vec::<String>::new());
     let progress = |l: &str| lines.lock().unwrap().push(l.to_owned());
+    let ledger = || -> Vec<(String, String, String, i64)> {
+        r.db.snapshot(|tx| {
+            let mut st = tx.prepare(
+                "SELECT server_id, name, base, context FROM local_model_variants ORDER BY name",
+            )?;
+            let got = st
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok::<_, rusqlite::Error>(got)
+        })
+        .unwrap()
+    };
+    let made_row = || {
+        vec![(
+            "ollama".to_owned(),
+            "qwen3:8b-helm-64k".to_owned(),
+            "qwen3:8b".to_owned(),
+            65_536,
+        )]
+    };
 
     // 1. A model that needs 6 GB with 4 free: Strata's idle model is unloaded, the variant made
     //    for the context setting, the older one removed, the model loaded with Helm's keep-alive.
@@ -731,6 +753,12 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
         (Some("qwen3:8b-helm-64k"), Some("15m"))
     );
     assert!(load.body.get("prompt").is_none(), "loading sends no prompt");
+    assert_eq!(
+        ledger(),
+        made_row(),
+        "the variant Helm just made is on the ledger, and the older one it removed — which Helm \
+         never made — leaves no row"
+    );
 
     // 1b. A launched variant of another model (the chat's model was just changed, its worker is
     //     still closing) is not the one to prepare: this model gets its own variant.
@@ -866,6 +894,12 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
         .prepare(&turn("ollama", "qwen3:8b"), &progress)
         .unwrap_err()
         .contains("did not answer"));
+    assert_eq!(
+        ledger(),
+        made_row(),
+        "the ledger holds only what Helm made: re-preparing an existing variant, a variant in use, \
+         and failed prepares add no rows"
+    );
 
     // 7. What a worker is launched with: the key (or a stand-in), the window and lean tools.
     r.svc.save(&servers(&s.base, &o.base)).unwrap();

@@ -883,11 +883,18 @@ impl LocalService {
             _ => srv::variant_name(&turn.model, st.ollama_context),
         };
         let ctx = srv::variant_context(&target).unwrap_or(st.ollama_context);
-        if !tags
+        let made = !tags
             .iter()
-            .any(|t| srv::norm(&t.name) == srv::norm(&target))
-        {
+            .any(|t| srv::norm(&t.name) == srv::norm(&target));
+        if made {
             srv::ollama_create(&self.http, conn, &target, &base.name, ctx).map_err(who)?;
+        }
+        // The ledger of variants Helm made, so a later step can list the stale ones and hide or
+        // delete them. A ledger fault never fails the turn.
+        if let Err(e) = self.db.write(|tx| {
+            crate::variants::note_variant(tx, &server.id, &target, &base.name, ctx, made)
+        }) {
+            log::warn!("could not record the variant {target} in the ledger: {e}");
         }
         let resident = srv::ollama_ps(&self.http, conn).map_err(who)?;
         self.note_memory(&resident);
@@ -916,12 +923,20 @@ impl LocalService {
                     .iter()
                     .any(|u| srv::norm(u) == srv::norm(&t.name))
         }) {
-            if let Err(e) = srv::ollama_delete(&self.http, conn, &old.name) {
-                log::warn!(
+            match srv::ollama_delete(&self.http, conn, &old.name) {
+                Ok(()) => {
+                    if let Err(e) = self
+                        .db
+                        .write(|tx| crate::variants::forget_variant(tx, &server.id, &old.name))
+                    {
+                        log::warn!("could not remove {} from the variant ledger: {e}", old.name);
+                    }
+                }
+                Err(e) => log::warn!(
                     "could not remove the older variant {}: {}",
                     old.name,
                     who(e)
-                );
+                ),
             }
         }
         Ok(target)

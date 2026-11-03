@@ -148,6 +148,8 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
         "local_model_settings",
         UserOnly("Which local model servers Helm uses is yours to set; chats may change only a few of its switches."),
     ),
+    // Which Ollama variants Helm made for chat windows; written and pruned by Helm alone.
+    ("local_model_variants", Data),
     // Web search: the Claude-chats switch (agents may change it through the settings tools) and
     // the last settings file imported from. The Brave key is in the credential store, not here.
     ("web_search_settings", Tool),

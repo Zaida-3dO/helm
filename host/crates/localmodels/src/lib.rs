@@ -35,6 +35,7 @@ pub mod starter;
 #[cfg(test)]
 mod tests;
 pub mod types;
+mod variants;
 
 pub use ops::register_ops;
 pub use service::LocalService;
@@ -48,7 +49,10 @@ use helm_platform::Platform;
 use std::sync::Arc;
 
 pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
-    reg.initializer("local-models", settings::init);
+    reg.initializer("local-models", |tx| {
+        settings::init(tx)?;
+        variants::init(tx)
+    });
 }
 
 /// The settings chats may change, for [`helm_hosttools::SettingsExtensions`].
