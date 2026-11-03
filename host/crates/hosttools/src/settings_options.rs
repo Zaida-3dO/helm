@@ -56,6 +56,7 @@ const BOOL: Kind = Kind::Bool;
 const STR_256: Kind = Kind::Text { max: 256 };
 const ID_200: Kind = Kind::Text { max: 200 };
 const SKILL_128: Kind = Kind::SkillName { max: 128 };
+const KEEP_AWAKE_MODES: &[&str] = &["off", "busy", "always"];
 
 /// Keys that no part of Helm reads yet: a value is stored and validated but changes nothing the
 /// user can see. `describe` says so, so an agent does not report a change that did nothing.
@@ -299,9 +300,10 @@ fn table() -> Vec<Entry> {
         },
         Entry {
             key: "keepAwake",
-            kind: Kind::Bool,
-            default: || json!(true),
-            about: "Keep the computer awake while a chat is running.",
+            kind: Kind::Choice(KEEP_AWAKE_MODES),
+            default: || json!("busy"),
+            about: "Keep the computer from sleeping: \"busy\" while a chat runs or a saved schedule \
+                    is close to due (the default), \"always\" while Helm is open, or \"off\".",
         },
         Entry {
             key: "hiddenSkills",

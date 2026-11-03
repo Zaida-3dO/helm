@@ -586,6 +586,81 @@ fn a_tick_sends_the_framed_prompt_once_records_it_and_tells_the_pane() {
 }
 
 #[test]
+fn a_run_coming_due_is_reported_to_the_shell_once_per_change() {
+    let (_d, db) = temp();
+    let c = chat(&db);
+    let s = make(&db, &c, interval(600)); // next run: T0 + 10 MIN
+    let (svc, sink) = svc(&db);
+    // Far off, and anything not active, is not "soon".
+    assert!(!scheduler::due_soon(&svc, T0));
+    db.write(|tx| {
+        store::update(
+            tx,
+            &ZONE,
+            T0,
+            &s.id,
+            1,
+            Update {
+                paused: Some(true),
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+    assert!(!scheduler::due_soon(&svc, T0 + 9 * MIN), "paused");
+    db.write(|tx| {
+        store::update(
+            tx,
+            &ZONE,
+            T0 + 9 * MIN,
+            &s.id,
+            2,
+            Update {
+                paused: Some(false),
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+    assert!(scheduler::due_soon(&svc, T0 + 9 * MIN), "a minute out");
+
+    // The flag is reported only when it changes.
+    let send = Recording(Mutex::new(vec![]), Mutex::new(None));
+    let mut wake = scheduler::wake_check(&svc, T0 + 8 * MIN, false);
+    assert!(wake);
+    wake = scheduler::wake_check(&svc, T0 + 9 * MIN, wake);
+    assert_eq!(
+        sink.kinds(),
+        ["schedules-wake"],
+        "not restated while unchanged"
+    );
+    // The run itself; afterwards the next slot is far off again, then close again.
+    scheduler::tick(&svc, &send, T0 + 10 * MIN);
+    wake = scheduler::wake_check(&svc, T0 + 10 * MIN + 1_000, wake);
+    assert!(!wake);
+    wake = scheduler::wake_check(&svc, T0 + 18 * MIN, wake);
+    assert!(wake);
+    assert_eq!(
+        sink.kinds(),
+        [
+            "schedules-wake",
+            "schedules",
+            "schedules-wake",
+            "schedules-wake"
+        ]
+    );
+    let flags: Vec<bool> = sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == "schedules-wake")
+        .map(|e| e.fields["dueSoon"].as_bool().unwrap())
+        .collect();
+    assert_eq!(flags, [true, false, true], "the flag as reported");
+}
+
+#[test]
 fn a_refused_send_is_recorded_as_failed_with_a_short_error_and_not_retried() {
     let (_d, db) = temp();
     let c = chat(&db);

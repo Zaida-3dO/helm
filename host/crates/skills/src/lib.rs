@@ -8,6 +8,7 @@
 //! the chat launch adds the flag in `helm_chats::runtime`.
 
 pub mod ops;
+pub use ops::register_ops;
 
 use serde::Serialize;
 use std::fs;

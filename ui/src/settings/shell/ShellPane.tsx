@@ -4,7 +4,7 @@
 import { useEffect, useState } from 'react';
 import { GLOBAL_HOTKEY_BINDING, shellOps, type AudioInput, type ShellSettings, type ShellSettingsView } from '../../api/shell.ts';
 import { useShell } from '../../shell/context.ts';
-import { Button, Checkbox, keys, normaliseChord, Picker, Segmented, SettingRow, TextInput } from '../../ui/index.ts';
+import { Button, keys, normaliseChord, Picker, Segmented, SettingRow, TextInput } from '../../ui/index.ts';
 import { registerSettingsPane } from '../registry.ts';
 import { hotkeyProblem } from './hotkey.ts';
 
@@ -90,8 +90,21 @@ function ShellPane() {
         />
         <Button onClick={() => saveHotkey(chord)}>Save</Button>
       </SettingRow>
-      <SettingRow title="Keep the PC awake while chats run" description="Stops idle sleep only; the screen can still turn off and lock.">
-        <Checkbox checked={s.keepAwake} onChange={(on) => save({ ...s, keepAwake: on })} />
+      <SettingRow
+        title="Keep the PC awake"
+        description="Stops idle sleep only; the screen can still turn off and lock. “While chats run” also covers the couple of minutes before a saved schedule is due."
+        testId="setting-keep-awake"
+      >
+        <Segmented
+          label="Keep the PC awake"
+          value={s.keepAwake}
+          options={[
+            { value: 'off', label: 'Off' },
+            { value: 'busy', label: 'While chats run' },
+            { value: 'always', label: 'Always' },
+          ]}
+          onChange={(v) => save({ ...s, keepAwake: v })}
+        />
       </SettingRow>
       {view.keepAwakeError && <p className="error">{view.keepAwakeError}</p>}
       <SettingRow title="Notifications" description="Where a finished chat tells you about it when you are not looking at it.">

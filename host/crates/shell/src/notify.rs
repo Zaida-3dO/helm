@@ -123,9 +123,19 @@ impl FlashTracker {
     }
 }
 
-/// Keep the machine awake while any chat is busy and the setting is on.
-pub fn want_keep_awake(busy: u32, setting: bool, shutting_down: bool) -> bool {
-    busy > 0 && setting && !shutting_down
+/// Keep the machine awake: under Busy, while any chat is busy or a saved schedule is close to
+/// running (the scheduler reports that as `due_soon`); under Always, the whole time; under Off,
+/// never. Quitting always releases it, whatever the mode.
+pub fn want_keep_awake(
+    busy: u32,
+    mode: crate::types::KeepAwake,
+    due_soon: bool,
+    shutting_down: bool,
+) -> bool {
+    if shutting_down || mode == crate::types::KeepAwake::Off {
+        return false;
+    }
+    mode == crate::types::KeepAwake::Always || busy > 0 || due_soon
 }
 
 #[cfg(test)]
@@ -237,9 +247,25 @@ mod tests {
 
     #[test]
     fn keep_awake_rule() {
-        assert!(want_keep_awake(1, true, false));
-        assert!(!want_keep_awake(0, true, false));
-        assert!(!want_keep_awake(2, false, false));
-        assert!(!want_keep_awake(2, true, true));
+        use crate::types::KeepAwake::{self, *};
+        // (busy, mode, due_soon, quitting) -> want
+        let cases: [((u32, KeepAwake, bool, bool), bool); 9] = [
+            ((1, Busy, false, false), true),
+            ((0, Busy, false, false), false),
+            ((0, Busy, true, false), true), // a saved schedule is close to running
+            ((1, Off, true, false), false),
+            ((0, Always, false, false), true),
+            ((0, Always, false, true), false), // quitting releases it in any mode
+            ((1, Busy, false, true), false),
+            ((1, Off, false, false), false),
+            ((0, Off, true, false), false),
+        ];
+        for ((busy, mode, due, down), want) in cases {
+            assert_eq!(
+                want_keep_awake(busy, mode, due, down),
+                want,
+                "{busy} {mode:?} {due} {down}"
+            );
+        }
     }
 }

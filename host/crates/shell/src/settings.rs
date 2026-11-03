@@ -1,7 +1,9 @@
 //! Reading and writing the shell's preferences. Every key but `keepAwake` is user-only (only the
 //! user, in Settings → Shell); the classes are in `helm_core::prefs::classes`.
 
-use crate::types::{MicChoice, NotificationMode, ShellSettings, TerminalShell, DEFAULT_HOTKEY};
+use crate::types::{
+    KeepAwake, MicChoice, NotificationMode, ShellSettings, TerminalShell, DEFAULT_HOTKEY,
+};
 use helm_core::prefs::{self, PrefError, PrefKey};
 use rusqlite::{Connection, Transaction};
 use serde_json::{json, Value};
@@ -24,12 +26,28 @@ pub fn load(conn: &Connection) -> ShellSettings {
     };
     ShellSettings {
         global_hotkey: hotkey,
-        keep_awake: prefs::get_or(conn, KEEP_AWAKE, true),
+        keep_awake: parse_keep_awake(prefs::read(conn, KEEP_AWAKE.name())),
         notifications: prefs::get_or(conn, NOTIFICATIONS, NotificationMode::InApp),
         dictation_mic: prefs::read(conn, DICTATION_MIC.name())
             .and_then(|v| serde_json::from_value::<MicChoice>(v).ok())
             .filter(valid_mic),
         terminal_shell: prefs::get_or(conn, TERMINAL_SHELL, TerminalShell::Pwsh),
+    }
+}
+
+/// The keep-awake mode. A value saved before the modes existed is a bare true/false: true meant
+/// "while chats run", so it reads as Busy; false reads as Off.
+fn parse_keep_awake(v: Option<Value>) -> KeepAwake {
+    match v {
+        Some(Value::Bool(b)) => {
+            if b {
+                KeepAwake::Busy
+            } else {
+                KeepAwake::Off
+            }
+        }
+        Some(v) => serde_json::from_value(v).unwrap_or_default(),
+        None => KeepAwake::default(),
     }
 }
 
@@ -57,7 +75,12 @@ pub fn save(tx: &Transaction<'_>, s: &ShellSettings) -> Result<ShellSettings, St
     }
     let sql = |e: PrefError| e.to_string();
     prefs::set(tx, GLOBAL_HOTKEY, &hotkey).map_err(sql)?;
-    prefs::set(tx, KEEP_AWAKE, &json!(s.keep_awake)).map_err(sql)?;
+    prefs::set(
+        tx,
+        KEEP_AWAKE,
+        &serde_json::to_value(s.keep_awake).unwrap_or(Value::Null),
+    )
+    .map_err(sql)?;
     prefs::set(
         tx,
         NOTIFICATIONS,
@@ -168,7 +191,39 @@ mod tests {
             .unwrap();
         assert_eq!(s, ShellSettings::default());
         assert_eq!(s.global_hotkey.as_deref(), Some("Ctrl+Alt+H"));
-        assert!(s.keep_awake);
+        assert_eq!(s.keep_awake, KeepAwake::Busy);
+    }
+
+    #[test]
+    fn keep_awake_modes_round_trip_and_old_booleans_still_read() {
+        let (_d, db) = temp_db(&MigrationRegistry::new());
+        for mode in [KeepAwake::Off, KeepAwake::Busy, KeepAwake::Always] {
+            let s = ShellSettings {
+                keep_awake: mode,
+                ..Default::default()
+            };
+            db.write(|tx| save(tx, &s).map_err(|_| rusqlite::Error::InvalidQuery))
+                .unwrap();
+            let got = db
+                .snapshot(|tx| Ok::<_, rusqlite::Error>(load(tx)))
+                .unwrap();
+            assert_eq!(got.keep_awake, mode, "{mode:?}");
+        }
+        // Saved before the modes existed.
+        for (stored, want) in [
+            (json!(true), KeepAwake::Busy),
+            (json!(false), KeepAwake::Off),
+            (json!("nonsense"), KeepAwake::Busy),
+        ] {
+            db.write(|tx| {
+                prefs::set(tx, KEEP_AWAKE, &stored).map_err(|_| rusqlite::Error::InvalidQuery)
+            })
+            .unwrap();
+            let got = db
+                .snapshot(|tx| Ok::<_, rusqlite::Error>(load(tx)))
+                .unwrap();
+            assert_eq!(got.keep_awake, want, "{stored}");
+        }
     }
 
     #[test]
@@ -176,7 +231,7 @@ mod tests {
         let (_d, db) = temp_db(&MigrationRegistry::new());
         let want = ShellSettings {
             global_hotkey: None,
-            keep_awake: false,
+            keep_awake: KeepAwake::Off,
             notifications: NotificationMode::Native,
             dictation_mic: Some(MicChoice {
                 uid: "{0.0.1}.{abc}".into(),

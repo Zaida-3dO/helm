@@ -150,7 +150,7 @@ impl TauriShellHost {
             }
             "keep_awake" => {
                 if let Some(s) = svc {
-                    report(s.set_keep_awake_setting(!s.settings().keep_awake));
+                    report(s.toggle_keep_awake());
                 }
             }
             "notif:in_app" => {
@@ -239,7 +239,7 @@ impl TauriShellHost {
         menu.append(&CheckMenuItem::with_id(
             app,
             "keep_awake",
-            "Keep awake while chats run",
+            &m.keep_awake_label,
             true,
             m.keep_awake,
             None::<&str>,

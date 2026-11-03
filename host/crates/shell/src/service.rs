@@ -1,4 +1,5 @@
-//! The shell service: it watches `attention` and `completion` events on their way
+//! The shell service: it watches `attention`, `completion`, `schedules-wake` (a saved schedule
+//! coming due) and `preferences` events on their way
 //! to the renderer (the app's event tap calls [`ShellService::observe`]) and drives the taskbar
 //! badge, the window flash, keep-awake, the tray menu and native toasts through a [`ShellHost`]
 //! the app implements with Tauri. It works with the window hidden.
@@ -7,7 +8,9 @@ use crate::notify::{badge_label, want_keep_awake, Announcer, FlashTracker};
 use crate::probe::Probe;
 use crate::settings;
 use crate::tray::{menu_model, TrayMenu};
-use crate::types::{AudioInput, MicChoice, NotificationMode, ShellSettings, ShellSettingsView};
+use crate::types::{
+    AudioInput, KeepAwake, MicChoice, NotificationMode, ShellSettings, ShellSettingsView,
+};
 use helm_chats::types::{AttentionSummary, Completion};
 use helm_core::db::Database;
 use helm_ipc::AppEvent;
@@ -43,6 +46,10 @@ struct State {
     flash: FlashTracker,
     keep_awake_on: bool,
     keep_awake_error: Option<String>,
+    /// A saved schedule is close to running (from the scheduler's wake transitions).
+    due_soon: bool,
+    /// The last mode that was not off, so the tray toggle can restore it.
+    last_keep_awake: KeepAwake,
     hotkey_registered: bool,
     hotkey_error: Option<String>,
     shutting_down: bool,
@@ -132,6 +139,41 @@ impl ShellService {
                     self.on_completion(&c);
                 }
             }
+            "schedules-wake" => {
+                let Some(due) = event.fields.get("dueSoon").and_then(|v| v.as_bool()) else {
+                    return;
+                };
+                if std::mem::replace(&mut self.state.lock().unwrap().due_soon, due) != due {
+                    self.apply_keep_awake();
+                }
+            }
+            "preferences" => {
+                // A changed preference row for the mode (the agent-facing settings tool writes
+                // it directly): adopt it and apply, rather than waiting for a restart.
+                if !event
+                    .fields
+                    .get("changed")
+                    .is_some_and(|c| c.get(settings::KEEP_AWAKE.name()).is_some())
+                {
+                    return;
+                }
+                let Ok(loaded) = self
+                    .db
+                    .snapshot(|tx| Ok::<_, rusqlite::Error>(settings::load(tx)))
+                else {
+                    return;
+                };
+                let mode = loaded.keep_awake;
+                {
+                    let mut st = self.state.lock().unwrap();
+                    st.settings.keep_awake = mode;
+                    if mode != KeepAwake::Off {
+                        st.last_keep_awake = mode;
+                    }
+                }
+                self.apply_keep_awake();
+                self.publish_tray();
+            }
             _ => {}
         }
     }
@@ -204,7 +246,7 @@ impl ShellService {
     fn apply_keep_awake(&self) {
         let mut st = self.state.lock().unwrap();
         let busy = st.summary.as_ref().map(|s| s.busy).unwrap_or(0);
-        let want = want_keep_awake(busy, st.settings.keep_awake, st.shutting_down);
+        let want = want_keep_awake(busy, st.settings.keep_awake, st.due_soon, st.shutting_down);
         // A failed request is retried on the next change: only a success moves keep_awake_on.
         if want == st.keep_awake_on && st.keep_awake_error.is_none() {
             return;
@@ -307,6 +349,9 @@ impl ShellService {
             .write(|tx| Ok::<_, rusqlite::Error>(settings::save(tx, &next)))
             .map_err(|e| e.to_string())??;
         let mut st = self.state.lock().unwrap();
+        if stored.keep_awake != KeepAwake::Off {
+            st.last_keep_awake = stored.keep_awake;
+        }
         let prev = std::mem::replace(&mut st.settings, stored.clone());
         let withdraw = if prev.notifications == NotificationMode::Native
             && stored.notifications != NotificationMode::Native
@@ -371,9 +416,19 @@ impl ShellService {
         self.save(next).map(|_| ())
     }
 
-    pub fn set_keep_awake_setting(&self, on: bool) -> Result<(), String> {
+    /// The tray's keep-awake check item: off, or back to the mode that was on before it was off.
+    pub fn toggle_keep_awake(&self) -> Result<(), String> {
+        let (current, remembered) = {
+            let st = self.state.lock().unwrap();
+            (st.settings.keep_awake, st.last_keep_awake)
+        };
+        let mode = if current == KeepAwake::Off {
+            remembered
+        } else {
+            KeepAwake::Off
+        };
         let mut next = self.state.lock().unwrap().settings.clone();
-        next.keep_awake = on;
+        next.keep_awake = mode;
         let r = self.save(next).map(|_| ());
         self.retick_on_error(r)
     }
@@ -672,9 +727,9 @@ mod tests {
         r.svc
             .observe(&event("attention", "summary", summary(0, 2, &[], &[])));
         assert!(r.power.is_on());
-        r.svc.set_keep_awake_setting(false).unwrap();
+        r.svc.toggle_keep_awake().unwrap();
         assert!(!r.power.is_on(), "toggling applies at once");
-        r.svc.set_keep_awake_setting(true).unwrap();
+        r.svc.toggle_keep_awake().unwrap();
         assert!(r.power.is_on());
         r.svc
             .observe(&event("attention", "summary", summary(0, 0, &[], &[])));
@@ -691,6 +746,61 @@ mod tests {
             .map(|v| v["on"].as_bool().unwrap())
             .collect();
         assert_eq!(ons, [true, false, true, false, true, false]);
+    }
+
+    #[test]
+    fn the_mode_a_due_run_and_an_agent_setting_all_keep_the_pc_awake() {
+        let r = rig();
+        let mut s = r.svc.settings();
+        // Always: idle chats keep it on; off releases again; the tray restores the remembered mode.
+        s.keep_awake = KeepAwake::Always;
+        r.svc.save(s.clone()).unwrap();
+        assert!(r.power.is_on(), "always, while open");
+        r.svc.toggle_keep_awake().unwrap();
+        assert!(!r.power.is_on());
+        r.svc.toggle_keep_awake().unwrap();
+        assert_eq!(r.svc.settings().keep_awake, KeepAwake::Always);
+        assert!(r.power.is_on(), "the tray restores the mode it turned off");
+        // Back to busy: idle again.
+        let mut busy_mode = r.svc.settings();
+        busy_mode.keep_awake = KeepAwake::Busy;
+        r.svc.save(busy_mode).unwrap();
+        assert!(
+            !r.power.is_on(),
+            "idle and busy mode: nothing to keep awake for"
+        );
+        // A saved schedule coming due, reported by the scheduler's tick.
+        r.svc
+            .observe(&event("schedules-wake", "dueSoon", json!(true)));
+        assert!(r.power.is_on(), "awake ahead of the run");
+        r.svc
+            .observe(&event("schedules-wake", "dueSoon", json!(false)));
+        assert!(!r.power.is_on());
+        // The tray menu names the mode that is on.
+        let menu = r.svc.tray_menu(false);
+        assert_eq!(menu.keep_awake_label, "Keep awake while chats run");
+        assert!(menu.keep_awake);
+        // An agent-facing settings write lands as a preference event and is applied at once.
+        set_keep_awake_pref(&r, "off");
+        assert!(!r.power.is_on(), "the adopted mode took effect");
+        assert_eq!(r.svc.settings().keep_awake, KeepAwake::Off);
+        assert!(!r.svc.tray_menu(false).keep_awake, "unticked");
+    }
+
+    /// Stand-in for the preference op: write the row, then emit the event the op sends.
+    fn set_keep_awake_pref(r: &Rig, value: &str) {
+        r.svc
+            .db
+            .write(|tx| {
+                helm_core::prefs::set(tx, settings::KEEP_AWAKE, &json!(value))
+                    .map_err(|_| rusqlite::Error::InvalidQuery)
+            })
+            .unwrap();
+        r.svc.observe(&event(
+            "preferences",
+            "changed",
+            json!({ settings::KEEP_AWAKE.name(): value }),
+        ));
     }
 
     #[test]

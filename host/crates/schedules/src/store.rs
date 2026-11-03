@@ -851,6 +851,16 @@ pub fn recover(tx: &Transaction<'_>) -> Result<usize, SErr> {
     Ok(stuck.len())
 }
 
+/// When the next run of any active schedule is due (None when nothing is waiting): the shell
+/// keeps the machine awake ahead of a run that is close.
+pub fn soonest_next_run(tx: &Transaction<'_>) -> Result<Option<i64>, SErr> {
+    Ok(tx.query_row(
+        "SELECT MIN(next_run_at) FROM schedules WHERE state = 'active' AND next_run_at IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
 /// Weekly schedules follow the clock: when the UTC offset at the next run no longer matches the
 /// one remembered (a daylight-saving change, a new timezone), the next run is worked out again.
 /// Returns how many were moved.

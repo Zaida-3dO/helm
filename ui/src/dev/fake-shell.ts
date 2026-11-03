@@ -6,7 +6,7 @@ import type { FakeOpHandler } from './fakeHost.ts';
 export function shellFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   let settings = {
     globalHotkey: 'Ctrl+Alt+H' as string | null,
-    keepAwake: true,
+    keepAwake: 'busy' as 'off' | 'busy' | 'always',
     notifications: 'in_app',
     dictationMic: null as { uid: string; name: string } | null,
     terminalShell: 'pwsh',

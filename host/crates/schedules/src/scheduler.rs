@@ -29,6 +29,10 @@ use std::time::Duration;
 /// How often the scheduler looks for due runs.
 pub const TICK: Duration = Duration::from_secs(5);
 
+/// How close a run has to be before the machine starts being kept awake for it: room for the
+/// tick and for starting a new chat, and no longer than the shortest ordinary repeat.
+pub const WAKE_LEAD_MS: i64 = 120_000;
+
 /// What the scheduler sends through. The app's is the chat runtime.
 pub trait Sender: Send + Sync {
     fn send(&self, chat_id: &str, submission_id: &str, text: &str) -> Result<(), ApiError>;
@@ -225,6 +229,28 @@ pub fn tick(svc: &SchedulesService, sender: &dyn Sender, now: i64) -> usize {
     claimed
 }
 
+/// Whether the next active run is due within [`WAKE_LEAD_MS`] of `now`. A run left unclaimed
+/// (its chat busy) counts as soon: it is already due.
+pub fn due_soon(svc: &SchedulesService, now: i64) -> bool {
+    svc.db
+        .snapshot(store::soonest_next_run)
+        .ok()
+        .flatten()
+        .is_some_and(|next| next - now <= WAKE_LEAD_MS)
+}
+
+/// Tell the shell whether a run is coming due, but only when that changed since `last`; returns
+/// the new state. The shell uses this to keep the machine awake ahead of a run under the
+/// "while chats run" setting.
+pub fn wake_check(svc: &SchedulesService, now: i64, last: bool) -> bool {
+    let soon = due_soon(svc, now);
+    if soon != last {
+        svc.events
+            .emit(AppEvent::new("schedules-wake").with("dueSoon", soon));
+    }
+    soon
+}
+
 /// Settle receipts a previous run of the app left mid-send. Call once at startup, before
 /// [`start`].
 pub fn recover(db: &Database) {
@@ -241,15 +267,23 @@ pub fn start(svc: Arc<SchedulesService>, runtime: ChatRuntime) {
     handle.spawn(async move {
         let mut every = tokio::time::interval(TICK);
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Kept between ticks: whether the shell is being told to stay awake for a run. False at
+        // the start, so the first tick reports the true state.
+        let mut wake = false;
         loop {
             every.tick().await;
             let svc = svc.clone();
             let rt = runtime.clone();
             // SQLite and the send are blocking calls: keep them off the async workers.
-            let _ = tokio::task::spawn_blocking(move || {
-                tick(&svc, &rt, helm_core::now_ms());
+            if let Ok(soon) = tokio::task::spawn_blocking(move || {
+                let now = helm_core::now_ms();
+                tick(&svc, &rt, now);
+                wake_check(&svc, now, wake)
             })
-            .await;
+            .await
+            {
+                wake = soon;
+            }
         }
     });
 }
