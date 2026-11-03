@@ -41,9 +41,15 @@ export function Notifications() {
       const s = (e as { summary?: { unread?: { chatId: string }[] } }).summary;
       if (s?.unread) stack.summary(s.unread.map((r) => r.chatId));
     });
+    // A saved item whose reminder came due: one quiet toast per item, no stack entry.
+    const offS = shell.bus.on('saved_due', (e) => {
+      const items = (e as { items?: { title: string }[] }).items ?? [];
+      for (const it of items) toast.show({ kind: 'info', text: `Saved for later, now due: ${it.title}` });
+    });
     return () => {
       offC();
       offA();
+      offS();
     };
   }, [shell, stack, mode]);
 

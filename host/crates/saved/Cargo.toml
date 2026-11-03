@@ -1,0 +1,20 @@
+[package]
+name = "helm-saved"
+description = "Saved for later: things the user or a chat parks to come back to, with notes, reminders and a start-a-task hook. Stored only in Helm."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+helm-chats.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

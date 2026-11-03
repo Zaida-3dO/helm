@@ -1806,6 +1806,7 @@ dependencies = [
  "helm-platform",
  "helm-projects",
  "helm-relay",
+ "helm-saved",
  "helm-schedules",
  "helm-search",
  "helm-shell",
@@ -2086,6 +2087,21 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
+name = "helm-saved"
+version = "0.6.2"
+dependencies = [
+ "helm-chats",
+ "helm-core",
+ "helm-ipc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
  "uuid",
 ]
 

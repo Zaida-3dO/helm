@@ -49,6 +49,8 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("chat_flags", Data),
     ("chat_turn_usage", Data),
     ("agent_waits", Data),
+    ("saved_items", Data),
+    ("saved_item_notes", Data),
     (
         "chat_mutes",
         UserOnly("Muting a chat is yours to decide; agents never mute or unmute."),

@@ -31,6 +31,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_updates::register_ops(reg);
     helm_github::register_ops(reg);
     helm_webtools::register_ops(reg);
+    helm_saved::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -51,6 +52,7 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_localmodels::register_migrations(reg);
     helm_waits::register_migrations(reg);
     helm_webtools::register_migrations(reg);
+    helm_saved::register_migrations(reg);
 }
 
 /// Shared services a crate adds for op handlers (`ctx.services.need::<T>()`), called once at
@@ -66,6 +68,8 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_usage::register_services(services, events);
     helm_schedules::register_services(services, events);
     helm_waits::register_services(services, events);
+    // Saved for later: the reminder sweep's service.
+    helm_saved::register_services(services, events);
 
     // After usage, which the governor reads.
     helm_afk::register_services(services, events);
@@ -193,6 +197,8 @@ pub fn attach_host_tools(
     helm_relay::attach_ops(dispatcher); // Telegram into chats
                                         // Declared waits: the watcher loops and the delivery of their messages.
     helm_waits::start(runtime, &dispatcher.ctx().services);
+    // Saved items: the reminder sweep, five seconds at worst.
+    helm_saved::start(runtime, &dispatcher.ctx().services);
 }
 
 /// The consent upkeep: every minute, and at once after a decision,
