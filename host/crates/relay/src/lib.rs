@@ -26,8 +26,11 @@
 //! [`sink::TelegramView`], `relay_telegram_save` ([`telegram::PolicyFile`]: the limits, the
 //! away-alerts switch, approving from Telegram, and the model and effort a new Telegram chat
 //! opens with) and
-//! `relay_telegram_reset` (drop the tag, so the next message starts a new chat).
+//! `relay_telegram_reset` (drop the tag, so the next message starts a new chat). The same policy
+//! reaches chats through [`agent_settings`]: the `telegram` key of `app_get_settings` and
+//! `app_update_settings`, where chats may change only the new chat's model and effort.
 
+pub mod agent_settings;
 pub mod approve;
 pub mod client;
 pub mod config;
@@ -36,6 +39,8 @@ pub mod gate;
 pub mod notify;
 pub mod sink;
 pub mod telegram;
+
+pub use agent_settings::settings_extension;
 
 use helm_core::credentials::CredentialStore;
 use helm_core::profile::Profile;

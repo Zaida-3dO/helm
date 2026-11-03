@@ -117,9 +117,14 @@ export function HubPane() {
       .api<{ models: { id: string; name: string; description?: string }[]; local?: LocalModelInfo[] }>('model_catalogue', { harness: 'claude' })
       .then((c) => live && setModels([...c.models, ...localModelChoices(c.local)]))
       .catch(() => undefined);
+    // A chat that changes the policy through its settings tools: re-read so the pickers follow.
+    const off = shell.bus.on('relay_telegram', () =>
+      void ops.telegram().then((t) => live && showTelegram(t)).catch(() => undefined),
+    );
     return () => {
       live = false;
       clearInterval(t);
+      off();
     };
   }, [ops, shell, showTelegram]);
 

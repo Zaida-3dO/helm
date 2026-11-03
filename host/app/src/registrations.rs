@@ -85,6 +85,10 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     if let Some(web) = services.get::<helm_webtools::WebSearch>() {
         extensions.push(helm_webtools::settings_extension(web));
     }
+    // The Telegram new-chat defaults: chats read the whole policy, change only model and effort.
+    if let Some(profile) = services.get::<helm_core::profile::Profile>() {
+        extensions.push(helm_relay::settings_extension(&profile.dir));
+    }
     services.insert(Arc::new(helm_hosttools::SettingsExtensions(extensions)));
     services.insert(Arc::new(worker_lines()));
     // Other crates reach running workers through the chat runtime (helm_hosttools::lines).
