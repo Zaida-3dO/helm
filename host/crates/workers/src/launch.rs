@@ -60,6 +60,10 @@ pub struct ClaudeLaunch {
     /// chat. The server's key is never in this file: it reaches the worker in its environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local: Option<LocalSpec>,
+    /// Plugin folders passed to the CLI as `--plugin-dir` (one entry: Helm's own skills plugin).
+    /// Absent when there is nothing of Helm's to load.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub plugin_dirs: Vec<String>,
 }
 
 /// Where a local chat's model lives and how far it may think. `baseUrl` is a loopback address;
@@ -296,6 +300,7 @@ pub fn claude_launch(
         schedule_tools: runtime.schedule_tools,
         shell_changes: runtime.shell_changes,
         local: None,
+        plugin_dirs: Vec::new(),
     };
     if let Some(t) = test {
         c.command = Some(t.command.clone());
@@ -485,5 +490,14 @@ mod tests {
                                "contextTokens": 65536, "thinkingTokens": 8192})
         );
         assert!(!v.to_string().to_lowercase().contains("key"));
+        // Plugin folders reach the CLI only when the spawner put one in (Helm's skills plugin).
+        assert!(
+            v.get("pluginDirs").is_none(),
+            "absent when there is nothing of Helm's to load"
+        );
+        let mut with_plugin = claude_launch(&rt, None, None, None, None);
+        with_plugin.plugin_dirs = vec!["C:/profile/skills".into()];
+        let v = serde_json::to_value(&with_plugin).unwrap();
+        assert_eq!(v["pluginDirs"], serde_json::json!(["C:/profile/skills"]));
     }
 }

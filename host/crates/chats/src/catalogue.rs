@@ -204,6 +204,7 @@ mod tests {
         SkillInfo {
             name: n.into(),
             description: format!("{n} does things"),
+            scope: String::new(),
         }
     }
 

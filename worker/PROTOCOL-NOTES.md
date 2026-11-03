@@ -264,6 +264,14 @@ public Agent SDK type definitions; no SDK code is used or copied.
 - **Native tools to disallow** (from the `init` tool list): `CronCreate`, `CronDelete`,
   `CronList`, `ScheduleWakeup`, `RemoteTrigger` (schedules), `EnterWorktree`, `ExitWorktree`
   (worktrees).
+- **Plugin folder (`--plugin-dir`, observed 2026-11-03).** The flag loads one plugin folder per
+  occurrence. The folder needs `.claude-plugin/plugin.json` (with a `name`) and its skills as
+  `skills/<name>/SKILL.md` with a `description:` in the front matter. A plugin skill is reported
+  in the `initialize` answer's `commands` as `<pluginName>:<skillFolder>`, and its description is
+  prefixed `(<pluginName>) ` (probed with a scratch plugin named `probe`: skill folder
+  `hello-probe` reported as `probe:hello-probe`, description `(probe) …`). So Helm's own skills
+  plugin, named `helm`, shows its skills as `helm:<name>`; the host matches those names back to
+  its skills folder and marks them `scope: "helm-skill"` for the `/` menu.
 
 ## Delivery, steering and tool control
 

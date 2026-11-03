@@ -3329,6 +3329,14 @@ async fn a_failed_edit_leaves_no_stray_image_file() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn skills_come_from_the_workers_get_state() {
     let mut h = harness();
+    // One of the reported skills is one of Helm's own: the host marks it so the `/` menu can say
+    // so, even though the CLI shows it under its plugin prefix.
+    std::fs::create_dir_all(h.profile.path("skills/skills/review")).unwrap();
+    std::fs::write(
+        h.profile.path("skills/skills/review/SKILL.md"),
+        "---\ndescription: Review the diff\n---\n",
+    )
+    .unwrap();
     let chat = h.create().await;
     assert_eq!(
         h.call("skills_list", json!({"chatId": chat}))
@@ -3341,7 +3349,10 @@ async fn skills_come_from_the_workers_get_state() {
     let c = w.expect("get_state").await;
     w.respond(
         &c,
-        json!({"capabilities": {}, "skills": [{"name": "review", "description": "Review the diff"}]}),
+        json!({"capabilities": {}, "skills": [
+            {"name": "helm:review", "description": "Review the diff"},
+            {"name": "deploy", "description": "Ship it"}
+        ]}),
     )
     .await;
     h.until("skills", |h| !h.rt.skills(&chat).is_empty()).await;
@@ -3351,7 +3362,10 @@ async fn skills_come_from_the_workers_get_state() {
         .unwrap();
     assert_eq!(
         s,
-        json!([{"name": "review", "description": "Review the diff"}])
+        json!([
+            {"name": "helm:review", "description": "Review the diff", "scope": "helm-skill"},
+            {"name": "deploy", "description": "Ship it", "scope": ""}
+        ])
     );
 }
 
@@ -4216,7 +4230,7 @@ async fn a_fresh_chat_borrows_its_folders_skills() {
     .await;
     h.until("skills", |h| !h.rt.skills(&chat).is_empty()).await;
     let fresh = h.create().await;
-    let want = json!([{"name": "review", "description": "Review the diff"}]);
+    let want = json!([{"name": "review", "description": "Review the diff", "scope": ""}]);
     assert_eq!(
         h.call("skills_list", json!({"chatId": fresh}))
             .await

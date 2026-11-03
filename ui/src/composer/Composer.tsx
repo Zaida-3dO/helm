@@ -24,7 +24,7 @@ import { bytesToBase64, isAnimated, refusal, unstagedOnly, type Attached } from 
 import { bytesFromBase64 } from '../transcript/messageImages.ts';
 import { Recall } from './recall.ts';
 import { ImageViewer } from '../transcript/ImageViewer.tsx';
-import { commandWithArgs, helmCommand, moveActive, SCOPE_LABEL, skillMenu, skillQuery, withHelmCommands, type Skill } from './skills.ts';
+import { commandWithArgs, helmCommand, matchesHidden, moveActive, SCOPE_LABEL, skillMenu, skillQuery, withHelmCommands, type Skill } from './skills.ts';
 import { rollOverChat } from '../sidebar/actions.ts';
 import { toast } from '../ui/index.ts';
 import { useHiddenSkills } from '../settings/applied.ts';
@@ -378,7 +378,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const [active, setActive] = useState(0);
   const hiddenSkills = useHiddenSkills();
   const shownSkills = useMemo(
-    () => withHelmCommands(skills.filter((k) => !hiddenSkills.some((h) => h.toLowerCase() === k.name.toLowerCase()))),
+    () => withHelmCommands(skills.filter((k) => !matchesHidden(k, hiddenSkills))),
     [skills, hiddenSkills],
   );
   const menu = menuShut === draftText ? null : skillMenu(draftText, shownSkills);

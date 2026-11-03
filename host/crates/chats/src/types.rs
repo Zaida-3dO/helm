@@ -1214,6 +1214,10 @@ pub struct AttachmentPutResult {
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
+    /// Where the skill comes from, when Helm can say: `helm-skill` for one from Helm's own
+    /// skills folder, empty otherwise. The `/` menu shows the source beside the name.
+    #[serde(default)]
+    pub scope: String,
 }
 
 /// `autocomplete_suggest`.

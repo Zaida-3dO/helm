@@ -32,6 +32,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_github::register_ops(reg);
     helm_webtools::register_ops(reg);
     helm_saved::register_ops(reg);
+    helm_skills::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {

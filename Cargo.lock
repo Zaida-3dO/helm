@@ -1810,6 +1810,7 @@ dependencies = [
  "helm-schedules",
  "helm-search",
  "helm-shell",
+ "helm-skills",
  "helm-terminal",
  "helm-updates",
  "helm-usage",
@@ -1835,6 +1836,7 @@ dependencies = [
  "helm-hosttools",
  "helm-ipc",
  "helm-platform",
+ "helm-skills",
  "helm-workers",
  "image",
  "log",
@@ -2153,6 +2155,18 @@ dependencies = [
  "serde_json",
  "tempfile",
  "ts-rs",
+]
+
+[[package]]
+name = "helm-skills"
+version = "0.6.2"
+dependencies = [
+ "helm-core",
+ "helm-ipc",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

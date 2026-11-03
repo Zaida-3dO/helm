@@ -3,4 +3,9 @@
 /**
  * One of the CLI's commands or skills, as `get_state` reported it.
  */
-export type SkillInfo = { name: string, description: string, };
+export type SkillInfo = { name: string, description: string, 
+/**
+ * Where the skill comes from, when Helm can say: `helm-skill` for one from Helm's own
+ * skills folder, empty otherwise. The `/` menu shows the source beside the name.
+ */
+scope: string, };

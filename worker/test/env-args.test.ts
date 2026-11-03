@@ -143,6 +143,11 @@ test("skip permissions, resume and settings flags", () => {
   assert.equal(flag(a, "--resume"), "s-1");
   assert.deepEqual(JSON.parse(flag(a, "--settings") ?? "null"), { other: 1, fastMode: true });
   assert.equal(buildClaudeArgs({}).includes("--permission-mode"), false);
+  // Helm-managed plugin folders (its own skills): one flag each, none when there is nothing to load.
+  assert.equal(buildClaudeArgs({}).includes("--plugin-dir"), false, "absent by default");
+  const two = buildClaudeArgs({ pluginDirs: ["C:/profile/skills", "D:/extra"] });
+  assert.deepEqual(two.filter((x) => x === "--plugin-dir"), ["--plugin-dir", "--plugin-dir"]);
+  assert.ok(two.includes("C:/profile/skills") && two.includes("D:/extra"));
 });
 
 test("Claude Code's worktree tools stay disallowed unless the launch allows them and no repository has worktrees off", () => {
