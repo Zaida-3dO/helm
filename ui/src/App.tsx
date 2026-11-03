@@ -30,6 +30,7 @@ import { GLOBAL_HOTKEY_BINDING, shellOps } from './api/shell.ts';
 import { ShellController, ShellProvider, useSelection, useShell } from './shell/context.ts';
 import type { Flushers } from './shell/quit.ts';
 import { connectAppearance } from './shell/theme.ts';
+import { connectSounds } from './shell/sounds.ts';
 import { KEYBINDINGS_PREF, keys, layers, toast, ToastSlotView } from './ui/index.ts';
 import { ChatStore } from './state/store.ts';
 import { TopBar } from './topbar/TopBar.tsx';
@@ -58,6 +59,8 @@ export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers:
   }, [shell, flushers]);
   // Colour mode, and the user's key map; both re-read when a preference changes.
   useEffect(() => connectAppearance(api, bus, document.documentElement), [api, bus]);
+  // Quiet cues for a finished chat and a chat needing attention, while the window is unfocused.
+  useEffect(() => connectSounds(api, bus), [api, bus]);
   useEffect(() => {
     const load = () =>
       api<unknown>('preference_get', { key: KEYBINDINGS_PREF })

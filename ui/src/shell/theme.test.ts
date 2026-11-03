@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FONT_DEFAULTS, SKINS, applyZoom, fontVars, parseFontSizes, parseSkin, parseZoom } from './theme.ts';
-import { sizeOptions, skinOptions, zoomOptions } from '../settings/generalOptions.ts';
+import { sizeOptions, skinOptions, volumeOptions, zoomOptions } from '../settings/generalOptions.ts';
 
 test('stored text sizes are kept only when whole and in range; the rest fall back to the defaults', () => {
   assert.deepEqual(parseFontSizes(undefined), FONT_DEFAULTS);
@@ -40,6 +40,10 @@ test('the General pane offers every size in range and every zoom step, defaults 
   const z = zoomOptions();
   assert.equal(z.length, 16);
   assert.equal(z.find((o) => o.value === '100')?.title, '100% (default)');
+  const vol = volumeOptions();
+  assert.equal(vol[0]?.title, 'Silent');
+  assert.equal(vol.find((o) => o.value === '45')?.title, '45% (default)');
+  assert.equal(vol.at(-1)?.value, '100');
 });
 
 test('the skin keeps only names styles.css carries; anything else reads as the default', () => {

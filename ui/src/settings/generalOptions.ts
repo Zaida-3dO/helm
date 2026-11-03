@@ -1,6 +1,7 @@
 // The choices Settings → General offers for text sizes, zoom and the interface skin.
 
 import { FONT_DEFAULTS, FONT_RANGES, SKINS, ZOOM_DEFAULT, type FontSizes, type Skin } from '../shell/theme.ts';
+import { SOUNDS_DEFAULT } from '../shell/sounds.ts';
 
 export interface SizeOption {
   value: string;
@@ -40,6 +41,16 @@ export function skinOptions(): SizeOption[] {
     value: s,
     title: s === 'default' ? 'Default (no skin)' : SKIN_TITLES[s],
   }));
+}
+
+/** Sound level 0 to 100 in steps of 5, the default marked and 0 named. */
+export function volumeOptions(): SizeOption[] {
+  const out: SizeOption[] = [];
+  for (let n = 0; n <= 100; n += 5) {
+    const title = n === SOUNDS_DEFAULT.volume ? `${n}% (default)` : n === 0 ? 'Silent' : `${n}%`;
+    out.push({ value: String(n), title });
+  }
+  return out;
 }
 
 /** The next zoom level one step up (1) or down (-1), kept within 50 to 200. */

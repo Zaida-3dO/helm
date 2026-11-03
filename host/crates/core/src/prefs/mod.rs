@@ -54,6 +54,9 @@ pub const APPEARANCE: PrefKey = PrefKey::classified("appearance");
 /// Settings > General interface skin: "default" plus the named themes; each
 /// comes in the light and dark form the `appearance` mode picks.
 pub const INTERFACE_THEME: PrefKey = PrefKey::classified("interfaceTheme");
+/// Settings > General interface sounds: `{enabled, volume (0 to 100), themed}`;
+/// a missing field reads as its default. The renderer plays the cues.
+pub const SOUNDS: PrefKey = PrefKey::classified("sounds");
 /// The user's key map: command id → chord, or null for a cleared binding.
 pub const KEYBINDINGS: PrefKey = PrefKey::classified("keybindings");
 /// Minutes without worker output before a running chat shows as stalled (1 to 1440, default 5).
@@ -92,6 +95,7 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     SELECTION,
     APPEARANCE,
     INTERFACE_THEME,
+    SOUNDS,
     KEYBINDINGS,
     STALL_MINUTES,
     CHAT_ELEMENTS,
@@ -279,6 +283,21 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
                 key: k,
                 why: "must be default, windows-xp, slack, chrome, terminal, intellij, discord, \
                       reddit or wikipedia",
+            }),
+        },
+        "sounds" => match value.as_object() {
+            Some(m)
+                if m.iter().all(|(name, v)| match (name.as_str(), v) {
+                    ("enabled", Value::Bool(_)) | ("themed", Value::Bool(_)) => true,
+                    ("volume", v) => v.as_i64().is_some_and(|n| (0..=100).contains(&n)),
+                    _ => false,
+                }) =>
+            {
+                Ok(())
+            }
+            _ => Err(PrefError::Invalid {
+                key: k,
+                why: "takes enabled (true/false), volume (a whole number 0 to 100) and themed (true/false)",
             }),
         },
         "keybindings" => validate_keybindings(value),
@@ -494,6 +513,13 @@ mod tests {
                 json!({"interface": 14, "response": 16}),
                 json!({"interface": 40}),
             ),
+            (
+                "sounds",
+                json!({"volume": 30, "enabled": false}),
+                json!({"volume": 101}),
+            ),
+            ("sounds", json!({"themed": false}), json!({"loud": true})),
+            ("sounds", json!({}), json!({"volume": 45.5})),
         ] {
             assert!(db.write(|tx| set_generic(tx, key, &ok)).is_ok(), "{key}");
             let r = db.write(|tx| set_generic(tx, key, &bad));

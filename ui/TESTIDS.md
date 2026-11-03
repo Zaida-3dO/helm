@@ -99,7 +99,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `timeline-rail` / `timeline-band` / `timeline-card` | The work-timeline rail in the transcript's right gutter, its visible-range band, and the marker preview card (hover or click a marker); markers are `.tl-marker[data-row-id]` |  |
 | `shell` / `topbar` / `topbar-title` / `panel-toggle` | App frame and top bar | `panel-toggle`: `aria-pressed` |
 | `topbar-local-status` | The top bar's wording for a busy chat on a local model server (queued behind other work, or being answered) | `data-ahead` (count ahead, 0 when unknown) |
-| `settings` / `settings-pane` / `appearance` / `theme` | Settings dialog, a pane, the General pane's colour-mode control and its Theme skin picker | `settings-pane`: `data-pane` = pane id; tabs are `.settings-tab[data-tab]`; `appearance` segments are `[data-value]` (`system` `light` `dark`) |
+| `settings` / `settings-pane` / `appearance` / `theme` / `sound-level` | Settings dialog, a pane, the General pane's colour-mode control, its Theme skin picker and its Sound level picker | `settings-pane`: `data-pane` = pane id; tabs are `.settings-tab[data-tab]`; `appearance` segments are `[data-value]` (`system` `light` `dark`) |
 | `toast-slot` / `notice` | The generic toast slot (top-centre) and its toast | `notice`: `data-kind` (`error` `info` `restored` `undo` `reorganize`) |
 | `toast` | An in-app completion notice, bottom-right | `data-chat-id`; its buttons carry `data-action` (`open` `continue` `reply`) |
 | `caption` / `topbar-fork` / `topbar-pin` / `topbar-archive` | Helm's caption buttons and the top bar's chat actions | |

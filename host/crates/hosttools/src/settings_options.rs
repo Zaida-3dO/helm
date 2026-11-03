@@ -61,7 +61,6 @@ const SKILL_128: Kind = Kind::SkillName { max: 128 };
 /// user can see. `describe` says so, so an agent does not report a change that did nothing.
 const NOT_READ: &[&str] = &[
     "theme",
-    "interfaceTheme",
     "codeThemes",
     "fontFamilies",
     "dopamine",
@@ -72,7 +71,6 @@ const NOT_READ: &[&str] = &[
     "pauseAnimationsOnScroll",
     "moveCompletedTasksToTop",
     "reviewWrap",
-    "sounds",
     "inspectorVisible",
     "inspectorWidth",
     "collapsedProjects",
@@ -826,6 +824,8 @@ mod tests {
         }
         for k in [
             "appearance",
+            "interfaceTheme",
+            "sounds",
             "sendShortcut",
             "zoomLevel",
             "keepAwake",

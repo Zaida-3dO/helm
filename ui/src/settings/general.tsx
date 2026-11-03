@@ -4,9 +4,10 @@
 import { useEffect, useState } from 'react';
 import { useShell } from '../shell/context.ts';
 import { FONT_DEFAULTS, parseAppearance, parseFontSizes, parseSkin, parseZoom, SKIN_DEFAULT, ZOOM_DEFAULT, type Appearance, type FontSizes, type Skin } from '../shell/theme.ts';
+import { parseSounds, SOUNDS_DEFAULT, type Sounds } from '../shell/sounds.ts';
 import { Checkbox, ChoiceTiles, Picker, SettingRow, toast } from '../ui/index.ts';
 import { IconMonitor, IconMoon, IconSun } from '../ui/icons.tsx';
-import { sizeOptions, skinOptions, zoomOptions } from './generalOptions.ts';
+import { sizeOptions, skinOptions, volumeOptions, zoomOptions } from './generalOptions.ts';
 import { registerSettingsPane } from './registry.ts';
 import { ChangedByChats } from './changed/ChangedByChats.tsx';
 import { parseNameList, SIDEBAR_ENTRIES } from './applied.ts';
@@ -16,6 +17,7 @@ function GeneralPane() {
   const shell = useShell();
   const [appearance, setAppearance] = useState<Appearance>('system');
   const [skin, setSkin] = useState<Skin>(SKIN_DEFAULT);
+  const [sounds, setSounds] = useState<Sounds>(SOUNDS_DEFAULT);
   const [compact, setCompact] = useState(false);
   const [sizes, setSizes] = useState<FontSizes>(FONT_DEFAULTS);
   const [zoom, setZoom] = useState(ZOOM_DEFAULT);
@@ -37,6 +39,10 @@ function GeneralPane() {
     shell
       .api<unknown>('preference_get', { key: 'interfaceTheme' })
       .then((v) => setSkin(parseSkin(v)))
+      .catch(() => undefined);
+    shell
+      .api<unknown>('preference_get', { key: 'sounds' })
+      .then((v) => setSounds(parseSounds(v)))
       .catch(() => undefined);
     shell
       .api<unknown>('preference_get', { key: 'agentSettingsAll' })
@@ -66,6 +72,16 @@ function GeneralPane() {
     void save('fontSizes', next, () => {
       setSizes(before);
       apply('fontSizes', before);
+    });
+  };
+  const setSound = (patch: Partial<Sounds>) => {
+    const before = sounds;
+    const next = { ...sounds, ...patch };
+    setSounds(next);
+    apply('sounds', next);
+    void save('sounds', next, () => {
+      setSounds(before);
+      apply('sounds', before);
     });
   };
   return (
@@ -147,6 +163,19 @@ function GeneralPane() {
               apply('zoomLevel', before);
             });
           }}
+        />
+      </SettingRow>
+      <SettingRow title="Interface sounds" description="A quiet chime when a chat finishes while the window is away, and a softer pair of notes when a chat turns up needing you." testId="setting-sounds">
+        <Checkbox checked={sounds.enabled} onChange={(on) => setSound({ enabled: on })} />
+      </SettingRow>
+      <SettingRow title="Sound level" description="How loud those cues are; they only play while the window does not have your focus." testId="setting-sound-level">
+        <Picker<string>
+          settings
+          label="Sound level"
+          testId="sound-level"
+          value={String(sounds.volume)}
+          options={volumeOptions()}
+          onChange={(v) => setSound({ volume: Number(v) })}
         />
       </SettingRow>
       <SettingRow title="Compact sidebar" description="Tighter rows in the sidebar.">
