@@ -166,7 +166,8 @@ pub async fn suggest(
         }
     }
     let release = Release(&rt.sh.autocomplete);
-    let job = json!({"draft": a.draft, "context": ctx});
+    let mut job = json!({"draft": a.draft, "context": ctx});
+    crate::background::decorate(&rt.sh, &a.chat_id, &mut job);
     let spawner = rt.sh.spawner.clone();
     let out = tokio::time::timeout(
         DEADLINE,

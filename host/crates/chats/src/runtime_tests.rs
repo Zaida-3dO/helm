@@ -2348,6 +2348,94 @@ more detail",
     assert_eq!(h.spawner.title_jobs.lock().unwrap().len(), 1);
 }
 
+/// A background model set in preferences rides on the helper job: the `claude` name for a Claude
+/// chat, and for a chat on a local model server the `local` name resolved through that chat's own
+/// server (address and window on the job; the key travels too, and the process spawner moves it
+/// into the helper's environment). Nothing set leaves the job as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_configured_background_model_rides_on_the_helper_job() {
+    let h = harness();
+    *h.spawner.title.lock().unwrap() = Ok("Fix the login redirect".into());
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("qwen3-8b-helm-4k".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+
+    // Nothing configured: the job is exactly what it was before this setting existed.
+    let plain = h.create().await;
+    h.send(&plain, "write the report on the q3 spend", "default")
+        .await;
+    h.until("plain title job", |h| {
+        !h.spawner.title_jobs.lock().unwrap().is_empty()
+    })
+    .await;
+    assert!(
+        h.spawner.title_jobs.lock().unwrap()[0]
+            .get("model")
+            .is_none(),
+        "an unset preference changes nothing"
+    );
+
+    // The generic writer behind the `preference` op (the op itself lives in core, outside this
+    // crate's harness; the writer is the part that classifies and validates).
+    h.db.write(|tx| {
+        helm_core::prefs::set_generic(
+            tx,
+            "backgroundModel",
+            &json!({"claude": "qwen-turbo", "local": "qwen3-8b-helm-4k"}),
+        )
+    })
+    .unwrap();
+
+    let claude_chat = h.create().await;
+    h.send(&claude_chat, "rename the deploy script safely", "default")
+        .await;
+    let made = h
+        .call(
+            "chat_create",
+            json!({"cwd": h.work.to_string_lossy(), "model": "local/ollama/qwen3-8b"}),
+        )
+        .await
+        .unwrap();
+    let local_chat = made["id"].as_str().unwrap().to_owned();
+    h.send(&local_chat, "summarise the notes on backups", "default")
+        .await;
+
+    h.until("three title jobs", |h| {
+        h.spawner.title_jobs.lock().unwrap().len() >= 3
+    })
+    .await;
+    let jobs = h.spawner.title_jobs.lock().unwrap().clone();
+    let job_for = |needle: &str| {
+        jobs.iter()
+            .find(|j| {
+                j["firstRequest"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(needle)
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("no job for {needle}: {jobs:?}"))
+    };
+    let on_claude = job_for("rename the deploy script");
+    assert_eq!(on_claude["model"], "qwen-turbo");
+    assert!(
+        on_claude.get("localBaseUrl").is_none(),
+        "a Claude chat never gets the local route"
+    );
+    let on_local = job_for("summarise the notes on backups");
+    assert_eq!(on_local["model"], "qwen3-8b-helm-4k");
+    assert_eq!(on_local["localBaseUrl"], "http://127.0.0.1:9");
+    assert_eq!(on_local["localKey"], "sk-fake-local-key");
+    assert_eq!(on_local["localContextTokens"], 65_536);
+    assert_eq!(on_local["localMaxOutputTokens"], 16_384);
+}
+
 /// A manual rename wins over a title that arrives later; a failed job keeps the fallback.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_manual_rename_wins_and_a_failure_keeps_the_fallback() {

@@ -282,9 +282,10 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
         });
         Ok::<_, rusqlite::Error>(Some((c.id, c.stamp, job)))
     });
-    let Ok(Some((chat, stamp, job))) = claimed else {
+    let Ok(Some((chat, stamp, mut job))) = claimed else {
         return;
     };
+    crate::background::decorate(sh, &chat, &mut job);
     {
         let mut g = sh.triage.lock().unwrap_or_else(|p| p.into_inner());
         g.running = true;

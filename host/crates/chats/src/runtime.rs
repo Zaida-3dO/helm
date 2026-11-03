@@ -414,6 +414,16 @@ impl ProcessSpawner {
         );
         let node = resolve_node(&NodeLookup::for_worker(&env)).map_err(|e| e.to_string())?;
         let mut job = job.clone();
+        // A background job routed at a local model server carries that server's key. It travels
+        // like a worker launch does: as one environment variable the helper reads once, never in
+        // the job JSON on stdin.
+        if let Some(k) = job.get("localKey").and_then(Value::as_str) {
+            let k = k.to_owned();
+            if let Some(obj) = job.as_object_mut() {
+                obj.remove("localKey");
+            }
+            env.set(helm_workers::launch::LOCAL_KEY_ENV, k);
+        }
         let (runtime, _) = ClaudeRuntime::load(&self.profile_dir);
         if let Some(t) = test_claude(
             self.debug,

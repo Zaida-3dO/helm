@@ -27,6 +27,13 @@ export interface TriageJob {
   commandArgs?: string[];
   /** Milliseconds per attempt; default 50 s. */
   timeoutMs?: number;
+  /** The model the person configured for background jobs; absent keeps the small default. */
+  model?: string;
+  /** Set together with `model` when the chat runs on a local model server; the key is not here,
+   * it is in the helper's environment (HELM_LOCAL_MODEL_KEY), like a worker launch. */
+  localBaseUrl?: string;
+  localContextTokens?: number;
+  localMaxOutputTokens?: number;
 }
 
 export interface Verdict {
@@ -100,7 +107,16 @@ export async function triage(job: TriageJob): Promise<Verdict | { error: string 
   for (const strict of [false, true]) {
     try {
       const raw = await askClaude(
-        { firstRequest: "", command: job.command, commandArgs: job.commandArgs, timeoutMs: job.timeoutMs ?? 50_000 },
+        {
+          firstRequest: "",
+          command: job.command,
+          commandArgs: job.commandArgs,
+          timeoutMs: job.timeoutMs ?? 50_000,
+          model: job.model,
+          localBaseUrl: job.localBaseUrl,
+          localContextTokens: job.localContextTokens,
+          localMaxOutputTokens: job.localMaxOutputTokens,
+        },
         buildPrompt(job, strict),
       );
       const v = parseVerdict(raw);

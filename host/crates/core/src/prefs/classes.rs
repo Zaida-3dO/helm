@@ -45,7 +45,7 @@ pub enum PrefClass {
 use PrefClass::*;
 use Tier::*;
 
-/// Every fixed preference key and its class. Seeded with the 35-key Base tier,
+/// Every fixed preference key and its class. Seeded with the Base tier,
 /// the All-tier `keybindings`, the generic-validated layout keys, and the all-settings
 /// switch. Later features add their keys here.
 pub const CLASSIFIED: &[(&str, PrefClass)] = &[
@@ -81,6 +81,8 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     ("newChat", Registry(Base)),
     ("autocomplete", Registry(Base)),
     ("taskTriage", Registry(Base)),
+    // The model background jobs ask (titles, autocomplete, the idle check).
+    ("backgroundModel", Registry(Base)),
     ("chatElements", Registry(Base)),
     ("desktopPet", Registry(Base)),
     ("projectsMode", Registry(Base)),
@@ -227,12 +229,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_tier_has_35_keys() {
+    fn base_tier_has_36_keys() {
         let base = CLASSIFIED
             .iter()
             .filter(|(_, c)| *c == Registry(Base))
             .count();
-        assert_eq!(base, 35);
+        assert_eq!(base, 36);
     }
 
     #[test]

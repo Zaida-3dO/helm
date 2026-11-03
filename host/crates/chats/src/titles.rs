@@ -144,6 +144,8 @@ pub fn start(rt: &ChatRuntime, chat_id: &str, job_body: Value) {
         set_job(rt, chat_id, Some("greeting"));
         return;
     }
+    let mut job_body = job_body;
+    crate::background::decorate(&rt.sh, chat_id, &mut job_body);
     set_job(rt, chat_id, Some("generating"));
     let rt = rt.clone();
     let chat = chat_id.to_owned();
@@ -289,7 +291,8 @@ pub async fn suggest(rt: &ChatRuntime, chat_id: &str) -> Result<String, helm_ipc
         ));
     };
     let latest = texts.last().filter(|_| texts.len() > 1);
-    let body = job(first, latest.map(String::as_str), false);
+    let mut body = job(first, latest.map(String::as_str), false);
+    crate::background::decorate(&rt.sh, chat_id, &mut body);
     let spawner = rt.sh.spawner.clone();
     let r = tokio::time::timeout(
         HOST_TIMEOUT,

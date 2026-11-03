@@ -49,6 +49,7 @@ pub mod archive;
 pub mod attachments;
 pub mod attention;
 pub mod autocomplete;
+mod background;
 pub mod bindings;
 pub mod catalogue;
 pub mod clock;

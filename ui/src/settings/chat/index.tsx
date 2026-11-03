@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useShell } from '../../shell/context.ts';
-import { Checkbox, Picker, SettingRow, TextArea, toast } from '../../ui/index.ts';
+import { Checkbox, Picker, SettingRow, TextArea, TextInput, toast } from '../../ui/index.ts';
 import type { SendBehavior } from '../../api/generated/index.ts';
 import { HOME_SEND_BEHAVIOR } from '../../api/types.ts';
 import { parseSendShortcut } from '../../hosttools/sendShortcut.ts';
@@ -22,6 +22,10 @@ function ChatPane() {
   const [hiddenSkills, setHiddenSkills] = useState('');
   // The list as last saved, so a failed save can put the box and the window back.
   const savedSkills = useRef<string[]>([]);
+  // The model background jobs ask, blank = the small default; same last-saved trick.
+  const [bgClaude, setBgClaude] = useState('');
+  const [bgLocal, setBgLocal] = useState('');
+  const savedBg = useRef<{ claude: string | null; local: string | null }>({ claude: null, local: null });
   useEffect(() => {
     void shell
       .api<unknown>('preference_get', { key: 'sendShortcut' })
@@ -41,6 +45,16 @@ function ChatPane() {
     void shell
       .api<unknown>('preference_get', { key: 'chatElements' })
       .then((v) => setEls(parseChatElements(v)))
+      .catch(() => undefined);
+    void shell
+      .api<unknown>('preference_get', { key: 'backgroundModel' })
+      .then((v) => {
+        const named = (x: unknown) => (typeof x === 'string' && x.trim() !== '' ? x.trim() : null);
+        const o = v && typeof v === 'object' ? (v as { claude?: unknown; local?: unknown }) : {};
+        savedBg.current = { claude: named(o.claude), local: named(o.local) };
+        setBgClaude(savedBg.current.claude ?? '');
+        setBgLocal(savedBg.current.local ?? '');
+      })
       .catch(() => undefined);
     void shell
       .api<unknown>('preference_get', { key: 'autocomplete' })
@@ -69,6 +83,23 @@ function ChatPane() {
       savedSkills.current = before;
       setHiddenSkills(before.join('\n'));
       shell.bus.dispatch({ kind: 'preferences', changed: { hiddenSkills: before } });
+      saveError(err);
+    });
+  };
+  const saveBackgroundModel = () => {
+    const before = savedBg.current;
+    const named = (s: string) => (s.trim() !== '' ? s.trim() : null);
+    const next = { claude: named(bgClaude), local: named(bgLocal) };
+    if (next.claude === before.claude && next.local === before.local) return;
+    savedBg.current = next;
+    setBgClaude(next.claude ?? '');
+    setBgLocal(next.local ?? '');
+    // Blank for both restores the default, which is stored as no value at all.
+    const value = next.claude === null && next.local === null ? null : next;
+    void shell.api('preference', { key: 'backgroundModel', value }).catch((err: unknown) => {
+      savedBg.current = before;
+      setBgClaude(before.claude ?? '');
+      setBgLocal(before.local ?? '');
       saveError(err);
     });
   };
@@ -154,6 +185,32 @@ function ChatPane() {
             });
           }}
         />
+      </SettingRow>
+      <SettingRow
+        title="Background model"
+        description="The model quiet behind-the-scenes jobs ask: naming a chat, completing your sentence and the idle check. Leave blank for the small built-in model. For chats that run on a local model server, name a model on that server; it is only used there."
+        testId="setting-background-model"
+      >
+        <div style={{ display: 'grid', gap: 6, minWidth: 240 }}>
+          <TextInput
+            aria-label="Background model for Claude chats"
+            data-testid="settings-background-claude"
+            placeholder="Claude model, e.g. haiku"
+            spellCheck={false}
+            value={bgClaude}
+            onChange={(e) => setBgClaude(e.target.value)}
+            onBlur={saveBackgroundModel}
+          />
+          <TextInput
+            aria-label="Background model for chats on a local model server"
+            data-testid="settings-background-local"
+            placeholder="Local model, e.g. qwen2.5-coder-7b-instruct"
+            spellCheck={false}
+            value={bgLocal}
+            onChange={(e) => setBgLocal(e.target.value)}
+            onBlur={saveBackgroundModel}
+          />
+        </div>
       </SettingRow>
       {ELEMENTS.map((e) => (
         <SettingRow key={e.id} title={e.title} description={e.description}>

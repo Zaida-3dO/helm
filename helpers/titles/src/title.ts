@@ -9,13 +9,17 @@
 //   credentials and passes no settings.
 // - v0.2 latency: it runs in a fresh empty folder with `--setting-sources ""`, so no project or
 //   user settings load and no hooks fire (they cost seconds and could act on a project).
+// - The host may name a different model on the job (`model`), or route the job at a local model
+//   server the chat runs on (`localBaseUrl` with the same rules as a worker launch: loopback only,
+//   key from HELM_LOCAL_MODEL_KEY in the helper's environment, read once and never passed on).
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildClaudeEnv } from "../../../worker/src/drivers/claude/env.ts";
+import { buildClaudeEnv, localPinnedEnv, takeLocalKey } from "../../../worker/src/drivers/claude/env.ts";
 import { resolveClaude } from "../../../worker/src/drivers/claude/resolve.ts";
+import type { LocalLaunch } from "../../../worker/src/protocol/types.ts";
 
 export interface TitleJob {
   /** The chat's first request (head and tail kept, at most 4,000 characters). */
@@ -31,6 +35,14 @@ export interface TitleJob {
   commandArgs?: string[];
   /** Milliseconds per attempt; default 45 s. */
   timeoutMs?: number;
+  /** The model to ask, when the person configured one; absent keeps the small default. */
+  model?: string;
+  /** Set together with `model` when the job runs on a local model server: the server's loopback
+   * address, and its window sizes when known. The key is not on the job: it is in the helper's
+   * environment (HELM_LOCAL_MODEL_KEY), read once like a worker launch does. */
+  localBaseUrl?: string;
+  localContextTokens?: number;
+  localMaxOutputTokens?: number;
 }
 
 export const MAX_TITLE_CHARS = 50;
@@ -82,28 +94,53 @@ export function cleanTitle(raw: string): string | null {
   return t;
 }
 
+/** The launch the job asks for: a configured model name, and the local-server route when the
+ * job carries one (the same loopback-only rule as a worker launch). Throws on an unusable job. */
+export function jobLaunch(job: TitleJob): { model: string; local?: LocalLaunch } {
+  const model = (job.model ?? "").trim();
+  const baseUrl = (job.localBaseUrl ?? "").trim();
+  if (!baseUrl) return { model };
+  if (!model) throw new Error("a background job on a local model server needs a model name");
+  const local: LocalLaunch = { baseUrl, model };
+  if (typeof job.localContextTokens === "number" && job.localContextTokens > 0) local.contextTokens = Math.floor(job.localContextTokens);
+  if (typeof job.localMaxOutputTokens === "number" && job.localMaxOutputTokens > 0) local.maxOutputTokens = Math.floor(job.localMaxOutputTokens);
+  return { model, local };
+}
+
 /** One print-mode call: send the prompt as one stream-json user message, read the result text. */
 export function askClaude(job: TitleJob, prompt: string): Promise<string> {
-  const args = [
-    ...(job.commandArgs ?? []),
-    "-p",
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--model",
-    MODEL,
-    "--no-session-persistence",
-    "--setting-sources",
-    "",
-    // The prompt carries chat text, which is data: the model gets no tools (print mode runs
-    // reads and searches without asking) and no MCP servers.
-    "--tools",
-    "",
-    "--strict-mcp-config",
-  ];
   return new Promise((resolve, reject) => {
+    let launch: { model: string; local?: LocalLaunch };
+    try {
+      launch = jobLaunch(job);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const args = [
+      ...(job.commandArgs ?? []),
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--model",
+      launch.model || MODEL,
+      "--no-session-persistence",
+      "--setting-sources",
+      "",
+      // The prompt carries chat text, which is data: the model gets no tools (print mode runs
+      // reads and searches without asking) and no MCP servers.
+      "--tools",
+      "",
+      "--strict-mcp-config",
+    ];
+    if (launch.local) {
+      // Same as the worker's local launch: pin the route and every model slot against any
+      // settings that could appear, and never a token (a settings argument is on the command line).
+      args.push("--settings", JSON.stringify({ env: localPinnedEnv(launch.local) }));
+    }
     let command = job.command;
     if (!command) {
       try {
@@ -122,7 +159,12 @@ export function askClaude(job: TitleJob, prompt: string): Promise<string> {
     }
     const child = spawn(command, args, {
       cwd,
-      env: buildClaudeEnv(process.env, {}),
+      env: buildClaudeEnv(
+        process.env,
+        launch.local
+          ? { local: launch.local, localKey: takeLocalKey({ ...process.env } as Record<string, string | undefined>) }
+          : {},
+      ),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });

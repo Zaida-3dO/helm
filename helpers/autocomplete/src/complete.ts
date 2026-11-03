@@ -22,6 +22,8 @@ export interface CompleteJob {
   command?: string;
   commandArgs?: string[];
   timeoutMs?: number;
+  /** The model the person configured for background jobs; absent keeps the small default. */
+  model?: string;
 }
 
 export const MAX_COMPLETION_CHARS = 320;
@@ -65,7 +67,7 @@ export function cleanCompletion(raw: string, draft: string): string {
 export async function complete(job: CompleteJob): Promise<{ completion: string } | { error: string }> {
   try {
     const raw = await askClaude(
-      { firstRequest: "", command: job.command, commandArgs: job.commandArgs, timeoutMs: job.timeoutMs ?? 4_000 },
+      { firstRequest: "", command: job.command, commandArgs: job.commandArgs, timeoutMs: job.timeoutMs ?? 4_000, model: job.model },
       buildPrompt(job),
     );
     return { completion: cleanCompletion(raw, job.draft) };

@@ -108,6 +108,69 @@ process.stdin.on("end", () => {
   assert.equal(fs.existsSync(seen.cwd), false, "the folder is removed");
 });
 
+test("a configured model is asked by name, and a local job keeps to the loopback server", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-titles-"));
+  const record = path.join(dir, "seen.json");
+  const script = path.join(dir, "fake.mjs");
+  fs.writeFileSync(
+    script,
+    `import fs from "node:fs";
+const wanted = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_USE_GATEWAY", "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "HELM_LOCAL_MODEL_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"];
+fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), env: Object.fromEntries(wanted.map((k) => [k, process.env[k] ?? null])) }));
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Plan the release" }) + "\\n");
+});
+`,
+  );
+  const read = () => JSON.parse(fs.readFileSync(record, "utf8")) as { argv: string[]; env: Record<string, string | null> };
+  const modelFlag = (argv: string[]) => argv[argv.indexOf("--model") + 1];
+
+  // The built-in small model when nothing is configured, a named one when configured.
+  assert.deepEqual(await makeTitle({ firstRequest: "plan it", command: process.execPath, commandArgs: [script] }), { title: "Plan the release" });
+  assert.equal(modelFlag(read().argv), "haiku");
+  assert.deepEqual(await makeTitle({ firstRequest: "plan it", command: process.execPath, commandArgs: [script], model: "qwen-turbo" }), { title: "Plan the release" });
+  let seen = read();
+  assert.equal(modelFlag(seen.argv), "qwen-turbo");
+  assert.equal(seen.env.ANTHROPIC_BASE_URL, null, "a Claude job carries no base URL");
+
+  // A local job: the chat's server address, its own key, every model slot pinned, and the hand-
+  // over variable gone from the child's environment.
+  process.env.HELM_LOCAL_MODEL_KEY = "sk-fake-bg-key";
+  try {
+    assert.deepEqual(
+      await makeTitle({ firstRequest: "plan it", command: process.execPath, commandArgs: [script], model: "small-4k", localBaseUrl: "http://127.0.0.1:19999", localContextTokens: 8192 }),
+      { title: "Plan the release" },
+    );
+  } finally {
+    delete process.env.HELM_LOCAL_MODEL_KEY;
+  }
+  seen = read();
+  assert.equal(modelFlag(seen.argv), "small-4k");
+  assert.equal(seen.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:19999");
+  assert.equal(seen.env.ANTHROPIC_AUTH_TOKEN, "sk-fake-bg-key");
+  assert.equal(seen.env.ANTHROPIC_MODEL, "small-4k");
+  assert.equal(seen.env.ANTHROPIC_SMALL_FAST_MODEL, "small-4k");
+  assert.equal(seen.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, "small-4k");
+  assert.equal(seen.env.CLAUDE_CODE_USE_GATEWAY, "1");
+  assert.equal(seen.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "8192");
+  assert.equal(seen.env.HELM_LOCAL_MODEL_KEY, null, "the hand-over name never reaches the child");
+  assert.equal(seen.env.ANTHROPIC_API_KEY, null);
+  assert.equal(seen.env.CLAUDE_CODE_OAUTH_TOKEN, null, "the local route never carries the user's sign-in");
+  const s = seen.argv.indexOf("--settings");
+  assert.ok(s >= 0, JSON.stringify(seen.argv));
+  const pinned = JSON.parse(seen.argv[s + 1]) as { env?: Record<string, string> };
+  assert.equal(pinned.env?.ANTHROPIC_BASE_URL, "http://127.0.0.1:19999", "the route is pinned against settings that could appear");
+  assert.ok(!JSON.stringify(pinned).includes("sk-fake-bg-key"), "the key is never on the command line");
+
+  // An address that is not plain http on this machine, or a local job without a name, fails the
+  // job (the title falls back) instead of sending the prompt away.
+  const off = await makeTitle({ firstRequest: "plan it", command: process.execPath, commandArgs: [script], model: "small-4k", localBaseUrl: "https://elsewhere.example" });
+  assert.ok("error" in off && /this machine/.test((off as { error: string }).error), JSON.stringify(off));
+  const nameless = await makeTitle({ firstRequest: "plan it", command: process.execPath, commandArgs: [script], localBaseUrl: "http://127.0.0.1:19999" });
+  assert.ok("error" in nameless && /model name/.test((nameless as { error: string }).error), JSON.stringify(nameless));
+});
+
 test("the empty folder is removed when claude exits without a title too", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-titles-"));
   const record = path.join(dir, "cwds.txt");
