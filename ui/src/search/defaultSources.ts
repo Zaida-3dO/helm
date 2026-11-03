@@ -3,6 +3,7 @@
 // the moment a search runs.
 
 import type { Api } from '../api/client.ts';
+import { claudeChatOps, type SearchHit as ClaudeHit } from '../api/claudechats.ts';
 import type { QuickResult } from '../api/panel.ts';
 import { searchOps, type SearchHit } from '../api/search.ts';
 import { absolutePath, baseName, dirName, rowId, shortFolder, type Row, type SearchSource } from './sources.ts';
@@ -28,6 +29,36 @@ export function chatsSource(d: ChatsDeps): SearchSource {
           id: rowId('chats', `${h.chatId}:${h.messageId ?? 'title'}`),
           title: h.title || 'Untitled chat',
           subtitle: h.project,
+          snippet: h.snippet || undefined,
+          tag: h.titleOnly ? 'title' : undefined,
+          open: () => d.open(h),
+        }),
+      );
+    },
+  };
+}
+
+export interface ClaudeChatsDeps {
+  api: Api;
+  /** Opens the read-only viewer for one record. */
+  open: (hit: ClaudeHit) => void;
+}
+
+/** Chats from Claude Code's own records, outside Helm. */
+export function claudeChatsSource(d: ClaudeChatsDeps): SearchSource {
+  const ops = claudeChatOps(d.api);
+  return {
+    id: 'claudechats',
+    // The record scan is heavier than the chat index: two characters keeps it off single letters.
+    minChars: 2,
+    timeoutMs: 8_000,
+    run: async (query) => {
+      const r = await ops.search(query);
+      return r.hits.map(
+        (h): Row => ({
+          id: rowId('claudechats', h.sessionId),
+          title: h.title || 'Untitled chat',
+          subtitle: h.folder || undefined,
           snippet: h.snippet || undefined,
           tag: h.titleOnly ? 'title' : undefined,
           open: () => d.open(h),

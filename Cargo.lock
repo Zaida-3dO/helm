@@ -1793,6 +1793,7 @@ dependencies = [
  "helm-actions",
  "helm-afk",
  "helm-chats",
+ "helm-claudechats",
  "helm-consent",
  "helm-core",
  "helm-github",
@@ -1846,6 +1847,23 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "ts-rs",
+ "uuid",
+]
+
+[[package]]
+name = "helm-claudechats"
+version = "0.6.2"
+dependencies = [
+ "chrono",
+ "helm-chats",
+ "helm-core",
+ "helm-ipc",
+ "helm-platform",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
  "ts-rs",
  "uuid",
 ]

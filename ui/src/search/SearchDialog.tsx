@@ -9,8 +9,9 @@ import { useDialog, useShell } from '../shell/context.ts';
 import { Checkbox, Dialog, Icon, Picker, useBinding, useLayer, type PickerOption } from '../ui/index.ts';
 import { flatRows, moveHighlight, movePage, statusLine, UniversalSearch } from './controller.ts';
 import { openTasks, tasksStoreFor } from '../tasks/index.ts';
+import { openClaudeChatViewer } from '../claudechats/index.ts';
 import { boardSource } from './boardSource.ts';
-import { chatsSource, filesSource } from './defaultSources.ts';
+import { chatsSource, claudeChatsSource, filesSource } from './defaultSources.ts';
 import { prsSource } from './prSource.ts';
 import { openPrTab } from '../pr/route.ts';
 import { GROUP_LABEL, groupOrder, type SourceId } from './sources.ts';
@@ -64,6 +65,13 @@ function SearchBody({ close }: { close: () => void }) {
           currentProjectId: () => shell.selection.projectId,
           open: (hit) => {
             shell.select(hit.chatId, hit.messageId ? { messageId: hit.messageId } : {});
+            close();
+          },
+        }),
+        claudeChatsSource({
+          api: shell.api,
+          open: (hit) => {
+            openClaudeChatViewer(shell.openDialog, hit.sessionId);
             close();
           },
         }),

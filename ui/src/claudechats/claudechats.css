@@ -1,0 +1,50 @@
+/* The read-only Claude Code chat view. */
+
+.ccv-folder,
+.ccv-cut {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+}
+
+.ccv-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 58vh;
+  overflow-y: auto;
+}
+
+.ccv-line-label {
+  font-size: 11.5px;
+  color: var(--muted, inherit);
+  margin-bottom: 2px;
+}
+
+.ccv-line[data-kind='tool'] .ccv-line-label {
+  font-style: italic;
+}
+
+.ccv-line-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12.5px;
+}
+
+.ccv-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+
+.ccv-note {
+  font-size: 12px;
+}
+
+.ccv-error {
+  margin: 0 0 6px;
+}

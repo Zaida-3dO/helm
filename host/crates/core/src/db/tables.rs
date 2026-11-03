@@ -61,6 +61,14 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("message_search_idx", Data),
     ("message_search_docsize", Data),
     ("message_search_config", Data),
+    // Claude Code's own chat records: Helm's index of them (an FTS5 table and its shadows).
+    ("claude_chat_records", Data),
+    ("claude_chat_search", Data),
+    ("claude_chat_search_content", Data),
+    ("claude_chat_search_data", Data),
+    ("claude_chat_search_idx", Data),
+    ("claude_chat_search_docsize", Data),
+    ("claude_chat_search_config", Data),
     // Projects.
     ("board_projects", Data),
     ("board_sync_state", Data),
