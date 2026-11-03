@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compactCount, contextTokens, formatTurnTime, newTokens, tokenChip, turnTimes } from './rowMeta.ts';
+import { compactCount, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, tokenChip, turnTimes } from './rowMeta.ts';
 
 const usage = { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 40_000, cacheWriteTokens: 500, costUsd: 0 };
 
@@ -54,4 +54,13 @@ test('the context size is the newest reply that reports usage: input plus cache 
   assert.equal(contextTokens(rows), 121_020);
   assert.equal(contextTokens(rows.slice(0, 1)), null);
   assert.equal(contextTokens([]), null);
+});
+
+test('a too-large-for-the-window refusal is recognised; other faults and no error are not', () => {
+  for (const e of ['Prompt is too long', 'prompt is too long: 300000 tokens > 262144 maximum', 'Context length exceeded', 'maximum context length is 8192 tokens', 'Too Many Tokens']) {
+    assert.equal(isTooLargeRefusal(e), true, e);
+  }
+  for (const e of [null, undefined, '', "You've hit your weekly limit", 'Connection error.', 'claude did not settle after Stop']) {
+    assert.equal(isTooLargeRefusal(e), false, String(e));
+  }
 });

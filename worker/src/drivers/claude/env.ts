@@ -143,6 +143,24 @@ export function localPinnedEnv(local: LocalLaunch): Record<string, string> {
   };
 }
 
+/** Refusals that say the prompt outgrew the model's window (the server's own wording, matched loosely). */
+const TOO_LONG_PHRASES = [/prompt is too long/i, /context length exceeded/i, /maximum context length/i, /too many tokens/i];
+
+/** True when the upstream error text is a too-long refusal rather than another fault. */
+export function isContextRefusal(error: string): boolean {
+  return TOO_LONG_PHRASES.some((re) => re.test(error));
+}
+
+/**
+ * When a turn died on a too-long refusal and the chat's window is known, the sentence that names
+ * the window and points at the way out, so the interrupted banner is not a bare dead end that
+ * "Continue" re-fails. Null when the error is not that refusal or the window was never learned.
+ */
+export function contextRefusalNote(error: string, contextTokens: number | undefined): string | null {
+  if (!contextTokens || !isContextRefusal(error)) return null;
+  return ` — the model's window is ${Math.floor(contextTokens).toLocaleString("en-US")} tokens. Roll over to a fresh chat to continue the work.`;
+}
+
 function applyLocal(out: Record<string, string>, local: LocalLaunch, key: string | undefined, effort: string | undefined): void {
   // The process environment carries the address and models; the switches for other providers are
   // simply absent there (the user's own are stripped above) and only pinned off in the settings.

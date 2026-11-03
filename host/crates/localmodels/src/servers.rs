@@ -270,6 +270,13 @@ pub struct Listed {
     pub context: Option<u64>,
 }
 
+/// Strata's own window from `/health`'s `max_context`, when it says one. Strata's model list
+/// often leaves the size out; the health line carries the window the whole server runs with.
+pub fn strata_context(h: &Http, c: &Conn) -> Option<u64> {
+    let r = good(h.get(c, "/health", net::QUICK).ok()?).ok()?;
+    r.json()?.get("max_context").and_then(num)
+}
+
 /// Strata's model list: `/v1/models`, then `/models`. `None` when neither gives one.
 pub fn strata_models(h: &Http, c: &Conn) -> Option<Vec<Listed>> {
     for path in ["/v1/models", "/models"] {

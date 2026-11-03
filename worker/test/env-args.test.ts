@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildClaudeArgs, disallowedTools } from "../src/drivers/claude/args.ts";
 import { cronTiming, NATIVE_SCHEDULE_TOOLS, scheduleRedirect } from "../src/drivers/claude/schedulecalls.ts";
-import { assertLoopbackHttp, buildClaudeEnv, STRIPPED_UNLESS_API_KEY_MODE, takeLocalKey } from "../src/drivers/claude/env.ts";
+import { assertLoopbackHttp, buildClaudeEnv, contextRefusalNote, STRIPPED_UNLESS_API_KEY_MODE, takeLocalKey } from "../src/drivers/claude/env.ts";
 
 const base = {
   PATH: "/bin",
@@ -194,4 +194,21 @@ test("fastMode is always explicit, strictly boolean, and only the launch's own f
   // Anything but the literal true is off.
   const loose = buildClaudeArgs({ fastMode: "true" as unknown as boolean });
   assert.deepEqual(JSON.parse(flag(loose, "--settings") ?? "null"), { fastMode: false });
+});
+
+test("a too-long refusal names the window and the roll over; other faults and an unknown window say nothing", () => {
+  for (const phrase of [
+    "Prompt is too long",
+    "prompt is too long: 300000 tokens > 262144 maximum",
+    "Context length exceeded",
+    "maximum context length is 8192 tokens",
+    "too many tokens",
+  ]) {
+    const note = contextRefusalNote(phrase, 262_144);
+    assert.ok(note && note.includes("262,144") && note.includes("Roll over"), phrase);
+  }
+  for (const other of ["Connection error.", "You've hit your weekly limit", "claude exited"]) {
+    assert.equal(contextRefusalNote(other, 262_144), null, other);
+  }
+  assert.equal(contextRefusalNote("Prompt is too long", undefined), null, "an unknown window has nothing to name");
 });

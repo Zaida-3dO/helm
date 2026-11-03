@@ -24,6 +24,7 @@ import { useShell } from './shell/context.ts';
 import { ConfirmDialog, useLayer, type ConfirmSpec } from './ui/index.ts';
 import { rollOverChat, rollOverConfirm } from './sidebar/actions.ts';
 import { ContextBar } from './transcript/ContextBar.tsx';
+import { isTooLargeRefusal } from './transcript/rowMeta.ts';
 import { IconFork } from './ui/icons.tsx';
 import { accessoriesAt, composerApi } from './composer/slots.ts';
 import { recallPrompts } from './composer/recall.ts';
@@ -312,6 +313,18 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       {chat.status === 'interrupted' && (
         <div className="banner" data-testid="interrupted-banner">
           <span>{chat.error ?? 'This chat was interrupted. Nothing saved was lost; check the chat before continuing.'}</span>
+          {isTooLargeRefusal(chat.error) && (
+            // The turn died on a prompt too large for the model's window. "Continue" would send
+            // the same oversized prompt and fail again; the roll over is the way out.
+            <button
+              type="button"
+              className="small"
+              data-testid="interrupted-roll-over"
+              onClick={() => setRollConfirm(rollOverConfirm(chat.title, () => rollOverChat(ops, chatId, (m) => setNotice(m))))}
+            >
+              Roll over
+            </button>
+          )}
           {lastUser && (
             <button
               type="button"

@@ -36,7 +36,7 @@ test("one server answers the Anthropic, Strata and Ollama routes, keeps loaded s
     const messages = { model: "fake-flash", max_tokens: 64, stream: true, messages: [{ role: "user", content: "ping" }] };
 
     // Strata: /health is open and reports not loaded; a keyless control call and a wrong key are 401s.
-    assert.deepEqual((await call(fake.url, "GET", "/health")).json(), { status: "ok", loaded: false, model: "fake-flash" });
+    assert.deepEqual((await call(fake.url, "GET", "/health")).json(), { status: "ok", loaded: false, model: "fake-flash", max_context: 262_144 });
     assert.equal((await call(fake.url, "POST", "/load")).status, 401);
     assert.equal((await call(fake.url, "POST", "/v1/messages", messages, { "x-api-key": "wrong" })).status, 401);
     assert.deepEqual((await call(fake.url, "GET", "/v1/models", undefined, bearer)).json().data.map((m: any) => m.id), ["fake-flash", "org/fake:3b"]);

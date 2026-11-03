@@ -213,10 +213,16 @@ fn strata_route(
         }
         let mut st = state.lock().unwrap();
         match (r.method.as_str(), r.path.as_str()) {
-            ("GET", "/health") => (200, json!({"status": "ok", "loaded": st.loaded})),
+            ("GET", "/health") => (
+                200,
+                json!({"status": "ok", "loaded": st.loaded, "max_context": 262_144}),
+            ),
             ("GET", "/v1/models") => (
                 200,
-                json!({"data": [{"id": "qwen-flash", "max_model_len": 262_144}]}),
+                json!({"data": [
+                    {"id": "qwen-flash"},
+                    {"id": "qwen-small", "max_model_len": 131_072},
+                ]}),
             ),
             ("POST", "/unload") => {
                 if st.loaded.take().is_some() {
@@ -461,7 +467,14 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
             strata_row.loaded,
             strata_row.reachable
         ),
-        (Some(262_144), Some(true), true)
+        (Some(262_144), Some(true), true),
+        "a model that does not name its window takes the server's from /health"
+    );
+    let small = rows.iter().find(|m| m.name == "qwen-small").unwrap();
+    assert_eq!(
+        small.context_tokens,
+        Some(131_072),
+        "a model that names its own window keeps it"
     );
     assert!(
         o.log.lock().unwrap().iter().all(|q| q.auth.is_empty()),

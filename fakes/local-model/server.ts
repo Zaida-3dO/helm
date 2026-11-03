@@ -219,7 +219,7 @@ export async function startFakeLocalModel(opts: FakeLocalModelOptions = {}): Pro
       // ---- Strata
       if (path === "/health" && method === "GET") {
         const strata = models[0];
-        return send(res, entry, 200, { status: "ok", loaded: strata?.loaded === true, model: strata?.name ?? null });
+        return send(res, entry, 200, { status: "ok", loaded: strata?.loaded === true, model: strata?.name ?? null, max_context: strata?.contextTokens });
       }
       if (path === "/load" && method === "POST") {
         const m = find(modelOf(body)) ?? models[0];

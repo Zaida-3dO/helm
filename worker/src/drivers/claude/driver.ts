@@ -10,7 +10,7 @@ import { markLaunch, markPrompt } from "../../protocol/timing.ts";
 import { DEFAULT_EFFORT, isEffort, type Json, type Launch, type UiResponse } from "../../protocol/types.ts";
 import { isAlive, treeKill } from "../../process/kill.ts";
 import { buildClaudeArgs, modelTakesEffort } from "./args.ts";
-import { buildClaudeEnv, localThinkingTokens } from "./env.ts";
+import { buildClaudeEnv, contextRefusalNote, localThinkingTokens } from "./env.ts";
 import { Interactions } from "./interactions.ts";
 import { BUDGET_HOOK_ID, SubagentBudget, subagentRule } from "./limits.ts";
 import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE } from "./longcmd.ts";
@@ -821,7 +821,14 @@ export class ClaudeDriver implements Driver {
     const e: Json = { type: "agent_settled", outcome };
     // Send now ended the turn: the host shows it as superseded by the user's message.
     if (superseded) e.superseded = true;
-    if (outcome === "error") e.error = typeof rec.result === "string" && rec.result ? rec.result : String(rec.subtype ?? "error");
+    if (outcome === "error") {
+      let err = typeof rec.result === "string" && rec.result ? rec.result : String(rec.subtype ?? "error");
+      // A too-long refusal against a local model names its window and points at the roll over:
+      // "Continue" alone would just re-send the same oversized prompt and fail the same way.
+      const note = contextRefusalNote(err, this.launch.claude?.local?.contextTokens);
+      if (note) err += note;
+      e.error = err;
+    }
     if (this.sessionId) e.sessionId = this.sessionId;
     this.ch.emit(e);
   }

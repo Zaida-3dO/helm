@@ -20,6 +20,17 @@ export function newTokens(u: Usage): number {
   return u.inputTokens + u.cacheWriteTokens + u.outputTokens;
 }
 
+/** Refusals saying the prompt outgrew the model's window (the server's own wording, matched loosely). */
+const TOO_LONG_PHRASES = [/prompt is too long/i, /context length exceeded/i, /maximum context length/i, /too many tokens/i];
+
+/**
+ * True when an interrupted chat's error is a too-large-for-the-window refusal: "Continue" would
+ * re-send the same prompt and fail the same way, so the banner offers the roll over instead.
+ */
+export function isTooLargeRefusal(error: string | null | undefined): boolean {
+  return !!error && TOO_LONG_PHRASES.some((re) => re.test(error));
+}
+
 /** Context size at which the chat offers a prominent Roll over button. */
 export const ROLL_OVER_TOKENS = 250_000;
 /** Below this the context size is not worth showing. */

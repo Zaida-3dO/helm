@@ -588,12 +588,20 @@ impl LocalService {
                         models: Vec::new(),
                     };
                 };
+                // A model that does not name its own window takes the server's, which `/health`
+                // reports as `max_context`. Without it the worker would run the chat with no
+                // known ceiling and the server would hit the wall instead of compacting in time.
+                let window = if listed.iter().any(|m| m.context.is_none()) {
+                    srv::strata_context(&self.http, &conn)
+                } else {
+                    None
+                };
                 let models = listed
                     .into_iter()
                     .map(|m| SeenModel {
                         loaded: Some(loaded.iter().any(|l| l == "*" || l == &m.id)),
                         model: m.id,
-                        context_tokens: m.context,
+                        context_tokens: m.context.or(window),
                         size_bytes: None,
                     })
                     .collect();
