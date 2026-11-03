@@ -189,8 +189,10 @@ fn next_significant(chars: impl Iterator<Item = char>) -> Option<char> {
     None
 }
 
-/// Read the Brave key from an OpenClaw settings file: `plugins.entries.brave.config.webSearch
-/// .apiKey`. Every error is a fixed sentence; none carries the file's text or the key.
+/// Read the Brave key from an OpenClaw settings file. Current files keep it at
+/// `tools.web.search.apiKey`; older ones kept it at `plugins.entries.brave.config.webSearch
+/// .apiKey`, which still works as a fallback. Every error is a fixed sentence; none carries the
+/// file's text or the key.
 pub fn read_openclaw_key(path: &str) -> Result<String, String> {
     let path = path.trim();
     if path.is_empty() || path.len() > 1_024 {
@@ -211,16 +213,26 @@ pub fn read_openclaw_key(path: &str) -> Result<String, String> {
                       Paste the key instead."
                 .to_owned()
         })?;
-    let found = &doc["plugins"]["entries"]["brave"]["config"]["webSearch"]["apiKey"];
-    match found {
-        Value::Null => Err("That file has no Brave search key at \
-                             plugins.entries.brave.config.webSearch.apiKey."
-            .to_owned()),
-        Value::String(k) if valid_key(k.trim()) => Ok(k.trim().to_owned()),
-        _ => Err(
+    // Current files keep the key under tools.web.search.apiKey; older ones kept it under
+    // plugins.entries.brave.config.webSearch.apiKey. Either location answers if it holds a
+    // plain key, and the current one wins when both do.
+    let here = &doc["tools"]["web"]["search"]["apiKey"];
+    let there = &doc["plugins"]["entries"]["brave"]["config"]["webSearch"]["apiKey"];
+    let plain = [here, there].into_iter().find_map(|v| match v {
+        Value::String(k) if valid_key(k.trim()) => Some(k.trim().to_owned()),
+        _ => None,
+    });
+    match plain {
+        Some(k) => Ok(k),
+        // Something sits at one location but is no plain key: most often a pointer at an
+        // environment variable rather than the key itself.
+        None if !(here.is_null() && there.is_null()) => Err(
             "The key in that file is not stored as plain text (it may point at an \
                   environment variable), so Helm cannot import it. Paste the key instead."
                 .to_owned(),
         ),
+        None => Err("That file has no Brave search key at \
+                     tools.web.search.apiKey or plugins.entries.brave.config.webSearch.apiKey."
+            .to_owned()),
     }
 }

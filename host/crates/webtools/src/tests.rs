@@ -220,19 +220,38 @@ fn the_small_rules() {
     ] {
         assert_eq!(store::valid_key(k), ok, "{k}");
     }
-    // Reading an OpenClaw file: plain JSON, then comments and trailing commas.
+    // Reading an OpenClaw file: plain JSON, then comments and trailing commas. The key sits at
+    // tools.web.search.apiKey in current files; the old nested location still works.
     let e = Env::new("http://127.0.0.1:1");
     let nest = |key: &str| {
         format!(
             r#"{{"plugins":{{"entries":{{"brave":{{"config":{{"webSearch":{{"apiKey":{key}}}}}}}}}}}}}"#
         )
     };
+    let top = |key: &str| format!(r#"{{"tools":{{"web":{{"search":{{"apiKey":{key}}}}}}}}}"#);
     let loose =
         "{\n // a note\n \"plugins\": {\"entries\": {\"brave\": {\"config\": {\"webSearch\": \
                  {\"apiKey\": \"BSA-fake-import-key-0001\", /* x */ },},},},},\n}";
+    let old_plain = nest(&format!("\"{FAKE_IMPORTED}\""));
     for (text, want) in [
         (nest(&format!("\"{FAKE_IMPORTED}\"")), Ok(FAKE_IMPORTED)),
+        (top(&format!("\"{FAKE_IMPORTED}\"")), Ok(FAKE_IMPORTED)),
         (loose.to_owned(), Ok(FAKE_IMPORTED)),
+        // Both locations hold a plain key: the current one wins.
+        (
+            format!(
+                r#"{{"tools":{{"web":{{"search":{{"apiKey":"{FAKE}"}}}}}},"plugins":{{"entries":{{"brave":{{"config":{{"webSearch":{{"apiKey":"BSA-old-import-key-0002"}}}}}}}}}}}}"#
+            ),
+            Ok(FAKE),
+        ),
+        // The current location holds only a pointer, the old one a plain key: still found.
+        (
+            r#"{"tools":{"web":{"search":{"apiKey":{"source":"env"}}}},"#.to_owned()
+                + &old_plain[1..old_plain.len() - 1]
+                + "}",
+            Ok(FAKE_IMPORTED),
+        ),
+        (top("\"${BRAVE_API_KEY}\""), Err("not stored as plain text")),
         (
             nest("\"${BRAVE_API_KEY}\""),
             Err("not stored as plain text"),
@@ -242,6 +261,7 @@ fn the_small_rules() {
             Err("not stored as plain text"),
         ),
         (r#"{"plugins":{}}"#.to_owned(), Err("no Brave search key")),
+        (r#"{"tools":{}}"#.to_owned(), Err("no Brave search key")),
         ("not json".to_owned(), Err("not valid JSON")),
     ] {
         let got = store::read_openclaw_key(&e.write_file("c.json", &text));
