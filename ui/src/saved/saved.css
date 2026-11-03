@@ -11,19 +11,21 @@
   flex: 1 1 220px;
 }
 
+/* Row rhythm matches the other Settings panes: 13 px text, 12 px meta, rows padded 10/12. */
 .saved-list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  font-size: 13px;
 }
 
 .saved-item {
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 8px 10px;
+  padding: 10px 12px;
   background: var(--surface);
 }
 .saved-item[data-state='done'],

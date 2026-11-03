@@ -602,9 +602,13 @@
 
 /* Increased contrast (prefers-contrast: more): body and metadata text reach 7:1 on every surface,
    and borders and the accent reach 3:1 against the page. Same names, higher values. */
+/* The skin blocks above match on two attributes, so this arm has to match one as well
+ * (`[data-skin]` is always written); equal weight plus coming later means increased contrast
+ * wins whatever skin is picked. */
 @media (prefers-contrast: more) {
   :root,
-  :root[data-theme='light'] {
+  :root[data-theme='light'],
+  :root[data-skin][data-theme='light'] {
     --text: #000000;
     --secondary: #3a3c3a;
     --muted: #494b49;
@@ -619,7 +623,8 @@
     --diff-del-text: #8a1530;
     --git-modified: #5f4d12;
   }
-  :root[data-theme='dark'] {
+  :root[data-theme='dark'],
+  :root[data-skin][data-theme='dark'] {
     --text: #ffffff;
     --secondary: #ececec;
     --muted: #dcdcdc;

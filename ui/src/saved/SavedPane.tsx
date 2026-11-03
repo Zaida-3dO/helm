@@ -126,8 +126,9 @@ function SavedPane() {
       </div>
       {items.length === 0 && (
         <p className="saved-empty">
-          Nothing here yet. A chat reply's Save for later button, selected text in a chat, and a chat's save tool all
-          put things here.
+          {total === 0
+            ? "Nothing saved yet. A reply's Save for later, selected text in a chat, and a chat's save tool all put things here."
+            : 'Nothing matches this search or filter.'}
         </p>
       )}
       <ul className="saved-list">
@@ -177,7 +178,7 @@ function SavedPane() {
                     Done
                   </Button>
                 )}
-                <Button variant="text" data-testid="saved-remove" onClick={() => patch(it, { remove: true })}>
+                <Button variant="text" danger data-testid="saved-remove" onClick={() => patch(it, { remove: true })}>
                   Remove
                 </Button>
               </div>
