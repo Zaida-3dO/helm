@@ -1,6 +1,6 @@
-// The choices Settings → General offers for text sizes and zoom.
+// The choices Settings → General offers for text sizes, zoom and the interface skin.
 
-import { FONT_DEFAULTS, FONT_RANGES, ZOOM_DEFAULT, type FontSizes } from '../shell/theme.ts';
+import { FONT_DEFAULTS, FONT_RANGES, SKINS, ZOOM_DEFAULT, type FontSizes, type Skin } from '../shell/theme.ts';
 
 export interface SizeOption {
   value: string;
@@ -20,6 +20,26 @@ export function zoomOptions(): SizeOption[] {
   const out: SizeOption[] = [];
   for (let n = 50; n <= 200; n += 10) out.push({ value: String(n), title: n === ZOOM_DEFAULT ? `${n}% (default)` : `${n}%` });
   return out;
+}
+
+const SKIN_TITLES: Record<Skin, string> = {
+  default: 'Default',
+  'windows-xp': 'Windows XP',
+  slack: 'Slack',
+  chrome: 'Chrome',
+  terminal: 'Terminal',
+  intellij: 'IntelliJ',
+  discord: 'Discord',
+  reddit: 'Reddit',
+  wikipedia: 'Wikipedia',
+};
+
+/** Every skin styles.css carries, in the order Settings shows them; the default marked. */
+export function skinOptions(): SizeOption[] {
+  return SKINS.map((s) => ({
+    value: s,
+    title: s === 'default' ? 'Default (no skin)' : SKIN_TITLES[s],
+  }));
 }
 
 /** The next zoom level one step up (1) or down (-1), kept within 50 to 200. */

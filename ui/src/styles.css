@@ -6,8 +6,9 @@
  * <html> before first paint (ui/src/shell/theme.ts). Without the attribute the OS colour scheme
  * decides, so a plain browser tab and the first frame both get a sensible palette.
  *
- * Values are the derived defaults with no custom colours. A later theme engine (themes milestone)
- * computes them at runtime from text, background and tint and writes the same names.
+ * Values are the derived defaults with no custom colours. Named interface skins below override a
+ * subset of them per mode; a later theme engine may compute the values at runtime from text,
+ * background and tint and write the same names.
  */
 
 :root,
@@ -183,6 +184,420 @@
   --chrome-code-shadow: inset 0 1px #ffffff06;
   --chrome-tile-shadow: inset 0 1px #ffffff0d, 0 3px 9px #0003;
   --wordmark-fill: linear-gradient(to bottom, #eff0f3 0.29em, #c8ccd3 1em);
+}
+
+/* Interface skins (`interfaceTheme`, written to data-skin by ui/src/shell/theme.ts). A skin
+   retints one mode of the app: it overrides the palette, the surfaces and the accents, and lets
+   everything else — error, diff, syntax, elevation — stand as in the plain theme. The names
+   evoke well-known interfaces; the colours are our own quiet approximations, first pass.
+   Muted and secondary text stay at or near 4.5:1 on the page and its surfaces. */
+
+/* Windows XP: Luna blue on cool silver, with the green start-button undertone. */
+:root[data-skin='windows-xp'][data-theme='light'] {
+  --palette-text: #112a45;
+  --palette-bg: #edf5fd;
+  --palette-tint: #23528c;
+  --bg: #edf5fd;
+  --text: #112a45;
+  --sidebar: #d3e5f5;
+  --surface: #fbfdff;
+  --surface-alt: #e4eefa;
+  --hover: #d8ecfa;
+  --selected: #bcdcf5;
+  --secondary: #3f5c78;
+  --muted: #55708c;
+  --line: #a4c6e4;
+  --line-strong: #7fa8d0;
+  --accent: #23528c;
+  --chrome-accent: #23528c;
+  --accent-bg: #dbe9f7;
+  --accent-fill: #2f6bb0;
+  --on-accent-fill: #ffffff;
+  --accent-mark: #24527f;
+  --link-tint: #3167a8;
+  --fx-accent: #4d84c0;
+}
+
+:root[data-skin='windows-xp'][data-theme='dark'] {
+  --palette-text: #eaf2fb;
+  --palette-bg: #172434;
+  --palette-tint: #8fb6de;
+  --bg: #172434;
+  --text: #eaf2fb;
+  --sidebar: #121d2a;
+  --surface: #1d2c3e;
+  --surface-alt: #192636;
+  --hover: #243549;
+  --selected: #2e4259;
+  --secondary: #c2d2e3;
+  --muted: #a3b6ca;
+  --line: #2c3d52;
+  --line-strong: #3d5470;
+  --accent: #8fb6de;
+  --chrome-accent: #8fb6de;
+  --accent-bg: #223247;
+  --accent-fill: #6f97c2;
+  --on-accent-fill: #0b1220;
+  --accent-mark: #9fbfe3;
+  --link-tint: #9dc0ea;
+  --fx-accent: #6f97c2;
+}
+
+/* Slack: aubergine against near-neutral grey. */
+:root[data-skin='slack'][data-theme='light'] {
+  --palette-text: #23272b;
+  --palette-bg: #fafbfc;
+  --palette-tint: #611f69;
+  --bg: #fafbfc;
+  --text: #23272b;
+  --sidebar: #f1f2f4;
+  --surface: #ffffff;
+  --surface-alt: #f6f7f8;
+  --hover: #eef0f3;
+  --selected: #e0e4ea;
+  --secondary: #4b545e;
+  --muted: #626c76;
+  --line: #e0e2e5;
+  --line-strong: #c8ccd2;
+  --accent: #611f69;
+  --chrome-accent: #611f69;
+  --accent-bg: #f0e8f2;
+  --accent-fill: #6b2c74;
+  --on-accent-fill: #ffffff;
+  --accent-mark: #55205c;
+  --link-tint: #2f6bad;
+  --fx-accent: #8a5296;
+}
+
+:root[data-skin='slack'][data-theme='dark'] {
+  --palette-text: #f4f6f8;
+  --palette-bg: #1a1d21;
+  --palette-tint: #c99fd0;
+  --bg: #1a1d21;
+  --text: #f4f6f8;
+  --sidebar: #14171a;
+  --surface: #22262b;
+  --surface-alt: #1d2125;
+  --hover: #2c313a;
+  --selected: #383e48;
+  --secondary: #d3d8de;
+  --muted: #b2b9c1;
+  --line: #33383f;
+  --line-strong: #464d57;
+  --accent: #c99fd0;
+  --chrome-accent: #c99fd0;
+  --accent-bg: #2d2433;
+  --accent-fill: #a877b4;
+  --on-accent-fill: #150a18;
+  --accent-mark: #d3add9;
+  --link-tint: #9fc2ec;
+  --fx-accent: #a877b4;
+}
+
+/* Chrome: shop-window grey with a calm browser blue. */
+:root[data-skin='chrome'][data-theme='light'] {
+  --palette-text: #202124;
+  --palette-bg: #f8f9fa;
+  --palette-tint: #3c6fae;
+  --bg: #f8f9fa;
+  --text: #202124;
+  --sidebar: #eef0f2;
+  --surface: #ffffff;
+  --surface-alt: #f4f5f6;
+  --hover: #e9ecef;
+  --selected: #dce0e5;
+  --secondary: #55585c;
+  --muted: #6b6e72;
+  --line: #dadce0;
+  --line-strong: #bdc1c6;
+  --accent: #3367d6;
+  --chrome-accent: #35608f;
+  --accent-bg: #e6ecf5;
+  --accent-fill: #38649f;
+  --on-accent-fill: #ffffff;
+  --accent-mark: #2f5a8f;
+  --link-tint: #3367d6;
+  --fx-accent: #6f96c8;
+}
+
+:root[data-skin='chrome'][data-theme='dark'] {
+  --palette-text: #f1f3f4;
+  --palette-bg: #1a1a1a;
+  --palette-tint: #9ec0ea;
+  --bg: #1a1a1a;
+  --text: #f1f3f4;
+  --sidebar: #141414;
+  --surface: #212121;
+  --surface-alt: #1c1c1c;
+  --hover: #2a2a2a;
+  --selected: #353535;
+  --secondary: #c8cbcd;
+  --muted: #aab0b5;
+  --line: #363636;
+  --line-strong: #484848;
+  --accent: #9ec0ea;
+  --chrome-accent: #9ec0ea;
+  --accent-bg: #263242;
+  --accent-fill: #7fa8d8;
+  --on-accent-fill: #0d1420;
+  --accent-mark: #a9c8ec;
+  --link-tint: #8ab4f8;
+  --fx-accent: #7fa8d8;
+}
+
+/* Terminal: a near-black console green that stays readable in daylight too. */
+:root[data-skin='terminal'][data-theme='light'] {
+  --palette-text: #1f2a1f;
+  --palette-bg: #f5f7f4;
+  --palette-tint: #2c6b39;
+  --bg: #f5f7f4;
+  --text: #1f2a1f;
+  --sidebar: #eaefe8;
+  --surface: #fcfdfb;
+  --surface-alt: #f0f3ee;
+  --hover: #e6ebe3;
+  --selected: #d6e0d2;
+  --secondary: #4c5a4c;
+  --muted: #62705f;
+  --line: #d6dcd2;
+  --line-strong: #b9c4b3;
+  --accent: #2c6b39;
+  --chrome-accent: #2c6b39;
+  --accent-bg: #e2ece2;
+  --accent-fill: #2f7040;
+  --on-accent-fill: #ffffff;
+  --accent-mark: #275f31;
+  --link-tint: #2c7a6a;
+  --fx-accent: #5c9464;
+}
+
+:root[data-skin='terminal'][data-theme='dark'] {
+  --palette-text: #e2eadf;
+  --palette-bg: #0f130f;
+  --palette-tint: #7fc383;
+  --bg: #0f130f;
+  --text: #e2eadf;
+  --sidebar: #0b0e0b;
+  --surface: #151a13;
+  --surface-alt: #11150f;
+  --hover: #1d241a;
+  --selected: #293322;
+  --secondary: #bcc7b8;
+  --muted: #9fae9c;
+  --line: #263022;
+  --line-strong: #38452f;
+  --accent: #7fc383;
+  --chrome-accent: #7fc383;
+  --accent-bg: #1a2417;
+  --accent-fill: #5ea064;
+  --on-accent-fill: #06120a;
+  --accent-mark: #8fd093;
+  --link-tint: #9fd6a5;
+  --fx-accent: #5ea064;
+}
+
+/* IntelliJ: Darcula charcoal with the IDE's green caret accent. */
+:root[data-skin='intellij'][data-theme='light'] {
+  --palette-text: #231f20;
+  --palette-bg: #f7f7f7;
+  --palette-tint: #4a6f8f;
+  --bg: #f7f7f7;
+  --text: #231f20;
+  --sidebar: #eeeeee;
+  --surface: #ffffff;
+  --surface-alt: #f3f3f3;
+  --hover: #e8eef5;
+  --selected: #d9e3ef;
+  --secondary: #565a5e;
+  --muted: #6c7074;
+  --line: #dcdcdc;
+  --line-strong: #c0c0c0;
+  --accent: #4a6f8f;
+  --chrome-accent: #4a6f8f;
+  --accent-bg: #e6edf3;
+  --accent-fill: #446c8e;
+  --on-accent-fill: #ffffff;
+  --accent-mark: #40617d;
+  --link-tint: #3d6d99;
+  --fx-accent: #6f8fa8;
+}
+
+:root[data-skin='intellij'][data-theme='dark'] {
+  --palette-text: #dfdfdf;
+  --palette-bg: #2b2b2b;
+  --palette-tint: #98be65;
+  --bg: #2b2b2b;
+  --text: #dfdfdf;
+  --sidebar: #252525;
+  --surface: #313335;
+  --surface-alt: #2e2f30;
+  --hover: #3a3c3e;
+  --selected: #45484a;
+  --secondary: #b9bbbd;
+  --muted: #9a9d9f;
+  --line: #3d4042;
+  --line-strong: #515557;
+  --accent: #98be65;
+  --chrome-accent: #98be65;
+  --accent-bg: #38412e;
+  --accent-fill: #7ba453;
+  --on-accent-fill: #10160a;
+  --accent-mark: #a6cc76;
+  --link-tint: #7aa2dc;
+  --fx-accent: #7ba453;
+}
+
+/* Discord: blurple, softened for a working window. */
+:root[data-skin='discord'][data-theme='light'] {
+  --palette-text: #23243a;
+  --palette-bg: #f7f8fc;
+  --palette-tint: #4f5bc7;
+  --bg: #f7f8fc;
+  --text: #23243a;
+  --sidebar: #eeeef6;
+  --surface: #ffffff;
+  --surface-alt: #f4f5fa;
+  --hover: #eceef6;
+  --selected: #dfe3f0;
+  --secondary: #4e516b;
+  --muted: #676a85;
+  --line: #dcdee8;
+  --line-strong: #c2c6d6;
+  --accent: #4f5bc7;
+  --chrome-accent: #4f5bc7;
+  --accent-bg: #e7e9f8;
+  --accent-fill: #5865f2;
+  --on-accent-fill: #ffffff;
+  --accent-mark: #47529f;
+  --link-tint: #4f5bc7;
+  --fx-accent: #7d86d8;
+}
+
+:root[data-skin='discord'][data-theme='dark'] {
+  --palette-text: #f2f3f5;
+  --palette-bg: #2b2d31;
+  --palette-tint: #a3aef5;
+  --bg: #2b2d31;
+  --text: #f2f3f5;
+  --sidebar: #232428;
+  --surface: #313338;
+  --surface-alt: #2c2d33;
+  --hover: #393b41;
+  --selected: #43454c;
+  --secondary: #c9ccd3;
+  --muted: #a6abb5;
+  --line: #3d4046;
+  --line-strong: #52555d;
+  --accent: #a3aef5;
+  --chrome-accent: #a3aef5;
+  --accent-bg: #3a3c55;
+  --accent-fill: #7986e8;
+  --on-accent-fill: #11131f;
+  --accent-mark: #b3bcf8;
+  --link-tint: #a3aef5;
+  --fx-accent: #7986e8;
+}
+
+/* Reddit: warm paper with the orange, kept below full volume. */
+:root[data-skin='reddit'][data-theme='light'] {
+  --palette-text: #2b2320;
+  --palette-bg: #fdf7f3;
+  --palette-tint: #a6431c;
+  --bg: #fdf7f3;
+  --text: #2b2320;
+  --sidebar: #f6efe8;
+  --surface: #fffcfa;
+  --surface-alt: #f9f2ea;
+  --hover: #f3e8de;
+  --selected: #e9d8c9;
+  --secondary: #5b4d45;
+  --muted: #70615a;
+  --line: #e6d7cb;
+  --line-strong: #cbbcab;
+  --accent: #a6431c;
+  --chrome-accent: #a6431c;
+  --accent-bg: #f5e4d8;
+  --accent-fill: #b04a1f;
+  --on-accent-fill: #ffffff;
+  --accent-mark: #97401f;
+  --link-tint: #b13f18;
+  --fx-accent: #c47a52;
+}
+
+:root[data-skin='reddit'][data-theme='dark'] {
+  --palette-text: #f2efeb;
+  --palette-bg: #1b1a19;
+  --palette-tint: #e08a5f;
+  --bg: #1b1a19;
+  --text: #f2efeb;
+  --sidebar: #161514;
+  --surface: #232221;
+  --surface-alt: #1f1e1d;
+  --hover: #2d2a27;
+  --selected: #3a342e;
+  --secondary: #cfc8c0;
+  --muted: #ada69e;
+  --line: #35312c;
+  --line-strong: #4c453c;
+  --accent: #e08a5f;
+  --chrome-accent: #e08a5f;
+  --accent-bg: #35281f;
+  --accent-fill: #c2643a;
+  --on-accent-fill: #170d06;
+  --accent-mark: #e89a76;
+  --link-tint: #e89a76;
+  --fx-accent: #c2643a;
+}
+
+/* Wikipedia: encyclopedia white and ink, with the article blue. */
+:root[data-skin='wikipedia'][data-theme='light'] {
+  --palette-text: #1f2428;
+  --palette-bg: #fafbfc;
+  --palette-tint: #3366cc;
+  --bg: #fafbfc;
+  --text: #1f2428;
+  --sidebar: #f1f3f5;
+  --surface: #ffffff;
+  --surface-alt: #f5f6f7;
+  --hover: #eaedf1;
+  --selected: #dee4ea;
+  --secondary: #4f575e;
+  --muted: #667078;
+  --line: #d8dde3;
+  --line-strong: #b9c1c9;
+  --accent: #3366cc;
+  --chrome-accent: #2c4c9c;
+  --accent-bg: #e5ecf8;
+  --accent-fill: #3156a8;
+  --on-accent-fill: #ffffff;
+  --accent-mark: #2c4c9c;
+  --link-tint: #3366cc;
+  --fx-accent: #6f8fc9;
+}
+
+:root[data-skin='wikipedia'][data-theme='dark'] {
+  --palette-text: #eef1f4;
+  --palette-bg: #1c2023;
+  --palette-tint: #9dbdf2;
+  --bg: #1c2023;
+  --text: #eef1f4;
+  --sidebar: #171a1d;
+  --surface: #23272b;
+  --surface-alt: #1f2327;
+  --hover: #2c3137;
+  --selected: #373d44;
+  --secondary: #c6ccd2;
+  --muted: #a7aeb6;
+  --line: #353b42;
+  --line-strong: #4c545d;
+  --accent: #9dbdf2;
+  --chrome-accent: #9dbdf2;
+  --accent-bg: #2a3548;
+  --accent-fill: #6f96d8;
+  --on-accent-fill: #0e141f;
+  --accent-mark: #a8c4f4;
+  --link-tint: #9dbdf2;
+  --fx-accent: #6f96d8;
 }
 
 /* Increased contrast (prefers-contrast: more): body and metadata text reach 7:1 on every surface,

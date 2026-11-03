@@ -3,10 +3,10 @@
 
 import { useEffect, useState } from 'react';
 import { useShell } from '../shell/context.ts';
-import { FONT_DEFAULTS, parseAppearance, parseFontSizes, parseZoom, ZOOM_DEFAULT, type Appearance, type FontSizes } from '../shell/theme.ts';
+import { FONT_DEFAULTS, parseAppearance, parseFontSizes, parseSkin, parseZoom, SKIN_DEFAULT, ZOOM_DEFAULT, type Appearance, type FontSizes, type Skin } from '../shell/theme.ts';
 import { Checkbox, ChoiceTiles, Picker, SettingRow, toast } from '../ui/index.ts';
 import { IconMonitor, IconMoon, IconSun } from '../ui/icons.tsx';
-import { sizeOptions, zoomOptions } from './generalOptions.ts';
+import { sizeOptions, skinOptions, zoomOptions } from './generalOptions.ts';
 import { registerSettingsPane } from './registry.ts';
 import { ChangedByChats } from './changed/ChangedByChats.tsx';
 import { parseNameList, SIDEBAR_ENTRIES } from './applied.ts';
@@ -15,6 +15,7 @@ import { UpdateSourceRow } from '../updates/UpdateSourceRow.tsx';
 function GeneralPane() {
   const shell = useShell();
   const [appearance, setAppearance] = useState<Appearance>('system');
+  const [skin, setSkin] = useState<Skin>(SKIN_DEFAULT);
   const [compact, setCompact] = useState(false);
   const [sizes, setSizes] = useState<FontSizes>(FONT_DEFAULTS);
   const [zoom, setZoom] = useState(ZOOM_DEFAULT);
@@ -32,6 +33,10 @@ function GeneralPane() {
     shell
       .api<unknown>('preference_get', { key: 'appearance' })
       .then((v) => setAppearance(parseAppearance(v)))
+      .catch(() => undefined);
+    shell
+      .api<unknown>('preference_get', { key: 'interfaceTheme' })
+      .then((v) => setSkin(parseSkin(v)))
       .catch(() => undefined);
     shell
       .api<unknown>('preference_get', { key: 'agentSettingsAll' })
@@ -83,6 +88,24 @@ function GeneralPane() {
             void save('appearance', v, () => {
               setAppearance(before);
               shell.bus.dispatch({ kind: 'preferences', changed: { appearance: before } });
+            });
+          }}
+        />
+      </SettingRow>
+      <SettingRow title="Theme" description="Recolour the whole app. Every theme comes in a light and dark form; Appearance above picks which of the two it shows in." testId="setting-theme">
+        <Picker<string>
+          settings
+          label="Theme"
+          testId="theme"
+          value={skin}
+          options={skinOptions()}
+          onChange={(v) => {
+            const before = skin;
+            setSkin(v as Skin);
+            apply('interfaceTheme', v);
+            void save('interfaceTheme', v, () => {
+              setSkin(before);
+              apply('interfaceTheme', before);
             });
           }}
         />

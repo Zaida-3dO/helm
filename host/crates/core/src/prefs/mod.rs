@@ -51,6 +51,9 @@ pub const SEND_BEHAVIOR: PrefKey = PrefKey::classified("sendBehavior");
 pub const SELECTION: PrefKey = PrefKey::classified("selection");
 /// Colour mode: "system", "light" or "dark".
 pub const APPEARANCE: PrefKey = PrefKey::classified("appearance");
+/// Settings > General interface skin: "default" plus the named themes; each
+/// comes in the light and dark form the `appearance` mode picks.
+pub const INTERFACE_THEME: PrefKey = PrefKey::classified("interfaceTheme");
 /// The user's key map: command id → chord, or null for a cleared binding.
 pub const KEYBINDINGS: PrefKey = PrefKey::classified("keybindings");
 /// Minutes without worker output before a running chat shows as stalled (1 to 1440, default 5).
@@ -88,6 +91,7 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     SEND_BEHAVIOR,
     SELECTION,
     APPEARANCE,
+    INTERFACE_THEME,
     KEYBINDINGS,
     STALL_MINUTES,
     CHAT_ELEMENTS,
@@ -264,6 +268,17 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
             _ => Err(PrefError::Invalid {
                 key: k,
                 why: "must be system, light or dark",
+            }),
+        },
+        "interfaceTheme" => match value.as_str() {
+            Some(
+                "default" | "windows-xp" | "slack" | "chrome" | "terminal" | "intellij" | "discord"
+                | "reddit" | "wikipedia",
+            ) => Ok(()),
+            _ => Err(PrefError::Invalid {
+                key: k,
+                why: "must be default, windows-xp, slack, chrome, terminal, intellij, discord, \
+                      reddit or wikipedia",
             }),
         },
         "keybindings" => validate_keybindings(value),
@@ -491,13 +506,25 @@ mod tests {
     }
 
     #[test]
-    fn appearance_and_keybindings_are_generic_and_validated() {
+    fn appearance_themes_and_keybindings_are_generic_and_validated() {
         let (_d, db) = temp_db(&MigrationRegistry::new());
         assert!(db
             .write(|tx| set_generic(tx, "appearance", &json!("dark")))
             .is_ok());
         let r = db.write(|tx| set_generic(tx, "appearance", &json!("sepia")));
         assert!(matches!(r, Err(PrefError::Invalid { .. })));
+        for ok in ["default", "slack", "wikipedia"] {
+            assert!(
+                db.write(|tx| set_generic(tx, "interfaceTheme", &json!(ok)))
+                    .is_ok(),
+                "{ok}"
+            );
+        }
+        // (null stays out of this list: like every key, a null interfaceTheme clears it.)
+        for bad in [json!("dracula"), json!(7), json!("slack ")] {
+            let r = db.write(|tx| set_generic(tx, "interfaceTheme", &bad));
+            assert!(matches!(r, Err(PrefError::Invalid { .. })), "{bad}");
+        }
         let ok = json!({"settings.toggle": "Ctrl+,", "panel.toggle": null});
         assert!(db.write(|tx| set_generic(tx, "keybindings", &ok)).is_ok());
         for bad in [

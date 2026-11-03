@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FONT_DEFAULTS, applyZoom, fontVars, parseFontSizes, parseZoom } from './theme.ts';
-import { sizeOptions, zoomOptions } from '../settings/generalOptions.ts';
+import { FONT_DEFAULTS, SKINS, applyZoom, fontVars, parseFontSizes, parseSkin, parseZoom } from './theme.ts';
+import { sizeOptions, skinOptions, zoomOptions } from '../settings/generalOptions.ts';
 
 test('stored text sizes are kept only when whole and in range; the rest fall back to the defaults', () => {
   assert.deepEqual(parseFontSizes(undefined), FONT_DEFAULTS);
@@ -40,6 +40,16 @@ test('the General pane offers every size in range and every zoom step, defaults 
   const z = zoomOptions();
   assert.equal(z.length, 16);
   assert.equal(z.find((o) => o.value === '100')?.title, '100% (default)');
+});
+
+test('the skin keeps only names styles.css carries; anything else reads as the default', () => {
+  for (const s of SKINS) assert.equal(parseSkin(s), s);
+  for (const bad of [undefined, null, '', 'dracula', 'slack ', 'DEFAULT', 7]) assert.equal(parseSkin(bad), 'default');
+  // The General picker offers exactly those skins, in that order, the default marked.
+  const opts = skinOptions();
+  assert.deepEqual(opts.map((o) => o.value), [...SKINS]);
+  assert.equal(opts[0]?.title, 'Default (no skin)');
+  assert.equal(opts.find((o) => o.value === 'slack')?.title, 'Slack');
 });
 
 test('zoom goes to the host web view and leaves no CSS zoom on the page', () => {

@@ -1,10 +1,34 @@
-// Colour mode: writes data-theme / data-skin / data-effects on <html>.
+// Colour mode and skin: writes data-theme / data-skin / data-effects on <html>.
 // The `appearance` preference is "system" | "light" | "dark"; anything else reads as system.
+// The `interfaceTheme` preference names the skin written to data-skin; styles.css defines a
+// colour set per skin per mode, so the appearance mode still picks light or dark.
 
 export type Appearance = 'system' | 'light' | 'dark';
 
 export function parseAppearance(v: unknown): Appearance {
   return v === 'light' || v === 'dark' ? v : 'system';
+}
+
+export const SKIN_DEFAULT = 'default';
+
+/** The skins styles.css carries, in the order Settings shows them. */
+export const SKINS = [
+  'default',
+  'windows-xp',
+  'slack',
+  'chrome',
+  'terminal',
+  'intellij',
+  'discord',
+  'reddit',
+  'wikipedia',
+] as const;
+
+export type Skin = (typeof SKINS)[number];
+
+/** The stored `interfaceTheme`; anything the host would not accept reads as the default skin. */
+export function parseSkin(v: unknown): Skin {
+  return typeof v === 'string' && (SKINS as readonly string[]).includes(v) ? (v as Skin) : SKIN_DEFAULT;
 }
 
 export function resolveTheme(appearance: Appearance, prefersDark: boolean): 'light' | 'dark' {
@@ -13,11 +37,11 @@ export function resolveTheme(appearance: Appearance, prefersDark: boolean): 'lig
 }
 
 /** Apply the theme attributes; returns a stop function for the OS colour-scheme listener. */
-export function applyTheme(root: HTMLElement, appearance: Appearance): () => void {
+export function applyTheme(root: HTMLElement, appearance: Appearance, skin: Skin = SKIN_DEFAULT): () => void {
   const mq = window.matchMedia('(prefers-color-scheme: dark)');
   const write = () => {
     root.dataset.theme = resolveTheme(appearance, mq.matches);
-    root.dataset.skin = 'default';
+    root.dataset.skin = skin;
     root.dataset.effects = 'full';
   };
   write();
@@ -83,17 +107,30 @@ type Bus = { on: (kind: string, h: (e: Record<string, unknown>) => void) => () =
 type ApiFn = <T = unknown>(op: string, args?: unknown) => Promise<T>;
 
 /**
- * Read `appearance`, `fontSizes` and `zoomLevel`, apply them, and re-apply when a preference
- * changes. Returns a stop function.
+ * Read `appearance`, `interfaceTheme`, `fontSizes` and `zoomLevel`, apply them, and re-apply
+ * when a preference changes. Returns a stop function.
  */
 export function connectAppearance(api: ApiFn, bus: Bus, root: HTMLElement): () => void {
-  let stop = applyTheme(root, 'system');
-  const set = (v: unknown) => {
+  let appearance: Appearance = 'system';
+  let skin: Skin = SKIN_DEFAULT;
+  let stop = applyTheme(root, appearance, skin);
+  const write = () => {
     stop();
-    stop = applyTheme(root, parseAppearance(v));
+    stop = applyTheme(root, appearance, skin);
+  };
+  const set = (v: unknown) => {
+    appearance = parseAppearance(v);
+    write();
+  };
+  const setSkin = (v: unknown) => {
+    skin = parseSkin(v);
+    write();
   };
   api<unknown>('preference_get', { key: 'appearance' })
     .then(set)
+    .catch(() => undefined);
+  api<unknown>('preference_get', { key: 'interfaceTheme' })
+    .then(setSkin)
     .catch(() => undefined);
   api<unknown>('preference_get', { key: 'fontSizes' })
     .then((v) => applyFontSizes(root, parseFontSizes(v)))
@@ -104,6 +141,7 @@ export function connectAppearance(api: ApiFn, bus: Bus, root: HTMLElement): () =
   const off = bus.on('preferences', (e) => {
     const changed = (e.changed ?? {}) as Record<string, unknown>;
     if ('appearance' in changed) set(changed.appearance);
+    if ('interfaceTheme' in changed) setSkin(changed.interfaceTheme);
     if ('fontSizes' in changed) applyFontSizes(root, parseFontSizes(changed.fontSizes));
     if ('zoomLevel' in changed) applyZoom(api, root, parseZoom(changed.zoomLevel));
   });
