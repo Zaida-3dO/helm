@@ -122,7 +122,9 @@ fn fetch_phrase(url: String) -> String {
     format!("Reading {url}")
 }
 
-/// A URL's page, as far as a line has room: host, plus its first path segment when it has one.
+/// A URL's site, as far as a line has room: the host and nothing after it. A path can carry a
+/// secret (a bot token, a ping or topic id), and a summary travels further than the transcript (a
+/// Telegram progress line, for one), so no path segment is ever kept.
 fn web_page(url: &str) -> Option<String> {
     let after = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let authority = after.split(['/', '?', '#']).next().unwrap_or("");
@@ -136,17 +138,7 @@ fn web_page(url: &str) -> Option<String> {
     if host.is_empty() {
         return None;
     }
-    let host = host.strip_prefix("www.").unwrap_or(host);
-    let seg = after[authority.len()..]
-        .trim_start_matches('/')
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("");
-    Some(if seg.is_empty() {
-        host.to_owned()
-    } else {
-        format!("{host}/{seg}")
-    })
+    Some(host.strip_prefix("www.").unwrap_or(host).to_owned())
 }
 
 /// Leading words of a hosted connector's underscore-spelled domain name.

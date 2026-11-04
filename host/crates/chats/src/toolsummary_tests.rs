@@ -106,12 +106,18 @@ fn one_table_says_what_each_call_is_doing() {
         (
             "WebFetch",
             json!({"url": "https://example.com/docs/install?x=1"}),
-            "Reading example.com/docs",
+            "Reading example.com",
+        ),
+        // A path can carry a secret: only the host is ever shown.
+        (
+            "WebFetch",
+            json!({"url": "https://api.telegram.org/bot123456:AAH-secret/getMe"}),
+            "Reading api.telegram.org",
         ),
         (
             "WebFetch",
             json!({"url": "http://www.build.example.org:8080/logs"}),
-            "Reading build.example.org/logs",
+            "Reading build.example.org",
         ),
         (
             "WebFetch",
