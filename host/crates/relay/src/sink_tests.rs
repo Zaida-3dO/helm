@@ -941,3 +941,48 @@ async fn the_sink_delivers_only_once_wired_and_stop_reaches_the_tagged_chat() {
         "{calls:?}"
     );
 }
+
+/// Only a voice note the hub could understand answers an agent's question, and what it answers
+/// with is the transcript; a picture, a document or a recording nobody heard does not.
+#[test]
+fn a_voice_note_answers_with_its_transcript_and_nothing_else_does() {
+    let file = |media: &str| crate::client::TelegramFile {
+        name: "note.ogg".into(),
+        media_type: media.into(),
+        data: String::new(),
+    };
+    for (text, files, images, want) in [
+        (
+            "[Voice note] yes, go ahead",
+            vec!["audio/ogg"],
+            vec![],
+            Some("yes, go ahead"),
+        ),
+        (
+            "[Voice note] (no speech was heard)",
+            vec!["audio/ogg"],
+            vec![],
+            None,
+        ),
+        (
+            "[Voice note] (not transcribed: transcription was unavailable)",
+            vec!["audio/ogg"],
+            vec![],
+            None,
+        ),
+        ("[Voice note] yes", vec!["application/pdf"], vec![], None),
+        (
+            "[Voice note] yes",
+            vec!["audio/ogg"],
+            vec!["image/png"],
+            None,
+        ),
+        ("[Voice note] yes", vec![], vec![], None),
+        ("yes", vec!["audio/ogg"], vec![], None),
+    ] {
+        let mut m = msg("v", text);
+        m.files = files.into_iter().map(file).collect();
+        m.images = images.into_iter().map(file).collect();
+        assert_eq!(spoken_answer(&m).as_deref(), want, "{text:?}");
+    }
+}

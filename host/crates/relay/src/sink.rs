@@ -530,14 +530,17 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         telegram::active_chat(&c.tag_path, &port, &c.policy, msg.bot.as_deref(), now)?;
     let baseline = max_row(&c.db, &chat);
     // A picture or file is never an answer to a question: the message goes in as an ordinary one.
-    let question =
-        answerable(&c.rt, &chat).filter(|_| msg.images.is_empty() && msg.files.is_empty());
+    // A voice note is: the hub attaches the recording, but what answers is its transcript.
+    let spoken = spoken_answer(msg);
+    let question = answerable(&c.rt, &chat)
+        .filter(|_| spoken.is_some() || (msg.images.is_empty() && msg.files.is_empty()));
     if let Some(q) = question {
+        let said = spoken.as_deref().unwrap_or(&msg.text);
         let value = match q.method {
             InteractionMethod::Select => {
-                telegram::question_answer(q.options.as_deref().unwrap_or(&[]), &msg.text)
+                telegram::question_answer(q.options.as_deref().unwrap_or(&[]), said)
             }
-            _ => msg.text.trim().to_owned(),
+            _ => said.trim().to_owned(),
         };
         c.handle
             .block_on(c.ops.invoke(
@@ -635,6 +638,20 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
 type Decoded = (String, String, Vec<u8>);
 
 /// The pictures or files of a message, and why one could not be read at all.
+/// The transcript of a message that is only a voice note the hub could understand: its files are
+/// recordings (no pictures), and its text is `[Voice note] <transcript>` with something heard.
+/// `None` for anything else, a recording that was not transcribed included.
+fn spoken_answer(msg: &crate::client::TelegramMessage) -> Option<String> {
+    if !msg.images.is_empty()
+        || msg.files.is_empty()
+        || !msg.files.iter().all(|f| f.media_type.starts_with("audio/"))
+    {
+        return None;
+    }
+    let heard = msg.text.trim().strip_prefix("[Voice note]")?.trim();
+    (!heard.is_empty() && !heard.starts_with('(')).then(|| heard.to_owned())
+}
+
 fn decode(images: &[crate::client::TelegramFile]) -> (Vec<Decoded>, Option<String>) {
     use base64::Engine as _;
     let mut out = vec![];
