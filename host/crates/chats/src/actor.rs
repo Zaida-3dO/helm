@@ -283,6 +283,17 @@ fn local_of(chat: &ChatRecord) -> Option<(String, String)> {
 const PREWARM_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 /// A local server's queue answer is read at most this often while a turn is open against it.
 const QUEUE_STALE: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long the last good reading of a server's queue still counts after reads start failing: two
+/// failed reads' worth. Past that the answer is unknown, not "still busy".
+const QUEUE_KEEP: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A remembered reading of a server's queue, only while it is recent enough to trust.
+fn recent_reading(
+    info: Option<crate::local::QueueInfo>,
+    good_at: Option<Instant>,
+) -> Option<crate::local::QueueInfo> {
+    good_at.filter(|t| t.elapsed() < QUEUE_KEEP).and(info)
+}
 /// Typing does not start a second model warm-up within this long of the last one.
 const WARM_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(300);
 
@@ -1423,13 +1434,16 @@ impl Actor {
                 .or_insert(crate::runtime::QueueSeen {
                     at: Instant::now() - QUEUE_STALE,
                     info: None,
+                    good_at: None,
                     fetching: false,
                 });
             if e.at.elapsed() >= QUEUE_STALE && !e.fetching {
                 e.fetching = true;
                 fetch = true;
             }
-            e.info
+            // Only a reading that is still recent counts, so a server that stops answering
+            // reads as unknown rather than busy with whatever it last said.
+            recent_reading(e.info, e.good_at)
         };
         if fetch {
             let sh = self.sh.clone();
@@ -1440,6 +1454,7 @@ impl Actor {
                 let e = map.entry(id).or_insert(crate::runtime::QueueSeen {
                     at: Instant::now(),
                     info: None,
+                    good_at: None,
                     fetching: false,
                 });
                 // A failed or shapeless read says nothing, so it does not erase what the last
@@ -1447,6 +1462,7 @@ impl Actor {
                 // every QUEUE_STALE while a chat asks.
                 if info.is_some() {
                     e.info = info;
+                    e.good_at = Some(Instant::now());
                 }
                 e.at = Instant::now();
                 e.fetching = false;
@@ -3776,5 +3792,29 @@ pub(crate) mod write_counts {
             .get(chat)
             .copied()
             .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod queue_reading_tests {
+    use super::*;
+
+    /// A failed read keeps the last good answer only briefly: a hung server must read as unknown,
+    /// not as busy for ever (which would hold the "may be stuck" flag off).
+    #[test]
+    fn an_old_server_reading_is_forgotten() {
+        let busy = Some(crate::local::QueueInfo {
+            busy: true,
+            queued: None,
+        });
+        let at = |ago: u64| Instant::now().checked_sub(std::time::Duration::from_secs(ago));
+        for (info, good_at, want) in [
+            (busy, at(1), busy),
+            (busy, at(QUEUE_KEEP.as_secs() + 5), None),
+            (busy, None, None),
+            (None, at(1), None),
+        ] {
+            assert_eq!(recent_reading(info, good_at), want);
+        }
     }
 }

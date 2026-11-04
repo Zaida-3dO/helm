@@ -477,6 +477,9 @@ pub(crate) struct QueueSeen {
     pub at: Instant,
     /// The server's answer; `None` when it reports no such thing or did not answer.
     pub info: Option<crate::local::QueueInfo>,
+    /// When `info` was last read successfully. A failed read keeps the old answer only for a
+    /// while: a server that has gone quiet must not stay "busy" on a reading from long ago.
+    pub good_at: Option<Instant>,
     /// A read of the server is already on its way.
     pub fetching: bool,
 }
