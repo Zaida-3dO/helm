@@ -63,11 +63,19 @@ export class SidebarActions {
     return { chatId: row.chatId, groupProjectId: row.groupProjectId, parentChatId: row.parentChatId };
   }
 
-  /** Apply `a`, with an undo entry that puts the chat back where it was. */
+  /** Whether the chat's current group is a board. Chats are only ever moved onto boards, so a move
+   *  out of a folder group cannot be undone: the host would refuse to put it back there. */
+  private fromBoard(row: SidebarRow): boolean {
+    return this.d.data.getSnapshot().projects.find((p) => p.id === row.groupProjectId)?.kind === 'board';
+  }
+
+  /** Apply `a`, with an undo entry that puts the chat back where it was (none when the chat left a
+   *  folder group, which it cannot go back to). */
   async move(row: SidebarRow, a: ChatOrganizeArgs, label: string): Promise<void> {
     const back = this.placement(row);
+    const leavesFolder = !!a.groupProjectId && a.groupProjectId !== row.groupProjectId && !this.fromBoard(row);
     const ok = await this.run(() => this.organize(a).then(() => true));
-    if (!ok) return;
+    if (!ok || leavesFolder) return;
     this.d.undo.push({
       label,
       undo: () => this.organize(back),
@@ -109,9 +117,10 @@ export class SidebarActions {
     };
     const forward: ChatOrganizeArgs = { chatId: row.chatId, parentChatId: level.parentChatId, pinned: level.pinned, beforeChatId, ...(level.groupProjectId ? { groupProjectId: level.groupProjectId } : {}) };
     const levelChanged = !!level.groupProjectId || level.parentChatId !== row.parentChatId || level.pinned !== row.pinned;
+    const leavesFolder = !!level.groupProjectId && level.groupProjectId !== row.groupProjectId && !this.fromBoard(row);
     return this.run(async () => {
       await this.organize(forward);
-      if (levelChanged) this.d.undo.push({ label: 'Move chat', undo: back, redo: () => this.organize(forward) });
+      if (levelChanged && !leavesFolder) this.d.undo.push({ label: 'Move chat', undo: back, redo: () => this.organize(forward) });
     }).then(() => undefined);
   }
 

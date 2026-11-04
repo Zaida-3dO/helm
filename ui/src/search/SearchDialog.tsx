@@ -15,14 +15,12 @@ import { chatsSource, claudeChatsSource, filesSource } from './defaultSources.ts
 import { prsSource } from './prSource.ts';
 import { openPrTab } from '../pr/route.ts';
 import { GROUP_LABEL, groupOrder, type SourceId } from './sources.ts';
+import type { ProjectNode } from '../api/projects.ts';
+import { getDefaultBoard } from '../newchat/boards.ts';
+import { pickerProjects } from '../newchat/places.ts';
 import './search.css';
 
 export const SEARCH_DIALOG = 'search';
-
-interface ProjectOption {
-  id: string;
-  name: string;
-}
 
 export function SearchDialog() {
   const shell = useShell();
@@ -45,7 +43,8 @@ function SearchBody({ close }: { close: () => void }) {
   const [text, setText] = useState('');
   const [projectId, setProjectId] = useState<string | null>(null);
   const [archived, setArchived] = useState(false);
-  const [projects, setProjects] = useState<ProjectOption[]>([]);
+  const [projects, setProjects] = useState<ProjectNode[]>([]);
+  const [hidden, setHidden] = useState<string[]>([]);
   const [index, setIndex] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
   // Escape clears a typed query before it closes the dialog (the shared Escape stack: search, then dialog).
@@ -108,11 +107,13 @@ function SearchBody({ close }: { close: () => void }) {
   const state = useSyncExternalStore(search.subscribe, search.snapshot);
 
   useEffect(() => {
-    // The project list belongs to the sidebar; without it the filter is simply absent.
+    // The project list belongs to the sidebar; without it the filter is simply absent. Chats are
+    // shown under boards, so the filter offers the boards a picker offers (finished ones too).
     shell
-      .api<ProjectOption[]>('project_list', {})
-      .then((p) => setProjects(p.map((x) => ({ id: x.id, name: x.name }))))
+      .api<ProjectNode[]>('project_list', {})
+      .then(setProjects)
       .catch(() => setProjects([]));
+    void getDefaultBoard(shell.api).then((b) => setHidden(b.hiddenBoardIds));
   }, [shell]);
 
   useEffect(() => {
@@ -121,8 +122,8 @@ function SearchBody({ close }: { close: () => void }) {
   }, [search, text, projectId, archived]);
 
   const projectOptions = useMemo<PickerOption<string>[]>(
-    () => [{ value: '', title: 'All projects' }, ...projects.map((p) => ({ value: p.id, title: p.name }))],
-    [projects],
+    () => [{ value: '', title: 'All projects' }, ...pickerProjects(projects, true, projectId, hidden).map((p) => ({ value: p.id, title: p.name }))],
+    [projects, projectId, hidden],
   );
   const rows = flatRows(state);
   const current = rows[index];

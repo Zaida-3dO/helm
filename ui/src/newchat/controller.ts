@@ -79,7 +79,7 @@ export const DRAFT_TEXT_KEY = 'helm.newchat.draftText';
 /** The dialogs the new-chat area draws (New project, Add folder, Primary folder…). */
 export type NewChatDialog =
   | { kind: 'new-project'; /** The title to start with. */ title?: string; /** Settings opens it without starting a chat after. */ noChat?: boolean }
-  | { kind: 'add-project'; /** Open on the New folder tab with this name filled in. */ newName?: string }
+  | { kind: 'add-project'; /** Open on the New folder tab with this name filled in. */ newName?: string; /** Start a chat in the folder once it is added. */ startChat?: boolean }
   | { kind: 'primary-folder'; projectId: string };
 
 type Listener = () => void;
@@ -106,6 +106,9 @@ export class NewChatController {
   projects: ProjectNode[] = [];
   /** The default board and the boards pickers leave out. */
   boards: DefaultBoardState = NO_DEFAULT_BOARD;
+  /** Whether a task board is connected. Without one a new project cannot be made there, so
+   *  "New project" adds a folder instead. */
+  boardConnected = false;
   /** The folder of the chat that was open when the page opened (folder resolution step 4). */
   openChatFolder: string | null = null;
   version = 0;
@@ -166,6 +169,24 @@ export class NewChatController {
   setBoards(s: DefaultBoardState): void {
     this.boards = s;
     this.changed();
+  }
+
+  setBoardConnected(on: boolean): void {
+    if (this.boardConnected === on) return;
+    this.boardConnected = on;
+    this.changed();
+  }
+
+  /** "New project" (Ctrl+O, the empty state, the picker's row, Settings): the New project form when
+   *  a task board is connected; without one, the Add folder dialog, which then starts a chat in the
+   *  new folder (unless `noChat`). */
+  newProject(opts: { title?: string; noChat?: boolean } = {}): void {
+    const title = opts.title?.trim() || undefined;
+    if (this.boardConnected) {
+      this.openDialog({ kind: 'new-project', ...(title ? { title } : {}), ...(opts.noChat ? { noChat: true } : {}) });
+    } else {
+      this.openDialog({ kind: 'add-project', ...(title ? { newName: title } : {}), ...(opts.noChat ? {} : { startChat: true }) });
+    }
   }
 
   /** The `chat.new` command (Ctrl+N), the sidebar's New chat and a project's "+". */

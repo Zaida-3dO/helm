@@ -222,7 +222,7 @@ export function ActionsPane({ api }: { api: Api }) {
                       {b.kind === 'new_chat' && (
                         <div className="ap-field">
                           <label className="ap-field-label" htmlFor={`project-${b.id}`}>
-                            Project
+                            Folder
                           </label>
                           <select
                             id={`project-${b.id}`}
@@ -235,7 +235,7 @@ export function ActionsPane({ api }: { api: Api }) {
                                 {p.name}
                               </option>
                             ))}
-                            {b.projectId && !projects.some((p) => p.id === b.projectId) && <option value={b.projectId}>(unavailable project)</option>}
+                            {b.projectId && !projects.some((p) => p.id === b.projectId) && <option value={b.projectId}>(unavailable folder)</option>}
                           </select>
                         </div>
                       )}

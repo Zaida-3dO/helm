@@ -1,5 +1,6 @@
 // The New project form (Ctrl+O: a new board project with its folder), the Add folder dialog
-// (Settings → Projects → Folders) and the Primary folder… dialog. All are drawn by `NewChatHost`
+// (Settings → Projects → Folders, and New project when no task board is connected) and the
+// Primary folder… dialog. All are drawn by `NewChatHost`
 // from the controller's `dialog`.
 
 import { useState } from 'react';
@@ -110,12 +111,13 @@ export function NewProjectDialog() {
   );
 }
 
-/** Add folder: a folder chats can run in (an existing one, or a new one made by name). Folders are
- *  not where chats are shown, so nothing opens after. */
+/** Add folder: a folder chats can run in (an existing one, or a new one made by name). Opened in
+ *  place of New project (no task board connected), it then starts a chat in the folder. */
 export function AddProjectDialog() {
   const shell = useShell();
   // Opened with a name: straight to the New folder tab, name filled in.
   const preset = newChat.dialog?.kind === 'add-project' ? newChat.dialog.newName : undefined;
+  const startChat = newChat.dialog?.kind === 'add-project' && !!newChat.dialog.startChat;
   const [mode, setMode] = useState<'existing' | 'new'>(preset !== undefined ? 'new' : 'existing');
   const [path, setPath] = useState('');
   const [name, setName] = useState(preset ?? '');
@@ -142,9 +144,9 @@ export function AddProjectDialog() {
     setBusy(true);
     setError(null);
     try {
-      if (mode === 'existing') await addExistingFolder(shell.api, path, shownName);
-      else await addNewFolder(shell.api, name, parent);
+      const node = mode === 'existing' ? await addExistingFolder(shell.api, path, shownName) : await addNewFolder(shell.api, name, parent);
       close();
+      if (startChat) newChat.show({ projectId: node.id });
     } catch (e) {
       setError(message(e));
     } finally {

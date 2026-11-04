@@ -176,19 +176,19 @@ export function ScheduleEditor({
         )}
         {newChat && (
           <p className="sched-fine" data-testid="schedule-newchat-note">
-            Starts a fresh chat in the project on every run, so it can repeat at most once an hour.
+            Starts a fresh chat in the folder on every run, so it can repeat at most once an hour.
           </p>
         )}
         {newChat ? (
           <div className="sched-field">
-            <span>Project</span>
+            <span>Folder</span>
             <Picker<string>
-              label="Project for the new chats"
+              label="Folder the new chats run in"
               value={projectId}
               options={projects.map((p) => ({ value: p.id, title: p.name, text: p.name }))}
               onChange={setProjectId}
               searchable
-              placeholder={projects.length === 0 ? 'No projects with a folder' : 'Pick a project'}
+              placeholder={projects.length === 0 ? 'No folders yet' : 'Pick a folder'}
               testId="schedule-project"
             />
           </div>

@@ -435,13 +435,23 @@ test('dropping a chat before another sends the target row level in one call, wit
   const calls: unknown[] = [];
   const undo = new UndoStack();
   let held = [row('a', 'g', { createdAt: 1 }), row('c', 'g', { createdAt: 3 }), row('e', 'g', { createdAt: 2 }), row('b', 'g', { parentChatId: 'p', createdAt: 5 }), row('b2', 'g', { parentChatId: 'p', createdAt: 4 })];
+  // g and h are boards; f is a folder group, which a chat can leave but never be moved back to.
+  const projects = [boardProject('g', false), boardProject('h', false), project('f')];
   const act = new SidebarActions({
     undo,
     onError: (m: string) => calls.push(`error ${m}`),
     pops: { organize: async (a: unknown) => (calls.push(a), []) },
     // Top level of g, newest first: c, a (so a is followed by nothing); b is the only child of p.
-    data: { mergeRows: () => undefined, getSnapshot: () => ({ rows: held }) },
+    data: { mergeRows: () => undefined, getSnapshot: () => ({ rows: held, projects }) },
   } as unknown as ActionDeps);
+  // Out of a folder group onto a board, by a drop or by Move to project: the move happens, with no undo entry.
+  await act.reorderBefore(row('x', 'f'), 'z', { parentChatId: null, pinned: false, groupProjectId: 'h' });
+  await act.moveTo(row('y', 'f'), 'h');
+  assert.deepEqual(calls.splice(0), [
+    { chatId: 'x', parentChatId: null, pinned: false, beforeChatId: 'z', groupProjectId: 'h' },
+    { chatId: 'y', groupProjectId: 'h', parentChatId: null },
+  ]);
+  assert.equal(undo.size, 0);
   // Before a nested child of p, from the top level: it takes parent p.
   await act.reorderBefore(row('a', 'g'), 'k', { parentChatId: 'p', pinned: false });
   // Before a top-level row of another group, from under p: top level there.

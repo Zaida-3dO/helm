@@ -211,6 +211,10 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
       case 'chat_organize': {
         const id = String(args.chatId);
         const c = chats.get(id)!;
+        // As the host: chats are shown on boards only; naming the chat's own group (a reorder) is fine.
+        if (typeof args.groupProjectId === 'string' && args.groupProjectId !== groupOf(id) && projects.get(args.groupProjectId)?.kind !== 'board') {
+          throw new ApiError('bad_args', 'Pick a board; folders are where chats run, not where they are shown.');
+        }
         if (typeof args.groupProjectId === 'string') c.group = args.groupProjectId === c.chat.projectId ? null : args.groupProjectId;
         if ('parentChatId' in args) c.parent = (args.parentChatId as string) ?? null;
         if (typeof args.pinned === 'boolean' && args.pinned !== c.pinned) {

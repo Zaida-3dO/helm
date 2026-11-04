@@ -319,8 +319,12 @@ test('New chat in a project moves a typed draft there, keeping the text; the fol
   assert.equal(h.ctl.draft?.text, 'keep me');
   assert.deepEqual(h.ctl.place(), { folder: 'C:/code/site', source: 'project' });
   h.ctl.show({ folder: 'c:/code/helm' });
-  assert.equal(h.ctl.draft?.projectId, 'helm', 'a folder picks its folder project');
+  assert.equal(h.ctl.draft?.projectId, null, 'a folder with no board over it leaves the board to follow the folder');
   assert.equal(h.ctl.place().folder, 'c:/code/helm');
+  h.ctl.setProjects([...PROJECTS, ...BOARDS]);
+  h.ctl.show({ folder: 'c:/code/site' });
+  assert.equal(h.ctl.draft?.projectId, 'b-site', 'a folder with a board over it picks that board');
+  assert.equal(h.ctl.place().folder, 'c:/code/site');
 });
 
 test('the first send creates the chat on the chosen board, moves the images and opens it', async () => {
@@ -557,9 +561,22 @@ test('the project picker lists open boards only, keeps the draft’s own, leaves
   ];
   for (const [completed, current, hidden, want] of cases) assert.deepEqual(ids(pickerProjects(list, completed, current, hidden)), want, `${completed} ${current} ${hidden}`);
 
-  newChat.openDialog({ kind: 'new-project', title: 'Brand new idea' });
-  assert.deepEqual(newChat.dialog, { kind: 'new-project', title: 'Brand new idea' });
-  newChat.closeDialog();
+  // New project makes a board project when a task board is connected; without one it adds a folder
+  // and starts a chat there (Settings asks for no chat).
+  const np: [boolean, Parameters<NewChatController['newProject']>[0], unknown][] = [
+    [true, { title: ' Brand new idea ' }, { kind: 'new-project', title: 'Brand new idea' }],
+    [true, { noChat: true }, { kind: 'new-project', noChat: true }],
+    [false, { title: 'Brand new idea' }, { kind: 'add-project', newName: 'Brand new idea', startChat: true }],
+    [false, {}, { kind: 'add-project', startChat: true }],
+    [false, { noChat: true }, { kind: 'add-project' }],
+  ];
+  for (const [connected, o, want] of np) {
+    newChat.setBoardConnected(connected);
+    newChat.newProject(o);
+    assert.deepEqual(newChat.dialog, want, `${connected} ${JSON.stringify(o)}`);
+    newChat.closeDialog();
+  }
+  newChat.setBoardConnected(false);
 });
 
 test('opening the chat a refused first send made does not discard it; a running send keeps its chat until it is refused', async () => {

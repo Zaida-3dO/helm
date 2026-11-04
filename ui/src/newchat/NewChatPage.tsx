@@ -56,6 +56,10 @@ export function NewChatHost({ flushers, sendShortcut }: { flushers: Flushers; se
         .then((l) => live && newChat.setProjects(l))
         .catch(() => undefined);
       void getDefaultBoard(shell.api).then((b) => live && newChat.setBoards(b));
+      void pops
+        .connection()
+        .then((c) => live && newChat.setBoardConnected(c.hasToken))
+        .catch(() => live && newChat.setBoardConnected(false));
     };
     load();
     const offs = [shell.bus.on('project', load), shell.bus.on('board_sync', load)];
@@ -66,7 +70,7 @@ export function NewChatHost({ flushers, sendShortcut }: { flushers: Flushers; se
   }, [pops, shell.api, shell.bus]);
 
   useBinding({ id: 'chat.new', title: 'New chat', defaultKeys: 'Ctrl+N', run: () => newChat.show() });
-  useBinding({ id: 'project.add', title: 'New project', defaultKeys: 'Ctrl+O', run: () => newChat.openDialog({ kind: 'new-project' }) });
+  useBinding({ id: 'project.add', title: 'New project', defaultKeys: 'Ctrl+O', run: () => newChat.newProject() });
 
   useSyncExternalStore(newChat.subscribe, newChat.getVersion);
   const d = newChat.dialog;
@@ -121,10 +125,11 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
   // The row after the matches: always there; with nothing found it offers to create what was typed.
   const createRow = (query: string, matches: number): PickerOption<string> => {
     const typed = query.trim();
-    return { value: NEW_PROJECT, title: matches === 0 && typed ? `Create project “${typed}”` : 'New project…' };
+    const what = newChat.boardConnected ? 'project' : 'folder';
+    return { value: NEW_PROJECT, title: matches === 0 && typed ? `Create ${what} “${typed}”` : newChat.boardConnected ? 'New project…' : 'Add folder…' };
   };
   const onPick = (v: string, query: string) => {
-    if (v === NEW_PROJECT) newChat.openDialog({ kind: 'new-project', title: query.trim() });
+    if (v === NEW_PROJECT) newChat.newProject({ title: query });
     else newChat.move(v);
   };
 

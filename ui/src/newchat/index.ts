@@ -4,8 +4,9 @@
 //   openNewChat({ projectId })        a project's "+" or its menu's New chat
 //   openNewChat({ folder })           start in a given folder
 //   openAddProject()                  Ctrl+O, the empty state's "Open a project": the New project
-//                                     form (a new board project with its folder)
-//   openNewProject({ noChat })        the same form; Settings opens it without starting a chat
+//                                     form (a new board project with its folder); with no task
+//                                     board connected, Add folder, then a chat in that folder
+//   openNewProject({ noChat })        the same; Settings opens it without starting a chat
 //   openAddFolder()                   Settings → Projects → Folders: add a folder chats can run in
 //   openPrimaryFolder(projectId)      a board's "Set folder": the folder its new chats start in
 //   primaryFolderMenuItem(project)    the project menu's "Primary folder…" item, for the sidebar
@@ -27,14 +28,16 @@ export function openNewChat(opts?: NewChatOptions): void {
   newChat.show(opts ?? {});
 }
 
-/** Open the New project form (Ctrl+O): a new board project, then a chat in it. */
+/** Open the New project form (Ctrl+O): a new board project, then a chat in it. With no task board
+ *  connected: Add folder, then a chat in the new folder. */
 export function openAddProject(): void {
   openNewProject();
 }
 
-/** Open the New project form. With `noChat` it only makes the project (Settings). */
+/** Open the New project form (or Add folder, with no task board). With `noChat` it only makes
+ *  the project (Settings). */
 export function openNewProject(opts: { title?: string; noChat?: boolean } = {}): void {
-  newChat.openDialog({ kind: 'new-project', ...opts });
+  newChat.newProject(opts);
 }
 
 /** Open the Add folder dialog: an existing folder or a new folder by name, for chats to run in. */
