@@ -34,6 +34,8 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("chat_retry_markers", Data),
     ("chat_titles", Data),
     ("message_records", Data),
+    ("draft_queue_slots", Data),
+    ("queued_submissions", Data),
     ("restart_continuations", Data),
     ("submission_context", Data),
     ("submission_meta", Data),
