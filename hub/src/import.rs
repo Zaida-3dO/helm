@@ -85,6 +85,7 @@ pub fn parse_args(args: &[String]) -> Result<ImportArgs, String> {
 }
 
 /// Every `*.md` file under `dir`, folders sorted, hidden folders (and symlinked ones) skipped.
+/// A symlinked file counts as the file it points at.
 fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
     entries.sort_by_key(|e| e.path());
@@ -96,7 +97,7 @@ fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
             if !hidden {
                 markdown_files(&path, out)?;
             }
-        } else if kind.is_file()
+        } else if (kind.is_file() || (kind.is_symlink() && path.is_file()))
             && path
                 .extension()
                 .is_some_and(|x| x.eq_ignore_ascii_case("md"))
@@ -197,7 +198,8 @@ pub fn import_dir(
             Err(e) => return Err(std::io::Error::other(e.to_string())),
         }
     }
-    if prune && report.files > 0 {
+    // Only index files found means the memories are not there either: prune nothing.
+    if prune && report.files > report.skipped.len() {
         let prefix = format!("{source_tag}:");
         let stale = store
             .with_source_prefix(&prefix)
@@ -484,11 +486,27 @@ same name as a.md",
             assert_eq!(s.get_by_name(name).is_ok(), present, "{name}");
         }
 
-        // An empty folder (a missing mount) prunes nothing.
+        // An empty folder (a missing mount), or one holding only an index file, prunes nothing.
         let empty = tempfile::tempdir().unwrap();
         let r = import_dir(&mut s, empty.path(), "mine", true).unwrap();
         assert!(r.pruned.is_empty());
+        std::fs::write(empty.path().join("MEMORY.md"), "- [keep](keep.md)").unwrap();
+        let r = import_dir(&mut s, empty.path(), "mine", true).unwrap();
+        assert!(r.pruned.is_empty());
         assert!(s.get_by_name("keep").is_ok());
+
+        // A symlinked memory file is imported like the file it points at, so prune keeps it.
+        #[cfg(unix)]
+        {
+            let target = other.path().join("linked-target.md");
+            std::fs::write(&target, "---\nname: linked\n---\nbody").unwrap();
+            std::os::unix::fs::symlink(&target, dir.path().join("linked.md")).unwrap();
+            import_dir(&mut s, dir.path(), "mine", true).unwrap();
+            assert!(s.get_by_name("linked").is_ok());
+            let r = import_dir(&mut s, dir.path(), "mine", true).unwrap();
+            assert!(r.pruned.is_empty(), "{:?}", r.pruned);
+            assert!(s.get_by_name("linked").is_ok());
+        }
     }
 
     #[test]
