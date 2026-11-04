@@ -21,6 +21,8 @@
 //! - `attachment_recover {chatId, messageId}` copies a sent message's images and references into
 //!   the chat's unstaged set ("Recover draft": the composer gets them back to send again). The
 //!   sent message keeps its own; the copies are new rows with new ids ([`crate::message_images`]).
+//! - `attachment_discard {chatId, attachmentId}` removes one unsent image or reference the user took
+//!   out of the composer: the row, the stored file and the thumbnail, so it cannot come back.
 //! - A file the host attaches for the user (one sent from the phone) is saved under
 //!   `attachments/<id>/<name>`, its name made safe for Windows ([`safe_file_name`]), and goes in as
 //!   a file reference to that copy ([`put_file`]). A hard delete removes the folder with the chat.
@@ -712,6 +714,80 @@ pub fn register(reg: &mut OpRegistry) {
         OpClass::Maintenance,
         attachment_recover,
     );
+    reg.blocking(
+        "attachment_discard",
+        OpClass::Maintenance,
+        attachment_discard,
+    );
+}
+
+/// Drop one attachment the user took out of the composer before sending: its row (image or
+/// reference), the stored file and the thumbnail. Only an unsent one of that chat; one a sent
+/// message carries is never touched.
+fn attachment_discard(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct DiscardArgs {
+        chat_id: String,
+        attachment_id: String,
+    }
+    let a: DiscardArgs = crate::ops::parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let profile = ctx.services.need::<Profile>()?;
+    let dir = profile.path("attachments");
+    let discarded = db
+        .write(|tx| {
+            discard_unsent(
+                tx,
+                &a.chat_id,
+                &a.attachment_id,
+                &dir,
+                &profile.path("thumbs"),
+            )
+        })
+        .map_err(crate::ops::sql)?;
+    Ok(json!({"discarded": discarded}))
+}
+
+/// The work of [`attachment_discard`]; `true` when something was removed.
+fn discard_unsent(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    id: &str,
+    dir: &Path,
+    thumbs: &Path,
+) -> rusqlite::Result<bool> {
+    let image = tx.execute(
+        "DELETE FROM chat_attachments WHERE id = ?1 AND chat_id = ?2 AND submission_id IS NULL",
+        params![id, chat_id],
+    )?;
+    if image > 0 {
+        if is_uuid(id) {
+            let _ = std::fs::remove_file(dir.join(id));
+            let _ = std::fs::remove_file(thumbs.join(id));
+        }
+        return Ok(true);
+    }
+    let target: Option<String> = tx
+        .query_row(
+            "SELECT target FROM chat_attachment_refs
+             WHERE id = ?1 AND chat_id = ?2 AND submission_id IS NULL",
+            params![id, chat_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(target) = target else {
+        return Ok(false);
+    };
+    tx.execute(
+        "DELETE FROM chat_attachment_refs WHERE id = ?1 AND chat_id = ?2",
+        params![id, chat_id],
+    )?;
+    // A file saved for a phone message lives in a folder only its own reference owns.
+    if saved_folder(id, &target, dir).is_some() {
+        let _ = std::fs::remove_dir_all(dir.join(id));
+    }
+    Ok(true)
 }
 
 #[derive(serde::Deserialize)]

@@ -11,6 +11,7 @@
 //! | `message_resend` | maintenance | [`MessageResendArgs`] → [`ChatSendResult`] (two-phase; see [`crate::edit`]) |
 //! | `attachment_put` | maintenance | [`AttachmentPutArgs`] → [`AttachmentPutResult`] (see [`crate::attachments`]) |
 //! | `attachment_list` | blocking | `{chatId}` → `{images, refs}`: the chat's attachments not sent yet |
+//! | `attachment_discard` | maintenance | `{chatId, attachmentId}` → `{discarded}`: one unsent image or reference removed with its stored file |
 //! | `attachment_recover` | maintenance | `{chatId, messageId}` → `{images, refs}`: a sent message's attachments copied back to that unstaged set |
 //! | `side_chat_resolve` | maintenance | [`SideChatResolveArgs`] → `ChatRecord` (promote) / `null` (discard) |
 //! | `chat_mute` | maintenance | [`ChatMuteArgs`] → [`ChatRecord`] (user-only) |

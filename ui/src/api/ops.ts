@@ -139,6 +139,9 @@ export function chatOps(api: Api) {
      */
     recoverAttachments: (chatId: string, messageId: number) =>
       api<{ images: number; refs: number }>('attachment_recover', { chatId, messageId }),
+    /** Drop one unsent attachment (image or reference) the user removed from the composer. */
+    discardAttachment: (chatId: string, attachmentId: string) =>
+      api<{ discarded: boolean }>('attachment_discard', { chatId, attachmentId }),
     /** The native multi-file dialog (helm-shell `files_pick`); empty when cancelled. */
     pickFiles: () => api<{ paths: string[] }>('files_pick', { title: 'Attach files' }),
     /** The native folder dialog (helm-shell `folder_pick`); null when cancelled. */

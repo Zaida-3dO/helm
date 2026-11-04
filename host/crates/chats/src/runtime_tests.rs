@@ -1001,6 +1001,56 @@ async fn a_withdrawn_steer_returns_as_a_newer_draft() {
         .await
         .unwrap();
     let img = put["attachmentId"].as_str().unwrap().to_owned();
+    // One the user takes out of the composer is gone for good, the stored file with it: it is not
+    // staged again, and a second discard finds nothing.
+    let extra = h
+        .call(
+            "attachment_put",
+            json!({"chatId": chat, "name": "extra.png", "mime": "image/png", "bytes": b64}),
+        )
+        .await
+        .unwrap()["attachmentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let note = h.work.join("discard-me.md");
+    std::fs::write(&note, "x").unwrap();
+    let by_ref = h
+        .call(
+            "attachment_ref",
+            json!({"chatId": chat, "kind": "path", "target": note.to_string_lossy()}),
+        )
+        .await
+        .unwrap()["attachmentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(h.profile.path("attachments").join(&extra).is_file());
+    for id in [&extra, &by_ref] {
+        let r = h
+            .call(
+                "attachment_discard",
+                json!({"chatId": chat, "attachmentId": id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r["discarded"], true);
+        let again = h
+            .call(
+                "attachment_discard",
+                json!({"chatId": chat, "attachmentId": id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(again["discarded"], false);
+    }
+    assert!(!h.profile.path("attachments").join(&extra).exists());
+    let left = h
+        .call("attachment_list", json!({"chatId": chat}))
+        .await
+        .unwrap();
+    assert_eq!(left["images"].as_array().unwrap().len(), 1);
+    assert!(left["refs"].as_array().unwrap().is_empty());
     // It waits in the chat's unstaged set until the steer takes it.
     let staged = h
         .call("attachment_list", json!({"chatId": chat}))

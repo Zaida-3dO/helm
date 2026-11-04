@@ -277,11 +277,20 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const viewingAt = viewing === null ? -1 : attached.findIndex((a) => a.id === viewing);
   const viewerImages = useMemo(() => attached.map((a) => ({ key: a.id, name: a.name, size: a.size })), [attached]);
 
-  const removeAttached = (id: string) =>
+  // Taking one out also drops it on the host, or it would be staged again the next time this chat
+  // opens and go out with the next send.
+  const discard = (id: string) => {
+    ops.discardAttachment(chat.id, id).catch(() => {
+      // Not reachable: it only stays staged on the host, as it was before.
+    });
+  };
+  const removeAttached = (id: string) => {
+    discard(id);
     setAttached((list) => {
       list.filter((a) => a.id === id).forEach((a) => URL.revokeObjectURL(a.url));
       return list.filter((a) => a.id !== id);
     });
+  };
 
   const send = useCallback(
     async (action: SendAction) => {
@@ -610,6 +619,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
                   className="composer-ref-x"
                   aria-label={`Remove ${r.name}`}
                   onClick={() => {
+                    discard(r.id);
                     refsRef.current = refsRef.current.filter((x) => x.id !== r.id);
                     setRefs(refsRef.current);
                   }}

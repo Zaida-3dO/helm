@@ -828,6 +828,14 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       if (!img) throw { code: 'not_found', message: 'No such image.' };
       return a.thumb === true ? fakeThumb(img.mime, img.bytes) : { mime: img.mime, bytes: img.bytes };
     },
+    attachment_discard: (a) => {
+      const id = String(a.attachmentId);
+      const img = attachments.get(id);
+      if (img && img.chatId === String(a.chatId) && img.sent === null) return { discarded: attachments.delete(id) };
+      const ref = sentRefList.get(id);
+      if (ref && ref.chatId === String(a.chatId) && ref.sent === null) return { discarded: sentRefList.delete(id) };
+      return { discarded: false };
+    },
     // The chat's attachments that are not sent yet: what a reopening composer stages again, and
     // what a taken-back send's message brings back.
     attachment_list: (a) => {

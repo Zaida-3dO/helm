@@ -631,6 +631,7 @@ pub(crate) mod tests {
             ("attachment_ref", OpClass::Maintenance),
             ("attachment_list", OpClass::Blocking),
             ("attachment_recover", OpClass::Maintenance),
+            ("attachment_discard", OpClass::Maintenance),
             ("message_output_save", OpClass::Blocking),
             ("side_chat_resolve", OpClass::Maintenance),
             ("chat_mute", OpClass::Maintenance),
