@@ -21,7 +21,7 @@
 //! - A restore is refuse-by-default. It replaces the chats, the settings and the approvals, so the
 //!   host demands the exact confirmation phrase; nothing changes at the moment of the request, only
 //!   a pending note is written. The pending restore is applied at the next start, before anything
-//!   opens the profile, and the current database is moved into a dated safety folder first.
+//!   opens the profile, and the current database and every other replaced entry are moved into a dated safety folder first.
 //! - The database is copied with SQLite's own online backup API, so the archive holds a consistent
 //!   snapshot even while Helm is running; the live file is never copied byte-for-byte.
 

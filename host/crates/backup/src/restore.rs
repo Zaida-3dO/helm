@@ -101,8 +101,9 @@ pub fn apply_pending(profile_dir: &Path) -> Result<Option<Applied>, BackupError>
         }
     };
 
-    // The database first: today's file and its sidecars go into a dated folder together, so a
-    // restore can be undone by hand whatever happens after this point.
+    // The database first: today's file and its sidecars go into a dated folder together, and every
+    // other entry the restore replaces is moved in beside them below, so a restore can be undone by
+    // hand whatever happens after this point.
     let safety_dir = profile_dir.join(format!("{}{}", SAFETY_PREFIX, stamp(helm_core::now_ms())));
     std::fs::create_dir_all(&safety_dir)?;
     for side in [
@@ -126,7 +127,7 @@ pub fn apply_pending(profile_dir: &Path) -> Result<Option<Applied>, BackupError>
             continue;
         }
         let target = profile_dir.join(name);
-        remove_target(&target)?;
+        set_aside_entry(&target, &safety_dir.join(name))?;
         let source = archive_dir.join(name);
         if source.exists() {
             copy_tree(&source, &target)?;
@@ -137,7 +138,7 @@ pub fn apply_pending(profile_dir: &Path) -> Result<Option<Applied>, BackupError>
     std::fs::copy(archive_dir.join(DB_FILE), profile_dir.join(DB_FILE))?;
     std::fs::remove_file(&pending_path)?;
     log::info!(
-        "the staged restore from {archive} was applied; the database it replaced is in {}",
+        "the staged restore from {archive} was applied; what it replaced is in {}",
         safety_dir.display()
     );
     Ok(Some(Applied {
@@ -153,6 +154,24 @@ fn set_aside(profile_dir: &Path) {
         profile_dir.join(PENDING_FILE),
         profile_dir.join(FAILED_FILE),
     );
+}
+
+/// Move a replaced entry into the safety folder (same volume, so it is a rename and cheap). Only if
+/// the rename fails is the entry deleted, and that is logged: the restore must still go through.
+fn set_aside_entry(from: &Path, to: &Path) -> Result<(), BackupError> {
+    if std::fs::symlink_metadata(from).is_err() {
+        return Ok(());
+    }
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            log::warn!(
+                "could not keep {} in the safety folder ({e}); it is being deleted instead",
+                from.display()
+            );
+            remove_target(from)
+        }
+    }
 }
 
 fn remove_target(p: &Path) -> Result<(), BackupError> {
@@ -222,6 +241,8 @@ mod tests {
         assert_eq!(testutil::db_note(target.dir.path()), "keep me");
         assert!(target.dir.path().join("sessions/s1/log.jsonl").is_file());
         assert!(!target.dir.path().join("sessions/only-old.txt").exists());
+        // The chat logs the restore replaced are kept too, not deleted.
+        assert!(applied.safety_dir.join("sessions/only-old.txt").is_file());
         assert!(applied.safety_dir.join(DB_FILE).is_file());
         assert_eq!(testutil::db_note(&applied.safety_dir), "old data");
         // The note is gone; a second start has nothing to do.

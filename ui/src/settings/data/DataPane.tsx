@@ -63,7 +63,7 @@ export function DataPane() {
   const askRestore = (b: BackupEntry) =>
     setConfirm({
       title: 'Restore this backup?',
-      body: `This replaces all of your chats, settings and approvals with the ones in ${b.name}. Nothing changes until you restart Helm; then your current database is kept in a "before-restore" folder inside Helm's data folder. Sign-ins and keys are not part of a backup and are not touched. To go ahead, press "${RESTORE_CONFIRM}".`,
+      body: `This replaces all of your chats, settings and approvals with the ones in ${b.name}. Nothing changes until you restart Helm; then your current chats and settings (the database, chat logs, images and the rest) are kept in a "before-restore" folder inside Helm's data folder. Sign-ins and keys are not part of a backup and are not touched. To go ahead, press "${RESTORE_CONFIRM}".`,
       confirm: RESTORE_CONFIRM,
       danger: true,
       onConfirm: async () => {
