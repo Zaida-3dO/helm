@@ -2143,8 +2143,8 @@ impl Actor {
         }
     }
 
-    /// Put the text of submissions that were never sent back in the draft, and their images and
-    /// files back in the composer's staged set.
+    /// Put the text of typed submissions that were never sent back in the draft, and their images
+    /// and files back in the composer's staged set. Any other submission is only marked rejected.
     fn give_back(&mut self, ids: Vec<String>) {
         let chat = self.chat_id.clone();
         self.write(|t| {
@@ -2162,10 +2162,21 @@ impl Actor {
                         "UPDATE submissions SET state = 'rejected' WHERE id = ?1",
                         [id],
                     )?;
-                    // The images and files go back to the chat's unstaged set with the text,
-                    // so the composer can attach them to the next send.
-                    crate::attachments::unlink(t, id)?;
-                    crate::submit::text_to_draft(t, &chat, &text)?;
+                    // Only what the user typed goes back into their draft. A message another
+                    // part of the app sent (a wait firing, a schedule, a phone message) stays
+                    // "not delivered" for whoever sent it to see; its text is not theirs to edit.
+                    let typed: bool = t
+                        .query_row(
+                            "SELECT COALESCE((SELECT origin FROM submission_meta WHERE submission_id = ?1), 'typed') = 'typed'",
+                            [id],
+                            |r| r.get(0),
+                        )?;
+                    if typed {
+                        // The images and files go back to the chat's unstaged set with the
+                        // text, so the composer can attach them to the next send.
+                        crate::attachments::unlink(t, id)?;
+                        crate::submit::text_to_draft(t, &chat, &text)?;
+                    }
                 }
             }
             Ok(())

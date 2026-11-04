@@ -4858,6 +4858,28 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         .iter()
         .any(|t| t == "context:llama3:8b can't load while Strata is answering in Notes."));
 
+    // A message the app itself sent (a wait firing, a schedule) is refused the same way but is
+    // not the user's text: it reads "not delivered" and the draft is left alone.
+    let app_sid = uuid::Uuid::new_v4().to_string();
+    crate::submit::host_send(
+        &h.rt,
+        crate::submit::HostSend {
+            chat_id: &chat,
+            submission_id: &app_sid,
+            text: "a wait fired",
+            origin: crate::types::SubmissionOrigin::App,
+        },
+    )
+    .unwrap();
+    h.until("the app message is refused", |h| {
+        h.state(&app_sid) == "rejected"
+    })
+    .await;
+    assert_eq!(
+        h.col(&format!("SELECT draft FROM chats WHERE id = '{chat}'")),
+        ["try again please"]
+    );
+
     // Stop while the model is being made ready: nothing was sent, the text goes back to the draft.
     let (open, gate) = std::sync::mpsc::channel();
     *local.gate.lock().unwrap() = Some(gate);

@@ -233,12 +233,77 @@ pub fn delivery_id(wait_id: &str) -> String {
     uuid::Uuid::from_bytes(b).to_string()
 }
 
+/// How many times a refused message is sent again before the wait gives up on it.
+const MAX_RESENDS: u32 = 3;
+
+/// The id for the `n`-th re-send of a message the chat refused (the same name-based form as
+/// [`delivery_id`], so a retry still can never deliver twice).
+fn resend_id(first: &str, n: u32) -> String {
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(format!("helm-wait-resend/{first}/{n}").as_bytes());
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&h[..16]);
+    b[6] = (b[6] & 0x0f) | 0x50;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(b).to_string()
+}
+
 /// Delivery through the chat runtime: an app message that starts a turn if the chat is
 /// idle and is read by the running turn at its next tool boundary if it is busy.
+///
+/// The wait counts as delivered only once the chat has accepted the message: a chat that refuses
+/// it (a local server that is down, a worker that will not start) leaves the message "not
+/// delivered", and the wait sends it again under a new id, up to a few times, rather than
+/// being used up with the agent never woken.
 pub struct RuntimeSink(pub helm_chats::ChatRuntime);
 
 impl Deliver for RuntimeSink {
     fn deliver(&self, chat_id: &str, submission_id: &str, text: &str) -> Delivery {
+        use helm_chats::types::SubmissionState as S;
+        let state_of = |id: &str| {
+            self.0
+                .db()
+                .snapshot(|t| helm_chats::store::get_submission(t, id))
+                .ok()
+                .flatten()
+                .map(|s| s.state)
+        };
+        for n in 0..=MAX_RESENDS {
+            let id = if n == 0 {
+                submission_id.to_owned()
+            } else {
+                resend_id(submission_id, n)
+            };
+            match state_of(&id) {
+                // Not read yet, or maybe read: either way the message is with the chat, and
+                // sending it again could wake the agent twice.
+                Some(S::Accepted | S::Delivered | S::Complete | S::Uncertain) => {
+                    return Delivery::Sent;
+                }
+                Some(S::Withdrawn | S::Superseded) => return Delivery::Gone,
+                // Refused before it reached Claude: the next id gets its own try.
+                Some(S::Rejected) => {
+                    log::info!("wait message for {chat_id} was refused; sending it again");
+                    continue;
+                }
+                // Handed over (or about to be) and not answered yet: ask again at the next sweep.
+                Some(S::Saved | S::Dispatching) | None => {
+                    return match self.hand_over(chat_id, &id, text) {
+                        Delivery::Sent => Delivery::Retry,
+                        other => other,
+                    };
+                }
+            }
+        }
+        log::warn!("wait message for {chat_id} was refused every time; giving up");
+        Delivery::Gone
+    }
+}
+
+impl RuntimeSink {
+    /// Save the message in the chat (or hand a saved one over again). `Sent` means the chat has
+    /// it; whether it accepts it is seen at a later sweep.
+    fn hand_over(&self, chat_id: &str, submission_id: &str, text: &str) -> Delivery {
         use helm_chats::submit::{host_send, HostSend};
         let sent = host_send(
             &self.0,
