@@ -5344,6 +5344,68 @@ async fn a_started_chat_moves_between_local_and_claude_in_both_directions() {
     cw.exit().await;
 }
 
+/// A switch to a local model waits for the chat's background agents, but a message that would open
+/// a turn must not go to the old worker meanwhile: the agents are stopped, with a notice, and the
+/// message goes to a worker on the new model.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_after_a_provider_switch_does_not_reach_the_old_worker_behind_its_agents() {
+    let mut h = harness();
+    let local = Arc::new(FakeLocal {
+        turns: Mutex::new(Vec::new()),
+        outcome: Mutex::new(Ok("alpha-model".into())),
+        gate: Mutex::new(None),
+        finished: Mutex::new(Vec::new()),
+        refreshed: Mutex::new(Vec::new()),
+        queue: Mutex::new(None),
+    });
+    h.rt.set_local_models(local.clone());
+    let chat = h.create().await;
+    h.call("chat_set_model", json!({"chatId": &chat, "model": "opus"}))
+        .await
+        .unwrap();
+    let small = json!({"inputTokens": 20, "outputTokens": 40, "cacheReadTokens": 500,
+                       "cacheWriteTokens": 60, "costUsd": 0.5});
+    let mut old = settled_turn(&mut h, &chat, "first", "m-1", "done", small, "native-0").await;
+    old.emit(json!({"type": "subagent_start", "toolCallId": "sa_1", "name": "background job"}))
+        .await;
+    h.until("the agent is running", |h| {
+        h.rt.live_thread(&chat)
+            .is_some_and(|t| t.subagents_running == 1)
+    })
+    .await;
+    h.call(
+        "chat_set_model",
+        json!({"chatId": &chat, "model": "local/strata/alpha"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        old.no_command_for(Duration::from_millis(200))
+            .await
+            .is_none(),
+        "the old worker stays while its agent runs"
+    );
+    h.send(&chat, "something private", "default").await;
+    old.expect("shutdown").await;
+    let mut fresh = h.worker().await;
+    assert!(
+        fresh.req.local.is_some(),
+        "the message goes to the local model's worker"
+    );
+    fresh.ready().await;
+    let p = fresh.expect("prompt").await;
+    assert_eq!(p["text"], "something private");
+    let notes = h.col(&format!(
+        "SELECT text FROM messages WHERE chat_id = '{chat}' AND role = 'context' ORDER BY id"
+    ));
+    assert!(
+        notes.iter().any(|t| t.contains("agents were stopped")),
+        "{notes:?}"
+    );
+    old.exit().await;
+    fresh.exit().await;
+}
+
 /// A model change whose conversation plainly will not fit the target's window is refused with a
 /// roll over offered instead of a turn that would be cut off; taking the offer rolls the chat over
 /// into a successor that runs on that model, carrying the hand-off.

@@ -229,6 +229,9 @@ struct Actor {
     launched_web_tools: Option<bool>,
     /// That setting changed while a turn ran: relaunch at the next idle point.
     relaunch_on_idle: bool,
+    /// The relaunch held for the idle point is a change of provider (Claude to a local model or
+    /// back): a message that would open a turn must not go to the old worker meanwhile.
+    provider_switch_pending: bool,
     /// Running subagents pushed off the live list by a 31st: kept so their end still reaches
     /// their tool row.
     evicted: Vec<Subagent>,
@@ -362,6 +365,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         launched_long: None,
         launched_web_tools: None,
         relaunch_on_idle: false,
+        provider_switch_pending: false,
         evicted: Vec::new(),
         timeline: None,
         spawn_failed_at: None,
@@ -849,6 +853,7 @@ impl Actor {
         let sb = self.live.lock().unwrap().thread.send_behavior;
         self.launched_long = Some(sb.long_commands);
         self.relaunch_on_idle = false;
+        self.provider_switch_pending = false;
         // A chat on a local model starts the worker for the name its preparation answered (for
         // Ollama, Helm's variant of the model).
         let local = local_of(&chat).map(|(server_id, model)| crate::runtime::LocalSpawn {
@@ -1247,6 +1252,7 @@ impl Actor {
     /// Close the idle worker so the next send starts one with the current settings.
     fn relaunch_worker(&mut self) {
         self.relaunch_on_idle = false;
+        self.provider_switch_pending = false;
         if let Some(l) = &self.link {
             self.link_closing = true;
             l.send(&json!({"type": "shutdown"}));
@@ -1619,6 +1625,7 @@ impl Actor {
                     // local model's thinking budget without a respawn.
                     if self.status().is_busy() || self.agents_running() {
                         self.relaunch_on_idle = true;
+                        self.provider_switch_pending = true;
                     } else {
                         self.relaunch_worker();
                     }
@@ -1933,6 +1940,17 @@ impl Actor {
         let busy = !opening && self.status().is_busy();
         if !busy && !opening && self.begin_prepare(sid) {
             return;
+        }
+        if !busy && self.provider_switch_pending && self.link.is_some() && !self.link_closing {
+            // The model changed provider while background agents kept the old worker alive. This
+            // message opens a turn, and the old worker would answer it on the wrong provider (for
+            // a switch to a local model, under the user's own sign-in): so the agents are stopped
+            // now, with a notice, and the message goes to a fresh worker.
+            self.context_row(
+                ContextKind::Notice,
+                "Background agents were stopped to switch this chat to its new model.",
+            );
+            self.relaunch_worker();
         }
         if !busy {
             let mut t = crate::timeline::SendTimeline::new(sid, sub.created_at, now());
