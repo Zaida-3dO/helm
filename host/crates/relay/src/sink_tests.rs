@@ -986,3 +986,52 @@ fn a_voice_note_answers_with_its_transcript_and_nothing_else_does() {
         assert_eq!(spoken_answer(&m).as_deref(), want, "{text:?}");
     }
 }
+
+/// A saved local model whose server is set up but switched off is left out when a new Telegram chat
+/// opens, so the chat answers on the app default instead of refusing every turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_saved_model_on_a_switched_off_server_is_left_out() {
+    struct Off;
+    impl helm_chats::local::LocalModels for Off {
+        fn knows(&self, _: &str) -> bool {
+            true
+        }
+        fn available(&self, _: &str) -> bool {
+            false
+        }
+        fn server(&self, _: &str, _: &str) -> Result<helm_chats::local::LocalServer, String> {
+            Err("off".into())
+        }
+        fn prepare(
+            &self,
+            _: &helm_chats::local::LocalTurn,
+            _: &dyn Fn(&str),
+        ) -> Result<String, String> {
+            Err("off".into())
+        }
+        fn finished(&self, _: &str, _: &str) {}
+        fn catalogue(&self, _: bool) -> Vec<helm_chats::types::LocalModelInfo> {
+            vec![]
+        }
+    }
+    let e = env();
+    e.ctx.rt.set_local_models(Arc::new(Off));
+    let ctx = Ctx {
+        new_chat_model: Some("local/strata/some-model".to_owned()),
+        new_chat_effort: Some("high".to_owned()),
+        ..e.ctx.clone()
+    };
+    let p = place_async(&ctx, msg("hub-off", "anyone home?"))
+        .await
+        .unwrap();
+    assert!(matches!(p, Placed::Sent { .. }));
+    let calls = e.ops.calls.lock().unwrap().clone();
+    let creates: Vec<&Value> = calls
+        .iter()
+        .filter(|(o, _)| o == "chat_create")
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(creates.len(), 1, "{calls:?}");
+    assert!(creates[0].get("model").is_none(), "{}", creates[0]);
+    assert_eq!(creates[0]["effort"].as_str(), Some("high"));
+}

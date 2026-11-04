@@ -359,6 +359,17 @@ pub fn telegram_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> 
     }
 }
 
+impl RealPort<'_> {
+    /// Whether a saved model can be used for a new chat now: a Claude model always, a local one
+    /// when its server is set up and switched on.
+    fn model_usable(&self, model: &str) -> bool {
+        let Some((server, _)) = helm_chats::local::split(model) else {
+            return !model.starts_with(helm_chats::local::PREFIX);
+        };
+        self.rt.local_models().is_none_or(|l| l.available(server))
+    }
+}
+
 impl ChatPort for RealPort<'_> {
     fn facts(&self, chat_id: &str) -> Option<ChatFacts> {
         chat_facts(self.db, chat_id)
@@ -370,7 +381,17 @@ impl ChatPort for RealPort<'_> {
         // `chat_create` already takes a model and an effort; without them it uses the new-chat
         // default exactly as before.
         let mut args = json!({ "cwd": self.folder });
-        if let Some(m) = &self.new_chat_model {
+        // A saved local model whose server is set up but switched off would be accepted here and
+        // then refuse every turn, leaving the phone with no reason: it is left out, and the chat
+        // opens on the app default (the effort, if any, is kept).
+        let model = self.new_chat_model.as_deref().filter(|m| {
+            let usable = self.model_usable(m);
+            if !usable {
+                log::warn!("relay: the saved Telegram model is on a local server that is not available; opening on the app default");
+            }
+            usable
+        });
+        if let Some(m) = model {
             args["model"] = json!(m);
         }
         if let Some(e) = &self.new_chat_effort {
