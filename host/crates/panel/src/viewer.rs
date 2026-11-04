@@ -2,7 +2,9 @@
 //!
 //! Text is read up to 512 KiB (a longer file comes back as an excerpt, marked truncated), images up
 //! to 8 MiB (as base64 bytes, shown by the renderer as an object URL), directories up to 1,000
-//! entries. Every path passes the lexical [`crate::pathgate`] check, then the private-root check,
+//! entries. PDFs, audio, video, fonts and ZIP archives are classified here by extension and never
+//! read whole: the renderer plays or shows them through [`crate::serve`] (ranged, a chunk at a time)
+//! and lists archives through [`crate::archive`]. Every path passes the lexical [`crate::pathgate`] check, then the private-root check,
 //! then a read that refuses links along the path. Nothing is ever executed or rendered here.
 
 use crate::pathgate;
@@ -26,6 +28,11 @@ pub enum ViewKind {
     Dir,
     Html,
     Binary,
+    Pdf,
+    Audio,
+    Video,
+    Font,
+    Archive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -53,6 +60,9 @@ pub struct FileView {
     pub mime: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entries: Option<Vec<DirEntry>>,
+    /// Where the renderer loads a PDF, audio, video or font from (a short-lived address).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<&'static str>,
@@ -116,6 +126,32 @@ pub fn image_mime(ext: &str) -> Option<&'static str> {
         "avif" => "image/avif",
         "ico" => "image/x-icon",
         "svg" => "image/svg+xml",
+        _ => return None,
+    })
+}
+
+/// How a file that is previewed by streaming (or listing) rather than reading is shown: its kind and
+/// content type, from the extension alone.
+pub fn stream_kind(ext: &str) -> Option<(ViewKind, &'static str)> {
+    Some(match ext {
+        "pdf" => (ViewKind::Pdf, "application/pdf"),
+        "mp4" | "m4v" => (ViewKind::Video, "video/mp4"),
+        "mov" => (ViewKind::Video, "video/quicktime"),
+        "webm" => (ViewKind::Video, "video/webm"),
+        "ogv" => (ViewKind::Video, "video/ogg"),
+        "avi" => (ViewKind::Video, "video/x-msvideo"),
+        "mkv" => (ViewKind::Video, "video/x-matroska"),
+        "mp3" => (ViewKind::Audio, "audio/mpeg"),
+        "wav" => (ViewKind::Audio, "audio/wav"),
+        "m4a" => (ViewKind::Audio, "audio/mp4"),
+        "ogg" | "oga" | "opus" => (ViewKind::Audio, "audio/ogg"),
+        "flac" => (ViewKind::Audio, "audio/flac"),
+        "aac" => (ViewKind::Audio, "audio/aac"),
+        "ttf" => (ViewKind::Font, "font/ttf"),
+        "otf" => (ViewKind::Font, "font/otf"),
+        "woff" => (ViewKind::Font, "font/woff"),
+        "woff2" => (ViewKind::Font, "font/woff2"),
+        "zip" | "jar" | "whl" => (ViewKind::Archive, "application/zip"),
         _ => return None,
     })
 }
@@ -194,6 +230,7 @@ pub fn read(raw: &str, roots: &PrivateRoots) -> Result<FileView, ReadError> {
             bytes: None,
             mime: None,
             entries: Some(entries),
+            url: None,
             truncated,
             language: None,
         });
@@ -215,6 +252,27 @@ pub fn read(raw: &str, roots: &PrivateRoots) -> Result<FileView, ReadError> {
             bytes: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
             mime: Some(mime),
             entries: None,
+            url: None,
+            truncated: false,
+            language: None,
+        });
+    }
+    if let Some((kind, mime)) = stream_kind(&ext) {
+        let limit = crate::serve::size_limit(kind);
+        if size > limit {
+            return Err(ReadError::TooLarge(
+                "The file is too large to preview here. Open it in its default app instead.",
+            ));
+        }
+        return Ok(FileView {
+            path: shown,
+            kind,
+            size,
+            text: None,
+            bytes: None,
+            mime: Some(mime),
+            entries: None,
+            url: None,
             truncated: false,
             language: None,
         });
@@ -234,6 +292,7 @@ pub fn read(raw: &str, roots: &PrivateRoots) -> Result<FileView, ReadError> {
             bytes: None,
             mime: None,
             entries: None,
+            url: None,
             truncated: false,
             language: None,
         });
@@ -249,6 +308,7 @@ pub fn read(raw: &str, roots: &PrivateRoots) -> Result<FileView, ReadError> {
         bytes: None,
         mime: None,
         entries: None,
+        url: None,
         truncated,
         language: language_for(&path),
     })
@@ -341,6 +401,29 @@ mod tests {
             read(&s(&html), &PrivateRoots::default()).unwrap().kind,
             ViewKind::Html
         );
+        // PDFs, media, fonts and archives are classified by extension and never read whole.
+        for (name, kind, mime) in [
+            ("a.pdf", ViewKind::Pdf, "application/pdf"),
+            ("a.MP4", ViewKind::Video, "video/mp4"),
+            ("a.flac", ViewKind::Audio, "audio/flac"),
+            ("a.woff2", ViewKind::Font, "font/woff2"),
+            ("a.jar", ViewKind::Archive, "application/zip"),
+        ] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, [0u8, 1, 2]).unwrap();
+            let v = read(&s(&p), &PrivateRoots::default()).unwrap();
+            assert_eq!((v.kind, v.mime, v.size), (kind, Some(mime), 3), "{name}");
+            assert!(v.bytes.is_none() && v.text.is_none() && v.url.is_none());
+        }
+        let font = dir.path().join("big.ttf");
+        std::fs::File::create(&font)
+            .unwrap()
+            .set_len(crate::serve::FONT_LIMIT + 1)
+            .unwrap();
+        assert!(matches!(
+            read(&s(&font), &PrivateRoots::default()),
+            Err(ReadError::TooLarge(_))
+        ));
     }
 
     #[test]

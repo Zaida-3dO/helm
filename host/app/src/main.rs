@@ -165,7 +165,48 @@ fn run_app(
     clock: Arc<helm_chats::clock::Clock>,
 ) {
     let debug = cfg!(debug_assertions);
+    // Previewed PDFs, audio, video and fonts are served in ranges through one custom scheme; the
+    // same server is the `file_read` op's way of issuing the short-lived addresses.
+    let media = Arc::new(helm_panel::serve::MediaServer::new(
+        helm_panel::private::PrivateRoots::new(&{
+            let mut roots = vec![profile.dir.clone()];
+            if let Ok(d) = helm_core::profile::default_profile_dir() {
+                roots.push(d);
+            }
+            roots
+        }),
+    ));
+    let media_for_scheme = media.clone();
     let app = tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol(
+            helm_panel::serve::SCHEME,
+            move |_ctx, request, responder| {
+                let media = media_for_scheme.clone();
+                // Reads of up to one chunk happen off the main thread.
+                std::thread::spawn(move || {
+                    let token = request.uri().path().trim_matches('/').to_owned();
+                    let range = request
+                        .headers()
+                        .get("range")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
+                    let reply = media.respond(request.method().as_str(), &token, range.as_deref());
+                    let mut b = tauri::http::Response::builder().status(reply.status);
+                    for (k, v) in &reply.headers {
+                        b = b.header(*k, v.as_str());
+                    }
+                    let response =
+                        b.body(std::borrow::Cow::Owned(reply.body))
+                            .unwrap_or_else(|_| {
+                                tauri::http::Response::builder()
+                                    .status(500)
+                                    .body(std::borrow::Cow::Owned(Vec::new()))
+                                    .expect("an empty response builds")
+                            });
+                    responder.respond(response);
+                });
+            },
+        )
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| tray::on_shortcut(app, event.state()))
@@ -210,6 +251,7 @@ fn run_app(
             let dialogs = quit_dialogs(&platform, debug);
             let mut services = Services::new();
             services.insert(Arc::new(profile.clone()));
+            services.insert(media.clone());
             services.insert(db.clone());
             services.insert(clock.clone());
             services.insert(Arc::new(QuitCoordinator::new()));

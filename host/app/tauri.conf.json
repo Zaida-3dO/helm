@@ -23,14 +23,14 @@
         "default-src": "'none'",
         "script-src": "'self'",
         "style-src": "'self' 'unsafe-inline'",
-        "font-src": "'self'",
+        "font-src": "'self' http://helmfile.localhost helmfile:",
         "img-src": "'self' data: blob:",
         "connect-src": "ipc: http://ipc.localhost",
         "base-uri": "'none'",
         "form-action": "'none'",
-        "frame-src": "'none'",
+        "frame-src": "http://helmfile.localhost helmfile:",
         "object-src": "'none'",
-        "media-src": "'none'"
+        "media-src": "http://helmfile.localhost helmfile:"
       },
       "dangerousDisableAssetCspModification": [
         "style-src"

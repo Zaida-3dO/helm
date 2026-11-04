@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { delimiterFor, filterRows, jsonMatches, parseDelimited, parseJson, stepZoom, ZOOM_MAX, ZOOM_MIN } from './preview.ts';
+import { archiveRows, delimiterFor, filterRows, jsonMatches, parseDelimited, parseJson, sizeLabel, stepZoom, ZOOM_MAX, ZOOM_MIN } from './preview.ts';
 
 test('delimited text handles quotes, embedded delimiters and newlines, and either line ending', () => {
   const rows: Array<[string, string, string[][]]> = [
@@ -42,4 +42,17 @@ test('zoom steps stay within the allowed range', () => {
   assert.equal(stepZoom(1.25, -1), 1);
   assert.equal(stepZoom(ZOOM_MAX, 1), ZOOM_MAX);
   assert.equal(stepZoom(ZOOM_MIN, -1), ZOOM_MIN);
+});
+
+test('archive entries become an indented folder tree, with implied folders and folders first', () => {
+  const e = (path: string, size = 1, dir = path.endsWith('/')) => ({ path, size, dir, encrypted: false });
+  const rows = archiveRows([e('b.txt', 5), e('src/deep/x.ts', 9), e('docs/', 0), e('src/a.ts', 3), e('A.md', 2), e('./odd//name.txt', 4)]);
+  assert.deepEqual(
+    rows.map((r) => `${' '.repeat(r.depth)}${r.name}${r.dir ? '/' : ''}`),
+    ['docs/', 'odd/', ' name.txt', 'src/', ' deep/', '  x.ts', ' a.ts', 'A.md', 'b.txt'],
+  );
+  assert.equal(rows.find((r) => r.name === 'x.ts')?.size, 9);
+  assert.equal(rows.find((r) => r.name === 'deep')?.size, undefined);
+  assert.deepEqual(archiveRows([]), []);
+  assert.deepEqual([512, 2048, 5 * 1024 * 1024, 3 * 1024 ** 3].map(sizeLabel), ['512 B', '2.0 KiB', '5.0 MiB', '3.0 GiB']);
 });

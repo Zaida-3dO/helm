@@ -3,7 +3,7 @@
 
 import type { Api } from './client.ts';
 
-export type ViewKind = 'text' | 'image' | 'dir' | 'html' | 'binary';
+export type ViewKind = 'text' | 'image' | 'dir' | 'html' | 'binary' | 'pdf' | 'audio' | 'video' | 'font' | 'archive';
 
 export interface DirEntry {
   name: string;
@@ -20,8 +20,29 @@ export interface FileView {
   bytes?: string;
   mime?: string;
   entries?: DirEntry[];
+  /** Where a PDF, audio, video or font loads from: a short-lived address served in byte ranges. */
+  url?: string;
   truncated: boolean;
   language?: string;
+}
+
+export interface ArchiveEntry {
+  path: string;
+  /** Absent when the archive keeps the size only in a ZIP64 extra field. */
+  size?: number;
+  compressedSize?: number;
+  dir: boolean;
+  encrypted: boolean;
+}
+
+/** A ZIP's central directory (names and sizes only; nothing is extracted). */
+export interface ArchiveView {
+  path: string;
+  size: number;
+  entries: ArchiveEntry[];
+  /** Every entry the archive declares, listed or not. */
+  total: number;
+  truncated: boolean;
 }
 
 export interface Handler {
@@ -139,6 +160,8 @@ export function panelOps(api: Api) {
   return {
     fileRead: (path: string, chatId?: string | null) =>
       api<FileView>('file_read', chatId ? { chatId, path } : { path }),
+    archiveList: (path: string, chatId?: string | null) =>
+      api<ArchiveView>('archive_list', chatId ? { chatId, path } : { path }),
     defaultHandler: (path: string) => api<DefaultHandlerResult>('default_handler', { path }),
     openDefault: (path: string) => api<null>('file_open_default', { path }),
     reveal: (path: string) => api<null>('file_reveal', { path }),

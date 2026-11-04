@@ -40,6 +40,7 @@ function read(path: string): FileView {
   const root = norm(FAKE_ROOT);
   if (!n.startsWith(root)) throw new ApiError('not_found', 'The file was not found.');
   const rel = n.slice(root.length).replace(/^\\/, '');
+  if (rel === 'assets.zip') return { path, kind: 'archive', size: 4096, mime: 'application/zip', truncated: false };
   if (rel === 'logo.svg') {
     return { path, kind: 'image', size: LOGO_SVG.length, bytes: btoa(LOGO_SVG), mime: 'image/svg+xml', truncated: false };
   }
@@ -64,7 +65,10 @@ function read(path: string): FileView {
     const at = rest.indexOf('\\');
     names.set(at < 0 ? rest : rest.slice(0, at), at < 0 ? 'file' : 'dir');
   }
-  if (!rel) names.set('logo.svg', 'file');
+  if (!rel) {
+    names.set('logo.svg', 'file');
+    names.set('assets.zip', 'file');
+  }
   if (names.size === 0) throw new ApiError('not_found', 'The file was not found.');
   const entries = [...names].map(([name, kind]) => ({ name, kind })).sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1));
   return { path, kind: 'dir', size: 0, entries, truncated: false };
@@ -177,6 +181,19 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       case 'file_read':
       case 'dir_list':
         return read(String(args.path ?? ''));
+      case 'archive_list':
+        return {
+          path: String(args.path ?? ''),
+          size: 4096,
+          total: 4,
+          truncated: false,
+          entries: [
+            { path: 'images/', dir: true, encrypted: false },
+            { path: 'images/logo.svg', size: 240, compressedSize: 120, dir: false, encrypted: false },
+            { path: 'notes.txt', size: 1536, compressedSize: 700, dir: false, encrypted: false },
+            { path: 'private.bin', size: 90, compressedSize: 90, dir: false, encrypted: true },
+          ],
+        };
       case 'default_handler':
         return String(args.path ?? '').endsWith('.md')
           ? { handler: { name: 'Demo Editor', appPath: 'C:\\Program Files\\Demo\\editor.exe' }, refusal: null }
@@ -208,5 +225,5 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         throw new ApiError('refused', 'This operation is not available here.');
     }
   };
-  return { prefixes: ['file_', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_', 'path_resolve', 'quick_open', 'changes', 'diff', 'vault_', 'panel_context_', 'review_comment_', 'review_turns', 'review_turn_diff'], handler };
+  return { prefixes: ['file_', 'archive_list', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_', 'path_resolve', 'quick_open', 'changes', 'diff', 'vault_', 'panel_context_', 'review_comment_', 'review_turns', 'review_turn_diff'], handler };
 }
