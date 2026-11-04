@@ -1831,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "helm-backup"
-version = "0.6.2"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "helm-core",
