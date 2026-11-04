@@ -194,7 +194,7 @@ function ChatPane() {
       </SettingRow>
       <SettingRow
         title="Agents can read your editor selection"
-        description="Lets agents ask for the file open in VS Code and the text selected in it, This needs Helm's small VS Code extension to be installed. Off until you turn it on."
+        description="Lets agents ask for the file open in VS Code and the text selected in it. This needs Helm's small VS Code extension to be installed. Off until you turn it on."
         testId="setting-ide-context"
       >
         <Checkbox
