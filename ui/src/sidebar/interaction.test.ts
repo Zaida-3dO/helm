@@ -35,6 +35,10 @@ test('drop decisions: onto a group, before a chat at its level, under a chat; le
   assert.equal(dropAction(src, { kind: 'chat', chatId: 'k', groupId: 'g', pinned: false, lowerHalf: false, parentChatId: 'b', levelOk: false }), null, 'a level it may not take');
   assert.equal(dropAction(src, { kind: 'chat', chatId: 'b', groupId: 'g', pinned: false, lowerHalf: true, nestOk: false }), null, 'no nesting where it does not fit');
   assert.equal(dropAction(src, { kind: 'chat', chatId: 'a', groupId: 'g', pinned: false, lowerHalf: true }), null, 'not onto itself');
+  // A chat is never moved onto a folder project: not onto its header, nor beside or under a chat in it.
+  assert.equal(dropAction(src, { kind: 'header', projectId: 'f', parentId: null, pinned: false, lowerHalf: false, board: false }), null, 'not onto a folder');
+  assert.equal(dropAction(src, { kind: 'chat', chatId: 'b', groupId: 'f', pinned: false, lowerHalf: true, board: false }), null, 'not under a chat in a folder');
+  assert.ok(dropAction(src, { kind: 'chat', chatId: 'b', groupId: 'g', pinned: false, lowerHalf: true, board: false }), 'within its own group it still moves');
   const p = { kind: 'project' as const, projectId: 'p', parentId: null, pinned: false };
   assert.deepEqual(dropAction(p, { kind: 'header', projectId: 'q', parentId: null, pinned: false, lowerHalf: false }), { kind: 'project-before', projectId: 'p', beforeProjectId: 'q' });
   assert.deepEqual(dropAction(p, { kind: 'header', projectId: 'q', parentId: 'x', pinned: false, lowerHalf: true }), { kind: 'project-nest', projectId: 'p', parentId: 'q' });
@@ -141,6 +145,24 @@ test('the chat menu follows state: archive or restore and delete, stop first whi
   assert.ok(!act.includes('nest'), 'no nesting in Activity');
   const pin = chatMenuItems({ row: row('a', { pinned: true }), projects: [project('g')], siblings: [], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'projects' }, chatActs).find((i) => i.id === 'pin');
   assert.equal(pin?.label, 'Unpin chat');
+});
+
+test('Move to project lists boards only: not folders, archived, stale, finished or hidden ones, but always the chat’s own group', () => {
+  const board = (id: string, over: { completed?: boolean; stale?: boolean } = {}, rest: Partial<ProjectNode> = {}) =>
+    project(id, { kind: 'board', board: { boardProjectId: id, url: '', title: id, headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: over.stale ?? false, completed: over.completed ?? false, editedLocally: false }, ...rest });
+  const projects = [project('g', { path: 'C:/w' }), project('other', { path: 'C:/o' }), board('live'), board('done', { completed: true }), board('gone', { stale: true }), board('shut', {}, { archived: true }), board('inbox')];
+  const moves = (r: SidebarRow, hidden?: string[]) =>
+    chatMenuItems({ row: r, projects, hidden, siblings: [r], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'projects' }, chatActs)
+      .find((i) => i.id === 'move')!
+      .submenu!.map((i) => `${i.id.slice(5)}${i.checked ? '*' : ''}`);
+  const cases: [SidebarRow, string[] | undefined, string[]][] = [
+    [row('a'), undefined, ['g*', 'live', 'inbox']], // a chat still under its folder sees it, checked, and boards
+    [row('a'), ['inbox'], ['g*', 'live']],
+    [row('a', { groupProjectId: 'live' }), ['inbox'], ['live*']],
+    [row('a', { groupProjectId: 'done' }), ['inbox'], ['live', 'done*']], // a finished board stays while the chat is on it
+    [row('a', { groupProjectId: 'inbox' }), ['inbox'], ['live', 'inbox*']],
+  ];
+  for (const [r, hidden, want] of cases) assert.deepEqual(moves(r, hidden), want, `${r.groupProjectId} ${hidden}`);
 });
 
 test('project nest targets keep three levels and refuse cycles', () => {

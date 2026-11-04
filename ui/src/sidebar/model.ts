@@ -11,6 +11,9 @@
 // Projects with no chats never show in the projects view (a pinned one, the open chat's project and
 // a parent of a shown project excepted). A finished board project (all its work done on the board)
 // shows only while it still holds chats, so none of them become unreachable.
+// The sidebar shows boards: a folder project is only where chats run (Settings → Projects lists
+// them), so one shows here only while chats are still shown under it (before they are moved onto a
+// board, or when no task board is connected), never just for being pinned or open.
 
 import type { ProjectNode, SidebarRow, SidebarView } from '../api/projects.ts';
 import { arrange, type ItemRef } from '../itemlinks/folders.ts';
@@ -34,7 +37,18 @@ export interface GroupMarks {
 }
 
 export type ListItem = (
-  | { kind: 'header'; key: string; project: ProjectNode; depth: number; height: number; collapsed: boolean; subtitle: string | null; marks: GroupMarks | null }
+  | {
+      kind: 'header';
+      key: string;
+      project: ProjectNode;
+      depth: number;
+      height: number;
+      collapsed: boolean;
+      subtitle: string | null;
+      marks: GroupMarks | null;
+      /** A board with no folder yet: the header offers "Set folder". */
+      needsFolder: boolean;
+    }
   | {
       kind: 'chat';
       key: string;
@@ -190,6 +204,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     let v: boolean;
     if (archivedView) v = own || child || p.archived;
     else if (p.archived) v = false;
+    else if (p.kind !== 'board') v = own || child || p.chatCount > 0;
     else if (p.board?.stale) v = own || child || p.id === selectedGroup;
     else v = own || child || p.chatCount > 0 || p.pinned || p.id === selectedGroup;
     memo.set(p.id, v);
@@ -229,6 +244,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
       collapsed,
       subtitle,
       marks: collapsed ? groupMarks(p) : null,
+      needsFolder: boardNeedsFolder(p, byId),
     });
     if (collapsed) return;
     const next = new Set(path).add(p.id);
@@ -313,6 +329,13 @@ export function headerSubtitle(p: ProjectNode, byId: ReadonlyMap<string, Project
   if (isFinished(p)) return 'Finished';
   if (p.kind === 'board' && p.primaryFolderProjectId) return byId.get(p.primaryFolderProjectId)?.path ?? null;
   return null;
+}
+
+/** An open board with no usable folder: its new chats have nowhere to start until one is set. */
+export function boardNeedsFolder(p: ProjectNode, byId: ReadonlyMap<string, ProjectNode>): boolean {
+  if (p.kind !== 'board' || p.archived || p.board?.stale) return false;
+  const folder = p.primaryFolderProjectId ? byId.get(p.primaryFolderProjectId) : undefined;
+  return !folder || folder.archived || !folder.path;
 }
 
 /** Ancestors of a chat among held rows, nearest first (to auto-expand the open chat's parents). */

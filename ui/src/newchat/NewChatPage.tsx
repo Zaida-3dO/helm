@@ -1,7 +1,7 @@
 // The new-chat page: heading, one card with the
-// project picker and a place line (folder ▾ and a short hint), and the ordinary composer docked
-// below. `NewChatHost` is mounted once in the app frame's chat area; it draws the page only while
-// it is open, and registers Ctrl+N.
+// project picker (boards only: where the chat is shown) and a place line (the folder it runs in ▾
+// and a short hint), and the ordinary composer docked below. `NewChatHost` is mounted once in the
+// app frame's chat area; it draws the page only while it is open, and registers Ctrl+N.
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { projectOps, type ProjectNode } from '../api/projects.ts';
@@ -13,12 +13,12 @@ import { Checkbox, ContextMenu, Picker, toast, useBinding, type MenuItem, type P
 import { IconCheck, IconCopy } from '../ui/icons.tsx';
 import { isFinished } from '../sidebar/model.ts';
 import { pickFolder } from './api.ts';
+import { getDefaultBoard } from './boards.ts';
 import { draftOps, newChat } from './controller.ts';
 import { folderMenu, folderName, pickerProjects, samePath } from './places.ts';
-import { AddProjectDialog, PrimaryFolderDialog } from './ProjectDialogs.tsx';
+import { AddProjectDialog, NewProjectDialog, PrimaryFolderDialog } from './ProjectDialogs.tsx';
 import './newchat.css';
 
-const NO_PROJECT = '__none__';
 const NEW_PROJECT = '__new__';
 
 /** Mounted once in the frame's chat area (App.tsx). */
@@ -47,24 +47,26 @@ export function NewChatHost({ flushers, sendShortcut }: { flushers: Flushers; se
     [shell],
   );
 
-  // The project list, kept current.
+  // The project list and the default board, kept current.
   useEffect(() => {
     let live = true;
-    const load = () =>
+    const load = () => {
       void pops
         .list(false)
         .then((l) => live && newChat.setProjects(l))
         .catch(() => undefined);
+      void getDefaultBoard(shell.api).then((b) => live && newChat.setBoards(b));
+    };
     load();
     const offs = [shell.bus.on('project', load), shell.bus.on('board_sync', load)];
     return () => {
       live = false;
       offs.forEach((o) => o());
     };
-  }, [pops, shell.bus]);
+  }, [pops, shell.api, shell.bus]);
 
   useBinding({ id: 'chat.new', title: 'New chat', defaultKeys: 'Ctrl+N', run: () => newChat.show() });
-  useBinding({ id: 'project.add', title: 'Add project', defaultKeys: 'Ctrl+O', run: () => newChat.openDialog({ kind: 'add-project' }) });
+  useBinding({ id: 'project.add', title: 'New project', defaultKeys: 'Ctrl+O', run: () => newChat.openDialog({ kind: 'new-project' }) });
 
   useSyncExternalStore(newChat.subscribe, newChat.getVersion);
   const d = newChat.dialog;
@@ -72,6 +74,7 @@ export function NewChatHost({ flushers, sendShortcut }: { flushers: Flushers; se
   return (
     <>
       {newChat.open && newChat.draft && <NewChatPage flushers={flushers} sendShortcut={sendShortcut} />}
+      {d?.kind === 'new-project' && <NewProjectDialog />}
       {d?.kind === 'add-project' && <AddProjectDialog />}
       {primaryOf && <PrimaryFolderDialog key={primaryOf.id} project={primaryOf} />}
     </>
@@ -86,10 +89,13 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
   const projects = newChat.projects;
   const project = projects.find((p) => p.id === draft.projectId);
   const { folder, source } = newChat.place();
-  // With no project picked, the trigger names the one that owns the folder shown below (the open
-  // chat's), or the folder itself, instead of asking the user to choose again.
-  const owner = project ?? (folder ? projects.find((p) => p.kind === 'folder' && p.path && samePath(p.path, folder)) : undefined);
-  const shownName = owner?.name ?? (source === 'open-chat' && folder ? folderName(folder) : null);
+  // The board the chat will be shown on: the one picked, else the board over the folder shown
+  // below, else the default board. The trigger names it instead of asking the user to choose.
+  const boardId = newChat.board();
+  const owner = projects.find((p) => p.id === boardId);
+  const isDefault = !draft.projectId && !!boardId && boardId === newChat.boards.boardId;
+  const shownName = owner ? (isDefault ? `${owner.name} (default)` : owner.name) : null;
+  const hidden = newChat.boards.hiddenBoardIds;
   const folderBtn = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [showCompleted, setShowCompleted] = useState(false);
@@ -102,16 +108,14 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
   });
 
   const options: PickerOption<string>[] = useMemo(
-    () => [
-      ...pickerProjects(projects, showCompleted, owner?.id ?? draft.projectId).map((p) => ({
+    () =>
+      pickerProjects(projects, showCompleted, owner?.id ?? null, hidden).map((p) => ({
         value: p.id,
         title: p.name,
-        text: `${p.name} ${p.path ?? ''}`,
+        text: `${p.name} ${p.board?.title ?? ''}`,
         subtitle: subtitleOf(p),
       })),
-      { value: NO_PROJECT, title: 'No project', subtitle: 'Use the folder’s own project' },
-    ],
-    [projects, showCompleted, owner?.id, draft.projectId],
+    [projects, showCompleted, owner?.id, hidden],
   );
   const hasCompleted = projects.some((p) => isFinished(p));
   // The row after the matches: always there; with nothing found it offers to create what was typed.
@@ -120,8 +124,8 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
     return { value: NEW_PROJECT, title: matches === 0 && typed ? `Create project “${typed}”` : 'New project…' };
   };
   const onPick = (v: string, query: string) => {
-    if (v === NEW_PROJECT) newChat.openDialog({ kind: 'add-project', newName: query.trim() });
-    else newChat.move(v === NO_PROJECT ? null : v);
+    if (v === NEW_PROJECT) newChat.openDialog({ kind: 'new-project', title: query.trim() });
+    else newChat.move(v);
   };
 
   const browse = async () => {
@@ -268,8 +272,9 @@ function FolderLabel({ name, path }: { name: string; path: string }) {
 }
 
 function subtitleOf(p: ProjectNode): string {
-  if (p.kind === 'board') return isFinished(p) ? 'Agent Standup · finished' : 'Agent Standup';
-  return p.path ?? 'Local group';
+  if (p.kind !== 'board') return p.path ?? 'Local group';
+  const folder = newChat.projects.find((f) => f.id === p.primaryFolderProjectId)?.path;
+  return [isFinished(p) ? 'Finished' : null, folder ?? 'No folder yet'].filter(Boolean).join(' · ');
 }
 
 /** The place line's short hint: only when the folder needs explaining. */

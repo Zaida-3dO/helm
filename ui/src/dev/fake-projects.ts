@@ -1,7 +1,9 @@
 // The dev fake host's project and sidebar ops, for checking
 // the sidebar in a plain browser. fakeHost.ts registers it through `registerFakeOps`; chats come
 // from the fake host's own `chat_list`. It seeds a three-level tree of board and folder projects,
-// plus one board project whose work is all finished (shown only while it holds chats).
+// plus one board project whose work is all finished (shown only while it holds chats), a board with
+// no folder yet, a default board and a catch-all inbox that pickers leave out. A new chat goes on
+// the board it names, else the one board over its folder, else the default board, as on the host.
 //
 // Dev builds only. fakeHost.ts imports this file, so this file only imports types from it.
 
@@ -20,6 +22,10 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
   // `?board=1` starts with a saved connection, so Tasks shows.
   let hasToken = typeof location !== 'undefined' && new URLSearchParams(location.search).get('board') === '1';
   let sync: BoardSyncState = { configured: false, syncing: false, lastSyncAt: null, error: null, projectCount: 0 };
+  /** The default board the user chose (null: the board named like the seeded fallback). */
+  let chosenDefault: string | null = null;
+  /** Chats already placed on a board, so a chat the user moved back is left where it is. */
+  const placed = new Set<string>();
 
   const node = (id: string, name: string, over: Partial<ProjectNode> = {}): ProjectNode => ({
     id,
@@ -48,15 +54,35 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
     });
   if (opts.seedBoard) {
     for (const p of [
-      board('b-helm', 'Helm'),
+      node('f-helm', 'helm', { path: 'C:/Users/me/Documents/Coding/helm' }),
+      node('f-notes', 'notes', { path: 'C:/Users/me/Documents/notes' }),
+      { ...board('b-helm', 'Helm'), primaryFolderProjectId: 'f-helm' },
       board('b-site', 'Client Website'),
       board('b-launch', 'Launch checklist', true),
+      { ...board('b-life', 'Life Admin'), primaryFolderProjectId: 'f-notes' },
+      board('b-inbox', 'Inbox'),
       node('f-w3', 'Release 3', { parentId: 'b-helm', parentSource: 'local', colour: 'teal' }),
       node('f-side', 'Sidebar', { parentId: 'f-w3', parentSource: 'local' }),
     ]) {
       projects.set(p.id, p);
     }
   }
+  const openBoard = (id: string | null | undefined): ProjectNode | undefined => {
+    const p = id ? projects.get(id) : undefined;
+    return p && p.kind === 'board' && !p.archived && !p.board?.stale ? p : undefined;
+  };
+  const defaultBoard = (): ProjectNode | undefined =>
+    openBoard(chosenDefault) ?? [...projects.values()].find((p) => openBoard(p.id) && p.name.toLowerCase() === 'life admin');
+  const hiddenBoardIds = () => [...projects.values()].filter((p) => p.kind === 'board' && p.name.toLowerCase() === 'inbox').map((p) => p.id);
+  const defaultState = () => {
+    const d = defaultBoard();
+    return { boardId: d?.id ?? null, name: d?.name ?? null, chosen: openBoard(chosenDefault) ? chosenDefault : null, hiddenBoardIds: hiddenBoardIds() };
+  };
+  /** The board a new chat in `folderProjectId` goes on: the one board over that folder, else the default. */
+  const homeBoard = (folderProjectId: string): string | null => {
+    const over = [...projects.values()].filter((b) => openBoard(b.id) && !b.board?.completed && b.primaryFolderProjectId === folderProjectId);
+    return over.length === 1 ? over[0]!.id : (defaultBoard()?.id ?? null);
+  };
 
   const groupOf = (id: string) => {
     const c = chats.get(id)!;
@@ -101,6 +127,12 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
     if (!projects.has(c.projectId)) {
       projects.set(c.projectId, node(c.projectId, c.cwd.split(/[\\/]/).filter(Boolean).pop() ?? c.cwd, { path: c.cwd }));
     }
+    // A chat seen for the first time goes on a board, as the host does when it makes one.
+    if (!prev && !placed.has(c.id) && !c.sideSourceId) {
+      placed.add(c.id);
+      const home = homeBoard(c.projectId);
+      if (home) chats.get(c.id)!.group = home;
+    }
   };
 
   const handler: FakeOpHandler = (op, args, ctx: FakeOpContext) => {
@@ -125,6 +157,8 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
         if (typeof args.pinned === 'boolean') next.pinned = args.pinned;
         if (typeof args.collapsed === 'boolean') next.collapsed = args.collapsed;
         if ('parentId' in args) next.parentId = (args.parentId as string) ?? null;
+        if ('path' in args) next.path = (args.path as string) ?? null;
+        if ('primaryFolderProjectId' in args) next.primaryFolderProjectId = (args.primaryFolderProjectId as string) ?? null;
         if (next.board && typeof args.name === 'string') next.board = { ...next.board, editedLocally: args.name !== next.board.title };
         projects.set(p.id, next);
         emit({ kind: 'project', project: next });
@@ -209,12 +243,38 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
         url = String(args.url);
         if (typeof args.token === 'string') hasToken = args.token.length > 0;
         return { url, hasToken };
+      case 'board_project_create': {
+        const title = String(args.title ?? '').trim();
+        if (!title) throw new ApiError('bad_args', 'A project needs a title.');
+        const id = `b-${rev++}`;
+        let primary: string | null = null;
+        if (typeof args.folder === 'string' && args.folder.trim()) {
+          const path = args.folder.trim();
+          const same = (a: string) => a.replace(/[\\/]+/g, '/').replace(/\/$/, '').toLowerCase();
+          const open = [...projects.values()].find((p) => p.kind === 'folder' && !p.archived && p.path && same(p.path) === same(path));
+          const folder = open ?? node(`p-${rev++}`, path.split(/[\\/]/).filter(Boolean).pop() ?? path, { path });
+          projects.set(folder.id, folder);
+          primary = folder.id;
+        }
+        const p = { ...board(id, title), primaryFolderProjectId: primary };
+        projects.set(id, p);
+        emit({ kind: 'project', project: p });
+        return p;
+      }
       case 'board_sync':
         sync = { configured: hasToken, syncing: false, lastSyncAt: Date.now(), error: hasToken ? null : 'Set a token first.', projectCount: [...projects.values()].filter((p) => p.kind === 'board').length };
         emit({ kind: 'board_sync', state: sync });
         return sync;
+      case 'default_board_get':
+        return defaultState();
+      case 'default_board_set': {
+        const want = (args.boardId as string | null) ?? null;
+        if (want !== null && !openBoard(want)) throw new ApiError('refused', 'Pick an open board.');
+        chosenDefault = want;
+        return defaultState();
+      }
     }
     throw new ApiError('refused', `fake-projects has no op ${op}`);
   };
-  return { prefixes: ['project_', 'sidebar_', 'chat_organize', 'board_'], handler };
+  return { prefixes: ['project_', 'sidebar_', 'chat_organize', 'board_', 'default_board_'], handler };
 }

@@ -8,7 +8,8 @@ import type { ChatRecord } from '../api/types.ts';
 import { LAST_PROJECT_KEY, NewChatController, draftOps, newChat, type NewChatEnv } from './controller.ts';
 import { primaryFolderMenuItem } from './menu.ts';
 import { addExistingFolder, addNewFolder, currentFolder, setPrimaryFolder } from './projects.ts';
-import { LEGACY_LAST_FOLDER_KEY, MAX_RECENTS, RECENTS_KEY, folderMenu, folderProjectFor, pickerProjects, pushRecent, readRecents, resolveFolder, samePath } from './places.ts';
+import { NO_DEFAULT_BOARD, createBoardProject, getDefaultBoard, setDefaultBoard } from './boards.ts';
+import { LEGACY_LAST_FOLDER_KEY, MAX_RECENTS, RECENTS_KEY, boardFor, folderMenu, folderProjectFor, pickerProjects, pushRecent, readRecents, resolveFolder, samePath } from './places.ts';
 
 function node(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
   return {
@@ -41,6 +42,19 @@ const PROJECTS: ProjectNode[] = [
   node('old', { path: 'C:/code/old', archived: true }),
 ];
 
+/** A board project; `completed` marks all its work finished on the board. */
+function boardNode(id: string, over: Partial<ProjectNode> = {}, info: { completed?: boolean; stale?: boolean } = {}): ProjectNode {
+  return node(id, {
+    kind: 'board',
+    board: { boardProjectId: id, url: '', title: id, headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: info.stale ?? false, completed: info.completed ?? false, editedLocally: false },
+    ...over,
+  });
+}
+
+/** Boards over the projects above: one over the site folder, a default one over nothing in the
+ *  list, and one with no folder yet. */
+const BOARDS: ProjectNode[] = [boardNode('b-site', { primaryFolderProjectId: 'site' }), boardNode('b-default', { primaryFolderProjectId: 'elsewhere' }), boardNode('b-bare')];
+
 class MemoryStorage {
   private m = new Map<string, string>();
   getItem(k: string): string | null {
@@ -54,6 +68,10 @@ class MemoryStorage {
 // ---- places ------------------------------------------------------------------------------------
 
 test('folder resolution: chosen, then the project, its primary, the open chat, the first open folder', () => {
+  // A board with no folder yet takes the open chat's folder, but never an unrelated first folder.
+  assert.deepEqual(resolveFolder('b-bare', null, [...PROJECTS, ...BOARDS], 'E:/y'), { folder: 'E:/y', source: 'open-chat' });
+  assert.deepEqual(resolveFolder('b-bare', null, [...PROJECTS, ...BOARDS], null), { folder: null, source: null });
+  assert.deepEqual(resolveFolder('b-site', null, [...PROJECTS, ...BOARDS], null), { folder: 'C:/code/site', source: 'primary' });
   assert.deepEqual(resolveFolder('helm', 'D:/x', PROJECTS, 'E:/y'), { folder: 'D:/x', source: 'chosen' });
   assert.deepEqual(resolveFolder('helm', null, PROJECTS, 'E:/y'), { folder: 'C:/code/helm', source: 'project' });
   assert.deepEqual(resolveFolder('group', null, PROJECTS, 'E:/y'), { folder: 'C:/code/site', source: 'primary' });
@@ -120,7 +138,7 @@ function chatRecord(id: string, cwd: string, projectId: string): ChatRecord {
   return { id, projectId, cwd } as ChatRecord;
 }
 
-function harness(opts: { open?: { id: string; cwd: string; projectId: string } } = {}): Harness {
+function harness(opts: { open?: { id: string; cwd: string; projectId: string }; groups?: Record<string, string> } = {}): Harness {
   const calls: { op: string; args: unknown[] }[] = [];
   const selected = { id: opts.open?.id ?? null };
   const storage = new MemoryStorage();
@@ -151,6 +169,7 @@ function harness(opts: { open?: { id: string; cwd: string; projectId: string } }
     // The host's folder project is the named one, else "fp:<cwd>".
     if (op === 'chat_create') return chatRecord(`chat-${++n}`, a.cwd!, a.projectId ?? `fp:${a.cwd}`);
     if (op === 'chat_discard_untouched') return { discarded: true };
+    if (op === 'sidebar_rows') return Object.entries(opts.groups ?? {}).map(([chatId, groupProjectId]) => ({ chatId, groupProjectId }));
     return null;
   }) as Api;
   const env: NewChatEnv = {
@@ -232,13 +251,61 @@ test('opening any chat leaves the page', () => {
   assert.equal(h.ctl.draft, null);
 });
 
-test('New chat from an open chat deselects it and starts in that chat’s project and folder', () => {
+test('New chat from an open chat deselects it and starts on that chat’s board, in its folder', async () => {
   const h = harness({ open: { id: 'c1', cwd: 'E:/work', projectId: 'bare' } });
   h.ctl.show();
   assert.equal(h.ctl.open, true, 'the deselect does not count as leaving');
   assert.equal(h.selected.id, null);
-  assert.equal(h.ctl.draft?.projectId, 'bare');
+  assert.equal(h.ctl.draft?.projectId, null, 'a folder project is not a board');
   assert.deepEqual(h.ctl.place(), { folder: 'E:/work', source: 'open-chat' });
+
+  // The board the open chat is shown on, once the host says which it is.
+  const b = harness({ open: { id: 'c1', cwd: 'C:/code/site', projectId: 'site' }, groups: { c1: 'b-default' } });
+  b.ctl.setProjects([...PROJECTS, ...BOARDS]);
+  b.ctl.show();
+  assert.equal(b.ctl.draft?.projectId, 'b-site', 'at first the board over its folder');
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(b.ctl.draft?.projectId, 'b-default', 'then the board it is really on');
+});
+
+test('which board a new chat goes on: the one picked, the board over its folder, else the default; a board with no folder asks for one', async () => {
+  const projects = [...PROJECTS, ...BOARDS];
+  const cases: [Parameters<NewChatController['show']>[0], string | null, string | null][] = [
+    [{ projectId: 'b-site' }, 'b-site', 'C:/code/site'],
+    [{ projectId: 'site' }, 'b-site', 'C:/code/site'], // a folder project stands for the board over it
+    [{ folder: 'c:/code/site' }, 'b-site', 'c:/code/site'],
+    [{ projectId: 'helm' }, 'b-default', 'C:/code/helm'], // no board over it: the default board
+    [{}, 'b-default', 'C:/code/helm'],
+  ];
+  for (const [open, board, folder] of cases) {
+    const h = harness();
+    h.ctl.setProjects(projects);
+    h.ctl.setBoards({ ...NO_DEFAULT_BOARD, boardId: 'b-default', name: 'Default' });
+    h.ctl.show(open);
+    assert.deepEqual([h.ctl.board(), h.ctl.place().folder, h.ctl.dialog], [board, folder, null], JSON.stringify(open));
+  }
+  // Without a default board and with no board over the folder, none is named: the host decides.
+  const none = harness();
+  none.ctl.show({ projectId: 'helm' });
+  assert.equal(none.ctl.board(), null);
+
+  const h = harness();
+  h.ctl.setProjects(projects);
+  h.ctl.setBoards({ ...NO_DEFAULT_BOARD, boardId: 'b-default', name: 'Default' });
+  h.ctl.show({ projectId: 'b-bare' });
+  assert.deepEqual(h.ctl.dialog, { kind: 'primary-folder', projectId: 'b-bare' });
+  assert.deepEqual(h.ctl.place(), { folder: null, source: null }, 'no folder until one is set');
+  h.ctl.closeDialog();
+  h.ctl.move('helm');
+  await draftOps(h.env.ops, h.ctl).send('x', 's', 'hi', 'default', 1);
+  assert.deepEqual(h.calls.find((c) => c.op === 'chat_create')!.args[0], { cwd: 'C:/code/helm', projectId: 'helm', boardId: 'b-default' });
+  assert.equal(h.storage.getItem(LAST_PROJECT_KEY), 'b-default');
+
+  // boardFor: one open, unfinished board over a folder, never two, never a stale or archived one.
+  const twice = [...projects, boardNode('b-site2', { primaryFolderProjectId: 'site' })];
+  assert.equal(boardFor('site', twice), null);
+  assert.equal(boardFor('site', [...PROJECTS, boardNode('b-site', { primaryFolderProjectId: 'site' }, { stale: true })]), null);
+  assert.equal(boardFor('b-site', [...PROJECTS, boardNode('b-site', { archived: true })]), null);
 });
 
 test('New chat in a project moves a typed draft there, keeping the text; the folder follows the project', () => {
@@ -256,9 +323,10 @@ test('New chat in a project moves a typed draft there, keeping the text; the fol
   assert.equal(h.ctl.place().folder, 'c:/code/helm');
 });
 
-test('the first send creates the chat, files it under the chosen project, moves the images and opens it', async () => {
+test('the first send creates the chat on the chosen board, moves the images and opens it', async () => {
   const h = harness();
-  h.ctl.show({ projectId: 'group' });
+  h.ctl.setProjects([...PROJECTS, ...BOARDS]);
+  h.ctl.show({ projectId: 'b-site' });
   const ops = draftOps(h.env.ops, h.ctl);
   await ops.setModel(h.ctl.draft!.id, 'opus', undefined);
   await ops.setModel(h.ctl.draft!.id, undefined, 'high');
@@ -267,16 +335,15 @@ test('the first send creates the chat, files it under the chosen project, moves 
   const r = await ops.send(h.ctl.draft!.id, 'sub-1', 'hello', 'default', 3, { attachments: [img.attachmentId] });
   assert.equal(r.submission.id, 'sub-1');
   const seen = h.calls.map((c) => c.op);
-  assert.deepEqual(seen, ['chat_create', 'storeChat', 'chat_organize', 'attach', 'send', 'select']);
-  // A group is not a folder project, so the host is not told a project: it uses the folder's own.
-  assert.deepEqual(h.calls[0]!.args[0], { cwd: 'C:/code/site', model: 'opus', effort: 'high' });
+  assert.deepEqual(seen, ['chat_create', 'storeChat', 'attach', 'send', 'select']);
+  // A board is not a folder project, so the host is told the board and finds the folder's own project.
+  assert.deepEqual(h.calls[0]!.args[0], { cwd: 'C:/code/site', boardId: 'b-site', model: 'opus', effort: 'high' });
   const chatId = (h.calls[1]!.args[0] as string);
-  assert.deepEqual(h.calls[2]!.args[0], { chatId, groupProjectId: 'group', parentChatId: null });
-  assert.deepEqual(h.calls[4]!.args, [chatId, 'sub-1', 'hello', ['att-shot.png']]);
+  assert.deepEqual(h.calls[3]!.args, [chatId, 'sub-1', 'hello', ['att-shot.png']]);
   assert.equal(h.selected.id, chatId);
   assert.equal(h.ctl.open, false);
   assert.equal(h.ctl.draft, null);
-  assert.equal(h.storage.getItem(LAST_PROJECT_KEY), 'group');
+  assert.equal(h.storage.getItem(LAST_PROJECT_KEY), 'b-site');
   assert.deepEqual(readRecents(h.storage), ['C:/code/site']);
 });
 
@@ -408,6 +475,24 @@ function recordingApi(answers: Record<string, (args: Record<string, unknown>) =>
   return { api, calls };
 }
 
+test('New project makes a board project, leaving empty fields out; the default board reads safely', async () => {
+  const { api, calls } = recordingApi({ board_project_create: (a) => boardNode('new', { name: String(a.title) }), default_board_set: (a) => ({ boardId: a.boardId, name: 'X', chosen: a.boardId, hiddenBoardIds: ['inbox'] }) });
+  await createBoardProject(api, { title: ' Garden plan ', description: '  ', folder: ' C:/code/garden ' });
+  await createBoardProject(api, { title: 'Notes', description: ' What it is for. ' });
+  assert.deepEqual(await setDefaultBoard(api, 'b1'), { boardId: 'b1', name: 'X', chosen: 'b1', hiddenBoardIds: ['inbox'] });
+  assert.deepEqual(calls, [
+    { op: 'board_project_create', args: { title: 'Garden plan', folder: 'C:/code/garden' } },
+    { op: 'board_project_create', args: { title: 'Notes', description: 'What it is for.' } },
+    { op: 'default_board_set', args: { boardId: 'b1' } },
+  ]);
+  // An older host, or no board yet: no default, nothing hidden.
+  const refusing = (async () => {
+    throw new ApiError('not_implemented', 'no');
+  }) as Api;
+  assert.deepEqual(await getDefaultBoard(refusing), NO_DEFAULT_BOARD);
+  assert.deepEqual(await getDefaultBoard((async () => ({ boardId: 'b' })) as Api), { ...NO_DEFAULT_BOARD, boardId: 'b' });
+});
+
 test('Add project: an existing folder is named after it unless named; a new folder goes to the host', async () => {
   const { api, calls } = recordingApi({ project_create: (a) => node('new', { name: String(a.name), path: String(a.path) }) });
   await addExistingFolder(api, ' C:\\code\\site\\ ');
@@ -458,21 +543,22 @@ test('the menu item opens the Primary folder dialog for its project and is off f
   assert.equal(primaryFolderMenuItem(PROJECTS.find((p) => p.id === 'old')!).disabled, true);
 });
 
-test('the project picker lists open projects, keeps the draft’s own, and brings finished ones back on request; the create row opens the dialog on the new-folder tab', () => {
-  const board = (id: string, completed: boolean, over: Partial<ProjectNode> = {}) =>
-    node(id, { kind: 'board', board: { boardProjectId: id, url: '', title: id, headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: false, completed, editedLocally: false }, ...over });
-  const list = [node('a', { path: 'C:/a' }), board('open', false), board('done', true), board('done-stale', true, { board: { ...board('x', true).board!, stale: true } }), node('gone', { archived: true })];
+test('the project picker lists open boards only, keeps the draft’s own, leaves the hidden ones out and brings finished ones back on request', () => {
+  const list = [node('a', { path: 'C:/a' }), boardNode('open'), boardNode('done', {}, { completed: true }), boardNode('done-stale', {}, { completed: true, stale: true }), boardNode('gone', { archived: true }), boardNode('inbox')];
   const ids = (l: ProjectNode[]) => l.map((p) => p.id);
-  const cases: [boolean, string | null, string[]][] = [
-    [false, null, ['a', 'open', 'done-stale']],
-    [true, null, ['a', 'open', 'done', 'done-stale']],
-    [false, 'done', ['a', 'open', 'done', 'done-stale']],
-    [false, 'gone', ['a', 'open', 'done-stale', 'gone']],
+  const cases: [boolean, string | null, string[], string[]][] = [
+    [false, null, [], ['open', 'inbox']],
+    [false, null, ['inbox'], ['open']],
+    [true, null, ['inbox'], ['open', 'done']],
+    [false, 'done', ['inbox'], ['open', 'done']],
+    [false, 'gone', ['inbox'], ['open', 'gone']],
+    [false, 'a', ['inbox'], ['a', 'open']], // a chat still under a folder keeps it as its choice
+    [false, 'inbox', ['inbox'], ['open', 'inbox']],
   ];
-  for (const [completed, current, want] of cases) assert.deepEqual(ids(pickerProjects(list, completed, current)), want, `${completed} ${current}`);
+  for (const [completed, current, hidden, want] of cases) assert.deepEqual(ids(pickerProjects(list, completed, current, hidden)), want, `${completed} ${current} ${hidden}`);
 
-  newChat.openDialog({ kind: 'add-project', newName: 'Brand new idea' });
-  assert.deepEqual(newChat.dialog, { kind: 'add-project', newName: 'Brand new idea' });
+  newChat.openDialog({ kind: 'new-project', title: 'Brand new idea' });
+  assert.deepEqual(newChat.dialog, { kind: 'new-project', title: 'Brand new idea' });
   newChat.closeDialog();
 });
 

@@ -1,6 +1,6 @@
-// Where a new chat will run: pure rules, so
-// they are tested under node:test. A project here is any sidebar group (a folder project, a local
-// group or a board project); the folder is where the chat's agent works.
+// Where a new chat will run and which board it is shown on: pure rules, so they are tested under
+// node:test. A board project is where a chat is shown; a folder project is only where it runs (the
+// folder its agent works in). Pickers list boards only.
 
 import type { ProjectNode } from '../api/projects.ts';
 import { isFinished } from '../sidebar/model.ts';
@@ -36,14 +36,17 @@ export function primaryFolder(project: ProjectNode | undefined, projects: Projec
 
 /**
  * First match wins: the folder the user chose, the project's primary folder, the folder of the chat
- * that was open, the first open folder in sidebar order. (A "folder of the project's most
- * recently updated chat" step would need the sidebar's rows and is left out here.)
+ * that was open, the first open folder in sidebar order. A board with no folder yet skips the last
+ * step: a chat in it should not land in an unrelated folder without being asked. (A "folder of the
+ * project's most recently updated chat" step would need the sidebar's rows and is left out here.)
  */
 export function resolveFolder(projectId: string | null, chosen: string | null, projects: ProjectNode[], openChatFolder: string | null): ResolvedFolder {
   if (chosen) return { folder: chosen, source: 'chosen' };
-  const own = primaryFolder(projects.find((p) => p.id === projectId), projects);
+  const project = projects.find((p) => p.id === projectId);
+  const own = primaryFolder(project, projects);
   if (own) return own;
   if (openChatFolder) return { folder: openChatFolder, source: 'open-chat' };
+  if (project?.kind === 'board') return { folder: null, source: null };
   const first = openFolders(projects)[0];
   return first ? { folder: first.path, source: 'first-open' } : { folder: null, source: null };
 }
@@ -58,13 +61,45 @@ export function folderProjectFor(projectId: string | null, folder: string, proje
   return p && p.kind === 'folder' && usable(p) && samePath(p.path, folder) ? p.id : null;
 }
 
+/** A board a chat can be put on: on the board still, and not archived in Helm. */
+export function isOpenBoard(p: ProjectNode | undefined): p is ProjectNode {
+  return !!p && p.kind === 'board' && !p.archived && !p.board?.stale;
+}
+
+/** A board with no folder yet: new chats in it have nowhere to start until one is set. */
+export function needsFolder(p: ProjectNode, projects: ProjectNode[]): boolean {
+  return isOpenBoard(p) && primaryFolder(p, projects) === null;
+}
+
 /**
- * The projects the new-chat picker lists: open ones only, unless `showCompleted` is on. Archived
- * projects never show, and neither do finished board projects, except the one the draft is already
- * in (`currentId`), which always stays so the picker never hides its own choice.
+ * The projects every project picker lists (New chat in…, Move to project, the chat's Project tag):
+ * boards only, since a folder is where a chat runs and not where it is shown. Archived boards and
+ * boards no longer on the task board never show, nor do the `hidden` ones (the catch-all inbox),
+ * and finished boards show only when `showCompleted` is on. The one already chosen (`currentId`)
+ * always stays, whatever it is, so a picker never hides its own choice.
  */
-export function pickerProjects(projects: ProjectNode[], showCompleted: boolean, currentId: string | null): ProjectNode[] {
-  return projects.filter((p) => p.id === currentId || (!p.archived && (showCompleted || !isFinished(p))));
+export function pickerProjects(projects: ProjectNode[], showCompleted: boolean, currentId: string | null, hidden: readonly string[] = []): ProjectNode[] {
+  const skip = new Set(hidden);
+  return projects.filter((p) => p.id === currentId || (isOpenBoard(p) && !skip.has(p.id) && (showCompleted || !isFinished(p))));
+}
+
+/**
+ * The board a project stands for: itself when it is an open board; for a folder project, the one
+ * open, unfinished board whose folder it is (so a chat started from a folder lands where the host
+ * would put it). Null when there is no such board, or more than one.
+ */
+export function boardFor(projectId: string | null | undefined, projects: ProjectNode[]): string | null {
+  const p = projects.find((x) => x.id === projectId);
+  if (!p) return null;
+  if (p.kind === 'board') return isOpenBoard(p) ? p.id : null;
+  const path = p.path;
+  const over = projects.filter((b) => {
+    if (!isOpenBoard(b) || isFinished(b)) return false;
+    if (b.primaryFolderProjectId === p.id) return true;
+    const folder = primaryFolder(b, projects)?.folder;
+    return !!path && !!folder && samePath(folder, path);
+  });
+  return over.length === 1 ? over[0]!.id : null;
 }
 
 /** The last segment of a path, for labels. */

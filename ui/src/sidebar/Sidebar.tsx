@@ -1,7 +1,7 @@
 // The sidebar: one grouped tree of
-// folder and board projects with their chats, virtualised, with the Projects / Activity / Archived
-// views, menus, drag and drop, hover preview and undo. Its test ids stay stable: `new-chat`,
-// `chat-item`.
+// board projects with their chats (a folder project only while chats are still shown under it),
+// virtualised, with the Projects / Activity / Archived views, menus, drag and drop, hover preview
+// and undo. Its test ids stay stable: `new-chat`, `chat-item`.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from 'react';
 import type { Api } from '../api/client.ts';
@@ -47,7 +47,8 @@ import {
 } from '../ui/icons.tsx';
 import { withChatIcons, withProjectIcons } from './menuIcons.tsx';
 import { StarMark, WheelMark } from '../ui/status/index.ts';
-import { openNewChat } from '../newchat/index.ts';
+import { openNewChat, openPrimaryFolder } from '../newchat/index.ts';
+import { getDefaultBoard } from '../newchat/boards.ts';
 import { ATTENTION_LABEL, age, needsYouLabel, rowStatusLabel, trailingIndicator } from './status.ts';
 import { localWaitLabel } from '../state/localModel.ts';
 import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
@@ -128,6 +129,19 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const now = useNow();
 
   useEffect(() => data.connect(bus), [data, bus]);
+
+  // The boards pickers leave out (the catch-all inbox), for "Move to project".
+  const [hiddenBoards, setHiddenBoards] = useState<string[]>([]);
+  useEffect(() => {
+    let live = true;
+    const load = () => void getDefaultBoard(api).then((b) => live && setHiddenBoards(b.hiddenBoardIds));
+    load();
+    const offs = [bus.on('board_sync', load), bus.on('project', load)];
+    return () => {
+      live = false;
+      offs.forEach((o) => o());
+    };
+  }, [api, bus]);
   useEffect(() => {
     void data.loadProjects();
     void data.page('projects');
@@ -261,7 +275,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       return kids.length === 0 ? 0 : 1 + Math.max(...kids.map((k) => heightOf(k.chatId)));
     };
     const items = withChatIcons(chatMenuItems(
-      { row, projects: snap.projects, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view },
+      { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view },
       {
         fork: () => void act.fork(row),
         rename: () => promptRename(row),
@@ -391,7 +405,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       if (header) {
         const p = projectsById.get(header.dataset.projectId ?? '');
         if (!p) return null;
-        return { kind: 'header', projectId: p.id, parentId: p.parentId, pinned: p.pinned, lowerHalf: lowerOf(header) };
+        return { kind: 'header', projectId: p.id, parentId: p.parentId, pinned: p.pinned, lowerHalf: lowerOf(header), board: p.kind === 'board' };
       }
       if (chat) {
         const row = data.row(chat.dataset.chatId ?? '');
@@ -408,6 +422,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           parentChatId: row.parentChatId,
           levelOk: mine ? canSitUnder(rows, mine, row.parentChatId) : true,
           nestOk: mine ? canSitUnder(rows, mine, row.chatId) : true,
+          board: projectsById.get(row.groupProjectId)?.kind === 'board',
         };
       }
       return null;
@@ -693,6 +708,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           onPin={() => void act.updateProject(p, { pinned: !p.pinned })}
           onMove={(dir) => moveProject(p, dir)}
           onNew={() => newChatIn(p)}
+          onSetFolder={() => openPrimaryFolder(p.id)}
           onRestore={() => void act.restoreProject(p)}
           onMenu={(x, y) => openMenu(x, y, projectMenu(p), `Options for ${p.name}`)}
           onPointerDown={(e) => startDrag(e, { kind: 'project', projectId: p.id, parentId: p.parentId, pinned: p.pinned }, p.name)}
@@ -765,6 +781,7 @@ function GroupHeader({
   onPin,
   onMove,
   onNew,
+  onSetFolder,
   onRestore,
   onMenu,
   onPointerDown,
@@ -776,6 +793,7 @@ function GroupHeader({
   onPin: () => void;
   onMove: (dir: -1 | 1) => void;
   onNew: () => void;
+  onSetFolder: () => void;
   onRestore: () => void;
   onMenu: (x: number, y: number) => void;
   onPointerDown: (e: ReactPointerEvent) => void;
@@ -857,6 +875,17 @@ function GroupHeader({
             </span>
           )}
         </button>
+        {item.needsFolder && (
+          <button
+            type="button"
+            className="sb-set-folder"
+            data-testid="sidebar-set-folder"
+            title={`Choose the folder new chats in ${p.name} start in`}
+            onClick={onSetFolder}
+          >
+            Set folder
+          </button>
+        )}
         <span className="sb-actions">
           {!p.archived && (
             <button

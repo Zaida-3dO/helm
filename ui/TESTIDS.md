@@ -8,17 +8,21 @@ breaks those checks, so change them only together with the checks. Everything el
 |---|---|---|
 | `new-chat` | "New chat" nav entry in the sidebar; opens the new-chat page (in the open chat's project) | |
 | `newchat-page` | The new-chat page: shown while a draft is open; nothing exists on the host until the first send | |
-| `newchat-card`, `newchat-project`, `newchat-folder`, `newchat-folder-menu`, `newchat-copy-path` | Its card, the project picker trigger, the folder (place line) button, the folder menu and the copy-path button | `newchat-copy-path` carries `data-copied` for 1.3 s after a copy |
-| `add-project`, `add-project-mode`, `add-project-path`, `add-project-name`, `add-project-submit`, `add-project-error` | The Add project dialog (Ctrl+O): the Existing folder / New folder switch, its fields, submit and error line | |
+| `newchat-card`, `newchat-project`, `newchat-folder`, `newchat-folder-menu`, `newchat-copy-path` | Its card, the project picker trigger (boards only), the folder (place line) button, the folder menu and the copy-path button | `newchat-copy-path` carries `data-copied` for 1.3 s after a copy |
+| `new-project`, `new-project-title`, `new-project-description`, `new-project-folder`, `new-project-submit`, `new-project-error` | The New project form (Ctrl+O, the picker's New project… row, Settings → Projects): a new board project's title, description and folder, submit and error line | |
+| `add-project`, `add-project-mode`, `add-project-path`, `add-project-name`, `add-project-submit`, `add-project-error` | The Add folder dialog (Settings → Projects → Folders): the Existing folder / New folder switch, its fields, submit and error line | |
 | `primary-folder`, `primary-folder-path`, `primary-folder-save`, `primary-folder-error` | The Primary folder… dialog | |
 | `chat-item` | One chat row in the sidebar | `data-chat-id`, `data-status`, `data-depth` (chat nesting 0–2), `data-group` (the project it is shown under), `data-stalled`, `data-local` (a chat on a local model server), `data-ahead` (how many chats stand ahead of it at that server; present only while it waits) |
-| `sidebar-group` | One project header in the sidebar | `data-project-id`, `data-kind` (`folder` `board`), `data-depth` (project nesting 0–2) |
+| `sidebar-group` | One project header in the sidebar (a board; a folder project only while chats are still shown under it) | `data-project-id`, `data-kind` (`folder` `board`), `data-depth` (project nesting 0–2) |
+| `sidebar-set-folder` | "Set folder" on the header of a board with no folder yet; opens the Primary folder dialog | |
+| `project-tags`, `project-tag`, `workspace-tag` | The strip under the top bar: the board the open chat is shown on (a boards-only picker) and the folder it runs in | `workspace-tag`: `title` = the full path |
 | `sidebar-titlestrip`, `sidebar-beacon`, `workspace-status` | The sidebar's 48 px title strip, the beacon (mark, wordmark, chevron) and its Workspace status popover | beacon: `aria-expanded` |
 | `nav-search`, `nav-attention` | The sidebar's Search chats and Needs attention nav entries | |
 | `attention-inbox`, `attention-card`, `attention-snooze-menu` | The Needs attention dialog, one card in it, and a card's Snooze menu | card: `data-chat-id`, `data-group` (`needsYou` `flagged` `stalled` `unread`) |
 | `attention-triage-setting`, `chat-flag` | The idle-check switch in the Needs attention dialog, and the flag on a sidebar row the idle check raised | |
 | `board-sync` | The Agent Standup sync line under the view switch | `data-state` (`never` `unconfigured` `syncing` `ok` `error`) |
 | `board-url`, `board-token`, `board-token-state`, `board-test`, `board-last-sync` | Settings → Projects connection fields: address, write-only token, "set"/"not set", Test connection, last sync | |
+| `default-board`, `settings-new-project`, `settings-boards`, `settings-set-folder`, `settings-add-folder`, `settings-folders` | Settings → Projects: the default board picker (Automatic or a board), New project…, the boards list and a folderless board's Set folder, Add folder… and the folders list | list rows carry `data-project-id` |
 | `settings-hub`, `hub-state`, `hub-field-lanUrl`, `hub-field-fallbackUrl`, `hub-field-token`, `hub-save`, `hub-error` | Settings → Hub: the pane, the line state, the write-only address, fallback and token rows ("Set."/"Not set." in the description), Save and the error line | `hub-state`: `data-state` (`off` `connecting` `online` `offline`) |
 | `update-pill`, `update-busy` | The top bar's "Restart to update" pill (shown only when the update folder holds a newer setup) and the list of running chats in its confirm dialog | |
 | `setting-update-folder`, `update-folder-path`, `update-folder-choose`, `update-folder-check`, `update-folder-clear` | Settings → General's Update folder row: the path, Choose/Change, Check now and Clear | |

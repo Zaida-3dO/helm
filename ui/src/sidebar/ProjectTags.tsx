@@ -1,20 +1,22 @@
-// The Project / Workspace tags under the top bar.
-// Project: the group the open chat is shown under; picking another writes `chat_groups` through
-// `chat_organize` (the first option, named for the folder project, puts it back there). Workspace: the folder it runs in,
-// which grouping never changes. Both read the cached project list; nothing waits on the board.
+// The Project / Folder tags under the top bar.
+// Project: the board the open chat is shown under; picking another board writes `chat_groups`
+// through `chat_organize`. Only boards are offered: a folder is where a chat runs, not where it is
+// shown. Folder: the folder it runs in, which moving it between boards never changes. Both read the
+// cached project list; nothing waits on the board.
 
 import { useEffect, useMemo, useState } from 'react';
 import { projectOps, type ProjectNode, type SidebarRow } from '../api/projects.ts';
 import { useShell } from '../shell/context.ts';
 import { Picker, toast, type PickerOption } from '../ui/index.ts';
-
-const NONE = '__none__';
+import { getDefaultBoard } from '../newchat/boards.ts';
+import { pickerProjects } from '../newchat/places.ts';
 
 export function ProjectTags({ chatId }: { chatId: string | null }) {
   const shell = useShell();
   const pops = useMemo(() => projectOps(shell.api), [shell.api]);
   const [row, setRow] = useState<SidebarRow | null>(null);
   const [projects, setProjects] = useState<ProjectNode[]>([]);
+  const [hidden, setHidden] = useState<string[]>([]);
 
   useEffect(() => {
     let live = true;
@@ -23,11 +25,12 @@ export function ProjectTags({ chatId }: { chatId: string | null }) {
         setRow(null);
         return;
       }
-      Promise.all([pops.rows([chatId]), pops.list(false)])
-        .then(([rows, list]) => {
+      Promise.all([pops.rows([chatId]), pops.list(false), getDefaultBoard(shell.api)])
+        .then(([rows, list, boards]) => {
           if (!live) return;
           setRow(rows[0] ?? null);
           setProjects(list);
+          setHidden(boards.hiddenBoardIds);
         })
         .catch(() => undefined);
     };
@@ -43,24 +46,19 @@ export function ProjectTags({ chatId }: { chatId: string | null }) {
       live = false;
       offs.forEach((o) => o());
     };
-  }, [chatId, pops, shell.bus]);
+  }, [chatId, pops, shell.api, shell.bus]);
 
   if (!chatId || !row) return null;
   const group = projects.find((p) => p.id === row.groupProjectId);
-  // A chat shown under its own folder project is labelled with that project's name, not
-  // "None"; picking another project moves it into that group.
-  const folderProject = projects.find((p) => p.id === row.folderProjectId);
-  const folderName = folderProject?.name ?? baseName(row.folderPath);
-  const options: PickerOption<string>[] = [
-    { value: NONE, title: folderName, text: folderName, subtitle: 'Its own folder project' },
-    ...projects
-      .filter((p) => p.kind === 'board' || p.id !== row.folderProjectId)
-      .map((p) => ({ value: p.id, title: p.name, text: p.name, subtitle: p.kind === 'board' ? 'Agent Standup' : (p.path ?? 'Local group') })),
-  ];
-  const value = row.groupProjectId === row.folderProjectId ? NONE : row.groupProjectId;
-  const shown = value === NONE ? folderName : (group?.name ?? folderName);
-  const choose = (v: string) => {
-    const groupProjectId = v === NONE ? row.folderProjectId : v;
+  // A chat not on a board yet (still under its folder) shows that folder's name until it is moved.
+  const shown = group?.name ?? baseName(row.folderPath);
+  const options: PickerOption<string>[] = pickerProjects(projects, false, row.groupProjectId, hidden).map((p) => ({
+    value: p.id,
+    title: p.name,
+    text: p.name,
+    subtitle: p.kind === 'board' ? 'Agent Standup' : 'A folder, not a board',
+  }));
+  const choose = (groupProjectId: string) => {
     if (groupProjectId === row.groupProjectId) return;
     pops
       .organize({ chatId: row.chatId, groupProjectId, parentChatId: null })
@@ -70,7 +68,7 @@ export function ProjectTags({ chatId }: { chatId: string | null }) {
   return (
     <div className="sb-tags" data-testid="project-tags">
       <Picker
-        value={value}
+        value={row.groupProjectId}
         options={options}
         onChange={choose}
         label={`Project: ${shown}`}
@@ -86,7 +84,7 @@ export function ProjectTags({ chatId }: { chatId: string | null }) {
         testId="project-tag"
       />
       <span className="sb-tag" data-testid="workspace-tag" title={row.folderPath}>
-        <span className="sb-tag-label">Workspace:</span>
+        <span className="sb-tag-label">Folder:</span>
         <span className="sb-tag-value">{baseName(row.folderPath)}</span>
       </span>
     </div>

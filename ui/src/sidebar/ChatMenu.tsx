@@ -14,6 +14,7 @@ import { IconMore } from '../ui/icons.tsx';
 import { deleteChatConfirm, PromptDialog, type Prompt } from './Sidebar.tsx';
 import { sidebarUndo } from './undo.ts';
 import { CostDialog } from '../usage/CostDialog.tsx';
+import { getDefaultBoard } from '../newchat/boards.ts';
 
 // Errors go to the shell's toast slot, where the user sees them.
 const showError = (text: string) => toast.show({ kind: 'error', text });
@@ -34,7 +35,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
   const open = async (x: number, y: number) => {
     if (!chatId) return;
     try {
-      const [rows, projects] = await Promise.all([pops.rows([chatId]), pops.list(false)]);
+      const [rows, projects, boards] = await Promise.all([pops.rows([chatId]), pops.list(false), getDefaultBoard(shell.api)]);
       const row: SidebarRow | undefined = rows[0];
       if (!row) return;
       const siblings = (await pops.page(row.archived ? 'archived' : 'projects', undefined, row.groupProjectId)).rows;
@@ -42,6 +43,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
         {
           row,
           projects: projects as ProjectNode[],
+          hidden: boards.hiddenBoardIds,
           siblings,
           heightOf: () => 0,
           depthOf: (id) => siblings.find((s) => s.chatId === id)?.depth ?? 0,

@@ -591,6 +591,21 @@
   text-overflow: ellipsis;
 }
 
+/* A board with no folder yet: a quiet text button on its header. */
+.sb-root .sb-set-folder {
+  flex: none;
+  padding: 0 6px;
+  height: 22px;
+  border-radius: 5px;
+  font-size: 11px;
+  color: var(--sb-muted);
+}
+
+.sb-root .sb-set-folder:hover {
+  background: var(--sb-hover);
+  color: var(--sb-text);
+}
+
 .sb-mark {
   display: inline-flex;
   font-size: 12px;

@@ -152,8 +152,10 @@ test('empty projects never show, with no row to bring them back; a finished proj
     project('kid', { parentId: 'parent', chatCount: 1 }),
     project('shell'), // empty, with an empty child: both hidden
     project('shellKid', { parentId: 'shell' }),
-    project('pinned', { pinned: true }),
-    project('open'),
+    project('pinned', { kind: 'board', path: null, pinned: true }),
+    project('pinnedFolder', { pinned: true }), // a folder project is only where chats run: never shown just for a pin
+    project('open', { kind: 'board', path: null }),
+    project('openFolder'), // nor for holding the open chat's archived row
     project('gone', { kind: 'board', path: null, board: { stale: true } as ProjectNode['board'] }),
     project('arch', { archived: true }),
     boardProject('live', false, { chatCount: 1 }),
@@ -174,14 +176,21 @@ test('empty projects never show, with no row to bring them back; a finished proj
     ['only', 'only', '-', 'only', 'first', 'last', 'only', 'only', 'only', 'only', 'first', 'last', 'only', 'only'],
   );
   assert.ok(buildList(projects, rows, { ...opts, view: 'activity' }).every((i) => i.block === undefined), 'activity rows stay separate');
-  // The open chat's group shows even when it holds nothing else (here its chat is archived).
+  // The open chat's group shows even when it holds nothing else (here its chat is archived), if it is a board.
   assert.ok(shape(buildList(projects, rows, { ...opts, selectedChatId: 'o1' })).includes('H0:open'));
+  assert.ok(!shape(buildList(projects, [...rows, row('o2', 'openFolder', { archived: true })], { ...opts, selectedChatId: 'o2' })).includes('H0:openFolder'));
   // A shown finished project says so under its name; a stale one still reads as gone.
   const shown = buildList(projects, rows, opts);
   const header = (id: string) => shown.find((i): i is Extract<ListItem, { kind: 'header' }> => i.kind === 'header' && i.project.id === id)!;
   assert.equal(header('done').subtitle, 'Finished');
   assert.equal(header('done').height, HEIGHTS.normal.headerSubtitle);
   assert.equal(header('live').subtitle, null);
+  // A board with no folder offers "Set folder"; one with a folder, a folder project and a stale board do not.
+  assert.deepEqual(['live', 'held', 'pinned'].map((id) => header(id).needsFolder), [true, false, true]);
+  const withFolder = buildList([boardProject('b', false, { chatCount: 1, primaryFolderProjectId: 'f' }), project('f')], [], opts);
+  assert.equal((withFolder[0] as Extract<ListItem, { kind: 'header' }>).needsFolder, false);
+  const archivedFolder = buildList([boardProject('b', false, { chatCount: 1, primaryFolderProjectId: 'f' }), project('f', { archived: true })], [], opts);
+  assert.equal((archivedFolder[0] as Extract<ListItem, { kind: 'header' }>).needsFolder, true, 'an archived folder is no folder');
   assert.equal(headerSubtitle(project('gone', { board: { stale: true } as ProjectNode['board'] }), new Map()), 'Not on the board');
   assert.equal(headerSubtitle(project('f', { board: null }), new Map()), null);
   // The archived view keeps its own rule: a finished project holding an archived chat shows there.
@@ -204,7 +213,7 @@ test('the drawn chat order skips collapsed groups and parents; Ctrl+Tab steps th
 });
 
 test('a pin break separates pinned and unpinned top-level groups', () => {
-  const items = buildList([project('p', { pinned: true }), project('q', { chatCount: 3 })], [], opts);
+  const items = buildList([project('p', { kind: 'board', path: null, pinned: true }), project('q', { chatCount: 3 })], [], opts);
   assert.deepEqual(shape(items), ['H0:p', '--', 'H0:q']);
   assert.equal(items[1]!.height, HEIGHTS.normal.pinBreak);
 });

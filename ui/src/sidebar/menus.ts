@@ -6,6 +6,7 @@ import type { MenuItem } from '../ui/index.ts';
 import type { ProjectNode, SidebarRow } from '../api/projects.ts';
 import { MAX_DEPTH } from './model.ts';
 import { primaryFolderMenuItem } from '../newchat/menu.ts';
+import { pickerProjects } from '../newchat/places.ts';
 
 export const PROJECT_COLOURS = ['red', 'orange', 'yellow', 'green', 'teal', 'blue', 'purple', 'pink'] as const;
 
@@ -34,8 +35,10 @@ export interface ChatMenuActions {
 
 export interface ChatMenuInput {
   row: SidebarRow;
-  /** Every project, flat (for "Move to project"). */
+  /** Every project, flat (for "Move to project", which lists boards only). */
   projects: ProjectNode[];
+  /** Boards "Move to project" leaves out (the catch-all inbox). */
+  hidden?: readonly string[];
   /** Rows held for the same group, for "Nest under…". */
   siblings: SidebarRow[];
   /** Depth of each held row's subtree below it (0 = no children). */
@@ -92,8 +95,7 @@ export function chatMenuItems(i: ChatMenuInput, a: ChatMenuActions): MenuItem[] 
       id: 'move',
       label: 'Move to project',
       disabled: r.archived || archivedGroup,
-      submenu: i.projects
-        .filter((p) => !p.archived)
+      submenu: pickerProjects(i.projects, false, r.groupProjectId, i.hidden)
         .map((p) => ({
           id: `move:${p.id}`,
           label: p.name,

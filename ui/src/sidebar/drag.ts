@@ -2,11 +2,14 @@
 //
 // A drag starts after 4 px of movement with the primary button, never in the Activity view.
 // Where it lands:
-// - a chat onto a group header: show it under that group;
+// - a chat onto a group header: show it under that group (a board: a chat is never moved onto a
+//   folder project, which is only where chats run);
 // - a chat onto the upper half of another chat: place it before that chat, at that chat's level
 //   (its group, its parent chat and its pin state), so the drop never asks the host to reorder
 //   across levels;
 // - a chat onto the lower half of another chat: nest it under that chat;
+// - a chat dropped beside or under a chat in another group moves to that group, so only when that
+//   group is a board;
 // - a level the chat may not take (under itself or its own started chats, or deeper than three
 //   levels) is not offered;
 // - a project header onto the upper half of another header: reorder before it (same parent and
@@ -20,8 +23,8 @@ export const DRAG_THRESHOLD_PX = 4;
 export type DragSource = { kind: 'chat'; chatId: string; groupId: string; pinned: boolean } | { kind: 'project'; projectId: string; parentId: string | null; pinned: boolean };
 
 export type DropTarget =
-  | { kind: 'header'; projectId: string; parentId: string | null; pinned: boolean; lowerHalf: boolean }
-  | { kind: 'chat'; chatId: string; groupId: string; pinned: boolean; lowerHalf: boolean; parentChatId?: string | null; levelOk?: boolean; nestOk?: boolean };
+  | { kind: 'header'; projectId: string; parentId: string | null; pinned: boolean; lowerHalf: boolean; /** False for a folder project. */ board?: boolean }
+  | { kind: 'chat'; chatId: string; groupId: string; pinned: boolean; lowerHalf: boolean; parentChatId?: string | null; levelOk?: boolean; nestOk?: boolean; /** Whether the chat's group is a board. */ board?: boolean };
 
 export type DropAction =
   | { kind: 'chat-to-group'; chatId: string; groupId: string }
@@ -60,11 +63,12 @@ export function canSitUnder(rows: readonly SidebarRow[], chatId: string, parentI
 export function dropAction(src: DragSource, t: DropTarget): DropAction | null {
   if (src.kind === 'chat') {
     if (t.kind === 'header') {
-      if (t.projectId === src.groupId) return null;
+      if (t.projectId === src.groupId || t.board === false) return null;
       return { kind: 'chat-to-group', chatId: src.chatId, groupId: t.projectId };
     }
     if (t.chatId === src.chatId) return null;
     const moveGroup = t.groupId !== src.groupId;
+    if (moveGroup && t.board === false) return null;
     if (t.lowerHalf && t.nestOk === false) return null;
     if (t.lowerHalf) return { kind: 'chat-nest', chatId: src.chatId, parentChatId: t.chatId, groupId: t.groupId, moveGroup };
     if (t.levelOk === false) return null;

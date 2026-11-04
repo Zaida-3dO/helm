@@ -551,7 +551,12 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       governor = { ...governor, ...(a.settings as object) } as typeof governor;
       return governorView();
     },
-    chat_create: (a) => newChat(String(a.cwd), typeof a.model === 'string' ? a.model : undefined, typeof a.effort === 'string' ? a.effort : undefined).chat,
+    chat_create: (a) => {
+      const chat = newChat(String(a.cwd), typeof a.model === 'string' ? a.model : undefined, typeof a.effort === 'string' ? a.effort : undefined).chat;
+      // The board it asked for: the projects fake shows it there (without one it picks the board itself).
+      if (typeof a.boardId === 'string') fakeOpFor('chat_organize')?.('chat_organize', { chatId: chat.id, groupProjectId: a.boardId }, { emit, call: (o, x = {}) => ops[o]?.(x) });
+      return chat;
+    },
     chat_list: () => [...chats.values()].map((c) => c.chat).filter((c) => !c.archived && !c.sideSourceId).sort((x, y) => y.createdAt - x.createdAt),
     chat_get: (a) => {
       const c = find(a.chatId);

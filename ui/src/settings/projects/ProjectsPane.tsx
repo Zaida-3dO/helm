@@ -1,13 +1,21 @@
-// Settings → Projects: the project list with archive and restore, and the Agent Standup
-// connection. The token field is write-only: the pane only ever learns "set" or "not set".
+// Settings → Projects: the Agent Standup connection, the default board, the boards (where chats
+// are shown) and the folders (where chats run), each with archive and restore. The token field is
+// write-only: the pane only ever learns "set" or "not set".
 
 import { useEffect, useMemo, useState } from 'react';
 import { projectOps, type BoardConnection, type BoardSyncState, type ProjectNode } from '../../api/projects.ts';
 import { useShell } from '../../shell/context.ts';
+import { Button, Picker, type PickerOption } from '../../ui/index.ts';
+import { getDefaultBoard, NO_DEFAULT_BOARD, setDefaultBoard, type DefaultBoardState } from '../../newchat/boards.ts';
+import { openAddFolder, openNewProject, openPrimaryFolder } from '../../newchat/index.ts';
+import { needsFolder, pickerProjects, primaryFolder } from '../../newchat/places.ts';
 
 function errorText(e: unknown): string {
   return String((e as Error)?.message ?? e);
 }
+
+/** The default board picker's "let the host choose" value. */
+const AUTOMATIC = '__auto__';
 
 export function ProjectsPane() {
   const shell = useShell();
@@ -17,15 +25,28 @@ export function ProjectsPane() {
   const [url, setUrl] = useState('');
   const [token, setToken] = useState('');
   const [sync, setSync] = useState<BoardSyncState | null>(null);
+  const [boards, setBoards] = useState<DefaultBoardState>(NO_DEFAULT_BOARD);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let live = true;
+  const reload = () => {
     ops
       .list(true)
-      .then((p) => live && setProjects(p))
+      .then(setProjects)
       .catch((e: unknown) => setError(errorText(e)));
+    void getDefaultBoard(shell.api).then(setBoards);
+  };
+
+  useEffect(() => {
+    let live = true;
+    const load = () => {
+      ops
+        .list(true)
+        .then((p) => live && setProjects(p))
+        .catch((e: unknown) => setError(errorText(e)));
+      void getDefaultBoard(shell.api).then((b) => live && setBoards(b));
+    };
+    load();
     ops
       .connection()
       .then((c) => {
@@ -34,18 +55,19 @@ export function ProjectsPane() {
         setUrl(c.url);
       })
       .catch((e: unknown) => setError(errorText(e)));
-    const off = shell.bus.on('board_sync', (e) => setSync(e.state as BoardSyncState));
+    const offs = [
+      shell.bus.on('board_sync', (e) => {
+        setSync(e.state as BoardSyncState);
+        load();
+      }),
+      // A board made or given a folder from this pane's dialogs, or anywhere else.
+      shell.bus.on('project', load),
+    ];
     return () => {
       live = false;
-      off();
+      offs.forEach((o) => o());
     };
-  }, [ops, shell.bus]);
-
-  const reload = () =>
-    ops
-      .list(true)
-      .then(setProjects)
-      .catch((e: unknown) => setError(errorText(e)));
+  }, [ops, shell.api, shell.bus]);
 
   const save = async (clearToken = false) => {
     setBusy(true);
@@ -66,7 +88,7 @@ export function ProjectsPane() {
     setError(null);
     try {
       setSync(await ops.sync());
-      void reload();
+      reload();
     } catch (e) {
       setError(errorText(e));
     }
@@ -76,11 +98,29 @@ export function ProjectsPane() {
   const toggleArchive = async (p: ProjectNode) => {
     try {
       await (p.archived ? ops.restore(p.id) : ops.archive(p.id));
-      void reload();
+      reload();
     } catch (e) {
       setError(errorText(e));
     }
   };
+
+  const chooseDefault = async (v: string) => {
+    setError(null);
+    try {
+      setBoards(await setDefaultBoard(shell.api, v === AUTOMATIC ? null : v));
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+
+  const boardList = projects.filter((p) => p.kind === 'board');
+  const folderList = projects.filter((p) => p.kind !== 'board');
+  const fallbackName = boards.chosen ? null : boards.name;
+  const defaultOptions: PickerOption<string>[] = [
+    { value: AUTOMATIC, title: 'Automatic', subtitle: fallbackName ? `Now ${fallbackName}` : 'No board found yet' },
+    ...pickerProjects(projects, true, boards.chosen, boards.hiddenBoardIds).map((p) => ({ value: p.id, title: p.name, text: p.name })),
+  ];
+  const defaultShown = boards.chosen ? (projects.find((p) => p.id === boards.chosen)?.name ?? boards.name ?? 'A board') : `Automatic${fallbackName ? ` (${fallbackName})` : ''}`;
 
   const shownError = sync?.error ?? error;
   return (
@@ -88,8 +128,8 @@ export function ProjectsPane() {
       <section className="sp-section" aria-labelledby="sp-board">
         <h3 id="sp-board">Agent Standup</h3>
         <p className="sp-help">
-          Board projects are read from Agent Standup and shown as groups. Helm never writes to it; renames, icons, colours
-          and nesting stay in Helm.
+          Projects on the task board are read from Agent Standup and are where chats are shown. Renames, icons, colours and
+          nesting stay in Helm; New project makes a project on the board.
         </p>
         <label className="sp-row">
           <span>Address</span>
@@ -135,16 +175,71 @@ export function ProjectsPane() {
         </p>
         {shownError && <p className="sp-error">{shownError}</p>}
       </section>
+      <section className="sp-section" aria-labelledby="sp-default">
+        <h3 id="sp-default">Default board</h3>
+        <p className="sp-help">
+          Where a chat with no project of its own goes: a quick question, a message from your phone, a scheduled run.
+        </p>
+        <Picker
+          value={boards.chosen ?? AUTOMATIC}
+          options={defaultOptions}
+          onChange={(v) => void chooseDefault(v)}
+          label={`Default board: ${defaultShown}`}
+          display={defaultShown}
+          heading="Default board"
+          searchable
+          settings
+          testId="default-board"
+        />
+      </section>
       <section className="sp-section" aria-labelledby="sp-projects">
-        <h3 id="sp-projects">Projects</h3>
-        <ul className="sp-list">
-          {projects.map((p) => (
+        <h3 id="sp-projects">Boards</h3>
+        <p className="sp-help">Where chats are shown. Each board has a folder its new chats start in.</p>
+        <div className="sp-actions">
+          <Button onClick={() => openNewProject({ noChat: true })} data-testid="settings-new-project">
+            New project…
+          </Button>
+        </div>
+        <ul className="sp-list" data-testid="settings-boards">
+          {boardList.map((p) => (
             <li key={p.id} className="sp-project" data-project-id={p.id}>
               <span className="sp-name">
                 {p.name}
                 <span className="sp-meta">
-                  {p.kind === 'board' ? ' · Agent Standup' : p.path ? ` · ${p.path}` : ' · local group'}
+                  {` · ${primaryFolder(p, projects)?.folder ?? 'no folder yet'}`}
                   {p.board?.stale ? ' · not on the board' : ''}
+                  {p.archived ? ' · archived' : ''}
+                </span>
+              </span>
+              <span className="sp-actions">
+                {!p.archived && !p.board?.stale && (
+                  <button type="button" data-testid={needsFolder(p, projects) ? 'settings-set-folder' : undefined} onClick={() => openPrimaryFolder(p.id)}>
+                    {needsFolder(p, projects) ? 'Set folder' : 'Change folder'}
+                  </button>
+                )}
+                <button type="button" onClick={() => void toggleArchive(p)}>
+                  {p.archived ? 'Restore' : 'Archive'}
+                </button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      </section>
+      <section className="sp-section" aria-labelledby="sp-folders">
+        <h3 id="sp-folders">Folders</h3>
+        <p className="sp-help">Where chats run. A folder is not shown in the sidebar; pick a board to show a chat under.</p>
+        <div className="sp-actions">
+          <Button onClick={() => openAddFolder()} data-testid="settings-add-folder">
+            Add folder…
+          </Button>
+        </div>
+        <ul className="sp-list" data-testid="settings-folders">
+          {folderList.map((p) => (
+            <li key={p.id} className="sp-project" data-project-id={p.id}>
+              <span className="sp-name">
+                {p.name}
+                <span className="sp-meta">
+                  {p.path ? ` · ${p.path}` : ' · local group'}
                   {p.archived ? ' · archived' : ''}
                 </span>
               </span>

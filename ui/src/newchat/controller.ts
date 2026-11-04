@@ -8,14 +8,15 @@
 
 import { ApiError, type Api } from '../api/client.ts';
 import type { ChatOps, SendExtras } from '../api/ops.ts';
-import type { ProjectNode } from '../api/projects.ts';
+import type { ProjectNode, SidebarRow } from '../api/projects.ts';
 import type { ChatRecord, SendAction, Submission } from '../api/types.ts';
 import { appendBlock, withItemContext } from '../tasks/context.ts';
 import { discardUntouched } from './api.ts';
-import { folderProjectFor, pushRecent, readRecents, resolveFolder, type ResolvedFolder } from './places.ts';
+import { NO_DEFAULT_BOARD, type DefaultBoardState } from './boards.ts';
+import { boardFor, folderProjectFor, isOpenBoard, needsFolder, pushRecent, readRecents, resolveFolder, samePath, type ResolvedFolder } from './places.ts';
 
 export interface NewChatOptions {
-  /** Preselect this project (any sidebar group). */
+  /** Preselect this board (a folder project stands for the one board whose folder it is). */
   projectId?: string;
   /** Start in this folder. */
   folder?: string;
@@ -37,6 +38,8 @@ export interface LocalImage {
 export interface Draft {
   /** A stand-in id for the composer; never sent to the host. */
   id: string;
+  /** The board the chat will be shown on; null follows the folder (the board over it, else the
+   *  default board). */
   projectId: string | null;
   /** The folder the user picked; null follows the project (folder resolution). */
   folder: string | null;
@@ -73,8 +76,9 @@ export const LAST_PROJECT_KEY = 'helm.newchat.lastProject';
 /** The typed text of the open draft, so it survives a restart (images and the place do not). */
 export const DRAFT_TEXT_KEY = 'helm.newchat.draftText';
 
-/** The dialogs the new-chat area draws (Add project, Primary folder…). */
+/** The dialogs the new-chat area draws (New project, Add folder, Primary folder…). */
 export type NewChatDialog =
+  | { kind: 'new-project'; /** The title to start with. */ title?: string; /** Settings opens it without starting a chat after. */ noChat?: boolean }
   | { kind: 'add-project'; /** Open on the New folder tab with this name filled in. */ newName?: string }
   | { kind: 'primary-folder'; projectId: string };
 
@@ -100,6 +104,8 @@ export class NewChatController {
   dialog: NewChatDialog | null = null;
   draft: Draft | null = null;
   projects: ProjectNode[] = [];
+  /** The default board and the boards pickers leave out. */
+  boards: DefaultBoardState = NO_DEFAULT_BOARD;
   /** The folder of the chat that was open when the page opened (folder resolution step 4). */
   openChatFolder: string | null = null;
   version = 0;
@@ -157,6 +163,11 @@ export class NewChatController {
     this.changed();
   }
 
+  setBoards(s: DefaultBoardState): void {
+    this.boards = s;
+    this.changed();
+  }
+
   /** The `chat.new` command (Ctrl+N), the sidebar's New chat and a project's "+". */
   show(opts: NewChatOptions = {}): void {
     const env = this.env;
@@ -168,14 +179,21 @@ export class NewChatController {
     const place = from ? env.chatPlace(from) : null;
     if (from) this.openChatFolder = place?.cwd ?? this.openChatFolder;
     const explicit = opts.projectId !== undefined || opts.folder !== undefined;
+    // The chat the user came from: its board, as far as the project list can tell (its folder's
+    // board), then the board it is really shown on once the host answers.
+    const fromBoard = place ? boardFor(place.projectId, this.projects) : null;
+    let follow = false;
     if (!this.draft) {
-      this.draft = this.newDraft(env, explicit ? null : (place?.projectId ?? this.lastProject(env)));
+      this.draft = this.newDraft(env, explicit ? null : place ? fromBoard : this.lastProject(env));
+      follow = !explicit && !!place;
     } else if (!explicit && place && this.untouched()) {
       // An untouched draft is reused, and follows the chat the user came from.
-      this.draft.projectId = place.projectId;
+      this.draft.projectId = fromBoard;
       this.draft.folder = null;
+      follow = true;
     }
-    if (explicit) this.move(opts.projectId ?? this.projectForFolder(opts.folder) ?? null, opts.folder ?? null, false);
+    if (follow && from) this.followBoardOf(env, from, this.draft);
+    if (explicit) this.move(opts.projectId !== undefined ? (boardFor(opts.projectId, this.projects) ?? opts.projectId) : this.projectForFolder(opts.folder), opts.folder ?? null, false);
     if (opts.itemId) {
       const title = opts.itemTitle ?? (this.draft.item?.id === opts.itemId ? this.draft.item.title : undefined);
       this.draft.item = { id: opts.itemId, ...(title ? { title } : {}) };
@@ -230,21 +248,57 @@ export class NewChatController {
     if (this.env) void discardUntouched(this.env.api, m.chat.id).catch(() => undefined);
   }
 
-  /** Where the draft would be created: the chosen project and the resolved folder. */
+  /** Where the draft would be created: the board and the resolved folder. */
   private placeKey(): string {
-    return JSON.stringify([this.draft?.projectId ?? null, this.place().folder]);
+    return JSON.stringify([this.board(), this.place().folder]);
   }
 
-  /** Change the draft's project; the folder follows the new project unless `folder` is given. */
+  /**
+   * Change the draft's board; the folder follows the new board unless `folder` is given. A board
+   * with no folder yet asks for one first (the Primary folder dialog).
+   */
   move(projectId: string | null, folder: string | null = null, notify = true): void {
     if (!this.draft) return;
     this.draft.projectId = projectId;
     this.draft.folder = folder;
     if (this.made && this.made.key !== this.placeKey()) this.dropMade();
+    const p = this.projects.find((x) => x.id === projectId);
+    if (p && !folder && needsFolder(p, this.projects)) this.dialog = { kind: 'primary-folder', projectId: p.id };
     if (notify) {
       this.changed();
       this.announce();
     }
+  }
+
+  /**
+   * The board the chat will be shown on: the one chosen, else the one board over the folder it will
+   * run in, else the default board. Null only when there is no board at all (the host then keeps the
+   * chat under its folder).
+   */
+  board(): string | null {
+    const chosen = this.draft?.projectId ?? null;
+    if (chosen) return boardFor(chosen, this.projects) ?? this.boards.boardId;
+    const folder = this.place().folder;
+    const over = folder ? this.projects.find((p) => p.kind === 'folder' && !p.archived && !!p.path && samePath(p.path, folder)) : undefined;
+    return (over ? boardFor(over.id, this.projects) : null) ?? this.boards.boardId;
+  }
+
+  /** Ask the host which board the chat the user came from is shown on, and follow it while the user
+   *  has not picked another. */
+  private followBoardOf(env: NewChatEnv, chatId: string, d: Draft): void {
+    const before = d.projectId;
+    void env
+      .api<SidebarRow[] | null>('sidebar_rows', { chatIds: [chatId] })
+      .then((rows) => {
+        const group = rows?.find((r) => r.chatId === chatId)?.groupProjectId;
+        if (!group || group === before || this.draft !== d || d.projectId !== before || d.folder !== null) return;
+        if (!isOpenBoard(this.projects.find((p) => p.id === group))) return;
+        d.projectId = group;
+        if (this.made && this.made.key !== this.placeKey()) this.dropMade();
+        this.changed();
+        this.announce();
+      })
+      .catch(() => undefined);
   }
 
   setFolder(folder: string): void {
@@ -360,23 +414,21 @@ export class NewChatController {
     if (this.made && this.made.key !== key) this.dropMade();
     let made = this.made;
     if (!made) {
-      // The exact project when the chosen one is a folder project over this folder (several
-      // projects may share a folder); otherwise the host finds or makes the folder's own.
+      // The exact folder project when the chosen one is a folder project over this folder
+      // (several projects may share a folder); otherwise the host finds or makes the folder's own.
+      // The board goes with it, and the host shows the chat there.
       const projectId = folderProjectFor(d.projectId, folder, this.projects);
+      const boardId = this.board();
       const chat = await env.api<ChatRecord>('chat_create', {
         cwd: folder,
         ...(projectId ? { projectId } : {}),
+        ...(boardId ? { boardId } : {}),
         ...(d.model ? { model: d.model } : {}),
         ...(d.effort ? { effort: d.effort } : {}),
       });
       made = { chat, key, uploads: new Map() };
       this.made = made;
       env.storeChat(chat);
-      // Shown under the chosen project when that is not the folder's own project.
-      const group = d.projectId;
-      if (group && group !== chat.projectId && this.projects.some((p) => p.id === group)) {
-        await env.api('chat_organize', { chatId: chat.id, groupProjectId: group, parentChatId: null }).catch(() => undefined);
-      }
     }
     const chat = made.chat;
     const ids: string[] = [];
@@ -395,7 +447,8 @@ export class NewChatController {
       ids.push(up);
     }
     const result = await env.ops.send(chat.id, submissionId, text, action, 0, { ...extras, attachments: ids });
-    env.storage.setItem(LAST_PROJECT_KEY, d.projectId ?? chat.projectId);
+    const shownOn = this.board();
+    if (shownOn) env.storage.setItem(LAST_PROJECT_KEY, shownOn);
     pushRecent(env.storage, folder);
     // A chat made for a board item is linked to it here, in Helm only. A failure here is not the
     // send's failure: the chat exists and was sent.
@@ -471,13 +524,18 @@ export class NewChatController {
 
   private lastProject(env: NewChatEnv): string | null {
     const id = env.storage.getItem(LAST_PROJECT_KEY);
-    return id && this.projects.some((p) => p.id === id && !p.archived) ? id : null;
+    return id && isOpenBoard(this.projects.find((p) => p.id === id)) ? id : null;
   }
 
-  /** The first open folder project over `folder`, if any. */
+  /** The board over `folder`: the one board whose folder it is, if there is exactly one. */
   private projectForFolder(folder: string | undefined): string | null {
     if (!folder) return null;
-    return this.projects.find((p) => folderProjectFor(p.id, folder, this.projects) !== null)?.id ?? null;
+    for (const p of this.projects) {
+      if (folderProjectFor(p.id, folder, this.projects) === null) continue;
+      const b = boardFor(p.id, this.projects);
+      if (b) return b;
+    }
+    return null;
   }
 
 }
