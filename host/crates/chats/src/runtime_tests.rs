@@ -176,6 +176,11 @@ pub fn limits() -> Limits {
 }
 
 pub fn harness_with(limits: Limits) -> H {
+    harness_with_services(limits, |_| {})
+}
+
+/// A harness with more services (a project gate, say) registered before the ops are built.
+pub fn harness_with_services(limits: Limits, extra: impl FnOnce(&mut Services)) -> H {
     let dir = tempfile::tempdir().unwrap();
     let profile = Profile::open(&dir.path().join("prof")).unwrap();
     let db =
@@ -210,6 +215,7 @@ pub fn harness_with(limits: Limits) -> H {
     s.insert(db.clone());
     s.insert(clock);
     s.insert(Arc::new(rt.clone()));
+    extra(&mut s);
     let mut ops = OpRegistry::new();
     crate::register_ops(&mut ops);
     let api = Arc::new(Dispatcher::new(

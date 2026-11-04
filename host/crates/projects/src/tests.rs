@@ -487,20 +487,34 @@ fn dragging_a_chat_onto_a_group_writes_chat_groups_and_never_moves_where_it_runs
     assert_eq!(r.folder_project_id, home, "where it runs is unchanged");
     assert_eq!(node(&db, &board).chat_count, 1);
     assert_eq!(node(&db, &home).chat_count, 0);
-    // Dropping it back on its folder project removes the row.
-    organize(
+    // Chats are shown on boards only: a folder project is refused, and the chat stays put.
+    let r = organize(
         &db,
         ChatOrganizeArgs {
             chat_id: c.clone(),
             group_project_id: Some(home.clone()),
             ..Default::default()
         },
-    )
-    .unwrap();
-    let n: i64 = db
-        .snapshot(|tx| tx.query_row("SELECT count(*) FROM chat_groups", [], |r| r.get(0)))
+    );
+    assert!(
+        matches!(&r, Err(Refusal::BadArgs(m)) if m.contains("Pick a board")),
+        "{r:?}"
+    );
+    assert_eq!(row(&db, &c).group_project_id, board);
+    // Naming the group a chat is already shown under changes nothing, board or not.
+    let d = chat_in(&db, "C:/w/app", 2);
+    for (chat, group) in [(&c, &board), (&d, &home)] {
+        organize(
+            &db,
+            ChatOrganizeArgs {
+                chat_id: chat.clone(),
+                group_project_id: Some(group.clone()),
+                ..Default::default()
+            },
+        )
         .unwrap();
-    assert_eq!(n, 0);
+        assert_eq!(&row(&db, chat).group_project_id, group);
+    }
 }
 
 #[test]

@@ -7,11 +7,13 @@
 //! the caller from its arguments.
 
 use crate::runtime::ChatRuntime;
+use crate::seams::BoardSummary;
+use crate::store::{same_path, Boards};
 use crate::submit::{host_send, HostSend};
 use crate::types::{ChatStatus, SubmissionOrigin};
 use helm_core::db::Database;
 use helm_hosttools::{HostToolRegistry, ToolCtx, ToolError, ToolResult, ToolSpec};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -78,46 +80,96 @@ fn chat_id_arg(a: &Value) -> Result<String, ToolError> {
     Ok(id.to_owned())
 }
 
-/// One chat as the tools describe it.
-fn chat_meta(tx: &rusqlite::Connection, id: &str) -> rusqlite::Result<Option<Value>> {
-    tx.query_row(
-        &format!(
-            "SELECT c.id, c.title, c.project_id, p.name, c.archived, c.status, c.created_at,
-                    c.updated_at, c.harness, {}, c.thinking, c.parent_chat_id, c.pinned,
-                    c.side_source_id
-             FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
-            crate::local::MODEL_ID_SQL
-        ),
-        [id],
-        |r| {
-            let id = r.get::<_, String>(0)?;
-            Ok(json!({
-                "link": chat_link(&id, None),
-                "chatId": id,
-                "title": r.get::<_, String>(1)?,
-                "projectId": r.get::<_, String>(2)?,
-                "projectName": r.get::<_, String>(3)?,
-                "archived": r.get::<_, bool>(4)?,
-                "status": r.get::<_, String>(5)?,
-                "createdAt": r.get::<_, i64>(6)?,
-                "updatedAt": r.get::<_, i64>(7)?,
-                "harness": r.get::<_, String>(8)?,
-                "model": r.get::<_, Option<String>>(9)?,
-                "effort": r.get::<_, Option<String>>(10)?,
-                "parentChatId": r.get::<_, Option<String>>(11)?,
-                "pinned": r.get::<_, bool>(12)?,
-                "sideChatOf": r.get::<_, Option<String>>(13)?,
-            }))
-        },
-    )
-    .optional()
+/// The refusal for a folder project's id where a board's is needed.
+const NOT_A_BOARD: &str = "Pick a board; folders are where chats run, not where they are shown.";
+
+/// The board a chat is shown on. A side chat is never shown in the sidebar, so it counts as on
+/// the board of the chat it was opened from.
+fn shown_board_id(
+    tx: &Transaction<'_>,
+    boards: &Boards,
+    id: &str,
+    side_of: Option<&str>,
+) -> rusqlite::Result<Option<String>> {
+    boards.chat_board(tx, side_of.unwrap_or(id))
+}
+
+/// One chat as the tools describe it: `projectId` and `projectName` are the board it is shown on
+/// (null while it is on none), `folderProjectId` and `folderPath` where it runs. So an agent can
+/// copy `projectId` from its own details straight into `app_create_chat`.
+fn chat_meta(tx: &Transaction<'_>, boards: &Boards, id: &str) -> rusqlite::Result<Option<Value>> {
+    let row = tx
+        .query_row(
+            &format!(
+                "SELECT c.id, c.title, c.project_id, p.path, c.archived, c.status, c.created_at,
+                        c.updated_at, c.harness, {}, c.thinking, c.parent_chat_id, c.pinned,
+                        c.side_source_id
+                 FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
+                crate::local::MODEL_ID_SQL
+            ),
+            [id],
+            |r| {
+                let id = r.get::<_, String>(0)?;
+                Ok(json!({
+                    "link": chat_link(&id, None),
+                    "chatId": id,
+                    "title": r.get::<_, String>(1)?,
+                    "folderProjectId": r.get::<_, String>(2)?,
+                    "folderPath": r.get::<_, Option<String>>(3)?,
+                    "archived": r.get::<_, bool>(4)?,
+                    "status": r.get::<_, String>(5)?,
+                    "createdAt": r.get::<_, i64>(6)?,
+                    "updatedAt": r.get::<_, i64>(7)?,
+                    "harness": r.get::<_, String>(8)?,
+                    "model": r.get::<_, Option<String>>(9)?,
+                    "effort": r.get::<_, Option<String>>(10)?,
+                    "parentChatId": r.get::<_, Option<String>>(11)?,
+                    "pinned": r.get::<_, bool>(12)?,
+                    "sideChatOf": r.get::<_, Option<String>>(13)?,
+                }))
+            },
+        )
+        .optional()?;
+    let Some(mut m) = row else {
+        return Ok(None);
+    };
+    let board = match shown_board_id(tx, boards, id, m["sideChatOf"].as_str())? {
+        Some(b) => boards.board(tx, &b)?,
+        None => None,
+    };
+    m["projectId"] = json!(board.as_ref().map(|b| b.id.as_str()));
+    m["projectName"] = json!(board.as_ref().map(|b| b.name.as_str()));
+    Ok(Some(m))
 }
 
 fn meta(ctx: &ToolCtx, id: &str) -> Result<Value, ToolError> {
+    let boards = Boards::of(&ctx.services);
     db(ctx)?
-        .snapshot(|tx| chat_meta(tx, id))
+        .snapshot(|tx| chat_meta(tx, &boards, id))
         .map_err(|e| ToolError::maybe(e.to_string()))?
         .ok_or_else(|| refuse("There is no chat with that id."))
+}
+
+/// The board `project_id` names. A folder project's id, or an unknown one, is refused.
+fn board_arg(
+    tx: &Transaction<'_>,
+    boards: &Boards,
+    project_id: &str,
+) -> rusqlite::Result<Result<BoardSummary, ToolError>> {
+    if let Some(b) = boards.board(tx, project_id)? {
+        return Ok(Ok(b));
+    }
+    let known = tx
+        .query_row("SELECT 1 FROM projects WHERE id = ?1", [project_id], |_| {
+            Ok(())
+        })
+        .optional()?
+        .is_some();
+    Ok(Err(refuse(if known {
+        NOT_A_BOARD
+    } else {
+        "There is no project with that id."
+    })))
 }
 
 fn cut_bytes(s: &str, max: usize) -> (String, bool) {
@@ -155,6 +207,7 @@ fn list_chats(ctx: &ToolCtx, a: Value) -> ToolResult {
         .unwrap_or(false);
     let project = str_arg(&a, "projectId").map(str::to_owned);
     let caller = ctx.caller_chat_id.clone();
+    let boards = Boards::of(&ctx.services);
     let words: Vec<String> = query
         .split_whitespace()
         .map(|w| w.to_lowercase().replace(['%', '_'], ""))
@@ -164,21 +217,26 @@ fn list_chats(ctx: &ToolCtx, a: Value) -> ToolResult {
         .snapshot(|tx| {
             let mut st = tx.prepare(
                 "SELECT c.id FROM chats c
-                 WHERE c.archived = ?1 AND (?2 IS NULL OR c.project_id = ?2)
-                   AND (?3 OR c.id <> ?4)
+                 WHERE c.archived = ?1 AND (?2 OR c.id <> ?3)
                  ORDER BY c.updated_at DESC, c.id",
             )?;
             let ids: Vec<String> = st
-                .query_map(params![archived, project, include_current, caller], |r| {
-                    r.get(0)
-                })?
+                .query_map(params![archived, include_current, caller], |r| r.get(0))?
                 .collect::<Result<_, _>>()?;
             let mut out = Vec::new();
             let mut skipped = 0i64;
             for id in ids {
-                let Some(m) = chat_meta(tx, &id)? else {
+                let Some(m) = chat_meta(tx, &boards, &id)? else {
                     continue;
                 };
+                // The board it is shown on; a folder project's id lists the chats running there.
+                if let Some(p) = project.as_deref() {
+                    if m["projectId"].as_str() != Some(p)
+                        && m["folderProjectId"].as_str() != Some(p)
+                    {
+                        continue;
+                    }
+                }
                 if !words.is_empty() {
                     let title = m["title"].as_str().unwrap_or("").to_lowercase();
                     let mut hit = words.iter().all(|w| title.contains(w.as_str()));
@@ -450,8 +508,143 @@ fn depth(tx: &rusqlite::Connection, id: &str) -> rusqlite::Result<usize> {
     Ok(d)
 }
 
+/// The chat's parent and whether it is archived or a side chat; `None` when there is no such chat.
+fn chat_row(
+    tx: &Transaction<'_>,
+    id: &str,
+) -> rusqlite::Result<Option<(Option<String>, bool, Option<String>)>> {
+    tx.query_row(
+        "SELECT parent_chat_id, archived, side_source_id FROM chats WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .optional()
+}
+
+/// Whether `chat` can be a parent on `board`: an unarchived chat shown on that board. It may run
+/// in another folder (a worktree, say); only the board has to match.
+fn parent_on(
+    tx: &Transaction<'_>,
+    boards: &Boards,
+    chat: &str,
+    board: &str,
+) -> rusqlite::Result<bool> {
+    Ok(match chat_row(tx, chat)? {
+        Some((_, false, None)) => boards.chat_board(tx, chat)?.as_deref() == Some(board),
+        _ => false,
+    })
+}
+
+/// Where `app_create_chat` puts a new chat, settled before anything is made.
+struct Placement {
+    board: String,
+    /// The folder it runs in, and the folder project over it when that is already known.
+    cwd: String,
+    folder_project: Option<String>,
+    parent: Option<String>,
+}
+
+/// The board, folder and parent of a new chat started by `caller`. `parent` is `None` when the
+/// argument was left out (nest under the caller), `Some(None)` for top level.
+fn place(
+    tx: &Transaction<'_>,
+    boards: &Boards,
+    caller: &str,
+    project: Option<&str>,
+    folder: Option<&str>,
+    parent: Option<Option<String>>,
+) -> rusqlite::Result<Result<Placement, ToolError>> {
+    // A side chat is not shown in the sidebar: it starts chats as the chat it was opened from.
+    let caller = match chat_row(tx, caller)? {
+        Some((_, _, Some(source))) => source,
+        _ => caller.to_owned(),
+    };
+    let board = match project {
+        Some(p) => match board_arg(tx, boards, p)? {
+            Ok(b) => b,
+            Err(e) => return Ok(Err(e)),
+        },
+        None => match boards.chat_board(tx, &caller)? {
+            Some(b) => match boards.board(tx, &b)? {
+                Some(b) => b,
+                None => return Ok(Err(refuse(NO_BOARD))),
+            },
+            None => return Ok(Err(refuse(NO_BOARD))),
+        },
+    };
+    if board.archived {
+        return Ok(Err(refuse(
+            "That board is archived; ask the user to restore it before starting chats on it.",
+        )));
+    }
+    let own = board
+        .folder_path
+        .clone()
+        .zip(board.folder_project_id.clone());
+    let (cwd, folder_project) = match (folder, own) {
+        (Some(f), Some((path, id))) if same_path(&path, f) => (path, Some(id)),
+        (Some(f), _) => (f.to_owned(), None),
+        (None, Some((path, id))) => (path, Some(id)),
+        (None, None) => {
+            let mut m = format!(
+                "The board '{}' has no folder yet. Ask the user to set one",
+                board.name
+            );
+            if let Some(r) = board
+                .repo
+                .as_deref()
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+            {
+                m.push_str(&format!(" (the board's repository is {r})"));
+            }
+            m.push('.');
+            return Ok(Err(refuse(m)));
+        }
+    };
+    let parent = match parent {
+        Some(None) => None,
+        Some(Some(p)) => {
+            if !parent_on(tx, boards, &p, &board.id)? {
+                return Ok(Err(refuse(
+                    "parentChatId must be an unarchived chat on the same board.",
+                )));
+            }
+            Some(p)
+        }
+        // By default under the caller, when the new chat is on the caller's board.
+        None => parent_on(tx, boards, &caller, &board.id)?.then_some(caller),
+    };
+    // A parent already at the deepest level takes the new chat beside it: under its own parent.
+    let parent = match parent {
+        Some(mut p) => {
+            let mut found = None;
+            for _ in 0..=MAX_DEPTH {
+                if depth(tx, &p)? < MAX_DEPTH {
+                    found = Some(p);
+                    break;
+                }
+                match chat_row(tx, &p)?.and_then(|(up, _, _)| up) {
+                    Some(up) if parent_on(tx, boards, &up, &board.id)? => p = up,
+                    _ => break,
+                }
+            }
+            found
+        }
+        None => None,
+    };
+    Ok(Ok(Placement {
+        board: board.id,
+        cwd,
+        folder_project,
+        parent,
+    }))
+}
+
+const NO_BOARD: &str =
+    "This chat is not on a board, so pass projectId: a board's id from app_list_projects.";
+
 async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolResult {
-    let project = str_arg(&a, "projectId").ok_or_else(|| refuse("projectId is required."))?;
     let body = message_arg(&a)?;
     let title = str_arg(&a, "title")
         .map(str::trim)
@@ -459,52 +652,52 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
     if title.is_some_and(|t| t.len() > 512) {
         return Err(refuse("title is at most 512 bytes."));
     }
-    let parent = str_arg(&a, "parentChatId").map(str::to_owned);
-    let db = db(&ctx)?;
-    let (path, parent_depth) = db
-        .snapshot(|tx| {
-            let path: Option<Option<String>> = tx
-                .query_row("SELECT path FROM projects WHERE id = ?1", [project], |r| {
-                    r.get(0)
-                })
-                .optional()?;
-            let pd = match &parent {
-                Some(p) => Some(
-                    // A parent must be an unarchived chat in the same project.
-                    tx.query_row(
-                        "SELECT count(*) FROM chats WHERE id = ?1 AND project_id = ?2 AND archived = 0",
-                        params![p, project],
-                        |r| r.get::<_, i64>(0),
-                    )?
-                    .gt(&0)
-                    .then(|| depth(tx, p))
-                    .transpose()?,
-                ),
-                None => None,
-            };
-            Ok::<_, rusqlite::Error>((path, pd))
-        })
-        .map_err(|e| ToolError::maybe(e.to_string()))?;
-    let path = path
-        .ok_or_else(|| refuse("There is no project with that id."))?
-        .ok_or_else(|| refuse("That project has no folder to start a chat in."))?;
-    if let Some(pd) = parent_depth {
-        match pd {
-            None => {
-                return Err(refuse(
-                    "parentChatId must be an unarchived chat in the same project.",
-                ))
+    let folder = match a.get("folder") {
+        None | Some(Value::Null) => None,
+        Some(f) => {
+            let f = f
+                .as_str()
+                .map(str::trim)
+                .filter(|f| std::path::Path::new(f).is_absolute())
+                .ok_or_else(|| refuse("folder must be an absolute path."))?;
+            if !std::path::Path::new(f).is_dir() {
+                return Err(refuse("That folder does not exist."));
             }
-            Some(d) if d >= MAX_DEPTH => {
-                return Err(refuse(
-                    "Chats nest at most two levels deep; pick a higher parent.",
-                ))
-            }
-            _ => {}
+            Some(f)
         }
-    }
+    };
+    let parent = match a.get("parentChatId") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(p) => Some(Some(
+            p.as_str()
+                .filter(|x| x.len() == 36 && uuid::Uuid::parse_str(x).is_ok())
+                .ok_or_else(|| {
+                    refuse("parentChatId must be a chat's exact 36-character id, or null for top level.")
+                })?
+                .to_owned(),
+        )),
+    };
+    let boards = Boards::of(&ctx.services);
+    let db = db(&ctx)?;
+    let placed = db
+        .snapshot(|tx| {
+            place(
+                tx,
+                &boards,
+                &ctx.caller_chat_id,
+                str_arg(&a, "projectId"),
+                folder,
+                parent,
+            )
+        })
+        .map_err(|e| ToolError::maybe(e.to_string()))??;
     limits.admit(&ctx.caller_chat_id, None, Instant::now())?;
-    let mut args = json!({"cwd": path});
+    // `chat_create` writes the board row; the folder project is found or added for `cwd`.
+    let mut args = json!({"cwd": placed.cwd, "boardId": placed.board});
+    if let Some(f) = &placed.folder_project {
+        args["projectId"] = json!(f);
+    }
     for k in ["model", "effort"] {
         if let Some(v) = str_arg(&a, k) {
             args[k] = json!(v);
@@ -512,7 +705,7 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
     }
     let chat = ctx.op("chat_create", args).await?;
     let id = chat["id"].as_str().unwrap_or_default().to_owned();
-    if let Some(p) = &parent {
+    if let Some(p) = &placed.parent {
         db.write(|tx| {
             tx.execute(
                 "UPDATE chats SET parent_chat_id = ?1 WHERE id = ?2",
@@ -574,7 +767,15 @@ async fn update_chat(ctx: ToolCtx, a: Value) -> ToolResult {
     // applied before anything else changes so a refusal leaves the chat as it was.
     let mut organize = json!({"chatId": id});
     if let Some(p) = a.get("projectId") {
-        organize["groupProjectId"] = p.clone();
+        // Chats are shown on boards only; where it runs does not change.
+        let p = p
+            .as_str()
+            .ok_or_else(|| refuse("projectId must be a board's id."))?;
+        let boards = Boards::of(&ctx.services);
+        db(&ctx)?
+            .snapshot(|tx| board_arg(tx, &boards, p))
+            .map_err(|e| ToolError::maybe(e.to_string()))??;
+        organize["groupProjectId"] = json!(p);
     }
     if let Some(p) = a.get("parentChatId") {
         if !p.is_null()
@@ -726,7 +927,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_list_chats",
-            format!("List recent Helm chats, newest first, or search their titles and messages (all query words must match). Excludes this chat unless includeCurrent is true. Each chat has its id, title, project, status and whether it is archived.{LINKS}"),
+            format!("List recent Helm chats, newest first, or search their titles and messages (all query words must match). Excludes this chat unless includeCurrent is true. Each chat has its id, title, the board it is shown on (projectId, projectName; null while it is on none), the folder it runs in (folderProjectId, folderPath), its status and whether it is archived. projectId lists one board's chats (a folder project's id lists the chats running in that folder).{LINKS}"),
             obj(
                 json!({
                     "query": {"type": "string", "maxLength": 512},
@@ -785,17 +986,18 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::write(
             "app_create_chat",
-            format!("Start a new chat in a project and send it a first message (framed like app_send_message). Pass parentChatId to nest it under a chat (at most two levels). Omitted model and effort use the new-chat defaults. model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>), whichever provider this chat itself runs on.{REPORT_BACK}{LINKS}{EXPLICIT}"),
+            format!("Start a new chat on a board and send it a first message (framed like app_send_message). projectId is the board to show it on: a board's id from app_list_projects, or the projectId in a chat's details; it defaults to this chat's own board, and a folder project's id is refused. The chat runs in the board's folder, or in folder (an absolute path) when you name another. It nests under this chat by default; pass parentChatId to nest it under another chat on the same board, or null for top level. Chats nest at most three deep: a new chat under a chat at the deepest level goes beside it instead (under that chat's parent). Omitted model and effort use the new-chat defaults. model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>), whichever provider this chat itself runs on.{REPORT_BACK}{LINKS}{EXPLICIT}"),
             obj(
                 json!({
-                    "projectId": {"type": "string"},
+                    "projectId": {"type": "string", "description": "The board to show the chat on; defaults to this chat's board."},
+                    "folder": {"type": "string", "maxLength": 4096, "description": "An absolute folder to run in instead of the board's folder; it is added as a folder project when Helm has none over it."},
                     "message": {"type": "string", "minLength": 1, "maxLength": 16384},
                     "title": {"type": "string", "minLength": 1, "maxLength": 512},
-                    "parentChatId": id,
+                    "parentChatId": {"type": ["string", "null"], "minLength": 36, "maxLength": 36, "description": "Defaults to this chat; null for top level."},
                     "model": {"type": "string", "description": "A Claude model id (sonnet, opus, ...) or a local model id (local/<server>/<model>)."},
                     "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}
                 }),
-                &["projectId", "message"],
+                &["message"],
             ),
         )
         .guidelines(
@@ -807,7 +1009,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .async_tool(
         ToolSpec::write(
             "app_fork_chat",
-            format!("Copy a chat, whole or up to one of its messages, as a new idle chat in the same project. It does not open, run or message the copy.{EXPLICIT}"),
+            format!("Copy a chat, whole or up to one of its messages, as a new idle chat on the same board, running in the same folder. It does not open, run or message the copy.{EXPLICIT}"),
             obj(
                 json!({"chatId": id, "messageId": {"type": "integer"}, "title": {"type": "string", "minLength": 1, "maxLength": 512}}),
                 &["chatId"],
@@ -819,7 +1021,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .async_tool(
         ToolSpec::write(
             "app_update_chat",
-            format!("Rename, pin or unpin a chat, change its model or effort (from its next turn), show it under another project (projectId; where it runs does not change), or nest it under another chat in that project (parentChatId) or make it top level (parentChatId null). model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>): a chat can move between its current provider and the other at any time and the conversation carries over. Say why in one sentence (reason) and it shows in the transcript. Muting, the harness and the provider are the user's to change.{EXPLICIT}"),
+            format!("Rename, pin or unpin a chat, change its model or effort (from its next turn), show it on another board (projectId: a board's id, never a folder project's; where it runs does not change), or nest it under another chat on that board (parentChatId) or make it top level (parentChatId null). model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>): a chat can move between its current provider and the other at any time and the conversation carries over. Say why in one sentence (reason) and it shows in the transcript. Muting, the harness and the provider are the user's to change.{EXPLICIT}"),
             obj(
                 json!({
                     "chatId": id,
@@ -1069,47 +1271,242 @@ mod tests {
         assert!(r["error"].as_str().unwrap().contains("36-character"));
     }
 
+    /// Boards for the tool tests, kept in memory: the sidebar tables live in the projects crate.
+    #[derive(Default)]
+    struct FakeBoards {
+        boards: Mutex<Vec<BoardSummary>>,
+        groups: Mutex<std::collections::HashMap<String, String>>,
+    }
+
+    impl crate::seams::ProjectGate for FakeBoards {
+        fn project_archived(&self, _tx: &Transaction<'_>, _id: &str) -> rusqlite::Result<bool> {
+            Ok(false)
+        }
+
+        fn board(&self, _tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option<BoardSummary>> {
+            Ok(self
+                .boards
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|b| b.id == id)
+                .cloned())
+        }
+
+        fn chat_board(
+            &self,
+            _tx: &Transaction<'_>,
+            chat: &str,
+        ) -> rusqlite::Result<Option<String>> {
+            Ok(self.groups.lock().unwrap().get(chat).cloned())
+        }
+
+        fn put_on_board(
+            &self,
+            _tx: &Transaction<'_>,
+            chat: &str,
+            board: &str,
+        ) -> rusqlite::Result<bool> {
+            let open = self
+                .boards
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|b| b.id == board && !b.archived);
+            if open {
+                self.groups
+                    .lock()
+                    .unwrap()
+                    .insert(chat.to_owned(), board.to_owned());
+            }
+            Ok(open)
+        }
+    }
+
+    fn gated() -> (H, Arc<FakeBoards>) {
+        let fake = Arc::new(FakeBoards::default());
+        let gate = Arc::new(crate::seams::ProjectGates(fake.clone()));
+        let h = crate::runtime_tests::harness_with_services(crate::runtime_tests::limits(), |s| {
+            s.insert(gate)
+        });
+        (h, fake)
+    }
+
+    fn board(
+        id: &str,
+        name: &str,
+        repo: Option<&str>,
+        folder: Option<(&str, &str)>,
+    ) -> BoardSummary {
+        BoardSummary {
+            id: id.into(),
+            name: name.into(),
+            repo: repo.map(Into::into),
+            folder_project_id: folder.map(|f| f.0.into()),
+            folder_path: folder.map(|f| f.1.into()),
+            archived: false,
+        }
+    }
+
+    async fn create(h: &H, t: &HostTools, caller: &str, mut args: Value) -> Value {
+        args["message"] = json!("Start here.");
+        call(h, t, caller, "app_create_chat", args).await
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn create_chat_nests_under_a_parent_at_most_two_deep() {
-        let h = harness();
+    async fn create_chat_puts_the_chat_on_a_board_nested_under_its_caller() {
+        let (h, fake) = gated();
         let t = tools(&h);
         let a = h.create().await;
-        let project = h
+        let stray = h.create().await;
+        let folder = h
             .col(&format!("SELECT project_id FROM chats WHERE id = '{a}'"))
             .pop()
             .unwrap();
-        let mk = |parent: Option<&str>| {
-            let mut args =
-                json!({"projectId": project, "message": "Start here.", "title": "Child"});
-            if let Some(p) = parent {
-                args["parentChatId"] = json!(p);
-            }
-            args
-        };
-        let c1 = call(&h, &t, &a, "app_create_chat", mk(Some(&a))).await;
-        assert_eq!(c1["ok"], true, "{c1}");
-        let c1 = c1["result"]["chatId"].as_str().unwrap().to_owned();
-        assert_eq!(
+        let work = h.work.to_string_lossy().into_owned();
+        let elsewhere = h.work.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let elsewhere = elsewhere.to_string_lossy().into_owned();
+        let own = Some((folder.as_str(), work.as_str()));
+        fake.boards.lock().unwrap().extend([
+            board("b-home", "Home", None, own),
+            board("b-other", "Other", None, own),
+            board("b-site", "Site", Some("owner/site"), None),
+            BoardSummary {
+                archived: true,
+                ..board("b-old", "Old", None, own)
+            },
+        ]);
+        fake.groups
+            .lock()
+            .unwrap()
+            .insert(a.clone(), "b-home".into());
+        let nil = Value::Null;
+        let no_folder = concat!(
+            "The board 'Site' has no folder yet. ",
+            "Ask the user to set one (the board's repository is owner/site)."
+        );
+        let not_board = "Pick a board; folders are where chats run";
+        // (caller, args, error text or "", then for a new chat: its board, parent and folder)
+        let cases: [(&str, Value, &str, &str, Option<&str>, &str); 11] = [
+            // Defaults: the caller's board, nested under the caller, in the board's folder.
+            (&a, json!({}), "", "b-home", Some(&a), &work),
+            (
+                &a,
+                json!({"projectId": "b-home", "parentChatId": nil}),
+                "",
+                "b-home",
+                None,
+                &work,
+            ),
+            // On another board than the caller's: top level there.
+            (
+                &a,
+                json!({"projectId": "b-other"}),
+                "",
+                "b-other",
+                None,
+                &work,
+            ),
+            // A folderless board takes a chat that names its own folder (added as a project).
+            (
+                &a,
+                json!({"projectId": "b-site", "folder": elsewhere}),
+                "",
+                "b-site",
+                None,
+                &elsewhere,
+            ),
+            (&a, json!({"projectId": folder}), not_board, "", None, ""),
+            (
+                &a,
+                json!({"projectId": "nope"}),
+                "no project with that id",
+                "",
+                None,
+                "",
+            ),
+            (&a, json!({"projectId": "b-site"}), no_folder, "", None, ""),
+            (&a, json!({"projectId": "b-old"}), "archived", "", None, ""),
+            (
+                &a,
+                json!({"projectId": "b-other", "parentChatId": a}),
+                "on the same board",
+                "",
+                None,
+                "",
+            ),
+            (
+                &a,
+                json!({"folder": "relative/path"}),
+                "absolute",
+                "",
+                None,
+                "",
+            ),
+            (&stray, json!({}), "not on a board", "", None, ""),
+        ];
+        let made = |id: &str, sql: &str| {
             h.col(&format!(
-                "SELECT parent_chat_id FROM chats WHERE id = '{c1}'"
-            )),
-            std::slice::from_ref(&a)
-        );
+                "SELECT {sql} FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = '{id}'"
+            ))
+            .pop()
+            .unwrap()
+        };
+        for (i, (caller, args, err, on, parent, runs_in)) in cases.into_iter().enumerate() {
+            let r = create(&h, &t, caller, args).await;
+            if !err.is_empty() {
+                assert_eq!(r["ok"], false, "case {i}: {r}");
+                assert!(r["error"].as_str().unwrap().contains(err), "case {i}: {r}");
+                continue;
+            }
+            assert_eq!(r["ok"], true, "case {i}: {r}");
+            let id = r["result"]["chatId"].as_str().unwrap();
+            assert_eq!(fake.groups.lock().unwrap()[id], on, "case {i}");
+            assert_eq!(
+                made(id, "c.parent_chat_id"),
+                parent.unwrap_or("NULL"),
+                "case {i}"
+            );
+            assert_eq!(made(id, "p.path"), runs_in, "case {i}");
+            // Its details name the board, so projectId can be copied straight back in.
+            assert_eq!(r["result"]["projectId"], on, "case {i}");
+            assert_eq!(r["result"]["folderPath"], runs_in, "case {i}");
+        }
         assert_eq!(
-            h.col(&format!("SELECT title FROM chats WHERE id = '{c1}'")),
-            ["Child"]
+            fake.groups.lock().unwrap().len(),
+            5,
+            "the caller and the four new chats: no refusal made a chat"
         );
-        let c2 = call(&h, &t, &a, "app_create_chat", mk(Some(&c1))).await;
-        assert_eq!(c2["ok"], true, "{c2}");
-        let c2 = c2["result"]["chatId"].as_str().unwrap().to_owned();
-        let c3 = call(&h, &t, &a, "app_create_chat", mk(Some(&c2))).await;
-        assert!(c3["error"].as_str().unwrap().contains("two levels"), "{c3}");
+        // A chat started from the deepest level goes beside its starter, under the starter's parent.
+        let id = |r: Value| r["result"]["chatId"].as_str().unwrap().to_owned();
+        let c1 = id(create(&h, &t, &a, json!({"title": "Child"})).await);
+        let c2 = id(create(&h, &t, &c1, json!({})).await);
+        let c3 = id(create(&h, &t, &c2, json!({})).await);
+        let c4 = id(create(&h, &t, &a, json!({"parentChatId": c2})).await);
+        for (chat, parent) in [(&c1, &a), (&c2, &c1), (&c3, &c1), (&c4, &c1)] {
+            assert_eq!(&made(chat, "c.parent_chat_id"), parent);
+        }
+        assert_eq!(made(&c1, "c.title"), "Child");
         // The first message is framed as another chat's.
         let n = h.col(&format!(
             "SELECT count(*) FROM submissions s JOIN submission_meta m ON m.submission_id = s.id
              WHERE s.chat_id = '{c1}' AND m.origin = 'other_chat'"
         ));
         assert_eq!(n, ["1"]);
+        // app_list_chats filters by board.
+        let r = call(
+            &h,
+            &t,
+            &a,
+            "app_list_chats",
+            json!({"projectId": "b-site", "includeCurrent": true}),
+        )
+        .await;
+        let listed = r["result"]["chats"].as_array().unwrap();
+        assert_eq!(listed.len(), 1, "{r}");
+        assert_eq!(listed[0]["folderPath"], elsewhere.as_str());
+        assert_eq!(listed[0]["projectName"], "Site");
     }
 
     /// The sidebar ops live in the projects crate, so `chat_organize` is answered by a recorder here.
@@ -1136,7 +1533,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_chat_regroups_and_nests_in_one_step_and_leaves_muting_to_the_user() {
-        let h = harness();
+        let (h, fake) = gated();
         let stub = Arc::new(Organize {
             inner: h.api.clone(),
             seen: Mutex::new(Vec::new()),
@@ -1146,6 +1543,14 @@ mod tests {
         let t = HostTools::new(Arc::new(r)).with_ops(stub.clone());
         let a = h.create().await;
         let b = h.create().await;
+        let folder = h
+            .col(&format!("SELECT project_id FROM chats WHERE id = '{a}'"))
+            .pop()
+            .unwrap();
+        fake.boards
+            .lock()
+            .unwrap()
+            .push(board("p1", "Board", None, None));
         let nil = Value::Null;
         // (extra args, error text or "", the chat_organize call it should make, if any)
         let cases = [
@@ -1153,6 +1558,13 @@ mod tests {
                 json!({"projectId": "p1", "parentChatId": b, "pinned": true}),
                 "",
                 Some(json!({"groupProjectId": "p1", "parentChatId": b, "pinned": true})),
+            ),
+            // Chats are shown on boards only.
+            (json!({"projectId": folder}), "Pick a board", None),
+            (
+                json!({"projectId": "nope"}),
+                "no project with that id",
+                None,
             ),
             (
                 json!({"parentChatId": nil}),

@@ -18,16 +18,61 @@ fn obj(props: Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": props, "required": required, "additionalProperties": false})
 }
 
-fn project_summary(p: &Value) -> Value {
+/// One project as the tools describe it. A board (kind `board`) is where chats are shown; its
+/// `primaryFolder` is where its new chats start. A folder project (kind `folder`) is where chats
+/// run, at `path`.
+fn project_summary(p: &Value, all: &[Value]) -> Value {
+    let primary = p["primaryFolderProjectId"].as_str();
+    let primary_path = primary
+        .and_then(|id| all.iter().find(|f| f["id"] == id))
+        .map(|f| f["path"].clone())
+        .unwrap_or(Value::Null);
     json!({
         "projectId": p["id"],
         "name": p["name"],
         "kind": p["kind"],
         "path": p["path"],
+        "primaryFolder": primary_path,
         "archived": p["archived"],
         "pinned": p["pinned"],
         "chatCount": p["chatCount"],
     })
+}
+
+/// Two folders compared the way Helm compares them: either slash, no trailing one, ignoring case
+/// on Windows.
+fn same_folder(a: &str, b: &str) -> bool {
+    let norm = |p: &str| {
+        let p = p.trim().replace('\\', "/");
+        let p = p.trim_end_matches('/').to_owned();
+        if cfg!(windows) {
+            p.to_lowercase()
+        } else {
+            p
+        }
+    };
+    norm(a) == norm(b)
+}
+
+/// The open folder project over `folder`, added when Helm has none.
+async fn folder_project(ctx: &ToolCtx, all: &[Value], folder: &str) -> Result<Value, ToolError> {
+    let open = all.iter().find(|p| {
+        p["kind"] == "folder"
+            && p["archived"] != true
+            && p["path"].as_str().is_some_and(|x| same_folder(x, folder))
+    });
+    if let Some(p) = open {
+        return Ok(p["id"].clone());
+    }
+    let name = std::path::Path::new(folder)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty() && !n.contains(['/', '\\', ':']))
+        .unwrap_or_else(|| "Folder".into());
+    let p = ctx
+        .op("project_create", json!({"name": name, "path": folder}))
+        .await?;
+    Ok(p["id"].clone())
 }
 
 async fn all_projects(ctx: &ToolCtx, archived: bool) -> Result<Vec<Value>, ToolError> {
@@ -37,11 +82,10 @@ async fn all_projects(ctx: &ToolCtx, archived: bool) -> Result<Vec<Value>, ToolE
     Ok(v.as_array().cloned().unwrap_or_default())
 }
 
-async fn find(ctx: &ToolCtx, id: &str) -> Result<Value, ToolError> {
-    all_projects(ctx, true)
-        .await?
-        .into_iter()
+fn find(all: &[Value], id: &str) -> Result<Value, ToolError> {
+    all.iter()
         .find(|p| p["id"] == id)
+        .cloned()
         .ok_or_else(|| ToolError::refused("There is no project with that id."))
 }
 
@@ -54,8 +98,8 @@ async fn list_projects(ctx: ToolCtx, a: Value) -> ToolResult {
     if q.len() > 512 {
         return Err(ToolError::refused("query is at most 512 bytes."));
     }
-    let hits: Vec<Value> = all_projects(&ctx, true)
-        .await?
+    let all = all_projects(&ctx, true).await?;
+    let hits: Vec<Value> = all
         .iter()
         .filter(|p| {
             q.is_empty()
@@ -63,7 +107,7 @@ async fn list_projects(ctx: ToolCtx, a: Value) -> ToolResult {
                     .as_str()
                     .is_some_and(|n| n.to_lowercase().contains(&q))
         })
-        .map(project_summary)
+        .map(|p| project_summary(p, &all))
         .collect();
     let truncated = hits.len() > MAX_LISTED;
     Ok(
@@ -83,7 +127,7 @@ async fn create_project(ctx: ToolCtx, a: Value) -> ToolResult {
         args["path"] = json!(p);
     }
     let p = ctx.op("project_create", args).await?;
-    Ok(project_summary(&p))
+    Ok(project_summary(&p, &[]))
 }
 
 async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
@@ -99,9 +143,29 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
             )));
         }
     }
-    let cur = find(&ctx, &id).await?;
+    let all = all_projects(&ctx, true).await?;
+    let cur = find(&all, &id)?;
     let mut upd = json!({"projectId": id, "revision": cur["revision"]});
     let mut any = false;
+    // A board's folder: where its new chats start. The folder is added as a folder project when
+    // Helm has none over it.
+    if let Some(f) = a.get("primaryFolder") {
+        if cur["kind"] != "board" {
+            return Err(ToolError::refused(
+                "primaryFolder is for boards. A folder project's folder cannot be changed by a chat; ask the user to do it in Settings.",
+            ));
+        }
+        let f = f
+            .as_str()
+            .map(str::trim)
+            .filter(|f| std::path::Path::new(f).is_absolute())
+            .ok_or_else(|| ToolError::refused("primaryFolder must be an absolute path."))?;
+        if !std::path::Path::new(f).is_dir() {
+            return Err(ToolError::refused("That folder does not exist."));
+        }
+        upd["primaryFolderProjectId"] = folder_project(&ctx, &all, f).await?;
+        any = true;
+    }
     if let Some(n) = a.get("name").and_then(Value::as_str) {
         let n = n.trim();
         if n.is_empty() || n.len() > 512 {
@@ -131,7 +195,8 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
             ctx.op(op, json!({"projectId": id})).await?;
         }
     }
-    Ok(project_summary(&find(&ctx, &id).await?))
+    let all = all_projects(&ctx, true).await?;
+    Ok(project_summary(&find(&all, &id)?, &all))
 }
 
 async fn repo_locations(ctx: ToolCtx, a: Value) -> ToolResult {
@@ -187,7 +252,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::read(
             "app_list_projects",
-            "List Helm's projects in sidebar order with their ids, folders, chat counts and whether they are pinned or archived; query filters by name.",
+            "List Helm's projects in sidebar order with their ids, kinds, folders, chat counts and whether they are pinned or archived; query filters by name. Boards (kind board) are where chats are shown: app_create_chat takes a board's id, and a board's primaryFolder is where its new chats start. Folder projects (kind folder) are where chats run (path).",
             obj(json!({"query": {"type": "string", "maxLength": 512}}), &[]),
         )
         .self_locking(),
@@ -196,7 +261,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .async_tool(
         ToolSpec::write(
             "app_create_project",
-            format!("Add a project: an existing absolute folder (path), or a new folder named name in Helm's projects folder.{EXPLICIT}"),
+            format!("Add a folder project (where chats run, not a board): an existing absolute folder (path), or a new folder named name in Helm's projects folder.{EXPLICIT}"),
             obj(
                 json!({"name": {"type": "string", "minLength": 1, "maxLength": 120}, "path": {"type": "string", "maxLength": 4096}}),
                 &["name"],
@@ -208,14 +273,15 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .async_tool(
         ToolSpec::write(
             "app_update_project",
-            format!("Rename, pin or unpin, recolour (a palette name, #rrggbb or none), archive or restore a project. Archiving archives its chats; working ones are stopped in the background.{EXPLICIT}"),
+            format!("Rename, pin or unpin, recolour (a palette name, #rrggbb or none), archive or restore a project, or set a board's folder (primaryFolder: an absolute folder where the board's new chats start; it is added as a folder project when Helm has none over it). Archiving archives its chats; working ones are stopped in the background.{EXPLICIT}"),
             obj(
                 json!({
                     "projectId": {"type": "string"},
                     "name": {"type": "string", "minLength": 1, "maxLength": 512},
                     "pinned": {"type": "boolean"},
                     "color": {"type": "string", "maxLength": 32},
-                    "archived": {"type": "boolean"}
+                    "archived": {"type": "boolean"},
+                    "primaryFolder": {"type": "string", "maxLength": 4096, "description": "For a board: the absolute folder its new chats start in."}
                 }),
                 &["projectId"],
             ),
@@ -324,9 +390,12 @@ mod tests {
             Box::pin(async move {
                 match op {
                     "project_list" => Ok(json!([
-                        {"id": "p1", "name": "Helm", "kind": "folder", "path": "C:/w/helm", "archived": false, "pinned": false, "chatCount": 2, "revision": 7},
-                        {"id": "p2", "name": "Board", "kind": "board", "path": null, "archived": false, "pinned": true, "chatCount": 0, "revision": 1}
+                        {"id": "p1", "name": "Helm", "kind": "folder", "path": FOLDER, "archived": false, "pinned": false, "chatCount": 2, "revision": 7},
+                        {"id": "p2", "name": "Board", "kind": "board", "path": null, "primaryFolderProjectId": "p1", "archived": false, "pinned": true, "chatCount": 0, "revision": 1}
                     ])),
+                    "project_create" => {
+                        Ok(json!({"id": "p3", "kind": "folder", "path": args["path"]}))
+                    }
                     "project_update" | "project_archive" => Ok(json!({})),
                     _ => Err(helm_ipc::ApiError::bad_args("no")),
                 }
@@ -345,6 +414,9 @@ mod tests {
             ops: Some(ops),
         }
     }
+
+    /// A folder that exists on every machine the tests run on.
+    const FOLDER: &str = env!("CARGO_MANIFEST_DIR");
 
     #[tokio::test]
     async fn projects_go_through_the_project_ops() {
@@ -371,6 +443,63 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.public.contains("path cannot be changed"));
+        // A board's folder: an open folder project over it is reused, else one is added; only a
+        // board takes one, and only an absolute folder that exists.
+        assert_eq!(r["projects"][0]["primaryFolder"], Value::Null);
+        let boards = list_projects(ctx(ops.clone()), json!({"query": "board"}))
+            .await
+            .unwrap();
+        assert_eq!(boards["projects"][0]["primaryFolder"], FOLDER);
+        let parent = std::path::Path::new(FOLDER).parent().unwrap();
+        let parent = parent.to_string_lossy().into_owned();
+        for (args, err, folder_project) in [
+            (
+                json!({"projectId": "p2", "primaryFolder": format!("{FOLDER}/")}),
+                "",
+                "p1",
+            ),
+            (
+                json!({"projectId": "p2", "primaryFolder": parent}),
+                "",
+                "p3",
+            ),
+            (
+                json!({"projectId": "p1", "primaryFolder": FOLDER}),
+                "for boards",
+                "",
+            ),
+            (
+                json!({"projectId": "p2", "primaryFolder": "relative"}),
+                "absolute",
+                "",
+            ),
+            (
+                json!({"projectId": "p2", "primaryFolder": format!("{FOLDER}/missing-folder")}),
+                "does not exist",
+                "",
+            ),
+        ] {
+            ops.0.lock().unwrap().clear();
+            let r = update_project(ctx(ops.clone()), args.clone()).await;
+            let calls = ops.0.lock().unwrap().clone();
+            let upd = calls.iter().find(|(o, _)| o == "project_update");
+            if err.is_empty() {
+                assert!(r.is_ok(), "{args}: {r:?}");
+                assert_eq!(
+                    upd.unwrap().1["primaryFolderProjectId"],
+                    folder_project,
+                    "{args}"
+                );
+                assert_eq!(
+                    calls.iter().any(|(o, _)| o == "project_create"),
+                    folder_project == "p3",
+                    "{args}: a folder project is added only when none is open over it"
+                );
+            } else {
+                assert!(r.unwrap_err().public.contains(err), "{args}");
+                assert!(upd.is_none(), "{args}");
+            }
+        }
         // The repository tools hand their arguments to the repository ops, with the caller's chat.
         repo_locations(ctx(ops.clone()), json!({"query": "helm"}))
             .await

@@ -926,20 +926,18 @@ pub fn sidebar_rows(tx: &Transaction<'_>, ids: &[String], revision: i64) -> Res<
 // ---- chat organisation ----------------------------------------------------------------------
 
 struct ChatBasics {
-    folder: String,
     pinned: bool,
     side: bool,
 }
 
 fn chat_basics(tx: &Transaction<'_>, id: &str) -> Res<ChatBasics> {
     tx.query_row(
-        "SELECT project_id, pinned, side_source_id IS NOT NULL FROM chats WHERE id = ?1",
+        "SELECT pinned, side_source_id IS NOT NULL FROM chats WHERE id = ?1",
         [id],
         |r| {
             Ok(ChatBasics {
-                folder: r.get(0)?,
-                pinned: r.get::<_, i64>(1)? != 0,
-                side: r.get(2)?,
+                pinned: r.get::<_, i64>(0)? != 0,
+                side: r.get(1)?,
             })
         },
     )
@@ -978,9 +976,24 @@ pub fn organize(tx: &Transaction<'_>, a: &ChatOrganizeArgs) -> Res<Vec<String>> 
         if is_archived(tx, group)? {
             return Err(Refusal::Refused(ARCHIVED_REFUSAL.into()));
         }
-        if group == me.folder {
-            tx.execute("DELETE FROM chat_groups WHERE chat_id = ?1", [id])?;
-        } else {
+        // Chats are shown on boards only. Naming the group a chat is already shown under (a
+        // reorder does) changes nothing, so a chat not yet on a board can still be reordered.
+        let shown: String = tx.query_row(
+            "SELECT COALESCE(g.project_id, c.project_id) FROM chats c
+             LEFT JOIN chat_groups g ON g.chat_id = c.id WHERE c.id = ?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        if group != shown {
+            let kind: String =
+                tx.query_row("SELECT kind FROM projects WHERE id = ?1", [group], |r| {
+                    r.get(0)
+                })?;
+            if kind != "board" {
+                return Err(bad(
+                    "Pick a board; folders are where chats run, not where they are shown.",
+                ));
+            }
             tx.execute(
                 "INSERT INTO chat_groups(chat_id, project_id) VALUES (?1, ?2)
                  ON CONFLICT(chat_id) DO UPDATE SET project_id = excluded.project_id",
