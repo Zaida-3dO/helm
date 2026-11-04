@@ -63,6 +63,24 @@ fn main() -> ExitCode {
         Err(e) => return fatal(&platform, &format!("Helm could not lock its profile: {e}")),
     };
 
+    // A restore the user staged last session applies now: the profile is ours (locked) and nothing
+    // has opened its database yet.
+    match helm_backup::apply_pending(&profile.dir) {
+        Ok(Some(applied)) => log::info!(
+            "restored the profile from {} ({} entries); the previous database is kept in {}",
+            applied.archive,
+            applied.entries,
+            applied.safety_dir.display()
+        ),
+        Ok(None) => {}
+        Err(e) => {
+            return fatal(
+                &platform,
+                &format!("Helm could not finish restoring its backup: {e}"),
+            )
+        }
+    }
+
     let mut migrations = MigrationRegistry::new();
     registrations::migrations(&mut migrations);
     let db = match Database::open(&profile.db_path(), &migrations) {

@@ -91,6 +91,11 @@ pub fn user_documents() -> Option<PathBuf> {
 pub(crate) fn inside(root: &Path, p: &Path) -> bool {
     let norm = |q: &Path| {
         let s = q.to_string_lossy().replace('\\', "/");
+        // Windows' verbatim prefix (`//?/C:/...`) names the same place as the plain drive path.
+        let s = match s.strip_prefix("//?/") {
+            Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
+            _ => s,
+        };
         s.trim_end_matches('/').to_lowercase()
     };
     let (r, n) = (norm(root), norm(p));
