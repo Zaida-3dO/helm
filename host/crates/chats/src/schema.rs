@@ -63,11 +63,20 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
          -- there is nothing worth keeping in them.
          DROP TABLE IF EXISTS slot_waits;
          DROP TABLE IF EXISTS run_slot_settings;
-         -- A message never waits for a turn to end: the table that held messages waiting for
-         -- their turn, and the table that remembered where in that hold each one sat, go; the
-         -- rows that mattered stay in `submissions` and are handed to Claude at once.
-         DROP TABLE IF EXISTS queued_submissions;
-         DROP TABLE IF EXISTS draft_queue_slots;
+         -- A message never waits for a turn to end: nothing uses the table that held messages
+         -- waiting for their turn, or the one that remembered where in that hold each one sat; the
+         -- rows that mattered stay in `submissions` and are handed to Claude at once. Both tables
+         -- stay, empty, so an older version that still reads them can open this profile again.
+         CREATE TABLE IF NOT EXISTS queued_submissions (
+             submission_id  TEXT PRIMARY KEY REFERENCES submissions(id) ON DELETE CASCADE,
+             chat_id        TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+             position       INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS draft_queue_slots (
+             chat_id   TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+             position  INTEGER NOT NULL,
+             revision  INTEGER NOT NULL
+         );
          CREATE INDEX IF NOT EXISTS messages_chat_order ON messages(chat_id, active, timestamp, id);
          CREATE TABLE IF NOT EXISTS chat_titles (
              chat_id  TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
@@ -310,6 +319,14 @@ pub(crate) mod tests {
         })
         .unwrap();
         helm_core::recovery::run(&db, &registry()).unwrap();
+        // The retired queue tables are still there (empty) for an older version to open.
+        assert_eq!(
+            col(
+                &db,
+                "SELECT name FROM sqlite_master WHERE name IN ('queued_submissions', 'draft_queue_slots') ORDER BY name"
+            ),
+            ["draft_queue_slots", "queued_submissions"]
+        );
         assert_eq!(
             col(&db, "SELECT chat_id FROM restart_continuations"),
             ["run"],
