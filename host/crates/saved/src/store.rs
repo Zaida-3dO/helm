@@ -453,25 +453,19 @@ pub fn notes(tx: &Transaction<'_>, item_id: &str) -> Result<Vec<SavedNote>, Stor
     .map_err(Into::into)
 }
 
-/// Every reminder due by `now`, exactly once: the rows are marked before they are returned, so
-/// the next sweep is silent until a reminder is set again.
-pub fn take_due(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<Vec<SavedItem>> {
-    let ids: Vec<String> = tx
-        .prepare("SELECT id FROM saved_items WHERE remind_at IS NOT NULL AND remind_at <= ?1 AND reminded_at IS NULL")?
-        .query_map(params![now], |r| r.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    tx.execute(
-        "UPDATE saved_items SET reminded_at = ?1 WHERE remind_at IS NOT NULL AND remind_at <= ?1 AND reminded_at IS NULL",
-        params![now],
-    )?;
-    let marks = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+/// The reminders due by `now` on items still open (saved or filed), oldest first. Nothing is
+/// marked: a reminder stays due, and the Saved pane keeps saying so, until the user clears it,
+/// moves it, or finishes the item. A reminder that comes due while Helm is closed, or before
+/// any window is listening, is therefore never lost; who has already been told is the
+/// service's business (see `SavedService`), not the table's.
+pub fn due(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<Vec<SavedItem>> {
     tx.prepare(&format!(
-        "SELECT {COLS} FROM saved_items s WHERE s.id IN ({marks})"
+        "SELECT {COLS} FROM saved_items s
+         WHERE s.remind_at IS NOT NULL AND s.remind_at <= ?1 AND s.reminded_at IS NULL
+           AND s.state IN ('saved', 'filed')
+         ORDER BY s.remind_at, s.id"
     ))?
-    .query_map(params_from_iter(ids.iter()), row_to_item)?
+    .query_map(params![now], row_to_item)?
     .collect::<Result<Vec<_>, _>>()
 }
 
@@ -774,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn reminders_fire_once_and_notes_are_bounded() {
+    fn reminders_stay_due_until_dealt_with_and_notes_are_bounded() {
         let (_d, db) = temp_db();
         let item = seed(&db, 1000, "Pay the invoice", "due on the first");
         db.write(|tx| {
@@ -789,16 +783,35 @@ mod tests {
             )
         })
         .unwrap();
-        let quiet = db.write(|tx| take_due(tx, 4000)).unwrap();
+        let quiet = db.snapshot(|tx| due(tx, 4000)).unwrap();
         assert!(quiet.is_empty(), "a future reminder is not due");
-        let due = db.write(|tx| take_due(tx, 6000)).unwrap();
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].id, item.id);
-        assert_eq!(due[0].reminded_at, Some(6000));
-        assert!(
-            db.write(|tx| take_due(tx, 7000)).unwrap().is_empty(),
-            "the same reminder never fires twice"
+        let now_due = db.snapshot(|tx| due(tx, 6000)).unwrap();
+        assert_eq!(now_due.len(), 1);
+        assert_eq!(now_due[0].id, item.id);
+        assert_eq!(
+            db.snapshot(|tx| due(tx, 7000)).unwrap().len(),
+            1,
+            "a reminder nobody has dealt with stays due, so one that came due unseen is not lost"
         );
+        for (state, left) in [("done", 0), ("dismissed", 0), ("filed", 1), ("saved", 1)] {
+            db.write(|tx| {
+                update(
+                    tx,
+                    &item.id,
+                    &Update {
+                        state: Some(state.into()),
+                        ..Default::default()
+                    },
+                    7050,
+                )
+            })
+            .unwrap();
+            assert_eq!(
+                db.snapshot(|tx| due(tx, 7000)).unwrap().len(),
+                left,
+                "{state}"
+            );
+        }
         db.write(|tx| {
             update(
                 tx,
@@ -811,11 +824,11 @@ mod tests {
             )
         })
         .unwrap();
-        assert_eq!(
-            db.write(|tx| take_due(tx, 9000)).unwrap().len(),
-            1,
-            "setting a reminder again re-arms it"
+        assert!(
+            db.snapshot(|tx| due(tx, 7500)).unwrap().is_empty(),
+            "a moved reminder is not due until its new time"
         );
+        assert_eq!(db.snapshot(|tx| due(tx, 9000)).unwrap().len(), 1);
         db.write(|tx| {
             update(
                 tx,
@@ -829,8 +842,8 @@ mod tests {
         })
         .unwrap();
         assert!(
-            db.write(|tx| take_due(tx, 9900)).unwrap().is_empty(),
-            "clearing it stops it firing"
+            db.snapshot(|tx| due(tx, 9900)).unwrap().is_empty(),
+            "clearing it stops it"
         );
 
         // Notes: bounded per note and per item, on real items only.

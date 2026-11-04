@@ -63,6 +63,14 @@ export function leafFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       return { item, already: false };
     }
     if (op === 'saved_list') return fakeSavedList(items, args);
+    if (op === 'saved_due') {
+      const now = Date.now();
+      return {
+        items: [...items.values()].filter(
+          (i) => i.remindAt !== null && i.remindAt <= now && i.remindedAt === null && (i.state === 'saved' || i.state === 'filed'),
+        ),
+      };
+    }
     if (op === 'saved_update') {
       const it = items.get(String(args.id));
       if (!it) throw new ApiError('not_found', 'No saved item with that id.');

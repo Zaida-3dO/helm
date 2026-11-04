@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dueLabel, draftFromItem, remindAtFor, savedFromText, STATE_TITLES } from './model.ts';
+import { dueLabel, dueNotice, draftFromItem, remindAtFor, savedFromText, STATE_TITLES } from './model.ts';
 
 test('a message or selection becomes a title from its first line and keeps all of it', () => {
   assert.deepEqual(savedFromText('Fix the sign-in copy\nthe wording is stiff'), {
@@ -33,6 +33,10 @@ test('the due line appears only while a reminder is pending', () => {
   assert.equal(dueLabel({ remindAt: now + 3 * 86_400_000, remindedAt: null }, now), 'Due in 3 d');
   assert.equal(dueLabel({ remindAt: now - 1, remindedAt: null }, now), 'Due now');
   assert.equal(dueLabel({ remindAt: now + 3_600_000, remindedAt: now + 60_000 }, now), null, 'an already-sounded reminder is quiet');
+  // One notice for everything due, whether it came due together or while Helm was closed.
+  assert.equal(dueNotice([]), null);
+  assert.equal(dueNotice(['Pay the invoice']), 'Saved for later, now due: Pay the invoice');
+  assert.equal(dueNotice(['a', 'b', 'c']), '3 saved items are due');
 });
 
 test('every state has a plain word, and the draft opens by naming the item', () => {

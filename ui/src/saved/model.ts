@@ -56,7 +56,16 @@ export function savedOps(api: Api) {
       api<{ item?: SavedItem; removed?: boolean }>('saved_update', a),
     note: (a: { id: string; text: string }) => api<{ note: SavedNote }>('saved_note', a),
     comments: (a: { id: string }) => api<{ notes: SavedNote[] }>('saved_comments', a),
+    /** The open items whose reminder is due now, whether or not this window was told as it came due. */
+    due: () => api<{ items: SavedItem[] }>('saved_due', {}),
   };
+}
+
+/** The one line that says what is due: the item's title for one, a count for several. */
+export function dueNotice(titles: string[]): string | null {
+  if (titles.length === 0) return null;
+  if (titles.length === 1) return `Saved for later, now due: ${titles[0]}`;
+  return `${titles.length} saved items are due`;
 }
 
 /** Turn a message or selection into a saved item: the first line is the title, all of it is kept. */

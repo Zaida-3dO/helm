@@ -8,7 +8,7 @@
 //! |---|---|
 //! | [`store`] | the two tables: saving, the bounded note trail, listing and searching, updates, removal, and the due sweep |
 //! | `ops` | `saved_save`, `saved_list`, `saved_update`, `saved_note`, `saved_comments` |
-//! | [`service`] | the reminder sweep: each due reminder fires exactly once and emits `saved_due {items}` |
+//! | [`service`] | the reminder sweep: a reminder that comes due is announced once with `saved_due {items}`, and stays due until the user deals with it |
 //!
 //! Event `saved {ids}` tells the UI to re-read after any change. Saving the same transcript row
 //! twice (same chat and message), or the same `captureKey` twice, answers with the item that is

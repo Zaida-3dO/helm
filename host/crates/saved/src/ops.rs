@@ -4,6 +4,7 @@
 //! |---|---|---|
 //! | `saved_save` | maintenance | `{chatId?, messageId?, captureKey?, title, body, remindAt?}` to `{item, already}`; emits `saved` |
 //! | `saved_list` | blocking | `{state?, query?, page?}` to a [`crate::store::SavedPage`] |
+//! | `saved_due` | blocking | `{}` to `{items}`: the open items whose reminder is due now |
 //! | `saved_update` | maintenance | `{id, title?, body?, state?, remindAt?, expectRevision?, remove?}` to `{item}` or `{id, removed}`; emits `saved` |
 //! | `saved_note` | maintenance | `{id, text, authorType?, authorId?}` to `{note}`; emits `saved` |
 //! | `saved_comments` | blocking | `{id}` to `{notes}` (oldest first) |
@@ -57,6 +58,15 @@ struct ListArgs {
     page: i64,
 }
 
+/// Tells an absent field (`None`) from an explicit `null` (`Some(None)`).
+fn double_option<'de, T, D>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateArgs {
@@ -68,7 +78,7 @@ struct UpdateArgs {
     #[serde(default)]
     state: Option<String>,
     // A present null clears the reminder; a missing field leaves it alone.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     remind_at: Option<Option<i64>>,
     #[serde(default)]
     expect_revision: Option<i64>,
@@ -98,7 +108,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("saved_list", OpClass::Blocking, list)
         .blocking("saved_update", OpClass::Maintenance, update)
         .blocking("saved_note", OpClass::Maintenance, note)
-        .blocking("saved_comments", OpClass::Blocking, comments);
+        .blocking("saved_comments", OpClass::Blocking, comments)
+        .blocking("saved_due", OpClass::Blocking, due);
 }
 
 fn save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -186,9 +197,33 @@ fn note(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     Ok(json!({"note": n}))
 }
 
+/// The open items whose reminder is due now: what a window that has just started shows.
+fn due(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+    let svc = ctx.services.need::<crate::service::SavedService>()?;
+    Ok(json!({"items": svc.due_now(helm_core::now_ms())}))
+}
+
 fn comments(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: IdArg = parse(args)?;
     let db = ctx.services.need::<Database>()?;
     let notes = db.snapshot(|tx| store::notes(tx, &a.id)).map_err(fail)?;
     to_value(&json!({"notes": notes}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reminder sent as `null` clears it; one left out is left alone; a number sets it.
+    #[test]
+    fn a_null_reminder_is_told_from_a_missing_one() {
+        for (args, want) in [
+            (json!({"id": "a"}), None),
+            (json!({"id": "a", "remindAt": null}), Some(None)),
+            (json!({"id": "a", "remindAt": 5000}), Some(Some(5000))),
+        ] {
+            let parsed: UpdateArgs = parse(args.clone()).unwrap();
+            assert_eq!(parsed.remind_at, want, "{args}");
+        }
+    }
 }

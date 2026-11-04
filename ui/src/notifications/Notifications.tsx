@@ -5,6 +5,9 @@
 
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { shellOps } from '../api/shell.ts';
+import { dueNotice, savedOps } from '../saved/model.ts';
+import { requestPane } from '../settings/registry.ts';
+import { SETTINGS_DIALOG } from '../settings/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, Icon, TextInput, toast } from '../ui/index.ts';
 import { NoticeStack, type CompletionLike, type Notice } from './model.ts';
@@ -41,11 +44,33 @@ export function Notifications() {
       const s = (e as { summary?: { unread?: { chatId: string }[] } }).summary;
       if (s?.unread) stack.summary(s.unread.map((r) => r.chatId));
     });
-    // A saved item whose reminder came due: one quiet toast per item, no stack entry.
-    const offS = shell.bus.on('saved_due', (e) => {
-      const items = (e as { items?: { title: string }[] }).items ?? [];
-      for (const it of items) toast.show({ kind: 'info', text: `Saved for later, now due: ${it.title}` });
-    });
+    // Saved items whose reminder came due: one lasting notice for all that are due (a count when
+    // several), not a toast per item that the next one replaces. What came due while no window
+    // was listening is asked for here, once this one is. The Saved pane keeps saying "Due now"
+    // until the user deals with each item.
+    const due = new Map<string, string>();
+    const add = (items: { id: string; title: string }[]) => {
+      for (const it of items) due.set(it.id, it.title);
+      const text = dueNotice([...due.values()]);
+      if (text === null) return;
+      toast.show({
+        kind: 'info',
+        text,
+        ttlMs: 60_000,
+        action: {
+          label: 'Open Saved',
+          run: () => {
+            requestPane('saved');
+            shell.openDialog(SETTINGS_DIALOG);
+          },
+        },
+      });
+    };
+    const offS = shell.bus.on('saved_due', (e) => add((e as { items?: { id: string; title: string }[] }).items ?? []));
+    savedOps(shell.api)
+      .due()
+      .then((r) => add(r.items))
+      .catch(() => undefined);
     return () => {
       offC();
       offA();
