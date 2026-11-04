@@ -38,7 +38,9 @@ fn parse_args<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, ApiError> {
 fn folder(asked: Option<&str>, fallback: &str) -> Result<PathBuf, BackupError> {
     match asked.map(str::trim).filter(|s| !s.is_empty()) {
         Some(s) => Ok(PathBuf::from(s)),
-        None => Ok(user_documents().ok_or(BackupError::NoDocuments)?.join(fallback)),
+        None => Ok(user_documents()
+            .ok_or(BackupError::NoDocuments)?
+            .join(fallback)),
     }
 }
 

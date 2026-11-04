@@ -50,7 +50,10 @@ pub fn export_markdown(
     let mut messages = Vec::new();
     for row in rows {
         let (role, tool, mut text, artifact) = row?;
-        if let Some(full) = artifact.as_deref().and_then(|n| read_artifact(artifacts, n)) {
+        if let Some(full) = artifact
+            .as_deref()
+            .and_then(|n| read_artifact(artifacts, n))
+        {
             text = full;
         }
         if text.trim().is_empty() {
@@ -101,7 +104,11 @@ fn render(title: &str, model: Option<&str>, created_at: i64, now_ms: i64, rows: 
                 out.push('\n');
             }
             "toolResult" => {
-                let name = r.tool.as_deref().filter(|t| !t.is_empty()).unwrap_or("tool");
+                let name = r
+                    .tool
+                    .as_deref()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or("tool");
                 out.push_str(&format!("### Tool result: {}\n\n", name.replace('\n', " ")));
                 let fence = "`".repeat((longest_run(&r.text, '`') + 1).max(3));
                 out.push_str(&format!("{fence}\n{}\n{fence}\n", r.text.trim_end()));
@@ -153,9 +160,7 @@ fn file_stem(title: &str) -> String {
         s = "chat".to_owned();
     }
     let lower = s.to_lowercase();
-    let reserved = ["con", "prn", "aux", "nul"]
-        .iter()
-        .any(|r| lower == *r)
+    let reserved = ["con", "prn", "aux", "nul"].iter().any(|r| lower == *r)
         || (lower.len() == 4
             && (lower.starts_with("com") || lower.starts_with("lpt"))
             && lower.as_bytes()[3].is_ascii_digit());
@@ -171,7 +176,11 @@ fn write_new(dir: &Path, base: &str, bytes: &[u8]) -> Result<PathBuf, BackupErro
     let mut name = format!("{base}.md");
     for i in 2.. {
         let p = dir.join(&name);
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&p)
+        {
             Ok(mut f) => {
                 f.write_all(bytes)?;
                 return Ok(p);
@@ -208,7 +217,11 @@ mod tests {
         )
         .unwrap();
         let arts = tempfile::tempdir().unwrap();
-        std::fs::write(arts.path().join("abc.json"), r#"{"text":"the whole thing"}"#).unwrap();
+        std::fs::write(
+            arts.path().join("abc.json"),
+            r#"{"text":"the whole thing"}"#,
+        )
+        .unwrap();
         let dest = tempfile::tempdir().unwrap();
         let out = dest.path().join("exports");
 
@@ -225,15 +238,26 @@ mod tests {
         assert!(!text.contains("secret thoughts"));
         assert!(!text.contains("a branch not taken"));
         // The file name is safe on Windows.
-        let name = Path::new(&a.path).file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with("Plan- the -big- trip") && name.ends_with(".md"), "{name}");
+        let name = Path::new(&a.path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.starts_with("Plan- the -big- trip") && name.ends_with(".md"),
+            "{name}"
+        );
 
         // Again in the same second: a second file, never an overwrite.
         let b = export_markdown(&c, arts.path(), "c1", &out, 1_760_000_100_000).unwrap();
         assert_ne!(a.path, b.path);
         // A reserved device name is not used as a bare file name; a missing chat is refused.
         let r = export_markdown(&c, arts.path(), "c2", &out, 1_760_000_100_000).unwrap();
-        assert!(Path::new(&r.path).file_name().unwrap().to_string_lossy().starts_with("chat con"));
+        assert!(Path::new(&r.path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("chat con"));
         assert!(matches!(
             export_markdown(&c, arts.path(), "nope", &out, 1),
             Err(BackupError::ChatNotFound)

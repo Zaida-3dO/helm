@@ -82,7 +82,9 @@ pub fn apply_pending(profile_dir: &Path) -> Result<Option<Applied>, BackupError>
         Ok(p) if !p.archive_dir.is_empty() => p.archive_dir,
         _ => {
             set_aside(profile_dir);
-            log::error!("the staged restore note could not be read; it was set aside as {FAILED_FILE}");
+            log::error!(
+                "the staged restore note could not be read; it was set aside as {FAILED_FILE}"
+            );
             return Ok(None);
         }
     };
@@ -147,7 +149,10 @@ pub fn apply_pending(profile_dir: &Path) -> Result<Option<Applied>, BackupError>
 
 fn set_aside(profile_dir: &Path) {
     let _ = std::fs::remove_file(profile_dir.join(FAILED_FILE));
-    let _ = std::fs::rename(profile_dir.join(PENDING_FILE), profile_dir.join(FAILED_FILE));
+    let _ = std::fs::rename(
+        profile_dir.join(PENDING_FILE),
+        profile_dir.join(FAILED_FILE),
+    );
 }
 
 fn remove_target(p: &Path) -> Result<(), BackupError> {
@@ -192,7 +197,12 @@ mod tests {
         assert_eq!(testutil::db_note(target.dir.path()), "old data");
 
         // Staged: the phrase is accepted whatever its case; a second stage is refused.
-        prepare(target.dir.path(), &created.archive_dir, "Replace Chats and Settings").unwrap();
+        prepare(
+            target.dir.path(),
+            &created.archive_dir,
+            "Replace Chats and Settings",
+        )
+        .unwrap();
         assert_eq!(
             pending_archive(target.dir.path()).as_deref(),
             created.archive_dir.to_str()

@@ -75,7 +75,10 @@ pub fn create(
     if inside(profile_dir, dest_root) {
         return Err(BackupError::InsideProfile);
     }
-    let archive = unique_dir(dest_root, &format!("{ARCHIVE_PREFIX}{}", crate::stamp(now_ms)))?;
+    let archive = unique_dir(
+        dest_root,
+        &format!("{ARCHIVE_PREFIX}{}", crate::stamp(now_ms)),
+    )?;
     {
         // The consistent database copy first, while Helm keeps answering around us.
         let src = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -101,8 +104,8 @@ pub fn create(
         app_version: app_version.to_owned(),
         entries,
     };
-    let text =
-        serde_json::to_string_pretty(&manifest).map_err(|e| BackupError::Io(std::io::Error::other(e)))?;
+    let text = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| BackupError::Io(std::io::Error::other(e)))?;
     std::fs::write(archive.join(MANIFEST_FILE), text)?;
     Ok(Created {
         archive_dir: archive,

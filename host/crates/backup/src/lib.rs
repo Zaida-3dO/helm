@@ -142,7 +142,11 @@ pub(crate) mod testutil {
             ))
             .unwrap();
         }
-        fs::write(dir.join(format!("{}-wal", helm_core::profile::DB_FILE)), "sidecar").unwrap();
+        fs::write(
+            dir.join(format!("{}-wal", helm_core::profile::DB_FILE)),
+            "sidecar",
+        )
+        .unwrap();
         fs::create_dir_all(dir.join("sessions/s1")).unwrap();
         fs::write(dir.join("sessions/s1/log.jsonl"), "a session line").unwrap();
         fs::create_dir_all(dir.join("artifacts")).unwrap();
@@ -164,7 +168,8 @@ pub(crate) mod testutil {
     /// The profile's single database row, as stored there right now.
     pub fn db_note(profile_dir: &Path) -> String {
         let c = Connection::open(profile_dir.join(helm_core::profile::DB_FILE)).unwrap();
-        c.query_row("SELECT x FROM notes", [], |r| r.get(0)).unwrap()
+        c.query_row("SELECT x FROM notes", [], |r| r.get(0))
+            .unwrap()
     }
 
     /// Every entry under `root`, `/`-joined and sorted; folders end in `/`.
