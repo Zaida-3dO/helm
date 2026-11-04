@@ -124,6 +124,8 @@ export class ClaudeDriver implements Driver {
   private readonly subs = new Map<string, Submission>();
   /** Submissions by the uuid written to Claude, only where it differs from the id (a re-send). */
   private readonly wireAliases = new Map<string, string>();
+  /** Stop and withdraw calls in flight: they report the messages Claude cancels themselves. */
+  private cancelling = 0;
   private readonly translator: StreamTranslator;
   private readonly interactions: Interactions;
   private turnOpen = false;
@@ -611,6 +613,12 @@ export class ClaudeDriver implements Driver {
         this.ackSub(sub);
         return this.deliverSub(sub);
       case "cancelled":
+        // Cancelled by a Stop or a withdrawal of ours: that answer carries it. Anything else
+        // (Claude dropped it on its own) is told to the host, or the message would stay
+        // "read by nobody" and keep the chat running.
+        if (!sub.dropped && !sub.delivered && this.cancelling === 0) {
+          this.ch.emit({ type: "submission_cancelled", submissionId: sub.id });
+        }
         sub.dropped = true;
         return;
       default:
@@ -932,6 +940,7 @@ export class ClaudeDriver implements Driver {
       }
     }
     const cancelledSubmissionIds: string[] = [];
+    this.cancelling++;
     try {
       const r = await this.control({ subtype: "interrupt", cancel_queued: true }, this.limits.controlTimeoutMs);
       for (const id of Array.isArray(r.cancelled) ? r.cancelled : []) {
@@ -942,6 +951,8 @@ export class ClaudeDriver implements Driver {
       }
     } catch (e) {
       this.deps.diag(`interrupt failed: ${(e as Error).message}`);
+    } finally {
+      this.cancelling--;
     }
     return { success: true, data: { state: "stopping", cancelledSubmissionIds } };
   }
@@ -989,6 +1000,7 @@ export class ClaudeDriver implements Driver {
   async withdraw(cmd: Json): Promise<ResponseBody> {
     const sub = this.subs.get(typeof cmd.submissionId === "string" ? cmd.submissionId : "");
     if (!sub || sub.delivered || sub.dropped || this.dead) return { success: true, data: { withdrawn: false } };
+    this.cancelling++;
     try {
       const r = await this.control({ subtype: "cancel_async_message", message_uuid: sub.wire }, QUICK_CONTROL_MS);
       if (r.cancelled === true && !sub.delivered) {
@@ -999,6 +1011,8 @@ export class ClaudeDriver implements Driver {
       return { success: true, data: { withdrawn: false } };
     } catch (e) {
       return { success: false, error: (e as Error).message };
+    } finally {
+      this.cancelling--;
     }
   }
 

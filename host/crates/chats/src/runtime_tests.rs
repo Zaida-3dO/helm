@@ -527,6 +527,28 @@ async fn a_busy_send_goes_to_claude_at_once() {
         .await;
     h.until("delivered", |h| h.state(&second) == "delivered")
         .await;
+    // A steer Claude drops on its own is not coming: it reads "not sent", not "accepted".
+    let (dropped, _) = h.send(&chat, "and that", "steer").await;
+    let p3 = w.expect("prompt").await;
+    ack(&w, &p3).await;
+    h.until("accepted", |h| h.state(&dropped) == "accepted")
+        .await;
+    w.emit(json!({"type": "submission_cancelled", "submissionId": dropped}))
+        .await;
+    h.until("uncertain", |h| h.state(&dropped) == "uncertain")
+        .await;
+    // A steer left "accepted" by an earlier run must not keep the chat running after this one.
+    h.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO submissions(id, chat_id, text, mode, state, created_at) VALUES ('stale', ?1, 't', 'steer', 'accepted', 1)",
+            [&chat],
+        )?;
+        tx.execute(
+            "INSERT INTO submission_meta(submission_id, run_id) VALUES ('stale', 'an-older-run')",
+            [],
+        )
+    })
+    .unwrap();
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
         .await;
     h.until("idle", |h| h.status(&chat) == "idle").await;

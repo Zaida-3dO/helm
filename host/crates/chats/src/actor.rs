@@ -1022,6 +1022,18 @@ impl Actor {
         self.emit_thread();
     }
 
+    /// In-flight submissions (sent, or accepted but not yet read) cannot be known once their worker
+    /// is gone, and are never replayed.
+    fn mark_in_flight_uncertain(&mut self) {
+        let id = self.chat_id.clone();
+        self.write(|t| {
+            t.execute(
+                "UPDATE submissions SET state = 'uncertain' WHERE chat_id = ?1 AND state IN ('dispatching', 'accepted')",
+                [&id],
+            )
+        });
+    }
+
     fn on_exit(&mut self, reason: String) {
         self.link = None;
         self.link_closing = false;
@@ -1053,6 +1065,9 @@ impl Actor {
             }
         }
         self.timers.clear();
+        // Whatever the worker had not settled is unknowable now, busy or not: a message left
+        // "accepted" by a worker that went away must not outlive it.
+        self.mark_in_flight_uncertain();
         if self.status().is_busy() {
             // A turn that was still waiting on its local model to be made ready dies with the
             // run: nothing reached the server, so what was typed goes back to the draft, and an
@@ -1070,15 +1085,9 @@ impl Actor {
             } else {
                 self.worker_error.clone().unwrap_or(reason)
             };
-            // In-flight submissions are now unknowable (never replayed). Written before the status,
-            // so no reader sees `interrupted` while they still look in flight.
-            let id = self.chat_id.clone();
-            self.write(|t| {
-                t.execute(
-                    "UPDATE submissions SET state = 'uncertain' WHERE chat_id = ?1 AND state IN ('dispatching', 'accepted')",
-                    [&id],
-                )
-            });
+            // Written before the status, so no reader sees `interrupted` while they still look in
+            // flight (see `mark_in_flight_uncertain`).
+            self.mark_in_flight_uncertain();
             if self.archived {
                 // The archive stopped it: not a crash, so nothing to resume or explain.
                 self.end_run(ChatStatus::Stopped, None, "stopped");
@@ -2678,6 +2687,20 @@ impl Actor {
                     }
                 }
             }
+            "submission_cancelled" => {
+                // Claude dropped a message it never read, outside a Stop or a withdrawal: it is
+                // not coming, so it must neither keep the chat running nor read as delivered.
+                if let Some(sid) = str_of(&v, "submissionId") {
+                    let accepted = self
+                        .submission(&sid)
+                        .is_some_and(|s| s.state == SubmissionState::Accepted);
+                    if accepted && self.stopping.is_none() {
+                        self.set_submission(&sid, SubmissionState::Uncertain);
+                        self.clear_timer(|t| *t == Timer::WaitLimit(sid.clone()));
+                        self.emit_pending();
+                    }
+                }
+            }
             "background_tasks" => {
                 let tasks: Vec<BackgroundTask> = v
                     .get("tasks")
@@ -3416,13 +3439,19 @@ impl Actor {
                 [&chat],
             )
         });
+        // Only this run's steers: one left over from an earlier worker or run is not coming, and
+        // counting it would keep the chat running after every later turn.
+        let run = self.run_id.clone();
         let unread_steers: i64 = self
             .sh
             .db
             .snapshot(|t| {
                 t.query_row(
-                    "SELECT count(*) FROM submissions WHERE chat_id = ?1 AND state = 'accepted' AND mode = 'steer'",
-                    [&chat],
+                    "SELECT count(*) FROM submissions s
+                     JOIN submission_meta m ON m.submission_id = s.id
+                     WHERE s.chat_id = ?1 AND s.state = 'accepted' AND s.mode = 'steer'
+                       AND m.run_id = ?2",
+                    rusqlite::params![chat, run],
                     |r| r.get(0),
                 )
             })

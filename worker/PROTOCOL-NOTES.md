@@ -310,6 +310,7 @@ registers the PreToolUse hook in `initialize`.
 | Event | Fields |
 |---|---|
 | `submission_delivered` | `submissionId` |
+| `submission_cancelled` | `submissionId`: Claude dropped a message it had not read, on its own (not through a Stop or a withdrawal, whose answers carry it) |
 | `background_tasks` | `tasks: [{id, title, command?, kind:"shell"\|"agent", startedAt}]`, the full list each time |
 | `shell_changes` | `toolCallId, paths` (absolute, forward slashes; at most 200): the files a Bash call changed, from a git comparison before and after it; sent after the call's `tool_execution_end`, only when there are some |
 | `long_command` | `toolCallId, action:"denied"\|"reminded"\|"escaped", reason` |

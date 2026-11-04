@@ -44,6 +44,7 @@ pub const ACTOR_LINES: &[&str] = &[
     "permission_mode",
     "native_session",
     "submission_delivered",
+    "submission_cancelled",
     "background_tasks",
     "compaction_start",
     "compaction_end",
