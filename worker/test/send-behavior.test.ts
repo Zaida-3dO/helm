@@ -278,6 +278,14 @@ describe("withdraw, stop_tool, compact and abort", () => {
       const settled = await s.host.waitForType("agent_settled", 5000, 0);
       assert.equal(settled.outcome, "stopped");
       assert.equal(s.host.ofType("submission_delivered").some((e) => e.submissionId === steer), false);
+      // The host sends a dropped steer again under the same id: it must reach Claude again (under a
+      // fresh uuid), not be answered from the old, already settled submission.
+      const again = await prompt(s.host, "never mind", {}, steer);
+      assert.equal(again.success, true);
+      const resent = (await s.host.waitFor((e) => e.type === "submission_delivered" && e.submissionId === steer, 5000, 0)) as Json;
+      assert.equal(resent.submissionId, steer);
+      const written = s.received().filter((r) => r.type === "user" && (r.message as Json | undefined)?.role === "user" && r.uuid !== steer);
+      assert.ok(written.length >= 1, "the re-sent message was written to Claude again");
     } finally {
       await s.done();
     }

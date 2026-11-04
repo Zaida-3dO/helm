@@ -251,6 +251,7 @@ function autoAnswer(rec: Json): void {
       const i = unread.findIndex((u) => u.uuid === id);
       if (i === -1) return ok({ cancelled: false });
       unread.splice(i, 1);
+      forget(id);
       life(id, "cancelled");
       return ok({ cancelled: true });
     }
@@ -259,13 +260,23 @@ function autoAnswer(rec: Json): void {
       if (req.cancel_queued === true) {
         const cancelled = unread.map((u) => String(u.uuid ?? "")).filter(Boolean);
         unread = [];
-        for (const id of cancelled) life(id, "cancelled");
+        for (const id of cancelled) {
+          forget(id);
+          life(id, "cancelled");
+        }
         return ok({ still_queued: [], cancelled });
       }
       return ok({ still_queued: unread.map((u) => String(u.uuid ?? "")).filter(Boolean) });
     }
     default:
       return;
+  }
+}
+
+/** A cancelled message is gone: the real CLI never runs it, so a script step cannot wait on it either. */
+function forget(uuid: string): void {
+  for (let i = inbox.length - 1; i >= 0; i--) {
+    if (inbox[i].type === "user" && inbox[i].uuid === uuid) inbox.splice(i, 1);
   }
 }
 

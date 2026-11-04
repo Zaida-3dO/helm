@@ -58,6 +58,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 interface Submission {
   id: string;
+  /** The uuid written to Claude: the id itself, or a fresh one when a dropped message is sent again. */
+  wire: string;
   state: "dispatching" | "accepted" | "uncertain" | "rejected";
   result: Promise<ResponseBody>;
   settle?: (b: ResponseBody) => void;
@@ -120,6 +122,8 @@ export class ClaudeDriver implements Driver {
   private nextControl = 1;
   private readonly controls = new Map<string, PendingControl>();
   private readonly subs = new Map<string, Submission>();
+  /** Submissions by the uuid written to Claude, only where it differs from the id (a re-send). */
+  private readonly wireAliases = new Map<string, string>();
   private readonly translator: StreamTranslator;
   private readonly interactions: Interactions;
   private turnOpen = false;
@@ -589,7 +593,7 @@ export class ClaudeDriver implements Driver {
   private onUserEcho(rec: Json): boolean {
     const uuid = typeof rec.uuid === "string" ? rec.uuid : undefined;
     if (!uuid) return false;
-    const sub = this.subs.get(uuid);
+    const sub = this.subByWire(uuid);
     if (!sub) return false;
     this.ackSub(sub);
     this.deliverSub(sub);
@@ -598,7 +602,7 @@ export class ClaudeDriver implements Driver {
 
   /** `command_lifecycle`: queued is the acknowledgement, started is the read (worker/PROTOCOL-NOTES.md). */
   private onLifecycle(rec: Json): void {
-    const sub = this.subs.get(String(rec.command_uuid ?? ""));
+    const sub = this.subByWire(String(rec.command_uuid ?? ""));
     if (!sub) return; // internal messages (/compact) and uuids we never sent
     switch (rec.state) {
       case "queued":
@@ -612,6 +616,12 @@ export class ClaudeDriver implements Driver {
       default:
         return;
     }
+  }
+
+  /** The submission Claude's record names by the uuid we wrote (a stale uuid from a dropped send names nothing). */
+  private subByWire(uuid: string): Submission | undefined {
+    const sub = this.subs.get(this.wireAliases.get(uuid) ?? uuid);
+    return sub && sub.wire === uuid ? sub : undefined;
   }
 
   private ackSub(sub: Submission): void {
@@ -848,7 +858,12 @@ export class ClaudeDriver implements Driver {
     const sid = typeof cmd.submissionId === "string" ? cmd.submissionId : undefined;
     if (!sid || !UUID_RE.test(sid)) return { success: false, error: "prompt needs a submissionId that is a UUID" };
     const existing = this.subs.get(sid);
-    if (existing) return existing.result; // idempotent: never sent twice
+    // Idempotent: never sent twice. The exception is a message Claude dropped unread (a Stop with
+    // the queue cancelled, a withdrawal): the host sends it again as the next turn, and it has to
+    // reach Claude again, under a fresh uuid in case Claude remembers the old one.
+    if (existing && !(existing.dropped && !existing.delivered)) return existing.result;
+    if (existing) this.wireAliases.delete(existing.wire);
+    const wire = existing ? randomUUID() : sid;
     const text = typeof cmd.text === "string" ? cmd.text : "";
     if (Buffer.byteLength(text, "utf8") > MAX_SUBMISSION_TEXT_BYTES) {
       return { success: false, error: "message text is over the 2 MB limit" };
@@ -867,8 +882,9 @@ export class ClaudeDriver implements Driver {
 
     let settle!: (b: ResponseBody) => void;
     const result = new Promise<ResponseBody>((r) => (settle = r));
-    const sub: Submission = { id: sid, state: "dispatching", result, settle, text, delivered: false, dropped: false, answered: false, deliveryHeld: false };
+    const sub: Submission = { id: sid, wire, state: "dispatching", result, settle, text, delivered: false, dropped: false, answered: false, deliveryHeld: false };
     this.subs.set(sid, sub);
+    if (wire !== sid) this.wireAliases.set(wire, sid);
 
     if (!this.turnOpen) await this.applyPendingSettings();
 
@@ -877,7 +893,7 @@ export class ClaudeDriver implements Driver {
       message: { role: "user", content },
       parent_tool_use_id: null,
       session_id: this.sessionId ?? "",
-      uuid: sid,
+      uuid: wire,
     };
     const now = cmd.priority === "now";
     if (now) msg.priority = "now";
@@ -919,7 +935,7 @@ export class ClaudeDriver implements Driver {
     try {
       const r = await this.control({ subtype: "interrupt", cancel_queued: true }, this.limits.controlTimeoutMs);
       for (const id of Array.isArray(r.cancelled) ? r.cancelled : []) {
-        const sub = this.subs.get(String(id));
+        const sub = this.subByWire(String(id));
         if (!sub || sub.delivered) continue; // ignore uuids we never sent (the CLI may list its own)
         sub.dropped = true;
         cancelledSubmissionIds.push(sub.id);
@@ -974,7 +990,7 @@ export class ClaudeDriver implements Driver {
     const sub = this.subs.get(typeof cmd.submissionId === "string" ? cmd.submissionId : "");
     if (!sub || sub.delivered || sub.dropped || this.dead) return { success: true, data: { withdrawn: false } };
     try {
-      const r = await this.control({ subtype: "cancel_async_message", message_uuid: sub.id }, QUICK_CONTROL_MS);
+      const r = await this.control({ subtype: "cancel_async_message", message_uuid: sub.wire }, QUICK_CONTROL_MS);
       if (r.cancelled === true && !sub.delivered) {
         sub.dropped = true;
         this.ackSub(sub); // written and now withdrawn: the prompt itself succeeded
