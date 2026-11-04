@@ -311,6 +311,7 @@ enum CreateRefusal {
     OtherFolder,
     NotABoard,
     BoardArchived,
+    BoardStale,
 }
 
 pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -374,6 +375,7 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 Some(b) => match boards.board(tx, &b)? {
                     None => return Ok(Err(CreateRefusal::NotABoard)),
                     Some(s) if s.archived => return Ok(Err(CreateRefusal::BoardArchived)),
+                    Some(s) if s.stale => return Ok(Err(CreateRefusal::BoardStale)),
                     Some(_) => Some(b),
                 },
                 // Nobody named a board: the board over this folder, else the default board.
@@ -402,6 +404,9 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 "refused",
                 "That board is archived; restore it to start new chats.",
             ),
+            CreateRefusal::BoardStale => {
+                ApiError::new("refused", "That board is no longer on Agent Standup.")
+            }
         })?;
     let rev = clock.next();
     let chat = db

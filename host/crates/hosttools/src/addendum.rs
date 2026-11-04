@@ -113,8 +113,8 @@ pub fn knowledge_text(note: Option<&str>, hub_server: Option<&str>) -> Option<St
     }
     if let Some(id) = hub_server.map(str::trim).filter(|i| !i.is_empty()) {
         parts.push(format!(
-            "Shared memories are connected (MCP server {id}). Before non-trivial work, search \
-             them with memory_search for lessons and conventions that apply."
+            "Shared memories are connected (MCP server {id}). When its memory_search tool is \
+             available, search it before non-trivial work for lessons and conventions that apply."
         ));
     }
     (!parts.is_empty()).then(|| parts.join("\n\n"))
@@ -261,7 +261,12 @@ mod tests {
         }
         // A note over the limit is cut, not dropped.
         let got = knowledge_text(Some(&long), None).unwrap();
-        assert_eq!(got.matches('x').count(), NOTE_PROMPT_CHARS);
+        assert!(
+            got.ends_with(&"x".repeat(NOTE_PROMPT_CHARS))
+                && !got.contains(&"x".repeat(NOTE_PROMPT_CHARS + 1)),
+            "{}",
+            got.len()
+        );
 
         // As a section: the lookups get the chat id, and it composes after earlier sections.
         let mut a = Addendum::new();

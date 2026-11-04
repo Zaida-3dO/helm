@@ -215,11 +215,20 @@ async fn finish(
     };
     let message = successor_message(&chat.title, &chat.id, &cut(&handoff, MAX_HANDOFF_BYTES));
     let mut create = json!({"cwd": chat.cwd, "projectId": chat.project_id});
-    // The successor stays on the old chat's board.
+    // The successor stays on the old chat's board while that board still takes chats; otherwise
+    // the host picks its home as for any new chat.
     let boards = crate::store::Boards::of(&ctx.services);
     let board = rt
         .db()
-        .snapshot(|tx| boards.chat_board(tx, &chat.id))
+        .snapshot(|tx| {
+            Ok::<_, rusqlite::Error>(match boards.chat_board(tx, &chat.id)? {
+                Some(b) => boards
+                    .board(tx, &b)?
+                    .filter(|s| !s.archived && !s.stale)
+                    .map(|s| s.id),
+                None => None,
+            })
+        })
         .map_err(|e| e.to_string())?;
     if let Some(b) = board {
         create["boardId"] = json!(b);

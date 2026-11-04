@@ -1,7 +1,9 @@
 //! The read-only Agent Standup client.
 //!
-//! Helm reads board projects from Agent Standup over fixed GET routes and never writes to it in
-//! v1. The bearer token Helm holds for it can write, so the guard is on the **method**: the one
+//! Helm reads board projects from Agent Standup over fixed GET routes, and this crate never writes
+//! to it. The few writes Helm does make live elsewhere, each behind its own op: the workflow
+//! crate's writer and the projects crate's `board_project_create` (Helm's "New project"). The
+//! bearer token Helm holds for it can write, so this crate's guard is on the **method**: the one
 //! transport seam, [`Transport::get`], is the only way a request leaves this crate, and a test scans
 //! the crate's source for any other request builder. `GET /api/projects` shares its path with the
 //! board's create route, so a path allowlist would not be enough.

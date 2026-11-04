@@ -82,6 +82,7 @@ fn chat_id_arg(a: &Value) -> Result<String, ToolError> {
 
 /// The refusal for a folder project's id where a board's is needed.
 const NOT_A_BOARD: &str = "Pick a board; folders are where chats run, not where they are shown.";
+const STALE_BOARD: &str = "That board is no longer on Agent Standup.";
 
 /// The board a chat is shown on. A side chat is never shown in the sidebar, so it counts as on
 /// the board of the chat it was opened from.
@@ -157,6 +158,9 @@ fn board_arg(
     project_id: &str,
 ) -> rusqlite::Result<Result<BoardSummary, ToolError>> {
     if let Some(b) = boards.board(tx, project_id)? {
+        if b.stale {
+            return Ok(Err(refuse(STALE_BOARD)));
+        }
         return Ok(Ok(b));
     }
     let known = tx
@@ -1345,6 +1349,7 @@ mod tests {
             folder_project_id: folder.map(|f| f.0.into()),
             folder_path: folder.map(|f| f.1.into()),
             archived: false,
+            stale: false,
         }
     }
 
@@ -1376,6 +1381,10 @@ mod tests {
                 archived: true,
                 ..board("b-old", "Old", None, own)
             },
+            BoardSummary {
+                stale: true,
+                ..board("b-gone", "Gone", None, own)
+            },
         ]);
         fake.groups
             .lock()
@@ -1389,7 +1398,7 @@ mod tests {
         let not_board = "Pick a board; folders are where chats run";
         // (caller, args, error text or "", then for a new chat: its board, parent and folder)
         type Case<'a> = (&'a str, Value, &'a str, &'a str, Option<&'a str>, &'a str);
-        let cases: [Case; 11] = [
+        let cases: [Case; 12] = [
             // Defaults: the caller's board, nested under the caller, in the board's folder.
             (&a, json!({}), "", "b-home", Some(&a), &work),
             (
@@ -1429,6 +1438,14 @@ mod tests {
             ),
             (&a, json!({"projectId": "b-site"}), no_folder, "", None, ""),
             (&a, json!({"projectId": "b-old"}), "archived", "", None, ""),
+            (
+                &a,
+                json!({"projectId": "b-gone"}),
+                "no longer on Agent Standup",
+                "",
+                None,
+                "",
+            ),
             (
                 &a,
                 json!({"projectId": "b-other", "parentChatId": a}),

@@ -321,16 +321,19 @@ async fn sync(ctx: OpCtx, _args: Value) -> Result<Value, ApiError> {
     let now = helm_core::now_ms();
     let outcome = db.write(|tx| match &fetched {
         Ok((projects, complete)) => {
-            apply_sync(tx, &base, projects, *complete, now)?;
-            record_result(tx, now, None)
+            let rehomed = apply_sync(tx, &base, projects, *complete, now)?;
+            record_result(tx, now, None)?;
+            Ok(rehomed)
         }
         Err(e) => {
             log::warn!("Agent Standup sync failed: {e}");
-            record_result(tx, now, Some(&e.to_string()))
+            record_result(tx, now, Some(&e.to_string()))?;
+            Ok(Default::default())
         }
     });
     drop(clear);
-    outcome.map_err(internal)?;
+    let rehomed = outcome.map_err(internal)?;
+    crate::boards::emit_rehoming(&ctx, &db, &rehomed);
     if fetched.is_ok() {
         // The one-time move of chats onto boards waits for the first sync that brings boards in.
         // It may ask the board about linked items, so it runs after the sync has answered.
@@ -357,18 +360,20 @@ async fn sync(ctx: OpCtx, _args: Value) -> Result<Value, ApiError> {
 ///   that rule could hide a live project (or keep showing a done one) until the next edit.
 /// - Local state (rename, icon, colour, pin, order, collapse, nesting) is never touched.
 /// - A board with no folder whose repository names exactly one folder gets that folder
-///   ([`crate::boards::fill_primary_folders`]); a folder already set is kept.
+///   ([`crate::boards::fill_primary_folders`]); a folder already set is kept. Chats the one-time
+///   move could only put on the default board follow such a folder
+///   ([`crate::boards::rehome_fallback_chats`]).
 /// - Every project of this board address missing from a complete sync is marked stale, never
 ///   deleted. A sync cut short at the page cap marks nothing stale.
 ///
-/// Returns how many projects the sync named.
+/// Returns the chats a filled-in folder moved.
 pub fn apply_sync(
     tx: &Transaction<'_>,
     url: &str,
     projects: &[BoardProject],
     complete: bool,
     now: i64,
-) -> rusqlite::Result<usize> {
+) -> rusqlite::Result<crate::boards::Rehoming> {
     let mut seen = std::collections::HashSet::new();
     for (i, p) in projects.iter().enumerate() {
         seen.insert(p.id.as_str());
@@ -445,9 +450,9 @@ pub fn apply_sync(
             }
         }
     }
-    crate::boards::fill_primary_folders(tx)?;
+    let filled = crate::boards::fill_primary_folders(tx)?;
     if !complete {
-        return Ok(projects.len());
+        return crate::boards::rehome_fallback_chats(tx, &filled, now);
     }
     let mut st = tx.prepare(
         "SELECT project_id, board_project_id FROM board_projects WHERE board_url = ?1 AND stale = 0",
@@ -466,5 +471,5 @@ pub fn apply_sync(
             [&pid],
         )?;
     }
-    Ok(projects.len())
+    crate::boards::rehome_fallback_chats(tx, &filled, now)
 }

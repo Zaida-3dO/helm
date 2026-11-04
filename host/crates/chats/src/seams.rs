@@ -55,6 +55,8 @@ pub struct BoardSummary {
     pub folder_project_id: Option<String>,
     pub folder_path: Option<String>,
     pub archived: bool,
+    /// The board no longer lists it: no new chat is put on it.
+    pub stale: bool,
 }
 
 /// Every board answer defaults to "no boards", so a gate that only knows about archiving (and a

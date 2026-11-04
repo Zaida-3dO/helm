@@ -104,10 +104,26 @@ fn project_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 fn project_update(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ProjectUpdateArgs = parse_args(args)?;
     let db = ctx.services.need::<Database>()?;
-    let (before, node) = db.write(|tx| {
-        let before = store::get_project(tx, &a.project_id)?.path;
+    let (before, node, rehomed) = db.write(|tx| {
+        let old = store::get_project(tx, &a.project_id)?;
         store::update_project(tx, &a)?;
-        Ok::<_, Refusal>((before, store::get_project(tx, &a.project_id)?))
+        let node = store::get_project(tx, &a.project_id)?;
+        // A board's folder changed: chats the one-time move could only put on the default board
+        // follow it, as if it had been set before the move.
+        let mut rehomed = Default::default();
+        if node.kind == ProjectKind::Board
+            && node.primary_folder_project_id != old.primary_folder_project_id
+        {
+            let folders: Vec<String> = [
+                old.primary_folder_project_id,
+                node.primary_folder_project_id.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            rehomed = crate::boards::rehome_fallback_chats(tx, &folders, helm_core::now_ms())?;
+        }
+        Ok::<_, Refusal>((old.path, node, rehomed))
     })?;
     // Primary folder…: the project's chats were all idle (update_project checks);
     // retire their workers so each next turn starts in the new folder.
@@ -115,6 +131,7 @@ fn project_update(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         retire_workers(ctx, &db, &a.project_id);
     }
     emit_project(ctx, &node);
+    crate::boards::emit_rehoming(ctx, &db, &rehomed);
     to_value(&node)
 }
 

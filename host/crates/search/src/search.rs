@@ -65,9 +65,11 @@ pub fn run(db: &Database, args: &SearchArgs, now_ms: i64) -> Result<SearchResult
 }
 
 /// The facts the boost reads, as columns after `c.id`: pinned, status, project, opens, opens time.
-const FACT_COLUMNS: &str =
-    "c.pinned, c.status, c.project_id, COALESCE(o.opens, 0.0), COALESCE(o.updated_at, 0)";
+/// A chat's project is the one it is shown under (its board), else the folder it runs in.
+const FACT_COLUMNS: &str = "c.pinned, c.status, COALESCE(g.project_id, c.project_id), COALESCE(o.opens, 0.0), COALESCE(o.updated_at, 0)";
 const FACT_JOIN: &str = "LEFT JOIN search_opens o ON o.chat_id = c.id";
+/// The project a chat is shown under, when it is not the folder it runs in.
+const GROUP_JOIN: &str = "LEFT JOIN chat_groups g ON g.chat_id = c.id";
 
 fn facts(
     r: &rusqlite::Row<'_>,
@@ -98,9 +100,10 @@ fn title_hits(
 ) -> rusqlite::Result<Vec<TitleHit>> {
     let needle = query.to_lowercase();
     let sql = format!(
-        "SELECT c.id, c.title, p.name, {FACT_COLUMNS} FROM chats c
-         JOIN projects p ON p.id = c.project_id {FACT_JOIN}
-         WHERE c.side_source_id IS NULL AND (?1 OR c.archived = 0) AND (?2 IS NULL OR c.project_id = ?2)
+        "SELECT c.id, c.title, p.name, {FACT_COLUMNS} FROM chats c {GROUP_JOIN}
+         JOIN projects p ON p.id = COALESCE(g.project_id, c.project_id) {FACT_JOIN}
+         WHERE c.side_source_id IS NULL AND (?1 OR c.archived = 0)
+           AND (?2 IS NULL OR COALESCE(g.project_id, c.project_id) = ?2)
          ORDER BY c.updated_at DESC, c.id"
     );
     let mut st = tx.prepare_cached(&sql)?;
@@ -141,9 +144,10 @@ fn text_hits(
         "SELECT s.message_id, s.chat_id, s.text, bm25(message_search), c.updated_at, c.title, p.name, {FACT_COLUMNS}
          FROM message_search f
          JOIN chat_search_source s ON s.message_id = f.rowid
-         JOIN chats c ON c.id = s.chat_id
-         JOIN projects p ON p.id = c.project_id {FACT_JOIN}
-         WHERE message_search MATCH ?1 AND (?2 OR s.archived = 0) AND (?3 IS NULL OR c.project_id = ?3)
+         JOIN chats c ON c.id = s.chat_id {GROUP_JOIN}
+         JOIN projects p ON p.id = COALESCE(g.project_id, c.project_id) {FACT_JOIN}
+         WHERE message_search MATCH ?1 AND (?2 OR s.archived = 0)
+           AND (?3 IS NULL OR COALESCE(g.project_id, c.project_id) = ?3)
          ORDER BY bm25(message_search) LIMIT ?4"
     );
     let mut st = tx.prepare_cached(&sql)?;
@@ -224,6 +228,13 @@ mod tests {
         helm_chats::register_migrations(&mut reg);
         crate::register_migrations(&mut reg);
         let db = Database::open(&dir.path().join("t.db"), &reg).unwrap();
+        // Where a chat is shown, when it is not its folder (the projects crate's table).
+        db.write(|tx| {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS chat_groups (chat_id TEXT PRIMARY KEY, project_id TEXT NOT NULL)",
+            )
+        })
+        .unwrap();
         (dir, db)
     }
 
@@ -446,17 +457,36 @@ mod tests {
     fn the_project_filter_applies_to_text_and_titles() {
         let (_d, db) = db();
         chat(&db, "C:/one", "Mango one", NOW, &[("user", "mango", 1)]);
-        chat(&db, "C:/two", "Mango two", NOW, &[("user", "mango", 1)]);
-        let project: String = db
-            .snapshot(|tx| {
-                tx.query_row("SELECT id FROM projects WHERE path = 'C:/one'", [], |r| {
+        let two = chat(&db, "C:/two", "Mango two", NOW, &[("user", "mango", 1)]);
+        chat(&db, "C:/two", "Mango three", NOW, &[("user", "mango", 1)]);
+        let project = |path: &str| -> String {
+            db.snapshot(|tx| {
+                tx.query_row("SELECT id FROM projects WHERE path = ?1", [path], |r| {
                     r.get(0)
                 })
             })
-            .unwrap();
-        let mut a = args("mango");
-        a.project_id = Some(project);
-        assert_eq!(ids(&run(&db, &a, NOW).unwrap()), ["Mango one"]);
+            .unwrap()
+        };
+        let (one, folder_two) = (project("C:/one"), project("C:/two"));
+        // "Mango two" runs in C:/two but is shown under C:/one (as a chat on a board is).
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO chat_groups(chat_id, project_id) VALUES (?1, ?2)",
+                [&two, &one],
+            )
+        })
+        .unwrap();
+        for (filter, want) in [
+            (one, vec!["Mango one", "Mango two"]),
+            (folder_two, vec!["Mango three"]),
+        ] {
+            let mut a = args("mango");
+            a.project_id = Some(filter);
+            let r = run(&db, &a, NOW).unwrap();
+            let mut got = ids(&r);
+            got.sort();
+            assert_eq!(got, want);
+        }
     }
 
     #[test]

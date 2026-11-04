@@ -11,7 +11,9 @@
 //! - [`fill_primary_folders`], run on every sync: a board with no folder whose repository names
 //!   exactly one folder gets that folder. A folder already set is never replaced;
 //! - the one-time move of chats onto boards ([`migrate_chats_onto_boards`]), run after a
-//!   successful sync so it never runs before there are boards to move chats onto;
+//!   successful sync so it never runs before there are boards to move chats onto. A chat it could
+//!   only send to the default board follows a board folder set later
+//!   ([`rehome_fallback_chats`]), so where it ends up does not depend on which came first;
 //! - `board_project_create`: a new board project made on Agent Standup itself, with its folder.
 //!
 //! | op | class | args → result |
@@ -31,7 +33,7 @@ use helm_standup::{BoardProject, Client, StandupError};
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 /// The board chats with no other home go to while the setting is unset.
@@ -46,8 +48,14 @@ pub const MIGRATION: &str = "projects-chats-onto-boards";
 pub const MIGRATION_LOG_KEY: &str = "migration:chatsOntoBoardsLog";
 /// Linked items the move asks the board about, at most.
 pub const MAX_ITEM_LOOKUPS: usize = 200;
-/// Parent steps climbed from an item to its project, at most.
+/// Parent steps climbed from an item to its project, or from a group to a board above it, at most.
 const MAX_HOPS: usize = 6;
+
+/// Why the one-time move put a chat where it did (the log's `why`).
+const WHY_LINKED: &str = "linked item";
+const WHY_ABOVE: &str = "board above its group";
+const WHY_FOLDER: &str = "folder";
+const WHY_DEFAULT: &str = "default board";
 
 /// An open board: not archived here and still on the board.
 const OPEN_BOARD: &str =
@@ -67,7 +75,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
 pub fn board_summary(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option<BoardSummary>> {
     tx.query_row(
         "SELECT p.id, COALESCE(l.title_override, b.title, p.name), b.repo,
-                l.primary_folder_project_id, f.path, COALESCE(l.archived, 0)
+                l.primary_folder_project_id, f.path, COALESCE(l.archived, 0), COALESCE(b.stale, 0)
          FROM projects p
          LEFT JOIN project_local l ON l.project_id = p.id
          LEFT JOIN board_projects b ON b.project_id = p.id
@@ -82,6 +90,7 @@ pub fn board_summary(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option<
                 folder_project_id: r.get(3)?,
                 folder_path: r.get(4)?,
                 archived: r.get::<_, i64>(5)? != 0,
+                stale: r.get::<_, i64>(6)? != 0,
             })
         },
     )
@@ -242,8 +251,8 @@ fn last_part(s: &str) -> String {
 /// Give every board that has no folder, and whose repository names exactly one folder (by the
 /// folder's own name), that folder. A board whose folder is already set, by the user or earlier,
 /// is never touched. Several projects over the one folder count as one folder; the one with the
-/// most chats is used. Returns how many boards gained a folder.
-pub fn fill_primary_folders(tx: &Transaction<'_>) -> rusqlite::Result<usize> {
+/// most chats is used. Returns the folder projects boards gained.
+pub fn fill_primary_folders(tx: &Transaction<'_>) -> rusqlite::Result<Vec<String>> {
     let boards: Vec<(String, String)> = {
         let mut st = tx.prepare(
             "SELECT p.id, b.repo FROM projects p
@@ -256,7 +265,7 @@ pub fn fill_primary_folders(tx: &Transaction<'_>) -> rusqlite::Result<usize> {
         rows.collect::<rusqlite::Result<_>>()?
     };
     if boards.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let folders: Vec<(String, String)> = {
         let mut st = tx.prepare(
@@ -270,7 +279,7 @@ pub fn fill_primary_folders(tx: &Transaction<'_>) -> rusqlite::Result<usize> {
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
-    let mut filled = 0;
+    let mut filled = Vec::new();
     for (board, repo) in boards {
         let want = last_part(&repo);
         if want.is_empty() {
@@ -290,11 +299,14 @@ pub fn fill_primary_folders(tx: &Transaction<'_>) -> rusqlite::Result<usize> {
             "INSERT OR IGNORE INTO project_local(project_id) VALUES (?1)",
             [&board],
         )?;
-        filled += tx.execute(
+        let set = tx.execute(
             "UPDATE project_local SET primary_folder_project_id = ?2, revision = revision + 1
              WHERE project_id = ?1 AND primary_folder_project_id IS NULL",
             params![board, matches[0].0],
         )?;
+        if set > 0 {
+            filled.push(matches[0].0.clone());
+        }
     }
     Ok(filled)
 }
@@ -515,7 +527,7 @@ pub fn learn_item_projects(client: &Client, items: &[String]) -> Option<ItemProj
 }
 
 /// What the one-time move did, as written to [`MIGRATION_LOG_KEY`].
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrationLog {
     pub at: i64,
@@ -523,9 +535,13 @@ pub struct MigrationLog {
     pub moved: Vec<MovedChat>,
     /// Chats whose parent landed on another board: they are no longer nested under it.
     pub unnested: Vec<Unnested>,
+    /// Chats moved again later because a board's folder was set or changed
+    /// ([`rehome_fallback_chats`]), oldest first.
+    #[serde(default)]
+    pub rehomed: Vec<Rehomed>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MovedChat {
     pub chat_id: String,
@@ -535,20 +551,121 @@ pub struct MovedChat {
     pub from: String,
     pub to_id: String,
     pub to: String,
-    /// `linked item`, `folder` or `default board`.
+    /// `linked item`, `board above its group`, `folder` or `default board`.
     pub why: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Unnested {
     pub chat_id: String,
     pub parent_chat_id: String,
 }
 
+/// A chat the one-time move could only send to the default board, moved again once a board
+/// folder changed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rehomed {
+    pub chat_id: String,
+    pub at: i64,
+    pub from_id: String,
+    pub to_id: String,
+    pub to: String,
+    /// `folder` (the one board over its folder) or `default board` (no single board is).
+    pub why: String,
+}
+
+/// The chats a board folder change moved, and the nesting it dropped.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Rehoming {
+    pub moved: Vec<Rehomed>,
+    pub unnested: Vec<Unnested>,
+}
+
+/// The nearest open board above `group` in the project tree (climbing at most [`MAX_HOPS`]
+/// parents, stopping at a loop).
+fn board_above(tx: &Transaction<'_>, group: &str) -> rusqlite::Result<Option<String>> {
+    let mut seen = vec![group.to_owned()];
+    for _ in 0..MAX_HOPS {
+        let cur = seen.last().expect("starts with the group").clone();
+        let parent: Option<String> = tx
+            .query_row(
+                "SELECT parent_id FROM project_parents WHERE project_id = ?1",
+                [&cur],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(parent) = parent else {
+            return Ok(None);
+        };
+        if seen.contains(&parent) {
+            return Ok(None);
+        }
+        if is_open_board(tx, &parent)? {
+            return Ok(Some(parent));
+        }
+        seen.push(parent);
+    }
+    Ok(None)
+}
+
+/// Each moved chat with its parent, then each child of a moved chat with that chat (each chat
+/// once).
+fn nesting_pairs(tx: &Transaction<'_>, moved: &[&str]) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut parent_of = tx.prepare_cached(
+        "SELECT parent_chat_id FROM chats WHERE id = ?1 AND parent_chat_id IS NOT NULL",
+    )?;
+    for m in moved {
+        if let Some(p) = parent_of
+            .query_row([m], |r| r.get::<_, String>(0))
+            .optional()?
+        {
+            pairs.push(((*m).to_owned(), p));
+        }
+    }
+    let mut kids_of = tx.prepare_cached(
+        "SELECT id FROM chats WHERE parent_chat_id = ?1 AND side_source_id IS NULL",
+    )?;
+    for m in moved {
+        let kids = kids_of
+            .query_map([m], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for k in kids {
+            if !pairs.iter().any(|(c, _)| *c == k) {
+                pairs.push((k, (*m).to_owned()));
+            }
+        }
+    }
+    Ok(pairs)
+}
+
+/// Unnest each (chat, parent) pair now on different boards, so no parent shows an expander with
+/// nothing under it.
+fn unnest_across_boards(
+    tx: &Transaction<'_>,
+    pairs: Vec<(String, String)>,
+) -> rusqlite::Result<Vec<Unnested>> {
+    let mut out = Vec::new();
+    for (chat, parent) in pairs {
+        if chat_board(tx, &chat)? != chat_board(tx, &parent)? {
+            tx.execute(
+                "UPDATE chats SET parent_chat_id = NULL WHERE id = ?1",
+                [&chat],
+            )?;
+            out.push(Unnested {
+                chat_id: chat,
+                parent_chat_id: parent,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Put every chat that is not on a board onto one, once: the board of its linked Agent Standup
-/// item when Helm can tell it, else the one board whose folder it runs in, else the default
-/// board. A chat and its parent that land on the same
+/// item when Helm can tell it, else the board its group is nested under, else the one board
+/// whose folder it runs in, else the default board. A chat and its parent that land on the same
 /// board stay nested; a chat whose parent lands on another board is no longer nested under it
 /// (logged, so it can be put back). Writes [`MIGRATION_LOG_KEY`] and the marker.
 ///
@@ -575,6 +692,7 @@ pub fn migrate_chats_onto_boards(
         default_board_id: default.clone(),
         moved: Vec::new(),
         unnested: Vec::new(),
+        rehomed: Vec::new(),
     };
     let mut parents: Vec<(String, String)> = Vec::new();
     for Unplaced {
@@ -592,10 +710,13 @@ pub fn migrate_chats_onto_boards(
             None
         };
         let (to, why) = match linked {
-            Some(b) => (b, "linked item"),
-            None => match folder_board(tx, &folder)? {
-                Some(b) => (b, "folder"),
-                None => (default.clone(), "default board"),
+            Some(b) => (b, WHY_LINKED),
+            None => match board_above(tx, &from_id)? {
+                Some(b) => (b, WHY_ABOVE),
+                None => match folder_board(tx, &folder)? {
+                    Some(b) => (b, WHY_FOLDER),
+                    None => (default.clone(), WHY_DEFAULT),
+                },
             },
         };
         if !put_on_board(tx, &chat, &to)? {
@@ -652,16 +773,143 @@ pub fn migrate_chats_onto_boards(
         "INSERT INTO counters(key, value) VALUES (?1, ?2)",
         params![helm_core::db::registry::marker_key(MIGRATION), now],
     )?;
-    let by_link = out.moved.iter().filter(|m| m.why == "linked item").count();
-    let by_folder = out.moved.iter().filter(|m| m.why == "folder").count();
+    let count = |why: &str| out.moved.iter().filter(|m| m.why == why).count();
     log::info!(
-        "moved {} chats onto boards ({} by their linked item, {} by their folder, the rest to the default board; {} no longer nested); the list is in the {MIGRATION_LOG_KEY} preference",
+        "moved {} chats onto boards ({} by their linked item, {} by the board above their group, {} by their folder, the rest to the default board; {} no longer nested); the list is in the {MIGRATION_LOG_KEY} preference",
         out.moved.len(),
-        by_link,
-        by_folder,
+        count(WHY_LINKED),
+        count(WHY_ABOVE),
+        count(WHY_FOLDER),
         out.unnested.len()
     );
     Ok(Some(out))
+}
+
+/// After a board's folder is set, changed or cleared (`folders`: its folder before and after).
+///
+/// Every chat the one-time move could only send to the default board, that runs in one of
+/// `folders` and still sits where the move (or an earlier call of this) left it, goes where the
+/// move would put it now: the one board over its folder, else the default board the move used.
+/// So where such a chat ends up does not depend on whether a board's folder was set before the
+/// move ran or after. A chat the user has moved since is left alone. Each move is added to the
+/// move's log. Does nothing before the move has run.
+pub fn rehome_fallback_chats(
+    tx: &Transaction<'_>,
+    folders: &[String],
+    now: i64,
+) -> rusqlite::Result<Rehoming> {
+    let mut out = Rehoming::default();
+    if folders.is_empty() {
+        return Ok(out);
+    }
+    let Some(raw) = helm_core::prefs::read(tx, MIGRATION_LOG_KEY) else {
+        return Ok(out);
+    };
+    let mut log: MigrationLog = match serde_json::from_value(raw) {
+        Ok(l) => l,
+        Err(e) => {
+            log::warn!("the record of moving chats onto boards is unreadable: {e}");
+            return Ok(out);
+        }
+    };
+    let mut names: HashMap<String, String> = HashMap::new();
+    for m in log.moved.iter().filter(|m| m.why == WHY_DEFAULT) {
+        let left_on = log
+            .rehomed
+            .iter()
+            .rev()
+            .find(|r| r.chat_id == m.chat_id)
+            .map_or(m.to_id.as_str(), |r| r.to_id.as_str());
+        let folder: Option<String> = tx
+            .query_row(
+                "SELECT project_id FROM chats WHERE id = ?1 AND side_source_id IS NULL",
+                [&m.chat_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(folder) = folder.filter(|f| folders.contains(f)) else {
+            continue;
+        };
+        if chat_board(tx, &m.chat_id)?.as_deref() != Some(left_on) {
+            continue;
+        }
+        let (to, why) = match folder_board(tx, &folder)? {
+            Some(b) => (b, WHY_FOLDER),
+            None => (log.default_board_id.clone(), WHY_DEFAULT),
+        };
+        if to == left_on || !put_on_board(tx, &m.chat_id, &to)? {
+            continue;
+        }
+        if !names.contains_key(&to) {
+            let n = board_summary(tx, &to)?.map(|b| b.name).unwrap_or_default();
+            names.insert(to.clone(), n);
+        }
+        out.moved.push(Rehomed {
+            chat_id: m.chat_id.clone(),
+            at: now,
+            from_id: left_on.to_owned(),
+            to: names.get(&to).cloned().unwrap_or_default(),
+            to_id: to,
+            why: why.to_owned(),
+        });
+    }
+    if out.moved.is_empty() {
+        return Ok(out);
+    }
+    let ids: Vec<&str> = out.moved.iter().map(|m| m.chat_id.as_str()).collect();
+    let pairs = nesting_pairs(tx, &ids)?;
+    out.unnested = unnest_across_boards(tx, pairs)?;
+    log.rehomed.extend(out.moved.iter().cloned());
+    log.unnested.extend(out.unnested.iter().cloned());
+    let record = serde_json::to_value(&log).unwrap_or(Value::Null);
+    if let Err(e) = helm_core::prefs::set_raw(tx, MIGRATION_LOG_KEY, &record) {
+        log::warn!("moving chats onto boards: the record was not kept: {e}");
+    }
+    log::info!(
+        "a board folder changed: moved {} chats the one-time move had put on the default board ({} no longer nested); listed in the {MIGRATION_LOG_KEY} preference",
+        out.moved.len(),
+        out.unnested.len()
+    );
+    Ok(out)
+}
+
+/// Tell the window about chats that moved between groups: their rows, then the projects they
+/// left and joined, so each header's chat count is current (an emptied folder group drops out).
+pub(crate) fn emit_moves<'a>(
+    ctx: &OpCtx,
+    db: &Database,
+    chats: Vec<String>,
+    projects: impl IntoIterator<Item = &'a str>,
+) {
+    emit_sidebar(ctx, &chats);
+    let mut seen = HashSet::new();
+    for p in projects {
+        if !seen.insert(p) {
+            continue;
+        }
+        match db.snapshot(|tx| store::get_project(tx, p)) {
+            Ok(node) => emit_project(ctx, &node),
+            Err(e) => log::debug!("project {p} after a move: {e:?}"),
+        }
+    }
+}
+
+/// [`emit_moves`] for what [`rehome_fallback_chats`] did.
+pub(crate) fn emit_rehoming(ctx: &OpCtx, db: &Database, r: &Rehoming) {
+    if r.moved.is_empty() {
+        return;
+    }
+    let chats = r
+        .moved
+        .iter()
+        .map(|m| m.chat_id.clone())
+        .chain(r.unnested.iter().map(|u| u.chat_id.clone()))
+        .collect();
+    let projects = r
+        .moved
+        .iter()
+        .flat_map(|m| [m.from_id.as_str(), m.to_id.as_str()]);
+    emit_moves(ctx, db, chats, projects);
 }
 
 /// After a successful sync: run the one-time move if it is still pending, asking the board where
@@ -700,8 +948,19 @@ pub(crate) async fn after_sync(ctx: &OpCtx, db: &Database, client: Client) {
     };
     match db.write(|tx| migrate_chats_onto_boards(tx, helm_core::now_ms(), &learnt)) {
         Ok(Some(record)) => {
-            let ids: Vec<String> = record.moved.iter().map(|m| m.chat_id.clone()).collect();
-            emit_sidebar(ctx, &ids);
+            // The moved chats and the ones no longer nested, then every group they left or
+            // joined, so emptied folder groups drop out of the sidebar at once.
+            let chats = record
+                .moved
+                .iter()
+                .map(|m| m.chat_id.clone())
+                .chain(record.unnested.iter().map(|u| u.chat_id.clone()))
+                .collect();
+            let projects = record
+                .moved
+                .iter()
+                .flat_map(|m| [m.from_id.as_str(), m.to_id.as_str()]);
+            emit_moves(ctx, db, chats, projects);
         }
         Ok(None) => {}
         Err(e) => log::warn!("moving chats onto boards failed, and will be tried again: {e}"),
