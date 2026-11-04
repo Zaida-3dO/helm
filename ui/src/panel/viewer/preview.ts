@@ -1,4 +1,7 @@
-// Pure helpers behind the JSON, CSV/TSV and image previews: parsing, searching and zoom steps.
+// Pure helpers behind the JSON, CSV/TSV, image and archive previews: parsing, searching, zoom steps
+// and the archive folder tree.
+
+import type { ArchiveEntry } from '../../api/panel.ts';
 
 export type Parsed = { ok: true; value: unknown } | { ok: false };
 
@@ -81,4 +84,72 @@ export const ZOOM_MAX = 8;
 export function stepZoom(current: number, dir: 1 | -1): number {
   const next = dir === 1 ? current * 1.25 : current / 1.25;
   return Math.round(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, next)) * 1000) / 1000;
+}
+
+export interface ArchiveRow {
+  /** The row's full path inside the archive, unique per row. */
+  key: string;
+  name: string;
+  depth: number;
+  dir: boolean;
+  size?: number;
+  compressedSize?: number;
+  encrypted: boolean;
+}
+
+interface ArchiveNode {
+  name: string;
+  dir: boolean;
+  size?: number;
+  compressedSize?: number;
+  encrypted: boolean;
+  children: Map<string, ArchiveNode>;
+}
+
+/**
+ * An archive's entries as indented rows, folders before files at each level and each group sorted
+ * by name. Folders the archive only implies (a file in `a/b/` with no `a/` entry) get a row too.
+ */
+export function archiveRows(entries: ArchiveEntry[]): ArchiveRow[] {
+  const root: ArchiveNode = { name: '', dir: true, encrypted: false, children: new Map() };
+  for (const e of entries) {
+    const parts = e.path.split('/').filter((p) => p !== '' && p !== '.');
+    let node = root;
+    parts.forEach((part, i) => {
+      const last = i === parts.length - 1;
+      let child = node.children.get(part);
+      if (!child) {
+        child = { name: part, dir: !last || e.dir, encrypted: false, children: new Map() };
+        node.children.set(part, child);
+      }
+      if (last) {
+        child.dir = child.dir || e.dir;
+        child.size = e.size;
+        child.compressedSize = e.compressedSize;
+        child.encrypted = e.encrypted;
+      }
+      node = child;
+    });
+  }
+  const rows: ArchiveRow[] = [];
+  const walk = (node: ArchiveNode, depth: number, prefix: string) => {
+    const kids = [...node.children.values()].sort((a, b) =>
+      a.dir === b.dir ? a.name.toLowerCase().localeCompare(b.name.toLowerCase()) : a.dir ? -1 : 1,
+    );
+    for (const k of kids) {
+      const key = `${prefix}${k.name}${k.dir ? '/' : ''}`;
+      rows.push({ key, name: k.name, depth, dir: k.dir, size: k.size, compressedSize: k.compressedSize, encrypted: k.encrypted });
+      walk(k, depth + 1, key);
+    }
+  };
+  walk(root, 0, '');
+  return rows;
+}
+
+/** A byte count in B, KiB, MiB or GiB. */
+export function sizeLabel(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
 }

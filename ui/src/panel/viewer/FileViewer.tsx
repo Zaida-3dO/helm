@@ -11,7 +11,8 @@ import { gateTarget, handleLink } from '../links.ts';
 import { openInPanel } from '../registry.ts';
 import { CodeView } from './CodeView.tsx';
 import { dirname, displayPath, joinPath, pathKey, splitSegments } from './paths.ts';
-import { canPreview, ImagePreview, JsonPreview, TablePreview } from './previews.tsx';
+import { sizeLabel } from './preview.ts';
+import { ArchivePreview, canPreview, FontPreview, ImagePreview, JsonPreview, MediaPreview, PdfPreview, TablePreview } from './previews.tsx';
 
 export interface Location {
   path: string;
@@ -23,11 +24,7 @@ export interface Location {
 
 const HISTORY_LIMIT = 100;
 
-function formatSize(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
-}
+const formatSize = sizeLabel;
 
 const KIND_LABEL: Record<string, string> = {
   typescript: 'TypeScript', javascript: 'JavaScript', json: 'JSON', markdown: 'Markdown', rust: 'Rust',
@@ -46,6 +43,11 @@ function kindLabel(v: FileView): string {
   if (v.kind === 'image') return 'Image';
   if (v.kind === 'html') return 'HTML';
   if (v.kind === 'binary') return 'Binary';
+  if (v.kind === 'pdf') return 'PDF';
+  if (v.kind === 'audio') return 'Audio';
+  if (v.kind === 'video') return 'Video';
+  if (v.kind === 'font') return 'Font';
+  if (v.kind === 'archive') return 'Archive';
   return (v.language && KIND_LABEL[v.language]) || 'Text';
 }
 
@@ -357,6 +359,14 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
     );
   } else if (view.kind === 'image') {
     body = <ImagePreview url={imageUrl} name={name} size={view.size} />;
+  } else if (view.kind === 'pdf') {
+    body = <PdfPreview url={view.url} name={name} />;
+  } else if (view.kind === 'audio' || view.kind === 'video') {
+    body = <MediaPreview url={view.url} name={name} kind={view.kind} />;
+  } else if (view.kind === 'font') {
+    body = <FontPreview url={view.url} name={name} />;
+  } else if (view.kind === 'archive') {
+    body = <ArchivePreview ops={ops} path={loc.path} chatId={chatId} />;
   } else if (view.kind === 'html' && effectiveMode === 'preview') {
     // Fully sandboxed: no scripts, no same-origin, no forms, no navigation.
     body = <iframe className="fv-html" title="HTML preview" sandbox="" srcDoc={view.text ?? ''} referrerPolicy="no-referrer" />;

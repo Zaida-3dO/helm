@@ -2,7 +2,8 @@
 //!
 //! | op | class | args → result |
 //! |---|---|---|
-//! | `file_read` / `dir_list` | heavy | `{chatId?, path}` → [`FileView`](crate::viewer::FileView) |
+//! | `file_read` / `dir_list` | heavy | `{chatId?, path}` → [`FileView`](crate::viewer::FileView) (a PDF, audio, video or font comes back with a short-lived `url` served in ranges by [`crate::serve`]) |
+//! | `archive_list` | heavy | `{chatId?, path}` → [`ArchiveView`](crate::archive::ArchiveView): a ZIP's central directory, never its data |
 //! | `default_handler` | blocking | `{path}` → `{handler: {name, appPath} \| null, refusal: {step, reason} \| null}` |
 //! | `file_open_default` | maintenance | `{path}` → `null`: re-runs every check, then opens |
 //! | `file_reveal` | maintenance | `{path}` → `null`: Explorer with the item selected |
@@ -29,7 +30,7 @@
 
 use crate::handler::{self, Decision};
 use crate::private::PrivateRoots;
-use crate::viewer::{self, ReadError};
+use crate::viewer::{self, ReadError, ViewKind};
 use crate::{changes, comments, context, git, pathgate, quick, resolve, tabs, turns, vault};
 use helm_core::db::Database;
 use helm_core::profile::Profile;
@@ -41,6 +42,7 @@ use serde_json::{json, Value};
 
 pub fn register_ops(reg: &mut OpRegistry) {
     reg.blocking("file_read", OpClass::Heavy, file_read)
+        .blocking("archive_list", OpClass::Heavy, archive_list)
         .blocking("dir_list", OpClass::Heavy, file_read)
         .blocking("default_handler", OpClass::Blocking, default_handler)
         .blocking("file_open_default", OpClass::Maintenance, file_open_default)
@@ -116,7 +118,24 @@ struct PathArgs {
 
 fn file_read(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: PathArgs = parse(args)?;
-    let view = viewer::read(&a.path, &private_roots(ctx)).map_err(read_error)?;
+    let mut view = viewer::read(&a.path, &private_roots(ctx)).map_err(read_error)?;
+    if matches!(
+        view.kind,
+        ViewKind::Pdf | ViewKind::Audio | ViewKind::Video | ViewKind::Font
+    ) {
+        // The bytes are never sent here: the renderer loads them from the served address. With no
+        // server (a host without the custom scheme) the view carries no address and says so.
+        if let Some(server) = ctx.services.get::<crate::serve::MediaServer>() {
+            let opened = server.open(&view.path).map_err(read_error)?;
+            view.url = Some(crate::serve::url_for(&opened.token));
+        }
+    }
+    serde_json::to_value(view).map_err(|e| ApiError::internal(e.to_string()))
+}
+
+fn archive_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: PathArgs = parse(args)?;
+    let view = crate::archive::list(&a.path, &private_roots(ctx)).map_err(read_error)?;
     serde_json::to_value(view).map_err(|e| ApiError::internal(e.to_string()))
 }
 

@@ -4,6 +4,8 @@
 //! |---|---|
 //! | [`pathgate`] | the lexical path check every op runs before touching the disk |
 //! | [`private`] | private roots, by path and by file identity |
+//! | [`serve`] | ranged, token-gated serving of PDFs, audio, video and fonts to the renderer |
+//! | [`archive`] | the ZIP contents listing |
 //! | [`viewer`] | `file_read` / `dir_list` within the viewer's limits |
 //! | [`handler`] | the checked default-app handler and reveal in Explorer |
 //! | [`resolve`] | clickable paths written in replies (`~`, drives, chat-relative) |
@@ -18,6 +20,7 @@
 //! | [`vault`] | Obsidian vaults, note resolution, confined reads, Open in Obsidian, the agent link instructions |
 //! | [`ops`] | the `api` ops |
 
+pub mod archive;
 pub mod changes;
 pub mod comments;
 pub mod context;
@@ -29,6 +32,7 @@ pub use helm_platform::pathgate;
 pub use helm_platform::private;
 pub mod quick;
 pub mod resolve;
+pub mod serve;
 pub mod tabs;
 pub mod turns;
 pub mod vault;

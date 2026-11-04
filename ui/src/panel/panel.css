@@ -1636,3 +1636,96 @@ html[data-panel-maximized] .shell-main {
 .pv-table tbody tr:hover {
   background: var(--sp-hover);
 }
+
+/* ---- Previews: PDF, audio and video, font specimen, archive listing ---- */
+
+.fv-pdf {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: none;
+  background: var(--sp-surface);
+}
+
+.pv-media {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+  background: var(--sp-surface);
+}
+
+.pv-video {
+  max-width: 100%;
+  max-height: 100%;
+  background: #000;
+}
+
+.pv-audio {
+  width: min(100%, 520px);
+}
+
+.pv-font {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pv-font-line {
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  color: var(--sp-text, inherit);
+}
+
+.pv-archive {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 0 12px;
+  font-size: calc(12 * var(--sp-u));
+}
+
+.pv-arc-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  padding-right: 12px;
+}
+
+.pv-arc-row:hover {
+  background: var(--sp-hover);
+}
+
+.pv-arc-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pv-arc-row[data-kind='dir'] .pv-arc-name {
+  font-weight: 600;
+}
+
+.pv-arc-tag {
+  flex: none;
+  color: var(--sp-secondary);
+  font-size: calc(11 * var(--sp-u));
+}
+
+.pv-arc-size {
+  flex: none;
+  min-width: 64px;
+  text-align: right;
+  color: var(--sp-muted);
+  font-variant-numeric: tabular-nums;
+}
