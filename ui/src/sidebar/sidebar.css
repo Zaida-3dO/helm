@@ -13,7 +13,7 @@
   --sb-line: var(--line, var(--border));
   --sb-line-strong: var(--line-strong, var(--border));
   --sb-accent-mark: var(--accent-mark, var(--accent));
-  --sb-select-share: var(--chat-selected-accent, 10%);
+  --sb-select-share: var(--chat-selected-accent, 11%);
   --sb-chat-h: 34px;
   --sb-header-h: 38px;
   --sb-bar-inset: 8px;
@@ -795,11 +795,11 @@
   padding-left: 17px;
 }
 
-/* Unread result. */
+/* Unread result: a quiet cue next to the open chat's card. No fill and no ring, only a full-colour
+   semibold title (the trailing unread mark does the rest), so the open chat is the one row that
+   looks like a card. */
 .sb-chat-wrap:has(.sb-ind-unread) .sb-chat {
   color: var(--sb-text);
-  background: linear-gradient(105deg, color-mix(in srgb, var(--accent) 12%, transparent), color-mix(in srgb, var(--accent) 3%, transparent) 75%);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 44%, transparent);
 }
 
 .sb-chat-wrap:has(.sb-ind-unread) .sb-chat-title {
@@ -807,8 +807,8 @@
   color: var(--sb-text);
 }
 
-/* Selected (open) chat: the tint fill, accent-mark ring, top highlight and left bar.
-   A selected row that is also unread takes the selected style. */
+/* Selected (open) chat: the only row with the filled, ringed card: tint fill, a double accent-mark
+   ring, a top highlight and a left bar. A selected row that is also unread takes this style. */
 .sb-chat-wrap[data-selected='true'] .sb-chat,
 .sb-chat-wrap[data-selected='true']:hover .sb-chat {
   /* The default theme's precomputed fill. */
@@ -818,7 +818,8 @@
   );
   box-shadow:
     inset 0 0 0 1px var(--sb-accent-mark),
-    inset 0 2px 0 color-mix(in srgb, var(--sb-surface) 38%, transparent);
+    inset 0 0 0 2px color-mix(in srgb, var(--sb-accent-mark) 22%, transparent),
+    inset 0 3px 0 color-mix(in srgb, var(--sb-surface) 38%, transparent);
 }
 
 .sb-chat-wrap[data-selected='true'][data-coloured='true'] .sb-chat {
@@ -832,7 +833,7 @@
   left: 5px;
   top: var(--sb-bar-inset);
   bottom: var(--sb-bar-inset);
-  width: 3px;
+  width: 4px;
   border-radius: 2px;
   background: var(--sb-accent-mark);
   pointer-events: none;
@@ -845,7 +846,15 @@
 
 .sb-chat-wrap[data-selected='true'] .sb-age,
 .sb-chat-wrap[data-selected='true'] .sb-chat-sub {
-  color: color-mix(in srgb, var(--sb-text) var(--chat-selected-quiet, 30%), var(--sb-muted));
+  color: color-mix(in srgb, var(--sb-text) var(--chat-selected-quiet, 90%), var(--sb-muted));
+}
+
+/* Forced colours drop fills, shadows and the bar's colour, so the open row keeps an outline. */
+@media (forced-colors: active) {
+  .sb-chat-wrap[data-selected='true'] .sb-chat {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
 }
 
 .sb-root .sb-chat:focus-visible {
@@ -958,7 +967,6 @@
   font: inherit;
   font-size: 10px;
   color: var(--sb-muted);
-  opacity: 0.75;
 }
 
 /* ---- Agent Standup sync line ---- */

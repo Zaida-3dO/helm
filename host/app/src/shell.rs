@@ -93,6 +93,12 @@ pub fn build_main_window(app: &tauri::App, profile: &Profile, debug: bool) -> ta
         .visible(false)
         .decorations(false)
         .data_directory(data_dir)
+        // Setting browser arguments replaces the ones the web view adds by default, so they are listed
+        // in full: the defaults (no mini menu, no SmartScreen) plus audio that may start without a
+        // click, so the first chime after launch is heard.
+        .additional_browser_args(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required",
+        )
         .on_navigation(move |url| {
             let ok = main_window_may_navigate(url.as_str(), debug);
             if !ok {

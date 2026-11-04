@@ -63,6 +63,7 @@ pub fn workflow_rules(s: &WorkflowSettings) -> String {
         "Builds are done by {}; during a task any other agent you dispatch counts as a build{exempt}. Only you dispatch stage agents, and record each change with app_workflow {{action: \"update\", repo, branch, pr?}}.",
         agent(&st.build.agent)
     ));
+    out.push("Don't plan or build yourself: brief each stage agent with file paths, have it hand off through files, and read its short report rather than its files. Keep one piece of work on one branch and one PR: coders write code and merge into it, and the finished branch goes to review once, with every finding in one fix list for one coder to apply.".into());
     out.push(match s.orchestrator_edits {
         EditsRule::Deny => "Do not edit files in a task's repositories yourself; Helm refuses those edits during a task. If one file is genuinely yours (a plan or a note, not the change's code), grant it with app_workflow {action: \"allow_edit\", file, reason}.".into(),
         EditsRule::Allow => "You may edit files in a task's repositories yourself.".into(),
@@ -135,6 +136,7 @@ mod tests {
         assert!(r.starts_with(HEADING));
         assert!(r.contains("At most 3 review rounds per change."));
         assert!(r.contains("`coder`"));
+        assert!(r.contains("Don't plan or build yourself"));
         assert!(r.contains("main, master"));
         assert!(!r.contains("Move fast"), "Move fast is off by default");
         assert!(

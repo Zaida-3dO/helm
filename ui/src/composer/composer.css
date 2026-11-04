@@ -39,13 +39,16 @@
   transition: border-color 110ms ease;
 }
 
-/* Focus is the border colour only; no ring around the box. */
+/* Focus tints the border and draws a ring around the box, so it shows without relying on the tint. */
 .composer-dock .composer-box:focus-within {
   border-color: color-mix(in srgb, var(--accent) 47%, var(--line));
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 :root[data-theme='dark'] .composer-dock .composer-box:focus-within {
   border-color: color-mix(in srgb, var(--chrome-accent) 66%, var(--line-strong));
+  outline-color: var(--chrome-accent);
 }
 
 /* Dark chrome accent: a short lit line along the top edge, brighter while focused. */
@@ -72,11 +75,10 @@
   opacity: 0.8;
 }
 
-/* Forced colours drop the border tint, so keep a visible ring there. */
+/* Forced colours use the system text colour for the ring. */
 @media (forced-colors: active) {
   .composer-dock .composer-box:focus-within {
-    outline: 2px solid CanvasText;
-    outline-offset: 1px;
+    outline-color: CanvasText;
   }
 }
 

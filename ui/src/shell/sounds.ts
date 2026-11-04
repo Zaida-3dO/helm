@@ -110,8 +110,10 @@ export function connectSounds(api: ApiFn, bus: Bus, hasFocus: () => boolean = ()
   api<unknown>('preference_get', { key: 'dopamine' })
     .then((v) => (zen = parseDopamine(v) === 'zen'))
     .catch(() => undefined);
-  // The audio context starts suspended until the page has had one interaction; open it on the
-  // first click or key so the next away-from-window cue is heard.
+  // Open the audio context now, so the first cue after launch does not have to create it while the
+  // window is in the background. Where the web view still holds it suspended until the page has had
+  // one interaction, the first click or key opens it.
+  void audioCtx();
   const unlock = () => void audioCtx();
   window.addEventListener('pointerdown', unlock, { once: true });
   window.addEventListener('keydown', unlock, { once: true });
