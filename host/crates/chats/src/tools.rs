@@ -508,11 +508,11 @@ fn depth(tx: &rusqlite::Connection, id: &str) -> rusqlite::Result<usize> {
     Ok(d)
 }
 
+/// A chat's parent, whether it is archived, and the chat it is a side chat of.
+type ChatRow = (Option<String>, bool, Option<String>);
+
 /// The chat's parent and whether it is archived or a side chat; `None` when there is no such chat.
-fn chat_row(
-    tx: &Transaction<'_>,
-    id: &str,
-) -> rusqlite::Result<Option<(Option<String>, bool, Option<String>)>> {
+fn chat_row(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option<ChatRow>> {
     tx.query_row(
         "SELECT parent_chat_id, archived, side_source_id FROM chats WHERE id = ?1",
         [id],
@@ -1388,7 +1388,8 @@ mod tests {
         );
         let not_board = "Pick a board; folders are where chats run";
         // (caller, args, error text or "", then for a new chat: its board, parent and folder)
-        let cases: [(&str, Value, &str, &str, Option<&str>, &str); 11] = [
+        type Case<'a> = (&'a str, Value, &'a str, &'a str, Option<&'a str>, &'a str);
+        let cases: [Case; 11] = [
             // Defaults: the caller's board, nested under the caller, in the board's folder.
             (&a, json!({}), "", "b-home", Some(&a), &work),
             (

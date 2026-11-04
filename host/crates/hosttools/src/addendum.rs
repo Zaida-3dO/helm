@@ -218,7 +218,8 @@ mod tests {
     fn knowledge_section_says_only_what_applies() {
         let long = "x".repeat(NOTE_PROMPT_CHARS + 50);
         // (note, hub server, expected pieces in order, pieces that must be absent)
-        let cases: Vec<(Option<&str>, Option<&str>, Vec<&str>, Vec<&str>)> = vec![
+        type Case<'a> = (Option<&'a str>, Option<&'a str>, Vec<&'a str>, Vec<&'a str>);
+        let cases: Vec<Case> = vec![
             (None, None, vec![], vec![]),
             (Some("  \n "), Some(" "), vec![], vec![]),
             (

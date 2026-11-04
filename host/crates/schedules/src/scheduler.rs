@@ -147,7 +147,7 @@ fn start_chat(svc: &SchedulesService, project_id: Option<&str>) -> Result<String
             if let Some(b) = boards.home_board(tx, Some(project))? {
                 boards.put_on_board(tx, &id, &b)?;
             }
-            Ok(Ok(id))
+            Ok::<_, rusqlite::Error>(Ok(id))
         })
         .map_err(|e| format!("Could not start a chat: {e:?}"))?
         .map_err(str::to_owned)?;
