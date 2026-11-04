@@ -153,7 +153,12 @@ pub fn add(profile: &Path, source: &Path) -> io::Result<SkillEntry> {
         ));
     }
     helm_core::privfs::create_private_dir_all(&dest)?;
-    copy_tree(source, &dest, 0)?;
+    if let Err(e) = copy_tree(source, &dest, 0) {
+        // Do not leave a half-copied skill behind: it would be listed, and a retry would be told
+        // the name is taken.
+        let _ = fs::remove_dir_all(&dest);
+        return Err(e);
+    }
     Ok(SkillEntry {
         name: name.clone(),
         description: front_description(&dest.join("SKILL.md")),
@@ -364,10 +369,13 @@ mod tests {
             ErrorKind::InvalidInput
         );
 
-        // One oversized file is refused.
+        // One oversized file is refused, even one that sorts after SKILL.md, and leaves no folder.
         let big = tmp.path().join("bigskill");
         write(&big.join("SKILL.md"), "---\n---\n");
-        write(&big.join("blob"), &"x".repeat(MAX_SKILL_FILE as usize + 10));
+        write(
+            &big.join("zdata"),
+            &"x".repeat(MAX_SKILL_FILE as usize + 10),
+        );
         assert_eq!(add(p, &big).unwrap_err().kind(), ErrorKind::InvalidInput);
 
         assert_eq!(skill_names(p), ["twice"]);
