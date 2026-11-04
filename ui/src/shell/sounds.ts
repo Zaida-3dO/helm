@@ -122,11 +122,17 @@ export function connectSounds(api: ApiFn, bus: Bus, hasFocus: () => boolean = ()
     if (c && typeof c.chatId === 'string' && !hasFocus()) play('complete');
   });
   const offA = bus.on('attention', (e) => {
-    const rows = (e.summary as { unread?: { chatId?: unknown }[] } | undefined)?.unread ?? [];
+    // Chats that need an answer (a question, an approval). A chat that merely finished is the
+    // completion cue's business, so it does not sound twice.
+    const rows = (e.summary as { needsYou?: { chatId?: unknown }[] } | undefined)?.needsYou ?? [];
+    const now = new Set<string>();
+    for (const r of rows) if (typeof r?.chatId === 'string') now.add(r.chatId);
+    // A chat that no longer needs you may need you again later, and sounds again then.
+    for (const id of seenAttention) if (!now.has(id)) seenAttention.delete(id);
     let fresh = false;
-    for (const r of rows) {
-      if (typeof r?.chatId === 'string' && !seenAttention.has(r.chatId)) {
-        seenAttention.add(r.chatId);
+    for (const id of now) {
+      if (!seenAttention.has(id)) {
+        seenAttention.add(id);
         fresh = true;
       }
     }

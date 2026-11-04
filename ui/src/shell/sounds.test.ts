@@ -97,7 +97,7 @@ test('away cues: completion plays only unfocused, attention only for a chat not 
   });
   const stop = connectSounds(api, bus, () => focused);
   const done = (id: string) => ({ completion: { chatId: id } });
-  const att = (ids: string[]) => ({ summary: { unread: ids.map((chatId) => ({ chatId })) } });
+  const att = (ids: string[]) => ({ summary: { needsYou: ids.map((chatId) => ({ chatId })), unread: [] } });
 
   focused = true;
   handlers.get('completion')!(done('a'));
@@ -112,6 +112,12 @@ test('away cues: completion plays only unfocused, attention only for a chat not 
   assert.equal(fakeCtx.created.length, 2, 'the attention cue fires once for the new chats');
   handlers.get('attention')!(att(['b', 'c']));
   assert.equal(fakeCtx.created.length, 2, 'the same chats do not sound again');
+  // A chat that finished and is merely unread does not cue again (its completion already did).
+  handlers.get('attention')!({ summary: { needsYou: [], unread: [{ chatId: 'x' }] } });
+  assert.equal(fakeCtx.created.length, 2, 'an unread chat is not a needs-you cue');
+  // 'b' left the list when it was answered; asking again later sounds again.
+  handlers.get('attention')!(att(['b']));
+  assert.equal(fakeCtx.created.length, 4, 'a chat that needs you again sounds again');
 
   // Turning sounds off in Settings reaches the cues at once (the host event carries the object).
   fakeCtx.created.length = 0;
