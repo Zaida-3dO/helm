@@ -111,11 +111,32 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
         services.get::<helm_core::db::Database>(),
     ) {
         let store = services.get::<helm_mcp::McpStore>();
+        if let Some(store) = &store {
+            // The launch contributors are built before the services; the prompt's memory line
+            // reads the store through this cell once it is set.
+            let _ = MCP_STORE.set(store.clone());
+        }
         services.insert(Arc::new(helm_hosttools::McpLaunchGate(Arc::new(
             McpLaunchFlags { gate, db, store },
         ))));
     } else {
         log::warn!("MCP launch gate unavailable: launches keep native MCP on and disable nothing");
+    }
+}
+
+/// The MCP store, for the prompt section that mentions the shared memories (set once the
+/// services exist; a launch before that, or in a test, simply has no such line).
+static MCP_STORE: std::sync::OnceLock<Arc<helm_mcp::McpStore>> = std::sync::OnceLock::new();
+
+/// The `knowledge` prompt section: the folder's project note and the shared-memories line.
+fn knowledge_section(db: &Arc<helm_core::db::Database>) -> helm_hosttools::KnowledgeSection {
+    let note_db = db.clone();
+    helm_hosttools::KnowledgeSection {
+        note: Arc::new(move |chat: &str| helm_projects::note::note_text_for_chat(&note_db, chat)),
+        hub: Arc::new(|| {
+            let servers = MCP_STORE.get()?.load().ok()?;
+            helm_mcp::presets::connected_memory_server(&servers)
+        }),
     }
 }
 
@@ -360,6 +381,7 @@ pub fn launch_contributors(
     .register_section(Arc::new(helm_hosttools::sections::GuidelinesSection {
         registry: Arc::new(host_tools()),
     }))
+    .register_section(Arc::new(knowledge_section(db)))
     .register_section(Arc::new(helm_itemlinks::ItemLinksSection))
     .register_section(Arc::new(helm_workflow::WorkflowSection { db: db.clone() }));
     let mut c = helm_workers::contrib::LaunchContributors::new();

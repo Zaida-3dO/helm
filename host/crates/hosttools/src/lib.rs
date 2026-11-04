@@ -36,7 +36,7 @@ pub mod shells;
 pub mod spec;
 pub mod tools;
 
-pub use addendum::{Addendum, AddendumSection, StaticSection};
+pub use addendum::{Addendum, AddendumSection, KnowledgeSection, StaticSection};
 pub use dispatch::{Caller, CallerBinding, ChatRequest, HostTools};
 pub use lines::{Broadcaster, WorkerBroadcast, WorkerLineCtx, WorkerLines};
 pub use registry::{

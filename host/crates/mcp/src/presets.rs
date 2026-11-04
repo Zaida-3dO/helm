@@ -85,6 +85,15 @@ pub fn presets() -> Vec<McpPreset> {
     ]
 }
 
+/// The id of the enabled shared-memory server, if one is configured: a server created from the
+/// hub preset, or one that took the preset's id. The first match wins.
+pub fn connected_memory_server(servers: &[crate::types::McpServer]) -> Option<String> {
+    servers
+        .iter()
+        .find(|s| s.enabled && (s.preset.as_deref() == Some("helm_hub") || s.id == "helm_hub"))
+        .map(|s| s.id.clone())
+}
+
 /// The guidance for a server created from `preset`, if any.
 pub fn guidance_for(preset: Option<&str>) -> Option<String> {
     let id = preset?;
@@ -132,5 +141,36 @@ mod tests {
             .contains("act=true"));
         assert!(guidance_for(Some("nope")).is_none());
         assert!(guidance_for(None).is_none());
+    }
+
+    #[test]
+    fn the_connected_memory_server_is_the_enabled_hub_one() {
+        let mk = |id: &str, preset: Option<&str>, enabled: bool| {
+            let mut s = crate::config::tests::hub("t");
+            s.id = id.into();
+            s.preset = preset.map(Into::into);
+            s.enabled = enabled;
+            s
+        };
+        for (servers, want) in [
+            (vec![], None),
+            (vec![mk("other", None, true)], None),
+            (vec![mk("helm_hub", Some("helm_hub"), false)], None),
+            (
+                vec![mk("helm_hub", Some("helm_hub"), true)],
+                Some("helm_hub"),
+            ),
+            (
+                vec![mk("memories", Some("helm_hub"), true)],
+                Some("memories"),
+            ),
+            (vec![mk("helm_hub", None, true)], Some("helm_hub")),
+            (
+                vec![mk("a", None, true), mk("b", Some("helm_hub"), true)],
+                Some("b"),
+            ),
+        ] {
+            assert_eq!(connected_memory_server(&servers).as_deref(), want);
+        }
     }
 }

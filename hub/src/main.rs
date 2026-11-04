@@ -1,5 +1,5 @@
 use helm_hub::auth::Tokens;
-use helm_hub::import::import_dir;
+use helm_hub::import::{import_dir, parse_args};
 use helm_hub::mcp::Options;
 use helm_hub::relay::Line;
 use helm_hub::server::{router, AppState};
@@ -13,7 +13,10 @@ const USAGE: &str = "helm-hub: the Helm hub (memory, relay line, Telegram bot)
 
 USAGE:
   helm-hub serve                       run the MCP server
-  helm-hub import <dir> [--source S]   import a folder of Markdown memories
+  helm-hub import <dir> --source S [--prune]
+                                       import a folder of Markdown memories, subfolders
+                                       included; --source is required; --prune removes
+                                       this source's memories whose files are gone
   helm-hub --version
 
 ENVIRONMENT:
@@ -64,28 +67,12 @@ fn main() -> ExitCode {
 }
 
 fn import(args: &[String]) -> ExitCode {
-    let mut dir = None;
-    let mut source = "default".to_owned();
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--source" => match it.next() {
-                Some(s) => source = s.clone(),
-                None => {
-                    eprintln!("--source needs a value");
-                    return ExitCode::from(2);
-                }
-            },
-            d if dir.is_none() => dir = Some(PathBuf::from(d)),
-            _ => {
-                eprintln!("{USAGE}");
-                return ExitCode::from(2);
-            }
+    let args = match parse_args(args) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}\n\n{USAGE}");
+            return ExitCode::from(2);
         }
-    }
-    let Some(dir) = dir else {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
     };
     let mut store = match Store::open(&db_path()) {
         Ok(s) => s,
@@ -94,7 +81,7 @@ fn import(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match import_dir(&mut store, &dir, &source) {
+    match import_dir(&mut store, &args.dir, &args.source, args.prune) {
         Ok(r) => {
             println!(
                 "imported {} of {} files: {} new, {} updated, {} unchanged; {} skipped (index files), {} failed",
@@ -111,6 +98,15 @@ fn import(args: &[String]) -> ExitCode {
             }
             for f in &r.failed {
                 println!("  failed  {f}");
+            }
+            if args.prune {
+                println!("pruned {} memories whose files are gone", r.pruned.len());
+                for p in &r.pruned {
+                    println!("  pruned  {p}");
+                }
+                if r.files == 0 {
+                    println!("  no memory files found, so nothing was pruned");
+                }
             }
             println!(
                 "the store now holds {} memories",

@@ -497,6 +497,17 @@ impl Store {
         Ok(())
     }
 
+    /// `(id, name, source)` of every memory whose source starts with `prefix` (case-sensitive,
+    /// no wildcards), for the importer's prune.
+    pub fn with_source_prefix(&self, prefix: &str) -> Result<Vec<(i64, Option<String>, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, source FROM memories
+             WHERE source IS NOT NULL AND substr(source, 1, length(?1)) = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([prefix], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// Insert or refresh a memory keyed on `name`, for the importer.
     /// Returns what happened. A changed body drops the stored vector.
     pub fn upsert_named(&mut self, m: &NewMemory) -> Result<Upsert> {

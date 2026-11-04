@@ -68,6 +68,22 @@ fn note_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .map_err(|e| ApiError::internal(e.to_string()))?
 }
 
+/// The note for the folder a chat runs in, for the chat's system prompt: `None` when the chat is
+/// unknown or the note is empty.
+pub fn note_text_for_chat(db: &Database, chat: &str) -> Option<String> {
+    db.snapshot(|tx| {
+        Ok::<_, rusqlite::Error>(
+            folder_of(tx, chat)
+                .and_then(|p| read(tx, &p))
+                .ok()
+                .and_then(|v| v["text"].as_str().map(str::to_owned)),
+        )
+    })
+    .ok()
+    .flatten()
+    .filter(|t| !t.trim().is_empty())
+}
+
 /// Whether the text looks like a credential: held back rather than stored, since the note is
 /// read by every chat in the folder.
 pub fn looks_like_secret(s: &str) -> bool {
@@ -215,5 +231,14 @@ mod tests {
         assert_eq!(get(&b).unwrap()["text"], "");
         assert_eq!(get(&other).unwrap()["text"], "Another folder.");
         assert_eq!(get("no-such-chat").unwrap_err().code, "not_found");
+        // What a chat's system prompt carries: the folder's note, nothing for an empty note or
+        // an unknown chat.
+        let db = ctx.services.need::<Database>().unwrap();
+        assert_eq!(
+            note_text_for_chat(&db, &other).as_deref(),
+            Some("Another folder.")
+        );
+        assert_eq!(note_text_for_chat(&db, &b), None);
+        assert_eq!(note_text_for_chat(&db, "no-such-chat"), None);
     }
 }

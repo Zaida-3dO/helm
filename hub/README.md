@@ -172,17 +172,24 @@ Update or an array of them: 400. The endpoint exists in both modes.
 
 ```
 helm-hub serve                       # HUB_DB, HUB_BIND, HUB_TOKENS, HUB_ALLOW_MUTATE, HUB_TELEGRAM_*
-helm-hub import <dir> [--source S]   # S: the source tag the imported memories carry
+helm-hub import <dir> --source S [--prune]   # S: the source tag the imported memories carry (required)
 ```
 
-`import` reads the top-level `*.md` files of a folder (subfolders are not read). Frontmatter `name`,
+`import` reads the `*.md` files of a folder and its subfolders (hidden folders such as `.git` are left out). Frontmatter `name`,
 `description` and `type` (or `metadata.type`) are kept, and so are the body and its `[[wiki links]]`.
 The memory's title is the body's first `# heading`, else its name. A file with no frontmatter is
 keyed on its file stem. The import is idempotent on `name`: unchanged files are left alone, changed
 files are updated in place, and a changed body drops that memory's stored vector, since the vector
 described the old text. `MEMORY.md` and `README.md` are index files and are skipped. Two files
 claiming one name are reported as failures rather than overwriting each other. Imported memories
-are tagged `imported`, the source tag, and their type.
+are tagged `imported`, the source tag, and their type, and carry the file's path below the folder
+as their source (`<tag>:sub/a.md`).
+
+`--source` is required, so a re-import cannot re-tag memories under another source by accident; keep
+using the same tag for the same folder. `--prune` then removes the memories of that source (and
+only that source) whose files are gone or whose `name` changed. Memories written by agents, or
+imported under another source, are never touched. A file that failed to import keeps its old
+memory, and a run that finds no memory files prunes nothing (an unmounted folder looks empty).
 
 ## Build, test, run
 
@@ -196,7 +203,7 @@ docker build -t helm-hub:latest .
 `compose.snippet.yml` is the service block for the server's compose group. The bot's
 long poll, the line and the memory store share the one-thread runtime; Bot API calls run on the
 blocking pool. Run the import inside
-the container: `docker exec helm-hub helm-hub import /mnt/memory`.
+the container: `docker exec helm-hub helm-hub import /mnt/memory --source my-memory`.
 
 ## Budget
 
