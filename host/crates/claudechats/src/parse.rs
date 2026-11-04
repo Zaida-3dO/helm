@@ -54,9 +54,26 @@ pub struct Transcript {
     pub lines: Vec<Decoded>,
 }
 
+/// How many of the newest messages an index pass keeps.
+pub const INDEX_MESSAGES: usize = 512;
+/// An index pass does not decode a line this long that carries a tool result: such a line is
+/// tool output, not conversation, and decoding it is most of the cost of reading a big record.
+const INDEX_SKIP_LINE_BYTES: usize = 64 * 1024;
+
 /// Parse a whole record file. The session id falls back to the file's name stem, which is how
 /// Claude Code names these files.
 pub fn parse_file(path: &Path) -> std::io::Result<Transcript> {
+    parse_with(path, false)
+}
+
+/// Parse a record file down to what the index holds: ids, folder, title, counts, the newest time
+/// and the newest [`INDEX_MESSAGES`] messages. Tool calls and results are not kept, so a record
+/// full of tool output costs no more memory than a short chat.
+pub fn parse_index(path: &Path) -> std::io::Result<Transcript> {
+    parse_with(path, true)
+}
+
+fn parse_with(path: &Path, index: bool) -> std::io::Result<Transcript> {
     let file = std::fs::File::open(path)?;
     let mut reader = BufReader::new(file);
     let stem = path
@@ -71,6 +88,7 @@ pub fn parse_file(path: &Path) -> std::io::Result<Transcript> {
         last_ts: 0,
         lines: Vec::new(),
     };
+    let mut first_user: Option<String> = None;
     let mut line = String::new();
     loop {
         line.clear();
@@ -79,6 +97,9 @@ pub fn parse_file(path: &Path) -> std::io::Result<Transcript> {
             Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
             Err(e) => return Err(e),
             Ok(_) => {}
+        }
+        if index && line.len() > INDEX_SKIP_LINE_BYTES && line.contains("\"tool_result\"") {
+            continue;
         }
         let Ok(record) = serde_json::from_str::<Value>(line.trim_end()) else {
             continue;
@@ -115,9 +136,19 @@ pub fn parse_file(path: &Path) -> std::io::Result<Transcript> {
                     continue;
                 }
                 if let Some(text) = plain_text(&content) {
+                    let before = t.message_count;
                     push_message(&mut t, Role::User, &text, ts);
+                    if first_user.is_none() && t.message_count > before {
+                        first_user = t.lines.last().and_then(|l| match l {
+                            Decoded::Message { text, .. } => Some(text.clone()),
+                            _ => None,
+                        });
+                    }
                 }
-                collect_results(&mut t, &content, ts);
+                if !index {
+                    collect_results(&mut t, &content, ts);
+                }
+                trim_for_index(&mut t, index);
             }
             Some("assistant") if skip(&record) => {}
             Some("assistant") => {
@@ -126,8 +157,9 @@ pub fn parse_file(path: &Path) -> std::io::Result<Transcript> {
                 };
                 if let Some(text) = plain_text(content) {
                     push_message(&mut t, Role::Assistant, &text, ts);
+                    trim_for_index(&mut t, index);
                 }
-                if let Some(blocks) = content.as_array() {
+                if let Some(blocks) = content.as_array().filter(|_| !index) {
                     for b in blocks {
                         if b.get("type").and_then(Value::as_str) != Some("tool_use") {
                             continue;
@@ -161,15 +193,7 @@ pub fn parse_file(path: &Path) -> std::io::Result<Transcript> {
         t.session_id = stem;
     }
     if t.title.is_empty() {
-        if let Some(Decoded::Message { text, .. }) = t.lines.iter().find(|l| {
-            matches!(
-                l,
-                Decoded::Message {
-                    role: Role::User,
-                    ..
-                }
-            )
-        }) {
+        if let Some(text) = first_user {
             t.title = text
                 .lines()
                 .next()
@@ -182,6 +206,13 @@ pub fn parse_file(path: &Path) -> std::io::Result<Transcript> {
         }
     }
     Ok(t)
+}
+
+/// In an index pass, drop the oldest message once more than [`INDEX_MESSAGES`] are held.
+fn trim_for_index(t: &mut Transcript, index: bool) {
+    if index && t.lines.len() > INDEX_MESSAGES {
+        t.lines.remove(0);
+    }
 }
 
 fn skip(record: &Value) -> bool {

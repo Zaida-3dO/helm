@@ -2,7 +2,10 @@
 //!
 //! The tables are refreshed when the list or a search runs, not on a timer. A file whose size and
 //! modification time match what the row already holds is not re-parsed, so a refresh over a few
-//! hundred unchanged records is just a folder walk. Ranking follows the chat search: text hits
+//! hundred unchanged records is just a folder walk. One refresh runs at a time (a caller that
+//! finds one running reads the index as it stands), a search does not start another within a
+//! minute of a finished one and stops reading new records after a few seconds, and each record
+//! is read down to what is indexed and written in small batches. Ranking follows the chat search: text hits
 //! score bm25 softened by age and are one per chat; chats whose title contains the whole query
 //! come first, newest first (there is no pin, run or open signal on an outside record to boost
 //! by).
@@ -92,13 +95,82 @@ fn walk(root: &Path) -> rusqlite::Result<(Vec<Candidate>, bool)> {
     Ok((out, true))
 }
 
-/// Re-index as needed. Ok(source_missing).
-pub fn refresh(db: &Database, root: &Path) -> rusqlite::Result<bool> {
+/// Files parsed per write, so a first pass over thousands of records never holds them all.
+const WRITE_BATCH: usize = 16;
+
+/// What a refresh did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Refreshed {
+    /// The records folder was not found (the rows already held are kept).
+    pub source_missing: bool,
+    /// Every changed record was read. False when a time budget ran out first; the next refresh
+    /// carries on with the newest ones left.
+    pub complete: bool,
+}
+
+/// Only one refresh runs at a time, and a search-time refresh that ran lately is not repeated.
+pub struct Gate {
+    running: std::sync::Mutex<()>,
+    last_done_ms: std::sync::atomic::AtomicI64,
+}
+
+/// How long a finished refresh is trusted by a search.
+pub const SEARCH_REFRESH_EVERY_MS: i64 = 60_000;
+
+impl Gate {
+    pub const fn new() -> Self {
+        Self {
+            running: std::sync::Mutex::new(()),
+            last_done_ms: std::sync::atomic::AtomicI64::new(i64::MIN),
+        }
+    }
+
+    /// Run `f` unless another refresh is running (then `None`: read the index as it stands) or,
+    /// when `force` is off, one finished within [`SEARCH_REFRESH_EVERY_MS`]. A run that
+    /// finished everything it found counts as done for the throttle.
+    pub fn run<E>(
+        &self,
+        force: bool,
+        now_ms: i64,
+        f: impl FnOnce() -> Result<Refreshed, E>,
+    ) -> Result<Option<Refreshed>, E> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let guard = match self.running.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+        };
+        let last = self.last_done_ms.load(Relaxed);
+        if !force && last != i64::MIN && now_ms.saturating_sub(last) < SEARCH_REFRESH_EVERY_MS {
+            return Ok(None);
+        }
+        let r = f()?;
+        if r.complete {
+            self.last_done_ms.store(now_ms, Relaxed);
+        }
+        drop(guard);
+        Ok(Some(r))
+    }
+}
+
+/// Re-index as needed. Records named in `exclude` (the chats Helm itself ran, whose records the
+/// same CLI wrote here) are left out, and any row already held for one is dropped. With a
+/// `budget`, stops reading new records once it is spent (newest first, so the ones a search
+/// most likely wants are in first).
+pub fn refresh(
+    db: &Database,
+    root: &Path,
+    exclude: &HashSet<String>,
+    budget: Option<std::time::Duration>,
+) -> rusqlite::Result<Refreshed> {
+    let started = std::time::Instant::now();
     let (candidates, found) = walk(root)?;
     if !found {
-        return Ok(true);
+        return Ok(Refreshed {
+            source_missing: true,
+            complete: false,
+        });
     }
-    // Parse outside the transaction: a refresh is mostly disk.
     let stored: HashMap<String, (i64, i64)> = db.snapshot(|tx| {
         let mut st = tx.prepare("SELECT path, size, mtime FROM claude_chat_records")?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
@@ -109,79 +181,50 @@ pub fn refresh(db: &Database, root: &Path) -> rusqlite::Result<bool> {
         }
         Ok::<_, rusqlite::Error>(m)
     })?;
-    let mut fresh: Vec<(Candidate, Transcript)> = Vec::new();
     let mut alive: HashSet<String> = HashSet::new();
+    let mut todo: Vec<Candidate> = Vec::new();
     for c in candidates {
-        let key = c.path.to_string_lossy().into_owned();
-        alive.insert(key.clone());
-        if stored.get(&key) == Some(&(c.size as i64, c.mtime)) {
+        let named_here = c
+            .path
+            .file_stem()
+            .is_some_and(|s| exclude.contains(s.to_string_lossy().as_ref()));
+        if named_here {
             continue;
         }
-        if let Ok(t) = parse::parse_file(&c.path) {
-            fresh.push((c, t));
+        let key = c.path.to_string_lossy().into_owned();
+        alive.insert(key.clone());
+        if stored.get(&key) != Some(&(c.size as i64, c.mtime)) {
+            todo.push(c);
+        }
+    }
+    // Parse outside the transaction (a refresh is mostly disk), a batch at a time.
+    let mut complete = true;
+    let mut todo = todo.into_iter().peekable();
+    while todo.peek().is_some() {
+        let mut fresh: Vec<(Candidate, Transcript)> = Vec::new();
+        while fresh.len() < WRITE_BATCH {
+            let Some(c) = todo.next() else { break };
+            if let Ok(t) = parse::parse_index(&c.path) {
+                if !exclude.contains(&t.session_id) {
+                    fresh.push((c, t));
+                }
+            }
+        }
+        db.write(|tx| write_batch(tx, &fresh))?;
+        if todo.peek().is_some() && budget.is_some_and(|b| started.elapsed() >= b) {
+            complete = false;
+            break;
         }
     }
     db.write(|tx| -> rusqlite::Result<()> {
-        for (c, t) in &fresh {
-            let old_session: Option<String> = tx
-                .query_row(
-                    "SELECT session_id FROM claude_chat_records WHERE path = ?1",
-                    [c.path.to_string_lossy().as_ref()],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            for sid in [old_session.as_deref(), Some(t.session_id.as_str())]
-                .into_iter()
-                .flatten()
-                .collect::<HashSet<_>>()
-            {
-                tx.execute("DELETE FROM claude_chat_search WHERE session_id = ?1", [sid])?;
-            }
-            let updated = t.last_ts.max(c.mtime);
-            tx.execute(
-                "INSERT INTO claude_chat_records(session_id, path, folder, title, updated_at, message_count, size, mtime)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(session_id) DO UPDATE SET
-                     path = excluded.path, folder = excluded.folder, title = excluded.title,
-                     updated_at = excluded.updated_at, message_count = excluded.message_count,
-                     size = excluded.size, mtime = excluded.mtime",
-                params![
-                    t.session_id,
-                    c.path.to_string_lossy().as_ref(),
-                    t.cwd,
-                    t.title,
-                    updated,
-                    t.message_count,
-                    c.size as i64,
-                    c.mtime
-                ],
-            )?;
-            // The newest messages of a long chat are the ones search cares about.
-            let msgs: Vec<&Decoded> = t
-                .lines
-                .iter()
-                .filter(|l| matches!(l, Decoded::Message { .. }))
-                .rev()
-                .take(512)
-                .collect();
-            for m in msgs {
-                let Decoded::Message { text, .. } = m else {
-                    unreachable!("filtered to messages");
-                };
-                tx.execute(
-                    "INSERT INTO claude_chat_search(text, session_id) VALUES (?1, ?2)",
-                    params![text, t.session_id],
-                )?;
-            }
-        }
-        // Files that are gone lose their rows.
+        // Files that are gone, and chats Helm ran itself, lose their rows.
         let stale: Vec<String> = {
             let mut st = tx.prepare("SELECT session_id, path FROM claude_chat_records")?;
             let rows = st.query_map([], |r| -> rusqlite::Result<(String, String)> {
                 Ok((r.get(0)?, r.get(1)?))
             })?;
             rows.filter_map(|r| r.ok())
-                .filter(|(_, p)| !alive.contains(p))
+                .filter(|(s, p)| !alive.contains(p) || exclude.contains(s))
                 .map(|(s, _)| s)
                 .collect()
         };
@@ -191,7 +234,62 @@ pub fn refresh(db: &Database, root: &Path) -> rusqlite::Result<bool> {
         }
         Ok(())
     })?;
-    Ok(false)
+    Ok(Refreshed {
+        source_missing: false,
+        complete,
+    })
+}
+
+fn write_batch(tx: &Transaction<'_>, fresh: &[(Candidate, Transcript)]) -> rusqlite::Result<()> {
+    for (c, t) in fresh {
+        let old_session: Option<String> = tx
+            .query_row(
+                "SELECT session_id FROM claude_chat_records WHERE path = ?1",
+                [c.path.to_string_lossy().as_ref()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        for sid in [old_session.as_deref(), Some(t.session_id.as_str())]
+            .into_iter()
+            .flatten()
+            .collect::<HashSet<_>>()
+        {
+            tx.execute(
+                "DELETE FROM claude_chat_search WHERE session_id = ?1",
+                [sid],
+            )?;
+        }
+        let updated = t.last_ts.max(c.mtime);
+        tx.execute(
+            "INSERT INTO claude_chat_records(session_id, path, folder, title, updated_at, message_count, size, mtime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(session_id) DO UPDATE SET
+                 path = excluded.path, folder = excluded.folder, title = excluded.title,
+                 updated_at = excluded.updated_at, message_count = excluded.message_count,
+                 size = excluded.size, mtime = excluded.mtime",
+            params![
+                t.session_id,
+                c.path.to_string_lossy().as_ref(),
+                t.cwd,
+                t.title,
+                updated,
+                t.message_count,
+                c.size as i64,
+                c.mtime
+            ],
+        )?;
+        // An index pass keeps only the newest messages of a long chat, the ones search cares about.
+        for l in &t.lines {
+            let Decoded::Message { text, .. } = l else {
+                continue;
+            };
+            tx.execute(
+                "INSERT INTO claude_chat_search(text, session_id) VALUES (?1, ?2)",
+                params![text, t.session_id],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 const ROW_COLUMNS: &str = "session_id, title, folder, updated_at, message_count";
@@ -441,6 +539,10 @@ mod tests {
         (dir, db)
     }
 
+    fn refresh_all(db: &Database, root: &Path) -> Refreshed {
+        refresh(db, root, &HashSet::new(), None).unwrap()
+    }
+
     /// `<root>/<folder>/<name>.jsonl`
     pub(crate) fn fixture(root: &Path, folder: &str, name: &str, lines: &[&str]) -> PathBuf {
         let dir = root.join(folder);
@@ -478,7 +580,7 @@ mod tests {
                 &assistant("s-a", "answer one"),
             ],
         );
-        assert!(!refresh(&database, root.path()).unwrap());
+        assert!(!refresh_all(&database, root.path()).source_missing);
         let chats = list(&database, 200).unwrap();
         assert_eq!(chats.len(), 1);
         assert_eq!(chats[0].session_id, "s-a");
@@ -491,11 +593,11 @@ mod tests {
         );
 
         // Re-refreshing an unchanged folder changes nothing (no re-parse, no lost row)...
-        refresh(&database, root.path()).unwrap();
+        refresh_all(&database, root.path());
         assert_eq!(list(&database, 200).unwrap().len(), 1);
         // ...and a deleted file loses its row and its text.
         std::fs::remove_file(&a).unwrap();
-        refresh(&database, root.path()).unwrap();
+        refresh_all(&database, root.path());
         assert!(list(&database, 200).unwrap().is_empty());
         assert!(record(&database, "s-a").unwrap().is_none());
         assert!(search(&database, "walrus", NOW).unwrap().hits.is_empty());
@@ -511,10 +613,13 @@ mod tests {
             "22222222-0000-0000-0000-00000000000b",
             &[&user("s-b", "one")],
         );
-        refresh(&database, root.path()).unwrap();
+        refresh_all(&database, root.path());
         assert_eq!(list(&database, 200).unwrap().len(), 1);
         let gone = root.path().join("nope");
-        assert!(refresh(&database, &gone).unwrap(), "source missing");
+        assert!(
+            refresh_all(&database, &gone).source_missing,
+            "source missing"
+        );
         assert_eq!(list(&database, 200).unwrap().len(), 1);
     }
 
@@ -544,7 +649,7 @@ mod tests {
                 "{\"type\":\"summary\",\"summary\":\"Zebra plans\"}",
             ],
         );
-        refresh(&database, root.path()).unwrap();
+        refresh_all(&database, root.path());
 
         let r = search(&database, "zebra", NOW + 1).unwrap();
         assert_eq!(
@@ -628,5 +733,124 @@ mod tests {
             (v2[0].kind, v2[0].role, v2[0].timestamp),
             (LineKind::Message, Some(LineRole::User), NOW)
         );
+    }
+
+    #[test]
+    fn refreshes_run_one_at_a_time_in_batches_leave_out_helm_chats_and_keep_what_search_needs() {
+        let root = tempfile::tempdir().unwrap();
+        let (_d, database) = db();
+        // 40 records (more than one write batch), each a title plus text, one with 600 messages
+        // and tool output: only the newest 512 messages are indexed and the title still comes
+        // from the first prompt.
+        for i in 0..40 {
+            let sid = format!("s-{i:02}");
+            fixture(
+                root.path(),
+                "p",
+                &sid,
+                &[
+                    &user(&sid, &format!("prompt {i}")),
+                    &assistant(&sid, "quokka"),
+                ],
+            );
+        }
+        let mut long: Vec<String> = (0..600).map(|i| user("s-long", &format!("m{i}"))).collect();
+        long.insert(1, format!(
+            "{{\"sessionId\":\"s-long\",\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"x\",\"content\":\"{}\"}}]}}}}",
+            "o".repeat(100_000)
+        ));
+        let long: Vec<&str> = long.iter().map(String::as_str).collect();
+        fixture(root.path(), "p", "s-long", &long);
+        let own: HashSet<String> = ["s-05".to_owned(), "s-06".to_owned()].into();
+
+        // A budget that is already spent stops after the first batch and says it is incomplete;
+        // the next refresh carries on.
+        let r = refresh(
+            &database,
+            root.path(),
+            &own,
+            Some(std::time::Duration::ZERO),
+        )
+        .unwrap();
+        assert!(!r.complete);
+        let partial = list(&database, 200).unwrap().len();
+        assert!((1..41).contains(&partial), "{partial}");
+        let r = refresh(&database, root.path(), &own, None).unwrap();
+        assert!(r.complete && !r.source_missing);
+        let ids: Vec<String> = list(&database, 200)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.session_id)
+            .collect();
+        assert_eq!(ids.len(), 39, "38 of the 40 plus the long one: {ids:?}");
+        assert!(!ids.contains(&"s-05".to_owned()) && !ids.contains(&"s-06".to_owned()));
+        assert!(search(&database, "quokka", NOW + 1)
+            .unwrap()
+            .hits
+            .iter()
+            .all(|h| h.session_id != "s-05"));
+        let long_row = record(&database, "s-long").unwrap().unwrap();
+        assert_eq!(
+            long_row.2, "m0",
+            "the title is the first prompt although it left the window"
+        );
+        let n: i64 = database
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT count(*) FROM claude_chat_search WHERE session_id = 's-long'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(n, 512);
+        // A chat that becomes Helm's own loses its row on the next refresh.
+        let own: HashSet<String> = ["s-long".to_owned()].into();
+        refresh(&database, root.path(), &own, None).unwrap();
+        assert!(record(&database, "s-long").unwrap().is_none());
+
+        // The gate: a second caller while one runs gets None without running; a search-time run
+        // right after a finished one is skipped, a forced one is not.
+        let gate = Gate::new();
+        let inner = gate
+            .run::<()>(true, 1_000, || {
+                assert!(gate
+                    .run::<()>(true, 1_000, || panic!("must not run"))
+                    .unwrap()
+                    .is_none());
+                Ok(Refreshed {
+                    source_missing: false,
+                    complete: true,
+                })
+            })
+            .unwrap();
+        assert!(inner.is_some());
+        assert!(gate
+            .run::<()>(false, 1_000 + 59_000, || panic!("throttled"))
+            .unwrap()
+            .is_none());
+        assert!(gate
+            .run::<()>(false, 1_000 + 61_000, || Ok(Refreshed {
+                source_missing: false,
+                complete: false
+            }))
+            .unwrap()
+            .is_some());
+        assert!(
+            gate.run::<()>(false, 1_000 + 62_000, || Ok(Refreshed {
+                source_missing: false,
+                complete: true
+            }))
+            .unwrap()
+            .is_some(),
+            "an incomplete run does not start the throttle"
+        );
+        assert!(gate
+            .run::<()>(true, 1_000 + 63_000, || Ok(Refreshed {
+                source_missing: false,
+                complete: true
+            }))
+            .unwrap()
+            .is_some());
     }
 }

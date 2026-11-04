@@ -8,8 +8,8 @@
 //!
 //! | op | class | args to result |
 //! |---|---|---|
-//! | `claude_chat_list` | heavy | `{}` to [`ChatList`] (re-indexes first, newest first) |
-//! | `claude_chat_search` | heavy | [`SearchArgs`] to [`SearchResults`] |
+//! | `claude_chat_list` | blocking | `{}` to [`ChatList`] (re-indexes first, newest first) |
+//! | `claude_chat_search` | blocking | [`SearchArgs`] to [`SearchResults`] |
 //! | `claude_chat_read` | heavy | [`ReadArgs`] to [`ChatRead`] |
 //! | `claude_chat_fork` | maintenance | [`ForkArgs`] to [`Forked`] |
 //!
