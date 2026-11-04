@@ -4,6 +4,7 @@
 
 import type { Api } from '../api/client.ts';
 import type { ChatOps } from '../api/ops.ts';
+import { backupOps } from '../api/backup.ts';
 import type { ChatOrganizeArgs, ProjectNode, ProjectOps, SidebarRow } from '../api/projects.ts';
 import type { SidebarData } from './data.ts';
 import { chatOrder } from './model.ts';
@@ -270,6 +271,16 @@ export async function compactChat(ops: Pick<ChatOps, 'compact'>, chatId: string,
     toast.show({ kind: 'info', text: 'Context compacted.' });
   } catch (e) {
     onError(`Could not compact this chat: ${message(e)}`);
+  }
+}
+
+/** "Export as Markdown": write the chat to a file under Documents and say where it went. */
+export async function exportChatMarkdown(api: Api, chatId: string, onError: (message: string) => void): Promise<void> {
+  try {
+    const out = await backupOps(api).exportChat(chatId);
+    toast.show({ kind: 'info', text: `Exported ${out.messages} messages to ${out.path}` });
+  } catch (e) {
+    onError(`Could not export this chat: ${message(e)}`);
   }
 }
 

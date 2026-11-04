@@ -18,6 +18,8 @@ export interface ChatMenuActions {
   rollOver(): void;
   /** Show what the chat has used: tokens, estimated cost, weekly share. */
   cost(): void;
+  /** Write the chat to a Markdown file under Documents (the `chat_export_markdown` op). */
+  exportMarkdown(): void;
   moveTo(projectId: string): void;
   nestUnder(chatId: string): void;
   topLevel(): void;
@@ -85,6 +87,7 @@ export function chatMenuItems(i: ChatMenuInput, a: ChatMenuActions): MenuItem[] 
     // Rolling over needs the chat idle: the agent writes the hand-off in a turn of its own.
     { id: 'rollover', label: 'Roll over…', disabled: r.archived || busy || archivedGroup, onSelect: a.rollOver },
     { id: 'cost', label: 'Cost…', onSelect: a.cost },
+    { id: 'export', label: 'Export as Markdown', onSelect: a.exportMarkdown },
     {
       id: 'move',
       label: 'Move to project',

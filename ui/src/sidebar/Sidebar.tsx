@@ -18,7 +18,7 @@ import { SchedulesEntry } from '../schedules/SchedulesEntry.tsx';
 import { TasksEntry } from '../tasks/TasksEntry.tsx';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, ConfirmDialog, ContextMenu, Dialog, TextInput, useBinding, type ConfirmSpec, type MenuItem } from '../ui/index.ts';
-import { SidebarActions, compactChat, rollOverChat, rollOverConfirm } from './actions.ts';
+import { SidebarActions, compactChat, exportChatMarkdown, rollOverChat, rollOverConfirm } from './actions.ts';
 import { SidebarData, errorText } from './data.ts';
 import { canSitUnder, dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
 import { chatMenuItems, projectMenuItems } from './menus.ts';
@@ -268,6 +268,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         compact: () => void compactChat(ops, row.chatId, setError),
         rollOver: () => setConfirm(rollOverConfirm(row.title, () => rollOverChat(ops, row.chatId, setError))),
         cost: () => setCost({ chatId: row.chatId }),
+        exportMarkdown: () => void exportChatMarkdown(api, row.chatId, setError),
         moveTo: (id) => void act.moveTo(row, id),
         nestUnder: (id) => {
           userCollapsed.current.delete(id);
