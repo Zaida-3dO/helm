@@ -28,10 +28,10 @@
   --surface-alt: #f5f5f5;
   --hover: #e8e8e7;
   --selected: #dededd;
-  --secondary: #5c5e5c;
+  --secondary: #565856;
   /* The base tones are #8c8d8c (muted), #6a6c6a (secondary), #737c88 (accent) and #ac9256 (git-modified);
      darkened so text in those colours reaches 4.5:1 on the page and its surfaces. */
-  --muted: #666766;
+  --muted: #606160;
   --line: #e3e3e2;
   --line-strong: #d0d0d0;
   --accent: #646c77;
@@ -205,7 +205,7 @@
   --hover: #d8ecfa;
   --selected: #bcdcf5;
   --secondary: #3f5c78;
-  --muted: #55708c;
+  --muted: #485f77;
   --line: #a4c6e4;
   --line-strong: #7fa8d0;
   --accent: #23528c;
@@ -256,7 +256,7 @@
   --hover: #eef0f3;
   --selected: #e0e4ea;
   --secondary: #4b545e;
-  --muted: #626c76;
+  --muted: #5c656e;
   --line: #e0e2e5;
   --line-strong: #c8ccd2;
   --accent: #611f69;
@@ -307,7 +307,7 @@
   --hover: #e9ecef;
   --selected: #dce0e5;
   --secondary: #55585c;
-  --muted: #6b6e72;
+  --muted: #606266;
   --line: #dadce0;
   --line-strong: #bdc1c6;
   --accent: #3367d6;
@@ -358,7 +358,7 @@
   --hover: #e6ebe3;
   --selected: #d6e0d2;
   --secondary: #4c5a4c;
-  --muted: #62705f;
+  --muted: #576354;
   --line: #d6dcd2;
   --line-strong: #b9c4b3;
   --accent: #2c6b39;
@@ -409,7 +409,7 @@
   --hover: #e8eef5;
   --selected: #d9e3ef;
   --secondary: #565a5e;
-  --muted: #6c7074;
+  --muted: #606467;
   --line: #dcdcdc;
   --line-strong: #c0c0c0;
   --accent: #4a6f8f;
@@ -433,8 +433,8 @@
   --surface-alt: #2e2f30;
   --hover: #3a3c3e;
   --selected: #45484a;
-  --secondary: #b9bbbd;
-  --muted: #9a9d9f;
+  --secondary: #c4c6c8;
+  --muted: #b6b8b9;
   --line: #3d4042;
   --line-strong: #515557;
   --accent: #98be65;
@@ -460,7 +460,7 @@
   --hover: #eceef6;
   --selected: #dfe3f0;
   --secondary: #4e516b;
-  --muted: #676a85;
+  --muted: #5f627b;
   --line: #dcdee8;
   --line-strong: #c2c6d6;
   --accent: #4f5bc7;
@@ -485,7 +485,7 @@
   --hover: #393b41;
   --selected: #43454c;
   --secondary: #c9ccd3;
-  --muted: #a6abb5;
+  --muted: #b0b4bd;
   --line: #3d4046;
   --line-strong: #52555d;
   --accent: #a3aef5;
@@ -511,7 +511,7 @@
   --hover: #f3e8de;
   --selected: #e9d8c9;
   --secondary: #5b4d45;
-  --muted: #70615a;
+  --muted: #6a5c56;
   --line: #e6d7cb;
   --line-strong: #cbbcab;
   --accent: #a6431c;
@@ -562,7 +562,7 @@
   --hover: #eaedf1;
   --selected: #dee4ea;
   --secondary: #4f575e;
-  --muted: #667078;
+  --muted: #5c656d;
   --line: #d8dde3;
   --line-strong: #b9c1c9;
   --accent: #3366cc;

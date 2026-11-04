@@ -49,11 +49,6 @@ const findings: Finding[] = [];
 // Only these exact controls are excused; any other finding still fails the report. Delete an entry
 // when its decision is made.
 const KNOWN: { kind: Finding["kind"]; what: RegExp; item: string }[] = [
-  // Muted colours below 4.5:1: the sidebar's shortcut hint and Settings → Actions' muted text.
-  { kind: "contrast", what: /^kbd\.sb-kbd /, item: "sidebar shortcut hint colour" },
-  { kind: "contrast", what: /^span\.ap-(label|tag|preview) /, item: "Actions muted text colour" },
-  // The composer shows focus as its box's border tint only (composer.css), a deliberate choice.
-  { kind: "focus", what: /^div\[composer\]\{Message\}\.editor-input: no outline or shadow when focused/, item: "composer focus tint" },
   // The search dialog and quick-open fields have no box of their own: focus shows as a line under
   // the field (the search dialog), and the dialog's edge frames them.
   { kind: "focus", what: /^input\[search-input\]\{Search\}\.search-input: no outline or shadow when focused/, item: "search field focus line" },

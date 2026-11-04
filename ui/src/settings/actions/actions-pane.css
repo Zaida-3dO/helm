@@ -46,8 +46,14 @@
   outline-offset: -2px;
 }
 
-.actions-pane .ap-item.is-hidden .ap-summary {
-  opacity: 0.6;
+/* A hidden action reads quieter by colour and weight, not by fading, so its text keeps 4.5:1. */
+.actions-pane .ap-item.is-hidden .ap-label {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.actions-pane .ap-item.is-hidden .ap-tag {
+  color: var(--muted);
 }
 
 .actions-pane .ap-label {
