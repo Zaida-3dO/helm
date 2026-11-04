@@ -89,6 +89,9 @@ export async function launchApp(profileDir: string, opts: LaunchOptions = {}): P
     HELM_PROFILE_DIR: profileDir,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
     HELM_TEST_CONFIRM: "ok",
+    // The window opens off-screen and is never focused, so a run does not take over the screen of
+    // whoever started it. `HELM_E2E_SHOW=1` opens it normally, to watch a check by eye.
+    ...(process.env.HELM_E2E_SHOW === "1" ? {} : { HELM_TEST_WINDOW: "background" }),
     // No local model server is ever contacted from a check: each shows as unreachable. A check that
     // wants one points this at the fake in fakes/local-model through `opts.env`.
     HELM_TEST_LOCAL_SERVERS: "off",

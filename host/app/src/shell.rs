@@ -58,6 +58,11 @@ impl TauriShell {
 impl AppControl for TauriShell {
     fn show_main(&self) {
         self.shown.store(true, std::sync::atomic::Ordering::SeqCst);
+        // A background test window is already on screen (off-screen): showing it again would
+        // activate it, take focus and un-minimise it, which is what that mode exists to avoid.
+        if test_background(cfg!(debug_assertions)) {
+            return;
+        }
         if let Some(w) = self.app.get_webview_window(MAIN_WINDOW) {
             let _ = w.show();
             let _ = w.unminimize();
@@ -76,21 +81,65 @@ impl AppControl for TauriShell {
     }
 }
 
+/// Debug builds honour `HELM_TEST_WINDOW=background`: the main window opens off-screen, at a fixed
+/// size, already shown but never focused, and later "show" requests leave it alone. Automated
+/// checks use it so a run never takes over the screen or steals focus. Release builds ignore it.
+pub fn test_background(debug: bool) -> bool {
+    background_window(debug, std::env::var("HELM_TEST_WINDOW").ok().as_deref())
+}
+
+fn background_window(debug: bool, value: Option<&str>) -> bool {
+    debug && value == Some("background")
+}
+
+/// Show a window without activating it (Windows' `SW_SHOWNOACTIVATE`), so it never takes focus.
+#[cfg(windows)]
+fn show_without_activating(window: &tauri::WebviewWindow) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+    }
+    const SW_SHOWNOACTIVATE: i32 = 4;
+    if let Ok(hwnd) = window.hwnd() {
+        // SAFETY: a plain Win32 call on the window handle Tauri just gave us.
+        unsafe {
+            ShowWindow(hwnd.0 as isize, SW_SHOWNOACTIVATE);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn show_without_activating(window: &tauri::WebviewWindow) {
+    let _ = window.show();
+}
+
 /// The main window is built in code, not from static config, so its navigation policy can be
 /// attached: only the app origin, `about:srcdoc` and (debug) the dev server; no new
 /// windows. Its WebView2 data lives inside the profile, so profiles never share web storage.
 pub fn build_main_window(app: &tauri::App, profile: &Profile, debug: bool) -> tauri::Result<()> {
     let data_dir = profile.path("webview");
     helm_core::privfs::create_private_dir_all(&data_dir)?;
-    let window = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
-        .title("Helm")
-        // Restored size 1220 x 820, minimum 760 x 540, opens maximised, created
-        // hidden and shown by the UI's `window_ready` once the first frame is drawn. Helm draws
-        // its own caption, so the native frame is off.
-        .inner_size(1220.0, 820.0)
+    let builder = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
+        .title("Helm");
+    let builder = if test_background(debug) {
+        // Off-screen and never focused, at the size the checks expect. It is shown right after
+        // creation (a hidden window may stop painting, and the checks take screenshots).
+        builder
+            .inner_size(1440.0, 900.0)
+            .maximized(false)
+            .visible(false)
+            .focused(false)
+    } else {
+        // Restored size 1220 x 820, opens maximised, created hidden and shown by the UI's
+        // `window_ready` once the first frame is drawn.
+        builder
+            .inner_size(1220.0, 820.0)
+            .maximized(true)
+            .visible(false)
+    };
+    let window = builder
+        // Minimum 760 x 540. Helm draws its own caption, so the native frame is off.
         .min_inner_size(760.0, 540.0)
-        .maximized(true)
-        .visible(false)
         .decorations(false)
         .data_directory(data_dir)
         // Setting browser arguments replaces the ones the web view adds by default, so they are listed
@@ -108,6 +157,12 @@ pub fn build_main_window(app: &tauri::App, profile: &Profile, debug: bool) -> ta
         })
         .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Deny)
         .build()?;
+    if test_background(debug) {
+        // Moved off-screen first, then shown without activating it (the builder's own position is
+        // not always honoured, and a plain show would take focus).
+        let _ = window.set_position(tauri::PhysicalPosition::new(-32000, -32000));
+        show_without_activating(&window);
+    }
     // Files dragged in from Explorer reach the composer as paths.
     let handle = app.handle().clone();
     window.on_window_event(move |e| {
@@ -152,6 +207,18 @@ pub fn file_drop_event(d: &tauri::DragDropEvent) -> AppEvent {
 #[cfg(test)]
 mod drop_tests {
     use super::*;
+
+    #[test]
+    fn the_background_test_window_is_a_debug_build_switch() {
+        for (debug, value, want) in [
+            (true, Some("background"), true),
+            (true, Some("shown"), false),
+            (true, None, false),
+            (false, Some("background"), false),
+        ] {
+            assert_eq!(background_window(debug, value), want, "{debug} {value:?}");
+        }
+    }
 
     #[test]
     fn a_drop_carries_its_paths_and_position() {
