@@ -2245,7 +2245,9 @@ async fn an_edit_replaces_the_branch_and_keeps_the_old_one_inactive() {
     )
     .await
     .unwrap();
-    // Phase two waits for the worker to close.
+    // Phase two waits for the worker to close; a message that arrives meanwhile (a phone message,
+    // a schedule) is not part of the replaced branch and still goes out after the edit.
+    let (held, _) = h.send(&chat, "arrived while closing", "default").await;
     w.expect("shutdown").await;
     w.exit().await;
     let mut w2 = h.worker().await;
@@ -2256,6 +2258,8 @@ async fn an_edit_replaces_the_branch_and_keeps_the_old_one_inactive() {
     w2.ready().await;
     let p = w2.expect("prompt").await;
     assert_eq!(p["text"], "second, edited");
+    let p2 = w2.expect("prompt").await;
+    assert_eq!(p2["submissionId"], held.as_str());
     let carried = p["context"].as_str().unwrap();
     assert!(carried.contains("User: first") && !carried.contains("answer two"));
     let t = texts(&h, &chat);

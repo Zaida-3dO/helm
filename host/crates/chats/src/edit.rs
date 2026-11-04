@@ -364,9 +364,12 @@ pub fn apply(
             params![chat_id, sid],
         )?;
         // A message not yet handed over is taken out of the running flow the same way:
-        // superseded, except the resent prompt this edit is about to send.
+        // superseded, except the resent prompt this edit is about to send. Only one saved before
+        // the edit was staged: a send that arrived while the worker was closing (a phone
+        // message, a schedule) belongs to the edited conversation and goes out after it.
         tx.execute(
-            "UPDATE submissions SET state = 'superseded' WHERE chat_id = ?1 AND id != ?2 AND state = 'saved'",
+            "UPDATE submissions SET state = 'superseded' WHERE chat_id = ?1 AND id != ?2 AND state = 'saved'
+               AND created_at < (SELECT created_at FROM pending_edits WHERE chat_id = ?1)",
             params![chat_id, sid],
         )?;
         crate::manage::drop_completion(tx, chat_id)?;
