@@ -103,18 +103,24 @@ pub fn baseline(tx: &Transaction<'_>, session: &str) -> rusqlite::Result<Option<
 }
 
 /// What the chat's conversation now holds in its context, and when it was measured: the input,
-/// cache-read and cache-write counts of the chat's newest turn — that turn's own request, which
-/// is the whole conversation as the model last saw it — with that turn's time. The session's
-/// running totals are not it: they add every turn's reading together, so a chat of a few turns
-/// would read as several times its real size. `None` when no turn of the chat has reported
-/// usage. This is the same reading the token chip, the context bar and the model-switch
-/// capacity check use, so an answer from a tool never disagrees with what the chat shows.
+/// cache-read and cache-write counts of the newest reply that reports usage, with that reply's
+/// time. A reply's usage is its own request — the whole conversation as the model last saw it.
+/// A turn's recorded share is not it: that adds up every request of the turn (a turn with many
+/// tool calls re-reads the conversation once per call), so a long turn would read as several
+/// times the real size. `None` when no reply of the chat has reported usage. This is the same
+/// reading the token chip and the context bar make, so an answer from a tool never disagrees
+/// with what the chat shows, and it is what the model-switch capacity check goes by.
 pub fn context_reported_at(tx: &Transaction<'_>, chat_id: &str) -> Option<(u64, i64)> {
     let row: Option<(i64, i64, i64, i64)> = tx
         .query_row(
-            "SELECT input_tokens, cache_read_tokens, cache_write_tokens, timestamp
-             FROM chat_turn_usage WHERE chat_id = ?1
-             ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+            "SELECT COALESCE(json_extract(details, '$.usage.inputTokens'), 0),
+                    COALESCE(json_extract(details, '$.usage.cacheReadTokens'), 0),
+                    COALESCE(json_extract(details, '$.usage.cacheWriteTokens'), 0),
+                    timestamp
+             FROM messages
+             WHERE chat_id = ?1 AND role = 'assistant' AND active = 1
+               AND json_extract(details, '$.usage') IS NOT NULL
+             ORDER BY timestamp DESC, id DESC LIMIT 1",
             [chat_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )

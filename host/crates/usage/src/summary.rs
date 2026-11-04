@@ -1137,6 +1137,17 @@ mod tests {
                                "cacheWriteTokens": w, "costUsd": 0.0});
             let raw = json!({"type": "usage", "id": key, "timestamp": ts, "nativeSession": "s",
                              "usage": usage, "running": usage});
+            // The context reading comes from the turn's reply row, as the chat shows it.
+            tx.execute(
+                "INSERT INTO messages(chat_id, source_key, role, timestamp, details)
+                 VALUES (?1, ?2, 'assistant', ?3, ?4)",
+                rusqlite::params![
+                    chat,
+                    format!("m:{key}"),
+                    ts,
+                    json!({"usage": usage}).to_string()
+                ],
+            )?;
             helm_chats::session_log::project(tx, dir.path(), chat, raw.as_object().unwrap(), 1)
         };
         db.write(|tx| {
@@ -1581,6 +1592,17 @@ mod tests {
                                "cacheWriteTokens": 2, "costUsd": c});
             let raw = json!({"type": "usage", "id": key, "timestamp": ts, "nativeSession": sess,
                              "usage": usage, "running": usage});
+            // The context reading comes from the turn's reply row, as the chat shows it.
+            tx.execute(
+                "INSERT INTO messages(chat_id, source_key, role, timestamp, details)
+                 VALUES (?1, ?2, 'assistant', ?3, ?4)",
+                rusqlite::params![
+                    chat,
+                    format!("m:{key}"),
+                    ts,
+                    json!({"usage": usage}).to_string()
+                ],
+            )?;
             helm_chats::session_log::project(tx, dir.path(), chat, raw.as_object().unwrap(), 1)
         };
         db.write(|tx| {

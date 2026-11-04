@@ -5214,6 +5214,9 @@ async fn settled_turn(
     ack(&w, &p).await;
     echo(&w, sid.as_str()).await;
     w.emit(json!({"type": "agent_start"})).await;
+    // Claude Code names its session as it starts, before anything is used.
+    w.emit(json!({"type": "native_session", "sessionId": session}))
+        .await;
     w.emit(json!({"type": "message_start", "message": {"id": mid, "role": "assistant", "content": []}}))
         .await;
     w.emit(json!({"type": "message_update", "messageId": mid, "index": 0, "delta": {"type": "text_delta", "text": answer}}))
@@ -5257,21 +5260,24 @@ async fn a_started_chat_moves_between_local_and_claude_in_both_directions() {
     h.call("chat_set_model", json!({"chatId": &chat, "model": "opus"}))
         .await
         .unwrap();
-    let small = json!({"inputTokens": 20, "outputTokens": 40, "cacheReadTokens": 500,
-                       "cacheWriteTokens": 60, "costUsd": 0.05});
+    // The session's running totals after its k-th turn: each turn adds the same amount.
+    let totals = |k: i64| {
+        json!({"inputTokens": 20 * k, "outputTokens": 40 * k, "cacheReadTokens": 500 * k,
+               "cacheWriteTokens": 60 * k, "costUsd": 0.5 * k as f64})
+    };
     let mut cw = settled_turn(
         &mut h,
         &chat,
         "first on Claude",
         "m-1",
         "working on it",
-        small.clone(),
+        totals(1),
         "native-0",
     )
     .await;
     // (move to, the notice row it must write, the worker launches on the local server, the
     //  session the next worker resumes, and the session that turn settles as)
-    for (model, notice, on_local, resumes, session) in [
+    for (k, (model, notice, on_local, resumes, session)) in [
         (
             "local/strata/alpha",
             "Model changed to alpha (local) — other provider",
@@ -5286,7 +5292,10 @@ async fn a_started_chat_moves_between_local_and_claude_in_both_directions() {
             "native-1",
             "native-2",
         ),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let moved = h
             .call(
                 "chat_set_model",
@@ -5304,7 +5313,7 @@ async fn a_started_chat_moves_between_local_and_claude_in_both_directions() {
             &format!("a turn on {model}"),
             &format!("m-{session}"),
             "carried on from the other provider",
-            small.clone(),
+            totals(k as i64 + 2),
             session,
         )
         .await;
@@ -5326,6 +5335,12 @@ async fn a_started_chat_moves_between_local_and_claude_in_both_directions() {
             "{model}: the transcript notice row is missing; rows are {notes:?}"
         );
     }
+    // Each turn records only its own share of the running totals, whichever side it ran on; the
+    // local turn costs nothing, and the Claude turn after it is not charged for the local one.
+    assert_eq!(
+        h.col("SELECT input_tokens || '/' || cache_read_tokens || '/' || cost_usd FROM chat_turn_usage ORDER BY timestamp, rowid"),
+        ["20/500/0.5", "20/500/0.0", "20/500/0.5"]
+    );
     cw.exit().await;
 }
 
@@ -5362,14 +5377,24 @@ async fn a_model_change_too_large_for_the_target_offers_a_roll_over() {
         "native-1",
     )
     .await;
-    // The newest turn's own request: far more than the small local window.
+    // The turn's share above is huge, but the context is the newest reply's own request (462).
+    let held = |h: &H| {
+        h.db.snapshot::<_, rusqlite::Error>(|t| {
+            Ok(crate::turn_usage::context_reported_at(t, &chat).map(|(n, _)| n))
+        })
+        .unwrap()
+    };
+    assert_eq!(held(&h), Some(462));
+    // The newest reply's own request: far more than the small local window.
     h.db.write(|tx| {
         tx.execute(
-            "UPDATE chat_turn_usage SET cache_read_tokens = 150000 WHERE chat_id = ?1",
+            "UPDATE messages SET details = json_set(details, '$.usage.cacheReadTokens', 150000)
+             WHERE chat_id = ?1 AND role = 'assistant'",
             [&chat],
         )
     })
     .unwrap();
+    assert_eq!(held(&h), Some(150_062));
     let e = h
         .call(
             "chat_set_model",

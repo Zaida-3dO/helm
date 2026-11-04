@@ -3019,12 +3019,12 @@ impl Actor {
         let main = crate::turn_usage::parse(v).unwrap_or_default();
         let local = self.launched_local.is_some();
         let turn = match v.get("running").and_then(crate::turn_usage::parse) {
-            Some(mut running) => {
-                // Whatever cost Claude Code works out for a model it does not know is not real:
-                // a local turn costs nothing, and its tokens are counted apart from the plan's.
-                if local {
-                    running.cost_usd = 0.0;
-                }
+            Some(running) => {
+                // The share is worked out on the raw running totals, so a switch between Claude
+                // and a local model does not read as a fresh start. Whatever cost Claude Code
+                // works out for a model it does not know is not real: a local turn's cost is
+                // zeroed below, once the share is known, and its tokens are counted apart from
+                // the plan's.
                 let turn = crate::turn_usage::share(&self.cost_base, &running, &main);
                 self.cost_base = running;
                 turn
