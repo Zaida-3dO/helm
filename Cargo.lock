@@ -1792,6 +1792,7 @@ dependencies = [
  "env_logger",
  "helm-actions",
  "helm-afk",
+ "helm-backup",
  "helm-chats",
  "helm-claudechats",
  "helm-consent",
@@ -1826,6 +1827,22 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-notification",
  "tokio",
+]
+
+[[package]]
+name = "helm-backup"
+version = "0.6.2"
+dependencies = [
+ "chrono",
+ "helm-core",
+ "helm-ipc",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ts-rs",
 ]
 
 [[package]]

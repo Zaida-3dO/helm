@@ -6,7 +6,7 @@ import { chatMenuItems, nestTargets, projectMenuItems, projectNestTargets, type 
 import { UNDO_LIMIT, UndoStack } from './undo.ts';
 
 const noop = () => undefined;
-const chatActs: ChatMenuActions = { fork: noop, rename: noop, compact: noop, rollOver: noop, cost: noop, moveTo: noop, nestUnder: noop, topLevel: noop, toggleChildren: noop, markUnread: noop, pin: noop, mute: noop, archive: noop, restore: noop, remove: noop };
+const chatActs: ChatMenuActions = { fork: noop, rename: noop, compact: noop, rollOver: noop, cost: noop, exportMarkdown: noop, moveTo: noop, nestUnder: noop, topLevel: noop, toggleChildren: noop, markUnread: noop, pin: noop, mute: noop, archive: noop, restore: noop, remove: noop };
 const projActs: ProjectMenuActions = { newChat: noop, pin: noop, rename: noop, changeIcon: noop, cost: noop, nestUnder: noop, topLevel: noop, archive: noop, restore: noop, colour: noop, customColour: noop };
 
 function row(chatId: string, over: Partial<SidebarRow> = {}): SidebarRow {
@@ -126,6 +126,11 @@ test('the chat menu follows state: archive or restore and delete, stop first whi
   assert.equal(rollOver(row('a', { archived: true }))?.disabled, true);
   rollOver(row('a'))?.onSelect?.();
   assert.equal(rolled, 1);
+  // Export as Markdown: offered for every chat (archived and busy too) and runs the action it was given.
+  assert.ok(ids(row('a')).includes('export') && ids(row('a', { archived: true })).includes('export') && ids(row('a', { status: 'running' })).includes('export'));
+  let exported = 0;
+  chatMenuItems({ row: row('a'), projects: [project('g')], siblings: [row('a')], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'projects' }, { ...chatActs, exportMarkdown: () => void exported++ }).find((i) => i.id === 'export')?.onSelect?.();
+  assert.equal(exported, 1);
   assert.ok(!ids(row('a')).includes('delete'));
   const archived = ids(row('a', { archived: true }));
   assert.ok(archived.includes('restore') && archived.includes('delete'));

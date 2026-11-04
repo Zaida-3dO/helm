@@ -6,7 +6,7 @@ import { useMemo, useState } from 'react';
 import { projectOps, type ProjectNode, type SidebarRow } from '../api/projects.ts';
 import { useShell } from '../shell/context.ts';
 import { ConfirmDialog, ContextMenu, toast, type ConfirmSpec, type MenuItem } from '../ui/index.ts';
-import { SidebarActions, compactChat, rollOverChat, rollOverConfirm } from './actions.ts';
+import { SidebarActions, compactChat, exportChatMarkdown, rollOverChat, rollOverConfirm } from './actions.ts';
 import { SidebarData } from './data.ts';
 import { chatMenuItems } from './menus.ts';
 import { withChatIcons } from './menuIcons.tsx';
@@ -54,6 +54,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
           compact: () => void compactChat(shell.ops, row.chatId, showError),
           rollOver: () => setConfirm(rollOverConfirm(row.title, () => rollOverChat(shell.ops, row.chatId, showError))),
           cost: () => setCost(row.chatId),
+          exportMarkdown: () => void exportChatMarkdown(shell.api, row.chatId, showError),
           moveTo: (id) => void act.moveTo(row, id),
           nestUnder: (id) => void act.nestUnder(row, id),
           topLevel: () => void act.topLevel(row),

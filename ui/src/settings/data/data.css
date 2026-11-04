@@ -1,0 +1,43 @@
+/* Settings → Data. Design-system tokens only. */
+
+.data-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.data-path {
+  font-size: 12px;
+  color: var(--secondary);
+  word-break: break-all;
+  max-width: 360px;
+}
+
+.data-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.data-row-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.data-row-name {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.data-row-meta {
+  font-size: 12px;
+  color: var(--secondary);
+  word-break: break-all;
+}
+
+.data-pending {
+  font-size: 12px;
+  color: var(--text);
+  padding: 8px 0;
+}
