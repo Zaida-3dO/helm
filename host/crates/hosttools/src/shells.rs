@@ -57,12 +57,64 @@ async fn list_saved(ctx: ToolCtx, a: Value) -> ToolResult {
         }
     }
     let page = ctx.op("saved_list", Value::Object(args)).await?;
-    Ok(json!({
-        "items": page.get("items").cloned().unwrap_or_else(|| json!([])),
+    let items = page
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let (items, omitted) = fit_items(items);
+    let mut out = json!({
+        "items": items,
         "total": page.get("total"),
         "page": page.get("page"),
         "pageSize": page.get("pageSize"),
-    }))
+    });
+    if omitted > 0 {
+        out["omitted"] = json!(omitted);
+        out["note"] = json!(
+            "Some items on this page were left out to fit the size limit; narrow the list with state or query."
+        );
+    }
+    Ok(out)
+}
+
+/// What the list may carry, a little under the size every tool result is held to.
+const LIST_BUDGET_BYTES: usize = 40 * 1024;
+
+/// A body is shown cut to this many characters (the full text is one the user can read in the
+/// Saved pane); it shrinks further when a page would still be too big.
+const BODY_PREVIEW_CHARS: [usize; 4] = [240, 120, 40, 0];
+
+/// Fit a page of saved items into [`LIST_BUDGET_BYTES`]: bodies are cut to a short preview
+/// (`bodyCut: true` marks one that was), the preview shrinks while the page is still too big, and
+/// as a last resort trailing items are left out and counted. Full bodies of up to 16 KiB each
+/// would otherwise make a normal page of real notes a refusal.
+fn fit_items(items: Vec<Value>) -> (Vec<Value>, usize) {
+    let size = |v: &[Value]| serde_json::to_vec(v).map(|b| b.len()).unwrap_or(usize::MAX);
+    let mut fitted = items.clone();
+    for keep in BODY_PREVIEW_CHARS {
+        fitted = items
+            .iter()
+            .map(|it| {
+                let mut it = it.clone();
+                if let Some(body) = it.get("body").and_then(Value::as_str) {
+                    if body.chars().count() > keep {
+                        let cut: String = body.chars().take(keep).collect();
+                        it["body"] = json!(cut);
+                        it["bodyCut"] = json!(true);
+                    }
+                }
+                it
+            })
+            .collect();
+        if size(&fitted) <= LIST_BUDGET_BYTES {
+            return (fitted, 0);
+        }
+    }
+    let total = fitted.len();
+    while size(&fitted) > LIST_BUDGET_BYTES && fitted.pop().is_some() {}
+    let left = total - fitted.len();
+    (fitted, left)
 }
 
 async fn save_saved(ctx: ToolCtx, a: Value) -> ToolResult {
@@ -148,7 +200,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::read(
             "app_list_saved_items",
-            "List the items the user saved for later (newest change first, 50 per page), with their state and any reminder.",
+            "List the items the user saved for later (newest change first, 50 per page), with their state and any reminder. A long body is shown cut (bodyCut: true); the full text is in the Saved pane.",
             open(json!({
                 "state": {"type": "string", "enum": ["saved", "filed", "done", "dismissed"]},
                 "query": {"type": "string", "description": "A case-insensitive substring of a title, body or note."},
@@ -213,6 +265,38 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
 mod tests {
     use super::*;
     use crate::registry::ToolHandler;
+
+    /// A page of real saved notes (long bodies, many items) still fits the result limit: bodies
+    /// shrink to previews and, past that, trailing items are counted out.
+    #[test]
+    fn a_page_of_long_saved_items_fits_the_result_limit() {
+        let item = |n: usize, body_chars: usize| {
+            json!({"id": format!("id-{n}"), "title": "t".repeat(150), "state": "saved",
+                   "body": "b".repeat(body_chars), "noteCount": 0})
+        };
+        for (items, body_chars, omitted, cut) in [
+            (50, 100, 0, false),
+            (50, 16_000, 0, true),
+            (4, 16_000, 0, true),
+        ] {
+            let page: Vec<Value> = (0..items).map(|n| item(n, body_chars)).collect();
+            let (fit, left) = fit_items(page);
+            assert_eq!(left, omitted);
+            assert_eq!(fit.len(), items - omitted);
+            assert!(serde_json::to_vec(&fit).unwrap().len() <= LIST_BUDGET_BYTES);
+            assert_eq!(
+                fit[0].get("bodyCut").is_some(),
+                cut,
+                "{items} x {body_chars}"
+            );
+        }
+        // Titles alone past the budget: the tail is counted out, not refused.
+        let heavy: Vec<Value> = (0..50)
+            .map(|n| json!({"id": format!("id-{n}"), "title": "字".repeat(1500), "body": "x"}))
+            .collect();
+        let (fit, left) = fit_items(heavy);
+        assert!(left > 0 && fit.len() + left == 50);
+    }
 
     #[test]
     fn attention_and_saved_tools_are_registered_and_delegate_to_ops() {
