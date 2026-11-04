@@ -266,7 +266,7 @@ pub fn fork(
         }
         let (model, effort) = helm_chats::runtime_settings::new_chat_defaults(tx);
         let (provider, model_col) = helm_chats::local::columns(model.as_deref())
-            .map_err(|m| SqlError::InvalidParameterName(m))?;
+            .map_err(SqlError::InvalidParameterName)?;
         tx.execute(
             "INSERT INTO chats(id, project_id, title, status, harness, provider, model, thinking, created_at, updated_at)
              VALUES (?1, ?2, ?3, 'idle', 'claude', ?4, ?5, ?6, ?7, ?7)",
