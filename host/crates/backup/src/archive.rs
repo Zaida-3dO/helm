@@ -16,9 +16,25 @@ pub const MANIFEST_FILE: &str = "manifest.json";
 /// The profile folder holding the credential envelopes.
 pub const CREDENTIALS_DIR: &str = "credentials";
 
+/// Top-level profile folders Helm rebuilds on its own: per-run staging, caches and transient editor
+/// selections. They are not worth carrying, and a restore must not put old copies back.
+const REBUILT_DIRS: [&str; 6] = [
+    "runtime",
+    "agent-bin",
+    "workers",
+    "thumbs",
+    "catalogue",
+    "ide-context",
+];
+
+/// The web view's own data folder. It holds the browser engine's sign-in and cookie stores, so it
+/// never goes into an archive.
+pub const WEBVIEW_DIR: &str = "webview";
+
 /// A profile entry that must never travel into an archive — and, read back from a manifest, never
-/// name something a restore may delete or replace. Everything credential-shaped is out by name,
-/// at every level (see [`copy_tree`]).
+/// name something a restore may delete or replace. Everything credential-shaped is out by name
+/// (the `.cred` rule also applies at every level, see [`copy_tree`]), and so are the web view's
+/// data and the folders Helm rebuilds itself.
 pub fn is_excluded(name: &str) -> bool {
     let n = name.to_lowercase();
     n == LOCK_FILE
@@ -29,6 +45,8 @@ pub fn is_excluded(name: &str) -> bool {
         || n == FAILED_FILE
         || n == MANIFEST_FILE
         || n == CREDENTIALS_DIR
+        || n == WEBVIEW_DIR
+        || REBUILT_DIRS.contains(&n.as_str())
         || n.ends_with(".cred")
         || n.starts_with(SAFETY_PREFIX)
 }
@@ -226,6 +244,13 @@ mod tests {
             assert!(!files.contains(&bad.to_string()), "{bad} in the archive");
         }
         assert!(!files.iter().any(|p| p.starts_with("before-restore-")));
+        // The web view's data (browser sign-in and cookie stores) and the folders Helm rebuilds.
+        for bad in ["webview", "runtime"] {
+            assert!(
+                !files.iter().any(|p| p.starts_with(bad)),
+                "{bad} in the archive"
+            );
+        }
 
         // The copied database is a real SQLite database holding the row as of the copy.
         let c = Connection::open(created.archive_dir.join(DB_FILE)).unwrap();

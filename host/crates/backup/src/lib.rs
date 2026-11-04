@@ -155,6 +155,14 @@ pub(crate) mod testutil {
         fs::create_dir_all(dir.join("credentials")).unwrap();
         fs::write(dir.join("credentials/key.cred"), "an envelope").unwrap();
         fs::write(dir.join("token.cred"), "another envelope").unwrap();
+        fs::create_dir_all(dir.join("webview/EBWebView/Default")).unwrap();
+        fs::write(
+            dir.join("webview/EBWebView/Default/Login Data"),
+            "browser store",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("runtime")).unwrap();
+        fs::write(dir.join("runtime/staged.js"), "rebuilt").unwrap();
         fs::write(dir.join(helm_core::profile::LOCK_FILE), "lock").unwrap();
         fs::write(dir.join(archive_pending_note()), "{}").unwrap();
         fs::create_dir_all(dir.join("before-restore-20260101-000000")).unwrap();
