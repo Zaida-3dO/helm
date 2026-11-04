@@ -379,7 +379,8 @@ impl ChatPort for RealPort<'_> {
         std::fs::create_dir_all(self.folder)
             .map_err(|_| "The Telegram chats' folder could not be made.".to_owned())?;
         // `chat_create` already takes a model and an effort; without them it uses the new-chat
-        // default exactly as before.
+        // default exactly as before. No board is named, so the chat goes to the default board
+        // (no board has the Telegram folder as its own).
         let mut args = json!({ "cwd": self.folder });
         // A saved local model whose server is set up but switched off would be accepted here and
         // then refuse every turn, leaving the phone with no reason: it is left out, and the chat

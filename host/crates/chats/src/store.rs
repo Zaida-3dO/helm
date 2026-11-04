@@ -145,6 +145,87 @@ pub fn create_chat_in(
     Ok(id)
 }
 
+/// Boards, as every chat-creating path and the chat tools ask about them. Boards and the chat's
+/// sidebar group live in the projects crate, which this crate never depends on, so the answers
+/// come through its [`crate::seams::ProjectGate`]. With no gate registered (most tests) there are
+/// no boards: nothing is a board and no chat is put on one.
+#[derive(Clone, Default)]
+pub struct Boards(Option<std::sync::Arc<crate::seams::ProjectGates>>);
+
+impl Boards {
+    pub fn of(services: &helm_ipc::Services) -> Self {
+        Self(services.get::<crate::seams::ProjectGates>())
+    }
+
+    pub fn from_gates(gates: Option<std::sync::Arc<crate::seams::ProjectGates>>) -> Self {
+        Self(gates)
+    }
+
+    /// Whether `project_id` is a board (archived or not).
+    pub fn is_board(&self, tx: &Transaction<'_>, project_id: &str) -> rusqlite::Result<bool> {
+        Ok(self.board(tx, project_id)?.is_some())
+    }
+
+    /// The board's name, repository, primary folder and archived state; `None` when the id is not
+    /// a board.
+    pub fn board(
+        &self,
+        tx: &Transaction<'_>,
+        project_id: &str,
+    ) -> rusqlite::Result<Option<crate::seams::BoardSummary>> {
+        match &self.0 {
+            Some(g) => g.0.board(tx, project_id),
+            None => Ok(None),
+        }
+    }
+
+    /// The board the chat is shown under, if it is on one.
+    pub fn chat_board(
+        &self,
+        tx: &Transaction<'_>,
+        chat_id: &str,
+    ) -> rusqlite::Result<Option<String>> {
+        match &self.0 {
+            Some(g) => g.0.chat_board(tx, chat_id),
+            None => Ok(None),
+        }
+    }
+
+    /// Put the chat on the board (its `chat_groups` row). False when nothing was written: the id is
+    /// not an open board, the chat is a side chat, or there are no boards.
+    pub fn put_on_board(
+        &self,
+        tx: &Transaction<'_>,
+        chat_id: &str,
+        board_id: &str,
+    ) -> rusqlite::Result<bool> {
+        match &self.0 {
+            Some(g) => g.0.put_on_board(tx, chat_id, board_id),
+            None => Ok(false),
+        }
+    }
+
+    /// The default board: where chats with no other home go.
+    pub fn default_board(&self, tx: &Transaction<'_>) -> rusqlite::Result<Option<String>> {
+        match &self.0 {
+            Some(g) => g.0.default_board(tx),
+            None => Ok(None),
+        }
+    }
+
+    /// The board a new chat in `folder_project_id` goes to when nobody named one.
+    pub fn home_board(
+        &self,
+        tx: &Transaction<'_>,
+        folder_project_id: Option<&str>,
+    ) -> rusqlite::Result<Option<String>> {
+        match &self.0 {
+            Some(g) => g.0.home_board(tx, folder_project_id),
+            None => Ok(None),
+        }
+    }
+}
+
 /// Whether `project_id` can take a new chat working in `cwd`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProjectFit {

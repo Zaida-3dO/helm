@@ -5,4 +5,9 @@ export type ChatCreateArgs = { cwd: string,
  * The folder project to put the chat in; it must be a folder project over `cwd`. Without it
  * the folder's project is found or made.
  */
-projectId?: string, model?: string, effort?: string, };
+projectId?: string, 
+/**
+ * The board to show the chat under. Without it the chat goes to the one board whose folder
+ * it runs in, else to the default board.
+ */
+boardId?: string, model?: string, effort?: string, };

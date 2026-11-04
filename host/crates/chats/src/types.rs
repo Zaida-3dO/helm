@@ -879,6 +879,11 @@ pub struct ChatCreateArgs {
     #[serde(default)]
     #[ts(optional)]
     pub project_id: Option<String>,
+    /// The board to show the chat under. Without it the chat goes to the one board whose folder
+    /// it runs in, else to the default board.
+    #[serde(default)]
+    #[ts(optional)]
+    pub board_id: Option<String>,
     #[serde(default)]
     #[ts(optional)]
     pub model: Option<String>,

@@ -63,7 +63,8 @@ pub struct SchedulesService {
     pub events: Arc<dyn EventSink>,
     /// Stamps the chat records a new-chat run announces (absent in tests that do not need it).
     pub clock: Option<Arc<Clock>>,
-    /// Whether a project is archived, so a new-chat run does not start a chat in one.
+    /// Whether a project is archived, so a new-chat run does not start a chat in one; and which
+    /// board the new chat is shown on.
     pub gates: Option<Arc<ProjectGates>>,
 }
 
@@ -100,7 +101,8 @@ because of it.\n\n{message}"
 }
 
 /// Start the chat a new-chat run sends into: an idle chat in the project's folder, with the
-/// defaults from Settings, Runtime, announced to the sidebar like any new chat.
+/// defaults from Settings, Runtime, on the board over that folder (else the default board),
+/// announced to the sidebar like any new chat.
 fn start_chat(svc: &SchedulesService, project_id: Option<&str>) -> Result<String, String> {
     let project = project_id.ok_or("The schedule has no project to start a chat in.")?;
     let id = svc
@@ -132,14 +134,20 @@ fn start_chat(svc: &SchedulesService, project_id: Option<&str>) -> Result<String
                 }
             }
             let (model, effort) = helm_chats::runtime_settings::new_chat_defaults(tx);
-            helm_chats::store::create_chat_in(
+            let id = helm_chats::store::create_chat_in(
                 tx,
                 project,
                 model.as_deref(),
                 Some(&effort),
                 helm_core::now_ms(),
-            )
-            .map(Ok)
+            )?;
+            // Shown on a board like every other chat: the board over this folder, else the
+            // default board.
+            let boards = helm_chats::store::Boards::from_gates(svc.gates.clone());
+            if let Some(b) = boards.home_board(tx, Some(project))? {
+                boards.put_on_board(tx, &id, &b)?;
+            }
+            Ok(Ok(id))
         })
         .map_err(|e| format!("Could not start a chat: {e:?}"))?
         .map_err(str::to_owned)?;

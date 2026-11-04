@@ -13,12 +13,14 @@
 //! | [`ops`] | the `api` ops |
 //! | [`note`] | the shared project context note and its ops |
 //! | [`board`] | the Agent Standup connection, the read-only sync and the mirror; the project gate |
+//! | [`boards`] | boards as where chats are shown: the default board, folders filled in on sync, the one-time move of chats onto boards, new board projects |
 //! | [`tasks`] | the Tasks view's read-only board reads (`board_read`, `board_cancel`) |
 //! | [`repos`], [`repo_ops`], [`guard`] | the repository list, its ops and worktree status, and the git stand-in launch contributor |
 //! | [`bindings`] | `ui/src/api/generated/projects/` |
 
 pub mod bindings;
 pub mod board;
+pub mod boards;
 pub mod guard;
 pub mod note;
 pub mod ops;

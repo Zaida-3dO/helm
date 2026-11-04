@@ -2,7 +2,7 @@
 //!
 //! | op | class | args → result |
 //! |---|---|---|
-//! | `chat_create` | maintenance | [`ChatCreateArgs`] → [`ChatRecord`] (optional `projectId`: that exact folder project) |
+//! | `chat_create` | maintenance | [`ChatCreateArgs`] → [`ChatRecord`] (optional `projectId`: that exact folder project, or a board to show it under; optional `boardId`; with neither board, the board over its folder or the default board) |
 //! | `chat_list` | blocking | `{}` → `ChatRecord[]` |
 //! | `chat_get` | blocking | [`ChatIdArgs`] → [`ChatGetResult`] |
 //! | `transcript_page` | heavy | [`TranscriptPageArgs`] → [`TranscriptPage`] |
@@ -309,6 +309,8 @@ enum CreateRefusal {
     Archived,
     NoProject,
     OtherFolder,
+    NotABoard,
+    BoardArchived,
 }
 
 pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -342,14 +344,23 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     }
     check_local_model(ctx, model.as_deref())?;
     let clock = ctx.services.need::<Clock>()?;
+    let boards = store::Boards::of(&ctx.services);
     let id = db
         .write(|tx| {
             let now = helm_core::now_ms();
+            // A board named as the project means "show it there"; the chat runs in `cwd`.
+            let mut board = a.board_id.clone();
             let project = match a.project_id.as_deref() {
                 // The exact project the new-chat page chose.
                 Some(p) => match store::project_fit(tx, p, cwd)? {
                     store::ProjectFit::Fits => p.to_owned(),
                     store::ProjectFit::NotFound => return Ok(Err(CreateRefusal::NoProject)),
+                    store::ProjectFit::NoFolder if boards.is_board(tx, p)? => {
+                        if board.is_none() {
+                            board = Some(p.to_owned());
+                        }
+                        store::upsert_folder_project(tx, cwd, now)?
+                    }
                     store::ProjectFit::NoFolder | store::ProjectFit::OtherFolder => {
                         return Ok(Err(CreateRefusal::OtherFolder))
                     }
@@ -359,7 +370,20 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             if crate::manage::project_archived(ctx, tx, &project)? {
                 return Ok(Err(CreateRefusal::Archived));
             }
-            store::create_chat_in(tx, &project, model.as_deref(), Some(&effort), now).map(Ok)
+            let board = match board {
+                Some(b) => match boards.board(tx, &b)? {
+                    None => return Ok(Err(CreateRefusal::NotABoard)),
+                    Some(s) if s.archived => return Ok(Err(CreateRefusal::BoardArchived)),
+                    Some(_) => Some(b),
+                },
+                // Nobody named a board: the board over this folder, else the default board.
+                None => boards.home_board(tx, Some(&project))?,
+            };
+            let id = store::create_chat_in(tx, &project, model.as_deref(), Some(&effort), now)?;
+            if let Some(b) = &board {
+                boards.put_on_board(tx, &id, b)?;
+            }
+            Ok(Ok(id))
         })
         .map_err(sql)?
         .map_err(|r| match r {
@@ -371,6 +395,13 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             CreateRefusal::OtherFolder => {
                 ApiError::bad_args("That project is not a folder project over this folder.")
             }
+            CreateRefusal::NotABoard => ApiError::bad_args(
+                "Pick a board; folders are where chats run, not where they are shown.",
+            ),
+            CreateRefusal::BoardArchived => ApiError::new(
+                "refused",
+                "That board is archived; restore it to start new chats.",
+            ),
         })?;
     let rev = clock.next();
     let chat = db

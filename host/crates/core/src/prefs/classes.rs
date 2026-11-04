@@ -144,6 +144,11 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         "ideContext",
         UserOnly("What your editor shares with agents is yours to choose."),
     ),
+    // The board chats with no other home are shown on (a board project id).
+    (
+        "defaultBoard",
+        UserOnly("Which board chats with no other home are shown on is yours to choose."),
+    ),
     // The pull request view: whether Helm reads and writes GitHub for you.
     (
         "githubPrView",

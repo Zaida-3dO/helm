@@ -291,6 +291,15 @@ fn chat_fork(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         &gate,
     )
     .map_err(ApiError::from)?;
+    // A fork is shown on its source's board (a side chat is not shown in the sidebar at all).
+    if !a.side.unwrap_or(false) && !forked.existing {
+        let boards = store::Boards::of(&ctx.services);
+        db.write(|tx| match boards.chat_board(tx, &a.chat_id)? {
+            Some(b) => boards.put_on_board(tx, &forked.chat_id, &b).map(|_| ()),
+            None => Ok(()),
+        })
+        .map_err(sql)?;
+    }
     if !forked.moved.is_empty() {
         let mut e = helm_ipc::AppEvent::new("sidebar");
         e.fields
@@ -388,11 +397,19 @@ fn side_chat_resolve(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     }
     match a.action {
         SideChatAction::Promote => {
+            let boards = store::Boards::of(&ctx.services);
             db.write(|tx| {
                 tx.execute(
                     "UPDATE chats SET side_source_id = NULL, updated_at = ?1 WHERE id = ?2",
                     params![helm_core::now_ms(), a.chat_id],
-                )
+                )?;
+                // Now shown in the sidebar: on the board of the chat it came from.
+                if let Some(b) = side.as_deref() {
+                    if let Some(board) = boards.chat_board(tx, b)? {
+                        boards.put_on_board(tx, &a.chat_id, &board)?;
+                    }
+                }
+                Ok::<_, rusqlite::Error>(())
             })
             .map_err(sql)?;
             to_value(&changed(ctx, &a.chat_id)?)

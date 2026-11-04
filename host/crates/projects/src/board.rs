@@ -65,8 +65,9 @@ pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) 
     services.insert(Arc::new(helm_chats::seams::ProjectGates(Arc::new(Gate))));
 }
 
-/// An archived project refuses new chats and single-chat restores.
-struct Gate;
+/// An archived project refuses new chats and single-chat restores. The gate also answers the
+/// chats crate's board questions ([`crate::boards`]).
+pub struct Gate;
 
 impl helm_chats::seams::ProjectGate for Gate {
     fn project_archived(&self, tx: &Transaction<'_>, project_id: &str) -> rusqlite::Result<bool> {
@@ -79,6 +80,39 @@ impl helm_chats::seams::ProjectGate for Gate {
             .optional()?
             .unwrap_or(0)
             != 0)
+    }
+
+    fn board(
+        &self,
+        tx: &Transaction<'_>,
+        project_id: &str,
+    ) -> rusqlite::Result<Option<helm_chats::seams::BoardSummary>> {
+        crate::boards::board_summary(tx, project_id)
+    }
+
+    fn chat_board(&self, tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Option<String>> {
+        crate::boards::chat_board(tx, chat_id)
+    }
+
+    fn put_on_board(
+        &self,
+        tx: &Transaction<'_>,
+        chat_id: &str,
+        board_id: &str,
+    ) -> rusqlite::Result<bool> {
+        crate::boards::put_on_board(tx, chat_id, board_id)
+    }
+
+    fn default_board(&self, tx: &Transaction<'_>) -> rusqlite::Result<Option<String>> {
+        crate::boards::default_board(tx)
+    }
+
+    fn home_board(
+        &self,
+        tx: &Transaction<'_>,
+        folder_project_id: Option<&str>,
+    ) -> rusqlite::Result<Option<String>> {
+        crate::boards::home_board(tx, folder_project_id)
     }
 }
 
@@ -96,7 +130,7 @@ pub(crate) fn ctx_credentials(ctx: &OpCtx) -> Result<CredentialStore, ApiError> 
     Ok(credentials(&profile, &platform))
 }
 
-fn stored_url(db: &Database) -> String {
+pub(crate) fn stored_url(db: &Database) -> String {
     db.snapshot(|tx| {
         tx.query_row("SELECT url FROM board_connection WHERE id = 1", [], |r| {
             r.get::<_, String>(0)
@@ -108,7 +142,7 @@ fn stored_url(db: &Database) -> String {
     .unwrap_or_else(|| DEFAULT_URL.to_owned())
 }
 
-fn test_override() -> Option<(String, Option<Token>)> {
+pub(crate) fn test_override() -> Option<(String, Option<Token>)> {
     if !cfg!(debug_assertions) {
         return None;
     }
@@ -119,7 +153,7 @@ fn test_override() -> Option<(String, Option<Token>)> {
     Some((url, token))
 }
 
-fn stored_token(creds: &CredentialStore) -> Option<Token> {
+pub(crate) fn stored_token(creds: &CredentialStore) -> Option<Token> {
     let bytes = creds.read(CRED_NAME, CRED_IDENTITY).ok()?;
     Token::new(String::from_utf8(bytes).ok()?)
 }
@@ -262,6 +296,7 @@ async fn sync(ctx: OpCtx, _args: Value) -> Result<Value, ApiError> {
         link.set(Some(client.clone()));
     }
     let base = client.base().to_owned();
+    let item_client = client.clone();
     // One sync at a time; a second caller gets the current state with `syncing: true`.
     if SYNCING.swap(true, Ordering::SeqCst) {
         return to_value(
@@ -296,6 +331,14 @@ async fn sync(ctx: OpCtx, _args: Value) -> Result<Value, ApiError> {
     });
     drop(clear);
     outcome.map_err(internal)?;
+    if fetched.is_ok() {
+        // The one-time move of chats onto boards waits for the first sync that brings boards in.
+        // It may ask the board about linked items, so it runs after the sync has answered.
+        let (ctx2, db2) = (ctx.clone(), db.clone());
+        tokio::spawn(async move {
+            crate::boards::after_sync(&ctx2, &db2, item_client).await;
+        });
+    }
     let s = db
         .snapshot(|tx| read_state(tx, true, Some(&base)))
         .map_err(internal)?;
@@ -313,6 +356,8 @@ async fn sync(ctx: OpCtx, _args: Value) -> Result<Value, ApiError> {
 ///   finishing or reopening work need not move `lastActivity` forward, and a flag held back by
 ///   that rule could hide a live project (or keep showing a done one) until the next edit.
 /// - Local state (rename, icon, colour, pin, order, collapse, nesting) is never touched.
+/// - A board with no folder whose repository names exactly one folder gets that folder
+///   ([`crate::boards::fill_primary_folders`]); a folder already set is kept.
 /// - Every project of this board address missing from a complete sync is marked stale, never
 ///   deleted. A sync cut short at the page cap marks nothing stale.
 ///
@@ -400,6 +445,7 @@ pub fn apply_sync(
             }
         }
     }
+    crate::boards::fill_primary_folders(tx)?;
     if !complete {
         return Ok(projects.len());
     }

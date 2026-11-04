@@ -2101,6 +2101,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "ts-rs",
+ "ureq",
  "uuid",
 ]
 

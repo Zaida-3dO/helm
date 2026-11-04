@@ -2,7 +2,7 @@
 //!
 //! `chat_roll_over {chatId}` asks the chat's own agent for a hand-off (what is done, what is left,
 //! the files and branches that matter, open problems), waits for that turn to end, starts a
-//! successor chat in the same project and folder with the same model and effort — or the model and
+//! successor chat in the same folder, on the same board, with the same model and effort — or the model and
 //! effort asked for, which is how the app offers a roll over when a conversation has outgrown a
 //! model the chat wants to move to — sends the successor the hand-off as its first message (with
 //! the old chat's title and id so the two can be matched), and archives the old chat, stopping it
@@ -215,6 +215,15 @@ async fn finish(
     };
     let message = successor_message(&chat.title, &chat.id, &cut(&handoff, MAX_HANDOFF_BYTES));
     let mut create = json!({"cwd": chat.cwd, "projectId": chat.project_id});
+    // The successor stays on the old chat's board.
+    let boards = crate::store::Boards::of(&ctx.services);
+    let board = rt
+        .db()
+        .snapshot(|tx| boards.chat_board(tx, &chat.id))
+        .map_err(|e| e.to_string())?;
+    if let Some(b) = board {
+        create["boardId"] = json!(b);
+    }
     // The asked-for model and effort win; otherwise the successor keeps the old chat's.
     if let Some(m) = model.as_ref().or(chat.model.as_ref()) {
         create["model"] = json!(m);

@@ -21,6 +21,8 @@ serde_json.workspace = true
 uuid.workspace = true
 log.workspace = true
 ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
+# New board projects are posted to Agent Standup (the read-only client cannot write).
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1432,3 +1432,387 @@ fn the_git_stand_in_is_on_the_path_only_while_a_repository_is_off() {
         "switched back on: untouched again"
     );
 }
+
+// ---- Boards as where chats are shown ---------------------------------------------------------
+
+use crate::boards;
+
+const LIFE: &str = "11111111-1111-4111-8111-111111111111";
+const WEB: &str = "22222222-2222-4222-8222-222222222222";
+const DOCS: &str = "33333333-3333-4333-8333-333333333333";
+const INBOX: &str = "44444444-4444-4444-8444-444444444444";
+/// A task on the board, under the Docs project.
+const TASK: &str = "55555555-5555-4555-8555-555555555555";
+
+fn with_repo(id: &str, title: &str, repo: Option<&str>) -> BoardProject {
+    BoardProject {
+        repo: repo.map(Into::into),
+        ..bp(id, title, "2026-11-01T00:00:00Z")
+    }
+}
+
+fn boards_synced(db: &Database) {
+    sync(
+        db,
+        &[
+            with_repo(LIFE, "Life Admin", None),
+            with_repo(WEB, "Web", Some("someone/web.git")),
+            with_repo(DOCS, "Docs", Some("docs")),
+            with_repo(INBOX, "Inbox", None),
+        ],
+    );
+}
+
+/// An Agent Standup item linked to a chat, as the item-links table stores it.
+fn link(db: &Database, chat: &str, item: &str, main: bool) {
+    db.write(|tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS item_chat_links (item_id TEXT NOT NULL,
+                 chat_id TEXT NOT NULL, is_main INTEGER NOT NULL DEFAULT 0,
+                 linked_by TEXT NOT NULL, linked_at INTEGER NOT NULL, title TEXT,
+                 PRIMARY KEY (item_id, chat_id))",
+        )?;
+        tx.execute(
+            "INSERT INTO item_chat_links(item_id, chat_id, is_main, linked_by, linked_at)
+             VALUES (?1, ?2, ?3, 'agent', 1)",
+            params![item.replace('-', ""), chat, main],
+        )
+    })
+    .unwrap();
+}
+
+fn board_of(db: &Database, chat: &str) -> Option<String> {
+    db.snapshot(|tx| boards::chat_board(tx, chat)).unwrap()
+}
+
+fn parent_chat(db: &Database, chat: &str) -> Option<String> {
+    db.snapshot(|tx| {
+        tx.query_row(
+            "SELECT parent_chat_id FROM chats WHERE id = ?1",
+            [chat],
+            |r| r.get(0),
+        )
+    })
+    .unwrap()
+}
+
+fn exec(db: &Database, q: &str, args: &[&dyn rusqlite::ToSql]) {
+    db.write(|tx| tx.execute(q, args).map(|_| ())).unwrap();
+}
+
+/// Folders filled in from a board's repository, the default board, the board over a folder, and
+/// the one-time move: it waits for a sync, places chats by linked item, then folder, then the
+/// default board, keeps nesting on one board, logs what it did and never runs twice.
+#[test]
+fn boards_fill_their_folders_and_the_one_time_move_puts_every_chat_on_a_board() {
+    let (_d, db) = temp_db();
+    let root = tempfile::tempdir().unwrap();
+    let dir = |n: &str| {
+        let p = root.path().join(n);
+        std::fs::create_dir_all(&p).unwrap();
+        p.to_string_lossy().into_owned()
+    };
+    let (web_dir, other) = (dir("web"), dir("other"));
+    let d1 = folder(&db, "docs", Some(dir("a/docs").as_str()));
+    folder(&db, "docs", Some(dir("b/docs").as_str()));
+    // Chats made before any board synced, in their folders.
+    let in_web = chat_in(&db, &web_dir, 1);
+    let parent = chat_in(&db, &other, 2);
+    let child = chat_in(&db, &other, 3);
+    let linked = chat_in(&db, &other, 4);
+    let linked_child = chat_in(&db, &other, 5);
+    let task_chat = chat_in(&db, &other, 6);
+    let side = chat_in(&db, &other, 7);
+    let nest = "UPDATE chats SET parent_chat_id = ?2 WHERE id = ?1";
+    exec(&db, nest, &[&child, &parent]);
+    exec(&db, nest, &[&linked_child, &linked]);
+    exec(
+        &db,
+        "UPDATE chats SET side_source_id = ?2 WHERE id = ?1",
+        &[&side, &parent],
+    );
+    link(&db, &linked, WEB, true);
+    link(&db, &task_chat, TASK, true);
+    let none = boards::ItemProjects::new();
+
+    // Before any sync: nothing is pending, there is no default board and nothing moves.
+    assert!(!db.snapshot(boards::migration_pending).unwrap());
+    assert_eq!(db.snapshot(boards::default_board).unwrap(), None);
+    assert_eq!(
+        db.write(|tx| boards::migrate_chats_onto_boards(tx, 9, &none))
+            .unwrap(),
+        None
+    );
+
+    boards_synced(&db);
+    let (life, web, docs, inbox) = (
+        by_board_id(&db, LIFE).id,
+        by_board_id(&db, WEB).id,
+        by_board_id(&db, DOCS).id,
+        by_board_id(&db, INBOX).id,
+    );
+    // A repository naming one folder fills the board's folder in; two folders of that name leave
+    // it for the user; a folder already set is kept.
+    let web_folder = project_of(&db, &in_web);
+    assert_eq!(
+        node(&db, &web).primary_folder_project_id.as_deref(),
+        Some(web_folder.as_str())
+    );
+    assert_eq!(node(&db, &docs).primary_folder_project_id, None);
+    let set_folder = |id: &str, f: &str| {
+        let mut a = upd(id, &db);
+        a.primary_folder_project_id = Some(Some(f.to_owned()));
+        update(&db, a).unwrap();
+    };
+    set_folder(&web, &d1);
+    boards_synced(&db);
+    assert_eq!(
+        node(&db, &web).primary_folder_project_id.as_deref(),
+        Some(d1.as_str()),
+        "a folder already set is kept"
+    );
+    set_folder(&web, &web_folder);
+
+    // The default board: the board named Life Admin until the setting names another open board.
+    let default = || db.snapshot(boards::default_board).unwrap();
+    assert_eq!(default(), Some(life.clone()));
+    assert!(
+        db.write(|tx| boards::set_default_board(tx, Some(web_folder.as_str())))
+            .is_err(),
+        "a folder is not a board"
+    );
+    db.write(|tx| boards::set_default_board(tx, Some(docs.as_str())))
+        .unwrap();
+    assert_eq!(default(), Some(docs.clone()));
+    db.write(|tx| boards::set_default_board(tx, None)).unwrap();
+    assert_eq!(default(), Some(life.clone()));
+    let view = db.snapshot(boards::default_board_view).unwrap();
+    assert_eq!(view.name.as_deref(), Some("Life Admin"));
+    assert_eq!(view.hidden_board_ids, vec![inbox.clone()]);
+    // A new chat with no board named: the one board over its folder, else the default board.
+    let home = |f: Option<&str>| db.snapshot(|tx| boards::home_board(tx, f)).unwrap();
+    assert_eq!(home(Some(web_folder.as_str())), Some(web.clone()));
+    assert_eq!(
+        home(Some(project_of(&db, &parent).as_str())),
+        Some(life.clone())
+    );
+    assert_eq!(home(None), Some(life.clone()));
+
+    // The move waits for a recorded sync, asks the board only about items the mirror cannot
+    // place, then puts every chat that is not a side chat on a board.
+    assert!(!db.snapshot(boards::migration_pending).unwrap());
+    db.write(|tx| record_result(tx, 5, None)).unwrap();
+    assert!(db.snapshot(boards::migration_pending).unwrap());
+    assert_eq!(
+        db.snapshot(boards::items_to_look_up).unwrap(),
+        vec![TASK.replace('-', "")]
+    );
+    let learnt = boards::ItemProjects::from([(TASK.replace('-', ""), DOCS.replace('-', ""))]);
+    let moved = db
+        .write(|tx| boards::migrate_chats_onto_boards(tx, 9, &learnt))
+        .unwrap()
+        .unwrap();
+    for (chat, board, why) in [
+        (&in_web, &web, "folder"),
+        (&parent, &life, "default board"),
+        (&child, &life, "default board"),
+        (&linked, &web, "linked item"),
+        (&linked_child, &life, "default board"),
+        (&task_chat, &docs, "linked item"),
+    ] {
+        assert_eq!(board_of(&db, chat).as_ref(), Some(board), "{why}");
+        assert!(
+            moved
+                .moved
+                .iter()
+                .any(|m| m.chat_id == *chat && m.why == why),
+            "{why}"
+        );
+    }
+    assert_eq!(moved.moved.len(), 6);
+    assert_eq!(
+        board_of(&db, &side),
+        None,
+        "a side chat is never on a board"
+    );
+    // Nesting is kept on one board and dropped (and logged) across boards.
+    assert_eq!(parent_chat(&db, &child), Some(parent.clone()));
+    assert_eq!(parent_chat(&db, &linked_child), None);
+    assert_eq!(
+        moved.unnested,
+        vec![boards::Unnested {
+            chat_id: linked_child.clone(),
+            parent_chat_id: linked.clone(),
+        }]
+    );
+    // Recorded, and never run again.
+    let record = db
+        .snapshot(|tx| {
+            Ok::<_, rusqlite::Error>(helm_core::prefs::read(tx, boards::MIGRATION_LOG_KEY))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(record["moved"].as_array().map(Vec::len), Some(6));
+    assert!(!db.snapshot(boards::migration_pending).unwrap());
+    exec(
+        &db,
+        "DELETE FROM chat_groups WHERE chat_id = ?1",
+        &[&parent],
+    );
+    assert_eq!(
+        db.write(|tx| boards::migrate_chats_onto_boards(tx, 10, &learnt))
+            .unwrap(),
+        None
+    );
+    assert_eq!(board_of(&db, &parent), None, "the move runs once");
+    // Only an open board takes a chat, and never a side chat.
+    let put = |chat: &str, board: &str| {
+        db.write(|tx| boards::put_on_board(tx, chat, board))
+            .unwrap()
+    };
+    assert!(!put(&side, &life));
+    assert!(!put(&parent, &web_folder));
+    assert!(put(&parent, &life));
+    db.write(|tx| store::archive_project(tx, &docs)).unwrap();
+    assert!(!put(&parent, &docs));
+}
+
+async fn create_chat(
+    api: &helm_ipc::Dispatcher,
+    args: serde_json::Value,
+) -> Result<String, helm_ipc::ApiError> {
+    let chat = api.call_host("chat_create", args).await?;
+    Ok(chat["id"].as_str().unwrap_or_default().to_owned())
+}
+
+/// `chat_create` puts every chat it makes on a board: the one named, the board over its folder,
+/// or the default board. A folder is not a board.
+#[tokio::test]
+async fn every_new_chat_is_put_on_a_board() {
+    use serde_json::json;
+    use std::sync::Arc;
+    let (_d, db) = temp_db();
+    let root = tempfile::tempdir().unwrap();
+    let (web_dir, other) = (root.path().join("web"), root.path().join("other"));
+    std::fs::create_dir_all(&web_dir).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let (web_dir, other) = (
+        web_dir.to_string_lossy().into_owned(),
+        other.to_string_lossy().into_owned(),
+    );
+    let web_folder = folder(&db, "web", Some(web_dir.as_str()));
+    boards_synced(&db);
+    let (life, web) = (by_board_id(&db, LIFE).id, by_board_id(&db, WEB).id);
+    let db = Arc::new(db);
+    let mut services = helm_ipc::Services::new();
+    services.insert(db.clone());
+    services.insert(Arc::new(helm_chats::clock::Clock::new(0)));
+    services.insert(Arc::new(helm_chats::seams::ProjectGates(Arc::new(
+        crate::board::Gate,
+    ))));
+    let ctx = helm_ipc::OpCtx {
+        services: Arc::new(services),
+        events: Arc::new(helm_ipc::NullSink),
+    };
+    let mut reg = helm_ipc::OpRegistry::new();
+    helm_chats::register_ops(&mut reg);
+    let api = helm_ipc::Dispatcher::new(reg, ctx, true);
+
+    let a = create_chat(&api, json!({"cwd": web_dir})).await.unwrap();
+    assert_eq!(
+        board_of(&db, &a),
+        Some(web.clone()),
+        "the board over its folder"
+    );
+    let b = create_chat(&api, json!({"cwd": other})).await.unwrap();
+    assert_eq!(board_of(&db, &b), Some(life.clone()), "the default board");
+    let c = create_chat(&api, json!({"cwd": other, "boardId": web}))
+        .await
+        .unwrap();
+    assert_eq!(board_of(&db, &c), Some(web.clone()), "the board named");
+    let d = create_chat(&api, json!({"cwd": other, "projectId": web}))
+        .await
+        .unwrap();
+    assert_eq!(
+        board_of(&db, &d),
+        Some(web.clone()),
+        "a board named as the project"
+    );
+    assert_ne!(
+        project_of(&db, &d),
+        web,
+        "it runs in its folder, not in the board"
+    );
+    let e = create_chat(&api, json!({"cwd": other, "boardId": web_folder}))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, "bad_args", "a folder is not a board");
+}
+
+struct FakePoster(std::sync::Mutex<Vec<(String, String)>>, u16, &'static str);
+
+impl boards::BoardPoster for FakePoster {
+    fn post(&self, url: &str, bearer: &str, body: &str) -> Result<(u16, String), String> {
+        assert_eq!(bearer, "secret-token");
+        self.0
+            .lock()
+            .unwrap()
+            .push((url.to_owned(), body.to_owned()));
+        Ok((self.1, self.2.to_owned()))
+    }
+}
+
+/// "New project" makes the project on the board, shows a refusal in plain words without the
+/// token, and the new board arrives at once with its folder.
+#[test]
+fn a_new_project_is_made_on_the_board_and_arrives_with_its_folder() {
+    let ok = FakePoster(
+        Default::default(),
+        201,
+        r#"{"item":{"id":"66666666-6666-4666-8666-666666666666"}}"#,
+    );
+    let id = boards::post_project(
+        &ok,
+        BOARD,
+        "secret-token",
+        "Garden",
+        "Plant the beds.",
+        "home",
+    )
+    .unwrap();
+    assert_eq!(id, "66666666-6666-4666-8666-666666666666");
+    let (url, body) = ok.0.lock().unwrap()[0].clone();
+    assert_eq!(url, format!("{BOARD}/api/projects"));
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({"title": "Garden", "body": "Plant the beds.", "area": "home", "originType": "auto"})
+    );
+    let no = FakePoster(
+        Default::default(),
+        400,
+        r#"{"error":{"message":"area secret-token is unknown"}}"#,
+    );
+    let e = boards::post_project(&no, BOARD, "secret-token", "Garden", "", "x").unwrap_err();
+    assert!(
+        e.message.contains("area [token] is unknown"),
+        "{}",
+        e.message
+    );
+
+    let (_d, db) = temp_db();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_string_lossy().into_owned();
+    let pid = db
+        .write(|tx| {
+            boards::record_new_board(tx, BOARD, &id, "Garden", "home", Some(path.as_str()), 7)
+        })
+        .unwrap();
+    let n = node(&db, &pid);
+    assert_eq!((n.kind, n.name.as_str()), (ProjectKind::Board, "Garden"));
+    let s = db
+        .snapshot(|tx| boards::board_summary(tx, &pid))
+        .unwrap()
+        .unwrap();
+    assert_eq!(s.folder_path.as_deref(), Some(path.as_str()));
+}
