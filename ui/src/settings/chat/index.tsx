@@ -17,6 +17,8 @@ function ChatPane() {
   const shell = useShell();
   const [els, setEls] = useState<ChatElements>({});
   const [ac, setAc] = useState(false);
+  // Whether agents may read the code editor's open file and selection (off by default).
+  const [ide, setIde] = useState(false);
   const [sendKey, setSendKey] = useState<SendShortcut>('mod-enter');
   const [sb, setSb] = useState<SendBehavior>(HOME_SEND_BEHAVIOR);
   const [hiddenSkills, setHiddenSkills] = useState('');
@@ -55,6 +57,10 @@ function ChatPane() {
         setBgClaude(savedBg.current.claude ?? '');
         setBgLocal(savedBg.current.local ?? '');
       })
+      .catch(() => undefined);
+    void shell
+      .api<unknown>('preference_get', { key: 'ideContext' })
+      .then((v) => setIde(v === true))
       .catch(() => undefined);
     void shell
       .api<unknown>('preference_get', { key: 'autocomplete' })
@@ -182,6 +188,24 @@ function ChatPane() {
               setAc(!on);
               shell.bus.dispatch({ kind: 'preferences', changed: { autocomplete: { enabled: !on } } });
               toast.show({ kind: 'error', text: `Could not save: ${String((err as Error).message ?? err)}` });
+            });
+          }}
+        />
+      </SettingRow>
+      <SettingRow
+        title="Agents can read your editor selection"
+        description="Lets agents ask for the file open in VS Code and the text selected in it, This needs Helm's small VS Code extension to be installed. Off until you turn it on."
+        testId="setting-ide-context"
+      >
+        <Checkbox
+          checked={ide}
+          aria-label="Agents can read your editor selection"
+          data-testid="settings-ide-context"
+          onChange={(on) => {
+            setIde(on);
+            void shell.api('preference', { key: 'ideContext', value: on }).catch((err: unknown) => {
+              setIde(!on);
+              saveError(err);
             });
           }}
         />

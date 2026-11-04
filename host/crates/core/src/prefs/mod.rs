@@ -44,6 +44,8 @@ pub const ZOOM_LEVEL: PrefKey = PrefKey::classified("zoomLevel");
 pub const SEND_SHORTCUT: PrefKey = PrefKey::classified("sendShortcut");
 /// Settings > MCP: whether chats load the user's own Claude Code MCP servers.
 pub const NATIVE_MCP: PrefKey = PrefKey::classified("nativeMcp");
+/// Settings > Chat: whether agents may read the code editor's open file and selection.
+pub const IDE_CONTEXT: PrefKey = PrefKey::classified("ideContext");
 /// Send behaviour. Stored as the keys that differ from the defaults, which
 /// live in `helm-chats` (`send_behavior::HOME_DEFAULTS`); validated here by shape.
 pub const SEND_BEHAVIOR: PrefKey = PrefKey::classified("sendBehavior");
@@ -91,6 +93,7 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     ZOOM_LEVEL,
     SEND_SHORTCUT,
     NATIVE_MCP,
+    IDE_CONTEXT,
     SEND_BEHAVIOR,
     SELECTION,
     APPEARANCE,
@@ -150,7 +153,7 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
                 })
             }
         }
-        "nativeMcp" => {
+        "nativeMcp" | "ideContext" => {
             if value.is_boolean() {
                 Ok(())
             } else {
@@ -508,6 +511,7 @@ mod tests {
             ("zoomLevel", json!(130), json!(125)),
             ("sendShortcut", json!("enter"), json!("ctrl-enter")),
             ("nativeMcp", json!(false), json!("no")),
+            ("ideContext", json!(true), json!(1)),
             (
                 "fontSizes",
                 json!({"interface": 14, "response": 16}),

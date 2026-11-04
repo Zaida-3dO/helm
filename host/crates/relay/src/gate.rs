@@ -30,6 +30,7 @@ const SCHEDULES: &str = "schedules are made only on the user's explicit request 
 const CONSENT: &str = "approvals and workflow decisions are made by the user in Helm";
 const LOCAL: &str = "it works on Helm's own local records";
 const TOOLS: &str = "it lists or runs the PC's own tools";
+const EDITOR: &str = "it reads the user's code editor on the PC";
 const SEARCH: &str = "it spends the user's own web search allowance";
 
 /// Every reserved name, classified. Kept in the order of `reserved.json`.
@@ -50,6 +51,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_fork_chat", Class::Denied(CHANGES)),
     ("app_get_feedback", Class::Denied(LOCAL)),
     ("app_get_settings", Class::Denied(SETTINGS)),
+    ("app_ide_context", Class::Denied(EDITOR)),
     ("app_import_mcp_servers", Class::Denied(MCP)),
     ("app_link_item", Class::Denied(LOCAL)),
     ("app_list_attention", Class::Allowed),

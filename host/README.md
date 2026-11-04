@@ -95,6 +95,16 @@ as `const MY_KEY: PrefKey = PrefKey::classified("myKey");`. An unclassified name
 Write through `helm_core::prefs::set`; never write SQL against `preferences` (a test scans
 every host source file and allows only `prefs/store.rs`).
 
+### Editor selection for agents
+
+`app_ide_context` (`crates/hosttools/src/ide.rs`) gives an agent the code editor's open file and
+selection. Helm never connects to the editor: the extension in `tools/vscode-editor-context` writes one
+JSON file per VS Code window to `<profile>/ide-context/` (see its README for what it holds and how to
+install it: copy the folder into `.vscode/extensions`, no build). The tool reads those files. It
+answers `available: false` with a reason when the user-only `ideContext` preference (Settings > Chat,
+off by default) is off, or when no file was written or touched in the last two minutes. Selections are cut
+to 12 KiB each and the reply keeps to 40 KiB of selected text.
+
 ## Design decisions
 
 - **Fresh baseline schema** (version 1): see the header of `crates/core/src/db/schema.rs`. Notably:

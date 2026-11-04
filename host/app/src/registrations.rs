@@ -427,6 +427,7 @@ mod host_tool_tests {
             "app_update_feedback",
             "app_list_feedback",
             "app_get_feedback",
+            "app_ide_context",
             "app_request_allow",
             "app_list_mcp_servers",
             "app_add_mcp_server",

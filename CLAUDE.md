@@ -16,6 +16,7 @@ does; this file is what an agent working on the code needs.
 | `fakes/` | Fake claude, fake host, fake MCP server, fake Telegram API and other test doubles |
 | `checks/` | End-to-end checks over WebView2's DevTools port, live checks, a renderer benchmark |
 | `hub/` | The optional home-server service (shared memory MCP, relay line, Telegram bot), its own Cargo workspace. See `hub/README.md` |
+| `tools/` | Small add-ons that live outside the app, built without the rest of the repo: `vscode-editor-context/` (the VS Code extension behind `app_ide_context`) |
 | `docs/roadmap.md` | Where the app is going next |
 
 Other notes kept beside the code: `host/crates/chats/SESSION-FORMAT.md` (the per-chat session log)

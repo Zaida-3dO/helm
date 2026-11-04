@@ -139,6 +139,11 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         "sendBehavior",
         UserOnly("Changes how your own messages reach a running agent, so only you set it."),
     ),
+    // Whether agents may read the code editor's open file and selection.
+    (
+        "ideContext",
+        UserOnly("What your editor shares with agents is yours to choose."),
+    ),
     // The pull request view: whether Helm reads and writes GitHub for you.
     (
         "githubPrView",
