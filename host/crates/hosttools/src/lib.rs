@@ -22,6 +22,7 @@ pub mod addendum;
 pub mod dispatch;
 pub mod feedback;
 pub mod feedback_items;
+pub mod ide;
 pub mod lines;
 pub mod registry;
 pub mod reserved;
@@ -58,6 +59,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     // Registered last among the built-ins.
     feedback::register_host_tools(r);
     feedback_items::register_host_tools(r);
+    ide::register_host_tools(r);
 }
 
 /// The settings change ring (`settings_changes`).

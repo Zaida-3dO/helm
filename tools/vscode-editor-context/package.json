@@ -1,0 +1,25 @@
+{
+  "name": "helm-editor-context",
+  "displayName": "Helm editor context",
+  "description": "Hands the open file and the selection to Helm, so an agent in Helm can read them when you allow it.",
+  "version": "0.1.0",
+  "publisher": "helm",
+  "private": true,
+  "license": "MIT",
+  "engines": { "vscode": "^1.80.0" },
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "extensionKind": ["ui"],
+  "contributes": {
+    "configuration": {
+      "title": "Helm editor context",
+      "properties": {
+        "helmEditorContext.folder": {
+          "type": "string",
+          "default": "",
+          "description": "Folder to write the hand-off to. Leave empty to use the ide-context folder inside Helm's profile folder."
+        }
+      }
+    }
+  }
+}

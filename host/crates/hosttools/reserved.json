@@ -17,6 +17,7 @@
     "app_fork_chat",
     "app_get_feedback",
     "app_get_settings",
+    "app_ide_context",
     "app_import_mcp_servers",
     "app_link_item",
     "app_list_attention",
