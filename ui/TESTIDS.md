@@ -20,7 +20,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `nav-search`, `nav-attention` | The sidebar's Search chats and Needs attention nav entries | |
 | `attention-inbox`, `attention-card`, `attention-snooze-menu` | The Needs attention dialog, one card in it, and a card's Snooze menu | card: `data-chat-id`, `data-group` (`needsYou` `flagged` `stalled` `unread`) |
 | `attention-triage-setting`, `chat-flag` | The idle-check switch in the Needs attention dialog, and the flag on a sidebar row the idle check raised | |
-| `board-sync` | The Agent Standup sync line under the view switch | `data-state` (`never` `unconfigured` `syncing` `ok` `error`) |
+| `board-refresh` | Settings → Projects: Refresh, syncs with Agent Standup now (the line also shows `board-last-sync`) | — |
 | `board-url`, `board-token`, `board-token-state`, `board-test`, `board-last-sync` | Settings → Projects connection fields: address, write-only token, "set"/"not set", Test connection, last sync | |
 | `default-board`, `settings-new-project`, `settings-boards`, `settings-set-folder`, `settings-add-folder`, `settings-folders` | Settings → Projects: the default board picker (Automatic or a board), New project…, the boards list and a folderless board's Set folder, Add folder… and the folders list | list rows carry `data-project-id` |
 | `settings-hub`, `hub-state`, `hub-field-lanUrl`, `hub-field-fallbackUrl`, `hub-field-token`, `hub-save`, `hub-error` | Settings → Hub: the pane, the line state, the write-only address, fallback and token rows ("Set."/"Not set." in the description), Save and the error line | `hub-state`: `data-state` (`off` `connecting` `online` `offline`) |

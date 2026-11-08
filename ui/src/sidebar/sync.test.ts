@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { BoardSyncState } from '../api/projects.ts';
-import { focusWantsSync, POLL_MS, startSyncTriggers, syncDisplay } from './sync.ts';
+import { focusWantsSync, OPEN_SYNC_MIN_MS, POLL_MS, startSyncTriggers, syncOnOpen } from './sync.ts';
 
 const state = (o: Partial<BoardSyncState> = {}): BoardSyncState => ({
   configured: true,
@@ -10,14 +10,6 @@ const state = (o: Partial<BoardSyncState> = {}): BoardSyncState => ({
   error: null,
   projectCount: 3,
   ...o,
-});
-
-test('sync display states', () => {
-  assert.equal(syncDisplay(null), 'never');
-  assert.equal(syncDisplay(state({ syncing: true, error: 'x' })), 'syncing');
-  assert.equal(syncDisplay(state({ configured: false })), 'unconfigured');
-  assert.equal(syncDisplay(state({ error: "Couldn't reach Agent Standup; showing the last sync." })), 'error');
-  assert.equal(syncDisplay(state()), 'ok');
 });
 
 test('focus syncs only when the last sync is over 2 minutes old', () => {
@@ -67,4 +59,19 @@ test('triggers: launch, a 10-minute poll only while visible, focus', () => {
   assert.equal(calls, 3);
   stop();
   assert.equal(removed, true);
+});
+
+test('opening a picker syncs, but not twice within 30 seconds', () => {
+  let calls = 0;
+  let now = 1_000_000;
+  const open = syncOnOpen(() => calls++, () => now);
+  open();
+  open();
+  assert.equal(calls, 1);
+  now += OPEN_SYNC_MIN_MS - 1;
+  open();
+  assert.equal(calls, 1);
+  now += 1;
+  open();
+  assert.equal(calls, 2);
 });

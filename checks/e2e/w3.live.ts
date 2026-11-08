@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
-import { dispose, launchApp, scratchDir, seedBoardChats, tid, type App } from "./harness.ts";
+import { dispose, launchApp, scratchDir, seedBoardChats, tid, waitBoardSync, type App } from "./harness.ts";
 
 const enabled = process.env.HELM_LIVE_STANDUP === "1";
 const token = process.env.HELM_LIVE_STANDUP_TOKEN ?? process.env.AGENT_STANDUP_TOKEN ?? "";
@@ -27,11 +27,7 @@ describe("live: Agent Standup read sync (L1)", { skip: !enabled || !token || !ur
 
   test("L1: the board's real projects appear as groups after one sync", async () => {
     const page = app!.page;
-    await page.waitForSelector(tid("board-sync", '[data-state="ok"]'), { timeout: 60_000 }).catch(async (e) => {
-      const state = await page.getAttribute(tid("board-sync"), "data-state").catch(() => "?");
-      const text = await page.textContent(tid("board-sync")).catch(() => "");
-      throw new Error(`sync did not reach ok (state ${state}: ${text}): ${(e as Error).message.split("\n")[0]}`);
-    });
+    await waitBoardSync(page, 60_000);
     // Projects with no chats do not draw: put a chat under each (in the scratch profile) first.
     await seedBoardChats(page);
     const groups = await page.$$eval(tid("sidebar-group", '[data-kind="board"]'), (els) => els.map((e) => (e.querySelector(".sb-name")?.textContent ?? "").trim()));
