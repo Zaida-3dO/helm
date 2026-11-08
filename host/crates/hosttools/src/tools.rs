@@ -18,6 +18,9 @@ fn obj(props: Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": props, "required": required, "additionalProperties": false})
 }
 
+/// What a write to a closed project says.
+const CLOSED_PROJECT: &str = "This project is closed. Reopen it first.";
+
 /// One project as the tools describe it. A board (kind `board`) is where chats are shown; its
 /// `primaryFolder` is where its new chats start. A folder project (kind `folder`) is where chats
 /// run, at `path`.
@@ -59,6 +62,7 @@ async fn folder_project(ctx: &ToolCtx, all: &[Value], folder: &str) -> Result<Va
     let open = all.iter().find(|p| {
         p["kind"] == "folder"
             && p["archived"] != true
+            && p["closed"] != true
             && p["path"].as_str().is_some_and(|x| same_folder(x, folder))
     });
     if let Some(p) = open {
@@ -75,9 +79,14 @@ async fn folder_project(ctx: &ToolCtx, all: &[Value], folder: &str) -> Result<Va
     Ok(p["id"].clone())
 }
 
+/// Every project, closed ones included: a closed project is left out of what a tool lists, but a
+/// tool that targets one by id has to find it to say it is closed.
 async fn all_projects(ctx: &ToolCtx, archived: bool) -> Result<Vec<Value>, ToolError> {
     let v = ctx
-        .op("project_list", json!({"includeArchived": archived}))
+        .op(
+            "project_list",
+            json!({"includeArchived": archived, "includeClosed": true}),
+        )
         .await?;
     Ok(v.as_array().cloned().unwrap_or_default())
 }
@@ -101,6 +110,7 @@ async fn list_projects(ctx: ToolCtx, a: Value) -> ToolResult {
     let all = all_projects(&ctx, true).await?;
     let hits: Vec<Value> = all
         .iter()
+        .filter(|p| p["closed"] != true)
         .filter(|p| {
             q.is_empty()
                 || p["name"]
@@ -145,6 +155,9 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
     }
     let all = all_projects(&ctx, true).await?;
     let cur = find(&all, &id)?;
+    if cur["closed"] == true {
+        return Err(ToolError::refused(CLOSED_PROJECT));
+    }
     let mut upd = json!({"projectId": id, "revision": cur["revision"]});
     let mut any = false;
     // A board's folder: where its new chats start. The folder is added as a folder project when
@@ -252,7 +265,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::read(
             "app_list_projects",
-            "List Helm's projects in sidebar order with their ids, kinds, folders, chat counts and whether they are pinned or archived; query filters by name. Boards (kind board) are where chats are shown: app_create_chat takes a board's id, and a board's primaryFolder is where its new chats start. Folder projects (kind folder) are where chats run (path).",
+            "List Helm's projects in sidebar order with their ids, kinds, folders, chat counts and whether they are pinned or archived; query filters by name. Projects the user has closed are left out, and a closed project refuses new chats and edits until the user reopens it. Boards (kind board) are where chats are shown: app_create_chat takes a board's id, and a board's primaryFolder is where its new chats start. Folder projects (kind folder) are where chats run (path).",
             obj(json!({"query": {"type": "string", "maxLength": 512}}), &[]),
         )
         .self_locking(),
@@ -391,7 +404,8 @@ mod tests {
                 match op {
                     "project_list" => Ok(json!([
                         {"id": "p1", "name": "Helm", "kind": "folder", "path": FOLDER, "archived": false, "pinned": false, "chatCount": 2, "revision": 7},
-                        {"id": "p2", "name": "Board", "kind": "board", "path": null, "primaryFolderProjectId": "p1", "archived": false, "pinned": true, "chatCount": 0, "revision": 1}
+                        {"id": "p2", "name": "Board", "kind": "board", "path": null, "primaryFolderProjectId": "p1", "archived": false, "pinned": true, "chatCount": 0, "revision": 1},
+                        {"id": "p9", "name": "Helmsman", "kind": "board", "path": null, "archived": false, "closed": true, "pinned": false, "chatCount": 0, "revision": 3}
                     ])),
                     "project_create" => {
                         Ok(json!({"id": "p3", "kind": "folder", "path": args["path"]}))
@@ -426,6 +440,14 @@ mod tests {
             .unwrap();
         assert_eq!(r["projects"].as_array().unwrap().len(), 1);
         assert_eq!(r["projects"][0]["projectId"], "p1");
+        // A closed project is left out of the listing and refuses edits.
+        assert_eq!(r["projects"].as_array().unwrap().len(), 1, "p9 is closed");
+        let e = update_project(ctx(ops.clone()), json!({"projectId": "p9", "name": "x"}))
+            .await
+            .unwrap_err();
+        assert!(e
+            .public
+            .contains("This project is closed. Reopen it first."));
         update_project(
             ctx(ops.clone()),
             json!({"projectId": "p1", "name": "Helm 2", "archived": true}),

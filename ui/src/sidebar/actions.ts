@@ -259,6 +259,13 @@ export class SidebarActions {
     });
   }
 
+  async closeProject(p: ProjectNode): Promise<void> {
+    const ok = await this.run(() => this.d.pops.close(p.id).then(() => true));
+    if (!ok) return;
+    void this.d.data.loadProjects();
+    this.d.data.invalidatePaging();
+  }
+
   async restoreProject(p: ProjectNode): Promise<void> {
     await this.run(() => this.d.pops.restore(p.id));
     void this.d.data.loadProjects();

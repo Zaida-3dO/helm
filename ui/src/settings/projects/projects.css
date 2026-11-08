@@ -80,3 +80,12 @@
 .sp-meta {
   color: var(--secondary);
 }
+
+/* Two boards over one folder: allowed, so a note and not an error. */
+.sp-warning {
+  margin: 8px 0 0;
+  padding: 4px 10px;
+  border-left: 2px solid var(--warning);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+}

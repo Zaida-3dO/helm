@@ -323,6 +323,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       topLevel: () => void act.nestProject(p, null),
       archive: () => setConfirm(archiveProjectConfirm(p, () => act.archiveProject(p))),
       restore: () => void act.restoreProject(p),
+      close: () => setConfirm(closeProjectConfirm(p, () => act.closeProject(p))),
       colour: (c) => void act.updateProject(p, { colour: c }),
       customColour: () =>
         setPrompt({
@@ -1095,6 +1096,15 @@ export function deleteChatConfirm(row: SidebarRow, onConfirm: () => void | Promi
     body: `“${row.title || 'Untitled chat'}” and its history are removed from this PC. This cannot be undone.`,
     confirm: 'Delete permanently',
     danger: true,
+    onConfirm,
+  };
+}
+
+export function closeProjectConfirm(p: ProjectNode, onConfirm: () => void | Promise<unknown>): ConfirmSpec {
+  return {
+    title: 'Close project?',
+    body: `“${p.name}” is hidden from the sidebar and every picker, and nothing new can be added to it. Chats already in it keep working. Reopen it from Settings → Projects.`,
+    confirm: 'Close project',
     onConfirm,
   };
 }

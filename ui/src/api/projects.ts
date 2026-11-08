@@ -31,11 +31,14 @@ export type {
 
 export function projectOps(api: Api) {
   return {
-    list: (includeArchived = false) => api<ProjectNode[]>('project_list', { includeArchived }),
+    /** Archived and closed projects are left out unless asked for. */
+    list: (includeArchived = false, includeClosed = false) => api<ProjectNode[]>('project_list', { includeArchived, includeClosed }),
     create: (a: ProjectCreateArgs) => api<ProjectNode>('project_create', a),
     update: (a: ProjectUpdateArgs) => api<ProjectNode>('project_update', a),
     archive: (projectId: string) => api<ProjectNode>('project_archive', { projectId }),
     restore: (projectId: string) => api<ProjectNode>('project_restore', { projectId }),
+    close: (projectId: string) => api<ProjectNode>('project_close', { projectId }),
+    reopen: (projectId: string) => api<ProjectNode>('project_reopen', { projectId }),
     page: (view: SidebarView, cursor?: string, groupId?: string) =>
       api<SidebarPage>('sidebar_page', { view, cursor, groupId }),
     rows: (chatIds: string[]) => api<SidebarRow[]>('sidebar_rows', { chatIds }),

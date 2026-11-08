@@ -1,5 +1,6 @@
 // Settings → Projects: the Agent Standup connection, the default board, the boards (where chats
-// are shown) and the folders (where chats run), each with archive and restore. The token field is
+// are shown) and the folders (where chats run), each with archive and restore, close, and a Closed
+// section to reopen from. The token field is
 // write-only: the pane only ever learns "set" or "not set".
 
 import { useEffect, useMemo, useState } from 'react';
@@ -8,7 +9,7 @@ import { useShell } from '../../shell/context.ts';
 import { Button, Picker, type PickerOption } from '../../ui/index.ts';
 import { getDefaultBoard, NO_DEFAULT_BOARD, setDefaultBoard, type DefaultBoardState } from '../../newchat/boards.ts';
 import { openAddFolder, openNewProject, openPrimaryFolder } from '../../newchat/index.ts';
-import { needsFolder, pickerProjects, primaryFolder } from '../../newchat/places.ts';
+import { needsFolder, pickerProjects, primaryFolder, sharedFolders } from '../../newchat/places.ts';
 
 function errorText(e: unknown): string {
   return String((e as Error)?.message ?? e);
@@ -31,7 +32,7 @@ export function ProjectsPane() {
 
   const reload = () => {
     ops
-      .list(true)
+      .list(true, true)
       .then(setProjects)
       .catch((e: unknown) => setError(errorText(e)));
     void getDefaultBoard(shell.api).then(setBoards);
@@ -41,7 +42,7 @@ export function ProjectsPane() {
     let live = true;
     const load = () => {
       ops
-        .list(true)
+        .list(true, true)
         .then((p) => live && setProjects(p))
         .catch((e: unknown) => setError(errorText(e)));
       void getDefaultBoard(shell.api).then((b) => live && setBoards(b));
@@ -104,6 +105,16 @@ export function ProjectsPane() {
     }
   };
 
+  const setClosed = async (p: ProjectNode, closed: boolean) => {
+    setError(null);
+    try {
+      await (closed ? ops.close(p.id) : ops.reopen(p.id));
+      reload();
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+
   const chooseDefault = async (v: string) => {
     setError(null);
     try {
@@ -113,8 +124,10 @@ export function ProjectsPane() {
     }
   };
 
-  const boardList = projects.filter((p) => p.kind === 'board');
-  const folderList = projects.filter((p) => p.kind !== 'board');
+  const closedList = projects.filter((p) => p.closed);
+  const boardList = projects.filter((p) => p.kind === 'board' && !p.closed);
+  const folderList = projects.filter((p) => p.kind !== 'board' && !p.closed);
+  const shared = sharedFolders(projects);
   const fallbackName = boards.chosen ? null : boards.name;
   const defaultOptions: PickerOption<string>[] = [
     { value: AUTOMATIC, title: 'Automatic', subtitle: fallbackName ? `Now ${fallbackName}` : 'No board found yet' },
@@ -229,10 +242,22 @@ export function ProjectsPane() {
                 <button type="button" onClick={() => void toggleArchive(p)}>
                   {p.archived ? 'Restore' : 'Archive'}
                 </button>
+                <button type="button" onClick={() => void setClosed(p, true)}>
+                  Close
+                </button>
               </span>
             </li>
           ))}
         </ul>
+        {shared.length > 0 && (
+          <div className="sp-warning" role="note" data-testid="shared-folder-warning">
+            {shared.map((g) => (
+              <p key={g.folder} className="sp-help">
+                {`${g.boards.map((b) => b.name).join(' and ')} start their chats in the same folder (${g.folder}). That works, but a chat started from the folder cannot tell which board it belongs to, so it goes to the default board. Give each board its own folder to avoid that.`}
+              </p>
+            ))}
+          </div>
+        )}
       </section>
       <section className="sp-section" aria-labelledby="sp-folders">
         <h3 id="sp-folders">Folders</h3>
@@ -252,13 +277,39 @@ export function ProjectsPane() {
                   {p.archived ? ' · archived' : ''}
                 </span>
               </span>
-              <button type="button" onClick={() => void toggleArchive(p)}>
-                {p.archived ? 'Restore' : 'Archive'}
-              </button>
+              <span className="sp-actions">
+                <button type="button" onClick={() => void toggleArchive(p)}>
+                  {p.archived ? 'Restore' : 'Archive'}
+                </button>
+                <button type="button" onClick={() => void setClosed(p, true)}>
+                  Close
+                </button>
+              </span>
             </li>
           ))}
         </ul>
       </section>
+      {closedList.length > 0 && (
+        <section className="sp-section" aria-labelledby="sp-closed">
+          <h3 id="sp-closed">Closed</h3>
+          <p className="sp-help">
+            Hidden from the sidebar and every picker, and nothing new can be added to them. Chats already inside keep working.
+          </p>
+          <ul className="sp-list" data-testid="settings-closed">
+            {closedList.map((p) => (
+              <li key={p.id} className="sp-project" data-project-id={p.id}>
+                <span className="sp-name">
+                  {p.name}
+                  <span className="sp-meta">{p.kind === 'board' ? ' · board' : p.path ? ` · ${p.path}` : ' · local group'}</span>
+                </span>
+                <button type="button" data-testid="settings-reopen" onClick={() => void setClosed(p, false)}>
+                  Reopen
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </div>
   );
 }

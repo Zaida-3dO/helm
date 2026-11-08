@@ -7,6 +7,7 @@
 //! | `project_create_folder` | maintenance | [`ProjectCreateFolderArgs`] → [`ProjectNode`] (a new folder by name) |
 //! | `project_update` | maintenance | [`ProjectUpdateArgs`] → [`ProjectNode`] (a new primary folder retires the project's idle workers) |
 //! | `project_archive` / `project_restore` | maintenance | [`ProjectIdArgs`] → [`ProjectNode`] |
+//! | `project_close` / `project_reopen` | maintenance | [`ProjectIdArgs`] → [`ProjectNode`] (a closed project is left out of `project_list` unless asked for, and refuses new work) |
 //! | `sidebar_page` | heavy | [`SidebarPageArgs`] → [`SidebarPage`] |
 //! | `sidebar_rows` | blocking | [`SidebarRowsArgs`] → `SidebarRow[]` |
 //! | `chat_organize` | maintenance | [`ChatOrganizeArgs`] → `SidebarRow[]` (the rows that moved) |
@@ -35,6 +36,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("project_update", OpClass::Maintenance, project_update)
         .blocking("project_archive", OpClass::Maintenance, project_archive)
         .blocking("project_restore", OpClass::Maintenance, project_restore)
+        .blocking("project_close", OpClass::Maintenance, project_close)
+        .blocking("project_reopen", OpClass::Maintenance, project_reopen)
         .blocking("sidebar_page", OpClass::Heavy, sidebar_page)
         .blocking("sidebar_rows", OpClass::Blocking, sidebar_rows)
         .blocking("chat_organize", OpClass::Maintenance, chat_organize);
@@ -86,7 +89,13 @@ pub(crate) fn emit_sidebar(ctx: &OpCtx, ids: &[String]) {
 fn project_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ProjectListArgs = parse_args(args)?;
     let db = ctx.services.need::<Database>()?;
-    let list = db.snapshot(|tx| store::list_projects(tx, a.include_archived.unwrap_or(false)))?;
+    let list = db.snapshot(|tx| {
+        store::list_projects(
+            tx,
+            a.include_archived.unwrap_or(false),
+            a.include_closed.unwrap_or(false),
+        )
+    })?;
     to_value(&list)
 }
 
@@ -301,6 +310,29 @@ fn project_archive(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 
 fn project_restore(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     archive_or_restore(ctx, args, false)
+}
+
+fn close_or_reopen(ctx: &OpCtx, args: Value, close: bool) -> Result<Value, ApiError> {
+    let a: ProjectIdArgs = parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let node = db.write(|tx| {
+        if close {
+            store::close_project(tx, &a.project_id)?;
+        } else {
+            store::reopen_project(tx, &a.project_id)?;
+        }
+        store::get_project(tx, &a.project_id)
+    })?;
+    emit_project(ctx, &node);
+    to_value(&node)
+}
+
+fn project_close(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    close_or_reopen(ctx, args, true)
+}
+
+fn project_reopen(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    close_or_reopen(ctx, args, false)
 }
 
 fn revision(ctx: &OpCtx) -> i64 {

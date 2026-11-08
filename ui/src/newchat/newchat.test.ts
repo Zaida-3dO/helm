@@ -9,7 +9,7 @@ import { LAST_PROJECT_KEY, NewChatController, draftOps, newChat, type NewChatEnv
 import { primaryFolderMenuItem } from './menu.ts';
 import { addExistingFolder, addNewFolder, currentFolder, setPrimaryFolder } from './projects.ts';
 import { NO_DEFAULT_BOARD, createBoardProject, getDefaultBoard, setDefaultBoard } from './boards.ts';
-import { LEGACY_LAST_FOLDER_KEY, MAX_RECENTS, RECENTS_KEY, boardFor, folderMenu, folderProjectFor, pickerProjects, pushRecent, readRecents, resolveFolder, samePath } from './places.ts';
+import { LEGACY_LAST_FOLDER_KEY, MAX_RECENTS, RECENTS_KEY, boardFor, sharedFolders, folderMenu, folderProjectFor, pickerProjects, pushRecent, readRecents, resolveFolder, samePath } from './places.ts';
 
 function node(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
   return {
@@ -25,6 +25,7 @@ function node(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
     collapsed: false,
     position: null,
     archived: false,
+    closed: false,
     board: null,
     primaryFolderProjectId: null,
     chatCount: 0,
@@ -310,6 +311,13 @@ test('which board a new chat goes on: the one picked, the board over its folder,
   assert.equal(boardFor('site', twice), null);
   assert.equal(boardFor('site', [...PROJECTS, boardNode('b-site', { primaryFolderProjectId: 'site' }, { stale: true })]), null);
   assert.equal(boardFor('b-site', [...PROJECTS, boardNode('b-site', { archived: true })]), null);
+  assert.equal(boardFor('b-site', [...PROJECTS, boardNode('b-site', { closed: true })]), null, 'a closed board is never chosen');
+
+  // sharedFolders: open boards over one folder are named; closed ones and lone boards are not.
+  const names = (list: ProjectNode[]) => sharedFolders(list).map((g) => g.boards.map((b) => b.id));
+  assert.deepEqual(names(twice), [['b-site', 'b-site2']]);
+  assert.deepEqual(names([...projects, boardNode('b-site2', { primaryFolderProjectId: 'site', closed: true })]), []);
+  assert.deepEqual(names(projects), []);
 });
 
 test('New chat in a project moves a typed draft there, keeping the text; the folder follows the project', () => {

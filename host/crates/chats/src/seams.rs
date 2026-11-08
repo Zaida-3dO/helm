@@ -43,6 +43,9 @@ pub trait SendContextBuilder: Send + Sync {
 #[derive(Clone)]
 pub struct SendContext(pub Arc<dyn SendContextBuilder>);
 
+/// What a refused write into a closed project says.
+pub const CLOSED_PROJECT: &str = "This project is closed. Reopen it first.";
+
 /// A board project as the chats crate sees it: where its new chats start and what to call it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoardSummary {
@@ -55,6 +58,8 @@ pub struct BoardSummary {
     pub folder_project_id: Option<String>,
     pub folder_path: Option<String>,
     pub archived: bool,
+    /// Closed by the user: hidden, and no chat is put on it until it is reopened.
+    pub closed: bool,
     /// The board no longer lists it: no new chat is put on it.
     pub stale: bool,
 }
@@ -64,6 +69,12 @@ pub struct BoardSummary {
 pub trait ProjectGate: Send + Sync {
     /// True when the project is archived: new chats and single-chat restores are refused.
     fn project_archived(&self, tx: &Transaction<'_>, project_id: &str) -> rusqlite::Result<bool>;
+
+    /// True when the project is closed: nothing new is created in it or moved into it. Chats
+    /// already there keep working. Open when the gate does not know.
+    fn project_closed(&self, _tx: &Transaction<'_>, _project_id: &str) -> rusqlite::Result<bool> {
+        Ok(false)
+    }
 
     /// The board with this project id; `None` when the id is a folder project or unknown.
     fn board(

@@ -133,6 +133,11 @@ fn start_chat(svc: &SchedulesService, project_id: Option<&str>) -> Result<String
                     ));
                 }
             }
+            if let Some(g) = &svc.gates {
+                if g.0.project_closed(tx, project)? {
+                    return Ok(Err(helm_chats::seams::CLOSED_PROJECT));
+                }
+            }
             let (model, effort) = helm_chats::runtime_settings::new_chat_defaults(tx);
             let id = helm_chats::store::create_chat_in(
                 tx,

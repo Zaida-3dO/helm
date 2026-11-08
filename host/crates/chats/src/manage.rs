@@ -72,6 +72,18 @@ pub(crate) fn project_archived(
     }
 }
 
+/// Whether the project is closed, through the projects crate's gate (open when none).
+pub(crate) fn project_closed(
+    ctx: &OpCtx,
+    tx: &Transaction<'_>,
+    project_id: &str,
+) -> rusqlite::Result<bool> {
+    match ctx.services.get::<ProjectGates>() {
+        Some(g) => g.0.project_closed(tx, project_id),
+        None => Ok(false),
+    }
+}
+
 pub(crate) const ARCHIVED_PROJECT: &str =
     "This chat's project is archived; restore the project first.";
 

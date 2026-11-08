@@ -4,7 +4,7 @@
 //!
 //! | Table | Holds |
 //! |---|---|
-//! | `project_local` | per project, local-only state: pin, position, collapse, icon, archive, a board project's local rename, primary folder, CAS revision |
+//! | `project_local` | per project, local-only state: pin, position, collapse, icon, archive, closed, a board project's local rename, primary folder, CAS revision |
 //! | `project_parents` | local nesting: one parent per project, `source` board or local |
 //! | `chat_groups` | the group a chat is shown under when it is not its folder project |
 //! | `project_archive_members` | exactly which chats a project archive archived, so restore brings back only those |
@@ -22,10 +22,14 @@ use helm_core::db::MigrationRegistry;
 use rusqlite::Transaction;
 
 pub const ARCHIVED_REFUSAL: &str = "Restore this project first.";
+/// A closed project is hidden from listings and pickers and takes nothing new; chats already in it
+/// keep working. Only reopening it lifts this.
+pub const CLOSED_REFUSAL: &str = helm_chats::seams::CLOSED_PROJECT;
 
 pub fn register(reg: &mut MigrationRegistry) {
     reg.initializer("projects-side-tables", init)
         .one_time("projects-board-completed", add_board_completed)
+        .one_time("projects-closed", add_closed)
         .initializer("projects-repositories", crate::repos::init);
 }
 
@@ -38,6 +42,7 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              collapsed                  INTEGER NOT NULL DEFAULT 0,
              icon                       TEXT,
              archived                   INTEGER NOT NULL DEFAULT 0,
+             closed                     INTEGER NOT NULL DEFAULT 0,
              title_override             TEXT,
              primary_folder_project_id  TEXT REFERENCES projects(id) ON DELETE SET NULL,
              revision                   INTEGER NOT NULL DEFAULT 0
@@ -124,6 +129,20 @@ fn add_board_completed(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         tx.execute_batch(
             "ALTER TABLE board_projects ADD COLUMN completed INTEGER NOT NULL DEFAULT 0",
         )?;
+    }
+    Ok(())
+}
+
+/// `project_local.closed` arrived after the table did: a profile made before it gets the column
+/// here, every project open. A new profile already has it from `init`.
+fn add_closed(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let present: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_local') WHERE name = 'closed')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !present {
+        tx.execute_batch("ALTER TABLE project_local ADD COLUMN closed INTEGER NOT NULL DEFAULT 0")?;
     }
     Ok(())
 }

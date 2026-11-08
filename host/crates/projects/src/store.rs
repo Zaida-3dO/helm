@@ -2,7 +2,7 @@
 //! transaction, so an op is one atomic
 //! write or one consistent snapshot.
 
-use crate::schema::ARCHIVED_REFUSAL;
+use crate::schema::{ARCHIVED_REFUSAL, CLOSED_REFUSAL};
 use crate::types::*;
 use helm_chats::types::ChatStatus;
 use rusqlite::{params, OptionalExtension, Row, Transaction};
@@ -32,6 +32,9 @@ impl From<rusqlite::Error> for Refusal {
         if let rusqlite::Error::SqliteFailure(_, Some(msg)) = &e {
             if msg.contains(ARCHIVED_REFUSAL) {
                 return Refusal::Refused(ARCHIVED_REFUSAL.into());
+            }
+            if msg.contains(CLOSED_REFUSAL) {
+                return Refusal::Refused(CLOSED_REFUSAL.into());
             }
         }
         Refusal::Sql(e)
@@ -116,7 +119,7 @@ const PROJECT_SELECT: &str = "SELECT p.id, p.kind, p.name, p.path, p.color, p.cr
         l.title_override, l.primary_folder_project_id, COALESCE(l.revision, 0),
         pp.parent_id, pp.source,
         b.board_url, b.board_project_id, b.title, b.headline, b.area, b.repo, b.priority,
-        b.last_activity, b.stale, b.completed
+        b.last_activity, b.stale, b.completed, COALESCE(l.closed, 0)
      FROM projects p
      LEFT JOIN project_local l ON l.project_id = p.id
      LEFT JOIN project_parents pp ON pp.project_id = p.id
@@ -167,6 +170,7 @@ fn project_from_row(r: &Row<'_>, counts: &HashMap<String, i64>) -> rusqlite::Res
         collapsed: r.get::<_, i64>(8)? != 0,
         icon,
         archived: r.get::<_, i64>(10)? != 0,
+        closed: r.get::<_, i64>(26)? != 0,
         primary_folder_project_id: r.get(12)?,
         revision: r.get(13)?,
         parent_id: r.get(14)?,
@@ -193,12 +197,25 @@ fn chat_counts(tx: &Transaction<'_>) -> rusqlite::Result<HashMap<String, i64>> {
     rows.collect()
 }
 
-pub fn list_projects(tx: &Transaction<'_>, include_archived: bool) -> Res<Vec<ProjectNode>> {
+/// The projects in sidebar order. Archived ones come only with `include_archived`, closed ones
+/// only with `include_closed`.
+pub fn list_projects(
+    tx: &Transaction<'_>,
+    include_archived: bool,
+    include_closed: bool,
+) -> Res<Vec<ProjectNode>> {
     let counts = chat_counts(tx)?;
-    let filter = if include_archived {
-        ""
+    let mut conds = Vec::new();
+    if !include_archived {
+        conds.push("COALESCE(l.archived, 0) = 0");
+    }
+    if !include_closed {
+        conds.push("COALESCE(l.closed, 0) = 0");
+    }
+    let filter = if conds.is_empty() {
+        String::new()
     } else {
-        "WHERE COALESCE(l.archived, 0) = 0"
+        format!("WHERE {}", conds.join(" AND "))
     };
     let mut st = tx.prepare(&format!("{PROJECT_SELECT} {filter} {PROJECT_ORDER}"))?;
     let rows = st.query_map([], |r| project_from_row(r, &counts))?;
@@ -232,6 +249,50 @@ fn is_archived(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<bool> {
         .optional()?
         .unwrap_or(0)
         != 0)
+}
+
+pub(crate) fn is_closed(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<bool> {
+    Ok(tx
+        .query_row(
+            "SELECT closed FROM project_local WHERE project_id = ?1",
+            [id],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0)
+        != 0)
+}
+
+/// Refuse a write that targets or places something in a closed project.
+fn refuse_if_closed(tx: &Transaction<'_>, id: &str) -> Res<()> {
+    if is_closed(tx, id)? {
+        return Err(Refusal::Refused(CLOSED_REFUSAL.into()));
+    }
+    Ok(())
+}
+
+/// Close a project: hidden from listings and pickers, and nothing new goes into it until it is
+/// reopened. Chats already in it are untouched. Closing twice is fine.
+pub fn close_project(tx: &Transaction<'_>, id: &str) -> Res<()> {
+    set_closed(tx, id, true)
+}
+
+/// Reopen a closed project. The one way out of closed.
+pub fn reopen_project(tx: &Transaction<'_>, id: &str) -> Res<()> {
+    set_closed(tx, id, false)
+}
+
+fn set_closed(tx: &Transaction<'_>, id: &str, closed: bool) -> Res<()> {
+    if !exists(tx, id)? {
+        return Err(Refusal::NotFound("That project does not exist.".into()));
+    }
+    ensure_local(tx, id)?;
+    tx.execute(
+        "UPDATE project_local SET closed = ?2, revision = revision + 1
+         WHERE project_id = ?1 AND closed != ?2",
+        params![id, closed],
+    )?;
+    Ok(())
 }
 
 fn exists(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<bool> {
@@ -355,6 +416,7 @@ pub fn set_parent(tx: &Transaction<'_>, id: &str, parent: Option<&str>) -> Res<(
             "That parent project does not exist.".into(),
         ));
     }
+    refuse_if_closed(tx, parent)?;
     let ancestors = project_ancestors(tx, parent)?;
     if ancestors.iter().any(|a| a == id) {
         return Err(bad(
@@ -455,6 +517,7 @@ pub fn update_project(tx: &Transaction<'_>, a: &ProjectUpdateArgs) -> Res<i64> {
         ));
     }
     let id = a.project_id.as_str();
+    refuse_if_closed(tx, id)?;
     ensure_local(tx, id)?;
     if let Some(name) = &a.name {
         let name = validate_name(name)?;
@@ -585,6 +648,7 @@ pub fn archive_project(tx: &Transaction<'_>, id: &str) -> Res<Vec<String>> {
     if !exists(tx, id)? {
         return Err(Refusal::NotFound("That project does not exist.".into()));
     }
+    refuse_if_closed(tx, id)?;
     if is_archived(tx, id)? {
         return Ok(Vec::new());
     }
@@ -621,6 +685,7 @@ pub fn restore_project(tx: &Transaction<'_>, id: &str) -> Res<Vec<String>> {
     if !exists(tx, id)? {
         return Err(Refusal::NotFound("That project does not exist.".into()));
     }
+    refuse_if_closed(tx, id)?;
     ensure_local(tx, id)?;
     tx.execute(
         "UPDATE project_local SET archived = 0, revision = revision + 1 WHERE project_id = ?1",
@@ -879,7 +944,8 @@ pub fn sidebar_page(tx: &Transaction<'_>, a: &SidebarPageArgs, revision: i64) ->
         SidebarView::Archived => ("c.archived = 1", CHAT_ORDER),
         // Activity: newest activity first, across every non-archived project.
         SidebarView::Activity => (
-            "c.archived = 0 AND NOT EXISTS (SELECT 1 FROM project_local l WHERE l.archived = 1
+            "c.archived = 0 AND NOT EXISTS (SELECT 1 FROM project_local l
+                 WHERE (l.archived = 1 OR l.closed = 1)
                  AND l.project_id IN (c.project_id, g.project_id))",
             "c.updated_at DESC, c.id",
         ),
@@ -985,6 +1051,7 @@ pub fn organize(tx: &Transaction<'_>, a: &ChatOrganizeArgs) -> Res<Vec<String>> 
             |r| r.get(0),
         )?;
         if group != shown {
+            refuse_if_closed(tx, group)?;
             let kind: String =
                 tx.query_row("SELECT kind FROM projects WHERE id = ?1", [group], |r| {
                     r.get(0)

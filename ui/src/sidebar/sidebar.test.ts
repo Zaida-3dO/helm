@@ -23,6 +23,7 @@ function project(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
     collapsed: false,
     position: null,
     archived: false,
+    closed: false,
     board: null,
     primaryFolderProjectId: null,
     chatCount: 0,

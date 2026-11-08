@@ -82,6 +82,10 @@ impl helm_chats::seams::ProjectGate for Gate {
             != 0)
     }
 
+    fn project_closed(&self, tx: &Transaction<'_>, project_id: &str) -> rusqlite::Result<bool> {
+        crate::store::is_closed(tx, project_id)
+    }
+
     fn board(
         &self,
         tx: &Transaction<'_>,

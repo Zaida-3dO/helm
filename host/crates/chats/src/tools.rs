@@ -587,6 +587,9 @@ fn place(
             "That board is archived; ask the user to restore it before starting chats on it.",
         )));
     }
+    if board.closed {
+        return Ok(Err(refuse(crate::seams::CLOSED_PROJECT)));
+    }
     let own = board
         .folder_path
         .clone()
@@ -1368,6 +1371,7 @@ mod tests {
             folder_project_id: folder.map(|f| f.0.into()),
             folder_path: folder.map(|f| f.1.into()),
             archived: false,
+            closed: false,
             stale: false,
         }
     }
@@ -1404,6 +1408,10 @@ mod tests {
                 stale: true,
                 ..board("b-gone", "Gone", None, own)
             },
+            BoardSummary {
+                closed: true,
+                ..board("b-shut", "Shut", None, own)
+            },
         ]);
         fake.groups
             .lock()
@@ -1417,7 +1425,7 @@ mod tests {
         let not_board = "Pick a board; folders are where chats run";
         // (caller, args, error text or "", then for a new chat: its board, parent and folder)
         type Case<'a> = (&'a str, Value, &'a str, &'a str, Option<&'a str>, &'a str);
-        let cases: [Case; 12] = [
+        let cases: [Case; 13] = [
             // Defaults: the caller's board, nested under the caller, in the board's folder.
             (&a, json!({}), "", "b-home", Some(&a), &work),
             (
@@ -1457,6 +1465,14 @@ mod tests {
             ),
             (&a, json!({"projectId": "b-site"}), no_folder, "", None, ""),
             (&a, json!({"projectId": "b-old"}), "archived", "", None, ""),
+            (
+                &a,
+                json!({"projectId": "b-shut"}),
+                "This project is closed. Reopen it first.",
+                "",
+                None,
+                "",
+            ),
             (
                 &a,
                 json!({"projectId": "b-gone"}),

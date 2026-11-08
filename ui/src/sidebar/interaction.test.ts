@@ -7,14 +7,14 @@ import { UNDO_LIMIT, UndoStack } from './undo.ts';
 
 const noop = () => undefined;
 const chatActs: ChatMenuActions = { fork: noop, rename: noop, compact: noop, rollOver: noop, cost: noop, exportMarkdown: noop, moveTo: noop, nestUnder: noop, topLevel: noop, toggleChildren: noop, markUnread: noop, pin: noop, mute: noop, archive: noop, restore: noop, remove: noop };
-const projActs: ProjectMenuActions = { newChat: noop, pin: noop, rename: noop, changeIcon: noop, cost: noop, nestUnder: noop, topLevel: noop, archive: noop, restore: noop, colour: noop, customColour: noop };
+const projActs: ProjectMenuActions = { newChat: noop, pin: noop, rename: noop, changeIcon: noop, cost: noop, nestUnder: noop, topLevel: noop, archive: noop, restore: noop, close: noop, colour: noop, customColour: noop };
 
 function row(chatId: string, over: Partial<SidebarRow> = {}): SidebarRow {
   return { chatId, title: chatId, groupProjectId: 'g', folderProjectId: 'g', folderPath: 'C:/w', depth: 0, parentChatId: null, hasChildren: false, status: 'idle', attention: null, pinned: false, unread: false, muted: false, stalled: false, local: false, localAhead: null, hasDraft: false, lastActivityAt: 1, archived: false, position: null, createdAt: 1, updatedAt: 1, revision: 1, ...over };
 }
 
 function project(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
-  return { id, kind: 'folder', name: id, path: null, parentId: null, parentSource: null, icon: null, colour: null, pinned: false, collapsed: false, position: null, archived: false, board: null, primaryFolderProjectId: null, chatCount: 0, createdAt: 1, revision: 0, ...over };
+  return { id, kind: 'folder', name: id, path: null, parentId: null, parentSource: null, icon: null, colour: null, pinned: false, collapsed: false, position: null, archived: false, closed: false, board: null, primaryFolderProjectId: null, chatCount: 0, createdAt: 1, revision: 0, ...over };
 }
 
 test('drag starts only after 4 px', () => {
@@ -172,7 +172,7 @@ test('project nest targets keep three levels and refuse cycles', () => {
   assert.deepEqual(names(all[0]!), [], 'a carries two levels');
   assert.deepEqual(names(all[2]!), ['a', 'd'], 'not its own parent b');
   const items = projectMenuItems(all[1]!, all, projActs).map((i) => i.id);
-  assert.ok(items.includes('top') && items.includes('colour') && items.includes('archive') && items.includes('cost'));
+  assert.ok(items.includes('top') && items.includes('colour') && items.includes('archive') && items.includes('close') && items.includes('cost'));
   const colours = projectMenuItems(all[1]!, all, projActs).find((i) => i.id === 'colour')!.submenu!;
   assert.equal(colours.length, 10, 'no colour, the eight named colours and a custom one');
 });

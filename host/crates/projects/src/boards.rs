@@ -57,9 +57,9 @@ const WHY_ABOVE: &str = "board above its group";
 const WHY_FOLDER: &str = "folder";
 const WHY_DEFAULT: &str = "default board";
 
-/// An open board: not archived here and still on the board.
-const OPEN_BOARD: &str =
-    "p.kind = 'board' AND COALESCE(l.archived, 0) = 0 AND COALESCE(b.stale, 0) = 0";
+/// An open board: not archived or closed here and still on the board.
+const OPEN_BOARD: &str = "p.kind = 'board' AND COALESCE(l.archived, 0) = 0
+     AND COALESCE(l.closed, 0) = 0 AND COALESCE(b.stale, 0) = 0";
 const BOARD_JOINS: &str = "LEFT JOIN project_local l ON l.project_id = p.id
      LEFT JOIN board_projects b ON b.project_id = p.id";
 
@@ -75,7 +75,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
 pub fn board_summary(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option<BoardSummary>> {
     tx.query_row(
         "SELECT p.id, COALESCE(l.title_override, b.title, p.name), b.repo,
-                l.primary_folder_project_id, f.path, COALESCE(l.archived, 0), COALESCE(b.stale, 0)
+                l.primary_folder_project_id, f.path, COALESCE(l.archived, 0), COALESCE(b.stale, 0),
+                COALESCE(l.closed, 0)
          FROM projects p
          LEFT JOIN project_local l ON l.project_id = p.id
          LEFT JOIN board_projects b ON b.project_id = p.id
@@ -91,6 +92,7 @@ pub fn board_summary(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option<
                 folder_path: r.get(4)?,
                 archived: r.get::<_, i64>(5)? != 0,
                 stale: r.get::<_, i64>(6)? != 0,
+                closed: r.get::<_, i64>(7)? != 0,
             })
         },
     )
@@ -174,22 +176,48 @@ pub fn default_board(tx: &Transaction<'_>) -> rusqlite::Result<Option<String>> {
 }
 
 /// The one open, unfinished board whose folder is `folder_project_id`; `None` when there is no
-/// such board or several.
+/// such board or several. Folders compare by path, so two folder projects over the same folder
+/// count as one folder. A board that shares its folder with another is never chosen here: the
+/// choice would be a guess, so only a board whose folder is its own is picked by folder.
 pub fn folder_board(
     tx: &Transaction<'_>,
     folder_project_id: &str,
 ) -> rusqlite::Result<Option<String>> {
+    let want: Option<String> = tx
+        .query_row(
+            "SELECT path FROM projects WHERE id = ?1",
+            [folder_project_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| norm_path(&p));
     let mut st = tx.prepare_cached(&format!(
-        "SELECT p.id FROM projects p {BOARD_JOINS}
+        "SELECT p.id, l.primary_folder_project_id, f.path FROM projects p {BOARD_JOINS}
+         LEFT JOIN projects f ON f.id = l.primary_folder_project_id
          WHERE {OPEN_BOARD} AND COALESCE(b.completed, 0) = 0
-           AND l.primary_folder_project_id = ?1
-         LIMIT 2"
+           AND l.primary_folder_project_id IS NOT NULL"
     ))?;
-    let ids = st
-        .query_map([folder_project_id], |r| r.get::<_, String>(0))?
+    let rows = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let ids: Vec<&String> = rows
+        .iter()
+        .filter(|(_, folder, path)| match (&want, path) {
+            (Some(w), Some(p)) => norm_path(p) == *w,
+            _ => folder == folder_project_id,
+        })
+        .map(|(id, _, _)| id)
+        .collect();
     Ok(match ids.as_slice() {
-        [only] => Some(only.clone()),
+        [only] => Some((*only).clone()),
         _ => None,
     })
 }

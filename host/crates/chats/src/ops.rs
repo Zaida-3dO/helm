@@ -307,6 +307,7 @@ fn default_usable(ctx: &OpCtx, model: &str) -> bool {
 /// Why `chat_create` made nothing.
 enum CreateRefusal {
     Archived,
+    Closed,
     NoProject,
     OtherFolder,
     NotABoard,
@@ -371,10 +372,14 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             if crate::manage::project_archived(ctx, tx, &project)? {
                 return Ok(Err(CreateRefusal::Archived));
             }
+            if crate::manage::project_closed(ctx, tx, &project)? {
+                return Ok(Err(CreateRefusal::Closed));
+            }
             let board = match board {
                 Some(b) => match boards.board(tx, &b)? {
                     None => return Ok(Err(CreateRefusal::NotABoard)),
                     Some(s) if s.archived => return Ok(Err(CreateRefusal::BoardArchived)),
+                    Some(s) if s.closed => return Ok(Err(CreateRefusal::Closed)),
                     Some(s) if s.stale => return Ok(Err(CreateRefusal::BoardStale)),
                     Some(_) => Some(b),
                 },
@@ -393,6 +398,7 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 "refused",
                 "This folder's project is archived; restore it to start new chats.",
             ),
+            CreateRefusal::Closed => ApiError::new("refused", crate::seams::CLOSED_PROJECT),
             CreateRefusal::NoProject => ApiError::new("not_found", "That project does not exist."),
             CreateRefusal::OtherFolder => {
                 ApiError::bad_args("That project is not a folder project over this folder.")

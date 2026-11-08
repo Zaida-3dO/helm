@@ -40,6 +40,7 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
     collapsed: false,
     position: null,
     archived: false,
+    closed: false,
     board: null,
     primaryFolderProjectId: null,
     chatCount: 0,
@@ -140,7 +141,16 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
     for (const c of (ctx.call('chat_list', {}) as ChatRecord[] | undefined) ?? []) observe(c);
     switch (op) {
       case 'project_list':
-        return list().filter((p) => args.includeArchived || !p.archived);
+        return list().filter((p) => (args.includeArchived || !p.archived) && (args.includeClosed || !p.closed));
+      case 'project_close':
+      case 'project_reopen': {
+        const p = projects.get(String(args.projectId));
+        if (!p) throw new ApiError('not_found', 'That project does not exist.');
+        const next: ProjectNode = { ...p, closed: op === 'project_close', revision: p.revision + 1 };
+        projects.set(p.id, next);
+        emit({ kind: 'project', project: next });
+        return next;
+      }
       case 'project_create': {
         const p = node(`p-${rev++}`, String(args.name), { path: (args.path as string) ?? null, parentId: (args.parentId as string) ?? null });
         projects.set(p.id, p);

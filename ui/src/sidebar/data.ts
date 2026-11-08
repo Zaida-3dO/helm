@@ -96,7 +96,9 @@ export class SidebarData {
   project(p: ProjectNode): void {
     const prev = this.projects.get(p.id);
     if (prev && prev.revision > p.revision) return;
-    this.projects.set(p.id, p);
+    // A closed project is hidden everywhere; the re-read below drops it.
+    if (p.closed) this.projects.delete(p.id);
+    else this.projects.set(p.id, p);
     // Order or nesting may have changed: re-read the list for the host's order.
     void this.loadProjects();
   }

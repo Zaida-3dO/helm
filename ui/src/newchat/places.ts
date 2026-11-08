@@ -63,7 +63,7 @@ export function folderProjectFor(projectId: string | null, folder: string, proje
 
 /** A board a chat can be put on: on the board still, and not archived in Helm. */
 export function isOpenBoard(p: ProjectNode | undefined): p is ProjectNode {
-  return !!p && p.kind === 'board' && !p.archived && !p.board?.stale;
+  return !!p && p.kind === 'board' && !p.archived && !p.closed && !p.board?.stale;
 }
 
 /** A board with no folder yet: new chats in it have nowhere to start until one is set. */
@@ -100,6 +100,25 @@ export function boardFor(projectId: string | null | undefined, projects: Project
     return !!path && !!folder && samePath(folder, path);
   });
   return over.length === 1 ? over[0]!.id : null;
+}
+
+/**
+ * Open boards that start their chats in the same folder, grouped by folder: only groups of two or
+ * more are returned. Closed, archived, finished and off-board boards do not count. Such boards are
+ * allowed, but a chat started from the folder cannot tell which one it belongs to, so settings
+ * point them out.
+ */
+export function sharedFolders(projects: ProjectNode[]): { folder: string; boards: ProjectNode[] }[] {
+  const groups: { folder: string; boards: ProjectNode[] }[] = [];
+  for (const b of projects) {
+    if (!isOpenBoard(b) || b.closed || isFinished(b)) continue;
+    const folder = primaryFolder(b, projects)?.folder;
+    if (!folder) continue;
+    const g = groups.find((x) => samePath(x.folder, folder));
+    if (g) g.boards.push(b);
+    else groups.push({ folder, boards: [b] });
+  }
+  return groups.filter((g) => g.boards.length > 1);
 }
 
 /** The last segment of a path, for labels. */

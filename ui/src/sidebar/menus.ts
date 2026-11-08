@@ -148,6 +148,8 @@ export interface ProjectMenuActions {
   topLevel(): void;
   archive(): void;
   restore(): void;
+  /** Hide the project and refuse new work in it; reopened from Settings → Projects. */
+  close(): void;
   colour(c: string | null): void;
   customColour(): void;
 }
@@ -202,6 +204,7 @@ export function projectMenuItems(p: ProjectNode, all: ProjectNode[], a: ProjectM
     p.archived
       ? { id: 'restore', label: 'Restore project', onSelect: a.restore }
       : { id: 'archive', label: 'Archive project…', onSelect: a.archive },
+    { id: 'close', label: 'Close project…', onSelect: a.close },
     {
       id: 'colour',
       label: 'Colour',

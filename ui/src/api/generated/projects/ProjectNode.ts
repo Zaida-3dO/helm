@@ -20,7 +20,12 @@ icon: string | null,
 /**
  * A named colour or `#rrggbb`, lowercase.
  */
-colour: string | null, pinned: boolean, collapsed: boolean, position: number | null, archived: boolean, board: BoardInfo | null, 
+colour: string | null, pinned: boolean, collapsed: boolean, position: number | null, archived: boolean, 
+/**
+ * Hidden from listings and pickers, takes nothing new until reopened. Chats already in it
+ * keep working. Only a listing that asks for closed projects returns one.
+ */
+closed: boolean, board: BoardInfo | null, 
 /**
  * For a board project or a folderless group: where its new chats start.
  */

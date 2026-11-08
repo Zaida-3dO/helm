@@ -213,6 +213,131 @@ fn an_archived_project_refuses_new_chats_and_chat_restores() {
 }
 
 #[test]
+fn a_closed_project_is_hidden_and_refuses_new_work_until_reopened() {
+    let (_d, db) = temp_db();
+    let listed = |db: &Database, closed: bool| -> Vec<String> {
+        db.snapshot(|tx| store::list_projects(tx, true, closed))
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect()
+    };
+    let board = board_project(&db, "b-1", "Board one");
+    let other = board_project(&db, "b-2", "Board two");
+    let c = chat_in(&db, "C:/w/app", 1);
+    let outsider = chat_in(&db, "C:/w/other", 2);
+    let to = |chat: &str, group: &str| ChatOrganizeArgs {
+        chat_id: chat.into(),
+        group_project_id: Some(group.into()),
+        ..Default::default()
+    };
+    organize(&db, to(&c, &board)).unwrap();
+    assert!(listed(&db, false).contains(&board));
+
+    db.write(|tx| store::close_project(tx, &board)).unwrap();
+    assert!(node(&db, &board).closed);
+    // Hidden from the default listing; asking for closed projects brings it back.
+    assert!(!listed(&db, false).contains(&board));
+    assert!(listed(&db, true).contains(&board));
+    // Moving a chat into it, renaming, archiving and nesting under it are all refused.
+    let said = |r: Result<(), Refusal>| match r {
+        Err(Refusal::Refused(m)) => m,
+        other => format!("{other:?}"),
+    };
+    let refusal = "This project is closed. Reopen it first.";
+    assert_eq!(
+        said(organize(&db, to(&outsider, &board)).map(|_| ())),
+        refusal
+    );
+    let mut rename = upd(&board, &db);
+    rename.name = Some("New name".into());
+    assert_eq!(said(update(&db, rename).map(|_| ())), refusal);
+    assert_eq!(
+        said(
+            db.write(|tx| store::archive_project(tx, &board))
+                .map(|_| ())
+        ),
+        refusal
+    );
+    assert_eq!(
+        said(
+            db.write(|tx| store::restore_project(tx, &board))
+                .map(|_| ())
+        ),
+        refusal
+    );
+    assert_eq!(
+        said(set_parent(&db, &other, Some(&board)).map(|_| ())),
+        refusal
+    );
+    // A chat already in it keeps working: it can be reordered, pinned and moved out.
+    organize(
+        &db,
+        ChatOrganizeArgs {
+            chat_id: c.clone(),
+            pinned: Some(true),
+            ..to(&c, &board)
+        },
+    )
+    .unwrap();
+    organize(&db, to(&c, &other)).unwrap();
+    assert_eq!(row(&db, &c).group_project_id, other);
+    // Closed stays closed through a restart-style reopen of the listing; reopening is explicit.
+    db.write(|tx| store::reopen_project(tx, &board)).unwrap();
+    assert!(!node(&db, &board).closed);
+    assert!(listed(&db, false).contains(&board));
+    organize(&db, to(&outsider, &board)).unwrap();
+}
+
+/// A folder is picked for a board only when one board has it: boards sharing a folder are never
+/// guessed between, folders compare by path, and a closed board is never picked.
+#[test]
+fn a_board_is_chosen_by_folder_only_when_its_folder_is_its_own() {
+    let (_d, db) = temp_db();
+    let root = tempfile::tempdir().unwrap();
+    let dir = |n: &str| {
+        let p = root.path().join(n);
+        std::fs::create_dir_all(&p).unwrap();
+        p.to_string_lossy().into_owned()
+    };
+    let (shared_path, own_path) = (dir("shared"), dir("own"));
+    let shared = folder(&db, "shared", Some(&shared_path));
+    let twin = folder(&db, "shared again", Some(&shared_path));
+    let own = folder(&db, "own", Some(&own_path));
+    let (a, b, c) = (
+        board_project(&db, "b-a", "A"),
+        board_project(&db, "b-b", "B"),
+        board_project(&db, "b-c", "C"),
+    );
+    let set = |board: &str, f: &str| {
+        let mut m = upd(board, &db);
+        m.primary_folder_project_id = Some(Some(f.into()));
+        update(&db, m).unwrap();
+    };
+    let pick = |f: &str| db.snapshot(|tx| boards::folder_board(tx, f)).unwrap();
+    set(&a, &shared);
+    set(&c, &own);
+    assert_eq!(pick(&shared), Some(a.clone()));
+    // A second board over the same folder, through another project over the same path, makes the
+    // folder ambiguous for both; the board with its own folder is still found.
+    set(&b, &twin);
+    assert_eq!(pick(&shared), None);
+    assert_eq!(pick(&twin), None);
+    assert_eq!(pick(&own), Some(c.clone()));
+    // Closing one of the two leaves the other as the only board over the folder.
+    db.write(|tx| store::close_project(tx, &b)).unwrap();
+    assert_eq!(pick(&shared), Some(a.clone()));
+    db.write(|tx| store::close_project(tx, &a)).unwrap();
+    assert_eq!(pick(&shared), None);
+    assert!(
+        db.snapshot(|tx| boards::board_summary(tx, &a))
+            .unwrap()
+            .unwrap()
+            .closed
+    );
+}
+
+#[test]
 fn update_is_compare_and_set_on_revision() {
     let (_d, db) = temp_db();
     let p = folder(&db, "Docs", None);
@@ -311,7 +436,7 @@ fn project_reorder_rewrites_positions_and_a_no_op_writes_nothing() {
     let b = folder(&db, "B", None);
     let c = folder(&db, "C", None);
     let order = |db: &Database| -> Vec<String> {
-        db.snapshot(|tx| store::list_projects(tx, false))
+        db.snapshot(|tx| store::list_projects(tx, false, false))
             .unwrap()
             .into_iter()
             .map(|p| p.name)
@@ -698,7 +823,7 @@ fn sync(db: &Database, projects: &[BoardProject]) {
 }
 
 fn by_board_id(db: &Database, board_id: &str) -> ProjectNode {
-    db.snapshot(|tx| store::list_projects(tx, true))
+    db.snapshot(|tx| store::list_projects(tx, true, false))
         .unwrap()
         .into_iter()
         .find(|p| {

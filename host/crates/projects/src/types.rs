@@ -84,6 +84,9 @@ pub struct ProjectNode {
     #[ts(type = "number | null")]
     pub position: Option<i64>,
     pub archived: bool,
+    /// Hidden from listings and pickers, takes nothing new until reopened. Chats already in it
+    /// keep working. Only a listing that asks for closed projects returns one.
+    pub closed: bool,
     pub board: Option<BoardInfo>,
     /// For a board project or a folderless group: where its new chats start.
     pub primary_folder_project_id: Option<String>,
@@ -246,6 +249,10 @@ pub struct ProjectListArgs {
     #[serde(default)]
     #[ts(optional)]
     pub include_archived: Option<bool>,
+    /// Closed projects are left out unless this is true.
+    #[serde(default)]
+    #[ts(optional)]
+    pub include_closed: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
