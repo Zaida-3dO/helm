@@ -83,7 +83,7 @@ export function connectRule(u: URL, allowPrivate: boolean, name: string, resolve
     new McpError(
       allowPrivate
         ? `${name}: plain http is only allowed to this computer or a private-network address.`
-        : `${name}: plain http to another machine needs "Allow unencrypted on my network" for this server in Settings → MCP.`,
+        : `${name}: plain http to another machine needs "Allow unencrypted on my network" turned on for this server (Settings → MCP, or allowPrivateHttp through the MCP admin tools).`,
     );
   if (net.isIP(host)) {
     if (!allowed(classifyAddress(host))) throw refusal();

@@ -27,7 +27,15 @@ pub struct AdminError(pub String);
 
 impl From<StoreError> for AdminError {
     fn from(e: StoreError) -> Self {
-        AdminError(e.to_string())
+        let m = e.to_string();
+        // Settings is where the user ticks the box; an agent is told how to ask for it itself.
+        if m.contains(crate::validate::NEEDS_OPT_IN) {
+            return AdminError(m.replace(
+                crate::validate::NEEDS_OPT_IN,
+                "Plain http to another machine needs allowPrivateHttp: true on this server, for a private-network address only (the user is shown a notice with Undo).",
+            ));
+        }
+        AdminError(m)
     }
 }
 
@@ -264,14 +272,30 @@ fn apply_edit(s: &mut McpServer, e: EditArgs) -> Result<(), StoreError> {
 pub fn edit(store: &McpStore, args: Value) -> Result<Value, AdminError> {
     let a: EditArgs = parse(args)?;
     let rev = a.revision.clone();
+    let mut note = None;
     let snap = store.mutate(Some(&rev), |list| {
         let s = list
             .iter_mut()
             .find(|s| s.id == a.server_id)
             .ok_or_else(|| StoreError::Invalid(format!("No server has the id {}.", a.server_id)))?;
-        apply_edit(s, a)
+        let old_host = host_of(s.transport.url.as_deref());
+        apply_edit(s, a)?;
+        // Saved headers stay with a server whose address changed; here they now travel unencrypted.
+        if s.allow_private_http
+            && !s.transport.headers.is_empty()
+            && host_of(s.transport.url.as_deref()) != old_host
+        {
+            note = Some(
+                "This server's saved headers will now be sent in plain text over http to the new address. Remove them with removeHeaders if they are secrets.",
+            );
+        }
+        Ok(())
     })?;
-    Ok(agent_snapshot(snap.revision, &snap.servers))
+    let mut out = agent_snapshot(snap.revision, &snap.servers);
+    if let (Some(n), Some(o)) = (note, out.as_object_mut()) {
+        o.insert("note".into(), json!(n));
+    }
+    Ok(out)
 }
 
 #[derive(Deserialize)]
@@ -526,9 +550,12 @@ mod tests {
                     "transport": {"type": "http", "url": url}}}),
             )
         };
-        // Without the opt-in, private http is refused with the Settings hint.
+        // Without the opt-in, private http is refused, and the agent is told how to ask for it.
         let e = add_http(&st, "h", "http://10.20.30.5/mcp", false).unwrap_err();
-        assert!(e.0.contains("Settings"), "{e}");
+        assert!(
+            e.0.contains("allowPrivateHttp") && !e.0.contains("Settings"),
+            "{e}"
+        );
         // The private ranges take it; public hosts, https and loopback do not need or take it.
         for ok in [
             "http://10.20.30.5/mcp",
@@ -622,11 +649,27 @@ mod tests {
             json!({"revision": rev(&st), "serverId": "hub", "url": "http://10.20.30.6:1/mcp"}),
         )
         .unwrap_err();
-        assert!(e.0.contains("Allow unencrypted"), "{e}");
+        assert!(e.0.contains("allowPrivateHttp"), "{e}");
         assert_eq!(
             st.load().unwrap()[0].transport.url.as_deref(),
             Some("http://10.20.30.5:1/other")
         );
+        // Moving it and opting in together, with headers saved, warns they go out in plain text.
+        let moved = call(
+            &st,
+            EDIT,
+            json!({"revision": rev(&st), "serverId": "hub", "url": "http://10.20.30.6:1/mcp",
+            "allowPrivateHttp": true, "headers": {"X-Key": {"kind": "environment", "value": "KEY"}}}),
+        )
+        .unwrap();
+        assert!(moved["note"].as_str().unwrap().contains("plain text"));
+        let same = call(
+            &st,
+            EDIT,
+            json!({"revision": rev(&st), "serverId": "hub", "url": "http://10.20.30.6:1/again"}),
+        )
+        .unwrap();
+        assert!(same.get("note").is_none(), "no move, no warning");
     }
 
     #[test]

@@ -1,10 +1,10 @@
 // Composer slots: other areas add accessories and send contributions without
 // editing the composer.
 //
-// - registerComposerAccessory: drawn above the editor (quick replies) or in the toolbar
+// - registerComposerAccessory: drawn above the editor (quick-reply chips) or in the toolbar
 //   (the panel-context eye toggle and its "Looking at: …" chip).
 // - composerApi(chatId).insert(text): put text into a chat's draft without sending (review
-//   comments' "Add to message", option-button amendments). Returns false when that chat's
+//   comments' "Add to message"). Returns false when that chat's
 //   composer is not mounted.
 // - registerSendContributor: called on every composer send; what it returns rides the send
 //   (the panel-context payload).

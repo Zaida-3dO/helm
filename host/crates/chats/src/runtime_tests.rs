@@ -2444,6 +2444,7 @@ async fn a_configured_background_model_rides_on_the_helper_job() {
         gate: Mutex::new(None),
         finished: Mutex::new(Vec::new()),
         refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
         queue: Mutex::new(None),
     });
     h.rt.set_local_models(local.clone());
@@ -4553,6 +4554,8 @@ struct FakeLocal {
     turns: Mutex<Vec<crate::local::LocalTurn>>,
     outcome: Mutex<Result<String, String>>,
     gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// What the one preparation that waited at the gate answers, whatever `outcome` says by then.
+    held_outcome: Mutex<Option<Result<String, String>>>,
     finished: Mutex<Vec<(String, String)>>,
     refreshed: Mutex<Vec<bool>>,
     queue: Mutex<Option<crate::local::QueueInfo>>,
@@ -4583,6 +4586,9 @@ impl crate::local::LocalModels for FakeLocal {
         let gate = self.gate.lock().unwrap().take();
         if let Some(g) = gate {
             let _ = g.recv_timeout(Duration::from_secs(5));
+            if let Some(held) = self.held_outcome.lock().unwrap().take() {
+                return held;
+            }
         }
         self.outcome.lock().unwrap().clone()
     }
@@ -4635,6 +4641,7 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         gate: Mutex::new(Some(gate)),
         finished: Mutex::new(Vec::new()),
         refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
         queue: Mutex::new(None),
     });
     h.rt.set_local_models(local.clone());
@@ -5012,6 +5019,9 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         ("opus", None),
     ] {
         *local.outcome.lock().unwrap() = Ok("llama3:8b".into());
+        // The first model's load is held at the gate and answers with a name nothing else uses,
+        // so its late answer can be told apart from the new model's own.
+        *local.held_outcome.lock().unwrap() = Some(Ok("stale-name".into()));
         let (open3, gate3) = std::sync::mpsc::channel();
         *local.gate.lock().unwrap() = Some(gate3);
         let racing = h
@@ -5040,7 +5050,6 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
             })
             .await;
         }
-        *local.outcome.lock().unwrap() = Ok("stale-name".into());
         let w3 = h.worker().await; // arrives without the old load being released
         assert_eq!(
             w3.req.local.as_ref().map(|l| l.model.as_str()),
@@ -5050,6 +5059,62 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         open3.send(()).unwrap();
         assert_ne!(h.state(&racing_sid), "rejected");
     }
+
+    // A later turn waiting on its load, with the chat's idle local worker still up, is moved to
+    // another model: the worker is replaced for the new model, and since no agents were running
+    // no notice says any were stopped.
+    *local.outcome.lock().unwrap() = Ok("qwen3:8b".into());
+    let later = h
+        .call(
+            "chat_create",
+            json!({"cwd": cwd, "model": "local/ollama/qwen3:8b"}),
+        )
+        .await
+        .unwrap();
+    let later_chat = later["id"].as_str().unwrap().to_owned();
+    let (first_sid, _) = h.send(&later_chat, "hello", "default").await;
+    let mut w4 = h.worker().await;
+    w4.ready().await;
+    let p4 = w4.expect("prompt").await;
+    ack(&w4, &p4).await;
+    w4.emit(json!({"type": "agent_start"})).await;
+    echo(&w4, &first_sid).await;
+    w4.emit(json!({"type": "agent_settled", "outcome": "complete", "sessionId": "native-later"}))
+        .await;
+    h.until("the first turn is over", |h| {
+        h.status(&later_chat) == "idle"
+    })
+    .await;
+    *local.outcome.lock().unwrap() = Ok("llama3:8b".into());
+    *local.held_outcome.lock().unwrap() = Some(Ok("stale-name".into()));
+    let (open4, gate4) = std::sync::mpsc::channel();
+    *local.gate.lock().unwrap() = Some(gate4);
+    let before = n(&later_chat);
+    h.send(&later_chat, "again", "default").await;
+    h.until("the second turn's load is waiting", |_| {
+        n(&later_chat) == before + 1
+    })
+    .await;
+    h.call(
+        "chat_set_model",
+        json!({"chatId": &later_chat, "model": "local/ollama/llama3:8b"}),
+    )
+    .await
+    .unwrap();
+    w4.expect("shutdown").await;
+    let w5 = h.worker().await; // arrives without the old load being released
+    assert_eq!(
+        w5.req.local.as_ref().map(|l| l.model.as_str()),
+        Some("llama3:8b"),
+        "the next turn starts on the model chosen while it waited"
+    );
+    open4.send(()).unwrap();
+    assert!(
+        !texts(&h, &later_chat)
+            .iter()
+            .any(|t| t.contains("Background agents were stopped")),
+        "nothing was running, so nothing is said to have been stopped"
+    );
 
     // A warm-up that fails stays quiet: no refusal, no turn — and no line left up in an idle chat.
     *local.outcome.lock().unwrap() = Err("no room on the server for that".into());
@@ -5137,6 +5202,7 @@ async fn a_send_during_a_worker_shutdown_starts_a_fresh_worker() {
         gate: Mutex::new(None),
         finished: Mutex::new(Vec::new()),
         refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
         queue: Mutex::new(None),
     });
     h.rt.set_local_models(local.clone());
@@ -5181,6 +5247,7 @@ async fn an_effort_change_on_a_local_chat_reaches_the_live_worker() {
         gate: Mutex::new(None),
         finished: Mutex::new(Vec::new()),
         refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
         queue: Mutex::new(None),
     });
     h.rt.set_local_models(local.clone());
@@ -5243,6 +5310,7 @@ async fn a_worker_exit_during_preparation_does_not_reopen_the_turn() {
         gate: Mutex::new(None),
         finished: Mutex::new(Vec::new()),
         refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
         queue: Mutex::new(None),
     });
     h.rt.set_local_models(local.clone());
@@ -5382,6 +5450,7 @@ async fn a_started_chat_moves_between_local_and_claude_in_both_directions() {
         gate: Mutex::new(None),
         finished: Mutex::new(Vec::new()),
         refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
         queue: Mutex::new(None),
     });
     h.rt.set_local_models(local.clone());
@@ -5485,6 +5554,7 @@ async fn a_send_after_a_provider_switch_does_not_reach_the_old_worker_behind_its
         gate: Mutex::new(None),
         finished: Mutex::new(Vec::new()),
         refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
         queue: Mutex::new(None),
     });
     h.rt.set_local_models(local.clone());
@@ -5547,6 +5617,7 @@ async fn a_model_change_too_large_for_the_target_offers_a_roll_over() {
         gate: Mutex::new(None),
         finished: Mutex::new(Vec::new()),
         refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
         queue: Mutex::new(None),
     });
     h.rt.set_local_models(local.clone());
@@ -5689,6 +5760,7 @@ async fn local_chats_say_who_the_model_server_is_busy_with() {
         gate: Mutex::new(None),
         finished: Mutex::new(Vec::new()),
         refreshed: Mutex::new(Vec::new()),
+        held_outcome: Mutex::new(None),
         queue: Mutex::new(Some(crate::local::QueueInfo {
             busy: true,
             queued: None,

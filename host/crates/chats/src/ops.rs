@@ -31,6 +31,7 @@ use crate::{catalogue, send_behavior, store, submit};
 use helm_core::db::Database;
 use helm_core::profile::Profile;
 use helm_ipc::{ApiError, OpClass, OpCtx, OpRegistry};
+use rusqlite::OptionalExtension;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -308,6 +309,8 @@ fn default_usable(ctx: &OpCtx, model: &str) -> bool {
 enum CreateRefusal {
     Archived,
     Closed,
+    /// The folder project the chat would be shown under is closed (the folder's name).
+    ClosedFolder(String),
     NoProject,
     OtherFolder,
     NotABoard,
@@ -372,9 +375,8 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             if crate::manage::project_archived(ctx, tx, &project)? {
                 return Ok(Err(CreateRefusal::Archived));
             }
-            if crate::manage::project_closed(ctx, tx, &project)? {
-                return Ok(Err(CreateRefusal::Closed));
-            }
+            // Only the project the chat is shown on must be open: a closed folder project can
+            // still be where a chat on an open board runs.
             let board = match board {
                 Some(b) => match boards.board(tx, &b)? {
                     None => return Ok(Err(CreateRefusal::NotABoard)),
@@ -386,6 +388,15 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 // Nobody named a board: the board over this folder, else the default board.
                 None => boards.home_board(tx, Some(&project))?,
             };
+            if board.is_none() && crate::manage::project_closed(ctx, tx, &project)? {
+                let name = tx
+                    .query_row("SELECT name FROM projects WHERE id = ?1", [&project], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .optional()?
+                    .unwrap_or_default();
+                return Ok(Err(CreateRefusal::ClosedFolder(name)));
+            }
             let id = store::create_chat_in(tx, &project, model.as_deref(), Some(&effort), now)?;
             if let Some(b) = &board {
                 boards.put_on_board(tx, &id, b)?;
@@ -399,6 +410,10 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 "This folder's project is archived; restore it to start new chats.",
             ),
             CreateRefusal::Closed => ApiError::new("refused", crate::seams::CLOSED_PROJECT),
+            CreateRefusal::ClosedFolder(name) => ApiError::new(
+                "refused",
+                format!("The folder project '{name}' is closed. Reopen it in Settings → Projects."),
+            ),
             CreateRefusal::NoProject => ApiError::new("not_found", "That project does not exist."),
             CreateRefusal::OtherFolder => {
                 ApiError::bad_args("That project is not a folder project over this folder.")

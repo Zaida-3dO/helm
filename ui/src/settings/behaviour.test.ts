@@ -33,6 +33,14 @@ test('changes by chats are read leniently and described in plain words', () => {
   assert.equal(list.length, 1);
   assert.equal(changeText(list[0]!), 'was the default, now on');
   assert.equal(describeValue({ a: 'x'.repeat(100) }).length, 60);
+  // A chat's plain-http opt-in for a private-network server reads as a sentence, not as JSON.
+  const optIn = (before: unknown, after: unknown) => ({ changeId: 1, chatId: 'c', key: 'mcpUnencryptedServers', before, after, at: 1, undone: false });
+  assert.equal(changeText(optIn({}, { nas: { url: 'http://192.168.1.5:8080/mcp', unencrypted: true } })), 'Allowed plain http for nas (http://192.168.1.5:8080/mcp)');
+  assert.equal(
+    changeText(optIn({ nas: { url: 'http://10.0.0.2/mcp', unencrypted: true } }, { nas: { url: 'http://10.0.0.3/mcp', unencrypted: true } })),
+    'Moved nas from http://10.0.0.2/mcp to http://10.0.0.3/mcp, still plain http',
+  );
+  assert.equal(keyTitle('mcpUnencryptedServers'), 'Plain http for MCP servers');
   assert.equal(keyTitle('compactSidebar'), 'Compact sidebar');
   assert.deepEqual(parseChanges(undefined), []);
   const chats = [{ id: 'c', title: 'Fix\u202e it\n' + 'x'.repeat(80) }, { id: 'd', title: ' ' }];

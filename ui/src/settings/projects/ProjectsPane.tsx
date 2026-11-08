@@ -6,7 +6,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { projectOps, type BoardConnection, type BoardSyncState, type ProjectNode } from '../../api/projects.ts';
 import { useShell } from '../../shell/context.ts';
-import { Button, Picker, type PickerOption } from '../../ui/index.ts';
+import { Button, ConfirmDialog, Picker, type ConfirmSpec, type PickerOption } from '../../ui/index.ts';
+import { closeProjectConfirm } from '../../sidebar/Sidebar.tsx';
+import { syncOnOpen } from '../../sidebar/sync.ts';
 import { getDefaultBoard, NO_DEFAULT_BOARD, setDefaultBoard, type DefaultBoardState } from '../../newchat/boards.ts';
 import { openAddFolder, openNewProject, openPrimaryFolder } from '../../newchat/index.ts';
 import { needsFolder, pickerProjects, primaryFolder, sharedFolders } from '../../newchat/places.ts';
@@ -29,6 +31,8 @@ export function ProjectsPane() {
   const [boards, setBoards] = useState<DefaultBoardState>(NO_DEFAULT_BOARD);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
+  const syncBoards = useMemo(() => syncOnOpen(() => void ops.sync().catch(() => undefined)), [ops]);
 
   const reload = () => {
     ops
@@ -177,17 +181,14 @@ export function ProjectsPane() {
           <button type="button" disabled={busy || !conn?.hasToken} onClick={() => void save(true)}>
             Remove token
           </button>
-          <button type="button" data-testid="board-test" disabled={busy} onClick={() => void test()}>
-            Test connection
-          </button>
           <button
             type="button"
-            data-testid="board-refresh"
-            title="Fetch the board's projects now"
-            disabled={busy || !conn?.hasToken}
+            data-testid="board-test"
+            title="Check the address and token, and fetch the board's projects now"
+            disabled={busy}
             onClick={() => void test()}
           >
-            Refresh
+            Test connection
           </button>
         </div>
         <p className="sp-help" data-testid="board-last-sync">
@@ -209,6 +210,7 @@ export function ProjectsPane() {
           label={`Default board: ${defaultShown}`}
           display={defaultShown}
           heading="Default board"
+          onOpen={syncBoards}
           searchable
           settings
           testId="default-board"
@@ -242,7 +244,7 @@ export function ProjectsPane() {
                 <button type="button" onClick={() => void toggleArchive(p)}>
                   {p.archived ? 'Restore' : 'Archive'}
                 </button>
-                <button type="button" onClick={() => void setClosed(p, true)}>
+                <button type="button" onClick={() => setConfirm(closeProjectConfirm(p, () => setClosed(p, true)))}>
                   Close
                 </button>
               </span>
@@ -281,7 +283,7 @@ export function ProjectsPane() {
                 <button type="button" onClick={() => void toggleArchive(p)}>
                   {p.archived ? 'Restore' : 'Archive'}
                 </button>
-                <button type="button" onClick={() => void setClosed(p, true)}>
+                <button type="button" onClick={() => setConfirm(closeProjectConfirm(p, () => setClosed(p, true)))}>
                   Close
                 </button>
               </span>
@@ -310,6 +312,7 @@ export function ProjectsPane() {
           </ul>
         </section>
       )}
+      {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
     </div>
   );
 }

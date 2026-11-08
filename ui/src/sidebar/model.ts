@@ -30,10 +30,12 @@ export const HEIGHTS = {
 /** Where an item sits in its project's block: the header and its chats draw as one tinted block. */
 export type BlockPos = 'only' | 'first' | 'mid' | 'last';
 
-/** What a collapsed group still has going on inside it: chats running and chats with an unread result. */
+/** What a collapsed group still has going on inside it: chats running, chats with an unread result
+ *  and chats waiting on you or flagged as possibly needing you. */
 export interface GroupMarks {
   running: number;
   unread: number;
+  flagged: number;
 }
 
 export type ListItem = (
@@ -77,6 +79,10 @@ export interface BuildOptions {
    *  collapsed, so a chat opened from search, a link or a notification can be seen. These are the
    *  ones the user collapsed while that chat was open: they stay collapsed, as the user asked. */
   keptShut?: ReadonlySet<string>;
+  /** Chats waiting on the user or flagged by the idle check: a collapsed group counts them. */
+  flagged?: ReadonlySet<string>;
+  /** Closed projects: their chats are never drawn, not even as loose rows. */
+  closed?: ReadonlySet<string>;
   /** Item links: the item each chat shows, and the item folders the user collapsed. */
   itemLinks?: { refs: ReadonlyMap<string, ItemRef>; collapsed: ReadonlySet<string> };
 }
@@ -155,9 +161,10 @@ function projectChildren(projects: ProjectNode[]): { roots: ProjectNode[]; kids:
 
 export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildOptions): ListItem[] {
   const h = o.compact ? HEIGHTS.compact : HEIGHTS.normal;
+  const closed = o.closed;
   if (o.view === 'activity') {
     return rows
-      .filter((r) => !r.archived)
+      .filter((r) => !r.archived && !closed?.has(r.groupProjectId))
       .slice()
       .sort((a, b) => b.updatedAt - a.updatedAt || (a.chatId < b.chatId ? -1 : 1))
       .map((row) => ({
@@ -172,7 +179,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
       }));
   }
   const archivedView = o.view === 'archived';
-  const shown = rows.filter((r) => r.archived === archivedView);
+  const shown = rows.filter((r) => r.archived === archivedView && !closed?.has(r.groupProjectId));
   const byGroup = new Map<string, SidebarRow[]>();
   for (const r of shown) {
     const list = byGroup.get(r.groupProjectId) ?? [];
@@ -218,16 +225,19 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     const next = new Set(path).add(p.id);
     let running = 0;
     let unread = 0;
+    let flagged = 0;
     for (const r of byGroup.get(p.id) ?? []) {
       if (isBusy(r.status)) running += 1;
       else if (r.unread) unread += 1;
+      if (o.flagged?.has(r.chatId)) flagged += 1;
     }
     for (const k of kids.get(p.id) ?? []) {
       const sub = groupMarks(k, next);
       running += sub?.running ?? 0;
       unread += sub?.unread ?? 0;
+      flagged += sub?.flagged ?? 0;
     }
-    return running + unread > 0 ? { running, unread } : null;
+    return running + unread + flagged > 0 ? { running, unread, flagged } : null;
   };
 
   const out: ListItem[] = [];

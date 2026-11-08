@@ -134,6 +134,22 @@ fn runs(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     to_value(&RunList { runs })
 }
 
+/// A schedule that starts new chats is refused up front for a closed project, as it would be when
+/// it fires.
+fn refuse_closed_project(svc: &SchedulesService, project: Option<&str>) -> Result<(), ApiError> {
+    let Some(p) = project else {
+        return Ok(());
+    };
+    let closed = svc
+        .db
+        .snapshot(|tx| crate::scheduler::closed_without_board(svc, tx, p))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if closed {
+        return Err(ApiError::new("refused", helm_chats::seams::CLOSED_PROJECT));
+    }
+    Ok(())
+}
+
 fn create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: CreateArgs = parse(args)?;
     if let Some(t) = &a.template {
@@ -142,6 +158,7 @@ fn create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         }
     }
     let svc = ctx.services.need::<SchedulesService>()?;
+    refuse_closed_project(&svc, a.project_id.as_deref())?;
     let now = helm_core::now_ms();
     let s = svc.db.write(|tx| {
         store::create(
@@ -171,6 +188,7 @@ fn create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 fn update(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: UpdateArgs = parse(args)?;
     let svc = ctx.services.need::<SchedulesService>()?;
+    refuse_closed_project(&svc, a.project_id.as_deref())?;
     let now = helm_core::now_ms();
     let s = svc.db.write(|tx| {
         store::update(

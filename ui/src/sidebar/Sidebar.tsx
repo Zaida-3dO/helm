@@ -200,6 +200,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
 
   const openItem = useOpenItem();
   const itemRefs = useItemRefs(useMemo(() => snap.rows.map((r) => r.chatId), [snap.rows]));
+  const flaggedIds = useMemo(() => new Set([...snap.needsYou, ...snap.flagged.keys()]), [snap.needsYou, snap.flagged]);
   const items = useMemo(
     () =>
       buildList(snap.projects, snap.rows, {
@@ -208,9 +209,11 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         expandedChats: expanded,
         selectedChatId: selected,
         keptShut: keptShut.chat === selected ? keptShut.ids : undefined,
+        flagged: flaggedIds,
+        closed: snap.closed,
         itemLinks: view === 'activity' ? undefined : { refs: itemRefs, collapsed: collapsedItems },
       }),
-    [snap.projects, snap.rows, view, compact, expanded, selected, keptShut, itemRefs, collapsedItems],
+    [snap.projects, snap.rows, view, compact, expanded, selected, keptShut, flaggedIds, snap.closed, itemRefs, collapsedItems],
   );
   useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
   const projectsById = useMemo(() => new Map(snap.projects.map((p) => [p.id, p])), [snap.projects]);
@@ -851,6 +854,11 @@ function GroupHeader({
               {item.marks.unread > 0 && (
                 <span className="sb-ind" role="img" aria-label={`${item.marks.unread} unread`} title={`${item.marks.unread} unread`}>
                   <StarMark size={26} className="sb-ind-star ui-star-shimmer" />
+                </span>
+              )}
+              {item.marks.flagged > 0 && (
+                <span className="sb-flag" data-testid="group-flag" role="img" aria-label={`${item.marks.flagged} may need you`} title={`${item.marks.flagged} may need you`}>
+                  <IconFlag size={12} filled />
                 </span>
               )}
             </span>

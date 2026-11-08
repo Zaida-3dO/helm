@@ -1924,11 +1924,14 @@ impl Actor {
             // The model changed provider while background agents kept the old worker alive. This
             // message opens a turn, and the old worker would answer it on the wrong provider (for
             // a switch to a local model, under the user's own sign-in): so the agents are stopped
-            // now, with a notice, and the message goes to a fresh worker.
-            self.context_row(
-                ContextKind::Notice,
-                "Background agents were stopped to switch this chat to its new model.",
-            );
+            // now, with a notice, and the message goes to a fresh worker. A switch made while the
+            // message only waited on its model's preparation stopped no agents, so says nothing.
+            if self.agents_running() {
+                self.context_row(
+                    ContextKind::Notice,
+                    "Background agents were stopped to switch this chat to its new model.",
+                );
+            }
             self.relaunch_worker();
         }
         if !busy {

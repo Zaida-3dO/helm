@@ -43,8 +43,7 @@ export function endsWithQuestion(text: string): boolean {
 
 /**
  * The reply the user can answer with one click: the chat's last row, when it is a complete
- * assistant reply, nothing is running and no interaction card is open. Chips and option buttons
- * both hang off it.
+ * assistant reply, nothing is running and no interaction card is open. The reply chips hang off it.
  */
 export function answerableReply<R extends Pick<MessageRow, 'role' | 'status' | 'text'>>(
   ctx: Omit<QuickReplyContext, 'rows'> & { rows: R[] },

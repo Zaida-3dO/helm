@@ -222,14 +222,18 @@ pub fn validate_url(
             HostClass::Private | HostClass::Name if has_oauth => Err(bad(
                 "A server that signs in with OAuth must use https unless it is on this computer.",
             )),
-            HostClass::Private | HostClass::Name if !allow_private_http => Err(bad(
-                "Plain http to another machine needs \"Allow unencrypted on my network\" for this server in Settings → MCP.",
-            )),
+            HostClass::Private | HostClass::Name if !allow_private_http => Err(bad(NEEDS_OPT_IN)),
             _ => Ok(u),
         },
-        _ => Err(bad("The URL must start with https:// (or http:// on a private network).")),
+        _ => Err(bad(
+            "The URL must start with https:// (or http:// on a private network).",
+        )),
     }
 }
+
+/// What a plain-http server on another machine is told when its opt-in is off.
+pub const NEEDS_OPT_IN: &str =
+    "Plain http to another machine needs \"Allow unencrypted on my network\" for this server in Settings → MCP.";
 
 fn validate_redirect(raw: &str) -> Result<(), Invalid> {
     let u = url::Url::parse(raw).map_err(|_| bad("The OAuth redirect URI is not valid."))?;

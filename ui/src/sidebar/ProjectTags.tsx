@@ -28,7 +28,7 @@ export function ProjectTags({ chatId }: { chatId: string | null }) {
         setRow(null);
         return;
       }
-      Promise.all([pops.rows([chatId]), pops.list(false), getDefaultBoard(shell.api)])
+      Promise.all([pops.rows([chatId]), pops.list(false, true), getDefaultBoard(shell.api)])
         .then(([rows, list, boards]) => {
           if (!live) return;
           setRow(rows[0] ?? null);
@@ -54,7 +54,7 @@ export function ProjectTags({ chatId }: { chatId: string | null }) {
   if (!chatId || !row) return null;
   const group = projects.find((p) => p.id === row.groupProjectId);
   // A chat not on a board yet (still under its folder) shows that folder's name until it is moved.
-  const shown = group?.name ?? baseName(row.folderPath);
+  const shown = group ? `${group.name}${group.closed ? ' (closed)' : ''}` : baseName(row.folderPath);
   const options: PickerOption<string>[] = pickerProjects(projects, false, row.groupProjectId, hidden).map((p) => ({
     value: p.id,
     title: p.name,

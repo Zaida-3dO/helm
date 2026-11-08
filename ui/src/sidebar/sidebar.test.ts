@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ProjectNode, SidebarRow } from '../api/projects.ts';
+import type { ProjectNode, ProjectOps, SidebarRow } from '../api/projects.ts';
+import type { AttentionSummary } from '../api/types.ts';
+import { SidebarData } from './data.ts';
 import { toast } from '../ui/toasts.ts';
 import { SidebarActions, type ActionDeps } from './actions.ts';
 import { UndoStack } from './undo.ts';
@@ -122,9 +124,58 @@ test('a collapsed group totals the running and unread chats inside it and its ne
   const rows = [row('r1', 'a', { status: 'running' }), row('u1', 'a', { unread: true }), row('i1', 'a'), row('r2', 'kid', { status: 'starting' }), row('o1', 'open', { status: 'running' })];
   const header = (items: ListItem[], id: string) => items.find((i): i is Extract<ListItem, { kind: 'header' }> => i.kind === 'header' && i.project.id === id)!;
   const items = buildList(projects, rows, opts);
-  assert.deepEqual(header(items, 'a').marks, { running: 2, unread: 1 });
+  assert.deepEqual(header(items, 'a').marks, { running: 2, unread: 1, flagged: 0 });
   assert.equal(header(items, 'open').marks, null, 'an expanded group shows its own rows instead');
   assert.equal(header(buildList([project('b', { collapsed: true, chatCount: 1 })], [row('x', 'b')], opts), 'b').marks, null, 'nothing going on, no marks');
+  // A waiting or flagged chat inside a collapsed group is counted on its header.
+  assert.deepEqual(header(buildList(projects, rows, { ...opts, flagged: new Set(['i1', 'r2']) }), 'a').marks, { running: 2, unread: 1, flagged: 2 });
+});
+
+test('chats in a closed project are never drawn, not even as loose rows, in any view', () => {
+  const rows = [row('x', 'gone'), row('y', 'a'), row('z', 'gone', { archived: true })];
+  const closed = new Set(['gone']);
+  const ids = (items: ListItem[]) => items.filter((i) => i.kind === 'chat').map((i) => (i as Extract<ListItem, { kind: 'chat' }>).row.chatId);
+  for (const view of ['projects', 'activity', 'archived'] as const) {
+    const items = buildList([project('a', { chatCount: 1 })], rows, { ...opts, view, closed });
+    assert.ok(!ids(items).some((id) => id === 'x' || id === 'z'), view);
+  }
+  assert.deepEqual(ids(buildList([project('a', { chatCount: 1 })], rows, opts)), ['y', 'x'], 'without the closed set they are loose rows');
+});
+
+test('the sidebar data drops a closed project rows, brings them back on reopen and reads flagged chats it does not hold', async () => {
+  const closedNode = project('b', { closed: true });
+  let listed: ProjectNode[] = [project('a'), project('b')];
+  const read: string[][] = [];
+  const stored = [row('x', 'b'), row('y', 'a'), row('f', 'a')];
+  const data = new SidebarData({
+    list: async () => listed,
+    rows: async (ids: string[]) => {
+      read.push(ids);
+      return stored.filter((r) => ids.includes(r.chatId));
+    },
+    page: async () => ({ rows: stored.filter((r) => !listed.some((p) => p.closed && p.id === r.groupProjectId)), nextCursor: null }),
+  } as unknown as ProjectOps);
+  await data.loadProjects();
+  await data.page('projects');
+  assert.deepEqual(data.snapshot.rows.map((r) => r.chatId).sort(), ['f', 'x', 'y']);
+  // Closing hides its chats at once, and a row event for one is ignored.
+  listed = [project('a'), closedNode];
+  data.project({ ...closedNode, revision: 1 });
+  data.mergeRows([row('x', 'b', { revision: 2 })]);
+  assert.deepEqual(data.snapshot.rows.map((r) => r.chatId).sort(), ['f', 'y']);
+  assert.ok(data.snapshot.closed.has('b'));
+  // Reopening starts every view again so the host's rows come back.
+  listed = [project('a'), project('b')];
+  data.project(project('b', { revision: 2 }));
+  assert.ok(!data.snapshot.closed.has('b'));
+  assert.equal(data.snapshot.paging.projects.started, false);
+  await data.page('projects');
+  assert.ok(data.snapshot.rows.some((r) => r.chatId === 'x'));
+  // A chat waiting on you that the window has not loaded is read, once.
+  const summary = (id: string) => ({ needsYou: [{ chatId: id, kind: 'approval' }], flagged: [] }) as unknown as AttentionSummary;
+  data.attention(summary('unheld'));
+  data.attention(summary('unheld'));
+  assert.deepEqual(read, [['unheld']]);
 });
 
 test('a missing parent draws at the top level and a collapsed group hides its contents, even the open chat', () => {
@@ -139,7 +190,7 @@ test('a missing parent draws at the top level and a collapsed group hides its co
   const shut = buildList(projects, rows, { ...opts, selectedChatId: 'x', keptShut: new Set(['b']) });
   assert.deepEqual(shape(shut), ['H0:a', 'H0:b']);
   const head = shut[1] as Extract<ListItem, { kind: 'header' }>;
-  assert.deepEqual([head.collapsed, head.marks], [true, { running: 1, unread: 0 }]);
+  assert.deepEqual([head.collapsed, head.marks], [true, { running: 1, unread: 0, flagged: 0 }]);
   // Collapsing the inner project shuts only that one; the project it sits in stays open around it.
   assert.deepEqual(shape(buildList(deep, rows, { ...opts, selectedChatId: 'y', keptShut: new Set(['c']) })), ['H0:a', 'H0:b', 'H1:c', 'C0:x']);
 });

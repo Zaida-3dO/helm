@@ -4,8 +4,7 @@
 //
 // - registerMessageAction: a button in a row's hover actions (Save for later, Explain
 //   plainly).
-// - registerRowFooter: content drawn under a row (option buttons on the latest assistant
-//   reply; the turn change card after a completed turn).
+// - registerRowFooter: content drawn under a row (the turn change card after a completed turn).
 // - registerSelectionAction: a button in the selected-text toolbar (Side
 //   chat and Quote; Save and Remind me).
 

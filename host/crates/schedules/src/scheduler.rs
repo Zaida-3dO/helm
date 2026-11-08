@@ -100,6 +100,23 @@ because of it.\n\n{message}"
     )
 }
 
+/// True when new chats cannot start in this folder project: it is closed and no open board would
+/// show them. A closed folder still serves as the folder of a chat shown on an open board.
+pub(crate) fn closed_without_board(
+    svc: &SchedulesService,
+    tx: &rusqlite::Transaction<'_>,
+    project: &str,
+) -> rusqlite::Result<bool> {
+    let Some(g) = &svc.gates else {
+        return Ok(false);
+    };
+    if !g.0.project_closed(tx, project)? {
+        return Ok(false);
+    }
+    let boards = helm_chats::store::Boards::from_gates(svc.gates.clone());
+    Ok(boards.home_board(tx, Some(project))?.is_none())
+}
+
 /// Start the chat a new-chat run sends into: an idle chat in the project's folder, with the
 /// defaults from Settings, Runtime, on the board over that folder (else the default board),
 /// announced to the sidebar like any new chat.
@@ -133,10 +150,8 @@ fn start_chat(svc: &SchedulesService, project_id: Option<&str>) -> Result<String
                     ));
                 }
             }
-            if let Some(g) = &svc.gates {
-                if g.0.project_closed(tx, project)? {
-                    return Ok(Err(helm_chats::seams::CLOSED_PROJECT));
-                }
+            if closed_without_board(svc, tx, project)? {
+                return Ok(Err(helm_chats::seams::CLOSED_PROJECT));
             }
             let (model, effort) = helm_chats::runtime_settings::new_chat_defaults(tx);
             let id = helm_chats::store::create_chat_in(

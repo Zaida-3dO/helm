@@ -21,6 +21,8 @@ export interface SidebarSnapshot {
   projects: ProjectNode[];
   rows: SidebarRow[];
   paging: Record<SidebarView, ViewPaging>;
+  /** Closed projects: their chats are not drawn, and a row in one is never a loose row. */
+  closed: ReadonlySet<string>;
   sync: BoardSyncState | null;
   error: string | null;
   needsYou: ReadonlySet<string>;
@@ -36,6 +38,7 @@ const freshPaging = (): ViewPaging => ({ cursor: null, complete: false, loading:
 export class SidebarData {
   private projects = new Map<string, ProjectNode>();
   private projectOrder: string[] = [];
+  private closedIds = new Set<string>();
   private rows = new Map<string, SidebarRow>();
   private paging: Record<SidebarView, ViewPaging> = {
     projects: freshPaging(),
@@ -68,6 +71,7 @@ export class SidebarData {
       projects: this.projectOrder.map((id) => this.projects.get(id)!).filter(Boolean),
       rows: [...this.rows.values()],
       paging: { ...this.paging },
+      closed: this.closedIds,
       sync: this.sync,
       error: this.error,
       needsYou: this.needsYou,
@@ -83,9 +87,12 @@ export class SidebarData {
 
   async loadProjects(): Promise<void> {
     try {
-      const list = await this.ops.list(true);
+      const all = await this.ops.list(true, true);
+      const list = all.filter((p) => !p.closed);
       this.projects = new Map(list.map((p) => [p.id, p]));
       this.projectOrder = list.map((p) => p.id);
+      this.closedIds = new Set(all.filter((p) => p.closed).map((p) => p.id));
+      this.dropClosedRows();
       this.error = null;
     } catch (e) {
       this.error = errorText(e);
@@ -96,16 +103,36 @@ export class SidebarData {
   project(p: ProjectNode): void {
     const prev = this.projects.get(p.id);
     if (prev && prev.revision > p.revision) return;
-    // A closed project is hidden everywhere; the re-read below drops it.
-    if (p.closed) this.projects.delete(p.id);
-    else this.projects.set(p.id, p);
+    // A closed project is hidden everywhere with its chats; reopening brings them back from the
+    // host, so every view starts again.
+    if (p.closed) {
+      this.projects.delete(p.id);
+      this.closedIds = new Set(this.closedIds).add(p.id);
+      this.dropClosedRows();
+      this.emit();
+    } else {
+      this.projects.set(p.id, p);
+      if (this.closedIds.has(p.id)) {
+        this.closedIds = new Set([...this.closedIds].filter((id) => id !== p.id));
+        for (const v of ['projects', 'activity', 'archived'] as SidebarView[]) this.paging[v] = freshPaging();
+        this.emit();
+      }
+    }
     // Order or nesting may have changed: re-read the list for the host's order.
     void this.loadProjects();
+  }
+
+  private dropClosedRows(): void {
+    for (const [id, r] of this.rows) if (this.closedIds.has(r.groupProjectId)) this.rows.delete(id);
   }
 
   mergeRows(rows: SidebarRow[]): void {
     let unknownGroup = false;
     for (const r of rows) {
+      if (this.closedIds.has(r.groupProjectId)) {
+        this.rows.delete(r.chatId);
+        continue;
+      }
       const prev = this.rows.get(r.chatId);
       if (!prev || prev.revision <= r.revision) this.rows.set(r.chatId, r);
       if (!this.projects.has(r.groupProjectId)) unknownGroup = true;
@@ -154,7 +181,17 @@ export class SidebarData {
     this.flagged = new Map(summary.flagged.map((r) => [r.chatId, r.reason]));
     this.summary = summary;
     this.emit();
+    // A waiting or flagged chat the window has not loaded (beyond the first page, or inside a
+    // collapsed group) is read now, so its row can carry the flag.
+    // Each is asked for once: the host leaves out chats in a closed project, which stay unheld.
+    const wanted = new Set([...this.needsYou, ...this.flagged.keys()]);
+    const missing = [...wanted].filter((id) => !this.rows.has(id) && !this.asked.has(id));
+    this.asked = new Set([...this.asked].filter((id) => wanted.has(id)));
+    for (const id of missing) this.asked.add(id);
+    if (missing.length > 0) void this.refetch(missing);
   }
+
+  private asked = new Set<string>();
 
   async refetch(chatIds: string[]): Promise<void> {
     for (let i = 0; i < chatIds.length; i += 200) {

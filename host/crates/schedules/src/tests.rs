@@ -1006,3 +1006,52 @@ async fn rt_send(
         .await
         .unwrap()
 }
+
+/// A schedule that starts new chats is refused for a closed folder project unless an open board
+/// would show the chats; the same check runs when it fires.
+#[test]
+fn a_closed_folder_project_refuses_new_chats_only_without_an_open_board() {
+    struct Gate {
+        closed: bool,
+        board: Option<&'static str>,
+    }
+    impl helm_chats::seams::ProjectGate for Gate {
+        fn project_archived(
+            &self,
+            _tx: &rusqlite::Transaction<'_>,
+            _id: &str,
+        ) -> rusqlite::Result<bool> {
+            Ok(false)
+        }
+        fn project_closed(
+            &self,
+            _tx: &rusqlite::Transaction<'_>,
+            _id: &str,
+        ) -> rusqlite::Result<bool> {
+            Ok(self.closed)
+        }
+        fn home_board(
+            &self,
+            _tx: &rusqlite::Transaction<'_>,
+            _folder: Option<&str>,
+        ) -> rusqlite::Result<Option<String>> {
+            Ok(self.board.map(str::to_owned))
+        }
+    }
+    let (_d, db) = temp();
+    let refuses = |closed: bool, board: Option<&'static str>| {
+        let (mut svc, _sink) = svc(&db);
+        svc.gates = Some(Arc::new(helm_chats::seams::ProjectGates(Arc::new(Gate {
+            closed,
+            board,
+        }))));
+        db.snapshot(|tx| scheduler::closed_without_board(&svc, tx, "p"))
+            .unwrap()
+    };
+    assert!(refuses(true, None));
+    assert!(
+        !refuses(true, Some("board")),
+        "an open board shows the chats"
+    );
+    assert!(!refuses(false, None));
+}

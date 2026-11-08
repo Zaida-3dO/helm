@@ -41,7 +41,7 @@ function slotContext(row: MessageRow, ctx: RowContext): SlotContext {
   return { chatId: ctx.chatId, isLatestAssistant: row.id === ctx.latestAssistantId, running: ctx.running, interactionOpen: ctx.interactionOpen };
 }
 
-/** Registered footers for one row (the reply's change card, option buttons). */
+/** Registered footers for one row (the reply's change card). */
 function Footers({ row, ctx }: { row: MessageRow; ctx: RowContext }) {
   const sctx = slotContext(row, ctx);
   const footers = rowFootersFor(row, sctx);

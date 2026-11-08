@@ -24,7 +24,6 @@ pub const USER_ONLY: &[(&str, &str)] = &[
     ("dictationMic", "Settings > Shell"),
     ("nativeMcp", "Settings > MCP"),
     ("agentSettingsAll", "Settings > General"),
-    ("mcpPrivateHttp", "Settings > MCP"),
     ("claudeExecutable", "Settings > Chat"),
     ("helperPaths", "Settings > Chat"),
     ("projectMcpApprovals", "Settings > MCP"),

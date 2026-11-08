@@ -939,14 +939,20 @@ pub fn sidebar_page(tx: &Transaction<'_>, a: &SidebarPageArgs, revision: i64) ->
         None => 0,
         Some(c) => c.parse().map_err(|_| bad("Unknown sidebar cursor."))?,
     };
+    // A chat in a closed project is left out of every view, keyed on the project it is shown
+    // under (its board when it has one, else its folder): a chat on an open board whose folder
+    // project is closed still shows. The attention summary and inbox still list such chats.
+    const SHOWN_OPEN: &str = "NOT EXISTS (SELECT 1 FROM project_local l WHERE l.closed = 1
+                 AND l.project_id = COALESCE(g.project_id, c.project_id))";
     let (filter, order) = match a.view {
-        SidebarView::Projects => ("c.archived = 0", CHAT_ORDER),
-        SidebarView::Archived => ("c.archived = 1", CHAT_ORDER),
-        // Activity: newest activity first, across every non-archived project.
+        SidebarView::Projects => (format!("c.archived = 0 AND {SHOWN_OPEN}"), CHAT_ORDER),
+        SidebarView::Archived => (format!("c.archived = 1 AND {SHOWN_OPEN}"), CHAT_ORDER),
+        // Activity: newest activity first, across every non-archived, open project.
         SidebarView::Activity => (
-            "c.archived = 0 AND NOT EXISTS (SELECT 1 FROM project_local l
-                 WHERE (l.archived = 1 OR l.closed = 1)
-                 AND l.project_id IN (c.project_id, g.project_id))",
+            format!(
+                "c.archived = 0 AND {SHOWN_OPEN} AND NOT EXISTS (SELECT 1 FROM project_local l
+                 WHERE l.archived = 1 AND l.project_id IN (c.project_id, g.project_id))"
+            ),
             "c.updated_at DESC, c.id",
         ),
     };

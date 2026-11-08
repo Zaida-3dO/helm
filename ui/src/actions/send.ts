@@ -1,4 +1,4 @@
-// How an action button, a chip, an option button or "Explain plainly" sends.
+// How an action button, a chip or "Explain plainly" sends.
 //
 // All of them are the user's own sends, so they follow the chat's send behaviour exactly
 // (`action: "default"`: a prompt when idle, a steer when busy), and none of them touches the

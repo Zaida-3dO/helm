@@ -35,7 +35,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
   const open = async (x: number, y: number) => {
     if (!chatId) return;
     try {
-      const [rows, projects, boards] = await Promise.all([pops.rows([chatId]), pops.list(false), getDefaultBoard(shell.api)]);
+      const [rows, projects, boards] = await Promise.all([pops.rows([chatId]), pops.list(false, true), getDefaultBoard(shell.api)]);
       const row: SidebarRow | undefined = rows[0];
       if (!row) return;
       const siblings = (await pops.page(row.archived ? 'archived' : 'projects', undefined, row.groupProjectId)).rows;

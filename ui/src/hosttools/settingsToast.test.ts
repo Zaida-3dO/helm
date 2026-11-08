@@ -22,6 +22,7 @@ test('an external_settings event becomes one notice that lasts 8 s', () => {
 test('many keys are summarised; malformed events show nothing', () => {
   const n = noticeFrom({ chatId: 'c', changes: ['a', 'b', 'c', 'd', 'e'].map((key, i) => ({ changeId: i, key })) }, 0);
   assert.equal(n?.text, 'A chat changed 5 settings: a, b, c and 2 more');
+  assert.equal(noticeFrom({ chatId: 'c', changes: [{ changeId: 1, key: 'mcpUnencryptedServers' }] }, 0)?.text, 'A chat changed a setting: plain http for an MCP server');
   assert.equal(noticeFrom({ chatId: 'c', changes: [] }, 0), null);
   assert.equal(noticeFrom({ changes: [{ changeId: 1, key: 'x' }] }, 0), null);
   assert.equal(noticeFrom(null, 0), null);

@@ -57,15 +57,18 @@ fn same_folder(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
-/// The open folder project over `folder`, added when Helm has none.
+/// The folder project over `folder`, added when Helm has none. An open one is preferred; a closed
+/// one is reused rather than duplicated (a closed folder project can still be where a chat runs).
 async fn folder_project(ctx: &ToolCtx, all: &[Value], folder: &str) -> Result<Value, ToolError> {
-    let open = all.iter().find(|p| {
-        p["kind"] == "folder"
-            && p["archived"] != true
-            && p["closed"] != true
-            && p["path"].as_str().is_some_and(|x| same_folder(x, folder))
-    });
-    if let Some(p) = open {
+    let over = |closed: bool| {
+        all.iter().find(|p| {
+            p["kind"] == "folder"
+                && p["archived"] != true
+                && (p["closed"] == true) == closed
+                && p["path"].as_str().is_some_and(|x| same_folder(x, folder))
+        })
+    };
+    if let Some(p) = over(false).or_else(|| over(true)) {
         return Ok(p["id"].clone());
     }
     let name = std::path::Path::new(folder)
@@ -405,6 +408,7 @@ mod tests {
                     "project_list" => Ok(json!([
                         {"id": "p1", "name": "Helm", "kind": "folder", "path": FOLDER, "archived": false, "pinned": false, "chatCount": 2, "revision": 7},
                         {"id": "p2", "name": "Board", "kind": "board", "path": null, "primaryFolderProjectId": "p1", "archived": false, "pinned": true, "chatCount": 0, "revision": 1},
+                        {"id": "p8", "name": "src", "kind": "folder", "path": format!("{FOLDER}/src"), "archived": false, "closed": true, "pinned": false, "chatCount": 0, "revision": 2},
                         {"id": "p9", "name": "Helmsman", "kind": "board", "path": null, "archived": false, "closed": true, "pinned": false, "chatCount": 0, "revision": 3}
                     ])),
                     "project_create" => {
@@ -484,6 +488,12 @@ mod tests {
                 json!({"projectId": "p2", "primaryFolder": parent}),
                 "",
                 "p3",
+            ),
+            // A closed folder project is reused, not duplicated.
+            (
+                json!({"projectId": "p2", "primaryFolder": format!("{FOLDER}/src")}),
+                "",
+                "p8",
             ),
             (
                 json!({"projectId": "p1", "primaryFolder": FOLDER}),

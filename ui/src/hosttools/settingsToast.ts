@@ -25,7 +25,7 @@ export function noticeFrom(event: unknown, now: number): SettingsNotice | null {
     (c): c is SettingsChange => !!c && typeof (c as SettingsChange).changeId === 'number' && typeof (c as SettingsChange).key === 'string',
   );
   if (changes.length === 0) return null;
-  const keys = changes.map((c) => c.key);
+  const keys = changes.map((c) => (c.key === 'mcpUnencryptedServers' ? 'plain http for an MCP server' : c.key));
   const list = keys.length <= 3 ? keys.join(', ') : `${keys.slice(0, 3).join(', ')} and ${keys.length - 3} more`;
   return {
     chatId: e.chatId,

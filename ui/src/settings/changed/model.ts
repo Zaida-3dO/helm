@@ -31,13 +31,39 @@ export function describeValue(v: unknown): string {
   return text.length > 60 ? `${text.slice(0, 59)}…` : text;
 }
 
+/** The key under which a chat's plain-http opt-in for a private-network MCP server is recorded:
+ *  a map from server id to `{ url, unencrypted }`. */
+export const UNENCRYPTED_SERVERS_KEY = 'mcpUnencryptedServers';
+
+type ServerMap = Record<string, { url?: string | null; unencrypted?: boolean } | undefined>;
+
+/** "Allowed plain http for nas (http://…)" or "moved nas from … to …", one clause per server. */
+function unencryptedText(c: SettingChange): string | null {
+  const after = c.after && typeof c.after === 'object' ? (c.after as ServerMap) : null;
+  const before = (c.before && typeof c.before === 'object' ? (c.before as ServerMap) : {}) as ServerMap;
+  if (!after) return null;
+  const parts: string[] = [];
+  for (const [id, now] of Object.entries(after)) {
+    const was = before[id];
+    if (!now?.url) continue;
+    if (!was) parts.push(`allowed plain http for ${id} (${now.url})`);
+    else if (was.url !== now.url) parts.push(`moved ${id} from ${was.url ?? 'its old address'} to ${now.url}, still plain http`);
+  }
+  return parts.length > 0 ? `${parts.join('; ').replace(/^./, (ch) => ch.toUpperCase())}` : null;
+}
+
 /** "was off, now on" */
 export function changeText(c: SettingChange): string {
+  if (c.key === UNENCRYPTED_SERVERS_KEY) {
+    const text = unencryptedText(c);
+    if (text) return text;
+  }
   return `was ${describeValue(c.before)}, now ${describeValue(c.after)}`;
 }
 
 /** A setting's key as a readable name: `compactSidebar` → "Compact sidebar". */
 export function keyTitle(key: string): string {
+  if (key === UNENCRYPTED_SERVERS_KEY) return 'Plain http for MCP servers';
   const words = key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
   return words.charAt(0).toUpperCase() + words.slice(1);
 }

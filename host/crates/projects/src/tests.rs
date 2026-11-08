@@ -239,6 +239,34 @@ fn a_closed_project_is_hidden_and_refuses_new_work_until_reopened() {
     // Hidden from the default listing; asking for closed projects brings it back.
     assert!(!listed(&db, false).contains(&board));
     assert!(listed(&db, true).contains(&board));
+    // Its chats leave every sidebar view, and no group is left to draw them as loose rows.
+    let shown = |view: SidebarView, group: Option<&str>| -> Vec<String> {
+        db.snapshot(|tx| {
+            store::sidebar_page(
+                tx,
+                &SidebarPageArgs {
+                    view,
+                    group_id: group.map(String::from),
+                    cursor: None,
+                },
+                1,
+            )
+        })
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|r| r.chat_id)
+        .collect()
+    };
+    for view in [
+        SidebarView::Projects,
+        SidebarView::Archived,
+        SidebarView::Activity,
+    ] {
+        assert!(shown(view, Some(&board)).is_empty());
+        assert!(!shown(view, None).contains(&c));
+    }
+    assert!(shown(SidebarView::Projects, Some(&project_of(&db, &outsider))).contains(&outsider));
     // Moving a chat into it, renaming, archiving and nesting under it are all refused.
     let said = |r: Result<(), Refusal>| match r {
         Err(Refusal::Refused(m)) => m,
@@ -287,6 +315,13 @@ fn a_closed_project_is_hidden_and_refuses_new_work_until_reopened() {
     assert!(!node(&db, &board).closed);
     assert!(listed(&db, false).contains(&board));
     organize(&db, to(&outsider, &board)).unwrap();
+    // A closed folder project hides only the chats shown under it: one on an open board stays.
+    let folder_of_outsider = project_of(&db, &outsider);
+    db.write(|tx| store::close_project(tx, &folder_of_outsider))
+        .unwrap();
+    for view in [SidebarView::Projects, SidebarView::Activity] {
+        assert!(shown(view, Some(&board)).contains(&outsider));
+    }
 }
 
 /// A folder is picked for a board only when one board has it: boards sharing a folder are never
@@ -2039,6 +2074,31 @@ async fn every_new_chat_is_put_on_a_board() {
     .unwrap();
     assert_eq!(board_of(&db, &stray), Some(docs.clone()));
     assert_eq!(board_of(&db, &b), Some(life.clone()));
+
+    // Only the project a chat is shown on has to be open. A closed folder project still serves as
+    // the folder of a chat on an open board, and is reused rather than duplicated.
+    db.write(|tx| store::close_project(tx, &web_folder))
+        .unwrap();
+    let g = create_chat(&api, json!({"cwd": web_dir, "boardId": web}))
+        .await
+        .unwrap();
+    assert_eq!(project_of(&db, &g), web_folder);
+    assert_eq!(board_of(&db, &g), Some(web.clone()));
+    // With no open board to show it on, the closed folder refuses, by name.
+    for board in [&web, &life] {
+        db.write(|tx| store::close_project(tx, board)).unwrap();
+    }
+    let e = create_chat(&api, json!({"cwd": web_dir}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e.message,
+        "The folder project 'web' is closed. Reopen it in Settings → Projects."
+    );
+    let e = create_chat(&api, json!({"cwd": other, "boardId": web}))
+        .await
+        .unwrap_err();
+    assert_eq!(e.message, "This project is closed. Reopen it first.");
 }
 
 struct FakePoster(std::sync::Mutex<Vec<(String, String)>>, u16, &'static str);
