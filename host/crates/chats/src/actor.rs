@@ -1611,54 +1611,17 @@ impl Actor {
                 self.emit_thread();
             }
             Cmd::ApplyModel { model, effort } => {
-                if model.is_some() {
-                    // The model changed: anything made ready for the old one — a running warm-up
-                    // or an answered one — does not carry over to the new.
-                    if matches!(&self.prepare, Some(p) if p.sid.is_none()) {
-                        let had_line = self.prepare.as_ref().is_some_and(|p| p.line);
-                        self.prepare = None;
-                        if had_line {
-                            self.clear_loading();
-                        }
-                    }
-                    self.prepared = None;
-                }
-                if self.link.is_none() {
-                    return; // the next launch carries it
-                }
-                if model.is_some()
-                    && (self.launched_local.is_some()
-                        || model
-                            .as_deref()
-                            .is_some_and(|m| crate::local::split(m).is_some()))
-                {
-                    // A local chat's model is part of its launch, and a worker started for one
-                    // provider cannot simply be retold to use the other: start a new worker,
-                    // which resumes the same session binding so the conversation carries
-                    // over — now when nothing runs, otherwise at the next idle point. An
-                    // effort-only change is not a provider change: it falls through to the
-                    // live retelling below, where the worker turns the new effort into the
-                    // local model's thinking budget without a respawn.
-                    if self.status().is_busy() || self.agents_running() {
-                        self.relaunch_on_idle = true;
-                        self.provider_switch_pending = true;
-                    } else {
-                        self.relaunch_worker();
-                    }
-                    return;
-                }
-                if let Some(m) = model {
-                    let id = self.request(json!({"type": "set_model", "model": m}), Pending::Model);
-                    let lim = self.sh.cfg.limits.model_ack;
-                    self.add_timer(lim, Timer::ModelAck(id));
-                }
-                if let Some(e) = effort {
-                    let id = self.request(
-                        json!({"type": "set_thinking_level", "level": e}),
-                        Pending::Model,
-                    );
-                    let lim = self.sh.cfg.limits.model_ack;
-                    self.add_timer(lim, Timer::ModelAck(id));
+                // A send that is waiting on the old model's preparation must not go out on it:
+                // take that preparation down first and put the send back through the model the
+                // chat has now, once the change below has settled the worker.
+                let waiting = if model.is_some() {
+                    self.drop_stale_prepare()
+                } else {
+                    None
+                };
+                self.apply_model(model, effort);
+                if let Some((sid, held)) = waiting {
+                    self.restart_prepare(sid, held);
                 }
             }
             Cmd::ToolStop {
@@ -2197,6 +2160,79 @@ impl Actor {
             }
             Ok(())
         });
+    }
+
+    fn apply_model(&mut self, model: Option<String>, effort: Option<String>) {
+        if model.is_some() {
+            // The model changed: anything made ready for the old one does not carry over.
+            self.prepared = None;
+        }
+        if self.link.is_none() {
+            return; // the next launch carries it
+        }
+        if model.is_some()
+            && (self.launched_local.is_some()
+                || model
+                    .as_deref()
+                    .is_some_and(|m| crate::local::split(m).is_some()))
+        {
+            // A local chat's model is part of its launch, and a worker started for one
+            // provider cannot simply be retold to use the other: start a new worker,
+            // which resumes the same session binding so the conversation carries
+            // over — now when nothing runs, otherwise at the next idle point. An
+            // effort-only change is not a provider change: it falls through to the
+            // live retelling below, where the worker turns the new effort into the
+            // local model's thinking budget without a respawn.
+            if self.status().is_busy() || self.agents_running() {
+                self.relaunch_on_idle = true;
+                self.provider_switch_pending = true;
+            } else {
+                self.relaunch_worker();
+            }
+            return;
+        }
+        if let Some(m) = model {
+            let id = self.request(json!({"type": "set_model", "model": m}), Pending::Model);
+            let lim = self.sh.cfg.limits.model_ack;
+            self.add_timer(lim, Timer::ModelAck(id));
+        }
+        if let Some(e) = effort {
+            let id = self.request(
+                json!({"type": "set_thinking_level", "level": e}),
+                Pending::Model,
+            );
+            let lim = self.sh.cfg.limits.model_ack;
+            self.add_timer(lim, Timer::ModelAck(id));
+        }
+    }
+
+    /// The chat's model changed: take down the preparation made for the old one. Its late answer
+    /// is ignored (it is matched by token), and its loading line goes. A preparation that had a
+    /// send behind it hands back that send and the ones held behind it.
+    fn drop_stale_prepare(&mut self) -> Option<(String, Vec<String>)> {
+        let p = self.prepare.take()?;
+        if p.line {
+            self.clear_loading();
+        }
+        p.sid.map(|sid| (sid, p.held))
+    }
+
+    /// Put sends that were waiting on a dropped preparation through the model the chat has now:
+    /// prepared afresh when it is a local one, otherwise sent as the turn it was always going to
+    /// open.
+    fn restart_prepare(&mut self, sid: String, held: Vec<String>) {
+        if self.begin_prepare(&sid) {
+            match self.prepare.as_mut() {
+                Some(p) => p.held = held,
+                None => self.give_back(held), // refused: nothing to prepare with
+            }
+            return;
+        }
+        self.opening = Some(sid.clone());
+        self.dispatch(&sid);
+        for h in held {
+            self.dispatch(&h);
+        }
     }
 
     /// A chat on a local model gets its model made ready before each turn it opens (the memory
