@@ -11,7 +11,10 @@
 //!   from the waiting tracker: the live interactions). Stopped or failed chats count only when
 //!   manually marked. Nothing is muted yet.
 //! - `busy` counts starting, running and stopping chats.
-//! - Each group lists at most [`MAX_ROWS`], newest activity first.
+//! - The running, stalled and unread groups list at most [`MAX_ROWS`], newest activity first. The
+//!   needs-you and flagged groups are never cut short: each row there is a flag drawn on a
+//!   sidebar row, and a flag that is counted in the badge must have a row to sit on. A chat can be
+//!   in both of them (the consumers show it once).
 //!
 //! [`publish`] recomputes the summary and emits an `attention` event when it changed. The actor
 //! calls it on every status change and every change to its interactions; ops that change marks,
@@ -224,19 +227,17 @@ pub fn compute(
             s.stalled.push(row(c, AttentionKind::Stalled));
         }
         if let Some(k) = need {
-            if s.needs_you.len() < MAX_ROWS {
-                let mut r = row(c, k);
-                if let (None, Some((question, why))) = (live_need, &c.asked) {
-                    r.reason =
-                        format!("Asked by the agent: {question} (Why it blocks the work: {why})");
-                }
-                s.needs_you.push(r);
+            let mut r = row(c, k);
+            if let (None, Some((question, why))) = (live_need, &c.asked) {
+                r.reason =
+                    format!("Asked by the agent: {question} (Why it blocks the work: {why})");
             }
+            s.needs_you.push(r);
         }
         if unread && s.unread.len() < MAX_ROWS {
             s.unread.push(row(c, AttentionKind::Unread));
         }
-        if flagged && !unread && need.is_none() && s.flagged.len() < MAX_ROWS {
+        if flagged {
             let mut r = row(c, AttentionKind::Triage);
             if let Some(why) = c.flagged.as_ref().filter(|w| !w.is_empty()) {
                 r.reason = why.clone();
@@ -481,5 +482,40 @@ mod tests {
         assert_eq!(s.busy, 10);
         assert_eq!(s.running.len(), MAX_ROWS);
         assert_eq!(s.badge, 0, "running alone is not a badge");
+    }
+
+    #[test]
+    fn waiting_and_flagged_groups_list_every_chat_even_unread_ones() {
+        let (_d, db) = temp_db();
+        let mut needs = Needs::new();
+        for i in 0..10 {
+            let c = chat(&db, &format!("w{i}"));
+            needs.insert(c, AttentionKind::Question);
+        }
+        let mut flagged = vec![];
+        for i in 0..10 {
+            let c = chat(&db, &format!("f{i}"));
+            exec(
+                &db,
+                "INSERT INTO chat_triage(chat_id, stamp, checked_at, needs, reason, failed)                  SELECT id, updated_at, 1, 1, 'Tests were never run', 0 FROM chats WHERE id = ?1",
+                &[&c],
+            );
+            flagged.push(c);
+        }
+        // One flagged chat is also unread: it still has its flag.
+        exec(
+            &db,
+            "INSERT INTO unread_marks(chat_id, token, marked_at) VALUES (?1, 't', 1)",
+            &[&flagged[0]],
+        );
+        let s = summary(&db, &needs);
+        assert_eq!(s.badge, 20);
+        assert_eq!(s.needs_you.len(), 10, "no cap on chats waiting on you");
+        assert_eq!(
+            s.flagged.len(),
+            10,
+            "no cap, and unread chats keep their flag"
+        );
+        assert!(s.flagged.iter().any(|r| r.chat_id == flagged[0]));
     }
 }

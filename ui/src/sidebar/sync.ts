@@ -1,20 +1,26 @@
-// When the sidebar asks for an Agent Standup sync: once at launch, on Refresh, every 10
-// minutes while the window is visible, and on focus when the last sync is more than 2 minutes old.
-// Nothing else waits on a sync: new chats and moves use the projects already held.
+// When the app asks for an Agent Standup sync, quietly (nothing is drawn while it runs): once at
+// launch, every 10 minutes while the window is visible, on focus when the last sync is more than
+// 2 minutes old, and when a board picker opens. Settings → Projects has a Refresh button for the
+// rest. Nothing else waits on a sync: new chats and moves use the projects already held.
 
 import type { BoardSyncState } from '../api/projects.ts';
 
 export const POLL_MS = 10 * 60_000;
 export const FOCUS_STALE_MS = 2 * 60_000;
 
-export type SyncDisplay = 'unconfigured' | 'syncing' | 'ok' | 'error' | 'never';
+/** Opening a picker syncs at most this often; the host runs one sync at a time anyway. */
+export const OPEN_SYNC_MIN_MS = 30_000;
 
-export function syncDisplay(s: BoardSyncState | null): SyncDisplay {
-  if (!s) return 'never';
-  if (s.syncing) return 'syncing';
-  if (!s.configured) return 'unconfigured';
-  if (s.error) return 'error';
-  return s.lastSyncAt ? 'ok' : 'never';
+/** A function to call when a board picker (or a menu listing boards) opens: it starts `sync`
+ *  unless one was started less than `OPEN_SYNC_MIN_MS` ago. `sync` must never throw. */
+export function syncOnOpen(sync: () => void, now: () => number = Date.now): () => void {
+  let last = -Infinity;
+  return () => {
+    const t = now();
+    if (t - last < OPEN_SYNC_MIN_MS) return;
+    last = t;
+    sync();
+  };
 }
 
 /** Whether a focus event should start a sync. */

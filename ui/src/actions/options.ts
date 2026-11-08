@@ -1,5 +1,4 @@
-// Inline option buttons and the answer popup: find the choices an assistant
-// reply offers, so each can be answered with one click.
+// The answer popup: find the choices an assistant reply offers, so they can be answered with one click.
 //
 // A list counts as choices only when it is the reply's last list, has 2 to 9 sequential markers
 // (`1.`, `1)`, `Option 1`, `A)`, `**A.**`, `Option A:`) and either uses the explicit word "Option"
@@ -253,11 +252,6 @@ export function answerLabel(count: number): string {
   return count > 1 ? `Answer ${count} questions` : 'Answer question';
 }
 
-/** The chip's caption: the option's short text, or "Option N" when it has none. */
-export function optionCaption(o: ParsedOption): string {
-  return o.short || `Option ${o.label}`;
-}
-
 function sentence(text: string): string {
   return /[.!?…]$/.test(text) ? text : `${text}.`;
 }
@@ -277,14 +271,4 @@ export function answerText(picked: readonly ParsedOption[], other = ''): string 
   const body = picked.map((o) => o.text).filter((t) => t !== '');
   const main = body.length === 0 ? `${head}.` : `${head}: ${sentence(body.join('; '))}`;
   return free ? `${main} Also: ${sentence(free)}` : main;
-}
-
-/** What a click sends. */
-export function optionSendText(o: ParsedOption): string {
-  return answerText([o]);
-}
-
-/** What Shift+click or the pencil puts in the draft, ready to be amended. */
-export function optionDraftText(o: ParsedOption): string {
-  return `Go with option ${o.label}${o.text ? `: ${o.text}` : ''} `;
 }

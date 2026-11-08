@@ -10,10 +10,13 @@ import { useShell } from '../shell/context.ts';
 import { Picker, toast, type PickerOption } from '../ui/index.ts';
 import { getDefaultBoard } from '../newchat/boards.ts';
 import { pickerProjects } from '../newchat/places.ts';
+import { syncOnOpen } from './sync.ts';
 
 export function ProjectTags({ chatId }: { chatId: string | null }) {
   const shell = useShell();
   const pops = useMemo(() => projectOps(shell.api), [shell.api]);
+  // Opening the picker syncs the boards quietly (at most every 30 seconds); the list updates when it reports in.
+  const syncBoards = useMemo(() => syncOnOpen(() => void pops.sync().catch(() => undefined)), [pops]);
   const [row, setRow] = useState<SidebarRow | null>(null);
   const [projects, setProjects] = useState<ProjectNode[]>([]);
   const [hidden, setHidden] = useState<string[]>([]);
@@ -81,6 +84,7 @@ export function ProjectTags({ chatId }: { chatId: string | null }) {
         }
         heading="Show this chat under"
         searchable
+        onOpen={syncBoards}
         testId="project-tag"
       />
       <span className="sb-tag" data-testid="workspace-tag" title={row.folderPath}>

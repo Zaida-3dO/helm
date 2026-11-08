@@ -167,6 +167,15 @@ export function ProjectsPane() {
           <button type="button" data-testid="board-test" disabled={busy} onClick={() => void test()}>
             Test connection
           </button>
+          <button
+            type="button"
+            data-testid="board-refresh"
+            title="Fetch the board's projects now"
+            disabled={busy || !conn?.hasToken}
+            onClick={() => void test()}
+          >
+            Refresh
+          </button>
         </div>
         <p className="sp-help" data-testid="board-last-sync">
           {sync?.lastSyncAt

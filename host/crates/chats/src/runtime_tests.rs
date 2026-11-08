@@ -5004,6 +5004,53 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
         "the dropped warm-up finished, but never answered for the send"
     );
 
+    // A message waiting on the old model's load goes out on the model chosen meanwhile: to
+    // another local model it is prepared afresh (the old load's late answer is ignored), and to
+    // a Claude model it needs no load at all.
+    for (target, expect_local) in [
+        ("local/ollama/llama3:8b", Some("llama3:8b")),
+        ("opus", None),
+    ] {
+        *local.outcome.lock().unwrap() = Ok("llama3:8b".into());
+        let (open3, gate3) = std::sync::mpsc::channel();
+        *local.gate.lock().unwrap() = Some(gate3);
+        let racing = h
+            .call(
+                "chat_create",
+                json!({"cwd": cwd, "model": "local/ollama/qwen3:8b"}),
+            )
+            .await
+            .unwrap();
+        let racing_chat = racing["id"].as_str().unwrap().to_owned();
+        let before = n(&racing_chat);
+        let (racing_sid, _) = h.send(&racing_chat, "hello", "default").await;
+        h.until("the first model's load is waiting", |_| {
+            n(&racing_chat) == before + 1
+        })
+        .await;
+        h.call(
+            "chat_set_model",
+            json!({"chatId": &racing_chat, "model": target}),
+        )
+        .await
+        .unwrap();
+        if expect_local.is_some() {
+            h.until("the new model is prepared too", |_| {
+                n(&racing_chat) == before + 2
+            })
+            .await;
+        }
+        *local.outcome.lock().unwrap() = Ok("stale-name".into());
+        let w3 = h.worker().await; // arrives without the old load being released
+        assert_eq!(
+            w3.req.local.as_ref().map(|l| l.model.as_str()),
+            expect_local,
+            "the turn starts on the model chosen while it waited ({target})"
+        );
+        open3.send(()).unwrap();
+        assert_ne!(h.state(&racing_sid), "rejected");
+    }
+
     // A warm-up that fails stays quiet: no refusal, no turn — and no line left up in an idle chat.
     *local.outcome.lock().unwrap() = Err("no room on the server for that".into());
     let failed = h

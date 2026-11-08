@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { answerLabel, answerText, defaultOption, optionCaption, optionDraftText, optionSendText, parseOptions, parseReplyQuestion } from './options.ts';
+import { answerLabel, answerText, defaultOption, parseOptions, parseReplyQuestion } from './options.ts';
 
 const labels = (t: string) => parseOptions(t)?.map((o) => o.label) ?? null;
 
@@ -21,8 +21,6 @@ test('each item is kept in full, without markdown, and gets a short form for the
     assert.equal(o?.short.slice(0, 20), short.slice(0, 20), text);
     assert.ok((o?.short.length ?? 0) <= 36, text);
   }
-  assert.equal(optionCaption(parseOptions('Pick one:\n1. Keep going\n2. Stop here')![1]!), 'Stop here');
-  assert.equal(optionCaption({ label: 'B', text: '', short: '', recommended: false }), 'Option B');
 });
 
 test('an option keeps its continuation lines and sub-bullets, but not the closing question', () => {
@@ -165,13 +163,12 @@ test('what an answer sends names the option and writes it out; typed text is sen
   const rows: [string, string][] = [
     [answerText([a!]), 'Go with option 1: Split the stylesheet by area.'],
     [answerText([b!]), 'Go with option 2: Move the tokens.'],
-    [optionSendText(c!), 'Go with option 3: Re-run checks.'],
+    [answerText([c!]), 'Go with option 3: Re-run checks.'],
     [answerText([a!, c!]), 'Go with options 1 and 3: Split the stylesheet by area; Re-run checks.'],
     [answerText([a!, b!, c!]), 'Go with options 1, 2 and 3: Split the stylesheet by area; Move the tokens; Re-run checks.'],
     [answerText([b!], 'and keep the old names'), 'Go with option 2: Move the tokens. Also: and keep the old names.'],
     [answerText([], '  something else entirely '), 'something else entirely'],
     [answerText([{ label: 'B', text: '', short: '', recommended: false }]), 'Go with option B.'],
-    [optionDraftText(a!), 'Go with option 1: Split the stylesheet by area '],
   ];
   for (const [got, want] of rows) assert.equal(got, want);
   assert.deepEqual([1, 2, 5].map(answerLabel), ['Answer question', 'Answer 2 questions', 'Answer 5 questions']);
