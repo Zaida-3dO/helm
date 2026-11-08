@@ -56,6 +56,8 @@ export interface PickerProps<T extends string> {
   placeholder?: string;
   /** An extra class on the trigger, for a place that needs it smaller or outlined. */
   className?: string;
+  /** Called each time the popover opens (a place that lists boards syncs them here). */
+  onOpen?: () => void;
   testId?: string;
 }
 
@@ -247,10 +249,15 @@ export function Picker<T extends string>({
   disabled,
   placeholder,
   className,
+  onOpen,
   testId,
 }: PickerProps<T>) {
   const trigger = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
+  const show = () => {
+    setOpen(true);
+    onOpen?.();
+  };
   const close = () => {
     setOpen(false);
     trigger.current?.focus();
@@ -268,11 +275,11 @@ export function Picker<T extends string>({
         title={title}
         disabled={disabled}
         data-testid={testId}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => (open ? setOpen(false) : show())}
         onKeyDown={(e) => {
           if (e.key === 'ArrowDown' && !open && !disabled) {
             e.preventDefault();
-            setOpen(true);
+            show();
           }
         }}
       >

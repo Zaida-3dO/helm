@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import { api, contrast, dispose, FAKE_CLAUDE, launchApp, measure, newChat, REPO, scratchDir, seedBoardChats, send, shot, tid, waitStatus, type App } from "./harness.ts";
+import { api, contrast, dispose, FAKE_CLAUDE, launchApp, measure, newChat, REPO, scratchDir, seedBoardChats, send, shot, tid, waitBoardSync, waitStatus, type App } from "./harness.ts";
 
 const OUT = process.env.HELM_E2E_OUT ?? scratchDir("helm-e2e-out-");
 const profile = scratchDir("helm-w3v-profile-");
@@ -147,7 +147,7 @@ describe("visual check and the host probes", { timeout: 15 * 60_000 }, () => {
   test("V1-V3: one Agent Standup sync, board groups, local nesting under a board project", async (t) => {
     if (!board) return t.skip("the fake board (fakes/board) is not available");
     await step("V1", async () => {
-      await page().waitForSelector(tid("board-sync", '[data-state="ok"]'), { timeout: 30_000 });
+      await waitBoardSync(page());
       await seedBoardChats(page());
       const groups = await page().$$eval(tid("sidebar-group", '[data-kind="board"]'), (els) =>
         els.map((e) => ({ id: e.getAttribute("data-project-id"), depth: e.getAttribute("data-depth"), h: e.getBoundingClientRect().height, text: e.textContent ?? "" })),
@@ -169,8 +169,7 @@ describe("visual check and the host probes", { timeout: 15 * 60_000 }, () => {
       const p = (await api(page(), "project_list", {})) as { id: string; revision: number; kind: string }[];
       const target = p.find((x) => x.id === parent)!;
       await api(page(), "project_update", { projectId: parent, revision: target.revision, name: "Renamed in Helm" });
-      await api(page(), "board_sync", {});
-      await page().waitForSelector(tid("board-sync", '[data-state="ok"]'), { timeout: 30_000 });
+      await waitBoardSync(page());
       await page().waitForFunction((id) => (document.querySelector(`[data-testid="sidebar-group"][data-project-id="${id}"]`)?.textContent ?? "").includes("Renamed in Helm"), parent, { timeout: 10_000 });
       assert.deepEqual(board!.violations, [], "only GETs went to the board");
       await readable(`${tid("sidebar-group")} .sb-name`);
