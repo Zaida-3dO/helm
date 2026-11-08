@@ -210,6 +210,20 @@ export async function newChat(page: Page, folder: string): Promise<string> {
 }
 
 /**
+ * The sidebar draws no sync line, so ask the host to sync and wait for a clean, finished result
+ * (the sync is quiet; the board's projects arrive as groups).
+ */
+export async function waitBoardSync(page: Page, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const s = (await api(page, "board_sync", {})) as { configured: boolean; syncing: boolean; lastSyncAt: number | null; error: string | null };
+    if (s.configured && !s.syncing && s.lastSyncAt !== null && !s.error) return;
+    if (Date.now() > deadline) throw new Error(`board sync did not finish: ${JSON.stringify(s)}`);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+/**
  * The sidebar hides projects with no chats, and a freshly synced board project holds none: put one
  * chat under each board project so its group draws. Returns the board projects' ids, in list order.
  */

@@ -7,7 +7,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
 import type { ChatOps } from '../api/ops.ts';
-import { projectOps, type BoardSyncState, type ProjectNode, type SidebarRow, type SidebarView } from '../api/projects.ts';
+import { projectOps, type ProjectNode, type SidebarRow, type SidebarView } from '../api/projects.ts';
 import type { RowPreview } from '../api/generated/projects/index.ts';
 import type { AttentionSummary } from '../api/types.ts';
 import type { ChatStore } from '../state/store.ts';
@@ -52,7 +52,7 @@ import { getDefaultBoard } from '../newchat/boards.ts';
 import { ATTENTION_LABEL, age, needsYouLabel, rowStatusLabel, trailingIndicator } from './status.ts';
 import { localWaitLabel } from '../state/localModel.ts';
 import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
-import { startSyncTriggers, syncDisplay, type SyncHost } from './sync.ts';
+import { startSyncTriggers, syncOnOpen, type SyncHost } from './sync.ts';
 import { sidebarUndo } from './undo.ts';
 import { CostDialog, type CostTarget } from '../usage/CostDialog.tsx';
 import { layout, visibleRange } from './virtual.ts';
@@ -160,7 +160,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     if (!snap.paging[view].started) void data.page(view);
   }, [view, data, snap.paging]);
 
-  // Agent Standup sync triggers. A failure only shows in the status line.
+  // Agent Standup sync triggers. Quiet: nothing is drawn, and a failure shows in Settings → Projects.
   const runSync = useCallback(() => {
     pops
       .sync()
@@ -170,6 +170,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       })
       .catch(() => undefined);
   }, [pops, data]);
+  // The chat menu lists boards to move to, so opening it syncs too (at most every 30 seconds).
+  const syncBoardsOnOpen = useMemo(() => syncOnOpen(runSync), [runSync]);
   useEffect(
     () =>
       startSyncTriggers({
@@ -569,7 +571,6 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           </div>
         )}
       </div>
-      <BoardSyncLine state={snap.sync} now={now} onRefresh={runSync} />
       <div
         className="sb-list"
         ref={listRef}
@@ -735,7 +736,10 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         }}
         onToggle={() => toggleChat(row.chatId)}
         onRename={() => promptRename(row)}
-        onMenu={(x, y) => openMenu(x, y, rowMenuItems(row), `Options for ${row.title}`)}
+        onMenu={(x, y) => {
+          syncBoardsOnOpen();
+          openMenu(x, y, rowMenuItems(row), `Options for ${row.title}`);
+        }}
         onArchive={() => (row.archived ? void act.restore(row) : archiveRow(row))}
         onHover={(el) => hoverRow(row, el)}
         onLeave={leaveRow}
@@ -747,30 +751,6 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       />
     );
   }
-}
-
-function BoardSyncLine({ state, now, onRefresh }: { state: BoardSyncState | null; now: number; onRefresh: () => void }) {
-  const d = syncDisplay(state);
-  const text =
-    d === 'syncing'
-      ? 'Syncing Agent Standup…'
-      : d === 'error'
-        ? state?.error
-        : d === 'ok' && state?.lastSyncAt
-          ? `Agent Standup synced ${age(state.lastSyncAt, now)}${age(state.lastSyncAt, now) === 'now' ? '' : ' ago'}`
-          : null;
-  return (
-    <div className="sb-sync" data-testid="board-sync" data-state={d} hidden={d === 'unconfigured' || d === 'never'}>
-      <span className="sb-sync-text" role="status">
-        {text}
-      </span>
-      {d !== 'syncing' && (
-        <button type="button" className="sb-sync-refresh" onClick={onRefresh}>
-          Refresh
-        </button>
-      )}
-    </div>
-  );
 }
 
 function GroupHeader({

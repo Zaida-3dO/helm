@@ -363,6 +363,14 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
           )}
         </div>
       )}
+      {chat.archived && (
+        <div className="banner" data-testid="archived-banner">
+          <span>This chat is archived.</span>
+          <button type="button" className="small" data-testid="archived-restore" onClick={() => ops.restore(chat.id).catch((e: unknown) => setNotice(String((e as Error).message ?? e)))}>
+            Restore
+          </button>
+        </div>
+      )}
       <ContextBar
         chat={chat}
         rows={view.rows}

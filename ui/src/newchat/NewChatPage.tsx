@@ -12,6 +12,7 @@ import { useShell } from '../shell/context.ts';
 import { Checkbox, ContextMenu, Picker, toast, useBinding, type MenuItem, type PickerOption } from '../ui/index.ts';
 import { IconCheck, IconCopy } from '../ui/icons.tsx';
 import { isFinished } from '../sidebar/model.ts';
+import { syncOnOpen } from '../sidebar/sync.ts';
 import { pickFolder } from './api.ts';
 import { getDefaultBoard } from './boards.ts';
 import { draftOps, newChat } from './controller.ts';
@@ -40,6 +41,7 @@ export function NewChatHost({ flushers, sendShortcut }: { flushers: Flushers; se
           return c ? { cwd: c.cwd, projectId: c.projectId } : null;
         },
         storeChat: (c) => shell.store.chat(c),
+        chatTitle: (id) => shell.store.view(id).chat?.title ?? null,
         storage: localStorage,
         now: () => Date.now(),
         uid: () => globalThis.crypto.randomUUID(),
@@ -88,6 +90,9 @@ export function NewChatHost({ flushers, sendShortcut }: { flushers: Flushers; se
 function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShortcut: SendShortcut }) {
   const shell = useShell();
   const ops = useMemo(() => draftOps(shell.ops, newChat), [shell.ops]);
+  const pops = useMemo(() => projectOps(shell.api), [shell.api]);
+  // Opening the picker syncs the boards quietly (at most every 30 seconds); the list updates when it reports in.
+  const syncBoards = useMemo(() => syncOnOpen(() => void pops.sync().catch(() => undefined)), [pops]);
   const draft = newChat.draft!;
   const chat = newChat.record()!;
   const projects = newChat.projects;
@@ -194,6 +199,7 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
               heading="Start the chat in"
               searchable
               placeholder="Choose a project"
+              onOpen={syncBoards}
               testId="newchat-project"
             />
           </div>

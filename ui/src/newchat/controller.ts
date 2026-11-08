@@ -35,6 +35,12 @@ export interface LocalImage {
   bytes: string;
 }
 
+/** A file, folder or chat the draft will refer to once its chat exists. */
+export interface LocalRef {
+  kind: 'path' | 'chat';
+  target: string;
+}
+
 export interface Draft {
   /** A stand-in id for the composer; never sent to the host. */
   id: string;
@@ -48,6 +54,8 @@ export interface Draft {
   model: string | null;
   effort: string | null;
   images: Map<string, LocalImage>;
+  /** References (files, folders, chats) added to the draft, by the id the composer holds them under. */
+  refs: Map<string, LocalRef>;
   createdAt: number;
   /** The board item this chat is for (see `NewChatOptions.itemId`). */
   item?: { id: string; title?: string };
@@ -66,6 +74,8 @@ export interface NewChatEnv {
   chatPlace(chatId: string): { cwd: string; projectId: string } | null;
   /** Hand a created chat to the chat store, so the chat view has it at once. */
   storeChat(chat: ChatRecord): void;
+  /** A chat's title, when the chat store knows the chat; names a chat dropped into the draft. */
+  chatTitle?(chatId: string): string | null;
   storage: Pick<Storage, 'getItem' | 'setItem'>;
   now(): number;
   uid(): string;
@@ -248,6 +258,7 @@ export class NewChatController {
     if (!this.open) return;
     this.open = false;
     this.draft?.images.clear();
+    this.draft?.refs.clear();
     if (this.made && this.made.chat.id === opening) this.made = null;
     this.dropMade();
     if (this.untouched()) this.draft = null;
@@ -257,7 +268,7 @@ export class NewChatController {
   /** Nothing typed and nothing pasted (a model or effort change alone does not count). */
   untouched(): boolean {
     const d = this.draft;
-    return !d || (d.text.trim() === '' && d.images.size === 0);
+    return !d || (d.text.trim() === '' && d.images.size === 0 && d.refs.size === 0);
   }
 
   /** Forget the chat a refused send made, asking the host to discard it if it is still untouched. */
@@ -406,6 +417,36 @@ export class NewChatController {
   }
 
   /**
+   * Refer to a file, folder or chat from the draft. There is no chat yet to hold the reference, so
+   * it is kept here and attached to the chat the first send creates. What the chip shows is read
+   * the same way the host will read it: a chat by its title, a path by its last part and whether it
+   * is a folder.
+   */
+  async addRef(kind: 'path' | 'chat', target: string): Promise<{ attachmentId: string; kind: 'file' | 'folder' | 'chat'; name: string }> {
+    const d = this.draft;
+    const env = this.env;
+    if (!d || !env) throw new ApiError('not_found', 'The new chat was closed.');
+    let shown: 'file' | 'folder' | 'chat' = 'chat';
+    let name = env.chatTitle?.(target) ?? 'Chat';
+    if (kind === 'path') {
+      if (!/^(?:[A-Za-z]:[\\/]|[\\/])/.test(target)) throw new ApiError('bad_args', 'Only an absolute path can be attached.');
+      const found = await env.api<{ kind?: string } | null>('path_resolve', { path: target }).catch(() => null);
+      shown = found?.kind === 'dir' ? 'folder' : 'file';
+      name = target.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || target;
+    }
+    for (const [id, r] of d.refs) if (r.kind === kind && r.target === target) return { attachmentId: id, kind: shown, name };
+    const id = `${DRAFT_PREFIX}ref:${env.uid()}`;
+    d.refs.set(id, { kind, target });
+    return { attachmentId: id, kind: shown, name };
+  }
+
+  /** The composer took an attachment out of the draft. */
+  dropAttachment(id: string): void {
+    this.draft?.images.delete(id);
+    this.draft?.refs.delete(id);
+  }
+
+  /**
    * The first send: create the chat in the chosen folder and project, move the pasted images onto
    * it, send, then open it. A second press while this runs gets the same promise. When the send is
    * refused after the chat was made, the next try sends to that chat rather than making another.
@@ -454,6 +495,17 @@ export class NewChatController {
     const chat = made.chat;
     const ids: string[] = [];
     for (const id of extras.attachments ?? []) {
+      const ref = d.refs.get(id);
+      if (ref) {
+        // Attached once per made chat, like the images.
+        let held = made.uploads.get(id);
+        if (!held) {
+          held = (await env.ops.attachRef(chat.id, ref.kind, ref.target)).attachmentId;
+          made.uploads.set(id, held);
+        }
+        ids.push(held);
+        continue;
+      }
       const img = d.images.get(id);
       if (!img) {
         ids.push(id);
@@ -532,7 +584,7 @@ export class NewChatController {
   }
 
   private makeDraft(env: NewChatEnv, projectId: string | null): Draft {
-    return { id: `${DRAFT_PREFIX}${env.uid()}`, projectId, folder: null, text: this.savedText(env), revision: 0, model: null, effort: null, images: new Map(), createdAt: env.now() };
+    return { id: `${DRAFT_PREFIX}${env.uid()}`, projectId, folder: null, text: this.savedText(env), revision: 0, model: null, effort: null, images: new Map(), refs: new Map(), createdAt: env.now() };
   }
 
   private savedText(env: NewChatEnv): string {
@@ -577,6 +629,12 @@ export function draftOps(real: ChatOps, ctl: NewChatController): ChatOps {
     },
     setModel: async (_id: string, model?: string, effort?: string) => ctl.setModel(model, effort),
     attach: async (_id: string, name: string, mime: string, bytes: string) => ({ attachmentId: ctl.addImage({ name, mime, bytes }) }),
+    attachRef: (_id: string, kind: 'path' | 'chat', target: string) => ctl.addRef(kind, target),
+    discardAttachment: async (_id: string, attachmentId: string) => {
+      ctl.dropAttachment(attachmentId);
+      return { discarded: true };
+    },
+    stagedAttachments: async () => ({ images: [], refs: [] }),
     skills: async () => [],
     autocomplete: async () => ({ completion: '', retryAfterMs: null }),
     send: (_id: string, submissionId: string, text: string, action: SendAction, _rev: number, extras: SendExtras = {}) => ctl.firstSend(submissionId, text, action, extras),
