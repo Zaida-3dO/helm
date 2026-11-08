@@ -70,7 +70,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   // Send waits while Claude Code cannot be found, and while the agent starts with nothing in flight.
   const runtime = useRuntimeCheck();
   const starting = chat.status === 'starting' && pending.length === 0;
-  const blocked = runtime.blocked || starting;
+  // An archived chat cannot be sent to; restoring it (the banner above the box) is the way back.
+  const blocked = runtime.blocked || starting || chat.archived;
   const blockedRef = useRef(blocked);
   blockedRef.current = blocked;
   const ctx: KeyContext = useMemo(
@@ -679,7 +680,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
               data-testid="send"
               disabled={blocked || sending || (empty && attached.length === 0 && refs.length === 0)}
               aria-busy={sending || undefined}
-              title={runtime.blocked ? 'Connect Claude Code to send' : starting ? 'Claude Code is starting' : sendTooltip(ctx, busy)}
+              title={chat.archived ? 'Restore this chat to send' : runtime.blocked ? 'Connect Claude Code to send' : starting ? 'Claude Code is starting' : sendTooltip(ctx, busy)}
               onClick={() => void send('default')}
             />
           </div>

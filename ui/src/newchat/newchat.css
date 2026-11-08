@@ -19,12 +19,13 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  padding: 0 25px 40px;
+  padding: 0 25px 18px;
 }
 
-/* Reserved space above the title; empty in the default theme. */
+/* The intro block sits just above the box, not in the middle of the page. The auto margin on the
+   first child pushes the block down, and unlike centring it never clips the top in a short window. */
 .nc-perch {
+  margin-top: auto;
   width: 260px;
   height: 64px;
   flex: none;

@@ -40,6 +40,7 @@ export function NewChatHost({ flushers, sendShortcut }: { flushers: Flushers; se
           return c ? { cwd: c.cwd, projectId: c.projectId } : null;
         },
         storeChat: (c) => shell.store.chat(c),
+        chatTitle: (id) => shell.store.view(id).chat?.title ?? null,
         storage: localStorage,
         now: () => Date.now(),
         uid: () => globalThis.crypto.randomUUID(),

@@ -160,6 +160,10 @@ function harness(opts: { open?: { id: string; cwd: string; projectId: string }; 
       }
       return { submission: { id: submissionId }, chat: chatRecord(chatId, '', '') };
     },
+    attachRef: async (chatId: string, kind: string, target: string) => {
+      calls.push({ op: 'attachRef', args: [chatId, kind, target] });
+      return { attachmentId: `ref-${target}`, kind, name: target };
+    },
   } as unknown as ChatOps;
   const runtime = { model: null as string | null };
   const api = (async (op: string, args?: unknown) => {
@@ -349,6 +353,24 @@ test('the first send creates the chat on the chosen board, moves the images and 
   assert.equal(h.ctl.draft, null);
   assert.equal(h.storage.getItem(LAST_PROJECT_KEY), 'b-site');
   assert.deepEqual(readRecents(h.storage), ['C:/code/site']);
+});
+
+test('a chat or file dragged onto a draft is kept and attached to the chat the first send makes', async () => {
+  const h = harness();
+  h.ctl.show({ projectId: 'helm' });
+  const ops = draftOps(h.env.ops, h.ctl);
+  const id = h.ctl.draft!.id;
+  const chat = await ops.attachRef(id, 'chat', 'other-chat');
+  const file = await ops.attachRef(id, 'path', 'C:\\work\\notes.txt');
+  assert.deepEqual([chat.kind, chat.name, file.kind, file.name], ['chat', 'Chat', 'file', 'notes.txt']);
+  assert.equal((await ops.attachRef(id, 'chat', 'other-chat')).attachmentId, chat.attachmentId, 'the same chat twice is one reference');
+  await assert.rejects(ops.attachRef(id, 'path', 'relative/file.txt'), /absolute/);
+  assert.equal(h.ctl.untouched(), false);
+  await ops.discardAttachment(id, file.attachmentId);
+  await ops.send(id, 'sub-r', 'hi', 'default', 1, { attachments: [chat.attachmentId] });
+  assert.ok(!h.calls.some((c) => c.op === 'attachRef' && c.args[1] === 'path'), 'a discarded reference is not attached');
+  assert.deepEqual(h.calls.find((c) => c.op === 'attachRef')!.args.slice(1), ['chat', 'other-chat']);
+  assert.deepEqual(h.calls.find((c) => c.op === 'send')!.args.slice(2), ['hi', ['ref-other-chat']]);
 });
 
 test('a folder project over the folder is named to the host, and the chat is not re-filed', async () => {

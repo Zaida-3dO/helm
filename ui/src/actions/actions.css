@@ -23,8 +23,7 @@
   font-size: calc(12 * var(--ui-unit, 1px));
 }
 
-.quick-replies,
-.option-buttons {
+.quick-replies {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -32,15 +31,8 @@
   padding: 6px 0;
 }
 
-.quick-reply,
-.option-button {
+.quick-reply {
   border-radius: var(--radius-pill, 999px);
-}
-
-.option-pair {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
 }
 
 .actions-pane label {

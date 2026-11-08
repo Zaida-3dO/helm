@@ -1,6 +1,6 @@
-// Registers the actions area's slot contributions with the other areas' registries: quick
-// replies above the composer, option buttons under the latest reply, Explain plainly in a reply's
-// actions, and the Actions pane in Settings. Mounted once in the app frame; it draws nothing itself.
+// Registers the actions area's slot contributions with the other areas' registries: quick replies above
+// the composer, Explain plainly in a reply's actions, and the Actions pane in Settings. Mounted once in the
+// app frame; it draws nothing itself.
 
 import { useEffect } from 'react';
 import { searchOps } from '../api/search.ts';
@@ -9,12 +9,12 @@ import { registerComposerAccessory } from '../composer/slots.ts';
 import { registerSettingsPane } from '../settings/registry.ts';
 import { useShell } from '../shell/context.ts';
 import { savedFromText, savedOps } from '../saved/model.ts';
-import { registerMessageAction, registerRowFooter, registerSelectionAction } from '../transcript/slots.ts';
+import { registerMessageAction, registerSelectionAction } from '../transcript/slots.ts';
 import { toast } from '../ui/index.ts';
 import { IconBookmark } from '../ui/icons.tsx';
 import { explainAppliesTo, ExplainPlainlyIcon } from './ExplainPlainly.tsx';
 import { AnswerButton } from './AnswerPopup.tsx';
-import { OptionButtons, QuickReplies } from './Replies.tsx';
+import { QuickReplies } from './Replies.tsx';
 import { EXPLAIN_PLAINLY_TEXT, sendActionText } from './send.ts';
 
 export function LeafSlots(): null {
@@ -31,11 +31,6 @@ export function LeafSlots(): null {
         id: 'leaf-quick-replies',
         placement: 'above',
         render: (ctx) => <QuickReplies chatId={ctx.chat.id} />,
-      }),
-      registerRowFooter({
-        id: 'leaf-option-buttons',
-        appliesTo: (row, ctx) => row.role === 'assistant' && ctx.isLatestAssistant && !ctx.running && !ctx.interactionOpen,
-        render: (_row, ctx) => <OptionButtons chatId={ctx.chatId} />,
       }),
       registerMessageAction({
         id: 'leaf-explain-plainly',
