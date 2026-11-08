@@ -81,6 +81,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_stop_chat", Class::Allowed),
     ("app_telegram_ask", Class::Denied(LOCAL)),
     ("app_telegram_send", Class::Denied(LOCAL)),
+    ("app_this_chat", Class::Denied(LOCAL)),
     ("app_update_attention", Class::Denied(LOCAL)),
     ("app_update_chat", Class::Denied(CHANGES)),
     ("app_update_feedback", Class::Denied(LOCAL)),

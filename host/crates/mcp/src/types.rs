@@ -127,7 +127,8 @@ pub struct McpServer {
     pub name: String,
     pub enabled: bool,
     pub transport: Transport,
-    /// The user's per-server "Allow unencrypted on my network" opt-in. User-only.
+    /// The per-server "Allow unencrypted on my network" opt-in. The user sets it in Settings; a
+    /// chat may set it for a plain-http server on a private address, and the user is told.
     #[serde(default)]
     pub allow_private_http: bool,
     /// The preset this server was created from, if any (informational).

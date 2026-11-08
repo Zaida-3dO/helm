@@ -170,22 +170,7 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
             if before == after {
                 return Ok(Ok((None, before, after)));
             }
-            tx.execute(
-                "INSERT INTO settings_changes(chat_id, key, before, after, at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    chat,
-                    k,
-                    before.as_ref().map(Value::to_string),
-                    after.as_ref().map(Value::to_string),
-                    now
-                ],
-            )?;
-            let id = tx.last_insert_rowid();
-            tx.execute(
-                "DELETE FROM settings_changes WHERE id NOT IN
-                     (SELECT id FROM settings_changes ORDER BY id DESC LIMIT ?1)",
-                [RING],
-            )?;
+            let id = insert_change(tx, &chat, k, before.as_ref(), after.as_ref(), now)?;
             Ok::<_, rusqlite::Error>(Ok((Some(id), before, after)))
         });
         match r {
@@ -244,6 +229,60 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
         out["error"] = json!(e);
     }
     Ok(out)
+}
+
+/// Write one change into the ring and trim it; answers the change id.
+fn insert_change(
+    tx: &Transaction<'_>,
+    chat: &str,
+    key: &str,
+    before: Option<&Value>,
+    after: Option<&Value>,
+    now: i64,
+) -> rusqlite::Result<i64> {
+    tx.execute(
+        "INSERT INTO settings_changes(chat_id, key, before, after, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            chat,
+            key,
+            before.map(Value::to_string),
+            after.map(Value::to_string),
+            now
+        ],
+    )?;
+    let id = tx.last_insert_rowid();
+    tx.execute(
+        "DELETE FROM settings_changes WHERE id NOT IN
+             (SELECT id FROM settings_changes ORDER BY id DESC LIMIT ?1)",
+        [RING],
+    )?;
+    Ok(id)
+}
+
+/// For a tool that changes a setting-extension key itself (rather than through
+/// `app_update_settings`): record the change so Settings lists it with Undo, and show the user
+/// the notice with Undo. Answers the change id.
+pub fn record_external_change(
+    ctx: &ToolCtx,
+    key: &str,
+    before: Value,
+    after: Value,
+) -> Result<i64, ToolError> {
+    let db = db(ctx)?;
+    let chat = ctx.caller_chat_id.clone();
+    let now = helm_core::now_ms();
+    let id = db
+        .write(|tx| insert_change(tx, &chat, key, Some(&before), Some(&after), now))
+        .map_err(sql)?;
+    ctx.events.emit(
+        AppEvent::new("external_settings")
+            .with("chatId", chat)
+            .with(
+                "changes",
+                json!([{"changeId": id, "key": key, "before": before, "after": after}]),
+            ),
+    );
+    Ok(id)
 }
 
 fn parse_json(s: Option<String>) -> Value {

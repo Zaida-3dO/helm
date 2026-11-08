@@ -47,6 +47,7 @@
     "app_stop_chat",
     "app_telegram_ask",
     "app_telegram_send",
+    "app_this_chat",
     "app_update_attention",
     "app_update_chat",
     "app_update_feedback",

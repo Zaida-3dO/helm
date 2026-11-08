@@ -13,6 +13,7 @@
 //! | [`repo_gate`] | the repository-server gate and its seeding from Claude Code |
 //! | [`status`] | the newest per-server status across workers (MC3) |
 //! | [`tools`] | their registration with the host-tool registry |
+//! | [`unencrypted`] | the notice and Undo when a chat turns on "Allow unencrypted on my network" |
 //! | [`bindings`] | generated TypeScript in `ui/src/api/generated/mcp/` |
 //!
 //! The app adds one `helm_mcp::register_worker_lines` line once the chats actor routes worker
@@ -29,6 +30,7 @@ pub mod repo_gate;
 pub mod status;
 pub mod tools;
 pub mod types;
+pub mod unencrypted;
 pub mod validate;
 
 pub use config::{McpStore, StoreError};

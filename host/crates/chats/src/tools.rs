@@ -287,6 +287,12 @@ fn list_chats(ctx: &ToolCtx, a: Value) -> ToolResult {
     Ok(out)
 }
 
+/// This chat's own details: its id (what a child chat should report back to), title, board,
+/// parent chat and model.
+fn this_chat(ctx: &ToolCtx, _a: Value) -> ToolResult {
+    meta(ctx, &ctx.caller_chat_id)
+}
+
 fn read_chat(ctx: &ToolCtx, a: Value) -> ToolResult {
     let id = chat_id_arg(&a)?;
     let limit = a
@@ -930,6 +936,14 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     let id = json!({"type": "string", "minLength": 36, "maxLength": 36});
     r.blocking(
         ToolSpec::read(
+            "app_this_chat",
+            format!("This chat's own details: its chatId (give it to a chat you start so it can report back to you with app_send_message), title, the board it is shown on (projectId, projectName), the folder it runs in, its parent chat (parentChatId), model and effort.{LINKS}"),
+            obj(json!({}), &[]),
+        ),
+        this_chat,
+    )
+    .blocking(
+        ToolSpec::read(
             "app_list_chats",
             format!("List recent Helm chats, newest first, or search their titles and messages (all query words must match). Excludes this chat unless includeCurrent is true. Each chat has its id, title, the board it is shown on (projectId, projectName; null while it is on none), the folder it runs in (folderProjectId, folderPath), its status and whether it is archived. projectId lists one board's chats (a folder project's id lists the chats running in that folder).{LINKS}"),
             obj(
@@ -990,7 +1004,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::write(
             "app_create_chat",
-            format!("Start a new chat on a board and send it a first message (framed like app_send_message). projectId is the board to show it on: a board's id from app_list_projects, or the projectId in a chat's details; it defaults to this chat's own board, and a folder project's id is refused. The chat runs in the board's folder, or in folder (an absolute path) when you name another. It nests under this chat by default; pass parentChatId to nest it under another chat on the same board, or null for top level. Chats nest at most three deep: a new chat under a chat at the deepest level goes beside it instead (under that chat's parent). Omitted model and effort use the new-chat defaults. model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>), whichever provider this chat itself runs on.{REPORT_BACK}{LINKS}{EXPLICIT}"),
+            format!("Start a new chat on a board and send it a first message (framed like app_send_message). projectId is the board to show it on: a board's id from app_list_projects, or the projectId in a chat's details; it defaults to this chat's own board, and a folder project's id is refused. Your own chat id, for the new chat to report back to, is the chatId app_this_chat returns. The chat runs in the board's folder, or in folder (an absolute path) when you name another. It nests under this chat by default; pass parentChatId to nest it under another chat on the same board, or null for top level. Chats nest at most three deep: a new chat under a chat at the deepest level goes beside it instead (under that chat's parent). Omitted model and effort use the new-chat defaults. model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>), whichever provider this chat itself runs on.{REPORT_BACK}{LINKS}{EXPLICIT}"),
             obj(
                 json!({
                     "projectId": {"type": "string", "description": "The board to show the chat on; defaults to this chat's board."},
@@ -1273,6 +1287,11 @@ mod tests {
         assert!(r["result"]["note"].as_str().unwrap().contains("data"));
         let r = call(&h, &t, &a, "app_read_chat", json!({"chatId": "nope"})).await;
         assert!(r["error"].as_str().unwrap().contains("36-character"));
+        // A chat can ask for its own details: the id a child chat reports back to.
+        let me = call(&h, &t, &b, "app_this_chat", json!({})).await;
+        assert_eq!(me["result"]["chatId"], b);
+        assert_eq!(me["result"]["link"], format!("helm://chats/{b}"));
+        assert!(me["result"].get("parentChatId").is_some() && me["result"].get("model").is_some());
     }
 
     /// Boards for the tool tests, kept in memory: the sidebar tables live in the projects crate.

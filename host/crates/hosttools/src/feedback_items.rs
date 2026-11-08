@@ -11,8 +11,8 @@
 //! - Tools: `app_create_feedback`, `app_list_feedback`, `app_get_feedback`,
 //!   `app_append_feedback`, `app_update_feedback`. Ops for Settings: `feedback_items`,
 //!   `feedback_item`, `feedback_create`, `feedback_append`, `feedback_update`.
-//! - Limits on agent writes: 10 new items and 40 entries per chat per 24 hours. Everyone: 2,000
-//!   items, 200 entries per item. Nothing is ever pruned silently, a full store refuses instead.
+//! - Limits, for everyone and with no per-chat or per-day allowance: 2,000 items, 200 entries
+//!   per item. Nothing is ever pruned silently, a full store refuses instead.
 //! - Local only. Entries returned to an agent are labelled as data, not instructions.
 
 use crate::feedback::{parse_since, text};
@@ -25,9 +25,6 @@ use serde_json::{json, Value};
 
 pub const MAX_ITEMS: i64 = 2_000;
 pub const MAX_ENTRIES_PER_ITEM: i64 = 200;
-pub const ITEMS_PER_CHAT_DAY: i64 = 10;
-pub const ENTRIES_PER_CHAT_DAY: i64 = 40;
-const DAY_MS: i64 = 86_400_000;
 const STATUSES: &[&str] = &["open", "filed", "done", "wont_do"];
 const AUTHORS: &[&str] = &["human", "agent", "agent_for_user"];
 const SNIPPET: usize = 300;
@@ -81,10 +78,6 @@ impl Author {
             kind: if for_user { "agent_for_user" } else { "agent" },
             chat: Some(chat.to_owned()),
         }
-    }
-
-    fn is_agent(&self) -> bool {
-        self.kind != "human"
     }
 }
 
@@ -145,41 +138,6 @@ fn count(
     tx.query_row(sql, p, |r| r.get(0))
 }
 
-/// The per-chat daily limits for agent writers; `new_item` also counts against the item limit.
-fn check_agent_rate(
-    tx: &Transaction<'_>,
-    a: &Author,
-    new_item: bool,
-    now: i64,
-) -> Result<(), Fail> {
-    let Some(chat) = a.chat.as_deref().filter(|_| a.is_agent()) else {
-        return Ok(());
-    };
-    let since = now - DAY_MS;
-    if new_item
-        && count(
-            tx,
-            "SELECT count(*) FROM feedback_items WHERE chat_id = ?1 AND created_at > ?2",
-            &[&chat, &since],
-        )? >= ITEMS_PER_CHAT_DAY
-    {
-        return refuse(format!(
-            "This chat has filed {ITEMS_PER_CHAT_DAY} feedback items in the last day. Append to an existing one instead."
-        ));
-    }
-    if count(
-        tx,
-        "SELECT count(*) FROM feedback_entries WHERE chat_id = ?1 AND at > ?2",
-        &[&chat, &since],
-    )? >= ENTRIES_PER_CHAT_DAY
-    {
-        return refuse(format!(
-            "This chat has written {ENTRIES_PER_CHAT_DAY} feedback entries in the last day."
-        ));
-    }
-    Ok(())
-}
-
 fn insert_entry(
     tx: &Transaction<'_>,
     item: i64,
@@ -199,7 +157,6 @@ pub fn create(db: &Database, a: &Author, title: &str, body: &str, now: i64) -> R
     let title = clean_title(title)?;
     let body = clean_text(body)?;
     db.write(|tx| {
-        check_agent_rate(tx, a, true, now)?;
         if count(tx, "SELECT count(*) FROM feedback_items", &[])? >= MAX_ITEMS {
             return refuse(format!(
                 "The feedback store is full ({MAX_ITEMS} items). Ask the user to clear out finished items."
@@ -223,7 +180,6 @@ pub fn append(db: &Database, a: &Author, id: i64, body: &str, now: i64) -> Resul
         if count(tx, "SELECT count(*) FROM feedback_items WHERE id = ?1", &[&id])? == 0 {
             return refuse(format!("There is no feedback item {id}."));
         }
-        check_agent_rate(tx, a, false, now)?;
         if count(tx, "SELECT count(*) FROM feedback_entries WHERE item_id = ?1", &[&id])?
             >= MAX_ENTRIES_PER_ITEM
         {
@@ -850,45 +806,17 @@ mod tests {
     }
 
     #[test]
-    fn limits_apply_to_agents_per_chat_and_to_everyone_per_store() {
+    fn limits_are_per_store_not_per_chat_or_day() {
         let (_d, db, ctx) = setup();
-        for i in 0..ITEMS_PER_CHAT_DAY {
+        // One chat may file many items and entries in one instant: there is no daily allowance.
+        for i in 0..50 {
             create_tool(&ctx, json!({"title": format!("t{i}"), "text": "x"}), 100).unwrap();
         }
-        assert!(refused(create_tool(
-            &ctx,
-            json!({"title": "late", "text": "x"}),
-            200
-        ))
-        .contains("filed 10"));
-        // The user is not rate limited, another chat has its own allowance, and the day slides.
-        create(&db, &Author::human(), "mine", "x", 200).unwrap();
-        let mut other = ctx.clone();
-        other.caller_chat_id = "chat-2".into();
-        create_tool(&other, json!({"title": "other", "text": "x"}), 200).unwrap();
-        create_tool(
-            &ctx,
-            json!({"title": "next day", "text": "x"}),
-            100 + DAY_MS + 1,
-        )
-        .unwrap();
-
-        // 10 items wrote 10 entries and the next-day one 1; fill chat-1 to 40 entries in the window.
         let id = create(&db, &Author::human(), "thread", "x", 1_000).unwrap();
-        for i in 0..(ENTRIES_PER_CHAT_DAY - 1) {
-            append_tool(
-                &ctx,
-                json!({"id": id, "text": format!("e{i}")}),
-                100 + DAY_MS + 2,
-            )
-            .unwrap_or_else(|e| panic!("{i}: {}", e.public));
+        for i in 0..100 {
+            append_tool(&ctx, json!({"id": id, "text": format!("e{i}")}), 1_001)
+                .unwrap_or_else(|e| panic!("{i}: {}", e.public));
         }
-        assert!(refused(append_tool(
-            &ctx,
-            json!({"id": id, "text": "more"}),
-            100 + DAY_MS + 3
-        ))
-        .contains("40 feedback entries"));
 
         // A thread holds 200 entries.
         let full = create(&db, &Author::human(), "long", "x", 5).unwrap();

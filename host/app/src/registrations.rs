@@ -93,6 +93,10 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     if let Some(web) = services.get::<helm_webtools::WebSearch>() {
         extensions.push(helm_webtools::settings_extension(web));
     }
+    // Servers a chat has opted in to plain http on the private network, with Undo.
+    if let Some(store) = services.get::<helm_mcp::McpStore>() {
+        extensions.push(helm_mcp::unencrypted::settings_extension(store));
+    }
     // The Telegram new-chat defaults: chats read the whole policy, change only model and effort.
     if let Some(profile) = services.get::<helm_core::profile::Profile>() {
         extensions.push(helm_relay::settings_extension(&profile.dir));
@@ -415,6 +419,7 @@ mod host_tool_tests {
         // Tool-surface baseline: every optional feature off, then the exact delta each adds.
         // A new tool, or one leaking past its condition, fails here.
         let base = [
+            "app_this_chat",
             "app_list_chats",
             "app_read_chat",
             "app_open_chat",

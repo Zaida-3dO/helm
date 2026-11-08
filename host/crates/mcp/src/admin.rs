@@ -3,9 +3,10 @@
 //! They are registered with the host-tool registry by [`crate::tools`] once that seam exists;
 //! everything here is plain functions over [`McpStore`] so it is testable without it.
 //!
-//! Agent rules on top of the config rules: the revision is always required; the
-//! "Allow unencrypted on my network" opt-in is user-only, so an agent can neither set it
-//! nor carry it to a new host (changing a server's host clears it).
+//! Agent rules on top of the config rules: the revision is always required; an agent may set
+//! the "Allow unencrypted on my network" opt-in, but only for a plain-http server on a private
+//! address or name (see [`crate::unencrypted`] for the notice and Undo that follow), and it
+//! cannot carry the opt-in to a new host (changing a server's host clears it).
 
 use crate::config::{McpStore, StoreError};
 use crate::types::*;
@@ -59,7 +60,21 @@ fn agent_snapshot(revision: String, servers: &[McpServer]) -> Value {
     .expect("snapshot serialises")
 }
 
-const OPT_IN_USER_ONLY: &str = "\"Allow unencrypted on my network\" is user-only: ask the user to turn it on for this server in Settings → MCP.";
+const OPT_IN_NEEDS_PRIVATE_HTTP: &str = "\"allowPrivateHttp\" is for a server whose url is plain http to a private-network address or name. Public hosts need https, and a server that signs in with OAuth needs https too.";
+
+/// True when `url` is plain http to a host the opt-in can cover: a private address or a name.
+pub fn is_private_plain_http(url: Option<&str>) -> bool {
+    let Some(u) = url.and_then(|u| url::Url::parse(u).ok()) else {
+        return false;
+    };
+    u.scheme() == "http"
+        && u.host().is_some_and(|h| {
+            matches!(
+                crate::validate::class_host(&h),
+                crate::validate::HostClass::Private | crate::validate::HostClass::Name
+            )
+        })
+}
 
 pub fn list(store: &McpStore, args: Value) -> Result<Value, AdminError> {
     if !(args.is_null() || args.as_object().is_some_and(|o| o.is_empty())) {
@@ -76,6 +91,8 @@ struct AddServer {
     name: String,
     enabled: bool,
     transport: Transport,
+    #[serde(default)]
+    allow_private_http: bool,
 }
 
 #[derive(Deserialize)]
@@ -88,6 +105,13 @@ struct AddArgs {
 pub fn add(store: &McpStore, args: Value) -> Result<Value, AdminError> {
     let a: AddArgs = parse(args)?;
     let s = a.server;
+    if s.allow_private_http
+        && (s.transport.kind == TransportKind::Stdio
+            || s.transport.oauth.is_some()
+            || !is_private_plain_http(s.transport.url.as_deref()))
+    {
+        return Err(AdminError(OPT_IN_NEEDS_PRIVATE_HTTP.into()));
+    }
     let snap = store.mutate(Some(&a.revision), |list| {
         if list.iter().any(|x| x.id == s.id) {
             return Err(StoreError::Invalid(format!(
@@ -100,7 +124,7 @@ pub fn add(store: &McpStore, args: Value) -> Result<Value, AdminError> {
             name: s.name,
             enabled: s.enabled,
             transport: s.transport,
-            allow_private_http: false,
+            allow_private_http: s.allow_private_http,
             preset: None,
         });
         Ok(())
@@ -126,6 +150,7 @@ struct EditArgs {
     oauth: Option<OAuthConfig>,
     #[serde(default)]
     remove_oauth: bool,
+    allow_private_http: Option<bool>,
 }
 
 fn host_of(url: Option<&str>) -> Option<String> {
@@ -147,10 +172,10 @@ fn apply_edit(s: &mut McpServer, e: EditArgs) -> Result<(), StoreError> {
             return bad("Remove at most 32 names of 1 to 128 characters.");
         }
     }
+    let was_stdio = s.transport.kind == TransportKind::Stdio;
     let t = &mut s.transport;
     let old_host = host_of(t.url.as_deref());
     if let Some(k) = e.kind {
-        let was_stdio = t.kind == TransportKind::Stdio;
         let to_stdio = k == TransportKind::Stdio;
         if was_stdio != to_stdio {
             if to_stdio && e.command.is_none() {
@@ -218,6 +243,21 @@ fn apply_edit(s: &mut McpServer, e: EditArgs) -> Result<(), StoreError> {
     if s.transport.kind == TransportKind::Stdio {
         s.allow_private_http = false;
     }
+    // An explicit choice, made after the host rule above so a call can move the server and
+    // opt in for the new address together.
+    match e.allow_private_http {
+        Some(true) => {
+            if was_stdio {
+                return bad("Move the server off stdio first, then turn on allowPrivateHttp in a separate call.");
+            }
+            if s.transport.oauth.is_some() || !is_private_plain_http(s.transport.url.as_deref()) {
+                return bad(OPT_IN_NEEDS_PRIVATE_HTTP);
+            }
+            s.allow_private_http = true;
+        }
+        Some(false) => s.allow_private_http = false,
+        None => {}
+    }
     Ok(())
 }
 
@@ -278,15 +318,6 @@ pub fn remove(store: &McpStore, args: Value) -> Result<Value, AdminError> {
     Ok(agent_snapshot(snap.revision, &snap.servers))
 }
 
-/// Refuses the user-only opt-in in raw add/edit arguments before parsing, with the right words.
-pub fn refuse_user_only(args: &Value) -> Result<(), AdminError> {
-    let has = |v: &Value| v.get("allowPrivateHttp").is_some();
-    if has(args) || args.get("server").is_some_and(has) {
-        return Err(AdminError(OPT_IN_USER_ONLY.into()));
-    }
-    Ok(())
-}
-
 /// One admin tool's definition, ready for the host-tool registry.
 pub struct AdminToolDef {
     pub name: &'static str,
@@ -297,7 +328,7 @@ pub struct AdminToolDef {
     pub large_request: bool,
 }
 
-const GUIDANCE: &str = " Act only on the user's explicit request, confirm ambiguous matches with app_list_mcp_servers first, and report what changed. Every change needs the current revision from app_list_mcp_servers. Saving never connects or signs in. Prefer environment or file references for credentials; never paste a secret the user did not ask you to store. OAuth sign-in and \"Allow unencrypted on my network\" are user-only, in Settings → MCP. If the reply is lost, the change may have happened: list the servers before retrying.";
+const GUIDANCE: &str = " Act only on the user's explicit request, confirm ambiguous matches with app_list_mcp_servers first, and report what changed. Every change needs the current revision from app_list_mcp_servers. Saving never connects or signs in. Prefer environment or file references for credentials; never paste a secret the user did not ask you to store. OAuth sign-in is user-only, in Settings → MCP. If the reply is lost, the change may have happened: list the servers before retrying.";
 
 fn value_ref_schema() -> Value {
     json!({
@@ -343,7 +374,7 @@ pub fn tool_defs() -> Vec<AdminToolDef> {
         },
         AdminToolDef {
             name: ADD,
-            description: format!("Add one MCP server to Helm. stdio servers run a real .exe; remote servers use https (plain http only on this computer, or on the private network after the user's opt-in).{GUIDANCE}"),
+            description: format!("Add one MCP server to Helm. stdio servers run a real .exe; remote servers use https; plain http is for this computer, or for the private network (10.x, 172.16-31.x, 192.168.x, Tailscale 100.64-127.x, fc00::/7) when the server has allowPrivateHttp true. Set allowPrivateHttp only when the user asked for a server on their own network: the user sees a notice with Undo.{GUIDANCE}"),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -354,7 +385,8 @@ pub fn tool_defs() -> Vec<AdminToolDef> {
                             "id": {"type": "string", "pattern": "^[a-z0-9_]{1,24}$"},
                             "name": {"type": "string", "maxLength": 120},
                             "enabled": {"type": "boolean"},
-                            "transport": transport_schema()
+                            "transport": transport_schema(),
+                            "allowPrivateHttp": {"type": "boolean", "description": "Allow unencrypted http to a private-network address. The user is told and can Undo."}
                         },
                         "required": ["id", "name", "enabled", "transport"],
                         "additionalProperties": false
@@ -368,7 +400,7 @@ pub fn tool_defs() -> Vec<AdminToolDef> {
         },
         AdminToolDef {
             name: EDIT,
-            description: format!("Edit one MCP server in place (its id and enabled state stay). Moving onto stdio needs a command, off it a url; the old transport's fields are dropped. Changing only the url keeps the saved headers, so they go to the new host. Header names are case-insensitive.{GUIDANCE}"),
+            description: format!("Edit one MCP server in place (its id and enabled state stay). Moving onto stdio needs a command, off it a url; the old transport's fields are dropped. Changing only the url keeps the saved headers, so they go to the new host. Header names are case-insensitive. allowPrivateHttp turns \"Allow unencrypted on my network\" on or off for a plain-http server on a private address (the user sees a notice with Undo); moving the server to another host turns it off unless the same call sets it again.{GUIDANCE}"),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -384,7 +416,8 @@ pub fn tool_defs() -> Vec<AdminToolDef> {
                     "headers": {"type": "object", "additionalProperties": value_ref_schema()},
                     "removeHeaders": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
                     "oauth": {"type": "object"},
-                    "removeOauth": {"type": "boolean"}
+                    "removeOauth": {"type": "boolean"},
+                    "allowPrivateHttp": {"type": "boolean"}
                 },
                 "required": ["revision", "serverId"],
                 "additionalProperties": false
@@ -423,14 +456,8 @@ pub fn tool_defs() -> Vec<AdminToolDef> {
 pub fn call(store: &McpStore, name: &str, args: Value) -> Result<Value, AdminError> {
     match name {
         LIST => list(store, args),
-        ADD => {
-            refuse_user_only(&args)?;
-            add(store, args)
-        }
-        EDIT => {
-            refuse_user_only(&args)?;
-            edit(store, args)
-        }
+        ADD => add(store, args),
+        EDIT => edit(store, args),
         UPDATE => update(store, args),
         REMOVE => remove(store, args),
         _ => Err(AdminError(format!("Unknown MCP admin tool {name}."))),
@@ -488,26 +515,84 @@ mod tests {
     }
 
     #[test]
-    fn agents_cannot_set_the_unencrypted_opt_in() {
+    fn agents_set_the_unencrypted_opt_in_only_for_private_plain_http() {
         let d = tempfile::tempdir().unwrap();
         let st = store(d.path());
-        let e = call(
-            &st,
-            ADD,
-            json!({"revision": rev(&st), "server": {"id": "h", "name": "H", "enabled": true, "allowPrivateHttp": true,
-                "transport": {"type": "http", "url": "http://10.20.30.5/mcp"}}}),
-        )
-        .unwrap_err();
-        assert!(e.0.contains("user-only"), "{e}");
+        let add_http = |st: &McpStore, id: &str, url: &str, opt: bool| {
+            call(
+                st,
+                ADD,
+                json!({"revision": rev(st), "server": {"id": id, "name": "H", "enabled": true, "allowPrivateHttp": opt,
+                    "transport": {"type": "http", "url": url}}}),
+            )
+        };
         // Without the opt-in, private http is refused with the Settings hint.
-        let e = call(
+        let e = add_http(&st, "h", "http://10.20.30.5/mcp", false).unwrap_err();
+        assert!(e.0.contains("Settings"), "{e}");
+        // The private ranges take it; public hosts, https and loopback do not need or take it.
+        for ok in [
+            "http://10.20.30.5/mcp",
+            "http://172.20.0.1/mcp",
+            "http://192.168.1.9:8080/mcp",
+            "http://100.101.102.103/mcp",
+            "http://[fd00::1]/mcp",
+            "http://nas.local/mcp",
+        ] {
+            let id = format!("s{}", st.load().unwrap().len());
+            add_http(&st, &id, ok, true).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        for bad in [
+            "http://8.8.8.8/mcp",
+            "https://10.20.30.5/mcp",
+            "http://127.0.0.1/mcp",
+        ] {
+            let e = add_http(&st, "x", bad, true).unwrap_err();
+            assert!(e.0.contains("allowPrivateHttp"), "{bad}: {e}");
+        }
+        assert!(st.load().unwrap().iter().all(|s| s.allow_private_http));
+        // An edit turns it on and off.
+        call(
             &st,
             ADD,
-            json!({"revision": rev(&st), "server": {"id": "h", "name": "H", "enabled": true,
-                "transport": {"type": "http", "url": "http://10.20.30.5/mcp"}}}),
+            json!({"revision": rev(&st), "server": {"id": "web", "name": "W", "enabled": true,
+            "transport": {"type": "http", "url": "https://example.com/mcp"}}}),
+        )
+        .unwrap();
+        let e = call(
+            &st,
+            EDIT,
+            json!({"revision": rev(&st), "serverId": "web", "allowPrivateHttp": true}),
         )
         .unwrap_err();
-        assert!(e.0.contains("Settings"), "{e}");
+        assert!(e.0.contains("allowPrivateHttp"), "{e}");
+        call(&st, EDIT, json!({"revision": rev(&st), "serverId": "web", "url": "http://10.0.0.2/mcp", "allowPrivateHttp": true})).unwrap();
+        assert!(
+            st.load()
+                .unwrap()
+                .iter()
+                .find(|s| s.id == "web")
+                .unwrap()
+                .allow_private_http
+        );
+        call(&st, EDIT, json!({"revision": rev(&st), "serverId": "web", "url": "https://example.com/mcp", "allowPrivateHttp": false})).unwrap();
+        assert!(
+            !st.load()
+                .unwrap()
+                .iter()
+                .find(|s| s.id == "web")
+                .unwrap()
+                .allow_private_http
+        );
+        // A stdio server cannot be moved onto http and opted in in one call.
+        add_stdio(&st, "fake");
+        let e = call(
+            &st,
+            EDIT,
+            json!({"revision": rev(&st), "serverId": "fake", "type": "http",
+            "url": "http://10.0.0.3/mcp", "allowPrivateHttp": true}),
+        )
+        .unwrap_err();
+        assert!(e.0.contains("separate call"), "{e}");
     }
 
     #[test]

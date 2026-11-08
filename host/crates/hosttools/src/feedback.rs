@@ -2,7 +2,7 @@
 //! features so the user can see what helps. Stored locally, never uploaded.
 //!
 //! - `app_feedback {feature, score −2..2, kind, note, context?}`: one entry per (chat, turn,
-//!   feature key); at most 10 per turn and 200 per chat in 24 h. A child's call is recorded with
+//!   feature key); at most 10 per turn. A child's call is recorded with
 //!   origin `subagent`.
 //! - `app_feedback_summary {...}`: per feature, the count, mean, a histogram, the kinds and the
 //!   three newest notes, labelled as data.
@@ -19,7 +19,6 @@ use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
 pub const PER_TURN: i64 = 10;
-pub const PER_DAY: i64 = 200;
 pub const KEEP: i64 = 50_000;
 pub const PRUNE_AT: i64 = 50_500;
 const DAY_MS: i64 = 86_400_000;
@@ -139,13 +138,6 @@ pub(crate) fn record(db: &Database, ctx: &ToolCtx, a: &Value, now: i64) -> ToolR
         )? >= PER_TURN
         {
             return Ok(Err("10 feedback entries were already recorded this turn."));
-        }
-        if count(
-            "SELECT count(*) FROM agent_feedback WHERE chat_id = ?1 AND at > ?2",
-            &[&chat, &(now - DAY_MS)],
-        )? >= PER_DAY
-        {
-            return Ok(Err("This chat has recorded 200 feedback entries in the last day."));
         }
         tx.execute(
             "INSERT INTO agent_feedback(chat_id, turn, feature, feature_key, score, kind, note, context, origin, at)
@@ -495,15 +487,10 @@ mod tests {
     }
 
     #[test]
-    fn two_hundred_per_chat_per_day() {
+    fn there_is_no_per_chat_daily_cap() {
         let (_d, db, ctx) = setup();
-        bulk(&db, "chat-1", 200, 1_000);
-        let e = record(&db, &ctx, &fb("late", 1), 2_000).unwrap_err();
-        assert!(e.public.contains("200 feedback"), "{}", e.public);
-        assert!(
-            record(&db, &ctx, &fb("late", 1), 1_000 + DAY_MS).is_ok(),
-            "the day slides"
-        );
+        bulk(&db, "chat-1", 300, 1_000);
+        assert!(record(&db, &ctx, &fb("late", 1), 2_000).is_ok());
     }
 
     #[test]

@@ -14,7 +14,8 @@ id: string,
  */
 name: string, enabled: boolean, transport: Transport, 
 /**
- * The user's per-server "Allow unencrypted on my network" opt-in. User-only.
+ * The per-server "Allow unencrypted on my network" opt-in. The user sets it in Settings; a
+ * chat may set it for a plain-http server on a private address, and the user is told.
  */
 allowPrivateHttp: boolean, 
 /**
