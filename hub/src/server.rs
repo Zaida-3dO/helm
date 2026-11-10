@@ -233,6 +233,13 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
             Err(mcp::ActAsError::UnknownPerson) => {
                 return refused(StatusCode::BAD_REQUEST, "there is no such person to act as")
             }
+            Err(mcp::ActAsError::NotAllowed) => {
+                return refused(
+                    StatusCode::FORBIDDEN,
+                    "this machine may not act for that person (allow it on the hub with \
+                     `helm-hub client acts-for <machine> <person>`)",
+                )
+            }
         }
     };
     let acted = acted.as_ref();
@@ -461,13 +468,21 @@ pub fn is_private(ip: IpAddr) -> bool {
 /// `POST /pair {"code": "ABCD-EFGH"}`: spend a one-time code and get this machine's token, once.
 async fn pair(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
-    if let Some(ConnectInfo(addr)) = parts.extensions.get::<ConnectInfo<SocketAddr>>() {
-        if !is_private(addr.ip()) {
-            return refused(
-                StatusCode::FORBIDDEN,
-                "pairing is only offered to the home network",
-            );
-        }
+    // Behind a reverse proxy every caller has the proxy's (private) address, so the address check
+    // means nothing there: a request the proxy passed on, which says so in these headers, is
+    // refused. The proxy must not route /pair.
+    let proxied = ["forwarded", "x-forwarded-for", "x-real-ip"]
+        .iter()
+        .any(|h| parts.headers.contains_key(*h));
+    let outside = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|ConnectInfo(addr)| !is_private(addr.ip()));
+    if proxied || outside {
+        return refused(
+            StatusCode::FORBIDDEN,
+            "pairing is only offered to the home network",
+        );
     }
     if state.pair_limit.blocked() {
         return refused(

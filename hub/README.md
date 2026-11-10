@@ -33,10 +33,12 @@ else from the repo.
 memories plus the ones other people made visible to everyone; each result says its `visibility`,
 its `owner` (the person's name) and whether it is `mine`. Someone else's private memory answers
 exactly like one that does not exist. The owner is always the caller's person (or the person the
-call acts as, below), never something a caller can set. A memory's optional `name` is a key shared
-by the whole hub, so pick names that will not collide. Memories stored before people existed (no
-owner) become private to the legacy person (`HUB_LEGACY_PERSON`, default `owner`) the first time the
-hub starts.
+call acts as, below), never something a caller can set. A memory's optional `name` is unique per
+owner: two people may each keep a memory of the same name, and `memory_read` by name finds the
+caller's own first, else a shared one. Memories stored before people existed (no owner) become
+private to the legacy person (`HUB_LEGACY_PERSON`, default `owner`) the first time the hub starts,
+so set `HUB_LEGACY_PERSON` to the name you pair your own PC under **before the first start** (see
+`HUB_TOKENS` below; `helm-hub person merge` fixes a hub that started with the wrong one).
 
 **Scope and person.** `scope` on `memory_write` and `memory_update` is `me` (the default: only the
 owner sees it) or `everyone`; `private` and `shared`, and the older `visibility`, mean the same, and
@@ -48,10 +50,16 @@ to look at other people's memories only when the user asks.
 
 **Acting as a person.** A `/mcp` request that carries `X-Helm-Person: <personId>` (a name works
 too) from a token with the `peer` scope is answered as that person: the memories it reads are that
-person's and the ones it writes belong to them. This is how a chat of one person, running on
-another person's computer, keeps to its own person's memories. Without the `peer` scope the header
-is refused with 403, an unknown person with 400; without the header nothing changes. The forwarded
-Helm tools (`app_*`) never act as anyone else: they still go down the caller's own lines.
+person's and the ones it writes belong to them. A machine may always name its own person. It may
+name another person only once it is allowed to act for them (`helm-hub client acts-for <machine>
+<person>`, or `--acts-for` when the machine is added or paired); that is how a chat of one person,
+running on another person's computer, keeps to its own person's memories. Without that allowance
+the header is refused with 403, so another person's private memories never reach a machine of
+someone else by default; the memories people shared with everyone stay readable by the whole
+household as before. Without the `peer` scope the header is refused with 403, an unknown person
+with 400; without the header nothing changes. Every call made for another person is logged with the
+machine and the person (never the arguments). The forwarded Helm tools (`app_*`) never act as
+anyone else: they still go down the caller's own lines.
 
 **The hub never computes an embedding.** Callers that have one (Helm on the PC) pass it; callers
 that do not (another assistant, or anyone while the PC is asleep) get keyword search.
@@ -89,15 +97,30 @@ They need no restart.
 
 ```
 helm-hub person add <name> | person list
-helm-hub client add --person P --machine M [--scopes S]   # prints the token once
+helm-hub person merge <from> <into>                       # fold one person into another
+helm-hub client add --person P --machine M [--scopes S] [--acts-for A]   # prints the token once
 helm-hub client list
 helm-hub client revoke <machine or id> [--person P]
-helm-hub pair --person P --machine M [--scopes S]         # prints a one-time code
+helm-hub client acts-for <machine or id> <person> [--person P]
+helm-hub client stop-acting-for <machine or id> <person> [--person P]
+helm-hub pair --person P --machine M [--scopes S] [--acts-for A]         # prints a one-time code
 ```
 
 A person that does not exist yet is made by `client add` and `pair`. Scopes are comma separated
 (`memory:rw,relay,app,peer`, the default). A machine name is unique per person while it is active.
 `client revoke` stops the token at once; an open line of that machine drops within 5 seconds.
+
+`--acts-for` (people who exist, comma separated) and `client acts-for` let a machine act for other
+people as well as its own: read their private memories and change their rules, skills and agents
+(see "Acting as a person" and "Knowledge files"). `client stop-acting-for` takes that back, and
+`client list` shows it. A machine always acts for its own person.
+
+`person merge <from> <into>` gives everything of `from` to `into` in one go: their machines (with
+their tokens, which keep working), pairing codes, the people their machines act for, their memories,
+and their rules, skills and agents (each file moves to `into`'s layer, and its old copy is deleted,
+so every device hears of both). Then `from` is removed. It changes nothing, and says why, when both
+have an active machine of the same name, a memory of the same name or a file at the same path.
+Restart the hub afterwards, so the lines and the voice line pick up the change.
 
 ### Pairing
 
@@ -110,10 +133,13 @@ POST /pair   {"code": "ABCD-EFGH"}
 ```
 
 The token is shown only in that answer and is not stored in the clear. Any other 4xx means the code
-is bad (403 wrong, expired or already used, all alike; 409 the machine name is taken); 429 means too
-many wrong codes in the last minute (10), which locks even a good code out for a while. The route
-answers only callers on this machine, the home network or Tailscale (loopback, private, link-local
-and 100.64.0.0/10 addresses).
+is bad (403 wrong, expired or already used, all alike; 409 the machine name is taken, and the code
+is left unspent); 429 means too many wrong codes in the last minute (10), which locks even a good
+code out for a while. The route answers only callers on this machine, the home network or Tailscale
+(loopback, private, link-local and 100.64.0.0/10 addresses). Behind a reverse proxy every caller
+has the proxy's address, so a request that carries `Forwarded`, `X-Forwarded-For` or `X-Real-IP`
+is refused with the same 403: the proxy must not route `/pair`. Pair from the home network, against
+the hub's own address and port.
 
 ### `HUB_TOKENS` (legacy)
 
@@ -129,6 +155,15 @@ cut at its first colon and the rest is read as its scope, so the hub refuses to 
 shorter token than you meant); use letters and digits, and `-` or `_`. A list that does not
 parse stops the hub from starting. With no clients at all the hub starts and says so; nobody can
 connect until one is added.
+
+**Set `HUB_LEGACY_PERSON` to the name you pair your own PC under before the first start.** These
+clients (a phone's `voice` token among them), the memories stored before people existed, the
+imported memories and Telegram users with no person all belong to that person. Left at `owner`
+while your PC is paired as, say, `Sam`, a phone's turns go to `owner`, who has no Helm line ("Helm
+is offline" for ever), and the old memories are not Sam's. To fix a hub that already started that
+way: run `helm-hub person merge owner Sam`, then set `HUB_LEGACY_PERSON=Sam` and restart the hub.
+The order matters: at every start the hub gives the `HUB_TOKENS` clients back to
+`HUB_LEGACY_PERSON`.
 
 ## Relay line and Helm tools
 
@@ -200,7 +235,8 @@ The hub never reads `op` or `args`; it carries the call to the device with that 
 seconds, and returns the answer under the sender's id. Its own errors are `scope` (no `peer` scope),
 `bad_request` (the sender has not announced a device, or `op` is empty or over 64 bytes), `offline`
 (no such device, or it is not up), `timeout` (no answer in 30 s, or the target's line dropped mid
-call: it may or may not have run) and `too_large` (a call or an answer over 1 MiB). A `dev_push` for
+call: it may or may not have run), `too_large` (a call or an answer over 1 MiB) and `busy` (the
+sender already has 8 calls waiting; the call was not passed on). A `dev_push` for
 a device that is not up is dropped without a word. Frames the hub does not know are ignored, so an
 older Helm is not disturbed. The largest frame the hub takes from a Helm is 4 MiB (it was 2 MiB; a
 knowledge file needs the room); every voice limit is unchanged.
@@ -214,7 +250,10 @@ folders deep and 200 bytes; no segment starting with a dot or ending in a dot or
 `\ : * ? " < > |`; no Windows device names; two paths may not differ only by letter case), up to 2
 MiB, with up to 64 MiB and 5000 files in a layer. Every change takes the next number of one counter
 (`seq`); a deletion stays as a row without a body, so devices that were off still hear of it. All
-four frames need the `peer` scope, and any `peer` line may write any existing person's layer.
+four frames need the `peer` scope. Every `peer` line reads every layer and may write `everyone`; a
+person's layer is changed only by that person's own machines, or by a machine allowed to act for
+them (`helm-hub client acts-for`, above), and such a change from another person's machine is
+logged. Any other put to it is refused with a plain sentence.
 
 | Frame | Fields |
 |---|---|
@@ -252,8 +291,9 @@ about 67 MB as base64) and ignores the `files` list, so files would be lost or s
 
 - A sender not on the allow-list gets nothing: no forward and no reply.
 - With several machines, a person's message goes to their most recently active connected line (it
-  attached, or handled a Telegram frame, last). Each person has their own queue, status message and
-  asks.
+  attached, or handled a Telegram frame, last). A message that line has not acknowledged stays with
+  it, and is sent again only there, while that line is up, so two machines never both answer it;
+  it moves on only when that line drops. Each person has their own queue, status message and asks.
 - While Helm is offline a message is queued in order and the sender is told at once. On reconnect
   the queue is delivered, each message carrying its age so Helm marks it "sent N min ago". An
   expired message is dropped and the user is told how many. `/cancel` drops the queue; `/stop`
@@ -279,7 +319,8 @@ about 67 MB as base64) and ignores the `files` list, so files would be lost or s
   was not sent to Helm: ...") and is left out. Several files sent together (an album) are gathered
   for 1.5 s after the last one and go as one message, its caption the one the album carries. One
   message carries at most 10 files and 50 MB; about 150 MB (counted as base64, which is what the
-  hub holds, a third more than the files) may wait for Helm at once. A file over
+  hub holds, a third more than the files) may wait for Helm at once, for the whole household
+  together. A file over
   any of these is left out with a reply, judged from the sizes the message gives before anything is
   downloaded and again once it has arrived. Two files are fetched at a time; a file's turn is given
   back as soon as it is downloaded, so a long transcription never holds up the downloads behind it.
@@ -372,16 +413,17 @@ Update or an array of them: 400. The endpoint exists in both modes.
 A phone (the phone app) talks to its owner's Helm: it uploads a recording or typed text, the hub
 turns a recording into text on the speech-to-text server, hands the turn to Helm down the relay
 line, and carries the answer back on a live WebSocket. Each phone has a token with the `voice`
-scope, made like any other client (`helm-hub client add --person Sam --machine phone --scopes
-voice`, or a `HUB_TOKENS` entry `phone:<token>:voice`); it reaches `/voice/*` and nothing else, and
-it speaks for its token's person only. Several phones of one person each get their own live
+scope, made like any other client (`helm-hub client add --person Sam --machine phone-voice
+--scopes voice`, or a `HUB_TOKENS` entry `phone-voice:<token>:voice`, which belongs to
+`HUB_LEGACY_PERSON`: set that to the person the phone is for, see `HUB_TOKENS` above); it reaches
+`/voice/*` and nothing else, and it speaks for its token's person only. Several phones of one person each get their own live
 socket, their own acknowledgements and their own screen state, and all of them see that person's
 replies. The protocol is "voice v1" and the phone app is built against it: the route paths, the
 frames, the limits and the token shape do not change without the phone app changing too.
 
 | Variable | |
 |---|---|
-| `HUB_VOICE` | `on` (the default) or `off`. Off: every `/voice/*` route answers 404 and the relay line drops the voice frames. Anything else: the hub refuses to start |
+| `HUB_VOICE` | `on` (the default) or `off`. On, the routes exist whether or not any voice token does; with none, every call to them answers 401 or 403 like any route without its token. Off: every `/voice/*` route answers 404 (to every caller, a voice token too) and the relay line drops the voice frames. Anything else: the hub refuses to start |
 | `HUB_VOICE_QUEUE_MINUTES` | How long a turn waits for Helm to take it, 1-1440 (default 30). The phone is told `expired` after that |
 | `HUB_VOICE_QUEUE_MAX` | How many turns may wait for Helm at once, 1-200 (default 20); one more answers 429 |
 | `HUB_VOICE_OUTBOX_MINUTES` | How long a reply or news item waits for the phone to acknowledge it, 1-10080 (default 120) |
@@ -390,8 +432,13 @@ Recordings are transcribed by the same server as Telegram's voice notes (`HUB_TE
 `_MODEL`, `_LANGUAGE`, `_TIMEOUT_MINUTES`), whether or not the bot is on. One recording is
 transcribed at a time, apart from Telegram's, and Helm is asked to free the PC's graphics memory
 first (see the bot's Recordings). Without `HUB_TELEGRAM_STT_URL` a recording is refused
-(503) and typed turns still work. Everything is held in memory: a restart drops the queue and the
-outbox, and the outbox's `seq` starts over.
+(503) and typed turns still work. Recordings waiting to be transcribed share one budget of 16 MiB
+for the whole hub: a recording that does not fit is refused at once with 429 "The hub is busy; try
+again in a moment." (judged by its `Content-Length` before it is read, and by its real size after),
+and each gives its share back once it is transcribed. An upload has 120 s to arrive. Everything is
+held in memory: a restart drops the queue and the outbox. The outbox's `seq` then starts from the
+clock (the time the hub started, in milliseconds), so it is above any `lastSeq` a phone kept from
+before the restart and the phone is sent every new entry.
 
 Every route needs `Authorization: Bearer <voice token>` (the WebSocket upgrade too). No or a bad
 token: 401 with `WWW-Authenticate: Bearer`. A token of another scope: 403. Error bodies are
@@ -399,7 +446,7 @@ token: 401 with `WWW-Authenticate: Bearer`. A token of another scope: 403. Error
 
 | Route | |
 |---|---|
-| `POST /voice/turn?turn=<id>&mode=conversation\|chat[&continues=<id>]` | A new turn. The body is `audio/ogg` (Opus), `audio/wav` (16 kHz mono) or `application/json` `{"text": "..."}` (1-8000 characters, no speech-to-text). The `turn` id is the phone's own (8-64 of `A-Za-z0-9_-`), so a retry is safe. `202 {"ok", "turn", "already": false, "helm": "online"\|"offline", "queued": true}`; the same id again `200 {"ok", "turn", "already": true, "state"}` (a turn that ended `failed` or `expired` is accepted again). 400 for a bad id, mode, empty or too-long text or an unknown `continues`; 413 for a body over 8 MiB or a recording over 130 s; 415 for another type; 429 when the queue is full; 503 for audio with no speech-to-text. Only this route lifts the 4 MiB request limit, to 8 MiB; a larger upload is read to its end and thrown away so the phone gets its 413 |
+| `POST /voice/turn?turn=<id>&mode=conversation\|chat[&continues=<id>]` | A new turn. The body is `audio/ogg` (Opus), `audio/wav` (16 kHz mono) or `application/json` `{"text": "..."}` (1-8000 characters, no speech-to-text). The `turn` id is the phone's own (8-64 of `A-Za-z0-9_-`), so a retry is safe. `202 {"ok", "turn", "already": false, "helm": "online"\|"offline", "queued": true}`; the same id again `200 {"ok", "turn", "already": true, "state"}` (a turn that ended `failed` or `expired` is accepted again). 400 for a bad id, mode, empty or too-long text or an unknown `continues`; 413 for a body over 8 MiB or a recording over 130 s; 415 for another type; 429 when the queue is full ("Helm is offline and the queue is full, so this wasn't kept." while Helm is offline, "Too many turns are waiting; try again in a moment." while it is online but has not taken them yet) or the hub holds too many recordings; 503 for audio with no speech-to-text. Only this route lifts the 4 MiB request limit, to 8 MiB; a larger upload is read to its end and thrown away so the phone gets its 413 |
 | `POST /voice/heard` | `{"reports": [{"reply", "state": "all"\|"partial"\|"none", "sentence"?, "charOffset"?, "replay"?, "at"?}]}`, 1-50 reports, at most 64 KiB (413 over). The latest report per reply is kept (at most 200 are held) and forwarded to Helm as `voice_heard` when a line is up. `200 {"ok", "forwarded": n}` |
 | `GET /voice/status` | `200 {"ok", "helm": "online"\|"offline", "version": 1, "stt": true\|false}`. Proves the address and token work; never touches speech-to-text |
 | `POST /voice/fresh` | Tell Helm to start a new voice conversation: `202 {"ok": true}`, or `409` when Helm is offline (it is not queued) |
@@ -409,26 +456,33 @@ token: 401 with `WWW-Authenticate: Bearer`. A token of another scope: 403. Error
 is closed with code 4000 "replaced"; the person's other phones keep theirs. The first frame from the
 phone must be a `hello` (`lastSeq`, `live`, `mode`, `app`) within 10 s, or the socket is closed
 (1008). The hub answers `welcome` (`version`, `helm`, `seq`, the newest seq it holds) and replays
-every kept frame above `lastSeq`. A `welcome.seq` below the phone's `lastSeq` means the hub
-restarted, and the phone starts over. Then the phone sends `ack` (cumulative), `presence` and
+every kept frame above `lastSeq`. Because a restarted hub's seqs start from the clock, its
+`welcome.seq` is above the phone's `lastSeq` and the phone keeps its place; a `lastSeq` above the
+hub's newest seq (a clock set back) gets everything the hub holds. Then the phone sends `ack` (cumulative), `presence` and
 `cancel`, and the hub sends `turn` (a turn's state: `transcribing`, `heard`, `empty`, `queued`,
 `delivered`, `failed`, `expired`, `cancelled`), `status` (Helm's working line, at most every 2.5 s,
 never kept), `reply` (an answer or news, kept and replayed) and `helm` (the line came up or went
-down). The hub **pings every 20 s** (a reverse proxy in front of it closes a socket idle for 60 s)
-and drops a socket silent for 90 s; a revoked token drops its socket within 5 seconds. Phone frames
-are at most 16 KiB. The hub never looks at the caller's address: behind a proxy it is always the
+down). The hub **pings every 20 s**, well inside the 60 s after which a reverse proxy in front of
+it closes an idle socket (the phone pings on its own schedule too), and drops a socket silent for
+90 s; a revoked token drops its socket within 5 seconds. Phone frames are at most 16 KiB. Frames
+to the phone have no cap of their own: a reply with four 1 MiB attachments is about 6 MB, which
+the phone takes. The hub never looks at the caller's address: behind a proxy it is always the
 proxy's.
 
 **Queues.** A turn goes to Helm in upload order and is sent again every 45 s until Helm sends
-`voice_ack`; a turn still being transcribed holds back the ones behind it. While Helm is offline
-turns wait (`turn: queued`) and go when a line comes up, each marked with its age. Replies and
-the final states of turns wait in the outbox (at most 200 entries and 24 MiB of attachment data;
-the oldest attachment bytes go first and the attachment is marked `dropped`) until every phone of
-the person has acknowledged them or the outbox time passes. An attachment Helm sends before its
-reply is held for 60 s waiting for it. Helm's frames are in the table in `src/relay.rs`
-(`voice`, `voice_stop`, `voice_heard`, `voice_presence`, `voice_fresh` down;
-`voice_ack`, `voice_status`, `voice_attachment`, `voice_final`, `voice_notify` up). The relay line
-accepts frames up to 2 MiB so one picture of 1 MiB fits.
+`voice_ack`; a turn still being transcribed holds back the ones behind it. With several PCs, a turn
+goes to the person's most recently active line and stays with that PC (it is sent again, and a
+cancel's `voice_stop` goes, only there) while its line is up, so two PCs never both answer it; it
+moves to another PC only when that line drops. While Helm is offline turns wait (`turn: queued`)
+and go when a line comes up, each marked with its age. Replies and the final states of turns wait
+in the outbox (at most 200 entries per person, and 24 MiB of attachment data for the whole hub; the
+oldest attachment bytes of the person whose reply went over go first, and the attachment is marked
+`dropped`) until every phone of the person has acknowledged them or the outbox time passes. An
+attachment Helm sends before its reply is held for 60 s waiting for it (at most 6 MiB of them for
+the whole hub). Helm's frames are in the table in `src/relay.rs` (`voice`, `voice_stop`,
+`voice_heard`, `voice_presence`, `voice_fresh` down; `voice_ack`, `voice_status`,
+`voice_attachment`, `voice_final`, `voice_notify` up). The relay line accepts frames up to 4 MiB,
+so one picture of 1 MiB fits easily.
 
 **Upgrading:** install the matching Helm on the PC first, then redeploy the hub; an older Helm
 ignores the voice frames and never acknowledges a turn. Put the `voice` token in the phone's
@@ -442,8 +496,8 @@ what is waiting for them, lets them read a transcript, send a message, stop a tu
 waits, all against the person's own Helm over the relay line. The hub keeps nothing about chats.
 
 **Turning it on.** Nothing is open until a person has a `remote` token: make one with
-`helm-hub client add --person Sam --machine phone --scopes remote` (or a `HUB_TOKENS` entry
-`phone:<token>:remote`) and paste it into the page, which keeps it for that browser tab only. The
+`helm-hub client add --person Sam --machine phone-remote --scopes remote` (or a `HUB_TOKENS` entry
+`phone-remote:<token>:remote`) and paste it into the page, which keeps it for that browser tab only. The
 token stands alone: it reaches nothing but the page's call. **Answering is a second switch, off
 until the person turns it on in Helm's Settings → Hub** ("Allow answering waiting prompts from the
 Remote page"); with it off the page shows what waits and says so. A permission, a plan or a
@@ -529,3 +583,12 @@ One-thread runtime, two SQLite connections (memories, and the registry that toke
 2 MB page cache. A release build idles at about 7 MB
 of working set with ~340 memories loaded (measured on Windows). Vector search is a brute-force
 scan, which is fine below roughly 50k rows.
+
+**The peak.** Idle is small, but the queues may fill, and every one of them is capped for the whole
+hub: Telegram files waiting for Helm about 150 MB (as base64), plus up to 64 MB of frames a
+reconnect builds at once and two downloads of up to 20 MB in flight; voice recordings waiting to be
+transcribed 16 MiB, attachments held for a reply 6 MiB and the voice outbox's attachments 24 MiB;
+one relay frame of up to 4 MiB per line. With everything full at once that is about 320 MB, so
+`compose.snippet.yml` gives the container 512 MB (`mem_limit: 512m`). A hub that never receives
+Telegram files stays far below that; a smaller limit only risks the container being restarted when
+the queues fill.

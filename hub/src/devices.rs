@@ -21,6 +21,7 @@
 //! | `bad_request` | the sender has not announced its device yet, or `op` is empty or over 64 bytes |
 //! | `offline` | the target is unknown, revoked or not up |
 //! | `timeout` | no `dev_result` within [`DEV_TIMEOUT`], or the target's line dropped mid-call |
+//! | `busy` | the sender already has [`MAX_DEV_CALLS`] calls waiting |
 //! | `too_large` | the call or its answer is over [`crate::relay::MAX_DEV_FRAME`] |
 
 use crate::auth::Scope;
@@ -34,6 +35,19 @@ use std::time::Duration;
 
 /// How long a `dev` call waits for the other device.
 pub const DEV_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many calls one line may have waiting at once; one more is refused with `busy`, so a
+/// device cannot pile up calls (and their arguments) on the hub.
+pub const MAX_DEV_CALLS: usize = 8;
+
+/// The `dev_result` for a call over [`MAX_DEV_CALLS`].
+pub fn busy(id: &Value) -> Value {
+    error_frame(
+        id,
+        "busy",
+        "Too many calls from this device are waiting; try again in a moment.",
+    )
+}
 
 /// Longest `op` a call may name.
 const MAX_OP: usize = 64;

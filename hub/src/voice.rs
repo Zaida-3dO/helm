@@ -6,8 +6,9 @@
 //! arrive through [`VoiceBridge::run`] from the receiver [`Lines::voice_receiver`] hands out.
 //!
 //! State is kept per person, so one person's phone never sees another person's replies, and in
-//! memory only: a restart drops it (the outbox's `seq` starts over, and the phone is told by a
-//! `welcome.seq` below its own `lastSeq`). The live socket is kept per phone, one for each voice
+//! memory only: a restart drops it. The outbox's `seq` then starts from the clock (epoch
+//! milliseconds when the bridge was made), so it is above any `lastSeq` a phone kept from before
+//! and the phone is sent every new entry. The live socket is kept per phone, one for each voice
 //! token: a newer socket of the same token replaces the older, and two phones of one person each
 //! keep their own socket, their own acked `seq` and their own screen state.
 //!
@@ -40,7 +41,7 @@ use crate::stt::Transcribe;
 use crate::telegram::now_ms;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -55,8 +56,12 @@ pub const RESEND_AFTER_MS: i64 = 45_000;
 pub const HELD_MS: i64 = 60_000;
 /// The fewest milliseconds between two working lines passed on to the phone.
 pub const STATUS_MIN_MS: i64 = 2_500;
-/// The most base64 bytes of attachments held for replies that have not arrived.
+/// The most base64 bytes of attachments held for replies that have not arrived, for the whole hub.
 pub const HELD_MAX_BYTES: usize = 6 * 1024 * 1024;
+/// The most bytes of recordings the whole hub holds while they wait to be transcribed. A
+/// recording that would go over it is refused with [`BUSY`] (429), so uploads in parallel cannot
+/// run the container out of memory.
+pub const AUDIO_BUDGET: usize = 16 * 1024 * 1024;
 /// Replies remembered, so a reply sent again is stored once.
 pub const SEEN_REPLIES: usize = 500;
 /// Heard reports kept.
@@ -82,13 +87,19 @@ pub const MAX_URL_CHARS: usize = 2000;
 pub const MAX_ATTACHMENT_B64: usize = 1_398_104;
 /// The longest recording the hub accepts, in seconds.
 pub const MAX_AUDIO_SECONDS: f64 = 130.0;
-/// Frames from the phone and to it.
+/// Frames from the phone. Frames to it have no cap of their own: the phone takes frames far
+/// larger than a reply with four attachments.
 pub const MAX_PHONE_FRAME: usize = 16 * 1024;
-pub const MAX_LIVE_FRAME: usize = 2 * 1024 * 1024;
 
 /// What the phone is told when the speech-to-text server fails; the reason goes to the log only.
-pub const STT_FAILED: &str = "The PC's speech-to-text didn't answer.";
+pub const STT_FAILED: &str = "The speech-to-text server didn't answer.";
 pub const STT_OFF: &str = "Speech-to-text isn't set up on the hub.";
+/// What a recording is told when the hub already holds [`AUDIO_BUDGET`] of them.
+pub const BUSY: &str = "The hub is busy; try again in a moment.";
+/// What a turn is told when too many turns wait.
+pub const QUEUE_FULL: &str = "Too many turns are waiting; try again in a moment.";
+/// What a turn is told when too many turns wait and Helm is offline.
+pub const QUEUE_FULL_OFFLINE: &str = "Helm is offline and the queue is full, so this wasn't kept.";
 /// What a turn Helm never took is told.
 pub const EXPIRED: &str = "Helm didn't take this one in time.";
 
@@ -606,7 +617,10 @@ pub enum Reject {
     BadId,
     BadText,
     UnknownContinues,
-    QueueFull,
+    /// Too many turns wait; `helm_online` is whether a relay line is up now.
+    QueueFull {
+        helm_online: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -669,6 +683,8 @@ struct TurnRec {
     changed: i64,
     /// The connection and time of the last send to Helm.
     sent: Option<(u64, i64)>,
+    /// The connection it last went down, kept once Helm took it, so a stop reaches that PC.
+    went: Option<u64>,
 }
 
 struct OutEntry {
@@ -723,10 +739,29 @@ struct Person {
     screen_clock: u64,
     helm_up: Option<bool>,
     last_status: i64,
+    /// What the hub-wide caps leave this person, set by the bridge before each call.
+    room: Room,
+    /// The person's relay lines that are up, set by the bridge before each call. A turn stays
+    /// with the PC it went to while that PC's line is up, so two PCs never both answer it.
+    lines_up: Vec<Arc<Line>>,
+}
+
+/// Attachment bytes one person may hold: the hub-wide caps less what everyone else holds.
+#[derive(Default, Clone, Copy)]
+struct Room {
+    held: usize,
+    outbox: usize,
 }
 
 fn turn_frame(turn: &str, state: &str) -> Value {
     json!({ "type": "turn", "turn": turn, "state": state })
+}
+
+/// Base64 bytes of attachments held for replies that have not arrived.
+fn held_bytes(held: &[Held]) -> usize {
+    held.iter()
+        .map(|h| h.attachment.data.as_ref().map_or(0, String::len))
+        .sum()
 }
 
 /// Base64 bytes of attachments in a reply frame.
@@ -751,6 +786,12 @@ impl Person {
 
     fn has_live(&self) -> bool {
         self.phones.values().any(|p| p.live.is_some())
+    }
+
+    /// The line whose current connection is `gen`, while it is up.
+    fn line_on(&self, gen: Option<u64>) -> Option<&Arc<Line>> {
+        let gen = gen?;
+        self.lines_up.iter().find(|l| l.generation() == Some(gen))
     }
 
     /// Store a frame for the phone under the next `seq`, and send it if a socket is open.
@@ -865,12 +906,7 @@ impl Person {
         }
         self.held
             .retain(|h| !(h.attachment.reply == a.reply && h.attachment.n == a.n));
-        let held: usize = self
-            .held
-            .iter()
-            .map(|h| h.attachment.data.as_ref().map_or(0, String::len))
-            .sum();
-        if held + a.data.as_ref().map_or(0, String::len) > HELD_MAX_BYTES {
+        if held_bytes(&self.held) + a.data.as_ref().map_or(0, String::len) > self.room.held {
             return;
         }
         self.held.push(Held {
@@ -925,24 +961,30 @@ impl Person {
     }
 
     fn cancel(&mut self, turn: &str, line: &Option<Arc<Line>>, now: i64) -> bool {
-        let Some(state) = self.turns.get(turn).map(|t| (t.state, t.sent.is_some())) else {
+        let Some((state, sent, went)) = self
+            .turns
+            .get(turn)
+            .map(|t| (t.state, t.sent.is_some(), t.went))
+        else {
             return false;
         };
-        let stop = |line: &Option<Arc<Line>>| {
-            if let Some(l) = line {
+        // The stop goes to the PC that has the turn while its line is up, else to the best line.
+        let to = self.line_on(went).or(line.as_ref()).cloned();
+        let stop = || {
+            if let Some(l) = &to {
                 l.send(&json!({ "type": "voice_stop", "turn": turn }));
             }
         };
         match state {
-            (TurnState::Transcribing, _) => self.end(turn, TurnState::Cancelled, now, &[]),
-            (TurnState::Queued, sent) => {
+            TurnState::Transcribing => self.end(turn, TurnState::Cancelled, now, &[]),
+            TurnState::Queued => {
                 self.end(turn, TurnState::Cancelled, now, &[]);
                 // Helm may have taken it with the ack lost on the way.
                 if sent {
-                    stop(line);
+                    stop();
                 }
             }
-            (TurnState::Delivered, _) => stop(line),
+            TurnState::Delivered => stop(),
             _ => return false,
         }
         true
@@ -1010,6 +1052,15 @@ impl Person {
                     // A turn still being transcribed holds back the ones after it.
                     TurnState::Transcribing => break,
                     TurnState::Queued => {
+                        // A turn sent down a line that is still up is sent again there only; it
+                        // moves to the best line when that line drops.
+                        let held = t.sent.and_then(|(g, _)| {
+                            self.lines_up
+                                .iter()
+                                .find(|l| l.generation() == Some(g))
+                                .map(|l| (l, g))
+                        });
+                        let (line, gen) = held.unwrap_or((line, gen));
                         let due = t
                             .sent
                             .is_none_or(|(g, at)| g != gen || now - at >= RESEND_AFTER_MS);
@@ -1029,6 +1080,7 @@ impl Person {
                         });
                         if line.send(&frame) {
                             t.sent = Some((gen, now));
+                            t.went = Some(gen);
                         }
                     }
                     _ => {}
@@ -1051,7 +1103,7 @@ impl Person {
         }
         let mut bytes: usize = self.outbox.iter().map(|e| attachment_bytes(&e.frame)).sum();
         for e in self.outbox.iter_mut() {
-            if bytes <= cfg.outbox_attachment_bytes {
+            if bytes <= self.room.outbox {
                 break;
             }
             let own = attachment_bytes(&e.frame);
@@ -1090,6 +1142,47 @@ impl Person {
     }
 }
 
+/// A share of the hub's recording budget ([`VoiceBridge::reserve_audio`]), given back on drop.
+pub struct AudioPermit {
+    held: Arc<AtomicUsize>,
+    budget: usize,
+    bytes: usize,
+}
+
+impl AudioPermit {
+    /// Hold `bytes` instead. False (and nothing changes) when growing would pass the budget.
+    pub fn resize(&mut self, bytes: usize) -> bool {
+        if bytes <= self.bytes {
+            self.held.fetch_sub(self.bytes - bytes, Ordering::SeqCst);
+            self.bytes = bytes;
+            return true;
+        }
+        let more = bytes - self.bytes;
+        let mut now = self.held.load(Ordering::SeqCst);
+        loop {
+            let Some(total) = now.checked_add(more).filter(|t| *t <= self.budget) else {
+                return false;
+            };
+            match self
+                .held
+                .compare_exchange(now, total, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => {
+                    self.bytes = bytes;
+                    return true;
+                }
+                Err(seen) => now = seen,
+            }
+        }
+    }
+}
+
+impl Drop for AudioPermit {
+    fn drop(&mut self) {
+        self.held.fetch_sub(self.bytes, Ordering::SeqCst);
+    }
+}
+
 /// The voice line of the whole hub: one [`Person`]'s state per person with a phone or a Helm.
 pub struct VoiceBridge {
     lines: Arc<Lines>,
@@ -1102,6 +1195,12 @@ pub struct VoiceBridge {
     room_wait: Duration,
     people: Mutex<HashMap<i64, Person>>,
     live_gen: AtomicU64,
+    /// Bytes of recordings held until they are transcribed, for the whole hub.
+    audio_held: Arc<AtomicUsize>,
+    audio_budget: usize,
+    /// Where every person's outbox `seq` starts: the clock when the bridge was made, so the seqs
+    /// of a hub that restarted are above any `lastSeq` a phone kept from before.
+    seq_base: u64,
 }
 
 impl VoiceBridge {
@@ -1114,7 +1213,33 @@ impl VoiceBridge {
             room_wait: crate::stt::ROOM_WAIT,
             people: Mutex::new(HashMap::new()),
             live_gen: AtomicU64::new(0),
+            seq_base: u64::try_from(now_ms()).unwrap_or(0),
+            audio_held: Arc::new(AtomicUsize::new(0)),
+            audio_budget: AUDIO_BUDGET,
         }
+    }
+
+    /// Hold at most `bytes` of recordings (instead of [`AUDIO_BUDGET`]).
+    pub fn with_audio_budget(mut self, bytes: usize) -> Self {
+        self.audio_budget = bytes;
+        self
+    }
+
+    /// Set aside `bytes` of the hub's recording budget, given back when the permit drops (once
+    /// the recording is transcribed, or refused). `None`: the hub holds too much already.
+    pub fn reserve_audio(&self, bytes: usize) -> Option<AudioPermit> {
+        let mut permit = AudioPermit {
+            held: self.audio_held.clone(),
+            budget: self.audio_budget,
+            bytes: 0,
+        };
+        permit.resize(bytes).then_some(permit)
+    }
+
+    /// Start every outbox `seq` above `base` instead of the clock (tests use small numbers).
+    pub fn with_seq_base(mut self, base: u64) -> Self {
+        self.seq_base = base;
+        self
     }
 
     /// Wait `wait` (instead of [`crate::stt::ROOM_WAIT`]) for Helm to make room for speech.
@@ -1147,7 +1272,29 @@ impl VoiceBridge {
     ) -> (R, usize) {
         let line = self.lines.best_up(person);
         let mut people = self.people.lock().unwrap_or_else(|p| p.into_inner());
-        let p = people.entry(person).or_default();
+        // The attachment caps are for the whole hub: this person gets what the others leave.
+        let (held, outbox) =
+            people
+                .iter()
+                .filter(|(id, _)| **id != person)
+                .fold((0, 0), |(h, o), (_, p)| {
+                    let out: usize = p.outbox.iter().map(|e| attachment_bytes(&e.frame)).sum();
+                    (h + held_bytes(&p.held), o + out)
+                });
+        let p = people.entry(person).or_insert_with(|| Person {
+            next_seq: self.seq_base,
+            ..Person::default()
+        });
+        p.room = Room {
+            held: HELD_MAX_BYTES.saturating_sub(held),
+            outbox: self.cfg.outbox_attachment_bytes.saturating_sub(outbox),
+        };
+        p.lines_up = self
+            .lines
+            .up_lines_of(person)
+            .into_iter()
+            .map(|(_, l)| l)
+            .collect();
         let r = f(p, &line);
         let forwarded = p.sync(&line, &self.cfg, now);
         (r, forwarded)
@@ -1198,7 +1345,9 @@ impl VoiceBridge {
             }
             let active = p.turns.values().filter(|r| !r.state.finished()).count();
             if active >= queue_max {
-                return Begin::Rejected(Reject::QueueFull);
+                return Begin::Rejected(Reject::QueueFull {
+                    helm_online: online,
+                });
             }
             let typed = text.is_some();
             p.turns.insert(
@@ -1217,6 +1366,7 @@ impl VoiceBridge {
                     },
                     changed: now,
                     sent: None,
+                    went: None,
                 },
             );
             p.order.push_back(t.id.clone());
@@ -1499,7 +1649,7 @@ mod tests {
             scopes: Scopes::default(),
         });
         Rig {
-            bridge: VoiceBridge::new(lines, cfg),
+            bridge: VoiceBridge::new(lines, cfg).with_seq_base(0),
             line,
         }
     }
@@ -1847,7 +1997,10 @@ mod tests {
         let begin = r.bridge.begin_turn(PERSON, second, T0 + 1);
         assert_eq!(begin, Begin::New { helm_online: false });
         let third = r.bridge.begin_turn(PERSON, typed(3, "third"), T0);
-        assert_eq!(third, Begin::Rejected(Reject::QueueFull));
+        assert_eq!(
+            third,
+            Begin::Rejected(Reject::QueueFull { helm_online: false })
+        );
         frames(&mut live);
         assert!(!r.bridge.status(PERSON).helm_online);
 
@@ -1869,6 +2022,13 @@ mod tests {
         assert_eq!(down[1]["continues"], Value::Null);
         assert_eq!(down[2]["continues"], json!(id(1)));
         assert_eq!(down[2]["sentAt"], T0 + 1);
+
+        // A full queue with Helm online says so: Helm has not taken the two yet.
+        let busy = r.bridge.begin_turn(PERSON, typed(3, "third"), T0 + 120_001);
+        assert_eq!(
+            busy,
+            Begin::Rejected(Reject::QueueFull { helm_online: true })
+        );
 
         // Not sent again before 45 s, then sent again.
         r.bridge.tick(T0 + 120_000 + 44_000);
@@ -1965,6 +2125,63 @@ mod tests {
             .map(|f| f["live"].as_bool().unwrap())
             .collect();
         assert_eq!(presence, [false]);
+
+        // A second PC of the person comes up and is the newest: a turn the first PC has not
+        // acknowledged is sent again to the first only, and its stop goes there too, while that
+        // line is up. Once it drops the turn moves to the other PC.
+        let laptop = r.bridge.lines.line_for(&Client {
+            id: 2,
+            name: "laptop".into(),
+            person_id: PERSON,
+            person: "p".into(),
+            machine: "laptop".into(),
+            scopes: Scopes::default(),
+        });
+        let t = T0 + 400_000;
+        r.bridge
+            .begin_turn(PERSON, typed(20, "Synthetic again."), t);
+        assert_eq!(types(&drain_json(&mut helm)), ["voice"]);
+        let (tx, mut other) = mpsc::unbounded_channel();
+        let laptop_gen = laptop.attach(tx);
+        drain_json(&mut other);
+        r.bridge.tick(t + 46_000);
+        let shown = |fs: Vec<Value>| -> Vec<String> {
+            fs.iter()
+                .filter(|f| f["type"] != "voice_presence")
+                .map(|f| f["type"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(shown(drain_json(&mut helm)), ["voice"]);
+        assert!(
+            shown(drain_json(&mut other)).is_empty(),
+            "the newer PC got nothing"
+        );
+        r.bridge
+            .on_upstream(PERSON, Upstream::VoiceAck(id(20)), t + 47_000);
+        assert!(r.bridge.cancel(PERSON, &id(20), t + 48_000));
+        assert_eq!(shown(drain_json(&mut helm)), ["voice_stop"]);
+        assert!(shown(drain_json(&mut other)).is_empty());
+        r.bridge
+            .begin_turn(PERSON, typed(21, "Synthetic third."), t + 49_000);
+        assert_eq!(
+            shown(drain_json(&mut other)),
+            ["voice"],
+            "new turns go to the newest"
+        );
+        r.bridge
+            .on_upstream(PERSON, Upstream::VoiceAck(id(21)), t + 50_000);
+        r.bridge
+            .begin_turn(PERSON, typed(22, "Synthetic fourth."), t + 51_000);
+        assert_eq!(shown(drain_json(&mut other)), ["voice"]);
+        laptop.detach(laptop_gen);
+        r.bridge.tick(t + 52_000);
+        let moved = drain_json(&mut helm);
+        assert_eq!(shown(moved.clone()), ["voice"]);
+        assert_eq!(
+            moved.last().unwrap()["id"],
+            json!(id(22)),
+            "moved once its PC dropped"
+        );
     }
 
     #[tokio::test]
@@ -2205,6 +2422,30 @@ mod tests {
         r.bridge.tick(T0 + 100 + keep);
         let (_g5, mut last) = phone(&r, 0, false, T0 + 101 + keep);
         assert_eq!(frames(&mut last).len(), 1);
+
+        // The attachment cap is for the whole hub: another person's 200 bytes leave this person
+        // 50, so their own pictures lose their bytes (and the other person's keep theirs).
+        let t1 = T0 + 200 + keep;
+        for (person, reply) in [(PERSON + 1, 20), (PERSON, 21)] {
+            r.bridge.on_upstream(person, picture(reply, 1), t1);
+            r.bridge.on_upstream(person, picture(reply, 2), t1);
+            r.bridge.on_upstream(person, answer(reply, 70), t1 + 1);
+        }
+        let (_g6, mut sixth) = phone(&r, 0, false, t1 + 2);
+        let got = frames(&mut sixth);
+        assert_eq!((got.len(), &got[1]["id"]), (2, &json!(id(21))));
+        assert_eq!(shape(&got[1]), [(false, true), (false, true)]);
+
+        // After a restart the hub's seqs start from the clock, above the phone's old lastSeq: the
+        // phone keeps its place and is sent every new entry.
+        let mut later = rig(VoiceConfig::default());
+        later.bridge = later.bridge.with_seq_base(1_000);
+        later.bridge.on_upstream(PERSON, answer(1, 51), T0);
+        later.bridge.on_upstream(PERSON, answer(2, 52), T0 + 1);
+        let (_g7, mut back) = phone(&later, 9, false, T0 + 2);
+        let got = frames(&mut back);
+        assert_eq!(got[0]["seq"], 1_002, "the welcome is above the old lastSeq");
+        assert_eq!(seqs(got), [1_001, 1_002]);
     }
 
     #[tokio::test]

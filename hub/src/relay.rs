@@ -212,6 +212,15 @@ pub trait Route: Send + Sync {
     /// the connection changes.
     fn generation(&self) -> Option<u64>;
     fn send(&self, frame: &Value) -> bool;
+    /// Whether the connection `generation` is still up on this route. A person's route has one
+    /// per machine, so a message stays with the machine it went to while that one is up.
+    fn holds(&self, generation: u64) -> bool {
+        self.generation() == Some(generation)
+    }
+    /// Send down the connection `generation` only; false when it is not up.
+    fn send_on(&self, generation: u64, frame: &Value) -> bool {
+        self.holds(generation) && self.send(frame)
+    }
     /// Ask this route's Helm to free the graphics memory speech-to-text needs, waiting at most
     /// `wait` and ignoring any failure (see [`crate::stt::make_room_on`]). A route that is one
     /// bare [`Line`] does nothing; a person's route (see `lines.rs`) asks their Helm.

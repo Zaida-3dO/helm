@@ -69,6 +69,18 @@ pub struct ClientRow {
     pub run: bool,
 }
 
+/// What [`Registry::merge_person`] moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    pub from: Person,
+    pub into: Person,
+    /// Machines, revoked ones included.
+    pub machines: usize,
+    pub memories: usize,
+    /// Rules, skills and agents.
+    pub files: usize,
+}
+
 /// A machine just paired: its token is shown once and never stored in the clear.
 #[derive(Debug, Clone)]
 pub struct Paired {
@@ -99,6 +111,11 @@ CREATE TABLE IF NOT EXISTS clients (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS clients_machine
     ON clients(person_id, machine_name COLLATE NOCASE) WHERE revoked_at IS NULL;
+CREATE TABLE IF NOT EXISTS acts_for (
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    person_id INTEGER NOT NULL REFERENCES people(id),
+    PRIMARY KEY (client_id, person_id)
+);
 CREATE TABLE IF NOT EXISTS pairings (
     code_sha256  BLOB PRIMARY KEY,
     person_id    INTEGER NOT NULL REFERENCES people(id),
@@ -158,6 +175,15 @@ impl Registry {
                 "ALTER TABLE clients ADD COLUMN device_uid TEXT;
                  ALTER TABLE clients ADD COLUMN device_name TEXT;
                  ALTER TABLE clients ADD COLUMN run INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        // A registry made before acting for others existed gains the pairing's list of people.
+        let has_acts_for = conn
+            .prepare("SELECT 1 FROM pragma_table_info('pairings') WHERE name = 'acts_for'")?
+            .exists([])?;
+        if !has_acts_for {
+            conn.execute_batch(
+                "ALTER TABLE pairings ADD COLUMN acts_for TEXT NOT NULL DEFAULT '';",
             )?;
         }
         Ok(Registry { conn })
@@ -564,18 +590,119 @@ impl Registry {
         Ok(())
     }
 
-    /// Whether any client could authenticate.
-    pub fn has_active_clients(&self) -> bool {
+    /// Fold the person `from` into `into` (names or ids): their machines, pairing codes, the
+    /// people their machines act for, their memories and their rules, skills and agents become
+    /// `into`'s, and `from` is removed. All in one transaction; refused, with nothing changed,
+    /// when both have an active machine, a memory name or a knowledge path in common.
+    pub fn merge_person(&mut self, from: &str, into: &str) -> Result<Merged> {
+        let from = self.find_person(from)?;
+        let into = self.find_person(into)?;
+        if from.id == into.id {
+            return Err(RegistryError::Invalid(
+                "a person cannot be merged into themselves".into(),
+            ));
+        }
+        let tx = self.conn.transaction()?;
+        let has_table = |name: &str| -> rusqlite::Result<bool> {
+            tx.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?
+                .exists([name])
+        };
+        let machines: Vec<String> = tx
+            .prepare(
+                "SELECT f.machine_name FROM clients f JOIN clients t
+                     ON t.machine_name = f.machine_name COLLATE NOCASE
+                 WHERE f.person_id = ?1 AND t.person_id = ?2
+                     AND f.revoked_at IS NULL AND t.revoked_at IS NULL",
+            )?
+            .query_map(params![from.id, into.id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if !machines.is_empty() {
+            return Err(RegistryError::Invalid(format!(
+                "both people have a machine called {}; revoke one first",
+                machines.join(", ")
+            )));
+        }
+        let memories = if has_table("memories")? {
+            crate::store::move_owner(&tx, from.id, into.id)?.map_err(RegistryError::Invalid)?
+        } else {
+            0
+        };
+        let files = if has_table("knowledge_files")? {
+            crate::knowledge::move_layer(&tx, from.id, into.id)?.map_err(RegistryError::Invalid)?
+        } else {
+            0
+        };
+        let moved = tx.execute(
+            "UPDATE clients SET person_id = ?2 WHERE person_id = ?1",
+            params![from.id, into.id],
+        )?;
+        tx.execute(
+            "UPDATE pairings SET person_id = ?2 WHERE person_id = ?1",
+            params![from.id, into.id],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO acts_for (client_id, person_id)
+             SELECT client_id, ?2 FROM acts_for WHERE person_id = ?1",
+            params![from.id, into.id],
+        )?;
+        tx.execute("DELETE FROM acts_for WHERE person_id = ?1", [from.id])?;
+        tx.execute("DELETE FROM people WHERE id = ?1", [from.id])?;
+        tx.commit()?;
+        Ok(Merged {
+            from,
+            into,
+            machines: moved,
+            memories,
+            files,
+        })
+    }
+
+    // ---- acting for other people ----
+
+    /// Whether the machine `client_id` may act for `person_id`: it is that person's own machine,
+    /// or it was allowed to with `--acts-for`. Only then may it read the person's private
+    /// memories or change their rules, skills and agents.
+    pub fn may_act_for(&self, client_id: i64, person_id: i64) -> bool {
         self.conn
             .query_row(
-                "SELECT 1 FROM clients WHERE revoked_at IS NULL LIMIT 1",
-                [],
+                "SELECT 1 FROM clients c WHERE c.id = ?1 AND c.revoked_at IS NULL AND
+                 (c.person_id = ?2 OR EXISTS
+                     (SELECT 1 FROM acts_for a WHERE a.client_id = c.id AND a.person_id = ?2))",
+                params![client_id, person_id],
                 |_| Ok(()),
             )
             .optional()
             .ok()
             .flatten()
             .is_some()
+    }
+
+    /// Let the machine `client_id` act for `person` (a name or an id), or stop it (`allow`
+    /// false). Returns the person.
+    pub fn set_acts_for(&mut self, client_id: i64, person: &str, allow: bool) -> Result<Person> {
+        let person = self.find_person(person)?;
+        if allow {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO acts_for (client_id, person_id) VALUES (?1, ?2)",
+                params![client_id, person.id],
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM acts_for WHERE client_id = ?1 AND person_id = ?2",
+                params![client_id, person.id],
+            )?;
+        }
+        Ok(person)
+    }
+
+    /// The other people the machine `client_id` may act for, by name.
+    pub fn acts_for(&self, client_id: i64) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.name FROM acts_for a JOIN people p ON p.id = a.person_id
+             WHERE a.client_id = ?1 ORDER BY p.name",
+        )?;
+        let rows = stmt.query_map([client_id], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     // ---- pairing ----
@@ -589,6 +716,24 @@ impl Registry {
         scopes: &Scopes,
         now_ms: i64,
     ) -> Result<(String, i64)> {
+        self.create_pairing_acting(person, machine, scopes, &[], now_ms)
+    }
+
+    /// [`Registry::create_pairing`] for a machine that may also act for the people `acts_for`
+    /// (names or ids, who must exist).
+    pub fn create_pairing_acting(
+        &mut self,
+        person: &str,
+        machine: &str,
+        scopes: &Scopes,
+        acts_for: &[&str],
+        now_ms: i64,
+    ) -> Result<(String, i64)> {
+        let others = acts_for
+            .iter()
+            .map(|who| self.find_person(who).map(|p| p.id.to_string()))
+            .collect::<Result<Vec<_>>>()?
+            .join(",");
         let person = self.ensure_person(person)?;
         let machine = clean_name(machine, "a machine name")?;
         if self.active_machine(person.id, &machine)?.is_some() {
@@ -607,25 +752,40 @@ impl Registry {
         self.conn.execute(
             &format!(
                 "INSERT INTO pairings (code_sha256, person_id, machine_name, scopes, created_at,
-                 expires_ms) VALUES (?1, ?2, ?3, ?4, {NOW}, ?5)"
+                 expires_ms, acts_for) VALUES (?1, ?2, ?3, ?4, {NOW}, ?5, ?6)"
             ),
             params![
                 digest(&code).to_vec(),
                 person.id,
                 machine,
                 scopes.to_csv(),
-                expires
+                expires,
+                others
             ],
         )?;
         Ok((code, expires))
     }
 
     /// Spend a pairing code. Single use: the second try, an expired code and a wrong code all
-    /// answer the same way, so nothing tells a guesser which codes exist.
+    /// answer the same way, so nothing tells a guesser which codes exist. The code is claimed and
+    /// the machine added in one transaction, so a machine that cannot be added leaves the code
+    /// unspent.
     pub fn redeem_pairing(&mut self, code: &str, now_ms: i64) -> Result<Paired> {
-        let bad = || RegistryError::BadCode;
-        let code = normalize_code(code).ok_or_else(bad)?;
+        let code = normalize_code(code).ok_or(RegistryError::BadCode)?;
         let hash = digest(&code).to_vec();
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let paired = self.redeem_claimed(&hash, now_ms);
+        match &paired {
+            Ok(_) => self.conn.execute_batch("COMMIT")?,
+            Err(_) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+            }
+        }
+        paired
+    }
+
+    /// [`Registry::redeem_pairing`] inside its transaction.
+    fn redeem_claimed(&mut self, hash: &[u8], now_ms: i64) -> Result<Paired> {
         let claimed = self.conn.execute(
             &format!(
                 "UPDATE pairings SET used_at = {NOW}
@@ -634,19 +794,30 @@ impl Registry {
             params![hash, now_ms],
         )?;
         if claimed != 1 {
-            return Err(bad());
+            return Err(RegistryError::BadCode);
         }
-        let (person_id, machine, scopes): (i64, String, String) = self.conn.query_row(
-            "SELECT person_id, machine_name, scopes FROM pairings WHERE code_sha256 = ?1",
-            [&hash],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
+        let (person_id, machine, scopes, acts_for): (i64, String, String, String) =
+            self.conn.query_row(
+                "SELECT person_id, machine_name, scopes, acts_for FROM pairings
+                 WHERE code_sha256 = ?1",
+                [hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
         let person = self
             .person_by_id(person_id)?
             .ok_or_else(|| RegistryError::NotFound("the person is gone".into()))?;
         let scopes = Scopes::parse_list(&scopes).map_err(RegistryError::Invalid)?;
         let token = new_token();
-        self.insert_client(&person, &machine, &scopes, &token, None)
+        let paired = self.insert_client(&person, &machine, &scopes, &token, None)?;
+        for other in acts_for.split(',').filter_map(|id| id.parse::<i64>().ok()) {
+            // A person removed since the code was made is passed over.
+            self.conn.execute(
+                "INSERT OR IGNORE INTO acts_for (client_id, person_id)
+                 SELECT ?1, id FROM people WHERE id = ?2",
+                params![paired.client.id, other],
+            )?;
+        }
+        Ok(paired)
     }
 }
 
@@ -782,6 +953,92 @@ mod tests {
             .is_none());
         assert!(!r.is_active(c.id));
         assert!(r.create_pairing("sam", "Laptop", &scopes, NOW).is_ok());
+    }
+
+    #[test]
+    fn merging_a_person_moves_everything_or_nothing() {
+        use crate::knowledge::{put, Put};
+        use crate::store::{NewMemory, Store};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hub.db");
+        let mut store = Store::open(&path).unwrap();
+        let mut r = Registry::open(&path).unwrap();
+        let scopes = Scopes::parse_list(crate::auth::DEFAULT_PAIRED_SCOPES).unwrap();
+        let owner = r.ensure_person("owner").unwrap();
+        let sam = r.ensure_person("Sam").unwrap();
+        let phone = r.add_client("owner", "phone", &scopes).unwrap().client.id;
+        r.add_client("Sam", "pc", &scopes).unwrap();
+        let memory = |store: &mut Store, owner: i64, name: &str| {
+            store
+                .insert(NewMemory {
+                    title: name.into(),
+                    body: "synthetic".into(),
+                    name: Some(name.into()),
+                    owner: Some(owner),
+                    ..Default::default()
+                })
+                .unwrap()
+        };
+        let old = memory(&mut store, owner.id, "a");
+        memory(&mut store, sam.id, "b");
+        let file = |store: &mut Store, person: i64, path: &str| {
+            let layer = format!("person:{person}");
+            put(
+                store.conn_mut(),
+                &Put {
+                    layer: &layer,
+                    path,
+                    base_seq: 0,
+                    sha256: "",
+                    deleted: false,
+                    body: Some("eA=="),
+                    device_uid: None,
+                },
+            )
+            .unwrap()
+        };
+        file(&mut store, owner.id, "rules/x.md");
+        file(&mut store, sam.id, "rules/y.md");
+
+        let m = r.merge_person("owner", "Sam").unwrap();
+        assert_eq!((m.machines, m.memories, m.files), (1, 1, 1));
+        assert!(r.find_person("owner").is_err());
+        assert_eq!(r.client_by_id(phone).unwrap().unwrap().person, "Sam");
+        assert_eq!(store.get(old).unwrap().owner_person, Some(sam.id));
+        let (files, _, _) = crate::knowledge::pull(store.conn(), 2, 10).unwrap();
+        let moved: Vec<(&str, &str, bool)> = files
+            .iter()
+            .map(|f| {
+                (
+                    f["layer"].as_str().unwrap(),
+                    f["path"].as_str().unwrap(),
+                    f["deleted"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        let (old_layer, new_layer) = (format!("person:{}", owner.id), format!("person:{}", sam.id));
+        assert_eq!(
+            moved,
+            [
+                (new_layer.as_str(), "rules/x.md", false),
+                (old_layer.as_str(), "rules/x.md", true)
+            ],
+            "the new copy and the old one's deletion both take new seqs"
+        );
+
+        // A memory name, a knowledge path or a machine name both use stops the merge whole.
+        let kit = r.ensure_person("Kit").unwrap();
+        memory(&mut store, kit.id, "b");
+        let clash = r.merge_person("Kit", "Sam").unwrap_err().to_string();
+        assert!(clash.contains("memories named b"), "{clash}");
+        assert_eq!(r.find_person("Kit").unwrap().id, kit.id);
+        let ivy = r.ensure_person("Ivy").unwrap();
+        file(&mut store, ivy.id, "rules/X.md");
+        let clash = r.merge_person("Ivy", "Sam").unwrap_err().to_string();
+        assert!(clash.contains("rules/X.md"), "{clash}");
+        r.add_client("Ivy", "PC", &scopes).unwrap();
+        assert!(r.merge_person("Ivy", "Sam").is_err());
+        assert!(r.merge_person("Sam", "sam").is_err(), "not into themselves");
     }
 
     #[test]

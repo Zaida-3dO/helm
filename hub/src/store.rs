@@ -196,7 +196,7 @@ pub struct Store {
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS memories (
     id          INTEGER PRIMARY KEY,
-    name        TEXT UNIQUE,
+    name        TEXT,
     title       TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     kind        TEXT,
@@ -292,6 +292,74 @@ fn is_iso_since(s: &str) -> bool {
     rest.is_empty() || rest == "Z"
 }
 
+/// Give every memory of the person `from` to `into` (for `helm-hub person merge`). `Ok(Err)`
+/// names the memory names both already use, and nothing moves.
+pub(crate) fn move_owner(
+    conn: &Connection,
+    from: i64,
+    into: i64,
+) -> rusqlite::Result<std::result::Result<usize, String>> {
+    let clashes: Vec<String> = conn
+        .prepare(
+            "SELECT f.name FROM memories f JOIN memories t ON t.name = f.name
+             WHERE f.owner_person = ?1 AND t.owner_person = ?2 ORDER BY f.name LIMIT 10",
+        )?
+        .query_map(params![from, into], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !clashes.is_empty() {
+        return Ok(Err(format!(
+            "both people have memories named {}; rename or delete one of each first",
+            clashes.join(", ")
+        )));
+    }
+    Ok(Ok(conn.execute(
+        "UPDATE memories SET owner_person = ?2 WHERE owner_person = ?1",
+        params![from, into],
+    )?))
+}
+
+/// Rebuild `memories` without the hub-wide `UNIQUE` on `name` (SQLite cannot drop a column's
+/// constraint in place). Ids are kept, so the tags and the search index still match; foreign keys
+/// are off meanwhile so dropping the old table does not take the tags with it.
+fn names_per_owner(conn: &Connection) -> rusqlite::Result<()> {
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let rebuilt = conn.execute_batch(
+        "BEGIN;
+         CREATE TABLE memories_new (
+             id          INTEGER PRIMARY KEY,
+             name        TEXT,
+             title       TEXT NOT NULL,
+             description TEXT NOT NULL DEFAULT '',
+             kind        TEXT,
+             body        TEXT NOT NULL,
+             tags        TEXT NOT NULL DEFAULT '[]',
+             source      TEXT,
+             links       TEXT NOT NULL DEFAULT '[]',
+             vector      BLOB,
+             model       TEXT,
+             dim         INTEGER,
+             created_at  TEXT NOT NULL,
+             updated_at  TEXT NOT NULL,
+             owner_person INTEGER,
+             visibility  TEXT NOT NULL DEFAULT 'private'
+         );
+         INSERT INTO memories_new (id, name, title, description, kind, body, tags, source, links,
+             vector, model, dim, created_at, updated_at, owner_person, visibility)
+         SELECT id, name, title, description, kind, body, tags, source, links,
+             vector, model, dim, created_at, updated_at, owner_person, visibility FROM memories;
+         DROP TABLE memories;
+         ALTER TABLE memories_new RENAME TO memories;
+         COMMIT;",
+    );
+    if rebuilt.is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    rebuilt?;
+    // The table's indexes and triggers went with the old table.
+    conn.execute_batch(SCHEMA)
+}
+
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 const SUMMARY_COLS: &str =
     "m.id, m.name, m.title, m.description, m.kind, m.tags, m.updated_at, m.visibility, m.owner_person";
@@ -322,8 +390,20 @@ impl Store {
                  ALTER TABLE memories ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private';",
             )?;
         }
+        // A store from when a name was unique across the whole hub makes it unique per owner.
+        let hub_wide_names = conn
+            .prepare(
+                "SELECT 1 FROM pragma_index_list('memories') l
+                 WHERE l.origin = 'u' AND (SELECT group_concat(name) FROM pragma_index_info(l.name))
+                     = 'name'",
+            )?
+            .exists([])?;
+        if hub_wide_names {
+            names_per_owner(&conn)?;
+        }
         conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS memories_owner ON memories(owner_person, visibility);",
+            "CREATE INDEX IF NOT EXISTS memories_owner ON memories(owner_person, visibility);
+             CREATE UNIQUE INDEX IF NOT EXISTS memories_owner_name ON memories(owner_person, name);",
         )?;
         // The household's knowledge files share this database (see `knowledge.rs`).
         crate::knowledge::init(&conn)?;
@@ -371,17 +451,22 @@ impl Store {
                 return Err(StoreError::Invalid("name must not be empty".into()));
             }
         }
+        let owner = m.owner.or(self.default_owner);
         let tx = self.conn.transaction()?;
         let exists: bool = match &m.name {
             Some(n) => tx
-                .query_row("SELECT 1 FROM memories WHERE name = ?1", [n], |_| Ok(()))
+                .query_row(
+                    "SELECT 1 FROM memories WHERE name = ?1 AND owner_person IS ?2",
+                    params![n, owner],
+                    |_| Ok(()),
+                )
                 .optional()?
                 .is_some(),
             None => false,
         };
         if exists {
             return Err(StoreError::Invalid(format!(
-                "a memory named {:?} already exists",
+                "you already have a memory named {:?}",
                 m.name.unwrap_or_default()
             )));
         }
@@ -403,7 +488,7 @@ impl Store {
                 blob,
                 model,
                 dim,
-                m.owner.or(self.default_owner),
+                owner,
                 m.visibility.as_str(),
             ],
         )?;
@@ -414,11 +499,23 @@ impl Store {
     }
 
     pub fn get(&self, id: i64) -> Result<Memory> {
-        self.get_where("id = ?1", rusqlite::types::Value::Integer(id))
+        self.get_where("id = ?1", vec![id.into()])
     }
 
+    /// The memory called `name`, whoever owns it (the oldest, when several people use the name).
     pub fn get_by_name(&self, name: &str) -> Result<Memory> {
-        self.get_where("name = ?1", rusqlite::types::Value::Text(name.to_owned()))
+        self.get_where(
+            "name = ?1 ORDER BY id LIMIT 1",
+            vec![name.to_owned().into()],
+        )
+    }
+
+    /// The memory `owner` keeps under `name` (names are unique per owner).
+    pub fn get_by_owner_name(&self, owner: Option<i64>, name: &str) -> Result<Memory> {
+        self.get_where(
+            "name = ?1 AND owner_person IS ?2",
+            vec![name.to_owned().into(), owner.into()],
+        )
     }
 
     /// One memory as `viewer` may see it: their own or a shared one, else "not found" (the same
@@ -427,12 +524,18 @@ impl Store {
         self.get(id).and_then(|m| visible_to(m, viewer))
     }
 
-    /// [`Store::get_visible`], by name.
+    /// [`Store::get_visible`], by name: the viewer's own memory of that name, else the oldest
+    /// shared one.
     pub fn get_by_name_visible(&self, name: &str, viewer: i64) -> Result<Memory> {
-        self.get_by_name(name).and_then(|m| visible_to(m, viewer))
+        self.get_where(
+            "name = ?1 AND (owner_person = ?2 OR visibility = 'shared')
+             ORDER BY owner_person IS ?2 DESC, id LIMIT 1",
+            vec![name.to_owned().into(), viewer.into()],
+        )
+        .and_then(|m| visible_to(m, viewer))
     }
 
-    fn get_where(&self, cond: &str, arg: rusqlite::types::Value) -> Result<Memory> {
+    fn get_where(&self, cond: &str, args: Vec<rusqlite::types::Value>) -> Result<Memory> {
         self.conn
             .query_row(
                 &format!(
@@ -440,7 +543,7 @@ impl Store {
                      model, dim, created_at, updated_at, visibility, owner_person
                      FROM memories WHERE {cond}"
                 ),
-                [arg],
+                rusqlite::params_from_iter(args),
                 |r| {
                     Ok(Memory {
                         id: r.get(0)?,
@@ -747,7 +850,7 @@ impl Store {
             .name
             .as_deref()
             .ok_or_else(|| StoreError::Invalid("upsert needs a name".into()))?;
-        let existing = match self.get_by_name(name) {
+        let existing = match self.get_by_owner_name(m.owner.or(self.default_owner), name) {
             Ok(e) => Some(e),
             Err(StoreError::NotFound) => None,
             Err(e) => return Err(e),
@@ -1340,26 +1443,80 @@ mod tests {
                 tags TEXT NOT NULL DEFAULT '[]', source TEXT, links TEXT NOT NULL DEFAULT '[]',
                 vector BLOB, model TEXT, dim INTEGER, created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL);
-             INSERT INTO memories (title, body, created_at, updated_at)
-                VALUES ('kept', 'body', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+             INSERT INTO memories (name, title, body, created_at, updated_at)
+                VALUES ('n', 'kept', 'body', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+             CREATE TABLE memory_tags (
+                memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                tag TEXT NOT NULL, PRIMARY KEY (memory_id, tag));
+             INSERT INTO memory_tags VALUES (1, 'old');",
         )
         .unwrap();
         let mut s = Store::init(conn).unwrap();
         assert_eq!(s.adopt_orphans(7).unwrap(), 1);
         let m = s.get_visible(1, 7).unwrap();
         assert_eq!(
-            (m.title.as_str(), m.visibility.as_str()),
-            ("kept", "private")
+            (m.title.as_str(), m.visibility.as_str(), m.tags.len()),
+            ("kept", "private", 0)
         );
         assert!(matches!(s.get_visible(1, 8), Err(StoreError::NotFound)));
+        // Its name is now unique per owner, and its tag row survived the move.
+        let tagged: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM memory_tags WHERE memory_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tagged, 1);
+        let mut other = mem("t", "kept body", &[]);
+        other.name = Some("n".into());
+        other.owner = Some(8);
+        s.insert(other).unwrap();
+        let found = s
+            .search(&SearchQuery {
+                query: "kept".into(),
+                k: 10,
+                viewer: Some(8),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            found.len(),
+            1,
+            "the search triggers came back with the table"
+        );
+        assert_eq!(s.get_by_name_visible("n", 7).unwrap().id, 1);
     }
 
     #[test]
-    fn duplicate_name_is_refused() {
+    fn a_name_is_unique_per_owner() {
         let mut s = Store::open_in_memory().unwrap();
-        let mut m = mem("t", "b", &[]);
-        m.name = Some("n".into());
-        s.insert(m.clone()).unwrap();
-        assert!(matches!(s.insert(m), Err(StoreError::Invalid(_))));
+        let named = |owner: i64, shared: bool| {
+            let mut m = mem(&format!("t{owner}"), "b", &[]);
+            m.name = Some("n".into());
+            m.owner = Some(owner);
+            if shared {
+                m.visibility = Visibility::Shared;
+            }
+            m
+        };
+        let mine = s.insert(named(1, false)).unwrap();
+        assert!(matches!(
+            s.insert(named(1, true)),
+            Err(StoreError::Invalid(_))
+        ));
+        let theirs = s.insert(named(2, true)).unwrap();
+        // By name a viewer gets their own first, else a shared one, never a private one.
+        assert_eq!(s.get_by_name_visible("n", 1).unwrap().id, mine);
+        assert_eq!(s.get_by_name_visible("n", 2).unwrap().id, theirs);
+        assert_eq!(s.get_by_name_visible("n", 3).unwrap().id, theirs);
+        // The importer's upsert matches its own owner's memory only.
+        s.set_default_owner(Some(2));
+        let mut again = named(2, true);
+        again.body = "changed".into();
+        again.owner = None;
+        assert_eq!(s.upsert_named(&again).unwrap(), Upsert::Updated);
+        assert_eq!(s.get(mine).unwrap().body, "b");
     }
 }

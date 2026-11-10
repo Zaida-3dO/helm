@@ -84,7 +84,7 @@ use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 pub use crate::stt::{SttConfig, VoiceFuture, STT_CONNECT, STT_TIMEOUT};
@@ -115,7 +115,8 @@ pub const MAX_FILES: usize = 10;
 /// frame Helm takes.
 pub const MAX_MESSAGE_BYTES: usize = 50 * 1024 * 1024;
 /// The most memory the files held for Helm may take at once (waiting to go, or sent and not yet
-/// acknowledged), counted as base64, which is what is held.
+/// acknowledged), counted as base64, which is what is held. One budget for the whole household:
+/// every person's bot counts what the others hold.
 pub const MAX_QUEUED_BYTES: usize = 150 * 1024 * 1024;
 /// A flush sends frames until this much base64 of files has gone down the line, then leaves the
 /// rest for the next tick, so a reconnect never builds every queued frame at once.
@@ -646,6 +647,9 @@ pub struct Bridge {
     transcribing: tokio::sync::Semaphore,
     /// How long a recording waits for Helm to free the PC's graphics memory.
     room_wait: Duration,
+    /// Every person's bridge of this bot (this one too), so the files they hold share one
+    /// budget. Filled once the bridges are made.
+    household: Arc<OnceLock<Vec<Weak<Bridge>>>>,
 }
 
 pub fn now_ms() -> i64 {
@@ -929,7 +933,21 @@ impl Bridge {
             downloads: tokio::sync::Semaphore::new(MAX_DOWNLOADS),
             transcribing: tokio::sync::Semaphore::new(1),
             room_wait: crate::stt::ROOM_WAIT,
+            household: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// What the other people's bridges hold of [`MAX_QUEUED_BYTES`]. Each is locked on its own,
+    /// never together with this one's state.
+    fn held_elsewhere(&self) -> usize {
+        self.household
+            .get()
+            .into_iter()
+            .flatten()
+            .filter_map(Weak::upgrade)
+            .filter(|b| !std::ptr::eq(b.as_ref(), self))
+            .map(|b| b.st().queue.iter().map(Queued::held).sum::<usize>())
+            .sum()
     }
 
     /// Wait `wait` (instead of [`crate::stt::ROOM_WAIT`]) for Helm to make room for speech.
@@ -1203,9 +1221,11 @@ impl Bridge {
         let label = label.as_deref().unwrap_or(job.media.noun());
         // The sizes the message gives are judged before anything is downloaded, so what is held
         // stays under the caps while files are fetched; what arrives is checked again.
+        let elsewhere = self.held_elsewhere();
         let queue_full = {
             let st = self.st();
-            st.queue.iter().map(Queued::held).sum::<usize>() + b64_len(job.size) > MAX_QUEUED_BYTES
+            let mine = st.queue.iter().map(Queued::held).sum::<usize>();
+            elsewhere + mine + b64_len(job.size) > MAX_QUEUED_BYTES
         };
         if queue_full {
             self.reply(chat, &queue_full_note(label)).await;
@@ -1384,10 +1404,11 @@ impl Bridge {
     /// note what the user must be told, and send what may go. A message dropped meanwhile with
     /// /cancel is not brought back.
     async fn part_done(&self, slot: &str, index: usize, job: &Job, got: Result<Part, String>) {
+        let elsewhere = self.held_elsewhere();
         {
             let mut st = self.st();
             // What is held besides this file, whose share set aside is given back now.
-            let held = st.queue.iter().map(Queued::held).sum::<usize>();
+            let held = st.queue.iter().map(Queued::held).sum::<usize>() + elsewhere;
             let held = held.saturating_sub(b64_len(job.size));
             let Some(g) = st
                 .queue
@@ -1439,8 +1460,10 @@ impl Bridge {
         let (due, expired, undelivered, gave_up, finished) = {
             let mut st = self.st();
             for q in st.queue.iter_mut() {
-                if q.sent_on.is_some() && q.sent_on != generation {
-                    q.sent_on = None; // that line is gone; resend on the next
+                // A message stays with the machine it went to while that line is up, so two of
+                // the person's machines never both answer it; once it drops, it goes to the next.
+                if q.sent_on.is_some_and(|g| !self.line.holds(g)) {
+                    q.sent_on = None;
                 }
             }
             // A long text whose window has ended (or that a short part closed) goes as it is, or as
@@ -1557,17 +1580,18 @@ impl Bridge {
                 if !q.files.is_empty() {
                     frame["files"] = list(&q.files);
                 }
-                q.sent_on = Some(gen);
+                let on = *q.sent_on.get_or_insert(gen);
                 q.sent_down_ms = now;
-                frame
+                (frame, on)
             };
-            if self.line.send(&frame) {
+            let (frame, on) = frame;
+            if self.line.send_on(on, &frame) {
                 sent.push(id);
             } else {
                 // The line dropped mid-flush: this one and the rest wait for the next.
                 let mut st = self.st();
                 for q in st.queue.iter_mut() {
-                    if q.id == id || q.sent_on == generation {
+                    if q.id == id || q.sent_on == Some(on) {
                         q.sent_on = None;
                     }
                 }
@@ -2033,7 +2057,8 @@ impl Telegram {
                 add(owner, *id);
             }
         }
-        let bridges = groups
+        let household = Arc::new(OnceLock::new());
+        let bridges: Vec<(i64, Arc<Bridge>)> = groups
             .into_iter()
             .map(|(person, ids)| {
                 let c = TelegramConfig {
@@ -2042,10 +2067,12 @@ impl Telegram {
                     ..cfg.clone()
                 };
                 let route = Arc::new(PersonRoute::new(lines.clone(), person));
-                let bridge = decorate(Bridge::with_route(api.clone(), route, &c));
+                let mut bridge = decorate(Bridge::with_route(api.clone(), route, &c));
+                bridge.household = household.clone();
                 (person, Arc::new(bridge))
             })
             .collect();
+        let _ = household.set(bridges.iter().map(|(_, b)| Arc::downgrade(b)).collect());
         Ok(Telegram::new(api, cfg.receive, bridges))
     }
 

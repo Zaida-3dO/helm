@@ -15,7 +15,7 @@ use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
 use helm_hub::stt::{Stt, SttConfig};
 use helm_hub::telegram::now_ms;
-use helm_hub::voice::{VoiceBridge, VoiceConfig, EXPIRED, STT_FAILED};
+use helm_hub::voice::{VoiceBridge, VoiceConfig, AUDIO_BUDGET, BUSY, EXPIRED, STT_FAILED};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -35,6 +35,10 @@ struct Opts {
     stt: bool,
     queue_max: usize,
     queue_lifetime: Duration,
+    /// Where the outbox's seqs start (a real hub starts them from the clock).
+    seq_base: u64,
+    /// Bytes of recordings the hub holds until they are transcribed.
+    audio_budget: usize,
 }
 
 impl Default for Opts {
@@ -44,6 +48,8 @@ impl Default for Opts {
             stt: true,
             queue_max: 20,
             queue_lifetime: Duration::from_secs(30 * 60),
+            seq_base: 0,
+            audio_budget: AUDIO_BUDGET,
         }
     }
 }
@@ -143,7 +149,9 @@ async fn start(o: Opts) -> Hub {
                 queue_lifetime: o.queue_lifetime,
                 ..VoiceConfig::default()
             },
-        );
+        )
+        .with_seq_base(o.seq_base)
+        .with_audio_budget(o.audio_budget);
         if o.stt {
             b = b.with_stt(Arc::new(Stt::new(&SttConfig {
                 url: stt.url.clone(),
@@ -659,6 +667,31 @@ async fn a_turn_is_accepted_or_refused_with_the_statuses_of_the_protocol() {
     assert_eq!(r.status, 202);
     let r = http(&bare, "GET", "/voice/status", Some(PHONE), "", &[]).await;
     assert_eq!(r.body["stt"], false);
+
+    // Recordings waiting to be transcribed share one budget for the whole hub: one that does not
+    // fit is refused at once, and a recording gives its share back once it is transcribed.
+    let tight = start(Opts {
+        audio_budget: 50,
+        ..Opts::default()
+    })
+    .await;
+    let r = post_turn(&tight, "turn-0107", "", "audio/wav", &wav(3200)).await;
+    assert_eq!((r.status, r.body["error"].as_str()), (429, Some(BUSY)));
+    let r = post_turn(&tight, "turn-0108", "", "audio/ogg", &ogg(2)).await;
+    assert_eq!(r.status, 202);
+    let mut second = 0;
+    for _ in 0..30 {
+        second = post_turn(&tight, "turn-0109", "", "audio/ogg", &ogg(2))
+            .await
+            .status;
+        if second != 429 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(second, 202, "the first recording gave its share back");
+    let r = post_turn(&tight, "turn-0110", "", "application/json", &typed("hi")).await;
+    assert_eq!(r.status, 202, "typed turns never count");
 }
 
 #[tokio::test]
@@ -1097,19 +1130,23 @@ async fn replies_wait_for_the_phone_replay_in_order_and_acks_free_them() {
         "everything was acknowledged"
     );
 
-    // A hub that restarted starts its seq over: its welcome is below the phone's lastSeq, which
-    // is how the phone knows to start over, and the next reply arrives under seq 1.
-    let fresh = start(Opts::default()).await;
+    // A hub that restarted starts its seqs from the clock, above the phone's lastSeq: the phone
+    // keeps its place, and the next reply arrives above it and is sent.
+    let fresh = start(Opts {
+        seq_base: 5_000,
+        ..Opts::default()
+    })
+    .await;
     let mut helm = pc(&fresh).await;
     let (mut me, welcome) = phone(&fresh, PHONE, 41, true).await;
-    assert_eq!(welcome["seq"], 0);
+    assert_eq!(welcome["seq"], 5_000);
     send(
         &mut helm,
         answer(&id("reply", 7), None, "Synthetic after a restart.", 0),
     )
     .await;
     let reply = next_where(&mut me, "reply", is("reply")).await;
-    assert_eq!(reply["seq"], 1);
+    assert_eq!(reply["seq"], 5_001);
     // An entry the phone never acknowledges is forgotten after the outbox time (2 hours).
     fresh.bridge().tick(now_ms() + 121 * 60_000);
     let (mut late, _) = phone(&fresh, PHONE, 0, false).await;

@@ -37,7 +37,8 @@ ENVIRONMENT:
                     scope: ro|rw|relay|app|peer|telegram|voice|remote, several joined with +
                     (rw+app); telegram, voice and remote stand alone
   HUB_LEGACY_PERSON the person who owns the HUB_TOKENS clients, the memories stored before
-                    people existed, and Telegram users with no person (default owner)
+                    people existed, and Telegram users with no person (default owner); set
+                    it to the name your own PC is paired under before the first start
   HUB_ALLOW_MUTATE  1 to offer memory_update and memory_delete
   HUB_TELEGRAM_BOT_TOKEN      the bot's token; without it the bot stays off
   HUB_TELEGRAM_ALLOWED_USERS  numeric Telegram user ids, each optionally followed by :person

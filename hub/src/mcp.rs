@@ -8,7 +8,8 @@
 //!
 //! A request from a Helm that carries `X-Helm-Person: <personId>` acts as that person: the memories
 //! it reads are that person's (their own and the shared ones) and the ones it writes belong to
-//! them. Only a token with the `peer` scope may do this (see [`act_as`]); it is how a chat of one
+//! them. Only a token with the `peer` scope may do this, and only for its own person or a person
+//! its machine was allowed to act for (`--acts-for`, see [`act_as`]); it is how a chat of one
 //! person, running on another person's computer, keeps to its own person's memories.
 //!
 //! `memory_write` takes `scope`: `me` (the default: only the person sees it) or `everyone` (the
@@ -40,10 +41,14 @@ pub enum ActAsError {
     NeedsPeer,
     /// No such person.
     UnknownPerson,
+    /// Another person this machine was not allowed to act for.
+    NotAllowed,
 }
 
 /// The client a request acts as: `None` when it names nobody (acts as itself), else a copy of
 /// `client` that belongs to the named person (an id or a name). The scopes stay the client's own.
+/// A machine acts only for its own person or for people it was allowed to act for, so another
+/// person's private memories never reach a machine of someone else by default.
 pub fn act_as(
     client: &Client,
     header: Option<&str>,
@@ -59,6 +64,12 @@ pub fn act_as(
     let person = registry
         .find_person(who)
         .map_err(|_| ActAsError::UnknownPerson)?;
+    if person.id != client.person_id {
+        if !registry.may_act_for(client.id, person.id) {
+            return Err(ActAsError::NotAllowed);
+        }
+        eprintln!("mcp: {} acts for {}", client.name, person.name);
+    }
     Ok(Some(Client {
         person_id: person.id,
         person: person.name,

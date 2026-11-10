@@ -4,10 +4,13 @@
 //! ```text
 //! helm-hub person add <name>
 //! helm-hub person list
-//! helm-hub client add --person P --machine M [--scopes S]   prints the token once
+//! helm-hub person merge <from> <into>
+//! helm-hub client add --person P --machine M [--scopes S] [--acts-for A]   prints the token once
 //! helm-hub client list
 //! helm-hub client revoke <machine or id> [--person P]
-//! helm-hub pair --person P --machine M [--scopes S]         prints a one-time code
+//! helm-hub client acts-for <machine or id> <person> [--person P]
+//! helm-hub client stop-acting-for <machine or id> <person> [--person P]
+//! helm-hub pair --person P --machine M [--scopes S] [--acts-for A]         prints a one-time code
 //! ```
 
 use crate::auth::{Scopes, DEFAULT_PAIRED_SCOPES};
@@ -15,17 +18,25 @@ use crate::registry::{display_code, ClientRow, Registry, PAIR_CODE_MINUTES};
 use std::collections::HashMap;
 
 pub const USAGE: &str = "  helm-hub person add <name> | person list
-  helm-hub client add --person P --machine M [--scopes S]
+  helm-hub person merge <from> <into>
+                                       give everything of one person (machines, memories,
+                                       rules, skills and agents) to another, and remove the first
+  helm-hub client add --person P --machine M [--scopes S] [--acts-for A]
                                        register a machine and print its token (once)
   helm-hub client list
   helm-hub client revoke <machine or id> [--person P]
                                        the machine's token stops working at once
-  helm-hub pair --person P --machine M [--scopes S]
+  helm-hub client acts-for <machine or id> <person> [--person P]
+  helm-hub client stop-acting-for <machine or id> <person> [--person P]
+                                       let a machine act for another person (read their private
+                                       memories, change their rules, skills and agents), or stop it
+  helm-hub pair --person P --machine M [--scopes S] [--acts-for A]
                                        print a one-time pairing code (8 characters, 15 minutes)
 
   Scopes: memory:ro, memory:rw, relay, app, peer, telegram, voice, remote (comma separated;
   telegram, voice and remote stand alone).
-  Default for a machine: memory:rw,relay,app,peer. A person that does not exist yet is made.";
+  Default for a machine: memory:rw,relay,app,peer. A person that does not exist yet is made.
+  --acts-for takes people who exist, comma separated; a machine always acts for its own person.";
 
 /// Whether `first` begins an admin command.
 pub fn is_admin_command(first: &str) -> bool {
@@ -48,6 +59,30 @@ pub fn run(registry: &mut Registry, args: &[String], now_ms: i64) -> Result<Stri
                 None => format!("added {} (id {})", p.name, p.id),
             })
         }
+        ["person", "merge", rest @ ..] => {
+            let (pos, _) = flags(rest, &[])?;
+            let [from, into] = pos.as_slice() else {
+                return Err(
+                    "person merge takes two people: the one to fold in, then the one to keep"
+                        .into(),
+                );
+            };
+            let m = registry
+                .merge_person(from, into)
+                .map_err(|e| e.to_string())?;
+            Ok(format!(
+                "merged {} into {}: {} machine(s), {} memories, {} rule, skill and agent file(s); \
+                 {} is gone. If {} was HUB_LEGACY_PERSON, set it to {} and restart the hub.\n",
+                m.from.name,
+                m.into.name,
+                m.machines,
+                m.memories,
+                m.files,
+                m.from.name,
+                m.from.name,
+                m.into.name
+            ))
+        }
         ["person", "list"] => {
             let people = registry.people().map_err(|e| e.to_string())?;
             let clients = registry.clients().map_err(|e| e.to_string())?;
@@ -65,12 +100,21 @@ pub fn run(registry: &mut Registry, args: &[String], now_ms: i64) -> Result<Stri
             Ok(out)
         }
         ["client", "add", rest @ ..] => {
-            let (_, f) = flags(rest, &["person", "machine", "scopes"])?;
+            let (_, f) = flags(rest, &["person", "machine", "scopes", "acts-for"])?;
             let (person, machine) = required(&f)?;
             let scopes = scopes_of(&f)?;
+            let others = acts_for_of(&f);
+            for who in &others {
+                registry.find_person(who).map_err(|e| e.to_string())?;
+            }
             let p = registry
                 .add_client(person, machine, &scopes)
                 .map_err(|e| e.to_string())?;
+            for who in &others {
+                registry
+                    .set_acts_for(p.client.id, who, true)
+                    .map_err(|e| e.to_string())?;
+            }
             Ok(format!(
                 "added {} for {} (id {}, {})\nToken, shown once (copy it now): {}\n",
                 p.client.machine,
@@ -80,11 +124,41 @@ pub fn run(registry: &mut Registry, args: &[String], now_ms: i64) -> Result<Stri
                 p.token
             ))
         }
+        ["client", verb @ ("acts-for" | "stop-acting-for"), rest @ ..] => {
+            let (pos, f) = flags(rest, &["person"])?;
+            let [who, other] = pos.as_slice() else {
+                return Err(format!(
+                    "client {verb} takes a machine name or id, then a person"
+                ));
+            };
+            let c = registry
+                .find_client(who, f.get("person").map(String::as_str))
+                .map_err(|e| e.to_string())?;
+            let allow = *verb == "acts-for";
+            let p = registry
+                .set_acts_for(c.id, other, allow)
+                .map_err(|e| e.to_string())?;
+            Ok(if allow {
+                format!(
+                    "{} of {} now acts for {} too\n",
+                    c.machine, c.person, p.name
+                )
+            } else {
+                format!(
+                    "{} of {} no longer acts for {}\n",
+                    c.machine, c.person, p.name
+                )
+            })
+        }
         ["client", "list"] => {
             let clients = registry.clients().map_err(|e| e.to_string())?;
             let mut out = String::new();
             for c in &clients {
                 out.push_str(&describe(c));
+                let others = registry.acts_for(c.id).map_err(|e| e.to_string())?;
+                if !others.is_empty() {
+                    out.push_str(&format!("  acts for {}", others.join(", ")));
+                }
                 out.push('\n');
             }
             if clients.is_empty() {
@@ -106,11 +180,13 @@ pub fn run(registry: &mut Registry, args: &[String], now_ms: i64) -> Result<Stri
             ))
         }
         ["pair", rest @ ..] => {
-            let (_, f) = flags(rest, &["person", "machine", "scopes"])?;
+            let (_, f) = flags(rest, &["person", "machine", "scopes", "acts-for"])?;
             let (person, machine) = required(&f)?;
             let scopes = scopes_of(&f)?;
+            let others = acts_for_of(&f);
+            let others: Vec<&str> = others.iter().map(String::as_str).collect();
             let (code, _) = registry
-                .create_pairing(person, machine, &scopes, now_ms)
+                .create_pairing_acting(person, machine, &scopes, &others, now_ms)
                 .map_err(|e| e.to_string())?;
             Ok(format!(
                 "Pairing code for {machine} ({person}): {}\nIt works once, for {PAIR_CODE_MINUTES} minutes. \
@@ -145,6 +221,19 @@ fn required(f: &HashMap<String, String>) -> Result<(&str, &str), String> {
         (Some(p), Some(m)) => Ok((p.as_str(), m.as_str())),
         _ => Err("--person and --machine are both required".into()),
     }
+}
+
+/// The people of `--acts-for`, comma separated.
+fn acts_for_of(f: &HashMap<String, String>) -> Vec<String> {
+    f.get("acts-for")
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn scopes_of(f: &HashMap<String, String>) -> Result<Scopes, String> {
@@ -232,6 +321,36 @@ mod tests {
             listed.contains("Sam / desk") && listed.contains("active"),
             "{listed}"
         );
+        // A machine may be allowed to act for another person who exists, and stopped again.
+        assert!(run_line(
+            &mut r,
+            "client add --person Sam --machine pc --acts-for Nobody"
+        )
+        .is_err());
+        run_line(
+            &mut r,
+            "client add --person Sam --machine pc --acts-for Kit",
+        )
+        .unwrap();
+        let pc = r.find_client("pc", Some("Sam")).unwrap().id;
+        let kit = r.find_person("Kit").unwrap().id;
+        assert!(r.may_act_for(pc, kit));
+        assert!(run_line(&mut r, "client list").unwrap().contains(
+            "Sam / pc  [memory:rw,relay,app,peer]  active  last seen never  acts for Kit"
+        ));
+        assert!(run_line(&mut r, "client stop-acting-for pc Kit")
+            .unwrap()
+            .contains("no longer acts for Kit"));
+        assert!(!r.may_act_for(pc, kit));
+        run_line(&mut r, "client acts-for pc Kit --person Sam").unwrap();
+        assert!(r.may_act_for(pc, kit));
+        // A code made with --acts-for gives the new machine the same allowance.
+        let code = run_line(&mut r, "pair --person Kit --machine tablet --acts-for Sam").unwrap();
+        let code = code.split(": ").nth(1).unwrap().split('\n').next().unwrap();
+        let tablet = r.redeem_pairing(code, 1_000_001).unwrap().client.id;
+        let sam = r.find_person("Sam").unwrap().id;
+        assert!(r.may_act_for(tablet, sam) && r.may_act_for(tablet, kit));
+
         // Revoke by name; the token dies at once.
         assert!(run_line(&mut r, "client revoke desk")
             .unwrap()

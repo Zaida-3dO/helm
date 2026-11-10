@@ -209,9 +209,16 @@ async fn pairing_connects_machines_side_by_side_and_a_revoke_drops_only_that_one
     };
     let code = new_code("laptop");
 
-    // A wrong code is refused; the right one, typed any way, pairs once.
+    // A wrong code is refused, and so is a request a reverse proxy passed on (its address says
+    // nothing), without spending the code; the right one, typed any way, pairs once.
     let (status, _) = post(&hub, "/pair", None, json!({ "code": "AAAA-AAAA" })).await;
     assert_eq!(status, 403);
+    for header in ["x-forwarded-for", "x-real-ip", "forwarded"] {
+        let via = [(header, "203.0.113.9")];
+        let (status, why) = post_with(&hub, "/pair", None, &via, json!({ "code": code })).await;
+        assert_eq!(status, 403, "{header}");
+        assert!(why.to_string().contains("home network"), "{header}: {why}");
+    }
     let typed = display_code(&code).to_lowercase();
     let (status, paired) = post(&hub, "/pair", None, json!({ "code": typed })).await;
     assert_eq!(status, 200, "{paired}");
@@ -779,6 +786,25 @@ async fn devices_see_each_other_and_calls_pushes_and_refusals_pass_between_them(
     assert_eq!(code(&next_of(&mut kit, "dev_result").await), "scope");
     send_json(&mut cy, call(json!("y1"), DESK, "hello", json!({}))).await;
     assert_eq!(code(&next_of(&mut cy, "dev_result").await), "bad_request");
+    // One device has at most 8 calls waiting: the ninth is refused at once, and the eight still
+    // get their answers.
+    for n in 0..9 {
+        send_json(
+            &mut bea,
+            call(json!(format!("b{n}")), DESK, "slow", json!({})),
+        )
+        .await;
+    }
+    let r = next_of(&mut bea, "dev_result").await;
+    assert_eq!((r["id"].as_str(), code(&r).as_str()), (Some("b8"), "busy"));
+    for _ in 0..8 {
+        let c = next_of(&mut ann, "dev_call").await;
+        let r = json!({ "type": "dev_result", "id": c["id"], "ok": true, "result": null });
+        send_json(&mut ann, r).await;
+    }
+    for _ in 0..8 {
+        assert_eq!(next_of(&mut bea, "dev_result").await["ok"], true);
+    }
     // A device id another person holds cannot be taken over.
     send_json(&mut cy, announce(DESK, "Stolen", true)).await;
     send_json(&mut cy, call(json!("y2"), LAPTOP, "hello", json!({}))).await;
@@ -934,8 +960,8 @@ async fn knowledge_files_sync_through_the_hub_with_a_conflict_on_a_stale_base() 
         (Some(true), true, Some(3))
     );
 
-    // A person's layer needs a person who exists; bad layers, paths and checksums are refused in
-    // words.
+    // A person's layer is changed by that person's own machines; another person's machine only
+    // once it is allowed to act for them.
     let layer = format!("person:{bea_person}");
     let skill = "---\nname: tidy\n---";
     send_json(
@@ -944,7 +970,38 @@ async fn knowledge_files_sync_through_the_hub_with_a_conflict_on_a_stale_base() 
     )
     .await;
     let r = next_of(&mut ann, "kn_put_result").await;
-    assert_eq!(result(&r), (Some("p5".into()), Some(true), Some(4)));
+    assert_eq!(r["ok"], false, "{r}");
+    assert!(r["error"].as_str().unwrap().contains("own machines"), "{r}");
+    send_json(
+        &mut bea,
+        put("p6", &layer, "skills/tidy/SKILL.md", 0, Some(skill)),
+    )
+    .await;
+    let r = next_of(&mut bea, "kn_put_result").await;
+    assert_eq!(result(&r), (Some("p6".into()), Some(true), Some(4)));
+    let desk = hub
+        .registry
+        .lock()
+        .unwrap()
+        .find_client("desk", Some("Ann"))
+        .unwrap()
+        .id;
+    hub.registry
+        .lock()
+        .unwrap()
+        .set_acts_for(desk, "Bea", true)
+        .unwrap();
+    let tidier = "---\nname: tidy\n---\nTidier.";
+    send_json(
+        &mut ann,
+        put("p7", &layer, "skills/tidy/SKILL.md", 4, Some(tidier)),
+    )
+    .await;
+    let r = next_of(&mut ann, "kn_put_result").await;
+    assert_eq!(result(&r), (Some("p7".into()), Some(true), Some(5)));
+
+    // A person's layer needs a person who exists; bad layers, paths and checksums are refused in
+    // words.
     for (id, bad_layer, path, why) in [
         ("r1", "person:999", "rules/a.md", "no such person"),
         ("r2", "team", "rules/a.md", "knowledge layer"),
@@ -1042,6 +1099,22 @@ async fn a_helm_acts_as_the_person_it_names_and_memories_say_who_wrote_them() {
         names
     };
 
+    // Another person's machine may not act as Bea until it is allowed to (`--acts-for`).
+    let (status, _) = tool_as(&hub, &ann, Some(bea), "memory_list", json!({})).await;
+    assert_eq!(status, 403, "Ann's desk was never allowed to act for Bea");
+    let desk = hub
+        .registry
+        .lock()
+        .unwrap()
+        .find_client("desk", Some("Ann"))
+        .unwrap()
+        .id;
+    hub.registry
+        .lock()
+        .unwrap()
+        .set_acts_for(desk, "Bea", true)
+        .unwrap();
+
     // What Ann's machine writes while acting as Bea is Bea's: private by default, hers to read.
     let write = json!({ "title": "Tea", "body": "likes green tea" });
     let (status, w) = tool_as(&hub, &ann, Some(bea), "memory_write", write).await;
@@ -1123,4 +1196,18 @@ async fn a_helm_acts_as_the_person_it_names_and_memories_say_who_wrote_them() {
     }
     let (s, r) = tool_as(&hub, &kit, None, "memory_list", json!({})).await;
     assert_eq!((s, r["isError"].clone()), (200, json!(false)));
+
+    // Bea's own machine needs no allowance, and Ann's desk loses it when it is taken back.
+    let bea_phone = add(&hub, "Bea", "phone", "memory:rw,peer");
+    let (s, r) = tool_as(&hub, &bea_phone, Some("Bea"), "memory_list", json!({})).await;
+    assert_eq!((s, count(&r)), (200, 3));
+    hub.registry
+        .lock()
+        .unwrap()
+        .set_acts_for(desk, "Bea", false)
+        .unwrap();
+    let (s, _) = tool_as(&hub, &ann, Some(bea), "memory_list", json!({})).await;
+    assert_eq!(s, 403);
+    let (s, _) = tool_as(&hub, &ann, Some("Ann"), "memory_list", json!({})).await;
+    assert_eq!(s, 200, "a machine may always name its own person");
 }

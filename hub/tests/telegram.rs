@@ -1010,6 +1010,46 @@ async fn an_unacknowledged_message_is_resent_on_the_same_line_until_it_expires()
         .await;
     e.bridge.on_ack(frames(&mut rx)[0]["id"].as_str().unwrap());
     assert_eq!(e.bridge.flush(T0 + 42 * MIN).await, 0);
+
+    // With two machines of the person, an unacknowledged message stays with the machine it went
+    // to while that line is up, even when the other becomes the newer; it moves once it drops.
+    let registry = Arc::new(Mutex::new(Registry::open_in_memory().unwrap()));
+    let (lines, _up) = Lines::new(registry);
+    let lines = Arc::new(lines);
+    let machine = |id: i64, name: &str| {
+        lines.line_for(&helm_hub::auth::Client {
+            id,
+            name: name.into(),
+            person_id: 7,
+            person: "p".into(),
+            machine: name.into(),
+            scopes: helm_hub::auth::Scopes::default(),
+        })
+    };
+    let (desk, laptop) = (machine(1, "desk"), machine(2, "laptop"));
+    let route = Arc::new(helm_hub::lines::PersonRoute::new(lines.clone(), 7));
+    let bridge = Arc::new(Bridge::with_route(e.api.clone(), route, &cfg()));
+    let (tx, mut on_desk) = mpsc::unbounded_channel();
+    let desk_gen = desk.attach(tx);
+    bridge
+        .on_update(&update(OWNER, "three", T0 / 1000), T0)
+        .await;
+    assert_eq!(frames(&mut on_desk).len(), 1);
+    let (tx, mut on_laptop) = mpsc::unbounded_channel();
+    laptop.attach(tx);
+    assert_eq!(bridge.flush(T0 + 45_000).await, 1);
+    assert_eq!(
+        frames(&mut on_desk).len(),
+        1,
+        "sent again to the same machine"
+    );
+    assert!(
+        frames(&mut on_laptop).is_empty(),
+        "never to the newer one too"
+    );
+    desk.detach(desk_gen);
+    assert_eq!(bridge.flush(T0 + 46_000).await, 1);
+    assert_eq!(frames(&mut on_laptop)[0]["text"], "three");
 }
 
 /// A file as it went down the line: (name, type, bytes).

@@ -7,6 +7,10 @@
 //! so a Helm asks for "everything after N" and applies the answer in order. A deleted file stays
 //! as a row without a body (a tombstone), so a deletion reaches devices that were off.
 //!
+//! Every `peer` line reads every layer. A person's layer is changed only by that person's own
+//! machines, or by a machine allowed to act for them (`helm-hub client acts-for`); a change from
+//! another person's machine that is allowed is logged.
+//!
 //! Frames on the relay line (all need a token with the `peer` scope):
 //!
 //! | Helm → hub | hub → Helm |
@@ -260,6 +264,81 @@ pub fn put(conn: &mut Connection, p: &Put<'_>) -> rusqlite::Result<PutOutcome> {
     Ok(PutOutcome::Saved { seq, changed: true })
 }
 
+/// Move the files of `from`'s layer into `into`'s (for `helm-hub person merge`). Each moved file
+/// takes a new `seq` in its new layer and leaves a deletion in the old one, so every device
+/// hears of both. `Ok(Err)` says why nothing moved: the two layers hold a file at the same path,
+/// or together they would be over a layer's limits.
+pub(crate) fn move_layer(
+    conn: &Connection,
+    from: i64,
+    into: i64,
+) -> rusqlite::Result<Result<usize, String>> {
+    let (old, new) = (format!("person:{from}"), format!("person:{into}"));
+    let clashes: Vec<String> = conn
+        .prepare(
+            "SELECT f.path FROM knowledge_files f JOIN knowledge_files t
+                 ON lower(t.path) = lower(f.path)
+             WHERE f.layer = ?1 AND t.layer = ?2 AND f.deleted = 0 AND t.deleted = 0
+             ORDER BY f.path LIMIT 10",
+        )?
+        .query_map(params![old, new], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !clashes.is_empty() {
+        return Ok(Err(format!(
+            "both people have rules, skills or agents at {}; delete one of each first",
+            clashes.join(", ")
+        )));
+    }
+    let (bytes, files): (i64, i64) = conn.query_row(
+        "SELECT COALESCE(SUM(size), 0), COUNT(*) FROM knowledge_files
+         WHERE layer IN (?1, ?2) AND deleted = 0",
+        params![old, new],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if bytes > MAX_LAYER_BYTES || files > MAX_LAYER_FILES {
+        return Ok(Err(
+            "together the two people's rules, skills and agents are over a layer's limits".into(),
+        ));
+    }
+    let paths: Vec<String> = conn
+        .prepare("SELECT path FROM knowledge_files WHERE layer = ?1 AND deleted = 0 ORDER BY seq")?
+        .query_map([&old], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let next = |conn: &Connection| -> rusqlite::Result<i64> {
+        conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM knowledge_files",
+            [],
+            |r| r.get(0),
+        )
+    };
+    for path in &paths {
+        let seq = next(conn)?;
+        conn.execute(
+            &format!(
+                "INSERT INTO knowledge_files
+                     (layer, path, seq, sha256, size, body, deleted, device_uid, updated_at)
+                 SELECT ?3, path, ?4, sha256, size, body, 0, device_uid, {NOW}
+                     FROM knowledge_files WHERE layer = ?1 AND path = ?2
+                 ON CONFLICT(layer, path) DO UPDATE SET
+                     seq = excluded.seq, sha256 = excluded.sha256, size = excluded.size,
+                     body = excluded.body, deleted = 0, device_uid = excluded.device_uid,
+                     updated_at = excluded.updated_at"
+            ),
+            params![old, path, new, seq],
+        )?;
+        let seq = next(conn)?;
+        conn.execute(
+            &format!(
+                "UPDATE knowledge_files SET seq = ?3, sha256 = '', size = 0, body = NULL,
+                     deleted = 1, updated_at = {NOW}
+                 WHERE layer = ?1 AND path = ?2"
+            ),
+            params![old, path, seq],
+        )?;
+    }
+    Ok(Ok(paths.len()))
+}
+
 /// The files with `seq > since`, oldest first: the frame's `files`, its `cursor` and whether
 /// `more` are left. At most `limit` files and about [`MAX_REPLY`] bytes; the first file is always
 /// sent, however big.
@@ -345,6 +424,8 @@ pub struct PutFrame<'a> {
 
 const NEEDS_PEER: &str = "This machine's token cannot use the household.";
 const NO_STORE: &str = "The hub's knowledge store is unavailable.";
+const NOT_THEIRS: &str =
+    "Only that person's own machines may change their rules, skills and agents.";
 
 /// The `kn_files` frame answering a `kn_pull` from the client `client_id`.
 pub fn pull_frame(lines: &Lines, client_id: i64, id: &Value, since: i64, limit: usize) -> Value {
@@ -394,15 +475,24 @@ pub fn put_frame(
         let Ok(r) = lines.registry().lock() else {
             return failed(NO_STORE);
         };
+        let me = r.client_by_id(client_id).ok().flatten();
         if let Layer::Person(person) = layer {
-            if r.person_by_id(person).ok().flatten().is_none() {
+            let Some(owner) = r.person_by_id(person).ok().flatten() else {
                 return failed("There is no such person.");
+            };
+            // A person's layer is changed by their own machines, or by one allowed to act for
+            // them; such a change from someone else's machine is logged.
+            if !r.may_act_for(client_id, person) {
+                return failed(NOT_THEIRS);
+            }
+            if let Some(c) = me.as_ref().filter(|c| c.person_id != person) {
+                eprintln!(
+                    "knowledge: {} of {} changed {} in {}'s layer",
+                    c.machine, c.person, f.path, owner.name
+                );
             }
         }
-        r.client_by_id(client_id)
-            .ok()
-            .flatten()
-            .and_then(|c| c.device_uid)
+        me.and_then(|c| c.device_uid)
     };
     let stored = match state.store.lock() {
         Ok(mut store) => put(

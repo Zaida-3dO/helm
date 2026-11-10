@@ -148,6 +148,7 @@ impl Lines {
             allowed: client.has(Scope::Peer),
         };
         let (lines, own_line) = (self.clone(), line.clone());
+        let dev_calls = Arc::new(tokio::sync::Semaphore::new(devices::MAX_DEV_CALLS));
         tokio::spawn(async move {
             while let Some(u) = rx.recv().await {
                 match u {
@@ -173,11 +174,16 @@ impl Lines {
                         args,
                         size,
                     } => {
+                        let Ok(permit) = dev_calls.clone().try_acquire_owned() else {
+                            own_line.send(&devices::busy(&id));
+                            continue;
+                        };
                         let (lines, line) = (lines.clone(), own_line.clone());
                         tokio::spawn(async move {
                             let reply =
                                 devices::route(&lines, client_id, id, &to, &op, args, size).await;
                             line.send(&reply);
+                            drop(permit);
                         });
                     }
                     Upstream::DevPush {
@@ -253,6 +259,14 @@ impl Lines {
             .collect()
     }
 
+    /// The person's connected line whose current connection is `generation`.
+    pub fn up_on(&self, person_id: i64, generation: u64) -> Option<Arc<Line>> {
+        self.lock()
+            .values()
+            .find(|s| s.person_id == person_id && s.line.generation() == Some(generation))
+            .map(|s| s.line.clone())
+    }
+
     /// The most recently active connected line of a person.
     pub fn best_up(&self, person_id: i64) -> Option<Arc<Line>> {
         self.lock()
@@ -301,6 +315,16 @@ impl Route for PersonRoute {
     fn send(&self, frame: &Value) -> bool {
         self.lines
             .best_up(self.person_id)
+            .is_some_and(|l| l.send(frame))
+    }
+
+    fn holds(&self, generation: u64) -> bool {
+        self.lines.up_on(self.person_id, generation).is_some()
+    }
+
+    fn send_on(&self, generation: u64, frame: &Value) -> bool {
+        self.lines
+            .up_on(self.person_id, generation)
             .is_some_and(|l| l.send(frame))
     }
 
@@ -365,6 +389,13 @@ mod tests {
         assert!(rx_a.try_recv().is_err(), "the other machine got nothing");
         assert!(rx_b.try_recv().unwrap().contains("welcome"));
         assert!(rx_b.try_recv().unwrap().contains("telegram_stop"));
+        // A frame may also go to one machine's connection, while that one is up; never to
+        // another person's.
+        assert!(route.holds(ga) && route.holds(gb) && !route.holds(gc));
+        assert!(route.send_on(ga, &json!({"type": "telegram_stop"})));
+        assert!(rx_a.try_recv().unwrap().contains("telegram_stop"));
+        assert!(rx_b.try_recv().is_err());
+        assert!(!route.send_on(gc, &json!({"type": "telegram_stop"})));
 
         // Activity on the first moves the route to it; frames are tagged with the person.
         assert!(la.receive(ga, r#"{"type":"telegram_final","text":"hi"}"#));

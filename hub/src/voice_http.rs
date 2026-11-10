@@ -4,7 +4,8 @@
 //! WebSocket `GET /voice/live`. All of them need a token with the `voice` scope and speak for that
 //! token's person. The state and the rules live in `voice.rs` ([`VoiceBridge`]); this file reads
 //! requests, answers with the statuses the protocol names, and runs the socket loop (the hello,
-//! the pings and the silence timeout). The protocol is section 4 of the voice build plan.
+//! the pings and the silence timeout). The protocol is described in `hub/README.md` (The voice
+//! line) and the frame table in `relay.rs`.
 
 use crate::auth::{Client, Scope};
 use crate::server::{client_of, refused, unauthorized, AppState, REVALIDATE_EVERY};
@@ -32,10 +33,13 @@ pub const MAX_HEARD_BODY: usize = 64 * 1024;
 /// A body over its limit is still read this far past it and thrown away, so the client finishes
 /// sending and gets its answer instead of a reset connection.
 const DRAIN_EXTRA: usize = 16 * 1024 * 1024;
+/// How long an upload may take to arrive; a slower one is dropped, so a stalled phone cannot hold
+/// a request open.
+pub const UPLOAD_WAIT: Duration = Duration::from_secs(120);
 /// How long a new socket may take to send its `hello`.
 pub const HELLO_WAIT: Duration = Duration::from_secs(10);
 /// The hub pings the phone this often. In production a reverse proxy closes a WebSocket that is
-/// idle for 60 s, so this stays well under that (the protocol's 30 s was too slow for it).
+/// idle for 60 s, so this stays well under that.
 pub const LIVE_PING_EVERY: Duration = Duration::from_secs(20);
 /// A socket that sends nothing (not even a pong) for this long is dropped.
 pub const LIVE_SILENCE: Duration = Duration::from_secs(90);
@@ -80,8 +84,15 @@ enum ReadError {
     Broken,
 }
 
-/// The body, up to `max` bytes. See [`DRAIN_EXTRA`] for what happens to one that is longer.
+/// The body, up to `max` bytes, within [`UPLOAD_WAIT`]. See [`DRAIN_EXTRA`] for what happens to
+/// one that is longer; one that takes longer counts as cut off.
 async fn read_capped(body: Body, max: usize) -> Result<Vec<u8>, ReadError> {
+    tokio::time::timeout(UPLOAD_WAIT, read_body(body, max))
+        .await
+        .unwrap_or(Err(ReadError::Broken))
+}
+
+async fn read_body(body: Body, max: usize) -> Result<Vec<u8>, ReadError> {
     let mut body = std::pin::pin!(body);
     let mut out: Vec<u8> = Vec::new();
     let mut total = 0usize;
@@ -119,6 +130,11 @@ fn query_value<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
 
 fn bad_request(why: &str) -> Response {
     refused(StatusCode::BAD_REQUEST, why)
+}
+
+/// The hub holds as many recordings as it may until some are transcribed.
+fn busy() -> Response {
+    refused(StatusCode::TOO_MANY_REQUESTS, voice::BUSY)
 }
 
 /// A recording over the body limit, or over 130 seconds.
@@ -172,6 +188,21 @@ async fn post_turn(State(state): State<Arc<AppState>>, req: Request) -> Response
     } else {
         MAX_TYPED_BODY
     };
+    // A recording takes its share of the hub's budget before it is read (as much as it says it
+    // is, or the whole limit when it does not say), and keeps it until it is transcribed.
+    let mut permit = None;
+    if audio_type.is_some() {
+        let declared = parts
+            .headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map_or(MAX_TURN_BODY, |n| n.min(MAX_TURN_BODY));
+        match bridge.reserve_audio(declared) {
+            Some(p) => permit = Some(p),
+            None => return busy(),
+        }
+    }
     let bytes = match read_capped(body, limit).await {
         Ok(b) => b,
         Err(ReadError::TooBig) if audio_type.is_some() => return too_long(),
@@ -179,6 +210,11 @@ async fn post_turn(State(state): State<Arc<AppState>>, req: Request) -> Response
         Err(ReadError::Broken) => return bad_request("The upload was cut off."),
     };
 
+    if let Some(p) = permit.as_mut() {
+        if !p.resize(bytes.len()) {
+            return busy();
+        }
+    }
     let (text, audio) = if audio_type.is_some() {
         if bytes.is_empty() {
             return bad_request("That recording is empty.");
@@ -210,6 +246,7 @@ async fn post_turn(State(state): State<Arc<AppState>>, req: Request) -> Response
                 let (bridge, person, id) = (bridge.clone(), client.person_id, turn.to_owned());
                 tokio::spawn(async move {
                     bridge.transcribe_turn(person, &id, audio, mime).await;
+                    drop(permit);
                 });
             }
             eprintln!(
@@ -247,9 +284,13 @@ async fn post_turn(State(state): State<Arc<AppState>>, req: Request) -> Response
         Begin::Rejected(Reject::UnknownContinues) => {
             bad_request("The turn this one carries on isn't known.")
         }
-        Begin::Rejected(Reject::QueueFull) => refused(
+        Begin::Rejected(Reject::QueueFull { helm_online }) => refused(
             StatusCode::TOO_MANY_REQUESTS,
-            "Helm is offline and the queue is full, so this wasn't kept.",
+            if helm_online {
+                voice::QUEUE_FULL
+            } else {
+                voice::QUEUE_FULL_OFFLINE
+            },
         ),
     }
 }
