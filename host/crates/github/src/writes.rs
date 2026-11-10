@@ -351,3 +351,168 @@ pub fn review(c: &Client, a: &ReviewArgs) -> GhResult<Answer> {
         json!({"commit_id": a.head, "body": a.body, "event": a.event}),
     ))
 }
+
+// ---- your own comments, and reactions -----------------------------------------------------
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommentEditArgs {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+    pub comment_id: String,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommentDeleteArgs {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+    pub comment_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReactArgs {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+    pub comment_id: String,
+    pub content: String,
+}
+
+/// A comment as GitHub has it: where it lives, whether the signed-in user wrote it, and the
+/// reactions on it.
+struct CommentFacts {
+    /// A conversation comment (otherwise a line comment in a review).
+    issue: bool,
+    mine: bool,
+    owner: String,
+    repo: String,
+    number: u64,
+    reactions: Value,
+}
+
+fn read_comment(c: &Client, comment_id: &str) -> GhResult<CommentFacts> {
+    check_node(comment_id).map_err(|_| GhError::invalid("That is not a GitHub comment id."))?;
+    let a = c.read(&graphql_request(
+        "commentForWrite",
+        json!({"commentId": comment_id}),
+    )?)?;
+    if a.status != 200 {
+        return Err(not_sent(&a));
+    }
+    let n = &a.data["node"];
+    let issue = match n["__typename"].as_str() {
+        Some("IssueComment") => true,
+        Some("PullRequestReviewComment") => false,
+        _ => {
+            return Err(GhError::new(
+                Class::Refused,
+                "GitHub has no such comment; nothing was sent.",
+            ))
+        }
+    };
+    let parent = if issue { &n["issue"] } else { &n["pullRequest"] };
+    match (
+        parent["number"].as_u64(),
+        parent["repository"]["owner"]["login"].as_str(),
+        parent["repository"]["name"].as_str(),
+    ) {
+        (Some(number), Some(o), Some(r)) => Ok(CommentFacts {
+            issue,
+            mine: n["viewerDidAuthor"].as_bool() == Some(true),
+            owner: o.to_owned(),
+            repo: r.to_owned(),
+            number,
+            reactions: n["reactionGroups"].clone(),
+        }),
+        _ => Err(GhError::new(
+            Class::Refused,
+            "GitHub has no such comment; nothing was sent.",
+        )),
+    }
+}
+
+/// The comment must be on the pull request the page shows.
+fn on_this_pr(f: &CommentFacts, owner: &str, repo: &str, number: u64) -> GhResult<()> {
+    if f.number == number && f.owner.eq_ignore_ascii_case(owner) && f.repo.eq_ignore_ascii_case(repo)
+    {
+        Ok(())
+    } else {
+        Err(GhError::new(
+            Class::Refused,
+            "That comment is not on this pull request; nothing was sent.",
+        ))
+    }
+}
+
+fn not_yours() -> GhError {
+    GhError::new(
+        Class::Refused,
+        "You can only change comments you wrote; nothing was sent.",
+    )
+}
+
+/// Edit one of your own comments, a conversation comment or a line comment.
+pub fn comment_edit(c: &Client, a: &CommentEditArgs) -> GhResult<Answer> {
+    check_pr(&a.owner, &a.repo, a.number)?;
+    check_body(&a.body, true)?;
+    let f = read_comment(c, &a.comment_id)?;
+    on_this_pr(&f, &a.owner, &a.repo, a.number)?;
+    if !f.mine {
+        return Err(not_yours());
+    }
+    let id = if f.issue {
+        "updateIssueComment"
+    } else {
+        "updatePullRequestReviewComment"
+    };
+    c.mutate(
+        &graphql_request(id, json!({"commentId": a.comment_id, "body": a.body}))?,
+        id,
+    )
+}
+
+/// Delete one of your own comments.
+pub fn comment_delete(c: &Client, a: &CommentDeleteArgs) -> GhResult<Answer> {
+    check_pr(&a.owner, &a.repo, a.number)?;
+    let f = read_comment(c, &a.comment_id)?;
+    on_this_pr(&f, &a.owner, &a.repo, a.number)?;
+    if !f.mine {
+        return Err(not_yours());
+    }
+    let id = if f.issue {
+        "deleteIssueComment"
+    } else {
+        "deletePullRequestReviewComment"
+    };
+    c.mutate(&graphql_request(id, json!({"commentId": a.comment_id}))?, id)
+}
+
+/// Toggle your reaction on a comment: added when you have not reacted with it, removed when you
+/// have. The answer is the comment's reactions as they stand after (`data.subject.reactionGroups`).
+pub fn react(c: &Client, a: &ReactArgs) -> GhResult<Answer> {
+    check_pr(&a.owner, &a.repo, a.number)?;
+    if !graphql::REACTIONS.contains(&a.content.as_str()) {
+        return Err(GhError::invalid("That is not a reaction GitHub offers."));
+    }
+    let f = read_comment(c, &a.comment_id)?;
+    on_this_pr(&f, &a.owner, &a.repo, a.number)?;
+    let have = f.reactions.as_array().is_some_and(|groups| {
+        groups.iter().any(|g| {
+            g["content"].as_str() == Some(a.content.as_str())
+                && g["viewerHasReacted"].as_bool() == Some(true)
+        })
+    });
+    let id = if have { "removeReaction" } else { "addReaction" };
+    c.mutate(
+        &graphql_request(
+            id,
+            json!({"commentId": a.comment_id, "content": a.content}),
+        )?,
+        id,
+    )
+}

@@ -20,6 +20,10 @@
 //! | `github_review_comment` | `{owner, repo, number, head, path, line, side, startLine?, body}` → answer |
 //! | `github_review_reply` | `{owner, repo, number, threadId, body}` → answer (`data.comment`) |
 //! | `github_review_resolve` | `{threadId, resolve}` → answer (`data.thread`, `data.changed`) |
+//! | `github_comment_edit` | `{owner, repo, number, commentId, body}` → answer; your own comment only, conversation or line comment |
+//! | `github_comment_delete` | `{owner, repo, number, commentId}` → answer; your own comment only |
+//! | `github_react` | `{owner, repo, number, commentId, content}` → answer (`data.subject.reactionGroups`); adds your reaction, or removes it when you already have it |
+//! | `github_image` | `{owner, repo, number, url}` → `{contentType, data}` (base64); only an image found in this pull request's own text, from GitHub's image hosts |
 //! | `github_review` | `{owner, repo, number, head, event, body}` → answer (the new review) |
 //!
 //! An answer is `{status, rateLimit, nextPage?, data, errors?}`: `rateLimit` is
@@ -34,6 +38,7 @@
 pub mod client;
 pub mod error;
 pub mod graphql;
+pub mod media;
 pub mod rest;
 pub mod transport;
 pub mod writes;
@@ -286,6 +291,22 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("github_review_resolve", OpClass::Blocking, |ctx, args| {
             let a = parse(args)?;
             answer(writes::review_resolve(&gate(ctx)?.client, &a))
+        })
+        .blocking("github_comment_edit", OpClass::Blocking, |ctx, args| {
+            let a = parse(args)?;
+            answer(writes::comment_edit(&gate(ctx)?.client, &a))
+        })
+        .blocking("github_comment_delete", OpClass::Blocking, |ctx, args| {
+            let a = parse(args)?;
+            answer(writes::comment_delete(&gate(ctx)?.client, &a))
+        })
+        .blocking("github_react", OpClass::Blocking, |ctx, args| {
+            let a = parse(args)?;
+            answer(writes::react(&gate(ctx)?.client, &a))
+        })
+        .blocking("github_image", OpClass::Blocking, |ctx, args| {
+            let a = parse(args)?;
+            Ok(media::image(&gate(ctx)?.client, &a)?)
         })
         .blocking("github_review", OpClass::Blocking, |ctx, args| {
             let a = parse(args)?;

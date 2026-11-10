@@ -13,8 +13,10 @@ serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
 rusqlite.workspace = true
-# Debug builds only: the loopback transport that end-to-end checks point at a fake GitHub.
-ureq = { version = "3", default-features = false }
+base64 = "0.22"
+# The loopback transport that end-to-end checks point at a fake GitHub (debug builds), and the
+# fetch of a pull request's own images from GitHub's image hosts, with no credential.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 tempfile.workspace = true

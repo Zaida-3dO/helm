@@ -32,7 +32,21 @@ pub enum Var {
     First,
     /// A comment body.
     Body,
+    /// One of GitHub's reaction names.
+    Reaction,
 }
+
+/// The reactions GitHub offers on a comment.
+pub const REACTIONS: [&str; 8] = [
+    "THUMBS_UP",
+    "THUMBS_DOWN",
+    "LAUGH",
+    "HOORAY",
+    "CONFUSED",
+    "HEART",
+    "ROCKET",
+    "EYES",
+];
 
 pub struct Doc {
     pub id: &'static str,
@@ -180,6 +194,8 @@ pub const DOCS: &[Doc] = &[
             totalCount
             nodes {
               id databaseId author { login } body createdAt updatedAt url outdated diffHunk
+              viewerDidAuthor viewerCanUpdate viewerCanDelete
+              reactionGroups { content viewerHasReacted reactors { totalCount } }
               commit { oid } originalCommit { oid }
               pullRequestReview { id state }
             }
@@ -294,6 +310,103 @@ pub const DOCS: &[Doc] = &[
         native: true,
     },
     Doc {
+        id: "commentForWrite",
+        text: r#"query($commentId: ID!) {
+  node(id: $commentId) {
+    __typename
+    ... on IssueComment {
+      viewerDidAuthor
+      issue { number repository { name owner { login } } }
+      reactionGroups { content viewerHasReacted reactors { totalCount } }
+    }
+    ... on PullRequestReviewComment {
+      viewerDidAuthor
+      pullRequest { number repository { name owner { login } } }
+      reactionGroups { content viewerHasReacted reactors { totalCount } }
+    }
+  }
+}"#,
+        vars: &[("commentId", Var::NodeId, true)],
+        native: true,
+    },
+    Doc {
+        id: "updateIssueComment",
+        text: r#"mutation($commentId: ID!, $body: String!) {
+  updateIssueComment(input: {id: $commentId, body: $body}) {
+    issueComment { id databaseId body updatedAt }
+  }
+}"#,
+        vars: &[("commentId", Var::NodeId, true), ("body", Var::Body, true)],
+        native: true,
+    },
+    Doc {
+        id: "updatePullRequestReviewComment",
+        text: r#"mutation($commentId: ID!, $body: String!) {
+  updatePullRequestReviewComment(input: {pullRequestReviewCommentId: $commentId, body: $body}) {
+    pullRequestReviewComment { id databaseId body updatedAt }
+  }
+}"#,
+        vars: &[("commentId", Var::NodeId, true), ("body", Var::Body, true)],
+        native: true,
+    },
+    Doc {
+        id: "deleteIssueComment",
+        text: r#"mutation($commentId: ID!) {
+  deleteIssueComment(input: {id: $commentId}) { clientMutationId }
+}"#,
+        vars: &[("commentId", Var::NodeId, true)],
+        native: true,
+    },
+    Doc {
+        id: "deletePullRequestReviewComment",
+        text: r#"mutation($commentId: ID!) {
+  deletePullRequestReviewComment(input: {id: $commentId}) { clientMutationId }
+}"#,
+        vars: &[("commentId", Var::NodeId, true)],
+        native: true,
+    },
+    Doc {
+        id: "addReaction",
+        text: r#"mutation($commentId: ID!, $content: ReactionContent!) {
+  addReaction(input: {subjectId: $commentId, content: $content}) {
+    subject { reactionGroups { content viewerHasReacted reactors { totalCount } } }
+  }
+}"#,
+        vars: &[
+            ("commentId", Var::NodeId, true),
+            ("content", Var::Reaction, true),
+        ],
+        native: true,
+    },
+    Doc {
+        id: "removeReaction",
+        text: r#"mutation($commentId: ID!, $content: ReactionContent!) {
+  removeReaction(input: {subjectId: $commentId, content: $content}) {
+    subject { reactionGroups { content viewerHasReacted reactors { totalCount } } }
+  }
+}"#,
+        vars: &[
+            ("commentId", Var::NodeId, true),
+            ("content", Var::Reaction, true),
+        ],
+        native: true,
+    },
+    Doc {
+        id: "pullRequestImages",
+        text: r#"query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      bodyHTML
+      comments(first: 100) { nodes { bodyHTML } }
+      reviews(first: 100) { nodes { bodyHTML } }
+      reviewThreads(first: 50) { nodes { comments(first: 50) { nodes { bodyHTML } } } }
+    }
+  }
+}"#,
+        vars: PR_VARS,
+        native: true,
+    },
+    Doc {
         id: "resolveReviewThread",
         text: r#"mutation($threadId: ID!) {
   resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } }
@@ -360,6 +473,7 @@ fn check_var(name: &str, kind: Var, v: &Value) -> GhResult<()> {
             .is_some_and(|s| s.len() <= 512 && !s.chars().any(char::is_control)),
         Var::First => v.as_i64().is_some_and(|n| (1..=100).contains(&n)),
         Var::Body => v.as_str().is_some_and(|s| json_len(s) <= MAX_BODY_BYTES),
+        Var::Reaction => v.as_str().is_some_and(|s| REACTIONS.contains(&s)),
     };
     if ok {
         Ok(())
