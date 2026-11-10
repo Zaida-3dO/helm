@@ -7,7 +7,7 @@ use axum::http::{header, HeaderMap, Request, StatusCode};
 use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
 use helm_hub::registry::Registry;
-use helm_hub::relay::{Line, Upstream, OFFLINE};
+use helm_hub::relay::{Line, Route, Upstream, OFFLINE};
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
 use helm_hub::telegram::{
@@ -19,6 +19,8 @@ use helm_hub::telegram::{
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -140,6 +142,29 @@ impl Voice for FakeVoice {
             self.gate.acquire().await.unwrap().forget();
             self.heard.clone()
         })
+    }
+}
+
+/// A route that writes "make room" into the voice's own log when it is asked to free the PC's
+/// graphics memory, so a test can see that it happens before a transcription.
+struct RoomRoute {
+    line: Arc<Line>,
+    voice: Arc<FakeVoice>,
+}
+
+impl Route for RoomRoute {
+    fn is_up(&self) -> bool {
+        self.line.is_up()
+    }
+    fn generation(&self) -> Option<u64> {
+        self.line.generation()
+    }
+    fn send(&self, frame: &Value) -> bool {
+        self.line.send(frame)
+    }
+    fn make_room(&self, _wait: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.voice.seen.lock().unwrap().push("make room".to_owned());
+        Box::pin(async {})
     }
 }
 
@@ -1204,6 +1229,33 @@ async fn recordings_go_with_their_transcript_and_the_recording_attached() {
     settle().await;
     assert_eq!(down(&mut rx), [unheard, "after"]);
     assert_eq!(e.api.sent_texts(), [down_reply(DOWN)]);
+
+    // A long transcription does not hold up the downloads behind it: all three notes are
+    // downloaded while the first is still being transcribed. Transcription is one at a time, and
+    // Helm is asked to free the PC's graphics memory before it starts.
+    let voice = FakeVoice::held(Ok("slow"));
+    let (line, _up) = Line::new();
+    let route = Arc::new(RoomRoute {
+        line: Arc::new(line),
+        voice: voice.clone(),
+    });
+    let bridge = Bridge::with_route(Arc::new(FakeApi::default()), route, &cfg());
+    let bridge = Arc::new(bridge.with_voice(voice.clone()));
+    for _ in 0..3 {
+        bridge
+            .on_update(&owner_message(json!({ "voice": note })), now)
+            .await;
+    }
+    settle().await;
+    let seen = voice.seen.lock().unwrap().clone();
+    let count = |what: &str| seen.iter().filter(|s| s.starts_with(what)).count();
+    assert_eq!(
+        (count("download"), count("make room"), count("transcribe")),
+        (3, 1, 1),
+        "{seen:?}"
+    );
+    let at = |what: &str| seen.iter().position(|s| s.starts_with(what)).unwrap();
+    assert!(at("make room") < at("transcribe"), "{seen:?}");
 }
 
 #[tokio::test]
@@ -1338,6 +1390,25 @@ async fn pictures_reach_helm_as_images_and_the_ones_it_cannot_show_as_plain_file
         assert_eq!(e.api.sent_texts(), [format!("{IMAGE_FAILED}{why}")], "{m}");
         assert!(attached_down(&mut rx).is_empty(), "{m}");
     }
+    // When every file fails, its caption still goes, as text, beside the reply that says why.
+    e.api.clear();
+    let gone =
+        json!({ "document": doc("image/png", "img-gone", "gone.png"), "caption": "the report" });
+    assert_eq!(
+        e.bridge.on_update(&owner_message(gone), now_ms()).await,
+        Handled::Image
+    );
+    settle().await;
+    assert_eq!(
+        e.api.sent_texts(),
+        [format!(
+            "{IMAGE_FAILED}the download from Telegram failed (HTTP 404)"
+        )]
+    );
+    assert_eq!(
+        attached_down(&mut rx),
+        [("the report".to_owned(), vec![], vec![])]
+    );
     // A message with no file and no text (a location) is not passed on, and files can be off.
     e.api.clear();
     let here = owner_message(json!({ "location": { "latitude": 51.5, "longitude": 0.1 } }));
@@ -1369,6 +1440,20 @@ async fn pictures_reach_helm_as_images_and_the_ones_it_cannot_show_as_plain_file
             .collect::<Vec<_>>(),
         [("first", 1), ("second", 0)]
     );
+
+    // A message whose files never finish arriving is dropped with a reply of its own, not the
+    // one about a wait for Helm.
+    let (e, _held) = env_with_files(vec![], false);
+    let now = now_ms();
+    e.bridge
+        .on_update(&owner_message(json!({ "photo": sizes })), now)
+        .await;
+    assert_eq!(e.bridge.flush(now + 76 * MIN).await, 0);
+    assert_eq!(
+        e.api.sent_texts(),
+        ["1 message with files was dropped: its files did not finish arriving in time."]
+    );
+    assert_eq!(e.bridge.queued_len(), 0);
 }
 
 #[tokio::test]

@@ -114,8 +114,12 @@ pub const MAX_FILES: usize = 10;
 /// The most file bytes one message carries to Helm. As base64 it stays well inside the largest
 /// frame Helm takes.
 pub const MAX_MESSAGE_BYTES: usize = 50 * 1024 * 1024;
-/// The most file bytes held for Helm at once (waiting to go, or sent and not yet acknowledged).
+/// The most memory the files held for Helm may take at once (waiting to go, or sent and not yet
+/// acknowledged), counted as base64, which is what is held.
 pub const MAX_QUEUED_BYTES: usize = 150 * 1024 * 1024;
+/// A flush sends frames until this much base64 of files has gone down the line, then leaves the
+/// rest for the next tick, so a reconnect never builds every queued frame at once.
+pub const FLUSH_BYTES: usize = 64 * 1024 * 1024;
 /// How many files are fetched (and transcribed) at once, so the bytes held while fetching stay
 /// bounded too.
 pub const MAX_DOWNLOADS: usize = 2;
@@ -377,25 +381,43 @@ struct Hold {
 }
 
 impl Queued {
-    /// The bytes it holds, or has set aside for files still being fetched, for the cap on what is
-    /// held.
-    fn held(&self) -> usize {
-        let reserved = self.gather.as_ref().map_or(0, |g| g.reserved);
-        reserved + self.parts_held()
-    }
-
-    fn parts_held(&self) -> usize {
+    /// Every file it holds, fetched so far.
+    fn blobs(&self) -> impl Iterator<Item = &Blob> {
         let parts = self
             .gather
             .iter()
             .flat_map(|g| g.parts.iter().map(|(_, p)| &p.blob));
+        self.images.iter().chain(&self.files).chain(parts)
+    }
+
+    /// The bytes of files it carries, or has set aside for files still being fetched: what the cap
+    /// of [`MAX_MESSAGE_BYTES`] counts.
+    fn file_bytes(&self) -> usize {
+        let reserved = self.gather.as_ref().map_or(0, |g| g.reserved);
+        reserved + self.blobs().map(|b| b.len).sum::<usize>()
+    }
+
+    /// The memory its files take, which is their base64 (a third more than the files), counting
+    /// what is set aside for files still being fetched the same way: what the cap of
+    /// [`MAX_QUEUED_BYTES`] counts.
+    fn held(&self) -> usize {
+        let reserved = self.gather.as_ref().map_or(0, |g| g.reserved);
+        b64_len(reserved) + self.blobs().map(|b| b.data.len()).sum::<usize>()
+    }
+
+    /// The base64 of the files that go down the line with it.
+    fn data_bytes(&self) -> usize {
         self.images
             .iter()
             .chain(&self.files)
-            .chain(parts)
-            .map(|b| b.len)
+            .map(|b| b.data.len())
             .sum()
     }
+}
+
+/// The base64 size of `raw` bytes, which is what the queue really holds for a file.
+fn b64_len(raw: usize) -> usize {
+    raw.div_ceil(3) * 4
 }
 
 /// A file on its way to Helm: base64, ready for the frame. Its bytes are never printed.
@@ -614,8 +636,13 @@ pub struct Bridge {
     state: Mutex<State>,
     /// Serialises Telegram sends, so a status edit and the final answer never interleave.
     ops: tokio::sync::Mutex<()>,
-    /// Turns to fetch a file: at most [`MAX_DOWNLOADS`] at once.
+    /// Turns to fetch a file: at most [`MAX_DOWNLOADS`] at once. A turn is given back once the
+    /// file is downloaded, so a long transcription never holds up the downloads behind it.
     downloads: tokio::sync::Semaphore,
+    /// One recording is transcribed at a time, as the server's graphics memory allows.
+    transcribing: tokio::sync::Semaphore,
+    /// How long a recording waits for Helm to free the PC's graphics memory.
+    room_wait: Duration,
 }
 
 pub fn now_ms() -> i64 {
@@ -897,7 +924,15 @@ impl Bridge {
             state: Mutex::new(State::default()),
             ops: tokio::sync::Mutex::new(()),
             downloads: tokio::sync::Semaphore::new(MAX_DOWNLOADS),
+            transcribing: tokio::sync::Semaphore::new(1),
+            room_wait: crate::stt::ROOM_WAIT,
         }
+    }
+
+    /// Wait `wait` (instead of [`crate::stt::ROOM_WAIT`]) for Helm to make room for speech.
+    pub fn with_room_wait(mut self, wait: Duration) -> Self {
+        self.room_wait = wait;
+        self
     }
 
     /// Turn voice notes on, transcribed by `voice`.
@@ -1167,7 +1202,7 @@ impl Bridge {
         // stays under the caps while files are fetched; what arrives is checked again.
         let queue_full = {
             let st = self.st();
-            st.queue.iter().map(Queued::held).sum::<usize>() + job.size > MAX_QUEUED_BYTES
+            st.queue.iter().map(Queued::held).sum::<usize>() + b64_len(job.size) > MAX_QUEUED_BYTES
         };
         if queue_full {
             self.reply(chat, &queue_full_note(label)).await;
@@ -1183,7 +1218,7 @@ impl Bridge {
                     .is_some_and(|g| g.group.as_ref() == Some(group))
             })?;
             let id = q.id.clone();
-            let mine = q.held();
+            let mine = q.file_bytes();
             let g = q.gather.as_mut()?;
             if g.pending + g.parts.len() >= MAX_FILES {
                 return Some(Err(format!(
@@ -1253,7 +1288,7 @@ impl Bridge {
     /// recording, the speech-to-text server.
     async fn fetch_part(&self, job: &Job) -> Result<Part, String> {
         // A few at a time, so only those few files' bytes are in memory while they are fetched.
-        let _turn = self
+        let turn = self
             .downloads
             .acquire()
             .await
@@ -1279,6 +1314,9 @@ impl Bridge {
             .and_then(Value::as_str)
             .ok_or("Telegram gave no download path for it")?;
         let bytes = self.download(path).await?;
+        // The download is done: give the turn back before a transcription, which can take
+        // minutes, so the files behind this one are not held up by it.
+        drop(turn);
         let own = job.name.as_deref().and_then(clean_name);
         let from_path = path.rsplit('/').next().and_then(clean_name);
         // Telegram sends every photo as a JPEG and names no type for it.
@@ -1297,6 +1335,13 @@ impl Bridge {
             (true, Some(voice)) => {
                 let name = own.clone().or(from_path.clone());
                 let name = name.unwrap_or_else(|| job.media.default_name().to_owned());
+                let _slot = self
+                    .transcribing
+                    .acquire()
+                    .await
+                    .map_err(|_| "the hub is shutting down".to_owned())?;
+                // Free the PC's graphics memory first; a failure only costs the wait.
+                self.line.make_room(self.room_wait).await;
                 Some(match voice.transcribe(bytes.clone(), &name, &mime).await {
                     Ok(t) => Heard::Text(t.trim().to_owned()),
                     Err(why) => Heard::Failed(why),
@@ -1340,7 +1385,7 @@ impl Bridge {
             let mut st = self.st();
             // What is held besides this file, whose share set aside is given back now.
             let held = st.queue.iter().map(Queued::held).sum::<usize>();
-            let held = held.saturating_sub(job.size);
+            let held = held.saturating_sub(b64_len(job.size));
             let Some(g) = st
                 .queue
                 .iter_mut()
@@ -1359,7 +1404,7 @@ impl Bridge {
                     let mine = mine + g.reserved;
                     if mine + part.blob.len > MAX_MESSAGE_BYTES {
                         g.notes.push(message_full_note(&name));
-                    } else if held + part.blob.len > MAX_QUEUED_BYTES {
+                    } else if held + part.blob.data.len() > MAX_QUEUED_BYTES {
                         g.notes.push(queue_full_note(&name));
                     } else {
                         match (&part.heard, part.media) {
@@ -1388,7 +1433,7 @@ impl Bridge {
     async fn flush_sent(&self, now: i64) -> Vec<String> {
         let generation = self.line.generation();
         let resend_ms = RESEND_AFTER.as_millis() as i64;
-        let (frames, expired, undelivered, finished) = {
+        let (due, expired, undelivered, gave_up, finished) = {
             let mut st = self.st();
             for q in st.queue.iter_mut() {
                 if q.sent_on.is_some() && q.sent_on != generation {
@@ -1417,7 +1462,9 @@ impl Bridge {
                 let mut parts = g.parts.clone();
                 parts.sort_by_key(|(i, _)| *i);
                 let parts: Vec<Part> = parts.into_iter().map(|(_, p)| p).collect();
-                let kept = !parts.is_empty();
+                // When every file failed the caption still goes, as text, beside the notes that
+                // say which files were left out; with no caption either there is nothing to send.
+                let kept = !parts.is_empty() || !g.caption.is_empty();
                 if kept {
                     q.text = Some(compose(&g, &parts));
                     for p in parts {
@@ -1438,56 +1485,79 @@ impl Bridge {
             // being fetched keeps its place for far longer than its HTTP timeouts allow, but not
             // for ever.
             let lifetime = self.lifetime_ms;
-            let (mut expired, mut undelivered) = (0, 0);
+            let (mut expired, mut undelivered, mut gave_up) = (0, 0, 0);
             st.queue.retain(|q| {
                 let keep = match q.text {
                     None => now - q.sent_down_ms <= GATHERING_MAX_MS,
                     Some(_) => now - q.sent_at_ms <= lifetime,
                 };
-                match (keep, q.sent_on) {
-                    (false, None) => expired += 1,
-                    (false, Some(_)) => undelivered += 1,
+                match (keep, q.sent_on, &q.text) {
+                    // Its files never finished arriving: that is not a wait for Helm.
+                    (false, _, None) => gave_up += 1,
+                    (false, None, _) => expired += 1,
+                    (false, Some(_), _) => undelivered += 1,
                     _ => {}
                 }
                 keep
             });
-            let bot = st.bot_name.clone();
-            let mut frames = vec![];
-            if let Some(gen) = generation {
-                let due = |q: &Queued| q.sent_on.is_none() || now - q.sent_down_ms >= resend_ms;
-                for q in st.queue.iter_mut().filter(|q| due(q)) {
-                    // Order is kept: nothing overtakes a message still gathering its files.
-                    let Some(text) = &q.text else { break };
-                    let age = (now - q.sent_at_ms) / 60_000;
-                    let mut frame = json!({
-                        "type": "telegram",
-                        "id": q.id,
-                        "text": text,
-                        "sentAt": q.sent_at_ms,
-                        "ageMinutes": if age >= 1 { json!(age) } else { Value::Null },
-                        "bot": bot,
-                    });
-                    let list = |blobs: &[Blob]| -> Value {
-                        blobs
-                            .iter()
-                            .map(|b| json!({ "name": b.name, "mediaType": b.mime, "data": &*b.data }))
-                            .collect()
-                    };
-                    if !q.images.is_empty() {
-                        frame["images"] = list(&q.images);
-                    }
-                    if !q.files.is_empty() {
-                        frame["files"] = list(&q.files);
-                    }
-                    frames.push((frame, q.id.clone()));
-                    q.sent_on = Some(gen);
-                    q.sent_down_ms = now;
-                }
-            }
-            (frames, expired, undelivered, finished)
+            // The messages to send now, in order. Order is kept: nothing overtakes a message
+            // still gathering its files.
+            let due: Vec<String> = match generation {
+                Some(_) => st
+                    .queue
+                    .iter()
+                    .filter(|q| q.sent_on.is_none() || now - q.sent_down_ms >= resend_ms)
+                    .map_while(|q| q.text.is_some().then(|| q.id.clone()))
+                    .collect(),
+                None => vec![],
+            };
+            (due, expired, undelivered, gave_up, finished)
         };
-        let mut sent = vec![];
-        for (frame, id) in frames {
+        // One frame at a time: a frame holds a second, JSON copy of its files' base64, so building
+        // them all at once would hold about twice what the queue does. A flush also stops after
+        // [`FLUSH_BYTES`] of files; the rest go on the next tick.
+        let mut sent: Vec<String> = vec![];
+        let mut budget = FLUSH_BYTES;
+        for id in due {
+            let Some(gen) = generation else { break };
+            let frame = {
+                let mut st = self.st();
+                let bot = st.bot_name.clone();
+                // Gone meanwhile (acknowledged, or dropped with /cancel): nothing to send.
+                let Some(q) = st.queue.iter_mut().find(|q| q.id == id) else {
+                    continue;
+                };
+                let Some(text) = &q.text else { break };
+                let weight = q.data_bytes();
+                if !sent.is_empty() && weight > budget {
+                    break;
+                }
+                budget = budget.saturating_sub(weight);
+                let age = (now - q.sent_at_ms) / 60_000;
+                let mut frame = json!({
+                    "type": "telegram",
+                    "id": q.id,
+                    "text": text,
+                    "sentAt": q.sent_at_ms,
+                    "ageMinutes": if age >= 1 { json!(age) } else { Value::Null },
+                    "bot": bot,
+                });
+                let list = |blobs: &[Blob]| -> Value {
+                    blobs
+                        .iter()
+                        .map(|b| json!({ "name": b.name, "mediaType": b.mime, "data": &*b.data }))
+                        .collect()
+                };
+                if !q.images.is_empty() {
+                    frame["images"] = list(&q.images);
+                }
+                if !q.files.is_empty() {
+                    frame["files"] = list(&q.files);
+                }
+                q.sent_on = Some(gen);
+                q.sent_down_ms = now;
+                frame
+            };
             if self.line.send(&frame) {
                 sent.push(id);
             } else {
@@ -1518,6 +1588,19 @@ impl Bridge {
             } else {
                 format!(
                     "{expired} queued messages expired before Helm reconnected and were dropped."
+                )
+            };
+            self.reply(chat, &text).await;
+        }
+        if gave_up > 0 {
+            let chat = self.reply_chat();
+            let text = if gave_up == 1 {
+                "1 message with files was dropped: its files did not finish arriving in time."
+                    .to_owned()
+            } else {
+                format!(
+                    "{gave_up} messages with files were dropped: their files did not finish \
+                     arriving in time."
                 )
             };
             self.reply(chat, &text).await;

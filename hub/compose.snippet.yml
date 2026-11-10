@@ -2,7 +2,8 @@
 # the memory-folder path are placeholders. HUB_TOKENS (client:token[:scope],...; optional,
 # machines are normally paired with `helm-hub pair`), HUB_LEGACY_PERSON,
 # HUB_TELEGRAM_BOT_TOKEN and HUB_TELEGRAM_ALLOWED_USERS live in the env file,
-# which is never committed. Without a bot token the Telegram bot stays off.
+# which is never committed. A token or client name there must not contain a comma or a colon.
+# Without a bot token the Telegram bot stays off.
 # On a bot another service already runs, set HUB_TELEGRAM_RECEIVE=off and give
 # that service's forwarder a telegram-scope token in HUB_TOKENS
 # (forwarder:<token>:telegram); it posts updates (messages and button taps) to
@@ -14,7 +15,7 @@ services:
     image: helm-hub:latest
     container_name: helm-hub
     restart: unless-stopped
-    user: "1000:100"
+    user: "1000:100" # ./helm-hub/data must be writable by this user and group (chown -R 1000:100)
     env_file: ./helm-hub/.env # HUB_TOKENS, HUB_TELEGRAM_BOT_TOKEN, HUB_TELEGRAM_ALLOWED_USERS
     environment:
       - TZ=Europe/London

@@ -240,6 +240,58 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF title, description, bod
 END;
 "#;
 
+/// Whether `s` is `YYYY-MM-DD`, optionally followed by `T` (or a space) and `HH:MM[:SS[.fff]]` and
+/// an optional `Z`. Text order of such a string is time order against `updated_at`, which is why
+/// nothing looser is let through: `since: "yesterday"` would otherwise match every memory.
+fn is_iso_since(s: &str) -> bool {
+    let b = s.as_bytes();
+    let digits = |from: usize, n: usize| -> Option<u32> {
+        let part = b.get(from..from + n)?;
+        part.iter()
+            .all(u8::is_ascii_digit)
+            .then(|| part.iter().fold(0, |acc, d| acc * 10 + u32::from(d - b'0')))
+    };
+    let (Some(_), Some(month), Some(day)) = (digits(0, 4), digits(5, 2), digits(8, 2)) else {
+        return false;
+    };
+    if b.get(4) != Some(&b'-') || b.get(7) != Some(&b'-') || !(1..=12).contains(&month) {
+        return false;
+    }
+    if !(1..=31).contains(&day) {
+        return false;
+    }
+    if b.len() == 10 {
+        return true;
+    }
+    if !matches!(b[10], b'T' | b' ') {
+        return false;
+    }
+    let (Some(hour), Some(minute)) = (digits(11, 2), digits(14, 2)) else {
+        return false;
+    };
+    if b.get(13) != Some(&b':') || hour > 23 || minute > 59 {
+        return false;
+    }
+    let mut rest = &s[16..];
+    if let Some(r) = rest.strip_prefix(':') {
+        let Some(second) = digits(17, 2) else {
+            return false;
+        };
+        if second > 60 {
+            return false;
+        }
+        rest = &r[2..];
+        if let Some(frac) = rest.strip_prefix('.') {
+            let n = frac.bytes().take_while(u8::is_ascii_digit).count();
+            if n == 0 {
+                return false;
+            }
+            rest = &frac[n..];
+        }
+    }
+    rest.is_empty() || rest == "Z"
+}
+
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 const SUMMARY_COLS: &str =
     "m.id, m.name, m.title, m.description, m.kind, m.tags, m.updated_at, m.visibility, m.owner_person";
@@ -457,6 +509,13 @@ impl Store {
             ));
         }
         if let Some(s) = since {
+            let s = s.trim();
+            if !is_iso_since(s) {
+                return Err(StoreError::Invalid(format!(
+                    "since must be an ISO-8601 date or UTC timestamp such as 2026-11-01 or \
+                     2026-11-01T09:30:00Z, not {s:?}"
+                )));
+            }
             args.push(s.to_owned().into());
             sql.push_str(&format!(" AND m.updated_at >= ?{}", args.len()));
         }
@@ -1183,6 +1242,33 @@ mod tests {
         assert_eq!(s.list(None, None, 3).unwrap().len(), 3);
         assert_eq!(s.list(None, Some("2000-01-01"), 100).unwrap().len(), 5);
         assert_eq!(s.list(None, Some("2999-01-01"), 100).unwrap().len(), 0);
+        // A date or UTC timestamp in any of the ISO shapes is read; anything else is refused
+        // rather than compared as text (where "yesterday" sorts after every real date).
+        for ok in [
+            "2000-01-01T00:00",
+            "2000-01-01T00:00:00Z",
+            "2000-01-01 12:30:59.123Z",
+            " 2000-01-01 ",
+        ] {
+            assert!(s.list(None, Some(ok), 100).is_ok(), "{ok:?}");
+        }
+        for bad in [
+            "yesterday",
+            "",
+            "2000-1-1",
+            "2000-13-01",
+            "2000-01-32",
+            "2000-01-01T24:00",
+            "2000-01-01T10",
+            "2000-01-01T10:00:00.Z",
+            "2000-01-01T10:00:00+01:00",
+            "2000-01-01x",
+        ] {
+            assert!(
+                matches!(s.list(None, Some(bad), 100), Err(StoreError::Invalid(_))),
+                "{bad:?}"
+            );
+        }
         // Newest first.
         assert_eq!(s.list(None, None, 1).unwrap()[0].title, "m4");
     }

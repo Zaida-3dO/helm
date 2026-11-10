@@ -118,6 +118,46 @@ async fn initialize_negotiates_and_notifications_get_202() {
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(body, Value::Null);
 
+    // A client's own response to a request (it has an id but no method) is 202 too, as is an
+    // error response; a message that is neither is told it is not a request.
+    for response in [
+        json!({ "jsonrpc": "2.0", "id": "r1", "result": {} }),
+        json!({ "jsonrpc": "2.0", "id": "r2", "error": { "code": -1, "message": "no" } }),
+    ] {
+        let (status, body) = post(&app, Some(RW), response).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body, Value::Null);
+    }
+    let (status, v) = post(&app, Some(RW), json!({ "jsonrpc": "2.0", "id": 3 })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["error"]["code"], -32600);
+
+    // An unknown tool is unknown for a read-only token too, not "needs a read-write token".
+    let r = call(&app, RO, "memory_nope", json!({})).await;
+    assert_eq!(r["isError"], true);
+    assert!(r["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("unknown tool"));
+    let r = call(
+        &app,
+        RO,
+        "memory_write",
+        json!({ "title": "t", "body": "b" }),
+    )
+    .await;
+    assert!(r["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("read-write"));
+
+    // `since` must be a date or a UTC timestamp.
+    let r = call(&app, RW, "memory_list", json!({ "since": "yesterday" })).await;
+    assert_eq!(r["isError"], true);
+    assert!(r["content"][0]["text"].as_str().unwrap().contains("since"));
+    let r = call(&app, RW, "memory_list", json!({ "since": "2000-01-01" })).await;
+    assert_eq!(r["isError"], false);
+
     let (_, v) = post(
         &app,
         Some(RW),

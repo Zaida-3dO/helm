@@ -26,7 +26,7 @@ else from the repo.
 | `memory_search {query, k?, vector?, model?, tags?, person?}` | Keyword search (FTS5, porter stemming, bm25 with title > description > tags > body). With `vector`, a hybrid: keyword and cosine rankings fused by reciprocal rank. Only vectors of the same dimension (and `model`, if given) are compared. Every listed tag must match. |
 | `memory_read {id}` | One memory in full, by numeric id or by name |
 | `memory_write {title, body, tags?, source?, name?, scope?, visibility?, vector?, model?}` | New memory, owned by the caller's person and for that person only unless `scope` is `everyone`. A vector must come with the id of the model that made it |
-| `memory_list {tag?, since?, limit?, person?}` | Newest first; `since` is an ISO-8601 date or UTC timestamp |
+| `memory_list {tag?, since?, limit?, person?}` | Newest first; `since` is an ISO-8601 date (`2026-11-01`) or UTC timestamp (`2026-11-01T09:30:00Z`), and anything else is refused |
 | `memory_update`, `memory_delete` | Only when `HUB_ALLOW_MUTATE=1`, and only on the caller's own memories (`memory_update` may also change `scope`). A new body without a new vector clears the old vector |
 
 **Whose memories.** `memory_search`, `memory_read` and `memory_list` return the caller's own
@@ -123,7 +123,10 @@ name. The scope is `rw` (the default), `ro`, `relay`, `app`, `peer`, `telegram`,
 `remote`, joined with `+` for several (`rw+app`, `rw+relay+app+peer`; `telegram`, `voice` and
 `remote` stand alone). The environment is the only place these are added or
 removed: the hub mirrors it into the registry at start-up, revokes entries no longer listed, and
-`client revoke` refuses them. Tokens are at least 24 characters and unique. A list that does not
+`client revoke` refuses them. Tokens are at least 24 characters and unique. A client name or a
+token must not contain a comma, which ends the entry, or a colon, which ends the field (a token is
+cut at its first colon and the rest is read as its scope, so the hub refuses to start or holds a
+shorter token than you meant); use letters and digits, and `-` or `_`. A list that does not
 parse stops the hub from starting. With no clients at all the hub starts and says so; nobody can
 connect until one is added.
 
@@ -275,12 +278,18 @@ about 67 MB as base64) and ignores the `files` list, so files would be lost or s
   The Bot API lets a bot download at most 20 MB, so a larger file gets a plain reply ("report.pdf
   was not sent to Helm: ...") and is left out. Several files sent together (an album) are gathered
   for 1.5 s after the last one and go as one message, its caption the one the album carries. One
-  message carries at most 10 files and 50 MB; about 150 MB may wait for Helm at once. A file over
+  message carries at most 10 files and 50 MB; about 150 MB (counted as base64, which is what the
+  hub holds, a third more than the files) may wait for Helm at once. A file over
   any of these is left out with a reply, judged from the sizes the message gives before anything is
-  downloaded and again once it has arrived. Two files are fetched at a time. A message keeps its
-  place in the queue while its files
-  are fetched, so a message sent after it waits for it. File bytes are never logged. Helm makes
-  each name safe for its disk and saves the file where the chat's agent can read it.
+  downloaded and again once it has arrived. Two files are fetched at a time; a file's turn is given
+  back as soon as it is downloaded, so a long transcription never holds up the downloads behind it.
+  A message keeps its place in the queue while its files
+  are fetched, so a message sent after it waits for it. A message whose files never finish arriving
+  is dropped after 75 minutes with a reply of its own. When every file of a message fails, its
+  caption still goes as text, beside the replies that say which files were left out. A reconnect
+  sends the queued messages one frame at a time, and stops after about 64 MB of base64 until the
+  next half-second tick, so it never builds every frame at once. File bytes are never logged. Helm
+  makes each name safe for its disk and saves the file where the chat's agent can read it.
 - **Recordings.** With `HUB_TELEGRAM_STT_URL` set, a voice note, an audio file or a video note is
   also sent to the speech-to-text server as a multipart form (`file` as uploaded, Telegram's
   OGG/Opus is fine; `model`; `language`; `response_format=text`; no auth). The transcript goes
@@ -291,6 +300,12 @@ about 67 MB as base64) and ignores the `files` list, so files would be lost or s
   JSON error gets a plain reply ("Transcription is unavailable right now: ..."), and the recording
   still goes, marked as not transcribed; a video note it cannot transcribe just goes as a file.
   Without a server the recordings go untranscribed, and a voice note gets a reply saying so.
+  One recording is transcribed at a time. Before each one the hub asks the person's own Helm,
+  over their most recently active relay line, to free the PC's graphics memory (the Helm tool
+  `app_make_room_for_speech`, called as `hub-speech`; Helm unloads idle local models). It waits at
+  most 4 s and ignores any failure, so an offline Helm, an older Helm or a refusal only means the
+  recording is transcribed without the extra room. The hub assumes nothing about where the
+  speech-to-text server runs, and does not offer that tool over MCP.
 - **Long messages arrive whole.** Telegram cuts a long message at 4,096 UTF-16 units and delivers
   the parts in a burst. A text message of 3,500 units or more (counted in UTF-16 units, as
   Telegram counts, so emoji count twice) is therefore held for 2 s. A text message that follows it,
@@ -354,15 +369,15 @@ Update or an array of them: 400. The endpoint exists in both modes.
 
 ## The voice line
 
-A phone (the Haven app) talks to its owner's Helm: it uploads a recording or typed text, the hub
+A phone (the phone app) talks to its owner's Helm: it uploads a recording or typed text, the hub
 turns a recording into text on the speech-to-text server, hands the turn to Helm down the relay
 line, and carries the answer back on a live WebSocket. Each phone has a token with the `voice`
 scope, made like any other client (`helm-hub client add --person Sam --machine phone --scopes
 voice`, or a `HUB_TOKENS` entry `phone:<token>:voice`); it reaches `/voice/*` and nothing else, and
 it speaks for its token's person only. Several phones of one person each get their own live
 socket, their own acknowledgements and their own screen state, and all of them see that person's
-replies. The protocol is "voice v1" and the Haven app is built against it: the route paths, the
-frames, the limits and the token shape do not change without the Haven side changing too.
+replies. The protocol is "voice v1" and the phone app is built against it: the route paths, the
+frames, the limits and the token shape do not change without the phone app changing too.
 
 | Variable | |
 |---|---|
@@ -373,7 +388,8 @@ frames, the limits and the token shape do not change without the Haven side chan
 
 Recordings are transcribed by the same server as Telegram's voice notes (`HUB_TELEGRAM_STT_URL`,
 `_MODEL`, `_LANGUAGE`, `_TIMEOUT_MINUTES`), whether or not the bot is on. One recording is
-transcribed at a time, apart from Telegram's. Without `HUB_TELEGRAM_STT_URL` a recording is refused
+transcribed at a time, apart from Telegram's, and Helm is asked to free the PC's graphics memory
+first (see the bot's Recordings). Without `HUB_TELEGRAM_STT_URL` a recording is refused
 (503) and typed turns still work. Everything is held in memory: a restart drops the queue and the
 outbox, and the outbox's `seq` starts over.
 
@@ -499,6 +515,13 @@ docker build -t helm-hub:latest .
 long poll, the line and the memory store share the one-thread runtime; Bot API calls run on the
 blocking pool. Run the import inside
 the container: `docker exec helm-hub helm-hub import /mnt/memory --source my-memory`.
+
+**Who owns the data folder.** The compose file runs the container as user `1000` and group `100`
+(`user: "1000:100"`), not as root. The folder mounted at `/data` (it holds `hub.db` and its WAL
+files) must therefore be writable by that user and group: `chown -R 1000:100 ./helm-hub/data` once,
+before the first start, or the hub cannot open its database. A folder left owned by root, for
+example one the Docker daemon made itself, fails the same way. The memory folder at `/mnt/memory`
+is mounted read-only and only needs to be readable by that user.
 
 ## Budget
 

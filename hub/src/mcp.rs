@@ -83,7 +83,11 @@ pub fn handle_with(
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(Value::as_str);
     let Some(method) = method else {
-        // A response or garbage: nothing to answer unless it carried an id.
+        // A JSON-RPC response (a client answering a request) needs no reply; the transport
+        // answers it 202. Anything else with an id is garbage and is told so.
+        if msg.get("result").is_some() || msg.get("error").is_some() {
+            return None;
+        }
         return id.map(|id| error(id, -32600, "not a JSON-RPC request"));
     };
     let id = id?; // notifications get no reply
@@ -140,6 +144,7 @@ fn tool_error(message: impl Into<String>) -> Value {
 }
 
 const READ_TOOLS: &[&str] = &["memory_search", "memory_read", "memory_list"];
+const WRITE_TOOLS: &[&str] = &["memory_write", "memory_update", "memory_delete"];
 
 fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
     if !client.scopes.can_read_memory() {
@@ -249,6 +254,10 @@ fn call_tool(
     name: &str,
     args: &Value,
 ) -> Value {
+    // A name the hub does not have is unknown whatever the token may do.
+    if !READ_TOOLS.contains(&name) && !WRITE_TOOLS.contains(&name) {
+        return tool_error(format!("unknown tool {name:?}"));
+    }
     let writes = !READ_TOOLS.contains(&name);
     if !client.scopes.can_read_memory() {
         return tool_error(format!("{name} needs a token with the memory scope"));

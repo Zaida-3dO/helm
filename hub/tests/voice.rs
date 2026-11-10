@@ -151,7 +151,8 @@ async fn start(o: Opts) -> Hub {
                 timeout: Duration::from_secs(30),
             })));
         }
-        let b = Arc::new(b);
+        // The test's Helm line never answers the call that frees the graphics memory.
+        let b = Arc::new(b.with_room_wait(Duration::from_millis(300)));
         tokio::spawn(b.clone().run(lines.voice_receiver()));
         state = state.with_voice(b.clone());
         bridge = Some(b);
@@ -677,6 +678,13 @@ async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
     let heard = next_where(&mut me, "heard", turn_is(t1.clone(), "heard")).await;
     assert_eq!(heard["transcript"], "Synthetic question one.");
     assert_eq!(heard["seq"], 1);
+    // Before the recording went to the speech-to-text server, the person's Helm was asked to free
+    // the PC's graphics memory (the test line never answers, so the hub moved on after its wait).
+    let room = next_where(&mut helm, "the room call", is("call")).await;
+    assert_eq!(
+        (room["tool"].as_str(), room["client"].as_str(), &room["args"]),
+        (Some("app_make_room_for_speech"), Some("hub-speech"), &json!({}))
+    );
     let v = next_where(&mut helm, "the voice frame", is("voice")).await;
     assert_eq!(
         (v["id"].as_str(), v["mode"].as_str(), v["text"].as_str(), v["source"].as_str()),

@@ -1098,6 +1098,8 @@ pub struct VoiceBridge {
     /// One recording is transcribed at a time, so the container holds one clip at once and a long
     /// recording never blocks Telegram's own transcriptions.
     stt_gate: tokio::sync::Semaphore,
+    /// How long a recording waits for the person's Helm to free the PC's graphics memory.
+    room_wait: Duration,
     people: Mutex<HashMap<i64, Person>>,
     live_gen: AtomicU64,
 }
@@ -1109,9 +1111,16 @@ impl VoiceBridge {
             cfg,
             stt: None,
             stt_gate: tokio::sync::Semaphore::new(1),
+            room_wait: crate::stt::ROOM_WAIT,
             people: Mutex::new(HashMap::new()),
             live_gen: AtomicU64::new(0),
         }
+    }
+
+    /// Wait `wait` (instead of [`crate::stt::ROOM_WAIT`]) for Helm to make room for speech.
+    pub fn with_room_wait(mut self, wait: Duration) -> Self {
+        self.room_wait = wait;
+        self
     }
 
     /// Spoken turns are transcribed by `stt`.
@@ -1280,6 +1289,9 @@ impl VoiceBridge {
         } else {
             "turn.ogg"
         };
+        // Free the PC's graphics memory first; the person's own Helm is asked, and a failure or a
+        // slow answer only costs the wait.
+        crate::lines::make_room(self.lines.clone(), person, self.room_wait).await;
         let result = match stt.transcribe(audio, name, mime).await {
             Ok(text) => Transcript::Text(text),
             Err(why) => {
