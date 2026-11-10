@@ -172,9 +172,11 @@ fn page_state_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: SaveArgs = parse(args)?;
     let server = ctx.services.need::<PageServer>()?;
     let db = ctx.services.need::<Database>()?;
-    let key = server
-        .key_of(&a.session)
-        .ok_or_else(|| ApiError::new("not_found", "That page is no longer open."))?;
+    // Saves of one open are spaced out; a page that saves on every keystroke waits its turn.
+    let (key, wait) = server.save_turn(&a.session).map_err(page_error)?;
+    if !wait.is_zero() {
+        std::thread::sleep(wait);
+    }
     let revision = db
         .write(|tx| store::state_save(tx, &key, &a.state, a.revision, helm_core::now_ms()))
         .map_err(|e| match e {

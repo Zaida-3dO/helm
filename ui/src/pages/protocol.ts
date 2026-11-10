@@ -135,7 +135,8 @@ export function checkState(payload: unknown): Checked<{ state: unknown; revision
 
 /**
  * The frame's sandbox. It leaves out `allow-same-origin`, which is what gives the page an opaque
- * origin: no access to the app's page, cookies or storage. It also leaves out top navigation,
- * popups, forms, modals and pointer lock.
+ * origin: no access to the app's page, cookies or storage. It also leaves out downloads (a page
+ * could otherwise drop files on the PC without asking), top navigation, popups, forms, modals and
+ * pointer lock.
  */
-export const PAGE_SANDBOX = 'allow-scripts allow-downloads';
+export const PAGE_SANDBOX = 'allow-scripts';

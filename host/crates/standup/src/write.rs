@@ -65,14 +65,10 @@ impl TitleTransport for HttpTitleTransport {
             .timeout_global(Some(timeout))
             .build()
             .send(body);
+        // Statuses are not errors on this agent (`http_status_as_error(false)`): a refusal comes
+        // back as a response, and its status is read below.
         let mut res = match res {
             Ok(r) => r,
-            Err(ureq::Error::StatusCode(s)) => {
-                return Ok(RawResponse {
-                    status: s,
-                    body: String::new(),
-                })
-            }
             Err(
                 e @ (ureq::Error::Io(_)
                 | ureq::Error::Timeout(_)

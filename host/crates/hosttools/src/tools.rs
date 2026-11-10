@@ -25,8 +25,9 @@ const CLOSED_PROJECT: &str = "This project is closed. Reopen it first.";
 
 /// One project as the tools describe it. A board (kind `board`) is where chats are shown; its
 /// `primaryFolder` is where its new chats start. A folder project (kind `folder`) is where chats
-/// run, at `path`. `description` is the board's headline from the local Standup mirror (null when
-/// there is none), so an agent can tell boards apart.
+/// run, at `path`. `description` is the project's own one-line description when it has one, else
+/// a board's headline from the local Standup mirror (null when there is neither), so an agent can
+/// tell projects apart.
 fn project_summary(p: &Value, all: &[Value]) -> Value {
     let primary = p["primaryFolderProjectId"].as_str();
     let primary_path = primary
@@ -39,7 +40,10 @@ fn project_summary(p: &Value, all: &[Value]) -> Value {
         "kind": p["kind"],
         "path": p["path"],
         "primaryFolder": primary_path,
-        "description": p["board"]["headline"],
+        "description": p["description"]
+            .as_str()
+            .filter(|d| !d.trim().is_empty())
+            .map_or_else(|| p["board"]["headline"].clone(), |d| json!(d)),
         "archived": p["archived"],
         "pinned": p["pinned"],
         "chatCount": p["chatCount"],
@@ -475,6 +479,7 @@ mod tests {
                         {"id": "p1", "name": "Helm", "kind": "folder", "path": FOLDER, "archived": false, "pinned": false, "chatCount": 2, "revision": 7},
                         {"id": "p2", "name": "Board", "kind": "board", "path": null, "primaryFolderProjectId": "p1", "board": {"headline": "Ship the board"}, "archived": false, "pinned": true, "chatCount": 0, "revision": 1},
                         {"id": "p8", "name": "src", "kind": "folder", "path": format!("{FOLDER}/src"), "archived": false, "closed": true, "pinned": false, "chatCount": 0, "revision": 2},
+                        {"id": "p7", "name": "Notes", "kind": "board", "path": null, "description": "Meeting notes", "board": {"headline": "Old headline"}, "archived": false, "pinned": false, "chatCount": 0, "revision": 1},
                         {"id": "p9", "name": "Helmsman", "kind": "board", "path": null, "archived": false, "closed": true, "pinned": false, "chatCount": 0, "revision": 3}
                     ])),
                     "project_create" => {
@@ -569,6 +574,11 @@ mod tests {
         assert_eq!(boards["projects"][0]["primaryFolder"], FOLDER);
         assert_eq!(boards["projects"][0]["description"], "Ship the board");
         assert_eq!(r["projects"][0]["description"], Value::Null, "no headline");
+        // The project's own description comes before a board's headline.
+        let notes = list_projects(ctx(ops.clone()), json!({"query": "notes"}))
+            .await
+            .unwrap();
+        assert_eq!(notes["projects"][0]["description"], "Meeting notes");
         let parent = std::path::Path::new(FOLDER).parent().unwrap();
         let parent = parent.to_string_lossy().into_owned();
         for (args, err, folder_project) in [

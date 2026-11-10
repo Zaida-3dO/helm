@@ -168,7 +168,7 @@
   });
 
   // A clicked link never navigates the frame. A web link is offered to the user through the app;
-  // fragment links and downloads are left to the browser.
+  // fragment links and download links are left alone (the sandbox allows no downloads).
   document.addEventListener(
     'click',
     function (e) {

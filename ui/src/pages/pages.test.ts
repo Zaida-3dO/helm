@@ -95,9 +95,9 @@ test('links and saved state from a page: web links only, never Helm’s own host
   for (const [p, ok] of states) assert.equal(checkState(p).ok, ok, JSON.stringify(p)?.slice(0, 60));
 });
 
-test('the sandbox gives a page scripts and downloads and nothing that could reach Helm', () => {
-  assert.deepEqual(PAGE_SANDBOX.split(' ').sort(), ['allow-downloads', 'allow-scripts']);
-  for (const never of ['allow-same-origin', 'allow-top-navigation', 'allow-popups', 'allow-forms', 'allow-modals']) {
+test('the sandbox gives a page scripts and nothing that could reach Helm or the disk', () => {
+  assert.deepEqual(PAGE_SANDBOX.split(' '), ['allow-scripts']);
+  for (const never of ['allow-same-origin', 'allow-downloads', 'allow-top-navigation', 'allow-popups', 'allow-forms', 'allow-modals']) {
     assert.ok(!PAGE_SANDBOX.includes(never), never);
   }
 });

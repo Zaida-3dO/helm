@@ -723,6 +723,12 @@ pub fn is_not_read(key: &str) -> bool {
 /// they come from the stored value, or from the default while none is stored. Any other key, and
 /// `null`, are stored as sent. The update has already passed [`check`].
 pub fn to_store(key: &str, stored: Option<&Value>, update: &Value) -> Value {
+    // Where the pet sits is the user's: a chat restoring the pet's defaults leaves it there.
+    if key == "desktopPet" && update.is_null() {
+        if let Some(position) = stored.and_then(|s| s.get("position")) {
+            return json!({ "position": position });
+        }
+    }
     let (true, Some(new)) = (MERGED.contains(&key), update.as_object()) else {
         return update.clone();
     };
@@ -923,6 +929,15 @@ mod tests {
         assert_eq!(
             to_store("desktopPet", Some(&pet), &json!({"enabled": true})),
             json!({"enabled": true, "kind": "puffin", "position": {"x": 40, "y": 60}})
+        );
+        // Restoring its defaults keeps that position too.
+        assert_eq!(
+            to_store("desktopPet", Some(&pet), &Value::Null),
+            json!({"position": {"x": 40, "y": 60}})
+        );
+        assert_eq!(
+            to_store("desktopPet", Some(&json!({"enabled": true})), &Value::Null),
+            Value::Null
         );
         assert_eq!(describe("sounds").unwrap()["merge"], true);
         assert!(describe("taskTriage").unwrap().get("merge").is_none());

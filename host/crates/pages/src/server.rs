@@ -43,6 +43,12 @@ pub const MAX_SESSIONS: usize = 24;
 /// Retained page text across all sessions.
 pub const MAX_RETAINED: usize = 64 * 1024 * 1024;
 pub const IDLE_BEFORE_DROP: Duration = Duration::from_secs(15 * 60);
+/// The least time between two state saves of one open page. A page's runtime sends one save at a
+/// time with its latest state, so spacing them loses nothing; it only keeps a page that saves on
+/// every keystroke from writing to the database as fast as it can.
+pub const SAVE_GAP: Duration = Duration::from_millis(250);
+/// The longest a save may be made to wait for its turn before it is refused instead.
+pub const MAX_SAVE_WAIT: Duration = Duration::from_secs(2);
 
 /// The address the renderer loads a session from (WebView2 maps a custom scheme to a `.localhost`
 /// host).
@@ -113,7 +119,7 @@ pub fn csp(network: bool) -> String {
          worker-src blob:; \
          frame-src blob: data:{net}; \
          object-src 'none'; base-uri 'none'; form-action 'none'; \
-         sandbox allow-scripts allow-downloads"
+         sandbox allow-scripts"
     )
 }
 
@@ -179,6 +185,8 @@ struct Session {
     stamp: Stamp,
     revision: u64,
     touched: Instant,
+    /// When the last state save of this open was let through (or is due to be).
+    last_save: Option<Instant>,
 }
 
 /// What a read of a page file produced.
@@ -462,6 +470,7 @@ impl PageServer {
             stamp: loaded.stamp,
             revision: 1,
             touched: Instant::now(),
+            last_save: None,
         };
         let out = Self::opened(&session);
         live.push(session);
@@ -474,6 +483,27 @@ impl PageServer {
         let before = live.len();
         live.retain(|s| s.id != id);
         live.len() != before
+    }
+
+    /// The page key a state save of this session is for, and how long the save must wait for its
+    /// turn: saves of one open are let through at most one per [`SAVE_GAP`], each taking the next
+    /// free turn. Refused when too many are already waiting.
+    pub fn save_turn(&self, id: &str) -> Result<(String, Duration), PageError> {
+        let mut live = self.lock();
+        let s = live
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or_else(Self::not_open)?;
+        let now = Instant::now();
+        let at = s.last_save.map_or(now, |t| (t + SAVE_GAP).max(now));
+        let wait = at - now;
+        if wait > MAX_SAVE_WAIT {
+            return Err(PageError::Refused(
+                "The page is saving too often; wait a moment and save again.".into(),
+            ));
+        }
+        s.last_save = Some(at);
+        Ok((s.key.clone(), wait))
     }
 
     /// The page key a session was opened for. The only way an op learns what a session means.
@@ -756,7 +786,8 @@ mod tests {
         let policy = header(&doc, "content-security-policy").unwrap();
         assert!(policy.contains("connect-src blob: data:;"));
         assert!(!policy.contains("https:") && !policy.contains("wss:"));
-        assert!(policy.contains("sandbox allow-scripts allow-downloads"));
+        // Scripts only: no downloads, which would drop files on the PC without asking.
+        assert!(policy.ends_with("sandbox allow-scripts"));
         assert!(policy.contains("form-action 'none'") && policy.contains("base-uri 'none'"));
         assert_eq!(header(&doc, "cache-control"), Some("no-store"));
         assert_eq!(header(&doc, "x-content-type-options"), Some("nosniff"));
@@ -894,6 +925,26 @@ mod tests {
             assert_eq!(upper.unwrap().key, o.key);
         }
         assert_eq!(s.key_of(&o.session).as_deref(), Some(o.key.as_str()));
+
+        // State saves of one open take turns SAVE_GAP apart; past MAX_SAVE_WAIT of queue they are
+        // refused. Another open has turns of its own.
+        let gaps = (MAX_SAVE_WAIT.as_millis() / SAVE_GAP.as_millis()) as u32;
+        for n in 0..=gaps {
+            let (key, wait) = s.save_turn(&o.session).unwrap();
+            assert_eq!(key, o.key);
+            assert!(
+                wait + Duration::from_millis(50) >= SAVE_GAP * n,
+                "turn {n}: {wait:?}"
+            );
+        }
+        assert!(matches!(
+            s.save_turn(&o.session),
+            Err(PageError::Refused(_))
+        ));
+        let other = s.open(&p.to_string_lossy(), false).unwrap();
+        assert_eq!(s.save_turn(&other.session).unwrap().1, Duration::ZERO);
+        assert!(s.close(&other.session));
+        assert!(matches!(s.save_turn("nope"), Err(PageError::NotFound(_))));
 
         // Nothing changed: same revision. A rewrite: re-read and a new revision.
         let st = s.status(&o.session).unwrap();

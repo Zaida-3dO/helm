@@ -1,7 +1,7 @@
 // One running page: the sealed frame, its toolbar and the bridge that lets it ask Helm for the
 // three things a page may ask for (save state, send a message, open a link).
 //
-// The frame is `<iframe sandbox="allow-scripts allow-downloads">` with no `allow-same-origin`, so
+// The frame is `<iframe sandbox="allow-scripts">` with no `allow-same-origin`, so
 // the page has an opaque origin and no way to reach this page, Helm's IPC, cookies or storage. It
 // loads from the `helmpage` scheme under a random per-open address. It is offline until the globe
 // is switched on; that switch belongs to this open only (it is not saved) and changing it ends the

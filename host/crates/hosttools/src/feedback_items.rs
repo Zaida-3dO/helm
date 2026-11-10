@@ -178,6 +178,9 @@ fn insert_entry(
     Ok(())
 }
 
+/// The most history events kept per item; older ones go as new ones arrive.
+pub const MAX_EVENTS_PER_ITEM: i64 = 200;
+
 fn record(
     tx: &Transaction<'_>,
     item: i64,
@@ -189,6 +192,12 @@ fn record(
     tx.execute(
         "INSERT INTO feedback_events(item_id, action, detail, author_kind, chat_id, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![item, action, detail, a.kind, a.chat, now],
+    )?;
+    // An agent that changes an item in a loop must not grow its history without end.
+    tx.execute(
+        "DELETE FROM feedback_events WHERE item_id = ?1 AND id <= (
+             SELECT id FROM feedback_events WHERE item_id = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2)",
+        params![item, MAX_EVENTS_PER_ITEM],
     )?;
     Ok(())
 }
@@ -1122,6 +1131,16 @@ mod tests {
         );
         assert!(create_tool(&ctx, json!({"title": " ", "text": "x"}), 9).is_err());
         assert!(create_tool(&ctx, json!({"title": "t", "text": "x".repeat(4001)}), 9).is_err());
+
+        // The history keeps the newest MAX_EVENTS_PER_ITEM events of an item.
+        for n in 0..MAX_EVENTS_PER_ITEM + 5 {
+            let status = if n % 2 == 0 { "open" } else { "filed" };
+            update(&db, &Author::human(), id, Some(status), None, None, 100 + n).unwrap();
+        }
+        let history = get(&db, id).unwrap().unwrap()["history"].clone();
+        let history = history.as_array().unwrap();
+        assert_eq!(history.len() as i64, MAX_EVENTS_PER_ITEM);
+        assert_eq!(history.last().unwrap()["at"], 100 + MAX_EVENTS_PER_ITEM + 4);
     }
 
     #[test]
