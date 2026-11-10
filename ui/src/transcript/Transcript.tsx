@@ -85,7 +85,7 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
         const item = byKey.get(k);
         if (!item) return null;
         if (item.kind === 'row') return (
-            <Row row={item.row} ctx={ctx} final={item.final} afterTool={item.afterTool} indent={item.indent} afterFold={item.afterFold} hideThinking={item.hideThinking} beforeTool={item.beforeTool} noticeLive={item.noticeLive} turnMs={times.get(item.row.id)} />
+            <Row row={item.row} ctx={ctx} final={item.final} afterTool={item.afterTool} indent={item.indent} afterFold={item.afterFold} hideThinking={item.hideThinking} beforeTool={item.beforeTool} noticeLive={item.noticeLive} recap={item.recap} turnMs={times.get(item.row.id)} />
           );
         if (item.kind === 'agents') return <AgentGroup rows={item.rows} flags={item.flags} ctx={ctx} />;
         return (

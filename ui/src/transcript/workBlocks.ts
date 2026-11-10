@@ -3,7 +3,8 @@
 // and the thinking fold behind one "worked for ..." row, and only when the turn did real work (a
 // tool call or thinking): a plain reply to "Hello" shows as it is. The notes the agent wrote between
 // tool calls, the subagent cards, errors, interruptions, retries, context rows and the turn's final
-// reply stay in the flow. Consecutive Agent calls are drawn as one group of cards.
+// reply stay in the flow, and so do the cards an agent puts in the chat (a gallery of pictures, an
+// option board). Consecutive Agent calls are drawn as one group of cards.
 //
 // A live turn folds as it goes: only its newest activity stays open, either the running tool or the
 // text written since the last tool, so at settle nothing but that last piece folds and the
@@ -13,6 +14,8 @@
 // all, closed or opened: hidden tool activity takes no space rather than leaving an empty gap.
 
 import type { MessageRow } from '../api/types.ts';
+import { isCardRow } from './cards.ts';
+import { buildRecap, type Recap } from './recap.ts';
 import { isAgentRow } from './subagents/model.ts';
 import { toolStatus } from './toolKinds.ts';
 import { ESTIMATE, estimateHeight, type EstimateInput } from './virtual.ts';
@@ -33,6 +36,8 @@ export interface RowFlags {
   beforeTool?: boolean;
   /** The newest notice, and the transcript's last row: the only notice row that is a live region. */
   noticeLive?: boolean;
+  /** On a settled turn's final reply: the recap drawn under it. */
+  recap?: Recap;
 }
 
 export type Item =
@@ -88,6 +93,17 @@ function alwaysShown(r: MessageRow): boolean {
 /** A note: what the agent wrote between tool calls (and the reply itself). */
 function isNote(r: MessageRow): boolean {
   return r.role === 'assistant' && r.text.trim() !== '';
+}
+
+const recaps = new WeakMap<MessageRow, { rows: number; recap: Recap | null }>();
+
+/** A settled turn's recap, remembered per final reply so a long transcript is not re-scanned on every update. */
+function recapFor(reply: MessageRow, work: MessageRow[]): Recap | null {
+  const kept = recaps.get(reply);
+  if (kept && kept.rows === work.length) return kept.recap;
+  const recap = reply.status === 'complete' ? buildRecap(work) : null;
+  recaps.set(reply, { rows: work.length, recap });
+  return recap;
 }
 
 /** Agent calls that follow one another become one item. */
@@ -154,6 +170,7 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
       openFrom = lastTool < 0 ? work.length - 1 : lastTool === work.length - 1 ? lastTool : lastTool + 1;
     }
     const open = (j: number) => (settled ? j === reply : j >= openFrom);
+    const recap = settled && reply >= 0 ? recapFor(work[reply]!, work) : null;
     // The next row that will actually be drawn, skipping the blank messages tool calls hide under.
     const nextDrawn = (j: number) => {
       for (let k = j + 1; k < work.length; k++) if (!undrawn(work[k]!)) return work[k]!;
@@ -167,6 +184,7 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
       items.push({
         kind: 'row',
         row: r,
+        ...(recap && j === reply ? { recap } : {}),
         // Live, the reply being written after the last tool already wears its final look, so
         // settling changes nothing about it.
         final: j === reply && hadTools && open(j),
@@ -183,7 +201,7 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
       continue;
     }
     // Tool calls and thinking fold; notes, subagent cards and the always-shown rows stay.
-    const keep = (r: MessageRow) => alwaysShown(r) || isAgentRow(r) || isNote(r);
+    const keep = (r: MessageRow) => alwaysShown(r) || isAgentRow(r) || isNote(r) || isCardRow(r);
     const foldedIdx: number[] = [];
     const shownIdx: number[] = [];
     work.forEach((r, j) => (open(j) || keep(r) ? shownIdx : foldedIdx).push(j));

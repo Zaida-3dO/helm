@@ -4,9 +4,10 @@
 // when there are no words to show — with its elapsed time and, when
 // per-tool Stop is on and the call can be stopped, Stop); right, Details › and the counts ("N live",
 // the background-shells chip with its hover list, the subagent roster, the turn's clock). Details
-// opens a list of what is running now.
+// opens a list of what is running now. While a turn runs, its checklist (if the agent keeps one)
+// is pinned in a card just above the dock.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatRecord, MessageRow, ThreadState } from '../api/types.ts';
 import { IconBrowser, IconCheck, IconChevronRight, IconFileText, IconSearch, IconStop, IconTerminal, IconWand } from '../ui/icons.tsx';
 import { WheelMark } from '../ui/status/index.ts';
@@ -14,6 +15,8 @@ import { useLayer } from '../ui/hooks.ts';
 import { toolKind, toolLabel, toolStatus, toolTarget, toolVerb } from './toolKinds.ts';
 import { formatElapsed } from './workBlocks.ts';
 import { SubagentRosterChip } from './subagents/SubagentRoster.tsx';
+import { newestTurn, turnChecklist } from './checklist.ts';
+import { LiveChecklist } from './LiveChecklist.tsx';
 import { backgroundShells, dockActivity, dockShown, dockState, finishedCount, finishedTurn, type FinishedTurn } from './dockModel.ts';
 import '../composer/dock.css';
 import './activityDock.css';
@@ -82,6 +85,7 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
     document.addEventListener('mousedown', away);
     return () => document.removeEventListener('mousedown', away);
   }, [details]);
+  const checklist = useMemo(() => (live && rows ? turnChecklist(newestTurn(rows)) : null), [live, rows]);
   const latest = thread.liveTools.at(-1);
   // With no tool running, say what the turn is doing instead: thinking, writing, waiting.
   const activity = shown && !latest && live && chat.status === 'running' && rows ? dockActivity(rows, thread, turnStartedAt, chat.localAhead) : null;
@@ -97,131 +101,134 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
   const narration = state.key === 'working' ? (activity?.narration ?? state.detail) : state.detail;
 
   return (
-    <div className="activity-dock" aria-live="off" data-testid="activity-dock" data-state={state.key} data-phase={activity?.phase} ref={root}>
-      <div className="ad-surface">
-        <span className="ad-glyph" aria-hidden="true">
-          {working ? (
-            <WheelMark size={40} state={chat.status === 'stopping' ? 'stopping' : live ? 'working' : 'calm'} />
-          ) : (
-            <IconCheck size={20} />
-          )}
-        </span>
-        <div className="ad-lines">
-          <div className="ad-line1">
-            <span className="ad-state">{state.label}</span>
-            {narration && <span className="ad-preview">{narration}</span>}
-          </div>
-          <div className="ad-line2">
-            {loading ? (
-              <span className="ad-phase" data-phase="loading" data-testid="dock-loading">
-                <span>Waiting for the model server</span>
-                <span className="ad-tool-time">{formatElapsed(Math.max(0, now - loading.startedAt))}</span>
-              </span>
-            ) : latest ? (
-              <span className="ad-tool">
-                <ToolIcon name={latest.name} />
-                <span className="ad-tool-name">{latest.summary || toolLabel(latest.name)}</span>
-                <span className="ad-tool-time">{formatElapsed(now - latest.startedAt)}</span>
-                {canStop && (
-                  <button
-                    type="button"
-                    className="ad-tool-stop"
-                    data-testid="dock-tool-stop"
-                    aria-label={`Stop ${latest.summary || toolLabel(latest.name)}`}
-                    title="Stop this command; the turn carries on"
-                    onClick={() => onStopTool(latest.toolCallId)}
-                  >
-                    <IconStop size={9} filled />
-                  </button>
-                )}
-              </span>
-            ) : activity ? (
-              <span className="ad-phase" data-phase={activity.phase} data-testid="dock-phase">
-                <span>{activity.label}</span>
-                <span className="ad-tool-time">{formatElapsed(Math.max(0, now - (phaseSince ?? activity.since)))}</span>
-              </span>
+    <>
+      {checklist && <LiveChecklist todos={checklist} />}
+      <div className="activity-dock" aria-live="off" data-testid="activity-dock" data-state={state.key} data-phase={activity?.phase} ref={root}>
+        <div className="ad-surface">
+          <span className="ad-glyph" aria-hidden="true">
+            {working ? (
+              <WheelMark size={40} state={chat.status === 'stopping' ? 'stopping' : live ? 'working' : 'calm'} />
             ) : (
-              <span className="ad-idle">{live ? 'Working' : 'Nothing running in this turn'}</span>
+              <IconCheck size={20} />
             )}
+          </span>
+          <div className="ad-lines">
+            <div className="ad-line1">
+              <span className="ad-state">{state.label}</span>
+              {narration && <span className="ad-preview">{narration}</span>}
+            </div>
+            <div className="ad-line2">
+              {loading ? (
+                <span className="ad-phase" data-phase="loading" data-testid="dock-loading">
+                  <span>Waiting for the model server</span>
+                  <span className="ad-tool-time">{formatElapsed(Math.max(0, now - loading.startedAt))}</span>
+                </span>
+              ) : latest ? (
+                <span className="ad-tool">
+                  <ToolIcon name={latest.name} />
+                  <span className="ad-tool-name">{latest.summary || toolLabel(latest.name)}</span>
+                  <span className="ad-tool-time">{formatElapsed(now - latest.startedAt)}</span>
+                  {canStop && (
+                    <button
+                      type="button"
+                      className="ad-tool-stop"
+                      data-testid="dock-tool-stop"
+                      aria-label={`Stop ${latest.summary || toolLabel(latest.name)}`}
+                      title="Stop this command; the turn carries on"
+                      onClick={() => onStopTool(latest.toolCallId)}
+                    >
+                      <IconStop size={9} filled />
+                    </button>
+                  )}
+                </span>
+              ) : activity ? (
+                <span className="ad-phase" data-phase={activity.phase} data-testid="dock-phase">
+                  <span>{activity.label}</span>
+                  <span className="ad-tool-time">{formatElapsed(Math.max(0, now - (phaseSince ?? activity.since)))}</span>
+                </span>
+              ) : (
+                <span className="ad-idle">{live ? 'Working' : 'Nothing running in this turn'}</span>
+              )}
+            </div>
+          </div>
+          <div className="ad-side">
+            <button
+              ref={toggle}
+              type="button"
+              className={`ad-details${details ? ' open' : ''}`}
+              aria-expanded={details}
+              data-testid="dock-details"
+              onClick={() => setDetails((d) => !d)}
+            >
+              Details <IconChevronRight size={12} />
+            </button>
+            <div className="ad-counts">
+              {thread.liveTools.length > 0 && <span>{thread.liveTools.length} live</span>}
+              {bg.length > 0 && (
+                <span
+                  className="bg-chip"
+                  tabIndex={0}
+                  data-testid="background-chip"
+                  data-count={bg.length}
+                  onMouseEnter={() => setOpen(true)}
+                  onMouseLeave={() => setOpen(false)}
+                  onFocus={() => setOpen(true)}
+                  onBlur={() => setOpen(false)}
+                >
+                  <span className="bg-dot" aria-hidden="true" />
+                  {bg.length} background
+                  {open && (
+                    <span className="bg-card" role="tooltip">
+                      {bg.map((t) => (
+                        <span key={t.id} className="bg-item">
+                          <IconTerminal size={12} />
+                          <span>{t.title || 'Untitled'}</span>
+                          {t.command && <span className="mono muted">{t.command}</span>}
+                          <span className="muted">{formatElapsed(now - t.startedAt)}</span>
+                        </span>
+                      ))}
+                      <span className="muted">The agent continues when each one exits.</span>
+                    </span>
+                  )}
+                </span>
+              )}
+              <SubagentRosterChip thread={thread} />
+              {live && turnStartedAt !== null && <span className="ad-clock">{formatElapsed(now - turnStartedAt)}</span>}
+            </div>
           </div>
         </div>
-        <div className="ad-side">
-          <button
-            ref={toggle}
-            type="button"
-            className={`ad-details${details ? ' open' : ''}`}
-            aria-expanded={details}
-            data-testid="dock-details"
-            onClick={() => setDetails((d) => !d)}
-          >
-            Details <IconChevronRight size={12} />
-          </button>
-          <div className="ad-counts">
-            {thread.liveTools.length > 0 && <span>{thread.liveTools.length} live</span>}
-            {bg.length > 0 && (
-              <span
-                className="bg-chip"
-                tabIndex={0}
-                data-testid="background-chip"
-                data-count={bg.length}
-                onMouseEnter={() => setOpen(true)}
-                onMouseLeave={() => setOpen(false)}
-                onFocus={() => setOpen(true)}
-                onBlur={() => setOpen(false)}
-              >
-                <span className="bg-dot" aria-hidden="true" />
-                {bg.length} background
-                {open && (
-                  <span className="bg-card" role="tooltip">
-                    {bg.map((t) => (
-                      <span key={t.id} className="bg-item">
-                        <IconTerminal size={12} />
-                        <span>{t.title || 'Untitled'}</span>
-                        {t.command && <span className="mono muted">{t.command}</span>}
-                        <span className="muted">{formatElapsed(now - t.startedAt)}</span>
-                      </span>
-                    ))}
-                    <span className="muted">The agent continues when each one exits.</span>
-                  </span>
-                )}
-              </span>
+        {details && (
+          <div className="ad-details-pop" role="region" aria-label="Activity" data-testid="dock-details-pop">
+            <div className="ad-details-head">
+              <strong>Activity</strong>
+              <span className="muted">Latest turn{live && turnStartedAt !== null ? ` · ${formatElapsed(now - turnStartedAt)}` : ''}</span>
+            </div>
+            {thread.liveTools.length === 0 && bg.length === 0 ? (
+              <div className="ad-details-empty muted">Nothing is running right now.</div>
+            ) : (
+              <ul className="ad-details-list">
+                {thread.liveTools.map((t) => (
+                  <li key={t.toolCallId}>
+                    <ToolIcon name={t.name} />
+                    <span>{t.summary || toolLabel(t.name)}</span>
+                    <span className="ad-details-status">Live</span>
+                    <span className="muted mono">{formatElapsed(now - t.startedAt)}</span>
+                  </li>
+                ))}
+                {bg.map((t) => (
+                  <li key={t.id}>
+                    <IconTerminal size={13} />
+                    <span>{t.title || t.command || 'Background shell'}</span>
+                    <span className="ad-details-status">Background</span>
+                    <span className="muted mono">{formatElapsed(now - t.startedAt)}</span>
+                  </li>
+                ))}
+              </ul>
             )}
-            <SubagentRosterChip thread={thread} />
-            {live && turnStartedAt !== null && <span className="ad-clock">{formatElapsed(now - turnStartedAt)}</span>}
           </div>
-        </div>
+        )}
       </div>
-      {details && (
-        <div className="ad-details-pop" role="region" aria-label="Activity" data-testid="dock-details-pop">
-          <div className="ad-details-head">
-            <strong>Activity</strong>
-            <span className="muted">Latest turn{live && turnStartedAt !== null ? ` · ${formatElapsed(now - turnStartedAt)}` : ''}</span>
-          </div>
-          {thread.liveTools.length === 0 && bg.length === 0 ? (
-            <div className="ad-details-empty muted">Nothing is running right now.</div>
-          ) : (
-            <ul className="ad-details-list">
-              {thread.liveTools.map((t) => (
-                <li key={t.toolCallId}>
-                  <ToolIcon name={t.name} />
-                  <span>{t.summary || toolLabel(t.name)}</span>
-                  <span className="ad-details-status">Live</span>
-                  <span className="muted mono">{formatElapsed(now - t.startedAt)}</span>
-                </li>
-              ))}
-              {bg.map((t) => (
-                <li key={t.id}>
-                  <IconTerminal size={13} />
-                  <span>{t.title || t.command || 'Background shell'}</span>
-                  <span className="ad-details-status">Background</span>
-                  <span className="muted mono">{formatElapsed(now - t.startedAt)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-    </div>
+    </>
   );
 }
 

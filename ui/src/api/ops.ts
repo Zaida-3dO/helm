@@ -173,3 +173,58 @@ export function chatOps(api: Api) {
 }
 
 export type ChatOps = ReturnType<typeof chatOps>;
+
+/** One picture in a gallery the agent showed. */
+export interface ShownImageMeta {
+  index: number;
+  name: string;
+  caption: string | null;
+  mime: string;
+  width: number;
+  height: number;
+}
+
+export interface ShownGallery {
+  galleryId: string;
+  title: string | null;
+  createdAt: number;
+  images: ShownImageMeta[];
+}
+
+export interface OptionBoardOption {
+  index: number;
+  label: string;
+  detail: string | null;
+  hasImage: boolean;
+}
+
+/** What the user chose: the picked labels, or their own words in `other`. */
+export interface OptionBoardAnswer {
+  labels: string[];
+  other: string | null;
+  answeredAt: number;
+}
+
+export interface OptionBoard {
+  boardId: string;
+  question: string;
+  multiSelect: boolean;
+  allowOther: boolean;
+  createdAt: number;
+  options: OptionBoardOption[];
+  answer: OptionBoardAnswer | null;
+}
+
+/** The galleries and option boards that agents put in a chat. A board's id also reads as a gallery id (the option's index picks the picture). */
+export function cardOps(api: Api) {
+  return {
+    gallery: (chatId: string, galleryId: string) => api<ShownGallery>('shown_gallery_get', { chatId, galleryId }),
+    image: (chatId: string, galleryId: string, index: number) => api<{ mime: string; bytes: string }>('shown_image_get', { chatId, galleryId, index }),
+    thumb: (chatId: string, galleryId: string, index: number) => api<{ mime: string; bytes: string }>('shown_image_thumb', { chatId, galleryId, index }),
+    board: (chatId: string, boardId: string) => api<OptionBoard>('option_board_state', { chatId, boardId }),
+    /** Records the one answer: picked `labels`, or `other` (never both). A second answer is refused with code `conflict`. */
+    answer: (chatId: string, boardId: string, a: { labels?: string[]; other?: string }) => api<OptionBoard>('option_board_answer', { chatId, boardId, ...a }),
+  };
+}
+
+export type CardOps = ReturnType<typeof cardOps>;

@@ -11,13 +11,17 @@ export interface Todo {
   state: TodoState;
 }
 
+/** A step's state from the status word a tool call carries; anything unknown is still to do. */
+export function todoState(status: unknown): TodoState {
+  return status === 'completed' || status === 'in_progress' ? status : 'pending';
+}
+
 function asTodo(v: unknown): Todo | null {
   if (!v || typeof v !== 'object') return null;
   const o = v as Record<string, unknown>;
   const text = typeof o.content === 'string' ? o.content : typeof o.subject === 'string' ? o.subject : null;
   if (!text) return null;
-  const state: TodoState = o.status === 'completed' || o.status === 'in_progress' ? o.status : 'pending';
-  return { text, state };
+  return { text, state: todoState(o.status) };
 }
 
 /** The list in a TodoWrite call, or null when the row is not one or holds no readable item. */

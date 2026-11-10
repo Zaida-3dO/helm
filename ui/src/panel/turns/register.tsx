@@ -2,13 +2,14 @@
 // files the agent changed that turn with net counts ("Net diff unavailable" when the history could
 // not be reconstructed). Five files, then "Show N more files"; grouped by repository when more than
 // one. Clicking a file opens it in the side panel; Review opens that turn's recorded edits in the Changes view; the minimise
-// button collapses every change card in the chat.
+// button collapses every change card in the chat. A turn whose reply has a recap card shows this card
+// inside the recap instead of under the reply.
 
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { TurnChanges, TurnFile } from '../../api/panel.ts';
 import { panelOps } from '../../api/panel.ts';
 import { splitPath } from '../../transcript/toolKinds.ts';
-import { registerRowFooter } from '../../transcript/slots.ts';
+import { registerRecapSection, registerRowFooter } from '../../transcript/slots.ts';
 import { IconChevronDown, IconFileDiff, IconMaximize, IconMinimize } from '../../ui/icons.tsx';
 import { openInPanel, panelStore } from '../registry.ts';
 import { displayPath, pathKey } from '../viewer/paths.ts';
@@ -164,6 +165,11 @@ function TurnCard({ chatId, messageId, revision }: { chatId: string; messageId: 
 registerRowFooter({
   id: 'turn-changes',
   // Every settled assistant reply asks; the host answers only for a completed turn's last reply.
-  appliesTo: (row, ctx) => row.role === 'assistant' && row.status === 'complete' && !(ctx.running && ctx.isLatestAssistant),
+  appliesTo: (row, ctx) => row.role === 'assistant' && row.status === 'complete' && !(ctx.running && ctx.isLatestAssistant) && !ctx.hasRecap,
+  render: (row, ctx) => <TurnCard chatId={ctx.chatId} messageId={row.id} revision={row.revision} />,
+});
+
+registerRecapSection({
+  id: 'turn-changes',
   render: (row, ctx) => <TurnCard chatId={ctx.chatId} messageId={row.id} revision={row.revision} />,
 });

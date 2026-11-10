@@ -5,9 +5,13 @@
 import { memo, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
 import { EditMessage, type EditState } from './EditMessage.tsx';
+import { boardRef, galleryRef } from './cards.ts';
+import { GalleryCard } from './GalleryCard.tsx';
 import { Markdown, type LinkTarget } from './Markdown.tsx';
 import { MessageImages } from './MessageImages.tsx';
 import { MessageRefs } from './MessageRefs.tsx';
+import { OptionBoardCard } from './OptionBoard.tsx';
+import { RecapCard } from './RecapCard.tsx';
 import { bubbleText, fromTelegram, peerMessage } from './origin.ts';
 import { IconPaperPlane } from '../ui/icons.tsx';
 import { ReplyActions, UserActions } from './MessageActions.tsx';
@@ -37,13 +41,13 @@ export interface RowContext {
   onCancelEdit?: () => void;
 }
 
-function slotContext(row: MessageRow, ctx: RowContext): SlotContext {
-  return { chatId: ctx.chatId, isLatestAssistant: row.id === ctx.latestAssistantId, running: ctx.running, interactionOpen: ctx.interactionOpen };
+function slotContext(row: MessageRow, ctx: RowContext, hasRecap = false): SlotContext {
+  return { chatId: ctx.chatId, isLatestAssistant: row.id === ctx.latestAssistantId, running: ctx.running, interactionOpen: ctx.interactionOpen, ...(hasRecap ? { hasRecap } : {}) };
 }
 
 /** Registered footers for one row (the reply's change card). */
-function Footers({ row, ctx }: { row: MessageRow; ctx: RowContext }) {
-  const sctx = slotContext(row, ctx);
+function Footers({ row, ctx, hasRecap }: { row: MessageRow; ctx: RowContext; hasRecap?: boolean }) {
+  const sctx = slotContext(row, ctx, hasRecap);
   const footers = rowFootersFor(row, sctx);
   if (!footers.length) return null;
   return (
@@ -110,7 +114,7 @@ function AssistantBody({ row, ctx, hideThinking }: { row: MessageRow; ctx: RowCo
   );
 }
 
-export const Row = memo(function Row({ row, ctx, final, afterTool, indent, afterFold, hideThinking, beforeTool, noticeLive, turnMs }: { row: MessageRow; ctx: RowContext; turnMs?: number } & RowFlags) {
+export const Row = memo(function Row({ row, ctx, final, afterTool, indent, afterFold, hideThinking, beforeTool, noticeLive, recap, turnMs }: { row: MessageRow; ctx: RowContext; turnMs?: number } & RowFlags) {
   const retry = row.details?.retry;
   const common = { 'data-testid': 'transcript-row', 'data-status': row.status, 'data-role': row.role, 'data-row-id': row.id };
   const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}${afterFold ? ' after-fold' : ''}${beforeTool ? ' before-tool' : ''}`;
@@ -156,6 +160,16 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
     );
   }
   if (row.role === 'toolResult') {
+    // An agent's gallery or option board is drawn as a card, not as a tool row.
+    const gallery = galleryRef(row);
+    const board = gallery ? null : boardRef(row);
+    if (gallery || board) {
+      return (
+        <div className={`row row-card${place}`} {...common}>
+          {gallery ? <GalleryCard chatId={ctx.chatId} galleryId={gallery.galleryId} /> : <OptionBoardCard chatId={ctx.chatId} boardId={board!.boardId} />}
+        </div>
+      );
+    }
     return (
       <div className={`row row-tool${place}`} {...common}>
         <ToolCard row={row} canStop={ctx.canStopTool(row)} onStop={ctx.onStopTool} />
@@ -200,12 +214,13 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
       )}
       <ReplyActions
         row={row}
-        sctx={slotContext(row, ctx)}
+        sctx={slotContext(row, ctx, recap !== undefined)}
         turnMs={turnMs}
         showTurnTime={ctx.elements?.turnTime !== 'hidden'}
         showTokens={ctx.elements?.tokens !== 'hidden'}
       />
-      <Footers row={row} ctx={ctx} />
+      {recap && <RecapCard recap={recap} row={row} ctx={slotContext(row, ctx, true)} />}
+      <Footers row={row} ctx={ctx} hasRecap={recap !== undefined} />
     </div>
   );
 });

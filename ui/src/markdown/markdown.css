@@ -173,3 +173,5 @@ summary.md-callout-title { cursor: pointer; }
 .md-mermaid-rendered svg { max-width: 100%; height: auto; }
 .md-diagram-source { margin: 0; padding: 10px 14px; border-top: 1px solid var(--md-border); overflow-x: auto; font-size: 12px; line-height: 1.6; }
 .md-mermaid-message { color: var(--error); font-size: 0.9em; margin-bottom: 0.4em; }
+/* A picture from disk opens full size when clicked. */
+.md-image-local { cursor: zoom-in; }

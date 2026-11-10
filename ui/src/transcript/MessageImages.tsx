@@ -3,61 +3,21 @@
 // is on screen (freed when it leaves); the full image is fetched only when a click opens it in the
 // image viewer, which steps through the message's other images too.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { MessageImage } from '../api/generated/MessageImage.ts';
 import { useShell } from '../shell/context.ts';
 import { ImageViewer } from './ImageViewer.tsx';
-import { UrlCache, bytesFromBase64, imageLabel, thumbSize } from './messageImages.ts';
+import { UrlCache, imageLabel, thumbSize } from './messageImages.ts';
+import { useBlobUrl, type Loaded } from './useBlobUrl.ts';
 import './messageImages.css';
-
-type Loaded = { state: 'loading' } | { state: 'ready'; url: string } | { state: 'failed' };
 
 /** Thumbnails kept after their row scrolls away, so scrolling back does not ask the host again. */
 const thumbUrls = new UrlCache(64, (url) => URL.revokeObjectURL(url));
 
 function useImageUrl(chatId: string, id: string, thumb: boolean): Loaded {
   const { api } = useShell();
-  const key = `${chatId}/${id}`;
-  // A kept thumbnail shows on the first render; the effect below takes its use.
-  const [loaded, setLoaded] = useState<Loaded>(() => {
-    const kept = thumb ? thumbUrls.peek(key) : undefined;
-    return kept ? { state: 'ready', url: kept } : { state: 'loading' };
-  });
-  useEffect(() => {
-    let url: string | null = null;
-    let cancelled = false;
-    // A thumbnail is shared and kept; the full image belongs to the dialog that opened it.
-    const kept = thumb ? thumbUrls.acquire(key) : undefined;
-    if (kept) {
-      setLoaded({ state: 'ready', url: kept });
-    } else {
-      setLoaded({ state: 'loading' });
-      api<{ mime: string; bytes: string }>('attachment_get', { chatId, attachmentId: id, thumb })
-        .then((r) => {
-          if (cancelled) return;
-          url = URL.createObjectURL(new Blob([bytesFromBase64(r.bytes)], { type: r.mime }));
-          if (thumb) {
-            // Another row may have fetched the same image meanwhile: share its URL, drop ours.
-            const shared = thumbUrls.put(key, url);
-            if (shared !== url) URL.revokeObjectURL(url);
-            url = shared;
-          }
-          setLoaded({ state: 'ready', url });
-        })
-        .catch(() => {
-          if (!cancelled) setLoaded({ state: 'failed' });
-        });
-    }
-    return () => {
-      cancelled = true;
-      if (thumb) {
-        if (kept || url) thumbUrls.release(key);
-      } else if (url) {
-        URL.revokeObjectURL(url);
-      }
-    };
-  }, [api, chatId, id, key, thumb]);
-  return loaded;
+  // A thumbnail is shared and kept; the full image belongs to the dialog that opened it.
+  return useBlobUrl(`${chatId}/${id}`, thumb ? thumbUrls : null, () => api<{ mime: string; bytes: string }>('attachment_get', { chatId, attachmentId: id, thumb }));
 }
 
 /** The viewer over a message's images: the full-size picture, with its thumbnail standing in while it loads. */

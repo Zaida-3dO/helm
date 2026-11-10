@@ -3,6 +3,7 @@ import type { MouseEvent } from 'react';
 import { LONG_TEXT_CHARS, renderShort, sharedOffloader } from './engine.ts';
 import { targetFromAttrs } from './links.ts';
 import type { LinkTarget } from './links.ts';
+import { ImageViewer } from '../transcript/ImageViewer.tsx';
 import { loadLocalImage } from './localImages.ts';
 import { diagramKind, renderDiagram, renderMath } from './mermaid.ts';
 import { StreamBlocks } from './blocks.ts';
@@ -335,6 +336,8 @@ export function Markdown({
   const [incremental] = useState(streaming);
   const html = useRenderedHtml(incremental ? '' : text, { streaming, interactive, mentionRepo });
   const ref = useRef<HTMLDivElement>(null);
+  // A picture from disk opens full size in the image viewer when it is clicked.
+  const [zoomed, setZoomed] = useState<{ url: string; name: string } | null>(null);
   useIncremental(incremental, ref, text, streaming, interactive, resolveEmbed, mentionRepo);
 
   useEffect(() => {
@@ -361,22 +364,30 @@ export function Markdown({
   };
 
   return (
-    <div
-      ref={ref}
-      className={className ? `md-root ${className}` : 'md-root'}
-      onClick={(event) => {
-        const tool = (event.target as Element).closest<HTMLElement>('[data-md-tool]');
-        if (tool && event.currentTarget.contains(tool)) {
-          runTool(tool);
-          return;
-        }
-        const target = linkFor(event);
-        if (target) onLink?.(target);
-      }}
-      onAuxClick={(event) => {
-        linkFor(event);
-      }}
-      dangerouslySetInnerHTML={incremental ? undefined : { __html: html }}
-    />
+    <>
+      <div
+        ref={ref}
+        className={className ? `md-root ${className}` : 'md-root'}
+        onClick={(event) => {
+          const picture = (event.target as Element).closest<HTMLImageElement>('img.md-image-local');
+          if (picture?.src && event.currentTarget.contains(picture)) {
+            setZoomed({ url: picture.src, name: picture.alt || 'Picture' });
+            return;
+          }
+          const tool = (event.target as Element).closest<HTMLElement>('[data-md-tool]');
+          if (tool && event.currentTarget.contains(tool)) {
+            runTool(tool);
+            return;
+          }
+          const target = linkFor(event);
+          if (target) onLink?.(target);
+        }}
+        onAuxClick={(event) => {
+          linkFor(event);
+        }}
+        dangerouslySetInnerHTML={incremental ? undefined : { __html: html }}
+      />
+      {zoomed && <ImageViewer images={[{ key: zoomed.url, name: zoomed.name }]} index={0} onIndex={() => {}} onClose={() => setZoomed(null)} src={zoomed.url} />}
+    </>
   );
 }

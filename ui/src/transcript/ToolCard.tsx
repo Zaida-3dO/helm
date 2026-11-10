@@ -53,8 +53,8 @@ export function ToolCard({ row, canStop, onStop }: ToolCardProps) {
   const id = toolIdentity(row);
   const target = toolTarget(row);
   const elapsed = useElapsed(row.timestamp, status === 'running');
-  // A to-do update shows its checklist without a click.
-  const [open, setOpen] = useState(() => row.toolName === 'TodoWrite');
+  // A to-do update's checklist is pinned live above the dock and kept in the recap, so its row starts closed.
+  const [open, setOpen] = useState(false);
   const rawName = row.toolName ?? '';
 
   const label = (() => {

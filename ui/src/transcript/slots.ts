@@ -5,6 +5,7 @@
 // - registerMessageAction: a button in a row's hover actions (Save for later, Explain
 //   plainly).
 // - registerRowFooter: content drawn under a row (the turn change card after a completed turn).
+// - registerRecapSection: a part of the recap card under a turn's final reply.
 // - registerSelectionAction: a button in the selected-text toolbar (Side
 //   chat and Quote; Save and Remind me).
 
@@ -21,6 +22,8 @@ export interface SlotContext {
   running: boolean;
   /** True while an interaction card (approval, question, plan) is open. */
   interactionOpen: boolean;
+  /** True for a reply that has a recap card under it, which carries the turn's recap sections instead of the row footers. */
+  hasRecap?: boolean;
 }
 
 export interface MessageAction {
@@ -49,6 +52,12 @@ export interface Selection {
   rowIds: number[];
 }
 
+/** A part of the recap card under a turn's final reply (the edited files, for one). */
+export interface RecapSection {
+  id: string;
+  render: (row: MessageRow, ctx: SlotContext) => ReactNode;
+}
+
 export interface SelectionAction {
   id: string;
   label: string;
@@ -59,6 +68,7 @@ export interface SelectionAction {
 const messageActions: MessageAction[] = [];
 const rowFooters: RowFooter[] = [];
 const selectionActions: SelectionAction[] = [];
+const recapSections: RecapSection[] = [];
 
 function upsert<T extends { id: string }>(list: T[], item: T): () => void {
   const i = list.findIndex((x) => x.id === item.id);
@@ -79,6 +89,10 @@ export function registerRowFooter(f: RowFooter): () => void {
   return upsert(rowFooters, f);
 }
 
+export function registerRecapSection(s: RecapSection): () => void {
+  return upsert(recapSections, s);
+}
+
 export function registerSelectionAction(a: SelectionAction): () => void {
   return upsert(selectionActions, a);
 }
@@ -89,6 +103,10 @@ export function messageActionsFor(row: MessageRow): MessageAction[] {
 
 export function rowFootersFor(row: MessageRow, ctx: SlotContext): RowFooter[] {
   return rowFooters.filter((f) => safe(() => f.appliesTo(row, ctx)));
+}
+
+export function recapSectionsFor(): readonly RecapSection[] {
+  return recapSections;
 }
 
 export function selectionActionsFor(sel: Selection): SelectionAction[] {

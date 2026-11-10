@@ -1,12 +1,14 @@
 // The image viewer: one picture fitted to the window at its own aspect ratio, with its name, size
 // and pixel dimensions, and Previous / Next (or the arrow keys) when there are several. The images
-// attached in the composer and the images in sent messages open in this same viewer. Escape, the
-// close button or a click anywhere but the picture closes it.
+// attached in the composer, the images in sent messages and the pictures an agent showed open in
+// this same viewer. A sideways drag or touchpad swipe steps too. Escape, the close button or a
+// click anywhere but the picture closes it.
 
 import { useEffect, useState, type KeyboardEvent } from 'react';
 import { Dialog } from '../ui/index.ts';
 import { IconChevronLeft, IconChevronRight } from '../ui/icons.tsx';
 import { fitImage, imageFacts, stepImage } from './messageImages.ts';
+import { useSwipe } from './swipe.ts';
 import './messageImages.css';
 
 export interface ViewerImage {
@@ -54,6 +56,8 @@ export function ImageViewer({ images, index, onIndex, onClose, src, state = 'rea
   // The loaded picture's own size: it wins over the size given up front, which only holds the
   // layout steady until the picture arrives.
   const [natural, setNatural] = useState<{ key: string; width: number; height: number } | null>(null);
+  const step = (delta: 1 | -1) => onIndex(stepImage(index, count, delta));
+  const swipe = useSwipe(step, count > 1);
   if (!image) return null;
   const known = image.width && image.height ? { width: image.width, height: image.height } : null;
   const loaded = natural?.key === image.key ? natural : null;
@@ -61,7 +65,6 @@ export function ImageViewer({ images, index, onIndex, onClose, src, state = 'rea
   const room = { width: Math.min(MAX_WIDTH, win.width - CHROME_WIDTH), height: win.height - Math.max(70, win.height * 0.1) - CHROME_HEIGHT };
   const box = dims ? fitImage(dims.width, dims.height, room.width, room.height) : null;
   const facts = imageFacts({ size: image.size, width: dims?.width, height: dims?.height });
-  const step = (delta: 1 | -1) => onIndex(stepImage(index, count, delta));
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (count < 2 || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') step(-1);
@@ -102,7 +105,7 @@ export function ImageViewer({ images, index, onIndex, onClose, src, state = 'rea
           if (!(e.target instanceof HTMLImageElement)) onClose();
         }}
       >
-        <div className="image-viewer-stage">
+        <div className="image-viewer-stage" {...swipe}>
           {src && state !== 'failed' ? (
             <img
               key={image.key}

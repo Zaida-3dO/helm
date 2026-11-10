@@ -1,6 +1,6 @@
 // A fake host for checking the UI in a plain browser. It implements the host's ops and
 // events with a scripted turn: streamed text, a tool card, and an approval, question or plan
-// card when the prompt asks for one ("approve", "question", "plan"). "todo" adds a TodoWrite checklist and "code" streams a fenced code block. "options" ends the reply with a numbered list of choices. "long" in a prompt adds a
+// card when the prompt asks for one ("approve", "question", "plan"). "todo" keeps a live checklist across the turn (a recap card follows any turn with a checklist or three tool steps), "pictures" shows a gallery card, "board" offers an option board ("board multi" lets several be picked) and "code" streams a fenced code block. "options" ends the reply with a numbered list of choices. "long" in a prompt adds a
 // background task. A steer sent mid-turn shows as Pending and is read about 1.5 s later.
 //
 // Dev builds only: main.tsx imports it behind `import.meta.env.DEV`, so production drops it.
@@ -25,6 +25,7 @@ import { panelFakeOps } from './fake-panel.ts';
 import { shellFakeOps } from './fake-shell.ts';
 import { mcpFakeOps } from './fake-mcp.ts';
 import { hosttoolsFakeOps } from './fake-hosttools.ts';
+import { cardsFakeOps, fakeBoard, fakeGallery } from './fake-cards.ts';
 import { usageFakeOps } from './fake-usage.ts';
 import { updatesFakeOps } from './fake-updates.ts';
 import { itemLinksFakeOps } from './fake-itemlinks.ts';
@@ -66,6 +67,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const sh = shellFakeOps(); registerFakeOps(sh.prefixes, sh.handler); }
 { const mcp = mcpFakeOps(); registerFakeOps(mcp.prefixes, mcp.handler); }
 { const ht = hosttoolsFakeOps(); registerFakeOps(ht.prefixes, ht.handler); }
+{ const cards = cardsFakeOps(); registerFakeOps(cards.prefixes, cards.handler); }
 { const us = usageFakeOps(); registerFakeOps(us.prefixes, us.handler); }
 { const up = updatesFakeOps(); registerFakeOps(up.prefixes, up.handler); }
 { const il = itemLinksFakeOps(); registerFakeOps(il.prefixes, il.handler); }
@@ -395,6 +397,14 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         c.thread = { ...c.thread, backgroundTasks: [{ id: uid(), title: 'npm test', command: 'npm test', kind: 'shell', startedAt: now() }] };
         emitThread(c);
       }
+      // "todo" keeps a checklist the whole turn: written first, then updated as each step finishes.
+      const steps = ['Read the code', 'Change it', 'Test it'];
+      const plan = async (done: number) => {
+        if (!/todo/i.test(text)) return;
+        const todos = steps.map((content, i) => ({ content, status: i < done ? 'completed' : i === done ? 'in_progress' : 'pending', activeForm: content }));
+        await tool(c, 'TodoWrite', { todos }, 'Todos updated', cancelled, 500);
+      };
+      await plan(0);
       if (/approve/i.test(text)) {
         const a = await ask(c, {
           method: 'select',
@@ -411,14 +421,20 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         await tool(c, 'Bash', { command: 'ls -la' }, 'README.md\npackage.json\nsrc\n', cancelled, 1500);
       }
       await tool(c, 'Read', { file_path: 'src/main.ts' }, 'export {}\n', cancelled);
+      await plan(1);
       await tool(c, 'Edit', { file_path: 'src/main.ts', old_string: 'export {}', new_string: 'export const x = 1;\nexport const y = 2;' }, 'ok', cancelled);
-      if (/todo/i.test(text)) {
-        const todos = [
-          { content: 'Read the code', status: 'completed', activeForm: 'Reading the code' },
-          { content: 'Change it', status: 'in_progress', activeForm: 'Changing it' },
-          { content: 'Test it', status: 'pending', activeForm: 'Testing it' },
-        ];
-        await tool(c, 'TodoWrite', { todos }, 'Todos updated', cancelled);
+      await plan(2);
+      if (/pictures/i.test(text)) {
+        const g = fakeGallery(c.chat.id);
+        const images = Array.from({ length: g.count }, (_, i) => ({ path: `C:/work/banner-${i + 1}.png`, caption: `Option ${i + 1}` }));
+        await tool(c, 'mcp__helm__app_show_images', { title: 'Banner options', images }, JSON.stringify(g), cancelled, 600);
+      }
+      if (/board/i.test(text)) {
+        const labels = ['Sunset', 'Ocean', 'Forest', 'Gold'];
+        const multiSelect = /multi/i.test(text);
+        const question = multiSelect ? 'Which colours for the bar?' : 'Which colour for the bar?';
+        const boardId = fakeBoard(c.chat.id, question, labels, { multiSelect });
+        await tool(c, 'mcp__helm__app_offer_options', { question, options: labels.map((label) => ({ label })), multiSelect }, JSON.stringify({ boardId, next: 'The board is on screen.' }), cancelled, 600);
       }
       if (/code/i.test(text)) await streamText(c, 'Here is the change:\n\n```ts\nexport const x = 1;\nexport const y = 2;\n```\n\n', cancelled);
       if (/subagent/i.test(text)) runFakeSubagents(c, { addRow, updateRow, emitThread, uid });
@@ -441,6 +457,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         const a = await ask(c, { method: 'confirm', attention: 'plan', title: 'Approve plan?', message: '1. Read the code\n2. Change it\n3. Test it', options: ['Approve plan', 'Keep planning'] });
         await streamText(c, a.confirmed || a.value === 'Approve plan' ? 'Plan approved, starting. ' : 'Keeping on planning. ', cancelled);
       }
+      await plan(3);
       if (/\[stream\]/i.test(text)) await streamLong(c, cancelled); // the long reply is the final one
       else if (/options/i.test(text)) {
         await streamText(

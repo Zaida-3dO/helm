@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { estimateItem, formatElapsed, layout, type Item } from './workBlocks.ts';
 import { ESTIMATE } from './virtual.ts';
 import { row } from '../dev/fixtures.ts';
+import { recapLine } from './recapText.ts';
+import type { MessageRow } from '../api/types.ts';
 
 function turn() {
   return [
@@ -280,4 +282,41 @@ test('thinking behind a closed fold is hidden on the notes that carry it, and sh
   assert.deepEqual(hidden(layout(rows, true)), [2]);
   // A turn that only thought and answered has nothing to fold: the thinking stays where it is.
   assert.deepEqual(hidden(layout([rows[0]!, { ...rows[3]!, id: 2 }], false)), []);
+});
+
+test('a gallery or board never folds, and a settled turn with a checklist or three steps gets a recap', () => {
+  const todo = (done: number) =>
+    JSON.stringify({ todos: ['one', 'two', 'three'].map((content, i) => ({ content, status: i < done ? 'completed' : 'pending' })) });
+  const gallery = row({ id: 4, role: 'toolResult', toolName: 'mcp__helm__app_show_images', text: '{"galleryId":"g1","count":3}', timestamp: 4000 });
+  const board = row({ id: 5, role: 'toolResult', toolName: 'mcp__helm__app_offer_options', text: '{"boardId":"b1","next":"wait"}', timestamp: 5000 });
+  const rows = [
+    row({ id: 1, role: 'user', timestamp: 0 }),
+    row({ id: 2, role: 'toolResult', toolName: 'TodoWrite', details: { toolArgs: todo(0) }, timestamp: 2000 }),
+    row({ id: 3, role: 'toolResult', toolName: 'Edit', details: { toolArgs: '{"file_path":"a.ts"}' }, timestamp: 3000 }),
+    gallery,
+    board,
+    row({ id: 6, role: 'toolResult', toolName: 'Edit', details: { toolArgs: '{"file_path":"b.ts"}' }, timestamp: 6000 }),
+    row({ id: 7, role: 'toolResult', toolName: 'TodoWrite', details: { toolArgs: todo(2) }, timestamp: 7000 }),
+    row({ id: 8, role: 'assistant', text: 'done', timestamp: 125_000 }),
+  ];
+  const items = layout(rows, false);
+  // The cards stay in the flow; the plain tool rows fold.
+  assert.deepEqual(shape(items), [1, 'fold[2,3,6,7]', 4, 5, 8]);
+  const reply = items.find((i) => i.kind === 'row' && i.row.id === 8);
+  const recap = reply?.kind === 'row' ? reply.recap : undefined;
+  assert.equal(recap?.files, 2);
+  assert.deepEqual(recap?.galleries, [{ galleryId: 'g1', count: 3 }]);
+  assert.equal(recap?.checklist?.filter((t) => t.state === 'completed').length, 2);
+  assert.equal(recap && recapLine(recap), 'Done in 2m 3s · 2 of 3 steps · 2 files edited · 3 pictures');
+  // Only the final reply carries it, and not while the turn is still running.
+  assert.equal(items.filter((i) => i.kind === 'row' && i.recap).length, 1);
+  assert.equal(layout(rows, true).some((i) => i.kind === 'row' && i.recap), false);
+  // Without a checklist it takes three tool steps.
+  const bare = (n: number) => [
+    row({ id: 1, role: 'user', timestamp: 0 }),
+    ...Array.from({ length: n }, (_, i) => row({ id: 2 + i, role: 'toolResult', toolName: 'Read', timestamp: 1000 * (i + 1) })),
+    row({ id: 20, role: 'assistant', text: 'ok', timestamp: 9000 }),
+  ];
+  const hasRecap = (rs: MessageRow[]) => layout(rs, false).some((i) => i.kind === 'row' && i.recap !== undefined);
+  assert.deepEqual([hasRecap(bare(2)), hasRecap(bare(3))], [false, true]);
 });
