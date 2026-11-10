@@ -1,30 +1,38 @@
-// Settings → Profiles: the people who use this Helm. Add, rename, recolour, link to a person on the
-// hub, delete (its chats go back to the home profile). The home profile is the one whose Claude
-// sign-in this computer runs under; it cannot be deleted. What this Helm shares with the household
-// is under Settings → Hub.
+// Settings → Profiles: the people who use this Helm. Add, rename, recolour, say how to address each
+// one ("About you"), link to a person on the hub, delete (its chats go back to the home profile).
+// The home profile is the one whose Claude sign-in this computer runs under; it cannot be deleted.
+// Which devices may run chats here is under Settings → Devices; pairing is under Settings → Hub.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ProfileSummary } from '../../api/profiles.ts';
 import { PROFILE_COLOURS } from '../../profiles/model.ts';
 import { ProfileDisc } from '../../profiles/Disc.tsx';
 import { useHouseholdWatch, useProfiles } from '../../profiles/hooks.ts';
 import { errorText, type ProfilesStore } from '../../profiles/store.ts';
 import { useShell } from '../../shell/context.ts';
-import { Button, ConfirmDialog, Picker, SettingRow, TextInput, type ConfirmSpec } from '../../ui/index.ts';
+import { Button, ConfirmDialog, Picker, SettingRow, TextArea, TextInput, type ConfirmSpec } from '../../ui/index.ts';
 import '../../profiles/profiles.css';
+import './profilesPane.css';
 
 const NOT_LINKED = '';
+/** The longest About text the host keeps. */
+const ABOUT_MAX = 2000;
 
-function ProfileRow({ profile, store, people, onError, confirm }: {
+function ProfileRow({ profile, homeName, store, people, onError, confirm }: {
   profile: ProfileSummary;
+  /** The home profile's name, for what happens to a deleted profile's chats. */
+  homeName: string;
   store: ProfilesStore;
   people: { id: string; name: string; you: boolean }[] | null;
   onError: (text: string | null) => void;
   confirm: (spec: ConfirmSpec) => void;
 }) {
   const [name, setName] = useState(profile.name);
+  const [about, setAbout] = useState(profile.about ?? '');
   const [busy, setBusy] = useState(false);
-  const change = (patch: { name?: string; colour?: string; hubPersonId?: string | null }) => {
+  // An edit made elsewhere (another window, the hub) replaces what is shown.
+  useEffect(() => setAbout(profile.about ?? ''), [profile.about]);
+  const change = (patch: { name?: string; colour?: string; hubPersonId?: string | null; about?: string }) => {
     setBusy(true);
     store.ops
       .update({ id: profile.id, ...patch })
@@ -34,6 +42,7 @@ function ProfileRow({ profile, store, people, onError, confirm }: {
       })
       .catch((e: unknown) => {
         setName(profile.name);
+        setAbout(profile.about ?? '');
         onError(errorText(e));
       })
       .finally(() => setBusy(false));
@@ -42,6 +51,9 @@ function ProfileRow({ profile, store, people, onError, confirm }: {
     const n = name.trim();
     if (n && n !== profile.name) change({ name: n });
     else setName(profile.name);
+  };
+  const commitAbout = () => {
+    if (about !== (profile.about ?? '')) change({ about });
   };
   const linkOptions = [
     { value: NOT_LINKED, title: 'Not linked', subtitle: 'Only labels chats on this computer' },
@@ -86,6 +98,23 @@ function ProfileRow({ profile, store, people, onError, confirm }: {
             />
           ))}
         </div>
+        <label className="pf-about">
+          <span className="pf-about-label">About you</span>
+          <TextArea
+            aria-label={`About ${profile.name}`}
+            rows={3}
+            maxLength={ABOUT_MAX}
+            value={about}
+            disabled={busy}
+            placeholder="For example: call me Sam, keep answers short, I am new to git."
+            onChange={(e) => setAbout(e.target.value)}
+            onBlur={commitAbout}
+            data-testid="profile-about"
+          />
+          <span className="setting-desc" data-testid="profile-about-hint">
+            How to address you and write for you. Every chat on your profile gets this, on any device. {about.length}/{ABOUT_MAX}
+          </span>
+        </label>
         <Picker
           settings
           label={`Hub person for ${profile.name}`}
@@ -104,7 +133,7 @@ function ProfileRow({ profile, store, people, onError, confirm }: {
             onClick={() =>
               confirm({
                 title: `Delete ${profile.name}?`,
-                body: `Its ${profile.chats === 1 ? 'chat goes' : 'chats go'} back to the home profile. Nothing is deleted from any chat.`,
+                body: `Its ${profile.chats === 1 ? 'chat moves' : 'chats move'} to ${homeName}. Nothing is deleted from any chat.`,
                 confirm: 'Delete profile',
                 danger: true,
                 onConfirm: () =>
@@ -132,6 +161,7 @@ export function ProfilesPane() {
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
   const view = snap.view;
+  const homeName = view?.profiles.find((p) => p.isHome)?.name ?? 'the home profile';
 
   const add = () => {
     const name = newName.trim();
@@ -152,13 +182,13 @@ export function ProfilesPane() {
     <div className="hub-pane" data-testid="settings-profiles">
       <SettingRow
         title="Profiles"
-        description="The people who use this Helm. A profile is a label on chats and a way to look at them one person at a time. Every chat here runs on this computer's Claude sign-in, whichever profile it is labelled with."
+        description="The people who use this Helm. A profile owns chats, and the sidebar shows one profile's chats and the ones shared with it. A chat runs on the computer it was started on, under that computer's Claude sign-in, whichever profile it belongs to."
       />
       {(view?.profiles ?? [])
         .slice()
         .sort((a, b) => Number(b.isHome) - Number(a.isHome))
         .map((p) => (
-          <ProfileRow key={p.id} profile={p} store={store} people={snap.people} onError={setError} confirm={setConfirm} />
+          <ProfileRow key={p.id} profile={p} homeName={homeName} store={store} people={snap.people} onError={setError} confirm={setConfirm} />
         ))}
       <div className="pf-pane-add">
         <TextInput

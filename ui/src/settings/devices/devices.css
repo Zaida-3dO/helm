@@ -1,0 +1,25 @@
+/* Settings → Devices. Design-system tokens only. */
+
+.dv-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dv-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.dv-dot.on {
+  background: var(--ok);
+}
+
+.dv-run {
+  font-size: 12px;
+  color: var(--secondary);
+}

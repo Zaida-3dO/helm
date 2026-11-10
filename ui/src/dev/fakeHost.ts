@@ -32,6 +32,7 @@ import { itemLinksFakeOps } from './fake-itemlinks.ts';
 import { hubFakeOps } from './fake-hub.ts';
 import { profilesFakeOps } from './fake-profiles.ts';
 import { devicesFakeOps } from './fake-devices.ts';
+import { knowledgeFakeOps } from './fake-knowledge.ts';
 import { githubFakeOps } from './fake-github.ts';
 import { webSearchFakeOps } from './fake-websearch.ts';
 import { localModelsFakeOps } from './fake-localmodels.ts';
@@ -78,6 +79,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const hub = hubFakeOps(); registerFakeOps(hub.prefixes, hub.handler); }
 { const pf = profilesFakeOps(); registerFakeOps(pf.prefixes, pf.handler); }
 { const dv = devicesFakeOps(); registerFakeOps(dv.prefixes, dv.handler); }
+{ const kn = knowledgeFakeOps(); registerFakeOps(kn.prefixes, kn.handler); }
 { const gh = githubFakeOps(); registerFakeOps(gh.prefixes, gh.handler); }
 { const ws = webSearchFakeOps(); registerFakeOps(ws.prefixes, ws.handler); }
 // Local models: the catalogue holds nothing until a refresh asks the (made-up) servers, as in the real host.

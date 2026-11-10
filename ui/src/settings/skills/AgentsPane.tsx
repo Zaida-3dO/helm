@@ -2,11 +2,14 @@
 // matter block with a name, a description and optionally the tools and model it uses, then its
 // instructions. Chats get the whole folder at their next start, by plain name (the names the
 // Orchestrator's stages point at). Adding copies files in; removing deletes Helm's copy only.
+// Like skills and rules, agents come in layers: Everyone's, and one list per profile (a profile's
+// agent wins over Everyone's when both have the same name).
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useShell } from '../../shell/context.ts';
 import { Button, ConfirmDialog, SettingRow, type ConfirmSpec } from '../../ui/index.ts';
 import { agentsOps, type AgentsView } from './api.ts';
+import { LayerPicker, MoveTo, useKnowledgeLayer } from './LayerPicker.tsx';
 import './skills.css';
 
 function errorText(e: unknown): string {
@@ -16,6 +19,8 @@ function errorText(e: unknown): string {
 export function AgentsPane() {
   const shell = useShell();
   const ops = useMemo(() => agentsOps(shell.api), [shell.api]);
+  const state = useKnowledgeLayer();
+  const { layer } = state;
   const [view, setView] = useState<AgentsView | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -25,15 +30,17 @@ export function AgentsPane() {
   const load = useCallback(
     () =>
       ops
-        .list()
+        .list(layer)
         .then(setView)
         .catch((e: unknown) => setError(errorText(e))),
-    [ops],
+    [ops, layer],
   );
 
   useEffect(() => {
+    setView(null);
     void load();
-    return shell.bus.on('agents-changed', () => void load());
+    const offs = [shell.bus.on('agents-changed', () => void load()), shell.bus.on('knowledge-changed', () => void load())];
+    return () => offs.forEach((off) => off());
   }, [shell, load]);
 
   /** Run one action: clear the old messages, show its error if it fails. */
@@ -56,7 +63,7 @@ export function AgentsPane() {
     run(async () => {
       const picked = await shell.api<{ path: string | null }>('folder_pick', { title: 'Folder with the agent files to add' });
       if (!picked.path) return;
-      const r = await ops.add(picked.path);
+      const r = await ops.add(picked.path, layer);
       const skipped = r.skipped.length > 0 ? ` Left out: ${r.skipped.join('; ')}.` : '';
       setNote(`Added ${r.added.join(', ')}. Chats pick them up from their next start.${skipped}`);
       await load();
@@ -70,7 +77,7 @@ export function AgentsPane() {
       danger: true,
       onConfirm: async () => {
         try {
-          await ops.remove(name);
+          await ops.remove(name, layer);
           setNote(`Removed ${name}.`);
           await load();
         } catch (e) {
@@ -81,6 +88,9 @@ export function AgentsPane() {
 
   return (
     <div className="skills-pane" data-testid="settings-agents">
+      <SettingRow title="Whose agents" description="Pick whose list to look at.">
+        <LayerPicker state={state} />
+      </SettingRow>
       <SettingRow
         testId="agents-folder"
         title="Helm's agents folder"
@@ -90,7 +100,7 @@ export function AgentsPane() {
           <Button variant="primary" data-testid="agents-add" disabled={busy} onClick={() => void addFromFolder()}>
             Add from folder
           </Button>
-          <Button variant="secondary" data-testid="agents-open" disabled={busy} onClick={() => void run(() => ops.reveal().then(() => undefined))}>
+          <Button variant="secondary" data-testid="agents-open" disabled={busy} onClick={() => void run(() => ops.reveal(layer).then(() => undefined))}>
             Open folder
           </Button>
         </div>
@@ -106,6 +116,20 @@ export function AgentsPane() {
             <div className="skills-name">{a.name}</div>
             {a.description !== '' && <div className="skills-desc">{a.description}</div>}
           </div>
+          <MoveTo
+            options={state.options}
+            from={layer}
+            what={a.name}
+            testId={`agent-move-${a.name}`}
+            disabled={busy}
+            onMove={(to) =>
+              void run(async () => {
+                await shell.api('knowledge_move', { kind: 'agent', name: a.name, from: layer, to });
+                setNote(`Moved ${a.name}.`);
+                await load();
+              })
+            }
+          />
           <Button variant="text" danger data-testid={`agent-remove-${a.name}`} disabled={busy} onClick={() => askRemove(a.name)}>
             Remove
           </Button>

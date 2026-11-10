@@ -34,3 +34,95 @@
   color: var(--secondary);
   overflow-wrap: anywhere;
 }
+
+/* Skills & rules: the layer picker, sections, inline editors. */
+
+.kn-layers {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-button);
+  background: var(--surface-alt);
+}
+
+.kn-layer {
+  padding: 4px 12px;
+  border: 0;
+  border-radius: var(--radius-button);
+  background: none;
+  color: var(--secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: var(--cursor-pointer);
+}
+
+.kn-layer.on {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.kn-section {
+  display: flex;
+  flex-direction: column;
+  margin-top: 14px;
+}
+
+.kn-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.kn-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.kn-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.kn-field {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.kn-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.kn-clash {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.kn-source {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

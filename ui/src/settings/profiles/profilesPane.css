@@ -1,0 +1,13 @@
+/* Settings → Profiles: the About you field. Design-system tokens only. */
+
+.pf-about {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+}
+
+.pf-about-label {
+  font-size: 12px;
+  color: var(--text);
+}

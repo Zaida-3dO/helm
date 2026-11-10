@@ -2,11 +2,11 @@
 // computer; typing it here with the hub's address connects this Helm as that person on this
 // computer: the host stores the token (sealed, never shown again), sets up the hub line and the
 // shared-memory server in one step, and links the home profile to the person. Entering a token by
-// hand stays available in the fields above. The household switches sit right under it.
+// hand stays available in the fields above. Whether other devices may run chats on this PC is under
+// Settings → Devices.
 
 import { useEffect, useMemo, useState } from 'react';
 import { hubOps, type HubConnection } from '../../api/hub.ts';
-import { SharingSwitches } from '../../profiles/SharingSwitches.tsx';
 import { useShell } from '../../shell/context.ts';
 import { Button, SettingRow, TextInput } from '../../ui/index.ts';
 import '../../profiles/profiles.css';
@@ -127,9 +127,6 @@ export function HubPairing() {
           {error}
         </div>
       )}
-
-      <h3 className="hub-heading">Household</h3>
-      <SharingSwitches api={shell.api} bus={shell.bus} />
     </div>
   );
 }

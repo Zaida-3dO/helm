@@ -20,6 +20,7 @@ import './settings/keyboard/index.tsx';
 import './settings/mcp/index.tsx';
 import './settings/hub/index.tsx';
 import './settings/profiles/index.tsx';
+import './settings/devices/index.tsx';
 import './settings/usage/index.tsx';
 import './settings/schedules/index.tsx';
 import './settings/orchestrator/index.tsx';
