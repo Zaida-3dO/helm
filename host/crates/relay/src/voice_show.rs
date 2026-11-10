@@ -726,14 +726,14 @@ mod tests {
             r"C:\work\credentials\notes.txt",
             r"C:\work\secrets\a.png",
             // Sign-in files by name.
-            r"C:\Users\a\.netrc",
-            r"C:\Users\a\_netrc",
+            r"D:\Home\a\.netrc",
+            r"D:\Home\a\_netrc",
             "/home/a/.pgpass",
             "/home/a/.pypirc",
-            r"C:\Users\a\.claude.json",
+            r"D:\Home\a\.claude.json",
             r"C:\work\.mcp.json",
             "/home/a/.git-credentials",
-            r"C:\Users\a\AppData\Roaming\GitHub CLI\hosts.yml",
+            r"D:\Home\a\AppData\Roaming\GitHub CLI\hosts.yml",
             "/home/a/x/gh/hosts.yml",
         ] {
             assert!(sensitive(Path::new(p)), "{p}");
