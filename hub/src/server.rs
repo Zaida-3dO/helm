@@ -113,6 +113,7 @@ impl PairLimit {
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
+    state.lines.bind(&state);
     Router::new()
         .route("/health", get(health))
         .route("/mcp", get(no_stream).post(post_mcp).delete(no_stream))
@@ -210,6 +211,28 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
             return (StatusCode::BAD_REQUEST, Json(e)).into_response();
         }
     };
+    // `X-Helm-Person` makes the memory calls act as that person; the forwarded Helm tools do not.
+    let acted = {
+        let named = headers
+            .get(mcp::ACT_AS_HEADER)
+            .map(|v| v.to_str().unwrap_or("?"));
+        let Ok(registry) = state.registry.lock() else {
+            return refused(StatusCode::INTERNAL_SERVER_ERROR, "the registry is unavailable");
+        };
+        match mcp::act_as(&client, named, &registry) {
+            Ok(acted) => acted,
+            Err(mcp::ActAsError::NeedsPeer) => {
+                return refused(
+                    StatusCode::FORBIDDEN,
+                    "only a token with the peer scope may act as a person",
+                )
+            }
+            Err(mcp::ActAsError::UnknownPerson) => {
+                return refused(StatusCode::BAD_REQUEST, "there is no such person to act as")
+            }
+        }
+    };
+    let acted = acted.as_ref();
     let started = Instant::now();
     let is_init = msg.get("method").and_then(Value::as_str) == Some("initialize");
     let label = describe(&msg);
@@ -218,7 +241,7 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
         Value::Array(batch) => {
             let mut replies = vec![];
             for m in batch {
-                match answer(&state, &client, m).await {
+                match answer(&state, &client, acted, m).await {
                     Ok(Some(r)) => replies.push(r),
                     Ok(None) => {}
                     Err(code) => return code.into_response(),
@@ -226,7 +249,7 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
             }
             (!replies.is_empty()).then_some(Value::Array(replies))
         }
-        m => match answer(&state, &client, m).await {
+        m => match answer(&state, &client, acted, m).await {
             Ok(r) => r,
             Err(code) => return code.into_response(),
         },
@@ -251,7 +274,12 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
 
 /// One JSON-RPC message: forwarded Helm tools go down one of the caller's own person's lines,
 /// without holding the store; everything else is the memory surface.
-async fn answer(state: &AppState, client: &Client, m: &Value) -> Result<Option<Value>, StatusCode> {
+async fn answer(
+    state: &AppState,
+    client: &Client,
+    acted: Option<&Client>,
+    m: &Value,
+) -> Result<Option<Value>, StatusCode> {
     let method = m.get("method").and_then(Value::as_str);
     let tool = m.pointer("/params/name").and_then(Value::as_str);
     if client.has(Scope::App) && method == Some("tools/call") {
@@ -276,11 +304,22 @@ async fn answer(state: &AppState, client: &Client, m: &Value) -> Result<Option<V
             }
         }
     }
+    // The people's names, so memory results can say who wrote them. Only a call needs them.
+    let people = if method == Some("tools/call") {
+        state
+            .registry
+            .lock()
+            .ok()
+            .and_then(|r| r.people().ok())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let reply = {
         let Ok(mut store) = state.store.lock() else {
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         };
-        mcp::handle(&mut store, client, &state.options, m)
+        mcp::handle_with(&mut store, acted.unwrap_or(client), &state.options, m, &people)
     };
     let mut reply = reply;
     if client.has(Scope::App) && method == Some("tools/list") {

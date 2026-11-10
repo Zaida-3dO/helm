@@ -5,20 +5,81 @@
 //! transport allows that). Sessions are not needed either: a session id is
 //! issued on `initialize` for clients that expect one, but no state hangs off
 //! it.
+//!
+//! A request from a Helm that carries `X-Helm-Person: <personId>` acts as that person: the memories
+//! it reads are that person's (their own and the shared ones) and the ones it writes belong to
+//! them. Only a token with the `peer` scope may do this (see [`act_as`]); it is how a chat of one
+//! person, running on another person's computer, keeps to its own person's memories.
+//!
+//! `memory_write` takes `scope`: `me` (the default: only the person sees it) or `everyone` (the
+//! whole household does); `private` and `shared`, and the older `visibility`, mean the same.
+//! `memory_search` and `memory_list` take `person`: `me` (the default) and `any` both mean the
+//! memories the person may see, their own and the shared ones; a name or id narrows that to what
+//! one person wrote. Someone else's private memories are never returned. Results carry `owner`,
+//! the name of the person who wrote the memory.
 
-use crate::auth::Client;
+use crate::auth::{Client, Scope};
+use crate::registry::{Person, Registry};
 use crate::store::{Embedding, MemoryPatch, NewMemory, SearchQuery, Store, StoreError, Visibility};
 use serde_json::{json, Value};
 
 pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// The request header that names the person a memory call acts as.
+pub const ACT_AS_HEADER: &str = "x-helm-person";
 
 pub struct Options {
     /// Offer `memory_update` and `memory_delete`.
     pub allow_mutate: bool,
 }
 
+/// Why a request could not act as the person it named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActAsError {
+    /// The client's token lacks the `peer` scope.
+    NeedsPeer,
+    /// No such person.
+    UnknownPerson,
+}
+
+/// The client a request acts as: `None` when it names nobody (acts as itself), else a copy of
+/// `client` that belongs to the named person (an id or a name). The scopes stay the client's own.
+pub fn act_as(
+    client: &Client,
+    header: Option<&str>,
+    registry: &Registry,
+) -> Result<Option<Client>, ActAsError> {
+    let who = header.map(str::trim).filter(|w| !w.is_empty());
+    let Some(who) = who else {
+        return Ok(None);
+    };
+    if !client.has(Scope::Peer) {
+        return Err(ActAsError::NeedsPeer);
+    }
+    let person = registry
+        .find_person(who)
+        .map_err(|_| ActAsError::UnknownPerson)?;
+    Ok(Some(Client {
+        person_id: person.id,
+        person: person.name,
+        ..client.clone()
+    }))
+}
+
 /// Answers one JSON-RPC message. `None` for a notification.
 pub fn handle(store: &mut Store, client: &Client, opts: &Options, msg: &Value) -> Option<Value> {
+    handle_with(store, client, opts, msg, &[])
+}
+
+/// [`handle`], knowing who the people are: results then carry `owner` as a name, and `person`
+/// can name someone.
+pub fn handle_with(
+    store: &mut Store,
+    client: &Client,
+    opts: &Options,
+    msg: &Value,
+    people: &[Person],
+) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(Value::as_str);
     let Some(method) = method else {
@@ -40,7 +101,8 @@ pub fn handle(store: &mut Store, client: &Client, opts: &Options, msg: &Value) -
                 "instructions": "Memory for the household. You see your own memories and the ones \
                     others shared. memory_search finds memories by keywords; pass `vector` (with `model`) \
                     for a hybrid keyword + similarity search. Read a hit in full with memory_read. A \
-                    new memory is private unless written with visibility \"shared\"."
+                    new memory is private (scope \"me\") unless written with scope \"everyone\". Look \
+                    at other people's memories only when the user asks."
             }))
         }
         "ping" => Ok(json!({})),
@@ -51,7 +113,7 @@ pub fn handle(store: &mut Store, client: &Client, opts: &Options, msg: &Value) -
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            Ok(call_tool(store, client, opts, name, &args))
+            Ok(call_tool(store, client, opts, people, name, &args))
         }
         _ => Err((-32601, format!("method {method:?} not found"))),
     };
@@ -87,6 +149,14 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
         "type": "string", "enum": ["private", "shared"],
         "description": "private (default): only you see it. shared: everyone in the household sees it."
     });
+    let scope = json!({
+        "type": "string", "enum": ["me", "everyone", "private", "shared"],
+        "description": "me (default): only this person sees it. everyone: the whole household sees it. Use everyone only when the memory holds whoever is asking, or the user says so. private and shared mean the same as me and everyone."
+    });
+    let person = json!({
+        "type": "string",
+        "description": "Whose memories: me or any (default: this person's own and the shared ones), or a person's name or id to see only what they wrote. Look at other people's memories only when the user asks."
+    });
     let vector = json!({
         "type": "array", "items": { "type": "number" },
         "description": "Embedding computed by the caller (the hub never computes one)."
@@ -94,13 +164,14 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "memory_search",
-            "description": "Search memories. Keyword (full-text) search on its own; with `vector`, a hybrid of keyword and cosine similarity over memories embedded with the same dimension (and `model`, if given).",
+            "description": "Search memories. Keyword (full-text) search on its own; with `vector`, a hybrid of keyword and cosine similarity over memories embedded with the same dimension (and `model`, if given). Each result names its owner.",
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string" },
                 "k": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 },
                 "vector": vector,
                 "model": { "type": "string", "description": "Only compare against vectors from this model." },
-                "tags": { "type": "array", "items": { "type": "string" }, "description": "Every tag must match." }
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "Every tag must match." },
+                "person": person
             }, "required": ["query"] },
             "annotations": { "readOnlyHint": true }
         }),
@@ -114,11 +185,12 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
         }),
         json!({
             "name": "memory_list",
-            "description": "List memories newest first, optionally by tag or updated since a date (ISO-8601, UTC).",
+            "description": "List memories newest first, optionally by tag or updated since a date (ISO-8601, UTC). Each result names its owner.",
             "inputSchema": { "type": "object", "properties": {
                 "tag": { "type": "string" },
                 "since": { "type": "string" },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 50 }
+                "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 50 },
+                "person": person
             } },
             "annotations": { "readOnlyHint": true }
         }),
@@ -126,13 +198,14 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
     if client.scopes.can_write_memory() {
         tools.push(json!({
             "name": "memory_write",
-            "description": "Store a new memory, private unless `visibility` is shared. Pass `vector` and `model` together to make it findable by similarity.",
+            "description": "Store a new memory, for this person only unless `scope` is everyone. Pass `vector` and `model` together to make it findable by similarity.",
             "inputSchema": { "type": "object", "properties": {
                 "title": { "type": "string" },
                 "body": { "type": "string" },
                 "tags": { "type": "array", "items": { "type": "string" } },
                 "source": { "type": "string" },
                 "name": { "type": "string", "description": "Optional unique key." },
+                "scope": scope,
                 "visibility": visibility,
                 "vector": vector,
                 "model": { "type": "string" }
@@ -149,6 +222,7 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
                     "description": { "type": "string" },
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "source": { "type": "string" },
+                    "scope": scope,
                     "visibility": visibility,
                     "vector": vector,
                     "model": { "type": "string" }
@@ -171,6 +245,7 @@ fn call_tool(
     store: &mut Store,
     client: &Client,
     opts: &Options,
+    people: &[Person],
     name: &str,
     args: &Value,
 ) -> Value {
@@ -182,9 +257,9 @@ fn call_tool(
         return tool_error(format!("{name} needs a read-write token"));
     }
     let r = match name {
-        "memory_search" => search(store, client, args),
-        "memory_read" => read(store, client, args),
-        "memory_list" => list(store, client, args),
+        "memory_search" => search(store, client, people, args),
+        "memory_read" => read(store, client, people, args),
+        "memory_list" => list(store, client, people, args),
         "memory_write" => write(store, client, args),
         "memory_update" | "memory_delete" if !opts.allow_mutate => {
             return tool_error(format!("{name} is turned off on this hub"));
@@ -264,13 +339,58 @@ fn store_err(e: StoreError) -> String {
     e.to_string()
 }
 
+/// Who may see a memory: `scope` (`me` or `everyone`, or `private` and `shared`) or the older
+/// `visibility` (`private` or `shared`). Naming both is fine when they agree.
 fn visibility_arg(args: &Value) -> Result<Option<Visibility>, String> {
-    match str_arg(args, "visibility")? {
-        None => Ok(None),
-        Some(v) => Visibility::parse(&v)
-            .map(Some)
-            .ok_or_else(|| "visibility must be private or shared".to_owned()),
+    let by_scope = match str_arg(args, "scope")? {
+        None => None,
+        Some(s) => Some(match s.trim() {
+            "me" => Visibility::Private,
+            "everyone" => Visibility::Shared,
+            other => Visibility::parse(other)
+                .ok_or_else(|| "scope must be me or everyone".to_owned())?,
+        }),
+    };
+    let by_visibility = match str_arg(args, "visibility")? {
+        None => None,
+        Some(v) => Some(
+            Visibility::parse(&v)
+                .ok_or_else(|| "visibility must be private or shared".to_owned())?,
+        ),
+    };
+    match (by_scope, by_visibility) {
+        (Some(a), Some(b)) if a != b => Err("scope and visibility disagree".into()),
+        (a, b) => Ok(a.or(b)),
     }
+}
+
+/// `owner` as a name: the person's, or null when the hub does not know them.
+fn with_owner(mut v: Value, owner: Option<i64>, people: &[Person]) -> Value {
+    let name = owner
+        .and_then(|id| people.iter().find(|p| p.id == id))
+        .map_or(Value::Null, |p| Value::String(p.name.clone()));
+    v["owner"] = name;
+    v
+}
+
+/// The `person` argument: `None` for me and any (the person's own memories and the shared ones,
+/// as the store already limits them), else the one person to narrow to, by id or name.
+fn person_arg(args: &Value, people: &[Person]) -> Result<Option<i64>, String> {
+    let Some(who) = str_arg(args, "person")? else {
+        return Ok(None);
+    };
+    let who = who.trim();
+    if who.is_empty() || who.eq_ignore_ascii_case("me") || who.eq_ignore_ascii_case("any") {
+        return Ok(None);
+    }
+    let by_id = who
+        .parse::<i64>()
+        .ok()
+        .and_then(|id| people.iter().find(|p| p.id == id));
+    by_id
+        .or_else(|| people.iter().find(|p| p.name.eq_ignore_ascii_case(who)))
+        .map(|p| Some(p.id))
+        .ok_or_else(|| format!("no person called {who:?}"))
 }
 
 /// A memory the caller may change: their own. Someone else's shared memory answers that only its
@@ -286,7 +406,7 @@ fn owned_by(store: &Store, client: &Client, id: i64) -> Result<(), String> {
     }
 }
 
-fn search(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
+fn search(store: &mut Store, client: &Client, people: &[Person], args: &Value) -> ToolResult {
     let q = SearchQuery {
         query: str_arg(args, "query")?.unwrap_or_default(),
         k: int_arg(args, "k")?.unwrap_or(10).max(1) as usize,
@@ -294,6 +414,7 @@ fn search(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
         model: str_arg(args, "model")?,
         tags: tags_arg(args, "tags")?.unwrap_or_default(),
         viewer: Some(client.person_id),
+        owner: person_arg(args, people)?,
     };
     let mode = if q.vector.is_some() {
         "hybrid"
@@ -301,10 +422,14 @@ fn search(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
         "keyword"
     };
     let hits = store.search(&q).map_err(store_err)?;
-    Ok(json!({ "mode": mode, "count": hits.len(), "results": hits }))
+    let results: Vec<Value> = hits
+        .iter()
+        .map(|h| with_owner(json!(h), h.summary.owner_person, people))
+        .collect();
+    Ok(json!({ "mode": mode, "count": results.len(), "results": results }))
 }
 
-fn read(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
+fn read(store: &mut Store, client: &Client, people: &[Person], args: &Value) -> ToolResult {
     let me = client.person_id;
     let m = match args.get("id") {
         Some(Value::Number(n)) => store.get_visible(n.as_i64().ok_or("id must be an integer")?, me),
@@ -314,22 +439,28 @@ fn read(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
         },
         _ => return Err("id is required".into()),
     };
-    m.map(|m| json!(m)).map_err(store_err)
+    m.map(|m| with_owner(json!(m), m.owner_person, people))
+        .map_err(store_err)
 }
 
-fn list(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
+fn list(store: &mut Store, client: &Client, people: &[Person], args: &Value) -> ToolResult {
     let tag = str_arg(args, "tag")?;
     let since = str_arg(args, "since")?;
     let limit = int_arg(args, "limit")?.unwrap_or(50).max(1) as usize;
     let rows = store
-        .list_for(
+        .list_by(
             Some(client.person_id),
+            person_arg(args, people)?,
             tag.as_deref(),
             since.as_deref(),
             limit,
         )
         .map_err(store_err)?;
-    Ok(json!({ "count": rows.len(), "results": rows }))
+    let results: Vec<Value> = rows
+        .iter()
+        .map(|r| with_owner(json!(r), r.owner_person, people))
+        .collect();
+    Ok(json!({ "count": results.len(), "results": results }))
 }
 
 fn write(store: &mut Store, client: &Client, args: &Value) -> ToolResult {

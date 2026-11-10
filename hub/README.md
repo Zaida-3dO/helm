@@ -23,19 +23,35 @@ else from the repo.
 
 | Tool | What it does |
 |---|---|
-| `memory_search {query, k?, vector?, model?, tags?}` | Keyword search (FTS5, porter stemming, bm25 with title > description > tags > body). With `vector`, a hybrid: keyword and cosine rankings fused by reciprocal rank. Only vectors of the same dimension (and `model`, if given) are compared. Every listed tag must match. |
+| `memory_search {query, k?, vector?, model?, tags?, person?}` | Keyword search (FTS5, porter stemming, bm25 with title > description > tags > body). With `vector`, a hybrid: keyword and cosine rankings fused by reciprocal rank. Only vectors of the same dimension (and `model`, if given) are compared. Every listed tag must match. |
 | `memory_read {id}` | One memory in full, by numeric id or by name |
-| `memory_write {title, body, tags?, source?, name?, visibility?, vector?, model?}` | New memory, owned by the caller's person and `private` unless `visibility` is `shared`. A vector must come with the id of the model that made it |
-| `memory_list {tag?, since?, limit?}` | Newest first; `since` is an ISO-8601 date or UTC timestamp |
-| `memory_update`, `memory_delete` | Only when `HUB_ALLOW_MUTATE=1`, and only on the caller's own memories (`memory_update` may also change `visibility`). A new body without a new vector clears the old vector |
+| `memory_write {title, body, tags?, source?, name?, scope?, visibility?, vector?, model?}` | New memory, owned by the caller's person and for that person only unless `scope` is `everyone`. A vector must come with the id of the model that made it |
+| `memory_list {tag?, since?, limit?, person?}` | Newest first; `since` is an ISO-8601 date or UTC timestamp |
+| `memory_update`, `memory_delete` | Only when `HUB_ALLOW_MUTATE=1`, and only on the caller's own memories (`memory_update` may also change `scope`). A new body without a new vector clears the old vector |
 
 **Whose memories.** `memory_search`, `memory_read` and `memory_list` return the caller's own
-memories plus the ones other people marked `shared`; each result says its `visibility` and whether
-it is `mine`. Someone else's private memory answers exactly like one that does not exist. The owner
-is always the caller's person, never something a caller can set. A memory's optional `name` is a
-key shared by the whole hub, so pick names that will not collide. Memories stored before people
-existed (no owner) become private to the legacy person (`HUB_LEGACY_PERSON`, default `owner`) the
-first time the hub starts.
+memories plus the ones other people made visible to everyone; each result says its `visibility`,
+its `owner` (the person's name) and whether it is `mine`. Someone else's private memory answers
+exactly like one that does not exist. The owner is always the caller's person (or the person the
+call acts as, below), never something a caller can set. A memory's optional `name` is a key shared
+by the whole hub, so pick names that will not collide. Memories stored before people existed (no
+owner) become private to the legacy person (`HUB_LEGACY_PERSON`, default `owner`) the first time the
+hub starts.
+
+**Scope and person.** `scope` on `memory_write` and `memory_update` is `me` (the default: only the
+owner sees it) or `everyone`; `private` and `shared`, and the older `visibility`, mean the same, and
+naming two that disagree is an error. `person` on `memory_search` and `memory_list` is `me` or `any`
+(the default: the caller's own memories and the ones shared with everyone) or a person's name or id
+(only what that person wrote, among what the caller may see). Nothing crosses privacy: another
+person's private memories are never returned, whatever `person` says. The descriptions tell agents
+to look at other people's memories only when the user asks.
+
+**Acting as a person.** A `/mcp` request that carries `X-Helm-Person: <personId>` (a name works
+too) from a token with the `peer` scope is answered as that person: the memories it reads are that
+person's and the ones it writes belong to them. This is how a chat of one person, running on
+another person's computer, keeps to its own person's memories. Without the `peer` scope the header
+is refused with 403, an unknown person with 400; without the header nothing changes. The forwarded
+Helm tools (`app_*`) never act as anyone else: they still go down the caller's own lines.
 
 **The hub never computes an embedding.** Callers that have one (Helm on the PC) pass it; callers
 that do not (another assistant, or anyone while the PC is asleep) get keyword search.
@@ -155,6 +171,61 @@ them for other people's machines: `list_chats` needs `chats`, `read_chat` needs 
 `transcripts`, `send_message` needs `transcripts` and `messages`. A person's own other machines need
 no switch. A refusal is always a plain sentence (`ok: false, error`), never silence; the asker's
 token needs the `peer` scope; an offline machine says it is offline. Nothing is stored on the hub.
+
+## Devices
+
+The whole hub is one household. Each Helm tells the hub which device it is with a `device` frame
+(`uid`: an id the install made for itself, 8 to 64 letters, digits or dashes; `name`, at most 40
+characters; `run`: whether other devices may run its chats), after `sharing` on every line-up and
+when something changes. Only a token with the `peer` scope takes part; the hub keeps the device on
+the machine's registry row (columns `device_uid`, `device_name`, `run`), so a device is still listed,
+offline, while its Helm is away. A device id held by another person's machine is refused; the same
+person's older machine gives it up (a Helm paired again keeps its id). Revoking a machine removes its
+device. The hub never uses a client's address to tell devices apart: it runs behind a reverse proxy.
+
+| Frame | Fields |
+|---|---|
+| hub → Helm `devices` | `list: [{uid, name, personId, person, online, lastSeenAt, run, self}]`, to every `peer` line when a `device` frame arrives and whenever a line comes up or drops. `personId` is the hub's person id as a string (here and in `from` below) |
+| Helm → hub `dev` | `id`, `to` (a device uid), `op`, `args` |
+| hub → Helm `dev_call` | `id` (the hub's own), `from: {uid, name, personId, person}`, `op`, `args` |
+| Helm → hub `dev_result` | `id` (the `dev_call`'s), `ok`, `result` or `error: {code, message}` |
+| hub → Helm `dev_result` | `id` (the `dev` frame's, as sent), `ok`, `result` or `error: {code, message}` |
+| Helm → hub `dev_push` | `to` (a device uid), `sub`, `seq`, `event` |
+| hub → Helm `dev_push` | `from` (the sender's device uid), `sub`, `seq`, `event` |
+
+The hub never reads `op` or `args`; it carries the call to the device with that uid, waits up to 30
+seconds, and returns the answer under the sender's id. Its own errors are `scope` (no `peer` scope),
+`bad_request` (the sender has not announced a device, or `op` is empty or over 64 bytes), `offline`
+(no such device, or it is not up), `timeout` (no answer in 30 s, or the target's line dropped mid
+call: it may or may not have run) and `too_large` (a call or an answer over 1 MiB). A `dev_push` for
+a device that is not up is dropped without a word. Frames the hub does not know are ignored, so an
+older Helm is not disturbed. The largest frame the hub takes from a Helm is 4 MiB (it was 2 MiB; a
+knowledge file needs the room); every voice limit is unchanged.
+
+## Knowledge files
+
+The rules, skills and agents of a household travel through the hub (`src/knowledge.rs`), in the
+same SQLite file as the memories (table `knowledge_files`). A *layer* is `everyone` or
+`person:<personId>`; a file is a path under `rules/`, `skills/<name>/` or `agents/` (at most 8
+folders deep and 200 bytes; no segment starting with a dot or ending in a dot or space; none of
+`\ : * ? " < > |`; no Windows device names; two paths may not differ only by letter case), up to 2
+MiB, with up to 64 MiB and 5000 files in a layer. Every change takes the next number of one counter
+(`seq`); a deletion stays as a row without a body, so devices that were off still hear of it. All
+four frames need the `peer` scope, and any `peer` line may write any existing person's layer.
+
+| Frame | Fields |
+|---|---|
+| Helm → hub `kn_pull` | `id`, `since` (a `seq`), `limit` (at most 200) |
+| hub → Helm `kn_files` | `id`, `files: [{layer, path, seq, sha256, size, deleted, body}]` (body in base64, left out when deleted), `cursor`, `more`; or `id` and `error` |
+| Helm → hub `kn_put` | `id`, `layer`, `path`, `baseSeq` (the `seq` last seen for the path, 0 for a new file), `sha256`, `deleted`, `body` (base64) |
+| hub → Helm `kn_put_result` | `id`, `ok: true`, `seq`; or `ok: false` with `conflict: {seq, sha256, deleted}`; or `ok: false` with `error` (a plain sentence) |
+| hub → every `peer` line `kn_changed` | `seq`, after a put that changed something |
+
+A `kn_files` reply holds about 1 MiB at most (a bigger single file is sent alone); ask again from
+its `cursor` while `more` is true. A put whose content equals what is stored is accepted as it is
+(same `seq`, no `kn_changed`). A put from a stale `baseSeq` is a `conflict` and nothing is written:
+the hub keeps its copy and the writer decides what to do with its own. A deleted path can be written
+again with `baseSeq` 0.
 
 ## Telegram bot
 

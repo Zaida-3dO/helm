@@ -183,6 +183,8 @@ pub struct SearchQuery {
     pub tags: Vec<String>,
     /// Whose memories may be returned: their own and shared ones. `None` sees everything.
     pub viewer: Option<i64>,
+    /// Only the memories this person wrote (among those the viewer may see). `None` is anyone's.
+    pub owner: Option<i64>,
 }
 
 pub struct Store {
@@ -271,10 +273,21 @@ impl Store {
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS memories_owner ON memories(owner_person, visibility);",
         )?;
+        // The household's knowledge files share this database (see `knowledge.rs`).
+        crate::knowledge::init(&conn)?;
         Ok(Store {
             conn,
             default_owner: None,
         })
+    }
+
+    /// The connection, for the knowledge files.
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub(crate) fn conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
     }
 
     /// The owner a memory gets when its writer names none: the importer's person.
@@ -420,9 +433,22 @@ impl Store {
         since: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Summary>> {
+        self.list_by(viewer, None, tag, since, limit)
+    }
+
+    /// [`Store::list_for`], narrowed to the memories `owner` wrote (that the viewer may see).
+    pub fn list_by(
+        &self,
+        viewer: Option<i64>,
+        owner: Option<i64>,
+        tag: Option<&str>,
+        since: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Summary>> {
         let mut sql = format!("SELECT {SUMMARY_COLS} FROM memories m WHERE 1=1");
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
         sql.push_str(&visible_filter(viewer, &mut args));
+        sql.push_str(&owner_filter(owner, &mut args));
         if let Some(t) = tag {
             args.push(t.trim().to_lowercase().into());
             sql.push_str(&format!(
@@ -453,14 +479,21 @@ impl Store {
             &q.query,
             &tags,
             q.viewer,
+            q.owner,
             if q.vector.is_some() { CANDIDATES } else { k },
         )?;
         let Some(vector) = &q.vector else {
             return Ok(fts.into_iter().take(k).collect());
         };
         check_vector(vector)?;
-        let vec_hits =
-            self.vector_search(vector, q.model.as_deref(), &tags, q.viewer, CANDIDATES)?;
+        let vec_hits = self.vector_search(
+            vector,
+            q.model.as_deref(),
+            &tags,
+            q.viewer,
+            q.owner,
+            CANDIDATES,
+        )?;
 
         // Reciprocal-rank fusion: robust to the two rankers' scores living on
         // unrelated scales, and needs no tuning.
@@ -500,6 +533,7 @@ impl Store {
         query: &str,
         tags: &[String],
         viewer: Option<i64>,
+        owner: Option<i64>,
         limit: usize,
     ) -> Result<Vec<Hit>> {
         let Some(match_expr) = fts_query(query) else {
@@ -514,6 +548,7 @@ impl Store {
         );
         sql.push_str(&tag_filter(tags, &mut args));
         sql.push_str(&visible_filter(viewer, &mut args));
+        sql.push_str(&owner_filter(owner, &mut args));
         args.push((limit as i64).into());
         sql.push_str(&format!(" ORDER BY rank LIMIT ?{}", args.len()));
         let mut stmt = self.conn.prepare(&sql)?;
@@ -536,6 +571,7 @@ impl Store {
         model: Option<&str>,
         tags: &[String],
         viewer: Option<i64>,
+        owner: Option<i64>,
         limit: usize,
     ) -> Result<Vec<(Summary, f64)>> {
         let qnorm = norm(query);
@@ -553,6 +589,7 @@ impl Store {
         }
         sql.push_str(&tag_filter(tags, &mut args));
         sql.push_str(&visible_filter(viewer, &mut args));
+        sql.push_str(&owner_filter(owner, &mut args));
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(args))?;
         let mut scored: Vec<(Summary, f64)> = Vec::new();
@@ -754,6 +791,15 @@ fn visible_filter(viewer: Option<i64>, args: &mut Vec<rusqlite::types::Value>) -
         " AND (m.owner_person = ?{} OR m.visibility = 'shared')",
         args.len()
     )
+}
+
+/// Restrict to the memories one person wrote (the viewer filter still applies).
+fn owner_filter(owner: Option<i64>, args: &mut Vec<rusqlite::types::Value>) -> String {
+    let Some(o) = owner else {
+        return String::new();
+    };
+    args.push(o.into());
+    format!(" AND m.owner_person = ?{}", args.len())
 }
 
 /// Restrict to memories carrying every one of `tags`.

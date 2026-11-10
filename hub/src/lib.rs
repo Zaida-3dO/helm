@@ -5,8 +5,10 @@
 pub mod admin;
 pub mod apptools;
 pub mod auth;
+pub mod devices;
 pub mod images;
 pub mod import;
+pub mod knowledge;
 pub mod lines;
 pub mod mcp;
 pub mod peer;

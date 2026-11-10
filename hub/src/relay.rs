@@ -38,6 +38,19 @@
 //! | Helm → hub | `voice_attachment` | `reply`, `n` (1-4), `kind`, `title`, and by kind `mediaType` + `data` (base64), `markdown` or `url`: one attachment, sent before its reply and held for 60 s |
 //! | Helm → hub | `voice_final` | `id` (the reply), `turn`, `mode`, `sentences`, `text`, `truncated`, `conversation`, `at`, `attachments` (a count): the answer to a turn |
 //! | Helm → hub | `voice_notify` | as `voice_final`, with `turn` null and `about` (`{"chat": title}` or null): news Helm starts |
+//! | Helm → hub | `device` | `uid`, `name`, `run` (whether other devices may run this Helm's chats): sent after `sharing` on every line-up and on change. Only a token with the `peer` scope takes part; the hub answers every `peer` line with a fresh `devices` |
+//! | hub → Helm | `devices` | `list`: every device of the household, `{uid, name, personId, person, online, lastSeenAt, run, self}`; sent to each `peer` line when a device frame arrives and whenever a line comes up or drops |
+//! | Helm → hub | `dev` | `id`, `to` (a device uid), `op`, `args`: a call for another device, answered with `dev_result` (see `devices.rs`) |
+//! | hub → Helm | `dev_call` | `id` (the hub's), `from` (`{uid, name, personId, person}`), `op`, `args`: another device's call for this one |
+//! | Helm → hub | `dev_result` | `id` (the `dev_call`'s), `ok`, `result` or `error` (`{code, message}`): the answer to a `dev_call` |
+//! | hub → Helm | `dev_result` | `id` (the `dev` frame's), `ok`, `result` or `error` (`{code, message}`). The hub's own errors: `offline`, `timeout`, `scope`, `too_large`, `bad_request` |
+//! | Helm → hub | `dev_push` | `to` (a device uid), `sub`, `seq`, `event`: handed on to that device, or dropped when it is not up |
+//! | hub → Helm | `dev_push` | `from` (the sender's device uid), `sub`, `seq`, `event` |
+//! | Helm → hub | `kn_pull` | `id`, `since` (a hub sequence), `limit` (at most 200): the knowledge files changed since (see `knowledge.rs`) |
+//! | hub → Helm | `kn_files` | `id`, `files` (`{layer, path, seq, sha256, size, deleted, body}`, body in base64 and left out for a deleted file), `cursor`, `more`; or `id` and `error` |
+//! | Helm → hub | `kn_put` | `id`, `layer`, `path`, `baseSeq` (0 for a new file), `sha256`, `deleted`, `body` (base64) |
+//! | hub → Helm | `kn_put_result` | `id`, `ok`, `seq`; or `ok` false with `conflict` (`{seq, sha256}`) or `error` |
+//! | hub → Helm | `kn_changed` | `seq`: some device changed a knowledge file; sent to every `peer` line |
 //!
 //! New frames go in the table above, a `match` arm in [`Line::receive`] and, for what Helm sends
 //! up that is not a call result, an [`Upstream`] variant.
@@ -64,8 +77,15 @@ pub const OFFLINE: &str = "Helm offline, nothing sent or changed.";
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Largest frame accepted from Helm: one voice attachment holds an image of up to 1 MiB, which is
-/// about 1.4 MB as base64.
-pub const MAX_FRAME: usize = 2 * 1024 * 1024;
+/// about 1.4 MB as base64, and one knowledge file of up to 2 MiB is about 2.8 MB.
+pub const MAX_FRAME: usize = 4 * 1024 * 1024;
+
+/// Largest `dev`, `dev_result` or `dev_push` frame the hub passes between devices.
+pub const MAX_DEV_FRAME: usize = 1024 * 1024;
+
+/// What a `dev_result` that was over [`MAX_DEV_FRAME`] is turned into on its way to the waiting
+/// call, so the router can answer the sender with `too_large`.
+pub const TOO_LARGE: &str = "too_large";
 
 /// What Helm sent up the line that is not a call result.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +120,41 @@ pub enum Upstream {
     VoiceAttachment(Attachment),
     VoiceFinal(ReplyIn),
     VoiceNotify(ReplyIn),
+    /// The line's Helm announced the device it is. Answered by `devices.rs`.
+    Device {
+        uid: String,
+        name: String,
+        run: bool,
+    },
+    /// A call for another device. `size` is the frame's length, for the `too_large` check.
+    Dev {
+        id: Value,
+        to: String,
+        op: String,
+        args: Value,
+        size: usize,
+    },
+    DevPush {
+        to: String,
+        sub: Value,
+        seq: Value,
+        event: Value,
+    },
+    /// Knowledge frames, answered by `knowledge.rs`.
+    KnPull {
+        id: Value,
+        since: i64,
+        limit: usize,
+    },
+    KnPut {
+        id: Value,
+        layer: String,
+        path: String,
+        base_seq: i64,
+        sha256: String,
+        deleted: bool,
+        body: Option<String>,
+    },
 }
 
 impl Upstream {
@@ -185,9 +240,14 @@ pub struct Line {
     activity: AtomicU64,
     sharing: Mutex<Sharing>,
     upstream: mpsc::UnboundedSender<Upstream>,
+    /// Told `true` when a connection attaches and `false` when the current one ends (the
+    /// household's device list follows it).
+    on_change: Mutex<Option<StateHook>>,
     /// Woken when a line comes up (the Telegram queue flushes on it).
     pub up: tokio::sync::Notify,
 }
+
+type StateHook = std::sync::Arc<dyn Fn(bool) + Send + Sync>;
 
 impl Line {
     /// The line, plus the receiver for what Helm sends that is not a call result.
@@ -206,10 +266,29 @@ impl Line {
                 activity: AtomicU64::new(0),
                 sharing: Mutex::new(Sharing::default()),
                 upstream,
+                on_change: Mutex::new(None),
                 up: tokio::sync::Notify::new(),
             },
             rx,
         )
+    }
+
+    /// Call `hook` with `true` after a connection attaches and `false` after the current one
+    /// ends. It runs with no lock of the line held.
+    pub fn on_change(&self, hook: impl Fn(bool) + Send + Sync + 'static) {
+        *self.on_change.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(std::sync::Arc::new(hook));
+    }
+
+    fn changed(&self, up: bool) {
+        let hook = self
+            .on_change
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook(up);
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -287,6 +366,7 @@ impl Line {
         }
         drop(old.0);
         self.up.notify_waiters();
+        self.changed(true);
         generation
     }
 
@@ -312,6 +392,7 @@ impl Line {
         for (_, s) in senders {
             let _ = s.send(CallOutcome::Unknown(dropped_text()));
         }
+        self.changed(false);
     }
 
     /// Send one frame down the current line. False when the line is down.
@@ -365,6 +446,24 @@ impl Line {
         self.request(
             timeout,
             |id| json!({ "type": "peer_call", "id": id, "person": person, "op": op, "args": args }),
+        )
+        .await
+    }
+
+    /// Pass another device's call to this one and wait for its `dev_result`, which comes back
+    /// whole (`CallOutcome::Ok` holds the frame) so the caller can read its `ok`, `result` and
+    /// `error {code, message}`. A frame over [`MAX_DEV_FRAME`] comes back as
+    /// `CallOutcome::Err` with [`TOO_LARGE`].
+    pub async fn dev_call(
+        &self,
+        from: &Value,
+        op: &str,
+        args: &Value,
+        timeout: Duration,
+    ) -> CallOutcome {
+        self.request(
+            timeout,
+            |id| json!({ "type": "dev_call", "id": id, "from": from, "op": op, "args": args }),
         )
         .await
     }
@@ -549,7 +648,104 @@ impl Line {
                 }
                 None => false,
             },
+            Some("device") => match (s("uid"), s("name")) {
+                (Some(uid), Some(name)) => self
+                    .upstream
+                    .send(Upstream::Device {
+                        uid,
+                        name,
+                        run: v.get("run").and_then(Value::as_bool).unwrap_or(false),
+                    })
+                    .is_ok(),
+                _ => false,
+            },
+            Some("dev") => match (v.get("id"), s("to"), s("op")) {
+                (Some(id), Some(to), Some(op)) if id.is_string() || id.is_number() => {
+                    let args = match v.get("args") {
+                        Some(a) if a.is_object() => a.clone(),
+                        _ => json!({}),
+                    };
+                    self.upstream
+                        .send(Upstream::Dev {
+                            id: id.clone(),
+                            to,
+                            op,
+                            args,
+                            size: text.len(),
+                        })
+                        .is_ok()
+                }
+                _ => false,
+            },
+            Some("dev_result") => {
+                let Some(id) = s("id") else { return false };
+                let Some(sender) = self.take_pending(&id, generation) else {
+                    return false;
+                };
+                let outcome = if text.len() > MAX_DEV_FRAME {
+                    CallOutcome::Err {
+                        text: TOO_LARGE.into(),
+                        changed: true,
+                    }
+                } else {
+                    CallOutcome::Ok(v.clone())
+                };
+                let _ = sender.send(outcome);
+                true
+            }
+            Some("dev_push") => match (s("to"), v.get("sub"), v.get("seq"), v.get("event")) {
+                (Some(to), Some(sub), Some(seq), Some(event)) if text.len() <= MAX_DEV_FRAME => {
+                    self.upstream
+                        .send(Upstream::DevPush {
+                            to,
+                            sub: sub.clone(),
+                            seq: seq.clone(),
+                            event: event.clone(),
+                        })
+                        .is_ok()
+                }
+                _ => false,
+            },
+            Some("kn_pull") => match v.get("id") {
+                Some(id) if id.is_string() || id.is_number() => self
+                    .upstream
+                    .send(Upstream::KnPull {
+                        id: id.clone(),
+                        since: v.get("since").and_then(Value::as_i64).unwrap_or(0).max(0),
+                        limit: v
+                            .get("limit")
+                            .and_then(Value::as_u64)
+                            .map_or(200, |n| n.clamp(1, 200) as usize),
+                    })
+                    .is_ok(),
+                _ => false,
+            },
+            Some("kn_put") => match (v.get("id"), s("layer"), s("path")) {
+                (Some(id), Some(layer), Some(path)) if id.is_string() || id.is_number() => self
+                    .upstream
+                    .send(Upstream::KnPut {
+                        id: id.clone(),
+                        layer,
+                        path,
+                        base_seq: v.get("baseSeq").and_then(Value::as_i64).unwrap_or(0),
+                        sha256: s("sha256").unwrap_or_default(),
+                        deleted: v.get("deleted").and_then(Value::as_bool).unwrap_or(false),
+                        body: s("body"),
+                    })
+                    .is_ok(),
+                _ => false,
+            },
             _ => false,
+        }
+    }
+
+    /// The caller waiting on `id`, if the connection of `generation` is the one the call went
+    /// down.
+    fn take_pending(&self, id: &str, generation: u64) -> Option<oneshot::Sender<CallOutcome>> {
+        let mut g = self.lock();
+        match g.pending.get(id) {
+            Some((gen, _)) if *gen == generation => g.pending.remove(id).map(|(_, s)| s),
+            _ => None,
         }
     }
 }
@@ -901,5 +1097,143 @@ mod tests {
         assert_eq!(f.last().unwrap()["type"], "telegram_stop");
         line.detach(g2);
         assert!(!line.is_up());
+    }
+
+    #[tokio::test]
+    async fn device_and_knowledge_frames_go_upstream_and_a_device_call_waits_for_its_answer() {
+        let (line, mut up) = Line::new();
+        let line = std::sync::Arc::new(line);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let gen = line.attach(tx);
+        let _ = frames(&mut rx);
+        let changes = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let seen = changes.clone();
+        line.on_change(move |now_up| seen.lock().unwrap().push(now_up));
+
+        assert!(line.receive(gen, r#"{"type":"device","uid":"u1","name":"Desk","run":true}"#));
+        assert!(line.receive(gen, r#"{"type":"dev","id":"c1","to":"u2","op":"hello"}"#));
+        assert!(line.receive(
+            gen,
+            r#"{"type":"dev_push","to":"u2","sub":"s","seq":3,"event":{"k":1}}"#
+        ));
+        assert!(line.receive(gen, r#"{"type":"kn_pull","id":1,"since":-5,"limit":999}"#));
+        assert!(line.receive(
+            gen,
+            r#"{"type":"kn_put","id":"p","layer":"everyone","path":"rules/a.md","baseSeq":2,"deleted":true}"#
+        ));
+        assert_eq!(
+            up.try_recv().unwrap(),
+            Upstream::Device {
+                uid: "u1".into(),
+                name: "Desk".into(),
+                run: true
+            }
+        );
+        let Upstream::Dev { id, to, op, args, size } = up.try_recv().unwrap() else {
+            panic!("expected the call");
+        };
+        assert_eq!(
+            (id, to.as_str(), op.as_str(), args, size > 0),
+            (json!("c1"), "u2", "hello", json!({}), true)
+        );
+        assert_eq!(
+            up.try_recv().unwrap(),
+            Upstream::DevPush {
+                to: "u2".into(),
+                sub: json!("s"),
+                seq: json!(3),
+                event: json!({ "k": 1 })
+            }
+        );
+        assert_eq!(
+            up.try_recv().unwrap(),
+            Upstream::KnPull {
+                id: json!(1),
+                since: 0,
+                limit: 200
+            }
+        );
+        assert_eq!(
+            up.try_recv().unwrap(),
+            Upstream::KnPut {
+                id: json!("p"),
+                layer: "everyone".into(),
+                path: "rules/a.md".into(),
+                base_seq: 2,
+                sha256: String::new(),
+                deleted: true,
+                body: None
+            }
+        );
+        // A bad id, a missing field and an oversized push are dropped.
+        let big = "x".repeat(MAX_DEV_FRAME);
+        for bad in [
+            r#"{"type":"device","uid":"u1"}"#.to_owned(),
+            r#"{"type":"dev","id":[1],"to":"u2","op":"hello"}"#.to_owned(),
+            r#"{"type":"dev","id":"c","op":"hello"}"#.to_owned(),
+            r#"{"type":"dev_push","to":"u2","sub":"s","seq":1}"#.to_owned(),
+            format!(r#"{{"type":"dev_push","to":"u2","sub":"s","seq":1,"event":"{big}"}}"#),
+            r#"{"type":"kn_pull"}"#.to_owned(),
+            r#"{"type":"kn_put","id":"p","layer":"everyone"}"#.to_owned(),
+            r#"{"type":"dev_result","id":"nobody-asked","ok":true}"#.to_owned(),
+        ] {
+            assert!(!line.receive(gen, &bad), "{}", &bad[..bad.len().min(60)]);
+        }
+        assert!(up.try_recv().is_err(), "nothing malformed went upstream");
+
+        // A device call goes out as a dev_call and its dev_result comes back whole, an answer
+        // that is too big as too_large, and silence as unknown.
+        let ask = |wait: u64| {
+            let line = line.clone();
+            tokio::spawn(async move {
+                let from = json!({ "uid": "u1" });
+                line.dev_call(&from, "hello", &json!({ "n": 1 }), Duration::from_millis(wait))
+                    .await
+            })
+        };
+        let mut answer = |result: Value| {
+            let mut rx_frames = frames(&mut rx);
+            let call = rx_frames.pop().filter(|f| f["type"] == "dev_call");
+            call.map(|c| {
+                assert_eq!((c["op"].as_str(), c["from"]["uid"].as_str()), (Some("hello"), Some("u1")));
+                json!({ "type": "dev_result", "id": c["id"], "ok": true, "result": result })
+            })
+        };
+        let task = ask(5000);
+        let reply = loop {
+            tokio::task::yield_now().await;
+            if let Some(r) = answer(json!({ "device": "Desk" })) {
+                break r;
+            }
+        };
+        assert!(line.receive(gen, &reply.to_string()));
+        let CallOutcome::Ok(frame) = task.await.unwrap() else {
+            panic!("expected the answer");
+        };
+        assert_eq!((frame["ok"].as_bool(), frame["result"].clone()), (Some(true), json!({ "device": "Desk" })));
+
+        let task = ask(5000);
+        let reply = loop {
+            tokio::task::yield_now().await;
+            if let Some(r) = answer(json!(big)) {
+                break r;
+            }
+        };
+        assert!(line.receive(gen, &reply.to_string()));
+        assert_eq!(
+            task.await.unwrap(),
+            CallOutcome::Err {
+                text: TOO_LARGE.into(),
+                changed: true
+            }
+        );
+
+        assert!(matches!(ask(20).await.unwrap(), CallOutcome::Unknown(_)));
+
+        // The change hook hears of a drop, and of a new connection.
+        line.detach(gen);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        line.attach(tx);
+        assert_eq!(*changes.lock().unwrap(), [false, true]);
     }
 }

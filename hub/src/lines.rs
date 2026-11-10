@@ -8,16 +8,22 @@
 //! Household questions (`peer` frames) are answered here too: each line's forwarding task hands
 //! them to `peer.rs` and sends the `peer_result` back down the line they came from. The voice
 //! frames go to the receiver [`Lines::voice_receiver`] hands out (dropped while there is none).
+//! The device and knowledge frames (`device`, `dev`, `dev_push`, `kn_pull`, `kn_put`) are answered
+//! here too, by `devices.rs` and `knowledge.rs`; a line coming up or dropping refreshes the
+//! household's device list.
 //! Everything else a line sends up (the Telegram frames) goes to the one receiver [`Lines::new`]
 //! returns.
 
 use crate::auth::{Client, Scope};
+use crate::devices;
+use crate::knowledge;
 use crate::peer::{self, Asker};
 use crate::registry::Registry;
 use crate::relay::{Line, Route, Upstream};
+use crate::server::AppState;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
@@ -25,6 +31,8 @@ struct Slot {
     person_id: i64,
     machine: String,
     line: Arc<Line>,
+    /// Whether the client's token has the `peer` scope, as of its last connection.
+    peer: bool,
 }
 
 /// What a line sent up that is not a call result, tagged with the person whose machine sent it.
@@ -37,6 +45,9 @@ pub struct Lines {
     registry: Arc<Mutex<Registry>>,
     /// Where the voice frames go, once the voice bridge asked for them.
     voice: Mutex<Option<mpsc::UnboundedSender<PersonUpstream>>>,
+    /// The hub's state, for the knowledge frames (they read and write the store). Set by
+    /// [`Lines::bind`] when the router is made.
+    state: Mutex<Option<Weak<AppState>>>,
 }
 
 impl Lines {
@@ -50,9 +61,50 @@ impl Lines {
                 upstream,
                 registry,
                 voice: Mutex::new(None),
+                state: Mutex::new(None),
             },
             rx,
         )
+    }
+
+    /// Let the lines reach the hub's state (the knowledge store). Called once by the router.
+    pub fn bind(&self, state: &Arc<AppState>) {
+        *self.state.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::downgrade(state));
+    }
+
+    /// The hub's state, while the router is alive.
+    pub fn app_state(&self) -> Option<Arc<AppState>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
+    }
+
+    /// The client registry the lines answer from.
+    pub fn registry(&self) -> &Arc<Mutex<Registry>> {
+        &self.registry
+    }
+
+    /// Whether the client's token carries the `peer` scope (false for a client never seen).
+    pub fn is_peer(&self, client_id: i64) -> bool {
+        self.lock().get(&client_id).is_some_and(|s| s.peer)
+    }
+
+    /// Every connected line whose token has the `peer` scope, with its client id.
+    pub fn peer_lines(&self) -> Vec<(i64, Arc<Line>)> {
+        self.lock()
+            .iter()
+            .filter(|(_, s)| s.peer && s.line.is_up())
+            .map(|(id, s)| (*id, s.line.clone()))
+            .collect()
+    }
+
+    /// Send `frame` down every connected `peer` line.
+    pub fn broadcast_peers(&self, frame: &Value) {
+        for (_, line) in self.peer_lines() {
+            line.send(frame);
+        }
     }
 
     /// The receiver for the voice frames the lines send up, tagged with their person. A second
@@ -78,10 +130,14 @@ impl Lines {
         if let Some(slot) = slots.get_mut(&client.id) {
             // A renamed machine keeps its line.
             slot.machine.clone_from(&client.machine);
+            slot.peer = client.has(Scope::Peer);
             return slot.line.clone();
         }
         let (line, mut rx) = Line::in_namespace(client.id as u64);
         let line = Arc::new(line);
+        let weak = Arc::downgrade(self);
+        let client_id = client.id;
+        line.on_change(move |_up| devices::on_line_change(&weak, client_id));
         let (tx, person_id) = (self.upstream.clone(), client.person_id);
         let asker = Asker {
             person_id,
@@ -102,6 +158,60 @@ impl Lines {
                             line.send(&peer::result_frame(&id, answer));
                         });
                     }
+                    // The household's devices and knowledge. These are handled in order, on this
+                    // task, except a device call, which waits for another machine.
+                    Upstream::Device { uid, name, run } => {
+                        devices::on_device(&lines, client_id, &uid, &name, run);
+                    }
+                    Upstream::Dev {
+                        id,
+                        to,
+                        op,
+                        args,
+                        size,
+                    } => {
+                        let (lines, line) = (lines.clone(), own_line.clone());
+                        tokio::spawn(async move {
+                            let reply =
+                                devices::route(&lines, client_id, id, &to, &op, args, size).await;
+                            line.send(&reply);
+                        });
+                    }
+                    Upstream::DevPush {
+                        to,
+                        sub,
+                        seq,
+                        event,
+                    } => devices::push(&lines, client_id, &to, sub, seq, event),
+                    Upstream::KnPull { id, since, limit } => {
+                        own_line.send(&knowledge::pull_frame(&lines, client_id, &id, since, limit));
+                    }
+                    Upstream::KnPut {
+                        id,
+                        layer,
+                        path,
+                        base_seq,
+                        sha256,
+                        deleted,
+                        body,
+                    } => {
+                        let put = knowledge::PutFrame {
+                            layer: &layer,
+                            path: &path,
+                            base_seq,
+                            sha256: &sha256,
+                            deleted,
+                            body: body.as_deref(),
+                        };
+                        let (reply, changed) = knowledge::put_frame(&lines, client_id, &id, &put);
+                        own_line.send(&reply);
+                        if let Some(seq) = changed {
+                            lines.broadcast_peers(&serde_json::json!({
+                                "type": "kn_changed",
+                                "seq": seq,
+                            }));
+                        }
+                    }
                     // The voice bridge's frames are dropped until it has asked for them.
                     other if other.is_voice() => {
                         if let Some(voice) = lines.voice_sink() {
@@ -120,6 +230,7 @@ impl Lines {
                 person_id,
                 machine: client.machine.clone(),
                 line: line.clone(),
+                peer: client.has(Scope::Peer),
             },
         );
         line

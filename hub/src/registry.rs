@@ -61,6 +61,12 @@ pub struct ClientRow {
     pub created_at: String,
     pub last_seen_at: Option<String>,
     pub revoked_at: Option<String>,
+    /// The id this machine's Helm gave itself (see [`Registry::set_device`]); `None` until its
+    /// first `device` frame.
+    pub device_uid: Option<String>,
+    pub device_name: Option<String>,
+    /// Whether that Helm lets other devices run its chats, as it last said.
+    pub run: bool,
 }
 
 /// A machine just paired: its token is shown once and never stored in the clear.
@@ -106,7 +112,13 @@ CREATE TABLE IF NOT EXISTS pairings (
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 const CLIENT_COLS: &str = "c.id, c.person_id, p.name, c.machine_name, c.scopes, \
-    c.legacy_name IS NOT NULL, c.created_at, c.last_seen_at, c.revoked_at";
+    c.legacy_name IS NOT NULL, c.created_at, c.last_seen_at, c.revoked_at, \
+    c.device_uid, c.device_name, c.run";
+
+/// Longest device name a Helm may announce.
+pub const MAX_DEVICE_NAME: usize = 40;
+/// A device uid is what the Helm made for itself: letters, digits and dashes, 8 to 64 of them.
+pub const MAX_DEVICE_UID: usize = 64;
 
 /// Pairing codes avoid look-alike characters (no 0, 1, I or O).
 const CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -137,6 +149,17 @@ impl Registry {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.execute_batch(SCHEMA)?;
+        // A registry made before devices existed gains their columns.
+        let has_device = conn
+            .prepare("SELECT 1 FROM pragma_table_info('clients') WHERE name = 'device_uid'")?
+            .exists([])?;
+        if !has_device {
+            conn.execute_batch(
+                "ALTER TABLE clients ADD COLUMN device_uid TEXT;
+                 ALTER TABLE clients ADD COLUMN device_name TEXT;
+                 ALTER TABLE clients ADD COLUMN run INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
         Ok(Registry { conn })
     }
 
@@ -340,6 +363,81 @@ impl Registry {
         )?;
         self.client_by_id(c.id)?
             .ok_or_else(|| RegistryError::NotFound("the client vanished".into()))
+    }
+
+    /// Record the device a machine's Helm announced: its own id and name, and whether other
+    /// devices may run its chats. A uid already held by another person's machine is refused; the
+    /// same person's older machine gives it up (a Helm paired again keeps its device id).
+    pub fn set_device(
+        &mut self,
+        client_id: i64,
+        uid: &str,
+        name: &str,
+        run: bool,
+    ) -> Result<ClientRow> {
+        if !valid_device_uid(uid) {
+            return Err(RegistryError::Invalid(
+                "a device id is 8 to 64 letters, digits or dashes".into(),
+            ));
+        }
+        let name = clean_name(name, "a device name")?;
+        if name.chars().count() > MAX_DEVICE_NAME {
+            return Err(RegistryError::Invalid(format!(
+                "a device name is at most {MAX_DEVICE_NAME} characters"
+            )));
+        }
+        let me = self
+            .client_by_id(client_id)?
+            .ok_or_else(|| RegistryError::NotFound("the client vanished".into()))?;
+        let other: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT person_id FROM clients
+                 WHERE device_uid = ?1 AND id <> ?2 AND revoked_at IS NULL AND person_id <> ?3",
+                params![uid, client_id, me.person_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if other.is_some() {
+            return Err(RegistryError::Invalid(
+                "that device id belongs to another person's machine".into(),
+            ));
+        }
+        self.conn.execute(
+            "UPDATE clients SET device_uid = NULL, device_name = NULL, run = 0
+             WHERE device_uid = ?1 AND id <> ?2",
+            params![uid, client_id],
+        )?;
+        self.conn.execute(
+            "UPDATE clients SET device_uid = ?2, device_name = ?3, run = ?4 WHERE id = ?1",
+            params![client_id, uid, name, run],
+        )?;
+        self.client_by_id(client_id)?
+            .ok_or_else(|| RegistryError::NotFound("the client vanished".into()))
+    }
+
+    /// The active machines that announced a device, oldest first.
+    pub fn devices(&self) -> Result<Vec<ClientRow>> {
+        Ok(self
+            .clients()?
+            .into_iter()
+            .filter(|c| c.revoked_at.is_none() && c.device_uid.is_some())
+            .collect())
+    }
+
+    /// The active machine that announced the device `uid`.
+    pub fn client_by_device(&self, uid: &str) -> Result<Option<ClientRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {CLIENT_COLS} FROM clients c JOIN people p ON p.id = c.person_id
+                     WHERE c.device_uid = ?1 AND c.revoked_at IS NULL"
+                ),
+                [uid],
+                client_from_row,
+            )
+            .optional()?)
     }
 
     /// Whether the client may still be used: it exists and is not revoked.
@@ -570,7 +668,16 @@ fn client_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ClientRow> {
         created_at: r.get(6)?,
         last_seen_at: r.get(7)?,
         revoked_at: r.get(8)?,
+        device_uid: r.get(9)?,
+        device_name: r.get(10)?,
+        run: r.get(11)?,
     })
+}
+
+/// A device uid as a Helm makes it: 8 to [`MAX_DEVICE_UID`] letters, digits or dashes.
+pub fn valid_device_uid(uid: &str) -> bool {
+    (8..=MAX_DEVICE_UID).contains(&uid.len())
+        && uid.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// A person or machine name: trimmed, 1 to [`MAX_NAME`] characters, no control characters.
