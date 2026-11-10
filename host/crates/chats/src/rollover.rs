@@ -293,7 +293,7 @@ async fn finish(
         let _ = rt
             .ask(
                 &chat.id,
-                |reply| Cmd::Stop { reply },
+                |reply| Cmd::StopNoResend { reply },
                 rt.limits().stop + Duration::from_secs(5),
             )
             .await;
