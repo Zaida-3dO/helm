@@ -119,6 +119,32 @@ pub fn read(conn: &Connection, key: &str) -> Option<Value> {
         .ok()
         .flatten();
     raw.and_then(|s| serde_json::from_str(&s).ok())
+        .map(|v| migrate_legacy(key, v))
+}
+
+/// The ids the interface skins had before they were renamed, and what each is called now.
+const LEGACY_SKINS: [(&str, &str); 7] = [
+    ("windows-xp", "retro-desktop"),
+    ("slack", "team-chat"),
+    ("chrome", "browser"),
+    ("intellij", "ide"),
+    ("discord", "community"),
+    ("reddit", "forum"),
+    ("wikipedia", "encyclopedia"),
+];
+
+/// A stored value written before a rename, moved to its current form; anything else passes
+/// through. Applied when a value is read and when one is written, so a chosen skin never resets.
+fn migrate_legacy(key: &str, value: Value) -> Value {
+    if key == "interfaceTheme" {
+        if let Some(new) = value
+            .as_str()
+            .and_then(|s| LEGACY_SKINS.iter().find(|(old, _)| *old == s))
+        {
+            return Value::String(new.1.to_string());
+        }
+    }
+    value
 }
 
 /// The stored value as `T`, or `default` when missing, unparseable or the wrong shape.
@@ -279,13 +305,13 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
         },
         "interfaceTheme" => match value.as_str() {
             Some(
-                "default" | "windows-xp" | "slack" | "chrome" | "terminal" | "intellij" | "discord"
-                | "reddit" | "wikipedia",
+                "default" | "retro-desktop" | "team-chat" | "browser" | "terminal" | "ide"
+                | "community" | "forum" | "encyclopedia",
             ) => Ok(()),
             _ => Err(PrefError::Invalid {
                 key: k,
-                why: "must be default, windows-xp, slack, chrome, terminal, intellij, discord, \
-                      reddit or wikipedia",
+                why: "must be default, retro-desktop, team-chat, browser, terminal, ide, \
+                      community, forum or encyclopedia",
             }),
         },
         "sounds" => match value.as_object() {
@@ -421,6 +447,7 @@ pub fn set(tx: &Transaction<'_>, key: PrefKey, value: &Value) -> Result<(), Pref
     if value.is_null() {
         return store::delete_row(tx, key.name());
     }
+    let value = &migrate_legacy(key.name(), value.clone());
     validate(key, value)?;
     store::put_row(tx, key.name(), value)
 }
@@ -543,7 +570,7 @@ mod tests {
             .is_ok());
         let r = db.write(|tx| set_generic(tx, "appearance", &json!("sepia")));
         assert!(matches!(r, Err(PrefError::Invalid { .. })));
-        for ok in ["default", "slack", "wikipedia"] {
+        for ok in ["default", "team-chat", "encyclopedia", "slack"] {
             assert!(
                 db.write(|tx| set_generic(tx, "interfaceTheme", &json!(ok)))
                     .is_ok(),
@@ -551,10 +578,28 @@ mod tests {
             );
         }
         // (null stays out of this list: like every key, a null interfaceTheme clears it.)
-        for bad in [json!("dracula"), json!(7), json!("slack ")] {
+        for bad in [json!("dracula"), json!(7), json!("team-chat ")] {
             let r = db.write(|tx| set_generic(tx, "interfaceTheme", &bad));
             assert!(matches!(r, Err(PrefError::Invalid { .. })), "{bad}");
         }
+        // An old id is stored under its new name; a row already stored under the old one reads as the new.
+        db.write(|tx| set_generic(tx, "interfaceTheme", &json!("windows-xp")))
+            .unwrap();
+        let stored = db
+            .snapshot(|tx| Ok::<_, rusqlite::Error>(read(tx, "interfaceTheme")))
+            .unwrap();
+        assert_eq!(stored, Some(json!("retro-desktop")));
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE preferences SET value = '\"wikipedia\"' WHERE key = 'interfaceTheme'",
+                [],
+            )
+        })
+        .unwrap();
+        let stored = db
+            .snapshot(|tx| Ok::<_, rusqlite::Error>(read(tx, "interfaceTheme")))
+            .unwrap();
+        assert_eq!(stored, Some(json!("encyclopedia")));
         let ok = json!({"settings.toggle": "Ctrl+,", "panel.toggle": null});
         assert!(db.write(|tx| set_generic(tx, "keybindings", &ok)).is_ok());
         for bad in [

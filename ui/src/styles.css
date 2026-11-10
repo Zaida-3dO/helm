@@ -192,8 +192,8 @@
    evoke well-known interfaces; the colours are our own quiet approximations, first pass.
    Muted and secondary text stay at or near 4.5:1 on the page and its surfaces. */
 
-/* Windows XP: Luna blue on cool silver, with the green start-button undertone. */
-:root[data-skin='windows-xp'][data-theme='light'] {
+/* Retro desktop: classic-desktop blue on cool silver, with a green undertone. */
+:root[data-skin='retro-desktop'][data-theme='light'] {
   --palette-text: #112a45;
   --palette-bg: #edf5fd;
   --palette-tint: #23528c;
@@ -218,7 +218,7 @@
   --fx-accent: #4d84c0;
 }
 
-:root[data-skin='windows-xp'][data-theme='dark'] {
+:root[data-skin='retro-desktop'][data-theme='dark'] {
   --palette-text: #eaf2fb;
   --palette-bg: #172434;
   --palette-tint: #8fb6de;
@@ -243,8 +243,8 @@
   --fx-accent: #6f97c2;
 }
 
-/* Slack: aubergine against near-neutral grey. */
-:root[data-skin='slack'][data-theme='light'] {
+/* Team chat: aubergine against near-neutral grey. */
+:root[data-skin='team-chat'][data-theme='light'] {
   --palette-text: #23272b;
   --palette-bg: #fafbfc;
   --palette-tint: #611f69;
@@ -269,7 +269,7 @@
   --fx-accent: #8a5296;
 }
 
-:root[data-skin='slack'][data-theme='dark'] {
+:root[data-skin='team-chat'][data-theme='dark'] {
   --palette-text: #f4f6f8;
   --palette-bg: #1a1d21;
   --palette-tint: #c99fd0;
@@ -294,8 +294,8 @@
   --fx-accent: #a877b4;
 }
 
-/* Chrome: shop-window grey with a calm browser blue. */
-:root[data-skin='chrome'][data-theme='light'] {
+/* Browser: shop-window grey with a calm blue. */
+:root[data-skin='browser'][data-theme='light'] {
   --palette-text: #202124;
   --palette-bg: #f8f9fa;
   --palette-tint: #3c6fae;
@@ -320,7 +320,7 @@
   --fx-accent: #6f96c8;
 }
 
-:root[data-skin='chrome'][data-theme='dark'] {
+:root[data-skin='browser'][data-theme='dark'] {
   --palette-text: #f1f3f4;
   --palette-bg: #1a1a1a;
   --palette-tint: #9ec0ea;
@@ -396,8 +396,8 @@
   --fx-accent: #5ea064;
 }
 
-/* IntelliJ: Darcula charcoal with the IDE's green caret accent. */
-:root[data-skin='intellij'][data-theme='light'] {
+/* IDE: charcoal with a green caret accent. */
+:root[data-skin='ide'][data-theme='light'] {
   --palette-text: #231f20;
   --palette-bg: #f7f7f7;
   --palette-tint: #4a6f8f;
@@ -422,7 +422,7 @@
   --fx-accent: #6f8fa8;
 }
 
-:root[data-skin='intellij'][data-theme='dark'] {
+:root[data-skin='ide'][data-theme='dark'] {
   --palette-text: #dfdfdf;
   --palette-bg: #2b2b2b;
   --palette-tint: #98be65;
@@ -447,8 +447,8 @@
   --fx-accent: #7ba453;
 }
 
-/* Discord: blurple, softened for a working window. */
-:root[data-skin='discord'][data-theme='light'] {
+/* Community: soft indigo, softened for a working window. */
+:root[data-skin='community'][data-theme='light'] {
   --palette-text: #23243a;
   --palette-bg: #f7f8fc;
   --palette-tint: #4f5bc7;
@@ -473,7 +473,7 @@
   --fx-accent: #7d86d8;
 }
 
-:root[data-skin='discord'][data-theme='dark'] {
+:root[data-skin='community'][data-theme='dark'] {
   --palette-text: #f2f3f5;
   --palette-bg: #2b2d31;
   --palette-tint: #a3aef5;
@@ -498,8 +498,8 @@
   --fx-accent: #7986e8;
 }
 
-/* Reddit: warm paper with the orange, kept below full volume. */
-:root[data-skin='reddit'][data-theme='light'] {
+/* Forum: warm paper with an orange accent, kept below full volume. */
+:root[data-skin='forum'][data-theme='light'] {
   --palette-text: #2b2320;
   --palette-bg: #fdf7f3;
   --palette-tint: #a6431c;
@@ -524,7 +524,7 @@
   --fx-accent: #c47a52;
 }
 
-:root[data-skin='reddit'][data-theme='dark'] {
+:root[data-skin='forum'][data-theme='dark'] {
   --palette-text: #f2efeb;
   --palette-bg: #1b1a19;
   --palette-tint: #e08a5f;
@@ -549,8 +549,8 @@
   --fx-accent: #c2643a;
 }
 
-/* Wikipedia: encyclopedia white and ink, with the article blue. */
-:root[data-skin='wikipedia'][data-theme='light'] {
+/* Encyclopedia: white and ink, with a link blue. */
+:root[data-skin='encyclopedia'][data-theme='light'] {
   --palette-text: #1f2428;
   --palette-bg: #fafbfc;
   --palette-tint: #3366cc;
@@ -575,7 +575,7 @@
   --fx-accent: #6f8fc9;
 }
 
-:root[data-skin='wikipedia'][data-theme='dark'] {
+:root[data-skin='encyclopedia'][data-theme='dark'] {
   --palette-text: #eef1f4;
   --palette-bg: #1c2023;
   --palette-tint: #9dbdf2;

@@ -48,12 +48,15 @@ test('the General pane offers every size in range and every zoom step, defaults 
 
 test('the skin keeps only names styles.css carries; anything else reads as the default', () => {
   for (const s of SKINS) assert.equal(parseSkin(s), s);
-  for (const bad of [undefined, null, '', 'dracula', 'slack ', 'DEFAULT', 7]) assert.equal(parseSkin(bad), 'default');
+  assert.equal(parseSkin('windows-xp'), 'retro-desktop');
+  assert.equal(parseSkin('wikipedia'), 'encyclopedia');
+  assert.equal(parseSkin('constructor'), 'default');
+  for (const bad of [undefined, null, '', 'dracula', 'team-chat ', 'DEFAULT', 7]) assert.equal(parseSkin(bad), 'default');
   // The General picker offers exactly those skins, in that order, the default marked.
   const opts = skinOptions();
   assert.deepEqual(opts.map((o) => o.value), [...SKINS]);
   assert.equal(opts[0]?.title, 'Default (no skin)');
-  assert.equal(opts.find((o) => o.value === 'slack')?.title, 'Slack');
+  assert.equal(opts.find((o) => o.value === 'team-chat')?.title, 'Team chat');
 });
 
 test('the delight level keeps the three names, plain or in a document, and everything else reads as standard', () => {
@@ -77,10 +80,10 @@ test('the theme write carries the level, and Zen also asks for the quiet effect 
     assert.equal(root.dataset.dopamine, 'zen');
     assert.equal(root.dataset.effects, 'quiet');
     stop();
-    applyTheme(root, 'light', 'slack', 'brainrot');
+    applyTheme(root, 'light', 'team-chat', 'brainrot');
     assert.equal(root.dataset.dopamine, 'brainrot');
     assert.equal(root.dataset.effects, 'full');
-    applyTheme(root, 'light', 'slack');
+    applyTheme(root, 'light', 'team-chat');
     assert.equal(root.dataset.dopamine, 'standard');
   } finally {
     delete g.window;

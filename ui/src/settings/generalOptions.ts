@@ -25,14 +25,14 @@ export function zoomOptions(): SizeOption[] {
 
 const SKIN_TITLES: Record<Skin, string> = {
   default: 'Default',
-  'windows-xp': 'Windows XP',
-  slack: 'Slack',
-  chrome: 'Chrome',
+  'retro-desktop': 'Retro desktop',
+  'team-chat': 'Team chat',
+  browser: 'Browser',
   terminal: 'Terminal',
-  intellij: 'IntelliJ',
-  discord: 'Discord',
-  reddit: 'Reddit',
-  wikipedia: 'Wikipedia',
+  ide: 'IDE',
+  community: 'Community',
+  forum: 'Forum',
+  encyclopedia: 'Encyclopedia',
 };
 
 /** Every skin styles.css carries, in the order Settings shows them; the default marked. */

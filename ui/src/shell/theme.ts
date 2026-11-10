@@ -14,21 +14,34 @@ export const SKIN_DEFAULT = 'default';
 /** The skins styles.css carries, in the order Settings shows them. */
 export const SKINS = [
   'default',
-  'windows-xp',
-  'slack',
-  'chrome',
+  'retro-desktop',
+  'team-chat',
+  'browser',
   'terminal',
-  'intellij',
-  'discord',
-  'reddit',
-  'wikipedia',
+  'ide',
+  'community',
+  'forum',
+  'encyclopedia',
 ] as const;
 
 export type Skin = (typeof SKINS)[number];
 
+/** The ids skins had before they were renamed; a stored old id reads as the new one. */
+const LEGACY_SKINS: Record<string, Skin> = {
+  'windows-xp': 'retro-desktop',
+  slack: 'team-chat',
+  chrome: 'browser',
+  intellij: 'ide',
+  discord: 'community',
+  reddit: 'forum',
+  wikipedia: 'encyclopedia',
+};
+
 /** The stored `interfaceTheme`; anything the host would not accept reads as the default skin. */
 export function parseSkin(v: unknown): Skin {
-  return typeof v === 'string' && (SKINS as readonly string[]).includes(v) ? (v as Skin) : SKIN_DEFAULT;
+  if (typeof v !== 'string') return SKIN_DEFAULT;
+  if ((SKINS as readonly string[]).includes(v)) return v as Skin;
+  return Object.hasOwn(LEGACY_SKINS, v) ? LEGACY_SKINS[v] : SKIN_DEFAULT;
 }
 
 export function resolveTheme(appearance: Appearance, prefersDark: boolean): 'light' | 'dark' {
