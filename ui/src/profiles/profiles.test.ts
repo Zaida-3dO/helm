@@ -2,12 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ApiError, type Api } from '../api/client.ts';
 import { EventBus } from '../api/events.ts';
-import type { PeerPerson, ProfilesView, Sharing } from '../api/profiles.ts';
+import type { HubPerson, ProfilesView } from '../api/profiles.ts';
 import { profileChoices, shareChoices } from './menu.ts';
-import { belongsTo, householdTargets, initialOf, itemText, lastSeenMs, needsFirstRun, offlineText, orderPeerChats, rowsForProfile, sharedFrom, sharedWithOf, stepTile, tileCounts } from './model.ts';
+import { belongsTo, initialOf, itemText, lastSeenMs, needsFirstRun, rowsForProfile, sharedFrom, sharedWithOf, stepTile, tileCounts } from './model.ts';
 import { ProfilesStore } from './store.ts';
 
-const NOW = Date.parse('2026-11-10T12:00:00');
 const sum = (id: string, name: string, over: Partial<ProfilesView['profiles'][number]> = {}): ProfilesView['profiles'][number] => ({
   id,
   name,
@@ -25,19 +24,9 @@ const view = (activeId: string | null, extra: Partial<ProfilesView> = {}): Profi
   activeId,
   ...extra,
 });
-const all: Sharing = { chats: true, transcripts: true, messages: false };
-const people: PeerPerson[] = [
-  { id: 'p-self', name: 'Home', you: true, machines: [{ id: 'm1', name: 'Desk', online: true, lastSeen: NOW, sharing: all }] },
-  {
-    id: 'p-other',
-    name: 'Other',
-    you: false,
-    machines: [
-      { id: 'm2', name: 'Laptop', online: true, lastSeen: NOW, sharing: all },
-      { id: 'm3', name: 'Tablet', online: false, lastSeen: NOW - 3_600_000, sharing: all },
-    ],
-  },
-  { id: 'p-third', name: 'Third', you: false, machines: [] },
+const people: HubPerson[] = [
+  { id: 'p-self', name: 'Home', you: true },
+  { id: 'p-other', name: 'Other', you: false },
 ];
 
 test('which chats a profile shows: its own and those shared with it, a started chat following its source', () => {
@@ -69,7 +58,7 @@ test('which chats a profile shows: its own and those shared with it, a started c
   assert.deepEqual([...sharedWithOf({ chatId: 'f', parentChatId: null, sharedWith: ['h'] }, new Set())], [], 'a share made here wins over the row');
 });
 
-test('the profile item, the first-run question, the tiles and the household words', () => {
+test('the profile item, the first-run question, the tiles and the last-seen time', () => {
   assert.equal(itemText(view('h')), 'Home');
   assert.equal(itemText(view('o')), 'Other');
   assert.equal(itemText(view('gone')), 'Home', 'an unknown active profile reads as the home profile');
@@ -79,33 +68,11 @@ test('the profile item, the first-run question, the tiles and the household word
   assert.deepEqual([tileCounts({ chats: 1, running: 0 }), tileCounts({ chats: 12, running: 2 })], ['1 chat · 0 running', '12 chats · 2 running']);
   assert.deepEqual([stepTile(3, -1, 1), stepTile(3, -1, -1), stepTile(3, 2, 1), stepTile(3, 0, -1), stepTile(3, 1, 1), stepTile(0, 0, 1)], [0, 2, 0, 2, 2, -1]);
   assert.deepEqual([initialOf('sam'), initialOf('  éa'), initialOf('')], ['S', 'É', '?']);
-  assert.equal(offlineText(people[1]!.machines[0]!, NOW), 'online');
-  assert.match(offlineText(people[1]!.machines[1]!, NOW), /^offline since \d/);
-  assert.equal(offlineText({ ...people[1]!.machines[1]!, lastSeen: null }, NOW), 'offline');
   assert.deepEqual([lastSeenMs('2026-11-10T11:00:00.000Z'), lastSeenMs(5), lastSeenMs('never'), lastSeenMs(''), lastSeenMs(null)], [Date.parse('2026-11-10T11:00:00Z'), 5, null, null, null]);
-  assert.match(offlineText({ ...people[1]!.machines[1]!, lastSeen: '2026-11-10T11:00:00.000Z' }, NOW), /^offline since /);
-  assert.deepEqual(
-    orderPeerChats([
-      { chatId: '1', title: '', status: '', updatedAt: 1 },
-      { chatId: '2', title: '', status: '', updatedAt: 5 },
-      { chatId: '3', title: '', status: '', updatedAt: 2, needsAttention: true },
-    ]).map((c) => c.chatId),
-    ['3', '2', '1'],
-  );
-});
-
-test('the household rows: every other person for All profiles, only the linked person for a profile', () => {
-  const keys = (v: ProfilesView | null) => householdTargets(v, people).map((t) => t.title);
-  assert.deepEqual(keys(view(null)), ['Other · Laptop', 'Other · Tablet'], 'your own person is never listed, nor a person with no computer');
-  assert.deepEqual(keys(view('o')), ['Other · Laptop', 'Other · Tablet']);
-  assert.deepEqual(keys(view('h')), [], 'the home profile has no household rows');
-  assert.deepEqual(keys(view('gone')), []);
-  assert.deepEqual(keys(null), []);
-  assert.deepEqual(householdTargets(view(null), null), []);
 });
 
 test('Move to profile and Share with: the choices, the current one marked, nothing when there is only one profile', () => {
-  const snap = { loaded: true, view: view('h'), ids: null, shared: new Map([['c', new Set(['x'])]]), sharing: all, people: null, groups: new Map(), error: null };
+  const snap = { loaded: true, view: view('h'), ids: null, shared: new Map([['c', new Set(['x'])]]), people: null, error: null };
   const rows = [{ chatId: 'a', parentChatId: null }, { chatId: 'b', parentChatId: null, profileId: 'o', sharedWith: ['h'] }, { chatId: 'c', parentChatId: null, profileId: 'h', sharedWith: ['o'] }];
   const cur = (id: string) => profileChoices(snap, id, rows).filter((c) => c.current).map((c) => c.id);
   assert.deepEqual([cur('a'), cur('b'), cur('c')], [['h'], ['o'], ['h']], 'the row names the profile; a row that does not belongs to the one showing');
@@ -118,7 +85,7 @@ test('Move to profile and Share with: the choices, the current one marked, nothi
 });
 
 /** A scripted host: the ops the store calls, recording what it was asked. */
-function host(opts: { online?: boolean; listFails?: boolean } = {}) {
+function host(opts: { online?: boolean } = {}) {
   const calls: [string, unknown][] = [];
   let active: string | null = null;
   const api = (async (op: string, args: unknown) => {
@@ -131,16 +98,10 @@ function host(opts: { online?: boolean; listFails?: boolean } = {}) {
       case 'profiles_assign_chats':
       case 'profiles_share_chats':
         return view(active);
-      case 'household_get':
-        return all;
       case 'relay_connection_get':
         return { hasAddress: true, hasFallback: false, hasToken: true, state: opts.online === false ? 'offline' : 'online' };
       case 'peer_people':
         return { people };
-      case 'peer_list_chats': {
-        if (opts.listFails) throw new ApiError('unavailable', 'Other does not share their chat list.');
-        return { chats: [{ chatId: 'r1', title: 'Theirs', status: 'idle', updatedAt: 1 }] };
-      }
       default:
         throw new ApiError('unknown_op', op);
     }
@@ -158,7 +119,8 @@ test("the store reads the active profile's chats, follows chat records, shares a
   await settle();
   assert.equal(store.snapshot.view?.activeId, 'o');
   assert.deepEqual([...(store.snapshot.ids ?? [])], ['b', 's'], 'own and shared, as the host lists them');
-  assert.deepEqual(store.snapshot.sharing, all);
+  assert.equal(store.snapshot.people, null, 'the people on the hub are read only when asked');
+  assert.ok(!h.calls.some(([op]) => op.startsWith('peer_') || op.startsWith('household_')), 'nothing about the household is polled');
 
   // The record says whose a chat is: owned or shared joins the list, anything else leaves it.
   const fresh = (id: string, over: Record<string, unknown> = {}) => ({ id, parentChatId: null, sideSourceId: null, createdAt: Date.now(), archived: false, ...over });
@@ -189,34 +151,11 @@ test("the store reads the active profile's chats, follows chat records, shares a
   store.stop();
 });
 
-test('the household is read only while watched, drops a list that stopped being shared, and clears when the hub is not connected', async () => {
-  const bus = new EventBus();
-  let tick: (() => void) | undefined;
-  let cleared = 0;
-  const deps = (api: Api) => ({ api, bus, setInterval: (f: () => void) => ((tick = f), 1), clearInterval: () => void cleared++ });
-
-  const ok = host();
-  const store = new ProfilesStore(deps(ok.api));
-  assert.equal(ok.calls.length, 0, 'nothing is asked before something watches');
-  const stopA = store.watchHousehold();
-  const stopB = store.watchHousehold();
-  await settle();
-  const groups = [...store.snapshot.groups.values()];
-  assert.deepEqual(groups.map((g) => [g.key, g.online, g.chats.length, g.note]), [['p-other/m2', true, 1, null], ['p-other/m3', false, 0, null]], 'the offline computer is not asked');
-  assert.equal(ok.calls.filter(([op]) => op === 'peer_list_chats').length, 1);
-  stopA();
-  assert.equal(cleared, 0, 'one watcher is still there');
-  stopB();
-  stopB();
-  assert.equal(cleared, 1, 'the poll stops with the last watcher, once');
-  assert.ok(tick);
-
-  const gone = new ProfilesStore(deps(host({ listFails: true }).api));
-  await gone.refreshHousehold();
-  assert.deepEqual([...gone.snapshot.groups.values()].map((g) => [g.chats.length, g.note]), [[0, 'Other does not share their chat list.'], [0, null]]);
-
-  const off = new ProfilesStore(deps(host({ online: false }).api));
-  await off.refreshHousehold();
+test('the people on the hub are read when asked, and none while the hub is not connected', async () => {
+  const on = new ProfilesStore({ api: host().api, bus: new EventBus() });
+  await on.loadPeople();
+  assert.deepEqual(on.snapshot.people?.map((p) => p.name), ['Home', 'Other']);
+  const off = new ProfilesStore({ api: host({ online: false }).api, bus: new EventBus() });
+  await off.loadPeople();
   assert.equal(off.snapshot.people, null);
-  assert.equal(off.snapshot.groups.size, 0);
 });

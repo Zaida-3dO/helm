@@ -17,11 +17,13 @@ export interface QueueListProps {
   thread: ThreadState | null;
   ops: ChatOps;
   chatId: string;
+  /** A chat on another device: its queue shows, but Withdraw and Recover are done there. */
+  readOnly?: boolean;
 }
 
 const DEFAULT_CAPS = { withdraw: false, deliverNow: false, stopTool: false, compact: false };
 
-export function QueueList({ pending, thread, ops, chatId }: QueueListProps) {
+export function QueueList({ pending, thread, ops, chatId, readOnly = false }: QueueListProps) {
   const items = inFlightView(pending, {
     capabilities: thread?.capabilities ?? DEFAULT_CAPS,
   });
@@ -54,12 +56,12 @@ export function QueueList({ pending, thread, ops, chatId }: QueueListProps) {
             <span className="queue-label" data-testid={state === 'pending' ? 'queue-pending' : undefined}>
               {label}
             </span>
-            {actions.includes('withdraw') && (
+            {!readOnly && actions.includes('withdraw') && (
               <button type="button" className="pill-btn" data-testid="queue-withdraw" onMouseDown={(e) => e.preventDefault()} onClick={() => void act(s, 'withdraw')}>
                 Withdraw
               </button>
             )}
-            {actions.includes('recover') && (
+            {!readOnly && actions.includes('recover') && (
               <button type="button" className="pill-btn" data-testid="queue-recover" title="Move the text back to the composer" onMouseDown={(e) => e.preventDefault()} onClick={() => void act(s, 'recover')}>
                 Recover
               </button>

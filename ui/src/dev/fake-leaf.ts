@@ -30,6 +30,8 @@ export function leafFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   let set: ActionSet = { revision: 1, seedVersion: 1, buttons: FAKE_SEED_BUTTONS };
   const items = new Map<string, FakeSavedItem>();
   const notes = new Map<string, FakeSavedNote[]>();
+  /** Removed items, kept so Undo (`restore`) can bring them back, as the host does for a while. */
+  const removed = new Map<string, { item: FakeSavedItem; notes: FakeSavedNote[] }>();
   const now = Date.now();
   seedSaved(items, notes, now);
   const handler: FakeOpHandler = (op, args, ctx) => {
@@ -72,9 +74,20 @@ export function leafFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       };
     }
     if (op === 'saved_update') {
+      if (args.restore === true) {
+        const gone = removed.get(String(args.id));
+        if (!gone) throw new ApiError('not_found', 'No removed item with that id.');
+        removed.delete(gone.item.id);
+        gone.item.revision += 1;
+        gone.item.updatedAt = Date.now();
+        items.set(gone.item.id, gone.item);
+        notes.set(gone.item.id, gone.notes);
+        return gone.item;
+      }
       const it = items.get(String(args.id));
       if (!it) throw new ApiError('not_found', 'No saved item with that id.');
       if (args.remove === true) {
+        removed.set(it.id, { item: it, notes: notes.get(it.id) ?? [] });
         items.delete(it.id);
         notes.delete(it.id);
         return { id: it.id, removed: true };

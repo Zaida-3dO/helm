@@ -113,6 +113,9 @@ function cleanRefs(m: Refs | undefined): Refs | undefined {
       if (r.value) out[name] = { kind: 'literal', value: r.value, ...(r.prefix ? { prefix: r.prefix } : {}) };
       else if (r.secretId) out[name] = { kind: 'literal', secretId: r.secretId, ...(r.prefix ? { prefix: r.prefix } : {}) };
       // An empty new literal is left out rather than saved empty.
+    } else if (r.kind === 'chatPerson') {
+      // Filled by the host per chat, so it never has a value of its own.
+      out[name] = { kind: 'chatPerson' };
     } else if (r.value) {
       out[name] = { kind: r.kind, value: r.value, ...(r.prefix ? { prefix: r.prefix } : {}) };
     }

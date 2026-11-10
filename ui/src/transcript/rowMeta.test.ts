@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agoText, compactCount, contextSize, messageTimeLabel, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, tokenChip, turnTimes, skillsByReply, chatRefOpens } from './rowMeta.ts';
+import { agoText, compactCount, contextSize, messageTimeFull, messageTimeLabel, messageTimeShort, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, tokenChip, turnTimes, skillsByReply, chatRefOpens } from './rowMeta.ts';
 
 const usage = { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 40_000, cacheWriteTokens: 500, costUsd: 0 };
 
@@ -124,6 +124,16 @@ test('a message tooltip names the day and time and how long ago, and the age rea
     assert.ok(label.startsWith(start) && label.endsWith(end), label);
     assert.match(label, / at .*\d/, label);
   }
+  // The hover row's short time: the time alone today, "Yesterday" and the time, else the date too.
+  for (const [stamp, want] of [
+    [at(2026, 11, 10, 4, 12), /^\d{1,2}[:.]12/],
+    [at(2026, 11, 9, 23, 40), /^Yesterday \d{1,2}[:.]40/],
+    [at(2026, 11, 8, 14, 5), /(8.*Nov|Nov.*8).*\d[:.]05/],
+    [at(2025, 11, 8, 14, 5), /2025/],
+  ] as const) {
+    assert.match(messageTimeShort(stamp, now), want, messageTimeShort(stamp, now));
+  }
+  assert.match(messageTimeFull(at(2026, 11, 8, 14, 5)), /2026/);
 });
 
 test('the skills of a turn sit on its last reply, once each; chat chips open only for chats the list holds', async () => {

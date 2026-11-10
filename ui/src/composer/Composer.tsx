@@ -7,6 +7,7 @@ import { ApiError } from '../api/client.ts';
 import type { ChatRecord, SendAction, Submission, ThreadState } from '../api/types.ts';
 import { HOME_SEND_BEHAVIOR } from '../api/types.ts';
 import type { Flushers } from '../shell/quit.ts';
+import { playCue } from '../shell/sounds.ts';
 import { DraftSaver } from './drafts.ts';
 import { Editor, type EditorHandle } from './Editor.tsx';
 import { resolveKey, sendLabel, sendTooltip, stopTooltip, type KeyContext, type SendShortcut } from './keymap.ts';
@@ -403,6 +404,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
           attachments: [...images.map((a) => a.id), ...sentRefs.map((r) => r.id)],
         });
         if (scrollOnSendRef.current) announceSent(chat.id);
+        // The send cue, for the button and Enter alike (off unless the interface sounds are on).
+        playCue('send');
         // The host now owns these attachments (linked to the send); if the send ever comes
         // back unread, it returns them to the chat's unstaged set and `restage` picks them up.
         images.forEach((a) => URL.revokeObjectURL(a.url));

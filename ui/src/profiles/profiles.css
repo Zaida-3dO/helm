@@ -207,6 +207,14 @@
   border-color: var(--text);
 }
 
+/* Forced colours paint every swatch alike, so the chosen one gets a system-coloured ring. */
+@media (forced-colors: active) {
+  .pf-swatch[aria-pressed='true'] {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+}
+
 .pf-pane-add {
   display: flex;
   gap: 8px;

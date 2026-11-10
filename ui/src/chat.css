@@ -234,6 +234,15 @@ button.danger {
   cursor: default;
 }
 
+.row-time {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: default;
+  padding: 0 4px;
+}
+
 .row-token-chip {
   font-size: 10px;
   font-variant-numeric: tabular-nums;

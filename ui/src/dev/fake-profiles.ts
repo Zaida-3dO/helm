@@ -1,38 +1,23 @@
-// The dev fake host's profiles, sharing, household switches and peer calls (the profile item and
-// screen, Settings → Profiles and the household switches in a plain browser). Dev builds only.
+// The dev fake host's profiles, sharing between profiles and the people on the hub (the profile
+// item and screen, and Settings → Profiles in a plain browser). Dev builds only.
 //
 // The page URL picks the state:
 //   (nothing)            one home profile and one other person, no hub paired
 //   ?profiles=empty      no profile yet: the profile item asks "Who uses this Helm?"
 //   ?profiles=firstrun   a placeholder home profile ("Me") that still needs its name
-//   ?household=on        paired to a hub; the other person's laptop is online and shares chats
-//                        and transcripts (also the default for any other `household=` value)
-//   ?household=send      the same, and they allow messages into their chats
-//   ?household=offline   their laptop is off; its last list shows greyed
-//   ?household=hidden    their laptop is on but shares nothing
+//   ?household           paired to a hub (see fake-hub.ts): a profile can be linked to a person
 
 import { ApiError } from '../api/client.ts';
-import type { PeerChat, PeerMessage, PeerPerson, Profile, ProfilesView, Sharing } from '../api/profiles.ts';
+import type { HubPerson, Profile, ProfilesView } from '../api/profiles.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
-
-type HouseholdMode = 'none' | 'on' | 'send' | 'offline' | 'hidden';
 
 function param(name: string): string | null {
   return typeof location === 'undefined' ? null : new URLSearchParams(location.search).get(name);
 }
 
-function householdMode(): HouseholdMode {
-  const v = param('household');
-  if (v === null) return 'none';
-  return v === 'send' || v === 'offline' || v === 'hidden' ? v : 'on';
-}
-
-const MIN = 60_000;
 const COLOURS = ['#6d8cff', '#ff8a65', '#4db6ac', '#ba68c8', '#ffd54f', '#81c784', '#f06292', '#90a4ae'];
 
 export function profilesFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
-  const mode = householdMode();
-  const t0 = Date.now();
   const profiles: Profile[] =
     param('profiles') === 'empty'
       ? []
@@ -50,41 +35,12 @@ export function profilesFakeOps(): { prefixes: string[]; handler: FakeOpHandler 
   /** Chats the fake has seen, so a chat started later joins the profile showing (the host's insert rule). */
   const known = new Set<string>();
   let seeded = false;
-  const sharing: Sharing = { chats: false, transcripts: false, messages: false };
   let seq = 1;
 
-  const normalised = (): Sharing => {
-    const transcripts = sharing.chats && sharing.transcripts;
-    return { chats: sharing.chats, transcripts, messages: transcripts && sharing.messages };
-  };
-
-  const people = (): PeerPerson[] => {
-    const other: Sharing =
-      mode === 'hidden' ? { chats: false, transcripts: false, messages: false } : { chats: true, transcripts: true, messages: mode === 'send' };
-    return [
-      { id: 'p-self', name: 'Alex', you: true, machines: [{ id: 'm1', name: 'Desk PC', online: true, lastSeen: new Date().toISOString(), sharing: normalised() }] },
-      {
-        id: 'p-other',
-        name: 'Sam',
-        you: false,
-        machines: [{ id: 'm2', name: "Sam's laptop", online: mode !== 'offline', lastSeen: new Date(mode === 'offline' ? t0 - 130 * MIN : Date.now()).toISOString(), sharing: other }],
-      },
-    ];
-  };
-
-  const theirChats = (): PeerChat[] => [
-    { chatId: 'r1', title: 'Plan the shop banner', status: 'idle', projectName: 'Shop', profileName: 'Sam', updatedAt: Date.now() - 12 * MIN, needsAttention: true },
-    { chatId: 'r2', title: 'Order spreadsheet', status: 'running', projectName: 'Shop', profileName: 'Sam', updatedAt: Date.now() - 90 * MIN },
-    { chatId: 'r3', title: 'Birthday card ideas', status: 'idle', projectName: null, profileName: 'Sam', updatedAt: Date.now() - 26 * 60 * MIN },
+  const people = (): HubPerson[] => [
+    { id: 'p-self', name: 'Alex', you: true },
+    { id: 'p-other', name: 'Sam', you: false },
   ];
-
-  const transcript = (): PeerMessage[] =>
-    Array.from({ length: 12 }, (_, i) => ({
-      messageId: i + 1,
-      role: i % 2 === 0 ? 'user' : 'assistant',
-      text: i % 2 === 0 ? `Question ${i / 2 + 1} about the shop banner.` : `Here is an answer to question ${(i + 1) / 2}, with a couple of options to look at.`,
-      at: Date.now() - (12 - i) * MIN,
-    }));
 
   const view = (ctx: { call: (op: string, a?: Record<string, unknown>) => unknown }): ProfilesView => {
     adopt(ctx);
@@ -204,38 +160,11 @@ export function profilesFakeOps(): { prefixes: string[]; handler: FakeOpHandler 
         const owner = (id: string) => labels.get(id) ?? home;
         return { chatIds: all.filter((id) => owner(id) === p.id || shares.get(id)?.has(p.id)) };
       }
-      case 'household_get':
-        return normalised();
-      case 'household_set':
-        for (const k of ['chats', 'transcripts', 'messages'] as const) if (typeof a[k] === 'boolean') sharing[k] = a[k] as boolean;
-        ctx.emit({ kind: 'household_changed' });
-        return normalised();
       case 'peer_people':
         return { people: people() };
-      case 'peer_list_chats': {
-        const m = people().find((p) => p.id === a.personId)?.machines[0];
-        if (!m?.online) throw new ApiError('unavailable', 'That computer is not connected to the hub.');
-        if (!m.sharing.chats) throw new ApiError('unavailable', 'Sam does not share their chat list with the household.');
-        return { chats: theirChats() };
-      }
-      case 'peer_read_chat': {
-        const m = people().find((p) => p.id === a.personId)?.machines[0];
-        if (!m?.online) throw new ApiError('unavailable', 'That computer is not connected to the hub.');
-        if (!m.sharing.transcripts) throw new ApiError('unavailable', 'Sam does not let the household read their transcripts.');
-        const limit = Math.min(Number(a.limit ?? 20), 50);
-        const before = typeof a.beforeMessageId === 'number' ? a.beforeMessageId : Number.MAX_SAFE_INTEGER;
-        const older = transcript().filter((x) => x.messageId < before);
-        const page = older.slice(-limit);
-        return { chat: { title: 'Plan the shop banner' }, messages: page, ...(page.length === limit && older.length > limit ? { beforeMessageId: page[0]!.messageId } : {}) };
-      }
-      case 'peer_send': {
-        const m = people().find((p) => p.id === a.personId)?.machines[0];
-        if (!m?.sharing.messages) throw new ApiError('unavailable', 'Sam does not let the household message their chats.');
-        return { sent: true };
-      }
       default:
         throw new ApiError('unknown_op', op);
     }
   };
-  return { prefixes: ['profiles_', 'household_', 'peer_'], handler };
+  return { prefixes: ['profiles_', 'peer_'], handler };
 }

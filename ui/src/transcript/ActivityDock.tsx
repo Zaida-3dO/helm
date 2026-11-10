@@ -35,7 +35,8 @@ export interface DockProps {
   chat: ChatRecord;
   thread: ThreadState;
   turnStartedAt: number | null;
-  onStopTool: (toolCallId: string) => void;
+  /** Stops the running tool; unset on a chat that runs on another device, where stopping a tool is done there. */
+  onStopTool?: (toolCallId: string) => void;
   /** The chat's loaded rows, for the settled line after a turn ends. */
   rows?: readonly MessageRow[];
   /** When the newest run ended, so the settled line's time stops there. */
@@ -96,7 +97,7 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows, ru
     const done = chat.status === 'idle' && rows ? finishedTurn(rows, runEndedAt ?? null) : null;
     return done ? <FinishedLine turn={done} /> : null;
   }
-  const canStop = Boolean(latest && thread.sendBehavior.toolStop && thread.capabilities.stopTool && latest.stoppable);
+  const canStop = Boolean(onStopTool && latest && thread.sendBehavior.toolStop && thread.capabilities.stopTool && latest.stoppable);
   const state = dockState(chat.status, thread, { model: chat.model, localAhead: chat.localAhead });
   const loading = state.key === 'loading' ? thread.loading : undefined;
   const working = live || (thread.subagentsRunning ?? 0) > 0;
@@ -142,7 +143,7 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows, ru
                       data-testid="dock-tool-stop"
                       aria-label={`Stop ${latest.summary || toolLabel(latest.name)}`}
                       title="Stop this command; the turn carries on"
-                      onClick={() => onStopTool(latest.toolCallId)}
+                      onClick={() => onStopTool?.(latest.toolCallId)}
                     >
                       <IconStop size={9} filled />
                     </button>

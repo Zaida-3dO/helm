@@ -7,7 +7,7 @@ import { useEffect, useState } from 'react';
 import type { ProfileSummary } from '../../api/profiles.ts';
 import { PROFILE_COLOURS } from '../../profiles/model.ts';
 import { ProfileDisc } from '../../profiles/Disc.tsx';
-import { useHouseholdWatch, useProfiles } from '../../profiles/hooks.ts';
+import { useProfiles } from '../../profiles/hooks.ts';
 import { errorText, type ProfilesStore } from '../../profiles/store.ts';
 import { useShell } from '../../shell/context.ts';
 import { Button, ConfirmDialog, Picker, SettingRow, TextArea, TextInput, type ConfirmSpec } from '../../ui/index.ts';
@@ -155,7 +155,8 @@ function ProfileRow({ profile, homeName, store, people, onError, confirm }: {
 export function ProfilesPane() {
   const shell = useShell();
   const { store, snap } = useProfiles(shell.api, shell.bus);
-  useHouseholdWatch(store);
+  // The people a profile can be linked to, read once while the pane shows.
+  useEffect(() => void store.loadPeople(), [store]);
   const [newName, setNewName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

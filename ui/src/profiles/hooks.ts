@@ -14,8 +14,3 @@ export function useProfiles(api: Api, bus: EventBus): { store: ProfilesStore; sn
   const snap = useSyncExternalStore(store.subscribe, () => store.snapshot);
   return { store, snap };
 }
-
-/** Keep the household lists fresh while the caller is mounted. */
-export function useHouseholdWatch(store: ProfilesStore, on = true): void {
-  useEffect(() => (on ? store.watchHousehold() : undefined), [store, on]);
-}

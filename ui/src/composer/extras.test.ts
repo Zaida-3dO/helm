@@ -109,6 +109,9 @@ test('the / menu stays open with the chosen command while its arguments are type
   assert.equal(matchesHidden(helmSkill, ['helm:review']), true, 'the reported name too');
   assert.equal(matchesHidden(helmSkill, ['reviewer']), false, 'a different name stays');
   assert.equal(matchesHidden({ name: 'helm:deploy', description: '', scope: 'plugin' }, ['deploy']), false, 'only Helm’s own drop the prefix');
+  assert.equal(matchesHidden({ name: 'Personal:Notes', description: '', scope: 'personal' }, ['notes']), true, 'a personal skill drops its prefix');
+  assert.equal(matchesHidden({ name: 'project:lint', description: '', scope: 'project' }, ['lint']), true, 'a project skill drops its prefix');
+  assert.equal(matchesHidden({ name: 'project:lint', description: '', scope: 'personal' }, ['lint']), false, 'only the prefix of its own scope');
   assert.equal(matchesHidden({ name: 'deploy', description: '' }, ['deploy']), true);
   assert.equal(matchesHidden({ name: 'deploy', description: '' }, [' deploy ']), true, 'spaces round the stored name');
 });

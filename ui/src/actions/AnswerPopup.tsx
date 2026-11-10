@@ -8,6 +8,7 @@
 
 import { useEffect, useMemo, useState, useSyncExternalStore, type KeyboardEvent } from 'react';
 import { chatOps } from '../api/ops.ts';
+import { useRemoteChat } from '../devices/hooks.ts';
 import { useShell } from '../shell/context.ts';
 import type { ChatStore } from '../state/store.ts';
 import { InteractionCard } from '../transcript/InteractionCard.tsx';
@@ -33,12 +34,15 @@ function useWaiting(store: ChatStore, chatId: string) {
     : null;
   const replyText = reply?.text ?? null;
   const asked = useMemo(() => (replyText ? parseReplyQuestion(replyText) : null), [replyText]);
-  return { interactions, asked };
+  return { interactions, asked, chat: view.chat };
 }
 
 export function AnswerButton({ chatId }: Props) {
-  const { api, store } = useShell();
-  const { interactions, asked } = useWaiting(store, chatId);
+  const { api, bus, store } = useShell();
+  const { interactions, asked, chat } = useWaiting(store, chatId);
+  // A chat on another device answers only while that device is live, as the inline card does.
+  const remote = useRemoteChat(api, bus, chat ?? null);
+  const lock = remote && !remote.state.live ? remote.state.text : null;
   const [open, setOpen] = useState(false);
   const first = interactions[0];
   const waiting = !!first || !!asked;
@@ -60,6 +64,7 @@ export function AnswerButton({ chatId }: Props) {
             key={first.id}
             interaction={first}
             popup
+            lock={lock}
             onAnswer={(id, a) => void chatOps(api).answer(chatId, id, a).catch(() => undefined)}
           />
         </Dialog>

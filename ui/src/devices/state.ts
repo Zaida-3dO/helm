@@ -53,9 +53,12 @@ export function seenText(iso: string | null | undefined, now: number): string {
   return `${at.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${time}`;
 }
 
-/** The state of a chat's host device. A device that is not on the hub (any more) reads as offline. */
-export function remoteChatState(d: DeviceInfo | null | undefined, now: number): RemoteChatState {
-  const state = deviceState(d);
+/**
+ * The state of a chat's host device. A device that is not on the hub (any more) reads as offline;
+ * with no device list at all (`listMissing`) nothing is known, so it reads as reconnecting.
+ */
+export function remoteChatState(d: DeviceInfo | null | undefined, now: number, listMissing = false): RemoteChatState {
+  const state = !d && listMissing ? 'reconnecting' : deviceState(d);
   const name = d?.name ?? 'Another device';
   switch (state) {
     case 'live':
@@ -75,10 +78,14 @@ export function remoteChatState(d: DeviceInfo | null | undefined, now: number): 
   }
 }
 
-/** The device a chat runs on, when that is not this PC; null for a chat here (or before the list is read). */
-export function remoteHostOf(chat: Pick<ChatRecord, 'hostDeviceId'> | null | undefined, list: DevicesList | null): string | null {
+/**
+ * The device a chat runs on, when that is not this PC; null for a chat here. Without a list, this
+ * PC's own uid (`selfUid`) decides; with neither, the chat is taken to run here.
+ */
+export function remoteHostOf(chat: Pick<ChatRecord, 'hostDeviceId'> | null | undefined, list: DevicesList | null, selfUid: string | null = null): string | null {
   const host = chat?.hostDeviceId ?? '';
-  if (!list || host === '' || host === list.self) return null;
+  const self = list?.self ?? selfUid;
+  if (!self || host === '' || host === self) return null;
   return host;
 }
 

@@ -326,6 +326,21 @@ export function HubPane() {
           />
         </SettingRow>
       )}
+      {tg && (
+        <SettingRow
+          testId="hub-remote-answers"
+          title="Allow answering waiting prompts from the Remote page"
+          description="Permission prompts, questions and plan approvals that wait in a chat can be answered from the hub's Remote page. Off, the Remote page cannot answer them."
+        >
+          <Checkbox
+            checked={tg.remoteAnswers}
+            disabled={busy}
+            aria-label="Allow answering waiting prompts from the Remote page"
+            data-testid="hub-remote-answers-box"
+            onChange={(on) => void run(ops.saveTelegram({ ...tg, remoteAnswers: on }), showTelegram)}
+          />
+        </SettingRow>
+      )}
       <VoiceBlock />
       {error && (
         <div className="ui-field-error" role="alert" data-testid="hub-error">

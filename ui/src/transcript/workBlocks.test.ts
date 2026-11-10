@@ -35,6 +35,11 @@ test('a turn with no tool call and no thinking does not fold, however long it to
   ];
   // The empty assistant message in between is not drawn: an empty row would just be a gap.
   assert.deepEqual(shape(layout(rows, false)), [1, 3]);
+  // A voice chat's "[quiet]" answer is never drawn, and the reply before it stays the final one.
+  const quiet = [...turn(), row({ id: 6, role: 'assistant', text: '[quiet]', timestamp: 66_000 })];
+  const items = layout(quiet, false);
+  assert.deepEqual(shape(items), [1, 'fold[3]', 2, 4, 5]);
+  assert.equal(items.find((i) => i.kind === 'row' && i.row.id === 5 && i.final) !== undefined, true);
 });
 
 test('thinking alone is work: the turn folds, timed from its first output', () => {

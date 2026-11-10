@@ -1,13 +1,12 @@
 // The sidebar's Schedules view. It opens Settings on the Schedules pane, counts the reminders that
 // are waiting, and posts a notice when a reminder comes due while the app is open. The sidebar's
 // tile row mounts `useSchedulesEntry`, so the hook is always on screen and keeps the schedule
-// store reading; `SchedulesEntry` is the same thing as a footer-style button.
+// store reading.
 
 import { useEffect, useSyncExternalStore } from 'react';
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
 import { requestPane } from '../settings/registry.ts';
-import { IconClock } from '../ui/icons.tsx';
 import { toast } from '../ui/index.ts';
 import { reminderText } from './model.ts';
 import { scheduleStoreFor } from './store.ts';
@@ -43,29 +42,4 @@ export function useSchedulesEntry(
   }, [store]);
   const waiting = useSyncExternalStore(store.subscribe, () => store.reminders.length);
   return { waiting, open };
-}
-
-export function SchedulesEntry({
-  api,
-  bus,
-  openSettings,
-  onOpenChat,
-}: {
-  api: Api;
-  bus: EventBus;
-  openSettings: () => void;
-  onOpenChat: (chatId: string) => void;
-}) {
-  const { waiting, open } = useSchedulesEntry(api, bus, openSettings, onOpenChat);
-  return (
-    <button type="button" className="sb-foot" onClick={open} data-testid="nav-schedules">
-      <IconClock />
-      <span>Schedules</span>
-      {waiting > 0 && (
-        <span className="sb-nav-count" aria-label={`${waiting} reminders waiting`} data-testid="nav-schedules-count">
-          {waiting}
-        </span>
-      )}
-    </button>
-  );
 }

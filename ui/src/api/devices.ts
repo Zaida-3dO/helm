@@ -1,6 +1,9 @@
 // Chats that run on another device (host crates `devices` and `chats::remote`). The list ops are in
 // `../devices/api.ts`; this file holds what the chat view needs once such a chat is open: the
-// device states, the error codes a refused change carries, the events, and the two extra calls.
+// device states, the events, and the two extra calls. A change refused because of where the chat
+// runs carries the code `reconnecting`, `offline`, `not_allowed` or `unconfirmed` (the request went
+// out and no answer came back: it may or may not have happened, and nothing is sent again by
+// itself), and its `message` is the sentence to show.
 //
 // A chat of another device is read from this PC's copy, so the ordinary chat ops (`chat_get`,
 // `transcript_page`, `chat_send`, `chat_stop`, `interaction_answer`, `chat_set_model`,
@@ -23,17 +26,6 @@ export type DeviceState =
   | 'offline'
   /** This PC's own line to the hub is down: what shows is the copy here. */
   | 'reconnecting';
-
-/**
- * The `code` of an op refused because of where the chat runs. `message` is the sentence to show.
- * `unconfirmed` means the request went out and no answer came back: the change may or may not
- * have happened, and nothing is ever sent again by itself.
- */
-export type RemoteErrorCode = 'reconnecting' | 'offline' | 'not_allowed' | 'unconfirmed';
-
-export function isRemoteError(code: string): code is RemoteErrorCode {
-  return code === 'reconnecting' || code === 'offline' || code === 'not_allowed' || code === 'unconfirmed';
-}
 
 /** Events the copy raises beyond the chat events. Each is a signal: read again through `api`. */
 export const DEVICE_EVENTS = {

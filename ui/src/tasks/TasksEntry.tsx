@@ -1,13 +1,11 @@
 // The sidebar's Tasks view. It shows only once a board address and token are saved, and opens the
 // Tasks tab. The connection is looked at on mount, when a board sync reports in and when the
 // window comes back into focus, so saving the connection in Settings makes the entry appear.
-// `useTasksEntry` is what the sidebar's tile row and its More menu share; `TasksEntry` is the same
-// thing as a footer-style button.
+// `useTasksEntry` is what the sidebar's tile row and its More menu share.
 
 import { useEffect, useSyncExternalStore } from 'react';
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
-import { IconBoard } from '../ui/icons.tsx';
 import { toast } from '../ui/index.ts';
 import { openTasks, tasksStoreFor } from './open.ts';
 
@@ -31,15 +29,4 @@ export function useTasksEntry(api: Api, bus: EventBus): { ready: boolean; open: 
       if (!openTasks(api)) toast.show({ kind: 'error', text: 'The side panel has no room for another tab.' });
     },
   };
-}
-
-export function TasksEntry({ api, bus }: { api: Api; bus: EventBus }) {
-  const tasks = useTasksEntry(api, bus);
-  if (!tasks.ready) return null;
-  return (
-    <button type="button" className="sb-foot" data-testid="nav-tasks" onClick={tasks.open}>
-      <IconBoard />
-      <span>Tasks</span>
-    </button>
-  );
 }

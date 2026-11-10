@@ -301,7 +301,7 @@ describe("sub-agent limits", () => {
   });
 });
 
-test("a tool result's pictures go up with the end of the call: at most 6, base64 only, none over the size cap", () => {
+test("a tool result's pictures go up with the end of the call: at most 6, base64 only, none over the size cap, all under the total", () => {
   const s = make();
   const png = (n: number): Json => ({ type: "image", source: { type: "base64", media_type: "image/png", data: `AAAA${n}` } });
   const result = (content: Json[]): Json => ({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content }] }, parent_tool_use_id: null });
@@ -314,4 +314,10 @@ test("a tool result's pictures go up with the end of the call: at most 6, base64
   assert.equal((end.result as Json).text, "shot");
   s.t.handle({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t2", content: "plain" }] }, parent_tool_use_id: null });
   assert.equal("images" in ((s.of("tool_execution_end")[1].result as Json) ?? {}), false, "no pictures, no field");
+  // Together the pictures stay under the total: two of 20 MB fit, a third is left behind, a small one after it still goes.
+  const big = (c: string): Json => ({ type: "image", source: { type: "base64", media_type: "image/png", data: c.repeat(20 * 1024 * 1024) } });
+  s.t.handle({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t3", content: [big("A"), big("B"), big("C"), png(9)] }] }, parent_tool_use_id: null });
+  const many = (s.of("tool_execution_end")[2].result as Json).images as Json[];
+  assert.deepEqual(many.map((i) => (i.data as string).slice(0, 4)), ["AAAA", "BBBB", "AAAA"]);
+  assert.equal(many[2]!.data, "AAAA9");
 });

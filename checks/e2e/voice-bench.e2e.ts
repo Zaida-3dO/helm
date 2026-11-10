@@ -14,7 +14,7 @@ import { noneRemoved, percentile, repliesDocument, resultsTable, summarise, type
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("the voice benchmark", () => {
-  test("its prompts: twenty, synthetic, with every kind the plan lists, news last", () => {
+  test("its prompts: twenty, synthetic, with every kind the benchmark lists, news last", () => {
     assert.equal(PROMPTS.length, 20);
     assert.equal(new Set(PROMPTS.map((p) => p.id)).size, 20);
     const kinds = (k: string) => PROMPTS.filter((p) => p.kind === k);
@@ -24,7 +24,7 @@ describe("the voice benchmark", () => {
     // News needs the voice chat to exist, so every news prompt comes after every turn.
     const firstNews = PROMPTS.findIndex((p) => p.kind === "news");
     assert.ok(PROMPTS.slice(firstNews).every((p) => p.kind === "news"));
-    // What the plan asks for: a short question, a long result, a list, a link and an id, a status.
+    // What the benchmark asks for: a short question, a long result, a list, a link and an id, a status.
     const text = PROMPTS.map((p) => p.text).join("\n");
     assert.match(text, /https:\/\/example\.com\//);
     assert.match(text, /#1234/);

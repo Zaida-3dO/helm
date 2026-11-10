@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent } from 'react';
 import { LONG_TEXT_CHARS, renderShort, sharedOffloader } from './engine.ts';
 import { targetFromAttrs } from './links.ts';
@@ -38,13 +38,15 @@ function useRenderedHtml(text: string, options: RenderOptions): string {
   );
   const long = text.length > LONG_TEXT_CHARS;
   const off = sharedOffloader();
+  // This instance's renders are one sequence: a newer text replaces a render still waiting.
+  const seq = useId();
 
   const [workerHtml, setWorkerHtml] = useState<string | null>(null);
   useEffect(() => {
     if (!long) return;
     let cancelled = false;
     off
-      .render(text, stable)
+      .render(text, stable, seq)
       .then((html) => {
         if (!cancelled) setWorkerHtml(html);
       })
@@ -55,7 +57,7 @@ function useRenderedHtml(text: string, options: RenderOptions): string {
     return () => {
       cancelled = true;
     };
-  }, [long, text, stable, off]);
+  }, [long, text, stable, off, seq]);
 
   if (!long) return renderShort(text, stable);
   // While the worker is busy, keep showing the last result rather than flashing plain text.

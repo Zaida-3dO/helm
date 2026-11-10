@@ -113,6 +113,24 @@ export function messageTimeLabel(timestamp: number, now: number): string {
   return `${day} at ${time} · ${agoText(now - timestamp)}`;
 }
 
+/** A message's time in its hover row: "04:12" today, "Yesterday 23:40", else "8 Nov 14:05" (the year added for another year). */
+export function messageTimeShort(timestamp: number, now: number): string {
+  const d = new Date(timestamp);
+  const n = new Date(now);
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((startOfDay(n) - startOfDay(d)) / 86_400_000);
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (days <= 0) return time;
+  if (days === 1) return `Yesterday ${time}`;
+  const date = d.toLocaleDateString([], { day: 'numeric', month: 'short', year: d.getFullYear() === n.getFullYear() ? undefined : 'numeric' });
+  return `${date} ${time}`;
+}
+
+/** The full date and time, for the hover row time's tooltip. */
+export function messageTimeFull(timestamp: number): string {
+  return new Date(timestamp).toLocaleString([], { dateStyle: 'full', timeStyle: 'short' });
+}
+
 /** The chip text ("12k tokens") and its tooltip, which says what was left out. */
 export function tokenChip(u: Usage): { text: string; title: string } {
   const n = newTokens(u);

@@ -150,15 +150,28 @@ export const RESULT_IMAGES_MAX = 6;
 /** A picture over 25 MB once decoded (4/3 as many base64 characters) is left behind: the host would refuse it. */
 export const RESULT_IMAGE_BASE64_MAX = Math.ceil((25 * 1024 * 1024 * 4) / 3);
 
-/** The pictures inside a tool result (a screenshot a tool returned): type and base64 bytes, nothing else. */
+/**
+ * The most base64 one tool result's pictures carry together. The line to the host has a size
+ * limit of its own, well above this, so a result full of large pictures still fits on one line.
+ */
+export const RESULT_IMAGES_BASE64_TOTAL = 48 * 1024 * 1024;
+
+/**
+ * The pictures inside a tool result (a screenshot a tool returned): type and base64 bytes, nothing
+ * else. A picture that would take the result past the total is left behind; a smaller one after
+ * it can still go.
+ */
 export function resultImages(content: unknown): { mimeType: string; data: string }[] {
   if (!Array.isArray(content)) return [];
   const out: { mimeType: string; data: string }[] = [];
+  let total = 0;
   for (const raw of content) {
     const b = obj(raw);
     if (b.type !== "image") continue;
     const src = obj(b.source);
     if (src.type !== "base64" || typeof src.data !== "string" || src.data === "" || src.data.length > RESULT_IMAGE_BASE64_MAX) continue;
+    if (total + src.data.length > RESULT_IMAGES_BASE64_TOTAL) continue;
+    total += src.data.length;
     out.push({ mimeType: typeof src.media_type === "string" ? src.media_type : "image/png", data: src.data });
     if (out.length >= RESULT_IMAGES_MAX) break;
   }

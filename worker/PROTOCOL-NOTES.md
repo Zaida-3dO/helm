@@ -330,7 +330,7 @@ registers the PreToolUse hook in `initialize`.
 | `long_command` | `toolCallId, action:"denied"\|"reminded"\|"escaped", reason` |
 | `tool_execution_start` | adds `stoppable: false` |
 | `tool_execution_update` | `toolCallId, stoppable: true` once the call is a foreground task that `stop_task` can end |
-| `compaction_start` | — |
+| `compaction_start` | — (also sent when the CLI compacts on its own: the translator reads a `system` record `{subtype:"status", status:"compacting"}` as the start. That trigger has not yet been seen from a live CLI, so an automatic compaction may show no start; a real automatic compaction still ends with its `compact_boundary`, which sends `compaction_end` either way) |
 
 `deliver_now`, `withdraw`, `stop_tool` and `compact` are refused, like `prompt`, until `get_state`
 has been answered.

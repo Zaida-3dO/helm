@@ -22,6 +22,7 @@ export function CheckpointSlot() {
         icon: IconUndo,
         order: 15,
         appliesTo: canGoBackTo,
+        localOnly: true,
         run: (row, ctx) => setTarget({ chatId: ctx.chatId, row }),
       }),
     [],

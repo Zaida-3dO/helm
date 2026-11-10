@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import type { Api } from '../api/client.ts';
+import { DEVICE_EVENTS } from '../api/devices.ts';
 import type { EventBus } from '../api/events.ts';
 import type { ChatRecord } from '../api/types.ts';
 import { deviceOps, type DeviceInfo } from './api.ts';
@@ -29,11 +30,11 @@ export interface RemoteView {
 /** The device a chat runs on and how it reads right now; null for a chat that runs here. */
 export function useRemoteChat(api: Api, bus: EventBus, chat: Pick<ChatRecord, 'hostDeviceId'> | null): RemoteView | null {
   const { snap } = useDevices(api, bus);
-  const uid = remoteHostOf(chat, snap.list);
+  const uid = remoteHostOf(chat, snap.list, snap.selfUid);
   return useMemo(() => {
     if (!uid) return null;
     const device = snap.list?.devices.find((d) => d.uid === uid) ?? null;
-    const state = remoteChatState(device, Date.now());
+    const state = remoteChatState(device, Date.now(), !snap.list);
     return { uid, device, state, composer: composerFor(uid, state) };
   }, [uid, snap.list]);
 }
@@ -73,8 +74,12 @@ export function useRemoteList(
         if (host === undefined || host === deviceUid) later();
       }),
       bus.on('chat_removed', later),
-      bus.on('devices_changed', later),
-      bus.on('profiles_changed', later),
+      // Chats of that computer nobody has open here change without a `chat` event.
+      bus.on(DEVICE_EVENTS.chats, (e) => {
+        if ((e as { deviceUid?: string }).deviceUid === deviceUid) later();
+      }),
+      bus.on(DEVICE_EVENTS.devices, later),
+      bus.on(DEVICE_EVENTS.profiles, later),
     ];
     return () => {
       clearTimeout(timer);

@@ -24,6 +24,14 @@ export function isHelmNote(row: MessageRow): boolean {
   return row.role === 'user' && row.details?.origin === 'app' && /^\[(?:Attention|Wait finished)\]/.test(row.text);
 }
 
+/**
+ * An agent's answer of `[quiet]`: what a voice chat says when a note needs no word to the user. It
+ * is a signal for Helm, never drawn.
+ */
+export function isQuietReply(row: MessageRow): boolean {
+  return row.role === 'assistant' && row.text.replace(/\s+/g, '').toLowerCase() === '[quiet]';
+}
+
 export function fromTelegram(row: MessageRow): boolean {
   return row.details?.origin === 'telegram';
 }

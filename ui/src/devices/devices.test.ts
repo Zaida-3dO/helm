@@ -68,14 +68,18 @@ test("another device's chats become rows and projects: groups made for projects 
 });
 
 /** A scripted host for the store: the devices on the hub, the stored choice, and the choices saved. */
-function host(initial: { stored: string | null; devices: DevicesList | null; saveFails?: boolean }) {
+function host(initial: { stored: string | null; devices: DevicesList | null; saveFails?: boolean; listFails?: boolean }) {
   const state = { ...initial };
   const saved: unknown[] = [];
   const api = (async (op: string, args: unknown) => {
     switch (op) {
       case 'devices_list':
         if (!state.devices) throw new ApiError('unknown_op', op);
+        if (state.listFails) throw new ApiError('internal', 'The hub line dropped.');
         return state.devices;
+      case 'device_get':
+        if (!state.devices) throw new ApiError('unknown_op', op);
+        return { uid: state.devices.self, name: 'Desk' };
       case 'preference_get':
         return state.stored;
       case 'preference': {
@@ -119,6 +123,12 @@ test('the devices store follows the choice, falls back to this PC when that devi
   h.state.saveFails = true;
   await assert.rejects(store.select('me'), /Not saved/);
   assert.equal(store.snapshot.selected, 'tab');
+
+  // A failed read keeps the list it had, and this PC's uid was read once at the start.
+  h.state.listFails = true;
+  bus.dispatch({ kind: 'devices_changed' });
+  await settle();
+  assert.deepEqual([store.snapshot.list?.devices.length, store.snapshot.selfUid], [2, 'me']);
 
   // A host with no device list (an older one): nothing is selected and the sidebar shows this PC.
   const old = new DevicesStore({ api: host({ stored: null, devices: null }).api, bus: new EventBus() });
@@ -196,6 +206,10 @@ test('a chat on another device reads by the device state: the words, the tone, w
   assert.equal(composerFor('lap', remoteChatState(lap(), NOW)).blocked, null);
   const l = list(lap());
   assert.deepEqual([remoteHostOf({ hostDeviceId: 'lap' }, l), remoteHostOf({ hostDeviceId: 'me' }, l), remoteHostOf({ hostDeviceId: '' }, l), remoteHostOf({ hostDeviceId: 'lap' }, null), remoteHostOf(null, l)], ['lap', null, null, null, null]);
+  // With no list, this PC's own uid still tells a chat that runs elsewhere, and that chat reads as reconnecting.
+  assert.deepEqual([remoteHostOf({ hostDeviceId: 'lap' }, null, 'me'), remoteHostOf({ hostDeviceId: 'me' }, null, 'me'), remoteHostOf({ hostDeviceId: '' }, null, 'me')], ['lap', null, null]);
+  const missing = remoteChatState(null, NOW, true);
+  assert.deepEqual([missing.state, missing.live, missing.tone], ['reconnecting', false, 'amber']);
   assert.equal(unconfirmedText('Laptop'), "Laptop didn't confirm this message. It may or may not have arrived.");
   assert.equal(waitingForApproval('Laptop'), 'Waiting for approval on Laptop');
 });

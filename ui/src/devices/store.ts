@@ -24,9 +24,11 @@ export interface DevicesSnapshot {
   selected: string | null;
   /** The selected computer when it is not this one. */
   remote: DeviceInfo | null;
+  /** This computer's uid, read once, so a chat that runs elsewhere is known even while the list is missing. */
+  selfUid: string | null;
 }
 
-const EMPTY: DevicesSnapshot = { loaded: false, list: null, stored: null, selected: null, remote: null };
+const EMPTY: DevicesSnapshot = { loaded: false, list: null, stored: null, selected: null, remote: null, selfUid: null };
 
 export interface DevicesDeps {
   api: Api;
@@ -58,7 +60,7 @@ export class DevicesStore {
     return this.snap;
   }
 
-  private set(patch: { loaded?: boolean; list?: DevicesList | null; stored?: string | null }): void {
+  private set(patch: { loaded?: boolean; list?: DevicesList | null; stored?: string | null; selfUid?: string | null }): void {
     const next = { ...this.snap, ...patch };
     const selected = resolveSelected(next.stored, next.list);
     this.snap = { ...next, selected, remote: remoteDevice(next.list, selected) };
@@ -70,6 +72,10 @@ export class DevicesStore {
     if (this.started) return;
     this.started = true;
     void this.reload();
+    this.ops.self().then(
+      (d) => this.set({ selfUid: d.uid || null }),
+      () => undefined,
+    );
     this.offs = [this.deps.bus.on('devices_changed', () => void this.reload()), this.deps.bus.on('preferences', () => void this.reloadSelected())];
   }
 
@@ -79,14 +85,17 @@ export class DevicesStore {
     this.started = false;
   }
 
-  /** The list and the stored choice. A read that a newer one overtook is dropped. */
+  /**
+   * The list and the stored choice. A read that a newer one overtook is dropped; a read that fails
+   * keeps the list it had, so a chat on another device never passes for one that runs here.
+   */
   async reload(): Promise<void> {
     const mine = ++this.seq;
     const [list, stored] = await Promise.allSettled([this.ops.list(), this.ops.selected()]);
     if (mine !== this.seq) return;
     this.set({
       loaded: true,
-      list: list.status === 'fulfilled' ? list.value : null,
+      list: list.status === 'fulfilled' ? list.value : this.snap.list,
       stored: stored.status === 'fulfilled' ? stored.value : null,
     });
   }

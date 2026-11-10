@@ -402,10 +402,10 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         </div>
       ))}
       {!chat.sideSourceId && !remote && <FlagNote chatId={chatId} ops={ops} />}
-      <QueueList pending={view.pending} thread={thread} ops={ops} chatId={chatId} />
+      <QueueList pending={view.pending} thread={thread} ops={ops} chatId={chatId} readOnly={!!remote} />
       </div>
       {/* The activity line sits directly on the box, below the in-flight messages. */}
-      {thread && <ActivityDock chat={chat} thread={thread} turnStartedAt={turnStartedAt} onStopTool={stopTool} rows={view.hasNewer ? undefined : view.rows} runEndedAt={view.lastRunEndedAt} />}
+      {thread && <ActivityDock chat={chat} thread={thread} turnStartedAt={turnStartedAt} onStopTool={remote ? undefined : stopTool} rows={view.hasNewer ? undefined : view.rows} runEndedAt={view.lastRunEndedAt} />}
       <Composer
         recall={recallPrompts(view.rows)}
         autocomplete={autocompleteOn}

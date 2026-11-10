@@ -1,6 +1,6 @@
-// Profiles, the household switches and the peer calls (host crates `profiles` and `relay`).
-// Typed by hand: these ops have no generated bindings. Every profiles change answers with the
-// whole view and emits `profiles_changed`.
+// Profiles (host crate `profiles`) and the people on the hub a profile can be linked to (host
+// crate `relay`). Typed by hand: these ops have no generated bindings. Every profiles change
+// answers with the whole view and emits `profiles_changed`.
 
 import type { Api } from './client.ts';
 
@@ -33,64 +33,12 @@ export interface ProfilesView {
   activeId: string | null;
 }
 
-/** What this install lets the household see; each switch counts only while the one before is on. */
-export interface Sharing {
-  chats: boolean;
-  transcripts: boolean;
-  messages: boolean;
-}
-
-export interface PeerMachine {
-  id: string;
-  name: string;
-  online: boolean;
-  /** When it last connected: an ISO time from the hub (epoch milliseconds also read), or null if never. */
-  lastSeen: string | number | null;
-  sharing: Sharing;
-}
-
-export interface PeerPerson {
+/** A person on the hub, as a profile's "Hub person" choice lists them. */
+export interface HubPerson {
   id: string;
   name: string;
   /** This install's own person. */
   you: boolean;
-  machines: PeerMachine[];
-}
-
-export interface PeerChat {
-  chatId: string;
-  title: string;
-  status: string;
-  projectName?: string | null;
-  profileName?: string | null;
-  updatedAt: number;
-  needsAttention?: boolean;
-}
-
-export interface PeerChatList {
-  chats: PeerChat[];
-  nextOffset?: number | null;
-}
-
-export interface PeerMessage {
-  messageId: number;
-  role: string;
-  text: string;
-  at: number;
-  tool?: string;
-  truncated?: boolean;
-}
-
-export interface PeerTranscript {
-  chat?: { title?: string; [k: string]: unknown };
-  messages: PeerMessage[];
-  /** Pass as `beforeMessageId` for the page before this one; absent on the first page. */
-  beforeMessageId?: number;
-}
-
-export interface PeerTarget {
-  personId: string;
-  machineId?: string;
 }
 
 export function profilesOps(api: Api) {
@@ -106,16 +54,7 @@ export function profilesOps(api: Api) {
     share: (chatIds: string[], profileId: string, shared: boolean) => api<ProfilesView>('profiles_share_chats', { chatIds, profileId, shared }),
     /** The chats a profile shows: its own and those shared with it. */
     chatIds: (profileId: string) => api<{ chatIds: string[] }>('profiles_chat_ids', { profileId }).then((r) => r.chatIds),
-  };
-}
-
-export function householdOps(api: Api) {
-  return {
-    get: () => api<Sharing>('household_get', {}),
-    set: (s: Partial<Sharing>) => api<Sharing>('household_set', s),
-    people: () => api<{ people: PeerPerson[] }>('peer_people', {}).then((r) => r.people ?? []),
-    listChats: (t: PeerTarget & { limit?: number; offset?: number }) => api<PeerChatList>('peer_list_chats', t),
-    readChat: (t: PeerTarget & { chatId: string; beforeMessageId?: number; limit?: number }) => api<PeerTranscript>('peer_read_chat', t),
-    send: (t: PeerTarget & { chatId: string; message: string }) => api<unknown>('peer_send', t),
+    /** Everyone on the hub, for linking a profile to a person. */
+    hubPeople: () => api<{ people: HubPerson[] }>('peer_people', {}).then((r) => r.people ?? []),
   };
 }

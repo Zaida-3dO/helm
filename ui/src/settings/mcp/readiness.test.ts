@@ -56,6 +56,8 @@ test('toSaveable keeps only the chosen transport and drops blank entries', () =>
   assert.equal(s.transport.headers, undefined, 'an empty new token is left out');
   d.transport.headers = { Authorization: { kind: 'literal', value: 'tok', prefix: 'Bearer ' }, ' ': { kind: 'environment', value: 'X' } };
   assert.deepEqual(toSaveable(d).transport.headers, { Authorization: { kind: 'literal', value: 'tok', prefix: 'Bearer ' } });
+  d.transport.headers['X-Helm-Person'] = { kind: 'chatPerson' };
+  assert.deepEqual(toSaveable(d).transport.headers?.['X-Helm-Person'], { kind: 'chatPerson' }, "the chat's-person header survives a save");
   const stdio = toSaveable({ ...d, transport: { ...d.transport, type: 'stdio', command: 'node.exe ' } });
   assert.deepEqual(stdio.transport, { type: 'stdio', command: 'node.exe' });
   assert.equal(stdio.allowPrivateHttp, false);

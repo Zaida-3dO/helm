@@ -15,7 +15,7 @@ export function defaultSettings(enabled: boolean): WorkflowSettings {
     stages: {
       plan: { use: 'required', agent: 'planner' },
       planReview: { use: 'required', agent: 'plan-reviewer', maxRounds: 2 },
-      build: { agent: 'coder', startAgents: ['coder', 'general-purpose'], buildExempt: [] },
+      build: { agent: 'coder', startAgents: ['coder', 'general-purpose'], buildExempt: ['explore'] },
       review: { use: 'required', agent: 'reviewer', maxRounds: 2 },
       cleanup: { use: 'required', agent: 'pr-cleanup' },
       smoketest: { use: 'auto', agent: 'smoketester', maxRounds: 2 },

@@ -27,6 +27,11 @@ test('message actions and footers apply by their predicates; a throwing slot is 
   try {
     assert.deepEqual(messageActionsFor(row({ role: 'assistant' })).map((a) => a.id), ['save']);
     assert.deepEqual(messageActionsFor(row({ role: 'user' })), []);
+    // An action that can only run here is left out on a chat that runs on another device.
+    const offL = registerMessageAction({ id: 'fork', label: 'Fork', localOnly: true, appliesTo: (r) => r.role === 'assistant', run: () => undefined });
+    assert.deepEqual(messageActionsFor(row({ role: 'assistant' })).map((a) => a.id), ['save', 'fork']);
+    assert.deepEqual(messageActionsFor(row({ role: 'assistant' }), { remote: true }).map((a) => a.id), ['save']);
+    offL();
     assert.equal(rowFootersFor(row({ role: 'assistant' }), sctx).length, 1);
     assert.equal(rowFootersFor(row({ role: 'assistant' }), { ...sctx, isLatestAssistant: false }).length, 0);
   } finally {

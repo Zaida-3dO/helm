@@ -3,7 +3,6 @@
 
 export { ProfileItem, PROFILES_PANE } from './ProfileItem.tsx';
 export { ProfileScreen } from './ProfileScreen.tsx';
-export { SharingSwitches } from './SharingSwitches.tsx';
 export { useProfiles } from './hooks.ts';
 export { profileChoices, shareChoices, moveChatToProfile, shareChatWith, type ChatProfileChoice, type ChatShareChoice } from './menu.ts';
 export { rowsForProfile, sharedFrom } from './model.ts';

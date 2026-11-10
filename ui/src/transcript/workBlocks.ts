@@ -16,7 +16,7 @@
 import type { MessageRow } from '../api/types.ts';
 import { isCardRow } from './cards.ts';
 import { buildRecap, type Recap } from './recap.ts';
-import { isHelmNote } from './origin.ts';
+import { isHelmNote, isQuietReply } from './origin.ts';
 import { isAgentRow } from './subagents/model.ts';
 import { toolStatus } from './toolKinds.ts';
 import { ESTIMATE, estimateHeight, type EstimateInput } from './virtual.ts';
@@ -80,7 +80,7 @@ function isBlank(r: MessageRow): boolean {
  * tall gap; rows that speak for themselves (an error, a retry, a stop) still show.
  */
 function undrawn(r: MessageRow): boolean {
-  return isBlank(r) && !alwaysShown(r);
+  return (isBlank(r) && !alwaysShown(r)) || isQuietReply(r);
 }
 
 function alwaysShown(r: MessageRow): boolean {
@@ -149,7 +149,7 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
     // The final reply: the last assistant row with text.
     let reply = -1;
     for (let j = work.length - 1; j >= 0; j--) {
-      if (work[j]!.role === 'assistant' && work[j]!.text.trim()) {
+      if (work[j]!.role === 'assistant' && work[j]!.text.trim() && !isQuietReply(work[j]!)) {
         reply = j;
         break;
       }

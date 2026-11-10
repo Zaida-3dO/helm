@@ -45,7 +45,14 @@ export interface RowContext {
 }
 
 function slotContext(row: MessageRow, ctx: RowContext, hasRecap = false): SlotContext {
-  return { chatId: ctx.chatId, isLatestAssistant: row.id === ctx.latestAssistantId, running: ctx.running, interactionOpen: ctx.interactionOpen, ...(hasRecap ? { hasRecap } : {}) };
+  return {
+    chatId: ctx.chatId,
+    isLatestAssistant: row.id === ctx.latestAssistantId,
+    running: ctx.running,
+    interactionOpen: ctx.interactionOpen,
+    ...(hasRecap ? { hasRecap } : {}),
+    ...(ctx.remoteDevice ? { remote: true } : {}),
+  };
 }
 
 /** Registered footers for one row (the reply's change card). */

@@ -379,11 +379,6 @@ export const ICON_LIBRARY: LibraryEntry[] = [
   },
 ];
 
-/** The library names, in the order the picker shows them. */
-export function libraryNames(): string[] {
-  return ICON_LIBRARY.map((e) => e.name);
-}
-
 export function isLibraryName(n: string | null | undefined): boolean {
   return !!n && ICON_LIBRARY.some((e) => e.name === n);
 }

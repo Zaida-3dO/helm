@@ -24,6 +24,8 @@ export interface SlotContext {
   interactionOpen: boolean;
   /** True for a reply that has a recap card under it, which carries the turn's recap sections instead of the row footers. */
   hasRecap?: boolean;
+  /** True for a chat that runs on another device. */
+  remote?: boolean;
 }
 
 export interface MessageAction {
@@ -35,6 +37,8 @@ export interface MessageAction {
   /** Place in the row after Copy, lowest first; default 100. Fork 10, Save 20, Remind 30. */
   order?: number;
   appliesTo: (row: MessageRow) => boolean;
+  /** Left out on a chat that runs on another device: what it does can only be done there. */
+  localOnly?: boolean;
   run: (row: MessageRow, ctx: SlotContext) => void;
 }
 
@@ -97,8 +101,8 @@ export function registerSelectionAction(a: SelectionAction): () => void {
   return upsert(selectionActions, a);
 }
 
-export function messageActionsFor(row: MessageRow): MessageAction[] {
-  return messageActions.filter((a) => safe(() => a.appliesTo(row)));
+export function messageActionsFor(row: MessageRow, ctx?: Pick<SlotContext, 'remote'>): MessageAction[] {
+  return messageActions.filter((a) => !(a.localOnly && ctx?.remote) && safe(() => a.appliesTo(row)));
 }
 
 export function rowFootersFor(row: MessageRow, ctx: SlotContext): RowFooter[] {

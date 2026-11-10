@@ -13,11 +13,15 @@ export interface Skill {
 
 export const SCOPE_LABEL: Record<string, string> = { personal: 'Personal skill', project: 'Project skill', plugin: 'Plugin skill', builtin: 'Command', helm: 'Helm command', 'helm-skill': 'Helm' };
 
-/** Whether the user hid this skill. Names match case-insensitively; one of Helm's own plugin
- *  skills also matches its bare folder name, the CLI may report it with a prefix. */
+/** The prefix the CLI may put on a skill's name for each scope that has one. */
+const SCOPE_PREFIX: Record<string, string> = { 'helm-skill': 'helm:', personal: 'personal:', project: 'project:' };
+
+/** Whether the user hid this skill. Names match case-insensitively; a Helm, personal or project
+ *  skill also matches its bare folder name, the CLI may report it with a prefix. */
 export function matchesHidden(s: Skill, hidden: readonly string[]): boolean {
   const n = s.name.toLowerCase();
-  const bare = s.scope === 'helm-skill' && n.startsWith('helm:') ? n.slice('helm:'.length) : n;
+  const prefix = s.scope ? SCOPE_PREFIX[s.scope] : undefined;
+  const bare = prefix && n.startsWith(prefix) ? n.slice(prefix.length) : n;
   return hidden.some((h) => {
     const x = h.trim().toLowerCase();
     return x === n || (bare !== n && x === bare);

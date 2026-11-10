@@ -18,7 +18,14 @@ function errorText(e: unknown): string {
   return String((e as Error)?.message ?? e);
 }
 
-function RefRows({ refs, onChange, kindLabel }: { refs: Refs; onChange: (r: Refs) => void; kindLabel: string }) {
+function RefRows({ refs, onChange, kindLabel, headers = false }: { refs: Refs; onChange: (r: Refs) => void; kindLabel: string; headers?: boolean }) {
+  const kinds: { value: RefKind; label: string }[] = [
+    { value: 'literal', label: 'Secret' },
+    { value: 'environment', label: 'Env var' },
+    { value: 'file', label: 'File' },
+  ];
+  // Only a header can carry the chat's person: Helm fills it per chat when it connects.
+  if (headers) kinds.push({ value: 'chatPerson', label: "Chat's person" });
   const rows = Object.entries(refs);
   const set = (oldKey: string, key: string, r: ValueRef) => {
     const next: Refs = {};
@@ -39,24 +46,28 @@ function RefRows({ refs, onChange, kindLabel }: { refs: Refs; onChange: (r: Refs
             <Segmented<RefKind>
               label="Value kind"
               value={r.kind}
-              options={[
-                { value: 'literal', label: 'Secret' },
-                { value: 'environment', label: 'Env var' },
-                { value: 'file', label: 'File' },
-              ]}
-              onChange={(kind) => set(k, k, { kind, value: '', ...(r.prefix ? { prefix: r.prefix } : {}) })}
-            />
-            <TextInput
-              aria-label={`${kindLabel} value`}
-              type={r.kind === 'literal' ? 'password' : 'text'}
-              autoComplete="off"
-              spellCheck={false}
-              value={r.value ?? ''}
-              placeholder={
-                r.kind === 'literal' ? (r.secretId ? 'Saved; type to replace' : 'Not set') : r.kind === 'environment' ? 'VARIABLE_NAME' : 'C:\\path\\to\\token.txt'
+              options={kinds}
+              onChange={(kind) =>
+                set(k, k, kind === 'chatPerson' ? { kind } : { kind, value: '', ...(r.prefix ? { prefix: r.prefix } : {}) })
               }
-              onChange={(e) => set(k, k, { ...r, value: e.target.value, ...(r.kind === 'literal' && e.target.value ? { secretId: undefined } : {}) })}
             />
+            {r.kind === 'chatPerson' ? (
+              <span className="mcp-help">
+                Sent as the chat's person
+              </span>
+            ) : (
+              <TextInput
+                aria-label={`${kindLabel} value`}
+                type={r.kind === 'literal' ? 'password' : 'text'}
+                autoComplete="off"
+                spellCheck={false}
+                value={r.value ?? ''}
+                placeholder={
+                  r.kind === 'literal' ? (r.secretId ? 'Saved; type to replace' : 'Not set') : r.kind === 'environment' ? 'VARIABLE_NAME' : 'C:\\path\\to\\token.txt'
+                }
+                onChange={(e) => set(k, k, { ...r, value: e.target.value, ...(r.kind === 'literal' && e.target.value ? { secretId: undefined } : {}) })}
+              />
+            )}
             <Button variant="text" danger onClick={() => drop(k)}>
               Remove
             </Button>
@@ -155,7 +166,7 @@ function Editor({
           </label>
           <div className="mcp-field mcp-field-top">
             <span>Headers</span>
-            <RefRows refs={t.headers ?? {}} kindLabel="Header" onChange={(headers) => setT({ headers })} />
+            <RefRows refs={t.headers ?? {}} kindLabel="Header" headers onChange={(headers) => setT({ headers })} />
           </div>
           <div className="mcp-field">
             <span />
