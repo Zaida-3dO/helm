@@ -23,7 +23,8 @@ pub const USAGE: &str = "  helm-hub person add <name> | person list
   helm-hub pair --person P --machine M [--scopes S]
                                        print a one-time pairing code (8 characters, 15 minutes)
 
-  Scopes: memory:ro, memory:rw, relay, app, peer (comma separated).
+  Scopes: memory:ro, memory:rw, relay, app, peer, telegram, voice, remote (comma separated;
+  telegram, voice and remote stand alone).
   Default for a machine: memory:rw,relay,app,peer. A person that does not exist yet is made.";
 
 /// Whether `first` begins an admin command.

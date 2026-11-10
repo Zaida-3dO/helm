@@ -34,8 +34,8 @@ ENVIRONMENT:
   HUB_BIND          listen address for serve (default 0.0.0.0:8000)
   HUB_TOKENS        client:token[:scope],... Optional now that machines are paired with
                     `helm-hub pair`; the entries here are clients of HUB_LEGACY_PERSON.
-                    scope: ro|rw|relay|app|peer|telegram|voice, several joined with +
-                    (rw+app); telegram and voice stand alone
+                    scope: ro|rw|relay|app|peer|telegram|voice|remote, several joined with +
+                    (rw+app); telegram, voice and remote stand alone
   HUB_LEGACY_PERSON the person who owns the HUB_TOKENS clients, the memories stored before
                     people existed, and Telegram users with no person (default owner)
   HUB_ALLOW_MUTATE  1 to offer memory_update and memory_delete

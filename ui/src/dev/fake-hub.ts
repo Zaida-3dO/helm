@@ -15,7 +15,7 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   const set = { lanUrl: pairedAtStart(), fallbackUrl: false, token: pairedAtStart() };
   let who: { personName: string; machineName: string } | null = pairedAtStart() ? { personName: 'Alex', machineName: 'Desk PC' } : null;
   let since = 0;
-  const tg: TelegramSettings = { chat: null, maxAgeHours: 24, maxTokens: 400_000, awayAlerts: true, approvals: false, model: null, effort: null };
+  const tg: TelegramSettings = { chat: null, maxAgeHours: 24, maxTokens: 400_000, awayAlerts: true, approvals: false, remoteAnswers: false, model: null, effort: null };
   const voice: VoiceSettings = { chat: null, model: 'claude-sonnet-5-5', effort: 'low', idleMinutes: 240, maxAgeHours: 24, maxTokens: 300_000, watch: 'flags' };
   const view = (): HubConnection => ({
     hasAddress: set.lanUrl,
@@ -61,6 +61,7 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         tg.maxTokens = Number(a.maxTokens);
         tg.awayAlerts = a.awayAlerts !== false;
         tg.approvals = a.approvals === true;
+        tg.remoteAnswers = a.remoteAnswers === true;
         // Blank or missing counts as unset, as the host reads it.
         tg.model = typeof a.model === 'string' && a.model.trim() ? a.model.trim() : null;
         tg.effort = typeof a.effort === 'string' && a.effort.trim() ? a.effort.trim() : null;

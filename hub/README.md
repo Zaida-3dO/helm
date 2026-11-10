@@ -13,6 +13,8 @@ the people of one household, each with one or more machines. It serves:
   and the live status and the answers come back to that person only.
 - **The voice line**: a phone talks to its owner's Helm (spoken or typed turns up, spoken-style
   answers back), through `/voice/*` and a live WebSocket (below).
+- **The Remote page**: a small web page at `/remote` where a phone or another computer can see the
+  person's chats, send a message, stop a turn and answer what is waiting (below).
 
 It is its own Cargo workspace and builds from `hub/` alone, so the container build needs nothing
 else from the repo.
@@ -53,10 +55,12 @@ is read on every request, so a revoke takes effect at once.
 | `peer` | the household questions a machine's line may ask (below) |
 | `telegram` | `POST /telegram/update` only: a forwarder for a shared bot (below). It stands alone |
 | `voice` | `/voice/*` only: a phone's voice line (below). It stands alone |
+| `remote` | `POST /remote/api/call` only: the Remote page's calls (below). It stands alone |
 
 A paired machine gets `memory:rw,relay,app,peer`. `/mcp` needs a memory or `app` scope, `/relay`
 needs `relay`, and a token with neither cannot reach what it has no scope for. A `voice` token
-reaches nothing but `/voice/*`: `/mcp`, `/relay` and `/telegram/update` answer it with 403. A new kind of
+reaches nothing but `/voice/*`, and a `remote` token nothing but the Remote page's call: `/mcp`,
+`/relay`, `/telegram/update` and the other scopes' routes answer them with 403. A new kind of
 caller is a new scope in `src/auth.rs` that its route checks with `Client::has`.
 
 Tokens are held only as SHA-256 digests and compared in constant time. `GET /health` is the one
@@ -99,8 +103,9 @@ and 100.64.0.0/10 addresses).
 
 `HUB_TOKENS=client:token[:scope],...` still works and is optional. Each entry becomes a client of
 the person named by `HUB_LEGACY_PERSON` (default `owner`), with its entry name as the machine
-name. The scope is `rw` (the default), `ro`, `relay`, `app`, `peer`, `telegram` or `voice`, joined
-with `+` for several (`rw+app`, `rw+relay+app+peer`; `telegram` and `voice` stand alone). The environment is the only place these are added or
+name. The scope is `rw` (the default), `ro`, `relay`, `app`, `peer`, `telegram`, `voice` or
+`remote`, joined with `+` for several (`rw+app`, `rw+relay+app+peer`; `telegram`, `voice` and
+`remote` stand alone). The environment is the only place these are added or
 removed: the hub mirrors it into the registry at start-up, revokes entries no longer listed, and
 `client revoke` refuses them. Tokens are at least 24 characters and unique. A list that does not
 parse stops the hub from starting. With no clients at all the hub starts and says so; nobody can
@@ -215,6 +220,17 @@ about 67 MB as base64) and ignores the `files` list, so files would be lost or s
   JSON error gets a plain reply ("Transcription is unavailable right now: ..."), and the recording
   still goes, marked as not transcribed; a video note it cannot transcribe just goes as a file.
   Without a server the recordings go untranscribed, and a voice note gets a reply saying so.
+- **Long messages arrive whole.** Telegram cuts a long message at 4,096 UTF-16 units and delivers
+  the parts in a burst. A text message of 3,500 units or more (counted in UTF-16 units, as
+  Telegram counts, so emoji count twice) is therefore held for 2 s. A text message that follows it,
+  while it is still the last in that person's queue, joins it with nothing put between the parts;
+  a part that is itself that long keeps the window open, and a shorter part ends it and the joined
+  message goes at once. An ordinary message is never held, and a command or a file is never held
+  or joined. A burst gathers at most 300,000 units (the rest starts a message of its own), and a
+  message of more than 100,000 units goes to Helm as an attached `message.txt` with a one-line
+  text saying so, not as text. Each person's bot has its own queue, so one person's burst never
+  joins another's. A message sent within the window after an unsplit long one joins it too: that
+  is the cost of the wait.
 - **Quoted replies.** A message that replies to another, or quotes part of one, reaches Helm with
   `Replying to: "<quoted text>"` on its own first line: the quoted part if there is one, else the
   replied-to message's text or caption, on one line and cut to 300 characters. Files and recordings too.
@@ -330,6 +346,50 @@ accepts frames up to 2 MiB so one picture of 1 MiB fits.
 **Upgrading:** install the matching Helm on the PC first, then redeploy the hub; an older Helm
 ignores the voice frames and never acknowledges a turn. Put the `voice` token in the phone's
 settings, never in the repo or the chat.
+
+## The Remote page
+
+A small page for a phone or another computer, served by the hub at `/remote` (`/remote/app.js` and
+`/remote/app.css` are its other two files, all built into the hub). It shows the person's chats and
+what is waiting for them, lets them read a transcript, send a message, stop a turn and answer what
+waits, all against the person's own Helm over the relay line. The hub keeps nothing about chats.
+
+**Turning it on.** Nothing is open until a person has a `remote` token: make one with
+`helm-hub client add --person Sam --machine phone --scopes remote` (or a `HUB_TOKENS` entry
+`phone:<token>:remote`) and paste it into the page, which keeps it for that browser tab only. The
+token stands alone: it reaches nothing but the page's call. **Answering is a second switch, off
+until the person turns it on in Helm's Settings → Hub** ("Allow answering waiting prompts from the
+Remote page"); with it off the page shows what waits and says so. A permission, a plan or a
+question can then be answered with a tap; one whose details are too long to read on a phone offers
+only the options that allow nothing; secret inputs, folder-trust prompts and consent requests are
+never offered, and an answer from the page is never consent. A message typed on the page reaches the
+chat framed as the user's own words from the Remote page, and still as no approval.
+
+**Reach.** The page needs no address check: it is served wherever the hub is (the home network and
+Tailscale), and in production behind the same HTTPS reverse proxy as the rest. Nothing in it relies
+on the client's address; the token is the only credential, so keep the hub off the open internet
+unless the proxy asks for a login.
+
+| Route | |
+|---|---|
+| `GET /remote`, `/remote/app.js`, `/remote/app.css` | The page. Open (a browser cannot send a header when it opens a page) and secret-free. Every response carries `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` and `X-Frame-Options: DENY`; no CORS; no inline script; chat text is shown as text only |
+| `POST /remote/api/call` | `{"name": "app_list_chats", "args": {...}, "machine": "Desk"?}`. A `remote` token only (401 no or bad token, 403 another scope or a tool the page may not call, 400 a body that is not a call, 413 over 64 KiB, 429 over the allowance with `Retry-After`). Always `200 {"ok", "result"\|"error", "offline"?, "unknown"?, "line", "machines"}` for what Helm says: `line` is whether the chosen line is up, `machines` the person's connected computers |
+
+Only the six Helm tools of the `app` scope and the page's own two (`app_list_waiting`,
+`app_answer_waiting`) can be called. The two are not offered over MCP, so an agent cannot answer a
+prompt through the hub. A call goes down one of the token's **own person's** lines (`machine`
+names one, the page shows a choice when more than one is connected, the default is the most
+recently active), never another person's. The hub stamps each call `"scope": "remote"` on the
+line, and Helm refuses the page's two tools (and the household too) without it, then checks the
+call again on the PC. Line down: "Helm offline, nothing sent or changed." No answer in 60 s: "may
+or may not have run". The log line is the token's machine name, the tool and the time, never the
+arguments or the token.
+
+**Limits.** Per token, 30 calls a minute that change something (a message, a stop, an answer) and
+240 reads a minute. The page reads at most a few times every five seconds (the open view every
+tick, the Waiting list every third tick when another view is open), skips a read while the last
+one is still out, and pauses when told to wait, so looking never uses up what an answer needs.
+What is being typed in an answer survives every refresh.
 
 ## Commands
 

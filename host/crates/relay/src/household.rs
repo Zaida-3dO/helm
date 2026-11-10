@@ -471,6 +471,15 @@ mod tests {
                 Err("not something"),
             ),
             ("list_chats", json!([1]), ALL, Err("object")),
+            // The Remote page's tools are the page's alone: not as an op, not by their tool name.
+            ("list_waiting", json!({}), ALL, Err("not something")),
+            ("app_list_waiting", json!({}), ALL, Err("not something")),
+            (
+                "answer_waiting",
+                json!({"chatId": "c", "requestId": "r", "index": 0, "label": "Allow"}),
+                ALL,
+                Err("not something"),
+            ),
         ];
         for (i, (op, args, sharing, want)) in cases.into_iter().enumerate() {
             match (admit_peer(op, &args, sharing), want) {

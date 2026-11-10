@@ -5,7 +5,9 @@
 //! Frames are the hub's line protocol (`hub/src/relay.rs`).
 //!
 //! - `call`: the gate ([`crate::gate::admit`]) first; a refusal is answered at once as "nothing
-//!   changed" and the tool never runs. An admitted call runs through the [`Executor`].
+//!   changed" and the tool never runs. An admitted call runs through the [`Executor`]. A call with
+//!   `"scope": "remote"` came from the hub's Remote page and goes through
+//!   [`crate::gate::admit_remote`], which also lets the page's own two tools in.
 //! - `telegram`: handed to the [`TelegramSink`]; acknowledged only once the sink took it, so a
 //!   message is never lost to a drop between the hub and the chat.
 //! - `telegram_stop`: the sink stops the running turn.
@@ -566,10 +568,18 @@ impl Client {
                 };
                 let caller = s("client").unwrap_or_default();
                 let args = v.get("args").cloned().unwrap_or(Value::Null);
+                // The hub stamps a call that came from its Remote page; only then do the page's
+                // own tools get through the gate.
+                let remote = s("scope").as_deref() == Some("remote");
                 let executor = self.executor.clone();
                 let out = out.clone();
                 tokio::spawn(async move {
-                    let reply = match gate::admit(&tool, &args) {
+                    let admitted = if remote {
+                        gate::admit_remote(&tool, &args)
+                    } else {
+                        gate::admit(&tool, &args)
+                    };
+                    let reply = match admitted {
                         Err(text) => refusal(&id, text),
                         Ok(admitted) => answer(&id, executor.run(&caller, admitted).await),
                     };
@@ -976,6 +986,35 @@ mod tests {
         let r = next(&mut ws).await;
         assert_eq!(r["ok"], true);
         assert_eq!(exec.ran.lock().unwrap()[0].0, "remote");
+
+        // The Remote page's own tools: refused without the hub's scope stamp (or with another),
+        // let through with it. (id, scope stamp, the call runs)
+        for (id, scope, runs) in [
+            ("4", None, false),
+            ("5", Some("telegram"), false),
+            ("6", Some("remote"), true),
+        ] {
+            let mut call = json!({"type": "call", "id": id, "client": "phone",
+                "tool": "app_list_waiting", "args": {}});
+            if let Some(scope) = scope {
+                call["scope"] = json!(scope);
+            }
+            ws.send(Message::Text(call.to_string().into()))
+                .await
+                .unwrap();
+            let r = next(&mut ws).await;
+            assert_eq!(r["ok"].as_bool(), Some(runs), "{id}: {r}");
+            if !runs {
+                assert!(r["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("only available from the hub's Remote page"));
+            }
+        }
+        let ran = exec.ran.lock().unwrap();
+        assert_eq!(ran.len(), 2, "only the stamped call ran");
+        assert!(ran[1].1.remote && ran[1].1.tool == "app_list_waiting");
+        drop(ran);
 
         // Telegram: delivered, then acknowledged.
         ws.send(Message::Text(

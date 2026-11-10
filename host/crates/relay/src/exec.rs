@@ -10,6 +10,9 @@
 //!   Each outside caller also gets the chats crate's per-target limit (the same count and window
 //!   as one chat messaging another), and a send counts against either limit only once it is
 //!   stored, so a refused send never uses up the allowance.
+//! - **`app_list_waiting` and `app_answer_waiting`** are for the hub's Remote page and are served
+//!   by [`crate::remote`]; the answer is refused unless the switch in Settings → Hub is on. A
+//!   message from the page is framed as the user's own ([`crate::gate::remote_frame`]).
 //! - **Household calls** (another person's Helm, through the hub) run the same way as
 //!   `peer:<person>` ([`AppExecutor::run_peer`]): the list answers with the shared fields only,
 //!   a chat page leaves the folder out, and a message arrives framed as another person's
@@ -29,6 +32,9 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// The allowed tools this executor answers itself; the rest go through the host-tool dispatcher.
+const SERVED_HERE: &[&str] = &["app_send_message", "app_list_waiting", "app_answer_waiting"];
+
 /// At most this many messages per outside caller per minute.
 pub const SENDS_PER_MINUTE: usize = 20;
 
@@ -46,9 +52,11 @@ type SendLog = VecDeque<(Instant, String, String)>;
 pub struct AppExecutor {
     wiring: OnceLock<Wiring>,
     sends: Mutex<SendLog>,
+    /// Prompts the Remote page answered a moment ago ([`crate::remote`]).
+    answered: crate::remote::Answered,
 }
 
-fn refused(text: impl Into<String>) -> ToolFailure {
+pub(crate) fn refused(text: impl Into<String>) -> ToolFailure {
     ToolFailure {
         text: text.into(),
         changed: false,
@@ -202,7 +210,7 @@ impl AppExecutor {
     ) -> Result<Value, ToolFailure> {
         let restricted: Vec<String> = gate::allowed_tools()
             .into_iter()
-            .filter(|t| *t != "app_send_message")
+            .filter(|t| !SERVED_HERE.contains(t))
             .map(str::to_owned)
             .collect();
         self.dispatch_as(w, external_id(caller), restricted, call)
@@ -290,10 +298,22 @@ impl Executor for AppExecutor {
             let Some(w) = self.wiring.get() else {
                 return Err(refused("Helm is still starting; try again in a moment."));
             };
-            if call.tool == "app_send_message" {
-                self.send_message(w, caller, &call.args, &|b| gate::frame(caller, b))
-            } else {
-                self.dispatch(w, caller, call).await
+            let (tool, remote) = (call.tool.clone(), call.remote);
+            match tool.as_str() {
+                // The Remote page's messages are the user's own words, and say so.
+                "app_send_message" if remote => {
+                    self.send_message(w, caller, &call.args, &gate::remote_frame)
+                }
+                "app_send_message" => {
+                    self.send_message(w, caller, &call.args, &|b| gate::frame(caller, b))
+                }
+                // The gate has already refused these for any other caller; this is the second wall.
+                "app_list_waiting" | "app_answer_waiting" if !remote => Err(refused(
+                    "That is only available from the hub's Remote page.",
+                )),
+                "app_list_waiting" => crate::remote::list_waiting(w),
+                "app_answer_waiting" => crate::remote::answer(w, &self.answered, &call.args).await,
+                _ => self.dispatch(w, caller, call).await,
             }
         })
     }

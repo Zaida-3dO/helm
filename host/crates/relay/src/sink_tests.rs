@@ -701,6 +701,7 @@ async fn the_telegram_settings_view_shows_the_saved_model_and_effort() {
         max_tokens: 50_000,
         away_alerts: true,
         approvals: false,
+        remote_answers: false,
         model: None,
         effort: None,
     };
@@ -913,6 +914,7 @@ async fn the_sink_delivers_only_once_wired_and_stop_reaches_the_tagged_chat() {
             max_tokens: 50_000,
             away_alerts: true,
             approvals: false,
+            remote_answers: false,
             model: Some("model-a".into()),
             effort: Some("low".into()),
         },

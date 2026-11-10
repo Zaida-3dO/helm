@@ -52,6 +52,8 @@ export interface TelegramSettings {
   awayAlerts: boolean;
   /** Permission prompts and plan approvals can be answered with Telegram buttons. */
   approvals: boolean;
+  /** Waiting prompts can be answered from the hub's Remote page. */
+  remoteAnswers: boolean;
   /** The model a new Telegram chat starts with; `null`: the same as any other new chat. */
   model: string | null;
   /** The effort a new Telegram chat starts with; `null`: the same as any other new chat. */
@@ -92,13 +94,14 @@ export function hubOps(api: Api) {
     saveConnection: (a: HubConnectionSave) => api<HubConnection>('relay_connection_save', a),
     telegram: () => api<TelegramSettings>('relay_telegram_get', {}),
     saveTelegram: (
-      s: Pick<TelegramSettings, 'maxAgeHours' | 'maxTokens' | 'awayAlerts' | 'approvals' | 'model' | 'effort'>,
+      s: Pick<TelegramSettings, 'maxAgeHours' | 'maxTokens' | 'awayAlerts' | 'approvals' | 'remoteAnswers' | 'model' | 'effort'>,
     ) =>
       api<TelegramSettings>('relay_telegram_save', {
         maxAgeHours: s.maxAgeHours,
         maxTokens: s.maxTokens,
         awayAlerts: s.awayAlerts,
         approvals: s.approvals,
+        remoteAnswers: s.remoteAnswers,
         model: s.model,
         effort: s.effort,
       }),

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>Helm Remote</title>
+<link rel="stylesheet" href="/remote/app.css">
+</head>
+<body>
+<header id="top" hidden>
+  <h1>Helm Remote</h1>
+  <select id="machine" aria-label="Which computer" data-testid="remote-machine" hidden></select>
+  <span id="line" class="pill" role="status" data-testid="remote-line">Checking…</span>
+  <button id="signout" type="button" class="quiet">Sign out</button>
+</header>
+
+<main>
+  <section id="signin" hidden>
+    <h2>Connect to Helm</h2>
+    <p>Paste the token the hub gave this device. It stays in this browser tab only and is gone when you close the tab.</p>
+    <form id="signin-form">
+      <label for="token">Token</label>
+      <input id="token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+      <button type="submit">Connect</button>
+    </form>
+  </section>
+
+  <section id="app" hidden>
+    <nav id="tabs" aria-label="Views">
+      <button id="tab-waiting" type="button" aria-pressed="true" data-testid="remote-tab-waiting">Waiting <span id="badge" class="badge" hidden>0</span></button>
+      <button id="tab-chats" type="button" aria-pressed="false" data-testid="remote-tab-chats">Chats</button>
+    </nav>
+    <p id="notice" role="alert" data-testid="remote-notice" hidden></p>
+
+    <div id="view-waiting"></div>
+
+    <div id="view-chats" hidden>
+      <input id="search" type="search" placeholder="Search chats" aria-label="Search chats" autocomplete="off">
+      <ul id="chat-list"></ul>
+    </div>
+
+    <div id="view-chat" hidden>
+      <div class="bar">
+        <button id="back" type="button" class="quiet">‹ Chats</button>
+        <strong id="chat-title"></strong>
+        <span id="chat-status" class="pill"></span>
+      </div>
+      <button id="older" type="button" class="quiet" hidden>Load older messages</button>
+      <ol id="messages"></ol>
+      <form id="send-form">
+        <label for="draft" class="sr">Message to this chat</label>
+        <textarea id="draft" rows="2" maxlength="16000" placeholder="Message to this chat"></textarea>
+        <div class="row">
+          <button id="send" type="submit">Send</button>
+          <button id="stop" type="button" class="danger">Stop</button>
+        </div>
+        <p class="hint">Sent to the chat as your own message, from this page. It is never an approval.</p>
+      </form>
+    </div>
+  </section>
+</main>
+<script src="/remote/app.js"></script>
+</body>
+</html>

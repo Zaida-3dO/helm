@@ -10,9 +10,10 @@
 //! What follows describes the `telegram` key.
 //!
 //! The value is the whole Telegram policy file: the tag limits, the away-alerts switch, whether
-//! approval prompts can be answered from Telegram, and the model and effort a new Telegram chat
-//! opens with. A chat reads all of it but may change only the last two: the limits and the two
-//! switches decide what leaves the machine unattended, so they stay the user's, changed only on
+//! approval prompts can be answered from Telegram, whether waiting prompts can be answered from
+//! the hub's Remote page, and the model and effort a new Telegram chat opens with. A chat reads
+//! all of it but may change only the last two: the limits and the three switches decide what
+//! leaves the machine unattended, so they stay the user's, changed only on
 //! the Settings page. An update that would move one of them is refused whole, even though it may
 //! repeat those fields at their current value.
 //!
@@ -115,7 +116,7 @@ fn as_json(f: &PolicyFile) -> Value {
 /// The policy as a value, or a sentence naming what is wrong with it.
 fn from_json(v: &Value) -> Result<PolicyFile, String> {
     serde_json::from_value(v.clone()).map_err(|e| {
-        format!("Expected maxAgeHours, maxTokens, awayAlerts, approvals, and optional model and effort: {e}")
+        format!("Expected maxAgeHours, maxTokens, awayAlerts, approvals, remoteAnswers, and optional model and effort: {e}")
     })
 }
 
@@ -215,7 +216,7 @@ fn io_err(e: std::io::Error) -> String {
 fn options() -> Value {
     json!({
         "type": "object",
-        "about": "Settings > Hub: the Telegram chat's tag limits and switches, and the model and effort a new Telegram chat opens with. Read all of it. You may change only model and effort; the limits and both switches are the user's and an update that touches them is refused. Send only the fields to change: the rest must repeat at their current value or stay out. null resets model and effort to unset.",
+        "about": "Settings > Hub: the Telegram chat's tag limits and switches, and the model and effort a new Telegram chat opens with. Read all of it. You may change only model and effort; the limits and the three switches are the user's and an update that touches them is refused. Send only the fields to change: the rest must repeat at their current value or stay out. null resets model and effort to unset.",
         "default": as_json(&PolicyFile::default()),
         "merge": true,
         "fields": {
@@ -223,6 +224,7 @@ fn options() -> Value {
             "maxTokens": {"type": "integer", "min": 10_000, "max": 5_000_000, "about": "The running token cap for the Telegram chat."},
             "awayAlerts": {"type": "boolean", "about": "Telegram alerts while the user is away."},
             "approvals": {"type": "boolean", "about": "Approval prompts can be answered with Telegram buttons."},
+            "remoteAnswers": {"type": "boolean", "about": "Waiting prompts can be answered from the hub's Remote page."},
             "model": {"type": "string or null", "rule": "a model id from the model picker (a Claude model, or local/<server>/<model>), at most 120 characters; null or blank: the app's usual new-chat model", "about": "The model a new Telegram chat opens with."},
             "effort": {"type": "enum", "allowed": helm_chats::catalogue::EFFORTS, "nullable": true, "about": "The effort a new Telegram chat opens with; null: the app's usual new-chat effort."},
         },
@@ -511,6 +513,7 @@ mod tests {
         // Undo (and the page) still see the user's fields untouched.
         assert_eq!(e.read()["maxAgeHours"], json!(24));
         assert_eq!(e.read()["approvals"], json!(false));
+        assert_eq!(e.read()["remoteAnswers"], json!(false));
 
         // A later field change merges with the earlier one; the effort set is the app's.
         let (_, after) = e.apply(json!({"effort": "xhigh"})).unwrap();
@@ -546,6 +549,13 @@ mod tests {
             err.contains("approvals") && err.contains("Settings > Hub"),
             "{err}"
         );
+        // Answering from the Remote page is the user's switch too, however it is worded.
+        let err = e.apply(json!({"remoteAnswers": true})).unwrap_err();
+        assert!(
+            err.contains("remoteAnswers") && err.contains("Settings > Hub"),
+            "{err}"
+        );
+        assert!(!telegram::load_file(&e.ext.path).remote_answers);
         assert!(e
             .apply(json!({"approvals": false, "maxAgeHours": 48}))
             .unwrap_err()
@@ -577,6 +587,7 @@ mod tests {
                 max_tokens: 50_000,
                 away_alerts: false,
                 approvals: true,
+                remote_answers: false,
                 model: Some("sonnet".into()),
                 effort: Some("medium".into()),
             },

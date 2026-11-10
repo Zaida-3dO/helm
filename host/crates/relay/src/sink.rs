@@ -314,6 +314,8 @@ pub struct TelegramView {
     pub away_alerts: bool,
     /// Approval prompts answered with Telegram buttons ([`crate::approve`]).
     pub approvals: bool,
+    /// Waiting prompts answered from the hub's Remote page ([`crate::remote`]).
+    pub remote_answers: bool,
     /// The model a new Telegram chat opens with; `None`: the same as any other new chat.
     pub model: Option<String>,
     /// The effort a new Telegram chat opens with; `None`: the same as any other new chat.
@@ -356,6 +358,7 @@ pub fn telegram_view(db: &Database, profile_dir: &std::path::Path, now: i64) -> 
         max_tokens: file.max_tokens,
         away_alerts: file.away_alerts,
         approvals: file.approvals,
+        remote_answers: file.remote_answers,
         model: model.map(str::to_owned),
         effort: effort.map(str::to_owned),
     }
@@ -449,7 +452,7 @@ pub enum Placed {
     Already,
 }
 
-fn is_answerable(i: &helm_chats::types::Interaction) -> bool {
+pub(crate) fn is_answerable(i: &helm_chats::types::Interaction) -> bool {
     i.attention == Some(InteractionAttention::Question)
         && matches!(
             i.method,
@@ -861,6 +864,43 @@ pub async fn mirror(
     }
 }
 
+/// Why a request could not be answered.
+#[derive(Debug, PartialEq)]
+pub(crate) enum AnswerError {
+    /// It no longer waits (answered in Helm, withdrawn, or not the kind that may be answered).
+    Gone,
+    /// Helm refused the answer.
+    Failed(String),
+}
+
+/// Answer a request that still waits, the way the card in Helm does, and leave a line in the chat
+/// saying where the answer came from. `accepts` says which waiting requests this way may answer;
+/// one that is gone, or not of that kind, answers nothing. Telegram's buttons and the Remote page
+/// both answer through here.
+pub(crate) async fn answer_request(
+    c: &Ctx,
+    chat_id: &str,
+    request_id: &str,
+    args: serde_json::Value,
+    accepts: fn(&helm_chats::types::Interaction) -> bool,
+    row: (helm_chats::types::ContextKind, String),
+) -> Result<(), AnswerError> {
+    let still = c.rt.live_thread(chat_id).is_some_and(|t| {
+        t.interactions
+            .iter()
+            .any(|i| i.id == request_id && accepts(i))
+    });
+    if !still {
+        return Err(AnswerError::Gone);
+    }
+    c.ops
+        .invoke("interaction_answer", args)
+        .await
+        .map_err(|e| AnswerError::Failed(e.message))?;
+    c.rt.add_context_row(chat_id, row.0, &row.1);
+    Ok(())
+}
+
 /// The app's Telegram sink. The executor's wiring gives it the chat runtime and database; the
 /// op dispatcher ([`ChatSink::attach_ops`]) and the line ([`ChatSink::attach_line`]) arrive at
 /// start.
@@ -908,7 +948,7 @@ impl ChatSink {
         let _ = self.up.set(up);
     }
 
-    fn ctx(&self) -> Result<Ctx, String> {
+    pub(crate) fn ctx(&self) -> Result<Ctx, String> {
         let w = self
             .exec
             .wiring()
@@ -1058,31 +1098,24 @@ impl TelegramSink for ChatSink {
                 }
                 return;
             }
-            let still = c.rt.live_thread(&ask.chat_id).is_some_and(|t| {
-                t.interactions
-                    .iter()
-                    .any(|i| i.id == ask.request_id && crate::approve::askable(i))
-            });
-            if !still {
-                up.notify(&nothing);
-                return;
-            }
-            match c
-                .ops
-                .invoke(
-                    "interaction_answer",
-                    crate::approve::answer_args(&ask, index),
-                )
-                .await
+            let row = (
+                helm_chats::types::ContextKind::Telegram,
+                format!("Answered from Telegram: {label}"),
+            );
+            match answer_request(
+                &c,
+                &ask.chat_id,
+                &ask.request_id,
+                crate::approve::answer_args(&ask, index),
+                crate::approve::askable,
+                row,
+            )
+            .await
             {
-                Ok(_) => c.rt.add_context_row(
-                    &ask.chat_id,
-                    helm_chats::types::ContextKind::Telegram,
-                    &format!("Answered from Telegram: {label}"),
-                ),
-                Err(e) => up.notify(&format!(
-                    "Your \"{label}\" was not used: Helm could not answer it ({}).",
-                    e.message
+                Ok(()) => {}
+                Err(AnswerError::Gone) => up.notify(&nothing),
+                Err(AnswerError::Failed(why)) => up.notify(&format!(
+                    "Your \"{label}\" was not used: Helm could not answer it ({why})."
                 )),
             }
         })

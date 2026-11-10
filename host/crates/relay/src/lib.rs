@@ -14,6 +14,7 @@
 //! | [`sink`] | Telegram messages into the active chat, and the status and answer mirrored back |
 //! | [`notify`] | Helm speaking first: the `app_telegram_send` tool and alerts while the user is away |
 //! | [`approve`] | approving from Telegram: buttons for permission prompts and plan approvals, off by default |
+//! | [`remote`] | the hub's Remote page: the prompts that wait, and answering them (off by default) |
 //! | [`voice`] | the voice chat: its tag and limits, the notes it is given, and the replies sent up for the phone |
 //! | [`voice_sink`] | voice turns into the voice chat, and the working line and answers mirrored back |
 //! | [`speakable`] | an answer cleaned, split and cut so it is good to hear |
@@ -32,8 +33,8 @@
 //! never a value) and `relay_connection_save` ([`config::RelaySaveArgs`]: absent keeps, empty
 //! clears). For Settings → Hub's Telegram section: `relay_telegram_get` →
 //! [`sink::TelegramView`], `relay_telegram_save` ([`telegram::PolicyFile`]: the limits, the
-//! away-alerts switch, approving from Telegram, and the model and effort a new Telegram chat
-//! opens with) and
+//! away-alerts switch, approving from Telegram, answering from the Remote page, and the model and
+//! effort a new Telegram chat opens with) and
 //! `relay_telegram_reset` (drop the tag, so the next message starts a new chat). The same policy
 //! reaches chats through [`agent_settings`]: the `telegram` key of `app_get_settings` and
 //! `app_update_settings`, where chats may change only the new chat's model and effort.
@@ -72,6 +73,7 @@ pub mod gate;
 pub mod household;
 pub mod notify;
 pub mod pair;
+pub mod remote;
 pub mod sink;
 pub mod speakable;
 pub mod telegram;
@@ -250,7 +252,7 @@ fn telegram_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
 fn telegram_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let f: telegram::PolicyFile = serde_json::from_value(args).map_err(|_| {
         ApiError::bad_args(
-            "Expected maxAgeHours, maxTokens, awayAlerts, approvals, and optional model and effort.",
+            "Expected maxAgeHours, maxTokens, awayAlerts, approvals, remoteAnswers, and optional model and effort.",
         )
     })?;
     f.check().map_err(ApiError::bad_args)?;

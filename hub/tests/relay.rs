@@ -19,6 +19,7 @@ const REMOTE: &str = "remote-token-0123456789abcdefghi";
 const MEMORY_ONLY: &str = "memory-token-0123456789abcdefgh";
 const FORWARDER: &str = "forwarder-token-0123456789abcdef";
 const PHONE: &str = "phone-token-0123456789abcdefghij";
+const PAGE: &str = "page-token-0123456789abcdefghijkl";
 
 /// The person who owns every client the legacy token list makes (the first person made).
 const OWNER: i64 = 1;
@@ -32,7 +33,7 @@ async fn start() -> Hub {
     let registry = Registry::from_legacy_spec(
         &format!(
             "helm-line:{LINE}:relay, remote:{REMOTE}:ro+app, notes:{MEMORY_ONLY}:rw, \
-             forwarder:{FORWARDER}:telegram, phone:{PHONE}:voice"
+             forwarder:{FORWARDER}:telegram, phone:{PHONE}:voice, page:{PAGE}:remote"
         ),
         "owner",
     )
@@ -146,10 +147,16 @@ async fn only_a_relay_token_opens_the_line() {
         Some(403),
         "a voice token cannot open it"
     );
+    assert_eq!(
+        connect(&hub, PAGE).await.err(),
+        Some(403),
+        "a Remote-page token cannot open it"
+    );
     let mut ws = connect(&hub, LINE).await.expect("the relay token opens it");
     assert_eq!(next_json(&mut ws).await["type"], "welcome");
-    // ...and neither the relay token, a telegram token nor a voice token reaches the MCP surface.
-    for token in [LINE, FORWARDER, PHONE] {
+    // ...and neither the relay token, a telegram token, a voice token nor a Remote-page token
+    // reaches the MCP surface.
+    for token in [LINE, FORWARDER, PHONE, PAGE] {
         let (status, _) = mcp(
             &hub,
             token,

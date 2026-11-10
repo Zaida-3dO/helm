@@ -49,6 +49,16 @@
 //!   last one and go as one message; a message carries at most [`MAX_FILES`] files and
 //!   [`MAX_MESSAGE_BYTES`] in all, and a file over either is left out with a reply. A message
 //!   keeps its place in the queue while its files are fetched: messages sent after it wait.
+//! - **Long messages arrive whole.** Telegram splits a long message (at 4,096 UTF-16 units) into
+//!   several that reach the hub in a burst. A text message of [`LONG_PART`] units or more is
+//!   therefore held for [`JOIN_WINDOW`]: a text message that follows it, while it is still the
+//!   last in the queue, joins it with nothing put between the parts, and the window starts again
+//!   while the parts keep being that long. A part shorter than that ends the burst and the joined
+//!   message goes at once. An ordinary message is never held. Only text joins; a command, a
+//!   picture or a recording is handled as before, and anything after a held message waits behind
+//!   it, in order. A burst gathers at most [`JOIN_LIMIT`] units, and a joined message of more than
+//!   [`MAX_JOINED`] units goes as a `message.txt` attachment instead of as text. Each person's bot
+//!   has its own queue, so a burst joins only within one person's messages.
 //! - **Recordings.** A voice note, an audio file or a video note also goes to the speech-to-text
 //!   server, when one is configured, and its transcript goes in the text beside the attached
 //!   recording (`[Voice note] <transcript>`). Long recordings may take a while: the server has
@@ -111,6 +121,17 @@ pub const MAX_QUEUED_BYTES: usize = 150 * 1024 * 1024;
 pub const MAX_DOWNLOADS: usize = 2;
 /// How long after the last file of an album more may join it.
 pub const ALBUM_WINDOW: Duration = Duration::from_millis(1500);
+/// A text message this long (in UTF-16 units, which is how Telegram counts) is probably the first
+/// part of a split one: Telegram cuts at 4,096.
+pub const LONG_PART: usize = 3500;
+/// How long after a long part more text may join it.
+pub const JOIN_WINDOW: Duration = Duration::from_millis(2000);
+/// The longest text that goes to Helm as text, in UTF-16 units. A joined message above it goes as
+/// a `message.txt` attachment.
+pub const MAX_JOINED: usize = 100_000;
+/// The most a burst gathers (UTF-16 units); text past it starts a message of its own. Kept low
+/// enough that the attachment, as base64, stays inside the largest frame Helm takes.
+pub const JOIN_LIMIT: usize = 300_000;
 /// How long a file download from Telegram may take in all.
 pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(100);
 /// A message whose files have not all arrived this long after it came (it never should: each
@@ -341,6 +362,18 @@ struct Queued {
     files: Vec<Blob>,
     /// While its files are being fetched.
     gather: Option<Gather>,
+    /// A long text held a moment for the rest of a split message; it becomes `text` then.
+    hold: Option<Hold>,
+}
+
+/// The text of a message that may be the first part of a long one.
+#[derive(Debug, Clone)]
+struct Hold {
+    text: String,
+    /// Its length in UTF-16 units.
+    units: usize,
+    /// More text may join until then.
+    open_until_ms: i64,
 }
 
 impl Queued {
@@ -776,6 +809,30 @@ fn compose(g: &Gather, parts: &[Part]) -> String {
     with_quote(g.quote.as_deref(), &lines.join("\n"))
 }
 
+/// A held text, ready to go: as the message's text, or, past [`MAX_JOINED`] UTF-16 units, as the
+/// attached `message.txt` with a line saying so.
+fn release(q: &mut Queued, h: Hold) {
+    if h.units <= MAX_JOINED {
+        q.text = Some(h.text);
+        return;
+    }
+    let len = h.text.len();
+    let data: Arc<str> = base64::engine::general_purpose::STANDARD
+        .encode(h.text.as_bytes())
+        .into();
+    q.files.push(Blob {
+        name: "message.txt".to_owned(),
+        mime: "text/plain".to_owned(),
+        data,
+        len,
+    });
+    q.text = Some(format!(
+        "[Long message] The whole text is in the attached message.txt ({}): it was too long to \
+         send as text.",
+        size_text(len)
+    ));
+}
+
 /// The reply when a file would take its message past [`MAX_MESSAGE_BYTES`].
 fn message_full_note(name: &str) -> String {
     format!(
@@ -981,11 +1038,54 @@ impl Bridge {
             }
             _ => {}
         }
+        let units = text.encode_utf16().count();
+        let long = units >= LONG_PART;
+        let window = JOIN_WINDOW.as_millis() as i64;
+        // The next part of a long message joins the one held for it, with nothing between, while
+        // that one is still the last in the queue.
+        let joined = {
+            let mut st = self.st();
+            st.queue
+                .back_mut()
+                .and_then(|q| {
+                    let id = q.id.clone();
+                    q.hold.as_mut().map(|h| (id, h))
+                })
+                .filter(|(_, h)| now < h.open_until_ms && h.units + units <= JOIN_LIMIT)
+                .map(|(id, h)| {
+                    h.text.push_str(text);
+                    h.units += units;
+                    // Parts that keep being this long keep the burst open; a shorter one ends it.
+                    h.open_until_ms = if long { now + window } else { now };
+                    id
+                })
+        };
+        if let Some(id) = joined {
+            // The sender was told about the queue by the first part; no more replies.
+            return if self.flush_sent(now).await.contains(&id) {
+                Handled::Forwarded
+            } else {
+                Handled::Queued
+            };
+        }
         let text = with_quote(quote.as_deref(), text);
+        let units = text.encode_utf16().count();
         let Some(id) = self.push(msg, Some(text), now) else {
             self.reply_full(chat).await;
             return Handled::Queued;
         };
+        if long {
+            // Hold it for the rest of the burst: it goes when the window ends or a short part
+            // joins.
+            let mut st = self.st();
+            if let Some(q) = st.queue.iter_mut().find(|q| q.id == id) {
+                q.hold = q.text.take().map(|text| Hold {
+                    text,
+                    units,
+                    open_until_ms: now + window,
+                });
+            }
+        }
         self.deliver(&id, chat, now).await
     }
 
@@ -1009,6 +1109,7 @@ impl Bridge {
             images: vec![],
             files: vec![],
             gather: None,
+            hold: None,
         });
         Some(id)
     }
@@ -1294,6 +1395,15 @@ impl Bridge {
                     q.sent_on = None; // that line is gone; resend on the next
                 }
             }
+            // A long text whose window has ended (or that a short part closed) goes as it is, or as
+            // an attachment when it is too long to be text.
+            for q in st.queue.iter_mut() {
+                if q.hold.as_ref().is_some_and(|h| now >= h.open_until_ms) {
+                    if let Some(h) = q.hold.take() {
+                        release(q, h);
+                    }
+                }
+            }
             // A message whose files have all arrived (and whose album has had its window) gets its
             // text; one left with no file at all goes, its replies saying why.
             let mut finished = vec![];
@@ -1320,8 +1430,9 @@ impl Bridge {
                 }
                 finished.push((q.id.clone(), g.chat, g.notes, kept));
             }
-            st.queue
-                .retain(|q| q.text.is_some() || q.gather.is_some() || q.sent_on.is_some());
+            st.queue.retain(|q| {
+                q.text.is_some() || q.gather.is_some() || q.hold.is_some() || q.sent_on.is_some()
+            });
             // Past the lifetime a message goes, waiting or unacknowledged alike: one Helm keeps
             // refusing would otherwise be resent for ever. A message whose files are still
             // being fetched keeps its place for far longer than its HTTP timeouts allow, but not

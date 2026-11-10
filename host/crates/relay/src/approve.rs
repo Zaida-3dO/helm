@@ -85,7 +85,7 @@ fn options_of(i: &Interaction) -> Vec<String> {
     o
 }
 
-fn cut(s: &str, max: usize) -> String {
+pub(crate) fn cut(s: &str, max: usize) -> String {
     let mut it = s.chars();
     let out: String = it.by_ref().take(max).collect();
     if it.next().is_some() {
@@ -157,6 +157,57 @@ pub fn ask_text(chat_title: &str, i: &Interaction) -> (String, bool) {
     (cut(&s, 3500), full)
 }
 
+/// What one waiting request shows on a small screen: its text, and the ask (the options it may
+/// offer). Shared by Telegram's buttons and the Remote page, so both show, and refuse, alike.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Offer {
+    pub ask: Ask,
+    pub text: String,
+    /// Whether the details fit in full. When they do not, only options that allow nothing remain.
+    pub full: bool,
+}
+
+/// The offer for a waiting request, or `None` when it is not askable or nothing could be offered.
+pub fn offer(w: &Waiting) -> Option<Offer> {
+    if !askable(&w.interaction) {
+        return None;
+    }
+    let all = options_of(&w.interaction);
+    let (mut text, full) = ask_text(&w.chat_title, &w.interaction);
+    let options = if full {
+        all.clone()
+    } else {
+        text.push_str("\n\nToo long to show in full here: open Helm to allow it.");
+        refusing(&all)
+    };
+    if options.is_empty() {
+        return None;
+    }
+    let ask = Ask {
+        chat_id: w.chat_id.clone(),
+        request_id: w.interaction.id.clone(),
+        method: w.interaction.method,
+        plan: w.interaction.attention == Some(InteractionAttention::Plan),
+        options,
+        // The label that answers yes, found by name: a refusing button left on its own never
+        // becomes it.
+        yes: (w.interaction.method == InteractionMethod::Confirm)
+            .then(|| {
+                all.iter()
+                    .find(|o| matches!(o.as_str(), "Approve plan" | "Allow"))
+                    .cloned()
+            })
+            .flatten(),
+        question: None,
+    };
+    Some(Offer { ask, text, full })
+}
+
+/// Whether choosing `label` lets something happen (as opposed to refusing it).
+pub fn allows(label: &str) -> bool {
+    refusing(&[label.to_owned()]).is_empty()
+}
+
 /// What the tapped option sends, as the card in Helm would: a confirmation answers yes for the
 /// first button; a plan's option also confirms when it is "Approve plan".
 pub fn answer_args(ask: &Ask, index: usize) -> Value {
@@ -212,37 +263,12 @@ impl Asks {
             if asked {
                 continue;
             }
-            let all = options_of(&w.interaction);
-            let (mut text, full) = ask_text(&w.chat_title, &w.interaction);
-            let options = if full {
-                all.clone()
-            } else {
-                text.push_str("\n\nToo long to show in full here: open Helm to allow it.");
-                refusing(&all)
-            };
-            if options.is_empty() {
+            let Some(o) = offer(w) else {
                 continue;
-            }
-            let ask = Ask {
-                chat_id: w.chat_id.clone(),
-                request_id: w.interaction.id.clone(),
-                method: w.interaction.method,
-                plan: w.interaction.attention == Some(InteractionAttention::Plan),
-                options,
-                // The label that answers yes, found by name: a refusing button left on its own
-                // never becomes it.
-                yes: (w.interaction.method == InteractionMethod::Confirm)
-                    .then(|| {
-                        all.iter()
-                            .find(|o| matches!(o.as_str(), "Approve plan" | "Allow"))
-                            .cloned()
-                    })
-                    .flatten(),
-                question: None,
             };
             let id = new_id();
-            step.ask.push((id.clone(), text, ask.options.clone()));
-            m.insert(id, ask);
+            step.ask.push((id.clone(), o.text, o.ask.options.clone()));
+            m.insert(id, o.ask);
         }
         step
     }

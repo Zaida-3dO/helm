@@ -64,6 +64,10 @@ pub struct PolicyFile {
     /// the user turns it on in Settings.
     #[serde(default)]
     pub approvals: bool,
+    /// Waiting prompts can be answered from the hub's Remote page ([`crate::remote`]). Off unless
+    /// the user turns it on in Settings.
+    #[serde(default)]
+    pub remote_answers: bool,
     /// The model a new Telegram chat opens with. `None` (or blank): the same model as any other
     /// new chat, from the new-chat settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,6 +100,7 @@ impl Default for PolicyFile {
             max_tokens: p.max_tokens,
             away_alerts: true,
             approvals: false,
+            remote_answers: false,
             model: None,
             effort: None,
         }
@@ -144,6 +149,11 @@ pub fn load_away_alerts(path: &Path) -> bool {
 /// Whether approvals may be answered from Telegram.
 pub fn load_approvals(path: &Path) -> bool {
     load_file(path).approvals
+}
+
+/// Whether waiting prompts may be answered from the Remote page.
+pub fn load_remote_answers(path: &Path) -> bool {
+    load_file(path).remote_answers
 }
 
 /// What was sent to the user on Telegram outside the Telegram chat (alerts from other chats), so
@@ -698,11 +708,16 @@ mod tests {
         assert_eq!(load_policy(&p), TagPolicy::default());
         assert!(load_away_alerts(&p), "on by default");
         assert!(!load_approvals(&p), "approvals are off unless turned on");
+        assert!(
+            !load_remote_answers(&p),
+            "answering from the Remote page is off unless turned on"
+        );
         let set = PolicyFile {
             max_age_hours: 6,
             max_tokens: 50_000,
             away_alerts: false,
             approvals: true,
+            remote_answers: true,
             model: Some("model-one".into()),
             effort: Some("medium".into()),
         };
@@ -716,12 +731,14 @@ mod tests {
                 max_tokens: tokens,
                 away_alerts: true,
                 approvals: false,
+                remote_answers: false,
                 model: None,
                 effort: None,
             };
             assert!(bad.check().is_err(), "{bad:?}");
         }
         assert!(load_approvals(&p), "saved on");
+        assert!(load_remote_answers(&p), "saved on");
         // The model and effort round-trip: set comes back, unset (or blank) reads as unset, and
         // a file saved without the fields at all — from an older Helm — loads as unset.
         assert_eq!(
@@ -750,6 +767,10 @@ mod tests {
         let old = load_file(&p);
         assert_eq!(old.model, None);
         assert_eq!(old.effort, None);
+        assert!(
+            !old.remote_answers,
+            "a file from before the switch reads as off"
+        );
         assert_eq!(old.new_chat(), (None, None));
         // An unknown model or effort is not refused here: the chats side answers for it, the
         // same as for any chat started in the app.

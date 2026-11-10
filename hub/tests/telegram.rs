@@ -13,8 +13,9 @@ use helm_hub::store::Store;
 use helm_hub::telegram::{
     now_ms, parse_allowed, parse_receive, size_text, ApiError, ApiFuture, Bridge, Files, Handled,
     HttpFiles, HttpVoice, Receive, SttConfig, Telegram, TelegramApi, TelegramConfig, Voice,
-    VoiceFuture, FILES_OFF, HELLO, IMAGE_FAILED, POLL_SECONDS, QUEUED, STT_DOWN, STT_DOWN_AFTER,
-    TAP_OFFLINE, TAP_SENT, TAP_STALE, TEXT_ONLY, VOICE_OFF,
+    VoiceFuture, FILES_OFF, HELLO, IMAGE_FAILED, JOIN_LIMIT, JOIN_WINDOW, LONG_PART, MAX_JOINED,
+    POLL_SECONDS, QUEUED, STT_DOWN, STT_DOWN_AFTER, TAP_OFFLINE, TAP_SENT, TAP_STALE, TEXT_ONLY,
+    VOICE_OFF,
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
@@ -31,6 +32,7 @@ const MIN: i64 = 60_000;
 const RW: &str = "rw-token-0123456789abcdefghij";
 const LINE: &str = "line-token-0123456789abcdefghij";
 const FORWARDER: &str = "forwarder-token-0123456789abcdef";
+const PAGE: &str = "page-token-0123456789abcdefghijkl";
 
 #[derive(Default)]
 struct FakeApi {
@@ -308,7 +310,9 @@ fn frames(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<Value> {
 /// token and a forwarder's telegram token.
 fn hub(e: &Env, bot_on: bool) -> axum::Router {
     let registry = Registry::from_legacy_spec(
-        &format!("helm:{RW}, helm-line:{LINE}:relay, forwarder:{FORWARDER}:telegram"),
+        &format!(
+            "helm:{RW}, helm-line:{LINE}:relay, forwarder:{FORWARDER}:telegram, page:{PAGE}:remote"
+        ),
         "owner",
     )
     .unwrap();
@@ -413,6 +417,185 @@ async fn the_allowed_user_is_forwarded_and_held_until_acknowledged() {
     assert_eq!(e.bridge.queued_len(), 1, "held until Helm acknowledges");
     e.bridge.on_ack(f[0]["id"].as_str().unwrap());
     assert_eq!(e.bridge.queued_len(), 0);
+}
+
+/// A part of a message: how many milliseconds after the first it arrives, and its text.
+type Part = (i64, String);
+/// A look at the line: how many milliseconds after the first part, and everything that has gone
+/// down it by then.
+type Look = (i64, Vec<String>);
+
+#[tokio::test]
+async fn a_long_message_telegram_split_arrives_whole_and_an_ordinary_one_is_never_held() {
+    let (a, b) = ("a".repeat(4096), "b".repeat(4096));
+    // Telegram counts UTF-16 units: 2,048 emoji are 4,096 units, though only 2,048 characters.
+    let emoji = "\u{1F600}".repeat(2048);
+    let window = JOIN_WINDOW.as_millis() as i64;
+    let cases: Vec<(&str, Vec<Part>, Vec<Look>)> = vec![
+        (
+            "a short part ends the burst at once",
+            vec![(0, a.clone()), (300, b.clone()), (500, "tail".into())],
+            vec![(500, vec![format!("{a}{b}tail")])],
+        ),
+        (
+            "a lone long message goes when the window ends",
+            vec![(0, a.clone())],
+            vec![(window - 1, vec![]), (window, vec![a.clone()])],
+        ),
+        (
+            "a long part keeps the burst open",
+            vec![(0, a.clone()), (1500, b.clone())],
+            vec![
+                (window + 100, vec![]),
+                (1500 + window, vec![format!("{a}{b}")]),
+            ],
+        ),
+        (
+            "three parts of 4,096 units with emoji arrive as one message",
+            vec![
+                (0, emoji.clone()),
+                (300, emoji.clone()),
+                (600, emoji.clone()),
+                (900, "end".into()),
+            ],
+            vec![(900, vec![format!("{emoji}{emoji}{emoji}end")])],
+        ),
+        (
+            "the same without a short part waits out the window after the last",
+            vec![
+                (0, emoji.clone()),
+                (300, emoji.clone()),
+                (600, emoji.clone()),
+            ],
+            vec![
+                (600 + window - 1, vec![]),
+                (600 + window, vec![format!("{emoji}{emoji}{emoji}")]),
+            ],
+        ),
+        (
+            "an ordinary message is never held, and each is separate",
+            vec![(0, "hello".into()), (10, "again".into())],
+            vec![(10, vec!["hello".into(), "again".into()])],
+        ),
+        (
+            "just under the length is not held",
+            vec![(0, "x".repeat(LONG_PART - 1))],
+            vec![(0, vec!["x".repeat(LONG_PART - 1)])],
+        ),
+        (
+            "exactly the length is held",
+            vec![(0, "x".repeat(LONG_PART))],
+            vec![(0, vec![]), (window, vec!["x".repeat(LONG_PART)])],
+        ),
+        (
+            "a message after a released burst is separate",
+            vec![(0, a.clone()), (10, "tail".into()), (20, "next".into())],
+            vec![(20, vec![format!("{a}tail"), "next".into()])],
+        ),
+    ];
+    for (name, parts, looks) in cases {
+        let e = env();
+        let mut rx = line_up(&e);
+        let mut gone: Vec<String> = vec![];
+        let mut parts = parts.into_iter().peekable();
+        for (at, want) in looks {
+            while let Some((t, text)) = parts.next_if(|(t, _)| *t <= at) {
+                e.bridge
+                    .on_update(&update(OWNER, &text, T0 / 1000), T0 + t)
+                    .await;
+            }
+            e.bridge.flush(T0 + at).await;
+            gone.extend(down(&mut rx));
+            assert_eq!(gone, want, "{name} at +{at} ms");
+        }
+        assert!(parts.next().is_none(), "{name}: every part was sent");
+    }
+
+    // A command is not held behind a long part, and the held part still goes out in order.
+    let e = env();
+    let mut rx = line_up(&e);
+    e.bridge.on_update(&update(OWNER, &a, T0 / 1000), T0).await;
+    assert_eq!(
+        e.bridge
+            .on_update(&update(OWNER, "/stop", T0 / 1000), T0 + 5)
+            .await,
+        Handled::Command
+    );
+    assert_eq!(down(&mut rx), ["telegram_stop"]);
+    e.bridge.flush(T0 + window).await;
+    assert_eq!(down(&mut rx), [a.clone()]);
+
+    // A message that has gone takes no more parts.
+    e.bridge
+        .on_update(&update(OWNER, "later", T0 / 1000), T0 + window + 5)
+        .await;
+    assert_eq!(down(&mut rx), ["later"]);
+
+    // Each person's bot holds and joins on its own: a short message to another bridge neither
+    // ends nor joins this one's burst.
+    let (mine, theirs) = (env(), env());
+    let (mut mine_rx, mut theirs_rx) = (line_up(&mine), line_up(&theirs));
+    mine.bridge
+        .on_update(&update(OWNER, &a, T0 / 1000), T0)
+        .await;
+    theirs
+        .bridge
+        .on_update(&update(OWNER, "hi", T0 / 1000), T0 + 10)
+        .await;
+    assert_eq!(down(&mut theirs_rx), ["hi"]);
+    assert!(down(&mut mine_rx).is_empty(), "still held");
+    mine.bridge.flush(T0 + window).await;
+    assert_eq!(down(&mut mine_rx), [a.clone()]);
+}
+
+#[tokio::test]
+async fn a_burst_over_the_text_limit_goes_as_a_file_and_one_past_the_limit_starts_another() {
+    use base64::Engine as _;
+    let part = "a".repeat(4096);
+    let window = JOIN_WINDOW.as_millis() as i64;
+    // 25 parts of 4,096 units is 102,400: over what goes as text, under what one burst gathers.
+    assert!(25 * 4096 > MAX_JOINED && 25 * 4096 < JOIN_LIMIT);
+    let e = env();
+    let mut rx = line_up(&e);
+    for i in 0..25 {
+        e.bridge
+            .on_update(&update(OWNER, &part, T0 / 1000), T0 + i * 10)
+            .await;
+    }
+    e.bridge
+        .on_update(&update(OWNER, "tail", T0 / 1000), T0 + 300)
+        .await;
+    let f = frames(&mut rx);
+    assert_eq!(f.len(), 1, "one message, not 26");
+    let text = f[0]["text"].as_str().unwrap();
+    assert!(text.contains("message.txt") && text.len() < 300, "{text}");
+    let file = &f[0]["files"][0];
+    assert_eq!(
+        (file["name"].clone(), file["mediaType"].clone()),
+        (json!("message.txt"), json!("text/plain"))
+    );
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(file["data"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(bytes, format!("{}tail", part.repeat(25)).into_bytes());
+    assert!(f[0].get("images").is_none());
+
+    // A burst gathers at most JOIN_LIMIT units; the part that would pass it is a message of its
+    // own, held in turn. The first goes as a file, the second as text.
+    let e = env();
+    let mut rx = line_up(&e);
+    let parts = (JOIN_LIMIT / 4096 + 1) as i64;
+    for i in 0..parts {
+        e.bridge
+            .on_update(&update(OWNER, &part, T0 / 1000), T0 + i)
+            .await;
+    }
+    e.bridge.flush(T0 + parts + window).await;
+    let f = frames(&mut rx);
+    assert_eq!(f.len(), 2, "the burst was cut at the limit");
+    assert!(f[0]["text"].as_str().unwrap().contains("message.txt"));
+    assert_eq!(f[1]["text"], json!(part));
+    assert!(f[1].get("files").is_none());
 }
 
 #[tokio::test]
@@ -678,6 +861,7 @@ async fn only_a_telegram_token_may_post_updates() {
         ),
         (&on, Some(RW), &start, StatusCode::FORBIDDEN),
         (&on, Some(LINE), &start, StatusCode::FORBIDDEN),
+        (&on, Some(PAGE), &start, StatusCode::FORBIDDEN),
         (
             &off,
             Some(FORWARDER),

@@ -343,6 +343,17 @@ impl Line {
         .await
     }
 
+    /// [`Line::call`] for a call made on the Remote page: the frame says `"scope": "remote"`, which
+    /// is what lets Helm's gate admit the page's own tools. Only the hub sets it, and only for a
+    /// token with the `remote` scope.
+    pub async fn call_remote(&self, client: &str, tool: &str, args: &Value) -> CallOutcome {
+        self.request(CALL_TIMEOUT, |id| {
+            json!({ "type": "call", "id": id, "client": client, "scope": "remote",
+                "tool": tool, "args": args })
+        })
+        .await
+    }
+
     /// Ask this machine's Helm a household question for `person` and wait for its answer.
     pub async fn peer_call(
         &self,
@@ -602,6 +613,10 @@ mod tests {
         };
         assert_eq!(call["type"], "call");
         assert_eq!(call["client"], "remote");
+        assert!(
+            call.get("scope").is_none(),
+            "an ordinary call carries no scope"
+        );
         let id = call["id"].as_str().unwrap().to_owned();
         // A stale generation cannot answer.
         let answer =

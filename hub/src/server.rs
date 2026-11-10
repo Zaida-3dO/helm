@@ -2,7 +2,8 @@
 //! the `relay` scope), `/pair` (a one-time code) and `/telegram/update` (Telegram updates posted
 //! by another service that already runs the bot, a `telegram`-scope token). The household
 //! questions travel over the relay lines (`peer.rs`), not over HTTP. The phone's `/voice/*`
-//! routes (a `voice`-scope token) are in `voice_http.rs`.
+//! routes (a `voice`-scope token) are in `voice_http.rs`, and the Remote page and its one call
+//! (`/remote`, a `remote`-scope token for the call) are in `remote.rs`.
 
 use crate::apptools;
 use crate::auth::{Client, Scope};
@@ -10,6 +11,7 @@ use crate::lines::Lines;
 use crate::mcp::{self, Options};
 use crate::registry::{Registry, RegistryError};
 use crate::relay::{Line, MAX_FRAME};
+use crate::remote;
 use crate::store::Store;
 use crate::telegram::{self, Telegram};
 use crate::voice::VoiceBridge;
@@ -39,6 +41,8 @@ pub struct AppState {
     /// The phone's voice line, or `None` when it is off.
     pub voice: Option<Arc<VoiceBridge>>,
     pub pair_limit: PairLimit,
+    /// How many calls each Remote-page token has made lately.
+    pub remote: remote::Limiter,
 }
 
 impl AppState {
@@ -57,6 +61,7 @@ impl AppState {
             telegram,
             voice: None,
             pair_limit: PairLimit::default(),
+            remote: remote::Limiter::default(),
         }
     }
 
@@ -114,6 +119,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/relay", get(relay))
         .route("/pair", post(pair))
         .route("/telegram/update", post(telegram_update))
+        .route("/remote", get(remote::page))
+        .route("/remote/app.js", get(remote::script))
+        .route("/remote/app.css", get(remote::style))
+        .route("/remote/api/call", post(remote::call))
         .layer(DefaultBodyLimit::max(MAX_REQUEST))
         // The voice routes read their own bodies to their own limits (a recording may be 8 MiB),
         // so they are merged in after the 4 MiB limit and stay outside it.
@@ -183,6 +192,8 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
             "a telegram token"
         } else if client.has(Scope::Voice) {
             "a voice token"
+        } else if client.has(Scope::Remote) {
+            "a remote token"
         } else {
             "this token"
         };

@@ -21,6 +21,12 @@ pub const FORWARDED: &[&str] = &[
     "app_stop_chat",
 ];
 
+/// The two tools only the Remote page may call: what waits for the user, and an answer to it.
+/// They are not offered over MCP (`FORWARDED` and [`tool_list`] stay as they were), so an agent
+/// cannot answer a prompt through the hub; Helm refuses them for any call the hub did not stamp
+/// as coming from the page.
+pub const REMOTE_ONLY: &[&str] = &["app_list_waiting", "app_answer_waiting"];
+
 const NOTE: &str = " Runs in Helm on one of the caller's own computers through the hub. When Helm \
     is offline the call answers that nothing was sent or changed.";
 
@@ -89,6 +95,11 @@ pub fn tool_list() -> Vec<Value> {
 
 pub fn is_forwarded(name: &str) -> bool {
     FORWARDED.contains(&name)
+}
+
+/// Whether the Remote page may call `name`: a forwarded tool, or one of the page's own two.
+pub fn is_remote_callable(name: &str) -> bool {
+    is_forwarded(name) || REMOTE_ONLY.contains(&name)
 }
 
 /// Run one forwarded call and shape the MCP tool result.
