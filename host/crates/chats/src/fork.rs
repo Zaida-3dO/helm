@@ -493,6 +493,13 @@ pub fn fork(
         String::new()
     };
     let rev = 0;
+    // The galleries and boards the carried history names go with it.
+    let history: String = entries
+        .iter()
+        .map(|e| Value::Object(e.clone()).to_string())
+        .collect::<Vec<_>>()
+        .join("
+");
     let vanished = std::cell::Cell::new(false);
     let result = db.write(|tx| {
         if project_archived(tx, &src.project)? {
@@ -527,6 +534,7 @@ pub fn fork(
                 params![fork_id_chat, c],
             )?;
         }
+        crate::shown_images::copy_for_fork(tx, req.source, &fork_id_chat, &history)?;
         for (old, new) in &carried {
             // The fork's log already names the copy, so a source image that vanished since it was
             // checked fails the fork (the transaction rolls back and nothing is kept) rather than

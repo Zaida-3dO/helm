@@ -16,6 +16,7 @@
 //! | `chat_forks` | fork ids and what they were asked for, for idempotent forks |
 //! | `pending_edits` | an edit staged with its submission, applied once the worker closes ([`crate::edit`]) |
 //! | `chat_attachments` | images attached to a chat, then to the submission that sent them ([`crate::attachments`]) |
+//! | `shown_galleries`, `shown_images`, `option_boards` | pictures an agent showed in the chat and the option boards it offered, with the user's answers ([`crate::shown_images`]) |
 //! | `fork_carry` | a message fork's carried history, sent once with its first prompt ([`crate::fork`]) |
 //! | `chat_file_cleanup` | files a hard delete left behind, removed after commit and retried at startup ([`crate::delete`]) |
 //! | `submission_context` | the panel-context block a composer send carried |
@@ -39,6 +40,7 @@ pub fn register(reg: &mut MigrationRegistry) {
     reg.initializer("chats-side-tables", init)
         .initializer("chats-attachment-refs", crate::attachments::init)
         .initializer("chats-flags", crate::flags::init)
+        .initializer("chats-shown-images", crate::shown_images::init)
         .initializer("chats-activity-queue", activity_queue)
         .initializer("chats-triage-tries", triage_tries)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)

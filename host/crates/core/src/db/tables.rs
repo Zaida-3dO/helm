@@ -45,6 +45,9 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("fork_carry", Data),
     ("pending_edits", Data),
     ("chat_attachments", Data),
+    ("shown_galleries", Data),
+    ("shown_images", Data),
+    ("option_boards", Data),
     ("chat_attachment_refs", Data), // file, folder and chat references
     ("chat_attention", Data),
     ("chat_triage", Data),

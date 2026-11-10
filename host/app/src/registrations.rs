@@ -385,6 +385,11 @@ pub fn launch_contributors(
     .register_section(Arc::new(helm_hosttools::sections::GuidelinesSection {
         registry: Arc::new(host_tools()),
     }))
+    .register_section(Arc::new(helm_hosttools::StaticSection {
+        id: "cards",
+        order: 35,
+        text: helm_hosttools::show_images::CARDS_ADDENDUM,
+    }))
     .register_section(Arc::new(knowledge_section(db)))
     .register_section(Arc::new(helm_itemlinks::ItemLinksSection))
     .register_section(Arc::new(helm_workflow::WorkflowSection { db: db.clone() }));
@@ -456,6 +461,8 @@ mod host_tool_tests {
             "app_list_feedback",
             "app_get_feedback",
             "app_ide_context",
+            "app_show_images",
+            "app_offer_options",
             "app_request_allow",
             "app_list_mcp_servers",
             "app_add_mcp_server",

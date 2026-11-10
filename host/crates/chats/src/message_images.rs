@@ -35,7 +35,7 @@ pub fn register(reg: &mut OpRegistry) {
 const LOCAL_IMAGE_MAX: u64 = 12 * 1024 * 1024;
 
 /// The type of a picture from its first bytes; `None` for anything that is not PNG, JPEG, GIF or WebP.
-fn sniff(b: &[u8]) -> Option<&'static str> {
+pub(crate) fn sniff(b: &[u8]) -> Option<&'static str> {
     if b.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
         Some("image/png")
     } else if b.starts_with(&[0xff, 0xd8, 0xff]) {
@@ -58,17 +58,7 @@ fn local_image_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_args("path is required."))?;
-    // The side panel's checks come first, before the disk is touched: the lexical gate (no shares,
-    // device paths, reserved names or alternate streams: opening a share would offer the user's
-    // credentials to that server), then no links along the path, then the app's own folders.
-    let mut private = Vec::new();
-    if let Some(p) = ctx.services.get::<Profile>() {
-        private.push(p.dir.clone());
-    }
-    if let Ok(d) = helm_core::profile::default_profile_dir() {
-        private.push(d);
-    }
-    let path = admit_local_path(path, &helm_platform::private::PrivateRoots::new(&private))?;
+    let path = admit_path(ctx, path)?;
     let (mime, bytes) = read_local_image(&path)?;
     Ok(json!({
         "mime": mime,
@@ -77,6 +67,21 @@ fn local_image_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 }
 
 /// The path a picture may be read from, or the refusal. Nothing is read here.
+///
+/// The side panel's checks come first, before the disk is touched: the lexical gate (no shares,
+/// device paths, reserved names or alternate streams: opening a share would offer the user's
+/// credentials to that server), then no links along the path, then the app's own folders.
+pub(crate) fn admit_path(ctx: &OpCtx, raw: &str) -> Result<std::path::PathBuf, ApiError> {
+    let mut private = Vec::new();
+    if let Some(p) = ctx.services.get::<Profile>() {
+        private.push(p.dir.clone());
+    }
+    if let Ok(d) = helm_core::profile::default_profile_dir() {
+        private.push(d);
+    }
+    admit_local_path(raw, &helm_platform::private::PrivateRoots::new(&private))
+}
+
 fn admit_local_path(
     raw: &str,
     roots: &helm_platform::private::PrivateRoots,

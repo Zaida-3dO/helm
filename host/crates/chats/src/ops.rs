@@ -69,6 +69,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .async_op("autocomplete_suggest", autocomplete_suggest);
     crate::manage::register(reg);
     crate::message_images::register(reg);
+    crate::shown_images::register(reg); // shown_image_*, option_board_*
     crate::output_save::register(reg); // message_output_save
     crate::rollover::register(reg); // chat_roll_over
     crate::attachments::register(reg); // attachment_ref
@@ -699,6 +700,14 @@ pub(crate) mod tests {
             ("runtime_status", OpClass::Blocking),
             ("runtime_settings_get", OpClass::Blocking),
             ("runtime_settings_save", OpClass::Maintenance),
+            // Shown pictures and option boards.
+            ("shown_images_add", OpClass::Blocking),
+            ("option_board_create", OpClass::Blocking),
+            ("shown_gallery_get", OpClass::Blocking),
+            ("shown_image_get", OpClass::Blocking),
+            ("shown_image_thumb", OpClass::Blocking),
+            ("option_board_state", OpClass::Blocking),
+            ("option_board_answer", OpClass::Blocking),
         ];
         for (name, class) in expected {
             assert_eq!(reg.class_of(name), Some(class), "{name}");
