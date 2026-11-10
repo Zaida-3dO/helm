@@ -228,7 +228,9 @@ pub fn rules_text(profile_dir: &Path, who: &ChatKnowledge, cap: usize) -> String
     parts.join("\n\n")
 }
 
-/// The `rules` system-prompt section (order 6, after who the chat is for).
+/// The `rules` system-prompt section. Order 6 puts it first among the addendum's sections, ahead
+/// of verbosity (10); the line saying who the chat is for is its own launch contributor and comes
+/// before the whole addendum.
 pub struct RulesSection {
     profile_dir: PathBuf,
     lookup: Arc<dyn ChatLookup>,

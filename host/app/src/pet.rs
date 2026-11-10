@@ -8,7 +8,9 @@
 //! the page reports where the window was dragged and the host stores it, clamped to a visible
 //! monitor whenever the window is made again.
 
-use crate::shell::BROWSER_ARGS;
+use crate::shell::{
+    guard_permissions, show_without_activating, watch_process_failures, BROWSER_ARGS,
+};
 use helm_core::db::Database;
 use helm_core::lifecycle::Shell;
 use helm_core::prefs;
@@ -137,26 +139,44 @@ fn desktop(app: &AppHandle) -> (Vec<Area>, usize) {
     (areas, primary)
 }
 
-/// Show a window without activating it (Windows' `SW_SHOWNOACTIVATE`), so the pet appearing
-/// never takes focus from what the user is typing in.
-#[cfg(windows)]
-fn show_without_activating(window: &tauri::WebviewWindow) {
-    #[link(name = "user32")]
-    extern "system" {
-        fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
-    }
-    const SW_SHOWNOACTIVATE: i32 = 4;
-    if let Ok(hwnd) = window.hwnd() {
-        // SAFETY: a plain Win32 call on the window handle Tauri just gave us.
-        unsafe {
-            ShowWindow(hwnd.0 as isize, SW_SHOWNOACTIVATE);
+/// The pet's page failed (WebView2 reported a failed process). The same loop guard as the main
+/// window's decides; the pet never asks the user anything, so where the main window would offer a
+/// reload, the pet is closed until the next start or the next change to its preference.
+fn on_failed(app: &AppHandle, kind: i32) {
+    use helm_shell::uiwatch::{CrashGuard, Failure, Recovery};
+    static GUARD: Mutex<Option<CrashGuard>> = Mutex::new(None);
+    let failure = Failure::from_kind(kind);
+    let recovery = GUARD
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get_or_insert_with(CrashGuard::new)
+        .on_failure(std::time::Instant::now(), failure);
+    log::warn!("the desktop pet's page reported {failure:?}; {recovery:?}");
+    let app = app.clone();
+    // Off the web view's own event: closing and making a window both wait on its thread.
+    std::thread::spawn(move || {
+        let Some(window) = app.get_webview_window(PET_WINDOW) else {
+            return;
+        };
+        match recovery {
+            Recovery::Ignore => {}
+            Recovery::Reload => {
+                let _ = window.reload();
+            }
+            Recovery::Rebuild | Recovery::Offer => {
+                let at = window.outer_position().ok().map(|p| (p.x, p.y));
+                let _one_at_a_time = SYNC.lock().unwrap_or_else(|p| p.into_inner());
+                let _ = window.destroy();
+                if recovery == Recovery::Rebuild {
+                    // The old window's label is free a moment after it is destroyed.
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    if let Err(e) = build(&app, at) {
+                        log::warn!("the desktop pet window could not be made again: {e}");
+                    }
+                }
+            }
         }
-    }
-}
-
-#[cfg(not(windows))]
-fn show_without_activating(window: &tauri::WebviewWindow) {
-    let _ = window.show();
+    });
 }
 
 fn build(app: &AppHandle, saved: Option<(i32, i32)>) -> tauri::Result<()> {
@@ -187,6 +207,9 @@ fn build(app: &AppHandle, saved: Option<(i32, i32)>) -> tauri::Result<()> {
     .on_navigation(move |url| main_window_may_navigate(url.as_str(), debug))
     .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Deny)
     .build()?;
+    // The pet never dictates, so it gets no microphone.
+    guard_permissions(&window, debug, false);
+    watch_process_failures(&window, on_failed);
     let scale = window.scale_factor().unwrap_or(1.0);
     let (areas, primary) = desktop(app);
     let size = (

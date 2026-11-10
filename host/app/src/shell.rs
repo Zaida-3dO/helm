@@ -105,7 +105,7 @@ fn background_window(debug: bool, value: Option<&str>) -> bool {
 
 /// Show a window without activating it (Windows' `SW_SHOWNOACTIVATE`), so it never takes focus.
 #[cfg(windows)]
-fn show_without_activating(window: &tauri::WebviewWindow) {
+pub fn show_without_activating(window: &tauri::WebviewWindow) {
     #[link(name = "user32")]
     extern "system" {
         fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
@@ -120,7 +120,7 @@ fn show_without_activating(window: &tauri::WebviewWindow) {
 }
 
 #[cfg(not(windows))]
-fn show_without_activating(window: &tauri::WebviewWindow) {
+pub fn show_without_activating(window: &tauri::WebviewWindow) {
     let _ = window.show();
 }
 
@@ -226,9 +226,12 @@ impl WindowCrashes {
     }
 }
 
-/// Listen for the web view's process-failed event on the main window.
+/// Listen for the web view's process-failed event on a window; `on_failed` gets the event's kind.
 #[cfg(windows)]
-fn watch_process_failures(window: &tauri::WebviewWindow, crashes: Arc<WindowCrashes>) {
+pub fn watch_process_failures(
+    window: &tauri::WebviewWindow,
+    on_failed: impl Fn(&AppHandle, i32) + Send + 'static,
+) {
     use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND;
     use webview2_com::ProcessFailedEventHandler;
     let app = window.app_handle().clone();
@@ -243,7 +246,7 @@ fn watch_process_failures(window: &tauri::WebviewWindow, crashes: Arc<WindowCras
                 if let Some(args) = args {
                     let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND(0);
                     if args.ProcessFailedKind(&mut kind).is_ok() {
-                        crashes.on_failed(&app, kind.0);
+                        on_failed(&app, kind.0);
                     }
                 }
                 Ok(())
@@ -260,14 +263,19 @@ fn watch_process_failures(window: &tauri::WebviewWindow, crashes: Arc<WindowCras
 }
 
 #[cfg(not(windows))]
-fn watch_process_failures(_window: &tauri::WebviewWindow, _crashes: Arc<WindowCrashes>) {}
+pub fn watch_process_failures(
+    _window: &tauri::WebviewWindow,
+    _on_failed: impl Fn(&AppHandle, i32) + Send + 'static,
+) {
+}
 
 /// Answer the web view's permission requests itself. The microphone (dictation) is allowed for
-/// Helm's own page only, never for a page in a frame. The clipboard and autoplay requests are left
-/// to the web view's other handler. Every other kind (camera, location, sensors, notifications,
-/// fonts, files and the rest) is denied: Helm uses none of them.
+/// Helm's own page only, never for a page in a frame, and only in a window that dictates
+/// (`microphone`). The clipboard and autoplay requests are left to the web view's other handler.
+/// Every other kind (camera, location, sensors, notifications, fonts, files and the rest) is
+/// denied: Helm uses none of them.
 #[cfg(windows)]
-fn guard_permissions(window: &tauri::WebviewWindow, debug: bool) {
+pub fn guard_permissions(window: &tauri::WebviewWindow, debug: bool, microphone: bool) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_AUTOPLAY,
         COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
@@ -292,7 +300,9 @@ fn guard_permissions(window: &tauri::WebviewWindow, debug: bool) {
                         COREWEBVIEW2_PERMISSION_KIND_MICROPHONE => {
                             let mut uri = Default::default();
                             args.Uri(&mut uri)?;
-                            if helm_ipc::authority::is_trusted_origin(&take_pwstr(uri), debug) {
+                            if microphone
+                                && helm_ipc::authority::is_trusted_origin(&take_pwstr(uri), debug)
+                            {
                                 COREWEBVIEW2_PERMISSION_STATE_ALLOW
                             } else {
                                 COREWEBVIEW2_PERMISSION_STATE_DENY
@@ -315,7 +325,7 @@ fn guard_permissions(window: &tauri::WebviewWindow, debug: bool) {
 }
 
 #[cfg(not(windows))]
-fn guard_permissions(_window: &tauri::WebviewWindow, _debug: bool) {}
+pub fn guard_permissions(_window: &tauri::WebviewWindow, _debug: bool, _microphone: bool) {}
 
 /// The main window is built in code, not from static config, so its navigation policy can be
 /// attached: only the app origin, `about:srcdoc` and (debug) the dev server; no new
@@ -367,8 +377,9 @@ pub fn build_main_window<M: Manager<tauri::Wry>>(
         let _ = window.set_position(tauri::PhysicalPosition::new(-32000, -32000));
         show_without_activating(&window);
     }
-    watch_process_failures(&window, crashes.clone());
-    guard_permissions(&window, debug);
+    let watcher = crashes.clone();
+    watch_process_failures(&window, move |app, kind| watcher.on_failed(app, kind));
+    guard_permissions(&window, debug, true);
     // Files dragged in from Explorer reach the composer as paths.
     let handle = app.app_handle().clone();
     window.on_window_event(move |e| {

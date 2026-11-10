@@ -3,6 +3,8 @@
 //! A quit request is deferred behind a native confirmation listing running work. On confirm:
 //! emit `quitting` and wait up to 2 s for the UI to report drafts and settings saved; drain workers
 //! for up to 8 s; checkpoint the WAL; then the app exits. Closing the main window only hides it.
+//! A sign-out or shutdown runs the same steps on shorter clocks (0.5 s, then 2.5 s), since the
+//! system stops waiting after a few seconds, and takes over a quit still waiting on its question.
 
 use crate::db::Database;
 use helm_ipc::{AppEvent, EventSink};
@@ -17,6 +19,10 @@ pub const DRAFT_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 pub const WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(8);
 /// An update restart waits longer for the drafts, because it replaces the app afterwards.
 pub const UPDATE_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
+/// A sign-out or shutdown: Windows gives an app a few seconds in all, so the UI and the workers
+/// get shorter windows and the WAL checkpoint still runs inside it.
+pub const SESSION_END_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
+pub const SESSION_END_DRAIN_TIMEOUT: Duration = Duration::from_millis(2500);
 
 /// The worker side of shutdown. [`NoWorkers`] stands in when there are none.
 pub trait WorkerDrain: Send + Sync {
@@ -110,12 +116,26 @@ impl QuitCoordinator {
         let confirmed = tokio::task::spawn_blocking(move || dialogs.confirm("Quit Helm", &message))
             .await
             .unwrap_or(false);
-        if !confirmed {
-            *self.phase.lock().unwrap() = Phase::Idle;
-            return QuitOutcome::Cancelled;
+        {
+            let mut phase = self.phase.lock().unwrap();
+            // A sign-out took over while the question was up: it runs the quit.
+            if *phase != Phase::Confirming {
+                return QuitOutcome::Busy;
+            }
+            if !confirmed {
+                *phase = Phase::Idle;
+                return QuitOutcome::Cancelled;
+            }
         }
-        self.finish_quit(events, workers, db, DRAFT_FLUSH_TIMEOUT, false)
-            .await
+        self.finish_quit(
+            events,
+            workers,
+            db,
+            DRAFT_FLUSH_TIMEOUT,
+            WORKER_DRAIN_TIMEOUT,
+            false,
+        )
+        .await
     }
 
     /// The quit sequence for a restart that installs an update. The user already confirmed in
@@ -131,24 +151,44 @@ impl QuitCoordinator {
         if !self.begin() {
             return QuitOutcome::Busy;
         }
-        self.finish_quit(events, workers, db, UPDATE_FLUSH_TIMEOUT, true)
-            .await
+        self.finish_quit(
+            events,
+            workers,
+            db,
+            UPDATE_FLUSH_TIMEOUT,
+            WORKER_DRAIN_TIMEOUT,
+            true,
+        )
+        .await
     }
 
     /// The quit sequence for a sign-out or shutdown. The system already decided, so there is no
-    /// prompt, and the UI gets its usual short window to save but is never required to answer.
-    /// Chats that were working are noted for a continuation, exactly as in a quit.
+    /// prompt, and the UI is never required to answer. It runs on the short session-end clocks so
+    /// the checkpoint happens before the system stops waiting, and it takes over a quit whose
+    /// question is still up. Chats that were working are noted for a continuation, exactly as in
+    /// a quit.
     pub async fn run_for_session_end(
         &self,
         events: Arc<dyn EventSink>,
         workers: Arc<dyn WorkerDrain>,
         db: Option<Arc<Database>>,
     ) -> QuitOutcome {
-        if !self.begin() {
-            return QuitOutcome::Busy;
+        {
+            let mut phase = self.phase.lock().unwrap();
+            if *phase == Phase::Quitting {
+                return QuitOutcome::Busy;
+            }
+            *phase = Phase::Confirming;
         }
-        self.finish_quit(events, workers, db, DRAFT_FLUSH_TIMEOUT, false)
-            .await
+        self.finish_quit(
+            events,
+            workers,
+            db,
+            SESSION_END_FLUSH_TIMEOUT,
+            SESSION_END_DRAIN_TIMEOUT,
+            false,
+        )
+        .await
     }
 
     /// Back to idle after a quit that was started but cannot go on (the update could not be
@@ -173,6 +213,7 @@ impl QuitCoordinator {
         workers: Arc<dyn WorkerDrain>,
         db: Option<Arc<Database>>,
         flush_timeout: Duration,
+        drain_timeout: Duration,
         require_saved: bool,
     ) -> QuitOutcome {
         let notify = Arc::new(Notify::new());
@@ -186,7 +227,7 @@ impl QuitCoordinator {
             self.abort();
             return QuitOutcome::SaveFailed;
         }
-        let drained = tokio::time::timeout(WORKER_DRAIN_TIMEOUT, workers.drain())
+        let drained = tokio::time::timeout(drain_timeout, workers.drain())
             .await
             .is_ok();
         if let Some(db) = db {
@@ -335,6 +376,39 @@ mod tests {
             q.run_for_session_end(sink, workers, None).await,
             QuitOutcome::Busy
         );
+
+        // Workers that never finish: the session end still ends on its short clocks, inside the
+        // few seconds the system gives, and it takes over a quit whose question is still up.
+        let q = Arc::new(QuitCoordinator::new());
+        let sink = Arc::new(RecordingSink::default());
+        let stuck = Arc::new(SlowWorkers(Duration::from_secs(60), AtomicBool::new(false)));
+        *q.phase.lock().unwrap() = Phase::Confirming;
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            q.run_for_session_end(sink.clone(), stuck.clone(), None)
+                .await,
+            QuitOutcome::Quit {
+                ui_saved: false,
+                drained: false
+            }
+        );
+        assert!(start.elapsed() <= SESSION_END_FLUSH_TIMEOUT + SESSION_END_DRAIN_TIMEOUT);
+        assert_eq!(sink.kinds(), ["quitting"]);
+
+        // The question answered after a session end took over: the quit is not run twice.
+        struct TakenOver(Arc<QuitCoordinator>);
+        impl Dialogs for TakenOver {
+            fn confirm(&self, _: &str, _: &str) -> bool {
+                *self.0.phase.lock().unwrap() = Phase::Quitting;
+                true
+            }
+        }
+        let q = Arc::new(QuitCoordinator::new());
+        let out = q
+            .run(Arc::new(TakenOver(q.clone())), sink.clone(), stuck, None)
+            .await;
+        assert_eq!(out, QuitOutcome::Busy);
+        assert_eq!(sink.kinds(), ["quitting"], "no second quitting event");
     }
 
     #[tokio::test(start_paused = true)]
