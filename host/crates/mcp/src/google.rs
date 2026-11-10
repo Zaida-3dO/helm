@@ -344,6 +344,13 @@ fn accounts_line(profile_dir: &Path) -> Option<String> {
     Some(format!("Accounts: {}", parts.join(", ")))
 }
 
+/// Give the server its callback port. The server reads a plain `PORT` before its own variable, so
+/// one left in the user's environment would move the sign-in page's port: both are set.
+fn set_port(env: &mut BTreeMap<String, String>, port: &str) {
+    env.insert(PORT_ENV.into(), port.to_owned());
+    env.insert("PORT".into(), port.to_owned());
+}
+
 /// Add what only the host knows to a resolved Google server: its folder and port (the user can
 /// still override them with their own environment entries), and the account list for the agent.
 pub fn prepare(profile_dir: &Path, out: &mut ResolvedServer) {
@@ -352,14 +359,12 @@ pub fn prepare(profile_dir: &Path, out: &mut ResolvedServer) {
     out.env
         .entry(CREDENTIALS_ENV.into())
         .or_insert_with(|| dir.to_string_lossy().into_owned());
-    out.env
-        .entry(PORT_ENV.into())
-        .or_insert_with(|| saved_port(profile_dir).to_string());
-    // The server reads a plain `PORT` before its own variable; one left in the user's
-    // environment would move the sign-in page's port, so it is set to the same port.
-    if let Some(port) = out.env.get(PORT_ENV).cloned() {
-        out.env.insert("PORT".into(), port);
-    }
+    let port = out
+        .env
+        .get(PORT_ENV)
+        .cloned()
+        .unwrap_or_else(|| saved_port(profile_dir).to_string());
+    set_port(&mut out.env, &port);
     // The sign-in page is plain http on this computer.
     out.env
         .entry("OAUTHLIB_INSECURE_TRANSPORT".into())
@@ -648,7 +653,7 @@ fn start_sign_in(
         return Err("That account is already added. Remove it first to sign in again.".into());
     }
     if let Some(p) = free_port() {
-        resolved.env.insert(PORT_ENV.into(), p.to_string());
+        set_port(&mut resolved.env, &p.to_string());
     }
     if SIGNING_IN
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)

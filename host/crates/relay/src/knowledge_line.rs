@@ -268,6 +268,14 @@ pub fn start(handle: &tokio::runtime::Handle, ctx: &OpCtx, client: &Arc<Client>)
     ) else {
         return;
     };
+    // Copies set aside by earlier passes are kept for a while, not for ever.
+    let parked_in = profile.dir.clone();
+    handle.spawn_blocking(move || {
+        let removed = helm_skills::sync::prune_conflicts(&parked_in, helm_core::now_ms());
+        if removed > 0 {
+            log::info!("knowledge sync: removed {removed} old parked copies");
+        }
+    });
     let k = KnowledgeLine::new(client.handle());
     client.attach_knowledge(k.clone());
     if let Some(trigger) = ctx.services.get::<helm_skills::sync::Trigger>() {

@@ -91,6 +91,25 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_governor::register_services(services, events);
     helm_localmodels::register_services(services, events);
     helm_relay::register_services(services, events);
+    // Graphics memory is kept free for speech-to-text only once it is set up: a dictation server
+    // saved, or the phone's voice screen used with this PC.
+    if let (Some(local), Some(db), Some(profile)) = (
+        services.get::<helm_localmodels::LocalService>(),
+        services.get::<helm_core::db::Database>(),
+        services.get::<helm_core::profile::Profile>(),
+    ) {
+        let voice_tag = helm_relay::voice::tag_path(&profile.dir);
+        local.set_speech_probe(Arc::new(move || {
+            let dictation = db
+                .snapshot(|tx| {
+                    Ok::<_, helm_core::db::DbError>(
+                        helm_dictation::settings::load(tx).stt_url.is_some(),
+                    )
+                })
+                .unwrap_or(false);
+            dictation || voice_tag.exists()
+        }));
+    }
     // Where chat events reach the service that answers other devices.
     helm_devices::register_services(services, events);
     // The people the hub names become profiles here.

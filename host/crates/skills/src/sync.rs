@@ -389,6 +389,12 @@ pub async fn sync_once(
 
 impl Pass<'_> {
     async fn run(&mut self) -> Result<(), String> {
+        // A first pass (nothing in the book yet: a PC that just joined) takes in what the
+        // household has before it offers anything, so an example this PC just copied in does not
+        // bring back one the household removed.
+        if self.st.cursor == 0 && self.st.files.is_empty() {
+            self.pull().await?;
+        }
         for link in self.links {
             self.push(link).await?;
         }
@@ -546,6 +552,22 @@ impl Pass<'_> {
         Ok(())
     }
 
+    /// A file this book already keeps in `layer` whose path differs from `path` only in letter
+    /// case. Only where the disk ignores case (Windows).
+    fn case_twin(&self, layer: &str, path: &str) -> Option<String> {
+        if !cfg!(windows) {
+            return None;
+        }
+        let prefix = format!("{layer}/");
+        let lower = path.to_lowercase();
+        self.st
+            .files
+            .keys()
+            .filter_map(|k| k.strip_prefix(&prefix))
+            .find(|p| *p != path && p.to_lowercase() == lower)
+            .map(str::to_owned)
+    }
+
     fn apply(&mut self, f: HubFile) {
         let Some(link) = self.links.iter().find(|l| l.hub == f.layer).cloned() else {
             return;
@@ -554,6 +576,15 @@ impl Pass<'_> {
             self.rep
                 .errors
                 .push("The hub sent a file with a name that cannot be used here.".to_owned());
+            return;
+        }
+        // Windows keeps one file for two names that differ only in letter case, so a second such
+        // name from the hub would overwrite (or delete) the first.
+        if let Some(twin) = self.case_twin(&f.layer, &f.path) {
+            self.rep.errors.push(format!(
+                "{} differs from {twin} only in letter case, which this PC cannot keep apart, so it was not written.",
+                f.path
+            ));
             return;
         }
         let root = link.local.root(self.dir);
@@ -583,8 +614,13 @@ impl Pass<'_> {
             None
         };
         let local_sha = local.as_deref().map(helm_core::sha256_hex);
-        // A copy edited since the last pass is set aside before the hub's takes over.
-        let edited = local_sha.is_some() && local_sha != known;
+        // A copy edited since the last pass is set aside before the hub's takes over. An example
+        // exactly as Helm ships it is nobody's edit.
+        let edited = local_sha.is_some()
+            && local_sha != known
+            && !local
+                .as_deref()
+                .is_some_and(|b| crate::examples::is_shipped(&f.path, b));
 
         if f.deleted {
             if let Some(bytes) = &local {
@@ -614,6 +650,16 @@ impl Pass<'_> {
             self.rep
                 .errors
                 .push(format!("{} arrived damaged and was not written.", f.path));
+            return;
+        }
+        // Rules, skills and agents are read by the model as instructions: text that hides
+        // something with invisible or direction-changing characters is refused, as it is when
+        // saved on this PC.
+        if std::str::from_utf8(&body).is_ok_and(helm_core::hidden::hides) {
+            self.rep.errors.push(format!(
+                "{} holds invisible or direction-changing characters and was not written.",
+                f.path
+            ));
             return;
         }
         if local_sha.as_deref() == Some(sha.as_str()) {
@@ -652,6 +698,58 @@ impl Pass<'_> {
                 .push(format!("{} could not be written: {e}", f.path)),
         }
     }
+}
+
+// ---- old parked copies ------------------------------------------------------------------------
+
+/// How long a parked copy is kept before [`prune_conflicts`] removes it.
+pub const CONFLICTS_KEPT_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Remove parked copies older than [`CONFLICTS_KEPT_MS`]: every
+/// `<knowledge>/conflicts/<layer>/<ms>/` folder whose `<ms>` is that old, then any layer folder
+/// left empty. A link (or junction) is never followed: one found there is removed as a link, and
+/// a folder whose name is not a time is left alone. Returns how many folders were removed.
+pub fn prune_conflicts(profile_dir: &Path, now: i64) -> usize {
+    let base = layers::knowledge_dir(profile_dir).join(CONFLICTS);
+    let mut removed = 0;
+    for layer in fs::read_dir(&base).into_iter().flatten().flatten() {
+        let layer_dir = layer.path();
+        let Ok(meta) = fs::symlink_metadata(&layer_dir) else {
+            continue;
+        };
+        if helm_platform::fs::is_link_like(&meta) || !meta.is_dir() {
+            continue;
+        }
+        for parked in fs::read_dir(&layer_dir).into_iter().flatten().flatten() {
+            let at = parked
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<i64>().ok());
+            if at.is_some_and(|at| now - at > CONFLICTS_KEPT_MS) && remove_tree(&parked.path()) {
+                removed += 1;
+            }
+        }
+        // Gone only when empty.
+        let _ = fs::remove_dir(&layer_dir);
+    }
+    removed
+}
+
+/// Remove a folder and what is in it without following a link: a link is removed itself.
+fn remove_tree(p: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(p) else {
+        return false;
+    };
+    if helm_platform::fs::is_link_like(&meta) {
+        return fs::remove_dir(p).is_ok() || fs::remove_file(p).is_ok();
+    }
+    if !meta.is_dir() {
+        return fs::remove_file(p).is_ok();
+    }
+    for e in fs::read_dir(p).into_iter().flatten().flatten() {
+        remove_tree(&e.path());
+    }
+    fs::remove_dir(p).is_ok()
 }
 
 // ---- what wakes the sync ------------------------------------------------------------------------
@@ -887,6 +985,24 @@ mod tests {
         );
         assert_eq!(parked(b), ["# Style\nBe long."]);
         assert!(parked(a).is_empty());
+        // Parked copies go after thirty days, and not before; a folder not named for a time and
+        // the folders around them stay until they are empty.
+        let now = helm_core::now_ms();
+        let odd = layers::knowledge_dir(b)
+            .join(CONFLICTS)
+            .join("everyone")
+            .join("keep");
+        fs::create_dir_all(&odd).unwrap();
+        assert_eq!(prune_conflicts(b, now), 0);
+        assert_eq!(parked(b), ["# Style\nBe long."]);
+        assert_eq!(prune_conflicts(b, now + CONFLICTS_KEPT_MS + 60_000), 1);
+        assert!(parked(b).is_empty() && odd.is_dir());
+        fs::remove_dir(&odd).unwrap();
+        prune_conflicts(b, now);
+        assert!(!layers::knowledge_dir(b)
+            .join(CONFLICTS)
+            .join("everyone")
+            .exists());
         assert_eq!(
             sync_once(b, &link_b, &*hub).await.unwrap(),
             Report::default()
@@ -925,9 +1041,30 @@ mod tests {
         ] {
             hub.inject("everyone", bad, b"nope");
         }
+        // Text hiding something with invisible or direction-changing characters.
+        hub.inject(
+            "everyone",
+            "rules/sneaky.md",
+            "# Sneaky\n\u{202E}evil".as_bytes(),
+        );
+        // A name differing from a kept file's only in letter case: one file on Windows.
+        hub.inject("everyone", "rules/Style.md", b"# Style\nother");
+        let twin = usize::from(cfg!(windows));
         let r = sync_once(b, &link_b, &*hub).await.unwrap();
-        assert_eq!((r.pulled, r.errors.len()), (0, 7), "{:?}", r.errors);
+        assert_eq!(
+            (r.pulled, r.errors.len()),
+            (1 - twin, 8 + twin),
+            "{:?}",
+            r.errors
+        );
         assert!(!layers::knowledge_dir(b).join("escape.md").exists());
+        assert!(read(b, &ev, "rules/sneaky.md").is_none());
+        if cfg!(windows) {
+            assert_eq!(
+                read(b, &ev, "rules/style.md").unwrap(),
+                "# Style\nBe brief, always."
+            );
+        }
 
         // A profile linked later gets the person's earlier files, which the cursor had passed.
         let link_b2 = links(&[
@@ -941,6 +1078,29 @@ mod tests {
             "# Sam\nhi"
         );
         assert_eq!(r.changed, [Layer::Profile("pc".into())]);
+
+        // A PC that joins later, with the examples freshly copied in, does not bring back one the
+        // household removed, and sets nothing aside for it.
+        let coder = crate::examples::AGENTS
+            .iter()
+            .find(|(n, _)| *n == "coder")
+            .unwrap()
+            .1;
+        write(a, &ev, "agents/coder.md", coder);
+        sync_once(a, &link_a, &*hub).await.unwrap();
+        fs::remove_file(ev.root(a).join("agents/coder.md")).unwrap();
+        sync_once(a, &link_a, &*hub).await.unwrap();
+        let c = tempfile::tempdir().unwrap();
+        let c = c.path();
+        crate::examples::seed(c);
+        assert!(read(c, &ev, "agents/coder.md").is_some());
+        let r = sync_once(c, &links(&[]), &*hub).await.unwrap();
+        assert!(read(c, &ev, "agents/coder.md").is_none(), "{r:?}");
+        assert!(!hub.has("everyone", "agents/coder.md"));
+        assert!(parked(c).is_empty());
+        assert!(
+            read(c, &ev, "agents/planner.md").is_some() && hub.has("everyone", "agents/planner.md")
+        );
     }
 
     #[test]

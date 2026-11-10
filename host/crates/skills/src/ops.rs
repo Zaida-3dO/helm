@@ -579,7 +579,16 @@ fn knowledge_memory_move(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
     let to = layer_of(Some(&a.to))?;
     let hub = memory_hub(ctx)?;
     let (to_person, linked) = memory_people(ctx, &to)?;
-    memories::move_to(&hub, id, &to, to_person.as_deref(), &linked).map_err(memory_error)?;
+    let (home, _) = memory_people(ctx, &Layer::Everyone)?;
+    memories::move_to(
+        &hub,
+        id,
+        &to,
+        to_person.as_deref(),
+        home.as_deref(),
+        &linked,
+    )
+    .map_err(memory_error)?;
     Ok(json!({ "moved": id.to_string() }))
 }
 

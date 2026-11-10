@@ -172,7 +172,17 @@ fn load_rules(root: &Path) -> Vec<Loaded> {
     rules::list_with_text(root)
         .into_iter()
         .filter_map(|(entry, text)| {
-            let body = rules::body_of(&text?);
+            let text = text?;
+            // A rule is read by the model as instructions: one that hides text with invisible or
+            // direction-changing characters (from the hub, or put there by hand) is left out.
+            if helm_core::hidden::hides(&text) || helm_core::hidden::hides(&entry.title) {
+                log::warn!(
+                    "rules: {} holds hidden characters and was left out",
+                    entry.path
+                );
+                return None;
+            }
+            let body = rules::body_of(&text);
             (!body.is_empty()).then(|| Loaded {
                 file: rules::rules_dir(root).join(entry.path.trim_start_matches("rules/")),
                 entry,

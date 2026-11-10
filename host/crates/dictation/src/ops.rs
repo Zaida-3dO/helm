@@ -139,27 +139,42 @@ pub(crate) fn set(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
         s.stt_url =
             Some(settings::check_stt_url(u, s.allow_private_network).map_err(ApiError::bad_args)?);
     }
-    if let Some(gb) = a.speech_reserve_gb {
-        if !(local::MIN_SPEECH_RESERVE_GB..=local::MAX_SPEECH_RESERVE_GB).contains(&gb) {
-            return Err(ApiError::bad_args(format!(
-                "The memory kept for speech must be a whole number of GB from {} to {}.",
-                local::MIN_SPEECH_RESERVE_GB,
-                local::MAX_SPEECH_RESERVE_GB
-            )));
+    // Everything is checked before anything is written, and the dictation record goes first: the
+    // reserve is the local models' setting, saved after it.
+    let reserve = match a.speech_reserve_gb {
+        Some(gb) => {
+            if !(local::MIN_SPEECH_RESERVE_GB..=local::MAX_SPEECH_RESERVE_GB).contains(&gb) {
+                return Err(ApiError::bad_args(format!(
+                    "The memory kept for speech must be a whole number of GB from {} to {}.",
+                    local::MIN_SPEECH_RESERVE_GB,
+                    local::MAX_SPEECH_RESERVE_GB
+                )));
+            }
+            let Some(svc) = ctx.services.get::<LocalService>() else {
+                return Err(ApiError::bad_args(
+                    "The memory kept for speech is a local model setting, and local models are not available here.",
+                ));
+            };
+            Some((svc, gb))
         }
-        let Some(svc) = ctx.services.get::<LocalService>() else {
-            return Err(ApiError::bad_args(
-                "The memory kept for speech is a local model setting, and local models are not available here.",
-            ));
-        };
-        svc.save(&local::Changes {
-            speech_reserve_gb: Some(gb),
-            ..Default::default()
-        })
-        .map_err(|m| ApiError::new("refused", m))?;
-    }
+        None => None,
+    };
     db.write(|tx| settings::save(tx, &s))
         .map_err(|_| ApiError::internal("The dictation settings could not be saved."))?;
+    if let Some((svc, gb)) = reserve {
+        let saved = svc.save(&local::Changes {
+            speech_reserve_gb: Some(gb),
+            ..Default::default()
+        });
+        if let Err(m) = saved {
+            // The rest is saved: say so, so the page re-reads instead of trusting its own copy.
+            ctx.events.emit(AppEvent::new(EVENT));
+            return Err(ApiError::new(
+                "refused",
+                format!("The other dictation settings were saved, but not the memory kept for speech: {m}"),
+            ));
+        }
+    }
     ctx.events.emit(AppEvent::new(EVENT));
     to_value(&view(ctx, &s))
 }

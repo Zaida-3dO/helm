@@ -46,6 +46,17 @@ pub const SKILLS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Whether `rel` (a path inside a layer, like `agents/coder.md`) holds exactly the text Helm ships
+/// for that example: a copy nobody has changed, which the household's own copy may replace.
+pub fn is_shipped(rel: &str, bytes: &[u8]) -> bool {
+    AGENTS
+        .iter()
+        .any(|(n, t)| rel == format!("agents/{n}.md") && t.as_bytes() == bytes)
+        || SKILLS
+            .iter()
+            .any(|(n, t)| rel == format!("skills/{n}/SKILL.md") && t.as_bytes() == bytes)
+}
+
 fn record_path(profile: &Path) -> std::path::PathBuf {
     profile.join("examples-offered.json")
 }

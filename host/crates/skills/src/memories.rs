@@ -9,7 +9,9 @@
 //! - a profile's layer is listed as that profile's person, and shows what they keep private;
 //! - a memory is moved by its owner, who is found by trying each linked person in turn. A memory
 //!   stays with the person who wrote it, so it can go to Everyone or to its owner's own layer,
-//!   never into someone else's.
+//!   never into someone else's. Only the person this Helm belongs to (the home profile's person)
+//!   may share a private memory with Everyone from here: another person's private memory is
+//!   theirs to share, from their own Helm, even though this PC can act for them.
 //!
 //! The hub is reached through [`MemoryHub`]; the production one calls the connected `helm_hub`
 //! server ([`HubMemory`]).
@@ -119,14 +121,15 @@ pub fn list(
         .collect())
 }
 
-/// Move memory `id` to `to`. `to_person` is the hub person of the target profile layer; `persons`
-/// are every linked person, the one this Helm belongs to first (empty when none is linked, and
-/// the call then acts as this machine's own person).
+/// Move memory `id` to `to`. `to_person` is the hub person of the target profile layer; `home` is
+/// the home profile's person; `persons` are every linked person, the one this Helm belongs to
+/// first (empty when none is linked, and the call then acts as this machine's own person).
 pub fn move_to(
     hub: &dyn MemoryHub,
     id: i64,
     to: &Layer,
     to_person: Option<&str>,
+    home: Option<&str>,
     persons: &[String],
 ) -> Result<(), MemError> {
     let actors: Vec<Option<&str>> = if persons.is_empty() {
@@ -152,6 +155,13 @@ pub fn move_to(
         ));
     };
     let scope = match to {
+        // With nobody linked the owner is this machine's own person.
+        Layer::Everyone if owner.is_some() && owner != home => {
+            return Err(MemError::Refused(
+                "Only the person who wrote a private memory can share it with everyone; they can do that from their own Helm."
+                    .to_owned(),
+            ));
+        }
         Layer::Everyone => "everyone",
         Layer::Profile(_) => {
             if to_person.is_none() || to_person != owner {
@@ -251,23 +261,31 @@ mod tests {
             .is_empty());
 
         let persons = ["3".to_owned(), "7".to_owned()];
-        // Sam's private diary goes to Everyone (found through Sam's own person), then back.
-        move_to(&hub, 4, &ev, None, &persons).unwrap();
-        assert_eq!(ids(list(&hub, &ev, Some("3")).unwrap()), [1, 2, 4]);
-        move_to(&hub, 4, &sam, Some("7"), &persons).unwrap();
-        assert_eq!(ids(list(&hub, &sam, Some("7")).unwrap()), [4]);
+        let me = Some("3");
+        // The home person's private diary goes to Everyone, then back.
+        move_to(&hub, 3, &ev, None, me, &persons).unwrap();
+        assert_eq!(ids(list(&hub, &ev, Some("3")).unwrap()), [1, 2, 3]);
+        move_to(&hub, 3, &home, Some("3"), me, &persons).unwrap();
+        assert_eq!(ids(list(&hub, &home, Some("3")).unwrap()), [3]);
+        // Sam's private diary is Sam's to share: found through Sam's person, and still refused.
+        let e = move_to(&hub, 4, &ev, None, me, &persons).unwrap_err();
+        assert!(
+            matches!(e, MemError::Refused(ref m) if m.contains("their own Helm")),
+            "{e:?}"
+        );
+        assert_eq!(ids(list(&hub, &ev, Some("3")).unwrap()), [1, 2]);
         // A shared memory goes into its owner's layer, not into someone else's.
-        move_to(&hub, 2, &sam, Some("7"), &persons).unwrap();
+        move_to(&hub, 2, &sam, Some("7"), me, &persons).unwrap();
         for (id, to, person) in [(1, &sam, Some("7")), (2, &home, Some("3")), (3, &sam, None)] {
-            let e = move_to(&hub, id, to, person, &persons).unwrap_err();
+            let e = move_to(&hub, id, to, person, me, &persons).unwrap_err();
             assert!(matches!(e, MemError::Refused(_)), "{id}: {e:?}");
         }
         assert!(matches!(
-            move_to(&hub, 99, &ev, None, &persons),
+            move_to(&hub, 99, &ev, None, me, &persons),
             Err(MemError::Refused(_))
         ));
         // With nothing linked the call acts as the machine's own person.
-        move_to(&hub, 1, &ev, None, &[]).unwrap();
+        move_to(&hub, 1, &ev, None, None, &[]).unwrap();
 
         let down = Fake {
             down: true,
@@ -278,7 +296,7 @@ mod tests {
             Err(MemError::Unavailable(_))
         ));
         assert!(matches!(
-            move_to(&down, 1, &ev, None, &persons),
+            move_to(&down, 1, &ev, None, None, &persons),
             Err(MemError::Unavailable(_))
         ));
     }

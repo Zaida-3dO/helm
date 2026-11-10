@@ -957,12 +957,32 @@ fn room_is_kept_for_speech_and_made_on_request() {
             .unwrap();
     };
 
-    // 1. The reserve is part of what a load asks for. The model needs 6 GB and 7 are free:
-    //    with no reserve it just loads; with the default 2 GB, Strata's idle model goes first.
-    reserve(0);
-    r.free.store(7 * GB, Ordering::SeqCst);
-    r.svc.prepare(&turn("ollama", "big:7b"), &nothing).unwrap();
-    assert_eq!(s.calls("POST", "/unload").len(), 0);
+    // 1. The reserve is part of what a load asks for, once speech-to-text is set up. The model
+    //    needs 6 GB and 7 are free: with no reserve, or with speech not set up, it just loads;
+    //    with the default 2 GB and speech set up, Strata's idle model goes first.
+    let speech = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe = speech.clone();
+    r.svc
+        .set_speech_probe(Arc::new(move || probe.load(Ordering::SeqCst)));
+    for (gb, set_up) in [(0, true), (2, false)] {
+        reserve(gb);
+        speech.store(set_up, Ordering::SeqCst);
+        ollama.lock().unwrap().loaded.clear();
+        r.free.store(7 * GB, Ordering::SeqCst);
+        r.svc.prepare(&turn("ollama", "big:7b"), &nothing).unwrap();
+        assert_eq!(
+            s.calls("POST", "/unload").len(),
+            0,
+            "{gb} GB, set up {set_up}"
+        );
+    }
+    r.free.store(GB, Ordering::SeqCst);
+    assert!(
+        !r.svc.speech_room_short(),
+        "no reserve while speech is not set up"
+    );
+    speech.store(true, Ordering::SeqCst);
+    assert!(r.svc.speech_room_short());
     reserve(2);
     ollama.lock().unwrap().loaded.clear();
     r.free.store(7 * GB, Ordering::SeqCst);

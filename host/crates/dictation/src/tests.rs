@@ -284,6 +284,8 @@ impl Env {
                 start_poll: Duration::from_millis(10),
             }),
         );
+        // Speech-to-text is set up in these tests, so the speech reserve counts.
+        models.set_speech_probe(Arc::new(|| true));
         // No model server is configured until a test points one at a stand-in.
         models
             .save(&Changes {

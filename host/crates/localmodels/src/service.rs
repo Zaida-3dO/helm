@@ -167,7 +167,13 @@ pub struct LocalService {
     /// One server is started at a time; anyone else who needs it waits on this and then finds it
     /// already answering.
     starting: Mutex<()>,
+    /// Whether speech-to-text is set up on this PC (dictation, or the phone's voice line). The
+    /// speech reserve is kept only then; without it no reserve is kept.
+    speech_in_use: Mutex<Option<SpeechProbe>>,
 }
+
+/// Tells the service whether speech-to-text is set up, so the speech reserve is worth keeping.
+pub type SpeechProbe = Arc<dyn Fn() -> bool + Send + Sync>;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -195,6 +201,24 @@ impl LocalService {
             loading: Mutex::new(()),
             starter: None,
             starting: Mutex::new(()),
+            speech_in_use: Mutex::new(None),
+        }
+    }
+
+    /// Say how to tell whether speech-to-text is set up. Until this is called, and whenever it
+    /// answers no, the speech reserve is 0: a PC that never dictates gives up no memory for it.
+    pub fn set_speech_probe(&self, probe: SpeechProbe) {
+        *lock(&self.speech_in_use) = Some(probe);
+    }
+
+    /// The memory kept free for speech now: the saved reserve once speech-to-text is set up,
+    /// else nothing.
+    fn speech_reserve(&self, st: &LocalSettings) -> u64 {
+        let probe = lock(&self.speech_in_use).clone();
+        if probe.is_some_and(|p| p()) {
+            u64::from(st.speech_reserve_gb) * GB
+        } else {
+            0
         }
     }
 
@@ -868,7 +892,7 @@ impl LocalService {
         let Some(free) = self.gpu.free_bytes() else {
             return Ok(()); // no figure: the server decides, as it would without Helm
         };
-        let with_reserve = need + u64::from(st.speech_reserve_gb) * GB;
+        let with_reserve = need + self.speech_reserve(st);
         if with_reserve <= free {
             return Ok(());
         }
@@ -899,10 +923,11 @@ impl LocalService {
     }
 
     /// Whether the graphics memory free now is below the speech reserve, so that speech-to-text
-    /// would have to squeeze in beside a local model. False when the reserve is 0 or the figure
-    /// can't be told (no NVIDIA card). Reads the card only; no model server is contacted.
+    /// would have to squeeze in beside a local model. False when the reserve is 0 (or speech is
+    /// not set up) or the figure can't be told (no NVIDIA card). Reads the card only; no model
+    /// server is contacted.
     pub fn speech_room_short(&self) -> bool {
-        let reserve = u64::from(self.settings().speech_reserve_gb) * GB;
+        let reserve = self.speech_reserve(&self.settings());
         reserve > 0 && self.gpu.free_bytes().is_some_and(|f| f < reserve)
     }
 
