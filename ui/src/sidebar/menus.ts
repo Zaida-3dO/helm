@@ -22,6 +22,8 @@ export interface ChatMenuActions {
   /** Write the chat to a Markdown file under Documents (the `chat_export_markdown` op). */
   exportMarkdown(): void;
   moveTo(projectId: string): void;
+  /** Label the chat with a profile (the `profiles_assign_chats` op). */
+  moveToProfile?(profileId: string): void;
   nestUnder(chatId: string): void;
   topLevel(): void;
   toggleChildren(): void;
@@ -46,6 +48,8 @@ export interface ChatMenuInput {
   depthOf: (chatId: string) => number;
   expanded: boolean;
   view: 'projects' | 'activity' | 'archived';
+  /** The profiles to move the chat between, current one marked; empty or absent: no entry. */
+  profiles?: { id: string; name: string; current: boolean }[];
 }
 
 /** Valid "Nest under…" targets: same group and archived state, not itself or its descendants, and
@@ -105,6 +109,14 @@ export function chatMenuItems(i: ChatMenuInput, a: ChatMenuActions): MenuItem[] 
         })),
     },
   ];
+  if (a.moveToProfile && i.profiles && i.profiles.length > 1) {
+    const moveToProfile = a.moveToProfile;
+    items.push({
+      id: 'profile',
+      label: 'Move to profile',
+      submenu: i.profiles.map((p) => ({ id: `profile:${p.id}`, label: p.name, checked: p.current, disabled: p.current, onSelect: () => moveToProfile(p.id) })),
+    });
+  }
   if (i.view !== 'activity') {
     const targets = nestTargets(i);
     items.push({

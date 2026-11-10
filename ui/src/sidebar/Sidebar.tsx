@@ -16,6 +16,8 @@ import { SEARCH_DIALOG } from '../search/index.ts';
 import { AttentionInbox, inboxRows, nextAttention } from '../attention/index.ts';
 import { SchedulesEntry } from '../schedules/SchedulesEntry.tsx';
 import { TasksEntry } from '../tasks/TasksEntry.tsx';
+import { PagesEntry } from '../pages/PagesEntry.tsx';
+import { HouseholdSection, ProfileChip, moveChatToProfile, profileChoices, rowsForProfile, useProfiles } from '../profiles/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, ConfirmDialog, ContextMenu, Dialog, TextInput, useBinding, type ConfirmSpec, type MenuItem } from '../ui/index.ts';
 import { SidebarActions, compactChat, exportChatMarkdown, rollOverChat, rollOverConfirm } from './actions.ts';
@@ -112,6 +114,13 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const pops = useMemo(() => projectOps(api), [api]);
   const data = useMemo(() => new SidebarData(pops), [pops]);
   const snap = useSyncExternalStore(data.subscribe, data.getSnapshot);
+  const { store: profileStore, snap: prof } = useProfiles(api, bus);
+  // The profile choice filters the chats drawn; the sidebar's data keeps every row it has loaded.
+  const activeProfile = prof.view?.activeId ?? null;
+  const shownRows = useMemo(
+    () => rowsForProfile(snap.rows, activeProfile, prof.view?.homeId ?? null, prof.labels) as SidebarRow[],
+    [snap.rows, activeProfile, prof.view?.homeId, prof.labels],
+  );
   const [view, setView] = useState<SidebarView>('projects');
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -203,7 +212,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const flaggedIds = useMemo(() => new Set([...snap.needsYou, ...snap.flagged.keys()]), [snap.needsYou, snap.flagged]);
   const items = useMemo(
     () =>
-      buildList(snap.projects, snap.rows, {
+      buildList(snap.projects, shownRows, {
         view,
         compact,
         expandedChats: expanded,
@@ -213,7 +222,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         closed: snap.closed,
         itemLinks: view === 'activity' ? undefined : { refs: itemRefs, collapsed: collapsedItems },
       }),
-    [snap.projects, snap.rows, view, compact, expanded, selected, keptShut, flaggedIds, snap.closed, itemRefs, collapsedItems],
+    [snap.projects, shownRows, view, compact, expanded, selected, keptShut, flaggedIds, snap.closed, itemRefs, collapsedItems],
   );
   useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
   const projectsById = useMemo(() => new Map(snap.projects.map((p) => [p.id, p])), [snap.projects]);
@@ -280,7 +289,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       return kids.length === 0 ? 0 : 1 + Math.max(...kids.map((k) => heightOf(k.chatId)));
     };
     const items = withChatIcons(chatMenuItems(
-      { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view },
+      { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view, profiles: profileChoices(prof, row.chatId, snap.rows) },
       {
         fork: () => void act.fork(row),
         rename: () => promptRename(row),
@@ -289,6 +298,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         cost: () => setCost({ chatId: row.chatId }),
         exportMarkdown: () => void exportChatMarkdown(api, row.chatId, setError),
         moveTo: (id) => void act.moveTo(row, id),
+        moveToProfile: (id) => moveChatToProfile(profileStore, row.chatId, id, setError),
         nestUnder: (id) => {
           userCollapsed.current.delete(id);
           setExpanded((s) => new Set(s).add(id));
@@ -622,7 +632,9 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           </button>
         )}
       </div>
+      <HouseholdSection api={api} bus={bus} />
       <div className="sb-footer">
+        <ProfileChip api={api} bus={bus} />
         <button
           type="button"
           className="sb-foot"
@@ -633,6 +645,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           <span>{view === 'archived' ? 'Back to projects' : 'Archived chats'}</span>
         </button>
         <TasksEntry api={api} bus={bus} />
+        <PagesEntry api={api} bus={bus} profileId={activeProfile} />
         {openSettings && <SchedulesEntry api={api} bus={bus} openSettings={openSettings} onOpenChat={onSelect} />}
         {openSettings && (
           <button type="button" className="sb-foot" onClick={openSettings}>

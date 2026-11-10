@@ -1,13 +1,19 @@
 // The dev fake host's hub ops (Settings → Hub in a plain browser): a connection that goes
 // "connecting" then "connected" once an address and token are saved, and a Telegram chat with
-// the default limits. Dev builds only.
+// the default limits. Pairing with the code ABCD2345 works. Dev builds only.
 
 import { ApiError } from '../api/client.ts';
 import type { HubConnection, TelegramSettings } from '../api/hub.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
 
+/** `?household=` in the page URL starts the fake already paired to a hub (see fake-profiles.ts). */
+export function pairedAtStart(): boolean {
+  return typeof location !== 'undefined' && new URLSearchParams(location.search).has('household');
+}
+
 export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
-  const set = { lanUrl: false, fallbackUrl: false, token: false };
+  const set = { lanUrl: pairedAtStart(), fallbackUrl: false, token: pairedAtStart() };
+  let who: { personName: string; machineName: string } | null = pairedAtStart() ? { personName: 'Alex', machineName: 'Desk PC' } : null;
   let since = 0;
   const tg: TelegramSettings = { chat: null, maxAgeHours: 24, maxTokens: 400_000, awayAlerts: true, approvals: false, model: null, effort: null };
   const view = (): HubConnection => ({
@@ -15,6 +21,8 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
     hasFallback: set.fallbackUrl,
     hasToken: set.token,
     state: !(set.lanUrl || set.fallbackUrl) || !set.token ? 'off' : Date.now() - since < 3000 ? 'connecting' : 'online',
+    personName: who?.personName ?? null,
+    machineName: who?.machineName ?? null,
   });
   const handler: FakeOpHandler = (op, a, ctx) => {
     switch (op) {
@@ -29,6 +37,18 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         }
         since = Date.now();
         return view();
+      case 'hub_pair': {
+        const address = String(a.address ?? '').trim();
+        if (!/^(ws|http):\/\//.test(address)) throw new ApiError('bad_args', 'The hub address must start with ws:// or http://.');
+        if (String(a.code ?? '').trim().toUpperCase() !== 'ABCD2345') throw new ApiError('bad_args', 'That pairing code is not valid, or it has run out. Ask for a new one.');
+        set.lanUrl = true;
+        set.fallbackUrl = typeof a.fallback === 'string' && a.fallback.trim() !== '';
+        set.token = true;
+        since = Date.now();
+        who = { personName: 'Alex', machineName: 'Desk PC' };
+        ctx.emit({ kind: 'profiles_changed' });
+        return { connection: view(), personId: 'p-self', personName: who.personName, machineId: 'm1', machineName: who.machineName, memoryServer: 'hub-memory', profileId: 'prof-home' };
+      }
       case 'relay_telegram_get':
         if (!tg.chat) {
           const first = (ctx.call('chat_list', {}) as { id: string; title: string }[])[0];
@@ -51,5 +71,5 @@ export function hubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         throw new ApiError('unknown_op', op);
     }
   };
-  return { prefixes: ['relay_'], handler };
+  return { prefixes: ['relay_', 'hub_pair'], handler };
 }

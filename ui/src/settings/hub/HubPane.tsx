@@ -11,6 +11,7 @@ import { Button, Checkbox, Picker, SettingRow, TextInput } from '../../ui/index.
 import { SETTINGS_DIALOG } from '../SettingsDialog.tsx';
 import { EFFORT_OPTIONS } from '../runtime/model.ts';
 import { compactCount } from '../../transcript/rowMeta.ts';
+import { HubPairing } from './HubPairing.tsx';
 import './hub.css';
 
 /** How often the pane re-reads the line's state while it is open. */
@@ -195,6 +196,8 @@ export function HubPane() {
           Save
         </Button>
       </div>
+
+      <HubPairing />
 
       <h3 className="hub-heading">Telegram</h3>
       <SettingRow

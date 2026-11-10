@@ -185,3 +185,16 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 | `page-network-notice` / `page-network-hint` / `page-runtime-error` | The notice while the network is on, the hint after an offline page tried the network, and the dismissible script-error strip | |
 | `page-handoff` / `page-handoff-text` / `page-handoff-send` / `page-handoff-add` / `page-handoff-cancel` / `page-handoff-open` / `page-handoff-url` | Helm's confirmation for a page's message or link: the dialog, the editable text, Send to agent, Add to message, Cancel, Open link and the address | |
 | `run-page` | The file tab's "Run page" button, shown for an HTML file | |
+
+## Profiles and the household
+
+| Hook | Element | Attributes |
+|---|---|---|
+| `profile-chip` / `profile-chip-text` / `profile-menu` | The sidebar footer's profile chip, its words ("Name · Plan", the name, or "All profiles"), and the switcher menu | |
+| `profile-first-run` / `profile-first-name` / `profile-first-save` | The inline "Who uses this Helm?" form shown in place of the chip until a profile exists | |
+| `profile-view` / `profile-view-name` / `profile-view-counts` / `profile-view-show` / `profile-view-manage` | The profile view dialog, its name and counts lines, "Show this profile" and "Manage profiles…" | |
+| `household` / `household-group` / `household-chat` | The sidebar's household block, one computer's group in it, and one shared chat row | `household-group`: `data-offline` while the computer is off |
+| `remote-chat` / `remote-chat-banner` / `remote-chat-messages` / `remote-chat-earlier` / `remote-chat-error` / `remote-chat-send` | The read-only remote chat dialog, its "On <computer>. Read only." banner, the messages, Load earlier messages, an error line, and the message box (only when household messages are allowed) | |
+| `settings-profiles` / `profile-row-<id>` / `profile-name` / `profile-link` / `profile-delete` / `profile-new-name` / `profile-add` / `profiles-error` | Settings → Profiles: the pane, one profile's row and its name, hub-person picker and Delete, the add field and button, and the error line | |
+| `hub-pairing` / `hub-pair-address` / `hub-pair-fallback` / `hub-pair-code` / `hub-pair` / `hub-paired` / `hub-pair-error` | Settings → Hub → Pair with a code: the block, its three fields, the Pair button, the "Connected as … on …" row and the error line | |
+| `household-switches` / `household-chats-box` / `household-transcripts-box` / `household-messages-box` | The three household switches (Settings → Hub, and the home profile's view) | |

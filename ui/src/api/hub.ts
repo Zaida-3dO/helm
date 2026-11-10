@@ -11,6 +11,20 @@ export interface HubConnection {
   hasFallback: boolean;
   hasToken: boolean;
   state: LineState;
+  /** Who this PC is paired as, once it has paired with a code. */
+  personName?: string | null;
+  machineName?: string | null;
+}
+
+/** What pairing with a code answered: who this PC now is on the hub. */
+export interface HubPairResult {
+  connection: HubConnection;
+  personId: string;
+  personName: string;
+  machineId: string;
+  machineName: string;
+  memoryServer: string;
+  profileId: string;
 }
 
 /** Each field absent keeps the stored value; an empty string clears it. */
@@ -47,6 +61,8 @@ export interface TelegramSettings {
 export function hubOps(api: Api) {
   return {
     connection: () => api<HubConnection>('relay_connection_get', {}),
+    /** Trade a one-time code for this PC's token; sets up the line and the memory server. */
+    pair: (a: { address: string; fallback?: string; code: string }) => api<HubPairResult>('hub_pair', a),
     saveConnection: (a: HubConnectionSave) => api<HubConnection>('relay_connection_save', a),
     telegram: () => api<TelegramSettings>('relay_telegram_get', {}),
     saveTelegram: (

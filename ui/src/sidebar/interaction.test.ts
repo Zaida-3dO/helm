@@ -113,6 +113,16 @@ test('nest targets exclude itself, its descendants, its parent, other groups and
 test('the chat menu follows state: archive or restore and delete, stop first while busy', () => {
   const ids = (r: SidebarRow) => chatMenuItems({ row: r, projects: [project('g')], siblings: [r], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'projects' }, chatActs).map((i) => i.id);
   assert.ok(ids(row('a')).includes('archive'));
+  // Move to profile: only with two profiles to choose between and an action to run; the current one is ticked and cannot be picked.
+  const withProfiles = (profiles: { id: string; name: string; current: boolean }[] | undefined, moved: string[] = []) =>
+    chatMenuItems({ row: row('a'), projects: [project('g')], siblings: [row('a')], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'projects', profiles }, { ...chatActs, moveToProfile: (id) => void moved.push(id) }).find((i) => i.id === 'profile');
+  assert.equal(withProfiles(undefined), undefined);
+  assert.equal(withProfiles([{ id: 'p1', name: 'One', current: true }]), undefined);
+  const moved: string[] = [];
+  const pm = withProfiles([{ id: 'p1', name: 'One', current: true }, { id: 'p2', name: 'Two', current: false }], moved);
+  assert.deepEqual(pm?.submenu?.map((i) => [i.id, i.checked, i.disabled]), [['profile:p1', true, true], ['profile:p2', false, false]]);
+  pm?.submenu?.[1]?.onSelect?.();
+  assert.deepEqual(moved, ['p2']);
   // Cost is there for every chat, archived or busy too.
   assert.ok(ids(row('a', { archived: true })).includes('cost') && ids(row('a', { status: 'running' })).includes('cost'));
   // Compact context: offered on an idle chat, not while it runs or once archived.
