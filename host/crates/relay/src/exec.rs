@@ -4,7 +4,7 @@
 //!   `app_list_attention`, `app_stop_chat`, and `app_make_room_for_speech`, which unloads idle
 //!   local models before the hub transcribes) go through Helm's own host-tool dispatcher as a
 //!   **restricted** caller named `external:<client>`: the restricted gate is default-deny and
-//!   lists only these six, and the dispatcher re-checks sizes, timeouts and the result limit.
+//!   lists only the vetted tools, and the dispatcher re-checks sizes, timeouts and the result limit.
 //! - **`app_send_message`** is Helm's own send with the gate's frame ("sent by another agent,
 //!   not approval"), origin `other_chat`, like any cross-chat message. The caller cannot
 //!   word the frame. Sends are rate-limited per outside caller.
