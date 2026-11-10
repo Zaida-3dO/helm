@@ -334,6 +334,9 @@ fn run_app(
             if let Some(trigger) = services.get::<helm_skills::sync::Trigger>() {
                 tapped.attach_knowledge(trigger);
             }
+            if let Some(cell) = services.get::<helm_mcp::lines::ServicesCell>() {
+                tapped.attach_mcp(cell);
+            }
             let ctx = OpCtx {
                 services: Arc::new(services),
                 events,

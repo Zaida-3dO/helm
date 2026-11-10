@@ -252,11 +252,22 @@ impl McpStore {
         env: &dyn Fn(&str) -> Option<String>,
         person: Option<&str>,
     ) -> Result<(String, Vec<ResolvedServer>), StoreError> {
+        self.resolve_enabled_where(env, person, false)
+    }
+
+    /// As [`McpStore::resolve_enabled_for`], leaving out the servers that send the chat's person
+    /// when `without_chat_person` is set (a chat whose profile is linked to no one on the hub).
+    pub fn resolve_enabled_where(
+        &self,
+        env: &dyn Fn(&str) -> Option<String>,
+        person: Option<&str>,
+        without_chat_person: bool,
+    ) -> Result<(String, Vec<ResolvedServer>), StoreError> {
         let servers = self.load()?;
         let revision = revision_of(&servers);
         let resolved = servers
             .iter()
-            .filter(|s| s.enabled)
+            .filter(|s| s.enabled && !(without_chat_person && sends_chat_person(s)))
             .map(|s| self.resolve_one(s, env, person))
             .collect();
         Ok((revision, resolved))

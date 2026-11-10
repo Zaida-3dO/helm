@@ -52,6 +52,7 @@ pub struct TappedEvents {
     voice: OnceLock<Arc<helm_relay::voice_watch::VoiceWatch>>,
     devices: OnceLock<Arc<helm_devices::EventTap>>,
     knowledge: OnceLock<Arc<helm_skills::sync::Trigger>>,
+    mcp: OnceLock<Arc<helm_mcp::lines::ServicesCell>>,
 }
 
 impl TappedEvents {
@@ -62,6 +63,7 @@ impl TappedEvents {
             voice: OnceLock::new(),
             devices: OnceLock::new(),
             knowledge: OnceLock::new(),
+            mcp: OnceLock::new(),
         }
     }
 
@@ -77,6 +79,11 @@ impl TappedEvents {
     /// Other devices that watch this PC's chats hear chat events too.
     pub fn attach_devices(&self, tap: Arc<helm_devices::EventTap>) {
         let _ = self.devices.set(tap);
+    }
+
+    /// The MCP master switch reaches the running chats at once.
+    pub fn attach_mcp(&self, cell: Arc<helm_mcp::lines::ServicesCell>) {
+        let _ = self.mcp.set(cell);
     }
 
     /// A change to a knowledge layer wakes the knowledge sync.
@@ -100,6 +107,17 @@ impl EventSink for TappedEvents {
         }
         if let Some(k) = self.knowledge.get() {
             k.observe(&event);
+        }
+        if let Some(m) = self.mcp.get() {
+            let master = event.kind == "preferences"
+                && event
+                    .fields
+                    .get("changed")
+                    .and_then(|c| c.as_object())
+                    .is_some_and(|c| c.contains_key("mcpEnabled"));
+            if master {
+                m.broadcast();
+            }
         }
         self.inner.emit(event);
     }

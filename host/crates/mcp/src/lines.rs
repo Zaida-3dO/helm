@@ -14,47 +14,71 @@ use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex, Weak};
 
-/// The `mcp_config` line for the current config, or `None` when it cannot be read.
-pub fn config_line(store: &McpStore) -> Option<Value> {
-    config_line_for(store, None)
+/// Who a chat is on the hub, for the servers that send the chat's person.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChatPerson {
+    /// The hub person the chat's profile is linked to (the home profile's when the chat has
+    /// none of its own).
+    pub person: Option<String>,
+    /// The chat's own profile is not the home one and is linked to no one on the hub: a server
+    /// that sends the chat's person would answer as this PC's owner, so it is left out.
+    pub unlinked: bool,
 }
 
-/// The `mcp_config` line for one chat: a header that names the chat's person carries `person`.
-pub fn config_line_for(store: &McpStore, person: Option<&str>) -> Option<Value> {
+/// The `mcp_config` line for one chat. With the MCP master switch off it lists no servers.
+pub fn config_line_for(services: &Services, store: &McpStore, who: &ChatPerson) -> Option<Value> {
+    if !services
+        .get::<Database>()
+        .is_none_or(|db| crate::repo_gate::all_on(&db))
+    {
+        let revision = crate::config::revision_of(&store.load().ok()?);
+        return Some(json!({ "type": "mcp_config", "revision": revision, "servers": [] }));
+    }
     let (revision, servers) = store
-        .resolve_enabled_for(&|k| std::env::var(k).ok(), person)
+        .resolve_enabled_where(
+            &|k| std::env::var(k).ok(),
+            who.person.as_deref(),
+            who.unlinked,
+        )
         .ok()?;
     Some(json!({ "type": "mcp_config", "revision": revision, "servers": servers }))
 }
 
-/// The hub person a chat belongs to: the one its profile is linked to (the home profile's when
-/// the chat has none of its own), or `None` when that profile is not linked to a hub person.
-pub fn chat_person(services: &Services, chat_id: &str) -> Option<String> {
-    let db = services.get::<Database>()?;
+/// Who a chat is on the hub (see [`ChatPerson`]).
+pub fn chat_person(services: &Services, chat_id: &str) -> ChatPerson {
+    let Some(db) = services.get::<Database>() else {
+        return ChatPerson::default();
+    };
     db.snapshot(|tx| {
         let own = tx
             .query_row(
-                "SELECT hub_person_id FROM profiles
+                "SELECT hub_person_id, COALESCE(is_home, 0) FROM profiles
                  WHERE id = (SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1)",
                 [chat_id],
-                |r| r.get::<_, Option<String>>(0),
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)? != 0)),
             )
             .optional()?;
-        match own {
-            Some(person) => Ok::<_, rusqlite::Error>(person),
-            None => tx
-                .query_row(
+        let (person, unlinked) = match own {
+            Some((person, home)) => {
+                let person = person.filter(|p| !p.is_empty());
+                let unlinked = person.is_none() && !home;
+                (person, unlinked)
+            }
+            None => (
+                tx.query_row(
                     "SELECT hub_person_id FROM profiles WHERE is_home = 1",
                     [],
                     |r| r.get::<_, Option<String>>(0),
                 )
                 .optional()
-                .map(Option::flatten),
-        }
+                .map(Option::flatten)?
+                .filter(|p| !p.is_empty()),
+                false,
+            ),
+        };
+        Ok::<_, rusqlite::Error>(ChatPerson { person, unlinked })
     })
-    .ok()
-    .flatten()
-    .filter(|p| !p.is_empty())
+    .unwrap_or_default()
 }
 
 /// Remembers the app's services the first time a worker starts, so a config save (which happens
@@ -74,7 +98,8 @@ impl ServicesCell {
             .and_then(Weak::upgrade)
     }
 
-    /// Sends the current config to every running worker.
+    /// Sends the current config to every running worker: after a config save, and when the MCP
+    /// master switch changes.
     pub fn broadcast(&self) {
         let Some(s) = self.get() else { return };
         let (Some(store), Some(b)) = (s.get::<McpStore>(), s.get::<Broadcaster>()) else {
@@ -85,15 +110,15 @@ impl ServicesCell {
             let running = b.0.running_chats();
             if !running.is_empty() {
                 for chat in running {
-                    let person = chat_person(&s, &chat);
-                    if let Some(line) = config_line_for(&store, person.as_deref()) {
+                    let who = chat_person(&s, &chat);
+                    if let Some(line) = config_line_for(&s, &store, &who) {
                         b.0.send_to_worker(&chat, &line);
                     }
                 }
                 return;
             }
         }
-        if let Some(line) = config_line(&store) {
+        if let Some(line) = config_line_for(&s, &store, &ChatPerson::default()) {
             b.0.broadcast_to_workers(&line);
         }
     }
@@ -118,8 +143,8 @@ pub fn register_worker_lines(l: &mut WorkerLines) {
         if let Some(cell) = services.get::<ServicesCell>() {
             cell.set(services);
         }
-        let person = chat_person(services, chat);
-        config_line_for(&*services.get::<McpStore>()?, person.as_deref())
+        let who = chat_person(services, chat);
+        config_line_for(services, &*services.get::<McpStore>()?, &who)
     });
 }
 
@@ -175,10 +200,10 @@ mod tests {
         let mut l = WorkerLines::new();
         register_worker_lines(&mut l);
         // The home person's chats, a chat with no profile and one whose profile is gone send
-        // the home person; a chat of a profile with no hub person sends none.
+        // the home person; a chat of a profile with no hub person gets no server that would
+        // answer as someone else.
         for (chat, want) in [
             ("c-sam", Some("7")),
-            ("c-guest", None),
             ("c-none", Some("3")),
             ("c-gone", Some("3")),
             ("unknown", Some("3")),
@@ -188,6 +213,20 @@ mod tests {
             assert_eq!(headers["X-Helm-Person"].as_str(), want, "{chat}");
             assert_eq!(headers["Authorization"], "Bearer tok-123456");
         }
+        let guest = l.start_lines("c-guest", &services);
+        assert_eq!(guest[0]["servers"], json!([]), "c-guest");
+        // With the MCP master switch off, no chat gets any server.
+        let db = services.get::<Database>().unwrap();
+        db.write(|tx| {
+            helm_core::prefs::set_raw(tx, "mcpEnabled", &json!(false))
+                .map_err(|_| rusqlite::Error::InvalidQuery)
+        })
+        .unwrap();
+        let off = l.start_lines("c-sam", &services);
+        assert_eq!(
+            (off[0]["type"].as_str(), &off[0]["servers"]),
+            (Some("mcp_config"), &json!([]))
+        );
     }
 
     #[test]

@@ -42,14 +42,10 @@ pub const CREDENTIALS_ENV: &str = "WORKSPACE_MCP_CREDENTIALS_DIR";
 pub const PORT_ENV: &str = "WORKSPACE_MCP_PORT";
 pub const CLIENT_ID_ENV: &str = "GOOGLE_OAUTH_CLIENT_ID";
 pub const CLIENT_SECRET_ENV: &str = "GOOGLE_OAUTH_CLIENT_SECRET";
-/// The arguments a new server starts with; the last one is the permission level.
-pub const DEFAULT_ARGS: [&str; 5] = [
-    "workspace-mcp",
-    "--tools",
-    "gmail",
-    "--permissions",
-    "gmail:drafts",
-];
+/// The arguments a new server starts with; the last one is the permission level. The server
+/// refuses `--tools` (and `--read-only`) beside `--permissions`, and `--permissions` alone loads
+/// only the services it names.
+pub const DEFAULT_ARGS: [&str; 3] = ["workspace-mcp", "--permissions", "gmail:drafts"];
 
 /// At most this many accounts are listed.
 pub const MAX_ACCOUNTS: usize = 50;
@@ -333,10 +329,17 @@ pub fn prepare(profile_dir: &Path, out: &mut ResolvedServer) {
     out.env
         .entry(PORT_ENV.into())
         .or_insert_with(|| saved_port(profile_dir).to_string());
+    // The server reads a plain `PORT` before its own variable; one left in the user's
+    // environment would move the sign-in page's port, so it is set to the same port.
+    if let Some(port) = out.env.get(PORT_ENV).cloned() {
+        out.env.insert("PORT".into(), port);
+    }
     // The sign-in page is plain http on this computer.
     out.env
         .entry("OAUTHLIB_INSECURE_TRANSPORT".into())
         .or_insert_with(|| "1".into());
+    // A server saved before `--permissions` replaced `--tools` would not start with both.
+    out.args = without_tool_flags(&out.args);
     if let Some(line) = accounts_line(profile_dir) {
         out.guidance = Some(match out.guidance.take() {
             Some(g) if !g.is_empty() => format!("{g} {line}"),
@@ -367,7 +370,33 @@ pub fn permission_of(args: &[String]) -> Option<GooglePermission> {
     GooglePermission::from_flag(joined)
 }
 
-/// `args` with the Gmail level set, keeping everything else.
+/// `args` without `--tools` (and its values) and `--read-only` when `--permissions` is there:
+/// the server will not start with both.
+pub fn without_tool_flags(args: &[String]) -> Vec<String> {
+    let has_permissions = args
+        .iter()
+        .any(|a| a == "--permissions" || a.starts_with("--permissions="));
+    if !has_permissions {
+        return args.to_vec();
+    }
+    let mut out = Vec::with_capacity(args.len());
+    let mut in_tools = false;
+    for a in args {
+        if a.starts_with("--") {
+            in_tools = a == "--tools";
+            if in_tools || a.starts_with("--tools=") || a == "--read-only" {
+                continue;
+            }
+        } else if in_tools {
+            continue;
+        }
+        out.push(a.clone());
+    }
+    out
+}
+
+/// `args` with the Gmail level set, keeping everything else but the flags the server refuses
+/// beside it ([`without_tool_flags`]).
 pub fn with_permission(args: &[String], level: GooglePermission) -> Vec<String> {
     let want = level.flag().to_owned();
     let mut out = args.to_vec();
@@ -385,7 +414,7 @@ pub fn with_permission(args: &[String], level: GooglePermission) -> Vec<String> 
         out.push("--permissions".into());
         out.push(want);
     }
-    out
+    without_tool_flags(&out)
 }
 
 // ---- starting a sign-in ---------------------------------------------------------------------
@@ -855,38 +884,21 @@ mod tests {
             (
                 strings(&DEFAULT_ARGS),
                 GooglePermission::Readonly,
-                strings(&[
-                    "workspace-mcp",
-                    "--tools",
-                    "gmail",
-                    "--permissions",
-                    "gmail:readonly",
-                ]),
+                strings(&["workspace-mcp", "--permissions", "gmail:readonly"]),
             ),
             (
                 strings(&DEFAULT_ARGS),
                 GooglePermission::Send,
-                strings(&[
-                    "workspace-mcp",
-                    "--tools",
-                    "gmail",
-                    "--permissions",
-                    "gmail:send",
-                ]),
+                strings(&["workspace-mcp", "--permissions", "gmail:send"]),
             ),
-            // The flag is missing: it is added at the end.
+            // The flag is missing: it is added at the end, and `--tools` (which the server refuses
+            // beside it) goes.
             (
                 strings(&["workspace-mcp", "--tools", "gmail"]),
                 GooglePermission::Drafts,
-                strings(&[
-                    "workspace-mcp",
-                    "--tools",
-                    "gmail",
-                    "--permissions",
-                    "gmail:drafts",
-                ]),
+                strings(&["workspace-mcp", "--permissions", "gmail:drafts"]),
             ),
-            // Other services' levels and later flags are kept.
+            // Other services' levels and other flags are kept; `--tools` and `--read-only` go.
             (
                 strings(&[
                     "workspace-mcp",
@@ -895,6 +907,9 @@ mod tests {
                     "gmail:full",
                     "--tools",
                     "gmail",
+                    "drive",
+                    "--read-only",
+                    "--single-user",
                 ]),
                 GooglePermission::Readonly,
                 strings(&[
@@ -902,21 +917,14 @@ mod tests {
                     "--permissions",
                     "drive:readonly",
                     "gmail:readonly",
-                    "--tools",
-                    "gmail",
+                    "--single-user",
                 ]),
             ),
             // The flag has no Gmail level yet: one is added to its values.
             (
-                strings(&["--permissions", "drive:readonly", "--tools", "gmail"]),
+                strings(&["--permissions", "drive:readonly", "--tools=gmail"]),
                 GooglePermission::Drafts,
-                strings(&[
-                    "--permissions",
-                    "drive:readonly",
-                    "gmail:drafts",
-                    "--tools",
-                    "gmail",
-                ]),
+                strings(&["--permissions", "drive:readonly", "gmail:drafts"]),
             ),
             (
                 strings(&["--permissions=gmail:full"]),
@@ -998,11 +1006,25 @@ mod tests {
             again.guidance.as_deref(),
             Some("Be careful. Accounts: work = a@x.com, b@y.org")
         );
-        // The user's own entries win.
+        // The user's own entries win, and a plain PORT follows them.
         let mut own = resolved();
         own.env.insert(PORT_ENV.into(), "9999".into());
         prepare(p, &mut own);
-        assert_eq!(own.env[PORT_ENV], "9999");
+        assert_eq!(
+            (own.env[PORT_ENV].as_str(), own.env["PORT"].as_str()),
+            ("9999", "9999")
+        );
+        // A server saved with `--tools` beside `--permissions` starts without it.
+        let mut old = resolved();
+        old.args = strings(&[
+            "workspace-mcp",
+            "--tools",
+            "gmail",
+            "--permissions",
+            "gmail:drafts",
+        ]);
+        prepare(p, &mut old);
+        assert_eq!(old.args, strings(&DEFAULT_ARGS));
         // Nothing about the accounts' contents ever reaches the guidance or the settings file.
         let settings = std::fs::read_to_string(settings_path(p)).unwrap();
         assert!(!settings.contains("NOT-A-REAL-TOKEN"));
