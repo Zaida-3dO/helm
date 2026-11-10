@@ -47,6 +47,10 @@ export function projectOps(api: Api) {
     saveConnection: (url: string, token?: string) =>
       api<BoardConnection>('board_connection_save', token === undefined ? { url } : { url, token }),
     sync: () => api<BoardSyncState>('board_sync', {}),
+    /** Set a project's picture: raw base64 of a PNG (at most 64 KB decoded). The project's icon becomes `img`. */
+    iconImageSet: (projectId: string, pngBase64: string) => api<ProjectNode>('project_icon_image_set', { projectId, pngBase64 }),
+    /** A project's picture as raw base64 of a PNG, or null when it has none. */
+    iconImageGet: (projectId: string) => api<{ pngBase64: string | null }>('project_icon_image_get', { projectId }),
   };
 }
 

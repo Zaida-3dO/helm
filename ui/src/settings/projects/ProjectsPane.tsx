@@ -9,7 +9,7 @@ import { useShell } from '../../shell/context.ts';
 import { Button, ConfirmDialog, Picker, type ConfirmSpec, type PickerOption } from '../../ui/index.ts';
 import { closeProjectConfirm } from '../../sidebar/Sidebar.tsx';
 import { syncOnOpen } from '../../sidebar/sync.ts';
-import { getDefaultBoard, NO_DEFAULT_BOARD, setDefaultBoard, type DefaultBoardState } from '../../newchat/boards.ts';
+import { ASK_EACH_TIME, getDefaultBoard, NO_DEFAULT_BOARD, setDefaultBoard, type DefaultBoardState } from '../../newchat/boards.ts';
 import { openAddFolder, openNewProject, openPrimaryFolder } from '../../newchat/index.ts';
 import { needsFolder, pickerProjects, primaryFolder, sharedFolders } from '../../newchat/places.ts';
 
@@ -19,6 +19,8 @@ function errorText(e: unknown): string {
 
 /** The default board picker's "let the host choose" value. */
 const AUTOMATIC = '__auto__';
+/** Its "ask on the new-chat page" value. */
+const ASK = '__ask__';
 
 export function ProjectsPane() {
   const shell = useShell();
@@ -122,7 +124,7 @@ export function ProjectsPane() {
   const chooseDefault = async (v: string) => {
     setError(null);
     try {
-      setBoards(await setDefaultBoard(shell.api, v === AUTOMATIC ? null : v));
+      setBoards(await setDefaultBoard(shell.api, v === AUTOMATIC ? null : v === ASK ? ASK_EACH_TIME : v));
     } catch (e) {
       setError(errorText(e));
     }
@@ -135,9 +137,14 @@ export function ProjectsPane() {
   const fallbackName = boards.chosen ? null : boards.name;
   const defaultOptions: PickerOption<string>[] = [
     { value: AUTOMATIC, title: 'Automatic', subtitle: fallbackName ? `Now ${fallbackName}` : 'No board found yet' },
+    { value: ASK, title: 'Ask each time', subtitle: 'The new-chat page opens its project picker with nothing chosen' },
     ...pickerProjects(projects, true, boards.chosen, boards.hiddenBoardIds).map((p) => ({ value: p.id, title: p.name, text: p.name })),
   ];
-  const defaultShown = boards.chosen ? (projects.find((p) => p.id === boards.chosen)?.name ?? boards.name ?? 'A board') : `Automatic${fallbackName ? ` (${fallbackName})` : ''}`;
+  const defaultShown = boards.ask
+    ? 'Ask each time'
+    : boards.chosen
+      ? (projects.find((p) => p.id === boards.chosen)?.name ?? boards.name ?? 'A board')
+      : `Automatic${fallbackName ? ` (${fallbackName})` : ''}`;
 
   const shownError = sync?.error ?? error;
   return (
@@ -202,9 +209,11 @@ export function ProjectsPane() {
         <h3 id="sp-default">Default board</h3>
         <p className="sp-help">
           Where a chat with no project of its own goes: a quick question, a message from your phone, a scheduled run.
+          “Ask each time” leaves the new-chat page's project picker empty so you choose; those other chats still go to the
+          board Automatic would pick.
         </p>
         <Picker
-          value={boards.chosen ?? AUTOMATIC}
+          value={boards.ask ? ASK : (boards.chosen ?? AUTOMATIC)}
           options={defaultOptions}
           onChange={(v) => void chooseDefault(v)}
           label={`Default board: ${defaultShown}`}

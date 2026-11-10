@@ -109,6 +109,15 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [showCompleted, setShowCompleted] = useState(false);
 
+  // "Ask each time": a new draft with no project opens the picker, search field focused, once.
+  const askFirst = newChat.boards.ask && !boardId;
+  const asked = useRef<string | null>(null);
+  useEffect(() => {
+    if (!askFirst || asked.current === draft.id) return;
+    asked.current = draft.id;
+    document.querySelector<HTMLButtonElement>('[data-testid="newchat-project"]')?.click();
+  }, [askFirst, draft.id]);
+
   useBinding({
     id: 'newchat.projectPicker',
     title: 'Choose the new chat’s project',
@@ -178,49 +187,51 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
   return (
     <div className="nc-page" data-testid="newchat-page">
       <div className="nc-center">
-        <div className="nc-perch" aria-hidden="true" />
-        <h1 className="nc-title">What are we building?</h1>
-        <div className="nc-card" data-testid="newchat-card">
-          <div className="nc-project">
-            <Picker
-              value={owner ? owner.id : null}
-              options={options}
-              onChange={onPick}
-              extraOption={createRow}
-              footer={
-                hasCompleted && (
-                  <div className="nc-completed" onKeyDown={(e) => e.stopPropagation()}>
-                    <Checkbox label="Show completed" checked={showCompleted} onChange={setShowCompleted} data-testid="newchat-show-completed" />
-                  </div>
-                )
-              }
-              label={shownName ? `Project: ${shownName}` : 'Choose a project'}
-              display={shownName ?? undefined}
-              heading="Start the chat in"
-              searchable
-              placeholder="Choose a project"
-              onOpen={syncBoards}
-              testId="newchat-project"
-            />
-          </div>
-          <div className="nc-place">
-            <button
-              ref={folderBtn}
-              type="button"
-              className="nc-folder"
-              data-testid="newchat-folder"
-              aria-haspopup="menu"
-              aria-expanded={!!menu}
-              title={folder ?? 'Choose a folder for the chat to work in'}
-              onClick={openMenu}
-            >
-              <span className="nc-folder-path">{folder ?? 'Choose a folder'}</span>
-              <span className="nc-chevron" aria-hidden="true">
-                ▾
-              </span>
-            </button>
-            {folder && <CopyPath path={folder} />}
-            {hintFor(source, folder) && <span className="nc-hint">· {hintFor(source, folder)}</span>}
+        <div className="nc-column">
+          <div className="nc-perch" aria-hidden="true" />
+          <h1 className="nc-title">What are we building?</h1>
+          <div className="nc-card" data-testid="newchat-card">
+            <div className="nc-project">
+              <Picker
+                value={owner ? owner.id : null}
+                options={options}
+                onChange={onPick}
+                extraOption={createRow}
+                footer={
+                  hasCompleted && (
+                    <div className="nc-completed" onKeyDown={(e) => e.stopPropagation()}>
+                      <Checkbox label="Show completed" checked={showCompleted} onChange={setShowCompleted} data-testid="newchat-show-completed" />
+                    </div>
+                  )
+                }
+                label={shownName ? `Project: ${shownName}` : 'Choose a project'}
+                display={shownName ?? undefined}
+                heading="Start the chat in"
+                searchable
+                placeholder="Choose a project"
+                onOpen={syncBoards}
+                testId="newchat-project"
+              />
+            </div>
+            <div className="nc-place">
+              <button
+                ref={folderBtn}
+                type="button"
+                className="nc-folder"
+                data-testid="newchat-folder"
+                aria-haspopup="menu"
+                aria-expanded={!!menu}
+                title={folder ?? 'Choose a folder for the chat to work in'}
+                onClick={openMenu}
+              >
+                <span className="nc-folder-path">{folder ?? 'Choose a folder'}</span>
+                <span className="nc-chevron" aria-hidden="true">
+                  ▾
+                </span>
+              </button>
+              {folder && <CopyPath path={folder} />}
+              {hintFor(source, folder) && <span className="nc-hint">· {hintFor(source, folder)}</span>}
+            </div>
           </div>
         </div>
       </div>

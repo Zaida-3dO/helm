@@ -18,14 +18,26 @@
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  padding: 0 25px 18px;
+  padding: 0 0 18px;
 }
 
-/* The intro block sits just above the box, not in the middle of the page. The auto margin on the
-   first child pushes the block down, and unlike centring it never clips the top in a short window. */
-.nc-perch {
+/* The intro sits in the same column as the composer dock below it (same offset, width and
+   gutters), so the heading, the picker and the box share one centre line at every window width.
+   It sits just above the box, not in the middle of the page: the auto margin pushes it down, and
+   unlike centring it never clips the top in a short window. */
+.nc-column {
   margin-top: auto;
+  width: 100%;
+  max-width: calc(var(--chat-column) + 2 * 33px);
+  margin-left: var(--nc-offset);
+  margin-right: auto;
+  padding: 0 33px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.nc-perch {
   width: 260px;
   height: 64px;
   flex: none;
@@ -148,19 +160,23 @@
 
 .nc-page {
   --column-factor: var(--shell-column-factor, 0.75);
+  /* How far the column sits from the left edge: a little left of centre, as the chat's column is,
+     so nothing jumps sideways when the first message is sent. The intro and the dock both use it. */
+  --nc-gutter: 76px;
+  --nc-offset: max(0px, calc((100% - var(--chat-column) - var(--nc-gutter)) / 2 * var(--column-factor) + 5px));
+}
+@media (max-width: 1000px) {
+  .nc-page {
+    --nc-gutter: 50px;
+  }
 }
 
 /* The box sits where it will sit in the chat, so it does not jump sideways when the first message is sent. */
 .nc-dock {
   flex: none;
   width: 100%;
-  margin-left: max(0px, calc((100% - var(--chat-column) - 76px) / 2 * var(--column-factor) + 5px));
+  margin-left: var(--nc-offset);
   margin-right: auto;
-}
-@media (max-width: 1000px) {
-  .nc-dock {
-    margin-left: max(0px, calc((100% - var(--chat-column) - 50px) / 2 * var(--column-factor) + 5px));
-  }
 }
 
 /* Add project and Primary folder… dialogs. */

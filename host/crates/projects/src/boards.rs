@@ -19,7 +19,7 @@
 //! | op | class | args → result |
 //! |---|---|---|
 //! | `default_board_get` | blocking | `{}` → [`DefaultBoardView`] |
-//! | `default_board_set` | maintenance | `{boardId: string \| null}` → [`DefaultBoardView`] |
+//! | `default_board_set` | maintenance | `{boardId: string \| null}` (a board id, `"ask"` or null) → [`DefaultBoardView`] |
 //! | `board_project_create` | async | [`BoardProjectCreateArgs`] → `ProjectNode` (the new board) |
 
 use crate::board::{ctx_credentials, test_override};
@@ -41,6 +41,10 @@ pub const DEFAULT_BOARD_NAME: &str = "Life Admin";
 /// Boards no project picker offers (the default board may still be one if the user picks it).
 pub const HIDDEN_BOARD_NAMES: &[&str] = &["Inbox"];
 const DEFAULT_BOARD: PrefKey = PrefKey::classified("defaultBoard");
+/// The stored default-board value that means "ask each time": the new-chat page opens its board
+/// picker with nothing chosen. Chats that start without a person at the page (a message from the
+/// phone, a scheduled run) still go to the fallback board.
+pub const ASK_EACH_TIME: &str = "ask";
 
 /// The one-time move's marker in `counters` (the same convention as the one-time migrations).
 pub const MIGRATION: &str = "projects-chats-onto-boards";
@@ -141,10 +145,18 @@ fn is_open_board(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<bool> {
 }
 
 /// The stored default-board setting, as written (it may name a board that has since gone).
+/// "Ask each time" is not a board and reads as none chosen; see [`asks_each_time`].
 fn chosen_default(tx: &Transaction<'_>) -> Option<String> {
     helm_core::prefs::read(tx, DEFAULT_BOARD.name())
         .and_then(|v| v.as_str().map(str::to_owned))
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && s != ASK_EACH_TIME)
+}
+
+/// Whether the setting is "ask each time".
+pub fn asks_each_time(tx: &Transaction<'_>) -> bool {
+    helm_core::prefs::read(tx, DEFAULT_BOARD.name())
+        .and_then(|v| v.as_str().map(|s| s == ASK_EACH_TIME))
+        .unwrap_or(false)
 }
 
 /// The open board shown as `name` (its local name or its board title, ignoring case). A board
@@ -944,6 +956,9 @@ pub(crate) fn emit_rehoming(ctx: &OpCtx, db: &Database, r: &Rehoming) {
 /// linked items sit first. Never fails the sync; a problem is logged and the move waits for the
 /// next sync.
 pub(crate) async fn after_sync(ctx: &OpCtx, db: &Database, client: Client) {
+    // A project renamed in Helm that the board has not heard yet: send it again now that the board
+    // has answered.
+    crate::retitle::push_in_background(ctx, None);
     let ready = db.snapshot(|tx| {
         Ok::<_, rusqlite::Error>(migration_pending(tx)? && default_board(tx)?.is_some())
     });
@@ -1004,8 +1019,10 @@ pub struct DefaultBoardView {
     /// The board chats with no other home go to now; `null` before any board has synced.
     pub board_id: Option<String>,
     pub name: Option<String>,
-    /// The setting as stored; `null` = the board named "Life Admin".
+    /// The setting as stored; `null` = the board named "Life Admin" (or ask each time, see `ask`).
     pub chosen: Option<String>,
+    /// The setting is "ask each time": the new-chat page leaves its picker empty and focused.
+    pub ask: bool,
     /// Boards no picker offers.
     pub hidden_board_ids: Vec<String>,
 }
@@ -1020,13 +1037,16 @@ pub fn default_board_view(tx: &Transaction<'_>) -> rusqlite::Result<DefaultBoard
         board_id,
         name,
         chosen: chosen_default(tx),
+        ask: asks_each_time(tx),
         hidden_board_ids: hidden_boards(tx)?,
     })
 }
 
-/// Set (or with `None` clear) the default board. Only an open board can be chosen.
+/// Set (or with `None` clear) the default board, or with "ask" ([`ASK_EACH_TIME`]) have the new-chat
+/// page ask. Only an open board can be chosen.
 pub fn set_default_board(tx: &Transaction<'_>, board: Option<&str>) -> store::Res<()> {
     let value = match board {
+        Some(ASK_EACH_TIME) => json!(ASK_EACH_TIME),
         Some(b) => {
             if !is_open_board(tx, b)? {
                 return Err(Refusal::BadArgs(

@@ -7,7 +7,7 @@ export function shellFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   let settings = {
     globalHotkey: 'Ctrl+Alt+H' as string | null,
     keepAwake: 'busy' as 'off' | 'busy' | 'always',
-    notifications: 'in_app',
+    notifications: 'off',
     dictationMic: null as { uid: string; name: string } | null,
     terminalShell: 'pwsh',
   };

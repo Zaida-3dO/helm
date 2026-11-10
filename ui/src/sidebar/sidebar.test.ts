@@ -20,6 +20,7 @@ function project(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
     path: `C:/w/${id}`,
     parentId: null,
     parentSource: null,
+    description: null,
     icon: null,
     colour: null,
     pinned: false,
@@ -77,7 +78,7 @@ const shape = (items: ListItem[]) =>
 
 /** A board project; `completed` marks all its work finished on the board. */
 function boardProject(id: string, completed: boolean, over: Partial<ProjectNode> = {}): ProjectNode {
-  const board = { boardProjectId: id, url: 'https://board.example', title: id, headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: false, completed, editedLocally: false };
+  const board = { boardProjectId: id, url: 'https://board.example', title: id, headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: false, completed, editedLocally: false, titlePending: false };
   return project(id, { kind: 'board', path: null, ...over, board: { ...board, ...over.board } });
 }
 
@@ -343,7 +344,7 @@ test('row heights match the design system, normal and compact', () => {
 });
 
 test('a stale board group shows only while it still holds chats', () => {
-  const stale = project('s', { kind: 'board', path: null, board: { boardProjectId: 'x', url: 'u', title: 's', headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: true, completed: false, editedLocally: false } });
+  const stale = project('s', { kind: 'board', path: null, board: { boardProjectId: 'x', url: 'u', title: 's', headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: true, completed: false, editedLocally: false, titlePending: false } });
   assert.deepEqual(shape(buildList([stale], [], opts)), []);
   assert.deepEqual(shape(buildList([stale], [row('a', 's')], opts)), ['H0:s', 'C0:a']);
 });

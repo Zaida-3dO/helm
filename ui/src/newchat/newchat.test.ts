@@ -8,7 +8,7 @@ import type { ChatRecord } from '../api/types.ts';
 import { LAST_PROJECT_KEY, NewChatController, draftOps, newChat, type NewChatEnv } from './controller.ts';
 import { primaryFolderMenuItem } from './menu.ts';
 import { addExistingFolder, addNewFolder, currentFolder, setPrimaryFolder } from './projects.ts';
-import { NO_DEFAULT_BOARD, createBoardProject, getDefaultBoard, setDefaultBoard } from './boards.ts';
+import { ASK_EACH_TIME, NO_DEFAULT_BOARD, createBoardProject, getDefaultBoard, setDefaultBoard } from './boards.ts';
 import { LEGACY_LAST_FOLDER_KEY, MAX_RECENTS, RECENTS_KEY, boardFor, sharedFolders, folderMenu, folderProjectFor, pickerProjects, pushRecent, readRecents, resolveFolder, samePath } from './places.ts';
 
 function node(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
@@ -19,6 +19,7 @@ function node(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
     path: null,
     parentId: null,
     parentSource: null,
+    description: null,
     icon: null,
     colour: null,
     pinned: false,
@@ -47,7 +48,7 @@ const PROJECTS: ProjectNode[] = [
 function boardNode(id: string, over: Partial<ProjectNode> = {}, info: { completed?: boolean; stale?: boolean } = {}): ProjectNode {
   return node(id, {
     kind: 'board',
-    board: { boardProjectId: id, url: '', title: id, headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: info.stale ?? false, completed: info.completed ?? false, editedLocally: false },
+    board: { boardProjectId: id, url: '', title: id, headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: info.stale ?? false, completed: info.completed ?? false, editedLocally: false, titlePending: false },
     ...over,
   });
 }
@@ -306,6 +307,22 @@ test('which board a new chat goes on: the one picked, the board over its folder,
   assert.deepEqual(h.calls.find((c) => c.op === 'chat_create')!.args[0], { cwd: 'C:/code/helm', projectId: 'helm', boardId: 'b-default' });
   assert.equal(h.storage.getItem(LAST_PROJECT_KEY), 'b-default');
 
+  // "Ask each time": a new draft starts with nothing chosen (the last project is not reloaded) and
+  // the default is no fallback; a pick or the board over the folder still counts, and a send needs one.
+  const asking = harness();
+  asking.storage.setItem(LAST_PROJECT_KEY, 'b-site');
+  asking.ctl.setProjects(projects);
+  asking.ctl.setBoards({ ...NO_DEFAULT_BOARD, boardId: 'b-default', name: 'Default', ask: true });
+  asking.ctl.show();
+  assert.deepEqual([asking.ctl.draft?.projectId, asking.ctl.board()], [null, null]);
+  asking.ctl.setFolder('C:/code/helm');
+  await assert.rejects(draftOps(asking.env.ops, asking.ctl).send('x', 's', 'hi', 'default', 1), /Choose a project/);
+  assert.equal(asking.calls.some((c) => c.op === 'chat_create'), false, 'nothing is made before a project is picked');
+  asking.ctl.move('b-site');
+  assert.equal(asking.ctl.board(), 'b-site');
+  asking.ctl.setFolder('c:/code/site');
+  assert.equal(asking.ctl.board(), 'b-site');
+
   // boardFor: one open, unfinished board over a folder, never two, never a stale or archived one.
   const twice = [...projects, boardNode('b-site2', { primaryFolderProjectId: 'site' })];
   assert.equal(boardFor('site', twice), null);
@@ -510,14 +527,16 @@ function recordingApi(answers: Record<string, (args: Record<string, unknown>) =>
 }
 
 test('New project makes a board project, leaving empty fields out; the default board reads safely', async () => {
-  const { api, calls } = recordingApi({ board_project_create: (a) => boardNode('new', { name: String(a.title) }), default_board_set: (a) => ({ boardId: a.boardId, name: 'X', chosen: a.boardId, hiddenBoardIds: ['inbox'] }) });
+  const { api, calls } = recordingApi({ board_project_create: (a) => boardNode('new', { name: String(a.title) }), default_board_set: (a) => ({ boardId: a.boardId, name: 'X', chosen: a.boardId, ask: a.boardId === 'ask', hiddenBoardIds: ['inbox'] }) });
   await createBoardProject(api, { title: ' Garden plan ', description: '  ', folder: ' C:/code/garden ' });
   await createBoardProject(api, { title: 'Notes', description: ' What it is for. ' });
-  assert.deepEqual(await setDefaultBoard(api, 'b1'), { boardId: 'b1', name: 'X', chosen: 'b1', hiddenBoardIds: ['inbox'] });
+  assert.deepEqual(await setDefaultBoard(api, 'b1'), { boardId: 'b1', name: 'X', chosen: 'b1', ask: false, hiddenBoardIds: ['inbox'] });
+  assert.equal((await setDefaultBoard(api, ASK_EACH_TIME)).ask, true);
   assert.deepEqual(calls, [
     { op: 'board_project_create', args: { title: 'Garden plan', folder: 'C:/code/garden' } },
     { op: 'board_project_create', args: { title: 'Notes', description: 'What it is for.' } },
     { op: 'default_board_set', args: { boardId: 'b1' } },
+    { op: 'default_board_set', args: { boardId: 'ask' } },
   ]);
   // An older host, or no board yet: no default, nothing hidden.
   const refusing = (async () => {

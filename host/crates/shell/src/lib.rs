@@ -12,8 +12,9 @@
 //! | `ui_error_report` | maintenance | `{kind, message, stack?, source?}`: one line in the renderer error log, see [`errlog`] |
 //!
 //! The app registers a [`ShellService`] (`register_services`) and taps every event through
-//! [`ShellService::observe`]. The tray, hotkey, badge and toasts are drawn by the app
-//! (`host/app/src/tray.rs`) through [`ShellHost`].
+//! [`ShellService::observe`]. The tray, its state dot, the hotkey, the badge and the toasts are
+//! drawn by the app (`host/app/src/tray.rs`) through [`ShellHost`]; what a toast says and what a
+//! click on it asks for is in [`toasts`].
 
 pub mod bindings;
 pub mod errlog;
@@ -23,6 +24,7 @@ pub mod notify;
 pub mod probe;
 pub mod service;
 pub mod settings;
+pub mod toasts;
 pub mod tray;
 pub mod types;
 pub mod uiwatch;

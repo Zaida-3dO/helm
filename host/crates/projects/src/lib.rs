@@ -14,6 +14,7 @@
 //! | [`note`] | the shared project context note and its ops |
 //! | [`board`] | the Agent Standup connection, the read-only sync and the mirror; the project gate |
 //! | [`boards`] | boards as where chats are shown: the default board, folders filled in on sync, the one-time move of chats onto boards, new board projects |
+//! | [`retitle`] | a board project renamed in Helm: the new title is written back to the board, and sent again after the next sync when it could not be |
 //! | [`tasks`] | the Tasks view's read-only board reads (`board_read`, `board_cancel`) |
 //! | [`repos`], [`repo_ops`], [`guard`] | the repository list, its ops and worktree status, and the git stand-in launch contributor |
 //! | [`repo_undo`] | the picture of the repository list a chat's edit is filed with, and Undo for it |
@@ -28,6 +29,7 @@ pub mod ops;
 pub mod repo_ops;
 pub mod repo_undo;
 pub mod repos;
+pub mod retitle;
 pub mod schema;
 pub mod store;
 pub mod tasks;

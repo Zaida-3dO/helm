@@ -64,6 +64,7 @@ export function remoteProject(p: RemoteProject, chatCount: number, createdAt = 0
     path: null,
     parentId: null,
     parentSource: null,
+    description: null,
     icon: null,
     colour: p.colour,
     pinned: false,

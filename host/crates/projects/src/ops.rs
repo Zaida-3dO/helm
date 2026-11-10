@@ -6,6 +6,8 @@
 //! | `project_create` | maintenance | [`ProjectCreateArgs`] → [`ProjectNode`] |
 //! | `project_create_folder` | maintenance | [`ProjectCreateFolderArgs`] → [`ProjectNode`] (a new folder by name) |
 //! | `project_update` | maintenance | [`ProjectUpdateArgs`] → [`ProjectNode`] (a new primary folder retires the project's idle workers) |
+//! | `project_icon_image_set` | maintenance | [`ProjectIconImageSetArgs`] → [`ProjectNode`] (a PNG of at most 64 KB becomes the icon) |
+//! | `project_icon_image_get` | blocking | [`ProjectIdArgs`] → [`ProjectIconImage`] |
 //! | `project_archive` / `project_restore` | maintenance | [`ProjectIdArgs`] → [`ProjectNode`] |
 //! | `project_close` / `project_reopen` | maintenance | [`ProjectIdArgs`] → [`ProjectNode`] (a closed project is left out of `project_list` unless asked for, and refuses new work) |
 //! | `sidebar_page` | heavy | [`SidebarPageArgs`] → [`SidebarPage`] |
@@ -36,6 +38,16 @@ pub fn register_ops(reg: &mut OpRegistry) {
             project_create_folder,
         )
         .blocking("project_update", OpClass::Maintenance, project_update)
+        .blocking(
+            "project_icon_image_set",
+            OpClass::Maintenance,
+            project_icon_image_set,
+        )
+        .blocking(
+            "project_icon_image_get",
+            OpClass::Blocking,
+            project_icon_image_get,
+        )
         .blocking("project_archive", OpClass::Maintenance, project_archive)
         .blocking("project_restore", OpClass::Maintenance, project_restore)
         .blocking("project_close", OpClass::Maintenance, project_close)
@@ -169,7 +181,35 @@ fn project_update(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     }
     emit_project(ctx, &node);
     crate::boards::emit_rehoming(ctx, &db, &rehomed);
+    // A board project renamed here owes the board its new title.
+    if a.name.is_some() && node.board.as_ref().is_some_and(|b| b.title_pending) {
+        crate::retitle::push_in_background(ctx, Some(a.project_id.clone()));
+    }
     to_value(&node)
+}
+
+/// `project_icon_image_set`: keep the picture and make it the project's icon.
+fn project_icon_image_set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ProjectIconImageSetArgs = parse_args(args)?;
+    let png = store::validate_icon_image(&a.png_base64)?;
+    let db = ctx.services.need::<Database>()?;
+    let node = db.write(|tx| {
+        store::set_icon_image(tx, &a.project_id, &png)?;
+        store::get_project(tx, &a.project_id)
+    })?;
+    emit_project(ctx, &node);
+    to_value(&node)
+}
+
+/// `project_icon_image_get`: the stored picture as base64, or null.
+fn project_icon_image_get(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    use base64::Engine;
+    let a: ProjectIdArgs = parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let png = db.snapshot(|tx| store::icon_image(tx, &a.project_id))?;
+    to_value(&ProjectIconImage {
+        png_base64: png.map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
+    })
 }
 
 fn retire_workers(ctx: &OpCtx, db: &Database, project_id: &str) {

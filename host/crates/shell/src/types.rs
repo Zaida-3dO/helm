@@ -3,13 +3,15 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// Where finished-turn notices go: in-app toasts by default, Windows
-/// toasts behind the setting.
+/// Whether Windows raises a toast when a chat finishes or needs the user. Off unless the user
+/// turns it on in Settings, Shell. The in-window notice stack this setting once chose between is
+/// gone, so the old stored text `in_app` reads as off: only a stored `native` ever turns toasts on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationMode {
     #[default]
-    InApp,
+    #[serde(alias = "in_app")]
+    Off,
     Native,
 }
 
@@ -63,7 +65,7 @@ impl Default for ShellSettings {
         Self {
             global_hotkey: Some(DEFAULT_HOTKEY.to_owned()),
             keep_awake: KeepAwake::Busy,
-            notifications: NotificationMode::InApp,
+            notifications: NotificationMode::Off,
             dictation_mic: None,
             terminal_shell: TerminalShell::Pwsh,
         }

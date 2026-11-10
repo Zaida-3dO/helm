@@ -567,20 +567,6 @@ describe("visual sweep", { timeout: 20 * 60_000 }, () => {
       }
       await dropToasts();
     }
-    // The real bottom-right completion notice, from a chat that finished in the background.
-    const bg = await newChat(page(), scratchDir("helm-w5v-chat-"));
-    await send(page(), "[E1] say hello");
-    await newChat(page(), scratchDir("helm-w5v-chat-"));
-    await page().waitForSelector(tid("toast", `[data-chat-id="${bg}"]`), { timeout: 30_000 });
-    for (const theme of THEMES) {
-      await setLook(theme, "normal");
-      const m = await page().evaluate(MEASURE_TOASTS, '[data-testid="toast"]');
-      assert.ok(m.length >= 3, `completion notice parts were measured (${m.length})`);
-      for (const part of m) {
-        const need = part.part === "icon" ? 3 : 4.5;
-        if (part.ratio < need) add({ surface: "completion-toast", theme, media: "normal", kind: "contrast", what: `${part.part} "${part.text}" ${part.ratio}:1 < ${need}` });
-      }
-    }
     await setLook("light", "normal");
   });
 

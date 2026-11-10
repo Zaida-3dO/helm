@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import { api, contrast, dispose, FAKE_CLAUDE, launchApp, measure, newChat, REPO, scratchDir, seedBoardChats, send, shot, tid, waitBoardSync, waitStatus, type App } from "./harness.ts";
+import { api, contrast, dispose, FAKE_CLAUDE, launchApp, measure, newChat, openChat, REPO, scratchDir, seedBoardChats, send, shot, tid, waitBoardSync, waitStatus, type App } from "./harness.ts";
 
 const OUT = process.env.HELM_E2E_OUT ?? scratchDir("helm-e2e-out-");
 const profile = scratchDir("helm-w3v-profile-");
@@ -258,33 +258,22 @@ describe("visual check and the host probes", { timeout: 15 * 60_000 }, () => {
     });
   });
 
-  test("V8 and C4: a background completion shows one toast, opening it withdraws it; badge and keep-awake follow", async () => {
+  test("V8 and C4: a background completion raises the badge and no in-window notice; reading the chat clears it; keep-awake follows", async () => {
     await step("V8", async () => {
       const bg = await newChat(page(), scratchDir("helm-w3v-chat-"));
       await send(page(), "finish quickly");
       // Move away before it finishes, so the completion lands in a background chat.
       await newChat(page(), scratchDir("helm-w3v-chat-"));
-      await page().waitForSelector(tid("toast", `[data-chat-id="${bg}"]`), { timeout: 30_000 });
-      assert.equal(await page().locator(tid("toast")).count(), 1, "one toast");
-      const toast = await measure(page(), tid("toast"));
-      const column = await page().evaluate(() => document.querySelector('[data-testid="chat-view"]')!.getBoundingClientRect().right);
-      const gap = column - (toast.x + toast.w);
-      assert.ok(toast.y >= 40 && toast.y < 120 && gap >= 0 && gap <= 40, `top right of the chat column, under the top bar (gap to the column edge ${gap}px)`);
-      await opaque(tid("toast"));
-      await readable(`${tid("toast")} .notice-title`);
-      // Nothing overlaps it.
-      const covered = await page().evaluate(() => {
-        const el = document.querySelector('[data-testid="toast"]')!;
-        const r = el.getBoundingClientRect();
-        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-        return !el.contains(hit);
-      });
-      assert.equal(covered, false, "nothing overlaps the toast");
+      const end0 = Date.now() + 30_000;
+      while (Date.now() < end0 && !probes("badge").some((p) => Number(p.count) >= 1)) await new Promise((r) => setTimeout(r, 200));
       const badges = probes("badge").map((p) => Number(p.count));
       assert.ok(badges.some((c) => c >= 1), `badge reached 1 (${badges})`);
-      await page().click(tid("toast", `[data-chat-id="${bg}"]`) + ' [data-action="open"]');
-      await page().waitForSelector(tid("toast"), { state: "detached", timeout: 10_000 });
-      await page().waitForFunction(() => true);
+      // The in-window completion stack is gone: the flags are the one place a chat asks for you.
+      assert.equal(await page().locator(tid("toast", "[data-chat-id]")).count(), 0, "no in-window completion notice");
+      // Windows notifications are opt-in, so the probe says the toast was not shown.
+      const toast = probes("toast").find((p) => p.chatId === bg);
+      assert.ok(toast && toast.shown === false && toast.mode === "off", `toasts are off by default (${JSON.stringify(toast)})`);
+      await openChat(page(), bg);
       const end = Date.now() + 10_000;
       while (Date.now() < end && Number(probes("badge").at(-1)?.count) !== 0) await new Promise((r) => setTimeout(r, 200));
       assert.equal(Number(probes("badge").at(-1)?.count), 0, "badge back to 0 after reading");

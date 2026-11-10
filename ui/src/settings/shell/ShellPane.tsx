@@ -1,4 +1,4 @@
-// Settings → Shell: the global hotkey, keep-awake, where notifications go, the microphone and
+// Settings → Shell: the global hotkey, keep-awake, Windows notifications, the microphone and
 // the terminal's shell. Every control saves at once (user-only keys, through shell_settings_save).
 
 import { useEffect, useState } from 'react';
@@ -108,13 +108,17 @@ function ShellPane() {
         />
       </SettingRow>
       {view.keepAwakeError && <p className="error">{view.keepAwakeError}</p>}
-      <SettingRow title="Notifications" description="Where a finished chat tells you about it when you are not looking at it.">
+      <SettingRow
+        title="Windows notifications"
+        description="Off by default. When on, Windows shows a toast when a chat finishes (reply, Continue or Open from it) and when a chat needs you (Open only: answers and approvals stay in Helm). Muted chats never notify, and nothing shows while Helm is in front."
+        testId="setting-notifications"
+      >
         <Segmented
-          label="Notifications"
+          label="Windows notifications"
           value={s.notifications}
           options={[
-            { value: 'in_app', label: 'In Helm' },
-            { value: 'native', label: 'Windows' },
+            { value: 'off', label: 'Off' },
+            { value: 'native', label: 'On' },
           ]}
           onChange={(v) => save({ ...s, notifications: v })}
         />

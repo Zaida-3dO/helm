@@ -27,7 +27,7 @@ pub fn load(conn: &Connection) -> ShellSettings {
     ShellSettings {
         global_hotkey: hotkey,
         keep_awake: parse_keep_awake(prefs::read(conn, KEEP_AWAKE.name())),
-        notifications: prefs::get_or(conn, NOTIFICATIONS, NotificationMode::InApp),
+        notifications: prefs::get_or(conn, NOTIFICATIONS, NotificationMode::Off),
         dictation_mic: prefs::read(conn, DICTATION_MIC.name())
             .and_then(|v| serde_json::from_value::<MicChoice>(v).ok())
             .filter(valid_mic),
@@ -192,6 +192,30 @@ mod tests {
         assert_eq!(s, ShellSettings::default());
         assert_eq!(s.global_hotkey.as_deref(), Some("Ctrl+Alt+H"));
         assert_eq!(s.keep_awake, KeepAwake::Busy);
+        assert_eq!(s.notifications, NotificationMode::Off, "toasts are opt-in");
+    }
+
+    #[test]
+    fn only_a_stored_native_ever_turns_toasts_on() {
+        let (_d, db) = temp_db(&MigrationRegistry::new());
+        // `in_app` is what the setting said before the in-window notices went away.
+        for (stored, want) in [
+            (json!("in_app"), NotificationMode::Off),
+            (json!("off"), NotificationMode::Off),
+            (json!("native"), NotificationMode::Native),
+            (json!("nonsense"), NotificationMode::Off),
+            (json!(true), NotificationMode::Off),
+            (json!(1), NotificationMode::Off),
+        ] {
+            db.write(|tx| {
+                prefs::set(tx, NOTIFICATIONS, &stored).map_err(|_| rusqlite::Error::InvalidQuery)
+            })
+            .unwrap();
+            let got = db
+                .snapshot(|tx| Ok::<_, rusqlite::Error>(load(tx)))
+                .unwrap();
+            assert_eq!(got.notifications, want, "{stored}");
+        }
     }
 
     #[test]

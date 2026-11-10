@@ -312,7 +312,8 @@ export class NewChatController {
     if (chosen) return boardFor(chosen, this.projects) ?? this.boards.boardId;
     const folder = this.place().folder;
     const over = folder ? this.projects.find((p) => p.kind === 'folder' && !p.archived && !!p.path && samePath(p.path, folder)) : undefined;
-    return (over ? boardFor(over.id, this.projects) : null) ?? this.boards.boardId;
+    // With "ask each time" there is no default to fall back on: the user picks.
+    return (over ? boardFor(over.id, this.projects) : null) ?? (this.boards.ask ? null : this.boards.boardId);
   }
 
   /** Ask the host which board the chat the user came from is shown on, and follow it while the user
@@ -475,6 +476,7 @@ export class NewChatController {
     if (!env || !d) throw new ApiError('not_found', 'The new chat was closed.');
     const { folder } = this.place();
     if (!folder) throw new ApiError('needs_folder', 'Choose a folder for this chat first.');
+    if (this.boards.ask && !this.board()) throw new ApiError('needs_board', 'Choose a project for this chat first.');
     const key = this.placeKey();
     if (this.made && this.made.key !== key) this.dropMade();
     let made = this.made;
@@ -599,6 +601,8 @@ export class NewChatController {
   }
 
   private lastProject(env: NewChatEnv): string | null {
+    // "Ask each time" starts every new chat with nothing chosen.
+    if (this.boards.ask) return null;
     const id = env.storage.getItem(LAST_PROJECT_KEY);
     return id && isOpenBoard(this.projects.find((p) => p.id === id)) ? id : null;
   }

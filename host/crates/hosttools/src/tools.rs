@@ -153,7 +153,7 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
         .and_then(Value::as_str)
         .ok_or_else(|| ToolError::refused("projectId is required."))?
         .to_owned();
-    for k in ["path", "beforeProjectId", "position", "icon"] {
+    for k in ["path", "beforeProjectId", "position"] {
         if a.get(k).is_some() {
             return Err(ToolError::refused(format!(
                 "{k} cannot be changed by a chat yet; ask the user to do it in the sidebar."
@@ -200,6 +200,22 @@ async fn update_project(ctx: ToolCtx, a: Value) -> ToolResult {
     }
     if let Some(c) = a.get("color").and_then(Value::as_str) {
         upd["colour"] = if c == "none" { Value::Null } else { json!(c) };
+        any = true;
+    }
+    // An emoji or `lib:<name>`; "none" goes back to the default glyph. A picture is the user's to
+    // choose, so `img` is refused here; the project op checks the rest.
+    if let Some(i) = a.get("icon") {
+        let i = i
+            .as_str()
+            .map(str::trim)
+            .filter(|i| !i.is_empty() && i.len() <= 128)
+            .ok_or_else(|| ToolError::refused("icon is an emoji, lib:<name> or none."))?;
+        if i == "img" {
+            return Err(ToolError::refused(
+                "A picture icon can only be chosen by the user, in the sidebar.",
+            ));
+        }
+        upd["icon"] = if i == "none" { Value::Null } else { json!(i) };
         any = true;
     }
     if any {
@@ -328,13 +344,14 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .async_tool(
         ToolSpec::write(
             "app_update_project",
-            format!("Rename, pin or unpin, recolour (a palette name, #rrggbb or none), archive or restore a project, or set a board's folder (primaryFolder: an absolute folder where the board's new chats start; it is added as a folder project when Helm has none over it). Archiving archives its chats; working ones are stopped in the background.{EXPLICIT}"),
+            format!("Rename, pin or unpin, recolour (a palette name, #rrggbb or none), give it an icon (an emoji, a library icon as lib:<name>, or none), archive or restore a project, or set a board's folder (primaryFolder: an absolute folder where the board's new chats start; it is added as a folder project when Helm has none over it). Archiving archives its chats; working ones are stopped in the background.{EXPLICIT}"),
             obj(
                 json!({
                     "projectId": {"type": "string"},
                     "name": {"type": "string", "minLength": 1, "maxLength": 512},
                     "pinned": {"type": "boolean"},
                     "color": {"type": "string", "maxLength": 32},
+                    "icon": {"type": "string", "maxLength": 128, "description": "An emoji, lib:<name> or none."},
                     "archived": {"type": "boolean"},
                     "primaryFolder": {"type": "string", "maxLength": 4096, "description": "For a board: the absolute folder its new chats start in."}
                 }),
@@ -518,6 +535,31 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.public.contains("path cannot be changed"));
+        // An icon is an emoji or a library name; a picture is the user's own choice.
+        for (icon, want) in [
+            (json!("🚀"), Some(json!("🚀"))),
+            (json!("lib:rocket"), Some(json!("lib:rocket"))),
+            (json!("none"), Some(Value::Null)),
+            (json!("img"), None),
+            (json!(""), None),
+            (json!(3), None),
+        ] {
+            ops.0.lock().unwrap().clear();
+            let r =
+                update_project(ctx(ops.clone()), json!({"projectId": "p1", "icon": icon})).await;
+            let calls = ops.0.lock().unwrap().clone();
+            match want {
+                Some(w) => {
+                    r.unwrap();
+                    let upd = calls.iter().find(|(o, _)| o == "project_update").unwrap();
+                    assert_eq!(upd.1["icon"], w, "{icon}");
+                }
+                None => {
+                    r.unwrap_err();
+                    assert!(calls.iter().all(|(o, _)| o != "project_update"), "{icon}");
+                }
+            }
+        }
         // A board's folder: an open folder project over it is reused, else one is added; only a
         // board takes one, and only an absolute folder that exists.
         assert_eq!(r["projects"][0]["primaryFolder"], Value::Null);

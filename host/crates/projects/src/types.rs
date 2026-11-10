@@ -9,6 +9,9 @@ use helm_chats::types::ChatStatus;
 use serde::{Deserialize, Deserializer, Serialize};
 use ts_rs::TS;
 
+/// The longest project description, in characters.
+pub const MAX_DESCRIPTION_CHARS: usize = 200;
+
 /// A project's kind: a folder project made in Helm, or a board project mirrored read-only from
 /// Agent Standup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -61,6 +64,8 @@ pub struct BoardInfo {
     pub completed: bool,
     /// A local override (name or icon) is in force.
     pub edited_locally: bool,
+    /// A rename made in Helm has not reached the board yet; it is sent again after the next sync.
+    pub title_pending: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -75,8 +80,12 @@ pub struct ProjectNode {
     pub path: Option<String>,
     pub parent_id: Option<String>,
     pub parent_source: Option<ParentSource>,
-    /// An emoji or a library icon name (`lib:<name>`); `null` = the default glyph.
+    /// An emoji, a library icon name (`lib:<name>`) or `img` (a picture the user chose, read with
+    /// `project_icon_image_get`); `null` = the default glyph.
     pub icon: Option<String>,
+    /// One plain line telling agents and people what the project is for, at most
+    /// [`MAX_DESCRIPTION_CHARS`] characters; `null` when there is none.
+    pub description: Option<String>,
     /// A named colour or `#rrggbb`, lowercase.
     pub colour: Option<String>,
     pub pinned: bool,
@@ -167,6 +176,14 @@ pub struct SidebarRow {
     pub local_ahead: Option<i64>,
     /// The chat holds an unsent draft: drawn as a small pencil before the age.
     pub has_draft: bool,
+    /// The profile the chat belongs to; left out when the chat has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub profile_id: Option<String>,
+    /// Profile ids, besides its own, that the chat is shown to; left out with `profile_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub shared_with: Option<Vec<String>>,
     #[ts(type = "number")]
     pub last_activity_at: i64,
     pub archived: bool,
@@ -283,6 +300,10 @@ pub struct ProjectUpdateArgs {
     #[serde(default, deserialize_with = "double_option")]
     #[ts(optional, type = "string | null")]
     pub colour: Option<Option<String>>,
+    /// One line, at most [`MAX_DESCRIPTION_CHARS`] characters; `null` or blank clears.
+    #[serde(default, deserialize_with = "double_option")]
+    #[ts(optional, type = "string | null")]
+    pub description: Option<Option<String>>,
     #[serde(default)]
     #[ts(optional)]
     pub pinned: Option<bool>,
@@ -311,6 +332,22 @@ pub struct ProjectUpdateArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProjectIdArgs {
     pub project_id: String,
+}
+
+/// `project_icon_image_set`: the picture the user chose, already cut square and drawn at 64 by 64.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectIconImageSetArgs {
+    pub project_id: String,
+    /// The PNG's bytes in base64, at most 64 KB once decoded.
+    pub png_base64: String,
+}
+
+/// `project_icon_image_get`: the stored picture, or `null` when the project has none.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectIconImage {
+    pub png_base64: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

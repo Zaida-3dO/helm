@@ -46,11 +46,12 @@ import { ShellShortcuts } from './shell/Shortcuts.tsx';
 import { SidebarResizer } from './shell/SidebarResizer.tsx';
 import { SIDEBAR_VISIBLE_PREF, SIDEBAR_WIDTH_PREF, sidebarLayout } from './shell/layout.ts';
 import { TerminalDock } from './terminal/TerminalDock.tsx';
-import { Notifications } from './notifications/Notifications.tsx';
+import { SavedDueNotice } from './saved/SavedDueNotice.tsx';
 import { SettingsToast } from './hosttools/SettingsToast.tsx';
 import { followSendShortcut } from './hosttools/sendShortcut.ts';
 import './hosttools/index.ts'; // the Allow cards
 import { NewChatHost } from './newchat/index.ts';
+import { IconPickerHost } from './projects/index.ts';
 import { FrameStats } from './perf/index.ts'; // the frame-stats overlay (Mod+Shift+P)
 import { ErrorBoundary } from './safety/ErrorBoundary.tsx';
 import { Delight } from './delight/index.tsx'; // celebrations, the first-run intro, the pet's settings
@@ -186,9 +187,10 @@ function Frame({ flushers }: { flushers: Flushers }) {
             )}
           </ErrorBoundary>
           <NewChatHost flushers={flushers} sendShortcut={sendShortcut} /> {/* the new-chat page */}
+          <IconPickerHost /> {/* the project icon picker */}
         </div>
         <TerminalDock />
-        <Notifications /> {/* over the chat column only, never the side panel */}
+        <SavedDueNotice /> {/* the one notice for saved items that came due */}
       </main>
       <ErrorBoundary name="side panel" resetKey={chatId}>
         <SidePanel api={shell.api} chatId={chatId} /> {/* side panel */}

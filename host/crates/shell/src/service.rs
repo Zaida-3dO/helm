@@ -1,12 +1,17 @@
 //! The shell service: it watches `attention`, `completion`, `schedules-wake` (a saved schedule
 //! coming due) and `preferences` events on their way
 //! to the renderer (the app's event tap calls [`ShellService::observe`]) and drives the taskbar
-//! badge, the window flash, keep-awake, the tray menu and native toasts through a [`ShellHost`]
-//! the app implements with Tauri. It works with the window hidden.
+//! badge, the window flash, keep-awake, the tray menu and its state dot, and native toasts through
+//! a [`ShellHost`] the app implements with Tauri. It works with the window hidden.
+//!
+//! Native toasts are opt-in (Settings, Shell). With them on, a finished turn and a chat that
+//! starts needing the user each raise one, unless the chat is muted or Helm is the window in
+//! front, where the flags already say so.
 
 use crate::notify::{badge_label, want_keep_awake, Announcer, FlashTracker};
 use crate::probe::Probe;
 use crate::settings;
+use crate::toasts::{finished_toast, needs_you_toast, tray_dot, NeedsTracker};
 use crate::tray::{menu_model, TrayMenu};
 use crate::types::{
     AudioInput, KeepAwake, MicChoice, NotificationMode, ShellSettings, ShellSettingsView,
@@ -14,6 +19,8 @@ use crate::types::{
 use helm_chats::types::{AttentionSummary, Completion};
 use helm_core::db::Database;
 use helm_ipc::AppEvent;
+use helm_platform::toast::ToastSpec;
+use helm_platform::trayicon::TrayDot;
 use helm_platform::{AudioInputs, CaptureDevice, PowerAssertions};
 use serde_json::json;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -28,10 +35,12 @@ pub trait ShellHost: Send + Sync {
     fn is_focused(&self) -> bool;
     /// Replace the tray's menu.
     fn set_tray(&self, menu: &TrayMenu);
-    /// Post (or replace) the chat's Windows toast.
-    fn post_toast(&self, c: &Completion);
+    /// Post (or replace) a Windows toast. The spec's tag is the chat's, so a chat has one.
+    fn post_toast(&self, spec: &ToastSpec);
     /// Withdraw the chat's Windows toast, if any.
     fn withdraw_toast(&self, chat_id: &str);
+    /// Draw the tray icon with this state dot.
+    fn set_tray_dot(&self, dot: TrayDot);
     /// Register the global hotkey (None unregisters). Err names why it failed.
     fn register_hotkey(&self, chord: Option<&str>) -> Result<(), String>;
     /// Zoom the main web view itself (1.0 is 100%), not the page's CSS.
@@ -43,6 +52,8 @@ struct State {
     settings: ShellSettings,
     summary: Option<AttentionSummary>,
     announcer: Announcer,
+    needs: NeedsTracker,
+    dot: TrayDot,
     flash: FlashTracker,
     keep_awake_on: bool,
     keep_awake_error: Option<String>,
@@ -106,6 +117,13 @@ impl ShellService {
         self.refresh_devices();
         let chord = self.state.lock().unwrap().settings.global_hotkey.clone();
         self.apply_hotkey(chord.as_deref());
+        // The launch summary was taken before the app side existed: show its dot now.
+        let dot = self.state.lock().unwrap().dot;
+        if dot != TrayDot::None {
+            if let Some(h) = self.host() {
+                h.set_tray_dot(dot);
+            }
+        }
         let summary = self.state.lock().unwrap().summary.clone();
         if let Some(s) = summary {
             self.on_summary(s, true);
@@ -191,6 +209,10 @@ impl ShellService {
         }
         let flash = st.flash.observe(&s) && !initial;
         let withdrawn = st.announcer.withdrawals(&s);
+        let asking = st.needs.fresh(&s);
+        let answered = st.needs.resolved(&s);
+        let dot = tray_dot(&s);
+        let dot_changed = std::mem::replace(&mut st.dot, dot) != dot;
         let label = badge_label(s.badge);
         let badge_changed = st.badge.as_ref() != Some(&label);
         st.badge = Some(label.clone());
@@ -203,6 +225,12 @@ impl ShellService {
             }
             self.probe.record("badge", json!({"count": s.badge}));
         }
+        if dot_changed {
+            if let Some(h) = self.host() {
+                h.set_tray_dot(dot);
+            }
+            self.probe.record("tray_dot", json!({"dot": dot.as_str()}));
+        }
         if flash {
             if let Some(h) = self.host() {
                 if !h.is_focused() {
@@ -211,7 +239,7 @@ impl ShellService {
                 }
             }
         }
-        for chat in withdrawn {
+        for chat in withdrawn.into_iter().chain(answered) {
             if mode == NotificationMode::Native {
                 if let Some(h) = self.host() {
                     h.withdraw_toast(&chat);
@@ -220,12 +248,26 @@ impl ShellService {
             self.probe
                 .record("toast_withdrawn", json!({"chatId": chat, "mode": mode}));
         }
+        // A chat that has just started needing the user. Never answered from the toast: it only
+        // opens the chat.
+        if !initial {
+            for row in asking {
+                let shown = self.toast(mode, &row.chat_id, || needs_you_toast(&row));
+                if shown {
+                    self.state.lock().unwrap().needs.posted(&row.chat_id);
+                }
+                self.probe.record(
+                    "toast",
+                    json!({"chatId": row.chat_id, "mode": mode, "kind": "needs_you", "shown": shown}),
+                );
+            }
+        }
         self.apply_keep_awake();
         self.publish_tray();
     }
 
-    /// A newly announced completion: decide whether it gets a native toast. In-app toasts are the
-    /// renderer's (it sees the same event); the decision here only covers native mode and the probe.
+    /// A newly announced completion: decide whether it gets a native toast. The decision here only
+    /// covers native mode and the probe; a finished chat is also in the attention views.
     pub fn on_completion(&self, c: &Completion) {
         let now = (self.clock)();
         let mut st = self.state.lock().unwrap();
@@ -234,13 +276,43 @@ impl ShellService {
         }
         let mode = st.settings.notifications;
         drop(st);
-        if mode == NotificationMode::Native {
-            if let Some(h) = self.host() {
-                h.post_toast(c);
-            }
+        let shown = self.toast(mode, &c.chat_id, || finished_toast(c));
+        self.probe.record(
+            "toast",
+            json!({"chatId": c.chat_id, "mode": mode, "kind": "finished", "shown": shown}),
+        );
+    }
+
+    /// Post the toast `spec` builds when toasts are on, the chat is not muted and Helm is not the
+    /// window in front. True when it was posted.
+    fn toast(
+        &self,
+        mode: NotificationMode,
+        chat_id: &str,
+        spec: impl FnOnce() -> ToastSpec,
+    ) -> bool {
+        if mode != NotificationMode::Native || self.is_muted(chat_id) {
+            return false;
         }
-        self.probe
-            .record("toast", json!({"chatId": c.chat_id, "mode": mode}));
+        let Some(h) = self.host() else { return false };
+        if h.is_focused() {
+            return false;
+        }
+        h.post_toast(&spec());
+        true
+    }
+
+    /// Whether the chat is muted. A muted chat never raises a toast, whatever path asks.
+    fn is_muted(&self, chat_id: &str) -> bool {
+        self.db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM chat_mutes WHERE chat_id = ?1)",
+                    [chat_id],
+                    |r| r.get::<_, bool>(0),
+                )
+            })
+            .unwrap_or(false)
     }
 
     fn apply_keep_awake(&self) {
@@ -356,7 +428,11 @@ impl ShellService {
         let withdraw = if prev.notifications == NotificationMode::Native
             && stored.notifications != NotificationMode::Native
         {
-            st.announcer.withdraw_all()
+            let mut all = st.announcer.withdraw_all();
+            all.extend(st.needs.withdraw_all());
+            all.sort();
+            all.dedup();
+            all
         } else {
             Vec::new()
         };
@@ -433,6 +509,16 @@ impl ShellService {
         self.retick_on_error(r)
     }
 
+    /// The tray's Windows notifications check item: on, or back off.
+    pub fn toggle_notifications(&self) -> Result<(), String> {
+        let now = self.state.lock().unwrap().settings.notifications;
+        self.set_notification_mode(if now == NotificationMode::Native {
+            NotificationMode::Off
+        } else {
+            NotificationMode::Native
+        })
+    }
+
     pub fn set_notification_mode(&self, mode: NotificationMode) -> Result<(), String> {
         let mut next = self.state.lock().unwrap().settings.clone();
         next.notifications = mode;
@@ -501,6 +587,7 @@ mod tests {
     #[derive(Default)]
     struct FakeHost {
         log: Mutex<Vec<String>>,
+        specs: Mutex<Vec<ToastSpec>>,
         focused: AtomicBool,
         refuse_hotkey: AtomicBool,
     }
@@ -523,11 +610,16 @@ mod tests {
                 .unwrap()
                 .push(format!("tray {} {}", m.groups.len(), m.mics.len()));
         }
-        fn post_toast(&self, c: &Completion) {
+        fn post_toast(&self, spec: &ToastSpec) {
+            let chat = spec.launch.strip_prefix("open:").unwrap_or(&spec.launch);
+            self.log.lock().unwrap().push(format!("toast {chat}"));
+            self.specs.lock().unwrap().push(spec.clone());
+        }
+        fn set_tray_dot(&self, dot: TrayDot) {
             self.log
                 .lock()
                 .unwrap()
-                .push(format!("toast {}", c.chat_id));
+                .push(format!("dot {}", dot.as_str()));
         }
         fn withdraw_toast(&self, chat: &str) {
             self.log.lock().unwrap().push(format!("withdraw {chat}"));
@@ -826,15 +918,21 @@ mod tests {
     }
 
     #[test]
-    fn in_app_mode_posts_no_native_toast_but_records_the_decision() {
+    fn with_toasts_off_nothing_is_posted_but_the_decision_is_recorded() {
         let r = rig();
+        assert_eq!(
+            r.svc.settings().notifications,
+            NotificationMode::Off,
+            "opt-in"
+        );
         r.host.take();
         r.svc
             .observe(&event("completion", "completion", completion("c1")));
         assert!(!r.host.take().iter().any(|l| l.starts_with("toast")));
         let t = probes(&r, "toast");
         assert_eq!(t[0]["chatId"], "c1");
-        assert_eq!(t[0]["mode"], "in_app");
+        assert_eq!(t[0]["mode"], "off");
+        assert_eq!(t[0]["shown"], false);
     }
 
     #[test]
@@ -871,10 +969,172 @@ mod tests {
         r.svc
             .observe(&event("completion", "completion", completion("c1")));
         r.host.take();
-        r.svc
-            .set_notification_mode(NotificationMode::InApp)
-            .unwrap();
+        r.svc.set_notification_mode(NotificationMode::Off).unwrap();
         assert!(r.host.take().contains(&"withdraw c1".to_owned()));
+    }
+
+    /// Mark chats muted the way the chats crate does (its table; the shell test database has none).
+    fn mute(r: &Rig, chats: &[&str]) {
+        r.svc
+            .db
+            .write(|tx| {
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS chat_mutes (chat_id TEXT PRIMARY KEY, muted_at INTEGER NOT NULL)",
+                )?;
+                for c in chats {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO chat_mutes(chat_id, muted_at) VALUES (?1, 1)",
+                        [c],
+                    )?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+    }
+
+    /// Which things toast: a finished turn (reply, continue, open) and a chat that starts needing
+    /// the user (open only), in Windows mode only, never for a muted chat, never while Helm is the
+    /// window in front, and never for a request that was already waiting at launch.
+    #[test]
+    fn native_toasts_cover_finished_and_needs_you_and_never_muted_or_focused_chats() {
+        let r = rig();
+        mute(&r, &["m1"]);
+        // Off: nothing, whatever happens.
+        r.svc
+            .observe(&event("attention", "summary", summary(1, 0, &[], &["w0"])));
+        r.svc.observe(&event(
+            "attention",
+            "summary",
+            summary(2, 0, &[], &["w0", "off1"]),
+        ));
+        r.svc
+            .observe(&event("completion", "completion", completion("off2")));
+        assert!(!r.host.take().iter().any(|l| l.starts_with("toast")));
+
+        r.svc
+            .set_notification_mode(NotificationMode::Native)
+            .unwrap();
+        r.host.take();
+        // A finished turn: title, reply box and two buttons.
+        r.svc
+            .observe(&event("completion", "completion", completion("c1")));
+        // A new request: Open only. w0 was already waiting, so it raises nothing.
+        r.svc.observe(&event(
+            "attention",
+            "summary",
+            summary(3, 0, &["c1"], &["w0", "off1", "c2"]),
+        ));
+        // A muted chat: neither kind.
+        r.svc
+            .observe(&event("completion", "completion", completion("m1")));
+        r.svc.observe(&event(
+            "attention",
+            "summary",
+            summary(4, 0, &["c1"], &["w0", "off1", "c2", "m1"]),
+        ));
+        // Helm in front: the flags already say so.
+        r.host.focused.store(true, Ordering::SeqCst);
+        r.svc
+            .observe(&event("completion", "completion", completion("f1")));
+        r.svc.observe(&event(
+            "attention",
+            "summary",
+            summary(5, 0, &["c1"], &["w0", "off1", "c2", "m1", "f2"]),
+        ));
+        let log = r.host.take();
+        let toasts: Vec<&String> = log.iter().filter(|l| l.starts_with("toast")).collect();
+        assert_eq!(toasts, ["toast c1", "toast c2"], "{log:?}");
+        let specs = r.host.specs.lock().unwrap().clone();
+        assert_eq!(specs[0].title, "T");
+        assert_eq!(
+            specs[0].reply_box.as_ref().map(|b| b.arguments.as_str()),
+            Some("reply:c1")
+        );
+        assert_eq!(
+            specs[0]
+                .actions
+                .iter()
+                .map(|a| a.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Continue", "Open"]
+        );
+        assert_eq!(specs[1].title, "T needs you");
+        assert_eq!(
+            specs[1]
+                .actions
+                .iter()
+                .map(|a| a.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Open"]
+        );
+        assert!(
+            specs[1].reply_box.is_none(),
+            "nothing is answered from a toast"
+        );
+        let shown: Vec<(String, bool)> = probes(&r, "toast")
+            .iter()
+            .filter(|p| p["mode"] == "native")
+            .map(|p| {
+                (
+                    p["chatId"].as_str().unwrap().to_owned(),
+                    p["shown"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        assert!(shown.contains(&("m1".to_owned(), false)));
+        assert!(shown.contains(&("f1".to_owned(), false)));
+        // Answering the request takes its toast back.
+        r.host.focused.store(false, Ordering::SeqCst);
+        r.svc.observe(&event(
+            "attention",
+            "summary",
+            summary(4, 0, &["c1"], &["w0", "off1", "m1", "f2"]),
+        ));
+        assert!(r.host.take().contains(&"withdraw c2".to_owned()));
+    }
+
+    #[test]
+    fn the_tray_dot_follows_what_needs_the_user_and_what_runs() {
+        let r = rig();
+        r.host.take();
+        let running = |n: usize| {
+            let mut s = summary(0, n as u32, &[], &[]);
+            s.running = (0..n)
+                .map(|i| AttentionRow {
+                    chat_id: format!("r{i}"),
+                    title: "T".into(),
+                    project: "P".into(),
+                    kind: AttentionKind::Running,
+                    reason: String::new(),
+                })
+                .collect();
+            s
+        };
+        for s in [
+            running(0),
+            running(2),
+            running(1),
+            summary(1, 0, &[], &["c1"]),
+            summary(0, 0, &[], &[]),
+        ] {
+            r.svc.observe(&event("attention", "summary", s));
+        }
+        let dots: Vec<String> = r
+            .host
+            .take()
+            .into_iter()
+            .filter(|l| l.starts_with("dot"))
+            .collect();
+        assert_eq!(
+            dots,
+            ["dot amber", "dot red", "dot none"],
+            "only changes are drawn"
+        );
+        let probed: Vec<String> = probes(&r, "tray_dot")
+            .iter()
+            .map(|p| p["dot"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(probed, ["amber", "red", "none"]);
     }
 
     #[test]

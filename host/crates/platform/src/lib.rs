@@ -5,8 +5,9 @@
 //!
 //! What is used for real: the credential key store ([`keychain`]), owner-only file security and
 //! atomic replace ([`fs`]), single-instance signalling ([`instance`]), the quit confirmation
-//! ([`dialogs`]) and sleep, wake, sign-out and shutdown ([`session`]). Taskbar badge and sound are
-//! no-op stubs until they are implemented.
+//! ([`dialogs`]), sleep, wake, sign-out and shutdown ([`session`]), Windows toasts ([`toast`]) and
+//! the tray icon's state dot ([`trayicon`]). Taskbar badge and sound are no-op stubs until they
+//! are implemented.
 
 pub mod audio;
 pub mod dialogs;
@@ -19,6 +20,8 @@ pub mod power;
 pub mod private;
 pub mod session;
 pub mod stubs;
+pub mod toast;
+pub mod trayicon;
 
 use std::sync::Arc;
 

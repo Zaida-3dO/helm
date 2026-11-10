@@ -1,9 +1,18 @@
-//! The Windows shell's Tauri side: the one tray icon and its menu,
+//! The Windows shell's Tauri side: the one tray icon, its menu and its state dot,
 //! the global hotkey, the taskbar overlay badge and flash, native toasts, and the event tap that
 //! feeds `helm_shell::ShellService`.
+//!
+//! Toasts are WinRT toasts (`helm_platform::toast`) shown under an app id registered for the
+//! current user. A click comes back in process while Helm runs: Open shows the chat; Continue and
+//! Reply are the user's own sends from a notification. If Windows will not show a toast, the
+//! notification plugin's plain one is used instead.
 
-use helm_chats::types::Completion;
 use helm_ipc::{AppEvent, EventSink, MAIN_WINDOW};
+use helm_platform::toast::{
+    register_app_id, tag_for, Activation, NativeToasts, NoToasts, ToastSpec, Toasts,
+};
+use helm_platform::trayicon::{self, TrayDot};
+use helm_shell::toasts::{parse_click, submission_id, Click};
 use helm_shell::tray::TrayMenu;
 use helm_shell::{NotificationMode, ShellHost, ShellService};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -13,6 +22,27 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 pub const TRAY_ID: &str = "helm";
+
+/// The icon the toast header shows, written beside the temporary files on first use.
+const TOAST_ICON: &[u8] = include_bytes!("../icons/128x128.png");
+
+/// True in a debug build driven by a check (it asks for the probe file or the background window).
+/// Such a run never shows a real toast and never falls back to one.
+fn under_test() -> bool {
+    cfg!(debug_assertions)
+        && [helm_shell::probe::PROBE_ENV, "HELM_TEST_WINDOW"]
+            .iter()
+            .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
+}
+
+fn toast_icon_path() -> Option<std::path::PathBuf> {
+    let path = std::env::temp_dir().join("helm-toast-icon.png");
+    let same = std::fs::metadata(&path).is_ok_and(|m| m.len() == TOAST_ICON.len() as u64);
+    if !same {
+        std::fs::write(&path, TOAST_ICON).ok()?;
+    }
+    Some(path)
+}
 
 /// Every event on its way to the renderer also goes past the shell service. The service is
 /// set once it exists; events before that are only forwarded.
@@ -71,15 +101,36 @@ pub struct TauriShellHost {
     tray: Mutex<Option<TrayIcon>>,
     hotkey: Mutex<Option<Shortcut>>,
     service: OnceLock<Arc<ShellService>>,
+    toasts: Arc<dyn Toasts>,
+    /// A check is driving this run: no toast is shown, not even the plain fallback.
+    quiet: bool,
+    /// The tray icon's own pixels (RGBA, width, height), which the state dot is drawn on.
+    base_icon: Mutex<Option<(Vec<u8>, u32, u32)>>,
 }
 
 impl TauriShellHost {
     pub fn new(app: AppHandle) -> Arc<Self> {
+        let quiet = under_test();
+        let toasts: Arc<dyn Toasts> = if quiet {
+            Arc::new(NoToasts)
+        } else {
+            let aumid = app.config().identifier.clone();
+            match register_app_id(&aumid, "Helm", toast_icon_path().as_deref()) {
+                Ok(()) => Arc::new(NativeToasts::new(&aumid)),
+                Err(e) => {
+                    log::warn!("toast app id: {e}");
+                    Arc::new(NoToasts)
+                }
+            }
+        };
         Arc::new(Self {
             app,
             tray: Mutex::new(None),
             hotkey: Mutex::new(None),
             service: OnceLock::new(),
+            toasts,
+            quiet,
+            base_icon: Mutex::new(None),
         })
     }
 
@@ -116,7 +167,48 @@ impl TauriShellHost {
         });
         let tray = builder.build(&self.app)?;
         *self.tray.lock().unwrap() = Some(tray);
+        if let Some(icon) = self.app.default_window_icon() {
+            *self.base_icon.lock().unwrap() =
+                Some((icon.rgba().to_vec(), icon.width(), icon.height()));
+        }
+        // Clicks on a toast come back here while Helm runs.
+        let me = self.clone();
+        self.toasts
+            .on_activated(Arc::new(move |a: Activation| me.on_toast_click(&a)));
         Ok(())
+    }
+
+    /// A click on a toast or one of its buttons.
+    fn on_toast_click(&self, a: &Activation) {
+        match parse_click(a) {
+            Click::Open(chat) => self.open_chat(&chat, None),
+            Click::Send { chat_id, text } => self.send_from_toast(&chat_id, &text),
+            Click::Ignore => {}
+        }
+    }
+
+    /// Reply and Continue: the user's own send, from a notification. It follows send behaviour
+    /// like any send, so it queues behind a running turn.
+    fn send_from_toast(&self, chat_id: &str, text: &str) {
+        let Some(d) = self.app.try_state::<Arc<helm_ipc::Dispatcher>>() else {
+            return;
+        };
+        let Some(rt) = d.ctx().services.get::<helm_chats::runtime::ChatRuntime>() else {
+            return;
+        };
+        let id = submission_id();
+        let sent = helm_chats::submit::host_send(
+            &rt,
+            helm_chats::submit::HostSend {
+                chat_id,
+                submission_id: &id,
+                text,
+                origin: helm_chats::types::SubmissionOrigin::Notification,
+            },
+        );
+        if let Err(e) = sent {
+            log::warn!("toast reply not sent: {}", e.message);
+        }
     }
 
     fn window(&self) -> Option<tauri::WebviewWindow> {
@@ -173,14 +265,9 @@ impl TauriShellHost {
                     report(s.toggle_keep_awake());
                 }
             }
-            "notif:in_app" => {
-                if let Some(s) = svc {
-                    report(s.set_notification_mode(NotificationMode::InApp));
-                }
-            }
             "notif:native" => {
                 if let Some(s) = svc {
-                    report(s.set_notification_mode(NotificationMode::Native));
+                    report(s.toggle_notifications());
                 }
             }
             "mic:auto" => {
@@ -264,16 +351,7 @@ impl TauriShellHost {
             m.keep_awake,
             None::<&str>,
         )?)?;
-        let notif = Submenu::with_id(app, "notif", "Notifications", true)?;
-        notif.append(&CheckMenuItem::with_id(
-            app,
-            "notif:in_app",
-            "In Helm",
-            true,
-            m.notifications == NotificationMode::InApp,
-            None::<&str>,
-        )?)?;
-        notif.append(&CheckMenuItem::with_id(
+        menu.append(&CheckMenuItem::with_id(
             app,
             "notif:native",
             "Windows notifications",
@@ -281,7 +359,6 @@ impl TauriShellHost {
             m.notifications == NotificationMode::Native,
             None::<&str>,
         )?)?;
-        menu.append(&notif)?;
         menu.append(&PredefinedMenuItem::separator(app)?)?;
         menu.append(&MenuItem::with_id(
             app,
@@ -343,33 +420,43 @@ impl ShellHost for TauriShellHost {
         }
     }
 
-    fn post_toast(&self, c: &Completion) {
+    fn post_toast(&self, spec: &ToastSpec) {
+        if self.quiet {
+            return;
+        }
+        let Err(why) = self.toasts.show(spec) else {
+            return;
+        };
+        log::warn!("native toast: {why}; using the plain one");
         use tauri_plugin_notification::NotificationExt;
-        let title = if c.title.trim().is_empty() {
-            "Task finished".to_owned()
-        } else {
-            c.title.clone()
-        };
-        let body = if c.project.is_empty() {
-            c.preview.clone()
-        } else {
-            format!("{}\n{}", c.project, c.preview)
-        };
         if let Err(e) = self
             .app
             .notification()
             .builder()
-            .title(title)
-            .body(body)
+            .title(spec.title.clone())
+            .body(spec.body.clone())
             .show()
         {
-            log::warn!("native toast: {e}");
+            log::warn!("plain toast: {e}");
         }
     }
 
-    fn withdraw_toast(&self, _chat_id: &str) {
-        // The notification plugin cannot retract a posted Windows toast; it ages out of the
-        // Action Center on its own (follow-up: a WinRT ToastNotifier with per-chat tags).
+    fn withdraw_toast(&self, chat_id: &str) {
+        if !self.quiet {
+            self.toasts.withdraw(&tag_for(chat_id));
+        }
+    }
+
+    fn set_tray_dot(&self, dot: TrayDot) {
+        let Some((base, w, h)) = self.base_icon.lock().unwrap().clone() else {
+            return;
+        };
+        let px = trayicon::compose(&base, w, h, dot);
+        if let Some(t) = self.tray.lock().unwrap().as_ref() {
+            if let Err(e) = t.set_icon(Some(tauri::image::Image::new_owned(px, w, h))) {
+                log::warn!("tray icon: {e}");
+            }
+        }
     }
 
     fn register_hotkey(&self, chord: Option<&str>) -> Result<(), String> {

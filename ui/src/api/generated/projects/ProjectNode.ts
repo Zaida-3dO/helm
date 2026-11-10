@@ -14,9 +14,15 @@ name: string,
  */
 path: string | null, parentId: string | null, parentSource: ParentSource | null, 
 /**
- * An emoji or a library icon name (`lib:<name>`); `null` = the default glyph.
+ * An emoji, a library icon name (`lib:<name>`) or `img` (a picture the user chose, read with
+ * `project_icon_image_get`); `null` = the default glyph.
  */
-icon: string | null, 
+icon: string | null,
+/**
+ * One plain line telling agents and people what the project is for, at most
+ * [`MAX_DESCRIPTION_CHARS`] characters; `null` when there is none.
+ */
+description: string | null,
 /**
  * A named colour or `#rrggbb`, lowercase.
  */

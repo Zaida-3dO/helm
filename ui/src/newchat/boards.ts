@@ -13,11 +13,17 @@ export interface DefaultBoardState {
   name: string | null;
   /** The board the user chose, or null when the host's fallback is in use. */
   chosen: string | null;
+  /** The setting is "ask each time": the new-chat page leaves its picker empty and focused. The
+   *  fallback board still takes chats nobody placed (a message from the phone, a scheduled run). */
+  ask: boolean;
   /** Boards no picker lists (the catch-all inbox). */
   hiddenBoardIds: string[];
 }
 
-export const NO_DEFAULT_BOARD: DefaultBoardState = { boardId: null, name: null, chosen: null, hiddenBoardIds: [] };
+/** The setting value that means "ask each time". */
+export const ASK_EACH_TIME = 'ask';
+
+export const NO_DEFAULT_BOARD: DefaultBoardState = { boardId: null, name: null, chosen: null, ask: false, hiddenBoardIds: [] };
 
 /** The default board, or none when the host cannot say (no board connected yet, or an older host). */
 export async function getDefaultBoard(api: Api): Promise<DefaultBoardState> {
@@ -28,7 +34,8 @@ export async function getDefaultBoard(api: Api): Promise<DefaultBoardState> {
   }
 }
 
-/** Choose the default board; null goes back to the host's fallback. */
+/** Choose the default board; null goes back to the host's fallback, and `ASK_EACH_TIME` has the
+ *  new-chat page ask. */
 export async function setDefaultBoard(api: Api, boardId: string | null): Promise<DefaultBoardState> {
   return normalise(await api<DefaultBoardState>('default_board_set', { boardId }));
 }
@@ -38,6 +45,7 @@ function normalise(s: Partial<DefaultBoardState> | null | undefined): DefaultBoa
     boardId: s?.boardId ?? null,
     name: s?.name ?? null,
     chosen: s?.chosen ?? null,
+    ask: s?.ask === true,
     hiddenBoardIds: Array.isArray(s?.hiddenBoardIds) ? s.hiddenBoardIds : [],
   };
 }

@@ -1,7 +1,8 @@
 //! Probe files for what a DOM check cannot see (used in place of dialogs).
 //! In debug builds only, `HELM_TEST_PROBE=<file>` makes the shell append one JSON line
 //! per observable effect: `badge {count}`, `keep_awake {on}`, `tray_menu {groups, mics}`,
-//! `toast {chatId, mode}`, `hotkey {chord, registered}`. Release builds ignore the variable.
+//! `toast {chatId, mode, kind, shown}`, `tray_dot {dot}`,
+//! `hotkey {chord, registered}`. Release builds ignore the variable.
 
 use serde_json::{Map, Value};
 use std::io::Write;

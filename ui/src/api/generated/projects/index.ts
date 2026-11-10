@@ -8,6 +8,8 @@ export type { ChatOrganizeArgs } from './ChatOrganizeArgs.ts';
 export type { ChatStatus } from './ChatStatus.ts';
 export type { ParentSource } from './ParentSource.ts';
 export type { ProjectCreateArgs } from './ProjectCreateArgs.ts';
+export type { ProjectIconImage } from './ProjectIconImage.ts';
+export type { ProjectIconImageSetArgs } from './ProjectIconImageSetArgs.ts';
 export type { ProjectIdArgs } from './ProjectIdArgs.ts';
 export type { ProjectKind } from './ProjectKind.ts';
 export type { ProjectListArgs } from './ProjectListArgs.ts';

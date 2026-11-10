@@ -519,6 +519,264 @@ fn colours_and_icons_are_validated() {
     assert!(store::validate_icon("lib:rocket").is_ok());
     assert!(store::validate_icon("abc").is_err());
     assert!(store::validate_icon("lib:").is_err());
+    assert!(store::validate_icon("lib:not-an-icon").is_err());
+    assert!(store::validate_icon("lib:Rocket").is_err());
+    assert_eq!(store::validate_icon(" img ").unwrap(), "img");
+    for name in store::ICON_LIBRARY {
+        assert!(
+            store::validate_icon(&format!("lib:{name}")).is_ok(),
+            "{name}"
+        );
+    }
+}
+
+/// The renderer draws the library icons; its list and the one that validates them are the same.
+#[test]
+fn the_icon_library_here_and_in_the_renderer_are_the_same_list() {
+    let ui = include_str!("../../../../ui/src/projects/iconLibrary.tsx");
+    for name in store::ICON_LIBRARY {
+        assert_eq!(
+            ui.matches(&format!("name: '{name}'")).count(),
+            1,
+            "{name} is drawn once"
+        );
+    }
+    assert_eq!(
+        ui.matches("name: '").count(),
+        store::ICON_LIBRARY.len(),
+        "the renderer draws no icon this side would refuse"
+    );
+    let mut sorted = store::ICON_LIBRARY.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), 48);
+}
+
+#[test]
+fn descriptions_and_icon_pictures_are_checked_and_kept_with_the_project() {
+    use base64::Engine;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let png = |extra: usize| {
+        let mut v = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        v.extend(std::iter::repeat(7u8).take(extra));
+        v
+    };
+    // The picture: a PNG of at most 64 KB, in base64.
+    assert!(store::validate_icon_image(&b64(&png(100))).is_ok());
+    assert!(store::validate_icon_image(&b64(&png(64 * 1024 - 8))).is_ok());
+    for bad in [
+        b64(&png(64 * 1024 - 7)),
+        b64(b"GIF89a-not-a-png"),
+        b64(&[]),
+        "not base64 !!".to_owned(),
+        "A".repeat(200_000),
+    ] {
+        assert!(
+            store::validate_icon_image(&bad).is_err(),
+            "{}",
+            &bad[..bad.len().min(20)]
+        );
+    }
+    // The description: one line, at most 200 characters, blank means none.
+    assert_eq!(
+        store::validate_description("  a line ").unwrap().as_deref(),
+        Some("a line")
+    );
+    assert_eq!(store::validate_description("   ").unwrap(), None);
+    assert!(store::validate_description(&"é".repeat(200)).is_ok());
+    for bad in [
+        format!("{}x", "é".repeat(200)),
+        "two\nlines".to_owned(),
+        "a\u{202e}b".to_owned(),
+    ] {
+        assert!(store::validate_description(&bad).is_err(), "{bad:?}");
+    }
+
+    let (_d, db) = temp_db();
+    let p = folder(&db, "Site", None);
+    // `img` needs a picture first; the picture makes it the icon; any other icon drops it.
+    let mut a = upd(&p, &db);
+    a.icon = Some(Some("img".into()));
+    assert!(matches!(update(&db, a), Err(Refusal::BadArgs(_))));
+    let before = node(&db, &p).revision;
+    db.write(|tx| store::set_icon_image(tx, &p, &png(10)))
+        .unwrap();
+    let n = node(&db, &p);
+    assert_eq!(n.icon.as_deref(), Some("img"));
+    assert!(
+        n.revision > before,
+        "the revision moves so a cached picture is dropped"
+    );
+    assert_eq!(
+        db.snapshot(|tx| store::icon_image(tx, &p)).unwrap(),
+        Some(png(10))
+    );
+    let mut a = upd(&p, &db);
+    a.description = Some(Some("  The marketing site ".into()));
+    update(&db, a).unwrap();
+    assert_eq!(
+        node(&db, &p).description.as_deref(),
+        Some("The marketing site")
+    );
+    let mut a = upd(&p, &db);
+    a.icon = Some(Some("lib:rocket".into()));
+    a.description = Some(None);
+    update(&db, a).unwrap();
+    let n = node(&db, &p);
+    assert_eq!(
+        (n.icon.as_deref(), n.description),
+        (Some("lib:rocket"), None)
+    );
+    assert_eq!(db.snapshot(|tx| store::icon_image(tx, &p)).unwrap(), None);
+    assert!(db
+        .write(|tx| store::set_icon_image(tx, "nope", &png(1)))
+        .is_err());
+    db.write(|tx| store::close_project(tx, &p)).unwrap();
+    assert!(matches!(
+        db.write(|tx| store::set_icon_image(tx, &p, &png(1))),
+        Err(Refusal::Refused(_))
+    ));
+}
+
+/// A rename made in Helm is owed to the board until the board has it.
+#[test]
+fn a_board_rename_is_owed_to_the_board_and_forgiven_once_sent() {
+    use crate::retitle::{send_owed, TitleSender};
+    use std::sync::Mutex;
+    struct Fake {
+        sent: Mutex<Vec<(String, String)>>,
+        refuse: bool,
+    }
+    impl TitleSender for Fake {
+        fn send(
+            &self,
+            _c: &helm_standup::Client,
+            id: &str,
+            title: &str,
+        ) -> Result<(), helm_standup::StandupError> {
+            if self.refuse {
+                return Err(helm_standup::StandupError::Unreachable("down".into()));
+            }
+            self.sent.lock().unwrap().push((id.into(), title.into()));
+            Ok(())
+        }
+    }
+    let (_d, db) = temp_db();
+    let a = board_project(&db, "b-a", "Alpha");
+    let b = board_project(&db, "b-b", "Beta");
+    let f = folder(&db, "Local", None);
+    let client = helm_standup::Client::new(
+        "https://board.test",
+        helm_standup::Token::new("token-123456").unwrap(),
+    )
+    .unwrap();
+    let rename = |id: &str, name: &str| {
+        let mut x = upd(id, &db);
+        x.name = Some(name.into());
+        update(&db, x).unwrap();
+    };
+    let owed = |id: &str| {
+        db.snapshot(|tx| store::pending_titles(tx, Some(id)))
+            .unwrap()
+            .len()
+    };
+    // Only a board project owes a title; renaming back to the board's own drops the debt.
+    rename(&f, "Local 2");
+    assert!(node(&db, &f).board.is_none() && owed(&f) == 0);
+    rename(&a, "Alpha 2");
+    assert!(node(&db, &a).board.unwrap().title_pending);
+    rename(&a, "Alpha");
+    assert!(!node(&db, &a).board.unwrap().title_pending);
+    assert_eq!(owed(&a), 0);
+    rename(&a, "Alpha 3");
+    rename(&b, "Beta 2");
+
+    // The board cannot be reached: the local names stay and stay owed.
+    let down = Fake {
+        sent: Mutex::new(vec![]),
+        refuse: true,
+    };
+    assert_eq!(send_owed(&db, &client, &down, None, |_| {}), 0);
+    assert_eq!(node(&db, &a).name, "Alpha 3");
+    assert!(node(&db, &a).board.unwrap().title_pending);
+
+    // Back up (the next sync): both go, once each, and read as the board's own afterwards.
+    let up = Fake {
+        sent: Mutex::new(vec![]),
+        refuse: false,
+    };
+    let mut shown = vec![];
+    assert_eq!(
+        send_owed(&db, &client, &up, None, |n| shown.push(n.name.clone())),
+        2
+    );
+    shown.sort();
+    assert_eq!(shown, ["Alpha 3", "Beta 2"]);
+    let mut got = up.sent.lock().unwrap().clone();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            ("b-a".to_owned(), "Alpha 3".to_owned()),
+            ("b-b".to_owned(), "Beta 2".to_owned())
+        ]
+    );
+    let n = node(&db, &a);
+    let board = n.board.unwrap();
+    assert_eq!(
+        (n.name.as_str(), board.title.as_str()),
+        ("Alpha 3", "Alpha 3")
+    );
+    assert!(!board.title_pending && !board.edited_locally);
+    assert_eq!(
+        send_owed(&db, &client, &up, None, |_| {}),
+        0,
+        "nothing is sent twice"
+    );
+
+    // A name changed again while an older one was in flight is not forgiven by the old send.
+    rename(&a, "Alpha 4");
+    db.write(|tx| store::title_sent(tx, &a, "Alpha 3x"))
+        .unwrap();
+    assert!(node(&db, &a).board.unwrap().title_pending);
+    // A board at another address is left alone.
+    let other = helm_standup::Client::new(
+        "https://other.test",
+        helm_standup::Token::new("token-123456").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(send_owed(&db, &other, &up, None, |_| {}), 0);
+}
+
+/// "Ask each time" is a setting value, not a board: it reads as no board chosen, the fallback
+/// board still takes chats nobody placed, and only an open board or "ask" can be stored.
+#[test]
+fn ask_each_time_is_a_default_board_setting_and_not_a_board() {
+    use crate::boards::{asks_each_time, default_board_view, set_default_board};
+    let (_d, db) = temp_db();
+    let a = board_project(&db, "b-a", "Life Admin");
+    let b = board_project(&db, "b-b", "Beta");
+    let view = || db.snapshot(default_board_view).unwrap();
+    assert!(!view().ask && view().chosen.is_none());
+    db.write(|tx| set_default_board(tx, Some(b.as_str())))
+        .unwrap();
+    assert_eq!((view().chosen, view().ask), (Some(b.clone()), false));
+    db.write(|tx| set_default_board(tx, Some("ask"))).unwrap();
+    let v = view();
+    assert!(v.ask && v.chosen.is_none());
+    assert_eq!(
+        v.board_id.as_deref(),
+        Some(a.as_str()),
+        "chats nobody placed still have a home"
+    );
+    assert!(db
+        .snapshot(|tx| Ok::<_, rusqlite::Error>(asks_each_time(tx)))
+        .unwrap());
+    assert!(db
+        .write(|tx| set_default_board(tx, Some("not-a-board")))
+        .is_err());
+    db.write(|tx| set_default_board(tx, None)).unwrap();
+    assert!(!view().ask);
 }
 
 // ---- SB5 paging ----------------------------------------------------------------------------

@@ -16,6 +16,7 @@ fn token() -> Token {
 struct FakeServer {
     base: String,
     log: Arc<Mutex<Vec<(String, String, String)>>>,
+    bodies: Arc<Mutex<Vec<String>>>,
 }
 
 type Responder = dyn Fn(&str, &str, &str) -> (u16, Vec<(String, String)>, String) + Send + Sync;
@@ -26,6 +27,8 @@ impl FakeServer {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let log = Arc::new(Mutex::new(Vec::new()));
         let log2 = log.clone();
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let bodies2 = bodies.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
@@ -54,6 +57,10 @@ impl FakeServer {
                 }
                 let mut body = vec![0u8; len];
                 let _ = reader.read_exact(&mut body);
+                bodies2
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&body).into_owned());
                 log2.lock()
                     .unwrap()
                     .push((method.clone(), path.clone(), auth.clone()));
@@ -70,7 +77,11 @@ impl FakeServer {
                 let _ = stream.write_all(body.as_bytes());
             }
         });
-        Self { base, log }
+        Self { base, log, bodies }
+    }
+
+    fn bodies(&self) -> Vec<String> {
+        self.bodies.lock().unwrap().clone()
     }
 
     fn requests(&self) -> Vec<(String, String, String)> {
@@ -369,6 +380,87 @@ fn the_client_has_no_write_method() {
         );
     }
     assert!(src.contains("fn get(&self, url: &str, bearer: &str, timeout: Duration)"));
+}
+
+/// The title write is the one write in the crate: a single PATCH to one item route in its own
+/// file, with the bearer token and a short deadline, never retried, and the token stays out of
+/// what it returns.
+#[test]
+fn the_title_write_is_one_patch_to_one_route_and_is_never_retried() {
+    let write = include_str!("write.rs");
+    assert_eq!(write.matches(".patch(").count(), 1, "one request builder");
+    for forbidden in [".post(", ".put(", ".delete(", ".get(", ".request("] {
+        assert_eq!(write.matches(forbidden).count(), 0, "write.rs: {forbidden}");
+    }
+    assert_eq!(write::TITLE_TIMEOUT, Duration::from_secs(10));
+
+    let status = Arc::new(AtomicUsize::new(204));
+    let s2 = status.clone();
+    let server = FakeServer::start(Arc::new(move |_, _, _| {
+        (s2.load(Ordering::SeqCst) as u16, vec![], String::new())
+    }));
+    let c = Client::new(&server.base, token()).unwrap();
+    c.set_title("board-1", "  A new name  ").unwrap();
+    let reqs = server.requests();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].0, "PATCH");
+    assert_eq!(reqs[0].1, "/api/items/board-1");
+    assert_eq!(reqs[0].2, format!("Bearer {SENTINEL}"));
+    let sent: Value = serde_json::from_str(&server.bodies()[0]).unwrap();
+    assert_eq!(sent, serde_json::json!({"title": "A new name"}));
+
+    // Refusals are plain errors, sent once each.
+    for (code, want) in [
+        (401u16, StandupError::Unauthorized),
+        (403, StandupError::Unauthorized),
+        (302, StandupError::Redirected),
+        (404, StandupError::Status(404)),
+        (500, StandupError::Status(500)),
+    ] {
+        status.store(code as usize, Ordering::SeqCst);
+        let before = server.requests().len();
+        assert_eq!(c.set_title("board-1", "x").unwrap_err(), want, "{code}");
+        assert_eq!(server.requests().len(), before + 1, "{code} is not retried");
+    }
+
+    // Bad input never leaves the process.
+    let before = server.requests().len();
+    for (id, title) in [
+        ("", "x"),
+        ("../x", "x"),
+        ("a b", "x"),
+        ("board-1", "   "),
+        ("board-1", "two\nlines"),
+    ] {
+        assert!(
+            matches!(c.set_title(id, title), Err(StandupError::Invalid(_))),
+            "{id:?} {title:?}"
+        );
+    }
+    assert!(c.set_title("board-1", &"y".repeat(201)).is_err());
+    assert_eq!(server.requests().len(), before, "nothing was sent");
+
+    // A board that cannot be reached is reported as such, and the token is scrubbed from it.
+    struct Echo;
+    impl write::TitleTransport for Echo {
+        fn patch_json(
+            &self,
+            _u: &str,
+            bearer: &str,
+            _b: &str,
+            _t: Duration,
+        ) -> Result<RawResponse, TransportError> {
+            Err(TransportError::Unreachable(format!(
+                "proxy said Bearer {bearer}"
+            )))
+        }
+    }
+    let c = Client::new("https://board.example", token())
+        .unwrap()
+        .with_title_transport(Arc::new(Echo));
+    let err = c.set_title("board-1", "x").unwrap_err();
+    assert!(matches!(err, StandupError::Unreachable(_)));
+    assert!(!format!("{err:?} {err}").contains(SENTINEL));
 }
 
 static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());

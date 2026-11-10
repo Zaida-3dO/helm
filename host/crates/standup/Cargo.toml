@@ -1,6 +1,6 @@
 [package]
 name = "helm-standup"
-description = "The read-only Agent Standup client: fixed GET routes only, bearer token never logged or echoed."
+description = "The Agent Standup client: fixed GET routes, one title write, bearer token never logged or echoed."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

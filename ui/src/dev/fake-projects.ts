@@ -24,8 +24,12 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
   let sync: BoardSyncState = { configured: false, syncing: false, lastSyncAt: null, error: null, projectCount: 0 };
   /** The default board the user chose (null: the board named like the seeded fallback). */
   let chosenDefault: string | null = null;
+  /** "Ask each time": the new-chat page leaves its picker empty. */
+  let askDefault = false;
   /** Chats already placed on a board, so a chat the user moved back is left where it is. */
   const placed = new Set<string>();
+  /** Project pictures (base64 PNG), by project id. */
+  const pictures = new Map<string, string>();
 
   const node = (id: string, name: string, over: Partial<ProjectNode> = {}): ProjectNode => ({
     id,
@@ -34,6 +38,7 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
     path: null,
     parentId: null,
     parentSource: null,
+    description: null,
     icon: null,
     colour: null,
     pinned: false,
@@ -51,7 +56,7 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
   const board = (id: string, title: string, completed = false): ProjectNode =>
     node(id, title, {
       kind: 'board',
-      board: { boardProjectId: id, url, title, headline: null, area: 'desktop-app', repo: 'helm', priority: 'p2', lastActivity: new Date().toISOString(), stale: false, completed, editedLocally: false },
+      board: { boardProjectId: id, url, title, headline: null, area: 'desktop-app', repo: 'helm', priority: 'p2', lastActivity: new Date().toISOString(), stale: false, completed, editedLocally: false, titlePending: false },
     });
   if (opts.seedBoard) {
     for (const p of [
@@ -77,7 +82,7 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
   const hiddenBoardIds = () => [...projects.values()].filter((p) => p.kind === 'board' && p.name.toLowerCase() === 'inbox').map((p) => p.id);
   const defaultState = () => {
     const d = defaultBoard();
-    return { boardId: d?.id ?? null, name: d?.name ?? null, chosen: openBoard(chosenDefault) ? chosenDefault : null, hiddenBoardIds: hiddenBoardIds() };
+    return { boardId: d?.id ?? null, name: d?.name ?? null, chosen: openBoard(chosenDefault) ? chosenDefault : null, ask: askDefault, hiddenBoardIds: hiddenBoardIds() };
   };
   /** The board a new chat in `folderProjectId` goes on: the one board over that folder, else the default. */
   const homeBoard = (folderProjectId: string): string | null => {
@@ -164,6 +169,7 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
         if (typeof args.name === 'string') next.name = args.name;
         if ('icon' in args) next.icon = (args.icon as string) ?? null;
         if ('colour' in args) next.colour = (args.colour as string) ?? null;
+        if ('description' in args) next.description = typeof args.description === 'string' ? args.description : null;
         if (typeof args.pinned === 'boolean') next.pinned = args.pinned;
         if (typeof args.collapsed === 'boolean') next.collapsed = args.collapsed;
         if ('parentId' in args) next.parentId = (args.parentId as string) ?? null;
@@ -174,6 +180,18 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
         emit({ kind: 'project', project: next });
         return next;
       }
+      case 'project_icon_image_set': {
+        const p = projects.get(String(args.projectId));
+        if (!p) throw new ApiError('not_found', 'That project does not exist.');
+        if (typeof args.pngBase64 !== 'string' || args.pngBase64.length === 0) throw new ApiError('bad_args', 'A picture is needed.');
+        pictures.set(p.id, args.pngBase64);
+        const next: ProjectNode = { ...p, icon: 'img', revision: p.revision + 1 };
+        projects.set(p.id, next);
+        emit({ kind: 'project', project: next });
+        return next;
+      }
+      case 'project_icon_image_get':
+        return { pngBase64: pictures.get(String(args.projectId)) ?? null };
       case 'project_archive':
       case 'project_restore': {
         const p = projects.get(String(args.projectId))!;
@@ -283,7 +301,13 @@ export function projectsFakeOps(opts: { seedBoard?: boolean } = { seedBoard: tru
         return defaultState();
       case 'default_board_set': {
         const want = (args.boardId as string | null) ?? null;
+        if (want === 'ask') {
+          askDefault = true;
+          chosenDefault = null;
+          return defaultState();
+        }
         if (want !== null && !openBoard(want)) throw new ApiError('refused', 'Pick an open board.');
+        askDefault = false;
         chosenDefault = want;
         return defaultState();
       }

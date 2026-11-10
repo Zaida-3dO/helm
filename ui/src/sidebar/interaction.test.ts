@@ -171,7 +171,7 @@ test('the chat menu follows state: archive or restore and delete, stop first whi
 
 test('Move to project lists boards only: not folders, archived, stale, finished or hidden ones, but always the chat’s own group', () => {
   const board = (id: string, over: { completed?: boolean; stale?: boolean } = {}, rest: Partial<ProjectNode> = {}) =>
-    project(id, { kind: 'board', board: { boardProjectId: id, url: '', title: id, headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: over.stale ?? false, completed: over.completed ?? false, editedLocally: false }, ...rest });
+    project(id, { kind: 'board', board: { boardProjectId: id, url: '', title: id, headline: null, area: null, repo: null, priority: null, lastActivity: null, stale: over.stale ?? false, completed: over.completed ?? false, editedLocally: false, titlePending: false }, ...rest });
   const projects = [project('g', { path: 'C:/w' }), project('other', { path: 'C:/o' }), board('live'), board('done', { completed: true }), board('gone', { stale: true }), board('shut', {}, { archived: true }), board('inbox')];
   const moves = (r: SidebarRow, hidden?: string[]) =>
     chatMenuItems({ row: r, projects, hidden, siblings: [r], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'projects' }, chatActs)

@@ -33,12 +33,10 @@ import { PromptDialog, type Prompt } from './PromptDialog.tsx';
 import { ItemChip, ItemFolderRow, ItemOpenButton, ItemPickerHost, useItemRefs, useOpenItem } from '../itemlinks/ItemUi.tsx'; // item links
 import {
   IconArchive,
-  IconBoard,
   IconChevronDown,
   IconChevronRight,
   IconEdit,
   IconFlag,
-  IconFolder,
   IconGrip,
   IconMore,
   IconMute,
@@ -53,6 +51,7 @@ import {
 import { withChatIcons, withProjectIcons } from './menuIcons.tsx';
 import { StarMark, WheelMark } from '../ui/status/index.ts';
 import { openNewChat, openPrimaryFolder } from '../newchat/index.ts';
+import { ProjectIcon, openIconPicker } from '../projects/index.ts';
 import { getDefaultBoard } from '../newchat/boards.ts';
 import { ATTENTION_LABEL, age, needsYouLabel, rowStatusLabel, trailingIndicator } from './status.ts';
 import { localWaitLabel } from '../state/localModel.ts';
@@ -336,13 +335,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       newChat: () => newChatIn(p),
       pin: (pinned) => void act.updateProject(p, { pinned }),
       rename: () => setPrompt({ title: 'Rename project', label: 'Name', value: p.name, onSave: (name) => act.editProject(p, { name }) }),
-      changeIcon: () =>
-        setPrompt({
-          title: 'Project icon',
-          label: 'One emoji (empty for the default icon)',
-          value: p.icon ?? '',
-          onSave: (v) => act.editProject(p, { icon: v.trim() ? v.trim() : null }),
-        }),
+      changeIcon: () => openIconPicker(p.id),
       editDescription: () =>
         setPrompt({
           title: 'Project description',
@@ -828,8 +821,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
 /** What a project's icon looks like in the tree: its emoji, else the board or folder glyph. One
  *  place, so the shared project icon can replace it. */
 function projectIconNode(p: ProjectNode): ReactNode {
-  if (p.icon && !p.icon.startsWith('lib:')) return p.icon;
-  return p.kind === 'board' ? <IconBoard size={16} strokeWidth={1.8} /> : <IconFolder size={16} strokeWidth={1.8} />;
+  return <ProjectIcon project={p} size={16} />;
 }
 
 function GroupHeader({
@@ -874,7 +866,7 @@ function GroupHeader({
       data-subtitle={item.subtitle ? 'true' : undefined}
       data-drag-source={dragging ? 'true' : undefined}
       style={{ marginLeft: item.depth * 16, ...(colour ? { ['--group-colour' as string]: colour } : {}) }}
-      title={[p.path ?? p.board?.title ?? p.name, p.board?.editedLocally ? 'Edited in Helm' : null, 'Drag to reorder or nest (Alt+Up or Down moves it)']
+      title={[p.path ?? p.board?.title ?? p.name, p.board?.editedLocally ? 'Edited in Helm' : null, 'Drag to reorder or nest (Alt+Up or Down moves it)', p.board?.titlePending ? 'Not saved to the board yet; retrying.' : null]
         .filter(Boolean)
         .join('\n')}
       onContextMenu={(e) => {

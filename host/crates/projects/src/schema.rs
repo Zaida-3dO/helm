@@ -4,7 +4,7 @@
 //!
 //! | Table | Holds |
 //! |---|---|
-//! | `project_local` | per project, local-only state: pin, position, collapse, icon, archive, closed, a board project's local rename, primary folder, CAS revision |
+//! | `project_local` | per project, local-only state: pin, position, collapse, icon (and the uploaded picture), description, archive, closed, a board project's local rename and whether the board has it yet, primary folder, CAS revision |
 //! | `project_parents` | local nesting: one parent per project, `source` board or local |
 //! | `chat_groups` | the group a chat is shown under when it is not its folder project |
 //! | `project_archive_members` | exactly which chats a project archive archived, so restore brings back only those |
@@ -30,6 +30,7 @@ pub fn register(reg: &mut MigrationRegistry) {
     reg.initializer("projects-side-tables", init)
         .one_time("projects-board-completed", add_board_completed)
         .one_time("projects-closed", add_closed)
+        .one_time("projects-icon-and-description", add_icon_and_description)
         .initializer("projects-repositories", crate::repos::init);
 }
 
@@ -45,7 +46,10 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              closed                     INTEGER NOT NULL DEFAULT 0,
              title_override             TEXT,
              primary_folder_project_id  TEXT REFERENCES projects(id) ON DELETE SET NULL,
-             revision                   INTEGER NOT NULL DEFAULT 0
+             revision                   INTEGER NOT NULL DEFAULT 0,
+             description                TEXT,
+             icon_image                 BLOB,
+             title_pending              INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS project_parents (
              project_id  TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
@@ -143,6 +147,36 @@ fn add_closed(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     )?;
     if !present {
         tx.execute_batch("ALTER TABLE project_local ADD COLUMN closed INTEGER NOT NULL DEFAULT 0")?;
+    }
+    Ok(())
+}
+
+/// The one-line description, the uploaded icon picture and the "rename not yet saved to the board"
+/// flag arrived after the table did: a profile made before them gets the columns here. A new
+/// profile already has them from `init`.
+fn add_icon_and_description(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    for (column, ddl) in [
+        (
+            "description",
+            "ALTER TABLE project_local ADD COLUMN description TEXT",
+        ),
+        (
+            "icon_image",
+            "ALTER TABLE project_local ADD COLUMN icon_image BLOB",
+        ),
+        (
+            "title_pending",
+            "ALTER TABLE project_local ADD COLUMN title_pending INTEGER NOT NULL DEFAULT 0",
+        ),
+    ] {
+        let present: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_local') WHERE name = ?1)",
+            [column],
+            |r| r.get(0),
+        )?;
+        if !present {
+            tx.execute_batch(ddl)?;
+        }
     }
     Ok(())
 }

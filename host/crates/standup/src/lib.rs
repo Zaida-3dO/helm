@@ -1,12 +1,14 @@
-//! The read-only Agent Standup client.
+//! The Agent Standup client: every read, and one write.
 //!
-//! Helm reads board projects from Agent Standup over fixed GET routes, and this crate never writes
-//! to it. The few writes Helm does make live elsewhere, each behind its own op: the workflow
-//! crate's writer and the projects crate's `board_project_create` (Helm's "New project"). The
-//! bearer token Helm holds for it can write, so this crate's guard is on the **method**: the one
-//! transport seam, [`Transport::get`], is the only way a request leaves this crate, and a test scans
-//! the crate's source for any other request builder. `GET /api/projects` shares its path with the
-//! board's create route, so a path allowlist would not be enough.
+//! Helm reads board projects from Agent Standup over fixed GET routes. The few writes Helm does
+//! make live elsewhere, each behind its own op: the workflow crate's writer and the projects
+//! crate's `board_project_create` (Helm's "New project"). The one write in this crate is a board
+//! project's title, when the user renames it in Helm (see [`write`]). The bearer token Helm holds
+//! for it can write, so this crate's guard is on the **method**: the one transport seam for reads,
+//! [`Transport::get`], is the only way a read leaves this crate, the title write has a seam of its
+//! own ([`write::TitleTransport`]) in a file of its own, and a test scans the read files for any
+//! other request builder. `GET /api/projects` shares its path with the board's create route, so a
+//! path allowlist would not be enough.
 //!
 //! Rules every request follows:
 //! - at most 3 attempts, 100 ms then 200 ms apart, retried only when the board is unreachable;
@@ -304,6 +306,7 @@ pub struct Client {
     base: String,
     token: Token,
     transport: Arc<dyn Transport>,
+    title_transport: Arc<dyn write::TitleTransport>,
 }
 
 impl fmt::Debug for Client {
@@ -341,7 +344,14 @@ impl Client {
             base: normalize_url(base)?,
             token,
             transport,
+            title_transport: Arc::new(write::HttpTitleTransport::default()),
         })
+    }
+
+    /// The same client with another transport for the title write (tests).
+    pub fn with_title_transport(mut self, transport: Arc<dyn write::TitleTransport>) -> Self {
+        self.title_transport = transport;
+        self
     }
 
     pub fn base(&self) -> &str {
@@ -448,6 +458,7 @@ impl BoardLink {
 }
 
 mod reads;
+pub mod write;
 pub use reads::FleetSnapshot;
 
 #[cfg(test)]

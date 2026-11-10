@@ -86,17 +86,75 @@ pub fn validate_colour(raw: &str) -> Res<String> {
     }
 }
 
-/// An icon is one emoji grapheme (at most 128 bytes, no ASCII letters or digits) or a library icon
-/// `lib:<name>`. Full emoji validation and the 64-icon catalogue arrive with the icon dialog.
+/// The library icons a project can use, as `lib:<name>`. The picture for each is drawn by the
+/// renderer (`ui/src/projects/iconLibrary.tsx`), which lists exactly these names; a test keeps the
+/// two lists the same.
+pub const ICON_LIBRARY: [&str; 48] = [
+    "anchor",
+    "compass",
+    "book",
+    "briefcase",
+    "code",
+    "terminal",
+    "bug",
+    "flask",
+    "leaf",
+    "house",
+    "car",
+    "money",
+    "chart",
+    "camera",
+    "music",
+    "heart",
+    "star",
+    "globe",
+    "map",
+    "mail",
+    "chat",
+    "calendar",
+    "clock",
+    "gift",
+    "cart",
+    "tool",
+    "gear",
+    "shield",
+    "key",
+    "lock",
+    "cloud",
+    "server",
+    "database",
+    "phone",
+    "laptop",
+    "game",
+    "paint",
+    "pen",
+    "puzzle",
+    "rocket",
+    "school",
+    "baby",
+    "dog",
+    "plant",
+    "sun",
+    "moon",
+    "flag",
+    "sparkle",
+];
+
+/// The icon value that means "the picture the user chose" (kept as bytes beside the project).
+pub const IMAGE_ICON: &str = "img";
+/// The largest stored icon picture, in bytes once decoded.
+pub const MAX_ICON_IMAGE_BYTES: usize = 64 * 1024;
+
+/// An icon is one emoji grapheme (at most 128 bytes, no ASCII letters or digits), a library icon
+/// `lib:<name>` that is in [`ICON_LIBRARY`], or `img`. `img` is only meaningful with a stored
+/// picture: [`update_project`] refuses it when there is none, and chats may not ask for it.
 pub fn validate_icon(raw: &str) -> Res<String> {
     let s = raw.trim();
+    if s == IMAGE_ICON {
+        return Ok(s.to_owned());
+    }
     if let Some(name) = s.strip_prefix("lib:") {
-        if !name.is_empty()
-            && name.len() <= 40
-            && name
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        {
+        if ICON_LIBRARY.contains(&name) {
             return Ok(s.to_owned());
         }
         return Err(bad("Unknown library icon."));
@@ -111,6 +169,39 @@ pub fn validate_icon(raw: &str) -> Res<String> {
     Ok(s.to_owned())
 }
 
+/// A description is one line of at most [`MAX_DESCRIPTION_CHARS`] characters; blank means none.
+pub fn validate_description(raw: &str) -> Res<Option<String>> {
+    let d = raw.trim();
+    if d.is_empty() {
+        return Ok(None);
+    }
+    if d.chars().count() > MAX_DESCRIPTION_CHARS
+        || d.chars()
+            .any(|c| c.is_control() || helm_core::hidden::is_hidden_char(c))
+    {
+        return Err(bad("A description is one line of at most 200 characters."));
+    }
+    Ok(Some(d.to_owned()))
+}
+
+/// Check a picture for a project icon: base64 of a PNG, at most [`MAX_ICON_IMAGE_BYTES`] decoded.
+pub fn validate_icon_image(png_base64: &str) -> Res<Vec<u8>> {
+    use base64::Engine;
+    if png_base64.len() > MAX_ICON_IMAGE_BYTES * 4 / 3 + 8 {
+        return Err(bad("That picture is too large for an icon."));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(png_base64.trim())
+        .map_err(|_| bad("The icon picture is not valid base64."))?;
+    if bytes.is_empty() || bytes.len() > MAX_ICON_IMAGE_BYTES {
+        return Err(bad("An icon picture is at most 64 KB."));
+    }
+    if !bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Err(bad("An icon picture must be a PNG."));
+    }
+    Ok(bytes)
+}
+
 // ---- projects -------------------------------------------------------------------------------
 
 const PROJECT_SELECT: &str = "SELECT p.id, p.kind, p.name, p.path, p.color, p.created_at,
@@ -118,7 +209,8 @@ const PROJECT_SELECT: &str = "SELECT p.id, p.kind, p.name, p.path, p.color, p.cr
         l.title_override, l.primary_folder_project_id, COALESCE(l.revision, 0),
         pp.parent_id, pp.source,
         b.board_url, b.board_project_id, b.title, b.headline, b.area, b.repo, b.priority,
-        b.last_activity, b.stale, b.completed, COALESCE(l.closed, 0)
+        b.last_activity, b.stale, b.completed, COALESCE(l.closed, 0),
+        l.description, COALESCE(l.title_pending, 0)
      FROM projects p
      LEFT JOIN project_local l ON l.project_id = p.id
      LEFT JOIN project_parents pp ON pp.project_id = p.id
@@ -148,6 +240,7 @@ fn project_from_row(r: &Row<'_>, counts: &HashMap<String, i64>) -> rusqlite::Res
             stale: r.get::<_, i64>(24)? != 0,
             completed: r.get::<_, i64>(25)? != 0,
             edited_locally: title_override.is_some() || icon.is_some(),
+            title_pending: r.get::<_, i64>(28)? != 0,
         }),
         None => None,
     };
@@ -168,6 +261,7 @@ fn project_from_row(r: &Row<'_>, counts: &HashMap<String, i64>) -> rusqlite::Res
         position: r.get(7)?,
         collapsed: r.get::<_, i64>(8)? != 0,
         icon,
+        description: r.get(27)?,
         archived: r.get::<_, i64>(10)? != 0,
         closed: r.get::<_, i64>(26)? != 0,
         primary_folder_project_id: r.get(12)?,
@@ -529,9 +623,12 @@ pub fn update_project(tx: &Transaction<'_>, a: &ProjectUpdateArgs) -> Res<i64> {
                 } else {
                     Some(name)
                 };
+                // A name that differs from the board's is also owed to the board: the op that
+                // called this sends it, and the flag stays set until the board has it.
                 tx.execute(
-                    "UPDATE project_local SET title_override = ?2 WHERE project_id = ?1",
-                    params![id, over],
+                    "UPDATE project_local SET title_override = ?2, title_pending = ?3
+                     WHERE project_id = ?1",
+                    params![id, over, over.is_some()],
                 )?;
             }
             ProjectKind::Folder => {
@@ -544,9 +641,32 @@ pub fn update_project(tx: &Transaction<'_>, a: &ProjectUpdateArgs) -> Res<i64> {
     }
     if let Some(icon) = &a.icon {
         let icon = icon.as_deref().map(validate_icon).transpose()?;
+        if icon.as_deref() == Some(IMAGE_ICON) {
+            let has_image: bool = tx.query_row(
+                "SELECT icon_image IS NOT NULL FROM project_local WHERE project_id = ?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            if !has_image {
+                return Err(bad("Choose a picture for the icon first."));
+            }
+        }
+        // Any other icon makes the stored picture dead weight.
         tx.execute(
-            "UPDATE project_local SET icon = ?2 WHERE project_id = ?1",
-            params![id, icon],
+            "UPDATE project_local SET icon = ?2,
+                 icon_image = CASE WHEN ?2 = ?3 THEN icon_image ELSE NULL END
+             WHERE project_id = ?1",
+            params![id, icon, IMAGE_ICON],
+        )?;
+    }
+    if let Some(description) = &a.description {
+        let description = match description.as_deref() {
+            Some(d) => validate_description(d)?,
+            None => None,
+        };
+        tx.execute(
+            "UPDATE project_local SET description = ?2 WHERE project_id = ?1",
+            params![id, description],
         )?;
     }
     if let Some(colour) = &a.colour {
@@ -627,6 +747,88 @@ pub fn update_project(tx: &Transaction<'_>, a: &ProjectUpdateArgs) -> Res<i64> {
         |r| r.get(0),
     )?;
     Ok(rev)
+}
+
+/// Keep the picture the user chose as the project's icon (`project_icon_image_set`): the icon
+/// becomes `img` and the revision moves on. The bytes are checked by [`validate_icon_image`].
+pub fn set_icon_image(tx: &Transaction<'_>, id: &str, png: &[u8]) -> Res<()> {
+    if !exists(tx, id)? {
+        return Err(Refusal::NotFound("That project does not exist.".into()));
+    }
+    refuse_if_closed(tx, id)?;
+    ensure_local(tx, id)?;
+    tx.execute(
+        "UPDATE project_local SET icon = ?2, icon_image = ?3, revision = revision + 1
+         WHERE project_id = ?1",
+        params![id, IMAGE_ICON, png],
+    )?;
+    Ok(())
+}
+
+/// The stored icon picture (PNG bytes), if the project has one.
+pub fn icon_image(tx: &Transaction<'_>, id: &str) -> Res<Option<Vec<u8>>> {
+    if !exists(tx, id)? {
+        return Err(Refusal::NotFound("That project does not exist.".into()));
+    }
+    Ok(tx
+        .query_row(
+            "SELECT icon_image FROM project_local WHERE project_id = ?1",
+            [id],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// A rename of a board project that the board has not heard yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingTitle {
+    pub project_id: String,
+    pub board_url: String,
+    pub board_project_id: String,
+    pub title: String,
+}
+
+/// Board projects renamed in Helm whose new name is still owed to the board, oldest id first.
+/// `only` limits the answer to one project.
+pub fn pending_titles(
+    tx: &Transaction<'_>,
+    only: Option<&str>,
+) -> rusqlite::Result<Vec<PendingTitle>> {
+    let mut st = tx.prepare(
+        "SELECT l.project_id, b.board_url, b.board_project_id, l.title_override
+         FROM project_local l JOIN board_projects b ON b.project_id = l.project_id
+         WHERE l.title_pending = 1 AND l.title_override IS NOT NULL AND b.stale = 0
+           AND (?1 IS NULL OR l.project_id = ?1)
+         ORDER BY l.project_id",
+    )?;
+    let rows = st.query_map([only], |r| {
+        Ok(PendingTitle {
+            project_id: r.get(0)?,
+            board_url: r.get(1)?,
+            board_project_id: r.get(2)?,
+            title: r.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// The board took the rename: its title is now the local name, so the local override is dropped
+/// and the project reads as the board's again. Does nothing when the name was changed again
+/// meanwhile (the newer one is still owed).
+pub fn title_sent(tx: &Transaction<'_>, id: &str, title: &str) -> rusqlite::Result<()> {
+    let done = tx.execute(
+        "UPDATE project_local SET title_override = NULL, title_pending = 0, revision = revision + 1
+         WHERE project_id = ?1 AND title_pending = 1 AND title_override = ?2",
+        params![id, title],
+    )?;
+    if done > 0 {
+        tx.execute(
+            "UPDATE board_projects SET title = ?2 WHERE project_id = ?1",
+            params![id, title],
+        )?;
+    }
+    Ok(())
 }
 
 fn has_chats_running_here(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<bool> {
@@ -758,6 +960,8 @@ fn row_from(r: &Row<'_>, revision: i64) -> rusqlite::Result<RawRow> {
             local: false,
             local_ahead: None,
             has_draft: false,
+            profile_id: None,
+            shared_with: None,
             last_activity_at: 0,
             archived: r.get::<_, i64>(8)? != 0,
             position: r.get(9)?,
@@ -921,6 +1125,10 @@ fn finish(
                 r.row.local = c.model.as_deref().is_some_and(|m| m.starts_with("local/"));
                 r.row.local_ahead = c.local_ahead;
                 r.row.has_draft = !c.draft.trim().is_empty();
+                if !c.profile_id.is_empty() {
+                    r.row.profile_id = Some(c.profile_id.clone());
+                    r.row.shared_with = Some(c.shared_with.clone());
+                }
                 r.row.last_activity_at = c.last_activity_at;
                 r.row.attention = row_attention(r.row.status, r.row.unread, false, r.row.pinned);
             }
