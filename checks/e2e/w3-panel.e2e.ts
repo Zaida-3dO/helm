@@ -172,6 +172,9 @@ describe("panel: Changes, the gate, vault notes, the viewer and quick-open", { t
       const fixture = (name: string) => fs.readFileSync(path.join(import.meta.dirname, "fixtures", name), "utf8");
       fs.writeFileSync(path.join(dir, "hostile-page.html"), fixture("hostile-page.html").replaceAll("@TCP@", String(tcpPort)).replaceAll("@UDP@", String(udpPort)));
       fs.writeFileSync(path.join(dir, "other-page.html"), fixture("other-page.html"));
+      // Quick open reads the folder again when a query finds nothing in a listing older than a
+      // quarter second; P4's listing may be younger than that.
+      await wait(500);
 
       // Quick-open the file, then "Run page" on its tab.
       const runPage = async (stem: string): Promise<FrameLocator> => {

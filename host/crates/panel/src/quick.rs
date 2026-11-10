@@ -193,12 +193,17 @@ pub fn walk(root: &Path, limit: usize, deadline: Duration) -> (Vec<String>, bool
     (out, false)
 }
 
-fn index_for(root: &Path, rebuild: bool) -> (Arc<Vec<String>>, bool) {
+/// A cached listing older than this is read again when a query finds nothing in it: the file
+/// asked for may have been made since. A listing that was cut short (a very large folder) is not.
+const RECHECK_AFTER: Duration = Duration::from_millis(250);
+
+/// The folder's listing, whether it was cut short, and whether it came from the cache.
+fn index_for(root: &Path, rebuild: bool) -> (Arc<Vec<String>>, bool, Option<Duration>) {
     let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
     c.retain(|i| i.built.elapsed() < INDEX_TTL);
     if !rebuild {
         if let Some(i) = c.iter().find(|i| i.root == root) {
-            return (i.names.clone(), i.partial);
+            return (i.names.clone(), i.partial, Some(i.built.elapsed()));
         }
     }
     let (names, partial) = walk(root, INDEX_LIMIT, INDEX_DEADLINE);
@@ -213,7 +218,7 @@ fn index_for(root: &Path, rebuild: bool) -> (Arc<Vec<String>>, bool) {
     while c.len() > CACHE_PROJECTS {
         c.remove(0);
     }
-    (names, partial)
+    (names, partial, None)
 }
 
 /// Fuzzy mode over the chat's project files.
@@ -224,8 +229,17 @@ pub fn fuzzy(
     rebuild: bool,
 ) -> Result<QuickResult, String> {
     let folder = admit(&folder.to_string_lossy(), roots).map_err(|e| e.message())?;
-    let (names, partial) = index_for(&folder, rebuild);
+    let (names, partial, age) = index_for(&folder, rebuild);
     let ql = q.to_lowercase();
+    // Nothing in a listing that is not brand new: read the folder again once.
+    if age.is_some_and(|a| a >= RECHECK_AFTER)
+        && !partial
+        && !names
+            .iter()
+            .any(|rel| fuzzy_score(&ql, &rel.to_lowercase()).is_some())
+    {
+        return fuzzy(q, &folder, roots, true);
+    }
     let mut items: Vec<QuickItem> = names
         .iter()
         .filter_map(|rel| {
@@ -323,5 +337,11 @@ mod tests {
             format!("src{}app.ts", std::path::MAIN_SEPARATOR)
         );
         assert_eq!(r.items.len(), 2);
+        // A file made after the listing was cached is found once a query finds nothing.
+        std::thread::sleep(RECHECK_AFTER);
+        std::fs::create_dir_all(dir.path().join("pages")).unwrap();
+        std::fs::write(dir.path().join("pages").join("other-page.html"), "").unwrap();
+        let r = fuzzy("other-page", dir.path(), &PrivateRoots::default(), false).unwrap();
+        assert_eq!(r.items.len(), 1, "{:?}", r.items);
     }
 }

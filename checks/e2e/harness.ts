@@ -77,6 +77,10 @@ export interface LaunchOptions {
   env?: Record<string, string>;
 }
 
+/** The app's own web view switches (`BROWSER_ARGS` in host/app/src/shell.rs). */
+export const APP_BROWSER_ARGS =
+  "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --force-webrtc-ip-handling-policy=disable_non_proxied_udp";
+
 export async function launchApp(profileDir: string, opts: LaunchOptions = {}): Promise<App> {
   const fake = opts.fake !== false;
   if (!fs.existsSync(HELM_EXE)) throw new Error(`${HELM_EXE} not found: run \`npm run build:debug\` first`);
@@ -89,7 +93,9 @@ export async function launchApp(profileDir: string, opts: LaunchOptions = {}): P
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k.toUpperCase() !== "CLAUDECODE") env[k] = v;
   Object.assign(env, {
     HELM_PROFILE_DIR: profileDir,
-    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
+    // This variable replaces the switches the app gives its web view, so they are repeated here
+    // (host/app/src/shell.rs BROWSER_ARGS): a check runs the web view the user runs.
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `${APP_BROWSER_ARGS} --remote-debugging-port=${port}`,
     HELM_TEST_CONFIRM: "ok",
     // The window opens off-screen and is never focused, so a run does not take over the screen of
     // whoever started it. `HELM_E2E_SHOW=1` opens it normally, to watch a check by eye.
