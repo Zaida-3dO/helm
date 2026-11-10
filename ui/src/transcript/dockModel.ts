@@ -58,7 +58,7 @@ export function dockState(
 
 /** What the settled line says about the chat's last turn. */
 export interface FinishedTurn {
-  /** From the turn's first output to its last (the span the "Worked for" row shows); a one-step reply is timed from the message. */
+  /** From the turn's first output to the end of its run (the span the "Worked for" row shows); a one-step reply is timed from the message. */
   elapsedMs: number;
   /** The tool calls the turn made, in order. */
   tools: MessageRow[];
@@ -69,8 +69,10 @@ export interface FinishedTurn {
 /**
  * The last turn of a chat, when it ended with a reply: the line the dock keeps once nothing runs.
  * A turn that is still going, failed or was stopped has nothing to settle, so there is no line.
+ * The turn ends where its run ended (`runEndedAt`) when that is known and not before its last row,
+ * since the final reply streams after its row is stamped.
  */
-export function finishedTurn(rows: readonly MessageRow[]): FinishedTurn | null {
+export function finishedTurn(rows: readonly MessageRow[], runEndedAt: number | null = null): FinishedTurn | null {
   let u = rows.length - 1;
   while (u >= 0 && !(rows[u]!.role === 'user' && rows[u]!.details?.mode !== 'steer')) u--;
   if (u < 0) return null;
@@ -79,8 +81,10 @@ export function finishedTurn(rows: readonly MessageRow[]): FinishedTurn | null {
   if (work.length === 0 || failedOrStopped || !work.some((r) => r.role === 'assistant' && r.text.trim())) return null;
   const tools = work.filter((r) => r.role === 'toolResult');
   if (tools.some((r) => toolStatus(r) === 'running')) return null;
+  const start = (work.length > 1 ? work[0]! : rows[u]!).timestamp;
+  const lastRow = work[work.length - 1]!.timestamp;
   return {
-    elapsedMs: Math.max(0, work[work.length - 1]!.timestamp - (work.length > 1 ? work[0]! : rows[u]!).timestamp),
+    elapsedMs: Math.max(0, (runEndedAt !== null && runEndedAt >= lastRow ? runEndedAt : lastRow) - start),
     tools,
     edits: new Set(tools.filter((r) => toolKind(r.toolName) === 'edit').map((r) => toolTarget(r) ?? `row:${r.id}`)).size,
   };

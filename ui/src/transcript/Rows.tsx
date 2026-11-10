@@ -116,7 +116,7 @@ function AssistantBody({ row, ctx, hideThinking }: { row: MessageRow; ctx: RowCo
   );
 }
 
-export const Row = memo(function Row({ row, ctx, final, afterTool, indent, afterFold, hideThinking, beforeTool, noticeLive, recap, turnMs }: { row: MessageRow; ctx: RowContext; turnMs?: number } & RowFlags) {
+export const Row = memo(function Row({ row, ctx, final, afterTool, indent, afterFold, hideThinking, beforeTool, noticeLive, recap, turnMs, skills }: { row: MessageRow; ctx: RowContext; turnMs?: number; skills?: string } & RowFlags) {
   const retry = row.details?.retry;
   const common = { 'data-testid': 'transcript-row', 'data-status': row.status, 'data-role': row.role, 'data-row-id': row.id };
   const place = `${afterTool ? ' after-tool' : ''}${final ? ' final-answer' : ''}${indent ? ' indented' : ''}${afterFold ? ' after-fold' : ''}${beforeTool ? ' before-tool' : ''}`;
@@ -218,6 +218,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
         row={row}
         sctx={slotContext(row, ctx, recap !== undefined)}
         turnMs={turnMs}
+        skills={skills}
         showTurnTime={ctx.elements?.turnTime !== 'hidden'}
         showTokens={ctx.elements?.tokens !== 'hidden'}
       />

@@ -22,6 +22,8 @@ export interface ThreadView {
   pending: Submission[];
   /** Revision of the last `pending` event applied; a page read resets it. */
   pendingRevision: number;
+  /** When the newest run ended (null while it runs or when there is none), so the settled line can end there. */
+  lastRunEndedAt: number | null;
   /** Bumped by a `refresh` event so the view knows to re-read its page. */
   refreshes: number;
 }
@@ -38,8 +40,14 @@ export function emptyView(chatId: string): ThreadView {
     newerCursor: null,
     pending: [],
     pendingRevision: 0,
+    lastRunEndedAt: null,
     refreshes: 0,
   };
+}
+
+/** The end of the newest run in a page's run list; null when that run has not ended. */
+function endOfLastRun(runs: TranscriptPage['runs']): number | null {
+  return runs.at(-1)?.endedAt ?? null;
 }
 
 /** Transcript order: (timestamp, sequence, id). */
@@ -91,6 +99,7 @@ export function applyPage(view: ThreadView, page: TranscriptPage, how: 'replace'
       newerCursor: page.newerCursor,
       pending: page.pending,
       pendingRevision: 0,
+      lastRunEndedAt: endOfLastRun(page.runs),
     };
     const next = applyRows(base, page.messages, 'newest');
     return next === base ? base : next;
@@ -100,7 +109,7 @@ export function applyPage(view: ThreadView, page: TranscriptPage, how: 'replace'
     return { ...next, hasOlder: page.hasOlder, olderCursor: page.olderCursor };
   }
   const next = applyRows(view, page.messages, 'newest');
-  return { ...next, hasNewer: page.hasNewer, newerCursor: page.newerCursor };
+  return { ...next, hasNewer: page.hasNewer, newerCursor: page.newerCursor, lastRunEndedAt: endOfLastRun(page.runs) };
 }
 
 export function applyChat(view: ThreadView, chat: ChatRecord): ThreadView {

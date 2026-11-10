@@ -19,6 +19,28 @@ export function pickIndex(key: string, count: number): number | null {
   return n < count ? n : null;
 }
 
+/**
+ * Where focus goes on an arrow key among `count` options, from `current` (-1 when none is focused);
+ * it wraps. Down and Right step on, Up and Left step back, Home and End jump. Null for any other key.
+ */
+export function moveIndex(key: string, current: number, count: number): number | null {
+  if (count <= 0) return null;
+  switch (key) {
+    case 'ArrowDown':
+    case 'ArrowRight':
+      return (current + 1) % count;
+    case 'ArrowUp':
+    case 'ArrowLeft':
+      return current <= 0 ? count - 1 : current - 1;
+    case 'Home':
+      return 0;
+    case 'End':
+      return count - 1;
+    default:
+      return null;
+  }
+}
+
 /** What choosing an option sends: a plan's approval is a confirmation; anything else its value. */
 export function optionAnswer(kind: string, option: string): InteractionAnswer {
   if (kind === 'plan') return { value: option, confirmed: option === 'Approve plan' };

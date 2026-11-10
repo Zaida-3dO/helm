@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
 import { FoldRow, Row, type RowContext } from './Rows.tsx';
 import { VirtualList } from './VirtualList.tsx';
-import { turnTimes } from './rowMeta.ts';
+import { skillsByReply, turnTimes } from './rowMeta.ts';
 import { estimateItem, layout, type Item } from './workBlocks.ts';
 import { AgentGroup } from './subagents/AgentGroup.tsx';
 
@@ -40,6 +40,7 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
   }, [items]);
   const keys = useMemo(() => items.map(itemKey), [items]);
   const times = useMemo(() => turnTimes(items), [items]);
+  const skills = useMemo(() => skillsByReply(rows), [rows]);
 
   // A jump into folded work (find in chat) opens that turn first, once per target, so the reader can
   // fold it again; the list scrolls once the row exists.
@@ -88,7 +89,7 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
         const item = byKey.get(k);
         if (!item) return null;
         if (item.kind === 'row') return (
-            <Row row={item.row} ctx={ctx} final={item.final} afterTool={item.afterTool} indent={item.indent} afterFold={item.afterFold} hideThinking={item.hideThinking} beforeTool={item.beforeTool} noticeLive={item.noticeLive} recap={item.recap} turnMs={times.get(item.row.id)} />
+            <Row row={item.row} ctx={ctx} final={item.final} afterTool={item.afterTool} indent={item.indent} afterFold={item.afterFold} hideThinking={item.hideThinking} beforeTool={item.beforeTool} noticeLive={item.noticeLive} recap={item.recap} turnMs={times.get(item.row.id)} skills={skills.get(item.row.id)} />
           );
         if (item.kind === 'agents') return <AgentGroup rows={item.rows} flags={item.flags} ctx={ctx} />;
         return (

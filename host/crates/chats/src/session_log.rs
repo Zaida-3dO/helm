@@ -69,6 +69,10 @@ pub struct ToolEntry {
     pub is_error: bool,
     pub started_at: i64,
     pub ended_at: i64,
+    /// Pictures the tool returned (a screenshot, say), kept as the chat's own images; the row
+    /// shows them as thumbnails.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::types::MessageImage>,
 }
 
 /// A context row: compaction, model or effort change, notice, restart. `id` is `c:<uuid>`.
@@ -572,6 +576,9 @@ impl RowWrite {
                     }
                     if t.is_error {
                         d["isError"] = json!(true);
+                    }
+                    if !t.images.is_empty() {
+                        d["images"] = json!(t.images);
                     }
                     // The same few words the live row carried, rebuilt here so a session read
                     // back from the log shows them too.

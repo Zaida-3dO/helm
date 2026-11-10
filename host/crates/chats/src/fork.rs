@@ -205,36 +205,51 @@ fn carry_images(
 ) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
     for entry in entries.iter_mut() {
-        let Some(images) = entry
+        // A user message keeps its images under `details`; a tool call keeps the pictures it
+        // returned on the entry itself.
+        if let Some(images) = entry
             .get_mut("details")
             .and_then(|d| d.get_mut("images"))
             .and_then(Value::as_array_mut)
-        else {
-            continue;
-        };
-        for image in images {
-            let Some(old) = image.get("id").and_then(Value::as_str).map(str::to_owned) else {
-                continue;
-            };
-            let sent = db
-                .snapshot(|t| crate::message_images::sent_image(t, source, &old))
-                .ok()
-                .flatten()
-                .is_some();
-            if !sent {
-                continue;
-            }
-            let new = uuid::Uuid::new_v4().to_string();
-            match crate::message_images::copy_file(attachments, &old, &new) {
-                Ok(()) => {
-                    image["id"] = Value::String(new.clone());
-                    pairs.push((old, new));
-                }
-                Err(e) => log::warn!("fork: image {old} could not be carried over: {e}"),
-            }
+        {
+            carry_list(db, attachments, source, images, &mut pairs);
+        }
+        if let Some(images) = entry.get_mut("images").and_then(Value::as_array_mut) {
+            carry_list(db, attachments, source, images, &mut pairs);
         }
     }
     pairs
+}
+
+/// Copy each listed image the source chat holds, pointing the list at the copies.
+fn carry_list(
+    db: &helm_core::db::Database,
+    attachments: &Path,
+    source: &str,
+    images: &mut [Value],
+    pairs: &mut Vec<(String, String)>,
+) {
+    for image in images {
+        let Some(old) = image.get("id").and_then(Value::as_str).map(str::to_owned) else {
+            continue;
+        };
+        let sent = db
+            .snapshot(|t| crate::message_images::sent_image(t, source, &old))
+            .ok()
+            .flatten()
+            .is_some();
+        if !sent {
+            continue;
+        }
+        let new = uuid::Uuid::new_v4().to_string();
+        match crate::message_images::copy_file(attachments, &old, &new) {
+            Ok(()) => {
+                image["id"] = Value::String(new.clone());
+                pairs.push((old, new));
+            }
+            Err(e) => log::warn!("fork: image {old} could not be carried over: {e}"),
+        }
+    }
 }
 
 /// What `chat_forks` recorded for a fork id: the source chat, the cut message, whether it was a
@@ -426,6 +441,7 @@ pub fn fork(
                     is_error: true,
                     started_at: ts,
                     ended_at: now,
+                    images: Vec::new(),
                 })
             } else {
                 Entry::message(MessageEntry {

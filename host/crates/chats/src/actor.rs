@@ -414,6 +414,14 @@ async fn recv_out(out: &mut Option<mpsc::Receiver<WorkerOutput>>) -> Option<Work
 
 /// Subagents kept on the live thread (the roster shows at most 30).
 const MAX_SUBAGENTS: usize = 30;
+
+/// The most pictures kept from one tool result.
+const RESULT_IMAGES_MAX: usize = 6;
+
+/// The most tool pictures one chat keeps; past this the oldest go, so a chat that screenshots
+/// every step does not grow the attachments folder without bound.
+const TOOL_PICTURES_PER_CHAT: i64 = 200;
+
 /// A settled subagent's report on the live thread: a preview, since the whole thread is sent on
 /// every change.
 const LIVE_REPORT_BYTES: usize = 2 * 1024;
@@ -494,6 +502,80 @@ impl Actor {
                 None
             }
         }
+    }
+
+    /// Keep the pictures a tool returned (a screenshot, say) as the chat's own images, so the
+    /// tool's row can show them like the thumbnails in a sent message. They are linked to the call,
+    /// never to a send, so the composer does not list them as waiting. A picture that is not a
+    /// readable still image, or is over the attachments limits, is skipped; at most
+    /// [`RESULT_IMAGES_MAX`] are kept per call and [`TOOL_PICTURES_PER_CHAT`] per chat. The bytes
+    /// are decoded before the write opens.
+    fn keep_result_images(&self, call_id: &str, list: Option<&Value>) -> Vec<MessageImage> {
+        use base64::Engine as _;
+        let Some(list) = list.and_then(Value::as_array) else {
+            return Vec::new();
+        };
+        let mut decoded: Vec<(String, Vec<u8>)> = Vec::new();
+        for img in list.iter().take(RESULT_IMAGES_MAX) {
+            let (Some(mime), Some(data)) = (str_of(img, "mimeType"), str_of(img, "data")) else {
+                continue;
+            };
+            match base64::engine::general_purpose::STANDARD.decode(data.as_bytes()) {
+                Ok(bytes) => decoded.push((mime, bytes)),
+                Err(e) => log::warn!("chat {}: a tool picture was not valid base64: {e}", self.chat_id),
+            }
+        }
+        if decoded.is_empty() {
+            return Vec::new();
+        }
+        let dir = self.sh.cfg.profile_dir.join("attachments");
+        let owner = self.chat_id.clone();
+        let link = format!("tool:{call_id}");
+        let at = now();
+        let kept = self
+            .write(|t| {
+                let mut kept = Vec::new();
+                for (n, (mime, bytes)) in decoded.iter().enumerate() {
+                    let name = format!("Picture {}", n + 1);
+                    match crate::attachments::put(t, &dir, &owner, &name, mime, bytes, at)? {
+                        Ok(stored) => {
+                            t.execute(
+                                "UPDATE chat_attachments SET submission_id = ?1 WHERE id = ?2",
+                                rusqlite::params![link, stored.id],
+                            )?;
+                            let (width, height) =
+                                crate::attachments::dimensions(mime, bytes).unwrap_or((0, 0));
+                            kept.push(MessageImage {
+                                id: stored.id,
+                                name,
+                                mime: mime.clone(),
+                                width,
+                                height,
+                            });
+                        }
+                        Err(_) => log::warn!("chat {owner}: a tool picture could not be kept"),
+                    }
+                }
+                // The oldest tool pictures past the cap go, rows and files.
+                let old: Vec<String> = {
+                    let mut st = t.prepare(
+                        "SELECT id FROM chat_attachments WHERE chat_id = ?1 AND submission_id LIKE 'tool:%'
+                         ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?2",
+                    )?;
+                    let rows =
+                        st.query_map(rusqlite::params![owner, TOOL_PICTURES_PER_CHAT], |r| r.get(0))?;
+                    rows.collect::<rusqlite::Result<_>>()?
+                };
+                for id in &old {
+                    t.execute("DELETE FROM chat_attachments WHERE id = ?1", [id])?;
+                }
+                Ok((kept, old))
+            })
+            .unwrap_or_default();
+        for id in &kept.1 {
+            let _ = std::fs::remove_file(dir.join(id));
+        }
+        kept.0
     }
 
     fn emit(&self, e: ChatEvent) {
@@ -2735,6 +2817,8 @@ impl Actor {
                     .unwrap_or_default()
                     .to_owned();
                 let is_error = v.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                let images =
+                    self.keep_result_images(&id, v.get("result").and_then(|r| r.get("images")));
                 let ts = now();
                 let entry = ToolEntry {
                     id: format!("t:{id}"),
@@ -2751,6 +2835,7 @@ impl Actor {
                     is_error,
                     started_at: rec.as_ref().map(|r| r.started_at).unwrap_or(ts),
                     ended_at: ts,
+                    images,
                 };
                 self.record(Entry::Tool(entry));
                 self.emit_thread();

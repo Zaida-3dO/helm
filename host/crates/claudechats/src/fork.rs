@@ -162,6 +162,7 @@ pub fn fork(
                     is_error: *is_error,
                     started_at: *timestamp,
                     ended_at: *timestamp,
+                    images: Vec::new(),
                 })
             }
         };

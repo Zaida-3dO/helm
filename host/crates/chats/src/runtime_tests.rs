@@ -877,6 +877,34 @@ async fn tools_are_written_at_start_and_end() {
     );
     w.emit(json!({"type": "tool_execution_end", "toolCallId": "tc3", "toolName": "Grep", "result": {"text": "2 files"}, "isError": false}))
         .await;
+    // A picture a tool returned is kept as the chat's own image and listed on the tool's row; it is
+    // linked to the call, so the composer never lists it as waiting. A bad picture is skipped.
+    {
+        use base64::Engine as _;
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        png.extend(6u32.to_be_bytes());
+        png.extend(4u32.to_be_bytes());
+        png.extend([8, 6, 0, 0, 0]);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        w.emit(json!({"type": "tool_execution_start", "toolCallId": "tc5", "toolName": "Shot", "args": {}, "stoppable": false}))
+            .await;
+        w.emit(json!({"type": "tool_execution_end", "toolCallId": "tc5", "toolName": "Shot",
+                      "result": {"text": "", "images": [{"mimeType": "image/png", "data": b64}, {"mimeType": "image/png", "data": "not base64!"}]},
+                      "isError": false}))
+            .await;
+        h.until("tool picture", |h| {
+            h.col("SELECT json_array_length(details, '$.images') FROM messages WHERE source_key = 't:tc5'") == ["1"]
+        })
+        .await;
+        assert_eq!(
+            h.col("SELECT json_extract(details, '$.images[0].width') FROM messages WHERE source_key = 't:tc5'"),
+            ["6"]
+        );
+        assert_eq!(
+            h.col("SELECT submission_id FROM chat_attachments WHERE name = 'Picture 1'"),
+            ["tool:tc5"]
+        );
+    }
     // The files the command changed are kept as an entry of their own, with no row; a line with
     // no usable path is dropped.
     w.emit(json!({"type": "shell_changes", "toolCallId": "tc1", "paths": ["C:/p/a.txt", "", 5]}))
@@ -2708,8 +2736,9 @@ async fn a_manual_rename_wins_and_a_failure_keeps_the_fallback() {
         .await
         .unwrap_err();
     assert_eq!(bad.code, "bad_args");
+    // A direction override and a zero-width space in the title are taken out.
     let r = h
-        .call("chat_rename", json!({"chatId": chat, "title": "My name"}))
+        .call("chat_rename", json!({"chatId": chat, "title": "My \u{202E}na\u{200B}me"}))
         .await
         .unwrap();
     assert_eq!(r["titleState"], "manual");
@@ -3118,8 +3147,28 @@ async fn forked_chats_have_their_own_copies_of_the_images() {
     use base64::Engine as _;
     let mut h = harness();
     let chat = h.create().await;
-    let (_w, id, png) = first_turn_with_image(&mut h, &chat).await;
+    let (mut w, id, png) = first_turn_with_image(&mut h, &chat).await;
     let want = base64::engine::general_purpose::STANDARD.encode(&png);
+    // A picture a tool returned is a copy-carried image too.
+    w.emit(json!({"type": "agent_start"})).await;
+    w.emit(json!({"type": "tool_execution_start", "toolCallId": "tcp", "toolName": "Shot", "args": {}, "stoppable": false}))
+        .await;
+    w.emit(json!({"type": "tool_execution_end", "toolCallId": "tcp", "toolName": "Shot",
+                  "result": {"text": "", "images": [{"mimeType": "image/png", "data": want}]}, "isError": false}))
+        .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("tool picture", |h| {
+        h.col(&format!(
+            "SELECT json_array_length(details, '$.images') FROM messages WHERE chat_id = '{chat}' AND source_key = 't:tcp'"
+        )) == ["1"]
+    })
+    .await;
+    h.until("idle again", |h| h.status(&chat) == "idle").await;
+    let tool_picture = h.col(&format!(
+        "SELECT json_extract(details, '$.images[0].id') FROM messages WHERE chat_id = '{chat}' AND source_key = 't:tcp'"
+    ))[0]
+        .clone();
     let reply: i64 = h.col(&format!(
         "SELECT id FROM messages WHERE chat_id = '{chat}' AND role = 'assistant'"
     ))[0]
@@ -3145,6 +3194,12 @@ async fn forked_chats_have_their_own_copies_of_the_images() {
         .as_str()
         .unwrap()
         .to_owned();
+    let kept = h.col(&format!(
+        "SELECT json_extract(details, '$.images[0].id') FROM messages WHERE chat_id = '{whole}' AND source_key = 't:tcp'"
+    ));
+    assert_eq!(kept.len(), 1, "the whole fork shows the tool's picture");
+    assert_ne!(kept[0], tool_picture, "it is the fork's own copy");
+    assert_eq!(image_bytes(&h, &whole, &kept[0]).await.unwrap(), want);
     let mut copies = Vec::new();
     for fork in [&whole, &cut] {
         let ids = user_image_ids(&h, fork).await;

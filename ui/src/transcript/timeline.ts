@@ -2,6 +2,7 @@
 // a rail of a given height. Pure, so the rail and the tests share it.
 
 import type { MessageRow } from '../api/types.ts';
+import { isHelmNote } from './origin.ts';
 import { changeLines, toolKind, toolStatus, toolTarget } from './toolKinds.ts';
 
 export type EventKind = 'prompt' | 'edit' | 'write' | 'test' | 'command' | 'failed' | 'running';
@@ -49,6 +50,7 @@ export function timelineEvents(rows: readonly MessageRow[]): TimelineEvent[] {
   const out: TimelineEvent[] = [];
   for (const row of rows) {
     if (row.role === 'user') {
+      if (isHelmNote(row)) continue;
       out.push({ rowId: row.id, kind: 'prompt', title: 'Prompt', detail: row.text.replace(/\s+/g, ' ').trim().slice(0, 160), body: row.text.trim().slice(0, PREVIEW_BODY_MAX), diff: [], output: '' });
     } else if (row.role === 'toolResult') {
       const e = toolEvent(row);

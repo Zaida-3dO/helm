@@ -74,6 +74,34 @@ export function toolTarget(row: MessageRow): string | null {
   );
 }
 
+/** The Allow request an `app_request_allow` call filed: the id its result names, or null. */
+export function allowRequestId(row: MessageRow): string | null {
+  const id = toolIdentity(row);
+  if (id.source !== 'host' || id.tool !== 'app_request_allow') return null;
+  try {
+    const v = JSON.parse(row.text) as { requestId?: unknown };
+    return typeof v.requestId === 'string' && v.requestId ? v.requestId : null;
+  } catch {
+    return /"requestId"\s*:\s*"([^"]+)"/.exec(row.text)?.[1] ?? null;
+  }
+}
+
+/** What an Allow request's tool chip says: waiting on the user, allowed (spent or not), or refused (denied or lapsed). */
+export function allowChipState(state: string | undefined): 'waiting' | 'allowed' | 'refused' | null {
+  switch (state) {
+    case 'pending':
+      return 'waiting';
+    case 'allowed':
+    case 'used':
+      return 'allowed';
+    case 'denied':
+    case 'expired':
+      return 'refused';
+    default:
+      return null;
+  }
+}
+
 export type ToolStatus = 'running' | 'complete' | 'failed' | 'interrupted';
 
 export function toolStatus(row: MessageRow): ToolStatus {

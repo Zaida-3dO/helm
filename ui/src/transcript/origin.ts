@@ -15,6 +15,15 @@ const TELEGRAM_NOTE = /^\[Sent from Telegram:[^\]\n]*\]\n(\[Sent to the user on 
  */
 const VOICE_NOTE = /^(\[Voice chat: you are[\s\S]*?If not, answer exactly \[quiet\]\.\]\n)?\[Voice · [^\]\n]*\]\n(\[Not heard by the user:[^\]\n]*\]\n)*/;
 
+/**
+ * A note Helm itself put in the chat for the agent, not something the user wrote or an agent sent:
+ * the voice chat's `[Attention]` and `[Wait finished]` news. It is for the agent, so the
+ * transcript does not draw it (the turn it starts still folds and settles as any other).
+ */
+export function isHelmNote(row: MessageRow): boolean {
+  return row.role === 'user' && row.details?.origin === 'app' && /^\[(?:Attention|Wait finished)\]/.test(row.text);
+}
+
 export function fromTelegram(row: MessageRow): boolean {
   return row.details?.origin === 'telegram';
 }

@@ -54,23 +54,31 @@ export interface ReplyActionsProps {
   sctx: SlotContext;
   /** The turn's time, on the reply that ends a turn with folded work. */
   turnMs?: number;
+  /** The skills this turn used, one per line. */
+  skills?: string;
   showTurnTime: boolean;
   showTokens: boolean;
 }
 
-export function ReplyActions({ row, sctx, turnMs, showTurnTime, showTokens }: ReplyActionsProps) {
+export function ReplyActions({ row, sctx, turnMs, skills, showTurnTime, showTokens }: ReplyActionsProps) {
   if (row.status === 'streaming') return null;
   const actions = ordered(messageActionsFor(row));
   const usage = row.status === 'complete' && showTokens ? row.details?.usage : undefined;
   const chip = usage ? tokenChip(usage) : null;
   const time = showTurnTime && turnMs !== undefined ? formatTurnTime(turnMs) : null;
   const copyable = row.text.trim() !== '';
-  if (!copyable && !actions.length && !chip && !time) return null;
+  const skillNames = skills ? skills.split('\n') : [];
+  if (!copyable && !actions.length && !chip && !time && skillNames.length === 0) return null;
   return (
     <div className="row-actions" data-testid="message-actions">
       {copyable && <CopyButton text={row.text} label="Copy response" />}
       {actions.map((a) => (
         <ActionButton key={a.id} action={a} row={row} sctx={sctx} />
+      ))}
+      {skillNames.map((name) => (
+        <span key={name} className="row-skill-chip" title={`This turn used the ${name} skill`} data-testid="skill-chip">
+          {name}
+        </span>
       ))}
       {time && (
         <span className="row-turn-time" title="Time spent on this turn">

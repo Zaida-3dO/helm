@@ -70,6 +70,10 @@ test('the settled line comes from the last turn when it ended with a reply', asy
     assert.equal(t === null ? 'none' : finishedCount(t), count ?? null, name);
     assert.equal(t?.elapsedMs ?? null, elapsed, name);
   }
+  // The settled time ends at the run's end when that is after the last row (the reply streams after its stamp).
+  assert.equal(finishedTurn([user, note, read, reply], 60_000)?.elapsedMs, 59_000);
+  assert.equal(finishedTurn([user, note, read, reply], 10_000)?.elapsedMs, 47_000, 'a run that ended before the last row changes nothing');
+  assert.equal(finishedTurn([user, note, read, reply], null)?.elapsedMs, 47_000);
 });
 
 test('with no tool running the dock says what the turn is doing, and since when', async () => {

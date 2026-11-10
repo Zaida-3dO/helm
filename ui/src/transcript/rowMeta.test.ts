@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agoText, compactCount, contextSize, messageTimeLabel, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, tokenChip, turnTimes } from './rowMeta.ts';
+import { agoText, compactCount, contextSize, messageTimeLabel, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, tokenChip, turnTimes, skillsByReply, chatRefOpens } from './rowMeta.ts';
 
 const usage = { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 40_000, cacheWriteTokens: 500, costUsd: 0 };
 
@@ -125,3 +125,27 @@ test('a message tooltip names the day and time and how long ago, and the age rea
     assert.match(label, / at .*\d/, label);
   }
 });
+
+test('the skills of a turn sit on its last reply, once each; chat chips open only for chats the list holds', async () => {
+  const { row } = await import('../dev/fixtures.ts');
+  const skill = (id: number, name: string) => row({ id, role: 'toolResult', toolName: 'Skill', details: { toolArgs: JSON.stringify({ skill: name }) } });
+  const rows = [
+    row({ id: 1, role: 'user' }),
+    skill(2, 'personal:spanish-trainer'),
+    row({ id: 3, role: 'assistant', text: 'one' }),
+    skill(4, 'helm:review'),
+    skill(5, 'personal:spanish-trainer'),
+    row({ id: 6, role: 'assistant', text: 'two' }),
+    row({ id: 7, role: 'user' }),
+    row({ id: 8, role: 'toolResult', toolName: 'Read' }),
+    row({ id: 9, role: 'assistant', text: 'plain' }),
+    row({ id: 10, role: 'user' }),
+    skill(11, 'project:deploy'),
+    row({ id: 12, role: 'assistant', text: '' }),
+  ];
+  assert.deepEqual([...skillsByReply(rows)], [[6, 'personal:spanish-trainer\nhelm:review']]);
+  assert.equal(chatRefOpens([], 'x'), true, 'a list that has not loaded says nothing');
+  assert.equal(chatRefOpens([{ id: 'a' }], 'a'), true);
+  assert.equal(chatRefOpens([{ id: 'a' }], 'gone'), false);
+});
+

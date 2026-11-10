@@ -145,6 +145,26 @@ function resultText(content: unknown): string {
     .join("\n");
 }
 
+/** The most pictures one tool result carries up to the host. */
+export const RESULT_IMAGES_MAX = 6;
+/** A picture over 25 MB once decoded (4/3 as many base64 characters) is left behind: the host would refuse it. */
+export const RESULT_IMAGE_BASE64_MAX = Math.ceil((25 * 1024 * 1024 * 4) / 3);
+
+/** The pictures inside a tool result (a screenshot a tool returned): type and base64 bytes, nothing else. */
+export function resultImages(content: unknown): { mimeType: string; data: string }[] {
+  if (!Array.isArray(content)) return [];
+  const out: { mimeType: string; data: string }[] = [];
+  for (const raw of content) {
+    const b = obj(raw);
+    if (b.type !== "image") continue;
+    const src = obj(b.source);
+    if (src.type !== "base64" || typeof src.data !== "string" || src.data === "" || src.data.length > RESULT_IMAGE_BASE64_MAX) continue;
+    out.push({ mimeType: typeof src.media_type === "string" ? src.media_type : "image/png", data: src.data });
+    if (out.length >= RESULT_IMAGES_MAX) break;
+  }
+  return out;
+}
+
 export class StreamTranslator {
   private live: LiveMessage | undefined;
   private readonly streamed = new Set<string>();
@@ -339,11 +359,12 @@ export class StreamTranslator {
       const toolCallId = String(b.tool_use_id ?? "");
       this.openTools.delete(toolCallId);
       const text = resultText(b.content);
+      const images = resultImages(b.content);
       this.h.emit({
         type: "tool_execution_end",
         toolCallId,
         toolName: this.toolNames.get(toolCallId) ?? "",
-        result: { text, content: Array.isArray(b.content) ? convertContent(b.content) : undefined },
+        result: { text, content: Array.isArray(b.content) ? convertContent(b.content) : undefined, ...(images.length > 0 ? { images } : {}) },
         isError: b.is_error === true,
       });
       this.onSubagentToolResult(toolCallId, text, b.is_error === true);

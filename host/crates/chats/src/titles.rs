@@ -186,8 +186,24 @@ pub fn start(rt: &ChatRuntime, chat_id: &str, job_body: Value) {
     });
 }
 
+/// A title with the characters that change how it reads without showing (direction overrides,
+/// zero-width and filler characters) taken out, as names are elsewhere, and trimmed.
+pub(crate) fn screened(title: &str) -> String {
+    title
+        .chars()
+        .filter(|c| !helm_core::hidden::is_hidden_char(*c))
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
 /// Write a generated title unless a manual rename came first.
 fn finish(rt: &ChatRuntime, chat_id: &str, title: &str) {
+    let title = screened(title);
+    if title.is_empty() {
+        return;
+    }
+    let title = title.as_str();
     let wrote = rt
         .db()
         .write(|tx| {
@@ -226,7 +242,8 @@ pub fn rename(
     chat_id: &str,
     title: &str,
 ) -> Result<ChatRecord, helm_ipc::ApiError> {
-    let t = title.trim();
+    let clean = screened(title);
+    let t = clean.as_str();
     if t.is_empty() || t.len() > MAX_TITLE_BYTES || t.chars().any(char::is_control) {
         return Err(helm_ipc::ApiError::bad_args(
             "A title is 1 to 512 bytes on one line.",
@@ -320,9 +337,8 @@ fn naming_context(
 
 /// A helper line as an option: one line, no control characters, at most the title limit.
 fn clean_suggestion(raw: &str) -> Option<String> {
-    let t = raw.trim();
-    (!t.is_empty() && t.len() <= MAX_TITLE_BYTES && !t.chars().any(char::is_control))
-        .then(|| t.to_owned())
+    let t = screened(raw);
+    (!t.is_empty() && t.len() <= MAX_TITLE_BYTES && !t.chars().any(char::is_control)).then_some(t)
 }
 
 /// The options to show: cleaned, no repeats (ignoring case), none equal to the current title, at

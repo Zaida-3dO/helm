@@ -2,6 +2,7 @@
 
 import type { MessageRow } from '../api/types.ts';
 import type { Item } from './workBlocks.ts';
+import { toolArgs } from './toolKinds.ts';
 
 type Usage = NonNullable<MessageRow['details']['usage']>;
 
@@ -146,3 +147,34 @@ export function turnTimes(items: Item[]): Map<number, number> {
   close();
   return out;
 }
+
+/**
+ * The skills a turn used, on the turn's last reply: `personal:`, `project:` and `helm:` skills
+ * alike, as the names the Skill tool was called with, one per line. Only a reply with text carries
+ * them, and a steering message does not start a new turn.
+ */
+export function skillsByReply(rows: readonly MessageRow[]): Map<number, string> {
+  const out = new Map<number, string>();
+  let used: string[] = [];
+  let reply: number | null = null;
+  const close = () => {
+    if (used.length > 0 && reply !== null) out.set(reply, used.join('\n'));
+    used = [];
+    reply = null;
+  };
+  for (const r of rows) {
+    if (r.role === 'user' && r.details?.mode !== 'steer') close();
+    else if (r.role === 'toolResult' && r.toolName === 'Skill') {
+      const name = toolArgs(r).skill;
+      if (typeof name === 'string' && name.trim() && !used.includes(name.trim())) used.push(name.trim());
+    } else if (r.role === 'assistant' && r.text.trim()) reply = r.id;
+  }
+  close();
+  return out;
+}
+
+/** Whether a chat attached by reference can still be opened: any chat the list holds, or every chat while the list has not loaded. */
+export function chatRefOpens(chats: readonly { id: string }[], id: string): boolean {
+  return chats.length === 0 || chats.some((c) => c.id === id);
+}
+

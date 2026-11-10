@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { defaultIndex, eyebrowOf, optionAnswer, pickIndex, splitRecommended } from './interactionModel.ts';
+import { defaultIndex, eyebrowOf, moveIndex, optionAnswer, pickIndex, splitRecommended } from './interactionModel.ts';
 
 test('1-9 pick an option that exists; other keys pick nothing', () => {
   assert.equal(pickIndex('1', 3), 0);
@@ -32,3 +32,14 @@ test('a recommended tag is split off the label, and only a question focuses a de
   assert.equal(defaultIndex('plan', ['Approve plan', 'Keep planning']), null);
   assert.equal(defaultIndex('question', []), null);
 });
+
+test('arrow keys, Home and End walk the options and wrap; other keys move nothing', () => {
+  for (const [key, from, count, to] of [
+    ['ArrowDown', -1, 3, 0], ['ArrowDown', 0, 3, 1], ['ArrowDown', 2, 3, 0], ['ArrowRight', 1, 3, 2],
+    ['ArrowUp', -1, 3, 2], ['ArrowUp', 0, 3, 2], ['ArrowUp', 2, 3, 1], ['ArrowLeft', 1, 3, 0],
+    ['Home', 2, 3, 0], ['End', 0, 3, 2], ['Enter', 0, 3, null], ['a', 0, 3, null], ['ArrowDown', 0, 0, null],
+  ] as const) {
+    assert.equal(moveIndex(key, from, count), to, `${key} from ${from} of ${count}`);
+  }
+});
+

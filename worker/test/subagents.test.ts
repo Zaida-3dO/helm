@@ -300,3 +300,18 @@ describe("sub-agent limits", () => {
     assert.equal(b.decide({}, "t2").kind, "deny");
   });
 });
+
+test("a tool result's pictures go up with the end of the call: at most 6, base64 only, none over the size cap", () => {
+  const s = make();
+  const png = (n: number): Json => ({ type: "image", source: { type: "base64", media_type: "image/png", data: `AAAA${n}` } });
+  const result = (content: Json[]): Json => ({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content }] }, parent_tool_use_id: null });
+  const huge = { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(35_000_000) } };
+  s.t.handle(result([{ type: "text", text: "shot" }, png(1), { type: "image", source: { type: "url", url: "http://x/y.png" } }, huge, ...[2, 3, 4, 5, 6, 7, 8].map(png)]));
+  const [end] = s.of("tool_execution_end");
+  const got = (end.result as Json).images as Json[];
+  assert.equal(got.length, 6);
+  assert.deepEqual(got[0], { mimeType: "image/png", data: "AAAA1" });
+  assert.equal((end.result as Json).text, "shot");
+  s.t.handle({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t2", content: "plain" }] }, parent_tool_use_id: null });
+  assert.equal("images" in ((s.of("tool_execution_end")[1].result as Json) ?? {}), false, "no pictures, no field");
+});

@@ -8,7 +8,9 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type KeyboardEvent, type RefObject } from 'react';
 import type { MessageRow } from '../api/types.ts';
-import { IconAlert, IconChat, IconCheck, IconClock, IconEdit, IconFilePlus, IconTerminal, type IconProps } from '../ui/icons.tsx';
+import { CHECKPOINT_ACTION_ID } from '../checkpoints/CheckpointSlot.tsx';
+import { IconAlert, IconChat, IconCheck, IconClock, IconEdit, IconFilePlus, IconTerminal, IconUndo, type IconProps } from '../ui/icons.tsx';
+import { messageActionsFor } from './slots.ts';
 import { compactCount, newTokens } from './rowMeta.ts';
 import { hasWork, railMarkers, timelineEvents, visibleSpan, type EventKind, type RailMarker } from './timeline.ts';
 
@@ -180,9 +182,25 @@ export function TimelineRail({ rows, onJump, container }: TimelineRailProps) {
     focusAt(keyMoves[e.key]!);
   };
   const current = Math.min(active, markers.length - 1);
+  // History: Go back, from the prompt the focused marker stands for, else from the newest message the reader sent.
+  const focused = markers[current]?.event;
+  const goBackRow = (focused?.kind === 'prompt' ? rows.find((r) => r.id === focused.rowId) : undefined) ?? [...rows].reverse().find((r) => messageActionsFor(r).some((a) => a.id === CHECKPOINT_ACTION_ID));
+  const goBack = goBackRow ? messageActionsFor(goBackRow).find((a) => a.id === CHECKPOINT_ACTION_ID) : undefined;
 
   return (
     <nav className="timeline-rail" aria-label="Work timeline" data-testid="timeline-rail" ref={root}>
+      {goBack && goBackRow && (
+        <button
+          type="button"
+          className="tl-history"
+          data-testid="timeline-history"
+          title="Go back to before this message"
+          aria-label="Go back to before this message"
+          onClick={() => goBack.run(goBackRow, { chatId: goBackRow.chatId, isLatestAssistant: false, running: false, interactionOpen: false })}
+        >
+          <IconUndo size={13} />
+        </button>
+      )}
       <div className="tl-track" ref={track} onKeyDown={onKey}>
         {band && <div className="tl-band" style={{ top: band.top, height: band.height }} aria-hidden="true" data-testid="timeline-band" />}
         {markers.map((m, i) => {
@@ -224,7 +242,7 @@ export function TimelineRail({ rows, onJump, container }: TimelineRailProps) {
             marker={markers[card.index]!}
             index={card.index}
             total={markers.length}
-            top={Math.max(0, (track.current?.querySelectorAll<HTMLElement>('.tl-marker')[card.index]?.offsetTop ?? 0) - 8)}
+            top={Math.max(0, (track.current?.offsetTop ?? 0) + (track.current?.querySelectorAll<HTMLElement>('.tl-marker')[card.index]?.offsetTop ?? 0) - 8)}
             onStep={(d) => {
               const n = card.index + d;
               if (markers[n]) setCard({ index: n, pinned: true });

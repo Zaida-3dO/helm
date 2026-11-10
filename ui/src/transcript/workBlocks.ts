@@ -16,6 +16,7 @@
 import type { MessageRow } from '../api/types.ts';
 import { isCardRow } from './cards.ts';
 import { buildRecap, type Recap } from './recap.ts';
+import { isHelmNote } from './origin.ts';
 import { isAgentRow } from './subagents/model.ts';
 import { toolStatus } from './toolKinds.ts';
 import { ESTIMATE, estimateHeight, type EstimateInput } from './virtual.ts';
@@ -139,7 +140,7 @@ export function layout(rows: MessageRow[], live: boolean, expanded: ReadonlySet<
   }
   while (i < rows.length) {
     const user = rows[i++]!;
-    items.push({ kind: 'row', row: user });
+    if (!isHelmNote(user)) items.push({ kind: 'row', row: user });
     const work: MessageRow[] = [];
     while (i < rows.length && !opensTurn(rows[i]!)) work.push(rows[i++]!);
     const isLast = i >= rows.length;

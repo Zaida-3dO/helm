@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MessageRow } from '../api/types.ts';
-import { bubbleText, fromTelegram, fromVoice, peerMessage } from './origin.ts';
+import { bubbleText, fromTelegram, fromVoice, isHelmNote, peerMessage } from './origin.ts';
 
 const NOTE = '[Sent from Telegram: answer briefly in plain text, with no tables or long code. Offer choices as a numbered list. Only the final message of each turn reaches the user\'s phone, so make that message stand on its own. The user can reply "more" for detail.]';
 
@@ -59,3 +59,12 @@ test('a message another chat sent splits into sender and body; anything else sta
   ];
   for (const [r, want] of cases) assert.deepEqual(peerMessage(r), want, r.text.slice(0, 40));
 });
+
+test('the notes Helm writes for the agent are recognised; nothing a person or another chat wrote is', () => {
+  assert.equal(isHelmNote(row('[Attention] Build: Waiting for an approval\n', 'app')), true);
+  assert.equal(isHelmNote(row('[Wait finished] The build is done.', 'app')), true);
+  assert.equal(isHelmNote(row('[Attention] typed by hand')), false, 'a typed message is never hidden');
+  assert.equal(isHelmNote(row('[Attention] from the phone', 'telegram')), false);
+  assert.equal(isHelmNote(row('Something else', 'app')), false);
+});
+

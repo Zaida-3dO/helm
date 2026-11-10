@@ -15,7 +15,7 @@ import type { Interaction } from '../api/types.ts';
 import type { InteractionAnswer } from '../api/ops.ts';
 import { IconChevronRight, IconHelp, IconPlan, IconSend, IconShield } from '../ui/icons.tsx';
 import { Markdown } from './Markdown.tsx';
-import { defaultIndex, eyebrowOf, optionAnswer, pickIndex, splitRecommended, KEY_GUARD_MS } from './interactionModel.ts';
+import { defaultIndex, eyebrowOf, moveIndex, optionAnswer, pickIndex, splitRecommended, KEY_GUARD_MS } from './interactionModel.ts';
 import '../composer/dock.css';
 
 export interface InteractionCardProps {
@@ -68,6 +68,16 @@ export function InteractionCard({ interaction: i, onAnswer, popup }: Interaction
     }
     const target = e.target as HTMLElement;
     if (target.closest('input, textarea')) return;
+    // Arrow keys walk the choices; Enter answers the focused one, as the button itself does.
+    if (!e.ctrlKey && !e.altKey && !e.metaKey && card.current) {
+      const buttons = Array.from(card.current.querySelectorAll<HTMLButtonElement>('.ia-option'));
+      const to = moveIndex(e.key, buttons.indexOf(target as HTMLButtonElement), buttons.length);
+      if (to !== null) {
+        e.preventDefault();
+        buttons[to]!.focus();
+        return;
+      }
+    }
     const n = pickIndex(e.key, options.length);
     if (n === null || e.ctrlKey || e.altKey || e.metaKey) return;
     e.preventDefault();

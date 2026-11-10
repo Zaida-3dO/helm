@@ -4,15 +4,19 @@
 
 import { useEffect, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
+import { consentOps } from '../api/consent.ts';
 import { useShell } from '../shell/context.ts';
 import { IconCopy, IconWrap } from '../ui/icons.tsx';
 import { Glyph, Spinner } from './icons.tsx';
 import { parseResult, type Cell, type GridRow } from './resultGrid.ts';
 import { LocalPicture } from './LocalPicture.tsx';
+import { MessageImages } from './MessageImages.tsx';
 import { TodoList } from './TodoList.tsx';
 import { localImagePath } from '../markdown/localImages.ts';
 import { parseTodos } from './todos.ts';
 import {
+  allowChipState,
+  allowRequestId,
   changeLines,
   hostIconFor,
   isFileTool,
@@ -47,6 +51,40 @@ function useElapsed(since: number, live: boolean): number {
 
 const STATUS_TITLE: Record<ToolStatus, string> = { running: 'Running', complete: 'Done', failed: 'Failed', interrupted: 'Stopped' };
 
+const ALLOW_CHIP_TEXT = { waiting: 'Waiting for you', allowed: 'Allowed', refused: 'Refused' } as const;
+
+/** Where an Allow request stands, read from the consent list: waiting, allowed or refused. Nothing when the list no longer holds it. */
+function AllowChip({ chatId, requestId }: { chatId: string; requestId: string }) {
+  const shell = useShell();
+  const [state, setState] = useState<string | undefined>();
+  useEffect(() => {
+    let live = true;
+    const load = () => {
+      consentOps(shell.api)
+        .list(chatId)
+        .then((l) => {
+          if (live) setState([...l.pending, ...l.decided].find((r) => r.id === requestId)?.state);
+        })
+        .catch(() => {});
+    };
+    load();
+    const off = shell.bus.on('consent', (e) => {
+      if ((e as { chatId?: unknown }).chatId === chatId) load();
+    });
+    return () => {
+      live = false;
+      off();
+    };
+  }, [shell.api, shell.bus, chatId, requestId]);
+  const chip = allowChipState(state);
+  if (!chip) return null;
+  return (
+    <span className={`allow-chip allow-chip-${chip}`} data-testid="tool-allow-state" data-state={chip}>
+      {ALLOW_CHIP_TEXT[chip]}
+    </span>
+  );
+}
+
 export function ToolCard({ row, canStop, onStop }: ToolCardProps) {
   const kind = toolKind(row.toolName);
   const status = toolStatus(row);
@@ -56,6 +94,7 @@ export function ToolCard({ row, canStop, onStop }: ToolCardProps) {
   // A to-do update's checklist is pinned live above the dock and kept in the recap, so its row starts closed.
   const [open, setOpen] = useState(false);
   const rawName = row.toolName ?? '';
+  const allowId = allowRequestId(row);
 
   const label = (() => {
     if (id.source === 'mcp') {
@@ -130,6 +169,7 @@ export function ToolCard({ row, canStop, onStop }: ToolCardProps) {
           {status === 'interrupted' && <Glyph name="pause" size={12} />}
           {status === 'complete' && id.source !== 'native' && <Glyph name="check" size={12} />}
         </span>
+        {allowId && <AllowChip chatId={row.chatId} requestId={allowId} />}
         {status === 'running' && <span className="tool-elapsed muted">{formatElapsed(elapsed)}</span>}
         {status === 'running' && canStop && row.toolCallId && (
           <button
@@ -143,6 +183,8 @@ export function ToolCard({ row, canStop, onStop }: ToolCardProps) {
           </button>
         )}
       </div>
+      {/* Pictures the tool returned stay in view, open or not. */}
+      <MessageImages chatId={row.chatId} images={row.details?.images} />
       {open && <ToolBody row={row} kind={kind} status={status} source={id.source} rawName={rawName} />}
     </div>
   );

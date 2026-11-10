@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { changeLines, hostIconFor, readable, splitPath, toolIdentity, toolKind, toolLabel, toolStatus, toolTarget, toolVerb } from './toolKinds.ts';
+import { allowChipState, allowRequestId, changeLines, hostIconFor, readable, splitPath, toolIdentity, toolKind, toolLabel, toolStatus, toolTarget, toolVerb } from './toolKinds.ts';
 import { row } from '../dev/fixtures.ts';
 
 test('tool kinds and MCP labels', () => {
@@ -56,3 +56,16 @@ test('readable names, host icons and path splitting', () => {
   assert.deepEqual(splitPath('src/a/b.ts'), { name: 'b.ts', dir: 'src/a/' });
   assert.deepEqual(splitPath('C:' + String.fromCharCode(92) + 'x' + String.fromCharCode(92) + 'y.md'), { name: 'y.md', dir: 'C:' + String.fromCharCode(92) + 'x' + String.fromCharCode(92) });
 });
+
+test('an Allow request call names its request, and the chip reads waiting, allowed or refused', () => {
+  const call = (text: string, tool = 'app_request_allow') => row({ role: 'toolResult', toolName: `mcp__helm__${tool}`, text, details: { toolSource: { kind: 'host', server: 'Helm', tool } } });
+  assert.equal(allowRequestId(call('{"requestId":"r1","state":"pending"}')), 'r1');
+  assert.equal(allowRequestId(call('{"requestId":"r2","state":"pending","summary":"cut off...')), 'r2');
+  assert.equal(allowRequestId(call('nothing here')), null);
+  assert.equal(allowRequestId(call('{"requestId":"r1"}', 'app_workflow')), null, 'only the Allow request tool');
+  assert.equal(allowRequestId(row({ role: 'toolResult', toolName: 'Bash', text: '{"requestId":"r1"}' })), null);
+  const want: Record<string, string | null> = { pending: 'waiting', allowed: 'allowed', used: 'allowed', denied: 'refused', expired: 'refused', other: null };
+  for (const [state, chip] of Object.entries(want)) assert.equal(allowChipState(state), chip, state);
+  assert.equal(allowChipState(undefined), null);
+});
+

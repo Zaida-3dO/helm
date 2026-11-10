@@ -38,6 +38,8 @@ export interface DockProps {
   onStopTool: (toolCallId: string) => void;
   /** The chat's loaded rows, for the settled line after a turn ends. */
   rows?: readonly MessageRow[];
+  /** When the newest run ended, so the settled line's time stops there. */
+  runEndedAt?: number | null;
 }
 
 function ToolIcon({ name }: { name: string }) {
@@ -59,7 +61,7 @@ function usePhaseSince(label: string | null, since: number | null): number | nul
   return label === null ? null : (seen.current.at ?? since);
 }
 
-export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: DockProps) {
+export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows, runEndedAt }: DockProps) {
   const live = chat.status === 'running' || chat.status === 'starting' || chat.status === 'stopping';
   const bg = backgroundShells(thread);
   const now = useNow(live || bg.length > 0);
@@ -91,7 +93,7 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
   const activity = shown && !latest && live && chat.status === 'running' && rows ? dockActivity(rows, thread, turnStartedAt, chat.localAhead) : null;
   const phaseSince = usePhaseSince(activity?.label ?? null, activity?.since ?? null);
   if (!shown) {
-    const done = chat.status === 'idle' && rows ? finishedTurn(rows) : null;
+    const done = chat.status === 'idle' && rows ? finishedTurn(rows, runEndedAt ?? null) : null;
     return done ? <FinishedLine turn={done} /> : null;
   }
   const canStop = Boolean(latest && thread.sendBehavior.toolStop && thread.capabilities.stopTool && latest.stoppable);

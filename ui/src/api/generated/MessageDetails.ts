@@ -33,8 +33,9 @@ toolSource?: ToolSource,
  */
 toolSummary?: string, 
 /**
- * For a user row: the images sent with the message, shown as thumbnails in the bubble. The
- * bytes are not in the row; `attachment_get` reads them (see `message_images`).
+ * For a user row: the images sent with the message, shown as thumbnails in the bubble. For a
+ * tool row: the pictures the tool returned. The bytes are not in the row; `attachment_get`
+ * reads them (see `message_images`).
  */
 images?: Array<MessageImage>, 
 /**

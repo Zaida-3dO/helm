@@ -172,3 +172,23 @@ button.msg-ref:focus-visible {
   touch-action: pan-y;
   overscroll-behavior-x: contain;
 }
+
+/* A chat that is archived or gone: shown quietly, no link. */
+.msg-ref-gone {
+  border-color: var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-weight: 400;
+  cursor: default;
+}
+
+.msg-ref-gone .ui-icon {
+  color: var(--muted);
+}
+
+.msg-ref-note {
+  flex: none;
+  font-size: calc(9 * var(--ui-unit, 1px));
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
