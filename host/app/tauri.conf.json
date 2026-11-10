@@ -37,7 +37,8 @@
       ],
       "freezePrototype": false,
       "capabilities": [
-        "main"
+        "main",
+        "pet"
       ]
     }
   },

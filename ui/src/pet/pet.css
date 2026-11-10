@@ -1,0 +1,458 @@
+/* The desktop pet: the transparent page the pet window shows, the creatures' poses and their motion.
+   Poses are static frames first (eyes, wings, flame, a cloud, "z"s); the animations come after and
+   sit under [data-pet-motion='on'], so with motion off, reduced motion or the quiet level the pet still
+   changes pose but nothing moves. */
+
+html[data-window='pet'],
+html[data-window='pet'] body,
+html[data-window='pet'] #root {
+  background: transparent !important;
+  margin: 0;
+  overflow: hidden;
+  height: 100%;
+}
+
+.pet-stage,
+.pet-preview {
+  --pet-ink: #1f2a3a;
+  --pet-light: #f5f1e8;
+}
+.pet-stage {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  padding-bottom: 6px;
+  user-select: none;
+  -webkit-user-select: none;
+  font-family: var(--font-ui);
+}
+html[data-theme='dark'] .pet-stage,
+html[data-theme='dark'] .pet-preview {
+  --pet-ink: #33425a;
+  --pet-light: #efeadc;
+}
+
+.pet-creature {
+  width: var(--pet-size);
+  height: var(--pet-size);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  display: block;
+  touch-action: none;
+}
+.pet-creature:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+.pet-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+  pointer-events: none;
+}
+
+/* --- the bubble and the menu --- */
+
+.pet-bubble {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: var(--surface, #fff);
+  color: var(--text, #222);
+  border: 1px solid var(--line-strong, #ccc);
+  box-shadow: 0 2px 8px #0003;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.pet-bubble::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  width: 8px;
+  height: 8px;
+  background: inherit;
+  border-right: 1px solid var(--line-strong, #ccc);
+  border-bottom: 1px solid var(--line-strong, #ccc);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.pet-menu {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  min-width: 136px;
+  padding: 4px;
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  color: var(--text, #222);
+  border: 1px solid var(--line-strong, #ccc);
+  box-shadow: 0 4px 16px #0004;
+  z-index: 2;
+}
+.pet-menu button {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.pet-menu button:hover,
+.pet-menu button:focus-visible {
+  background: var(--hover, #eee);
+  outline: none;
+}
+
+/* --- static frames --- */
+
+.pet-eyes.shut {
+  transform: scaleY(0.1);
+}
+.pet-eyes.half {
+  transform: scaleY(0.5);
+}
+.pet-puffin .pet-eyes {
+  transform-origin: 32px 26.5px;
+}
+.pet-crab .pet-eyes {
+  transform-origin: 22px 29.2px;
+}
+.pet-lantern .pet-eyes {
+  transform-origin: 32px 38.2px;
+}
+
+.pet-puffin.pet-pose-failed .pet-head {
+  transform: rotate(6deg);
+  transform-origin: 32px 40px;
+}
+/* Wings out: a wing hangs from the shoulder, so a clockwise turn swings the left one out. */
+.pet-puffin.pet-pose-celebrate .pet-wing-l {
+  transform: rotate(38deg);
+  transform-origin: 18px 34px;
+}
+.pet-puffin.pet-pose-celebrate .pet-wing-r {
+  transform: rotate(-38deg);
+  transform-origin: 46px 34px;
+}
+
+.pet-crab.pet-pose-waiting .pet-claw-l,
+.pet-crab.pet-pose-celebrate .pet-claw-l {
+  transform: rotate(42deg);
+  transform-origin: 12px 46px;
+}
+/* Pulled into the shell: the body is gone and the shell settles low. */
+.pet-crab.pet-pose-failed .pet-crab-body,
+.pet-crab.pet-pose-sleeping .pet-crab-body {
+  opacity: 0;
+}
+.pet-crab.pet-pose-failed .pet-shell,
+.pet-crab.pet-pose-sleeping .pet-shell {
+  transform: translate(-10px, 9px);
+}
+
+.pet-lantern .pet-flame {
+  --fs: 1;
+  transform: scale(var(--fs));
+  transform-origin: 32px 44px;
+}
+.pet-flame-a {
+  fill: #ffb02e;
+}
+.pet-flame-b {
+  fill: #fff1a8;
+}
+.pet-lantern.pet-pose-working .pet-flame {
+  --fs: 1.14;
+  filter: brightness(1.18);
+}
+.pet-lantern.pet-pose-waiting .pet-flame-a {
+  fill: var(--accent);
+}
+.pet-lantern.pet-pose-waiting .pet-flame-b {
+  fill: color-mix(in srgb, var(--accent) 35%, #fff);
+}
+.pet-lantern.pet-pose-celebrate .pet-flame {
+  --fs: 1.3;
+}
+.pet-lantern.pet-pose-failed .pet-flame {
+  --fs: 0.5;
+}
+.pet-lantern.pet-pose-failed .pet-flame-a {
+  fill: #4f8cff;
+}
+.pet-lantern.pet-pose-failed .pet-flame-b {
+  fill: #bcd8ff;
+}
+.pet-lantern.pet-pose-sleeping .pet-flame {
+  --fs: 0.35;
+}
+
+.pet-spark {
+  opacity: 0.9;
+}
+.pet-z {
+  opacity: 0.85;
+}
+
+/* --- motion --- */
+
+[data-pet-motion='on'] .pet-eyes {
+  transition: transform 50ms ease-out;
+}
+
+@keyframes pet-breathe {
+  from {
+    transform: scaleY(1);
+  }
+  to {
+    transform: scaleY(1.03);
+  }
+}
+@keyframes pet-bob {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-2px);
+  }
+}
+@keyframes pet-hop {
+  0%,
+  55%,
+  100% {
+    transform: translateY(0);
+  }
+  18% {
+    transform: translateY(-8px);
+  }
+  34% {
+    transform: translateY(0);
+  }
+  44% {
+    transform: translateY(-3px);
+  }
+}
+@keyframes pet-jump {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-14px);
+  }
+}
+@keyframes pet-paddle {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-2.2px);
+  }
+}
+@keyframes pet-tap {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-1.8px);
+  }
+}
+@keyframes pet-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes pet-sway {
+  from {
+    transform: rotate(-5deg);
+  }
+  to {
+    transform: rotate(5deg);
+  }
+}
+@keyframes pet-wave {
+  from {
+    transform: rotate(30deg);
+  }
+  to {
+    transform: rotate(56deg);
+  }
+}
+@keyframes pet-swing {
+  from {
+    transform: rotate(-4deg);
+  }
+  to {
+    transform: rotate(4deg);
+  }
+}
+@keyframes pet-flicker {
+  0%,
+  100% {
+    transform: scale(var(--fs));
+  }
+  33% {
+    transform: scale(calc(var(--fs) * 0.95), calc(var(--fs) * 1.05));
+  }
+  66% {
+    transform: scale(calc(var(--fs) * 1.05), calc(var(--fs) * 0.97));
+  }
+}
+@keyframes pet-pulse {
+  0%,
+  100% {
+    transform: scale(var(--fs));
+    opacity: 1;
+  }
+  50% {
+    transform: scale(calc(var(--fs) * 1.14));
+    opacity: 0.75;
+  }
+}
+@keyframes pet-fade {
+  0% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-3px) scale(0.8);
+  }
+}
+@keyframes pet-rise {
+  0% {
+    opacity: 0;
+    transform: translate(0, 3px);
+  }
+  30% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(3px, -6px);
+  }
+}
+
+[data-pet-motion='on'] .pet-pose-idle .pet-all,
+[data-pet-motion='on'] .pet-pose-sleeping .pet-all {
+  transform-origin: 32px 60px;
+  animation: pet-breathe 3.2s ease-in-out infinite alternate;
+}
+[data-pet-motion='on'] .pet-pose-sleeping .pet-all {
+  animation-duration: 4.6s;
+}
+
+/* working */
+[data-pet-motion='on'] .pet-puffin.pet-pose-working .pet-all {
+  animation: pet-bob 0.8s ease-in-out infinite alternate;
+}
+[data-pet-motion='on'] .pet-puffin.pet-pose-working .pet-foot-l {
+  animation: pet-paddle 0.4s ease-in-out infinite alternate;
+}
+[data-pet-motion='on'] .pet-puffin.pet-pose-working .pet-foot-r {
+  animation: pet-paddle 0.4s ease-in-out infinite alternate-reverse;
+}
+[data-pet-motion='on'] .pet-crab.pet-pose-working .pet-wheel {
+  transform-origin: 38px 31px;
+  animation: pet-turn 6s linear infinite;
+}
+[data-pet-motion='on'] .pet-crab.pet-pose-working .pet-leg {
+  animation: pet-tap 0.3s ease-in-out infinite alternate;
+}
+[data-pet-motion='on'] .pet-crab.pet-pose-working .pet-leg-2,
+[data-pet-motion='on'] .pet-crab.pet-pose-working .pet-leg-4 {
+  animation-direction: alternate-reverse;
+}
+[data-pet-motion='on'] .pet-lantern.pet-pose-working .pet-swing {
+  transform-origin: 32px 8px;
+  animation: pet-swing 1.6s ease-in-out infinite alternate;
+}
+
+/* waiting */
+[data-pet-motion='on'] .pet-puffin.pet-pose-waiting .pet-all {
+  animation: pet-hop 1.6s ease-in-out infinite;
+}
+[data-pet-motion='on'] .pet-crab.pet-pose-waiting .pet-claw-l {
+  animation: pet-wave 0.6s ease-in-out infinite alternate;
+}
+[data-pet-motion='on'] .pet-lantern.pet-pose-waiting .pet-flame {
+  animation: pet-pulse 1.1s ease-in-out infinite;
+}
+
+/* idle: the eye stalks sway, the flame flickers */
+[data-pet-motion='on'] .pet-crab.pet-pose-idle .pet-stalks {
+  transform-origin: 22px 41px;
+  animation: pet-sway 2.4s ease-in-out infinite alternate;
+}
+[data-pet-motion='on'] .pet-lantern.pet-pose-idle .pet-flame,
+[data-pet-motion='on'] .pet-lantern.pet-pose-working .pet-flame,
+[data-pet-motion='on'] .pet-lantern.pet-pose-celebrate .pet-flame {
+  animation: pet-flicker 1.3s ease-in-out infinite;
+}
+
+/* celebrate */
+[data-pet-motion='on'] .pet-pose-celebrate .pet-all {
+  animation: pet-jump 0.9s ease-in-out infinite;
+}
+[data-pet-motion='on'] .pet-crab.pet-pose-celebrate .pet-wheel {
+  transform-origin: 38px 31px;
+  animation: pet-turn 0.8s ease-in-out 1;
+}
+[data-pet-motion='on'] .pet-crab.pet-pose-celebrate .pet-claw-l {
+  animation: pet-wave 0.35s ease-in-out infinite alternate;
+}
+[data-pet-motion='on'] .pet-spark {
+  animation: pet-fade 1.2s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/* sleeping */
+[data-pet-motion='on'] .pet-z1 {
+  animation: pet-rise 2s ease-in infinite;
+}
+[data-pet-motion='on'] .pet-z2 {
+  animation: pet-rise 2s ease-in 1s infinite;
+}
+
+/* --- Settings: the companion cards --- */
+
+.pet-cards {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.pet-card {
+  min-width: 96px;
+  cursor: pointer;
+}
+.pet-card .pet-preview {
+  display: block;
+  width: 56px;
+  height: 56px;
+}

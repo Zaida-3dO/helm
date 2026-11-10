@@ -75,6 +75,8 @@ pub const THEME_EFFECTS: PrefKey = PrefKey::classified("themeEffects");
 pub const PAUSE_ANIMATIONS_ON_SCROLL: PrefKey = PrefKey::classified("pauseAnimationsOnScroll");
 /// Settings > Appearance > Colours: `{profileId | "default": {accentHue, tint, contrast}}`.
 pub const CUSTOM_COLOURS: PrefKey = PrefKey::classified("customColours");
+/// Settings > Appearance > Desktop pet: `{enabled, kind, size, bubble, position}`; null leaves it off.
+pub const DESKTOP_PET: PrefKey = PrefKey::classified("desktopPet");
 /// The user's key map: command id → chord, or null for a cleared binding.
 pub const KEYBINDINGS: PrefKey = PrefKey::classified("keybindings");
 /// Minutes without worker output before a running chat shows as stalled (1 to 1440, default 5).
@@ -130,6 +132,7 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     THEME_EFFECTS,
     PAUSE_ANIMATIONS_ON_SCROLL,
     CUSTOM_COLOURS,
+    DESKTOP_PET,
 ];
 
 /// The theme effects `themeEffects` can switch, by id.
@@ -379,6 +382,7 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
             }
         }
         "customColours" => validate_custom_colours(value),
+        "desktopPet" => validate_desktop_pet(value),
         "keybindings" => validate_keybindings(value),
         _ => Ok(()),
     }
@@ -460,6 +464,43 @@ fn validate_custom_colours(value: &Value) -> Result<(), PrefError> {
                     "accentHue is 0 to 359 or null, tint is none, soft or strong, contrast is standard or more",
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// `desktopPet`: `enabled` and `bubble` are true or false, `kind` is puffin, crab or lantern, `size`
+/// is s, m or l, and `position` is null or the window's top-left corner in screen pixels. Each
+/// field is optional; a missing one reads as its default.
+fn validate_desktop_pet(value: &Value) -> Result<(), PrefError> {
+    let bad = |why: &'static str| PrefError::Invalid {
+        key: "desktopPet",
+        why,
+    };
+    let Some(map) = value.as_object() else {
+        return Err(bad("must be an object"));
+    };
+    let coordinate = |v: Option<&Value>| {
+        v.and_then(Value::as_i64)
+            .is_some_and(|n| n.abs() <= 100_000)
+    };
+    for (name, v) in map {
+        let ok = match name.as_str() {
+            "enabled" | "bubble" => v.is_boolean(),
+            "kind" => matches!(v.as_str(), Some("puffin" | "crab" | "lantern")),
+            "size" => matches!(v.as_str(), Some("s" | "m" | "l")),
+            "position" => {
+                v.is_null()
+                    || v.as_object().is_some_and(|p| {
+                        p.len() == 2 && coordinate(p.get("x")) && coordinate(p.get("y"))
+                    })
+            }
+            _ => return Err(bad("has an unknown key")),
+        };
+        if !ok {
+            return Err(bad(
+                "takes enabled and bubble (true/false), kind (puffin, crab or lantern), size (s, m or l) and position ({x, y} or null)",
+            ));
         }
     }
     Ok(())
@@ -736,6 +777,18 @@ mod tests {
                 Value::Object([("x".repeat(65), json!({}))].into_iter().collect()),
             ),
             ("customColours", json!({}), json!([1])),
+            (
+                "desktopPet",
+                json!({"enabled": true, "kind": "crab", "size": "l", "bubble": false, "position": {"x": -20, "y": 40}}),
+                json!({"kind": "gull"}),
+            ),
+            (
+                "desktopPet",
+                json!({"position": null}),
+                json!({"position": {"x": 1}}),
+            ),
+            ("desktopPet", json!({}), json!({"enabled": "yes"})),
+            ("desktopPet", json!({"size": "s"}), json!({"roams": true})),
         ] {
             assert!(db.write(|tx| set_generic(tx, key, &ok)).is_ok(), "{key}");
             let r = db.write(|tx| set_generic(tx, key, &bad));

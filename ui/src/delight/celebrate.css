@@ -1,0 +1,103 @@
+/* Celebrations: one fixed layer that lets every click through, holding the sweeping ring, the
+   spray and the merge check. Nothing here is drawn at the quiet level or under reduced motion
+   (celebrate.ts checks), and everything removes itself when its animation ends. */
+
+#delight-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+@property --delight-sweep {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/* The ring: a 2 px line whose visible part grows clockwise from the top as a conic mask opens, then
+   fades. */
+.delight-ring {
+  position: fixed;
+  box-sizing: border-box;
+  border-radius: var(--r, 6px);
+  --delight-sweep: 0deg;
+  -webkit-mask-image: conic-gradient(from 0deg, #000 var(--delight-sweep), transparent var(--delight-sweep));
+  mask-image: conic-gradient(from 0deg, #000 var(--delight-sweep), transparent var(--delight-sweep));
+  animation:
+    delight-sweep 700ms linear forwards,
+    delight-fade 200ms ease-out 700ms forwards;
+}
+.delight-ring-line {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  border: 2px solid var(--accent);
+  border-radius: inherit;
+}
+
+@keyframes delight-sweep {
+  to {
+    --delight-sweep: 360deg;
+  }
+}
+@keyframes delight-fade {
+  to {
+    opacity: 0;
+  }
+}
+
+/* Spray: small dots thrown from the row's right edge on an arc. */
+.delight-dot {
+  position: fixed;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--c, var(--accent));
+  animation: delight-spray var(--d, 700ms) cubic-bezier(0.2, 0.7, 0.4, 1) forwards;
+}
+@keyframes delight-spray {
+  0% {
+    transform: translate(0, 0) scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: translate(calc(var(--dx) * 0.6), calc(var(--dy) * 0.6 - 10px)) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(var(--dx), var(--dy)) scale(0.6);
+    opacity: 0;
+  }
+}
+
+/* The merge check: pops from 0.6 to 1.1 to 1 in 300 ms, stays a moment, then fades. */
+.delight-check {
+  position: fixed;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: var(--on-accent-fill, #fff);
+  box-shadow: 0 2px 8px #0003;
+  animation:
+    delight-pop 300ms ease-out both,
+    delight-fade 300ms ease-in 1100ms forwards;
+}
+@keyframes delight-pop {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}

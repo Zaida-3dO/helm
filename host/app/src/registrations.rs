@@ -38,6 +38,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_profiles::register_ops(reg);
     helm_pages::register_ops(reg);
     helm_devices::register_ops(reg);
+    crate::pet::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {

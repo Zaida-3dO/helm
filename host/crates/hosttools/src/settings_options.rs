@@ -81,13 +81,12 @@ const NOT_READ: &[&str] = &[
     "expandedChats",
     "defaultHarness",
     "taskTriage",
-    "desktopPet",
     "tasks",
 ];
 
 /// Object keys where an update that names some fields keeps the others, instead of replacing the
 /// whole object.
-const MERGED: &[&str] = &["fontSizes", "sounds"];
+const MERGED: &[&str] = &["fontSizes", "sounds", "desktopPet"];
 
 /// What the tools say about an unread key.
 const NOT_READ_NOTE: &str =
@@ -162,6 +161,8 @@ const COLOUR_CONTRASTS: Kind = Kind::Choice(&["standard", "more"]);
 const SHOWN_OR_HIDDEN: Kind = Kind::Choice(&["shown", "hidden"]);
 const CHORD: Kind = Kind::TextOrNull { max: 100 };
 const LEVELS: Kind = Kind::Choice(&["zen", "standard", "brainrot"]);
+const PET_KINDS: Kind = Kind::Choice(&["puffin", "crab", "lantern"]);
+const PET_SIZES: Kind = Kind::Choice(&["s", "m", "l"]);
 const ANY_OBJECT: Kind = Kind::AnyObject;
 
 fn table() -> Vec<Entry> {
@@ -433,9 +434,14 @@ fn table() -> Vec<Entry> {
         },
         Entry {
             key: "desktopPet",
-            kind: Kind::AnyObject,
+            kind: Kind::Fields(&[
+                ("enabled", &BOOL),
+                ("kind", &PET_KINDS),
+                ("size", &PET_SIZES),
+                ("bubble", &BOOL),
+            ]),
             default: null,
-            about: "The desktop pet's settings. Null leaves the pet off.",
+            about: "The desktop pet, a small companion on the desktop that reacts to the user's chats: enabled shows it (off by default), kind is puffin, crab or lantern, size is s, m or l, bubble turns its speech bubble on or off. Send only the fields to change: the others keep their values. Where the pet sits is the user's to move and cannot be set here. The pet rests under the quiet motion level and when motion is reduced.",
         },
         Entry {
             key: "projectsMode",
@@ -832,6 +838,13 @@ mod tests {
         assert!(check("dopamine", &json!("calm")).is_err());
         assert!(check("sounds", &json!({"cues": true, "focused": false})).is_ok());
         assert!(check("sounds", &json!({"cues": "on"})).is_err());
+        // The pet: its look and switches, never where it sits.
+        let look = json!({"enabled": true, "kind": "crab", "size": "l"});
+        assert!(check("desktopPet", &look).is_ok());
+        assert!(check("desktopPet", &json!({"kind": "gull"})).is_err());
+        assert!(check("desktopPet", &json!({"position": {"x": 1, "y": 2}}))
+            .unwrap_err()
+            .contains("no field"));
         // Own colours: a hue from 0 to 359 or null, and the tint and contrast words.
         assert!(check("customColours", &json!({"accentHue": 4})).is_ok());
         assert!(check(
@@ -915,6 +928,12 @@ mod tests {
         let tt = json!({"enabled": false, "delayMinutes": 5, "prompt": null});
         let old = json!({"enabled": true, "delayMinutes": 15, "prompt": "x"});
         assert_eq!(to_store("taskTriage", Some(&old), &tt), tt);
+        // The pet keeps the position the user dragged it to when a chat changes anything else.
+        let pet = json!({"enabled": false, "kind": "puffin", "position": {"x": 40, "y": 60}});
+        assert_eq!(
+            to_store("desktopPet", Some(&pet), &json!({"enabled": true})),
+            json!({"enabled": true, "kind": "puffin", "position": {"x": 40, "y": 60}})
+        );
         assert_eq!(describe("sounds").unwrap()["merge"], true);
         assert!(describe("taskTriage").unwrap().get("merge").is_none());
     }
@@ -942,6 +961,7 @@ mod tests {
             "dopamine",
             "pauseAnimationsOnScroll",
             "customColours",
+            "desktopPet",
         ] {
             assert!(describe(k).unwrap().get("hasEffect").is_none(), "{k}");
             assert!(!is_not_read(k));

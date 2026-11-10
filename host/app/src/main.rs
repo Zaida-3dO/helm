@@ -7,6 +7,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod pet;
 mod registrations;
 mod shell;
 mod system;
@@ -258,7 +259,8 @@ fn run_app(
             let tapped = Arc::new(tray::TappedEvents::new(Arc::new(shell::TauriEvents::new(
                 handle.clone(),
             ))));
-            let events: Arc<dyn helm_ipc::EventSink> = tapped.clone();
+            // The desktop pet's window hears the few events its page draws from.
+            let events = pet::PetEvents::wrap(tapped.clone(), handle.clone());
             let worker_source = helm_workers::stage::default_source(
                 debug,
                 app.path().resource_dir().ok().as_deref(),
@@ -333,9 +335,12 @@ fn run_app(
                 services: Arc::new(services),
                 events,
             };
-            let dispatcher = Arc::new(Dispatcher::new(ops.clone(), ctx, debug));
+            let mut dispatcher = Dispatcher::new(ops.clone(), ctx, debug);
+            pet::allow_ops(&mut dispatcher);
+            let dispatcher = Arc::new(dispatcher);
             registrations::attach_host_tools(&runtime, &dispatcher);
             app.manage(dispatcher);
+            pet::start(&handle, &db, profile.path("webview"), debug);
 
             shell::build_main_window(&*app, &crashes)?;
             // If the UI never reports its first frame (a broken bundle), show the window anyway.

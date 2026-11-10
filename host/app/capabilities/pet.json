@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pet",
+  "description": "The desktop pet's window: the api command (the dispatcher lets it call six ops only), host events, and dragging itself.",
+  "windows": ["pet"],
+  "permissions": [
+    "allow-api",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging"
+  ]
+}

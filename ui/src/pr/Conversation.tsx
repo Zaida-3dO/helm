@@ -1,7 +1,8 @@
 // Conversation: the description, the read-only sidebar, the status card with the merge box, and the
 // timeline (comments, reviews with their threads, commits and one-line events).
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { celebrate } from '../delight/celebrate.ts';
 import { Button } from '../ui/index.ts';
 import { attempt, clickFrom } from './client.ts';
 import { METHOD_LABEL } from './client.ts';
@@ -337,6 +338,7 @@ function MergeBox({ entry, pr }: { entry: PrEntry; pr: PrSummary }) {
   const [anyway, setAnyway] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; kind: 'ok' | 'bad' | 'warn'; refresh?: boolean } | null>(null);
+  const box = useRef<HTMLDivElement>(null);
   const land = entry.land;
 
   if (pr.state === 'MERGED') {
@@ -373,6 +375,7 @@ function MergeBox({ entry, pr }: { entry: PrEntry; pr: PrSummary }) {
           setConfirm(false);
           setAnyway(null);
           setMsg(mergeText(r.value));
+          if (r.value.outcome === 'merged') celebrate.merged(box.current);
           void entry.afterPublish();
         } else if (r.cls === 'Tracked') {
           setConfirm(false);
@@ -389,7 +392,7 @@ function MergeBox({ entry, pr }: { entry: PrEntry; pr: PrSummary }) {
   };
 
   return (
-    <div className="pr-merge" data-testid="pr-merge">
+    <div className="pr-merge" data-testid="pr-merge" ref={box}>
       {reason && !disabled && <div className="pr-fine pr-warn">{reason}</div>}
       {disabled && <div className="pr-fine">{disabled}</div>}
       {!confirm && !anyway && (

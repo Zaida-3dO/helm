@@ -53,6 +53,7 @@ import './hosttools/index.ts'; // the Allow cards
 import { NewChatHost } from './newchat/index.ts';
 import { FrameStats } from './perf/index.ts'; // the frame-stats overlay (Mod+Shift+P)
 import { ErrorBoundary } from './safety/ErrorBoundary.tsx';
+import { Delight } from './delight/index.tsx'; // celebrations, the first-run intro, the pet's settings
 
 export function App({ api, bus, flushers }: { api: Api; bus: EventBus; flushers: Flushers }) {
   const ops = useMemo(() => chatOps(api), [api]);
@@ -202,6 +203,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
       <CheckpointSlot /> {/* go back to before a message */}
       <AfkPresence /> {/* AFK presence */}
       <FrameStats /> {/* frame-stats overlay */}
+      <Delight /> {/* celebrations and the first-run intro */}
       {null /* the saved-items dialog mounts here */}
     </div>
   );

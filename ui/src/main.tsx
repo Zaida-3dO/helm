@@ -26,7 +26,14 @@ async function boot(): Promise<{ api: Api; bus: EventBus }> {
   return { api: tauri.api, bus: tauri.bus };
 }
 
-void boot().then(({ api, bus }) => {
+void boot().then(async ({ api, bus }) => {
+  // The desktop pet's window shows its own small page instead of the app.
+  if (new URLSearchParams(location.search).get('window') === 'pet') {
+    const { PetApp } = await import('./pet/PetApp.tsx');
+    const petRoot = document.getElementById('root');
+    if (petRoot) createRoot(petRoot).render(<PetApp api={api} bus={bus} />);
+    return;
+  }
   const flushers = new Flushers();
   installErrorReporting(api);
   installContextMenuPolicy(document, import.meta.env.DEV);

@@ -981,6 +981,25 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     chat_compact: () => null,
     chat_warm: () => null,
     chat_roll_over: () => ({ started: true }),
+    // The desktop pet's page (open the dev server with ?window=pet) and the first-run intro.
+    pet_ready: () => null,
+    pet_moved: (a) => {
+      prefs.set('desktopPet', { ...(prefs.get('desktopPet') as object | undefined), position: { x: a.x, y: a.y } });
+      return null;
+    },
+    pet_open: (a) => {
+      if (typeof a.chatId === 'string') emit({ kind: 'shell_open_chat', chatId: a.chatId });
+      else if (a.chatId === null) emit({ kind: 'shell_open_attention' });
+      else if (a.settings === true) emit({ kind: 'shell_open_settings', pane: 'appearance' });
+      return null;
+    },
+    pet_hide: () => {
+      const next = { ...(prefs.get('desktopPet') as object | undefined), enabled: false };
+      prefs.set('desktopPet', next);
+      emit({ kind: 'preferences', changed: { desktopPet: next } });
+      return null;
+    },
+    intro_allowed: () => ({ allowed: true }),
     preference_get: (a) => (a.key === 'sendBehavior' ? sendBehavior : (prefs.get(String(a.key)) ?? null)),
     preference: (a) => {
       if (a.key === 'sendBehavior') sendBehavior = { ...HOME_SEND_BEHAVIOR, ...(a.value as object) };

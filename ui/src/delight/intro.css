@@ -1,0 +1,158 @@
+/* The first-run intro. The moving version is one 2.8 s timeline (the delays below are from its start):
+   scrim in 0 to 200 ms, the wheel drawn 200 to 1100, a quarter turn as the full-colour wheel fades
+   in 1100 to 1600, "Helm" 1300 to 1700, the line under it 1700 to 2000, held, then everything fades
+   out 2500 to 2800. The still version (motion off) is one card fading in and out over 1.2 s. */
+
+.delight-intro {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  backdrop-filter: blur(6px);
+}
+.intro-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.intro-wheel {
+  position: relative;
+  width: 160px;
+  height: 160px;
+}
+.intro-wheel > * {
+  position: absolute;
+  inset: 0;
+}
+.intro-title {
+  font-size: 44px;
+  opacity: 0;
+}
+.intro-tag {
+  font-size: 15px;
+  color: var(--secondary);
+  opacity: 0;
+}
+.intro-mark {
+  opacity: 0;
+}
+
+.delight-intro[data-phase='still'] {
+  animation: intro-still 1200ms ease-in-out both;
+}
+.delight-intro[data-phase='still'] .intro-mark,
+.delight-intro[data-phase='still'] .intro-title,
+.delight-intro[data-phase='still'] .intro-tag {
+  opacity: 1;
+}
+
+.delight-intro[data-phase='motion'] {
+  animation:
+    intro-in 200ms ease-out both,
+    intro-out 300ms ease-in 2500ms forwards;
+}
+.delight-intro[data-phase='motion'] .intro-wheel {
+  animation: intro-turn 500ms cubic-bezier(0.2, 0.9, 0.3, 1.15) 1100ms both;
+}
+.delight-intro[data-phase='motion'] .intro-mark {
+  animation: intro-show 400ms ease-out 1100ms forwards;
+}
+.delight-intro[data-phase='motion'] .ui-wheel-outline {
+  animation: intro-hide 400ms ease-in 1200ms forwards;
+}
+.delight-intro[data-phase='motion'] .intro-title {
+  animation: intro-rise 400ms ease-out 1300ms forwards;
+}
+.delight-intro[data-phase='motion'] .intro-tag {
+  animation: intro-rise 300ms ease-out 1700ms forwards;
+}
+
+/* The wheel drawn on, stroke by stroke (WheelOutline's classes). */
+.delight-intro[data-phase='motion'] .wo-rim,
+.delight-intro[data-phase='motion'] .wo-spoke,
+.delight-intro[data-phase='motion'] .wo-knob,
+.delight-intro[data-phase='motion'] .wo-hub,
+.delight-intro[data-phase='motion'] .wo-dome {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: intro-draw 400ms ease-out both;
+}
+.delight-intro[data-phase='motion'] .wo-rim {
+  animation-delay: 200ms;
+  animation-duration: 450ms;
+}
+.delight-intro[data-phase='motion'] .wo-spoke {
+  animation-delay: calc(450ms + var(--i, 0) * 40ms);
+  animation-duration: 420ms;
+}
+.delight-intro[data-phase='motion'] .wo-knob {
+  animation-delay: calc(700ms + var(--i, 0) * 30ms);
+  animation-duration: 300ms;
+}
+.delight-intro[data-phase='motion'] .wo-hub {
+  animation-delay: 850ms;
+  animation-duration: 250ms;
+}
+.delight-intro[data-phase='motion'] .wo-dome {
+  animation-delay: 950ms;
+  animation-duration: 200ms;
+}
+
+@keyframes intro-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes intro-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes intro-still {
+  0% {
+    opacity: 0;
+  }
+  25%,
+  75% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes intro-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes intro-turn {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(90deg);
+  }
+}
+@keyframes intro-show {
+  to {
+    opacity: 1;
+  }
+}
+@keyframes intro-hide {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes intro-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
