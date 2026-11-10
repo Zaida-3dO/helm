@@ -1,0 +1,175 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>hostile</title>
+<!-- A page that tries everything a sealed page must not manage. The side panel check fills in the
+     two loopback ports it listens on (@TCP@ and @UDP@): any connection or packet that arrives there
+     is a leak. The page writes what it saw into #out and marks it done. -->
+<pre id="out">running</pre>
+<script>
+(async () => {
+  const TCP = '@TCP@';
+  const UDP = '@UDP@';
+  const base = 'http://127.0.0.1:' + TCP;
+  const violations = [];
+  document.addEventListener('securitypolicyviolation', (e) => {
+    violations.push(e.effectiveDirective + ' ' + String(e.blockedURI).slice(0, 80));
+  });
+
+  const probes = {};
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  const attempt = async (name, fn) => {
+    try {
+      const v = await Promise.race([fn(), pause(4000).then(() => { throw new Error('timeout'); })]);
+      probes[name] = { ok: true, value: String(v).slice(0, 120) };
+    } catch (e) {
+      probes[name] = { ok: false, error: (e && e.name) + ': ' + String((e && e.message) || e).slice(0, 120) };
+    }
+  };
+  // An element that loads something: what it says when the load is refused.
+  const element = (tag, set) =>
+    new Promise((resolve) => {
+      const el = document.createElement(tag);
+      el.onload = () => resolve('load');
+      el.onerror = () => resolve('error');
+      set(el);
+      document.body.appendChild(el);
+      setTimeout(() => resolve('silent'), 1500);
+    });
+
+  // Resolves only when the element really loaded; a refused load rejects, so `ok` always means
+  // "the page got through".
+  const loads = async (tag, set) => {
+    const r = await element(tag, set);
+    if (r === 'load') return r;
+    throw new Error('refused: ' + r);
+  };
+  // Things with no reliable event: the loopback listener is what tells whether they got out.
+  const notes = {};
+  const note = async (name, fn) => {
+    try {
+      notes[name] = String(await Promise.race([fn(), pause(4000).then(() => 'timeout')])).slice(0, 120);
+    } catch (e) {
+      notes[name] = 'threw ' + ((e && e.name) || e);
+    }
+  };
+
+  const globals = {
+    tauri: typeof window.__TAURI__,
+    internals: typeof window.__TAURI_INTERNALS__,
+    ipc: typeof window.ipc,
+    webview: typeof (window.chrome && window.chrome.webview),
+  };
+
+  // 1. The app's IPC.
+  await attempt('ipcInvoke', async () => {
+    const t = window.__TAURI_INTERNALS__;
+    if (!t || typeof t.invoke !== 'function') throw new Error('no IPC object here');
+    return JSON.stringify(await t.invoke('api', { op: 'project_list', args: {} }));
+  });
+  await attempt('ipcFetch', () => fetch('http://ipc.localhost/api', { method: 'POST', body: '{}' }));
+  await attempt('ipcImage', () => loads('img', (el) => { el.src = 'http://ipc.localhost/x.png'; }));
+
+  // 2. The app's page.
+  await attempt('parentDocument', () => parent.document.title);
+  await attempt('topDocument', () => top.document.title);
+  await attempt('parentIpc', () => typeof parent.__TAURI_INTERNALS__);
+  await attempt('parentStorage', () => parent.localStorage.length);
+  let frames = -1;
+  try { frames = parent.frames.length; } catch (e) { /* hidden */ }
+  let framesReached = 0;
+  for (let i = 0; i < Math.max(frames, 0); i++) {
+    try {
+      const w = parent.frames[i];
+      if (w !== window && typeof w.document === 'object') framesReached++;
+    } catch (e) { /* cross-origin: expected */ }
+  }
+
+  // 3. Storage.
+  await attempt('localStorage', () => localStorage.length);
+  await attempt('sessionStorage', () => sessionStorage.length);
+  await attempt('cookieRead', () => document.cookie);
+  await attempt('cookieWrite', () => { document.cookie = 'probe=1'; return 'written'; });
+  await attempt('indexedDB', () => indexedDB.open('probe'));
+  await attempt('caches', () => caches.open('probe'));
+
+  // 4. The network, offline: fetch, XHR, sockets, beacons, elements, frames, workers, forms.
+  await attempt('fetchOutside', () => fetch('https://example.com/'));
+  await attempt('fetchLoopback', () => fetch(base + '/fetch'));
+  await attempt('xhrLoopback', () => new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('GET', base + '/xhr');
+    x.onload = () => resolve('load');
+    x.onerror = () => reject(new Error('xhr refused'));
+    x.send();
+  }));
+  await attempt('webSocket', () => new Promise((resolve, reject) => {
+    const s = new WebSocket('ws://127.0.0.1:' + TCP + '/ws');
+    s.onopen = () => resolve('open');
+    s.onerror = () => reject(new Error('socket refused'));
+  }));
+  await attempt('eventSource', () => new Promise((resolve, reject) => {
+    const s = new EventSource(base + '/es');
+    s.onopen = () => resolve('open');
+    s.onerror = () => reject(new Error('stream refused'));
+  }));
+  await note('beacon', () => navigator.sendBeacon(base + '/beacon', 'x'));
+  await attempt('imageLoopback', () => loads('img', (el) => { el.src = base + '/img.png'; }));
+  await attempt('scriptLoopback', () => loads('script', (el) => { el.src = base + '/s.js'; }));
+  await attempt('styleLoopback', () => loads('link', (el) => { el.rel = 'stylesheet'; el.href = base + '/s.css'; }));
+  await note('prefetch', () => element('link', (el) => { el.rel = 'prefetch'; el.href = base + '/prefetch'; }));
+  await note('frameLoopback', () => element('iframe', (el) => { el.src = base + '/frame'; }));
+  await note('frameData', () => element('iframe', (el) => {
+    el.src = 'data:text/html,' + encodeURIComponent(
+      '<script>fetch("' + base + '/nested").catch(function(){});' +
+      'new Image().src="' + base + '/nestedimg";<\/script>');
+  }));
+  await note('frameSrcdoc', () => element('iframe', (el) => {
+    el.srcdoc = '<script>fetch("' + base + '/srcdoc").catch(function(){});<\/script>';
+  }));
+  await note('worker', () => new Promise((resolve) => {
+    const url = URL.createObjectURL(new Blob(
+      ['fetch("' + base + '/worker").catch(function(){});new WebSocket("ws://127.0.0.1:' + TCP + '/wws");postMessage(1)'],
+      { type: 'text/javascript' }));
+    const w = new Worker(url);
+    w.onmessage = () => resolve('ran');
+    w.onerror = () => resolve('error');
+    setTimeout(() => resolve('silent'), 1500);
+  }));
+  await note('form', () => {
+    const f = document.createElement('form');
+    f.action = base + '/form';
+    f.method = 'post';
+    document.body.appendChild(f);
+    f.submit();
+    return 'submitted';
+  });
+  await note('popup', () => String(window.open(base + '/popup')));
+  await note('rtc', async () => {
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:127.0.0.1:' + UDP }] });
+    pc.createDataChannel('probe');
+    await pc.setLocalDescription(await pc.createOffer());
+    await pause(2500);
+    pc.close();
+    return 'offered';
+  });
+
+  // 5. What the page is allowed: its own saved state, and nothing of another page's.
+  await helm.ready;
+  const before = helm.state;
+  let saved = null;
+  let saveError = null;
+  try {
+    saved = await helm.setState({ probe: 'ok', n: 1 });
+  } catch (e) {
+    saveError = String((e && e.message) || e);
+  }
+  const state = { before, saved, saveError, after: helm.state, frozen: Object.isFrozen(helm) };
+
+  const out = document.getElementById('out');
+  out.textContent = JSON.stringify({ globals, probes, notes, violations, frames, framesReached, state });
+  out.setAttribute('data-done', '1');
+
+  // Last, after the result is read: leaving through a link. It must go nowhere.
+  setTimeout(() => { location.href = base + '/nav'; }, 1500);
+})();
+</script>

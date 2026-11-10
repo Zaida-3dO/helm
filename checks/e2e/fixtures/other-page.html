@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>other</title>
+<!-- A well-behaved page with something worth stealing: it saves a secret in its own state. -->
+<pre id="out">other</pre>
+<script>
+(async () => {
+  await helm.ready;
+  if (helm.state === null) await helm.setState({ secret: 'OTHER-SECRET' });
+  const out = document.getElementById('out');
+  out.textContent = JSON.stringify(helm.state);
+  out.setAttribute('data-done', '1');
+})();
+</script>
