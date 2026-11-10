@@ -5,7 +5,7 @@
 //! chat, so the card outlives the files. The answer is `{galleryId, count}`; the transcript's
 //! gallery card reads the rest from the op `shown_gallery_get`.
 
-use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
+use crate::registry::{screen_label, HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::spec::ToolSpec;
 use serde_json::{json, Map, Value};
 
@@ -76,12 +76,14 @@ fn op_args(chat_id: &str, a: &Value) -> Result<Value, ToolError> {
         let mut o = Map::new();
         o.insert("path".into(), json!(path));
         if let Some(c) = text(img, "caption", &which)? {
+            screen_label(&format!("{which}: caption"), &c)?;
             o.insert("caption".into(), json!(c));
         }
         out.push(Value::Object(o));
     }
     let mut args = json!({"chatId": chat_id, "images": out});
     if let Some(t) = text(a, "title", "app_show_images")? {
+        screen_label("The title", &t)?;
         args["title"] = json!(t);
     }
     Ok(args)
@@ -139,6 +141,14 @@ mod tests {
             (
                 json!({"title": 5, "images": [{"path": "C:/a.png"}]}),
                 "title must be text",
+            ),
+            (
+                json!({"title": "T\u{202e}", "images": [{"path": "C:/a.png"}]}),
+                "title cannot hold invisible",
+            ),
+            (
+                json!({"images": [{"path": "C:/a.png", "caption": "c\u{200f}"}]}),
+                "Picture 1: caption cannot hold invisible",
             ),
         ];
         for (a, says) in bad {

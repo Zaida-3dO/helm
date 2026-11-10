@@ -110,6 +110,8 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     // The Telegram new-chat defaults: chats read the whole policy, change only model and effort.
     if let Some(profile) = services.get::<helm_core::profile::Profile>() {
         extensions.push(helm_relay::settings_extension(&profile.dir));
+        // A chat's edits to the repository list, which Undo puts back.
+        extensions.push(helm_projects::repo_undo::settings_extension(&profile.dir));
     }
     services.insert(Arc::new(helm_hosttools::SettingsExtensions(extensions)));
     services.insert(Arc::new(worker_lines()));

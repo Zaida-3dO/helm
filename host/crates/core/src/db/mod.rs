@@ -5,8 +5,10 @@
 //! 3 s busy timeout on the writer and 100 ms on snapshot readers: a reader
 //! still locked out after that falls back to reading on the writer, which waits its 3 s and then
 //! fails with an error. Nothing retries in a loop. Opening runs the core migrations, refuses a newer schema, then runs every
-//! registered feature initializer and pending one-time migration.
+//! registered feature initializer and pending one-time migration, then trims the growing tables
+//! listed in [`caps`]. Deleted content is overwritten (`secure_delete`), not left in free pages.
 
+pub mod caps;
 pub mod registry;
 pub mod schema;
 pub mod tables;
@@ -58,6 +60,9 @@ impl Database {
         configure_writer(&conn)?;
         migrate(&mut conn)?;
         run_feature_steps(&mut conn, registry)?;
+        if let Err(e) = caps::trim(&conn) {
+            log::warn!("trimming the capped tables failed: {e}");
+        }
         for suffix in ["-wal", "-shm"] {
             let side = PathBuf::from(format!("{}{suffix}", path.display()));
             if side.exists() {
@@ -189,6 +194,9 @@ fn configure_writer(conn: &Connection) -> Result<(), DbError> {
     }
     conn.pragma_update(None, "synchronous", "FULL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
+    // Deleted content is overwritten, not left in free pages and the write-ahead log: a deleted
+    // chat or message does not stay readable in the file.
+    conn.pragma_update(None, "secure_delete", true)?;
     Ok(())
 }
 
@@ -278,6 +286,10 @@ pub(crate) mod tests {
         assert_eq!(sync, 2, "FULL");
         assert_eq!(fks, 1);
         assert_eq!(busy, 3000);
+        let secure: i64 = conn
+            .pragma_query_value(None, "secure_delete", |r| r.get(0))
+            .unwrap();
+        assert_eq!(secure, 1, "deleted content is overwritten");
     }
 
     #[test]

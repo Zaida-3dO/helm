@@ -139,6 +139,10 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
             if serde_json::to_vec(v).map(|b| b.len()).unwrap_or(usize::MAX) > MAX_VALUE_BYTES {
                 return Ok(Err(format!("The value for {k} is too large.")));
             }
+            // A label or shortcut that hides characters can read as something it is not.
+            if let Some(at) = helm_core::hidden::find_hidden(v) {
+                return Ok(Err(hidden_refusal(k, &at)));
+            }
             let (before, after) = if let Some(x) = ext.owner(k) {
                 if x.needs_all_settings(k) && !all_settings(tx) {
                     return Ok(Err(needs_all_refusal(k)));
@@ -229,6 +233,16 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
         out["error"] = json!(e);
     }
     Ok(out)
+}
+
+//// Why a value is refused for holding an invisible or direction-changing character.
+fn hidden_refusal(key: &str, at: &str) -> String {
+    let place = match at {
+        "" => String::new(),
+        a if a.starts_with('[') => format!(" (at {key}{a})"),
+        a => format!(" (at {key}.{a})"),
+    };
+    format!("{key} cannot hold invisible or direction-changing characters{place}.")
 }
 
 /// Write one change into the ring and trim it; answers the change id.
@@ -896,6 +910,52 @@ mod tests {
         ];
         let err = undo(&op(&e), json!({"changeIds": ids})).unwrap_err();
         assert!(err.message.contains("one at a time"), "{}", err.message);
+    }
+
+    #[test]
+    fn labels_and_shortcuts_with_hidden_characters_or_bad_chords_are_refused() {
+        let e = env();
+        // Anywhere in a value, nested or not, and in an object key.
+        for (key, value, at) in [
+            (
+                "hiddenSkills",
+                json!(["review", "re\u{202e}view"]),
+                "hiddenSkills[1]",
+            ),
+            (
+                "fontSizes",
+                json!({"interface\u{200b}": 15}),
+                "fontSizes.interface",
+            ),
+        ] {
+            let why = update_settings(&ctx(&e), json!({"changes": {key: value}}))
+                .unwrap_err()
+                .public;
+            assert!(why.contains("invisible or direction-changing"), "{why}");
+            assert!(why.contains(at), "{why}");
+        }
+        let stored =
+            e.db.snapshot(|tx| Ok::<_, rusqlite::Error>(prefs::read(tx, "hiddenSkills")))
+                .unwrap();
+        assert_eq!(stored, None);
+        // Shortcuts need the all-settings switch; with it on they get the chord checks too.
+        all_settings_set(&op(&e), json!({"enabled": true})).unwrap();
+        for (bad, says) in [
+            (json!({"a": "Ctrl+\u{200b}K"}), "invisible"),
+            (json!({"a\u{2066}": "Ctrl+K"}), "invisible"),
+            (json!({"a": "Alt+F4"}), "belongs to Windows"),
+            (json!({"a": "Ctrl+K", "b": "mod+k"}), "given to both"),
+        ] {
+            let why = update_settings(&ctx(&e), json!({"changes": {"keybindings": bad}}))
+                .unwrap_err()
+                .public;
+            assert!(why.contains(says), "{bad}: {why}");
+        }
+        let ok = update_settings(
+            &ctx(&e),
+            json!({"changes": {"keybindings": {"a": "Ctrl+K", "b": null}}}),
+        );
+        assert!(ok.is_ok());
     }
 
     #[test]

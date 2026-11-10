@@ -11,6 +11,7 @@ import type { Json } from "../protocol/types.ts";
 import { DEFAULT_TIMEOUT_MS, NOTHING_CHANGED, type CallResult, type RequestChannel } from "./channel.ts";
 import { capToolResult, type OutputCap } from "./cap.ts";
 import { COMPAT_ALWAYS, COMPAT_WITH_MCP } from "./names.ts";
+import { MAX_TOOL_NAME_BYTES } from "../mcp/naming.ts";
 
 export const SERVER_NAME = "helm";
 /** The CLI's name for a tool on this server. */
@@ -185,6 +186,8 @@ export class HostToolServer {
 
   /** Route one tool call. */
   async call(name: string, args: Json, caller: CallerInfo, signal?: AbortSignal): Promise<CallResult> {
+    // One length cap on a tool name wherever it enters, and a long name is never echoed back.
+    if (Buffer.byteLength(name, "utf8") > MAX_TOOL_NAME_BYTES) return refuse(`A tool name is at most ${MAX_TOOL_NAME_BYTES} bytes.`);
     if (name === LIST_TOOLS.name) {
       if (caller.child) return refuse(`${name} is only available to the parent chat.`);
       return { ok: true, result: this.search(args) };
@@ -195,6 +198,7 @@ export class HostToolServer {
     }
     if (name === MCP_CALL.name) {
       const target = String(args.name ?? "");
+      if (Buffer.byteLength(target, "utf8") > MAX_TOOL_NAME_BYTES) return refuse(`A tool name is at most ${MAX_TOOL_NAME_BYTES} bytes.`);
       const inner = (args.arguments ?? {}) as Json;
       if (target === MCP_CALL.name || target === LIST_TOOLS.name || target === MCP_TOOLS.name) {
         return refuse(`${target} cannot be called through app_mcp_call.`);

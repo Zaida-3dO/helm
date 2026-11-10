@@ -6,7 +6,7 @@
 //! so the agent ends its turn. The card's tap sends that message and records the choice (ops
 //! `option_board_answer` and `option_board_state`).
 
-use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
+use crate::registry::{screen_label, HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::spec::ToolSpec;
 use serde_json::{json, Map, Value};
 
@@ -78,6 +78,7 @@ fn op_args(chat_id: &str, a: &Value) -> Result<Value, ToolError> {
     let question = text(a, "question", "app_offer_options")?
         .filter(|q| !q.trim().is_empty())
         .ok_or_else(|| ToolError::refused("question is required."))?;
+    screen_label("The question", &question)?;
     let options = a
         .get("options")
         .and_then(Value::as_array)
@@ -89,10 +90,12 @@ fn op_args(chat_id: &str, a: &Value) -> Result<Value, ToolError> {
         let label = text(opt, "label", &which)?
             .filter(|l| !l.trim().is_empty())
             .ok_or_else(|| ToolError::refused(format!("{which}: label is required.")))?;
+        screen_label(&format!("{which}: label"), &label)?;
         let mut o = Map::new();
         o.insert("label".into(), json!(label));
         for key in ["detail", "image"] {
             if let Some(v) = text(opt, key, &which)?.filter(|v| !v.trim().is_empty()) {
+                screen_label(&format!("{which}: {key}"), &v)?;
                 o.insert(key.into(), json!(v));
             }
         }
@@ -157,6 +160,18 @@ mod tests {
             (
                 json!({"question": "Q", "options": opts(2), "multiSelect": "yes"}),
                 "multiSelect must be true or false",
+            ),
+            (
+                json!({"question": "Q\u{202e}", "options": opts(2)}),
+                "question cannot hold invisible",
+            ),
+            (
+                json!({"question": "Q", "options": [{"label": "A"}, {"label": "B\u{200b}"}]}),
+                "Option 2: label cannot hold invisible",
+            ),
+            (
+                json!({"question": "Q", "options": [{"label": "A", "detail": "d\u{2066}"}, {"label": "B"}]}),
+                "Option 1: detail cannot hold invisible",
             ),
         ];
         for (a, says) in bad {

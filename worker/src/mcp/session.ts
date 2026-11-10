@@ -2,6 +2,7 @@
 // and tools/call, with per-request timeouts. Server-to-client requests other than ping are
 // answered "method not found": Helm offers no sampling, roots or elicitation.
 
+import { toolNameOk } from "./naming.ts";
 import { McpError, type Json, type McpLimits, type McpTool } from "./types.ts";
 
 export const PROTOCOL_VERSION = "2025-06-18";
@@ -175,7 +176,7 @@ export class McpSession {
       const tools = Array.isArray(r?.tools) ? (r.tools as Json[]) : [];
       for (const t of tools) {
         if (out.length >= this.limits.maxListed) return out;
-        if (typeof t?.name !== "string" || t.name === "") continue;
+        if (!toolNameOk(t?.name)) continue;
         const schema = t.inputSchema as Json | undefined;
         if (!schema || typeof schema !== "object" || Array.isArray(schema) || schema.type !== "object") continue;
         out.push({

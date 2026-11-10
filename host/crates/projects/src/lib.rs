@@ -16,6 +16,7 @@
 //! | [`boards`] | boards as where chats are shown: the default board, folders filled in on sync, the one-time move of chats onto boards, new board projects |
 //! | [`tasks`] | the Tasks view's read-only board reads (`board_read`, `board_cancel`) |
 //! | [`repos`], [`repo_ops`], [`guard`] | the repository list, its ops and worktree status, and the git stand-in launch contributor |
+//! | [`repo_undo`] | the picture of the repository list a chat's edit is filed with, and Undo for it |
 //! | [`bindings`] | `ui/src/api/generated/projects/` |
 
 pub mod bindings;
@@ -25,6 +26,7 @@ pub mod guard;
 pub mod note;
 pub mod ops;
 pub mod repo_ops;
+pub mod repo_undo;
 pub mod repos;
 pub mod schema;
 pub mod store;

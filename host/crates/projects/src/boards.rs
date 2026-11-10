@@ -1306,6 +1306,9 @@ pub fn record_new_board(
 async fn board_project_create(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: BoardProjectCreateArgs = parse_args(args)?;
     let (title, description, folder) = check_new(&a)?;
+    if let Some(f) = &folder {
+        crate::ops::refuse_inside_profile(&ctx, f)?;
+    }
     let db = ctx.services.need::<Database>()?;
     let creds = ctx_credentials(&ctx)?;
     let (url, token) = match test_override() {

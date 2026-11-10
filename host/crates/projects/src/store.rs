@@ -49,8 +49,8 @@ fn bad(msg: &str) -> Refusal {
 
 // ---- names ----------------------------------------------------------------------------------
 
-/// The trimmed name, or why it is refused: 1–120 bytes, not `.`/`..`, no control characters and
-/// none of `/ \:`.
+/// The trimmed name, or why it is refused: 1–120 bytes, not `.`/`..`, no control, invisible or
+/// direction-changing characters, and none of `/ \:`.
 pub fn validate_name(raw: &str) -> Res<String> {
     let name = raw.trim();
     if name.is_empty() {
@@ -62,12 +62,11 @@ pub fn validate_name(raw: &str) -> Res<String> {
     if name == "." || name == ".." {
         return Err(bad("A project cannot be named . or .."));
     }
-    if name
-        .chars()
-        .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
-    {
+    if name.chars().any(|c| {
+        c.is_control() || helm_core::hidden::is_hidden_char(c) || matches!(c, '/' | '\\' | ':')
+    }) {
         return Err(bad(
-            "A project name cannot contain / \\ : or control characters.",
+            "A project name cannot contain / \\ : or control, invisible or direction-changing characters.",
         ));
     }
     Ok(name.to_owned())

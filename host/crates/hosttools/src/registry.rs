@@ -86,6 +86,17 @@ pub struct ToolError {
     pub changed: Changed,
 }
 
+//// Refuse a label an agent supplies (a title, caption, option label...) that holds an invisible or
+/// direction-changing character, since it could read as something it is not.
+pub(crate) fn screen_label(what: &str, s: &str) -> Result<(), ToolError> {
+    if s.chars().any(helm_core::hidden::is_hidden_char) {
+        return Err(ToolError::refused(format!(
+            "{what} cannot hold invisible or direction-changing characters."
+        )));
+    }
+    Ok(())
+}
+
 /// Longest error text returned to the agent.
 pub const MAX_ERROR_BYTES: usize = 2_000;
 

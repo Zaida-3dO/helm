@@ -7,6 +7,7 @@
 //! | [`db`] | WAL, single writer, snapshot readers, migrations |
 //! | [`revisions`] | CAS and keyed revisions |
 //! | [`drafts`] | `draft_revision` compare-and-set |
+//! | [`hidden`] | invisible and direction-changing characters, screened out of labels and shortcuts |
 //! | [`prefs`] | the preference registry and its classes |
 //! | [`credentials`] | AES-256-GCM envelopes; key in Credential Manager |
 //! | [`recovery`] | startup recovery of interrupted work |
@@ -23,6 +24,7 @@ pub mod privfs;
 pub mod profile;
 pub mod recovery;
 pub mod revisions;
+pub mod hidden;
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {

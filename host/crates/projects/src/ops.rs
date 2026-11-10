@@ -19,7 +19,9 @@ use crate::store::{self, Refusal};
 use crate::types::*;
 use helm_chats::clock::Clock;
 use helm_core::db::Database;
+use helm_core::profile::Profile;
 use helm_ipc::{ApiError, AppEvent, OpClass, OpCtx, OpRegistry};
+use helm_platform::private::PrivateRoots;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
@@ -86,6 +88,26 @@ pub(crate) fn emit_sidebar(ctx: &OpCtx, ids: &[String]) {
     }
 }
 
+/// Refuse a folder that is Helm's own data folder (the profile, and the default one) or inside it:
+/// a project there would let a chat read and write the app's database, sessions and backups.
+/// Checked by path and by file identity, so another spelling of the folder does not get past.
+pub(crate) fn refuse_inside_profile(ctx: &OpCtx, folder: &str) -> Result<(), ApiError> {
+    let mut roots = Vec::new();
+    if let Some(p) = ctx.services.get::<Profile>() {
+        roots.push(p.dir.clone());
+    }
+    if let Ok(d) = helm_core::profile::default_profile_dir() {
+        roots.push(d);
+    }
+    if PrivateRoots::new(&roots).contains(Path::new(folder.trim())) {
+        return Err(ApiError::new(
+            "refused",
+            "Helm's own data folder cannot be used as a project folder.",
+        ));
+    }
+    Ok(())
+}
+
 fn project_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ProjectListArgs = parse_args(args)?;
     let db = ctx.services.need::<Database>()?;
@@ -101,6 +123,9 @@ fn project_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 
 fn project_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ProjectCreateArgs = parse_args(args)?;
+    if let Some(path) = a.path.as_deref().filter(|p| !p.trim().is_empty()) {
+        refuse_inside_profile(ctx, path)?;
+    }
     let db = ctx.services.need::<Database>()?;
     let node = db.write(|tx| {
         let id = store::create_project(tx, &a, helm_core::now_ms())?;
@@ -112,6 +137,9 @@ fn project_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 
 fn project_update(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ProjectUpdateArgs = parse_args(args)?;
+    if let Some(Some(path)) = &a.path {
+        refuse_inside_profile(ctx, path)?;
+    }
     let db = ctx.services.need::<Database>()?;
     let (before, node, rehomed) = db.write(|tx| {
         let old = store::get_project(tx, &a.project_id)?;
@@ -272,6 +300,7 @@ fn project_create_folder(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             dir
         }
     };
+    refuse_inside_profile(ctx, &parent.to_string_lossy())?;
     let node = create_folder_project(&db, &a.name, &parent, helm_core::now_ms())?;
     emit_project(ctx, &node);
     to_value(&node)
@@ -458,5 +487,57 @@ mod newchat_tests {
         let e = project_create_folder(&ctx, serde_json::json!({"name": "x", "where": "y"}))
             .unwrap_err();
         assert_eq!(e.code, "bad_args");
+    }
+
+    #[test]
+    fn helms_own_data_folder_is_refused_wherever_a_folder_is_set() {
+        use serde_json::json;
+        let (_d, db) = temp_db();
+        let base = tempfile::tempdir().unwrap();
+        let profile = Profile::open(&base.path().join("Helm")).unwrap();
+        let root = profile.dir.clone();
+        let inner = root.join("sessions");
+        std::fs::create_dir_all(&inner).unwrap();
+        let outside = base.path().join("work");
+        std::fs::create_dir_all(&outside).unwrap();
+        let mut services = Services::new();
+        services.insert(Arc::new(db));
+        services.insert(Arc::new(profile));
+        let ctx = OpCtx {
+            services: Arc::new(services),
+            events: Arc::new(RecordingSink::default()),
+        };
+        let made = project_create(
+            &ctx,
+            json!({"name": "Work", "path": outside.to_string_lossy()}),
+        )
+        .unwrap();
+        for folder in [&root, &inner] {
+            let p = folder.to_string_lossy().into_owned();
+            let errors = [
+                project_create(&ctx, json!({"name": "P", "path": p})),
+                project_update(
+                    &ctx,
+                    json!({"projectId": made["id"], "revision": made["revision"], "path": p}),
+                ),
+                project_create_folder(&ctx, json!({"name": "P", "parent": p})),
+                crate::repo_ops::repo_update(
+                    &ctx,
+                    json!({"repoId": "r", "expectedRevision": 0, "addLocations": [{"path": p}]}),
+                ),
+            ];
+            for e in errors {
+                let e = e.unwrap_err();
+                assert_eq!(e.code, "refused", "{p}: {}", e.message);
+                assert!(e.message.contains("own data folder"), "{}", e.message);
+            }
+        }
+        // A folder beside it is fine, and nothing was made in the profile.
+        let other = project_create(
+            &ctx,
+            json!({"name": "Other", "path": outside.to_string_lossy()}),
+        );
+        assert!(other.is_ok());
+        assert!(!root.join("P").exists());
     }
 }

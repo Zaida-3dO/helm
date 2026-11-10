@@ -8,7 +8,16 @@
 
 import { createHash } from "node:crypto";
 
+/** The longest tool name, in bytes, accepted from an MCP server or asked for by a caller. */
+export const MAX_TOOL_NAME_BYTES = 256;
+
+/** True for a tool name that is present and within the cap (counted in UTF-8 bytes). */
+export function toolNameOk(name: unknown): name is string {
+  return typeof name === "string" && name !== "" && Buffer.byteLength(name, "utf8") <= MAX_TOOL_NAME_BYTES;
+}
+
 export function generatedName(serverId: string, tool: string): string {
+  if (Buffer.byteLength(tool, "utf8") > MAX_TOOL_NAME_BYTES) throw new RangeError(`A tool name is at most ${MAX_TOOL_NAME_BYTES} bytes.`);
   const hash = createHash("sha256").update(tool).digest("hex").slice(0, 12);
   const clean = tool
     .toLowerCase()

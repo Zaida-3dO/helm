@@ -29,6 +29,15 @@ test("the helm server reaches MCP tools through the adapter, child calls include
   const te = await server.call("app_mcp_call", { name: generatedName("fake", "tool_error"), arguments: {} }, { child: false });
   assert.deepEqual(te, { ok: false, error: "tool says no", changed: "maybe" });
 
+  // One 256-byte cap on a tool name where it enters: a longer name is refused whole and never echoed.
+  const long = "t".repeat(257);
+  const direct = (await server.call(long, {}, { child: false })) as { ok: false; error: string };
+  assert.match(direct.error, /at most 256 bytes/);
+  assert.ok(!direct.error.includes("tttt"));
+  const viaCall = (await server.call("app_mcp_call", { name: long, arguments: {} }, { child: false })) as { ok: false; error: string };
+  assert.match(viaCall.error, /at most 256 bytes/);
+  assert.throws(() => generatedName("fake", long), /at most 256 bytes/);
+
   // A later mcp_config line reaches this same running worker, no restart: dropping the server
   // takes its tools away, and re-adding it (an enable after a disable) brings them back.
   assert.equal(applyConfigLine(h.bridge, { type: "mcp_config", revision: "r2", servers: [] }), true);

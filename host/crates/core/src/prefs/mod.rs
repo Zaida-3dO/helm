@@ -337,7 +337,8 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
 }
 
 /// `keybindings`: at most 500 entries, ids and chords of at most 100 bytes; a null chord is a
-/// cleared binding. Chord grammar and conflicts are checked by the UI's registry.
+/// cleared binding, and none may hold an invisible or direction-changing character. Chord grammar
+/// and conflicts are checked by the UI's registry (and, for a chat's change, by the settings tool).
 fn validate_keybindings(value: &Value) -> Result<(), PrefError> {
     let bad = |why: &'static str| PrefError::Invalid {
         key: "keybindings",
@@ -353,6 +354,11 @@ fn validate_keybindings(value: &Value) -> Result<(), PrefError> {
         let ok_chord = v.is_null() || v.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 100);
         if k.is_empty() || k.len() > 100 || !ok_chord {
             return Err(bad("entries must map an id to a chord or null"));
+        }
+        if crate::hidden::has_hidden(k) || v.as_str().is_some_and(crate::hidden::has_hidden) {
+            return Err(bad(
+                "ids and chords cannot hold invisible or direction-changing characters",
+            ));
         }
     }
     Ok(())
@@ -610,6 +616,9 @@ mod tests {
             json!({"a": 5}),
             json!({"a": ""}),
             json!({"": "Ctrl+K"}),
+            json!({"a": "Ctrl+\u{200b}K"}),
+            json!({"a": "Ctrl+K\u{202e}"}),
+            json!({"panel\u{2066}.toggle": "Ctrl+K"}),
         ] {
             let r = db.write(|tx| set_generic(tx, "keybindings", &bad));
             assert!(matches!(r, Err(PrefError::Invalid { .. })), "{bad}");

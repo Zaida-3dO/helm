@@ -2108,6 +2108,7 @@ version = "1.0.1"
 dependencies = [
  "helm-chats",
  "helm-core",
+ "helm-hosttools",
  "helm-ipc",
  "helm-platform",
  "helm-standup",

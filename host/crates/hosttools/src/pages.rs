@@ -6,7 +6,7 @@
 //! to Helm, the user's files or the network unless the user switches the network on for that
 //! open. An agent updates a page by rewriting its file; the open tab reloads by itself.
 
-use crate::registry::{HostToolRegistry, ToolCtx, ToolResult};
+use crate::registry::{screen_label, HostToolRegistry, ToolCtx, ToolResult};
 use crate::spec::ToolSpec;
 use serde_json::{json, Map, Value};
 
@@ -24,6 +24,9 @@ async fn pin(ctx: ToolCtx, a: Value) -> ToolResult {
     let mut args = Map::new();
     for k in ["path", "title"] {
         if let Some(v) = a.get(k).filter(|v| v.is_string()) {
+            if k == "title" {
+                screen_label("The title", v.as_str().unwrap_or_default())?;
+            }
             args.insert(k.into(), v.clone());
         }
     }

@@ -130,6 +130,9 @@ fn clean_title(s: &str) -> Result<String, Fail> {
     match t.chars().count() {
         0 => refuse("A feedback item needs a title."),
         n if n > 120 => refuse("A title is at most 120 characters."),
+        _ if t.chars().any(helm_core::hidden::is_hidden_char) => {
+            refuse("A title cannot hold invisible or direction-changing characters.")
+        }
         _ => Ok(t),
     }
 }

@@ -12,7 +12,7 @@
 //   dropped, so a child can call only tools that are discovered and still registered.
 
 import { HttpTransport, type Resolver } from "./http.ts";
-import { generatedName, label, matches, terms } from "./naming.ts";
+import { generatedName, label, matches, terms, toolNameOk } from "./naming.ts";
 import { formatResult } from "./output.ts";
 import { Redactor } from "./redact.ts";
 import { McpSession, type Transport } from "./session.ts";
@@ -276,7 +276,7 @@ export function createMcpBridge(sink: (line: Json) => void, opts: BridgeOptions 
         emit(e, "connected", { toolCount: list.length });
         const t = terms(query, e.server.id);
         // A tool whose name reveals a secret cannot be renamed safely, so it is not offered.
-        const safe = list.filter((tool) => !e.red.reveals(tool.name));
+        const safe = list.filter((tool) => toolNameOk(tool.name) && !e.red.reveals(tool.name));
         const hits = safe.filter((tool) => matches(t, [tool.name, tool.description, tool.title, label(e.server.name, tool.name)]));
         const out: LoadedTool[] = [];
         for (const tool of hits) {

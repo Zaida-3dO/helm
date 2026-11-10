@@ -87,10 +87,7 @@ fn bad(m: impl Into<String>) -> Refusal {
 }
 
 fn unsafe_text(s: &str) -> bool {
-    s.chars().any(|c| {
-        c.is_control()
-            || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
-    })
+    helm_core::hidden::has_hidden(s)
 }
 
 pub fn check_repo_id(id: &str) -> Result<(), Refusal> {
@@ -266,7 +263,7 @@ pub enum Registered {
     AlreadyListed,
 }
 
-fn insert_checkout(
+pub(crate) fn insert_checkout(
     tx: &Transaction<'_>,
     repo_id: &str,
     path: &str,
@@ -357,7 +354,7 @@ pub fn add_clone(
     Ok((id, Registered::Created))
 }
 
-fn bump(tx: &Transaction<'_>, repo_id: &str) -> rusqlite::Result<()> {
+pub(crate) fn bump(tx: &Transaction<'_>, repo_id: &str) -> rusqlite::Result<()> {
     tx.execute(
         "UPDATE repositories SET revision = revision + 1 WHERE repo_id = ?1",
         [repo_id],

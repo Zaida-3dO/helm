@@ -10,7 +10,7 @@
 //! - The prompt a schedule sends later is framed as not typed by the user, and goes in as a
 //!   schedule-origin send (see the schedules crate); it cannot spend the user's consent.
 
-use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
+use crate::registry::{screen_label, HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::spec::ToolSpec;
 use serde_json::{json, Map, Value};
 
@@ -167,6 +167,7 @@ async fn create(ctx: ToolCtx, a: Value) -> ToolResult {
     let str_of = |k: &str| a.get(k).and_then(Value::as_str);
     let title = str_of("title").ok_or_else(|| refuse("title is required."))?;
     let message = str_of("message").ok_or_else(|| refuse("message is required."))?;
+    screen_label("The title", title)?;
     let t = timing(
         a.get("timing")
             .ok_or_else(|| refuse("timing is required."))?,
@@ -210,6 +211,9 @@ async fn update(ctx: ToolCtx, a: Value) -> ToolResult {
     let mut args = Map::new();
     args.insert("scheduleId".into(), json!(id));
     args.insert("revision".into(), current["revision"].clone());
+    if let Some(t) = a.get("title").and_then(Value::as_str) {
+        screen_label("The title", t)?;
+    }
     for k in [
         "title",
         "message",

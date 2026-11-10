@@ -446,7 +446,7 @@ fn table() -> Vec<Entry> {
                 max: 500,
             },
             default: || json!({}),
-            about: "Keyboard shortcuts as {commandId: chord}; a null chord clears that shortcut. Needs the all-settings switch.",
+            about: "Keyboard shortcuts as {commandId: chord}; a null chord clears that shortcut. A chord Windows or the web view keeps (Alt+F4, F12, anything with the Windows key...) and one chord given to two commands are refused. Needs the all-settings switch.",
         },
     ]
 }
@@ -697,7 +697,12 @@ pub fn check(key: &str, v: &Value) -> Result<(), String> {
             format!("its default is {d}")
         };
         format!("{why} ({default}; send null to restore it.)")
-    })
+    })?;
+    // A shortcut a chat sets gets the checks the Settings page applies to the user's own.
+    if key == "keybindings" {
+        crate::keybindings::check(v)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -777,6 +782,15 @@ mod tests {
         assert!(check("dopamine", &json!("zen")).is_ok());
         assert!(check("dopamine", &json!({"version": 1})).is_ok());
         assert!(check("dopamine", &json!("calm")).is_err());
+    }
+
+    #[test]
+    fn a_shortcut_a_chat_sets_gets_the_reserved_and_doubled_chord_checks() {
+        assert!(check("keybindings", &json!({"panel.toggle": "Ctrl+B", "x": null})).is_ok());
+        let e = check("keybindings", &json!({"a": "Alt+F4"})).unwrap_err();
+        assert!(e.contains("belongs to Windows"), "{e}");
+        let e = check("keybindings", &json!({"a": "Ctrl+K", "b": "mod+k"})).unwrap_err();
+        assert!(e.contains("given to both"), "{e}");
     }
 
     #[test]

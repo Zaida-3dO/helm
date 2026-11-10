@@ -80,7 +80,17 @@ fn names_are_1_to_120_bytes_without_separators_or_controls() {
     assert_eq!(store::validate_name("  Web app ").unwrap(), "Web app");
     assert!(store::validate_name(&"é".repeat(60)).is_ok()); // 120 bytes
     for bad in [
-        "", "   ", ".", "..", "a/b", "a\\b", "a:b", "a\u{7}b", "a\nb",
+        "",
+        "   ",
+        ".",
+        "..",
+        "a/b",
+        "a\\b",
+        "a:b",
+        "a\u{7}b",
+        "a\nb",
+        "a\u{200b}b",
+        "a\u{202e}b",
     ] {
         assert!(
             store::validate_name(bad).is_err(),

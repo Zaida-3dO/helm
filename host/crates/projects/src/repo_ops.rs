@@ -4,6 +4,7 @@
 //! |---|---|---|
 //! | `repo_list` | maintenance | `{repoId?, query?, path?, chatId?, cursor?}` → `{entries, nextCursor?, chatRepo?}` (fills the list from folder projects first) |
 //! | `repo_update` | maintenance | `{repoId, expectedRevision, remoteUrl?, addLocations?, removeLocationIds?, remove?, protectedBases?}` → the entry |
+//! | `repo_snapshot` | blocking | `{}` → `{repositories}`: the list as a change to it is filed for Undo |
 //! | `repo_set_worktrees` | maintenance | `{repoId, allowed}` → the entry (the user's switch; no tool calls it) |
 //! | `repo_register` | maintenance | `{chatId, repoId?}` → `{result, repoId, checkout, remoteUrl}` |
 //! | `worktree_status` | maintenance | `{chatId}` → where the chat is, what the repository allows, who else is there |
@@ -14,7 +15,7 @@
 //! rewritten (it is what the git stand-in reads). Running workers are left alone; a chat gets the
 //! stand-in on its `PATH` (or loses it) when its worker next starts.
 
-use crate::ops::{parse_args, to_value};
+use crate::ops::{parse_args, refuse_inside_profile, to_value};
 use crate::repos::{self, Entry, Patch, Registered};
 use crate::store::Refusal;
 use helm_chats::types::ChatStatus;
@@ -29,6 +30,7 @@ use std::path::Path;
 pub fn register_ops(reg: &mut OpRegistry) {
     reg.blocking("repo_list", OpClass::Maintenance, repo_list)
         .blocking("repo_update", OpClass::Maintenance, repo_update)
+        .blocking("repo_snapshot", OpClass::Blocking, repo_snapshot)
         .blocking(
             "repo_set_worktrees",
             OpClass::Maintenance,
@@ -146,6 +148,9 @@ struct UpdateArgs {
 
 pub(crate) fn repo_update(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: UpdateArgs = parse_args(args)?;
+    for l in &a.add_locations {
+        refuse_inside_profile(ctx, &l.path)?;
+    }
     let db = ctx.services.need::<Database>()?;
     let patch = Patch {
         repo_id: a.repo_id,
@@ -163,6 +168,18 @@ pub(crate) fn repo_update(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let entry = db.write(|tx| repos::update(tx, &patch))?;
     refresh_off_list(ctx, &db);
     to_value(&entry)
+}
+
+/// The whole repository list as a picture, for the host tools to read before and after a chat's
+/// edit and file the pair for Undo (see [`crate::repo_undo`]).
+pub(crate) fn repo_snapshot(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+    let db = ctx.services.need::<Database>()?;
+    let list = db
+        .snapshot(|tx| {
+            crate::repo_undo::projection(tx).map_err(rusqlite::Error::InvalidParameterName)
+        })
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(json!({"repositories": list}))
 }
 
 #[derive(Debug, Deserialize)]

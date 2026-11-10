@@ -7,6 +7,10 @@ use serde_json::Value;
 pub const PREFIX: &str = "app_";
 /// Longest name after the prefix.
 pub const MAX_NAME_TAIL: usize = 60;
+//// The longest tool name, in bytes, accepted anywhere one enters: a host tool's own name, the
+/// name a worker asks to run, and (in the worker) a name an MCP server offers. A longer name is
+/// refused whole rather than cut, and is never echoed back.
+pub const MAX_TOOL_NAME_BYTES: usize = 256;
 /// Longest description: Claude Code truncates longer MCP tool descriptions.
 pub const MAX_DESCRIPTION: usize = 2_048;
 /// The default host-side timeout.
@@ -145,6 +149,11 @@ impl ToolSpec {
     /// Why this declaration is invalid, or `None`.
     pub fn problem(&self) -> Option<String> {
         let n = self.name;
+        if n.len() > MAX_TOOL_NAME_BYTES {
+            return Some(format!(
+                "host-tool names are at most {MAX_TOOL_NAME_BYTES} bytes"
+            ));
+        }
         let Some(tail) = n.strip_prefix(PREFIX) else {
             return Some(format!("{n}: host-tool names start with {PREFIX}"));
         };

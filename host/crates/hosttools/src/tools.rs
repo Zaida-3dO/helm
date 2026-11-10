@@ -5,7 +5,9 @@
 //!
 //! The repository list lives in the projects crate (`repo_*` ops): `app_repo_locations` reads it,
 //! `app_update_repo` edits an entry, `app_register_checkout` adds the chat's own folder and
-//! `app_worktree_status` says where the chat stands and what the repository allows.
+//! `app_worktree_status` says where the chat stands and what the repository allows. An edit to the
+//! list is read before and after (`repo_snapshot`) and filed in the change ring, so it appears
+//! under "Changed by chats" and can be undone.
 
 use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
 use crate::spec::{Condition, ToolSpec};
@@ -221,10 +223,40 @@ async fn repo_locations(ctx: ToolCtx, a: Value) -> ToolResult {
     ctx.op("repo_list", args).await
 }
 
-async fn update_repo(ctx: ToolCtx, a: Value) -> ToolResult {
-    let r = ctx.op("repo_update", a).await?;
-    Ok(json!({"repository": r}))
+/// The change-ring key the repository list is filed under (the projects crate reads it back to
+/// undo the edit).
+const REPOSITORIES_KEY: &str = "repositories";
+
+/// The repository list as a picture, or `None` when it cannot be read here.
+async fn repo_picture(ctx: &ToolCtx) -> Option<Value> {
+    ctx.op("repo_snapshot", json!({}))
+        .await
+        .ok()
+        .map(|v| v["repositories"].clone())
 }
+
+/// File an edit to the repository list in the change ring, so Settings lists it as changed by a
+/// chat and the user sees a notice with Undo. Answers whether it was filed; an edit that changed
+/// nothing is not filed.
+async fn file_repo_change(ctx: &ToolCtx, before: Option<Value>) -> bool {
+    let (Some(before), Some(after)) = (before, repo_picture(ctx).await) else {
+        return false;
+    };
+    before != after
+        && crate::settings::record_external_change(ctx, REPOSITORIES_KEY, before, after).is_ok()
+}
+
+async fn update_repo(ctx: ToolCtx, a: Value) -> ToolResult {
+    let before = repo_picture(&ctx).await;
+    let r = ctx.op("repo_update", a).await?;
+    let mut out = json!({"repository": r});
+    if file_repo_change(&ctx, before).await {
+        out["undo"] = json!(UNDO_NOTE);
+    }
+    Ok(out)
+}
+
+const UNDO_NOTE: &str = "The user was shown a notice with Undo for this change.";
 
 async fn worktree_status(ctx: ToolCtx, _a: Value) -> ToolResult {
     ctx.op("worktree_status", json!({"chatId": ctx.caller_chat_id}))
@@ -236,7 +268,12 @@ async fn register_checkout(ctx: ToolCtx, a: Value) -> ToolResult {
     if let Some(id) = a.get("repoId") {
         args["repoId"] = id.clone();
     }
-    ctx.op("repo_register", args).await
+    let before = repo_picture(&ctx).await;
+    let mut out = ctx.op("repo_register", args).await?;
+    if file_repo_change(&ctx, before).await {
+        out["undo"] = json!(UNDO_NOTE);
+    }
+    Ok(out)
 }
 
 /// `app_read_project_context`: the shared note of the folder this chat runs in.
@@ -403,8 +440,18 @@ mod tests {
             args: Value,
         ) -> Pin<Box<dyn Future<Output = Result<Value, helm_ipc::ApiError>> + Send + 'a>> {
             self.0.lock().unwrap().push((op.to_owned(), args.clone()));
+            // How many edits to the repository list have gone through so far: its "picture".
+            let edits = self
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(o, _)| o == "repo_update" || o == "repo_register")
+                .count();
             Box::pin(async move {
                 match op {
+                    "repo_update" | "repo_register" => Ok(json!({"repoId": "r"})),
+                    "repo_snapshot" => Ok(json!({"repositories": {"r": {"edits": edits}}})),
                     "project_list" => Ok(json!([
                         {"id": "p1", "name": "Helm", "kind": "folder", "path": FOLDER, "archived": false, "pinned": false, "chatCount": 2, "revision": 7},
                         {"id": "p2", "name": "Board", "kind": "board", "path": null, "primaryFolderProjectId": "p1", "archived": false, "pinned": true, "chatCount": 0, "revision": 1},
@@ -549,5 +596,61 @@ mod tests {
         assert_eq!(call("repo_update")["expectedRevision"], 1);
         assert_eq!(call("worktree_status"), json!({"chatId": "c"}));
         assert_eq!(call("repo_register"), json!({"chatId": "c", "repoId": "x"}));
+    }
+
+    #[tokio::test]
+    async fn an_edit_to_the_repository_list_is_filed_for_undo() {
+        use helm_core::db::{Database, MigrationRegistry};
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = MigrationRegistry::new();
+        reg.initializer("settings-changes", crate::settings::init);
+        let db = Arc::new(Database::open(&dir.path().join("t.db"), &reg).unwrap());
+        let mut services = helm_ipc::Services::new();
+        services.insert(db.clone());
+        let services = Arc::new(services);
+        let ops = Arc::new(FakeOps(Mutex::new(Vec::new())));
+        let with_db = || {
+            let mut c = ctx(ops.clone());
+            c.services = services.clone();
+            c
+        };
+        let r = update_repo(with_db(), json!({"repoId": "r", "expectedRevision": 1}))
+            .await
+            .unwrap();
+        assert!(r["undo"].as_str().unwrap().contains("Undo"), "{r}");
+        let r = register_checkout(with_db(), json!({})).await.unwrap();
+        assert!(r["undo"].is_string(), "{r}");
+        let row = |n: i64| -> (String, String, String) {
+            db.snapshot(|tx| {
+                tx.query_row(
+                    "SELECT key, before, after FROM settings_changes ORDER BY id LIMIT 1 OFFSET ?1",
+                    [n],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+            })
+            .unwrap()
+        };
+        let rows = [row(0), row(1)];
+        assert_eq!(
+            rows,
+            [
+                (
+                    "repositories".to_owned(),
+                    r#"{"r":{"edits":0}}"#.to_owned(),
+                    r#"{"r":{"edits":1}}"#.to_owned()
+                ),
+                (
+                    "repositories".to_owned(),
+                    r#"{"r":{"edits":1}}"#.to_owned(),
+                    r#"{"r":{"edits":2}}"#.to_owned()
+                ),
+            ]
+        );
     }
 }

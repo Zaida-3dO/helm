@@ -38,6 +38,7 @@ pub mod shells;
 pub mod show_images;
 pub mod spec;
 pub mod tools;
+mod keybindings;
 
 pub use addendum::{Addendum, AddendumSection, KnowledgeSection, StaticSection};
 pub use dispatch::{Caller, CallerBinding, ChatRequest, HostTools};
@@ -50,6 +51,7 @@ pub use settings_ext::{SettingsExtension, SettingsExtensions};
 pub use spec::{
     Availability, CatalogueEntry, Condition, LaunchKeys, McpLaunch, McpLaunchGate, McpLaunchSource,
     RequestLimit, ToolSpec, WebToolsGate, WebToolsSource, DEFAULT_TIMEOUT_MS, MAX_DESCRIPTION,
+    MAX_TOOL_NAME_BYTES,
 };
 
 /// This crate's own tools: projects and repositories ([`tools`]). The chat tools register from

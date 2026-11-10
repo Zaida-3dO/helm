@@ -120,6 +120,13 @@ impl HostTools {
     /// The gates, in order. `Ok` names the tool to run.
     pub fn gate(&self, caller: &Caller, req: &ChatRequest) -> Result<&RegisteredTool, ToolError> {
         let name = req.operation.as_str();
+        // 0. One length cap on a tool name, before it is compared, looked up or echoed anywhere.
+        if name.len() > crate::spec::MAX_TOOL_NAME_BYTES {
+            return Err(ToolError::refused(format!(
+                "A tool name is at most {} bytes.",
+                crate::spec::MAX_TOOL_NAME_BYTES
+            )));
+        }
         // 1. Restricted gate (authoritative, default deny).
         if let Some(allowed) = &caller.restricted {
             if !allowed.iter().any(|a| a == name) {
@@ -320,7 +327,7 @@ pub fn write_response(tools_dir: &Path, id: &str, body: &Value) -> std::io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::ToolSpec;
+    use crate::spec::{ToolSpec, MAX_TOOL_NAME_BYTES};
     use helm_ipc::NullSink;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -491,6 +498,17 @@ mod tests {
         );
         let r = call(&t, &me(), &req("app_list_chats", json!([1]), false)).await;
         assert!(r["error"].as_str().unwrap().contains("object"));
+        // One cap on a tool name, whatever the caller's restrictions, and the name is not echoed.
+        let long = format!("app_{}", "x".repeat(MAX_TOOL_NAME_BYTES));
+        let r = call(&t, &me(), &req(&long, json!({}), false)).await;
+        let why = r["error"].as_str().unwrap();
+        assert!(
+            why.contains("at most 256 bytes") && !why.contains("xxxx"),
+            "{why}"
+        );
+        let at_cap = format!("app_{}", "x".repeat(MAX_TOOL_NAME_BYTES - 4));
+        let r = call(&t, &me(), &req(&at_cap, json!({}), false)).await;
+        assert!(r["error"].as_str().unwrap().contains("no host tool"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
