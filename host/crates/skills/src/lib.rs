@@ -5,8 +5,11 @@
 //! skills folder. The folder shape is the plugin shape the CLI reads: a manifest under
 //! `.claude-plugin/`, and one folder per skill under `skills/`, each with a `SKILL.md` (a name and
 //! description in its front matter, then the instructions). Settings > Skills manages the folder;
-//! the chat launch adds the flag in `helm_chats::runtime`.
+//! the chat launch adds the flag in `helm_chats::runtime`. Agents have their own folder beside it
+//! (see [`agents`]), and the example agents and skills Helm offers are in [`examples`].
 
+pub mod agents;
+pub mod examples;
 pub mod ops;
 pub use ops::register_ops;
 
@@ -400,5 +403,184 @@ mod tests {
                 .unwrap()
                 .contains("\"mine\"")
         );
+    }
+
+    #[test]
+    fn examples_are_offered_once_and_every_stage_agent_ships() {
+        use crate::{agents, examples};
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path();
+
+        // Every agent a workflow stage defaults to is shipped, and each example is a valid file
+        // whose front matter name is its file name.
+        for stage in [
+            "planner",
+            "plan-reviewer",
+            "coder",
+            "reviewer",
+            "pr-cleanup",
+            "smoketester",
+        ] {
+            assert!(examples::AGENTS.iter().any(|(n, _)| *n == stage), "{stage}");
+        }
+        for (name, text) in examples::AGENTS {
+            let a =
+                agents::parse_agent(text).unwrap_or_else(|| panic!("{name} has no front matter"));
+            assert_eq!(a.name, *name);
+            assert!(!a.description.is_empty() && !a.prompt.is_empty(), "{name}");
+        }
+        for (name, text) in examples::SKILLS {
+            assert!(text.contains(&format!("name: {name}\n")), "{name}");
+        }
+
+        examples::seed(p);
+        assert_eq!(agents::list(p).len(), examples::AGENTS.len());
+        assert_eq!(list(p).len(), examples::SKILLS.len());
+        assert!(
+            launch_plugin_dir(p).is_some(),
+            "the example skills load into chats"
+        );
+
+        // A removed example stays removed; an edited one is left alone.
+        agents::remove(p, "coder").unwrap();
+        remove(p, "orchestrate").unwrap();
+        let edited = p.join("agents/planner.md");
+        fs::write(
+            &edited,
+            "---\nname: planner\ndescription: mine\n---\nmy plan\n",
+        )
+        .unwrap();
+        examples::seed(p);
+        assert!(!agents::agent_names(p).contains(&"coder".to_owned()));
+        assert!(!skill_names(p).contains(&"orchestrate".to_owned()));
+        assert!(fs::read_to_string(&edited).unwrap().contains("my plan"));
+
+        // A file already there when an example is first offered is not overwritten.
+        let tmp2 = tempfile::tempdir().unwrap();
+        write(
+            &tmp2.path().join("agents/reviewer.md"),
+            "---\nname: reviewer\ndescription: house\n---\nhouse rules\n",
+        );
+        examples::seed(tmp2.path());
+        assert_eq!(
+            agents::list(tmp2.path())
+                .iter()
+                .find(|a| a.name == "reviewer")
+                .unwrap()
+                .description,
+            "house"
+        );
+    }
+
+    #[test]
+    fn agents_parse_add_remove_and_reach_the_launch_file() {
+        use crate::agents;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path();
+        assert_eq!(agents::launch_agents_file(p), None, "no agents, no file");
+
+        // Front matter shapes: list or comma tools, comments, quotes, model aliases only.
+        let a = agents::parse_agent(
+            "\n---\n# a comment\nname: \"scout\"\ndescription: Looks around\ntools: [Read, \"Grep\"]\nmodel: OPUS\n---\n\nBody line\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (a.name.as_str(), a.tools.clone()),
+            ("scout", vec!["Read".to_owned(), "Grep".to_owned()])
+        );
+        assert_eq!(a.prompt, "Body line");
+        assert_eq!(agents::parse_agent("no front matter"), None);
+        assert_eq!(agents::parse_agent("---\nname: x\nnever closed"), None);
+
+        let src = |name: &str, body: &str| {
+            let f = tmp.path().join("picked").join(name);
+            write(&f, body);
+            f
+        };
+        let scout = src("scout.md", "---\nname: scout\ndescription: Looks around\ntools: Read, Grep\nmodel: OPUS\n---\nLook.\n");
+        let added = agents::add(p, &scout).unwrap();
+        assert_eq!(added.names, ["scout"]);
+        let odd = src(
+            "odd.md",
+            "---\ndescription: Odd one\nmodel: gpt-5\n---\nDo odd things.\n",
+        );
+        assert_eq!(
+            agents::add(p, &odd).unwrap().names,
+            ["odd"],
+            "the file name is the fallback"
+        );
+
+        // A folder takes each agent file in it and reports the ones it left out.
+        write(
+            &tmp.path().join("bundle/extra.md"),
+            "---
+description: From a folder
+---
+Work.
+",
+        );
+        write(&tmp.path().join("bundle/notes.md"), "just notes");
+        write(&tmp.path().join("bundle/readme.txt"), "ignored");
+        let bundle = agents::add(p, &tmp.path().join("bundle")).unwrap();
+        assert_eq!(bundle.names, ["extra"]);
+        assert_eq!(bundle.skipped.len(), 1);
+        assert!(bundle.skipped[0].starts_with("notes.md"));
+        let empty = tmp.path().join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        assert_eq!(
+            agents::add(p, &empty).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+        agents::remove(p, "extra").unwrap();
+
+        let doc = agents::launch_json(p);
+        assert_eq!(doc["scout"]["prompt"], "Look.");
+        assert_eq!(doc["scout"]["tools"], serde_json::json!(["Read", "Grep"]));
+        assert_eq!(doc["scout"]["model"], "opus");
+        assert!(doc["odd"].get("model").is_none() && doc["odd"].get("tools").is_none());
+        let file = agents::launch_agents_file(p).unwrap();
+        assert_eq!(
+            fs::read_to_string(file).unwrap(),
+            serde_json::to_string(&doc).unwrap()
+        );
+
+        // Refusals change nothing.
+        for (body, kind) in [
+            (
+                "---\nname: scout\ndescription: dup\n---\nx\n",
+                ErrorKind::AlreadyExists,
+            ),
+            (
+                "---\nname: Bad Name\ndescription: d\n---\nx\n",
+                ErrorKind::InvalidInput,
+            ),
+            ("---\nname: nodesc\n---\nx\n", ErrorKind::InvalidInput),
+            (
+                "---\nname: nobody\ndescription: d\n---\n",
+                ErrorKind::InvalidInput,
+            ),
+            ("plain text", ErrorKind::InvalidInput),
+        ] {
+            let f = src("try.md", body);
+            assert_eq!(agents::add(p, &f).unwrap_err().kind(), kind, "{body}");
+        }
+        assert_eq!(
+            agents::add(p, &tmp.path().join("missing.md"))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::NotFound
+        );
+        assert_eq!(agents::agent_names(p), ["odd", "scout"]);
+
+        agents::remove(p, "scout").unwrap();
+        assert_eq!(
+            agents::remove(p, "scout").unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
+        assert_eq!(
+            agents::remove(p, "../x").unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(agents::agent_names(p), ["odd"]);
     }
 }

@@ -55,6 +55,8 @@ export interface ClaudeLaunch {
   shellChanges?: boolean;
   /** Plugin folders the CLI loads for this launch (`--plugin-dir`, repeatable): Helm's own skills. */
   pluginDirs?: string[];
+  /** A file of agent definitions the CLI loads for this launch (`--agents`): Helm's own agents folder. */
+  agentsFile?: string;
   /** Run on a local model server. Absent: a normal Claude chat. */
   local?: LocalLaunch;
 }

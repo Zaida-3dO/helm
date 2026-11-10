@@ -64,6 +64,10 @@ pub struct ClaudeLaunch {
     /// Absent when there is nothing of Helm's to load.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub plugin_dirs: Vec<String>,
+    /// A file of agent definitions passed to the CLI as `--agents` (Helm's own agents folder).
+    /// Absent when that folder has no agents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agents_file: Option<String>,
 }
 
 /// Where a local chat's model lives and how far it may think. `baseUrl` is a loopback address;
@@ -301,6 +305,7 @@ pub fn claude_launch(
         shell_changes: runtime.shell_changes,
         local: None,
         plugin_dirs: Vec::new(),
+        agents_file: None,
     };
     if let Some(t) = test {
         c.command = Some(t.command.clone());
@@ -499,5 +504,10 @@ mod tests {
         with_plugin.plugin_dirs = vec!["C:/profile/skills".into()];
         let v = serde_json::to_value(&with_plugin).unwrap();
         assert_eq!(v["pluginDirs"], serde_json::json!(["C:/profile/skills"]));
+        // The agents file likewise: absent until the spawner names one.
+        assert!(v.get("agentsFile").is_none());
+        with_plugin.agents_file = Some("C:/profile/agents-launch.json".into());
+        let v = serde_json::to_value(&with_plugin).unwrap();
+        assert_eq!(v["agentsFile"], "C:/profile/agents-launch.json");
     }
 }

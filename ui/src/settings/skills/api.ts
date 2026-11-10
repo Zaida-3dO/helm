@@ -26,3 +26,26 @@ export function skillsOps(api: Api) {
     reveal: (name?: string) => api<{ revealed: boolean }>('helm_skills_reveal', name ? { name } : {}),
   };
 }
+
+/** One agent as listed: its file name without `.md`, the description from its front matter, and its path. */
+export interface AgentRow {
+  name: string;
+  description: string;
+  path: string;
+}
+
+export interface AgentsView {
+  agents: AgentRow[];
+  /** The agents folder itself, for the "Open folder" button. */
+  folder: string;
+}
+
+export function agentsOps(api: Api) {
+  return {
+    list: () => api<AgentsView>('helm_agents_list', {}),
+    /** A single agent file, or a folder of them. */
+    add: (source: string) => api<{ agents: AgentRow[]; added: string[]; skipped: string[] }>('helm_agents_add', { source }),
+    remove: (name: string) => api<{ agents: AgentRow[] }>('helm_agents_remove', { name }),
+    reveal: () => api<{ revealed: boolean }>('helm_agents_reveal', {}),
+  };
+}

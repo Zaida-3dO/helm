@@ -149,6 +149,9 @@ test("skip permissions, resume and settings flags", () => {
   const two = buildClaudeArgs({ pluginDirs: ["C:/profile/skills", "D:/extra"] });
   assert.deepEqual(two.filter((x) => x === "--plugin-dir"), ["--plugin-dir", "--plugin-dir"]);
   assert.ok(two.includes("C:/profile/skills") && two.includes("D:/extra"));
+  // Helm-managed agents: one file, none when the folder has none.
+  assert.equal(buildClaudeArgs({}).includes("--agents"), false, "absent by default");
+  assert.equal(flag(buildClaudeArgs({ agentsFile: "C:/profile/agents-launch.json" }), "--agents"), "C:/profile/agents-launch.json");
 });
 
 test("Claude Code's worktree tools stay disallowed unless the launch allows them and no repository has worktrees off", () => {

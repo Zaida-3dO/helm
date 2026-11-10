@@ -299,9 +299,13 @@ impl Spawner for ProcessSpawner {
         claude.append_system_prompt = contrib::system_prompt(&extras);
         // Helm's own skills folder loads in every chat (Claude and local-model alike: both run
         // the same CLI). Absent while the folder has nothing to load.
+        helm_skills::examples::seed(&self.profile_dir);
         if let Some(dir) = helm_skills::launch_plugin_dir(&self.profile_dir) {
             claude.plugin_dirs = vec![dir];
         }
+        // Helm's own agents load the same way, under their plain names (the names the
+        // orchestrator's stages use).
+        claude.agents_file = helm_skills::agents::launch_agents_file(&self.profile_dir);
         if let Some(l) = &req.local {
             apply_local_launch(&mut claude, &mut env, l)?;
         }
