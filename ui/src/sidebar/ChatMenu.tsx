@@ -15,7 +15,7 @@ import { deleteChatConfirm, PromptDialog, type Prompt } from './Sidebar.tsx';
 import { sidebarUndo } from './undo.ts';
 import { CostDialog } from '../usage/CostDialog.tsx';
 import { getDefaultBoard } from '../newchat/boards.ts';
-import { moveChatToProfile, profileChoices, profilesStoreFor } from '../profiles/index.ts';
+import { moveChatToProfile, profileChoices, profilesStoreFor, shareChatWith, shareChoices } from '../profiles/index.ts';
 
 // Errors go to the shell's toast slot, where the user sees them.
 const showError = (text: string) => toast.show({ kind: 'error', text });
@@ -51,6 +51,7 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
           expanded: false,
           view: row.archived ? 'archived' : 'projects',
           profiles: profileChoices(profilesStoreFor(shell.api, shell.bus).snapshot, row.chatId, siblings),
+          shares: shareChoices(profilesStoreFor(shell.api, shell.bus).snapshot, row.chatId, [row, ...siblings]),
         },
         {
           fork: () => void act.fork(row),
@@ -61,6 +62,10 @@ export function ChatMenu({ chatId }: { chatId: string | null }) {
           exportMarkdown: () => void exportChatMarkdown(shell.api, row.chatId, showError),
           moveTo: (id) => void act.moveTo(row, id),
           moveToProfile: (id) => moveChatToProfile(profilesStoreFor(shell.api, shell.bus), row.chatId, id, showError),
+          shareWith: (id) => {
+            const store = profilesStoreFor(shell.api, shell.bus);
+            shareChatWith(store, row.chatId, shareChoices(store.snapshot, row.chatId, [row, ...siblings]), id, showError);
+          },
           nestUnder: (id) => void act.nestUnder(row, id),
           topLevel: () => void act.topLevel(row),
           toggleChildren: () => undefined,

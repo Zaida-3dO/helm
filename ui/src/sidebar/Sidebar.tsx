@@ -3,7 +3,7 @@
 // virtualised, with the Projects / Activity / Archived views, menus, drag and drop, hover preview
 // and undo. Its test ids stay stable: `new-chat`, `chat-item`.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
 import type { ChatOps } from '../api/ops.ts';
@@ -14,19 +14,22 @@ import type { ChatStore } from '../state/store.ts';
 import { SETTINGS_DIALOG } from '../settings/index.ts';
 import { SEARCH_DIALOG } from '../search/index.ts';
 import { AttentionInbox, inboxRows, nextAttention } from '../attention/index.ts';
-import { SchedulesEntry } from '../schedules/SchedulesEntry.tsx';
-import { TasksEntry } from '../tasks/TasksEntry.tsx';
 import { PagesEntry } from '../pages/PagesEntry.tsx';
-import { HouseholdSection, ProfileChip, moveChatToProfile, profileChoices, rowsForProfile, useProfiles } from '../profiles/index.ts';
+import { ProfileDisc } from '../profiles/Disc.tsx';
+import { ProfileItem, moveChatToProfile, profileChoices, rowsForProfile, shareChatWith, shareChoices, sharedFrom, useProfiles } from '../profiles/index.ts';
+import { DeviceToggle } from '../devices/DeviceToggle.tsx';
+import { useDevices, useRemoteList } from '../devices/hooks.ts';
+import { scopeNote } from '../devices/model.ts';
 import { useSelection, useShell } from '../shell/context.ts';
-import { Button, ConfirmDialog, ContextMenu, Dialog, TextInput, useBinding, type ConfirmSpec, type MenuItem } from '../ui/index.ts';
+import { ConfirmDialog, ContextMenu, useBinding, type ConfirmSpec, type MenuItem } from '../ui/index.ts';
 import { SidebarActions, compactChat, exportChatMarkdown, rollOverChat, rollOverConfirm } from './actions.ts';
 import { SidebarData, errorText } from './data.ts';
 import { canSitUnder, dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
 import { chatMenuItems, projectMenuItems } from './menus.ts';
-import { buildList, chatAncestors, projectsHolding, visibleChatOrder, type ListItem } from './model.ts';
+import { buildList, chatAncestors, projectsHolding, showsCalmWheel, visibleChatOrder, type ListItem } from './model.ts';
 import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
+import { PromptDialog, type Prompt } from './PromptDialog.tsx';
 import { ItemChip, ItemFolderRow, ItemOpenButton, ItemPickerHost, useItemRefs, useOpenItem } from '../itemlinks/ItemUi.tsx'; // item links
 import {
   IconArchive,
@@ -60,7 +63,11 @@ import { CostDialog, type CostTarget } from '../usage/CostDialog.tsx';
 import { layout, visibleRange } from './virtual.ts';
 import './sidebar.css';
 
+export { PromptDialog, type Prompt } from './PromptDialog.tsx';
+
 export const PREVIEW_DELAY_MS = 300;
+/** The longest project description, in characters. */
+export const DESCRIPTION_MAX = 200;
 /** The space between one project's block and the next, in pixels. */
 const BLOCK_GAP = 4;
 
@@ -100,13 +107,6 @@ export function colourCss(c: string | null | undefined): string | null {
 }
 
 type Menu = { x: number; y: number; items: MenuItem[]; label: string };
-export type Prompt = {
-  title: string;
-  label: string;
-  value: string;
-  /** Answers with why it failed (the dialog stays open and shows it), or nothing on success. */
-  onSave: (v: string) => Promise<string | null | void> | void;
-};
 type Preview = { row: SidebarRow; top: number; left: number };
 type Drag = { src: DragSource; x0: number; y0: number; active: boolean; title: string; target: DropTarget | null; x: number; y: number };
 
@@ -115,13 +115,22 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const data = useMemo(() => new SidebarData(pops), [pops]);
   const snap = useSyncExternalStore(data.subscribe, data.getSnapshot);
   const { store: profileStore, snap: prof } = useProfiles(api, bus);
-  // The profile choice filters the chats drawn; the sidebar's data keeps every row it has loaded.
+  // The profile choice filters the chats drawn: its own and those shared with it. The sidebar's
+  // data keeps every row it has loaded.
   const activeProfile = prof.view?.activeId ?? null;
-  const shownRows = useMemo(
-    () => rowsForProfile(snap.rows, activeProfile, prof.view?.homeId ?? null, prof.labels) as SidebarRow[],
-    [snap.rows, activeProfile, prof.view?.homeId, prof.labels],
-  );
+  const localRows = useMemo(() => rowsForProfile(snap.rows, activeProfile, prof.ids) as SidebarRow[], [snap.rows, activeProfile, prof.ids]);
   const [view, setView] = useState<SidebarView>('projects');
+  // Another device's chats: read through the mirror for the active profile, drawn by the same tree.
+  const { snap: dev } = useDevices(api, bus);
+  const remote = dev.remote;
+  const { snap: other, loadMore: loadMoreRemote } = useRemoteList(api, bus, remote?.uid ?? null, activeProfile, view === 'archived');
+  const shownRows = remote ? other.rows : localRows;
+  // Another device's groups collapse on this screen only: its projects are not ours to change.
+  const [remoteShut, setRemoteShut] = useState<ReadonlySet<string>>(() => new Set());
+  const shownProjects = useMemo(
+    () => (remote ? other.projects.map((p) => (remoteShut.has(p.id) ? { ...p, collapsed: true } : p)) : snap.projects),
+    [remote, other.projects, remoteShut, snap.projects],
+  );
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [collapsedItems, setCollapsedItems] = useState<Set<string>>(() => new Set());
@@ -212,20 +221,20 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const flaggedIds = useMemo(() => new Set([...snap.needsYou, ...snap.flagged.keys()]), [snap.needsYou, snap.flagged]);
   const items = useMemo(
     () =>
-      buildList(snap.projects, shownRows, {
+      buildList(shownProjects, shownRows, {
         view,
         compact,
         expandedChats: expanded,
         selectedChatId: selected,
         keptShut: keptShut.chat === selected ? keptShut.ids : undefined,
-        flagged: flaggedIds,
-        closed: snap.closed,
-        itemLinks: view === 'activity' ? undefined : { refs: itemRefs, collapsed: collapsedItems },
+        flagged: remote ? undefined : flaggedIds,
+        closed: remote ? undefined : snap.closed,
+        itemLinks: view === 'activity' || remote ? undefined : { refs: itemRefs, collapsed: collapsedItems },
       }),
-    [snap.projects, shownRows, view, compact, expanded, selected, keptShut, flaggedIds, snap.closed, itemRefs, collapsedItems],
+    [shownProjects, shownRows, view, compact, expanded, selected, keptShut, flaggedIds, snap.closed, itemRefs, collapsedItems, remote],
   );
   useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
-  const projectsById = useMemo(() => new Map(snap.projects.map((p) => [p.id, p])), [snap.projects]);
+  const projectsById = useMemo(() => new Map(shownProjects.map((p) => [p.id, p])), [shownProjects]);
   const slotProject = (it: ListItem): ProjectNode | undefined =>
     projectsById.get(it.kind === 'header' ? it.project.id : it.kind === 'chat' ? it.row.groupProjectId : it.kind === 'itemFolder' ? it.groupId : '');
   const groupDepth = useMemo(() => {
@@ -240,7 +249,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
 
   // The nav's New chat: the new-chat page, in the open chat's project when one is open.
   const navNewChat = () => {
-    const projectId = selectedRow?.groupProjectId;
+    const projectId = remote ? undefined : selectedRow?.groupProjectId;
     openNewChat(projectId ? { projectId } : {});
   };
 
@@ -271,6 +280,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   };
   const promptRename = (row: SidebarRow) => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, onSave: (t) => act.renameChat(row, t) });
   const rowMenuItems = (row: SidebarRow): MenuItem[] => {
+    // A chat on another device is renamed here; everything else is done on that device.
+    if (remote) return withChatIcons([{ id: 'rename', label: 'Rename chat…', onSelect: () => promptRename(row) }]);
     const siblings = snap.rows.filter((r) => r.groupProjectId === row.groupProjectId && r.archived === row.archived);
     const byId = new Map(siblings.map((r) => [r.chatId, r]));
     const depthOf = (id: string) => {
@@ -289,7 +300,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       return kids.length === 0 ? 0 : 1 + Math.max(...kids.map((k) => heightOf(k.chatId)));
     };
     const items = withChatIcons(chatMenuItems(
-      { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view, profiles: profileChoices(prof, row.chatId, snap.rows) },
+      { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view, profiles: profileChoices(prof, row.chatId, snap.rows), shares: shareChoices(prof, row.chatId, snap.rows) },
       {
         fork: () => void act.fork(row),
         rename: () => promptRename(row),
@@ -299,6 +310,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         exportMarkdown: () => void exportChatMarkdown(api, row.chatId, setError),
         moveTo: (id) => void act.moveTo(row, id),
         moveToProfile: (id) => moveChatToProfile(profileStore, row.chatId, id, setError),
+        shareWith: (id) => shareChatWith(profileStore, row.chatId, shareChoices(prof, row.chatId, snap.rows), id, setError),
         nestUnder: (id) => {
           userCollapsed.current.delete(id);
           setExpanded((s) => new Set(s).add(id));
@@ -330,6 +342,14 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           label: 'One emoji (empty for the default icon)',
           value: p.icon ?? '',
           onSave: (v) => act.editProject(p, { icon: v.trim() ? v.trim() : null }),
+        }),
+      editDescription: () =>
+        setPrompt({
+          title: 'Project description',
+          label: 'One line telling agents what this project is for',
+          value: (p as ProjectNode & { description?: string | null }).description ?? '',
+          maxLength: DESCRIPTION_MAX,
+          onSave: (v) => act.editProject(p, { description: v.trim() }),
         }),
       cost: () => setCost({ projectId: p.id }),
       nestUnder: (id) => void act.nestProject(p, id),
@@ -405,7 +425,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   dragRef.current = drag;
   const suppressClick = useRef(false);
   const startDrag = (e: ReactPointerEvent, src: DragSource, title: string) => {
-    if (e.button !== 0 || e.ctrlKey || e.pointerType === 'touch' || view === 'activity') return;
+    if (e.button !== 0 || e.ctrlKey || e.pointerType === 'touch' || view === 'activity' || remote) return;
     setDrag({ src, title, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, active: false, target: null });
   };
   useEffect(() => {
@@ -502,7 +522,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     };
   }, [drag !== null, act, data, projectsById]);
 
-  const paging = snap.paging[view];
+  const paging = remote ? { loading: other.loading, complete: !other.more, error: other.error, started: true } : snap.paging[view];
+  const loadMoreChats = () => (remote ? loadMoreRemote() : void data.page(view));
   const switchView = (v: SidebarView) => {
     setView(v);
     setMenu(null);
@@ -552,11 +573,15 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       }}
     >
       <SidebarTop
+        api={api}
+        bus={bus}
         attention={snap.attention}
+        inboxOpen={inboxOpen}
         onNewChat={navNewChat}
         onSearch={openSearch}
         onAttention={() => setInboxOpen(true)}
         onOpenChat={onSelect}
+        openSettings={openSettings}
       />
       {(error ?? snap.error) && (
         <p className="sb-error" role="alert">
@@ -571,11 +596,12 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
           <span>Archived chats</span>
         ) : (
           <div className="sb-switch" role="group" aria-label="Sidebar view">
-            <button type="button" aria-pressed={view === 'projects'} title="Chats grouped by project" onClick={() => switchView('projects')}>
+            <button type="button" data-testid="sidebar-view-projects" aria-pressed={view === 'projects'} title="Chats grouped by project" onClick={() => switchView('projects')}>
               Projects
             </button>
             <button
               type="button"
+              data-testid="sidebar-view-activity"
               aria-pressed={view === 'activity'}
               title="Recent chat activity across all projects, newest first"
               onClick={() => switchView('activity')}
@@ -584,7 +610,13 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
             </button>
           </div>
         )}
+        <DeviceToggle api={api} bus={bus} onError={setError} />
       </div>
+      {remote && (
+        <div className="sb-device-note" data-testid="device-scope-note" data-online={remote.online ? 'true' : 'false'}>
+          {scopeNote(remote, now)}
+        </div>
+      )}
       <div
         className="sb-list"
         ref={listRef}
@@ -623,32 +655,38 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         </div>
         {items.length === 0 && !paging.loading && (
           <div className="sb-empty">
-            {view === 'activity' ? 'No recent activity' : view === 'archived' ? 'No archived chats' : 'Add your first project'}
+            {remote
+              ? remote.online
+                ? `No chats on ${remote.name} for this profile`
+                : `${remote.name} is offline and no copy of its chats is held here`
+              : view === 'activity'
+                ? 'No recent activity'
+                : view === 'archived'
+                  ? 'No archived chats'
+                  : 'Add your first project'}
           </div>
         )}
         {(!paging.complete || paging.error) && paging.started && (
-          <button type="button" className="sb-more" disabled={paging.loading} onClick={() => void data.page(view)}>
+          <button type="button" className="sb-more" disabled={paging.loading} onClick={loadMoreChats}>
             {paging.loading ? 'Loading chats…' : paging.error ? 'Retry' : 'Load more chats'}
           </button>
         )}
       </div>
-      <HouseholdSection api={api} bus={bus} />
       <div className="sb-footer">
-        <ProfileChip api={api} bus={bus} />
         <button
           type="button"
           className="sb-foot"
           aria-pressed={view === 'archived'}
+          data-testid="nav-archived"
           onClick={() => switchView(view === 'archived' ? 'projects' : 'archived')}
         >
           <IconArchive />
           <span>{view === 'archived' ? 'Back to projects' : 'Archived chats'}</span>
         </button>
-        <TasksEntry api={api} bus={bus} />
         <PagesEntry api={api} bus={bus} profileId={activeProfile} />
-        {openSettings && <SchedulesEntry api={api} bus={bus} openSettings={openSettings} onOpenChat={onSelect} />}
+        <ProfileItem api={api} bus={bus} />
         {openSettings && (
-          <button type="button" className="sb-foot" onClick={openSettings}>
+          <button type="button" className="sb-foot" data-testid="nav-settings" onClick={openSettings}>
             <IconSettings />
             <span>Settings</span>
           </button>
@@ -687,6 +725,13 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     </div>
   );
 
+  /** The owner of a chat that is shared with the active profile (a small disc after the title). */
+  function sharedByOf(row: SidebarRow): { name: string; colour: string } | null {
+    const owner = sharedFrom(row, activeProfile);
+    const p = owner ? prof.view?.profiles.find((x) => x.id === owner) : undefined;
+    return p ? { name: p.name, colour: p.colour } : null;
+  }
+
   function renderItem(it: ListItem) {
     if (it.kind === 'pinBreak') return <div className="sb-pin-break" aria-hidden="true" />;
     if (it.kind === 'itemFolder') {
@@ -721,8 +766,16 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
             if (collapse && selected && projectsHolding(projectsById, selectedRow?.groupProjectId).has(p.id)) {
               setKeptShut((k) => ({ chat: selected, ids: new Set(k.chat === selected ? k.ids : []).add(p.id) }));
             }
-            if (p.collapsed !== collapse) void act.updateProject(p, { collapsed: collapse });
+            if (remote) {
+              setRemoteShut((s) => {
+                const n = new Set(s);
+                if (collapse) n.add(p.id);
+                else n.delete(p.id);
+                return n;
+              });
+            } else if (p.collapsed !== collapse) void act.updateProject(p, { collapsed: collapse });
           }}
+          readOnly={!!remote}
           onPin={() => void act.updateProject(p, { pinned: !p.pinned })}
           onMove={(dir) => moveProject(p, dir)}
           onNew={() => newChatIn(p)}
@@ -740,9 +793,11 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         indent={view === 'activity' ? 0 : (groupDepth.get(row.groupProjectId) ?? 0) * 16 + (it.block ? 4 : 0)}
         project={projectsById.get(row.groupProjectId)}
         selected={row.chatId === selected}
-        needsYou={snap.needsYou.has(row.chatId)}
+        needsYou={!remote && snap.needsYou.has(row.chatId)}
         needsLabel={needsYouLabel(snap.attention?.needsYou.find((r) => r.chatId === row.chatId)?.kind)}
-        flagReason={snap.flagged.get(row.chatId)}
+        flagReason={remote ? undefined : snap.flagged.get(row.chatId)}
+        remote={remote ? { name: remote.name, online: remote.online } : null}
+        sharedBy={sharedByOf(row)}
         dragging={drag?.active === true && drag.src.kind === 'chat' && drag.src.chatId === row.chatId}
         now={now}
         onOpen={() => {
@@ -770,10 +825,18 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   }
 }
 
+/** What a project's icon looks like in the tree: its emoji, else the board or folder glyph. One
+ *  place, so the shared project icon can replace it. */
+function projectIconNode(p: ProjectNode): ReactNode {
+  if (p.icon && !p.icon.startsWith('lib:')) return p.icon;
+  return p.kind === 'board' ? <IconBoard size={16} strokeWidth={1.8} /> : <IconFolder size={16} strokeWidth={1.8} />;
+}
+
 function GroupHeader({
   item,
   current,
   dragging,
+  readOnly,
   onToggle,
   onPin,
   onMove,
@@ -786,6 +849,8 @@ function GroupHeader({
   item: Extract<ListItem, { kind: 'header' }>;
   current: boolean;
   dragging: boolean;
+  /** Another device's project: it collapses here, and has no menu or buttons. */
+  readOnly: boolean;
   onToggle: () => void;
   onPin: () => void;
   onMove: (dir: -1 | 1) => void;
@@ -814,7 +879,7 @@ function GroupHeader({
         .join('\n')}
       onContextMenu={(e) => {
         e.preventDefault();
-        onMenu(e.clientX, e.clientY);
+        if (!readOnly) onMenu(e.clientX, e.clientY);
       }}
     >
       <div className="sb-header-line">
@@ -833,7 +898,7 @@ function GroupHeader({
           onClick={onToggle}
           onPointerDown={onPointerDown}
           onKeyDown={(e) => {
-            if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+            if (!readOnly && e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
               e.preventDefault();
               onMove(e.key === 'ArrowUp' ? -1 : 1);
             }
@@ -841,7 +906,7 @@ function GroupHeader({
           aria-expanded={!item.collapsed}
         >
           <span className="sb-icon" aria-hidden="true">
-            {p.icon && !p.icon.startsWith('lib:') ? p.icon : p.kind === 'board' ? <IconBoard size={16} strokeWidth={1.8} /> : <IconFolder size={16} strokeWidth={1.8} />}
+            {projectIconNode(p)}
           </span>
           <span className="sb-title">{p.name}</span>
           {p.archived && (
@@ -862,6 +927,11 @@ function GroupHeader({
               {item.marks.running > 0 && (
                 <span className="sb-ind" role="img" aria-label={`${item.marks.running} running`} title={`${item.marks.running} running`}>
                   <WheelMark size={20} state="working" className="sb-ind-wheel" />
+                </span>
+              )}
+              {showsCalmWheel(item.marks) && (
+                <span className="sb-ind" data-testid="group-background" role="img" aria-label="Background work running" title="Background work running">
+                  <WheelMark size={20} state="calm" className="sb-ind-wheel" />
                 </span>
               )}
               {item.marks.unread > 0 && (
@@ -888,7 +958,7 @@ function GroupHeader({
             Set folder
           </button>
         )}
-        <span className="sb-actions">
+        <span className="sb-actions" hidden={readOnly}>
           {!p.archived && (
             <button
               type="button"
@@ -964,6 +1034,8 @@ function ChatRow({
   needsYou,
   needsLabel,
   flagReason,
+  remote,
+  sharedBy,
   dragging,
   now,
   onOpen,
@@ -984,6 +1056,10 @@ function ChatRow({
   needsLabel: string;
   /** Why the idle check thinks this quiet chat still needs you. */
   flagReason: string | undefined;
+  /** The chat runs on another device: dimmed while that device is offline, and it cannot be archived here. */
+  remote: { name: string; online: boolean } | null;
+  /** Who shared this chat with the active profile, when it is not the active profile's own. */
+  sharedBy: { name: string; colour: string } | null;
   dragging: boolean;
   now: number;
   onOpen: () => void;
@@ -1012,6 +1088,7 @@ function ChatRow({
       data-coloured={colour ? 'true' : undefined}
       data-flagged={needsYou || flagReason !== undefined ? 'true' : undefined}
       data-drag-source={dragging ? 'true' : undefined}
+      data-offline={remote && !remote.online ? 'true' : undefined}
       data-chat-id={r.chatId}
       style={{
         marginLeft: indent + item.depth * 16,
@@ -1045,6 +1122,7 @@ function ChatRow({
         data-depth={item.depth}
         data-group={r.groupProjectId}
         data-muted={r.muted ? 'true' : undefined}
+        title={remote && !remote.online ? `${remote.name} is offline` : undefined}
         data-stalled={r.stalled ? 'true' : undefined}
         data-local={r.local ? 'true' : undefined}
         data-ahead={r.local && r.localAhead !== null ? String(r.localAhead) : undefined}
@@ -1069,8 +1147,13 @@ function ChatRow({
           </span>
         )}
         {r.muted && (
-          <span className="sb-muted" role="img" aria-label="Muted: no notifications or needs-you flags" title="Muted">
+          <span className="sb-muted" data-testid="row-muted" role="img" aria-label="Muted: no notices or flags" title="Muted: no notices or flags">
             <IconMute size={11} />
+          </span>
+        )}
+        {sharedBy && (
+          <span className="sb-shared-from" data-testid="chat-shared-from" role="img" aria-label={`Shared by ${sharedBy.name}`} title={`Shared by ${sharedBy.name}`}>
+            <ProfileDisc name={sharedBy.name} colour={sharedBy.colour} size={14} />
           </span>
         )}
         {!item.expanded && item.children > 0 && <span className="sb-agg">{item.children}</span>}
@@ -1096,15 +1179,17 @@ function ChatRow({
         >
           <IconMore />
         </button>
-        <button
-          type="button"
-          className="sb-act"
-          aria-label={r.archived ? `Restore ${r.title}` : `Archive ${r.title}`}
-          title={r.archived ? 'Restore chat' : 'Archive chat'}
-          onClick={onArchive}
-        >
-          {r.archived ? <IconRestore /> : <IconArchive />}
-        </button>
+        {!remote && (
+          <button
+            type="button"
+            className="sb-act"
+            aria-label={r.archived ? `Restore ${r.title}` : `Archive ${r.title}`}
+            title={r.archived ? 'Restore chat' : 'Archive chat'}
+            onClick={onArchive}
+          >
+            {r.archived ? <IconRestore /> : <IconArchive />}
+          </button>
+        )}
       </span>
     </div>
   );
@@ -1137,69 +1222,6 @@ export function archiveProjectConfirm(p: ProjectNode, onConfirm: () => void | Pr
     confirm: 'Archive project',
     onConfirm,
   };
-}
-
-export function PromptDialog({ prompt, onClose }: { prompt: Prompt; onClose: () => void }) {
-  const [value, setValue] = useState(prompt.value);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const field = useRef<HTMLInputElement>(null);
-  const canSave = value !== prompt.value && !busy;
-  const save = async () => {
-    if (!canSave) return;
-    setBusy(true);
-    setError(null);
-    let failed: string | null | void = null;
-    try {
-      failed = await prompt.onSave(value);
-    } catch (e) {
-      failed = String((e as Error)?.message ?? e);
-    }
-    setBusy(false);
-    if (failed) {
-      setError(failed);
-      // The field was read-only while saving; hand focus back to it once it is editable again.
-      setTimeout(() => field.current?.focus(), 0);
-    } else onClose();
-  };
-  return (
-    <Dialog
-      title={prompt.title}
-      onClose={onClose}
-      busy={busy}
-      padded
-      testId="sidebar-prompt"
-      footer={
-        <>
-          <Button variant="secondary" onClick={onClose} disabled={busy}>
-            Cancel
-          </Button>
-          <Button variant="primary" onClick={() => void save()} disabled={value === prompt.value} busy={busy} data-testid="sidebar-prompt-save">
-            {busy ? 'Saving…' : 'Save'}
-          </Button>
-        </>
-      }
-    >
-      <label className="sb-prompt">
-        <span>{prompt.label}</span>
-        <TextInput
-          ref={field}
-          autoFocus
-          value={value}
-          maxLength={120}
-          invalid={error}
-          readOnly={busy}
-          onChange={(e) => {
-            setValue(e.target.value);
-            setError(null);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') void save();
-          }}
-        />
-      </label>
-    </Dialog>
-  );
 }
 
 function PreviewCard({

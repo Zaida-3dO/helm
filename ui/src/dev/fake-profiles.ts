@@ -1,9 +1,10 @@
-// The dev fake host's profiles, household switches and peer calls (the footer chip, Settings →
-// Profiles and the household rows in a plain browser). Dev builds only.
+// The dev fake host's profiles, sharing, household switches and peer calls (the profile item and
+// screen, Settings → Profiles and the household switches in a plain browser). Dev builds only.
 //
 // The page URL picks the state:
 //   (nothing)            one home profile and one other person, no hub paired
-//   ?profiles=empty      no profile yet: the footer asks "Who uses this Helm?"
+//   ?profiles=empty      no profile yet: the profile item asks "Who uses this Helm?"
+//   ?profiles=firstrun   a placeholder home profile ("Me") that still needs its name
 //   ?household=on        paired to a hub; the other person's laptop is online and shares chats
 //                        and transcripts (also the default for any other `household=` value)
 //   ?household=send      the same, and they allow messages into their chats
@@ -35,12 +36,20 @@ export function profilesFakeOps(): { prefixes: string[]; handler: FakeOpHandler 
   const profiles: Profile[] =
     param('profiles') === 'empty'
       ? []
-      : [
-          { id: 'prof-home', name: 'Alex', colour: COLOURS[0]!, hubPersonId: 'p-self', isHome: true },
-          { id: 'prof-sam', name: 'Sam', colour: COLOURS[1]!, hubPersonId: 'p-other', isHome: false },
-        ];
-  let active: string | null = null;
+      : param('profiles') === 'firstrun'
+        ? [{ id: 'prof-home', name: 'Me', colour: COLOURS[0]!, hubPersonId: null, isHome: true, about: '', needsName: true }]
+        : [
+            { id: 'prof-home', name: 'Alex', colour: COLOURS[0]!, hubPersonId: 'p-self', isHome: true, about: '', needsName: false },
+            { id: 'prof-sam', name: 'Sam', colour: COLOURS[1]!, hubPersonId: 'p-other', isHome: false, about: '', needsName: false },
+          ];
+  // The host always has an active profile; the home profile unless one was chosen.
+  let active: string | null = profiles.find((p) => p.isHome)?.id ?? null;
   const labels = new Map<string, string>();
+  /** Chats shared with a profile other than their owner's: chat id → profile ids. */
+  const shares = new Map<string, Set<string>>();
+  /** Chats the fake has seen, so a chat started later joins the profile showing (the host's insert rule). */
+  const known = new Set<string>();
+  let seeded = false;
   const sharing: Sharing = { chats: false, transcripts: false, messages: false };
   let seq = 1;
 
@@ -78,6 +87,7 @@ export function profilesFakeOps(): { prefixes: string[]; handler: FakeOpHandler 
     }));
 
   const view = (ctx: { call: (op: string, a?: Record<string, unknown>) => unknown }): ProfilesView => {
+    adopt(ctx);
     const chats = ((ctx.call('chat_list', {}) as { id: string; archived?: boolean; status?: string }[]) ?? []).filter((c) => !c.archived);
     const home = profiles.find((p) => p.isHome);
     const of = (c: { id: string }) => labels.get(c.id) ?? home?.id;
@@ -89,6 +99,24 @@ export function profilesFakeOps(): { prefixes: string[]; handler: FakeOpHandler 
       homeId: home?.id ?? null,
       activeId: active,
     };
+  };
+
+  /** A top-level chat that appeared after the first look belongs to the profile showing. */
+  const adopt = (ctx: { call: (op: string, a?: Record<string, unknown>) => unknown }): void => {
+    const all = (ctx.call('chat_list', {}) as { id: string; parentChatId?: string | null }[]) ?? [];
+    for (const c of all) {
+      if (known.has(c.id)) continue;
+      known.add(c.id);
+      const home = profiles.find((p) => p.isHome);
+      if (seeded && !c.parentChatId && active && active !== home?.id) labels.set(c.id, active);
+    }
+    // A first look at a seeded dev host: one chat is the other person's, one is shared with them.
+    const other = profiles.find((p) => !p.isHome);
+    if (!seeded && other && all.length >= 3) {
+      labels.set(all[1]!.id, other.id);
+      shares.set(all[2]!.id, new Set([other.id]));
+    }
+    seeded = true;
   };
 
   const must = (id: unknown): Profile => {
@@ -125,6 +153,7 @@ export function profilesFakeOps(): { prefixes: string[]; handler: FakeOpHandler 
           isHome: profiles.length === 0,
         };
         profiles.push(profile);
+        if (profile.isHome) active = profile.id;
         return changed({ profile });
       }
       case 'profiles_update': {
@@ -132,6 +161,8 @@ export function profilesFakeOps(): { prefixes: string[]; handler: FakeOpHandler 
         if (typeof a.name === 'string' && a.name.trim().toLowerCase() !== p.name.toLowerCase()) p.name = cleanName(a.name);
         if (typeof a.colour === 'string') p.colour = cleanColour(a.colour);
         if ('hubPersonId' in a) p.hubPersonId = typeof a.hubPersonId === 'string' && a.hubPersonId.trim() ? a.hubPersonId.trim() : null;
+        if (typeof a.about === 'string') p.about = a.about.slice(0, 2000);
+        if (typeof a.name === 'string' && a.name.trim()) p.needsName = false;
         return changed({ profile: p });
       }
       case 'profiles_delete': {
@@ -139,7 +170,8 @@ export function profilesFakeOps(): { prefixes: string[]; handler: FakeOpHandler 
         if (p.isHome) throw new ApiError('bad_args', 'The home profile cannot be deleted.');
         profiles.splice(profiles.indexOf(p), 1);
         for (const [chat, prof] of [...labels]) if (prof === p.id) labels.delete(chat);
-        if (active === p.id) active = null;
+        if (active === p.id) active = profiles.find((x) => x.isHome)?.id ?? null;
+        for (const set of shares.values()) set.delete(p.id);
         return changed();
       }
       case 'profiles_set_active':
@@ -153,11 +185,24 @@ export function profilesFakeOps(): { prefixes: string[]; handler: FakeOpHandler 
         }
         return changed();
       }
-      case 'profiles_chat_ids': {
+      case 'profiles_share_chats': {
         const p = must(a.profileId);
-        if (!p.isHome) return { chatIds: [...labels].filter(([, prof]) => prof === p.id).map(([id]) => id) };
-        const all = (ctx.call('chat_list', {}) as { id: string }[]) ?? [];
-        return { chatIds: all.map((c) => c.id).filter((id) => !labels.has(id)) };
+        for (const id of (a.chatIds as string[]) ?? []) {
+          const set = shares.get(id) ?? new Set<string>();
+          if (a.shared === false) set.delete(p.id);
+          else set.add(p.id);
+          shares.set(id, set);
+        }
+        return changed();
+      }
+      case 'profiles_chat_ids': {
+        // Own and shared, as the host reads its column.
+        adopt(ctx);
+        const p = must(a.profileId);
+        const all = ((ctx.call('chat_list', {}) as { id: string }[]) ?? []).map((c) => c.id);
+        const home = profiles.find((x) => x.isHome)?.id;
+        const owner = (id: string) => labels.get(id) ?? home;
+        return { chatIds: all.filter((id) => owner(id) === p.id || shares.get(id)?.has(p.id)) };
       }
       case 'household_get':
         return normalised();

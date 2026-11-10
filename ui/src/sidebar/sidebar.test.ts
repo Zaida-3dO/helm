@@ -6,10 +6,11 @@ import { SidebarData } from './data.ts';
 import { toast } from '../ui/toasts.ts';
 import { SidebarActions, type ActionDeps } from './actions.ts';
 import { UndoStack } from './undo.ts';
-import { buildList, chatAncestors, headerSubtitle, HEIGHTS, nestRows, stepChat, visibleChatOrder, type ListItem } from './model.ts';
+import { buildList, chatAncestors, headerSubtitle, HEIGHTS, nestRows, showsCalmWheel, stepChat, visibleChatOrder, type ListItem } from './model.ts';
 import { loadMore, readBudget, type PageResult } from './paging.ts';
 import { age, needsYouLabel, rowAttention, rowStatusLabel, trailingIndicator } from './status.ts';
 import { layout, visibleRange } from './virtual.ts';
+import { mergeOrder, moveView, orderViews, readOrder, slotsFit, splitViews, touchView, writeOrder } from './tiles.ts';
 
 function project(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
   return {
@@ -124,11 +125,22 @@ test('a collapsed group totals the running and unread chats inside it and its ne
   const rows = [row('r1', 'a', { status: 'running' }), row('u1', 'a', { unread: true }), row('i1', 'a'), row('r2', 'kid', { status: 'starting' }), row('o1', 'open', { status: 'running' })];
   const header = (items: ListItem[], id: string) => items.find((i): i is Extract<ListItem, { kind: 'header' }> => i.kind === 'header' && i.project.id === id)!;
   const items = buildList(projects, rows, opts);
-  assert.deepEqual(header(items, 'a').marks, { running: 2, unread: 1, flagged: 0 });
+  assert.deepEqual(header(items, 'a').marks, { running: 2, unread: 1, flagged: 0, lingering: 0 });
   assert.equal(header(items, 'open').marks, null, 'an expanded group shows its own rows instead');
   assert.equal(header(buildList([project('b', { collapsed: true, chatCount: 1 })], [row('x', 'b')], opts), 'b').marks, null, 'nothing going on, no marks');
   // A waiting or flagged chat inside a collapsed group is counted on its header.
-  assert.deepEqual(header(buildList(projects, rows, { ...opts, flagged: new Set(['i1', 'r2']) }), 'a').marks, { running: 2, unread: 1, flagged: 2 });
+  assert.deepEqual(header(buildList(projects, rows, { ...opts, flagged: new Set(['i1', 'r2']) }), 'a').marks, { running: 2, unread: 1, flagged: 2, lingering: 0 });
+
+  // Background work only: the header carries the calm wheel, unless a chat inside runs (running wins).
+  const held = (extra: SidebarRow[]) => header(buildList([project('bg', { collapsed: true, chatCount: 3 })], [row('l1', 'bg', { attention: 'lingering' }), row('q1', 'bg'), ...extra], opts), 'bg').marks;
+  const cases: [string, SidebarRow[], boolean][] = [
+    ['background work only', [], true],
+    ['plus a running chat', [row('r1', 'bg', { status: 'running', attention: 'running' })], false],
+    ['plus an unread one', [row('u1', 'bg', { unread: true, attention: 'unread' })], true],
+  ];
+  for (const [what, extra, calm] of cases) assert.equal(showsCalmWheel(held(extra)!), calm, what);
+  assert.equal(held([])?.lingering, 1);
+  assert.equal(header(buildList([project('bg', { collapsed: true, chatCount: 1 })], [row('q1', 'bg')], opts), 'bg').marks, null, 'nothing going on: no mark');
 });
 
 test('chats in a closed project are never drawn, not even as loose rows, in any view', () => {
@@ -190,7 +202,7 @@ test('a missing parent draws at the top level and a collapsed group hides its co
   const shut = buildList(projects, rows, { ...opts, selectedChatId: 'x', keptShut: new Set(['b']) });
   assert.deepEqual(shape(shut), ['H0:a', 'H0:b']);
   const head = shut[1] as Extract<ListItem, { kind: 'header' }>;
-  assert.deepEqual([head.collapsed, head.marks], [true, { running: 1, unread: 0, flagged: 0 }]);
+  assert.deepEqual([head.collapsed, head.marks], [true, { running: 1, unread: 0, flagged: 0, lingering: 0 }]);
   // Collapsing the inner project shuts only that one; the project it sits in stays open around it.
   assert.deepEqual(shape(buildList(deep, rows, { ...opts, selectedChatId: 'y', keptShut: new Set(['c']) })), ['H0:a', 'H0:b', 'H1:c', 'C0:x']);
 });
@@ -529,3 +541,41 @@ test('dropping a chat before another sends the target row level in one call, wit
   assert.deepEqual(calls.at(-1), { chatId: 'a', groupProjectId: 'g', parentChatId: null, pinned: false, toEnd: true });
 });
 
+
+test('the tile row: how many tiles fit, what goes under More, and the most-recently-used order', () => {
+  // Fit is floor((width + 4) / 60), never below New, Search and More.
+  assert.deepEqual([0, 100, 200, 235, 236, 480].map(slotsFit), [3, 3, 3, 3, 4, 8]);
+  const views = ['flagged', 'tasks', 'schedules'];
+  const split = (fit: number) => {
+    const { shown, more } = splitViews(views, fit);
+    return `${shown.join(',')}|${more.join(',')}`;
+  };
+  // At 200 px (3 slots) only New, Search and More show; at 480 px (8 slots) all five tiles do.
+  assert.deepEqual([3, 4, 5, 8].map(split), ['|flagged,tasks,schedules', 'flagged|tasks,schedules', 'flagged,tasks,schedules|', 'flagged,tasks,schedules|']);
+  assert.deepEqual(splitViews(['flagged'], 3), { shown: ['flagged'], more: [] }, 'one view fits beside New and Search: no More');
+  assert.deepEqual(splitViews([], 3), { shown: [], more: [] });
+
+  // The saved order: views that are off are skipped, new ones follow in default order, repeats collapse.
+  assert.deepEqual(orderViews(['schedules', 'gone', 'schedules', 'flagged'], ['flagged', 'tasks', 'schedules']), ['schedules', 'flagged', 'tasks']);
+  assert.deepEqual(orderViews([], ['flagged', 'tasks']), ['flagged', 'tasks']);
+  // Opening a view moves it to the front; an unknown view changes nothing.
+  assert.deepEqual(touchView(['flagged', 'tasks', 'schedules'], 'schedules'), ['schedules', 'flagged', 'tasks']);
+  assert.deepEqual(touchView(['flagged', 'tasks'], 'schedules'), ['flagged', 'tasks']);
+  // Alt+arrow steps one place, and stops at the ends.
+  assert.deepEqual(moveView(['flagged', 'tasks', 'schedules'], 'tasks', -1), ['tasks', 'flagged', 'schedules']);
+  assert.deepEqual(moveView(['flagged', 'tasks', 'schedules'], 'schedules', 1), ['flagged', 'tasks', 'schedules']);
+  // A view that is off right now keeps its saved place behind the visible ones.
+  assert.deepEqual(mergeOrder(['tasks', 'flagged', 'schedules'], ['schedules', 'flagged']), ['schedules', 'flagged', 'tasks']);
+
+  // Per device: a damaged or missing value reads as no order, and a blocked store loses nothing else.
+  const mem = new Map<string, string>();
+  const store = { getItem: (k: string) => mem.get(k) ?? null, setItem: (k: string, v: string) => void mem.set(k, v) };
+  assert.deepEqual(readOrder(store), []);
+  writeOrder(['tasks', 'flagged'], store);
+  assert.deepEqual(readOrder(store), ['tasks', 'flagged']);
+  mem.set('helm.sidebar.tiles', '{not json');
+  assert.deepEqual(readOrder(store), []);
+  mem.set('helm.sidebar.tiles', '[1,"tasks",null]');
+  assert.deepEqual(readOrder(store), ['tasks']);
+  assert.doesNotThrow(() => writeOrder(['x'], { getItem: () => null, setItem: () => { throw new Error('full'); } }));
+});

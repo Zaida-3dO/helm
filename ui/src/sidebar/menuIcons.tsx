@@ -10,6 +10,7 @@ import {
   IconChevronRight,
   IconCoins,
   IconCompact,
+  IconEdit,
   IconFileText,
   IconFolder,
   IconFolderTree,
@@ -56,6 +57,7 @@ const PROJECT: Record<string, (label: string, p: ProjectNode) => ReactNode> = {
   'primary-folder': () => <IconFolder />,
   // "Change icon…" shows the project's own icon.
   icon: (_l, p) => (p.icon && !p.icon.startsWith('lib:') ? <span className="sb-menu-emoji">{p.icon}</span> : <IconSparkles />),
+  description: () => <IconEdit />,
   cost: () => <IconCoins />,
   nest: () => <IconFolderTree />,
   top: () => <IconUnnest />,

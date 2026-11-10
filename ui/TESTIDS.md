@@ -6,7 +6,7 @@ breaks those checks, so change them only together with the checks. Everything el
 
 | Hook | Element | Attributes |
 |---|---|---|
-| `new-chat` | "New chat" nav entry in the sidebar; opens the new-chat page (in the open chat's project) | |
+| `new-chat` | The New tile in the sidebar's tile row; opens the new-chat page (in the open chat's project) | |
 | `newchat-page` | The new-chat page: shown while a draft is open; nothing exists on the host until the first send | |
 | `newchat-card`, `newchat-project`, `newchat-folder`, `newchat-folder-menu`, `newchat-copy-path` | Its card, the project picker trigger (boards only), the folder (place line) button, the folder menu and the copy-path button | `newchat-copy-path` carries `data-copied` for 1.3 s after a copy |
 | `new-project`, `new-project-title`, `new-project-description`, `new-project-folder`, `new-project-submit`, `new-project-error` | The New project form (Ctrl+O, the picker's New project… row, Settings → Projects): a new board project's title, description and folder, submit and error line | |
@@ -17,7 +17,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `sidebar-set-folder` | "Set folder" on the header of a board with no folder yet; opens the Primary folder dialog | |
 | `project-tags`, `project-tag`, `workspace-tag` | The strip under the top bar: the board the open chat is shown on (a boards-only picker) and the folder it runs in | `workspace-tag`: `title` = the full path |
 | `sidebar-titlestrip`, `sidebar-beacon`, `workspace-status` | The sidebar's 48 px title strip, the beacon (mark, wordmark, chevron) and its Workspace status popover | beacon: `aria-expanded` |
-| `nav-search`, `nav-attention` | The sidebar's Search chats and Needs attention nav entries | |
+| `sidebar-tiles`, `tile-more`, `tile-more-menu`, `nav-search`, `nav-attention`, `nav-schedules`, `nav-schedules-count` | The sidebar's tile row (a toolbar; New and Search, then Flagged, Tasks and Schedules in most-recently-used order), its More tile and the menu of views that do not fit, the Search and Flagged tiles, the Schedules tile and its waiting-reminders badge | tiles: `aria-pressed` while a view is open, `aria-disabled` until the Flagged count has loaded; `data-tile-view` on the view tiles |
 | `attention-inbox`, `attention-card`, `attention-snooze-menu` | The Needs attention dialog, one card in it, and a card's Snooze menu | card: `data-chat-id`, `data-group` (`needsYou` `flagged` `stalled` `unread`) |
 | `attention-triage-setting`, `chat-flag` | The idle-check switch in the Needs attention dialog, and the flag on a sidebar row the idle check raised | |
 | `board-refresh` | Settings → Projects: Refresh, syncs with Agent Standup now (the line also shows `board-last-sync`) | — |
@@ -181,7 +181,7 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 
 | Hook | Element | Attributes |
 |---|---|---|
-| `nav-tasks` | The sidebar footer's Tasks entry (drawn only once a board address and token are saved) | |
+| `nav-tasks` | The sidebar's Tasks tile (drawn only once a board address and token are saved) | |
 | `tasks-view` / `tasks-status` / `tasks-stale` / `tasks-error` / `tasks-refresh` | The Tasks tab, its status line, the out-of-date banner, a failed first read, and the Refresh button in the panel header | `tasks-view`: `data-connection` (`unknown` `ready` `missing`), `data-loaded` |
 | `tasks-rail` / `tasks-project-all` / `tasks-project` | The project list, its All projects button, one project | `tasks-project`: `data-project-id`; `data-active` on both buttons |
 | `tasks-board` / `tasks-column` / `tasks-column-count` / `tasks-column-more` | The columns, one column, its count ("30 / 41"), its Load more | `tasks-column`: `data-column` (`backlog` `in_progress` `waiting` `completed`) |
@@ -194,6 +194,7 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 | Hook | Element | Attributes |
 |---|---|---|
 | `nav-pages` / `nav-pages-count` | The sidebar footer's Pages entry and its pinned-page count | |
+| `nav-archived` / `nav-settings` | The sidebar footer's Archived chats and Settings entries | `nav-archived`: `aria-pressed` while the archived list shows |
 | `pages-list` / `pages-row` / `pages-empty` | The Pages dialog, one pinned page in it (click opens it as a tab), and the empty note | |
 | `page-frame-root` / `page-frame` / `page-error` | A page tab's body (`data-network` is `on` or `off`), its sandboxed frame, and the error shown when the page could not open | |
 | `page-reload` / `page-network` / `page-pin` / `page-link-chat` / `page-reset` | The toolbar's Reload, network globe (`aria-pressed`), Pin and Unpin (`aria-pressed`), "send messages to the chat in view" and Reset storage buttons | |
@@ -205,11 +206,11 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 
 | Hook | Element | Attributes |
 |---|---|---|
-| `profile-chip` / `profile-chip-text` / `profile-menu` | The sidebar footer's profile chip, its words ("Name · Plan", the name, or "All profiles"), and the switcher menu | |
-| `profile-first-run` / `profile-first-name` / `profile-first-save` | The inline "Who uses this Helm?" form shown in place of the chip until a profile exists | |
-| `profile-view` / `profile-view-name` / `profile-view-counts` / `profile-view-show` / `profile-view-manage` | The profile view dialog, its name and counts lines, "Show this profile" and "Manage profiles…" | |
-| `household` / `household-group` / `household-chat` | The sidebar's household block, one computer's group in it, and one shared chat row | `household-group`: `data-offline` while the computer is off |
-| `remote-chat` / `remote-chat-banner` / `remote-chat-messages` / `remote-chat-earlier` / `remote-chat-error` / `remote-chat-send` | The read-only remote chat dialog, its "On <computer>. Read only." banner, the messages, Load earlier messages, an error line, and the message box (only when household messages are allowed) | |
+| `profile-item` / `profile-item-name` | The sidebar's profile item above Settings and its words (the profile's name, or "Who uses this Helm?" while the name is unset) | `profile-item`: `data-needs-name` |
+| `profile-first-run` / `profile-first-run-name` / `profile-first-run-device` / `profile-first-run-save` | The first-run dialog: your name, what this PC is called (prefilled) and Save | |
+| `profile-screen` / `profile-tile-<id>` / `profile-tile-add` / `profile-new-name` / `profile-screen-manage` | The full-window profile screen, one profile's tile, the Add profile tile and its name field, and the Manage profiles link | `profile-tile-<id>`: `aria-current` on the active profile |
+| `sidebar-view-projects` / `sidebar-view-activity` / `device-toggle` / `device-menu` / `device-item-<uid>` / `device-scope-note` | The Projects and Activity switch, the device toggle at its right (hidden while this PC is the only device), its menu and one device in it, and the note shown while another device's chats list | `device-item-<uid>`: `data-online`; `device-scope-note`: `data-online` |
+| `chat-shared-from` / `row-muted` / `group-background` | A small disc of the owner on a chat shared with the active profile, the bell-off mark on a muted chat row, and the calm wheel on a collapsed project that holds only background work | |
 | `settings-profiles` / `profile-row-<id>` / `profile-name` / `profile-link` / `profile-delete` / `profile-new-name` / `profile-add` / `profiles-error` | Settings → Profiles: the pane, one profile's row and its name, hub-person picker and Delete, the add field and button, and the error line | |
 | `hub-pairing` / `hub-pair-address` / `hub-pair-fallback` / `hub-pair-code` / `hub-pair` / `hub-paired` / `hub-pair-error` | Settings → Hub → Pair with a code: the block, its three fields, the Pair button, the "Connected as … on …" row and the error line | |
 | `household-switches` / `household-chats-box` / `household-transcripts-box` / `household-messages-box` | The three household switches (Settings → Hub, and the home profile's view) | |

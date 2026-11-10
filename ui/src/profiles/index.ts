@@ -1,11 +1,10 @@
-// Profiles: who uses this Helm. The footer chip and switcher, the household block, the profile view
-// and the sidebar filter. Settings → Profiles registers itself from ../settings/profiles.
+// Profiles: who uses this Helm. The sidebar's profile item and the profile screen, the first-run
+// question, and the sidebar filter. Settings → Profiles registers itself from ../settings/profiles.
 
-export { ProfileChip, PROFILES_PANE } from './ProfileChip.tsx';
-export { HouseholdSection } from './HouseholdSection.tsx';
-export { ProfileView } from './ProfileView.tsx';
+export { ProfileItem, PROFILES_PANE } from './ProfileItem.tsx';
+export { ProfileScreen } from './ProfileScreen.tsx';
 export { SharingSwitches } from './SharingSwitches.tsx';
 export { useProfiles } from './hooks.ts';
-export { profileChoices, moveChatToProfile, type ChatProfileChoice } from './menu.ts';
-export { rowsForProfile } from './model.ts';
+export { profileChoices, shareChoices, moveChatToProfile, shareChatWith, type ChatProfileChoice, type ChatShareChoice } from './menu.ts';
+export { rowsForProfile, sharedFrom } from './model.ts';
 export { profilesStoreFor } from './store.ts';

@@ -1,10 +1,9 @@
-// The profiles store: the host's profiles view, which chats carry which label, the household
-// switches, and (only while a household row is on screen) other people's shared chat lists.
+// The profiles store: the host's profiles view, the chats the active profile shows, the household
+// switches, and (only while something watches them) other people's shared chat lists.
 //
-// Labels come from the host as one chat-id list per profile other than home; a chat in none of
-// them, and not started from a labelled chat, is the home profile's (the host's own rule). The
-// household lists live in memory only: nothing is saved, and they refresh every 30 s while
-// something watches them.
+// The chats the active profile shows come from the host as one id list (its own and those shared
+// with it), read when the profile changes and kept current from chat events. The household lists
+// live in memory only: nothing is saved, and they refresh every 30 s while something watches them.
 
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
@@ -17,10 +16,21 @@ import {
   type Sharing,
 } from '../api/profiles.ts';
 import { hubOps } from '../api/hub.ts';
-import { householdTargets } from './model.ts';
+import { belongsTo, householdTargets } from './model.ts';
+
+/** The chat record fields the store reads off a `chat` event. */
+interface ChatSighting {
+  id: string;
+  parentChatId: string | null;
+  sideSourceId: string | null;
+  createdAt: number;
+  archived: boolean;
+  profileId?: string;
+  sharedWith?: string[];
+}
 
 export const HOUSEHOLD_POLL_MS = 30_000;
-/** A chat first seen this recently, while another person's profile is active, joins that profile. */
+/** On a host that does not say which profile a chat has: one first seen this recently joins the active profile. */
 export const NEW_CHAT_WINDOW_MS = 15_000;
 
 /** One machine of another person, as last read. */
@@ -41,8 +51,10 @@ export interface HouseholdGroup {
 export interface ProfilesSnapshot {
   loaded: boolean;
   view: ProfilesView | null;
-  /** Chat id → profile id, for every chat labelled with a profile other than home. */
-  labels: ReadonlyMap<string, string>;
+  /** The chats the active profile shows, own and shared; `null` until read, and with no active profile. */
+  ids: ReadonlySet<string> | null;
+  /** Chats shared from this window, by chat id, until the host's rows say so themselves. */
+  shared: ReadonlyMap<string, ReadonlySet<string>>;
   sharing: Sharing;
   /** Everyone on the hub; `null` until read, and while the hub cannot be reached. */
   people: PeerPerson[] | null;
@@ -71,7 +83,7 @@ export class ProfilesStore {
   readonly household: ReturnType<typeof householdOps>;
   private readonly hub: ReturnType<typeof hubOps>;
   private readonly deps: ProfilesDeps;
-  private snap: ProfilesSnapshot = { loaded: false, view: null, labels: new Map(), sharing: OFF, people: null, groups: new Map(), error: null };
+  private snap: ProfilesSnapshot = { loaded: false, view: null, ids: null, shared: new Map(), sharing: OFF, people: null, groups: new Map(), error: null };
   private readonly listeners = new Set<Listener>();
   private started = false;
   private seq = 0;
@@ -112,7 +124,7 @@ export class ProfilesStore {
     this.offs = [
       this.deps.bus.on('profiles_changed', () => void this.reload()),
       this.deps.bus.on('household_changed', () => void this.reloadSharing()),
-      this.deps.bus.on('chat', (e) => this.sawChat(e.chat as { id: string; parentChatId: string | null; sideSourceId: string | null; createdAt: number; archived: boolean })),
+      this.deps.bus.on('chat', (e) => this.sawChat(e.chat as ChatSighting | undefined)),
     ];
   }
 
@@ -122,17 +134,14 @@ export class ProfilesStore {
     this.started = false;
   }
 
-  /** The view and the labels. A reload that a newer one overtook is dropped. */
+  /** The view and the active profile's chats. A reload that a newer one overtook is dropped. */
   async reload(): Promise<void> {
     const mine = ++this.seq;
     try {
       const view = await this.ops.list();
-      const others = view.profiles.filter((p) => !p.isHome);
-      const lists = await Promise.all(others.map((p) => this.ops.chatIds(p.id).then((ids) => [p.id, ids] as const)));
+      const ids = view.activeId ? new Set(await this.ops.chatIds(view.activeId)) : null;
       if (mine !== this.seq) return;
-      const labels = new Map<string, string>();
-      for (const [pid, ids] of lists) for (const id of ids) labels.set(id, pid);
-      this.set({ loaded: true, view, labels, error: null });
+      this.set({ loaded: true, view, ids, error: null });
     } catch (e) {
       if (mine === this.seq) this.set({ loaded: true, error: errorText(e) });
     }
@@ -152,17 +161,42 @@ export class ProfilesStore {
     void this.reload();
   }
 
-  /** A chat the user just started while another person's profile is showing joins that profile. */
-  private sawChat(c: { id: string; parentChatId: string | null; sideSourceId: string | null; createdAt: number; archived: boolean } | undefined): void {
-    if (!c || this.seenChats.has(c.id)) return;
-    this.seenChats.add(c.id);
-    const view = this.snap.view;
-    const active = view?.activeId;
-    if (!view || !active || active === view.homeId) return;
-    const now = (this.deps.now ?? Date.now)();
-    if (c.parentChatId || c.sideSourceId || c.archived || now - c.createdAt > NEW_CHAT_WINDOW_MS) return;
-    this.set({ labels: new Map(this.snap.labels).set(c.id, active) });
-    this.ops.assign([c.id], active).catch(() => void this.reload());
+  /**
+   * A chat record from the `chat` event keeps the active profile's list current: the record says
+   * whose the chat is and who it is shared with. A host that does not say still gets its new
+   * chats right: one started from a chat in the list, or just started at the top level, joins it.
+   */
+  private sawChat(c: ChatSighting | undefined): void {
+    const active = this.snap.view?.activeId;
+    const ids = this.snap.ids;
+    if (!c || !active || !ids) return;
+    let member = belongsTo(c, active);
+    if (member === null) {
+      if (this.seenChats.has(c.id)) return;
+      this.seenChats.add(c.id);
+      const now = (this.deps.now ?? Date.now)();
+      const fresh = !c.sideSourceId && !c.archived && now - c.createdAt <= NEW_CHAT_WINDOW_MS;
+      member = (!!c.parentChatId && ids.has(c.parentChatId)) || (fresh && !c.parentChatId);
+      if (!member) return;
+    }
+    if (member === ids.has(c.id)) return;
+    const next = new Set(ids);
+    if (member) next.add(c.id);
+    else next.delete(c.id);
+    this.set({ ids: next });
+  }
+
+  /**
+   * Share one chat with a profile (or stop). `current` is who it was shared with: the marks show
+   * the new set at once, and the host's event confirms it.
+   */
+  async share(chatId: string, profileId: string, shared: boolean, current: ReadonlySet<string>): Promise<void> {
+    const view = await this.ops.share([chatId], profileId, shared);
+    const set = new Set(current);
+    if (shared) set.add(profileId);
+    else set.delete(profileId);
+    this.set({ shared: new Map(this.snap.shared).set(chatId, set) });
+    this.apply(view);
   }
 
   // ---- the household ----

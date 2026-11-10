@@ -12,6 +12,10 @@ export interface Profile {
   /** The hub's id for the person this profile is, when linked. */
   hubPersonId: string | null;
   isHome: boolean;
+  /** How to address this person and write for them; read by every chat on the profile. */
+  about?: string;
+  /** The home profile still has its placeholder name: the first-run question is asked. */
+  needsName?: boolean;
 }
 
 /** A profile with the counts the popover and the profile view show (chats that are not archived). */
@@ -94,10 +98,13 @@ export function profilesOps(api: Api) {
     list: () => api<ProfilesView>('profiles_list', {}),
     create: (a: { name: string; colour?: string; hubPersonId?: string }) => api<ProfilesView & { profile: Profile }>('profiles_create', a),
     /** `hubPersonId: null` unlinks. */
-    update: (a: { id: string; name?: string; colour?: string; hubPersonId?: string | null }) => api<ProfilesView & { profile: Profile }>('profiles_update', a),
+    update: (a: { id: string; name?: string; colour?: string; hubPersonId?: string | null; about?: string }) => api<ProfilesView & { profile: Profile }>('profiles_update', a),
     remove: (id: string) => api<ProfilesView>('profiles_delete', { id }),
     setActive: (id: string | null) => api<ProfilesView>('profiles_set_active', { id }),
     assign: (chatIds: string[], profileId: string) => api<ProfilesView>('profiles_assign_chats', { chatIds, profileId }),
+    /** Share chats with a profile (`shared`) or stop sharing them. At most 500 chats. */
+    share: (chatIds: string[], profileId: string, shared: boolean) => api<ProfilesView>('profiles_share_chats', { chatIds, profileId, shared }),
+    /** The chats a profile shows: its own and those shared with it. */
     chatIds: (profileId: string) => api<{ chatIds: string[] }>('profiles_chat_ids', { profileId }).then((r) => r.chatIds),
   };
 }

@@ -7,7 +7,7 @@ import { UNDO_LIMIT, UndoStack } from './undo.ts';
 
 const noop = () => undefined;
 const chatActs: ChatMenuActions = { fork: noop, rename: noop, compact: noop, rollOver: noop, cost: noop, exportMarkdown: noop, moveTo: noop, nestUnder: noop, topLevel: noop, toggleChildren: noop, markUnread: noop, pin: noop, mute: noop, archive: noop, restore: noop, remove: noop };
-const projActs: ProjectMenuActions = { newChat: noop, pin: noop, rename: noop, changeIcon: noop, cost: noop, nestUnder: noop, topLevel: noop, archive: noop, restore: noop, close: noop, colour: noop, customColour: noop };
+const projActs: ProjectMenuActions = { newChat: noop, pin: noop, rename: noop, changeIcon: noop, editDescription: noop, cost: noop, nestUnder: noop, topLevel: noop, archive: noop, restore: noop, close: noop, colour: noop, customColour: noop };
 
 function row(chatId: string, over: Partial<SidebarRow> = {}): SidebarRow {
   return { chatId, title: chatId, groupProjectId: 'g', folderProjectId: 'g', folderPath: 'C:/w', depth: 0, parentChatId: null, hasChildren: false, status: 'idle', attention: null, pinned: false, unread: false, muted: false, stalled: false, local: false, localAhead: null, hasDraft: false, lastActivityAt: 1, archived: false, position: null, createdAt: 1, updatedAt: 1, revision: 1, ...over };
@@ -123,6 +123,18 @@ test('the chat menu follows state: archive or restore and delete, stop first whi
   assert.deepEqual(pm?.submenu?.map((i) => [i.id, i.checked, i.disabled]), [['profile:p1', true, true], ['profile:p2', false, false]]);
   pm?.submenu?.[1]?.onSelect?.();
   assert.deepEqual(moved, ['p2']);
+  // Share with: ticked where the chat is shared, a pick toggles that profile, and the entry sits after Move to profile.
+  const shared: string[] = [];
+  const share = chatMenuItems(
+    { row: row('a'), projects: [project('g')], siblings: [row('a')], heightOf: () => 0, depthOf: () => 0, expanded: false, view: 'projects', profiles: [{ id: 'p1', name: 'One', current: true }, { id: 'p2', name: 'Two', current: false }], shares: [{ id: 'p2', name: 'Two', shared: true }] },
+    { ...chatActs, moveToProfile: noop, shareWith: (id) => void shared.push(id) },
+  );
+  assert.deepEqual(share.find((i) => i.id === 'share')?.submenu?.map((i) => [i.id, i.checked]), [['share:p2', true]]);
+  share.find((i) => i.id === 'share')?.submenu?.[0]?.onSelect?.();
+  assert.deepEqual(shared, ['p2']);
+  assert.equal(share[share.findIndex((i) => i.id === 'profile') + 1]?.id, 'share');
+  const order = share.map((i) => i.id);
+  assert.equal(order[order.indexOf('pin') + 1], 'mute', 'Mute stays in the list right after Pin');
   // Cost is there for every chat, archived or busy too.
   assert.ok(ids(row('a', { archived: true })).includes('cost') && ids(row('a', { status: 'running' })).includes('cost'));
   // Compact context: offered on an idle chat, not while it runs or once archived.
@@ -190,4 +202,5 @@ test('project nest targets keep three levels and refuse cycles', () => {
 test('the project menu places Primary folder… right after Rename', () => {
   const ids = projectMenuItems(project('a'), [project('a')], projActs).map((i) => i.id);
   assert.equal(ids[ids.indexOf('rename') + 1], 'primary-folder');
+  assert.ok(ids.includes('description'), 'a one-line description can be edited from the menu');
 });

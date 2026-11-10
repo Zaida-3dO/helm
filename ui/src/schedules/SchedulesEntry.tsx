@@ -1,6 +1,7 @@
-// The sidebar footer's Schedules entry. It opens Settings on the Schedules pane, shows how many
-// reminders are waiting, and posts a notice when a reminder comes due while the app is open.
-// Mounted by the sidebar, so it is always on screen and keeps the schedule store reading.
+// The sidebar's Schedules view. It opens Settings on the Schedules pane, counts the reminders that
+// are waiting, and posts a notice when a reminder comes due while the app is open. The sidebar's
+// tile row mounts `useSchedulesEntry`, so the hook is always on screen and keeps the schedule
+// store reading; `SchedulesEntry` is the same thing as a footer-style button.
 
 import { useEffect, useSyncExternalStore } from 'react';
 import type { Api } from '../api/client.ts';
@@ -13,20 +14,16 @@ import { scheduleStoreFor } from './store.ts';
 
 export const SCHEDULES_PANE = 'schedules';
 
-/** How long a reminder notice stays up before it falls back to the footer count. */
+/** How long a reminder notice stays up before it falls back to the count. */
 export const REMINDER_TOAST_MS = 15_000;
 
-export function SchedulesEntry({
-  api,
-  bus,
-  openSettings,
-  onOpenChat,
-}: {
-  api: Api;
-  bus: EventBus;
-  openSettings: () => void;
-  onOpenChat: (chatId: string) => void;
-}) {
+/** How many reminders wait, and how to open Settings on the Schedules pane. */
+export function useSchedulesEntry(
+  api: Api,
+  bus: EventBus,
+  openSettings: () => void,
+  onOpenChat: (chatId: string) => void,
+): { waiting: number; open: () => void } {
   const store = scheduleStoreFor(api, bus);
   const open = () => {
     requestPane(SCHEDULES_PANE);
@@ -45,6 +42,21 @@ export function SchedulesEntry({
     // `open` and `onOpenChat` are stable enough for a notice that lasts seconds.
   }, [store]);
   const waiting = useSyncExternalStore(store.subscribe, () => store.reminders.length);
+  return { waiting, open };
+}
+
+export function SchedulesEntry({
+  api,
+  bus,
+  openSettings,
+  onOpenChat,
+}: {
+  api: Api;
+  bus: EventBus;
+  openSettings: () => void;
+  onOpenChat: (chatId: string) => void;
+}) {
+  const { waiting, open } = useSchedulesEntry(api, bus, openSettings, onOpenChat);
   return (
     <button type="button" className="sb-foot" onClick={open} data-testid="nav-schedules">
       <IconClock />

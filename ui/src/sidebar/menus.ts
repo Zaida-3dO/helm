@@ -24,6 +24,8 @@ export interface ChatMenuActions {
   moveTo(projectId: string): void;
   /** Label the chat with a profile (the `profiles_assign_chats` op). */
   moveToProfile?(profileId: string): void;
+  /** Share the chat with a profile, or stop (the `profiles_share_chats` op). */
+  shareWith?(profileId: string): void;
   nestUnder(chatId: string): void;
   topLevel(): void;
   toggleChildren(): void;
@@ -50,6 +52,8 @@ export interface ChatMenuInput {
   view: 'projects' | 'activity' | 'archived';
   /** The profiles to move the chat between, current one marked; empty or absent: no entry. */
   profiles?: { id: string; name: string; current: boolean }[];
+  /** The other profiles the chat can be shared with, ticked where it is; empty or absent: no entry. */
+  shares?: { id: string; name: string; shared: boolean }[];
 }
 
 /** Valid "Nest under…" targets: same group and archived state, not itself or its descendants, and
@@ -117,6 +121,14 @@ export function chatMenuItems(i: ChatMenuInput, a: ChatMenuActions): MenuItem[] 
       submenu: i.profiles.map((p) => ({ id: `profile:${p.id}`, label: p.name, checked: p.current, disabled: p.current, onSelect: () => moveToProfile(p.id) })),
     });
   }
+  if (a.shareWith && i.shares && i.shares.length > 0) {
+    const shareWith = a.shareWith;
+    items.push({
+      id: 'share',
+      label: 'Share with',
+      submenu: i.shares.map((p) => ({ id: `share:${p.id}`, label: p.name, checked: p.shared, onSelect: () => shareWith(p.id) })),
+    });
+  }
   if (i.view !== 'activity') {
     const targets = nestTargets(i);
     items.push({
@@ -130,6 +142,8 @@ export function chatMenuItems(i: ChatMenuInput, a: ChatMenuActions): MenuItem[] 
       items.push({ id: 'children', label: i.expanded ? 'Collapse started chats' : 'Expand started chats', onSelect: a.toggleChildren });
     }
   }
+  // The entries from here on are a plain list: an item added after Pin (a new switch for the chat)
+  // slots in without moving the others.
   items.push(
     { id: 'unread', label: 'Mark as unread', shortcut: 'Ctrl+Shift+U', disabled: r.unread, onSelect: a.markUnread },
     { id: 'pin', label: r.pinned ? 'Unpin chat' : 'Pin chat', shortcut: 'Ctrl+Alt+P', onSelect: () => a.pin(!r.pinned) },
@@ -154,6 +168,8 @@ export interface ProjectMenuActions {
   pin(pinned: boolean): void;
   rename(): void;
   changeIcon(): void;
+  /** One line (at most 200 characters) that tells agents what the project is for. */
+  editDescription(): void;
   /** Show what every chat inside has used. */
   cost(): void;
   nestUnder(projectId: string): void;
@@ -203,6 +219,7 @@ export function projectMenuItems(p: ProjectNode, all: ProjectNode[], a: ProjectM
     { id: 'rename', label: 'Rename project…', onSelect: a.rename },
     primaryFolderMenuItem(p),
     { id: 'icon', label: 'Change icon…', onSelect: a.changeIcon },
+    { id: 'description', label: 'Edit description…', onSelect: a.editDescription },
     { id: 'cost', label: 'Cost…', onSelect: a.cost },
     {
       id: 'nest',

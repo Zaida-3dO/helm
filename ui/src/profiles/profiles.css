@@ -1,6 +1,6 @@
-/* Profiles: the footer chip, the switcher, the household block, the profile view and the
-   read-only remote chat. Dialogs are portalled to the body, so they use the app tokens, not the
-   sidebar's. */
+/* Profiles: the sidebar's profile item, the full-window profile screen, the first-run question, and
+   Settings → Profiles. Dialogs and the screen are portalled to the body, so they use the app
+   tokens, not the sidebar's. */
 
 .pf-disc {
   flex: none;
@@ -12,23 +12,6 @@
   font-weight: 600;
   line-height: 1;
   user-select: none;
-}
-
-.pf-all {
-  flex: none;
-  position: relative;
-  display: inline-block;
-}
-
-.pf-all-disc {
-  position: absolute;
-  border-radius: 50%;
-  background: var(--secondary, var(--muted));
-  box-shadow: 0 0 0 1.5px var(--sidebar, var(--panel));
-}
-
-.pf-all-disc + .pf-all-disc {
-  background: var(--muted);
 }
 
 .pf-dot {
@@ -46,296 +29,157 @@
   opacity: 1;
 }
 
-/* ---- footer chip ---- */
-
-.sb-root .pf-chip > span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pf-first {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 5px 9px 7px;
-}
-
-.pf-first-q {
-  font-size: 11.5px;
-  color: var(--sb-secondary, var(--secondary));
-}
-
-.pf-first-row {
-  display: flex;
-  gap: 6px;
-}
-
-.pf-first-row input {
-  flex: 1;
-  min-width: 0;
-}
-
-.pf-first-error {
+.pf-error {
   margin: 2px 9px;
   font-size: 11px;
   color: var(--error);
 }
 
-/* ---- the switcher's entries ---- */
+/* ---- the profile item above Settings ---- */
 
-.pf-entry {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
+.sb-root .sb-foot > .pf-disc {
+  flex: none;
 }
 
-.pf-entry-text {
+.sb-root .sb-profile > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-root .sb-profile[data-needs-name='true'] > span:last-child {
+  color: var(--sb-text, var(--text));
+  font-weight: 550;
+}
+
+/* ---- the profile screen ---- */
+
+.pf-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
   display: flex;
   flex-direction: column;
-  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 32px;
+  background: color-mix(in srgb, var(--bg, #fff) 94%, transparent);
+  backdrop-filter: blur(6px);
+  color: var(--text);
 }
 
-.pf-entry-name {
-  font-size: 12.5px;
+.pf-screen-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
 }
 
-.pf-entry-sub {
+.pf-screen-grid {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
+  gap: 18px;
+  max-width: 760px;
+}
+
+.pf-tile {
+  width: 140px;
+  height: 160px;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 4px 8px;
-  font-size: 11px;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 2px solid transparent;
+  text-align: center;
+  color: var(--text);
+}
+
+.pf-tile:hover {
+  background: var(--hover, var(--border));
+}
+
+.pf-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.pf-tile[aria-current='true'] {
+  border-color: var(--accent);
+}
+
+.pf-tile-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pf-tile-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
   color: var(--muted);
 }
 
-.pf-machine {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-/* ---- the household block ---- */
-
-.pf-house {
-  flex: none;
-  max-height: 34%;
-  overflow-y: auto;
-  margin: 0 12px 4px;
-  padding-top: 6px;
-  border-top: 1px solid var(--sb-line, var(--border));
-}
-
-.pf-house-group[data-offline='true'] {
-  opacity: 0.55;
-}
-
-.pf-house-head {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 4px 6px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 600;
-  text-align: left;
-  color: var(--sb-secondary, var(--secondary));
-}
-
-.pf-house-head:hover {
-  background: var(--sb-hover, var(--hover));
-}
-
-.pf-house-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pf-house-state {
-  flex: none;
-  font-weight: 400;
-  color: var(--sb-muted, var(--muted));
-}
-
-.pf-house-note {
-  padding: 2px 8px 4px 20px;
-  font-size: 11px;
-  color: var(--sb-muted, var(--muted));
-}
-
-.pf-house-row {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 6px 4px 20px;
-  border-radius: 6px;
-  font-size: 12px;
-  text-align: left;
-  color: var(--sb-text, var(--text));
-}
-
-.pf-house-row:hover:not(:disabled) {
-  background: var(--sb-hover, var(--hover));
-}
-
-.pf-house-row:disabled {
-  cursor: default;
-  color: var(--sb-muted, var(--muted));
-}
-
-.pf-house-chat-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pf-house-flag {
-  flex: none;
+.pf-tile-attention {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--att-triage, var(--warning-text));
 }
 
-.pf-house-age {
-  flex: none;
-  font-size: 10px;
-  color: var(--sb-muted, var(--muted));
+.pf-tile-add .pf-tile-plus {
+  width: 72px;
+  height: 72px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 2px dashed var(--border);
+  color: var(--muted);
 }
 
-/* ---- the profile view ---- */
+.pf-tile-form {
+  cursor: default;
+}
 
-.pf-view {
+.pf-tile-form input {
+  width: 100%;
+}
+
+.pf-screen-foot {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+}
+
+.pf-screen-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--error);
+}
+
+/* ---- the first-run question ---- */
+
+.pf-first {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-}
-
-.pf-view-head {
-  display: flex;
-  align-items: center;
   gap: 12px;
 }
 
-.pf-view-name {
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.pf-view-sub {
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.pf-view-list {
-  display: grid;
-  grid-template-columns: 90px 1fr;
-  gap: 8px 12px;
-  margin: 0;
-  font-size: 12.5px;
-}
-
-.pf-view-list dt {
-  color: var(--muted);
-}
-
-.pf-view-list dd {
-  margin: 0;
-}
-
-.pf-machines {
-  margin: 4px 0 0;
-  padding: 0;
-  list-style: none;
+.pf-first label {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   font-size: 12px;
-}
-
-.pf-machines li {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.pf-view-heading {
-  margin: 4px 0 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--muted);
-}
-
-/* ---- the remote chat ---- */
-
-.pf-remote {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  max-height: 70vh;
-}
-
-.pf-remote-banner {
-  padding: 6px 10px;
-  border-radius: 6px;
-  font-size: 12px;
-  background: var(--hover, var(--border));
   color: var(--secondary, var(--muted));
-}
-
-.pf-remote-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.pf-remote-who {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--muted);
-}
-
-.pf-remote-text {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-size: 13px;
-}
-
-.pf-remote-empty {
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-.pf-remote-send {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.pf-remote-send-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.pf-remote-hint {
-  font-size: 11px;
-  color: var(--muted);
 }
 
 /* ---- Settings → Profiles ---- */

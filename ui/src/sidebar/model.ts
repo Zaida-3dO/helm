@@ -30,12 +30,19 @@ export const HEIGHTS = {
 /** Where an item sits in its project's block: the header and its chats draw as one tinted block. */
 export type BlockPos = 'only' | 'first' | 'mid' | 'last';
 
-/** What a collapsed group still has going on inside it: chats running, chats with an unread result
- *  and chats waiting on you or flagged as possibly needing you. */
+/** What a collapsed group still has going on inside it: chats running, chats with an unread result,
+ *  chats waiting on you or flagged as possibly needing you, and chats idle apart from background
+ *  work still running (the header shows the calm wheel for those when nothing runs). */
 export interface GroupMarks {
   running: number;
   unread: number;
   flagged: number;
+  lingering: number;
+}
+
+/** The calm wheel on a collapsed header: background work only. A running chat's wheel wins over it. */
+export function showsCalmWheel(m: GroupMarks): boolean {
+  return m.lingering > 0 && m.running === 0;
 }
 
 export type ListItem = (
@@ -226,9 +233,11 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
     let running = 0;
     let unread = 0;
     let flagged = 0;
+    let lingering = 0;
     for (const r of byGroup.get(p.id) ?? []) {
       if (isBusy(r.status)) running += 1;
       else if (r.unread) unread += 1;
+      else if (r.attention === 'lingering') lingering += 1;
       if (o.flagged?.has(r.chatId)) flagged += 1;
     }
     for (const k of kids.get(p.id) ?? []) {
@@ -236,8 +245,9 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
       running += sub?.running ?? 0;
       unread += sub?.unread ?? 0;
       flagged += sub?.flagged ?? 0;
+      lingering += sub?.lingering ?? 0;
     }
-    return running + unread + flagged > 0 ? { running, unread, flagged } : null;
+    return running + unread + flagged + lingering > 0 ? { running, unread, flagged, lingering } : null;
   };
 
   const out: ListItem[] = [];
