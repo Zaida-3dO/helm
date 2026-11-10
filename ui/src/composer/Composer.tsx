@@ -404,8 +404,6 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
           attachments: [...images.map((a) => a.id), ...sentRefs.map((r) => r.id)],
         });
         if (scrollOnSendRef.current) announceSent(chat.id);
-        // The send cue, for the button and Enter alike (off unless the interface sounds are on).
-        playCue('send');
         // The host now owns these attachments (linked to the send); if the send ever comes
         // back unread, it returns them to the chat's unstaged set and `restage` picks them up.
         images.forEach((a) => URL.revokeObjectURL(a.url));
@@ -416,6 +414,13 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
           editor.current?.setText('');
           setEmpty(true);
           prevText.current = '';
+        }
+        // The send cue, for the button and Enter alike (off unless the interface sounds are on).
+        // A sound that cannot play never undoes a send that went through.
+        try {
+          playCue('send');
+        } catch {
+          // No audio here: the send stands.
         }
       } catch (e) {
         // Refused: the text stays in the draft. A send nobody confirmed is told apart: it may have arrived.

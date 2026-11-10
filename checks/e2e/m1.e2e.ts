@@ -228,6 +228,8 @@ describe("core scenarios end to end with the fake claude", { timeout: 15 * 60_00
       await page().waitForSelector(tid("attachment-thumb"), { timeout: 15_000 });
       await send(page(), "what is in this picture");
       await page().waitForSelector(tid("message-image"), { timeout: 20_000 });
+      // The message can draw before the send's answer reaches the composer, which then clears.
+      await page().waitForFunction(() => document.querySelectorAll('[data-testid="attachment-thumb"]').length === 0, null, { timeout: 10_000 }).catch(() => undefined);
       assert.equal(await page().locator(tid("attachment-thumb")).count(), 0, "the composer's thumbnails clear once sent");
       await waitText(page(), "You said: what is in this picture");
       await waitStatus(page(), "idle");
