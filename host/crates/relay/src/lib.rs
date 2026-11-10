@@ -21,6 +21,7 @@
 //! | [`voice_show`] | the `app_voice_show` tool: pictures, tables, lists, links, text and files queued for the phone's screen |
 //! | [`pair`] | pairing with the hub by a one-time code: token, names, the shared-memory server and the home profile in one step |
 //! | [`household`] | other people's Helms through the hub: the three sharing switches, serving their calls, and asking theirs |
+//! | [`devlink`] | the household's devices over the line: the device crate's frames up and down, and the service that answers other devices |
 //!
 //! Wiring: [`register_services`] adds the line (its [`client::LineHandle`] and
 //! [`client::Client`]) and [`start`] connects it once the host-tool dispatcher exists;
@@ -65,6 +66,7 @@ pub mod agent_settings;
 pub mod approve;
 pub mod client;
 pub mod config;
+pub mod devlink;
 pub mod exec;
 pub mod gate;
 pub mod household;
@@ -192,6 +194,8 @@ pub fn attach_ops(dispatcher: &Arc<helm_ipc::Dispatcher>) {
     if let Some(v) = dispatcher.ctx().services.get::<voice_sink::ChatVoice>() {
         v.attach_ops(dispatcher.clone());
     }
+    // Other devices of the household read and drive this PC's chats through the same dispatcher.
+    devlink::attach(dispatcher);
 }
 
 pub fn register_ops(reg: &mut OpRegistry) {

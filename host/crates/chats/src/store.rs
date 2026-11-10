@@ -93,6 +93,49 @@ pub fn list_chats(tx: &Transaction<'_>, revision: i64) -> rusqlite::Result<Vec<C
     rows.collect()
 }
 
+/// Every chat another device may list, archived ones included but not side chats, the most
+/// recently active first, at most `limit`. With `since`, only those whose row or activity changed
+/// at or after it.
+pub fn list_for_devices(
+    tx: &Transaction<'_>,
+    revision: i64,
+    since: Option<i64>,
+    limit: i64,
+) -> rusqlite::Result<Vec<ChatRecord>> {
+    let mut st = tx.prepare(&format!(
+        "SELECT {CHAT_COLUMNS} FROM chats c {CHAT_JOINS}
+         WHERE c.side_source_id IS NULL
+           AND MAX(c.updated_at, COALESCE(a.last_activity_at, 0)) >= ?1
+         ORDER BY MAX(c.updated_at, COALESCE(a.last_activity_at, 0)) DESC, c.id LIMIT ?2"
+    ))?;
+    let rows = st.query_map(params![since.unwrap_or(0), limit], |r| {
+        chat_from_row(r, revision)
+    })?;
+    rows.collect()
+}
+
+/// A chat's active message rows whose revision is newer than `since`: the newest `limit`, oldest
+/// first, and whether older ones were left out.
+pub fn messages_since(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    since: i64,
+    limit: i64,
+) -> rusqlite::Result<(Vec<MessageRow>, bool)> {
+    let mut st = tx.prepare(&format!(
+        "SELECT {MESSAGE_COLUMNS} FROM messages
+         WHERE chat_id = ?1 AND active = 1 AND revision > ?2
+         ORDER BY timestamp DESC, id DESC LIMIT ?3"
+    ))?;
+    let mut rows: Vec<MessageRow> = st
+        .query_map(params![chat_id, since, limit + 1], message_from_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    let more = rows.len() as i64 > limit;
+    rows.truncate(limit as usize);
+    rows.reverse();
+    Ok((rows, more))
+}
+
 /// The folder project for `cwd`, created when missing. Paths compare
 /// case-insensitively on Windows.
 pub fn upsert_folder_project(

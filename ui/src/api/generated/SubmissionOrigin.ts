@@ -5,4 +5,4 @@
  * typing in the composer. Button and notification sends are still the user's own sends (they
  * follow `sendBehavior`), but they never count as typed consent.
  */
-export type SubmissionOrigin = "typed" | "action" | "notification" | "answer" | "app" | "other_chat" | "schedule" | "telegram" | "voice";
+export type SubmissionOrigin = "typed" | "action" | "notification" | "answer" | "app" | "other_chat" | "schedule" | "telegram" | "voice" | "remote";

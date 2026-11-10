@@ -183,6 +183,8 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
         "chat_shares",
         UserOnly("Which profiles a chat is shared with is yours to set."),
     ),
+    // Messages other devices sent here, kept a week so a repeat runs once.
+    ("remote_sends", Data),
     // This install's own device id and name; written by Helm and the user's rename alone.
     (
         "device_self",

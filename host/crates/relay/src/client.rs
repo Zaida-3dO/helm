@@ -17,8 +17,10 @@
 //!   (`voice_ack`) only once the sink took it, like Telegram's. `voice_stop`, `voice_heard`,
 //!   `voice_presence` and `voice_fresh` reach the same sink; an old Helm never sees them and the
 //!   hub never needs them answered.
+//! - `devices`, `dev_call`, `dev_result` and `dev_push`: the household's devices (`crate::devlink`).
+//!   They are handed to the [`DeviceSink`] as they came, and ignored until one is attached.
 //! - The first frame up on every line is `sharing` (the household switches), and another goes
-//!   whenever the user changes one.
+//!   whenever the user changes one. The device announces itself right after it.
 //! - Upward, [`LineHandle`] sends the Telegram status and final answer, and alerts Helm starts
 //!   ([`crate::notify`]), and for the voice chat its working line and answers.
 
@@ -150,6 +152,16 @@ pub trait VoiceSink: Send + Sync {
     }
 }
 
+/// Where the household's device frames go on the PC (`crate::devlink`).
+pub trait DeviceSink: Send + Sync {
+    /// A `devices`, `dev_call`, `dev_result` or `dev_push` frame, as the hub sent it.
+    fn frame(&self, frame: Value);
+    /// A new line is up and the household switches have been sent: frames may go up now.
+    fn line_up(&self) {}
+    /// The line is gone.
+    fn line_down(&self) {}
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineState {
     Off = 0,
@@ -256,6 +268,11 @@ impl LineHandle {
             let _ = tx.send(Err("The hub line dropped before the answer came.".into()));
         }
     }
+    /// A device frame for the hub. `false` when the line is down and it was not sent: device
+    /// requests are never queued for a later line.
+    pub fn device_frame(&self, frame: Value) -> bool {
+        self.state() == LineState::Online && self.up.send(frame).is_ok()
+    }
     /// The one live status message on Telegram, edited in place by the hub.
     pub fn telegram_status(&self, text: &str) {
         let _ = self
@@ -322,6 +339,8 @@ pub struct Client {
     sink: Arc<dyn TelegramSink>,
     /// Where voice turns go; frames for it are ignored until it is attached.
     voice: std::sync::OnceLock<Arc<dyn VoiceSink>>,
+    /// Where the household's device frames go; they are ignored until it is attached.
+    devices: std::sync::OnceLock<Arc<dyn DeviceSink>>,
     handle: Arc<LineHandle>,
     up_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Value>>,
     /// Hub ids of Telegram messages being delivered now: the hub's resend of one of them is
@@ -372,6 +391,7 @@ impl Client {
             executor,
             sink,
             voice: std::sync::OnceLock::new(),
+            devices: std::sync::OnceLock::new(),
             handle: Arc::new(LineHandle {
                 state: AtomicU8::new(LineState::Off as u8),
                 up,
@@ -391,6 +411,11 @@ impl Client {
     /// Give the line the sink for voice turns.
     pub fn attach_voice(&self, sink: Arc<dyn VoiceSink>) {
         let _ = self.voice.set(sink);
+    }
+
+    /// Give the line the sink for the household's device frames.
+    pub fn attach_devices(&self, sink: Arc<dyn DeviceSink>) {
+        let _ = self.devices.set(sink);
     }
 
     /// What the household may see now.
@@ -497,6 +522,10 @@ impl Client {
         {
             return;
         }
+        // The device announces itself after the switches, so the hub knows what is shared first.
+        if let Some(d) = self.devices.get() {
+            d.line_up();
+        }
         let silence = tokio::time::sleep(SILENCE);
         tokio::pin!(silence);
         loop {
@@ -520,6 +549,9 @@ impl Client {
             }
         }
         let _ = sink_ws.close().await;
+        if let Some(d) = self.devices.get() {
+            d.line_down();
+        }
     }
 
     fn on_frame(&self, text: &str, out: &mpsc::UnboundedSender<Value>) {
@@ -699,6 +731,11 @@ impl Client {
                     return;
                 };
                 tokio::spawn(async move { voice.fresh().await });
+            }
+            Some("devices" | "dev_call" | "dev_result" | "dev_push") => {
+                if let Some(d) = self.devices.get() {
+                    d.frame(v.clone());
+                }
             }
             Some("telegram_stop") => {
                 let sink = self.sink.clone();
@@ -1262,6 +1299,94 @@ mod tests {
         reply.turn = None;
         assert!(h.voice_reply(&reply));
         assert_eq!(next(&mut ws).await["type"], "voice_notify");
+        task.abort();
+    }
+
+    #[derive(Default)]
+    struct Devices {
+        frames: Mutex<Vec<Value>>,
+        ups: Mutex<usize>,
+        downs: Mutex<usize>,
+    }
+    impl DeviceSink for Devices {
+        fn frame(&self, frame: Value) {
+            self.frames.lock().unwrap().push(frame);
+        }
+        fn line_up(&self) {
+            *self.ups.lock().unwrap() += 1;
+        }
+        fn line_down(&self) {
+            *self.downs.lock().unwrap() += 1;
+        }
+    }
+
+    #[tokio::test]
+    async fn device_frames_go_up_after_the_switches_and_come_down_to_the_sink() {
+        let (url, hub) = fake_hub().await;
+        let devices = Arc::new(Devices::default());
+        let c = client(
+            (&url, ""),
+            Arc::new(Exec::default()),
+            Arc::new(Sink::default()),
+        );
+        c.attach_devices(devices.clone());
+        let task = tokio::spawn(c.clone().run());
+        let (_, mut ws) = hub.await.unwrap();
+        // The switches come first; the device is told the line is up right after them.
+        assert_eq!(next(&mut ws).await["type"], "sharing");
+        for _ in 0..200 {
+            if *devices.ups.lock().unwrap() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(*devices.ups.lock().unwrap(), 1);
+        let hello = json!({"type": "device", "uid": "u1", "name": "Desk", "run": true});
+        assert!(c.handle().device_frame(hello.clone()));
+        assert_eq!(next(&mut ws).await, hello);
+
+        // Device frames reach the sink as sent; other frames and unknown types do not.
+        let send = |v: Value| Message::Text(v.to_string().into());
+        for f in [
+            json!({"type": "devices", "list": []}),
+            json!({"type": "dev_call", "id": "h1", "op": "hello"}),
+            json!({"type": "dev_result", "id": "r1", "ok": true}),
+            json!({"type": "dev_push", "from": "u2", "sub": "chats", "seq": 1, "event": {}}),
+            json!({"type": "dev_unheard_of"}),
+        ] {
+            ws.send(send(f)).await.unwrap();
+        }
+        for _ in 0..200 {
+            if devices.frames.lock().unwrap().len() >= 4 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let kinds: Vec<_> = devices
+            .frames
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|f| f["type"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(kinds, ["devices", "dev_call", "dev_result", "dev_push"]);
+
+        // When the line drops the sink is told, and nothing more goes up.
+        drop(ws);
+        for _ in 0..200 {
+            if *devices.downs.lock().unwrap() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(*devices.downs.lock().unwrap(), 1);
+        for _ in 0..200 {
+            if c.handle().state() != LineState::Online {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!c.handle().device_frame(hello));
         task.abort();
     }
 

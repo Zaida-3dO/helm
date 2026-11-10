@@ -20,6 +20,7 @@ pub struct TappedEvents {
     inner: Arc<dyn EventSink>,
     shell: OnceLock<Arc<ShellService>>,
     voice: OnceLock<Arc<helm_relay::voice_watch::VoiceWatch>>,
+    devices: OnceLock<Arc<helm_devices::EventTap>>,
 }
 
 impl TappedEvents {
@@ -28,6 +29,7 @@ impl TappedEvents {
             inner,
             shell: OnceLock::new(),
             voice: OnceLock::new(),
+            devices: OnceLock::new(),
         }
     }
 
@@ -38,6 +40,11 @@ impl TappedEvents {
     /// The voice chat's watch also sees attention, finished replies and busy chats.
     pub fn attach_voice(&self, watch: Arc<helm_relay::voice_watch::VoiceWatch>) {
         let _ = self.voice.set(watch);
+    }
+
+    /// Other devices that watch this PC's chats hear chat events too.
+    pub fn attach_devices(&self, tap: Arc<helm_devices::EventTap>) {
+        let _ = self.devices.set(tap);
     }
 }
 
@@ -50,6 +57,9 @@ impl EventSink for TappedEvents {
         }
         if let Some(v) = self.voice.get() {
             v.observe(&event);
+        }
+        if let Some(d) = self.devices.get() {
+            d.observe(&event);
         }
         self.inner.emit(event);
     }

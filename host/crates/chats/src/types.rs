@@ -755,6 +755,9 @@ pub enum SubmissionOrigin {
     /// Spoken or typed on the phone's voice screen and forwarded by the hub. Like `telegram`, it
     /// never counts as consent, and approvals, plans and trust prompts are never answered by it.
     Voice,
+    /// Typed on another device of the household for a chat that runs here. The person at that
+    /// device owns the chat, so it counts as their own words.
+    Remote,
 }
 
 impl SubmissionOrigin {
@@ -769,6 +772,7 @@ impl SubmissionOrigin {
             Self::Schedule => "schedule",
             Self::Telegram => "telegram",
             Self::Voice => "voice",
+            Self::Remote => "remote",
         }
     }
 
@@ -784,6 +788,7 @@ impl SubmissionOrigin {
             "schedule" => Self::Schedule,
             "telegram" => Self::Telegram,
             "voice" => Self::Voice,
+            "remote" => Self::Remote,
             _ => Self::App,
         }
     }
@@ -792,7 +797,7 @@ impl SubmissionOrigin {
     pub fn is_users_own(self) -> bool {
         matches!(
             self,
-            Self::Typed | Self::Action | Self::Notification | Self::Answer
+            Self::Typed | Self::Action | Self::Notification | Self::Answer | Self::Remote
         )
     }
 }

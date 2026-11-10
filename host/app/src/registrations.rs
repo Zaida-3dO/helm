@@ -86,6 +86,8 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_governor::register_services(services, events);
     helm_localmodels::register_services(services, events);
     helm_relay::register_services(services, events);
+    // Where chat events reach the service that answers other devices.
+    helm_devices::register_services(services, events);
     helm_updates::register_services(services, events);
     helm_github::register_services(services, events);
     // The Brave key and the gate that tells launches whether to list web search.
