@@ -14,6 +14,9 @@
 //! | [`sink`] | Telegram messages into the active chat, and the status and answer mirrored back |
 //! | [`notify`] | Helm speaking first: the `app_telegram_send` tool and alerts while the user is away |
 //! | [`approve`] | approving from Telegram: buttons for permission prompts and plan approvals, off by default |
+//! | [`voice`] | the voice chat: its tag and limits, the notes it is given, and the replies sent up for the phone |
+//! | [`voice_sink`] | voice turns into the voice chat, and the working line and answers mirrored back |
+//! | [`speakable`] | an answer cleaned, split and cut so it is good to hear |
 //! | [`pair`] | pairing with the hub by a one-time code: token, names, the shared-memory server and the home profile in one step |
 //! | [`household`] | other people's Helms through the hub: the three sharing switches, serving their calls, and asking theirs |
 //!
@@ -31,6 +34,13 @@
 //! `relay_telegram_reset` (drop the tag, so the next message starts a new chat). The same policy
 //! reaches chats through [`agent_settings`]: the `telegram` key of `app_get_settings` and
 //! `app_update_settings`, where chats may change only the new chat's model and effort.
+//!
+//! The voice chat (Settings → Hub's Voice block): `relay_voice_get` → [`voice_sink::VoiceView`]
+//! (the chat the phone talks to, the model and effort a new voice chat opens with, the idle, age
+//! and token limits, and what the attention watch wakes it for), `relay_voice_save`
+//! ([`voice::PolicyFile`], whole) and `relay_voice_reset` (drop the tag, so the next turn starts a
+//! new chat). Chats see the same policy through the `voice` key of `app_get_settings` and
+//! `app_update_settings`, and may change only the model and effort.
 //!
 //! Identity and the household (Settings → Hub, the sidebar's profile popover). All of these are
 //! the user's own; no agent tool reaches them.
@@ -59,7 +69,10 @@ pub mod household;
 pub mod notify;
 pub mod pair;
 pub mod sink;
+pub mod speakable;
 pub mod telegram;
+pub mod voice;
+pub mod voice_sink;
 
 pub use agent_settings::settings_extension;
 
@@ -101,17 +114,24 @@ pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) 
     let creds = Arc::new(credentials(&profile, &platform));
     let executor = Arc::new(exec::AppExecutor::default());
     let sink = Arc::new(sink::ChatSink::new(executor.clone(), profile.dir.clone()));
+    let voice = Arc::new(voice_sink::ChatVoice::new(
+        executor.clone(),
+        profile.dir.clone(),
+    ));
     let client = client::Client::new(
         Arc::new(move || config::effective(&creds)),
         executor.clone(),
         sink.clone(),
     );
     sink.attach_line(client.handle());
+    voice.attach_line(client.handle());
+    client.attach_voice(voice.clone());
     // The household switches the user last chose (all off until they choose).
     if let Some(db) = services.get::<helm_core::db::Database>() {
         client.restore_sharing(household::load(&db));
     }
     services.insert(sink);
+    services.insert(voice);
     services.insert(client.handle());
     services.insert(executor);
     services.insert(client);
@@ -154,6 +174,9 @@ pub fn attach_ops(dispatcher: &Arc<helm_ipc::Dispatcher>) {
     if let Some(s) = dispatcher.ctx().services.get::<sink::ChatSink>() {
         s.attach_ops(dispatcher.clone());
     }
+    if let Some(v) = dispatcher.ctx().services.get::<voice_sink::ChatVoice>() {
+        v.attach_ops(dispatcher.clone());
+    }
 }
 
 pub fn register_ops(reg: &mut OpRegistry) {
@@ -165,7 +188,10 @@ pub fn register_ops(reg: &mut OpRegistry) {
         )
         .blocking("relay_telegram_get", OpClass::Blocking, telegram_get)
         .blocking("relay_telegram_save", OpClass::Blocking, telegram_save)
-        .blocking("relay_telegram_reset", OpClass::Blocking, telegram_reset);
+        .blocking("relay_telegram_reset", OpClass::Blocking, telegram_reset)
+        .blocking("relay_voice_get", OpClass::Blocking, voice_get)
+        .blocking("relay_voice_save", OpClass::Blocking, voice_save)
+        .blocking("relay_voice_reset", OpClass::Blocking, voice_reset);
     pair::register_ops(reg);
     household::register_ops(reg);
 }
@@ -220,4 +246,34 @@ fn telegram_reset(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
     telegram::save_tag(&telegram::tag_path(&profile.dir), None)
         .map_err(|_| ApiError::internal("The Telegram chat tag could not be removed."))?;
     telegram_view(ctx)
+}
+
+fn voice_view(ctx: &OpCtx) -> Result<Value, ApiError> {
+    let profile = ctx.services.need::<Profile>()?;
+    let db = ctx.services.need::<helm_core::db::Database>()?;
+    to_value(&voice_sink::voice_view(&db, &profile.dir, helm_core::now_ms()))
+}
+
+fn voice_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+    voice_view(ctx)
+}
+
+fn voice_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let f: voice::PolicyFile = serde_json::from_value(args).map_err(|_| {
+        ApiError::bad_args(
+            "Expected model, effort, idleMinutes, maxAgeHours, maxTokens and watch (off, flags or flags+done).",
+        )
+    })?;
+    f.check().map_err(ApiError::bad_args)?;
+    let profile = ctx.services.need::<Profile>()?;
+    voice::save_policy(&voice::policy_path(&profile.dir), &f)
+        .map_err(|_| ApiError::internal("The voice limits could not be saved."))?;
+    voice_view(ctx)
+}
+
+fn voice_reset(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
+    let profile = ctx.services.need::<Profile>()?;
+    voice::save_tag(&voice::tag_path(&profile.dir), None)
+        .map_err(|_| ApiError::internal("The voice chat tag could not be removed."))?;
+    voice_view(ctx)
 }

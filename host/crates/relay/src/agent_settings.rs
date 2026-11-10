@@ -1,4 +1,13 @@
-//! Settings → Hub for chats: the `telegram` key of `app_get_settings` and `app_update_settings`.
+//! Settings → Hub for chats: the `telegram` and `voice` keys of `app_get_settings` and
+//! `app_update_settings`.
+//!
+//! The `voice` key is the voice chat's policy ([`crate::voice::PolicyFile`]): the model and effort a
+//! new voice chat opens with, the idle, age and token limits, and what the attention watch wakes
+//! it for. As for Telegram, a chat may change only the model and effort; the rest is the user's,
+//! and an update that would move any of it is refused whole. `null` puts the model and effort
+//! back to the defaults, and a blank one means the app's usual new-chat setting.
+//!
+//! What follows describes the `telegram` key.
 //!
 //! The value is the whole Telegram policy file: the tag limits, the away-alerts switch, whether
 //! approval prompts can be answered from Telegram, and the model and effort a new Telegram chat
@@ -14,6 +23,7 @@
 //! credentials live in the credential store.
 
 use crate::telegram::{self, PolicyFile};
+use crate::voice;
 use helm_hosttools::SettingsExtension;
 use helm_ipc::AppEvent;
 use rusqlite::Transaction;
@@ -34,11 +44,68 @@ pub struct TelegramPolicy {
     path: PathBuf,
 }
 
-/// The extension to register as a [`helm_hosttools::SettingsExtensions`] entry.
+/// The extension to register as a [`helm_hosttools::SettingsExtensions`] entry. It owns both
+/// keys, `telegram` and `voice`.
 pub fn settings_extension(profile_dir: &std::path::Path) -> std::sync::Arc<dyn SettingsExtension> {
-    std::sync::Arc::new(TelegramPolicy {
-        path: telegram::policy_path(profile_dir),
+    std::sync::Arc::new(Both {
+        telegram: TelegramPolicy {
+            path: telegram::policy_path(profile_dir),
+        },
+        voice: VoicePolicy {
+            path: voice::policy_path(profile_dir),
+        },
     })
+}
+
+/// Both keys behind one registration: each call goes to the policy that owns the key.
+struct Both {
+    telegram: TelegramPolicy,
+    voice: VoicePolicy,
+}
+
+impl Both {
+    fn owner(&self, key: &str) -> &dyn SettingsExtension {
+        if key == VOICE_KEY {
+            &self.voice
+        } else {
+            &self.telegram
+        }
+    }
+}
+
+impl SettingsExtension for Both {
+    fn keys(&self) -> Vec<&'static str> {
+        vec![KEY, VOICE_KEY]
+    }
+    fn describe(&self, key: &str) -> Option<Value> {
+        self.owner(key).describe(key)
+    }
+    fn needs_all_settings(&self, key: &str) -> bool {
+        self.owner(key).needs_all_settings(key)
+    }
+    fn read(&self, tx: &Transaction<'_>, key: &str) -> Value {
+        self.owner(key).read(tx, key)
+    }
+    fn apply(
+        &self,
+        tx: &Transaction<'_>,
+        key: &str,
+        value: &Value,
+    ) -> Result<(Value, Value), String> {
+        self.owner(key).apply(tx, key, value)
+    }
+    fn restore(&self, tx: &Transaction<'_>, key: &str, value: &Value) -> Result<(), String> {
+        self.owner(key).restore(tx, key, value)
+    }
+    fn changed_event(&self, key: &str) -> AppEvent {
+        self.owner(key).changed_event(key)
+    }
+    fn details(&self, tx: &Transaction<'_>, key: &str) -> Option<Value> {
+        self.owner(key).details(tx, key)
+    }
+    fn after_commit(&self, key: &str) {
+        self.owner(key).after_commit(key)
+    }
 }
 
 fn as_json(f: &PolicyFile) -> Value {
@@ -229,6 +296,140 @@ impl SettingsExtension for TelegramPolicy {
     }
 }
 
+// ---- the voice chat's policy ---------------------------------------------------------------
+
+pub const VOICE_KEY: &str = "voice";
+const VOICE_EVENT: &str = "relay_voice";
+
+pub struct VoicePolicy {
+    path: PathBuf,
+}
+
+fn voice_json(f: &voice::PolicyFile) -> Value {
+    serde_json::to_value(f).expect("the policy serialises")
+}
+
+/// The voice policy as a value, or a sentence naming what is wrong with it.
+fn voice_from_json(v: &Value) -> Result<voice::PolicyFile, String> {
+    serde_json::from_value(v.clone()).map_err(|e| {
+        format!("Expected model, effort, idleMinutes, maxAgeHours, maxTokens and watch: {e}")
+    })
+}
+
+/// The two fields a chat may set, checked; a sentence naming the problem, if any.
+fn check_voice_changeable(patch: &Value) -> Result<(), String> {
+    if let Some(m) = patch.get("model") {
+        if !m.is_null() {
+            let s = m.as_str().ok_or_else(|| {
+                format!("{VOICE_KEY}.model must be a model id or null (null puts back the default; blank uses the app's usual new-chat model).")
+            })?;
+            if s.chars().count() > MAX_MODEL_CHARS || s.chars().any(char::is_control) {
+                return Err(format!(
+                    "{VOICE_KEY}.model must be a model id from the model picker (one line, at most {MAX_MODEL_CHARS} characters), or null."
+                ));
+            }
+        }
+    }
+    if let Some(e) = patch.get("effort") {
+        if !e.is_null() {
+            let s = e
+                .as_str()
+                .ok_or_else(|| format!("{VOICE_KEY}.effort must be one of {EFFORT_LIST} or null."))?;
+            if !s.trim().is_empty() && !helm_chats::catalogue::is_effort(s.trim()) {
+                return Err(format!(
+                    "{VOICE_KEY}.effort must be one of {EFFORT_LIST} or null."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn voice_options() -> Value {
+    json!({
+        "type": "object",
+        "about": "Settings > Hub: the voice chat's model and effort for a new voice chat, its limits, and what the attention watch wakes it for. Read all of it. You may change only model and effort; the limits and the watch are the user's and an update that touches them is refused. Send only the fields to change: the rest must repeat at their current value or stay out. null puts model and effort back to the defaults.",
+        "default": voice_json(&voice::PolicyFile::default()),
+        "merge": true,
+        "fields": {
+            "model": {"type": "string", "rule": "a model id from the model picker (a Claude model, or local/<server>/<model>), at most 120 characters; blank: the app's usual new-chat model; null: the default", "about": "The model a new voice chat opens with."},
+            "effort": {"type": "enum", "allowed": helm_chats::catalogue::EFFORTS, "blankAllowed": true, "nullable": true, "about": "The effort a new voice chat opens with; blank: the app's usual new-chat effort; null: the default."},
+            "idleMinutes": {"type": "integer", "min": 15, "max": 1440, "about": "A message arriving this long after the last one starts a new voice chat."},
+            "maxAgeHours": {"type": "integer", "min": 1, "max": 720, "about": "A voice chat this old is left behind."},
+            "maxTokens": {"type": "integer", "min": 10_000, "max": 5_000_000, "about": "The running token cap for a voice chat."},
+            "watch": {"type": "enum", "allowed": ["off", "flags", "flags+done"], "about": "What the attention watch wakes the voice chat for."},
+        },
+    })
+}
+
+impl SettingsExtension for VoicePolicy {
+    fn keys(&self) -> Vec<&'static str> {
+        vec![VOICE_KEY]
+    }
+
+    fn describe(&self, key: &str) -> Option<Value> {
+        (key == VOICE_KEY).then(voice_options)
+    }
+
+    fn read(&self, _tx: &Transaction<'_>, _key: &str) -> Value {
+        voice_json(&voice::load_file(&self.path))
+    }
+
+    fn apply(
+        &self,
+        _tx: &Transaction<'_>,
+        _key: &str,
+        value: &Value,
+    ) -> Result<(Value, Value), String> {
+        let before = voice_json(&voice::load_file(&self.path));
+        let mut wanted = if value.is_null() {
+            reset_changeable(&before)
+        } else if value.is_object() {
+            check_voice_changeable(value)?;
+            let mut m = before.clone();
+            merge(&mut m, value);
+            m
+        } else {
+            return Err(format!(
+                "{VOICE_KEY} must be an object with only the fields to change (see options.{VOICE_KEY}), or null."
+            ));
+        };
+        // A null model or effort is the default again.
+        let defaults = voice_json(&voice::PolicyFile::default());
+        if let Some(o) = wanted.as_object_mut() {
+            for k in ["model", "effort"] {
+                if o.get(k).is_none_or(|v| v.is_null()) {
+                    o.insert(k.to_owned(), defaults[k].clone());
+                }
+            }
+        }
+        let merged = voice_from_json(&wanted)?;
+        merged.check()?;
+        let after = voice_json(&merged);
+        if let Some(path) = first_diff(&locked(&before), &locked(&after), "") {
+            return Err(format!(
+                "{VOICE_KEY}.{path} is yours to change only: ask the user to change it in {PAGE}. You may change model and effort."
+            ));
+        }
+        voice::save_policy(&self.path, &merged).map_err(voice_io_err)?;
+        Ok((before, after))
+    }
+
+    fn restore(&self, _tx: &Transaction<'_>, _key: &str, value: &Value) -> Result<(), String> {
+        let f = voice_from_json(value)?;
+        f.check()?;
+        voice::save_policy(&self.path, &f).map_err(voice_io_err)
+    }
+
+    fn changed_event(&self, _key: &str) -> AppEvent {
+        AppEvent::new(VOICE_EVENT)
+    }
+}
+
+fn voice_io_err(e: std::io::Error) -> String {
+    format!("The voice policy could not be saved: {e}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +617,79 @@ mod tests {
         assert!(e.read().get("model").is_none());
         // Everything lived under the temp folder's profile path; nothing touched the real one.
         assert!(telegram::policy_path(&e.dir.path().join("prof")).is_file());
+    }
+
+    #[test]
+    fn a_chat_sets_the_voice_chats_model_and_effort_only_and_undo_puts_them_back() {
+        let e = env();
+        let voice_ext = VoicePolicy {
+            path: voice::policy_path(&e.dir.path().join("prof")),
+        };
+        let apply = |v: Value| {
+            e.db.write(|tx| Ok::<_, rusqlite::Error>(voice_ext.apply(tx, VOICE_KEY, &v)))
+                .expect("the policy file save is not a sql error")
+        };
+        let read = || {
+            e.db.snapshot(|tx| Ok::<_, rusqlite::Error>(voice_ext.read(tx, VOICE_KEY)))
+                .unwrap()
+        };
+        // One registration owns both keys, and each goes to its own policy.
+        let both = settings_extension(&e.dir.path().join("prof"));
+        assert_eq!(both.keys(), vec![KEY, VOICE_KEY]);
+        assert!(both.describe(VOICE_KEY).is_some() && both.describe(KEY).is_some());
+        assert!(both.describe("theme").is_none());
+        assert_eq!(both.changed_event(VOICE_KEY).kind, VOICE_EVENT);
+        assert_eq!(both.changed_event(KEY).kind, EVENT);
+
+        // The defaults read in full.
+        let start = read();
+        assert_eq!(
+            (start["model"].as_str(), start["effort"].as_str(), start["idleMinutes"].as_i64()),
+            (Some("claude-sonnet-5-5"), Some("low"), Some(240))
+        );
+        assert_eq!(start["watch"], json!("flags"));
+
+        // A chat sets the two fields, and the file holds them.
+        let (before, after) = apply(json!({"model": "opus", "effort": "high"})).unwrap();
+        assert_eq!(before["model"], json!("claude-sonnet-5-5"));
+        assert_eq!((after["model"].as_str(), after["effort"].as_str()), (Some("opus"), Some("high")));
+        assert_eq!(voice::load_file(&voice_ext.path).new_chat(), (Some("opus"), Some("high")));
+        assert_eq!(read()["idleMinutes"], json!(240));
+
+        // Refusals: a bad effort, a bad model, the user's fields, a stranger, a bare value.
+        for bad in ["ultra", "HIGH"] {
+            let err = apply(json!({"effort": bad})).unwrap_err();
+            assert!(err.contains("low, medium, high, xhigh or max"), "{bad}: {err}");
+        }
+        assert!(apply(json!({"model": 3})).unwrap_err().contains("model id"));
+        assert!(apply(json!({"model": "ha\nku"})).unwrap_err().contains("at most 120"));
+        for field in [json!({"idleMinutes": 30}), json!({"watch": "off"}), json!({"maxTokens": 20_000})] {
+            let err = apply(field.clone()).unwrap_err();
+            let name = field.as_object().unwrap().keys().next().unwrap().clone();
+            assert!(err.contains(&name) && err.contains("Settings > Hub"), "{err}");
+        }
+        assert!(apply(json!({"idleMinutes": 5})).unwrap_err().contains("idle time"));
+        assert!(apply(json!({"token": "abc"})).unwrap_err().contains("idleMinutes"));
+        assert!(apply(json!("opus")).unwrap_err().contains("object"));
+        // The user's fields may be repeated as they are.
+        assert!(apply(json!({"idleMinutes": 240, "watch": "flags", "model": "sonnet"})).is_ok());
+        assert_eq!(read()["model"], json!("sonnet"));
+
+        // Blank means the app's usual setting; null puts the defaults back; undo restores.
+        apply(json!({"model": "", "effort": ""})).unwrap();
+        assert_eq!(voice::load_file(&voice_ext.path).new_chat(), (None, None));
+        let (before, after) = apply(json!(null)).unwrap();
+        assert_eq!(after["model"], json!("claude-sonnet-5-5"));
+        assert_eq!(after["effort"], json!("low"));
+        voice_ext_restore(&e, &voice_ext, &before);
+        assert_eq!(read()["model"], json!(""));
+        voice_ext_restore(&e, &voice_ext, &after);
+        assert_eq!(read()["model"], json!("claude-sonnet-5-5"));
+    }
+
+    fn voice_ext_restore(e: &Env, ext: &VoicePolicy, v: &Value) {
+        e.db.write(|tx| Ok::<_, rusqlite::Error>(ext.restore(tx, VOICE_KEY, v)))
+            .expect("the policy file save is not a sql error")
+            .unwrap();
     }
 }

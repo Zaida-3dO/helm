@@ -12,6 +12,7 @@ import { SETTINGS_DIALOG } from '../SettingsDialog.tsx';
 import { EFFORT_OPTIONS } from '../runtime/model.ts';
 import { compactCount } from '../../transcript/rowMeta.ts';
 import { HubPairing } from './HubPairing.tsx';
+import { VoiceBlock } from './VoiceBlock.tsx';
 import './hub.css';
 
 /** How often the pane re-reads the line's state while it is open. */
@@ -325,6 +326,7 @@ export function HubPane() {
           />
         </SettingRow>
       )}
+      <VoiceBlock />
       {error && (
         <div className="ui-field-error" role="alert" data-testid="hub-error">
           {error}

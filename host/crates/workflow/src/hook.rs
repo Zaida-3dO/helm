@@ -19,9 +19,9 @@
 //! In force, a refusal is soft: it says why and how to get through. The orchestrator (never a
 //! sub-agent) can override with a first line `# helm-override: <reason>` (reason tier) or
 //! `# helm-override: <reason> [user: "<the user's own words>"]` (quote tier, checked against what
-//! the user typed in this chat since the task's turn began; a Telegram message, a schedule or
-//! another chat never counts), or for the reason tier by sending the same command again as its
-//! next Bash call in the turn. A refused MCP call is overridden by a Bash call whose whole
+//! the user typed in this chat since the task's turn began; a Telegram or voice message, a
+//! schedule or another chat never counts), or for the reason tier by sending the same command
+//! again as its next Bash call in the turn. A refused MCP call is overridden by a Bash call whose whole
 //! command is the override line, then the same MCP call again. Each override writes one
 //! `guard_override` row and each refusal a `gate_denied` row; both show in the workflow panel's
 //! Needs you until the user's next message.
@@ -402,7 +402,7 @@ fn bash(
             let resend_hint = if *tier == Tier::Reason {
                 " Or send the same command again as your next Bash call."
             } else {
-                " The user's words must be typed in this chat; a Telegram message does not count."
+                " The user's words must be typed in this chat; a Telegram or voice message does not count."
             };
             Ok(Answer::refuse(format!(
                 "{text}{resend_hint}{} {TURN_OFF}",
@@ -683,7 +683,7 @@ fn mcp(db: &Database, chat: &str, c: &Check, f: &InForce, now: i64) -> rusqlite:
     drop(states);
     gate_denied(db, chat, &f.run, "mcp", &key, rule, now)?;
     Ok(Answer::refuse(format!(
-        "Helm refused: {why}. This needs the user's permission: ask them, then run a Bash command that is only `{} <reason> [user: \"<their exact words>\"]` and send this exact call again. The user's words must be typed in this chat; a Telegram message does not count.{} {TURN_OFF}",
+        "Helm refused: {why}. This needs the user's permission: ask them, then run a Bash command that is only `{} <reason> [user: \"<their exact words>\"]` and send this exact call again. The user's words must be typed in this chat; a Telegram or voice message does not count.{} {TURN_OFF}",
         overrides::MARKER,
         way_through(rule)
     )))
@@ -1099,6 +1099,12 @@ mod tests {
             "# helm-override: asked [user: \"push the hotfix to main\"]\n{MAIN}"
         ));
         assert!(!tg.allow && tg.reason.unwrap().contains("do not match"));
+        // Nor is one spoken into the voice chat.
+        t.says("s1v", "go ahead and push the hotfix to main", "voice", 25);
+        let vo = t.bash(&format!(
+            "# helm-override: asked [user: \"push the hotfix to main\"]\n{MAIN}"
+        ));
+        assert!(!vo.allow && vo.reason.unwrap().contains("do not match"));
         // The user's own typed words let the one command through, and it is recorded.
         t.says("s2", "Yes, push the hotfix to main now.", "typed", 30);
         let ok = t.bash(&format!(

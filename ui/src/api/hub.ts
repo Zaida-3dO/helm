@@ -1,4 +1,4 @@
-// The hub line and its Telegram chat (host/crates/relay), for Settings → Hub.
+// The hub line, its Telegram chat and its voice chat (host/crates/relay), for Settings → Hub.
 
 import type { Api } from './client.ts';
 
@@ -58,6 +58,32 @@ export interface TelegramSettings {
   effort: string | null;
 }
 
+/** What the attention watch wakes the voice chat for. */
+export type VoiceWatch = 'off' | 'flags' | 'flags+done';
+
+/** The chat the phone's voice screen talks to while its tag holds. */
+export interface VoiceChat {
+  id: string;
+  title: string;
+  startedAt: number;
+  /** Tokens used since it became the voice chat (what the token limit counts). */
+  tokensUsed: number;
+}
+
+export interface VoiceSettings {
+  /** `null`: the next voice message starts a new chat. */
+  chat: VoiceChat | null;
+  /** The model a new voice chat starts with; blank: the same as any other new chat. */
+  model: string;
+  /** The effort a new voice chat starts with; blank: the same as any other new chat. */
+  effort: string;
+  /** A message arriving this long after the last one starts a new chat. */
+  idleMinutes: number;
+  maxAgeHours: number;
+  maxTokens: number;
+  watch: VoiceWatch;
+}
+
 export function hubOps(api: Api) {
   return {
     connection: () => api<HubConnection>('relay_connection_get', {}),
@@ -77,5 +103,16 @@ export function hubOps(api: Api) {
         effort: s.effort,
       }),
     resetTelegram: () => api<TelegramSettings>('relay_telegram_reset', {}),
+    voice: () => api<VoiceSettings>('relay_voice_get', {}),
+    saveVoice: (s: Omit<VoiceSettings, 'chat'>) =>
+      api<VoiceSettings>('relay_voice_save', {
+        model: s.model,
+        effort: s.effort,
+        idleMinutes: s.idleMinutes,
+        maxAgeHours: s.maxAgeHours,
+        maxTokens: s.maxTokens,
+        watch: s.watch,
+      }),
+    resetVoice: () => api<VoiceSettings>('relay_voice_reset', {}),
   };
 }

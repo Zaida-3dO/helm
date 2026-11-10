@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MessageRow } from '../api/types.ts';
-import { bubbleText, fromTelegram, peerMessage } from './origin.ts';
+import { bubbleText, fromTelegram, fromVoice, peerMessage } from './origin.ts';
 
 const NOTE = '[Sent from Telegram: answer briefly in plain text, with no tables or long code. Offer choices as a numbered list. Only the final message of each turn reaches the user\'s phone, so make that message stand on its own. The user can reply "more" for detail.]';
 
@@ -25,6 +25,24 @@ test('a Telegram message shows without the note for the agent; other messages ar
   for (const [r, tg, shown] of cases) {
     assert.equal(fromTelegram(r), tg, r.text);
     assert.equal(bubbleText(r), shown, r.text);
+  }
+});
+
+test('a voice message shows without the primer and notes for the agent; other messages are left alone', () => {
+  const primer = '[Voice chat: you are the user\'s voice assistant in Helm.\nEach message says its mode. A message that starts with [Wait finished] is news.\nIf not, answer exactly [quiet].]\n';
+  const mode = '[Voice · conversation: speak it, short, no markup]\n';
+  const late = '(sent 3 min ago, queued while Helm was offline)\nhi';
+  const cases: [MessageRow, string][] = [
+    [row(`${primer}${mode}hello`, 'voice'), 'hello'],
+    [row(`${mode}hello`, 'voice'), 'hello'],
+    [row(`[Voice · chat: read on screen, formatting fine · continuing what they just said]\n[Not heard by the user: your reply "Sure" stopped after sentence 2 of 5]\n${late}`, 'voice'), late],
+    [row(`${mode}hello`, 'typed'), `${mode}hello`],
+    [row(`${mode}hello`), `${mode}hello`],
+    [row('a plain voice message', 'voice'), 'a plain voice message'],
+  ];
+  for (const [r, shown] of cases) {
+    assert.equal(bubbleText(r), shown, r.text);
+    assert.equal(fromVoice(r), r.details?.origin === 'voice');
   }
 });
 

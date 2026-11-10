@@ -1035,3 +1035,358 @@ async fn a_saved_model_on_a_switched_off_server_is_left_out() {
     assert!(creates[0].get("model").is_none(), "{}", creates[0]);
     assert_eq!(creates[0]["effort"].as_str(), Some("high"));
 }
+
+// ------------------------------------------------------------------ the voice chat
+
+use crate::client::{VoiceSink, VoiceTurn};
+use crate::voice;
+use crate::voice_sink as vs;
+
+fn owed_of(out: &[vs::Up]) -> vs::Owed {
+    match out.last() {
+        Some(vs::Up::Final(o)) => o.clone(),
+        other => panic!("expected an answer, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_voice_mirror_gives_a_working_line_then_one_answer_and_keeps_an_unsent_one() {
+    let mut m = vs::Mirror::new(0, T0);
+    // A working line, held to the gap and sent only when it changes.
+    assert_eq!(
+        m.step(&busy(&[], &[]), T0),
+        vec![vs::Up::Status("Thinking".into())]
+    );
+    assert!(m.step(&busy(&[], &[]), T0 + 5_000).is_empty());
+    let b = busy(&["Checking the nightly backup"], &[]);
+    assert!(m.step(&b, T0 + STATUS_GAP_MS - 1).is_empty());
+    assert_eq!(
+        m.step(&b, T0 + STATUS_GAP_MS),
+        vec![vs::Up::Status("Checking the nightly backup".into())]
+    );
+    // The answer goes up the moment its turn closes, while the chat is still busy. One that the
+    // line would not take is offered again with the same reply id, and nothing else meanwhile.
+    let mut done = busy(&[], &[]);
+    done.turn_done = Some((7, "It passed.".into()));
+    let owed = owed_of(&m.step(&done, T0 + 10_000));
+    assert_eq!(owed.what, vs::What::Answer("It passed.".into()));
+    m.ack(&owed.id, false);
+    assert_eq!(
+        m.step(&busy(&[], &[]), T0 + 11_000),
+        vec![vs::Up::Final(owed.clone())]
+    );
+    m.ack(&owed.id, true);
+    // Once it is up the chat only winds down: no working line, and the close says nothing more.
+    assert!(m.step(&done, T0 + 20_000).is_empty());
+    let settled = Snap {
+        turn_done: done.turn_done.clone(),
+        final_text: Some("It passed.".into()),
+        max_id: 9,
+        ..Default::default()
+    };
+    assert!(m.step(&settled, T0 + 21_000).is_empty());
+    assert!(m.step(&settled, T0 + 21_500).is_empty());
+    assert!(m.done);
+
+    // A prompt only Helm's window can answer: said once, as a working line and a sentence.
+    let mut m = vs::Mirror::new(0, T0);
+    let mut blocked = busy(&[], &[]);
+    blocked.blocked = Some(("req1".into(), "Waiting for you in Helm".into()));
+    let out = m.step(&blocked, T0);
+    assert_eq!(out[0], vs::Up::Status(vs::WAITING_STATUS.into()));
+    let owed = owed_of(&out);
+    assert_eq!((out.len(), &owed.what), (2, &vs::What::Waiting));
+    m.ack(&owed.id, true);
+    assert!(m.step(&blocked, T0 + 1_000).is_empty(), "said once");
+    // The turn then ends with nothing to say: it still gets a closing word.
+    assert!(m.step(&idle(None), T0 + 2_000).is_empty());
+    let owed = owed_of(&m.step(&idle(None), T0 + 2_500));
+    assert_eq!((owed.text(), &owed.what), ("Done.", &vs::What::Nothing));
+    m.ack(&owed.id, true);
+    assert!(m.done);
+
+    // A message that never starts a turn is not left silent.
+    let mut m = vs::Mirror::new(0, T0);
+    assert!(m.step(&idle(None), T0 + vs::START_WAIT_MS - 1).is_empty());
+    let owed = owed_of(&m.step(&idle(None), T0 + vs::START_WAIT_MS));
+    assert_eq!(owed.what, vs::What::NotStarted);
+    m.ack(&owed.id, true);
+    assert!(m.done);
+
+    // The reply is made for the mode the phone is in, under the answer's own id.
+    let live = vs::Live {
+        turn: Some("t1".into()),
+        conversation: "c1".into(),
+        ..Default::default()
+    };
+    let r = vs::reply_for(&live, &owed, 5);
+    assert_eq!(
+        (r.id.as_str(), r.turn.as_deref()),
+        (owed.id.as_str(), Some("t1"))
+    );
+    assert_eq!(
+        r.sentences,
+        ["Helm has not started that yet.", "It is saved in the voice chat."]
+    );
+    let chat = vs::Live {
+        mode: voice::Mode::Chat,
+        ..live
+    };
+    let r = vs::reply_for(&chat, &owed, 5);
+    assert!(r.sentences.is_empty() && r.text == vs::NOT_STARTED);
+}
+
+fn vturn(id: &str, text: &str, mode: &str) -> VoiceTurn {
+    VoiceTurn {
+        id: id.into(),
+        mode: mode.into(),
+        text: text.into(),
+        source: "speech".into(),
+        sent_at: 0,
+        age_minutes: None,
+        continues: None,
+    }
+}
+
+fn vctx(e: &Env, file: voice::PolicyFile) -> vs::Ctx {
+    let prof = e.dir.path().join("prof");
+    vs::Ctx {
+        rt: e.ctx.rt.clone(),
+        db: e.db.clone(),
+        ops: e.ops.clone(),
+        handle: tokio::runtime::Handle::current(),
+        tag_path: voice::tag_path(&prof),
+        folder: plain_path(&voice::folder(&prof)),
+        policy: file.check().unwrap(),
+        file,
+    }
+}
+
+async fn vplace(c: &vs::Ctx, t: VoiceTurn, now: i64) -> Result<vs::Placed, String> {
+    let c = c.clone();
+    tokio::task::spawn_blocking(move || vs::place(&c, &t, &[], now))
+        .await
+        .unwrap()
+}
+
+fn vchat(p: &vs::Placed) -> (String, String) {
+    match p {
+        vs::Placed::Sent {
+            chat, conversation, ..
+        } => (chat.clone(), conversation.clone()),
+        vs::Placed::Already => panic!("expected a placed turn"),
+    }
+}
+
+fn set_idle(e: &Env, chat: &str) {
+    sql(
+        &e.db,
+        "UPDATE chats SET status = 'idle' WHERE id = ?1",
+        &[&chat],
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn voice_turns_enter_one_chat_with_origin_voice_a_primer_once_and_a_new_chat_after_idle() {
+    let e = env();
+    let c = vctx(&e, voice::PolicyFile::default());
+    let t0 = helm_core::now_ms();
+
+    // The first turn starts "Voice <date>" on the saved model and effort, with the primer.
+    let p = vplace(
+        &c,
+        vturn("t1", "Synthetic question one.", "conversation"),
+        t0,
+    )
+    .await
+    .unwrap();
+    let (chat, conversation) = vchat(&p);
+    let calls = e.ops.calls.lock().unwrap().clone();
+    assert_eq!(calls[0].0, "chat_create");
+    assert_eq!(calls[0].1["model"], "claude-sonnet-5-5");
+    assert_eq!(calls[0].1["effort"], "low");
+    assert!(
+        calls[0].1["cwd"].as_str().unwrap().ends_with("voice"),
+        "{calls:?}"
+    );
+    let title: String =
+        e.db.snapshot(|tx| {
+            tx.query_row("SELECT title FROM chats WHERE id = ?1", [&chat], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert!(title.starts_with("Voice "), "{title}");
+    let s = subs(&e.db, &chat);
+    assert_eq!(s.len(), 1);
+    assert_eq!(s[0].0, voice::submission_id("t1"));
+    assert_eq!(s[0].1, "voice", "never the user's typed words");
+    assert!(s[0].4.starts_with(voice::PRIMER_START), "{}", s[0].4);
+    assert!(
+        s[0].4.ends_with(
+            "\n[Voice · conversation: speak it, short, no markup]\nSynthetic question one."
+        ),
+        "{}",
+        s[0].4
+    );
+    assert_eq!(conversation.len(), 16);
+
+    // The hub resends it while its turn runs (Helm restarted before the acknowledgement): stored
+    // once, and the turn is watched. Once the turn is over, there is nothing more to do.
+    sql(
+        &e.db,
+        "UPDATE chats SET status = 'running' WHERE id = ?1",
+        &[&chat],
+    );
+    let running = vplace(&c, vturn("t1", "Synthetic question one.", "conversation"), t0 + 1)
+        .await
+        .unwrap();
+    assert_eq!(vchat(&running), (chat.clone(), conversation.clone()));
+    set_idle(&e, &chat);
+    assert_eq!(
+        vplace(
+            &c,
+            vturn("t1", "Synthetic question one.", "conversation"),
+            t0 + 1
+        )
+        .await
+        .unwrap(),
+        vs::Placed::Already
+    );
+    assert_eq!(subs(&e.db, &chat).len(), 1);
+
+    // The next turn goes to the same chat and conversation: no primer, its mode and its lateness.
+    let mut t2 = vturn("t2", "Synthetic question two.", "chat");
+    t2.age_minutes = Some(5);
+    t2.continues = Some("t1".into());
+    let p = vplace(&c, t2, t0 + 60_000).await.unwrap();
+    assert_eq!(vchat(&p), (chat.clone(), conversation.clone()));
+    let s = subs(&e.db, &chat);
+    assert_eq!(s.len(), 2);
+    let second = s
+        .iter()
+        .find(|r| r.0 == voice::submission_id("t2"))
+        .unwrap();
+    assert_eq!(
+        second.4,
+        "[Voice · chat: read on screen, formatting fine · continuing what they just said]\n(sent 5 min ago, queued while Helm was offline)\nSynthetic question two."
+    );
+
+    // Idle for longer than the limit: a new chat and conversation, and the primer again. A
+    // limit the user has set applies from the next turn.
+    set_idle(&e, &chat);
+    let c = vctx(
+        &e,
+        voice::PolicyFile {
+            model: String::new(),
+            effort: "high".into(),
+            idle_minutes: 30,
+            ..Default::default()
+        },
+    );
+    let p = vplace(
+        &c,
+        vturn("t3", "Synthetic question three.", "conversation"),
+        t0 + 60_000 + 31 * 60_000,
+    )
+    .await
+    .unwrap();
+    let (chat3, conversation3) = vchat(&p);
+    assert_ne!(chat3, chat);
+    assert_ne!(conversation3, conversation);
+    assert!(subs(&e.db, &chat3)[0].4.starts_with(voice::PRIMER_START));
+    let calls = e.ops.calls.lock().unwrap().clone();
+    let last = &calls.iter().rfind(|(o, _)| o == "chat_create").unwrap().1;
+    assert!(
+        last.get("model").is_none(),
+        "blank model: the app default, {last}"
+    );
+    assert_eq!(last["effort"], "high");
+}
+
+/// A line that takes nothing, for sinks whose mirror is not what is being looked at.
+struct Rec;
+impl vs::VoiceUpstream for Rec {
+    fn status(&self, _turn: &str, _text: &str) {}
+    fn reply(&self, _reply: &voice::Reply) -> bool {
+        false
+    }
+}
+
+fn wired_voice(e: &Env) -> vs::ChatVoice {
+    let mut services = helm_ipc::Services::new();
+    services.insert(e.db.clone());
+    services.insert(Arc::new(e.ctx.rt.clone()));
+    let exec = Arc::new(AppExecutor::default());
+    exec.wire(crate::exec::Wiring {
+        services: Arc::new(services),
+        events: Arc::new(helm_ipc::NullSink),
+        tools: Arc::new(helm_hosttools::HostTools::new(Arc::new(
+            helm_hosttools::HostToolRegistry::new(),
+        ))),
+    });
+    vs::ChatVoice::new(exec, e.dir.path().join("prof"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_voice_sink_delivers_only_once_wired_and_stop_presence_and_fresh_act_on_the_tag() {
+    let e = env();
+    // Unwired: a delivery is refused, so the hub keeps the turn.
+    let bare = vs::ChatVoice::new(Arc::new(AppExecutor::default()), e.dir.path().join("prof"));
+    assert!(bare.deliver(vturn("x", "y", "chat")).await.is_err());
+    let v = wired_voice(&e);
+    assert!(
+        v.deliver(vturn("x", "y", "chat")).await.is_err(),
+        "no ops yet"
+    );
+
+    v.attach_ops(e.ops.clone());
+    v.attach_line(Arc::new(Rec));
+    v.deliver(vturn("t1", "Synthetic question one.", "chat"))
+        .await
+        .unwrap();
+    let live = v.live();
+    assert_eq!(live.turn.as_deref(), Some("t1"));
+    assert_eq!(
+        (live.mode, live.conversation.len()),
+        (voice::Mode::Chat, 16)
+    );
+    let tag_path = voice::tag_path(&e.dir.path().join("prof"));
+    let tag = voice::load_tag(&tag_path).unwrap();
+    assert_eq!(tag.conversation, live.conversation);
+    assert!(tag.primed, "the primer went with the first message");
+
+    // Stop acts only on the turn being answered, and on the tagged chat.
+    let stops = || {
+        e.ops
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(o, _)| o == "chat_stop")
+            .map(|(_, a)| a.clone())
+            .collect::<Vec<_>>()
+    };
+    v.stop("an-older-turn".into()).await;
+    assert!(stops().is_empty());
+    v.stop("t1".into()).await;
+    assert_eq!(stops(), vec![json!({ "chatId": tag.chat_id })]);
+
+    // The phone's screen is remembered; a fresh start drops the tag.
+    v.presence(true, "chat");
+    let live = v.live();
+    assert_eq!(
+        (live.presence_live, live.presence_mode),
+        (true, voice::Mode::Chat)
+    );
+    v.fresh().await;
+    assert!(voice::load_tag(&tag_path).is_none());
+
+    // What Settings shows: the saved policy, and no chat once the tag is gone.
+    let view = vs::voice_view(&e.db, &e.dir.path().join("prof"), helm_core::now_ms());
+    assert!(view.chat.is_none());
+    assert_eq!(
+        (view.model.as_str(), view.idle_minutes),
+        ("claude-sonnet-5-5", 240)
+    );
+}

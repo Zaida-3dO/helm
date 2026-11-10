@@ -190,7 +190,7 @@ pub fn save_policy(path: &Path, f: PolicyFile) -> std::io::Result<()> {
     write_private(path, &f)
 }
 
-fn write_private<T: Serialize>(path: &Path, v: &T) -> std::io::Result<()> {
+pub(crate) fn write_private<T: Serialize>(path: &Path, v: &T) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         helm_core::privfs::create_private_dir_all(dir)?;
     }
@@ -331,7 +331,7 @@ pub fn chat_title(bot: Option<&str>, now: i64) -> String {
 }
 
 /// Days since 1970-01-01 to a calendar date (proleptic Gregorian).
-fn civil_date(days: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_date(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -401,7 +401,7 @@ pub const MAX_FINAL_CHARS: usize = 3000;
 /// The longest status message.
 pub const MAX_STATUS_CHARS: usize = 400;
 
-fn cut_chars(s: &str, max: usize) -> (String, bool) {
+pub(crate) fn cut_chars(s: &str, max: usize) -> (String, bool) {
     let mut it = s.chars();
     let out: String = it.by_ref().take(max).collect();
     (out, it.next().is_some())

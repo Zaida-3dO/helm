@@ -13,10 +13,14 @@
 //!   a chat's messages or to deliver a message. [`crate::household::admit_peer`] checks the
 //!   sharing switches and the arguments first; the answer is a `result` frame like a call's.
 //! - `peer_result`: the hub's answer to a `peer` request this Helm sent ([`LineHandle::peer`]).
+//! - `voice`: one turn from the phone's voice screen, handed to the [`VoiceSink`] and acknowledged
+//!   (`voice_ack`) only once the sink took it, like Telegram's. `voice_stop`, `voice_heard`,
+//!   `voice_presence` and `voice_fresh` reach the same sink; an old Helm never sees them and the
+//!   hub never needs them answered.
 //! - The first frame up on every line is `sharing` (the household switches), and another goes
 //!   whenever the user changes one.
 //! - Upward, [`LineHandle`] sends the Telegram status and final answer, and alerts Helm starts
-//!   ([`crate::notify`]).
+//!   ([`crate::notify`]), and for the voice chat its working line and answers.
 
 use crate::config::RelayConfig;
 use crate::gate;
@@ -110,6 +114,40 @@ pub trait TelegramSink: Send + Sync {
     fn stop<'a>(&'a self) -> BoxFut<'a, ()>;
     /// The user tapped button `index` of the approval ask `id` ([`LineHandle::telegram_ask`]).
     fn answer<'a>(&'a self, id: String, index: usize) -> BoxFut<'a, ()>;
+}
+
+/// One turn for the voice chat as the hub forwarded it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoiceTurn {
+    /// The phone's id for the turn.
+    pub id: String,
+    /// `conversation` (heard) or `chat` (read).
+    pub mode: String,
+    pub text: String,
+    /// `speech` or `typed`.
+    pub source: String,
+    pub sent_at: i64,
+    pub age_minutes: Option<i64>,
+    /// The turn this one carries on, when it was spoken as a continuation.
+    pub continues: Option<String>,
+}
+
+/// Where voice turns go on the PC.
+pub trait VoiceSink: Send + Sync {
+    /// `Ok` once the turn is safely in Helm (it is then acknowledged to the hub).
+    fn deliver<'a>(&'a self, turn: VoiceTurn) -> BoxFut<'a, Result<(), String>>;
+    /// The phone cancelled this turn after Helm took it.
+    fn stop<'a>(&'a self, turn: String) -> BoxFut<'a, ()>;
+    /// What the phone did and did not play: the hub's reports, as sent.
+    fn heard<'a>(&'a self, _reports: Vec<Value>) -> BoxFut<'a, ()> {
+        Box::pin(async {})
+    }
+    /// The phone's screen is in front (`live`) or not, in this mode.
+    fn presence(&self, _live: bool, _mode: &str) {}
+    /// Start the next voice message in a new chat.
+    fn fresh<'a>(&'a self) -> BoxFut<'a, ()> {
+        Box::pin(async {})
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,12 +295,33 @@ impl LineHandle {
                 .send(json!({ "type": "telegram_final", "text": text }))
                 .is_ok()
     }
+
+    /// The voice chat's working line for a turn. The hub passes it to the phone if it is
+    /// listening and drops it otherwise, so it is sent only while the line is up.
+    pub fn voice_status(&self, turn: &str, text: &str) {
+        if self.state() == LineState::Online {
+            let _ = self
+                .up
+                .send(json!({ "type": "voice_status", "turn": turn, "text": text }));
+        }
+    }
+    /// An answer to a turn (`voice_final`), or news (`voice_notify`). `false` when the line is
+    /// down and it was not sent, so the mirror can try again.
+    pub fn voice_reply(&self, reply: &crate::voice::Reply) -> bool {
+        self.state() == LineState::Online && self.up.send(reply.frame()).is_ok()
+    }
+    /// One attachment, sent just before the reply it belongs to. `false` when it was not sent.
+    pub fn voice_attachment(&self, frame: Value) -> bool {
+        self.state() == LineState::Online && self.up.send(frame).is_ok()
+    }
 }
 
 pub struct Client {
     config: Arc<dyn Fn() -> RelayConfig + Send + Sync>,
     executor: Arc<dyn Executor>,
     sink: Arc<dyn TelegramSink>,
+    /// Where voice turns go; frames for it are ignored until it is attached.
+    voice: std::sync::OnceLock<Arc<dyn VoiceSink>>,
     handle: Arc<LineHandle>,
     up_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Value>>,
     /// Hub ids of Telegram messages being delivered now: the hub's resend of one of them is
@@ -312,6 +371,7 @@ impl Client {
             config,
             executor,
             sink,
+            voice: std::sync::OnceLock::new(),
             handle: Arc::new(LineHandle {
                 state: AtomicU8::new(LineState::Off as u8),
                 up,
@@ -326,6 +386,11 @@ impl Client {
 
     pub fn handle(&self) -> Arc<LineHandle> {
         self.handle.clone()
+    }
+
+    /// Give the line the sink for voice turns.
+    pub fn attach_voice(&self, sink: Arc<dyn VoiceSink>) {
+        let _ = self.voice.set(sink);
     }
 
     /// What the household may see now.
@@ -564,6 +629,77 @@ impl Client {
                     }
                 });
             }
+            Some("voice") => {
+                let (Some(id), Some(text)) = (s("id"), s("text")) else {
+                    return;
+                };
+                let Some(voice) = self.voice.get().cloned() else {
+                    return;
+                };
+                // The same dedupe as Telegram's, kept apart from it by a prefix.
+                let key = format!("voice/{id}");
+                let delivering = self.delivering.clone();
+                if !delivering
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(key.clone())
+                {
+                    return;
+                }
+                let turn = VoiceTurn {
+                    id: id.clone(),
+                    mode: s("mode").unwrap_or_default(),
+                    text,
+                    source: s("source").unwrap_or_default(),
+                    sent_at: v.get("sentAt").and_then(Value::as_i64).unwrap_or(0),
+                    age_minutes: v.get("ageMinutes").and_then(Value::as_i64),
+                    continues: s("continues"),
+                };
+                let out = out.clone();
+                tokio::spawn(async move {
+                    let r = voice.deliver(turn).await;
+                    delivering
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(&key);
+                    match r {
+                        Ok(()) => {
+                            let _ = out.send(json!({ "type": "voice_ack", "id": id }));
+                        }
+                        // Not acknowledged: the hub keeps it and sends it again.
+                        Err(e) => log::warn!("relay: a voice turn was not delivered: {e}"),
+                    }
+                });
+            }
+            Some("voice_stop") => {
+                let (Some(turn), Some(voice)) = (s("turn"), self.voice.get().cloned()) else {
+                    return;
+                };
+                tokio::spawn(async move { voice.stop(turn).await });
+            }
+            Some("voice_heard") => {
+                let (Some(reports), Some(voice)) = (
+                    v.get("reports").and_then(Value::as_array).cloned(),
+                    self.voice.get().cloned(),
+                ) else {
+                    return;
+                };
+                tokio::spawn(async move { voice.heard(reports).await });
+            }
+            Some("voice_presence") => {
+                if let Some(voice) = self.voice.get() {
+                    voice.presence(
+                        v.get("live").and_then(Value::as_bool).unwrap_or(false),
+                        s("mode").as_deref().unwrap_or("conversation"),
+                    );
+                }
+            }
+            Some("voice_fresh") => {
+                let Some(voice) = self.voice.get().cloned() else {
+                    return;
+                };
+                tokio::spawn(async move { voice.fresh().await });
+            }
             Some("telegram_stop") => {
                 let sink = self.sink.clone();
                 tokio::spawn(async move { sink.stop().await });
@@ -636,6 +772,50 @@ mod tests {
             Box::pin(async {})
         }
         fn answer<'a>(&'a self, _id: String, _index: usize) -> BoxFut<'a, ()> {
+            Box::pin(async {})
+        }
+    }
+
+    #[derive(Default)]
+    struct Voice {
+        got: Mutex<Vec<VoiceTurn>>,
+        stops: Mutex<Vec<String>>,
+        heard: Mutex<Vec<Value>>,
+        presence: Mutex<Vec<(bool, String)>>,
+        fresh: Mutex<usize>,
+        refuse: std::sync::atomic::AtomicBool,
+        hold: std::sync::atomic::AtomicBool,
+        release: tokio::sync::Notify,
+    }
+    impl VoiceSink for Voice {
+        fn deliver<'a>(&'a self, turn: VoiceTurn) -> BoxFut<'a, Result<(), String>> {
+            self.got.lock().unwrap().push(turn);
+            let hold = self.hold.load(Ordering::SeqCst);
+            let refuse = self.refuse.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if hold {
+                    self.release.notified().await;
+                }
+                if refuse {
+                    Err("no".to_owned())
+                } else {
+                    Ok(())
+                }
+            })
+        }
+        fn stop<'a>(&'a self, turn: String) -> BoxFut<'a, ()> {
+            self.stops.lock().unwrap().push(turn);
+            Box::pin(async {})
+        }
+        fn heard<'a>(&'a self, reports: Vec<Value>) -> BoxFut<'a, ()> {
+            self.heard.lock().unwrap().extend(reports);
+            Box::pin(async {})
+        }
+        fn presence(&self, live: bool, mode: &str) {
+            self.presence.lock().unwrap().push((live, mode.to_owned()));
+        }
+        fn fresh<'a>(&'a self) -> BoxFut<'a, ()> {
+            *self.fresh.lock().unwrap() += 1;
             Box::pin(async {})
         }
     }
@@ -968,6 +1148,120 @@ mod tests {
         // The next frame up is the marker, not an ack.
         assert_eq!(next(&mut ws).await["type"], "telegram_final");
         assert_eq!(sink.got.lock().unwrap().len(), 1);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn voice_turns_are_acknowledged_once_delivered_and_the_rest_reach_the_sink() {
+        let (url, hub) = fake_hub().await;
+        let voice = Arc::new(Voice::default());
+        let c = client(
+            (&url, ""),
+            Arc::new(Exec::default()),
+            Arc::new(Sink::default()),
+        );
+        c.attach_voice(voice.clone());
+        let task = tokio::spawn(c.clone().run());
+        let (_, mut ws) = hub.await.unwrap();
+        assert_eq!(next(&mut ws).await["type"], "sharing");
+        let send = |v: Value| Message::Text(v.to_string().into());
+        let wait = |n: usize| {
+            let voice = voice.clone();
+            async move {
+                for _ in 0..200 {
+                    if voice.got.lock().unwrap().len() >= n {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                panic!("the sink never saw {n} turns");
+            }
+        };
+
+        // Delivered, then acknowledged; every field arrives as sent.
+        ws.send(send(
+            json!({"type": "voice", "id": "t1", "mode": "chat", "text": "hello", "source": "typed",
+                   "sentAt": 5, "ageMinutes": 3, "continues": "t0"}),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(next(&mut ws).await, json!({"type": "voice_ack", "id": "t1"}));
+        assert_eq!(
+            voice.got.lock().unwrap()[0],
+            VoiceTurn {
+                id: "t1".into(),
+                mode: "chat".into(),
+                text: "hello".into(),
+                source: "typed".into(),
+                sent_at: 5,
+                age_minutes: Some(3),
+                continues: Some("t0".into()),
+            }
+        );
+
+        // Not taken: no acknowledgement, and the hub's resend is tried again and then answered.
+        voice.refuse.store(true, Ordering::SeqCst);
+        let again = json!({"type": "voice", "id": "t2", "mode": "conversation", "text": "x"});
+        ws.send(send(again.clone())).await.unwrap();
+        wait(2).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        voice.refuse.store(false, Ordering::SeqCst);
+        ws.send(send(again)).await.unwrap();
+        assert_eq!(next(&mut ws).await, json!({"type": "voice_ack", "id": "t2"}));
+        assert_eq!(voice.got.lock().unwrap().len(), 3);
+
+        // A resend that arrives while the first is still being delivered is dropped.
+        voice.hold.store(true, Ordering::SeqCst);
+        let slow = json!({"type": "voice", "id": "t3", "mode": "conversation", "text": "y"});
+        ws.send(send(slow.clone())).await.unwrap();
+        wait(4).await;
+        ws.send(send(slow)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(voice.got.lock().unwrap().len(), 4);
+        voice.release.notify_one();
+        assert_eq!(next(&mut ws).await, json!({"type": "voice_ack", "id": "t3"}));
+
+        // The rest reach the sink and are never answered.
+        for f in [
+            json!({"type": "voice_stop", "turn": "t3"}),
+            json!({"type": "voice_heard", "reports": [{"reply": "r1", "state": "all", "at": 1}]}),
+            json!({"type": "voice_presence", "live": true, "mode": "chat"}),
+            json!({"type": "voice_fresh"}),
+        ] {
+            ws.send(send(f)).await.unwrap();
+        }
+        for _ in 0..200 {
+            if *voice.fresh.lock().unwrap() == 1 && !voice.heard.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(*voice.stops.lock().unwrap(), ["t3".to_owned()]);
+        assert_eq!(voice.heard.lock().unwrap()[0]["reply"], "r1");
+        assert_eq!(*voice.presence.lock().unwrap(), [(true, "chat".to_owned())]);
+
+        // Upward: the working line, then an answer and news in the shape the hub expects.
+        let h = c.handle();
+        h.voice_status("t1", "Thinking");
+        assert_eq!(
+            next(&mut ws).await,
+            json!({"type": "voice_status", "turn": "t1", "text": "Thinking"})
+        );
+        let mut reply = crate::voice::Reply::from_text(
+            "r1".into(),
+            Some("t1".into()),
+            crate::voice::Mode::Conversation,
+            "Done. Want the details?",
+            "c1".into(),
+            9,
+        );
+        assert!(h.voice_reply(&reply));
+        let f = next(&mut ws).await;
+        assert_eq!((f["type"].as_str(), f["id"].as_str()), (Some("voice_final"), Some("r1")));
+        assert_eq!(f["sentences"][1], json!({"n": 2, "text": "Want the details?"}));
+        reply.turn = None;
+        assert!(h.voice_reply(&reply));
+        assert_eq!(next(&mut ws).await["type"], "voice_notify");
         task.abort();
     }
 

@@ -703,6 +703,9 @@ pub enum SubmissionOrigin {
     OtherChat,
     Schedule,
     Telegram,
+    /// Spoken or typed on the phone's voice screen and forwarded by the hub. Like `telegram`, it
+    /// never counts as consent, and approvals, plans and trust prompts are never answered by it.
+    Voice,
 }
 
 impl SubmissionOrigin {
@@ -716,6 +719,7 @@ impl SubmissionOrigin {
             Self::OtherChat => "other_chat",
             Self::Schedule => "schedule",
             Self::Telegram => "telegram",
+            Self::Voice => "voice",
         }
     }
 
@@ -730,6 +734,7 @@ impl SubmissionOrigin {
             "other_chat" => Self::OtherChat,
             "schedule" => Self::Schedule,
             "telegram" => Self::Telegram,
+            "voice" => Self::Voice,
             _ => Self::App,
         }
     }

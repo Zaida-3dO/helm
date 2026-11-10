@@ -252,20 +252,22 @@ impl Mirror {
 }
 
 /// The real chat port: facts from the database, creation through the `chat_create` op.
-struct RealPort<'a> {
-    db: &'a Database,
-    rt: &'a ChatRuntime,
-    ops: &'a dyn OpInvoker,
-    handle: &'a tokio::runtime::Handle,
-    folder: &'a str,
-    /// The model and effort saved for new Telegram chats; `None` passes neither to the op, so
+pub(crate) struct RealPort<'a> {
+    pub(crate) db: &'a Database,
+    pub(crate) rt: &'a ChatRuntime,
+    pub(crate) ops: &'a dyn OpInvoker,
+    pub(crate) handle: &'a tokio::runtime::Handle,
+    pub(crate) folder: &'a str,
+    /// What the chats this port starts are for ("Telegram", "voice"), for the log and errors.
+    pub(crate) label: &'a str,
+    /// The model and effort saved for new chats of this kind; `None` passes neither to the op, so
     /// the chat opens on the new-chat default as before.
-    new_chat_model: Option<String>,
-    new_chat_effort: Option<String>,
+    pub(crate) new_chat_model: Option<String>,
+    pub(crate) new_chat_effort: Option<String>,
 }
 
 /// Whether the chat is archived and the tokens it has used; `None` when it no longer exists.
-fn chat_facts(db: &Database, chat_id: &str) -> Option<ChatFacts> {
+pub(crate) fn chat_facts(db: &Database, chat_id: &str) -> Option<ChatFacts> {
     db.snapshot(|tx| {
         tx.query_row(
             "SELECT c.archived,
@@ -377,7 +379,7 @@ impl ChatPort for RealPort<'_> {
 
     fn create(&self, title: &str) -> Result<String, String> {
         std::fs::create_dir_all(self.folder)
-            .map_err(|_| "The Telegram chats' folder could not be made.".to_owned())?;
+            .map_err(|_| format!("The {} chats' folder could not be made.", self.label))?;
         // `chat_create` already takes a model and an effort; without them it uses the new-chat
         // default exactly as before. No board is named, so the chat goes to the default board
         // (no board has the Telegram folder as its own).
@@ -388,7 +390,10 @@ impl ChatPort for RealPort<'_> {
         let model = self.new_chat_model.as_deref().filter(|m| {
             let usable = self.model_usable(m);
             if !usable {
-                log::warn!("relay: the saved Telegram model is on a local server that is not available; opening on the app default");
+                log::warn!(
+                    "relay: the saved {} model is on a local server that is not available; opening on the app default",
+                    self.label
+                );
             }
             usable
         });
@@ -406,7 +411,11 @@ impl ChatPort for RealPort<'_> {
                 // A refused saved model or effort — the model's local server was removed from
                 // this machine, say — must not leave the channel dark: open the chat without
                 // them so it answers on the app default instead.
-                log::warn!("relay: refused the saved Telegram chat settings ({0}); opening on the app default: {0}", e.message);
+                log::warn!(
+                    "relay: refused the saved {} chat settings ({}); opening on the app default",
+                    self.label,
+                    e.message
+                );
                 self.handle
                     .block_on(
                         self.ops
@@ -469,7 +478,7 @@ fn blocking(
     })
 }
 
-fn max_row(db: &Database, chat: &str) -> i64 {
+pub(crate) fn max_row(db: &Database, chat: &str) -> i64 {
     db.snapshot(|tx| {
         tx.query_row(
             "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?1",
@@ -545,6 +554,7 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         ops: &*c.ops,
         handle: &c.handle,
         folder: &c.folder,
+        label: "Telegram",
         new_chat_model: c.new_chat_model.clone(),
         new_chat_effort: c.new_chat_effort.clone(),
     };
@@ -867,7 +877,7 @@ pub struct ChatSink {
 }
 
 /// A path the worker can be started in: without Windows' verbatim prefix.
-fn plain_path(p: &std::path::Path) -> String {
+pub(crate) fn plain_path(p: &std::path::Path) -> String {
     let s = p.to_string_lossy().into_owned();
     match s.strip_prefix(r"\\?\") {
         Some(rest) if !rest.starts_with("UNC\\") => rest.to_owned(),

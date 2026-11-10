@@ -8,12 +8,24 @@ import type { MessageRow } from '../api/types.ts';
 /** The notes the host puts in front of a Telegram message (bracketed lines). */
 const TELEGRAM_NOTE = /^\[Sent from Telegram:[^\]\n]*\]\n(\[Sent to the user on Telegram by other chats[^\]\n]*\]\n)?/;
 
+/**
+ * The notes the host puts in front of a voice message: the primer (first message of a
+ * conversation, ending where the host's text does), the mode line, and a line for each reply the
+ * user did not hear.
+ */
+const VOICE_NOTE = /^(\[Voice chat: you are[\s\S]*?If not, answer exactly \[quiet\]\.\]\n)?\[Voice · [^\]\n]*\]\n(\[Not heard by the user:[^\]\n]*\]\n)*/;
+
 export function fromTelegram(row: MessageRow): boolean {
   return row.details?.origin === 'telegram';
 }
 
+export function fromVoice(row: MessageRow): boolean {
+  return row.details?.origin === 'voice';
+}
+
 /** The text the bubble shows. */
 export function bubbleText(row: MessageRow): string {
+  if (fromVoice(row)) return row.text.replace(VOICE_NOTE, '');
   return fromTelegram(row) ? row.text.replace(TELEGRAM_NOTE, '') : row.text;
 }
 
