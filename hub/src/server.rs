@@ -11,6 +11,7 @@ use crate::registry::{Registry, RegistryError};
 use crate::relay::{Line, MAX_FRAME};
 use crate::store::Store;
 use crate::telegram::{self, Telegram};
+use crate::voice::VoiceBridge;
 use axum::body::Bytes;
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -33,6 +34,8 @@ pub struct AppState {
     pub lines: Arc<Lines>,
     /// The Telegram bot, or `None` when it is off.
     pub telegram: Option<Arc<Telegram>>,
+    /// The phone's voice line, or `None` when it is off.
+    pub voice: Option<Arc<VoiceBridge>>,
     pub pair_limit: PairLimit,
 }
 
@@ -50,8 +53,15 @@ impl AppState {
             options,
             lines,
             telegram,
+            voice: None,
             pair_limit: PairLimit::default(),
         }
+    }
+
+    /// The same state with the voice line on.
+    pub fn with_voice(mut self, voice: Arc<VoiceBridge>) -> Self {
+        self.voice = Some(voice);
+        self
     }
 }
 
@@ -166,6 +176,8 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
             "a relay token"
         } else if client.has(Scope::Telegram) {
             "a telegram token"
+        } else if client.has(Scope::Voice) {
+            "a voice token"
         } else {
             "this token"
         };

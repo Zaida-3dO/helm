@@ -28,6 +28,16 @@
 //! | Helm → hub | `telegram_notify` | `text`: a message Helm starts (an alert), sent as a new message; the live status is left alone |
 //! | Helm → hub | `telegram_ask` | `id` (16-32 lowercase hex), `text`, `options` (1-4 strings): a new message with one button per option |
 //! | Helm → hub | `telegram_ask_done` | `id`, `text`: the ask was settled in Helm; its message gains `text` and loses its buttons |
+//! | hub → Helm | `voice` | `id` (the turn), `mode` (`conversation` or `chat`), `text` (at most 8000 characters), `source` (`speech` or `typed`), `sentAt` (ms), `ageMinutes` (null when fresh), `continues` (a turn id or null). One turn for the voice chat; sent again every 45 s until `voice_ack` |
+//! | hub → Helm | `voice_stop` | `turn`: the phone cancelled a turn Helm may already have taken |
+//! | hub → Helm | `voice_heard` | `reports`: what the phone did and did not play (see `voice.rs`) |
+//! | hub → Helm | `voice_presence` | `live`, `mode`: whether the phone's talk screen is open, and in which mode |
+//! | hub → Helm | `voice_fresh` | — : start a new voice conversation |
+//! | Helm → hub | `voice_ack` | `id`: the turn is placed in the voice chat |
+//! | Helm → hub | `voice_status` | `turn`, `text` (at most 300 characters): the working line, shown and never spoken |
+//! | Helm → hub | `voice_attachment` | `reply`, `n` (1-4), `kind`, `title`, and by kind `mediaType` + `data` (base64), `markdown` or `url`: one attachment, sent before its reply and held for 60 s |
+//! | Helm → hub | `voice_final` | `id` (the reply), `turn`, `mode`, `sentences`, `text`, `truncated`, `conversation`, `at`, `attachments` (a count): the answer to a turn |
+//! | Helm → hub | `voice_notify` | as `voice_final`, with `turn` null and `about` (`{"chat": title}` or null): news Helm starts |
 //!
 //! New frames go in the table above, a `match` arm in [`Line::receive`] and, for what Helm sends
 //! up that is not a call result, an [`Upstream`] variant.
@@ -37,6 +47,7 @@
 //! "may or may not have run": they were sent, so the hub cannot say nothing
 //! changed.
 
+use crate::voice::{Attachment, ReplyIn, MAX_STATUS_CHARS};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -52,8 +63,9 @@ pub const OFFLINE: &str = "Helm offline, nothing sent or changed.";
 /// How long a forwarded call may wait for Helm's answer.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Largest frame accepted from Helm.
-pub const MAX_FRAME: usize = 256 * 1024;
+/// Largest frame accepted from Helm: one voice attachment holds an image of up to 1 MiB, which is
+/// about 1.4 MB as base64.
+pub const MAX_FRAME: usize = 2 * 1024 * 1024;
 
 /// What Helm sent up the line that is not a call result.
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +90,30 @@ pub enum Upstream {
         op: String,
         args: Value,
     },
+    /// The turn is placed in the voice chat. The voice frames go to the voice bridge, never to
+    /// the Telegram one.
+    VoiceAck(String),
+    VoiceStatus {
+        turn: String,
+        text: String,
+    },
+    VoiceAttachment(Attachment),
+    VoiceFinal(ReplyIn),
+    VoiceNotify(ReplyIn),
+}
+
+impl Upstream {
+    /// A frame for the voice bridge.
+    pub fn is_voice(&self) -> bool {
+        matches!(
+            self,
+            Upstream::VoiceAck(_)
+                | Upstream::VoiceStatus { .. }
+                | Upstream::VoiceAttachment(_)
+                | Upstream::VoiceFinal(_)
+                | Upstream::VoiceNotify(_)
+        )
+    }
 }
 
 /// An ask's id: 16 to 32 lowercase hex characters, so it fits a button's callback data.
@@ -467,6 +503,41 @@ impl Line {
                     .is_ok(),
                 _ => false,
             },
+            Some("voice_ack") => match s("id") {
+                Some(id) => {
+                    self.bump();
+                    self.upstream.send(Upstream::VoiceAck(id)).is_ok()
+                }
+                None => false,
+            },
+            Some("voice_status") => match (s("turn"), s("text")) {
+                (Some(turn), Some(text)) => self
+                    .upstream
+                    .send(Upstream::VoiceStatus {
+                        turn,
+                        text: text.chars().take(MAX_STATUS_CHARS).collect(),
+                    })
+                    .is_ok(),
+                _ => false,
+            },
+            Some("voice_attachment") => match Attachment::parse(&v) {
+                Some(a) => self.upstream.send(Upstream::VoiceAttachment(a)).is_ok(),
+                None => false,
+            },
+            Some("voice_final") => match ReplyIn::parse(&v, false) {
+                Some(r) => {
+                    self.bump();
+                    self.upstream.send(Upstream::VoiceFinal(r)).is_ok()
+                }
+                None => false,
+            },
+            Some("voice_notify") => match ReplyIn::parse(&v, true) {
+                Some(r) => {
+                    self.bump();
+                    self.upstream.send(Upstream::VoiceNotify(r)).is_ok()
+                }
+                None => false,
+            },
             _ => false,
         }
     }
@@ -647,6 +718,79 @@ mod tests {
             }
         );
         assert!(up.try_recv().is_err(), "nothing malformed went upstream");
+    }
+
+    #[tokio::test]
+    async fn voice_frames_go_upstream_and_junk_is_dropped() {
+        let (line, mut up) = Line::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let gen = line.attach(tx);
+        let reply = |frame_type: &str, extra: Value| {
+            let mut v = json!({
+                "type": frame_type, "id": "reply-0001", "turn": "turn-0001",
+                "mode": "conversation", "text": "Synthetic.", "attachments": 1
+            });
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v.to_string()
+        };
+        let attachment = json!({
+            "type": "voice_attachment", "reply": "reply-0001", "n": 1, "kind": "link",
+            "title": "The page", "url": "https://example.test/p"
+        });
+        assert!(line.receive(gen, r#"{"type":"voice_ack","id":"turn-0001"}"#));
+        assert!(line.receive(
+            gen,
+            r#"{"type":"voice_status","turn":"turn-0001","text":"Thinking"}"#
+        ));
+        assert!(line.receive(gen, &attachment.to_string()));
+        assert!(line.receive(gen, &reply("voice_final", json!({}))));
+        assert!(line.receive(
+            gen,
+            &reply(
+                "voice_notify",
+                json!({"turn": null, "about": {"chat": "Build"}})
+            )
+        ));
+        // A missing id, a bad mode, an answer with no turn, a link that is not https, an empty
+        // text: dropped.
+        assert!(!line.receive(gen, r#"{"type":"voice_ack"}"#));
+        assert!(!line.receive(gen, r#"{"type":"voice_status","turn":"turn-0001"}"#));
+        assert!(!line.receive(gen, &reply("voice_final", json!({"mode": "loud"}))));
+        assert!(!line.receive(gen, &reply("voice_final", json!({"turn": null}))));
+        assert!(!line.receive(gen, &reply("voice_final", json!({"text": " "}))));
+        let insecure = attachment.to_string().replace("https://", "http://");
+        assert!(!line.receive(gen, &insecure));
+        assert_eq!(
+            up.try_recv().unwrap(),
+            Upstream::VoiceAck("turn-0001".into())
+        );
+        assert_eq!(
+            up.try_recv().unwrap(),
+            Upstream::VoiceStatus {
+                turn: "turn-0001".into(),
+                text: "Thinking".into()
+            }
+        );
+        let Upstream::VoiceAttachment(a) = up.try_recv().unwrap() else {
+            panic!("expected the attachment");
+        };
+        assert_eq!(
+            (a.reply.as_str(), a.n, a.kind.as_str()),
+            ("reply-0001", 1, "link")
+        );
+        let Upstream::VoiceFinal(f) = up.try_recv().unwrap() else {
+            panic!("expected the answer");
+        };
+        assert_eq!((f.turn.as_deref(), f.attachments), (Some("turn-0001"), 1));
+        let Upstream::VoiceNotify(n) = up.try_recv().unwrap() else {
+            panic!("expected the news");
+        };
+        assert_eq!((n.turn, n.about.as_deref()), (None, Some("Build")));
+        assert!(up.try_recv().is_err(), "nothing malformed went upstream");
+        assert!(Upstream::VoiceAck(String::new()).is_voice());
+        assert!(!Upstream::TelegramAck(String::new()).is_voice());
     }
 
     #[tokio::test]

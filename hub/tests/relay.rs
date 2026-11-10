@@ -5,7 +5,7 @@ use futures_util::{SinkExt, StreamExt};
 use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
 use helm_hub::registry::Registry;
-use helm_hub::relay::{Line, OFFLINE};
+use helm_hub::relay::{Line, Upstream, OFFLINE};
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
 use serde_json::{json, Value};
@@ -18,6 +18,7 @@ const LINE: &str = "line-token-0123456789abcdefghij";
 const REMOTE: &str = "remote-token-0123456789abcdefghi";
 const MEMORY_ONLY: &str = "memory-token-0123456789abcdefgh";
 const FORWARDER: &str = "forwarder-token-0123456789abcdef";
+const PHONE: &str = "phone-token-0123456789abcdefghij";
 
 /// The person who owns every client the legacy token list makes (the first person made).
 const OWNER: i64 = 1;
@@ -31,7 +32,7 @@ async fn start() -> Hub {
     let registry = Registry::from_legacy_spec(
         &format!(
             "helm-line:{LINE}:relay, remote:{REMOTE}:ro+app, notes:{MEMORY_ONLY}:rw, \
-             forwarder:{FORWARDER}:telegram"
+             forwarder:{FORWARDER}:telegram, phone:{PHONE}:voice"
         ),
         "owner",
     )
@@ -140,10 +141,15 @@ async fn only_a_relay_token_opens_the_line() {
         Some(403),
         "a telegram token cannot open it"
     );
+    assert_eq!(
+        connect(&hub, PHONE).await.err(),
+        Some(403),
+        "a voice token cannot open it"
+    );
     let mut ws = connect(&hub, LINE).await.expect("the relay token opens it");
     assert_eq!(next_json(&mut ws).await["type"], "welcome");
-    // ...and neither the relay token nor a telegram token reaches the MCP surface.
-    for token in [LINE, FORWARDER] {
+    // ...and neither the relay token, a telegram token nor a voice token reaches the MCP surface.
+    for token in [LINE, FORWARDER, PHONE] {
         let (status, _) = mcp(
             &hub,
             token,
@@ -310,4 +316,48 @@ async fn the_hub_list_is_checked_again_at_the_call() {
     let v = helm_hub::apptools::call(&line, "remote", "app_list_chats", &json!([1])).await;
     assert_eq!(v["isError"], true, "arguments must be an object");
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn an_upstream_frame_up_to_two_mib_is_accepted_and_a_bigger_one_ends_the_line() {
+    let hub = start().await;
+    let mut voice = hub.lines.voice_receiver();
+    let mut ws = connect(&hub, LINE).await.unwrap();
+    assert_eq!(next_json(&mut ws).await["type"], "welcome");
+    // One picture of 1 MiB is about 1.4 MB as base64: it fits in a single frame.
+    let data = "A".repeat(1_398_104);
+    let frame = json!({"type": "voice_attachment", "reply": "synthetic-0001", "n": 1,
+        "kind": "image", "title": "A picture", "mediaType": "image/png", "data": data});
+    ws.send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+    let (person, up) = tokio::time::timeout(Duration::from_secs(5), voice.recv())
+        .await
+        .expect("the frame within 5 s")
+        .unwrap();
+    assert_eq!(person, OWNER);
+    let Upstream::VoiceAttachment(a) = up else {
+        panic!("not an attachment: {up:?}");
+    };
+    assert_eq!(a.data.map(|d| d.len()), Some(1_398_104));
+
+    // A frame over 2 MiB is refused and the line is closed.
+    let big = json!({"type": "telegram_status", "text": "x".repeat(2 * 1024 * 1024 + 1)});
+    ws.send(Message::Text(big.to_string().into()))
+        .await
+        .unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        ended.is_ok(),
+        "the hub kept a line that sent a frame over the limit"
+    );
+    wait_up(&hub, false).await;
 }

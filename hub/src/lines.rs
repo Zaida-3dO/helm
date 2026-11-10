@@ -6,8 +6,10 @@
 //! messages go to that person's most recently active line ([`PersonRoute`]).
 //!
 //! Household questions (`peer` frames) are answered here too: each line's forwarding task hands
-//! them to `peer.rs` and sends the `peer_result` back down the line they came from. Everything
-//! else a line sends up (the Telegram frames) goes to the one receiver [`Lines::new`] returns.
+//! them to `peer.rs` and sends the `peer_result` back down the line they came from. The voice
+//! frames go to the receiver [`Lines::voice_receiver`] hands out (dropped while there is none).
+//! Everything else a line sends up (the Telegram frames) goes to the one receiver [`Lines::new`]
+//! returns.
 
 use crate::auth::{Client, Scope};
 use crate::peer::{self, Asker};
@@ -33,6 +35,8 @@ pub struct Lines {
     upstream: mpsc::UnboundedSender<PersonUpstream>,
     /// For the household questions: who the people and their machines are.
     registry: Arc<Mutex<Registry>>,
+    /// Where the voice frames go, once the voice bridge asked for them.
+    voice: Mutex<Option<mpsc::UnboundedSender<PersonUpstream>>>,
 }
 
 impl Lines {
@@ -45,9 +49,22 @@ impl Lines {
                 slots: Mutex::new(HashMap::new()),
                 upstream,
                 registry,
+                voice: Mutex::new(None),
             },
             rx,
         )
+    }
+
+    /// The receiver for the voice frames the lines send up, tagged with their person. A second
+    /// call replaces the first receiver's feed.
+    pub fn voice_receiver(&self) -> mpsc::UnboundedReceiver<PersonUpstream> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        *self.voice.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
+        rx
+    }
+
+    fn voice_sink(&self) -> Option<mpsc::UnboundedSender<PersonUpstream>> {
+        self.voice.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<i64, Slot>> {
@@ -84,6 +101,12 @@ impl Lines {
                                 peer::answer(&lines.registry, &lines, &asker, &op, &args).await;
                             line.send(&peer::result_frame(&id, answer));
                         });
+                    }
+                    // The voice bridge's frames are dropped until it has asked for them.
+                    other if other.is_voice() => {
+                        if let Some(voice) = lines.voice_sink() {
+                            let _ = voice.send((person_id, other));
+                        }
                     }
                     other => {
                         let _ = tx.send((person_id, other));
@@ -232,5 +255,15 @@ mod tests {
         assert_eq!(lines.up_lines_of(10).len(), 1);
         assert!(lines.pick(30, None).is_none());
         assert!(!PersonRoute::new(lines.clone(), 30).is_up());
+
+        // Voice frames skip the Telegram receiver and arrive tagged with their person.
+        let ack = r#"{"type":"voice_ack","id":"turn-0001"}"#;
+        let mut voice = lines.voice_receiver();
+        assert!(la.receive(ga, ack));
+        assert_eq!(
+            voice.recv().await.unwrap(),
+            (10, Upstream::VoiceAck("turn-0001".into()))
+        );
+        assert!(up.try_recv().is_err(), "Telegram never saw a voice frame");
     }
 }

@@ -68,6 +68,7 @@
 use crate::images;
 use crate::lines::{Lines, PersonRoute, PersonUpstream};
 use crate::relay::{valid_ask_id, Line, Route, Upstream, OFFLINE};
+use crate::stt::{agent_with, blocking, Stt, Transcribe};
 use base64::Engine as _;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -75,6 +76,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+pub use crate::stt::{SttConfig, VoiceFuture, STT_CONNECT, STT_TIMEOUT};
 
 /// The fewest milliseconds between two edits of the status message. Telegram allows about one
 /// message per second in a chat; a slower pace leaves room for the final answer.
@@ -108,12 +111,8 @@ pub const MAX_QUEUED_BYTES: usize = 150 * 1024 * 1024;
 pub const MAX_DOWNLOADS: usize = 2;
 /// How long after the last file of an album more may join it.
 pub const ALBUM_WINDOW: Duration = Duration::from_millis(1500);
-/// How long a connection may take to open, and a file download from Telegram in all.
-pub const STT_CONNECT: Duration = Duration::from_secs(5);
+/// How long a file download from Telegram may take in all.
 pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(100);
-/// How long the speech-to-text server may take to answer by default. It splits long recordings
-/// into pieces and can take minutes on an hour of audio.
-pub const STT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// A message whose files have not all arrived this long after it came (it never should: each
 /// HTTP step has its own timeout) gives up its place in the queue.
 const GATHERING_MAX_MS: i64 = 75 * 60_000;
@@ -151,9 +150,6 @@ pub trait TelegramApi: Send + Sync {
     fn call<'a>(&'a self, method: &'a str, body: Value) -> ApiFuture<'a>;
 }
 
-/// A voice step's result; the error is a reason in plain words for the user.
-pub type VoiceFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
-
 /// Fetching a voice note's audio and turning it into text. The real one is [`HttpVoice`]; tests
 /// use a fake. No error may carry the bot token.
 pub trait Voice: Send + Sync {
@@ -189,17 +185,6 @@ pub enum Receive {
     /// Another service already runs the bot and posts its updates to `/telegram/update`; the
     /// hub never polls, but still sends, edits and deletes messages with the bot token.
     Off,
-}
-
-/// The OpenAI-compatible speech-to-text server voice notes go to.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SttConfig {
-    /// The transcriptions endpoint, e.g. `http://<host>:<port>/v1/audio/transcriptions`.
-    pub url: String,
-    pub model: String,
-    pub language: String,
-    /// How long one transcription may take.
-    pub timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -616,7 +601,7 @@ fn strip_helm(text: &str) -> Option<&str> {
 }
 
 /// `s` in at most `max` characters, ending in an ellipsis when it was cut.
-fn cut(s: &str, max: usize) -> String {
+pub(crate) fn cut(s: &str, max: usize) -> String {
     if s.chars().nth(max).is_none() {
         return s.to_owned();
     }
@@ -1692,8 +1677,14 @@ impl Bridge {
             Upstream::TelegramNotify(t) => self.on_notify(&t).await,
             Upstream::TelegramAsk { id, text, options } => self.on_ask(&id, &text, &options).await,
             Upstream::TelegramAskDone { id, text } => self.on_ask_done(&id, &text).await,
-            // Household questions are answered where the line is kept, never here.
-            Upstream::Peer { .. } => {}
+            // Household questions are answered where the line is kept, and the voice frames go
+            // to the voice bridge; neither reaches this one.
+            Upstream::Peer { .. }
+            | Upstream::VoiceAck(_)
+            | Upstream::VoiceStatus { .. }
+            | Upstream::VoiceAttachment(_)
+            | Upstream::VoiceFinal(_)
+            | Upstream::VoiceNotify(_) => {}
         }
     }
 
@@ -1990,34 +1981,20 @@ impl TelegramApi for HttpApi {
     }
 }
 
-/// Voice notes over HTTP: the file from the Bot API's file host, the transcript from an
-/// OpenAI-compatible speech-to-text server (a multipart form with `file`, `model`, `language`
-/// and `response_format=text`; no auth).
+/// Voice notes over HTTP: the file from the Bot API's file host, the transcript from the
+/// speech-to-text server (see `stt.rs`).
 pub struct HttpVoice {
     files: HttpFiles,
-    stt: SttConfig,
-    /// The speech-to-text server's own, with its longer timeout.
-    agent: ureq::Agent,
+    stt: Stt,
 }
 
 impl HttpVoice {
     pub fn new(api_base: &str, token: &str, stt: &SttConfig) -> Self {
         HttpVoice {
             files: HttpFiles::new(api_base, token),
-            stt: stt.clone(),
-            agent: agent_with(stt.timeout),
+            stt: Stt::new(stt),
         }
     }
-}
-
-/// An HTTP agent that answers an error status as a response and gives up after `timeout`.
-fn agent_with(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_connect(Some(STT_CONNECT))
-        .timeout_global(Some(timeout))
-        .http_status_as_error(false)
-        .build()
-        .into()
 }
 
 /// Files over HTTP, from the Bot API's file host.
@@ -2070,77 +2047,6 @@ fn fetch<'a>(
     }))
 }
 
-/// Run a blocking HTTP exchange on the blocking pool.
-async fn blocking<T: Send + 'static>(
-    f: impl FnOnce() -> Result<T, String> + Send + 'static,
-) -> Result<T, String> {
-    tokio::task::spawn_blocking(f)
-        .await
-        .unwrap_or_else(|e| Err(format!("the call did not finish: {e}")))
-}
-
-/// A `multipart/form-data` body: the file part, then the plain fields.
-fn multipart(boundary: &str, file: (&str, &str, &[u8]), fields: &[(&str, &str)]) -> Vec<u8> {
-    let (name, mime, bytes) = file;
-    let name = name.replace(['"', '\\', '\r', '\n'], "_");
-    let mut body = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\n\
-         Content-Type: {mime}\r\n\r\n"
-    )
-    .into_bytes();
-    body.extend_from_slice(bytes);
-    for (k, v) in fields {
-        body.extend_from_slice(
-            format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}")
-                .as_bytes(),
-        );
-    }
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    body
-}
-
-/// Why the speech-to-text server gave no answer, in plain words: out of time is said as such.
-fn stt_failed(e: ureq::Error, minutes: u64) -> String {
-    let unit = if minutes == 1 { "minute" } else { "minutes" };
-    match e {
-        ureq::Error::Timeout(t)
-            if !matches!(t, ureq::Timeout::Connect | ureq::Timeout::Resolve) =>
-        {
-            format!("the speech-to-text server did not finish within {minutes} {unit}")
-        }
-        e => format!("the speech-to-text server could not be reached: {e}"),
-    }
-}
-
-/// The speech-to-text server's answer as a transcript, or why it is not one. The transcript is
-/// passed on as the server wrote it, with any markers it puts in (a gap it skipped, a cut).
-fn stt_reply(status: u16, body: &str) -> Result<String, String> {
-    let body = body.trim();
-    let server = "the speech-to-text server";
-    if status != 200 {
-        return Err(match body {
-            "" => format!("{server} answered HTTP {status}"),
-            b => format!("{server} answered HTTP {status}: {}", cut(b, 300)),
-        });
-    }
-    if body.starts_with('{') {
-        if body.contains("\"error\"") {
-            return Err(format!("{server} reported an error: {}", cut(body, 300)));
-        }
-        // A server that ignored `response_format=text` answers JSON with the text in it.
-        if let Some(t) = serde_json::from_str::<Value>(body)
-            .ok()
-            .and_then(|v| v.get("text")?.as_str().map(str::to_owned))
-        {
-            return Ok(t.trim().to_owned());
-        }
-    }
-    match body {
-        "" => Err(format!("{server} returned no text")),
-        b => Ok(b.to_owned()),
-    }
-}
-
 impl Voice for HttpVoice {
     fn download<'a>(&'a self, file_path: &'a str) -> VoiceFuture<'a, Vec<u8>> {
         self.files.download(file_path)
@@ -2152,39 +2058,6 @@ impl Voice for HttpVoice {
         name: &'a str,
         mime: &'a str,
     ) -> VoiceFuture<'a, String> {
-        let boundary = format!("helm-hub-{}", uuid::Uuid::new_v4().simple());
-        let body = multipart(
-            &boundary,
-            (name, mime, audio.as_slice()),
-            &[
-                ("model", self.stt.model.as_str()),
-                ("language", self.stt.language.as_str()),
-                ("response_format", "text"),
-            ],
-        );
-        let (agent, url) = (self.agent.clone(), self.stt.url.clone());
-        let minutes = self.stt.timeout.as_secs().div_ceil(60);
-        Box::pin(blocking(move || {
-            let mut resp = agent
-                .post(&url)
-                .header(
-                    "Content-Type",
-                    format!("multipart/form-data; boundary={boundary}"),
-                )
-                .send(&body[..])
-                .map_err(|e| stt_failed(e, minutes))?;
-            let status = resp.status().as_u16();
-            let text = resp
-                .body_mut()
-                .with_config()
-                .limit(1024 * 1024)
-                .lossy_utf8(true)
-                .read_to_string()
-                .map_err(|e| match e {
-                    e @ ureq::Error::Timeout(_) => stt_failed(e, minutes),
-                    e => format!("the speech-to-text server's answer was unreadable: {e}"),
-                })?;
-            stt_reply(status, &text)
-        }))
+        self.stt.transcribe(audio, name, mime)
     }
 }

@@ -11,14 +11,15 @@
 //! | `app` | the Helm tools forwarded down the caller's own person's lines |
 //! | `peer` | the household calls (`/peer/*`) |
 //! | `telegram` | `POST /telegram/update` and nothing else (a forwarder for a shared bot) |
+//! | `voice` | `/voice/*`, the phone's voice line to its owner's Helm, and nothing else |
 //!
-//! New scopes (a voice token, for one) are a new [`Scope`] variant, a [`Scope::parse`] arm and a
-//! [`Scope::label`] arm; routes check the scope they need with [`Client::has`], so a client without
-//! it is refused with no further change.
+//! New scopes are a new [`Scope`] variant, a [`Scope::parse`] arm and a [`Scope::label`] arm;
+//! routes check the scope they need with [`Client::has`], so a client without it is refused with
+//! no further change.
 //!
 //! Clients live in the registry (`registry.rs`). `HUB_TOKENS=client:token[:scope]` still works: its
 //! entries become legacy clients of one person, parsed here. The scope field is `rw` (the default),
-//! `ro`, `relay`, `app`, `peer` or `telegram`, or several joined with `+` (`rw+app`,
+//! `ro`, `relay`, `app`, `peer`, `telegram` or `voice`, or several joined with `+` (`rw+app`,
 //! `rw+relay+app+peer`); `memory:rw` and `memory:ro` are also accepted.
 //!
 //! Only SHA-256 digests of tokens are kept, and a presented token is compared against every
@@ -39,6 +40,8 @@ pub enum Scope {
     App,
     /// May use the household calls.
     Peer,
+    /// The phone's voice line (`/voice/*`); never anything else.
+    Voice,
 }
 
 impl Scope {
@@ -50,6 +53,7 @@ impl Scope {
             Scope::Telegram => "telegram",
             Scope::App => "app",
             Scope::Peer => "peer",
+            Scope::Voice => "voice",
         }
     }
 
@@ -61,6 +65,7 @@ impl Scope {
             "telegram" => Scope::Telegram,
             "app" => Scope::App,
             "peer" => Scope::Peer,
+            "voice" => Scope::Voice,
             _ => return None,
         })
     }
@@ -109,7 +114,8 @@ impl Scopes {
         {
             list.push(Scope::parse(part).ok_or_else(|| {
                 format!(
-                    "{part:?} is not a scope; use memory:ro, memory:rw, relay, app, peer or telegram"
+                    "{part:?} is not a scope; use memory:ro, memory:rw, relay, app, peer, telegram \
+                     or voice"
                 )
             })?);
         }
@@ -120,6 +126,10 @@ impl Scopes {
         // A forwarder's token posts updates and nothing else.
         if scopes.has(Scope::Telegram) && scopes.0.len() > 1 {
             return Err("the telegram scope cannot be combined with another".into());
+        }
+        // So is a phone's: a voice token reaches the voice line and nothing else.
+        if scopes.has(Scope::Voice) && scopes.0.len() > 1 {
+            return Err("the voice scope cannot be combined with another".into());
         }
         Ok(scopes)
     }
@@ -266,7 +276,7 @@ mod tests {
     fn legacy_scopes_parse_to_scope_sets() {
         let t = Tokens::parse(&format!(
             "helm:{A}, remote:{B}:ro+app, line:{C}:relay, fwd:{A}x:telegram, \
-             full:{B}x:rw+relay+app+peer"
+             full:{B}x:rw+relay+app+peer, phone:{C}x:voice"
         ))
         .unwrap();
         assert_eq!(scopes_of(&t, "helm"), "memory:rw");
@@ -274,6 +284,12 @@ mod tests {
         assert_eq!(scopes_of(&t, "line"), "relay");
         assert_eq!(scopes_of(&t, "fwd"), "telegram");
         assert_eq!(scopes_of(&t, "full"), "memory:rw,relay,app,peer");
+        assert_eq!(scopes_of(&t, "phone"), "voice");
+        assert!(
+            Scopes::parse_list("voice,rw").is_err(),
+            "a voice token stands alone"
+        );
+        assert!(Tokens::parse(&format!("phone:{A}:voice+app")).is_err());
         // rw wins over ro; a forwarder token stands alone; unknown scopes fail.
         assert_eq!(Scopes::parse_list("ro,rw").unwrap().to_csv(), "memory:rw");
         assert!(Scopes::parse_list("telegram,app").is_err());
@@ -291,6 +307,9 @@ mod tests {
         let s = Scopes::parse_list(DEFAULT_PAIRED_SCOPES).unwrap();
         assert!(s.can_write_memory() && s.has(Scope::Peer) && s.has(Scope::App));
         assert_eq!(Scope::parse(Scope::Peer.label()), Some(Scope::Peer));
+        assert_eq!(Scope::parse(Scope::Voice.label()), Some(Scope::Voice));
+        let v = Scopes::parse_list("voice").unwrap();
+        assert!(v.has(Scope::Voice) && !v.can_read_memory() && !v.has(Scope::Relay));
     }
 
     #[test]

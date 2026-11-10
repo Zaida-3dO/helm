@@ -6,9 +6,11 @@ use helm_hub::mcp::Options;
 use helm_hub::registry::Registry;
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
+use helm_hub::stt::Stt;
 use helm_hub::telegram::{
     now_ms, Bridge, HttpApi, HttpFiles, HttpVoice, Receive, Telegram, TelegramApi, TelegramConfig,
 };
+use helm_hub::voice::{VoiceBridge, VoiceConfig};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -32,7 +34,8 @@ ENVIRONMENT:
   HUB_BIND          listen address for serve (default 0.0.0.0:8000)
   HUB_TOKENS        client:token[:scope],... Optional now that machines are paired with
                     `helm-hub pair`; the entries here are clients of HUB_LEGACY_PERSON.
-                    scope: ro|rw|relay|app|peer|telegram, several joined with + (rw+app)
+                    scope: ro|rw|relay|app|peer|telegram|voice, several joined with +
+                    (rw+app); telegram and voice stand alone
   HUB_LEGACY_PERSON the person who owns the HUB_TOKENS clients, the memories stored before
                     people existed, and Telegram users with no person (default owner)
   HUB_ALLOW_MUTATE  1 to offer memory_update and memory_delete
@@ -52,7 +55,14 @@ ENVIRONMENT:
   HUB_TELEGRAM_STT_MODEL      the model it is asked for (default large-v3-turbo)
   HUB_TELEGRAM_STT_LANGUAGE   the language of the voice notes (default en)
   HUB_TELEGRAM_STT_TIMEOUT_MINUTES
-                              how long one transcription may take (1-60, default 10)",
+                              how long one transcription may take (1-60, default 10).
+                              The phone's voice line uses the same server
+  HUB_VOICE                   on (default) or off: the voice line for a phone with a
+                              voice-scope token (`client add --scopes voice`)
+  HUB_VOICE_QUEUE_MINUTES     how long a spoken or typed turn waits for Helm (1-1440,
+                              default 30)
+  HUB_VOICE_QUEUE_MAX         how many turns wait for Helm (1-200, default 20)
+  HUB_VOICE_OUTBOX_MINUTES    how long a reply waits for the phone (1-10080, default 120)",
         admin::USAGE
     )
 }
@@ -251,6 +261,13 @@ fn serve() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let voice_cfg = match VoiceConfig::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}; refusing to start");
+            return ExitCode::FAILURE;
+        }
+    };
     let allow_mutate = std::env::var("HUB_ALLOW_MUTATE").is_ok_and(|v| v == "1" || v == "true");
     let bind = std::env::var("HUB_BIND").unwrap_or_else(|_| "0.0.0.0:8000".into());
     let registry = Arc::new(Mutex::new(registry));
@@ -313,13 +330,24 @@ fn serve() -> ExitCode {
             "no clients yet: nobody can connect until one is added (helm-hub pair or client add)"
         );
     }
-    let state = Arc::new(AppState::new(
+    // The voice line shares the Telegram bot's speech-to-text settings, bot or no bot.
+    let voice = voice_cfg.map(|cfg| {
+        let mut bridge = VoiceBridge::new(lines.clone(), cfg);
+        if let Some(stt) = &telegram_cfg.stt {
+            bridge = bridge.with_stt(Arc::new(Stt::new(stt)));
+        }
+        Arc::new(bridge)
+    });
+    let voice_upstream = voice.as_ref().map(|_| lines.voice_receiver());
+    let mut state = AppState::new(
         store,
         registry.clone(),
         Options { allow_mutate },
         lines.clone(),
         telegram.clone(),
-    ));
+    );
+    state.voice = voice.clone();
+    let state = Arc::new(state);
 
     // One thread is plenty for a household's memory store and keeps RSS small.
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -355,6 +383,15 @@ fn serve() -> ExitCode {
                 }
             );
             tokio::spawn(bot.run(upstream));
+        }
+        if let (Some(bridge), Some(frames)) = (voice, voice_upstream) {
+            eprintln!(
+                "voice: on, transcription {}",
+                if bridge.has_stt() { "on" } else { "off" }
+            );
+            tokio::spawn(bridge.run(frames));
+        } else {
+            eprintln!("voice: off (HUB_VOICE=off)");
         }
         eprintln!(
             "helm-hub {} listening on {bind}; clients: {}; update/delete {}",
