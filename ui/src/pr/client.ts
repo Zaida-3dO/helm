@@ -7,7 +7,8 @@
 
 import type { Api } from '../api/client.ts';
 import { ApiError } from '../api/client.ts';
-import type { LandInfo, PrRef, PrWriteResult, ViewedState } from './types.ts';
+import { groupReactions } from './parse.ts';
+import type { LandInfo, PrRef, PrWriteResult, Reaction, ViewedState } from './types.ts';
 
 export interface RateLimit {
   remaining?: number;
@@ -163,6 +164,20 @@ export function prClient(api: Api) {
       need(click);
       return api('github_review_reply', { ...refVars(r), threadId, body });
     },
+    commentEdit: async (click: Click | null, r: PrRef, commentId: string, body: string) => {
+      need(click);
+      return api('github_comment_edit', { ...refVars(r), commentId, body });
+    },
+    commentDelete: async (click: Click | null, r: PrRef, commentId: string) => {
+      need(click);
+      return api('github_comment_delete', { ...refVars(r), commentId });
+    },
+    /** Adds your reaction, or takes it back when you already have it; answers the comment's reactions as they now stand. */
+    react: async (click: Click | null, r: PrRef, commentId: string, content: string): Promise<Reaction[]> => {
+      need(click);
+      const a = await api<Answer<{ subject?: { reactionGroups?: unknown } }>>('github_react', { ...refVars(r), commentId, content });
+      return groupReactions(a.data?.subject?.reactionGroups);
+    },
     resolve: async (click: Click | null, threadId: string, resolve: boolean) => {
       need(click);
       return api('github_review_resolve', { threadId, resolve });
@@ -171,6 +186,9 @@ export function prClient(api: Api) {
       need(click);
       return api('github_review', { ...refVars(r), head, event, body });
     },
+
+    /** A picture from this pull request's own text, fetched by the host: `{contentType, data}` with `data` in base64. */
+    image: (r: PrRef, url: string) => api<{ contentType: string; data: string }>('github_image', { ...refVars(r), url }),
 
     // merge box and draft state: the workflow crate's ops, which obey the repository's landing rule
     landInfo: async (r: PrRef, headBranch?: string): Promise<LandInfo> => parseLandInfo(await api('pr_land_info', { ...refVars(r), ...(headBranch ? { headBranch } : {}) })),

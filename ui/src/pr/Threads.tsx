@@ -1,12 +1,14 @@
 // Comments and review threads: one comment body, and a thread card used inline in Files and in the
 // Conversation timeline. Reply and Resolve are the only writes here, each from its own click.
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Markdown } from '../markdown/index.ts';
 import type { LinkTarget } from '../markdown/index.ts';
 import { handleLink } from '../panel/links.ts';
 import { Button } from '../ui/index.ts';
 import { attempt, clickFrom } from './client.ts';
+import { CommentBlock } from './CommentTools.tsx';
+import { useRemoteImages } from './images.ts';
 import type { PrEntry } from './store.ts';
 import type { Thread, ThreadComment } from './types.ts';
 import { AssociationBadge, Avatar, WriteBox, fullDate, relTime, useEntry } from './util.tsx';
@@ -15,16 +17,19 @@ export function openLink(t: LinkTarget): void {
   void handleLink(t, { chatId: null });
 }
 
-export function CommentBody({ text, empty = 'No description provided.' }: { text: string; empty?: string }) {
+/** `entry` lets the pictures in the text be fetched through the host; without it they stay links. */
+export function CommentBody({ text, empty = 'No description provided.', entry }: { text: string; empty?: string; entry?: PrEntry }) {
+  const host = useRef<HTMLDivElement>(null);
+  useRemoteImages(host, entry);
   if (!text.trim()) return <div className="pr-empty">{empty}</div>;
   return (
-    <div className="pr-md">
+    <div className="pr-md" ref={host}>
       <Markdown text={text} onLink={openLink} />
     </div>
   );
 }
 
-function ThreadComments({ comments }: { comments: ThreadComment[] }) {
+function ThreadComments({ entry, comments }: { entry: PrEntry; comments: ThreadComment[] }) {
   return (
     <>
       {comments.map((c) => (
@@ -37,7 +42,9 @@ function ThreadComments({ comments }: { comments: ThreadComment[] }) {
                 {relTime(c.createdAt)}
               </span>
             </div>
-            <CommentBody text={c.body} empty="" />
+            <CommentBlock entry={entry} commentId={c.id} text={c.body} mine={c.mine} reactions={c.reactions} changed={() => void entry.loadThreads()}>
+              <CommentBody text={c.body} empty="" entry={entry} />
+            </CommentBlock>
           </div>
         </div>
       ))}
@@ -111,7 +118,7 @@ export function ThreadCard({
       {!isFolded && (
         <>
           {!inline && <HunkTail hunk={thread.diffHunk} />}
-          <ThreadComments comments={thread.comments} />
+          <ThreadComments entry={entry} comments={thread.comments} />
           <div className="pr-thread-actions">
             {thread.canReply && !thread.resolved && (
               <ReplyBox entry={entry} thread={thread} />

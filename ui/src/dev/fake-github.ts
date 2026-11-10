@@ -172,7 +172,7 @@ export function githubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } 
     };
   };
 
-  const WRITES = ['github_comment', 'github_review_comment', 'github_review_reply', 'github_review', 'pr_merge', 'pr_ready', 'pr_draft'];
+  const WRITES = ['github_comment', 'github_comment_edit', 'github_comment_delete', 'github_react', 'github_review_comment', 'github_review_reply', 'github_review', 'pr_merge', 'pr_ready', 'pr_draft'];
   const handler: FakeOpHandler = (op, a) => {
     if (WRITES.includes(op)) st(number(a)).updated = iso(0);
     switch (op) {
@@ -300,6 +300,13 @@ export function githubFakeOps(): { prefixes: string[]; handler: FakeOpHandler } 
         ((t.comments as J).nodes as J[]).push({ id: `C${id}`, databaseId: id, body: a.body, createdAt: iso(0), author: user('sam'), authorAssociation: 'OWNER', diffHunk: '', pullRequestReview: null });
         return { status: 200 };
       }
+      case 'github_comment_edit':
+      case 'github_comment_delete':
+        return { status: 200 };
+      case 'github_react':
+        return { status: 200, data: { subject: { reactionGroups: [{ content: a.content, viewerHasReacted: true, reactors: { totalCount: 1 } }] } } };
+      case 'github_image':
+        throw new ApiError('invalid', '[Refused] There are no pictures in the sample pull request.');
       case 'github_review_resolve': {
         for (const s of states.values()) for (const t of s.threads) if (t.id === a.threadId) t.isResolved = a.resolve === true;
         if (states.size === 0) for (const t of st(42).threads) if (t.id === a.threadId) t.isResolved = a.resolve === true;

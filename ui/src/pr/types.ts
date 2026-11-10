@@ -72,9 +72,19 @@ export interface Revision {
   updatedAt: string;
 }
 
+/** One reaction on a comment: GitHub's name for it, how many people used it, and whether you did. */
+export interface Reaction {
+  content: string;
+  count: number;
+  mine: boolean;
+}
+
 export interface ThreadComment {
   id: string;
   databaseId: number;
+  /** You wrote it, so you may edit or delete it. */
+  mine: boolean;
+  reactions: Reaction[];
   author: string;
   authorAssociation: string;
   body: string;
@@ -103,7 +113,7 @@ export interface Thread {
 export type ReviewState = 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING';
 
 export type TimelineItem =
-  | { type: 'comment'; key: string; id: number; at: string; author: string; association: string; body: string; edited: boolean }
+  | { type: 'comment'; key: string; id: number; nodeId: string; at: string; author: string; association: string; body: string; edited: boolean; reactions: Reaction[] }
   | {
       type: 'review';
       key: string;

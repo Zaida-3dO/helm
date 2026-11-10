@@ -12,6 +12,7 @@ import type {
   PrFile,
   PrState,
   PrSummary,
+  Reaction,
   ReviewDecision,
   ReviewState,
   Thread,
@@ -103,6 +104,33 @@ export function parseSummary(rest: unknown, summary: unknown): PrSummary {
 
 // ---- Conversation ----
 
+const REST_REACTIONS: [string, string][] = [
+  ['+1', 'THUMBS_UP'],
+  ['-1', 'THUMBS_DOWN'],
+  ['laugh', 'LAUGH'],
+  ['hooray', 'HOORAY'],
+  ['confused', 'CONFUSED'],
+  ['heart', 'HEART'],
+  ['rocket', 'ROCKET'],
+  ['eyes', 'EYES'],
+];
+
+/** The counts a REST comment carries; which of them are yours is not part of that answer. */
+function restReactions(v: unknown): Reaction[] {
+  const o = obj(v);
+  return REST_REACTIONS.map(([key, content]) => ({ content, count: num(o[key]), mine: false })).filter((r) => r.count > 0);
+}
+
+/** The reactions of a GraphQL comment, in GitHub's order, without the ones nobody used. */
+export function groupReactions(v: unknown): Reaction[] {
+  return arr(v)
+    .map((g) => {
+      const o = obj(g);
+      return { content: str(o.content), count: num(obj(o.reactors).totalCount), mine: o.viewerHasReacted === true };
+    })
+    .filter((r) => r.content && r.count > 0);
+}
+
 export function parseIssueComments(list: unknown): TimelineItem[] {
   return arr(list).map((c) => {
     const o = obj(c);
@@ -111,11 +139,13 @@ export function parseIssueComments(list: unknown): TimelineItem[] {
       type: 'comment' as const,
       key: `c${num(o.id)}`,
       id: num(o.id),
+      nodeId: str(o.node_id),
       at: created,
       author: login(o.user),
       association: str(o.author_association),
       body: str(o.body),
       edited: Boolean(str(o.updated_at)) && str(o.updated_at) !== created,
+      reactions: restReactions(o.reactions),
     };
   });
 }
@@ -146,6 +176,8 @@ function threadComment(c: unknown): ThreadComment {
   return {
     id: str(o.id),
     databaseId: num(o.databaseId),
+    mine: o.viewerDidAuthor === true,
+    reactions: groupReactions(o.reactionGroups),
     author: login(o.author),
     authorAssociation: str(o.authorAssociation),
     body: str(o.body),

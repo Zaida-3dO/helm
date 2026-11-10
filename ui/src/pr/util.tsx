@@ -1,10 +1,11 @@
 // Small shared pieces of the PR view: people as initials, times, pills, the typed-text box.
 
-import { useRef, useSyncExternalStore } from 'react';
+import { useRef, useState, useSyncExternalStore } from 'react';
 import type { ReactNode } from 'react';
 import { Button } from '../ui/index.ts';
 import { attempt, clickFrom } from './client.ts';
 import type { Click, WriteOutcome } from './client.ts';
+import { insertMention, matchLogins, mentionAt, participantLogins } from './mentions.ts';
 import { openOnGitHub } from './open.ts';
 import type { PrEntry } from './store.ts';
 import type { PrState } from './types.ts';
@@ -143,6 +144,21 @@ export function WriteBox({
   const bytes = byteLength(text);
   const tooBig = bytes > MAX_BODY_BYTES;
   const ref = useRef<HTMLTextAreaElement>(null);
+  const [caret, setCaret] = useState(0);
+  // Typing `@` suggests people already on the pull request.
+  const typing = mentionAt(text, caret);
+  const suggestions = typing && !sending ? matchLogins(participantLogins(entry.summary, entry.conv?.data ?? null), typing.query) : [];
+  const mention = (login: string) => {
+    if (!typing) return;
+    const next = insertMention(text, typing.start, caret, login);
+    entry.drafts.set(id, next.text);
+    setCaret(next.caret);
+    entry.changed();
+    requestAnimationFrame(() => {
+      ref.current?.focus();
+      ref.current?.setSelectionRange(next.caret, next.caret);
+    });
+  };
 
   const send = (a: BoxAction, click: Click | null) => {
     if (!click || entry.sending.has(id)) return;
@@ -188,10 +204,15 @@ export function WriteBox({
         autoFocus={autoFocus}
         onChange={(e) => {
           entry.drafts.set(id, e.target.value);
+          setCaret(e.target.selectionStart);
           entry.changed();
         }}
+        onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && primary) {
+          if (e.key === 'Tab' && !e.shiftKey && suggestions[0]) {
+            e.preventDefault();
+            mention(suggestions[0]);
+          } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && primary) {
             e.preventDefault();
             send(primary, clickFrom(e.nativeEvent));
           } else if (e.key === 'Escape' && onCancel) {
@@ -200,6 +221,16 @@ export function WriteBox({
           }
         }}
       />
+      {suggestions.length > 0 && (
+        <div className="pr-mentions" role="listbox" aria-label="People on this pull request" data-testid="pr-mentions">
+          {suggestions.map((l) => (
+            <button key={l} type="button" role="option" aria-selected="false" className="pr-mention" onMouseDown={(e) => e.preventDefault()} onClick={() => mention(l)}>
+              <Avatar login={l} size={16} /> {l}
+            </button>
+          ))}
+          <span className="pr-fine">Tab picks the first.</span>
+        </div>
+      )}
       {note && <div className="pr-fine">{note}</div>}
       {bytes >= COUNTER_FROM && (
         <div className={tooBig ? 'pr-fine pr-bad' : 'pr-fine'}>

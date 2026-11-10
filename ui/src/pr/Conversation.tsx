@@ -7,6 +7,7 @@ import { attempt, clickFrom } from './client.ts';
 import { METHOD_LABEL } from './client.ts';
 import type { PrWriteResult } from './types.ts';
 import type { PrEntry } from './store.ts';
+import { CommentBlock } from './CommentTools.tsx';
 import { CommentBody, ThreadCard } from './Threads.tsx';
 import type { PrAnchor, PrSummary, TimelineItem } from './types.ts';
 import { AssociationBadge, Avatar, ErrorBlock, fullDate, relTime, useEntry } from './util.tsx';
@@ -56,7 +57,7 @@ export function ConversationView({ entry, anchor, clearAnchor, focused }: { entr
               </span>{' '}
               <AssociationBadge value={pr.authorAssociation} />
             </div>
-            <CommentBody text={pr.body} />
+            <CommentBody text={pr.body} entry={entry} />
           </div>
         </div>
         <StatusCard entry={entry} pr={pr} />
@@ -104,7 +105,9 @@ function TimelineRow({ entry, item }: { entry: PrEntry; item: TimelineItem }) {
               {item.edited && <span className="pr-muted"> · edited</span>}{' '}
               <AssociationBadge value={item.association} />
             </div>
-            <CommentBody text={item.body} empty="" />
+            <CommentBlock entry={entry} commentId={item.nodeId} text={item.body} mine={Boolean(entry.summary?.viewer) && item.author === entry.summary?.viewer} reactions={item.reactions} changed={() => void entry.loadConversation(true)}>
+              <CommentBody text={item.body} empty="" entry={entry} />
+            </CommentBlock>
           </div>
         </div>
       );
@@ -122,7 +125,7 @@ function TimelineRow({ entry, item }: { entry: PrEntry; item: TimelineItem }) {
           </div>
           {item.body.trim() && (
             <div className="pr-comment-main pr-review-body">
-              <CommentBody text={item.body} empty="" />
+              <CommentBody text={item.body} empty="" entry={entry} />
             </div>
           )}
           {item.threads.map((t) => (
