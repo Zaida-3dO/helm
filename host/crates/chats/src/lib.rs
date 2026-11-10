@@ -14,6 +14,7 @@
 //! | [`runtime`] | the runtime service, the worker spawner seam, quit drain |
 //! | `actor` | one task per chat: worker, streaming, tools, interactions, Stop, timers |
 //! | [`submit`] | sends, in-flight actions, model changes, restart continuation |
+//! | [`outage`] | sleep and outage lines in the transcript, and the continuation after an outage |
 //! | [`titles`] | automatic titles through `helpers/titles`, renames, suggestions |
 //! | [`toolsummary`] | the few plain words a running tool call shows in the progress lines |
 //! | [`autocomplete`] | composer autocomplete through `helpers/autocomplete` |
@@ -66,6 +67,7 @@ pub mod local;
 pub mod manage;
 pub mod message_images;
 pub mod ops;
+pub mod outage;
 pub mod output_save;
 pub mod rollover;
 pub mod runtime;

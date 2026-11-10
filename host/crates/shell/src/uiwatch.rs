@@ -6,7 +6,12 @@
 //! diagnostic line ([`write_diagnostic`]) and reloads the page. Drafts survive because the composer
 //! saves them on a debounce; nothing here touches the database.
 //!
-//! Decisions (Tauri does not surface WebView2's process-failed event):
+//! WebView2's own process-failed event is the fast path ([`CrashGuard`]): a renderer that exits is
+//! reloaded at once, a browser process that exits gets a new window, and a window that keeps
+//! failing is left alone until the user says to reload it. The probe above is the backstop for a
+//! page that hangs without any process dying.
+//!
+//! Decisions:
 //! - Probing, not page timers, so a hidden or occluded window whose timers are throttled is never
 //!   mistaken for a dead one; a hidden or minimised window is not judged at all.
 //! - A page that has not answered since it (re)loaded is never reloaded, so a slow first load or a
@@ -82,6 +87,33 @@ impl UiWatchdog {
 
 /// Append one line to `<dir>/ui-process.log` (created owner-only), keeping the file small.
 pub fn write_diagnostic(dir: &Path, unix_ms: i64, silent_for: Duration) -> std::io::Result<()> {
+    append_line(
+        dir,
+        &format!(
+            "{unix_ms} the main window's page did not answer for {} s; reloaded it",
+            silent_for.as_secs()
+        ),
+    )
+}
+
+/// The same file, for a process WebView2 reported as failed.
+pub fn write_crash(
+    dir: &Path,
+    unix_ms: i64,
+    failure: Failure,
+    recovery: Recovery,
+) -> std::io::Result<()> {
+    append_line(
+        dir,
+        &format!(
+            "{unix_ms} the web view reported {}; {}",
+            failure.describe(),
+            recovery.describe()
+        ),
+    )
+}
+
+fn append_line(dir: &Path, line: &str) -> std::io::Result<()> {
     helm_core::privfs::create_private_dir_all(dir)?;
     let path = dir.join("ui-process.log");
     if let Ok(meta) = std::fs::metadata(&path) {
@@ -99,11 +131,110 @@ pub fn write_diagnostic(dir: &Path, unix_ms: i64, silent_for: Duration) -> std::
         .create(true)
         .append(true)
         .open(&path)?;
-    writeln!(
-        f,
-        "{unix_ms} the main window's page did not answer for {} s; reloaded it",
-        silent_for.as_secs()
-    )
+    writeln!(f, "{line}")
+}
+
+/// A process WebView2 reported as failed (its process-failed event, by kind).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// The browser process that hosts everything: the web view is gone.
+    BrowserExited,
+    /// The page's renderer process exited or crashed.
+    RendererExited,
+    /// The renderer stopped answering but is still alive.
+    RendererUnresponsive,
+    /// A renderer for a frame inside the page exited (a sealed page in the side panel, say).
+    FrameRendererExited,
+    /// Anything else (GPU, utility and helper processes): WebView2 restarts those itself.
+    Other,
+}
+
+impl Failure {
+    /// From the event's kind number: 0 browser, 1 renderer, 2 renderer unresponsive, 3 frame
+    /// renderer; the rest are processes WebView2 recovers on its own.
+    pub fn from_kind(kind: i32) -> Self {
+        match kind {
+            0 => Self::BrowserExited,
+            1 => Self::RendererExited,
+            2 => Self::RendererUnresponsive,
+            3 => Self::FrameRendererExited,
+            _ => Self::Other,
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Self::BrowserExited => "the browser process exited",
+            Self::RendererExited => "the page's renderer exited",
+            Self::RendererUnresponsive => "the page's renderer was unresponsive",
+            Self::FrameRendererExited => "a frame's renderer exited",
+            Self::Other => "another web view process failed",
+        }
+    }
+}
+
+/// What the app does about a [`Failure`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    /// Nothing: the failure is not the main page's, or it may clear by itself.
+    Ignore,
+    /// Reload the page in the same window.
+    Reload,
+    /// The web view is gone: build the window again.
+    Rebuild,
+    /// It keeps failing: ask the user before trying again.
+    Offer,
+}
+
+impl Recovery {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Ignore => "left it alone",
+            Self::Reload => "reloaded the page",
+            Self::Rebuild => "built the window again",
+            Self::Offer => "asked whether to reload",
+        }
+    }
+}
+
+/// The repair that would be the `CRASH_LIMIT`th within `CRASH_WINDOW` is offered instead.
+pub const CRASH_WINDOW: Duration = Duration::from_secs(120);
+pub const CRASH_LIMIT: usize = 3;
+
+/// Decides what to do about each reported failure, and stops a crash loop.
+#[derive(Debug, Default)]
+pub struct CrashGuard {
+    repairs: Vec<Instant>,
+}
+
+impl CrashGuard {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn on_failure(&mut self, now: Instant, failure: Failure) -> Recovery {
+        let wanted = match failure {
+            Failure::RendererExited => Recovery::Reload,
+            Failure::BrowserExited => Recovery::Rebuild,
+            // A frame's renderer is not the main page; an unresponsive one is the probe's to judge.
+            Failure::FrameRendererExited | Failure::RendererUnresponsive | Failure::Other => {
+                return Recovery::Ignore
+            }
+        };
+        self.repairs
+            .retain(|t| now.saturating_duration_since(*t) < CRASH_WINDOW);
+        if self.repairs.len() + 1 >= CRASH_LIMIT {
+            return Recovery::Offer;
+        }
+        self.repairs.push(now);
+        wanted
+    }
+
+    /// The user said to repair after an offer: the count starts again, with this repair in it.
+    pub fn offered_and_accepted(&mut self, now: Instant) {
+        self.repairs.clear();
+        self.repairs.push(now);
+    }
 }
 
 #[cfg(test)]
@@ -180,6 +311,45 @@ mod tests {
     }
 
     #[test]
+    fn a_crash_loop_ends_in_an_offer_and_other_failures_are_left_alone() {
+        let t0 = Instant::now();
+        for (kind, want) in [
+            (0, Failure::BrowserExited),
+            (1, Failure::RendererExited),
+            (2, Failure::RendererUnresponsive),
+            (3, Failure::FrameRendererExited),
+            (6, Failure::Other),
+            (99, Failure::Other),
+        ] {
+            assert_eq!(Failure::from_kind(kind), want, "kind {kind}");
+        }
+        let mut g = CrashGuard::new();
+        for f in [
+            Failure::FrameRendererExited,
+            Failure::RendererUnresponsive,
+            Failure::Other,
+        ] {
+            assert_eq!(g.on_failure(t0, f), Recovery::Ignore, "{f:?}");
+        }
+        // Two quick repairs are made; the third within two minutes is offered instead.
+        let r = Failure::RendererExited;
+        assert_eq!(g.on_failure(at(t0, 0), r), Recovery::Reload);
+        assert_eq!(
+            g.on_failure(at(t0, 30), Failure::BrowserExited),
+            Recovery::Rebuild
+        );
+        assert_eq!(g.on_failure(at(t0, 60), r), Recovery::Offer);
+        assert_eq!(g.on_failure(at(t0, 61), r), Recovery::Offer);
+        // Failures spread out in time are each repaired.
+        assert_eq!(g.on_failure(at(t0, 400), r), Recovery::Reload);
+        assert_eq!(g.on_failure(at(t0, 900), r), Recovery::Reload);
+        // After the user accepts an offer, the count starts again.
+        g.offered_and_accepted(at(t0, 901));
+        assert_eq!(g.on_failure(at(t0, 902), r), Recovery::Reload);
+        assert_eq!(g.on_failure(at(t0, 903), r), Recovery::Offer);
+    }
+
+    #[test]
     fn the_diagnostic_appends_a_line_and_stays_small() {
         let d = tempfile::tempdir().unwrap();
         let dir = d.path().join("diagnostics");
@@ -194,14 +364,18 @@ mod tests {
         for i in 0..2000 {
             write_diagnostic(&dir, i, Duration::from_secs(30)).unwrap();
         }
+        write_crash(&dir, 7, Failure::RendererExited, Recovery::Reload).unwrap();
         let len = std::fs::metadata(dir.join("ui-process.log")).unwrap().len();
-        assert!(len <= DIAGNOSTIC_MAX_BYTES + 100, "{len}");
+        assert!(len <= DIAGNOSTIC_MAX_BYTES + 200, "{len}");
         let text = std::fs::read_to_string(dir.join("ui-process.log")).unwrap();
         assert!(
-            text.ends_with("1999 the main window's page did not answer for 30 s; reloaded it\n")
+            text.ends_with(
+                "7 the web view reported the page's renderer exited; reloaded the page\n"
+            ),
+            "{text:?}"
         );
         assert!(
-            text.lines().all(|l| l.ends_with("reloaded it")),
+            text.lines().all(|l| l.contains("reloaded")),
             "cut on a line boundary"
         );
     }

@@ -135,6 +135,22 @@ impl QuitCoordinator {
             .await
     }
 
+    /// The quit sequence for a sign-out or shutdown. The system already decided, so there is no
+    /// prompt, and the UI gets its usual short window to save but is never required to answer.
+    /// Chats that were working are noted for a continuation, exactly as in a quit.
+    pub async fn run_for_session_end(
+        &self,
+        events: Arc<dyn EventSink>,
+        workers: Arc<dyn WorkerDrain>,
+        db: Option<Arc<Database>>,
+    ) -> QuitOutcome {
+        if !self.begin() {
+            return QuitOutcome::Busy;
+        }
+        self.finish_quit(events, workers, db, DRAFT_FLUSH_TIMEOUT, false)
+            .await
+    }
+
     /// Back to idle after a quit that was started but cannot go on (the update could not be
     /// started after the workers had drained).
     pub fn abort(&self) {
@@ -292,6 +308,33 @@ mod tests {
         );
         assert!(workers.1.load(Ordering::SeqCst));
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_end_quits_without_a_prompt_and_without_the_ui() {
+        let q = QuitCoordinator::new();
+        let sink = Arc::new(RecordingSink::default());
+        let workers = Arc::new(SlowWorkers(
+            Duration::from_millis(10),
+            AtomicBool::new(false),
+        ));
+        let out = q
+            .run_for_session_end(sink.clone(), workers.clone(), None)
+            .await;
+        assert_eq!(
+            out,
+            QuitOutcome::Quit {
+                ui_saved: false,
+                drained: true
+            }
+        );
+        assert!(workers.1.load(Ordering::SeqCst), "the workers were drained");
+        assert_eq!(sink.kinds(), ["quitting"]);
+        // Already quitting: a second request does not start another sequence.
+        assert_eq!(
+            q.run_for_session_end(sink, workers, None).await,
+            QuitOutcome::Busy
+        );
     }
 
     #[tokio::test(start_paused = true)]

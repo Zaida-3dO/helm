@@ -4,8 +4,9 @@
 //! implementations, Linux gets cheap ones or no-op stubs, and macOS is not a target.
 //!
 //! What is used for real: the credential key store ([`keychain`]), owner-only file security and
-//! atomic replace ([`fs`]), single-instance signalling ([`instance`]) and the quit confirmation
-//! ([`dialogs`]). Power, taskbar badge and sound are no-op stubs until they are implemented.
+//! atomic replace ([`fs`]), single-instance signalling ([`instance`]), the quit confirmation
+//! ([`dialogs`]) and sleep, wake, sign-out and shutdown ([`session`]). Taskbar badge and sound are
+//! no-op stubs until they are implemented.
 
 pub mod audio;
 pub mod dialogs;
@@ -16,6 +17,7 @@ pub mod keychain;
 pub mod pathgate;
 pub mod power;
 pub mod private;
+pub mod session;
 pub mod stubs;
 
 use std::sync::Arc;

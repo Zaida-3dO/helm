@@ -5,7 +5,18 @@ use helm_core::profile::Profile;
 use helm_ipc::{
     authority::main_window_may_navigate, AppEvent, EventSink, EVENT_CHANNEL, MAIN_WINDOW,
 };
+use helm_shell::uiwatch::{self, CrashGuard, Failure, Recovery};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+
+/// The web view's command line. Setting it replaces the ones the web view adds by default, so they
+/// are listed in full: the defaults (no mini menu, no SmartScreen) plus audio that may start
+/// without a click, so the first chime after launch is heard. The last switch keeps WebRTC from
+/// using the machine's own network addresses: with it, a page cannot open a direct UDP path to
+/// anywhere (Helm uses WebRTC nowhere), which closes the one network route a page's content
+/// security policy does not cover.
+pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --force-webrtc-ip-handling-policy=disable_non_proxied_udp";
 
 /// Emit one event on the tagged channel, to the main window only.
 pub fn emit(app: &AppHandle, event: AppEvent) {
@@ -113,10 +124,153 @@ fn show_without_activating(window: &tauri::WebviewWindow) {
     let _ = window.show();
 }
 
+/// What it takes to repair the main window when WebView2 says one of its processes failed: the
+/// loop guard, where to write the diagnostic line, a way to ask the user, and what is needed to
+/// build the window again.
+pub struct WindowCrashes {
+    guard: Mutex<CrashGuard>,
+    diagnostics: std::path::PathBuf,
+    dialogs: Arc<dyn helm_platform::Dialogs>,
+    profile: Profile,
+    debug: bool,
+}
+
+impl WindowCrashes {
+    pub fn new(
+        profile: &Profile,
+        debug: bool,
+        dialogs: Arc<dyn helm_platform::Dialogs>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            guard: Mutex::new(CrashGuard::new()),
+            diagnostics: profile.path("diagnostics"),
+            dialogs,
+            profile: profile.clone(),
+            debug,
+        })
+    }
+
+    /// WebView2 reported a failed process (`kind` is its event's number). Chats live in the host,
+    /// not the page, so repairing the page loses none of them; drafts are saved as they are typed.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn on_failed(self: &Arc<Self>, app: &AppHandle, kind: i32) {
+        let failure = Failure::from_kind(kind);
+        let recovery = self
+            .guard
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .on_failure(Instant::now(), failure);
+        log::error!("the web view reported {failure:?}; {recovery:?}");
+        if let Err(e) =
+            uiwatch::write_crash(&self.diagnostics, helm_core::now_ms(), failure, recovery)
+        {
+            log::warn!("ui diagnostic not written: {e}");
+        }
+        if recovery == Recovery::Ignore {
+            return;
+        }
+        // Off the web view's own event: asking and rebuilding both wait on its thread.
+        let me = self.clone();
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let mut recovery = recovery;
+            if recovery == Recovery::Offer {
+                let yes = me.dialogs.confirm(
+                    "Helm",
+                    "Helm's window has stopped working several times in a row. Your chats are safe. Reload the window?",
+                );
+                if !yes {
+                    return;
+                }
+                me.guard
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .offered_and_accepted(Instant::now());
+                recovery = if failure == Failure::BrowserExited {
+                    Recovery::Rebuild
+                } else {
+                    Recovery::Reload
+                };
+            }
+            me.repair(&app, recovery);
+        });
+    }
+
+    fn repair(self: &Arc<Self>, app: &AppHandle, recovery: Recovery) {
+        match recovery {
+            Recovery::Reload => {
+                if let Some(w) = app.get_webview_window(MAIN_WINDOW) {
+                    if let Err(e) = w.reload() {
+                        log::error!("reloading the main window failed: {e}");
+                    }
+                }
+            }
+            Recovery::Rebuild => {
+                if let Some(w) = app.get_webview_window(MAIN_WINDOW) {
+                    let _ = w.destroy();
+                }
+                // The old window's label is free a moment after it is destroyed.
+                for _ in 0..5 {
+                    match build_main_window(app, self) {
+                        Ok(()) => return,
+                        Err(e) => {
+                            log::warn!("building the main window again failed: {e}");
+                            std::thread::sleep(Duration::from_millis(300));
+                        }
+                    }
+                }
+                log::error!("the main window could not be built again");
+            }
+            Recovery::Ignore | Recovery::Offer => {}
+        }
+    }
+}
+
+/// Listen for the web view's process-failed event on the main window.
+#[cfg(windows)]
+fn watch_process_failures(window: &tauri::WebviewWindow, crashes: Arc<WindowCrashes>) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND;
+    use webview2_com::ProcessFailedEventHandler;
+    let app = window.app_handle().clone();
+    let attached = window.with_webview(move |platform| {
+        // SAFETY: COM calls on the controller Tauri created, made on the thread that owns it.
+        unsafe {
+            let core = match platform.controller().CoreWebView2() {
+                Ok(core) => core,
+                Err(e) => return log::warn!("web view crash handler not attached: {e}"),
+            };
+            let handler = ProcessFailedEventHandler::create(Box::new(move |_sender, args| {
+                if let Some(args) = args {
+                    let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND(0);
+                    if args.ProcessFailedKind(&mut kind).is_ok() {
+                        crashes.on_failed(&app, kind.0);
+                    }
+                }
+                Ok(())
+            }));
+            let mut token = 0i64;
+            if let Err(e) = core.add_ProcessFailed(&handler, &mut token) {
+                log::warn!("web view crash handler not attached: {e}");
+            }
+        }
+    });
+    if let Err(e) = attached {
+        log::warn!("web view crash handler not attached: {e}");
+    }
+}
+
+#[cfg(not(windows))]
+fn watch_process_failures(_window: &tauri::WebviewWindow, _crashes: Arc<WindowCrashes>) {}
+
 /// The main window is built in code, not from static config, so its navigation policy can be
 /// attached: only the app origin, `about:srcdoc` and (debug) the dev server; no new
 /// windows. Its WebView2 data lives inside the profile, so profiles never share web storage.
-pub fn build_main_window(app: &tauri::App, profile: &Profile, debug: bool) -> tauri::Result<()> {
+/// Also called to build it again after the web view's browser process has died.
+pub fn build_main_window<M: Manager<tauri::Wry>>(
+    app: &M,
+    crashes: &Arc<WindowCrashes>,
+) -> tauri::Result<()> {
+    let (profile, debug) = (&crashes.profile, crashes.debug);
     let data_dir = profile.path("webview");
     helm_core::privfs::create_private_dir_all(&data_dir)?;
     let builder = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
@@ -142,12 +296,7 @@ pub fn build_main_window(app: &tauri::App, profile: &Profile, debug: bool) -> ta
         .min_inner_size(760.0, 540.0)
         .decorations(false)
         .data_directory(data_dir)
-        // Setting browser arguments replaces the ones the web view adds by default, so they are listed
-        // in full: the defaults (no mini menu, no SmartScreen) plus audio that may start without a
-        // click, so the first chime after launch is heard.
-        .additional_browser_args(
-            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required",
-        )
+        .additional_browser_args(BROWSER_ARGS)
         .on_navigation(move |url| {
             let ok = main_window_may_navigate(url.as_str(), debug);
             if !ok {
@@ -163,8 +312,9 @@ pub fn build_main_window(app: &tauri::App, profile: &Profile, debug: bool) -> ta
         let _ = window.set_position(tauri::PhysicalPosition::new(-32000, -32000));
         show_without_activating(&window);
     }
+    watch_process_failures(&window, crashes.clone());
     // Files dragged in from Explorer reach the composer as paths.
-    let handle = app.handle().clone();
+    let handle = app.app_handle().clone();
     window.on_window_event(move |e| {
         if let tauri::WindowEvent::DragDrop(d) = e {
             emit(&handle, file_drop_event(d));
@@ -217,6 +367,17 @@ mod drop_tests {
             (false, Some("background"), false),
         ] {
             assert_eq!(background_window(debug, value), want, "{debug} {value:?}");
+        }
+    }
+
+    #[test]
+    fn the_web_view_keeps_its_defaults_and_closes_webrtc() {
+        for part in [
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+            "--autoplay-policy=no-user-gesture-required",
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+        ] {
+            assert!(BROWSER_ARGS.contains(part), "{part}");
         }
     }
 

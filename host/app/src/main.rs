@@ -9,10 +9,11 @@
 
 mod registrations;
 mod shell;
+mod system;
 mod tray;
 
 use helm_core::db::{Database, DbError, MigrationRegistry};
-use helm_core::lifecycle::{PlatformDialogs, QuitCoordinator, Shell, Workers};
+use helm_core::lifecycle::{PlatformDialogs, QuitCoordinator, Shell, WorkerDrain, Workers};
 use helm_core::profile::{self, LockOutcome, Profile};
 use helm_core::{recovery, revisions::KeyedRevisions};
 use helm_ipc::{ApiError, Caller, Dispatcher, OpCtx, OpRegistry, Services};
@@ -285,22 +286,36 @@ fn run_app(
                 tokio_handle,
             );
             let dialogs = quit_dialogs(&platform, debug);
+            let crashes = shell::WindowCrashes::new(&profile, debug, dialogs.clone());
+            let quit = Arc::new(QuitCoordinator::new());
+            let drain: Arc<dyn WorkerDrain> = Arc::new(helm_chats::RuntimeDrain(runtime.clone()));
+            // Chats that lose the connection or the computer's attention get a line saying so, and
+            // are asked to carry on once things are back.
+            let outages = helm_chats::outage::OutageWatch::new(runtime.clone());
+            outages.start();
             let mut services = Services::new();
             services.insert(Arc::new(profile.clone()));
             services.insert(media.clone());
             services.insert(pages.clone());
             services.insert(db.clone());
             services.insert(clock.clone());
-            services.insert(Arc::new(QuitCoordinator::new()));
+            services.insert(quit.clone());
             services.insert(Arc::new(KeyedRevisions::new()));
             services.insert(Arc::new(PlatformDialogs(dialogs)));
-            services.insert(Arc::new(Workers(Arc::new(helm_chats::RuntimeDrain(
-                runtime.clone(),
-            )))));
+            services.insert(Arc::new(Workers(drain.clone())));
             services.insert(Arc::new(runtime.clone()));
             services.insert(Arc::new(Shell(shell.clone())));
             services.insert(Arc::new(platform.clone()));
             registrations::services(&mut services, &events);
+            // Sleep, wake, sign-out and shutdown.
+            helm_platform::session::watch(Arc::new(system::AppSystem {
+                outages,
+                quit,
+                events: events.clone(),
+                workers: drain,
+                db: db.clone(),
+                shell: shell.clone(),
+            }));
             let shell_svc = services.get::<helm_shell::ShellService>();
             if let Some(t) = services.get::<helm_terminal::TerminalManager>() {
                 app.manage(t);
@@ -316,7 +331,7 @@ fn run_app(
             registrations::attach_host_tools(&runtime, &dispatcher);
             app.manage(dispatcher);
 
-            shell::build_main_window(app, &profile, debug)?;
+            shell::build_main_window(&*app, &crashes)?;
             // If the UI never reports its first frame (a broken bundle), show the window anyway.
             let late = shell.clone();
             std::thread::spawn(move || {

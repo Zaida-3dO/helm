@@ -529,6 +529,9 @@ pub enum ContextKind {
     /// Something AFK did with an ask while the user was away (an automatic answer, or an ask it
     /// left waiting for them).
     Afk,
+    /// A gap in the chat's work that was not its doing: the computer slept, the connection was
+    /// down, or Helm asked the chat to carry on after one.
+    Interruption,
 }
 
 /// The `details` bag of a message row. Every field is optional and absent when unset.

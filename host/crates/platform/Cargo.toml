@@ -24,6 +24,9 @@ windows-sys = { version = "0.59", features = [
   "Win32_UI_Shell",
   "Win32_System_Power",
   "Win32_System_SystemServices",
+  "Win32_Graphics_Gdi",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Shutdown",
 ] }
 windows = { version = "0.62", features = [
   "Win32_Media_Audio",

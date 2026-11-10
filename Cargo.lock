@@ -1828,6 +1828,7 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-notification",
  "tokio",
+ "webview2-com",
 ]
 
 [[package]]
@@ -1851,6 +1852,7 @@ name = "helm-chats"
 version = "1.0.1"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "helm-core",
  "helm-hosttools",
  "helm-ipc",
