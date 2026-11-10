@@ -7,6 +7,9 @@ import type { McpEditorSnapshot, McpPreset, McpServer, RepoServer, ServerStatus,
 /** "Use my Claude Code MCP servers" (user-only; on by default). */
 export const NATIVE_MCP_PREF = 'nativeMcp';
 
+/** The MCP master switch (user-only; on by default). Off, no chat loads any MCP server. */
+export const MCP_ENABLED_PREF = 'mcpEnabled';
+
 export type {
   McpEditorSnapshot,
   McpPreset,
@@ -39,6 +42,8 @@ export function mcpOps(api: Api) {
     repoRevoke: (s: RepoServer) => api<RepoServer[]>('mcp_repo_revoke', { file: s.file, name: s.name }),
     nativeOn: async () => (await api<unknown>('preference_get', { key: NATIVE_MCP_PREF })) !== false,
     setNative: (on: boolean) => api<unknown>('preference', { key: NATIVE_MCP_PREF, value: on }),
+    allOn: async () => (await api<unknown>('preference_get', { key: MCP_ENABLED_PREF })) !== false,
+    setAll: (on: boolean) => api<unknown>('preference', { key: MCP_ENABLED_PREF, value: on }),
   };
 }
 

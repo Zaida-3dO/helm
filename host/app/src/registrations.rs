@@ -154,10 +154,11 @@ struct McpLaunchFlags {
 
 impl helm_hosttools::McpLaunchSource for McpLaunchFlags {
     fn for_launch(&self, _chat_id: &str, cwd: &std::path::Path) -> helm_hosttools::McpLaunch {
+        let all_on = helm_mcp::repo_gate::all_on(&self.db);
         let g = self
             .gate
-            .for_launch(cwd, helm_mcp::repo_gate::native_on(&self.db));
-        let helm_servers = self
+            .for_launch(cwd, all_on && helm_mcp::repo_gate::native_on(&self.db));
+        let any_enabled = self
             .store
             .as_ref()
             .and_then(|s| {
@@ -166,6 +167,7 @@ impl helm_hosttools::McpLaunchSource for McpLaunchFlags {
                     .ok()
             })
             .is_some_and(|l| l.iter().any(|s| s.enabled));
+        let helm_servers = all_on && any_enabled;
         helm_hosttools::McpLaunch {
             native: g.native,
             disabled: g.disabled,

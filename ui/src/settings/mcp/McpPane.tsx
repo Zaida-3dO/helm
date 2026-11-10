@@ -231,6 +231,7 @@ export function McpPane() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [native, setNative] = useState(true);
+  const [allOn, setAllOn] = useState(true);
   const [repo, setRepo] = useState<RepoServer[]>([]);
 
   const reload = useCallback(() => {
@@ -253,6 +254,7 @@ export function McpPane() {
     reload();
     reloadStatus();
     ops.nativeOn().then(setNative).catch(() => {});
+    ops.allOn().then(setAllOn).catch(() => {});
     ops.repoList().then(setRepo).catch(() => {});
     ops
       .presets()
@@ -287,11 +289,29 @@ export function McpPane() {
   const empty = pageReadiness(servers);
   return (
     <div className="mcp-pane" data-testid="mcp-pane">
+      <section aria-labelledby="mcp-master" data-testid="mcp-master">
+        <h3 id="mcp-master">MCP in chats</h3>
+        <Checkbox
+          data-testid="mcp-master-switch"
+          checked={allOn}
+          onChange={(on) => {
+            setAllOn(on);
+            ops.setAll(on).catch((e: unknown) => setError(errorText(e)));
+          }}
+          label="Let chats use MCP servers"
+        />
+        <p className="mcp-help" data-testid="mcp-harnesses">
+          {allOn
+            ? 'Chats on Claude, and chats on a local model (which also run through Claude Code), connect to the servers listed below through Helm. Claude Code may add its own servers too; the next section controls that. Takes effect for chats started from now on.'
+            : 'No chat loads any MCP server: not the ones listed below and not Claude Code’s own. Takes effect for chats started from now on.'}
+        </p>
+      </section>
       <section aria-labelledby="mcp-servers">
         <h3 id="mcp-servers">MCP servers</h3>
         <p className="mcp-help">
-          Servers Helm connects chats to through its own client. When Claude Code has its own copy of a server listed here, chats use
-          Helm's copy.
+          Servers Helm connects chats to through its own client. When "Use my Claude Code MCP servers" is on and Claude Code
+          already loads a server of the same name, chats use Claude Code's copy and skip the one listed here. Servers here are shared with the chats of every project, and a server you add can read whatever you give it access
+          to, so add only ones you trust.
         </p>
         {empty && (
           <div className="mcp-empty" data-testid="mcp-empty" data-state={empty.state}>
@@ -361,7 +381,7 @@ export function McpPane() {
         />
         <p className="mcp-help">
           {native
-            ? 'Chats also load the servers Claude Code loads for you: your own, the claude.ai connectors and approved repository servers. Helm skips its own copy of any server Claude Code already loads.'
+            ? 'Chats also load the servers Claude Code loads for you: your own, the claude.ai connectors and approved repository servers. Helm skips its own copy of any server Claude Code already loads,.'
             : 'Chats load only the servers listed above. Takes effect for chats started from now on.'}
         </p>
         {native && (

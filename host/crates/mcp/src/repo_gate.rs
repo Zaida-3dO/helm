@@ -101,6 +101,14 @@ pub fn native_on(db: &helm_core::db::Database) -> bool {
         != Some(Value::Bool(false))
 }
 
+/// The MCP master switch: on unless set to `false`. Off, no chat loads any MCP server.
+pub fn all_on(db: &helm_core::db::Database) -> bool {
+    db.snapshot(|tx| Ok::<_, rusqlite::Error>(helm_core::prefs::read(tx, "mcpEnabled")))
+        .ok()
+        .flatten()
+        != Some(Value::Bool(false))
+}
+
 pub fn is_reserved(name: &str) -> bool {
     let norm: String = name
         .to_ascii_lowercase()

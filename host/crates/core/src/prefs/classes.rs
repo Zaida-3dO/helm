@@ -130,6 +130,11 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         "nativeMcp",
         UserOnly("Which of your own MCP servers chats load is yours to choose."),
     ),
+    // The MCP master switch, default on. Off: no chat loads any MCP server.
+    (
+        "mcpEnabled",
+        UserOnly("Whether chats may use MCP servers at all is yours to choose."),
+    ),
     (
         "updateSource",
         UserOnly("Decides which program Helm runs to update itself, so only you choose it."),
