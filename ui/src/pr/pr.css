@@ -1005,3 +1005,106 @@
   height: calc(100% - 2px);
   top: 1px;
 }
+
+/* ---- split view, whole-file toggle ---- */
+
+.pr-diff-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+}
+
+.pr-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.pr-split > .pr-line {
+  overflow: hidden;
+}
+
+.pr-split > .pr-line + .pr-line {
+  border-left: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+}
+
+.pr-split > .pr-blank {
+  background: color-mix(in srgb, var(--line) 18%, transparent);
+}
+
+/* Reactions, own-comment actions and @-mention suggestions. */
+.pr-root .pr-comment-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.pr-root .pr-reactions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.pr-root .pr-reaction {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  padding: 1px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pr-root .pr-reaction[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-fill);
+}
+
+.pr-root .pr-reaction:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.pr-root .pr-reaction-picker {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.pr-root .pr-own-actions {
+  display: inline-flex;
+  gap: 10px;
+  margin-left: auto;
+  font-size: 12px;
+}
+
+.pr-root .pr-mentions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.pr-root .pr-mention {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  padding: 1px 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pr-root .pr-mention:hover {
+  background: var(--accent-fill);
+}

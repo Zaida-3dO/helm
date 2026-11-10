@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { parseDiff } from '../panel/changes/diffModel.ts';
+import { revealInFiles } from '../panel/viewer/kinds.tsx';
 import { Button } from '../ui/index.ts';
 import { addToChat, newChatWith, openPrFile } from './actions.ts';
 import { fileBlock, linesBlock } from './addToChat.ts';
@@ -10,7 +11,7 @@ import { attempt, clickFrom } from './client.ts';
 import { Diff, placeThread, rowTarget } from './Diff.tsx';
 import type { Selection } from './Diff.tsx';
 import { NO_FILTER, SORT_LABEL, STATUS_LABEL, filterFiles, groupByDir, sortFiles, withoutTests } from './files.ts';
-import type { FileFilter, SortPreset } from './files.ts';
+import type { DiffMode, FileFilter, SortPreset } from './files.ts';
 import type { PrEntry } from './store.ts';
 import type { FileStatus, PrFile, Thread } from './types.ts';
 import { ErrorBlock, useEntry } from './util.tsx';
@@ -35,6 +36,9 @@ function uiOf(entry: PrEntry): FilesUi {
   }
   return u;
 }
+
+/** Unified or side by side, kept for the session and shared by every pull request tab. */
+let diffMode: DiffMode = 'unified';
 
 const TYPES: FileStatus[] = ['added', 'modified', 'removed', 'renamed'];
 
@@ -203,6 +207,23 @@ export function FilesView({ entry }: { entry: PrEntry }) {
             ))}
           </select>
         </label>
+        <div className="pr-types" role="group" aria-label="Diff layout">
+          {(['unified', 'split'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              className={`pr-viewtab${diffMode === m ? ' active' : ''}`}
+              aria-pressed={diffMode === m}
+              data-testid={`pr-mode-${m}`}
+              onClick={() => {
+                diffMode = m;
+                rerender();
+              }}
+            >
+              {m === 'unified' ? 'Unified' : 'Split'}
+            </button>
+          ))}
+        </div>
       </div>
       <div className="pr-stats" data-testid="pr-files-stats">
         <span>
@@ -311,6 +332,7 @@ export function FilesView({ entry }: { entry: PrEntry }) {
               onSelect={(s, extend) => select(s, extend)}
               commentOff={commentOff}
               head={head}
+              mode={diffMode}
               openBox={ui.box}
               setOpenBox={(b) => {
                 ui.box = b;
@@ -380,6 +402,7 @@ function FileSection({
   onSelect,
   commentOff,
   head,
+  mode,
   openBox,
   setOpenBox,
   onNote,
@@ -398,6 +421,7 @@ function FileSection({
   onSelect: (s: Selection | null, extend: boolean) => void;
   commentOff: string | null;
   head: string;
+  mode: DiffMode;
   openBox: { path: string; from: number; to: number } | null;
   setOpenBox: (b: { path: string; from: number; to: number } | null) => void;
   onNote: (text: string) => void;
@@ -427,6 +451,16 @@ function FileSection({
         >
           Copy path
         </button>
+        <button
+          type="button"
+          className="pr-link-btn"
+          data-testid="pr-file-reveal"
+          disabled={removed}
+          title={removed ? 'This file was removed' : 'Show this file’s folder in the Files tab'}
+          onClick={() => !revealInFiles(f.path) && onNote('That path cannot be shown in Files.')}
+        >
+          Reveal in Files
+        </button>
         <span className="pr-file-stat">
           <span className="pr-add">+{f.additions}</span> <span className="pr-del">−{f.deletions}</span>
         </span>
@@ -455,7 +489,7 @@ function FileSection({
             </button>
           </div>
         ) : f.patch ? (
-          <Diff entry={entry} file={f} threads={threads} selection={selection} onSelect={(s, extend) => onSelect(s, extend)} commentOff={commentOff} head={head} openBox={openBox} setOpenBox={setOpenBox} />
+          <Diff entry={entry} file={f} threads={threads} selection={selection} onSelect={(s, extend) => onSelect(s, extend)} commentOff={commentOff} head={head} openBox={openBox} setOpenBox={setOpenBox} mode={mode} />
         ) : (
           <div className="pr-nodiff">{/\.(png|jpe?g|gif|webp|svg|mp4|mov|webm)$/i.test(f.path) ? 'Image or video file, not shown.' : 'Binary file, or too large to show here.'}</div>
         ))}

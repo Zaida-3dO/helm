@@ -8,7 +8,7 @@ import { driveForm, isRemoteOrDevicePath } from '../../markdown/paths.ts';
 import { ExternalIcon, FileTextIcon, FolderOpenIcon } from '../icons.tsx';
 import { registerLinkRoute } from '../links.ts';
 import type { PanelTab } from '../model.ts';
-import { openInPanel, panelStore, registerPanelKind, registerPanelSlot } from '../registry.ts';
+import { openInPanel, panelStore, registerPanelKind, registerPanelSlot, showSlot } from '../registry.ts';
 import type { TabContext } from '../registry.ts';
 import { FileViewer } from './FileViewer.tsx';
 import type { Location } from './FileViewer.tsx';
@@ -164,9 +164,33 @@ registerLinkRoute('path', async (req, ctx) => {
   }
 });
 
-/** The Inspector's Files slot: the chat's project folder, one level at a time. */
+/** A path asked to show in the Files slot, as the folder holding it, relative to the chat's project folder. */
+let reveal: { dir: string; nonce: number } | null = null;
+let revealNonce = 0;
+const revealListeners = new Set<() => void>();
+
+/** Opens the Files slot in the folder that holds `rel`, a path inside the chat's project folder. */
+export function revealInFiles(rel: string): boolean {
+  const parts = rel.split(/[\\/]/);
+  if (parts.some((s) => s === '' || s === '.' || s === '..')) return false;
+  reveal = { dir: parts.slice(0, -1).join('/'), nonce: ++revealNonce };
+  revealListeners.forEach((l) => l());
+  showSlot('files');
+  return true;
+}
+
+/** The Inspector's Files slot: the chat's project folder, one level at a time, or the folder a path was revealed in. */
 function FilesSlot({ chatId, visible }: { chatId: string | null; visible: boolean }) {
   const [root, setRoot] = useState<string | null | undefined>(undefined);
+  const [asked, setAsked] = useState(reveal);
+  useEffect(() => {
+    const on = () => setAsked(reveal);
+    revealListeners.add(on);
+    return () => {
+      revealListeners.delete(on);
+      reveal = null;
+    };
+  }, []);
   useEffect(() => {
     setRoot(undefined);
     if (!chatId || !visible) return;
@@ -179,7 +203,12 @@ function FilesSlot({ chatId, visible }: { chatId: string | null; visible: boolea
       cancelled = true;
     };
   }, [chatId, visible]);
-  const start = useMemo<Location | null>(() => (root ? { path: root } : null), [root]);
+  const start = useMemo<Location | null>(() => {
+    if (!root) return null;
+    return asked?.dir ? { path: `${root.replace(/[\\/]+$/, '')}/${asked.dir}` } : { path: root };
+    // A new nonce is a new reveal, even of the same folder.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [root, asked?.nonce]);
   const o = useMemo(() => ops(), []);
   if (!chatId) return <div className="sp-empty">Pick a chat to browse its project files.</div>;
   if (root === undefined) return <div className="sp-empty">Loading…</div>;

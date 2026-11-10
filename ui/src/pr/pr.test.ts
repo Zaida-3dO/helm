@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { insertMention, matchLogins, mentionAt, participantLogins } from './mentions.ts';
 import { readFileSync, readdirSync } from 'node:fs';
 import { test } from 'node:test';
 import { ApiError } from '../api/client.ts';
@@ -7,7 +8,7 @@ import { githubFakeOps } from '../dev/fake-github.ts';
 import { parsePrSearch } from '../search/prSource.ts';
 import { appendToDraft, clean, excerpt, fenceFor, fileBlock, linesBlock, prBlock } from './addToChat.ts';
 import { PrError, attempt, clickFrom, parseLandInfo, prClient, toPrError } from './client.ts';
-import { NO_FILTER, filterFiles, groupByDir, isTestFile, sortFiles, statBlocks, withoutTests } from './files.ts';
+import { NO_FILTER, expandWhole, filterFiles, groupByDir, isTestFile, pairSplit, sortFiles, statBlocks, textLines, visibleRange, withoutTests } from './files.ts';
 import { findMentions, mergeOpen, parsePrUrl, prKey, repoFromRemote } from './links.ts';
 import { buildTimeline, formatDuration, parseTimelineEvents, groupChecks, parseChecks, parseCommits, parseFiles, parseSummary, parseThreads } from './parse.ts';
 import { mentionRepoFor } from './mentionRepo.ts';
@@ -116,7 +117,7 @@ test('answers read into plain shapes: summary, checks, commits, files, threads a
   ] });
   assert.deepEqual(threads.map((t) => [t.line, t.outdated]), [[3, false], [9, true]]);
   const tl = buildTimeline({
-    comments: [{ type: 'comment', key: 'c1', id: 1, at: '2026-01-01T01:00:00Z', author: 'a', association: '', body: '', edited: false }],
+    comments: [{ type: 'comment', key: 'c1', id: 1, nodeId: 'IC1', at: '2026-01-01T01:00:00Z', author: 'a', association: '', body: '', edited: false, reactions: [] }],
     reviews: [{ type: 'review', key: 'r10', id: 10, nodeId: 'RV10', at: '2026-01-01T02:00:00Z', author: 'a', association: '', state: 'COMMENTED', body: '', threads: [] }],
     events: [{ type: 'event', key: 'e', at: '2026-01-01T00:30:00Z', actor: 'a', text: 'x' }],
     threads,
@@ -150,6 +151,32 @@ test('files: test detection, sort presets, directory groups, filters and the wit
   assert.equal(withoutTests([f('a.ts', 1, 1)]), null);
   assert.deepEqual(statBlocks(3, 1), ['add', 'add', 'add', 'add', 'del']);
   assert.deepEqual(statBlocks(0, 0), Array(5).fill('neutral'));
+
+  // Split pairing: deletions beside the additions that follow, a lone side left blank, headers full width.
+  const kinds = [['hunk', 'h'], ['ctx', 'c1'], ['del', 'd1'], ['del', 'd2'], ['add', 'a1'], ['ctx', 'c2'], ['add', 'a2'], ['add', 'a3']] as const;
+  const paired = pairSplit(kinds.map(([kind, id]) => ({ kind, id })));
+  assert.deepEqual(
+    paired.map((p) => (p.kind === 'full' ? `F${p.row.id}` : `${p.left?.id ?? '-'}|${p.right?.id ?? '-'}`)),
+    ['Fh', 'c1|c1', 'd1|a1', 'd2|-', 'c2|c2', '-|a2', '-|a3'],
+  );
+  // Windowing: the slice for a view, with overscan, and the space of the rows left out.
+  const tens = Array(100).fill(10) as number[];
+  const windows: [number, number, number, ReturnType<typeof visibleRange>][] = [
+    [200, 100, 0, { start: 20, end: 30, before: 200, after: 700 }],
+    [200, 100, 50, { start: 15, end: 35, before: 150, after: 650 }],
+    [0, 25, 0, { start: 0, end: 3, before: 0, after: 970 }],
+    [5000, 100, 0, { start: 100, end: 100, before: 1000, after: 0 }],
+  ];
+  for (const [top, height, over, want] of windows) assert.deepEqual(visibleRange(tens, top, height, over), want, `${top}/${height}/${over}`);
+  // Whole file: unchanged lines filled in around and between hunks, old numbers following the hunks.
+  const row = (r: ReturnType<typeof expandWhole>[number]) => `${r.kind}:${r.oldNo ?? ''}:${r.newNo ?? ''}:${r.text}:${r.src}`;
+  const wholes: [string, string[], string[]][] = [
+    ['@@ -3,3 +3,3 @@\n c\n-X\n+d\n e', ['a', 'b', 'c', 'd', 'e', 'f'], ['ctx:1:1:a:-1', 'ctx:2:2:b:-1', 'ctx:3:3:c:1', 'del:4::X:2', 'add::4:d:3', 'ctx:5:5:e:4', 'ctx:6:6:f:-1']],
+    ['@@ -2,0 +3,1 @@\n+N', ['a', 'b', 'N', 'c'], ['ctx:1:1:a:-1', 'ctx:2:2:b:-1', 'add::3:N:1', 'ctx:3:4:c:-1']],
+    ['@@ -3,1 +2,0 @@\n-X', ['a', 'b', 'c'], ['ctx:1:1:a:-1', 'ctx:2:2:b:-1', 'del:3::X:1', 'ctx:4:3:c:-1']],
+  ];
+  for (const [patch, text, want] of wholes) assert.deepEqual(expandWhole(parseDiff(patch), text).map(row), want, patch);
+  assert.deepEqual([['a\r\nb\n'], ['x'], ['']].map(([t]) => textLines(t as string)), [['a', 'b'], ['x'], []]);
 });
 
 // ---- Add to chat ----
@@ -350,4 +377,14 @@ test('only the client module names a PR-view write; every other module goes thro
     const text = readFileSync(new URL(name, dir), 'utf8');
     assert.ok(!write.test(text), `${name} names a write op directly`);
   }
+});
+
+test('mention helpers find the name being typed, suggest people on the pull request and insert the pick', () => {
+  assert.deepEqual(mentionAt('hi @al', 6), { start: 3, query: 'al' });
+  assert.equal(mentionAt('mail@al', 7), null);
+  assert.equal(mentionAt('hi @al ', 7), null);
+  assert.deepEqual(matchLogins(['Alice', 'bob', 'Malik'], 'al'), ['Alice', 'Malik']);
+  assert.deepEqual(insertMention('hi @al there', 3, 6, 'Alice'), { text: 'hi @Alice  there', caret: 10 });
+  const comment = (author: string) => ({ type: 'comment' as const, key: author, id: 1, nodeId: 'N', at: '', author, association: '', body: '', edited: false, reactions: [] });
+  assert.deepEqual(participantLogins(null, [comment('Ann'), comment('ann'), comment('Bo')]), ['Ann', 'Bo']);
 });
