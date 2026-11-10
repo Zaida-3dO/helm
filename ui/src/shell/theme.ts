@@ -3,6 +3,9 @@
 // The `interfaceTheme` preference names the skin written to data-skin; styles.css defines a
 // colour set per skin per mode, so the appearance mode still picks light or dark.
 
+import { applyColours, clearColours, colourProfileKey, coloursFor, COLOURS_DEFAULT_PROFILE, CUSTOM_COLOURS_PREF, setColoursAdjusted } from './colours.ts';
+import { connectMotion } from './motion.ts';
+
 export type Appearance = 'system' | 'light' | 'dark';
 
 export function parseAppearance(v: unknown): Appearance {
@@ -64,15 +67,17 @@ export function parseDopamine(v: unknown): Dopamine {
 /**
  * Apply the theme attributes; returns a stop function for the OS colour-scheme listener.
  * The delight level rides along: Zen writes the quiet effects set as well, so the theme and the
- * level are always consistent however they changed.
+ * level are always consistent however they changed. `onApplied` runs after every write, including
+ * the one made when the operating system's colour mode flips.
  */
-export function applyTheme(root: HTMLElement, appearance: Appearance, skin: Skin = SKIN_DEFAULT, level: Dopamine = DOPAMINE_DEFAULT): () => void {
+export function applyTheme(root: HTMLElement, appearance: Appearance, skin: Skin = SKIN_DEFAULT, level: Dopamine = DOPAMINE_DEFAULT, onApplied?: () => void): () => void {
   const mq = window.matchMedia('(prefers-color-scheme: dark)');
   const write = () => {
     root.dataset.theme = resolveTheme(appearance, mq.matches);
     root.dataset.skin = skin;
     root.dataset.dopamine = level;
     root.dataset.effects = level === 'zen' ? 'quiet' : 'full';
+    onApplied?.();
   };
   write();
   mq.addEventListener('change', write);
@@ -137,18 +142,27 @@ type Bus = { on: (kind: string, h: (e: Record<string, unknown>) => void) => () =
 type ApiFn = <T = unknown>(op: string, args?: unknown) => Promise<T>;
 
 /**
- * Read `appearance`, `interfaceTheme`, `dopamine`, `fontSizes` and `zoomLevel`, apply them, and
- * re-apply when a preference changes. Returns a stop function.
+ * Read `appearance`, `interfaceTheme`, `dopamine`, `fontSizes`, `zoomLevel` and the profile's own
+ * colours (`customColours`, picked by `activeProfile`), apply them, and re-apply when a preference
+ * changes or the operating system's colour mode flips. Returns a stop function.
  */
 export function connectAppearance(api: ApiFn, bus: Bus, root: HTMLElement): () => void {
   let appearance: Appearance = 'system';
   let skin: Skin = SKIN_DEFAULT;
   let level: Dopamine = DOPAMINE_DEFAULT;
-  let stop = applyTheme(root, appearance, skin, level);
+  let colourMap: unknown = null;
+  let profile = COLOURS_DEFAULT_PROFILE;
+  // The skin and colour mode are on the root by now, so the colours solve against the real thing.
+  const recolour = () => {
+    if (!root.style) return;
+    setColoursAdjusted(applyColours(root, coloursFor(colourMap, profile), root.dataset.theme === 'dark' ? 'dark' : 'light').adjusted);
+  };
+  let stop = applyTheme(root, appearance, skin, level, recolour);
   const write = () => {
     stop();
-    stop = applyTheme(root, appearance, skin, level);
+    stop = applyTheme(root, appearance, skin, level, recolour);
   };
+  const stopMotion = connectMotion(api, bus, root);
   const set = (v: unknown) => {
     appearance = parseAppearance(v);
     write();
@@ -170,6 +184,18 @@ export function connectAppearance(api: ApiFn, bus: Bus, root: HTMLElement): () =
   api<unknown>('preference_get', { key: 'dopamine' })
     .then(setLevel)
     .catch(() => undefined);
+  api<unknown>('preference_get', { key: CUSTOM_COLOURS_PREF })
+    .then((v) => {
+      colourMap = v;
+      recolour();
+    })
+    .catch(() => undefined);
+  api<unknown>('preference_get', { key: 'activeProfile' })
+    .then((v) => {
+      profile = colourProfileKey(v);
+      recolour();
+    })
+    .catch(() => undefined);
   api<unknown>('preference_get', { key: 'fontSizes' })
     .then((v) => applyFontSizes(root, parseFontSizes(v)))
     .catch(() => undefined);
@@ -183,9 +209,17 @@ export function connectAppearance(api: ApiFn, bus: Bus, root: HTMLElement): () =
     if ('dopamine' in changed) setLevel(changed.dopamine);
     if ('fontSizes' in changed) applyFontSizes(root, parseFontSizes(changed.fontSizes));
     if ('zoomLevel' in changed) applyZoom(api, root, parseZoom(changed.zoomLevel));
+    // A profile switch or a new colour set re-solves; the skin and mode changes above already did.
+    const mapChanged = CUSTOM_COLOURS_PREF in changed;
+    const profileChanged = 'activeProfile' in changed;
+    if (mapChanged) colourMap = changed[CUSTOM_COLOURS_PREF];
+    if (profileChanged) profile = colourProfileKey(changed.activeProfile);
+    if (mapChanged || profileChanged) recolour();
   });
   return () => {
     off();
     stop();
+    stopMotion();
+    if (root.style) clearColours(root);
   };
 }

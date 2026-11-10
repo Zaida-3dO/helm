@@ -65,6 +65,16 @@ pub const INTERFACE_THEME: PrefKey = PrefKey::classified("interfaceTheme");
 /// Settings > General interface sounds: `{enabled, volume (0 to 100), themed}`;
 /// a missing field reads as its default. The renderer plays the cues.
 pub const SOUNDS: PrefKey = PrefKey::classified("sounds");
+/// Settings > Appearance motion level: "zen", "standard" or "brainrot", or `{version, mode, custom}`.
+pub const DOPAMINE: PrefKey = PrefKey::classified("dopamine");
+/// Per-effect animation overrides (an object); null follows the motion level.
+pub const ANIMATION_CONTROLS: PrefKey = PrefKey::classified("animationControls");
+/// Single theme effects switched on or off by id (see [`THEME_EFFECT_IDS`]).
+pub const THEME_EFFECTS: PrefKey = PrefKey::classified("themeEffects");
+/// Settings > Appearance: pause animations while the page scrolls (off when missing).
+pub const PAUSE_ANIMATIONS_ON_SCROLL: PrefKey = PrefKey::classified("pauseAnimationsOnScroll");
+/// Settings > Appearance > Colours: `{profileId | "default": {accentHue, tint, contrast}}`.
+pub const CUSTOM_COLOURS: PrefKey = PrefKey::classified("customColours");
 /// The user's key map: command id → chord, or null for a cleared binding.
 pub const KEYBINDINGS: PrefKey = PrefKey::classified("keybindings");
 /// Minutes without worker output before a running chat shows as stalled (1 to 1440, default 5).
@@ -115,6 +125,24 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     BACKGROUND_MODEL,
     HIDDEN_SIDEBAR_ITEMS,
     HIDDEN_SKILLS,
+    DOPAMINE,
+    ANIMATION_CONTROLS,
+    THEME_EFFECTS,
+    PAUSE_ANIMATIONS_ON_SCROLL,
+    CUSTOM_COLOURS,
+];
+
+/// The theme effects `themeEffects` can switch, by id.
+pub const THEME_EFFECT_IDS: &[&str] = &[
+    "trail",
+    "cursors",
+    "cursorGlow",
+    "edgeLights",
+    "particles",
+    "gloss",
+    "frames",
+    "typing",
+    "results",
 ];
 
 /// The stored value, or `None` when the row is missing or its JSON does not parse.
@@ -187,7 +215,8 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
                 })
             }
         }
-        "nativeMcp" | "mcpEnabled" | "ideContext" | "scrollOnSend" | "doubleShift" => {
+        "nativeMcp" | "mcpEnabled" | "ideContext" | "scrollOnSend" | "doubleShift"
+        | "pauseAnimationsOnScroll" => {
             if value.is_boolean() {
                 Ok(())
             } else {
@@ -325,7 +354,7 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
         "sounds" => match value.as_object() {
             Some(m)
                 if m.iter().all(|(name, v)| match (name.as_str(), v) {
-                    ("enabled", Value::Bool(_)) | ("themed", Value::Bool(_)) => true,
+                    ("enabled" | "themed" | "cues" | "focused", Value::Bool(_)) => true,
                     ("volume", v) => v.as_i64().is_some_and(|n| (0..=100).contains(&n)),
                     _ => false,
                 }) =>
@@ -334,12 +363,106 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
             }
             _ => Err(PrefError::Invalid {
                 key: k,
-                why: "takes enabled (true/false), volume (a whole number 0 to 100) and themed (true/false)",
+                why: "takes enabled, themed, cues and focused (true/false) and volume (a whole number 0 to 100)",
             }),
         },
+        "dopamine" => validate_dopamine(value),
+        "themeEffects" => validate_theme_effects(value),
+        "animationControls" => {
+            if value.is_object() {
+                Ok(())
+            } else {
+                Err(PrefError::Invalid {
+                    key: k,
+                    why: "must be an object",
+                })
+            }
+        }
+        "customColours" => validate_custom_colours(value),
         "keybindings" => validate_keybindings(value),
         _ => Ok(()),
     }
+}
+
+/// `dopamine` is a level name, or a document `{version, mode, custom}` whose fields are optional.
+fn validate_dopamine(value: &Value) -> Result<(), PrefError> {
+    let bad = |why: &'static str| PrefError::Invalid {
+        key: "dopamine",
+        why,
+    };
+    if matches!(value.as_str(), Some("zen" | "standard" | "brainrot")) {
+        return Ok(());
+    }
+    let Some(map) = value.as_object() else {
+        return Err(bad(
+            "must be zen, standard, brainrot or {version, mode, custom}",
+        ));
+    };
+    for (k, v) in map {
+        let ok = match k.as_str() {
+            "version" => v.as_u64().is_some(),
+            "mode" => matches!(v.as_str(), Some("zen" | "standard" | "brainrot" | "custom")),
+            "custom" => v.is_object(),
+            _ => return Err(bad("has an unknown key")),
+        };
+        if !ok {
+            return Err(bad("has a value of the wrong kind"));
+        }
+    }
+    Ok(())
+}
+
+/// `themeEffects` maps known effect ids to true or false.
+fn validate_theme_effects(value: &Value) -> Result<(), PrefError> {
+    let fine = value.as_object().is_some_and(|m| {
+        m.iter()
+            .all(|(id, v)| THEME_EFFECT_IDS.contains(&id.as_str()) && v.is_boolean())
+    });
+    if fine {
+        Ok(())
+    } else {
+        Err(PrefError::Invalid {
+            key: "themeEffects",
+            why: "maps known effect ids to true or false",
+        })
+    }
+}
+
+/// `customColours`: at most 16 entries keyed by a profile id (or "default") of 1 to 64 bytes; each
+/// entry holds only `accentHue` (0 to 359 or null), `tint` and `contrast`.
+fn validate_custom_colours(value: &Value) -> Result<(), PrefError> {
+    let bad = |why: &'static str| PrefError::Invalid {
+        key: "customColours",
+        why,
+    };
+    let Some(map) = value.as_object() else {
+        return Err(bad("must be an object keyed by profile"));
+    };
+    if map.len() > 16 {
+        return Err(bad("has more than 16 entries"));
+    }
+    for (profile, entry) in map {
+        if profile.is_empty() || profile.len() > 64 || crate::hidden::has_hidden(profile) {
+            return Err(bad("profile keys must be 1 to 64 visible bytes"));
+        }
+        let Some(fields) = entry.as_object() else {
+            return Err(bad("each entry must be {accentHue, tint, contrast}"));
+        };
+        for (name, v) in fields {
+            let ok = match name.as_str() {
+                "accentHue" => v.is_null() || v.as_i64().is_some_and(|n| (0..=359).contains(&n)),
+                "tint" => matches!(v.as_str(), Some("none" | "soft" | "strong")),
+                "contrast" => matches!(v.as_str(), Some("standard" | "more")),
+                _ => return Err(bad("an entry has only accentHue, tint and contrast")),
+            };
+            if !ok {
+                return Err(bad(
+                    "accentHue is 0 to 359 or null, tint is none, soft or strong, contrast is standard or more",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `keybindings`: at most 500 entries, ids and chords of at most 100 bytes; a null chord is a
@@ -568,11 +691,69 @@ mod tests {
             ),
             ("sounds", json!({"themed": false}), json!({"loud": true})),
             ("sounds", json!({}), json!({"volume": 45.5})),
+            (
+                "sounds",
+                json!({"cues": true, "focused": false}),
+                json!({"cues": 1}),
+            ),
+            ("dopamine", json!("zen"), json!("calm")),
+            (
+                "dopamine",
+                json!({"version": 1, "mode": "custom", "custom": {}}),
+                json!({"mode": "loud"}),
+            ),
+            ("dopamine", json!({}), json!(5)),
+            (
+                "themeEffects",
+                json!({"trail": true, "gloss": false}),
+                json!({"sparkle": true}),
+            ),
+            ("themeEffects", json!({}), json!({"trail": "yes"})),
+            ("animationControls", json!({"typing": "off"}), json!([1])),
+            ("pauseAnimationsOnScroll", json!(true), json!("yes")),
+            (
+                "customColours",
+                json!({
+                    "default": {"accentHue": 4, "tint": "soft", "contrast": "more"},
+                    "p-1": {"accentHue": null}
+                }),
+                json!({"default": {"accentHue": 360}}),
+            ),
+            ("customColours", json!({"default": {}}), json!({"": {}})),
+            (
+                "customColours",
+                json!({}),
+                json!({"default": {"tint": "heavy"}}),
+            ),
+            (
+                "customColours",
+                json!({"default": {"accentHue": 0}}),
+                json!({"default": {"accent": 4}}),
+            ),
+            (
+                "customColours",
+                json!({}),
+                Value::Object([("x".repeat(65), json!({}))].into_iter().collect()),
+            ),
+            ("customColours", json!({}), json!([1])),
         ] {
             assert!(db.write(|tx| set_generic(tx, key, &ok)).is_ok(), "{key}");
             let r = db.write(|tx| set_generic(tx, key, &bad));
-            assert!(matches!(r, Err(PrefError::Invalid { .. })), "{key}");
+            assert!(matches!(r, Err(PrefError::Invalid { .. })), "{key} {bad}");
         }
+        // Sixteen profiles' colours fit; a seventeenth does not.
+        let many = |n: usize| {
+            Value::Object(
+                (0..n)
+                    .map(|i| (format!("p{i}"), json!({"accentHue": i})))
+                    .collect(),
+            )
+        };
+        assert!(db
+            .write(|tx| set_generic(tx, "customColours", &many(16)))
+            .is_ok());
+        let r = db.write(|tx| set_generic(tx, "customColours", &many(17)));
+        assert!(matches!(r, Err(PrefError::Invalid { .. })));
         let z = db
             .snapshot(|tx| Ok::<_, rusqlite::Error>(read(tx, "zoomLevel")))
             .unwrap();

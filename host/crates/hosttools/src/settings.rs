@@ -42,6 +42,15 @@ fn all_settings(tx: &rusqlite::Connection) -> bool {
     matches!(prefs::read(tx, "agentSettingsAll"), Some(Value::Bool(true)))
 }
 
+/// The entry of `customColours` this device is showing: the active profile's id, or "default"
+/// while none is chosen (or all of them are shown). The interface reads the same rule.
+fn colour_profile(tx: &rusqlite::Connection) -> String {
+    match prefs::read(tx, "activeProfile") {
+        Some(Value::String(id)) if !id.is_empty() && id != "all" && id.len() <= 64 => id,
+        _ => settings_options::DEFAULT_PROFILE.to_owned(),
+    }
+}
+
 fn sql(e: rusqlite::Error) -> ToolError {
     ToolError::maybe(e.to_string())
 }
@@ -164,7 +173,11 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
                     .map(PrefKey::classified)
                     .expect("refusal() passed only agent keys");
                 let before = prefs::read(tx, k);
-                let stored = settings_options::to_store(k, before.as_ref(), v);
+                let stored = if k == settings_options::COLOURS_KEY {
+                    settings_options::merge_colours(before.as_ref(), v, &colour_profile(tx))
+                } else {
+                    settings_options::to_store(k, before.as_ref(), v)
+                };
                 if let Err(e) = prefs::set(tx, key, &stored) {
                     return Ok(Err(e.to_string()));
                 }
@@ -636,7 +649,9 @@ mod tests {
         update_settings(&ctx(&e), json!({"changes": {"sounds": {"volume": 30}}})).unwrap();
         assert_eq!(
             read("sounds"),
-            Some(json!({"enabled": true, "volume": 30, "themed": true}))
+            Some(
+                json!({"enabled": true, "volume": 30, "themed": true, "cues": false, "focused": false})
+            )
         );
         // A wrong field is still refused, and the stored value is untouched.
         assert!(update_settings(&ctx(&e), json!({"changes": {"sounds": {"loud": 1}}})).is_err());
@@ -644,6 +659,64 @@ mod tests {
         // Null restores the default.
         update_settings(&ctx(&e), json!({"changes": {"fontSizes": null}})).unwrap();
         assert_eq!(read("fontSizes"), None);
+    }
+
+    #[test]
+    fn own_colours_are_merged_into_the_active_profiles_entry() {
+        let e = env();
+        let read = || {
+            e.db.snapshot(|tx| Ok::<_, rusqlite::Error>(prefs::read(tx, "customColours")))
+                .unwrap()
+        };
+        // No profile chosen: the "default" entry takes the change, and the screen is told at once.
+        let r = update_settings(
+            &ctx(&e),
+            json!({"changes": {"customColours": {"accentHue": 4}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            r["applied"]["customColours"]["after"],
+            json!({"default": {"accentHue": 4}})
+        );
+        assert_eq!(e.sink.kinds(), ["preferences", "external_settings"]);
+        // Other fields merge into the same entry.
+        update_settings(
+            &ctx(&e),
+            json!({"changes": {"customColours": {"tint": "soft"}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            read(),
+            Some(json!({"default": {"accentHue": 4, "tint": "soft"}}))
+        );
+        // With a profile active, its entry is the one that changes and "default" is left alone.
+        e.db.write(|tx| prefs::set_raw(tx, "activeProfile", &json!("p-1")))
+            .unwrap();
+        update_settings(
+            &ctx(&e),
+            json!({"changes": {"customColours": {"accentHue": 235}}}),
+        )
+        .unwrap();
+        assert_eq!(
+            read(),
+            Some(json!({"default": {"accentHue": 4, "tint": "soft"}, "p-1": {"accentHue": 235}}))
+        );
+        // A hue out of range is refused and nothing is stored; null clears only this profile's entry.
+        assert!(update_settings(
+            &ctx(&e),
+            json!({"changes": {"customColours": {"accentHue": 360}}})
+        )
+        .is_err());
+        update_settings(&ctx(&e), json!({"changes": {"customColours": null}})).unwrap();
+        assert_eq!(
+            read(),
+            Some(json!({"default": {"accentHue": 4, "tint": "soft"}}))
+        );
+        assert_eq!(
+            get_settings(&ctx(&e), json!({"keys": ["customColours"]})).unwrap()["options"]
+                ["customColours"]["merge"],
+            true
+        );
     }
 
     #[test]

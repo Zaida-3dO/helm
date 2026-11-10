@@ -19,6 +19,11 @@ enum Kind {
         max: i64,
         step: i64,
     },
+    /// A whole number in `min..=max`, or null.
+    IntOrNull {
+        min: i64,
+        max: i64,
+    },
     /// A string of at most `max` bytes.
     Text {
         max: usize,
@@ -64,12 +69,10 @@ const NOT_READ: &[&str] = &[
     "theme",
     "codeThemes",
     "fontFamilies",
-    "dopamine",
     "animationControls",
     "themeEffects",
     "cursorTrail",
     "customCursors",
-    "pauseAnimationsOnScroll",
     "moveCompletedTasksToTop",
     "reviewWrap",
     "inspectorVisible",
@@ -153,9 +156,12 @@ const DELAY_MINUTES: Kind = Kind::Int {
     max: 1440,
     step: 1,
 };
+const ACCENT_HUE: Kind = Kind::IntOrNull { min: 0, max: 359 };
+const COLOUR_TINTS: Kind = Kind::Choice(&["none", "soft", "strong"]);
+const COLOUR_CONTRASTS: Kind = Kind::Choice(&["standard", "more"]);
 const SHOWN_OR_HIDDEN: Kind = Kind::Choice(&["shown", "hidden"]);
 const CHORD: Kind = Kind::TextOrNull { max: 100 };
-const LEVELS: Kind = Kind::Choice(&["zen", "standard", "brainrot", "custom"]);
+const LEVELS: Kind = Kind::Choice(&["zen", "standard", "brainrot"]);
 const ANY_OBJECT: Kind = Kind::AnyObject;
 
 fn table() -> Vec<Entry> {
@@ -294,9 +300,23 @@ fn table() -> Vec<Entry> {
                 ("enabled", &BOOL),
                 ("volume", &VOLUME),
                 ("themed", &BOOL),
+                ("cues", &BOOL),
+                ("focused", &BOOL),
             ]),
-            default: || json!({"enabled": true, "volume": 45, "themed": true}),
-            about: "Interface sounds. Send only the fields to change: the others keep their values.",
+            default: || {
+                json!({"enabled": true, "volume": 45, "themed": true, "cues": false, "focused": false})
+            },
+            about: "Interface sounds: enabled and volume (0 to 100) cover the chimes when a chat finishes or needs you; themed picks the two-note chimes over one plain beep; cues adds small sounds for sending and clicking (off by default); focused also plays the chimes while Helm is in front (off by default). The quiet motion level (dopamine zen) silences everything. Send only the fields to change: the others keep their values.",
+        },
+        Entry {
+            key: "customColours",
+            kind: Kind::Fields(&[
+                ("accentHue", &ACCENT_HUE),
+                ("tint", &COLOUR_TINTS),
+                ("contrast", &COLOUR_CONTRASTS),
+            ]),
+            default: || json!({"accentHue": null, "tint": "none", "contrast": "standard"}),
+            about: "Your own colours, on top of any skin, for the profile active on this device: accentHue is the accent's hue in degrees (0 red, 25 orange, 145 green, 235 blue, 285 violet; null uses the skin's own), tint washes the background with that hue, contrast more raises text contrast. Send only the fields to change. Colours are always adjusted to stay readable.",
         },
         Entry {
             key: "keepAwake",
@@ -473,6 +493,9 @@ impl Kind {
                 }
                 o
             }
+            Kind::IntOrNull { min, max } => {
+                json!({"type": "integer or null", "min": min, "max": max})
+            }
             Kind::Text { max } => json!({"type": "string", "maxLength": max}),
             Kind::SkillName { max } => {
                 json!({"type": "string", "maxLength": max, "note": "no leading $"})
@@ -513,6 +536,9 @@ impl Kind {
                 format!("a whole number from {min} to {max} in steps of {step}")
             }
             Kind::Int { min, max, .. } => format!("a whole number from {min} to {max}"),
+            Kind::IntOrNull { min, max } => {
+                format!("a whole number from {min} to {max}, or null")
+            }
             Kind::Text { max } => format!("text of at most {max} bytes"),
             Kind::SkillName { max } => {
                 format!("a skill name of at most {max} bytes, without a leading $")
@@ -548,6 +574,13 @@ impl Kind {
             Kind::Int { min, max, step } => match v.as_i64() {
                 Some(n) if (*min..=*max).contains(&n) && (n - min) % step == 0 => Ok(()),
                 _ => bad(self),
+            },
+            Kind::IntOrNull { min, max } => match v {
+                Value::Null => Ok(()),
+                _ => match v.as_i64() {
+                    Some(n) if (*min..=*max).contains(&n) => Ok(()),
+                    _ => bad(self),
+                },
             },
             Kind::Text { max } => match v.as_str() {
                 Some(s) if s.len() <= *max && !s.chars().any(char::is_control) => Ok(()),
@@ -652,10 +685,46 @@ pub fn describe(key: &str) -> Option<Value> {
     } else {
         o["about"] = json!(e.about);
     }
-    if MERGED.contains(&key) {
+    if MERGED.contains(&key) || key == COLOURS_KEY {
         o["merge"] = json!(true);
     }
     Some(o)
+}
+
+/// The key holding each profile's own colours.
+pub const COLOURS_KEY: &str = "customColours";
+
+/// The profile entry used when no profile is chosen, or all of them are shown.
+pub const DEFAULT_PROFILE: &str = "default";
+
+/// The stored `customColours` after an update to one profile's entry. The update's fields are
+/// merged into that profile's stored entry, and every other profile keeps its own. `null` removes
+/// the profile's entry, and an empty map comes back as `null` so the row is deleted.
+pub fn merge_colours(stored: Option<&Value>, update: &Value, profile: &str) -> Value {
+    let mut map = match stored {
+        Some(Value::Object(m)) => m.clone(),
+        _ => Map::new(),
+    };
+    match update.as_object() {
+        Some(new) => {
+            let mut entry = match map.get(profile) {
+                Some(Value::Object(e)) => e.clone(),
+                _ => Map::new(),
+            };
+            for (k, v) in new {
+                entry.insert(k.clone(), v.clone());
+            }
+            map.insert(profile.to_owned(), Value::Object(entry));
+        }
+        None => {
+            map.remove(profile);
+        }
+    }
+    if map.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(map)
+    }
 }
 
 /// True when nothing in Helm reads `key` yet.
@@ -782,6 +851,51 @@ mod tests {
         assert!(check("dopamine", &json!("zen")).is_ok());
         assert!(check("dopamine", &json!({"version": 1})).is_ok());
         assert!(check("dopamine", &json!("calm")).is_err());
+        assert!(check("sounds", &json!({"cues": true, "focused": false})).is_ok());
+        assert!(check("sounds", &json!({"cues": "on"})).is_err());
+        // Own colours: a hue from 0 to 359 or null, and the tint and contrast words.
+        assert!(check("customColours", &json!({"accentHue": 4})).is_ok());
+        assert!(check(
+            "customColours",
+            &json!({"accentHue": null, "tint": "strong"})
+        )
+        .is_ok());
+        assert!(check("customColours", &json!({"contrast": "more"})).is_ok());
+        let e = check("customColours", &json!({"accentHue": 360})).unwrap_err();
+        assert!(
+            e.contains("customColours.accentHue must be a whole number from 0 to 359, or null"),
+            "{e}"
+        );
+        assert!(check("customColours", &json!({"accentHue": 12.5})).is_err());
+        assert!(check("customColours", &json!({"tint": "heavy"})).is_err());
+        assert!(check("customColours", &json!({"contrast": "high"})).is_err());
+        assert!(check("customColours", &json!({"colour": "red"}))
+            .unwrap_err()
+            .contains("no field"));
+    }
+
+    #[test]
+    fn own_colours_merge_into_one_profiles_entry() {
+        let stored = json!({"default": {"accentHue": 4}, "p-1": {"tint": "soft"}});
+        let merged = merge_colours(Some(&stored), &json!({"contrast": "more"}), "p-1");
+        assert_eq!(
+            merged,
+            json!({"default": {"accentHue": 4}, "p-1": {"tint": "soft", "contrast": "more"}})
+        );
+        assert_eq!(
+            merge_colours(None, &json!({"accentHue": 18}), "default"),
+            json!({"default": {"accentHue": 18}})
+        );
+        // Null clears one profile's entry; the last one leaving deletes the row.
+        assert_eq!(
+            merge_colours(Some(&stored), &Value::Null, "p-1"),
+            json!({"default": {"accentHue": 4}})
+        );
+        assert_eq!(
+            merge_colours(Some(&json!({"default": {}})), &Value::Null, "default"),
+            Value::Null
+        );
+        assert_eq!(describe("customColours").unwrap()["merge"], true);
     }
 
     #[test]
@@ -815,7 +929,7 @@ mod tests {
         let merged = to_store("sounds", None, &json!({"volume": 30}));
         assert_eq!(
             merged,
-            json!({"enabled": true, "volume": 30, "themed": true})
+            json!({"enabled": true, "volume": 30, "themed": true, "cues": false, "focused": false})
         );
         // Null still restores the default, and a non-merged key is replaced whole.
         assert_eq!(to_store("sounds", Some(&stored), &Value::Null), Value::Null);
@@ -846,6 +960,9 @@ mod tests {
             "zoomLevel",
             "keepAwake",
             "chatElements",
+            "dopamine",
+            "pauseAnimationsOnScroll",
+            "customColours",
         ] {
             assert!(describe(k).unwrap().get("hasEffect").is_none(), "{k}");
             assert!(!is_not_read(k));

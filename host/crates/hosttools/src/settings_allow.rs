@@ -111,9 +111,10 @@ mod tests {
 
     #[test]
     fn the_tiers_and_the_floor() {
-        // Base 36 (responseVerbosity left Base for user-only; backgroundModel joined it), plus keybindings.
-        assert_eq!(agent_keys(false).len(), 36);
-        assert_eq!(agent_keys(true).len(), 37);
+        // Base 37 (responseVerbosity left Base for user-only; backgroundModel and customColours
+        // joined it), plus keybindings.
+        assert_eq!(agent_keys(false).len(), 37);
+        assert_eq!(agent_keys(true).len(), 38);
         assert!(agent_keys(true).contains(&"keybindings"));
         assert!(!agent_keys(false).contains(&"keybindings"));
         assert!(refusal("theme", false).is_none());

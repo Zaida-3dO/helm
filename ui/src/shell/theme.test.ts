@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyTheme, DOPAMINE_DEFAULT, FONT_DEFAULTS, parseDopamine, SKINS, applyZoom, fontVars, parseFontSizes, parseSkin, parseZoom } from './theme.ts';
 import { motionOptions, sizeOptions, skinOptions, volumeOptions, zoomOptions } from '../settings/generalOptions.ts';
+import { connectMotion, flair, mayMove, onMotionChange } from './motion.ts';
 
 test('stored text sizes are kept only when whole and in range; the rest fall back to the defaults', () => {
   assert.deepEqual(parseFontSizes(undefined), FONT_DEFAULTS);
@@ -85,6 +86,11 @@ test('the theme write carries the level, and Zen also asks for the quiet effect 
     assert.equal(root.dataset.effects, 'full');
     applyTheme(root, 'light', 'team-chat');
     assert.equal(root.dataset.dopamine, 'standard');
+    // The colours hook in after every write, the first one included.
+    let applied = 0;
+    applyTheme(root, 'dark', 'default', 'standard', () => applied++);
+    assert.equal(applied, 1);
+    assert.equal(root.dataset.theme, 'dark');
   } finally {
     delete g.window;
   }
@@ -100,4 +106,56 @@ test('zoom goes to the host web view and leaves no CSS zoom on the page', () => 
   applyZoom(api, root, 120);
   assert.deepEqual(calls, [['window_zoom', { level: 120 }]]);
   assert.equal(root.style.zoom, '');
+});
+
+test('mayMove says no under reduced motion, Zen or the slow-display mode, and while scrolling when pausing is on', () => {
+  const root = { dataset: {} as Record<string, string> } as unknown as HTMLElement;
+  let reduced = false;
+  const timers: (() => void)[] = [];
+  let onScroll: (() => void) | undefined;
+  let onPref: ((e: Record<string, unknown>) => void) | undefined;
+  const win = {
+    matchMedia: () => ({ matches: reduced, addEventListener: () => undefined, removeEventListener: () => undefined }),
+    addEventListener: (k: string, h: () => void) => {
+      if (k === 'scroll') onScroll = h;
+    },
+    removeEventListener: () => undefined,
+    setTimeout: (h: () => void) => timers.push(h),
+    clearTimeout: () => undefined,
+  };
+  const bus = {
+    on: (k: string, h: (e: Record<string, unknown>) => void) => {
+      if (k === 'preferences') onPref = h;
+      return () => undefined;
+    },
+  };
+  const stop = connectMotion(() => Promise.resolve(null as never), bus, root, win);
+  let changes = 0;
+  const off = onMotionChange(() => changes++);
+  assert.equal(mayMove(), true);
+  assert.equal(flair(), 'standard');
+  for (const [level, want, may] of [['zen', 'quiet', false], ['brainrot', 'maximal', true], ['standard', 'standard', true]] as const) {
+    root.dataset.dopamine = level;
+    assert.deepEqual([flair(), mayMove()], [want, may], level);
+  }
+  root.dataset.motion = 'low';
+  assert.equal(mayMove(), false, 'the slow-display mode');
+  delete root.dataset.motion;
+  reduced = true;
+  assert.equal(mayMove(), false, 'the operating system asks for less motion');
+  reduced = false;
+  // Scrolling only matters once "Pause animations while scrolling" is on.
+  onScroll!();
+  assert.equal(mayMove(), true);
+  onPref!({ changed: { pauseAnimationsOnScroll: true } });
+  onScroll!();
+  assert.equal(mayMove(), false);
+  assert.equal(root.dataset.scrolling, '1');
+  assert.ok(changes > 0, 'listeners hear the change');
+  timers.at(-1)!();
+  assert.equal(mayMove(), true, 'the page has stopped scrolling');
+  assert.equal(root.dataset.scrolling, undefined);
+  off();
+  stop();
+  assert.equal(mayMove(), true);
 });

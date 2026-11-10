@@ -1,0 +1,96 @@
+/* Settings → Appearance. */
+
+.appearance-section:first-child .settings-section {
+  margin-top: 6px;
+}
+
+/* Colours: swatches, a hue slider, the tint choice, more contrast and reset. */
+.colours-control {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: calc(10 * var(--ui-unit));
+  max-width: calc(360 * var(--ui-unit));
+}
+
+.colour-presets {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: calc(6 * var(--ui-unit));
+}
+
+.colour-swatch {
+  width: calc(24 * var(--ui-unit));
+  height: calc(24 * var(--ui-unit));
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: var(--radius-pill);
+  cursor: var(--cursor-pointer);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 18%, transparent);
+}
+.colour-swatch:hover {
+  transform: scale(1.08);
+}
+.colour-swatch[aria-pressed='true'] {
+  border-color: var(--text);
+  outline: 2px solid var(--bg);
+  outline-offset: -4px;
+}
+.colour-swatch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* "Skin's own": a split disc, so it reads as "no colour of mine". */
+.colour-swatch-skin {
+  background: linear-gradient(135deg, var(--surface-alt) 50%, var(--line-strong) 50%);
+}
+
+.colour-hue-row {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ui-unit));
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+.colour-hue {
+  width: calc(210 * var(--ui-unit));
+  height: calc(8 * var(--ui-unit));
+  border-radius: var(--radius-pill);
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: var(--cursor-pointer);
+}
+.colour-hue::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: calc(16 * var(--ui-unit));
+  height: calc(16 * var(--ui-unit));
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  border: 2px solid var(--text);
+}
+.colour-hue-value {
+  min-width: calc(34 * var(--ui-unit));
+  text-align: right;
+}
+
+.colour-options {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: calc(10 * var(--ui-unit));
+}
+
+.colour-adjusted {
+  font-size: calc(11 * var(--ui-unit));
+  color: var(--secondary);
+}
+
+/* "Pause animations while scrolling": motion.ts sets data-scrolling on the root while a scroll is
+   under way and the option is on. */
+:root[data-scrolling] *,
+:root[data-scrolling] *::before,
+:root[data-scrolling] *::after {
+  animation-play-state: paused !important;
+}

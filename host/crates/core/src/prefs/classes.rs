@@ -61,6 +61,8 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     ("themeEffects", Registry(Base)),
     ("cursorTrail", Registry(Base)),
     ("customCursors", Registry(Base)),
+    // Settings > Appearance > Colours: an accent hue, a tint and a contrast choice, per profile.
+    ("customColours", Registry(Base)),
     ("pauseAnimationsOnScroll", Registry(Base)),
     ("compactSidebar", Registry(Base)),
     ("hiddenSidebarItems", Registry(Base)),
@@ -269,12 +271,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_tier_has_36_keys() {
+    fn base_tier_has_37_keys() {
         let base = CLASSIFIED
             .iter()
             .filter(|(_, c)| *c == Registry(Base))
             .count();
-        assert_eq!(base, 36);
+        assert_eq!(base, 37);
     }
 
     #[test]

@@ -2,3 +2,4 @@
 // pane module and add one side-effect import line below.
 export { registerSettingsPane } from './registry.ts';
 export { SettingsDialog, SETTINGS_DIALOG } from './SettingsDialog.tsx';
+export { AppearanceSection, registerAppearanceSection } from './appearance/AppearancePane.tsx';

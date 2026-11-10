@@ -1,13 +1,10 @@
-// Settings → General: appearance (System / Light / Dark), text sizes and zoom, and compact sidebar. Each control saves
-// at once through the generic `preference` op and applies at once.
+// Settings → General: the compact sidebar and which sidebar entries show, whether chats may change
+// every setting, and where updates come from. How Helm looks, moves and sounds lives in the
+// Appearance pane. Each control saves at once through the generic `preference` op and applies at once.
 
 import { useEffect, useState } from 'react';
 import { useShell } from '../shell/context.ts';
-import { DOPAMINE_DEFAULT, FONT_DEFAULTS, parseAppearance, parseDopamine, parseFontSizes, parseSkin, parseZoom, SKIN_DEFAULT, ZOOM_DEFAULT, type Appearance, type Dopamine, type FontSizes, type Skin } from '../shell/theme.ts';
-import { parseSounds, SOUNDS_DEFAULT, type Sounds } from '../shell/sounds.ts';
-import { Checkbox, ChoiceTiles, Picker, SettingRow, toast } from '../ui/index.ts';
-import { IconMonitor, IconMoon, IconSun } from '../ui/icons.tsx';
-import { motionOptions, sizeOptions, skinOptions, volumeOptions, zoomOptions } from './generalOptions.ts';
+import { Checkbox, SettingRow, toast } from '../ui/index.ts';
 import { registerSettingsPane } from './registry.ts';
 import { ChangedByChats } from './changed/ChangedByChats.tsx';
 import { parseNameList, SIDEBAR_ENTRIES } from './applied.ts';
@@ -15,40 +12,10 @@ import { UpdateSourceRow } from '../updates/UpdateSourceRow.tsx';
 
 function GeneralPane() {
   const shell = useShell();
-  const [appearance, setAppearance] = useState<Appearance>('system');
-  const [skin, setSkin] = useState<Skin>(SKIN_DEFAULT);
-  const [motion, setMotion] = useState<Dopamine>(DOPAMINE_DEFAULT);
-  const [sounds, setSounds] = useState<Sounds>(SOUNDS_DEFAULT);
   const [compact, setCompact] = useState(false);
-  const [sizes, setSizes] = useState<FontSizes>(FONT_DEFAULTS);
-  const [zoom, setZoom] = useState(ZOOM_DEFAULT);
   const [allSettings, setAllSettings] = useState(false);
   const [hiddenItems, setHiddenItems] = useState<string[]>([]);
   useEffect(() => {
-    shell
-      .api<unknown>('preference_get', { key: 'fontSizes' })
-      .then((v) => setSizes(parseFontSizes(v)))
-      .catch(() => undefined);
-    shell
-      .api<unknown>('preference_get', { key: 'zoomLevel' })
-      .then((v) => setZoom(parseZoom(v)))
-      .catch(() => undefined);
-    shell
-      .api<unknown>('preference_get', { key: 'appearance' })
-      .then((v) => setAppearance(parseAppearance(v)))
-      .catch(() => undefined);
-    shell
-      .api<unknown>('preference_get', { key: 'interfaceTheme' })
-      .then((v) => setSkin(parseSkin(v)))
-      .catch(() => undefined);
-    shell
-      .api<unknown>('preference_get', { key: 'dopamine' })
-      .then((v) => setMotion(parseDopamine(v)))
-      .catch(() => undefined);
-    shell
-      .api<unknown>('preference_get', { key: 'sounds' })
-      .then((v) => setSounds(parseSounds(v)))
-      .catch(() => undefined);
     shell
       .api<unknown>('preference_get', { key: 'agentSettingsAll' })
       .then((v) => setAllSettings(v === true))
@@ -69,139 +36,8 @@ function GeneralPane() {
     });
   // Apply at once through the same event the host sends after a save; undo on a failed save.
   const apply = (key: string, value: unknown) => shell.bus.dispatch({ kind: 'preferences', changed: { [key]: value } });
-  const setSize = (k: keyof FontSizes, n: number) => {
-    const before = sizes;
-    const next = { ...sizes, [k]: n };
-    setSizes(next);
-    apply('fontSizes', next);
-    void save('fontSizes', next, () => {
-      setSizes(before);
-      apply('fontSizes', before);
-    });
-  };
-  const setSound = (patch: Partial<Sounds>) => {
-    const before = sounds;
-    const next = { ...sounds, ...patch };
-    setSounds(next);
-    apply('sounds', next);
-    void save('sounds', next, () => {
-      setSounds(before);
-      apply('sounds', before);
-    });
-  };
   return (
     <div>
-      <SettingRow title="Appearance" description="Follow Windows, or always use the light or dark colours." testId="setting-appearance">
-        <ChoiceTiles<Appearance>
-          label="Appearance"
-          testId="appearance"
-          value={appearance}
-          options={[
-            { value: 'system', label: 'System', icon: <IconMonitor size={17} /> },
-            { value: 'light', label: 'Light', icon: <IconSun size={17} /> },
-            { value: 'dark', label: 'Dark', icon: <IconMoon size={17} /> },
-          ]}
-          onChange={(v) => {
-            const before = appearance;
-            setAppearance(v);
-            // Apply at once; the host's own `preferences` event re-applies the same value.
-            shell.bus.dispatch({ kind: 'preferences', changed: { appearance: v } });
-            void save('appearance', v, () => {
-              setAppearance(before);
-              shell.bus.dispatch({ kind: 'preferences', changed: { appearance: before } });
-            });
-          }}
-        />
-      </SettingRow>
-      <SettingRow title="Theme" description="Recolour the whole app. Every theme comes in a light and dark form; Appearance above picks which of the two it shows in." testId="setting-theme">
-        <Picker<string>
-          settings
-          label="Theme"
-          testId="theme"
-          value={skin}
-          options={skinOptions()}
-          onChange={(v) => {
-            const before = skin;
-            setSkin(v as Skin);
-            apply('interfaceTheme', v);
-            void save('interfaceTheme', v, () => {
-              setSkin(before);
-              apply('interfaceTheme', before);
-            });
-          }}
-        />
-      </SettingRow>
-      <SettingRow title="Motion and flair" description="How much movement the interface shows. Quiet stills the animations and silences the away-from-window chimes; Maximal leans into them." testId="setting-motion">
-        <Picker<string>
-          settings
-          label="Motion and flair"
-          testId="motion"
-          value={motion}
-          options={motionOptions()}
-          onChange={(v) => {
-            const before = motion;
-            const next = v as Dopamine;
-            setMotion(next);
-            apply('dopamine', next);
-            void save('dopamine', next, () => {
-              setMotion(before);
-              apply('dopamine', before);
-            });
-          }}
-        />
-      </SettingRow>
-      <SettingRow title="Interface text size" description="The font size of menus, the sidebar and every control. The whole interface scales with it." testId="setting-interface-size">
-        <Picker<string>
-          settings
-          label="Interface text size"
-          testId="interface-size"
-          value={String(sizes.interface)}
-          options={sizeOptions('interface')}
-          onChange={(v) => setSize('interface', Number(v))}
-        />
-      </SettingRow>
-      <SettingRow title="Reply text size" description="The font size of Claude's replies in the chat." testId="setting-response-size">
-        <Picker<string>
-          settings
-          label="Reply text size"
-          testId="response-size"
-          value={String(sizes.response)}
-          options={sizeOptions('response')}
-          onChange={(v) => setSize('response', Number(v))}
-        />
-      </SettingRow>
-      <SettingRow title="Zoom" description="Make everything in the window larger or smaller." testId="setting-zoom">
-        <Picker<string>
-          settings
-          label="Zoom"
-          testId="zoom"
-          value={String(zoom)}
-          options={zoomOptions()}
-          onChange={(v) => {
-            const before = zoom;
-            const next = Number(v);
-            setZoom(next);
-            apply('zoomLevel', next);
-            void save('zoomLevel', next, () => {
-              setZoom(before);
-              apply('zoomLevel', before);
-            });
-          }}
-        />
-      </SettingRow>
-      <SettingRow title="Interface sounds" description="A quiet chime when a chat finishes while the window is away, and a softer pair of notes when a chat turns up needing you." testId="setting-sounds">
-        <Checkbox checked={sounds.enabled} onChange={(on) => setSound({ enabled: on })} />
-      </SettingRow>
-      <SettingRow title="Sound level" description="How loud those cues are; they only play while the window does not have your focus." testId="setting-sound-level">
-        <Picker<string>
-          settings
-          label="Sound level"
-          testId="sound-level"
-          value={String(sounds.volume)}
-          options={volumeOptions()}
-          onChange={(v) => setSound({ volume: Number(v) })}
-        />
-      </SettingRow>
       <SettingRow title="Compact sidebar" description="Tighter rows in the sidebar.">
         <Checkbox
           checked={compact}
