@@ -930,3 +930,120 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     let none = settings::LocalSettings::default();
     assert_eq!(none.compare_with.key(), "sonnet");
 }
+
+#[test]
+fn room_is_kept_for_speech_and_made_on_request() {
+    let r = rig();
+    let ollama = Arc::new(Mutex::new(OllamaState {
+        installed: vec![("big:7b".into(), 5 * GB)],
+        loaded: vec![],
+    }));
+    let strata = Arc::new(Mutex::new(StrataState {
+        loaded: Some("qwen-flash".into()),
+    }));
+    let (o, s) = (
+        fake_ollama(ollama.clone()),
+        fake_strata(strata.clone(), r.free.clone()),
+    );
+    r.svc.save(&servers(&s.base, &o.base)).unwrap();
+    r.svc.set_key("strata", KEY).unwrap();
+    let nothing = |_: &str| {};
+    let reserve = |gb: u32| {
+        r.svc
+            .save(&Changes {
+                speech_reserve_gb: Some(gb),
+                ..Default::default()
+            })
+            .unwrap();
+    };
+
+    // 1. The reserve is part of what a load asks for. The model needs 6 GB and 7 are free:
+    //    with no reserve it just loads; with the default 2 GB, Strata's idle model goes first.
+    reserve(0);
+    r.free.store(7 * GB, Ordering::SeqCst);
+    r.svc.prepare(&turn("ollama", "big:7b"), &nothing).unwrap();
+    assert_eq!(s.calls("POST", "/unload").len(), 0);
+    reserve(2);
+    ollama.lock().unwrap().loaded.clear();
+    r.free.store(7 * GB, Ordering::SeqCst);
+    r.svc.prepare(&turn("ollama", "big:7b"), &nothing).unwrap();
+    assert_eq!(s.calls("POST", "/unload").len(), 1);
+
+    // 2. The reserve is a wish: when what stands in the way is a reply in progress, a model that
+    //    fits without it still loads.
+    strata.lock().unwrap().loaded = Some("qwen-flash".into());
+    ollama.lock().unwrap().loaded.clear();
+    r.free.store(7 * GB, Ordering::SeqCst);
+    busy_chat(&r.db, "c-sb", "Write tests", "strata", "qwen-flash");
+    r.svc.prepare(&turn("ollama", "big:7b"), &nothing).unwrap();
+    assert_eq!(
+        s.calls("POST", "/unload").len(),
+        1,
+        "a reply is not cut off"
+    );
+    r.db.write(|tx| tx.execute("DELETE FROM chats WHERE id = 'c-sb'", []))
+        .unwrap();
+
+    // 3. Making room for speech unloads every idle model, on every server, and says how much came
+    //    back. A model in the middle of a reply stays, and so does the one on the same server
+    //    that the reply is not using.
+    ollama.lock().unwrap().loaded = vec!["big:7b-helm-64k".into(), "other:1b".into()];
+    strata.lock().unwrap().loaded = Some("qwen-flash".into());
+    r.free.store(GB, Ordering::SeqCst);
+    busy_chat(&r.db, "c-ob", "Review diff", "ollama", "big:7b");
+    let before = s.calls("POST", "/unload").len();
+    let room = r.svc.free_for_speech();
+    assert_eq!(room.unloaded, 2, "the idle Ollama model and Strata's");
+    assert_eq!(room.freed_gb, 12.0);
+    assert_eq!(s.calls("POST", "/unload").len(), before + 1);
+    assert_eq!(
+        ollama.lock().unwrap().loaded,
+        ["big:7b-helm-64k"],
+        "the model that is answering stays loaded"
+    );
+    busy_chat(&r.db, "c-sb", "Write tests", "strata", "qwen-flash");
+    strata.lock().unwrap().loaded = Some("qwen-flash".into());
+    ollama.lock().unwrap().loaded = vec!["big:7b-helm-64k".into()];
+    let room = r.svc.free_for_speech();
+    assert_eq!(
+        (room.unloaded, room.freed_gb),
+        (0, 0.0),
+        "nothing idle to free"
+    );
+    assert_eq!(s.calls("POST", "/unload").len(), before + 1);
+
+    // 4. Dictation asks only when the card is short of the reserve.
+    r.free.store(GB, Ordering::SeqCst);
+    assert!(r.svc.speech_room_short());
+    r.free.store(3 * GB, Ordering::SeqCst);
+    assert!(!r.svc.speech_room_short());
+    reserve(0);
+    r.free.store(0, Ordering::SeqCst);
+    assert!(!r.svc.speech_room_short(), "a reserve of 0 keeps none");
+
+    // 5. Strata's reported window is believed only between 4k and 1M tokens.
+    for (reported, want) in [
+        (json!(262_144), Some(262_144)),
+        (json!(4_096), Some(4_096)),
+        (json!(1_000_000), Some(1_000_000)),
+        (json!(4_095), None),
+        (json!(5_000_000), None),
+        (json!(18_446_744_073_709), None),
+        (json!("big"), None),
+    ] {
+        let health = Fake::start(move |_| {
+            (
+                200,
+                json!({"status": "ok", "max_context": reported.clone()}),
+            )
+        });
+        let conn = crate::net::Conn {
+            base: health.base.clone(),
+            key: None,
+        };
+        assert_eq!(
+            crate::servers::strata_context(&crate::net::Http::default(), &conn),
+            want
+        );
+    }
+}

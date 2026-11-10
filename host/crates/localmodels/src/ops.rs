@@ -3,7 +3,7 @@
 //! | Op | Class | Args | Result |
 //! |---|---|---|---|
 //! | `local_models_state` | blocking | none | `LocalModelsState` |
-//! | `local_models_save` | maintenance | `{servers?, ollamaContext?, keepAliveMinutes?, strataNeedGb?, tools?, compareWith?}` | `LocalModelsState` |
+//! | `local_models_save` | maintenance | `{servers?, ollamaContext?, keepAliveMinutes?, strataNeedGb?, speechReserveGb?, tools?, compareWith?}` | `LocalModelsState` |
 //! | `local_server_key_set` | maintenance | `{serverId, key}` | `LocalModelsState` |
 //! | `local_server_key_forget` | maintenance | `{serverId}` | `LocalModelsState` |
 //! | `local_server_test` | blocking | `{serverId}` | `TestResult` |

@@ -262,6 +262,61 @@ fn watch_process_failures(window: &tauri::WebviewWindow, crashes: Arc<WindowCras
 #[cfg(not(windows))]
 fn watch_process_failures(_window: &tauri::WebviewWindow, _crashes: Arc<WindowCrashes>) {}
 
+/// Answer the web view's permission requests itself. The microphone (dictation) is allowed for
+/// Helm's own page only, never for a page in a frame. The clipboard and autoplay requests are left
+/// to the web view's other handler. Every other kind (camera, location, sensors, notifications,
+/// fonts, files and the rest) is denied: Helm uses none of them.
+#[cfg(windows)]
+fn guard_permissions(window: &tauri::WebviewWindow, debug: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_AUTOPLAY,
+        COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
+        COREWEBVIEW2_PERMISSION_STATE_ALLOW, COREWEBVIEW2_PERMISSION_STATE_DENY,
+    };
+    use webview2_com::{take_pwstr, PermissionRequestedEventHandler};
+    let attached = window.with_webview(move |platform| {
+        // SAFETY: COM calls on the controller Tauri created, made on the thread that owns it.
+        unsafe {
+            let core = match platform.controller().CoreWebView2() {
+                Ok(core) => core,
+                Err(e) => return log::warn!("permission handler not attached: {e}"),
+            };
+            let handler =
+                PermissionRequestedEventHandler::create(Box::new(move |_sender, args| {
+                    let Some(args) = args else { return Ok(()) };
+                    let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+                    args.PermissionKind(&mut kind)?;
+                    let state = match kind {
+                        COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ
+                        | COREWEBVIEW2_PERMISSION_KIND_AUTOPLAY => return Ok(()),
+                        COREWEBVIEW2_PERMISSION_KIND_MICROPHONE => {
+                            let mut uri = Default::default();
+                            args.Uri(&mut uri)?;
+                            if helm_ipc::authority::is_trusted_origin(&take_pwstr(uri), debug) {
+                                COREWEBVIEW2_PERMISSION_STATE_ALLOW
+                            } else {
+                                COREWEBVIEW2_PERMISSION_STATE_DENY
+                            }
+                        }
+                        _ => COREWEBVIEW2_PERMISSION_STATE_DENY,
+                    };
+                    args.SetState(state)?;
+                    Ok(())
+                }));
+            let mut token = 0i64;
+            if let Err(e) = core.add_PermissionRequested(&handler, &mut token) {
+                log::warn!("permission handler not attached: {e}");
+            }
+        }
+    });
+    if let Err(e) = attached {
+        log::warn!("permission handler not attached: {e}");
+    }
+}
+
+#[cfg(not(windows))]
+fn guard_permissions(_window: &tauri::WebviewWindow, _debug: bool) {}
+
 /// The main window is built in code, not from static config, so its navigation policy can be
 /// attached: only the app origin, `about:srcdoc` and (debug) the dev server; no new
 /// windows. Its WebView2 data lives inside the profile, so profiles never share web storage.
@@ -313,6 +368,7 @@ pub fn build_main_window<M: Manager<tauri::Wry>>(
         show_without_activating(&window);
     }
     watch_process_failures(&window, crashes.clone());
+    guard_permissions(&window, debug);
     // Files dragged in from Explorer reach the composer as paths.
     let handle = app.app_handle().clone();
     window.on_window_event(move |e| {

@@ -72,6 +72,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_list_schedules", Class::Denied(SCHEDULES)),
     ("app_list_tools", Class::Denied(TOOLS)),
     ("app_list_waiting", Class::Allowed),
+    // The hub asks it before it transcribes: it only unloads idle local models.
+    ("app_make_room_for_speech", Class::Allowed),
     ("app_mcp_call", Class::Denied(MCP)),
     ("app_mcp_tools", Class::Denied(MCP)),
     ("app_offer_options", Class::Denied(LOCAL)),
@@ -350,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_vetted_eight_are_allowed() {
+    fn only_the_vetted_nine_are_allowed() {
         assert_eq!(
             allowed_tools(),
             [
@@ -359,6 +361,7 @@ mod tests {
                 "app_list_chats",
                 "app_list_projects",
                 "app_list_waiting",
+                "app_make_room_for_speech",
                 "app_read_chat",
                 "app_send_message",
                 "app_stop_chat"

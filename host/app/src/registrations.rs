@@ -39,6 +39,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_pages::register_ops(reg);
     helm_devices::register_ops(reg);
     crate::pet::register_ops(reg);
+    helm_dictation::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -64,6 +65,7 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_profiles::register_migrations(reg);
     helm_pages::register_migrations(reg);
     helm_devices::register_migrations(reg);
+    helm_dictation::register_migrations(reg);
 }
 
 /// Shared services a crate adds for op handlers (`ctx.services.need::<T>()`), called once at
@@ -225,6 +227,7 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_usage::register_host_tools(&mut reg);
     helm_webtools::register_host_tools(&mut reg);
     helm_skills::register_host_tools(&mut reg);
+    helm_dictation::register_host_tools(&mut reg);
     reg
 }
 

@@ -33,6 +33,7 @@
     "app_list_schedules",
     "app_list_tools",
     "app_list_waiting",
+    "app_make_room_for_speech",
     "app_mcp_call",
     "app_mcp_tools",
     "app_offer_options",

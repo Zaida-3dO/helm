@@ -14,8 +14,9 @@
 //! | [`types`], [`bindings`] | the shapes the UI sees |
 //!
 //! **Helm never reaches a local server on its own.** There is no probe at start-up and no timer:
-//! a server is asked only for a catalogue refresh, a Test, or a local chat's turn — and a Strata
-//! that is set to be started when needed is launched only at one of those moments, never at
+//! a server is asked only for a catalogue refresh, a Test, a local chat's turn, or a request to
+//! make room for speech-to-text — and a Strata
+//! that is set to be started when needed is launched only at one of the first three, never at
 //! start-up. In debug builds `HELM_TEST_LOCAL_SERVERS` is `off` (no server is ever contacted) or a
 //! loopback address that every server uses instead (a fake); release builds ignore it, and with it
 //! in effect no real Strata is ever launched.

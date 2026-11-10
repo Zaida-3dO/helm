@@ -51,6 +51,7 @@ helm-skills = { path = "../crates/skills" }
 helm-claudechats = { path = "../crates/claudechats" }
 helm-backup = { path = "../crates/backup" }
 helm-pages = { path = "../crates/pages" }
+helm-dictation = { path = "../crates/dictation" }
 serde_json.workspace = true
 tokio.workspace = true
 log.workspace = true

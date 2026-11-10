@@ -2,12 +2,14 @@
 //! before and after each turn of a local chat.
 //!
 //! **Nothing here runs on its own.** Helm reaches a server only when asked: a catalogue refresh
-//! (the picker or Settings opened), a Test, a local chat's send, or that chat's queue check — a
+//! (the picker or Settings opened), a Test, a local chat's send, making room for speech-to-text
+//! ([`LocalService::free_for_speech`], on a dictation or a call from the hub), or that chat's queue check — a
 //! server that answers one request at a time is asked about its waiting requests only while a
 //! request of ours is open against it, and not more than every few seconds. There is no start-up
 //! probe and no timer. A Strata server whose settings allow it is *launched* at one of those same moments,
 //! and only when a check finds it not answering — see [`starter`]. Nothing here ever stops,
-//! restarts or unloads a running server beyond what the memory check does to idle models.
+//! restarts or unloads a running server beyond what the memory check, and making room for speech,
+//! do to idle models.
 //!
 //! **Before a turn** ([`LocalService::prepare`]): if the model is already loaded, go. If not, the
 //! free graphics memory is read; when the model will not fit, idle models on the *other* servers
@@ -40,6 +42,19 @@ pub const TEST_ENV: &str = "HELM_TEST_LOCAL_SERVERS";
 /// A key a server that wants none is given: Claude Code needs some token, and it must never fall
 /// back to the user's own sign-in.
 pub const KEYLESS: &str = "local";
+
+const GB: u64 = 1024 * 1024 * 1024;
+
+/// What [`LocalService::free_for_speech`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechRoom {
+    /// Graphics memory that came back, in GB to one decimal. 0 when nothing was unloaded or the
+    /// card can't be read.
+    pub freed_gb: f64,
+    /// How many idle models were unloaded.
+    pub unloaded: u32,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Override {
@@ -780,24 +795,22 @@ impl LocalService {
             .unwrap_or_default()
     }
 
-    /// Free graphics memory for `need` bytes, by unloading idle models on the other servers.
-    /// `Err` only when models that are mid-reply are what stands in the way.
-    fn make_room(
+    /// Unload the idle models on every enabled server except `except` (all of them when it is
+    /// `None`). A model a chat is answering in (not counting `chat_id`) is left alone and named
+    /// instead. Returns how many unloads went through, and the first model left alone.
+    fn unload_idle(
         &self,
         st: &LocalSettings,
-        server: &Server,
-        display: &str,
-        need: u64,
+        except: Option<&str>,
         chat_id: &str,
-    ) -> Result<(), String> {
-        let Some(free) = self.gpu.free_bytes() else {
-            return Ok(()); // no figure: the server decides, as it would without Helm
-        };
-        if need <= free {
-            return Ok(());
-        }
+    ) -> (u32, Option<(String, String)>) {
+        let mut asked = 0;
         let mut blocker: Option<(String, String)> = None;
-        for other in st.servers.iter().filter(|o| o.enabled && o.id != server.id) {
+        for other in st
+            .servers
+            .iter()
+            .filter(|o| o.enabled && Some(o.id.as_str()) != except)
+        {
             let Ok(conn) = self.conn(other) else { continue };
             let loaded: Vec<String> = match other.kind {
                 LocalServerKind::Ollama => match srv::ollama_ps(&self.http, &conn) {
@@ -827,19 +840,45 @@ impl LocalService {
                     LocalServerKind::Ollama => srv::ollama_unload(&self.http, &conn, &name),
                     LocalServerKind::Strata => srv::strata_unload(&self.http, &conn),
                 };
-                if let Err(e) = done {
-                    log::warn!(
+                match done {
+                    Ok(()) => asked += 1,
+                    Err(e) => log::warn!(
                         "could not unload {name} on {}: {}",
                         other.name,
                         e.say(&other.name, &other.base_url)
-                    );
+                    ),
                 }
             }
         }
-        // A server hands its memory back a moment after an unload.
+        (asked, blocker)
+    }
+
+    /// Free graphics memory for `need` bytes, by unloading idle models on the other servers, and
+    /// leave the speech reserve free as well when that is possible. The reserve is a wish, not a
+    /// condition: a model that fits without it still loads. `Err` only when models that are
+    /// mid-reply are what stands in the way.
+    fn make_room(
+        &self,
+        st: &LocalSettings,
+        server: &Server,
+        display: &str,
+        need: u64,
+        chat_id: &str,
+    ) -> Result<(), String> {
+        let Some(free) = self.gpu.free_bytes() else {
+            return Ok(()); // no figure: the server decides, as it would without Helm
+        };
+        let with_reserve = need + u64::from(st.speech_reserve_gb) * GB;
+        if with_reserve <= free {
+            return Ok(());
+        }
+        let (unloaded, blocker) = self.unload_idle(st, Some(server.id.as_str()), chat_id);
+        // A server hands its memory back a moment after an unload. The reserve is only waited
+        // for when something was unloaded to make it: otherwise waiting could not change it.
+        let goal = if unloaded > 0 { with_reserve } else { need };
         let deadline = Instant::now() + self.timings.memory_wait;
         loop {
-            if self.gpu.free_bytes().is_none_or(|f| need <= f) {
+            if self.gpu.free_bytes().is_none_or(|f| goal <= f) {
                 return Ok(());
             }
             if Instant::now() >= deadline {
@@ -848,11 +887,53 @@ impl LocalService {
             std::thread::sleep(self.timings.memory_poll);
         }
         match blocker {
-            Some((other, title)) => Err(format!(
-                "{display} can't load while {other} is answering in {title}. Send again when it finishes."
-            )),
-            // Nothing Helm can free: let the server try, as it would without Helm.
-            None => Ok(()),
+            Some((other, title)) if self.gpu.free_bytes().is_some_and(|f| f < need) => {
+                Err(format!(
+                    "{display} can't load while {other} is answering in {title}. Send again when it finishes."
+                ))
+            }
+            // Nothing Helm can free, or the model fits without the reserve: let the server try,
+            // as it would without Helm.
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether the graphics memory free now is below the speech reserve, so that speech-to-text
+    /// would have to squeeze in beside a local model. False when the reserve is 0 or the figure
+    /// can't be told (no NVIDIA card). Reads the card only; no model server is contacted.
+    pub fn speech_room_short(&self) -> bool {
+        let reserve = u64::from(self.settings().speech_reserve_gb) * GB;
+        reserve > 0 && self.gpu.free_bytes().is_some_and(|f| f < reserve)
+    }
+
+    /// Make room for speech-to-text now: unload every idle model on every enabled server and
+    /// report how much memory came back. A model a chat is answering in is left alone, so no
+    /// reply is cut off. A server that can't be reached or refuses is logged and skipped:
+    /// speech-to-text goes ahead either way. Called by dictation when the card is short, and by
+    /// the hub before it transcribes.
+    pub fn free_for_speech(&self) -> SpeechRoom {
+        let st = self.settings();
+        let before = self.gpu.free_bytes();
+        let (unloaded, _) = self.unload_idle(&st, None, "");
+        let mut freed = 0;
+        if let Some(before) = before.filter(|_| unloaded > 0) {
+            // The memory comes back a moment after an unload: wait for it to stop rising.
+            let deadline = Instant::now() + self.timings.memory_wait;
+            let mut last = before;
+            loop {
+                let now = self.gpu.free_bytes().unwrap_or(last);
+                let settled = now > before && now == last;
+                last = now;
+                if settled || Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(self.timings.memory_poll);
+            }
+            freed = last.saturating_sub(before);
+        }
+        SpeechRoom {
+            freed_gb: (freed as f64 / GB as f64 * 10.0).round() / 10.0,
+            unloaded,
         }
     }
 
@@ -956,7 +1037,7 @@ impl LocalService {
             // The model loads when the first request reaches the server; this line stays up until
             // its first words arrive.
             progress(&format!("Loading {}…", turn.model));
-            let need = u64::from(st.strata_need_gb) * 1024 * 1024 * 1024;
+            let need = u64::from(st.strata_need_gb) * GB;
             self.make_room(st, server, &turn.model, need, &turn.chat_id)?;
         }
         Ok(turn.model.clone())

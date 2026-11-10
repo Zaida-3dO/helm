@@ -1,0 +1,25 @@
+[package]
+name = "helm-dictation"
+description = "Dictation in the composer: the speech-to-text address and its safety rules, the transcription call, and the host tool that makes graphics memory room for speech."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+helm-hosttools = { path = "../hosttools" }
+helm-localmodels = { path = "../localmodels" }
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+log.workspace = true
+base64 = "0.22"
+uuid.workspace = true
+ureq = { version = "3", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true
+helm-chats.workspace = true
+helm-platform.workspace = true

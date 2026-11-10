@@ -28,6 +28,10 @@ pub const DEFAULT_KEEP_ALIVE: u32 = 15;
 pub const MIN_STRATA_GB: u32 = 1;
 pub const MAX_STRATA_GB: u32 = 256;
 pub const DEFAULT_STRATA_GB: u32 = 12;
+/// Graphics memory (GB) kept free for speech-to-text when a model loads. 0 keeps none.
+pub const MIN_SPEECH_RESERVE_GB: u32 = 0;
+pub const MAX_SPEECH_RESERVE_GB: u32 = 24;
+pub const DEFAULT_SPEECH_RESERVE_GB: u32 = 2;
 
 /// The longest a Strata folder path or a preset name may be.
 pub const MAX_FOLDER: usize = 500;
@@ -107,6 +111,9 @@ pub struct LocalSettings {
     pub keep_alive_minutes: u32,
     /// Memory (GB) a Strata model needs, for the check before it loads.
     pub strata_need_gb: u32,
+    /// Memory (GB) a model load leaves free for speech-to-text, so dictation and the voice line's
+    /// transcription still fit beside a local model.
+    pub speech_reserve_gb: u32,
     pub tools: ToolsSetup,
     pub compare_with: CompareModel,
 }
@@ -153,6 +160,7 @@ impl Default for LocalSettings {
             ollama_context: DEFAULT_CONTEXT,
             keep_alive_minutes: DEFAULT_KEEP_ALIVE,
             strata_need_gb: DEFAULT_STRATA_GB,
+            speech_reserve_gb: DEFAULT_SPEECH_RESERVE_GB,
             tools: ToolsSetup::Lean,
             compare_with: CompareModel::Sonnet,
         }
@@ -349,6 +357,12 @@ pub fn read_lenient(v: &Value) -> LocalSettings {
     {
         s.strata_need_gb = n;
     }
+    if let Some(n) = o
+        .get("speechReserveGb")
+        .and_then(|v| int_in(v, MIN_SPEECH_RESERVE_GB, MAX_SPEECH_RESERVE_GB))
+    {
+        s.speech_reserve_gb = n;
+    }
     if let Some(t) = o
         .get("tools")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -418,6 +432,7 @@ pub struct Changes {
     pub ollama_context: Option<u32>,
     pub keep_alive_minutes: Option<u32>,
     pub strata_need_gb: Option<u32>,
+    pub speech_reserve_gb: Option<u32>,
     pub tools: Option<ToolsSetup>,
     pub compare_with: Option<CompareModel>,
 }
@@ -541,6 +556,16 @@ pub fn apply_changes(current: &LocalSettings, changes: &Changes) -> Result<Local
         }
         s.strata_need_gb = n;
     }
+    if let Some(n) = changes.speech_reserve_gb {
+        if !(MIN_SPEECH_RESERVE_GB..=MAX_SPEECH_RESERVE_GB).contains(&n) {
+            return Err(range_err(
+                "The memory kept for speech (GB)",
+                MIN_SPEECH_RESERVE_GB,
+                MAX_SPEECH_RESERVE_GB,
+            ));
+        }
+        s.speech_reserve_gb = n;
+    }
     if let Some(t) = changes.tools {
         s.tools = t;
     }
@@ -637,6 +662,15 @@ mod tests {
                 s.compare_with
             ),
             (DEFAULT_CONTEXT, 30, ToolsSetup::Full, CompareModel::Haiku)
+        );
+        assert_eq!(
+            (
+                read_lenient(&json!({"speechReserveGb": 0})).speech_reserve_gb,
+                read_lenient(&json!({"speechReserveGb": 6})).speech_reserve_gb,
+                read_lenient(&json!({"speechReserveGb": 99})).speech_reserve_gb,
+            ),
+            (0, 6, DEFAULT_SPEECH_RESERVE_GB),
+            "the speech reserve reads back, and a value out of range is the default"
         );
         assert_eq!(read_lenient(&json!("junk")), LocalSettings::default());
         assert_eq!(
@@ -793,6 +827,13 @@ mod tests {
                     ..Default::default()
                 },
                 "Strata",
+            ),
+            (
+                Changes {
+                    speech_reserve_gb: Some(25),
+                    ..Default::default()
+                },
+                "kept for speech",
             ),
         ] {
             let e = apply_changes(&cur, &changes).unwrap_err();

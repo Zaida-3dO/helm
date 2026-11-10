@@ -272,10 +272,18 @@ pub struct Listed {
 
 /// Strata's own window from `/health`'s `max_context`, when it says one. Strata's model list
 /// often leaves the size out; the health line carries the window the whole server runs with.
+/// A figure outside the windows a model can really have (4k to 1M tokens) is not believed: the
+/// chat would size its context meter, and its compaction, by it.
 pub fn strata_context(h: &Http, c: &Conn) -> Option<u64> {
     let r = good(h.get(c, "/health", net::QUICK).ok()?).ok()?;
-    r.json()?.get("max_context").and_then(num)
+    r.json()?
+        .get("max_context")
+        .and_then(num)
+        .filter(|n| STRATA_CONTEXT_RANGE.contains(n))
 }
+
+/// The windows Helm believes a Strata server reports: 4,096 tokens up to one million.
+const STRATA_CONTEXT_RANGE: std::ops::RangeInclusive<u64> = 4_096..=1_048_576;
 
 /// Strata's model list: `/v1/models`, then `/models`. `None` when neither gives one.
 pub fn strata_models(h: &Http, c: &Conn) -> Option<Vec<Listed>> {

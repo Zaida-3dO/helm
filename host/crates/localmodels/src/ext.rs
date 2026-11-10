@@ -6,6 +6,7 @@
 //! | `localOllamaContext` | Ollama context window for Helm's variants, 8192 to 262144 tokens |
 //! | `localKeepAliveMinutes` | how long Ollama keeps a model after a turn, 1 to 240 |
 //! | `localServersEnabled` | `{serverId: true or false}`: which servers Helm uses |
+//! | `localSpeechReserveGb` | graphics memory (GB, 0 to 24) a model load leaves free for speech-to-text |
 //! | `localToolsSetup` | `lean` or `full`: the tools a local chat is offered |
 //! | `localCompareModel` | `opus`, `sonnet` or `haiku`: the Claude model local usage is priced against |
 //!
@@ -23,6 +24,7 @@ use std::sync::Arc;
 pub const CONTEXT: &str = "localOllamaContext";
 pub const KEEP_ALIVE: &str = "localKeepAliveMinutes";
 pub const ENABLED: &str = "localServersEnabled";
+pub const SPEECH_RESERVE: &str = "localSpeechReserveGb";
 pub const TOOLS: &str = "localToolsSetup";
 pub const COMPARE: &str = "localCompareModel";
 
@@ -40,6 +42,7 @@ fn value_of(s: &LocalSettings, key: &str) -> Value {
         CONTEXT => json!(s.ollama_context),
         KEEP_ALIVE => json!(s.keep_alive_minutes),
         ENABLED => Value::Object(settings::enabled_map(s)),
+        SPEECH_RESERVE => json!(s.speech_reserve_gb),
         TOOLS => serde_json::to_value(s.tools).unwrap_or(Value::Null),
         _ => serde_json::to_value(s.compare_with).unwrap_or(Value::Null),
     }
@@ -99,6 +102,17 @@ fn change(key: &str, cur: &LocalSettings, value: &Value) -> Result<Changes, Stri
                         "{key} is a whole number of minutes from {} to {}.",
                         settings::MIN_KEEP_ALIVE,
                         settings::MAX_KEEP_ALIVE
+                    )
+                },
+            )?)
+        }
+        SPEECH_RESERVE => {
+            c.speech_reserve_gb = Some(v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(
+                || {
+                    format!(
+                        "{key} is a whole number of GB from {} to {}.",
+                        settings::MIN_SPEECH_RESERVE_GB,
+                        settings::MAX_SPEECH_RESERVE_GB
                     )
                 },
             )?)
@@ -168,7 +182,7 @@ fn put(
 
 impl SettingsExtension for LocalKeys {
     fn keys(&self) -> Vec<&'static str> {
-        vec![CONTEXT, KEEP_ALIVE, ENABLED, TOOLS, COMPARE]
+        vec![CONTEXT, KEEP_ALIVE, ENABLED, SPEECH_RESERVE, TOOLS, COMPARE]
     }
 
     fn describe(&self, key: &str) -> Option<Value> {
@@ -194,6 +208,13 @@ impl SettingsExtension for LocalKeys {
                 "about": format!("{PAGE}: whether Helm uses each local model server, by server id (read it to see the ids). Send only the servers to change. A server that is off shows no models and refuses new turns. Adding, removing or re-addressing a server, and its key, are the user's, in {PAGE}."),
                 "valueType": "boolean",
                 "default": "every server on",
+            })),
+            SPEECH_RESERVE => Some(json!({
+                "type": "integer",
+                "min": settings::MIN_SPEECH_RESERVE_GB,
+                "max": settings::MAX_SPEECH_RESERVE_GB,
+                "default": d.speech_reserve_gb,
+                "about": format!("{PAGE} and Settings > Shell > Dictation, Keep GPU memory for speech: graphics memory, in GB, that Helm leaves free when it loads a local model, so speech-to-text (dictation, and the voice line's transcription) still fits beside it. 0 keeps none. It applies to the next model load."),
             })),
             TOOLS => Some(json!({
                 "type": "enum",
@@ -255,7 +276,7 @@ mod tests {
                 .unwrap()
         };
         // The keys, their descriptions and their defaults.
-        assert_eq!(ext.keys().len(), 5);
+        assert_eq!(ext.keys().len(), 6);
         for k in ext.keys() {
             assert!(ext.describe(k).is_some(), "{k}");
             assert!(!ext.needs_all_settings(k), "{k}");
@@ -276,6 +297,17 @@ mod tests {
             .unwrap_err()
             .contains("keep-alive"));
         apply(KEEP_ALIVE, json!(60)).unwrap();
+        assert_eq!(read(SPEECH_RESERVE), json!(2));
+        assert_eq!(
+            apply(SPEECH_RESERVE, json!(4)).unwrap(),
+            (json!(2), json!(4))
+        );
+        assert!(apply(SPEECH_RESERVE, json!(30))
+            .unwrap_err()
+            .contains("kept for speech"));
+        assert!(apply(SPEECH_RESERVE, json!("lots"))
+            .unwrap_err()
+            .contains("whole number"));
         apply(TOOLS, json!("full")).unwrap();
         assert!(apply(TOOLS, json!("heavy")).unwrap_err().contains("lean"));
         apply(COMPARE, json!("haiku")).unwrap();
