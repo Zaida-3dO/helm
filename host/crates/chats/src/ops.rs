@@ -74,6 +74,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
     crate::rollover::register(reg); // chat_roll_over
     crate::attachments::register(reg); // attachment_ref
     crate::runtime_settings::register_ops(reg); // Settings → Runtime
+    crate::checkpoint::register(reg); // checkpoint_info
 }
 
 /// `skills_list`: what the chat's worker reported; empty until it has run once.
@@ -708,6 +709,8 @@ pub(crate) mod tests {
             ("shown_image_thumb", OpClass::Blocking),
             ("option_board_state", OpClass::Blocking),
             ("option_board_answer", OpClass::Blocking),
+            // Going back to before a message.
+            ("checkpoint_info", OpClass::Blocking),
         ];
         for (name, class) in expected {
             assert_eq!(reg.class_of(name), Some(class), "{name}");

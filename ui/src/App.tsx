@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore, type CSSProperties 
 import type { Api } from './api/client.ts';
 import type { EventBus } from './api/events.ts';
 import { ActionRow, LeafSlots } from './actions/index.ts';
+import { CheckpointSlot } from './checkpoints/index.ts';
 import { ClaudeChatViewer } from './claudechats/index.ts';
 import { SearchDialog } from './search/index.ts';
 import { chatOps } from './api/ops.ts';
@@ -196,6 +197,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
       <SearchDialog /> {/* Mod+K search */}
       <ClaudeChatViewer /> {/* one of Claude Code's own chats, read */}
       <LeafSlots /> {/* registers the action slots */}
+      <CheckpointSlot /> {/* go back to before a message */}
       <AfkPresence /> {/* AFK presence */}
       <FrameStats /> {/* frame-stats overlay */}
       {null /* the saved-items dialog mounts here */}

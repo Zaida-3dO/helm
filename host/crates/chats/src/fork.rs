@@ -18,6 +18,12 @@
 //!   native session there, so it starts a fresh one and its first prompt carries the conversation
 //!   up to the chosen reply as one text block (`fork_carry`, budgeted like the carried turn
 //!   text: newest steps kept, with an "earlier steps omitted" line).
+//! - **Going back to before a message.** A `messageId` naming one of the user's own messages cuts
+//!   the history just *before* it instead of after a reply, and puts that message's text in the
+//!   fork's draft, so the user can change it and send it again from there. The source chat is not
+//!   touched: everything after the cut stays where it was. The carry is the same as for a reply
+//!   fork. Only the text comes back; pictures on the message do not. Project files are never
+//!   touched (see [`crate::checkpoint`] for what the chat tells the user about them).
 //! - **Creation and placement.** Same folder project, model and effort; titled "Fork · <source>"
 //!   with no stacked prefix; placed directly below the source when the source has a position
 //!   (later rows shift by one, and a `sidebar` signal names every row that moved). A whole-chat
@@ -170,7 +176,10 @@ fn refuse(msg: &str) -> Refusal {
 }
 
 /// Read the source log's entries; a missing log is an empty history.
-fn source_entries(sessions: &Path, source: &str) -> Result<Vec<Map<String, Value>>, Refusal> {
+pub(crate) fn source_entries(
+    sessions: &Path,
+    source: &str,
+) -> Result<Vec<Map<String, Value>>, Refusal> {
     let path = session_log::log_path(sessions, source);
     if !path.exists() {
         return Ok(Vec::new());
@@ -319,21 +328,23 @@ pub fn fork(
     if src.side.is_some() {
         return Err(refuse("Promote this side chat before forking it."));
     }
+    // Set when the cut is just before one of the user's own messages: that message's text.
+    let mut before_text: Option<String> = None;
     let cut_key: Option<String> = match req.message_id {
         None => None,
         Some(mid) => {
-            let row: Option<(String, String, String, bool)> = db
+            let row: Option<(String, String, String, bool, String)> = db
                 .snapshot(|tx| {
                     tx.query_row(
-                        "SELECT source_key, role, status, active FROM messages WHERE chat_id = ?1 AND id = ?2",
+                        "SELECT source_key, role, status, active, text FROM messages WHERE chat_id = ?1 AND id = ?2",
                         params![req.source, mid],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                     )
                     .optional()
                 })
                 .map_err(sql)?;
             match row {
-                Some((key, role, status, true)) if role == "assistant" => {
+                Some((key, role, status, true, _)) if role == "assistant" => {
                     if status == "streaming" {
                         return Err(refuse(
                             "That reply is still being saved; try again in a moment.",
@@ -341,7 +352,16 @@ pub fn fork(
                     }
                     Some(key)
                 }
-                _ => return Err(refuse("Fork from a reply that is part of this chat.")),
+                Some((key, role, status, true, text)) if role == "user" && !req.side => {
+                    if status != "complete" {
+                        return Err(refuse(
+                            "That message is still being saved; try again in a moment.",
+                        ));
+                    }
+                    before_text = Some(text);
+                    Some(key)
+                }
+                _ => return Err(refuse("Fork from a message that is part of this chat.")),
             }
         }
     };
@@ -357,7 +377,7 @@ pub fn fork(
                 "That reply is still being saved; try again in a moment.",
             ));
         };
-        entries.truncate(at + 1);
+        entries.truncate(if before_text.is_some() { at } else { at + 1 });
     }
     let now = helm_core::now_ms();
     let fork_id_chat = uuid::Uuid::new_v4().to_string();
@@ -419,7 +439,12 @@ pub fn fork(
         timestamp: now,
         kind: ContextKind::Fork,
         text: format!(
-            "Forked from {}{}",
+            "{} {}{}",
+            if before_text.is_some() {
+                "Went back to before a message in"
+            } else {
+                "Forked from"
+            },
             if src.title.trim().is_empty() {
                 "Untitled"
             } else {
@@ -490,7 +515,7 @@ pub fn fork(
     } else if cut_key.is_none() {
         src.draft.clone()
     } else {
-        String::new()
+        before_text.clone().unwrap_or_default()
     };
     let rev = 0;
     // The galleries and boards the carried history names go with it.

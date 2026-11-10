@@ -26,6 +26,7 @@
 //! | [`edit`] | two-phase, crash-safe edit and resend |
 //! | [`flags`] | the agent's own attention flag: one question for the user, per chat |
 //! | [`fork`] | forks and side-chat creation |
+//! | [`checkpoint`] | going back to before one of the user's messages: what it means, as a fork |
 //! | [`manage`] | archive, restore, delete, unread marks and completion acks |
 //! | [`seams`] | traits other crates implement (panel context, project gate) |
 //! | [`local`] | chats on local model servers: the model id, the thinking budget and the server seam |
@@ -52,6 +53,7 @@ pub mod autocomplete;
 mod background;
 pub mod bindings;
 pub mod catalogue;
+pub mod checkpoint;
 pub mod clock;
 pub mod delete;
 pub mod edit;

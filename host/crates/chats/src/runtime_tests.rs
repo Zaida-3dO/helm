@@ -2119,14 +2119,51 @@ async fn a_message_fork_is_cut_at_the_reply_and_carries_it_once() {
     h.send(&fork, "next", "default").await;
     let p = w2.expect("prompt").await;
     assert!(p.get("context").is_none(), "carried once");
-    // A user row is not a fork point.
-    let u: i64 = h.col("SELECT id FROM messages WHERE role = 'user' LIMIT 1")[0]
-        .parse()
+    // The user's own message is a checkpoint: the fork is cut just before it, its draft holds
+    // that message's text, and the source keeps everything.
+    let second = user_row(&h, &chat, "second");
+    let back = h
+        .call(
+            "chat_fork",
+            json!({"chatId": chat, "forkId": uuid::Uuid::new_v4().to_string(), "messageId": second}),
+        )
+        .await
         .unwrap();
+    assert_eq!(back["draft"], "second");
+    // What going back means, as the confirmation shows it: only the conversation comes back.
+    let info = h
+        .call("checkpoint_info", json!({"chatId": chat, "messageId": second}))
+        .await
+        .unwrap();
+    assert_eq!(info["prompt"], "second");
+    assert_eq!(info["messagesAfter"], 1);
+    assert_eq!(info["filesRestored"], false);
+    let t = texts(&h, back["id"].as_str().unwrap());
+    assert!(t.contains(&"assistant:answer one".to_owned()));
+    assert!(!t.iter().any(|x| x.contains("two")), "nothing from the message on");
+    assert_eq!(
+        t.last().unwrap(),
+        "context:Went back to before a message in first"
+    );
+    assert!(texts(&h, &chat).contains(&"assistant:answer two".to_owned()));
+    // Before the very first message the fork starts empty.
+    let first = user_row(&h, &chat, "first");
+    let start = h
+        .call(
+            "chat_fork",
+            json!({"chatId": chat, "forkId": uuid::Uuid::new_v4().to_string(), "messageId": first}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(start["draft"], "first");
+    assert!(!texts(&h, start["id"].as_str().unwrap())
+        .iter()
+        .any(|x| x.starts_with("user:") || x.starts_with("assistant:")));
+    // A row that is not part of the chat is refused.
     let bad = h
         .call(
             "chat_fork",
-            json!({"chatId": chat, "forkId": uuid::Uuid::new_v4().to_string(), "messageId": u}),
+            json!({"chatId": chat, "forkId": uuid::Uuid::new_v4().to_string(), "messageId": 999_999}),
         )
         .await
         .unwrap_err();
