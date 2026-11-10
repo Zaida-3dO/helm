@@ -1,9 +1,17 @@
 //! The two tables and everything that reads or writes them: the bounds, the duplicate rule,
-//! listing and search, updates with an optional revision check, the note trail, and the sweep
-//! that turns a reminder due into exactly one due item.
+//! listing and search, updates with an optional revision check, the note trail, soft removal with
+//! an undo window, and the sweep that turns a reminder due into exactly one due item.
 
 use rusqlite::{params, params_from_iter, OptionalExtension, Transaction};
 use serde::Serialize;
+
+const DAY_MS: i64 = 86_400_000;
+/// How long a removed item can still be brought back; after that it is deleted for good.
+pub const UNDO_WINDOW_MS: i64 = 7 * DAY_MS;
+/// A reminder may lie this far in the past (a little slack for a clock or a late click) ...
+const REMIND_PAST_MS: i64 = DAY_MS;
+/// ... and this far ahead.
+const REMIND_AHEAD_MS: i64 = 5 * 365 * DAY_MS;
 
 pub const MAX_ITEMS: i64 = 10_000;
 pub const MAX_NOTES: i64 = 200;
@@ -61,15 +69,15 @@ pub enum StoreError {
     /// Someone else changed the item since the caller last read it.
     Conflict,
     Full,
+    /// The database itself failed.
+    Host(String),
 }
 
 // Database::write and snapshot need E: From<rusqlite::Error>, so the store's error can drive them
-// directly; a host failure is rare and shows as a plain refusal.
+// directly; a host failure is rare and shows as a plain message.
 impl From<rusqlite::Error> for StoreError {
     fn from(e: rusqlite::Error) -> Self {
-        StoreError::Bad(Box::leak(
-            format!("Helm could not read the saved items: {e}").into_boxed_str(),
-        ))
+        StoreError::Host(format!("Helm could not read the saved items: {e}"))
     }
 }
 
@@ -77,6 +85,7 @@ impl StoreError {
     pub fn message(&self) -> String {
         match self {
             StoreError::Bad(m) => (*m).to_owned(),
+            StoreError::Host(m) => m.clone(),
             StoreError::NotFound => "No saved item has that id.".to_owned(),
             StoreError::Conflict => "The item changed since you read it.".to_owned(),
             StoreError::Full => {
@@ -100,7 +109,9 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              updated_at INTEGER NOT NULL,
              revision INTEGER NOT NULL DEFAULT 1,
              remind_at INTEGER,
-             reminded_at INTEGER
+             reminded_at INTEGER,
+             removed_at INTEGER,
+             saved_by TEXT
          );
          CREATE UNIQUE INDEX IF NOT EXISTS saved_origin ON saved_items(chat_id, message_id)
              WHERE chat_id IS NOT NULL AND message_id IS NOT NULL;
@@ -114,6 +125,24 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              created_at INTEGER NOT NULL
          );
          CREATE INDEX IF NOT EXISTS saved_notes_item ON saved_item_notes(item_id);",
+    )?;
+    // Both columns arrived after the table did: an older profile gets them here, empty (nothing
+    // removed, and no item remembered as saved by a chat).
+    for (column, ddl) in [
+        ("removed_at", "removed_at INTEGER"),
+        ("saved_by", "saved_by TEXT"),
+    ] {
+        let present: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('saved_items') WHERE name = ?1)",
+            params![column],
+            |r| r.get(0),
+        )?;
+        if !present {
+            tx.execute_batch(&format!("ALTER TABLE saved_items ADD COLUMN {ddl}"))?;
+        }
+    }
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS saved_remind ON saved_items(remind_at) WHERE remind_at IS NOT NULL;",
     )
 }
 
@@ -134,6 +163,16 @@ fn check_text(title: &str, body: &str) -> Result<(), StoreError> {
     }
     if body.len() > MAX_BODY_BYTES {
         return Err(StoreError::Bad("Saved item text is at most 16 KiB."));
+    }
+    Ok(())
+}
+
+/// A reminder time must be sensible: from a day ago to five years ahead.
+fn check_remind(at: i64, now: i64) -> Result<(), StoreError> {
+    if at < now.saturating_sub(REMIND_PAST_MS) || at > now.saturating_add(REMIND_AHEAD_MS) {
+        return Err(StoreError::Bad(
+            "A reminder time must be between a day ago and five years from now.",
+        ));
     }
     Ok(())
 }
@@ -171,6 +210,37 @@ pub struct NewItem<'a> {
     pub title: &'a str,
     pub body: &'a str,
     pub remind_at: Option<i64>,
+    /// The chat that saved it through its own tool, if one did: the only chat allowed to remove it.
+    pub saved_by: Option<&'a str>,
+}
+
+/// Delete an item and its notes for good.
+fn delete_for_good(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM saved_item_notes WHERE item_id = ?1",
+        params![id],
+    )?;
+    tx.execute("DELETE FROM saved_items WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// An item the user removed must not answer a later save of the same row or key (it is hidden):
+/// it is deleted for good so the save makes a fresh item.
+fn drop_removed_twins(
+    tx: &Transaction<'_>,
+    cond: &str,
+    p: impl rusqlite::Params,
+) -> rusqlite::Result<()> {
+    let ids = tx
+        .prepare(&format!(
+            "SELECT id FROM saved_items WHERE removed_at IS NOT NULL AND {cond}"
+        ))?
+        .query_map(p, |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for id in ids {
+        delete_for_good(tx, &id)?;
+    }
+    Ok(())
 }
 
 /// Save an item. The same transcript row (chat and message) or the same capture key answers
@@ -187,9 +257,14 @@ pub fn save(
         title,
         body,
         remind_at,
+        saved_by,
     } = *n;
     check_text(title, body)?;
+    if let Some(r) = remind_at {
+        check_remind(r, now)?;
+    }
     if let (Some(c), Some(m)) = (chat_id, message_id) {
+        drop_removed_twins(tx, "chat_id = ?1 AND message_id = ?2", params![c, m])?;
         let found = tx
             .query_row(
                 &format!(
@@ -204,6 +279,7 @@ pub fn save(
         }
     }
     if let Some(k) = capture_key {
+        drop_removed_twins(tx, "capture_key = ?1", params![k])?;
         let found = tx
             .query_row(
                 &format!("SELECT {COLS} FROM saved_items s WHERE s.capture_key = ?1"),
@@ -215,22 +291,27 @@ pub fn save(
             return Ok((item, true));
         }
     }
-    let count: i64 = tx.query_row("SELECT COUNT(*) FROM saved_items", params![], |r| r.get(0))?;
+    let count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM saved_items WHERE removed_at IS NULL",
+        params![],
+        |r| r.get(0),
+    )?;
     if count >= MAX_ITEMS {
         return Err(StoreError::Full);
     }
     let id = uuid::Uuid::new_v4().simple().to_string();
     tx.execute(
-        "INSERT INTO saved_items (id, title, body, chat_id, message_id, capture_key, created_at, updated_at, remind_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
-        params![id, title.trim(), body, chat_id, message_id, capture_key, now, remind_at],
+        "INSERT INTO saved_items (id, title, body, chat_id, message_id, capture_key, created_at, updated_at, remind_at, saved_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9)",
+        params![id, title.trim(), body, chat_id, message_id, capture_key, now, remind_at, saved_by],
     )?;
     Ok((get(tx, &id)?, false))
 }
 
+/// One item that has not been removed.
 pub fn get(tx: &Transaction<'_>, id: &str) -> Result<SavedItem, StoreError> {
     tx.query_row(
-        &format!("SELECT {COLS} FROM saved_items s WHERE s.id = ?1"),
+        &format!("SELECT {COLS} FROM saved_items s WHERE s.id = ?1 AND s.removed_at IS NULL"),
         params![id],
         row_to_item,
     )
@@ -256,12 +337,13 @@ pub fn list(
         }
     };
     let page = page.max(1);
-    // Case-insensitive the way SQLite is: ASCII folding, on both sides.
+    // Case-insensitive the way SQLite's lower() is: ASCII folding only, on both sides. A full
+    // Unicode fold here would turn "É" into "é" while the column still holds "É" and never match.
     let q = query
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(str::to_lowercase);
-    let mut where_sql = String::from("WHERE 1");
+        .map(str::to_ascii_lowercase);
+    let mut where_sql = String::from("WHERE s.removed_at IS NULL");
     let mut args: Vec<String> = Vec::new();
     if let Some(s) = state {
         where_sql.push_str(" AND s.state = ?");
@@ -312,6 +394,9 @@ pub fn update(
     u: &Update,
     now: i64,
 ) -> Result<SavedItem, StoreError> {
+    if let Some(Some(r)) = u.remind_at {
+        check_remind(r, now)?;
+    }
     if u.title.is_some() || u.body.is_some() {
         let current = get(tx, id)?;
         let title = u.title.as_deref().unwrap_or(&current.title);
@@ -356,7 +441,10 @@ pub fn update(
     sets.push("revision = revision + 1".to_owned());
     sets.push("updated_at = ?".to_owned());
     bind.push(now.to_string());
-    let mut sql = format!("UPDATE saved_items SET {} WHERE id = ?", sets.join(", "));
+    let mut sql = format!(
+        "UPDATE saved_items SET {} WHERE id = ? AND removed_at IS NULL",
+        sets.join(", ")
+    );
     bind.push(id.to_owned());
     if let Some(r) = u.expect_revision {
         sql.push_str(" AND revision = ?");
@@ -365,7 +453,7 @@ pub fn update(
     let found = tx.execute(&sql, params_from_iter(bind.iter()))?;
     if found == 0 {
         let exists: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM saved_items WHERE id = ?",
+            "SELECT COUNT(*) FROM saved_items WHERE id = ? AND removed_at IS NULL",
             params![id],
             |r| r.get(0),
         )?;
@@ -378,16 +466,64 @@ pub fn update(
     get(tx, id)
 }
 
-pub fn remove(tx: &Transaction<'_>, id: &str) -> Result<(), StoreError> {
+/// Remove an item: it is hidden from lists, search and counts at once and kept (notes and all) for
+/// [`UNDO_WINDOW_MS`], so [`restore`] can bring it back. `by_chat` is the chat asking, when a chat
+/// is: a chat may only remove an item it saved itself, while the user (`None`) may remove any.
+pub fn remove(
+    tx: &Transaction<'_>,
+    id: &str,
+    by_chat: Option<&str>,
+    now: i64,
+) -> Result<(), StoreError> {
+    let owner: Option<Option<String>> = tx
+        .query_row(
+            "SELECT saved_by FROM saved_items WHERE id = ?1 AND removed_at IS NULL",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(owner) = owner else {
+        return Err(StoreError::NotFound);
+    };
+    if let Some(chat) = by_chat {
+        if owner.as_deref() != Some(chat) {
+            return Err(StoreError::Bad(
+                "A chat can only remove saved items it saved itself; ask the user to remove this one.",
+            ));
+        }
+    }
     tx.execute(
-        "DELETE FROM saved_item_notes WHERE item_id = ?1",
+        "UPDATE saved_items SET removed_at = ?2 WHERE id = ?1",
+        params![id, now],
+    )?;
+    Ok(())
+}
+
+/// Bring back an item removed within the undo window, exactly as it was.
+pub fn restore(tx: &Transaction<'_>, id: &str) -> Result<SavedItem, StoreError> {
+    let back = tx.execute(
+        "UPDATE saved_items SET removed_at = NULL WHERE id = ?1 AND removed_at IS NOT NULL",
         params![id],
     )?;
-    let gone = tx.execute("DELETE FROM saved_items WHERE id = ?1", params![id])?;
-    if gone == 0 {
+    if back == 0 {
         return Err(StoreError::NotFound);
     }
-    Ok(())
+    get(tx, id)
+}
+
+/// Delete for good the items removed more than [`UNDO_WINDOW_MS`] before `now`, with their notes.
+/// Returns how many items went.
+pub fn purge(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<usize> {
+    let cutoff = now.saturating_sub(UNDO_WINDOW_MS);
+    tx.execute(
+        "DELETE FROM saved_item_notes WHERE item_id IN \
+         (SELECT id FROM saved_items WHERE removed_at IS NOT NULL AND removed_at < ?1)",
+        params![cutoff],
+    )?;
+    tx.execute(
+        "DELETE FROM saved_items WHERE removed_at IS NOT NULL AND removed_at < ?1",
+        params![cutoff],
+    )
 }
 
 pub fn add_note(
@@ -408,14 +544,12 @@ pub fn add_note(
     if text.len() > MAX_NOTE_BYTES {
         return Err(StoreError::Bad("Notes are at most 8 KiB each."));
     }
+    get(tx, item_id)?;
     let held: i64 = tx.query_row(
         "SELECT COUNT(*) FROM saved_item_notes WHERE item_id = ?1",
         params![item_id],
         |r| r.get(0),
     )?;
-    if held == 0 && get(tx, item_id).is_err() {
-        return Err(StoreError::NotFound);
-    }
     if held >= MAX_NOTES {
         return Err(StoreError::Bad("Each saved item holds at most 200 notes."));
     }
@@ -462,7 +596,7 @@ pub fn due(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<Vec<SavedItem>> {
     tx.prepare(&format!(
         "SELECT {COLS} FROM saved_items s
          WHERE s.remind_at IS NOT NULL AND s.remind_at <= ?1 AND s.reminded_at IS NULL
-           AND s.state IN ('saved', 'filed')
+           AND s.removed_at IS NULL AND s.state IN ('saved', 'filed')
          ORDER BY s.remind_at, s.id"
     ))?
     .query_map(params![now], row_to_item)?
@@ -683,8 +817,18 @@ mod tests {
         });
         assert!(matches!(e.unwrap_err(), StoreError::Bad(_)));
 
-        // Removal takes the note trail with it.
-        db.write(|tx| remove(tx, &a.id)).unwrap();
+        // Search folds ASCII the way the column does, so a capital outside ASCII still matches.
+        seed(&db, 6500, "ÉCOLE visit", "bring the form");
+        let hit = db.snapshot(|tx| list(tx, None, Some("É"), 1)).unwrap();
+        assert_eq!(hit.items.len(), 1, "a non-ASCII capital matches itself");
+
+        // Removal hides the item (and its notes from search) at once, but keeps it for the undo
+        // window; restoring brings it back as it was, and only then is it purged for good.
+        let total = db.snapshot(|tx| list(tx, None, None, 1)).unwrap().total;
+        db.write(|tx| remove(tx, &a.id, None, 7000)).unwrap();
+        let after = db.snapshot(|tx| list(tx, None, None, 1)).unwrap();
+        assert_eq!(after.total, total - 1, "a removed item leaves the count");
+        assert!(after.items.iter().all(|i| i.id != a.id));
         assert_eq!(
             db.snapshot(|tx| list(tx, None, Some("button label"), 1))
                 .unwrap()
@@ -692,8 +836,88 @@ mod tests {
                 .len(),
             0
         );
-        let e = db.write(|tx| remove(tx, &a.id));
+        assert!(db.snapshot(|tx| due(tx, 1_000_000)).unwrap().is_empty());
+        let e = db.write(|tx| remove(tx, &a.id, None, 7001));
         assert!(matches!(e.unwrap_err(), StoreError::NotFound));
+        let e = db.write(|tx| add_note(tx, &a.id, "user", None, "late", 7002));
+        assert!(
+            matches!(e.unwrap_err(), StoreError::NotFound),
+            "no notes on a removed item"
+        );
+        let e = db.write(|tx| {
+            update(
+                tx,
+                &a.id,
+                &Update {
+                    state: Some("done".to_owned()),
+                    ..Default::default()
+                },
+                7003,
+            )
+        });
+        assert!(matches!(e.unwrap_err(), StoreError::NotFound));
+        let back = db.write(|tx| restore(tx, &a.id)).unwrap();
+        assert_eq!((back.note_count, back.updated_at), (1, 1000), "restored as it was");
+        assert_eq!(
+            db.snapshot(|tx| list(tx, None, Some("button label"), 1))
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        let e = db.write(|tx| restore(tx, &a.id));
+        assert!(matches!(e.unwrap_err(), StoreError::NotFound), "nothing to undo");
+
+        // Purge: only items removed longer ago than the window go, with their notes.
+        db.write(|tx| remove(tx, &a.id, None, 8000)).unwrap();
+        for (at, gone) in [
+            (8000 + UNDO_WINDOW_MS, 0),
+            (8000 + UNDO_WINDOW_MS + 1, 1),
+            (8000 + UNDO_WINDOW_MS + 2, 0),
+        ] {
+            assert_eq!(db.write(|tx| purge(tx, at)).unwrap(), gone, "at {at}");
+        }
+        let e = db.write(|tx| restore(tx, &a.id));
+        assert!(matches!(e.unwrap_err(), StoreError::NotFound), "purged for good");
+        let left: i64 = db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT COUNT(*) FROM saved_item_notes WHERE item_id = ?1",
+                    params![a.id],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(left, 0, "the note trail goes with it");
+
+        // A chat removes only what it saved itself; the user removes anything.
+        let mine = db
+            .write(|tx| {
+                save(
+                    tx,
+                    &NewItem {
+                        title: "Mine",
+                        body: "saved by a chat",
+                        saved_by: Some("chat-1"),
+                        ..Default::default()
+                    },
+                    9000,
+                )
+            })
+            .unwrap()
+            .0;
+        for (id, who, ok) in [
+            (&mine.id, Some("chat-2"), false),
+            (&b.id, Some("chat-1"), false),
+            (&mine.id, Some("chat-1"), true),
+            (&b.id, None, true),
+        ] {
+            let r = db.write(|tx| remove(tx, id, who, 9100));
+            assert_eq!(r.is_ok(), ok, "{id} by {who:?}");
+            if !ok {
+                assert!(matches!(r.unwrap_err(), StoreError::Bad(_)));
+            }
+        }
     }
 
     #[test]
@@ -765,6 +989,15 @@ mod tests {
             assert!(!other.1);
         }
         assert_eq!(db.snapshot(|tx| list(tx, None, None, 1)).unwrap().total, 4);
+        // A removed item does not answer a later save of the same row or key: the save is fresh.
+        for (gone, again) in [
+            (&first.0.id, item(Some("chat-1"), Some(7), None, "Turn A", "once more")),
+            (&keyed.0.id, item(None, None, Some("nightly-sync"), "Sync", "once more")),
+        ] {
+            db.write(|tx| remove(tx, gone, None, 3000)).unwrap();
+            let (fresh, already) = db.write(|tx| save(tx, &again, 4000)).unwrap();
+            assert!(!already && fresh.id != *gone && fresh.body == "once more");
+        }
     }
 
     #[test]
@@ -845,6 +1078,45 @@ mod tests {
             db.snapshot(|tx| due(tx, 9900)).unwrap().is_empty(),
             "clearing it stops it"
         );
+
+        // A reminder time must lie between a day ago and five years ahead, on save and on update.
+        let now = 100 * DAY_MS;
+        for (at, ok) in [
+            (now - DAY_MS, true),
+            (now - DAY_MS - 1, false),
+            (now + 5 * 365 * DAY_MS, true),
+            (now + 5 * 365 * DAY_MS + 1, false),
+            (i64::MAX, false),
+            (i64::MIN, false),
+        ] {
+            let saved = db.write(|tx| {
+                save(
+                    tx,
+                    &NewItem {
+                        title: "Remind",
+                        body: "range",
+                        remind_at: Some(at),
+                        ..Default::default()
+                    },
+                    now,
+                )
+            });
+            let updated = db.write(|tx| {
+                update(
+                    tx,
+                    &item.id,
+                    &Update {
+                        remind_at: Some(Some(at)),
+                        ..Default::default()
+                    },
+                    now,
+                )
+            });
+            assert_eq!((saved.is_ok(), updated.is_ok()), (ok, ok), "{at}");
+            if !ok {
+                assert!(matches!(saved.unwrap_err(), StoreError::Bad(_)));
+            }
+        }
 
         // Notes: bounded per note and per item, on real items only.
         for n in 0..MAX_NOTES {

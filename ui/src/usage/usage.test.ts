@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventBus } from '../api/events.ts';
 import type { UsageSnapshot, UsageWindow } from '../api/usage.ts';
-import { asOf, bars, type BarModel, compactTokensText, emptyTitle, localText, percentText, rangeOf, relativeFuture, shareText, tokensText, usdText } from './model.ts';
+import { asOf, bars, type BarModel, compactTokensText, customRange, emptyTitle, localText, percentText, rangeOf, relativeFuture, shareText, tokensText, usdText } from './model.ts';
 import { POLL_MS, UsageStore } from './store.ts';
 
 const NOW = Date.parse('2026-10-18T12:00:00Z');
@@ -70,6 +70,14 @@ test('relative times and ranges', () => {
   assert.ok(today.since <= NOW && NOW - today.since < 86_400_000 + 3_600_000 && new Date(today.since).getHours() === 0);
   assert.deepEqual(rangeOf('all', NOW), { since: 0, until: NOW });
   assert.equal(rangeOf('hour', NOW).until - rangeOf('hour', NOW).since, 3_600_000);
+  // Custom range: whole local days, both ends included.
+  const one = customRange('2026-03-10', '2026-03-10');
+  assert.ok(one && new Date(one.since).getHours() === 0 && new Date(one.until).getDate() === 11);
+  const span = customRange('2026-03-01', '2026-03-31');
+  assert.ok(span && span.until > span.since && new Date(span.until).getMonth() === 3);
+  for (const [from, to] of [['', '2026-03-10'], ['2026-03-10', ''], ['2026-03-11', '2026-03-10'], ['2026-02-31', '2026-03-10'], ['10/03/2026', '2026-03-10']]) {
+    assert.equal(customRange(from, to), null, `${from} to ${to}`);
+  }
 });
 
 test('the store reads at start, applies the event, refreshes on its timer only while visible', async () => {

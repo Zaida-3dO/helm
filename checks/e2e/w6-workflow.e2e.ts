@@ -47,7 +47,7 @@ describe("Settings > Orchestrator and the per-chat Orchestrator state", { timeou
     assert.equal(s.enabled, false);
     assert.equal(s.newChats, "auto", "Auto is the default for new chats");
     assert.equal(s.moveFast, false);
-    assert.equal(((s.stages as Json).review as Json).maxRounds, 3);
+    assert.equal(((s.stages as Json).review as Json).maxRounds, 2);
     const e = await rejects("workflow_settings_save", { settings: { enabled: true, landing: { fromBoxes: true } } });
     assert.match(e, /landing\.fromBoxes/);
     assert.equal(((await api(page(), "workflow_settings_get", {})) as Json).enabled, false, "the refused save wrote nothing");

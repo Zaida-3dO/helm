@@ -18,7 +18,7 @@ use rusqlite::{OptionalExtension, Transaction};
 use serde_json::{Map, Value};
 
 pub const MAX_ROUNDS: u32 = 20;
-pub const DEFAULT_ROUNDS: u32 = 3;
+pub const DEFAULT_ROUNDS: u32 = 2;
 pub const MAX_AGENT_LIST: usize = 32;
 pub const MAX_REPOS: usize = 50;
 pub const MAX_LABELS: usize = 8;
@@ -647,11 +647,11 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn defaults_are_off_with_caps_of_three_and_auto_for_new_chats() {
+    fn defaults_are_off_with_caps_of_two_and_auto_for_new_chats() {
         let d = WorkflowSettings::default();
         assert!(!d.enabled);
-        assert_eq!(d.stages.review.max_rounds, 3);
-        assert_eq!(d.stages.plan_review.max_rounds, 3);
+        assert_eq!(d.stages.review.max_rounds, 2);
+        assert_eq!(d.stages.plan_review.max_rounds, 2);
         assert_eq!(d.stages.smoketest.use_, StageUse::Auto);
         assert_eq!(d.new_chats, NewChats::Auto);
         assert!(!d.move_fast);

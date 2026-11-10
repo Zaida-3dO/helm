@@ -3,11 +3,11 @@
 // Enter opens the highlighted row, and Escape clears a typed query before it closes the dialog.
 // Search is local and never calls a model.
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { handleLink } from '../panel/index.ts';
 import { useDialog, useShell } from '../shell/context.ts';
 import { Checkbox, Dialog, Icon, Picker, useBinding, useLayer, type PickerOption } from '../ui/index.ts';
-import { flatRows, moveHighlight, movePage, statusLine, UniversalSearch } from './controller.ts';
+import { enterTarget, flatRows, moveHighlight, movePage, statusLine, UniversalSearch } from './controller.ts';
 import { openTasks, tasksStoreFor } from '../tasks/index.ts';
 import { openClaudeChatViewer } from '../claudechats/index.ts';
 import { boardSource } from './boardSource.ts';
@@ -54,6 +54,12 @@ function SearchBody({ close }: { close: () => void }) {
   const filters = useRef({ projectId, archived });
   filters.current = { projectId, archived };
 
+  // `close` may be a new function on every render; the sources call it through a ref so the search
+  // (and the query it is running) is not rebuilt each time.
+  const closeRef = useRef(close);
+  closeRef.current = close;
+  const closeNow = useCallback(() => closeRef.current(), []);
+
   const availability = useRef<Promise<boolean> | null>(null);
   const search = useMemo(
     () =>
@@ -64,14 +70,14 @@ function SearchBody({ close }: { close: () => void }) {
           currentProjectId: () => shell.selection.projectId,
           open: (hit) => {
             shell.select(hit.chatId, hit.messageId ? { messageId: hit.messageId } : {});
-            close();
+            closeNow();
           },
         }),
         claudeChatsSource({
           api: shell.api,
           open: (hit) => {
             openClaudeChatViewer(shell.openDialog, hit.sessionId);
-            close();
+            closeNow();
           },
         }),
         filesSource({
@@ -83,7 +89,7 @@ function SearchBody({ close }: { close: () => void }) {
           },
           openFile: (path) => {
             void handleLink({ kind: 'url', href: path }, { chatId: shell.selection.chatId });
-            close();
+            closeNow();
           },
         }),
         boardSource({
@@ -91,17 +97,17 @@ function SearchBody({ close }: { close: () => void }) {
           // One look at the saved connection per dialog, not one per keystroke.
           available: () => (availability.current ??= tasksStoreFor(shell.api).checkConnection()),
           openTasks: (itemId) => void openTasks(shell.api, itemId),
-          close,
+          close: closeNow,
         }),
         prsSource({
           api: shell.api,
           open: (ref) => {
             openPrTab({ ...ref, view: 'conversation' }, shell.selection.chatId);
-            close();
+            closeNow();
           },
         }),
       ]),
-    [shell, close],
+    [shell, closeNow],
   );
   useEffect(() => () => search.dispose(), [search]);
   const state = useSyncExternalStore(search.subscribe, search.snapshot);
@@ -141,7 +147,7 @@ function SearchBody({ close }: { close: () => void }) {
       setIndex((i) => movePage(i, e.key === 'PageDown' ? 1 : -1, rows.length));
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      current?.row.open();
+      enterTarget(state, index)?.open();
     }
   };
 

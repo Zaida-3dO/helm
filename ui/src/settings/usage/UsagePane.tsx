@@ -4,9 +4,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { usageOps, type RequestModes, type UsageSnapshot } from '../../api/usage.ts';
 import { useShell } from '../../shell/context.ts';
-import { asOf, percentText, RANGES, rangeOf, resetLine, expired, sourceLabel, type RangeId } from '../../usage/model.ts';
+import { asOf, customRange, percentText, RANGES, rangeOf, resetLine, expired, sourceLabel, type RangeId } from '../../usage/model.ts';
 import { useUsageStore } from '../../usage/UsageMeter.tsx';
-import { Button, PillTabs, Segmented } from '../../ui/index.ts';
+import { Button, PillTabs, Segmented, TextInput } from '../../ui/index.ts';
 import { FeedbackTab } from './FeedbackTab.tsx';
 import { HelmFeedbackTab } from './HelmFeedbackTab.tsx';
 import '../../usage/usage.css';
@@ -97,10 +97,21 @@ function RequestModesPanel() {
   const [modes, setModes] = useState<RequestModes | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const needDates = range === 'custom' && !customRange(from, to);
 
   const load = useCallback(() => {
     let live = true;
-    const { since, until } = rangeOf(range, Date.now());
+    const span = range === 'custom' ? customRange(from, to) : rangeOf(range, Date.now());
+    if (!span) {
+      // A custom range with a missing, unreal or reversed date asks nothing.
+      setModes(null);
+      setError(null);
+      setLoading(false);
+      return undefined;
+    }
+    const { since, until } = span;
     setLoading(true);
     ops.modes(since, until).then(
       (m) => {
@@ -120,7 +131,7 @@ function RequestModesPanel() {
     return () => {
       live = false;
     };
-  }, [ops, range]);
+  }, [ops, range, from, to]);
 
   useEffect(() => load(), [load]);
 
@@ -141,6 +152,23 @@ function RequestModesPanel() {
         </Button>
       </div>
       <Segmented<RangeId> label="Range" testId="request-modes-range" value={range} options={RANGES.map((r) => ({ value: r.id, label: r.label }))} onChange={setRange} />
+      {range === 'custom' && (
+        <div className="usage-custom-range" data-testid="request-modes-custom">
+          <label>
+            From
+            <TextInput type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} data-testid="request-modes-from" />
+          </label>
+          <label>
+            To
+            <TextInput type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} data-testid="request-modes-to" />
+          </label>
+        </div>
+      )}
+      {needDates && (
+        <p className="usage-notice" data-testid="request-modes-need-dates" data-state="inactive">
+          Pick a start and an end date, with the start no later than the end.
+        </p>
+      )}
       {error && (
         <p className="usage-notice" data-testid="request-modes-error" data-state="inactive">
           {error}

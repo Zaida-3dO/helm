@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { LayerStack } from './layers.ts';
 import { KeyRegistry, chordOf, normaliseChord } from './keys.ts';
 import { ToastSlot } from './toasts.ts';
-import { nextIndex, placeAtPoint, placeBelow } from './place.ts';
+import { firstFocusTarget, nextIndex, placeAtPoint, placeBelow } from './place.ts';
 import { folderLabel, startsDrag } from '../topbar/label.ts';
 
 const key = (k: string, mods: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean } = {}, target?: unknown) => ({
@@ -170,6 +170,18 @@ test('anchored placement flips above and clamps to the window', () => {
   assert.equal(flipped.left, 800 - 8 - 344);
   const m = placeAtPoint(790, 590, { width: 200, height: 100 }, vp);
   assert.deepEqual(m, { left: 590, top: 490, above: true });
+});
+
+test('dialog focus lands on the autofocus element, else the first field, else the first control; nothing when empty', () => {
+  const root = (present: string[]) => ({
+    querySelector: (sel: string) => (present.find((p) => sel.includes(p)) ? `found:${present.find((p) => sel.includes(p))}` : null),
+  });
+  const any = 'button, [href]';
+  assert.equal(firstFocusTarget(root(['[autofocus]', 'input', 'button']), any), 'found:[autofocus]');
+  assert.equal(firstFocusTarget(root(['input', 'button']), any), 'found:input');
+  assert.equal(firstFocusTarget(root(['button']), any), 'found:button');
+  assert.equal(firstFocusTarget(root([]), any), null);
+  assert.equal(firstFocusTarget(null, any), null, 'no panel yet');
 });
 
 test('arrow navigation skips disabled entries and wraps', () => {

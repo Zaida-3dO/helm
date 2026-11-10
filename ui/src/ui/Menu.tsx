@@ -7,7 +7,7 @@ import { createPortal } from 'react-dom';
 import { Icon } from './controls.tsx';
 import { useLayer } from './hooks.ts';
 import { keys } from './keys.ts';
-import { layoutSize, nextIndex, pageZoom, placeAtPoint, viewportAt } from './place.ts';
+import { layoutSize, nextIndex, placeAtPoint } from './place.ts';
 
 export interface MenuItem {
   id: string;
@@ -46,8 +46,7 @@ export function ContextMenu({ x, y, items, onClose, label, testId }: ContextMenu
     else onClose();
   });
   useLayoutEffect(() => {
-    const z = pageZoom();
-    if (el.current) setPos(placeAtPoint(x / z, y / z, layoutSize(el.current), viewportAt(z)));
+    if (el.current) setPos(placeAtPoint(x, y, layoutSize(el.current), { width: innerWidth, height: innerHeight }));
     el.current?.focus();
   }, [x, y]);
   const choose = (it: MenuItem, i: number) => {

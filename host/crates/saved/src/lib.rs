@@ -6,7 +6,7 @@
 //!
 //! | Module | What |
 //! |---|---|
-//! | [`store`] | the two tables: saving, the bounded note trail, listing and searching, updates, removal, and the due sweep |
+//! | [`store`] | the two tables: saving, the bounded note trail, listing and searching, updates, soft removal with an undo (a removed item is kept a week, then purged), and the due sweep |
 //! | `ops` | `saved_save`, `saved_list`, `saved_update`, `saved_note`, `saved_comments` |
 //! | [`service`] | the reminder sweep: a reminder that comes due is announced once with `saved_due {items}`, and stays due until the user deals with it |
 //!
@@ -47,10 +47,21 @@ pub fn start(runtime: &helm_chats::ChatRuntime, services: &Services) {
     let local = svc.clone();
     runtime.handle().spawn(async move {
         let mut every = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut ticks: u32 = 0;
         loop {
             every.tick().await;
             let svc = local.clone();
-            let _ = tokio::task::spawn_blocking(move || svc.sweep(helm_core::now_ms())).await;
+            // Items removed more than a week ago go for good: at start, then about hourly.
+            let purge = ticks % 720 == 0;
+            ticks = ticks.wrapping_add(1);
+            let _ = tokio::task::spawn_blocking(move || {
+                let now = helm_core::now_ms();
+                if purge {
+                    svc.purge(now);
+                }
+                svc.sweep(now);
+            })
+            .await;
         }
     });
 }

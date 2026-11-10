@@ -113,6 +113,8 @@ export interface Draft {
   /** `time` text: HH:mm. */
   at: string;
   days: boolean[];
+  /** An interval's first run, when it has one; the editor has no field for it, so editing keeps it. */
+  startAt: number | null;
 }
 
 /** A `datetime-local` value for an instant, in the machine's local time. */
@@ -123,7 +125,7 @@ export function toLocalInput(ms: number): string {
 
 /** Defaults when a kind is picked: one-time = an hour from now, every 30 minutes, 09:00 Monday to Friday. */
 export function defaultDraft(now: number): Draft {
-  return { kind: 'interval', onceAt: toLocalInput(now + 3_600_000), everyMinutes: '30', at: '09:00', days: [true, true, true, true, true, false, false] };
+  return { kind: 'interval', onceAt: toLocalInput(now + 3_600_000), everyMinutes: '30', at: '09:00', days: [true, true, true, true, true, false, false], startAt: null };
 }
 
 export function timingToDraft(t: Timing, now: number): Draft {
@@ -132,7 +134,7 @@ export function timingToDraft(t: Timing, now: number): Draft {
     case 'once':
       return { ...d, kind: 'once', onceAt: toLocalInput(t.at) };
     case 'interval':
-      return { ...d, kind: 'interval', everyMinutes: String(Math.round((t.seconds / 60) * 1000) / 1000) };
+      return { ...d, kind: 'interval', everyMinutes: String(Math.round((t.seconds / 60) * 1000) / 1000), startAt: t.startAt ?? null };
     case 'weekly':
       return { ...d, kind: 'weekly', at: clock(t.hour, t.minute), days: DAY_LABELS.map((_, i) => t.days.includes(i)) };
   }
@@ -153,7 +155,7 @@ export function draftToTiming(d: Draft, now: number): Parsed<Timing> {
       if (!d.everyMinutes.trim() || !Number.isFinite(minutes)) return { ok: false, error: 'Enter how many minutes between runs.' };
       const seconds = Math.round(minutes * 60);
       if (seconds < MIN_INTERVAL_SECONDS || seconds > MAX_INTERVAL_SECONDS) return { ok: false, error: 'Repeat between every 1 minute and every 525,600 minutes.' };
-      return { ok: true, value: { kind: 'interval', seconds } };
+      return { ok: true, value: d.startAt === null ? { kind: 'interval', seconds } : { kind: 'interval', seconds, startAt: d.startAt } };
     }
     case 'weekly': {
       const m = /^(\d{1,2}):(\d{2})$/.exec(d.at);

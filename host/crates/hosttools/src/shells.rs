@@ -146,10 +146,14 @@ async fn save_saved(ctx: ToolCtx, a: Value) -> ToolResult {
     if args.get("messageId").is_some() {
         args["chatId"] = json!(ctx.caller_chat_id);
     }
+    // Remembered so that only this chat can remove the item later.
+    args["savedBy"] = json!(ctx.caller_chat_id);
     ctx.op("saved_save", args).await
 }
 
-async fn update_saved(ctx: ToolCtx, a: Value) -> ToolResult {
+/// The `saved_update` args for a chat's update: the named fields, and for a removal the calling
+/// chat, so the op lets it remove only an item it saved itself (the user may remove any).
+fn saved_update_args(chat_id: &str, a: &Value) -> Result<Value, ToolError> {
     let id = a
         .get("id")
         .and_then(Value::as_str)
@@ -166,6 +170,14 @@ async fn update_saved(ctx: ToolCtx, a: Value) -> ToolResult {
             "name at least one field to change, or remove: true.",
         ));
     }
+    if args.get("remove").and_then(Value::as_bool) == Some(true) {
+        args["byChat"] = json!(chat_id);
+    }
+    Ok(args)
+}
+
+async fn update_saved(ctx: ToolCtx, a: Value) -> ToolResult {
+    let args = saved_update_args(&ctx.caller_chat_id, &a)?;
     ctx.op("saved_update", args).await
 }
 
@@ -240,7 +252,8 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
             "app_update_saved_item",
             format!(
                 "Change or remove a saved item (its id comes from the list). state moves it between saved, filed, done and dismissed; \
-                 set remindAt to a new epoch-ms time to arm a reminder, or to null to clear it.{EXPLICIT}"
+                 set remindAt to a new epoch-ms time (from a day ago to five years ahead) to arm a reminder, or to null to clear it. \
+                 remove works only on items this chat saved itself; the user removes the rest.{EXPLICIT}"
             ),
             json!({
                 "type": "object",
@@ -296,6 +309,30 @@ mod tests {
             .collect();
         let (fit, left) = fit_items(heavy);
         assert!(left > 0 && fit.len() + left == 50);
+    }
+
+    /// A chat's update names only the fields it was given; a removal also names the chat, which is
+    /// how the op limits a chat to the items it saved.
+    #[test]
+    fn a_saved_update_names_the_calling_chat_only_for_a_removal() {
+        for (given, want) in [
+            (json!({"id": "x", "state": "done"}), Some(json!({"id": "x", "state": "done"}))),
+            (
+                json!({"id": "x", "remove": true}),
+                Some(json!({"id": "x", "remove": true, "byChat": "chat-1"})),
+            ),
+            (json!({"id": "x", "remove": false}), Some(json!({"id": "x", "remove": false}))),
+            // A chat cannot name itself: the caller field is the host's alone.
+            (
+                json!({"id": "x", "remove": true, "byChat": "other"}),
+                Some(json!({"id": "x", "remove": true, "byChat": "chat-1"})),
+            ),
+            (json!({"id": "x"}), None),
+            (json!({"id": "", "remove": true}), None),
+        ] {
+            let got = saved_update_args("chat-1", &given).ok();
+            assert_eq!(got, want, "{given}");
+        }
     }
 
     #[test]

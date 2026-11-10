@@ -10,20 +10,18 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 're
 import { createPortal } from 'react-dom';
 import { Icon } from './controls.tsx';
 import { useLayer } from './hooks.ts';
-import { layoutSize, pageZoom, placeBelow, unzoom, viewportAt, type Rect } from './place.ts';
+import { firstFocusTarget, layoutSize, placeBelow, type Rect } from './place.ts';
 
 const FOCUSABLE =
   'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
 
-function useFocusTrap(panel: React.RefObject<HTMLElement | null>) {
+/** `ready` is false while the dialog is still hidden awaiting its position: a hidden element cannot take focus. */
+function useFocusTrap(panel: React.RefObject<HTMLElement | null>, ready = true) {
   useEffect(() => {
+    if (!ready) return;
     const before = document.activeElement as HTMLElement | null;
     const el = panel.current;
-    const first =
-      el?.querySelector<HTMLElement>('[autofocus], [data-autofocus]') ??
-      el?.querySelector<HTMLElement>('input:not([disabled]), select, textarea') ??
-      el?.querySelector<HTMLElement>(FOCUSABLE);
-    first?.focus();
+    firstFocusTarget<HTMLElement>(el, FOCUSABLE)?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Tab' || !el) return;
       const items = [...el.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((x) => x.offsetParent !== null);
@@ -38,7 +36,7 @@ function useFocusTrap(panel: React.RefObject<HTMLElement | null>) {
       el?.removeEventListener('keydown', onKey);
       if (before && document.contains(before)) before.focus();
     };
-  }, [panel]);
+  }, [panel, ready]);
 }
 
 export interface DialogProps {
@@ -112,7 +110,7 @@ export interface AnchoredDialogProps extends Omit<DialogProps, 'wide'> {
 export function AnchoredDialog({ title, onClose, busy, anchor, intro, footer, testId, children }: AnchoredDialogProps) {
   const panel = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
-  useFocusTrap(panel);
+  useFocusTrap(panel, pos !== null);
   useLayer('dialog', true, () => {
     if (busy) return true;
     onClose();
@@ -120,8 +118,7 @@ export function AnchoredDialog({ title, onClose, busy, anchor, intro, footer, te
   useLayoutEffect(() => {
     const el = panel.current;
     if (!el) return;
-    const z = pageZoom();
-    setPos(placeBelow(unzoom(anchor, z), layoutSize(el), viewportAt(z)));
+    setPos(placeBelow(anchor, layoutSize(el), { width: innerWidth, height: innerHeight }));
   }, [anchor]);
   return createPortal(
     <div

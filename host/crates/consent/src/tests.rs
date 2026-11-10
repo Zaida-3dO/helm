@@ -387,6 +387,60 @@ fn a_row_without_an_origin_never_counts_as_typed() {
     );
 }
 
+/// The earliest builds wrote the user's own messages with origin `user`; the verifier reads only
+/// `typed`, so the chats crate rewrites the old rows once on open. Pinned through the registry (the
+/// real chats registration, not a call to its function) so dropping that registration fails here
+/// instead of silently turning old typed approvals into app-originated rows.
+#[test]
+fn old_user_origin_rows_become_typed_when_the_profile_opens() {
+    let registry = || {
+        let mut reg = MigrationRegistry::new();
+        helm_chats::register_migrations(&mut reg);
+        crate::register_migrations(&mut reg);
+        reg
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.db");
+    let db = Database::open(&path, &registry()).unwrap();
+    db.write::<_, rusqlite::Error>(|tx| {
+        tx.execute(
+            "INSERT INTO projects(id, name, created_at) VALUES ('p', 'P', 1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO chats(id, project_id, created_at, updated_at) VALUES ('c0', 'p', 1, 1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('s1', 'c0', 'Run the test action alpha.', 'complete', ?1)",
+            params![T0 + 1],
+        )?;
+        // A profile from before the rewrite: the old spelling, and the step not yet recorded as done.
+        tx.execute(
+            "INSERT INTO submission_meta(submission_id, origin) VALUES ('s1', 'user')",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM counters WHERE key = 'migration:chats-origin-user-is-typed'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    drop(db);
+    let db = Database::open(&path, &registry()).unwrap();
+    let origin: String = db
+        .snapshot(|tx| {
+            tx.query_row(
+                "SELECT origin FROM submission_meta WHERE submission_id = 's1'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(origin, "typed");
+}
+
 #[test]
 fn only_the_first_two_typed_messages_and_two_hours_count() {
     let e = env();

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   DEBOUNCE_MS,
+  enterTarget,
   flatRows,
   moveHighlight,
   movePage,
@@ -206,6 +207,14 @@ test('rows are listed Chats then Files, and Files first when the query looks lik
   clock.advance(DEBOUNCE_MS);
   await flush();
   assert.deepEqual(flatRows(s.snapshot()).map((r) => r.row.id), ['files:f1', 'chats:c1']);
+  // Enter opens the highlighted row, but not one left over from an older query while the new one runs.
+  assert.equal(enterTarget(s.snapshot(), 1)?.id, 'chats:c1');
+  assert.equal(enterTarget(s.snapshot(), 2), null, 'no row there');
+  s.update('notes');
+  assert.equal(enterTarget(s.snapshot(), 0), null, 'the rows shown are from the older query');
+  clock.advance(DEBOUNCE_MS);
+  await flush();
+  assert.equal(enterTarget(s.snapshot(), 0)?.id, 'chats:c1');
 });
 
 test('queries are trimmed to 12 words and 512 bytes', () => {

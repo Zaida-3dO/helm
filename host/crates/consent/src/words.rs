@@ -336,6 +336,10 @@ mod tests {
             ("Approve the MCP server other from .mcp.json.", "more than"),
             ("Approve the MCP server notes from .mcp.json. Approve the MCP server notes from .mcp.json.", "more than once"),
             ("Ok thanks", "more than"),
+            // A tab is not a space: it cannot be used to pull a word into a token's exact text.
+            ("Approve the MCP server notes from\t.mcp.json.", "names exactly"),
+            // A backticked case-twin of a plain name is a different name.
+            ("Approve the MCP server `Notes` from .mcp.json.", "names exactly"),
         ];
         for (msg, why) in cases {
             let e = check(msg, FORM).expect_err(msg);

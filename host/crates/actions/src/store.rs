@@ -215,16 +215,37 @@ mod tests {
     fn first_read_writes_the_six_seeds_once() {
         let (_d, db) = db();
         let a = get_or_seed(&db).unwrap();
-        let labels: Vec<&str> = a.buttons.iter().map(|b| b.label.as_str()).collect();
+        // Each seed's label and exact prompt, in order: the texts are what users get, so a changed
+        // word shows up here.
+        let seeded: Vec<(&str, &str)> = a
+            .buttons
+            .iter()
+            .map(|b| (b.label.as_str(), b.text.as_str()))
+            .collect();
         assert_eq!(
-            labels,
+            seeded,
             [
-                "Update",
-                "Needs me",
-                "Ship it",
-                "Close session",
-                "New session",
-                "Git sync"
+                (
+                    "Update",
+                    "Please give me a brief plain-language status: what is finished, what is under way, what is stuck, and what you need from me."
+                ),
+                (
+                    "Needs me",
+                    "What needs my attention right now, and why? Only list things that truly need a decision from me (check each one) and give me the options for each."
+                ),
+                (
+                    "Ship it",
+                    "I am happy with this. Commit only your own changes, push, open or update the pull request, and merge to main once review passes. Tell me what landed."
+                ),
+                (
+                    "Close session",
+                    "Please wrap up this session: record what we learned, clean up worktrees and branches, then commit and push. Report each step as pass or fail."
+                ),
+                ("New session", "Let's start a new session."),
+                (
+                    "Git sync",
+                    "Please sync this repo: fetch, fast-forward only if that is safe, and tell me about anything unexpected. Do not commit."
+                ),
             ]
         );
         assert_eq!(a.revision, 1);

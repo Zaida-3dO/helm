@@ -40,6 +40,9 @@ export interface SavedPage {
 
 export const PAGE_SIZE = 50;
 
+/** How long the Undo button stays on screen after a Remove (the host keeps the item for a week). */
+export const UNDO_REMOVE_MS = 8_000;
+
 export const STATE_TITLES: Record<SavedState, string> = {
   saved: 'Saved',
   filed: 'Filed',
@@ -52,7 +55,7 @@ export function savedOps(api: Api) {
     save: (a: { title: string; body: string; chatId?: string; messageId?: number; captureKey?: string; remindAt?: number }) =>
       api<{ item: SavedItem; already: boolean }>('saved_save', a),
     list: (a: { state?: SavedState; query?: string; page?: number } = {}) => api<SavedPage>('saved_list', a),
-    update: (a: { id: string; title?: string; body?: string; state?: SavedState; remindAt?: number | null; expectRevision?: number; remove?: boolean }) =>
+    update: (a: { id: string; title?: string; body?: string; state?: SavedState; remindAt?: number | null; expectRevision?: number; remove?: boolean; restore?: boolean }) =>
       api<{ item?: SavedItem; removed?: boolean }>('saved_update', a),
     note: (a: { id: string; text: string }) => api<{ note: SavedNote }>('saved_note', a),
     comments: (a: { id: string }) => api<{ notes: SavedNote[] }>('saved_comments', a),

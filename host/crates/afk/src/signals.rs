@@ -93,6 +93,9 @@ mod imp {
                 },
                 WM_POWERBROADCAST => {
                     match wp as u32 {
+                        // Windows gives no way to hold a suspend that has begun (a shutdown block
+                        // reason or a power request only guards shutdown and idle sleep), so the
+                        // marker is written here, before the handler returns.
                         PBT_APMSUSPEND => svc.signal(Signal::WillSleep { sent_at: now }, now),
                         PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
                             svc.signal(Signal::DidWake { at: now }, now)

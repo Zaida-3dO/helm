@@ -291,7 +291,7 @@ mod tests {
             .unwrap();
         assert_eq!(v["moveFast"], false);
         assert_eq!(v["newChats"], "auto");
-        assert_eq!(v["stages"]["review"]["maxRounds"], 3);
+        assert_eq!(v["stages"]["review"]["maxRounds"], 2);
         let o = OrchestratorSettings.describe(KEY).unwrap();
         assert_eq!(
             o["fields"]["newChats"]["allowed"],
@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(s.new_chats, NewChats::Never);
         assert_eq!(s.stages.review.agent, "my-reviewer");
         // Fields the update left out kept their values.
-        assert_eq!(s.stages.review.max_rounds, 3);
+        assert_eq!(s.stages.review.max_rounds, 2);
         assert_eq!(s.stages.plan.agent, "planner");
         assert_eq!(s.landing.protected_branches, ["main", "master"]);
     }

@@ -12,7 +12,7 @@ import { Fragment, useLayoutEffect, useMemo, useRef, useState, type ReactNode, t
 import { createPortal } from 'react-dom';
 import { Icon } from './controls.tsx';
 import { useLayer } from './hooks.ts';
-import { layoutSize, nextIndex, pageZoom, placeBelow, unzoom, viewportAt } from './place.ts';
+import { layoutSize, nextIndex, placeBelow } from './place.ts';
 
 export interface PickerOption<T extends string> {
   value: T;
@@ -127,12 +127,10 @@ export function PickerPopover<T extends string>({
   useLayer('search', true, () => setQ(''), () => q.length > 0);
   useLayoutEffect(() => {
     const a = anchor.current?.getBoundingClientRect();
-    const z = pageZoom();
     if (a && pop.current) {
-      const at = unzoom(a, z);
       const size = layoutSize(pop.current);
-      const placed = placeBelow(at, size, viewportAt(z), 4);
-      if (alignEnd) placed.left = Math.max(8, at.left + at.width - size.width);
+      const placed = placeBelow(a, size, { width: innerWidth, height: innerHeight }, 4);
+      if (alignEnd) placed.left = Math.max(8, a.left + a.width - size.width);
       setPos(placed);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

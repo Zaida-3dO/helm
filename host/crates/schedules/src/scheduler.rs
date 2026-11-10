@@ -2,7 +2,9 @@
 //!
 //! Nothing runs while the app is closed or the machine sleeps. When it is awake again the first
 //! tick sees every missed slot as one due run and claims it once (coalescing; see
-//! [`crate::timing`]). A due run for a busy chat is left unclaimed and tried again next tick.
+//! [`crate::timing`]). A due run for a busy chat is left unclaimed and tried again next tick; so is
+//! one the send refuses for now (the chat is stopping, or Helm is at its limit of working chats):
+//! the slot is given back rather than failed.
 //!
 //! **The send path.** Scheduled prompts go through [`helm_chats::submit::host_send`] with origin
 //! [`SubmissionOrigin::Schedule`], never through the `chat_send` op: that op
@@ -192,6 +194,12 @@ fn discard_chat(svc: &SchedulesService, id: &str) {
     }
 }
 
+/// Whether a refused send is only for now: the chat is stopping, or Helm is already running as
+/// many chats as it allows. The run is tried again on a later tick instead of being failed.
+fn try_again_later(e: &ApiError) -> bool {
+    matches!(e.code.as_str(), "busy" | "capacity")
+}
+
 /// One pass: re-time weekly schedules after a clock change, claim what is due, send it.
 /// Returns how many occurrences were claimed.
 pub fn tick(svc: &SchedulesService, sender: &dyn Sender, now: i64) -> usize {
@@ -217,8 +225,9 @@ pub fn tick(svc: &SchedulesService, sender: &dyn Sender, now: i64) -> usize {
             .map(|(t, id)| (t.as_str(), id.as_str()));
         let text = frame(&c.title, &c.schedule_id, &c.message, by);
         let started = c.chat_id.is_empty();
+        // The error carries whether the refusal is only for now (see [`try_again_later`]).
         let sent = if started {
-            start_chat(svc, c.project_id.as_deref())
+            start_chat(svc, c.project_id.as_deref()).map_err(|m| (false, m))
         } else {
             Ok(c.chat_id.clone())
         }
@@ -230,12 +239,32 @@ pub fn tick(svc: &SchedulesService, sender: &dyn Sender, now: i64) -> usize {
                     if started {
                         discard_chat(svc, &chat);
                     }
-                    e.message
+                    (try_again_later(&e), e.message)
                 })
         });
+        // Nothing was handed over for a refusal that is only for now: give the slot back so the
+        // next tick claims it again, as it does for a chat that is busy before the claim. If the
+        // slot cannot be given back, the run is recorded as failed like any other refusal.
+        let sent = match sent {
+            Err((true, message)) => match svc.db.write(|tx| store::release(tx, zone, c)) {
+                Ok(()) => {
+                    log::info!(
+                        "schedules: run of {} waits, the chat cannot take it yet: {message}",
+                        c.schedule_id
+                    );
+                    claimed = claimed.saturating_sub(1);
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!("schedules: could not release a run: {e:?}");
+                    Err((false, message))
+                }
+            },
+            other => other,
+        };
         let (status, error, chat) = match sent {
             Ok(chat) => (RunStatus::Started, None, started.then_some(chat)),
-            Err(message) => {
+            Err((_, message)) => {
                 log::info!(
                     "schedules: run of {} not delivered: {message}",
                     c.schedule_id

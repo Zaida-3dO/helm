@@ -19,30 +19,16 @@ const MARGIN = 8;
 /**
  * Viewport-space measurements (getBoundingClientRect, clientX, innerWidth) are in the CSS pixels a
  * fixed element's left and top are written in: Settings → General → Zoom zooms the web view itself
- * (`window_zoom`), not the page, so no compensation is needed. `unzoom` and `pageZoom` stay as
- * identity shims for their callers, to be deleted with them.
+ * (`window_zoom`), not the page, so no compensation is needed.
  */
-export function unzoom(r: Rect, _zoom: number): Rect {
-  return r;
-}
-
-/** Always 1: see [`unzoom`]. */
-export function pageZoom(): number {
-  return 1;
-}
 
 /**
  * A surface's own size for placing it: its layout box in CSS pixels. Unlike getBoundingClientRect
  * this ignores the entrance animation's scale (a menu opening at 95% x 90% would otherwise measure
- * small and fail to flip at the window edge) and is already in CSS pixels under page zoom.
+ * small and fail to flip at the window edge).
  */
 export function layoutSize(el: HTMLElement): { width: number; height: number } {
   return { width: el.offsetWidth, height: el.offsetHeight };
-}
-
-/** The window in CSS pixels. */
-export function viewportAt(_zoom = 1): { width: number; height: number } {
-  return { width: innerWidth, height: innerHeight };
 }
 
 /**
@@ -72,6 +58,21 @@ export function placeAtPoint(x: number, y: number, size: { width: number; height
     above = true;
   }
   return { left, top, above };
+}
+
+/** The part of an element the focus rule needs, so the rule is testable without a DOM. */
+export interface FocusRoot<T> {
+  querySelector(selector: string): T | null;
+}
+
+/** Where focus lands when a dialog opens: its [autofocus] element, else the first field, else the first focusable control. */
+export function firstFocusTarget<T>(root: FocusRoot<T> | null | undefined, focusable: string): T | null {
+  if (!root) return null;
+  return (
+    root.querySelector('[autofocus], [data-autofocus]') ??
+    root.querySelector('input:not([disabled]), select, textarea') ??
+    root.querySelector(focusable)
+  );
 }
 
 /** Next enabled index for arrow-key navigation in a list, wrapping. -1 when none is enabled. */

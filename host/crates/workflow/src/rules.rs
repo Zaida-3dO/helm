@@ -134,7 +134,7 @@ mod tests {
         let d = WorkflowSettings::default();
         let r = workflow_rules(&d);
         assert!(r.starts_with(HEADING));
-        assert!(r.contains("At most 3 review rounds per change."));
+        assert!(r.contains("At most 2 review rounds per change."));
         assert!(r.contains("`coder`"));
         assert!(r.contains("Don't plan or build yourself"));
         assert!(r.contains("main, master"));

@@ -1610,7 +1610,7 @@ button.danger {
 }
 
 .tl-line-add {
-  color: #64885f;
+  color: var(--tone-test);
 }
 
 .tl-line-del {

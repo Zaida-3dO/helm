@@ -84,7 +84,8 @@ export function emptyTitle(snap: UsageSnapshot | null): string {
   return snap?.readiness.reason ?? 'Reading plan usage…';
 }
 
-export type RangeId = 'hour' | 'day' | 'today' | 'week' | 'month' | 'all';
+export type PresetRangeId = 'hour' | 'day' | 'today' | 'week' | 'month' | 'all';
+export type RangeId = PresetRangeId | 'custom';
 
 export const RANGES: { id: RangeId; label: string }[] = [
   { id: 'hour', label: 'Past hour' },
@@ -93,10 +94,30 @@ export const RANGES: { id: RangeId; label: string }[] = [
   { id: 'week', label: '7 days' },
   { id: 'month', label: '30 days' },
   { id: 'all', label: 'All' },
+  { id: 'custom', label: 'Custom' },
 ];
 
+/**
+ * A custom range from two `YYYY-MM-DD` date fields, as local days: it starts at the first day's
+ * midnight and ends at the end of the last day. Null while either field is empty or not a real
+ * date, or when the first day is after the last.
+ */
+export function customRange(from: string, to: string): { since: number; until: number } | null {
+  const day = (s: string, plus: number): number | null => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (!m) return null;
+    const [y, mo, d] = [Number(m[1]), Number(m[2]) - 1, Number(m[3])];
+    const at = new Date(y, mo, d);
+    if (at.getFullYear() !== y || at.getMonth() !== mo || at.getDate() !== d) return null;
+    return new Date(y, mo, d + plus).getTime();
+  };
+  const since = day(from, 0);
+  const until = day(to, 1);
+  return since === null || until === null || since >= until ? null : { since, until };
+}
+
 /** The `[since, until)` range in epoch milliseconds; "today" starts at local midnight. */
-export function rangeOf(id: RangeId, now: number): { since: number; until: number } {
+export function rangeOf(id: PresetRangeId, now: number): { since: number; until: number } {
   const until = now;
   switch (id) {
     case 'hour':

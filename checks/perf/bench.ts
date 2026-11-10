@@ -11,7 +11,7 @@
 //   applyRows    one streaming row update in a 600-row thread (node)
 //
 // Enforced budgets (exit code 1 when one fails; `--baseline` records without enforcing):
-// - scroll layout shift < 0.1; tool-turn layout shift < 0.05;
+// - scroll layout shift < 0.1; tool-turn layout shift < 0.02;
 // - keydown processing p95 < 12 ms, idle and while streaming (the editor transaction);
 // - streaming cost flat with length: late ms/s at most 1.5x early + 10;
 // - Markdown per-update cost flat with length: p95 at 32 KB at most 3x the p95 at 2 KB + 0.5 ms.
@@ -227,7 +227,7 @@ async function turnScenario(browser: Browser, url: string): Promise<void> {
   const following = (await page.locator('[data-testid="jump-latest"]').count()) === 0;
   results.turn = { layoutShift: round(b.ls, 3), stillFollowing: following };
   await ctx.close();
-  budget('tool turn: layout shift, send to settle', b.ls < 0.05, `${round(b.ls, 3)}`);
+  budget('tool turn: layout shift, send to settle', b.ls < 0.02, `${round(b.ls, 3)}`);
   budget('tool turn: the view still follows the end', following, following ? 'following' : 'the Latest pill is showing');
 }
 

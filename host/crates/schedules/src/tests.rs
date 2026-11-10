@@ -668,7 +668,7 @@ fn a_refused_send_is_recorded_as_failed_with_a_short_error_and_not_retried() {
     let (svc, _sink) = svc(&db);
     let send = Recording(
         Mutex::new(vec![]),
-        Mutex::new(Some(ApiError::new("capacity", "x".repeat(500)))),
+        Mutex::new(Some(ApiError::new("refused", "x".repeat(500)))),
     );
     scheduler::tick(&svc, &send, T0 + MIN);
     let r = runs(&db, &s.id);
@@ -676,6 +676,41 @@ fn a_refused_send_is_recorded_as_failed_with_a_short_error_and_not_retried() {
     assert_eq!(r[0].error.as_ref().unwrap().chars().count(), 240);
     scheduler::tick(&svc, &send, T0 + MIN + 5_000);
     assert_eq!(send.0.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_busy_or_capacity_refusal_gives_the_slot_back_and_the_next_tick_retries() {
+    let (_d, db) = temp();
+    let c = chat(&db);
+    let (svc, sink) = svc(&db);
+    // Both codes, on an interval schedule and on a one-time one (which would otherwise complete).
+    for code in ["capacity", "busy"] {
+        for timing in [interval(60), Timing::Once { at: T0 + MIN }] {
+            let s = make(&db, &c, timing.clone());
+            let slot = get(&db, &s.id).next_run_at.unwrap();
+            let send = Recording(
+                Mutex::new(vec![]),
+                Mutex::new(Some(ApiError::new(code, "Too many chats are already working."))),
+            );
+            let before = sink.kinds().len();
+            assert_eq!(scheduler::tick(&svc, &send, slot), 0, "{code}: nothing claimed");
+            assert!(runs(&db, &s.id).is_empty(), "{code}: no receipt is left");
+            let back = get(&db, &s.id);
+            assert_eq!(
+                (back.state, back.next_run_at),
+                (ScheduleState::Active, Some(slot)),
+                "{code}: back at the same slot"
+            );
+            assert_eq!(sink.kinds().len(), before, "{code}: the pane is not told");
+            // The refusal clears: the very next tick delivers the same slot, once.
+            *send.1.lock().unwrap() = None;
+            assert_eq!(scheduler::tick(&svc, &send, slot + 5_000), 1, "{code}");
+            let sent = send.0.lock().unwrap().clone();
+            assert_eq!(sent.len(), 2);
+            assert_eq!(sent[0].1, sent[1].1, "{code}: the same submission id");
+            assert_eq!(runs(&db, &s.id)[0].status, RunStatus::Started);
+        }
+    }
 }
 
 fn project_of(db: &Database, chat: &str) -> String {
@@ -821,7 +856,7 @@ fn reminders_post_a_note_and_new_chat_runs_start_their_own_chat() {
 
     // A refused send leaves no empty chat behind; reminders can be dismissed one by one or all.
     let before = chat_count(&db);
-    *send.1.lock().unwrap() = Some(ApiError::new("capacity", "busy"));
+    *send.1.lock().unwrap() = Some(ApiError::new("refused", "busy"));
     scheduler::tick(&svc, &send, T0 + 3 * HR);
     assert_eq!(chat_count(&db), before);
     assert_eq!(runs(&db, &fresh.id)[0].status, RunStatus::Failed);

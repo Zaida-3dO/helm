@@ -48,6 +48,15 @@ async function until<T>(what: string, f: () => T | undefined | Promise<T | undef
   }
 }
 
+/** For a "nothing happens" claim: run `check` over and over until `ms` have passed, so a violation anywhere in the window fails it, not just one at the end. */
+async function holds(ms: number, check: () => Promise<void>): Promise<void> {
+  const end = Date.now() + ms;
+  do {
+    await check();
+    await new Promise((r) => setTimeout(r, 200));
+  } while (Date.now() < end);
+}
+
 const list = async (): Promise<{ schedules: Schedule[]; templates: { id: string; title: string }[] }> =>
   (await api(page(), "schedule_list", { includeInactive: true })) as never;
 const runsOf = async (id: string): Promise<Run[]> => ((await api(page(), "schedule_runs", { scheduleId: id })) as { runs: Run[] }).runs;
@@ -184,10 +193,12 @@ describe("schedules: prompts into an existing chat", { timeout: 10 * 60_000 }, (
 
     await sendMessage("[HOLD] keep busy");
     // Past the due time and two ticks on, the chat still busy (its turn lasts 40 s): nothing claimed.
-    await until("the slot to be due", () => (Date.now() > startAt + 10_000 ? true : undefined), 30_000);
-    assert.deepEqual(await runsOf(waiting.id), [], "a busy chat is not sent a prompt");
-    const mid = (await list()).schedules.find((s) => s.id === waiting!.id)!;
-    assert.equal(mid.nextRunAt, startAt, "the slot is still waiting");
+    // Checked all along, so a claim at any moment of the wait fails it.
+    await holds(startAt + 10_000 - Date.now(), async () => {
+      assert.deepEqual(await runsOf(waiting!.id), [], "a busy chat is not sent a prompt");
+      const mid = (await list()).schedules.find((s) => s.id === waiting!.id)!;
+      assert.equal(mid.nextRunAt, startAt, "the slot is still waiting");
+    });
 
     // The turn ends (about 40 s in): one run, for the slot that was waiting.
     const runs = await until("the waiting run", async () => {
@@ -234,9 +245,10 @@ describe("schedules: prompts into an existing chat", { timeout: 10 * 60_000 }, (
     await openChat(page(), chatA);
     await until("the prompt in chat A", async () => ((await scheduledBubbles()) >= 1 ? true : undefined), 20_000);
     // Two more ticks go by: still one.
-    await new Promise((r) => setTimeout(r, 11_000));
-    assert.equal(await scheduledBubbles(), 1);
-    assert.equal((await runsOf(checkIn!.id)).length, 1);
+    await holds(11_000, async () => {
+      assert.equal(await scheduledBubbles(), 1);
+      assert.equal((await runsOf(checkIn!.id)).length, 1);
+    });
     assert.match((await page().textContent(tid("transcript-row", '[data-role="user"]:has-text("[Scheduled prompt]")'))) ?? "", /30-minute check-in/);
     assert.deepEqual(await app.cspViolations(), []);
 

@@ -324,12 +324,16 @@ pub fn status(tx: &Transaction<'_>, x: &Act<'_>) -> Out {
 
 /// The line that frames the next round of a verdict stage for the agent that will run it ("round 2
 /// of 3"), with the near-cap sentence on the last round. The orchestrator copies it into the stage
-/// agent's brief; `done` rounds are those already used and `cap` the limit now.
-pub fn round_line(what: &str, done: i64, cap: i64) -> String {
+/// agent's brief; `done` rounds are those already used, `cap` the limit now and `max` the
+/// setting's own limit (a round past it only runs because more rounds were allowed).
+pub fn round_line(what: &str, done: i64, cap: i64, max: i64) -> String {
     let n = done + 1;
     let mut line = format!("{what}: this is round {n} of {cap}.");
     if n >= cap {
         line.push_str(" This is the last round the cap allows: report only the problems that make the work wrong or unsafe, and leave small nits as notes with an approval.");
+    }
+    if n > max {
+        line.push_str(" This is past the round cap: before going on, record one short lesson about why review needed another round (the run-lessons skill covers how).");
     }
     line
 }
@@ -345,7 +349,7 @@ fn add_round_lines(
     if s.stages.plan_review.use_ != StageUse::Off && run.plan_id.is_some() && !run.plan_approved {
         let cap = engine::cap(tx, s, run, CapStage::PlanReview, None)?;
         if run.plan_rounds < cap {
-            lines.push(json!({"stage": "planReview", "line": round_line("Plan review", run.plan_rounds, cap)}));
+            lines.push(json!({"stage": "planReview", "line": round_line("Plan review", run.plan_rounds, cap, s.stages.plan_review.max_rounds as i64)}));
         }
     }
     if s.stages.review.use_ != StageUse::Off {
@@ -356,7 +360,7 @@ fn add_round_lines(
             let cap = engine::cap(tx, s, run, CapStage::Review, Some((&c.repo, &c.branch)))?;
             if c.review_rounds < cap {
                 let what = format!("Review of {}", c.branch);
-                lines.push(json!({"stage": "review", "repo": c.repo, "branch": c.branch, "line": round_line(&what, c.review_rounds, cap)}));
+                lines.push(json!({"stage": "review", "repo": c.repo, "branch": c.branch, "line": round_line(&what, c.review_rounds, cap, s.stages.review.max_rounds as i64)}));
             }
         }
     }
@@ -799,4 +803,30 @@ pub fn allow_more_with(tx: &Transaction<'_>, x: &Act<'_>, a: &Value, proof: Proo
     Ok(Ok(
         json!({"stage": stage.name(), "added": 1, "by": "orchestrator", "row": row}),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The framing line: the round number, the last-round sentence at the cap, and the lesson
+    /// sentence only on a round past the setting's own limit (one that extra rounds allowed).
+    #[test]
+    fn the_round_line_adds_its_sentences_at_the_cap_and_past_the_limit() {
+        for (done, cap, max, last, lesson) in [
+            (0, 2, 2, false, false),
+            (1, 2, 2, true, false),
+            (2, 3, 2, true, true),
+            (2, 4, 2, false, true),
+            (0, 1, 1, true, false),
+        ] {
+            let line = round_line("Review of x", done, cap, max);
+            assert!(line.starts_with(&format!(
+                "Review of x: this is round {} of {cap}.",
+                done + 1
+            )));
+            assert_eq!(line.contains("the last round the cap allows"), last, "{line}");
+            assert_eq!(line.contains("record one short lesson"), lesson, "{line}");
+        }
+    }
 }

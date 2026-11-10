@@ -288,6 +288,8 @@ pub fn create_folder_project(
 fn project_create_folder(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ProjectCreateFolderArgs = parse_args(args)?;
     let db = ctx.services.need::<Database>()?;
+    // A bad name is refused before the default projects folder is created for it.
+    folder_name(&a.name)?;
     let parent = match a.parent.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
         Some(p) => PathBuf::from(p),
         None => {

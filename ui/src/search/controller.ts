@@ -153,6 +153,15 @@ export function flatRows(state: SearchState): { group: SourceId; row: Row }[] {
   return out;
 }
 
+/**
+ * The row Enter opens: the highlighted one, unless its group is still searching. Until a group has
+ * answered the new query it keeps the rows of the older one, which must not be opened by mistake.
+ */
+export function enterTarget(state: SearchState, index: number): Row | null {
+  const entry = flatRows(state)[index];
+  return entry && state.groups[entry.group]?.status !== 'searching' ? entry.row : null;
+}
+
 /** Up/Down move the highlight and wrap; with no rows it stays at 0. */
 export function moveHighlight(index: number, delta: -1 | 1, count: number): number {
   if (count <= 0) return 0;

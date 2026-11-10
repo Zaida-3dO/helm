@@ -24,14 +24,17 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS item_chat_links_chat ON item_chat_links(chat_id);",
     )?;
     // The title arrived after the table did: an older profile gets the column here, with no
-    // title until an agent next names the item.
-    let present: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('item_chat_links') WHERE name = 'title')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !present {
-        tx.execute_batch("ALTER TABLE item_chat_links ADD COLUMN title TEXT")?;
+    // title until an agent next names the item. `title_tried_at` is when a title lookup was last
+    // started for the item, so one that failed is not retried on every read.
+    for (column, kind) in [("title", "TEXT"), ("title_tried_at", "INTEGER")] {
+        let present: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('item_chat_links') WHERE name = ?1)",
+            [column],
+            |r| r.get(0),
+        )?;
+        if !present {
+            tx.execute_batch(&format!("ALTER TABLE item_chat_links ADD COLUMN {column} {kind}"))?;
+        }
     }
     Ok(())
 }
@@ -65,6 +68,41 @@ pub fn set_title(tx: &Transaction<'_>, item_id: &str, raw_title: &str) -> rusqli
         params![item_id, title],
     )?;
     Ok(())
+}
+
+/// Items that have no title anywhere (neither stored with a link nor in the board mirror) and
+/// that nobody has tried to look up yet, at most `limit`. Each one handed back is marked as tried
+/// in the same transaction, so a lookup that fails or finds nothing is not repeated on the next
+/// read. The caller asks the board for each id outside the transaction and stores what it gets
+/// with [`set_title`]. This crate itself never talks to the board.
+pub fn claim_untitled(
+    tx: &Transaction<'_>,
+    now: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<String>> {
+    let mut st = tx.prepare(
+        "SELECT item_id FROM item_chat_links GROUP BY item_id
+         HAVING count(title) = 0 AND count(title_tried_at) = 0
+         ORDER BY max(linked_at) DESC",
+    )?;
+    let candidates = st
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut claimed = Vec::new();
+    for id in candidates {
+        if claimed.len() >= limit {
+            break;
+        }
+        if title_of(tx, &id).is_some() {
+            continue;
+        }
+        tx.execute(
+            "UPDATE item_chat_links SET title_tried_at = ?2 WHERE item_id = ?1",
+            params![id, now],
+        )?;
+        claimed.push(id);
+    }
+    Ok(claimed)
 }
 
 /// The newest stored title among an item's links.
@@ -605,6 +643,29 @@ pub(crate) mod tests {
         db.write::<_, rusqlite::Error>(|tx| set_title(tx, ITEM_ID, &"x".repeat(500)))
             .unwrap();
         assert_eq!(title(&db, "b").unwrap().chars().count(), MAX_TITLE);
+        // An untitled item is handed out for one lookup, once: a lookup that finds nothing is not
+        // asked again, and an item that already has a title is never handed out.
+        let other = "b2c3d4e5f6a74b8c9d0e1f2a3b4c5d6e";
+        let claim = |db: &Database, now: i64| {
+            db.write::<_, rusqlite::Error>(|tx| claim_untitled(tx, now, 10))
+                .unwrap()
+        };
+        db.write::<_, rusqlite::Error>(|tx| {
+            link(tx, "a", other, false, LinkedBy::Agent, 5).map_err(rusqlite::Error::InvalidParameterName)?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(claim(&db, 100), [other]);
+        assert!(claim(&db, 200).is_empty(), "the failed lookup is not retried");
+        db.write::<_, rusqlite::Error>(|tx| set_title(tx, other, "Found it"))
+            .unwrap();
+        assert_eq!(
+            db.snapshot(|tx| for_item(tx, other).map_err(rusqlite::Error::InvalidParameterName))
+                .unwrap()[0]
+                .item_title
+                .as_deref(),
+            Some("Found it")
+        );
         // A profile from before titles loads: the column is added and no link has a title.
         db.write::<_, rusqlite::Error>(|tx| {
             tx.execute_batch("ALTER TABLE item_chat_links DROP COLUMN title")?;

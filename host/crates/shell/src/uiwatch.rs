@@ -46,6 +46,8 @@ pub struct UiWatchdog {
     answered_since_load: bool,
     /// The oldest probe still waiting for an answer.
     outstanding: Option<Instant>,
+    /// When the watchdog last ran, to notice a gap that no timer could explain.
+    last_tick: Option<Instant>,
 }
 
 impl UiWatchdog {
@@ -55,6 +57,16 @@ impl UiWatchdog {
 
     /// Called every [`PROBE_EVERY`] with whether the main window is shown and not minimised.
     pub fn tick(&mut self, now: Instant, shown: bool) -> Action {
+        // A gap of more than twice the period means the machine slept (or the app was frozen
+        // outright): the page could not answer a probe sent before it, and that silence says
+        // nothing about the page, so the old probe is forgotten and a fresh one judged from now.
+        let gap = self
+            .last_tick
+            .map_or(Duration::ZERO, |t| now.saturating_duration_since(t));
+        self.last_tick = Some(now);
+        if gap > PROBE_EVERY * 2 {
+            self.outstanding = None;
+        }
         if !shown {
             // Not judged while hidden; a probe sent before hiding does not count against it.
             self.outstanding = None;
@@ -294,6 +306,26 @@ mod tests {
         assert_eq!(w.tick(at(t0, 620), true), Action::Probe);
         w.answered("\"helm-ui-alive\"");
         assert_eq!(w.tick(at(t0, 630), true), Action::Probe);
+    }
+
+    #[test]
+    fn a_sleep_between_ticks_does_not_look_like_a_hung_page() {
+        let t0 = Instant::now();
+        let mut w = UiWatchdog::new();
+        assert_eq!(w.tick(t0, true), Action::Probe);
+        w.answered("\"helm-ui-alive\"");
+        assert_eq!(w.tick(at(t0, 10), true), Action::Probe);
+        // The machine sleeps for an hour with that probe unanswered, then the next tick runs: the
+        // old probe is dropped and a new one sent, not a reload.
+        assert_eq!(w.tick(at(t0, 3_610), true), Action::Probe);
+        // A gap of exactly twice the period is still an ordinary late tick.
+        let mut w = UiWatchdog::new();
+        assert_eq!(w.tick(t0, true), Action::Probe);
+        w.answered("\"helm-ui-alive\"");
+        assert_eq!(w.tick(at(t0, 10), true), Action::Probe);
+        assert_eq!(w.tick(at(t0, 30), true), Action::Nothing);
+        // Ordinary spacing, so a page that stays silent is still reloaded.
+        assert!(matches!(w.tick(at(t0, 40), true), Action::Reload { .. }));
     }
 
     #[test]

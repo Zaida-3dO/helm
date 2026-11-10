@@ -227,6 +227,7 @@ export function TerminalDock() {
                 return x && x.state !== next ? all.map((y) => (y.id === t.id ? { ...y, state: next } : y)) : all;
               })
             }
+            onAttached={() => t.fresh && setTabs((all) => all.map((y) => (y.id === t.id ? { ...y, fresh: false } : y)))}
             onExit={(code) => setTabs((all) => all.map((y) => (y.id === t.id ? { ...y, state: 'exited', exitCode: code } : y)))}
             onCommand={(cmd) => command(cmd, t)}
             openLink={openLink}

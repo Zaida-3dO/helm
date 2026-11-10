@@ -50,19 +50,21 @@ export interface XtermViewProps {
   bus: EventBus;
   visible: boolean;
   onOutput: () => void;
+  /** The reattach has answered and its replay is written: the session is no longer fresh. */
+  onAttached?: () => void;
   onExit: (code: number) => void;
   onCommand: (cmd: string) => void;
   openLink: (url: string) => void;
 }
 
-export const XtermView = forwardRef<XtermHandle, XtermViewProps>(function XtermView({ id, fresh, ops, bus, visible, onOutput, onExit, onCommand, openLink }, ref) {
+export const XtermView = forwardRef<XtermHandle, XtermViewProps>(function XtermView({ id, fresh, ops, bus, visible, onOutput, onAttached, onExit, onCommand, openLink }, ref) {
   const host = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | null>(null);
   const fit = useRef<FitAddon | null>(null);
   const search = useRef<SearchAddon | null>(null);
   const exited = useRef(false);
-  const cb = useRef({ onOutput, onExit, onCommand, openLink, fresh });
-  cb.current = { onOutput, onExit, onCommand, openLink, fresh };
+  const cb = useRef({ onOutput, onAttached, onExit, onCommand, openLink, fresh });
+  cb.current = { onOutput, onAttached, onExit, onCommand, openLink, fresh };
 
   useImperativeHandle(ref, () => ({
     find: (q, back) => (q ? (back ? search.current?.findPrevious(q) : search.current?.findNext(q)) ?? false : false),
@@ -189,7 +191,13 @@ export const XtermView = forwardRef<XtermHandle, XtermViewProps>(function XtermV
       .catch(() => undefined)
       .finally(() => {
         attached = true;
-        for (const h of held.splice(0)) if (seq.accept(h.seq)) writeLive(h.data);
+        // Its queries have now been answered once; a later attach of this session must strip them.
+        cb.current.onAttached?.();
+        for (const h of held.splice(0)) {
+          if (!seq.accept(h.seq)) continue;
+          writeLive(h.data);
+          cb.current.onOutput();
+        }
         publishTail();
       });
     const ro = new ResizeObserver(() => {

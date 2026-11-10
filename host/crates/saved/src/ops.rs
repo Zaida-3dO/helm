@@ -2,12 +2,15 @@
 //!
 //! | op | class | args to result |
 //! |---|---|---|
-//! | `saved_save` | maintenance | `{chatId?, messageId?, captureKey?, title, body, remindAt?}` to `{item, already}`; emits `saved` |
+//! | `saved_save` | maintenance | `{chatId?, messageId?, captureKey?, title, body, remindAt?, savedBy?}` to `{item, already}`; emits `saved` |
 //! | `saved_list` | blocking | `{state?, query?, page?}` to a [`crate::store::SavedPage`] |
 //! | `saved_due` | blocking | `{}` to `{items}`: the open items whose reminder is due now |
-//! | `saved_update` | maintenance | `{id, title?, body?, state?, remindAt?, expectRevision?, remove?}` to `{item}` or `{id, removed}`; emits `saved` |
+//! | `saved_update` | maintenance | `{id, title?, body?, state?, remindAt?, expectRevision?, remove?, byChat?, restore?}` to `{item}` or `{id, removed}`; emits `saved` |
 //! | `saved_note` | maintenance | `{id, text, authorType?, authorId?}` to `{note}`; emits `saved` |
 //! | `saved_comments` | blocking | `{id}` to `{notes}` (oldest first) |
+//!
+//! `remove` hides an item and keeps it for a week; `restore` undoes that (the Saved pane's Undo).
+//! `savedBy` and `byChat` are set by the chat tools only: a chat may remove just what it saved.
 
 use crate::store::{self, StoreError, Update};
 use helm_core::db::Database;
@@ -25,6 +28,7 @@ fn fail(e: StoreError) -> ApiError {
         StoreError::NotFound => ApiError::new("not_found", e.message()),
         StoreError::Conflict => ApiError::conflict(e.message()),
         StoreError::Full => ApiError::new("refused", e.message()),
+        StoreError::Host(_) => ApiError::internal(e.message()),
     }
 }
 
@@ -45,6 +49,9 @@ struct SaveArgs {
     body: String,
     #[serde(default)]
     remind_at: Option<i64>,
+    /// The chat whose tool saved this item; it alone may remove it later.
+    #[serde(default)]
+    saved_by: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +91,12 @@ struct UpdateArgs {
     expect_revision: Option<i64>,
     #[serde(default)]
     remove: bool,
+    /// The chat asking to remove, when a chat is; the user's own removals leave it out.
+    #[serde(default)]
+    by_chat: Option<String>,
+    /// Bring back an item removed in the last week.
+    #[serde(default)]
+    restore: bool,
 }
 
 #[derive(Deserialize)]
@@ -126,6 +139,7 @@ fn save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                     title: &a.title,
                     body: &a.body,
                     remind_at: a.remind_at,
+                    saved_by: a.saved_by.as_deref(),
                 },
                 helm_core::now_ms(),
             )
@@ -150,8 +164,15 @@ fn list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 fn update(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: UpdateArgs = parse(args)?;
     let db = ctx.services.need::<Database>()?;
+    if a.restore {
+        let item = db.write(|tx| store::restore(tx, &a.id)).map_err(fail)?;
+        ctx.events
+            .emit(AppEvent::new("saved").with("ids", json!([item.id.clone()])));
+        return Ok(json!({"item": item}));
+    }
     if a.remove {
-        db.write(|tx| store::remove(tx, &a.id)).map_err(fail)?;
+        db.write(|tx| store::remove(tx, &a.id, a.by_chat.as_deref(), helm_core::now_ms()))
+            .map_err(fail)?;
         ctx.events
             .emit(AppEvent::new("saved").with("ids", json!([a.id.clone()])));
         return Ok(json!({"id": a.id, "removed": true}));

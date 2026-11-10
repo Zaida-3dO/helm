@@ -60,9 +60,11 @@ async function waitForCdp(port: number, proc: ChildProcess, timeoutMs: number): 
 /** For a failed start: which WebView2 processes our helm.exe has, and in which session (CI). */
 function webviewDiagnostics(pid: number | undefined): string {
   if (process.platform !== "win32" || !pid) return "";
-  const ps = `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq ${pid} -or $_.Name -like 'msedgewebview2*' } | ForEach-Object { "$($_.ProcessId) $($_.Name) session=$($_.SessionId) $($_.CommandLine)" }; "helm session=" + (Get-Process -Id ${pid}).SessionId; "runtime=" + (Get-ItemProperty 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv`;
+  const ps = `Get-Process msedgewebview2 -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Id) $($_.ProcessName) session=$($_.SessionId)" }; "helm session=" + (Get-Process -Id ${pid}).SessionId; "runtime=" + (Get-ItemProperty 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv`;
   const r = spawnSync("powershell", ["-NoProfile", "-Command", ps], { encoding: "utf8", timeout: 20_000 });
-  return `; diagnostics: ${(r.stdout ?? "").slice(0, 3000)}${(r.stderr ?? "").slice(0, 500)}`;
+  // A query that timed out or could not start says so, instead of looking like "no processes".
+  const outcome = `status=${r.status ?? "none"}${r.signal ? ` signal=${r.signal}` : ""}${r.error ? ` error=${r.error.message}` : ""}`;
+  return `; diagnostics (${outcome}): ${(r.stdout ?? "").slice(0, 3000)}${(r.stderr ?? "").slice(0, 500)}`;
 }
 
 /** Launches the debug app against `profileDir` (created if needed) and connects to its page. */

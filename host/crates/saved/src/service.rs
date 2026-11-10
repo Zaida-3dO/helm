@@ -40,6 +40,12 @@ impl SavedService {
             .collect()
     }
 
+    /// Delete for good the items removed more than a week ago. A host hiccup is left for the
+    /// next pass.
+    pub fn purge(&self, now: i64) {
+        let _ = self.db.write(|tx| store::purge(tx, now));
+    }
+
     /// Announce the reminders that have come due since the last sweep. A host hiccup is left for
     /// the next tick.
     pub fn sweep(&self, now: i64) {

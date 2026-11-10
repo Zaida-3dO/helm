@@ -54,6 +54,12 @@ test('fields become a timing, and a timing becomes the same fields', () => {
   const w = draftToTiming(weekly, NOW);
   assert.deepEqual(w, { ok: true, value: { kind: 'weekly', hour: 12, minute: 0, days: [0, 6] } });
   if (w.ok) assert.deepEqual(timingToDraft(w.value, NOW), { ...weekly, onceAt: defaultDraft(NOW).onceAt, everyMinutes: '30' });
+  // Editing an interval keeps its start; one without a start stays without the key.
+  const anchored = { kind: 'interval' as const, seconds: 600, startAt: NOW + 60_000 };
+  assert.deepEqual(draftToTiming(timingToDraft(anchored, NOW), NOW), { ok: true, value: anchored });
+  assert.deepEqual(draftToTiming(timingToDraft({ kind: 'interval', seconds: 600 }, NOW), NOW), { ok: true, value: { kind: 'interval', seconds: 600 } });
+  const retimed = draftToTiming({ ...timingToDraft(anchored, NOW), everyMinutes: '5' }, NOW);
+  assert.deepEqual(retimed, { ok: true, value: { kind: 'interval', seconds: 300, startAt: NOW + 60_000 } });
   const once = draftToTiming({ ...defaultDraft(NOW), kind: 'once' }, NOW);
   assert.equal(once.ok && once.value.kind === 'once' && once.value.at, NOW + 3_600_000);
   assert.equal(toLocalInput(NOW + 3_600_000), '2026-10-19T10:00');

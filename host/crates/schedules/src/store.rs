@@ -793,6 +793,30 @@ pub fn finish(
     finish_in(tx, claim, status, error, None)
 }
 
+/// Give a claimed slot back after a send that was refused for now (the chat is stopping, or too
+/// many chats are working): the receipt goes and the schedule returns to the slot, so the next
+/// tick claims it again. A schedule the user paused or cancelled meanwhile stays as it is.
+pub fn release(tx: &Transaction<'_>, zone: &dyn Zone, claim: &Claim) -> Result<(), SErr> {
+    tx.execute(
+        "DELETE FROM schedule_runs WHERE schedule_id = ?1 AND scheduled_at = ?2 AND status = 'dispatching'",
+        params![claim.schedule_id, claim.scheduled_at],
+    )?;
+    let mut r = match load(tx, &claim.schedule_id) {
+        Ok(r) => r,
+        Err(SErr::Api(e)) if e.code == "not_found" => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let moved_on = r.next_run_at.is_none_or(|n| n > claim.scheduled_at);
+    if matches!(r.state, ScheduleState::Active | ScheduleState::Completed) && moved_on {
+        r.state = ScheduleState::Active;
+        r.next_run_at = Some(claim.scheduled_at);
+        r.calendar_offset = zone.offset_secs(claim.scheduled_at);
+        r.revision += 1;
+        save(tx, &r)?;
+    }
+    Ok(())
+}
+
 /// [`finish`], also recording the chat a new-chat run started.
 pub fn finish_in(
     tx: &Transaction<'_>,

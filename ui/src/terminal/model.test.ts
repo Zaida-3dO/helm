@@ -62,6 +62,11 @@ test('tab dots: background output marks unseen, seeing clears it, exit sticks', 
 test('replayed terminal queries are stripped so a reattached view never answers twice', () => {
   const E = String.fromCharCode(27);
   assert.equal(stripQueries(`a${E}[6nb${E}[cc${E}[>cd${E}[5ne`), 'abcde');
+  // Every status-report and attribute form goes: plain and private (?) reports, and 0, > and = attribute queries.
+  for (const q of ['[5n', '[6n', '[?6n', '[?15n', '[?25n', '[?26n', '[?53n', '[c', '[0c', '[>c', '[>0c', '[=c']) {
+    assert.equal(stripQueries(`x${E}${q}y`), 'xy', q);
+  }
+  assert.equal(stripQueries(`${E}[7n${E}[?7n${E}[1c`), `${E}[7n${E}[?7n${E}[1c`, 'other sequences stay');
   assert.equal(stripQueries(`${E}[31mred${E}[0m`), `${E}[31mred${E}[0m`, 'colours stay');
 });
 

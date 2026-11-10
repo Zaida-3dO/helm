@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useShell } from '../shell/context.ts';
 import { registerSettingsPane } from '../settings/registry.ts';
 import { Button, PillTabs, TextInput, toast } from '../ui/index.ts';
-import { dueLabel, draftFromItem, PAGE_SIZE, REMIND_PRESETS, remindAtFor, savedOps, STATE_TITLES, type SavedItem, type SavedNote, type SavedState } from './model.ts';
+import { dueLabel, draftFromItem, PAGE_SIZE, REMIND_PRESETS, remindAtFor, savedOps, STATE_TITLES, UNDO_REMOVE_MS, type SavedItem, type SavedNote, type SavedState } from './model.ts';
 import './saved.css';
 
 type Filter = 'all' | SavedState;
@@ -50,7 +50,25 @@ function SavedPane() {
     if (open === it.id) setOpen(null);
     ops
       .update({ id: it.id, ...args })
-      .then(load)
+      .then(() => {
+        load();
+        if (args.remove) {
+          toast.show({
+            kind: 'undo',
+            text: 'Removed from Saved',
+            ttlMs: UNDO_REMOVE_MS,
+            action: {
+              label: 'Undo',
+              run: () => {
+                ops
+                  .update({ id: it.id, restore: true })
+                  .then(load)
+                  .catch((e: unknown) => toast.show({ kind: 'error', text: `Could not undo the removal: ${errText(e)}` }));
+              },
+            },
+          });
+        }
+      })
       .catch((e: unknown) => toast.show({ kind: 'error', text: `Could not change the item: ${errText(e)}` }));
   };
 

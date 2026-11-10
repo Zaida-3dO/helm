@@ -133,5 +133,5 @@ export const PALETTE = {
  */
 export function stripQueries(text: string): string {
   const ESC = String.fromCharCode(27);
-  return text.replace(new RegExp(`${ESC}\\[(?:[56]n|\\?6n|[>=]?c|0?c)`, 'g'), '');
+  return text.replace(new RegExp(`${ESC}\\[(?:[56]n|\\?(?:6|15|25|26|53)n|[>=]?0?c)`, 'g'), '');
 }

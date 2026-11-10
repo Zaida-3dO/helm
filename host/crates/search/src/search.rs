@@ -246,8 +246,25 @@ mod tests {
         updated: i64,
         msgs: &[(&str, &str, i64)],
     ) -> String {
+        chat_as(db, None, cwd, title, updated, msgs)
+    }
+
+    /// [`chat`] under a chosen id, for a test that must not depend on how random ids sort.
+    fn chat_as(
+        db: &Database,
+        fixed_id: Option<&str>,
+        cwd: &str,
+        title: &str,
+        updated: i64,
+        msgs: &[(&str, &str, i64)],
+    ) -> String {
         db.write(|tx| {
-            let id = helm_chats::store::create_chat(tx, cwd, None, None, updated)?;
+            let mut id = helm_chats::store::create_chat(tx, cwd, None, None, updated)?;
+            if let Some(f) = fixed_id {
+                // Nothing refers to the new chat yet, so its id can be swapped before messages go in.
+                tx.execute("UPDATE chats SET id = ?1 WHERE id = ?2", [f, id.as_str()])?;
+                id = f.to_owned();
+            }
             tx.execute(
                 "UPDATE chats SET title = ?1, updated_at = ?2 WHERE id = ?3",
                 params![title, updated, id],
@@ -398,15 +415,19 @@ mod tests {
     fn a_newer_chat_outranks_an_older_one_with_the_same_text() {
         let (_d, db) = db();
         let week = 7 * 24 * 60 * 60 * 1000;
-        chat(
+        // Ties break by chat id, ascending: the older chat gets the lower id, so only the recency
+        // boost can put the newer one first.
+        chat_as(
             &db,
+            Some("chat-a"),
             "C:/a",
             "old",
             NOW - 52 * week,
             &[("user", "the quarterly report", 1)],
         );
-        chat(
+        chat_as(
             &db,
+            Some("chat-b"),
             "C:/a",
             "new",
             NOW,
