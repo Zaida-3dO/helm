@@ -140,3 +140,11 @@ export function checkState(payload: unknown): Checked<{ state: unknown; revision
  * pointer lock.
  */
 export const PAGE_SANDBOX = 'allow-scripts';
+
+/**
+ * The sandbox for one open: {@link PAGE_SANDBOX}, or nothing allowed at all when the host says the
+ * page's scripts may not run (offline, in a web view that cannot keep them off the network).
+ */
+export function pageSandbox(scripts: boolean): string {
+  return scripts ? PAGE_SANDBOX : '';
+}

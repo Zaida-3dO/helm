@@ -2,7 +2,7 @@
 //!
 //! | op | class | args → result |
 //! |---|---|---|
-//! | `page_open` | heavy | `{path, chatId?, network?}` → the session (`session`, `channel`, `url`, `path`, `key`, `title`, `network`, `revision`, `size`) plus `state`, `stateRevision` and `pins` |
+//! | `page_open` | heavy | `{path, chatId?, network?}` → the session (`session`, `channel`, `url`, `path`, `key`, `title`, `network`, `scripts`, `revision`, `size`) plus `state`, `stateRevision` and `pins` |
 //! | `page_reload` | heavy | `{session}` → the session again, re-read |
 //! | `page_close` | blocking | `{session}` → `{closed}` |
 //! | `page_status` | blocking | `{session}` → `{revision, changed, missing, error?}`: the file watch, polled by the open frame |

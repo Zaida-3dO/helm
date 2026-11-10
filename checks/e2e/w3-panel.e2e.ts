@@ -152,25 +152,35 @@ describe("panel: Changes, the gate, vault notes, the viewer and quick-open", { t
   }
 
   test("P5: a hostile page run with Run page stays sealed, keeps its own state and sees no other page's", async () => {
-    // Anything that reaches these two loopback listeners got out of the page.
+    // Anything that reaches one of these loopback listeners got out of the page. Each attempt in
+    // the page has its own port, so a leak names the attempt that made it.
     const leaks: string[] = [];
-    const tcp = net.createServer((sock) => {
-      leaks.push("a connection on the loopback port");
-      sock.on("error", () => undefined);
-      sock.destroy();
-    });
-    const udp = dgram.createSocket("udp4");
-    udp.on("message", (m) => leaks.push(`a ${m.length}-byte packet on the loopback UDP port`));
-    await new Promise<void>((done) => tcp.listen(0, "127.0.0.1", () => done()));
-    await new Promise<void>((done) => udp.bind(0, "127.0.0.1", () => done()));
-    const tcpPort = (tcp.address() as net.AddressInfo).port;
-    const udpPort = udp.address().port;
+    const TCP_ATTEMPTS = ["fetchLoopback", "xhrLoopback", "webSocket", "eventSource", "beacon", "imageLoopback", "scriptLoopback", "styleLoopback", "prefetch", "frameLoopback", "frameData", "frameSrcdoc", "worker", "form", "popup", "nav", "rtcTurn"];
+    const UDP_ATTEMPTS = ["rtcStun", "rtcFrame", "rtcBorrowed"];
+    const ports: Record<string, number> = {};
+    const tcps = await Promise.all(TCP_ATTEMPTS.map(async (name) => {
+      const tcp = net.createServer((sock) => {
+        leaks.push(`${name}: a connection on its loopback port`);
+        sock.on("error", () => undefined);
+        sock.destroy();
+      });
+      await new Promise<void>((done) => tcp.listen(0, "127.0.0.1", () => done()));
+      ports[name] = (tcp.address() as net.AddressInfo).port;
+      return tcp;
+    }));
+    const udps = await Promise.all(UDP_ATTEMPTS.map(async (name) => {
+      const udp = dgram.createSocket("udp4");
+      udp.on("message", (m) => leaks.push(`${name}: a ${m.length}-byte packet on its loopback UDP port`));
+      await new Promise<void>((done) => udp.bind(0, "127.0.0.1", () => done()));
+      ports[name] = udp.address().port;
+      return udp;
+    }));
     const wait = (ms: number) => new Promise((done) => setTimeout(done, ms));
     try {
       const dir = path.join(repo, "pages");
       fs.mkdirSync(dir, { recursive: true });
       const fixture = (name: string) => fs.readFileSync(path.join(import.meta.dirname, "fixtures", name), "utf8");
-      fs.writeFileSync(path.join(dir, "hostile-page.html"), fixture("hostile-page.html").replaceAll("@TCP@", String(tcpPort)).replaceAll("@UDP@", String(udpPort)));
+      fs.writeFileSync(path.join(dir, "hostile-page.html"), fixture("hostile-page.html").replaceAll("@PORTS@", JSON.stringify(ports)));
       fs.writeFileSync(path.join(dir, "other-page.html"), fixture("other-page.html"));
       // Quick open reads the folder again when a query finds nothing in a listing older than a
       // quarter second; P4's listing may be younger than that.
@@ -194,12 +204,33 @@ describe("panel: Changes, the gate, vault notes, the viewer and quick-open", { t
         return (await out.textContent()) ?? "";
       };
 
+      const root = () => page().locator(`${tid("page-frame-root")}:visible`);
       // The other page saves a secret in its own state.
       const other = await runPage("other-page");
+      assert.equal(await root().getAttribute("data-network"), "off", "a page opens offline");
+      // Scripts run offline only in a web view that keeps them off the network. Anywhere else the
+      // page shows without them and says so, and its button turns the network on to run them.
+      const sealed = (await root().getAttribute("data-scripts")) === "on";
+      if (sealed) {
+        assert.equal(await page().locator(`${tid("page-scripts-off")}:visible`).count(), 0, "scripts run, so no notice");
+      } else {
+        await page().waitForSelector(`${tid("page-scripts-off")}:visible`, { timeout: 10_000 });
+        assert.equal(await other.locator("#out").textContent(), "other");
+        await page().locator(`${tid("page-scripts-network")}:visible`).click();
+        await page().waitForSelector(`${tid("page-frame-root")}[data-network="on"][data-scripts="on"]:visible`, { timeout: 20_000 });
+      }
       assert.deepEqual(JSON.parse(await finished(other)), { secret: "OTHER-SECRET" });
 
       const hostile = await runPage("hostile-page");
-      assert.equal(await page().locator(`${tid("page-frame-root")}:visible`).getAttribute("data-network"), "off", "a page opens offline");
+      assert.equal(await root().getAttribute("data-network"), "off", "a page opens offline");
+      if (!sealed) {
+        // Offline without scripts, the hostile page does nothing and nothing gets out.
+        assert.equal(await root().getAttribute("data-scripts"), "off");
+        assert.equal(await hostile.locator("#out").textContent(), "running");
+        await wait(4_000);
+        assert.deepEqual(leaks, []);
+        return;
+      }
       const text = await finished(hostile);
       const r = JSON.parse(text) as Report;
       const why = (k: string) => `${k}: ${JSON.stringify(r.probes[k])} notes=${JSON.stringify(r.notes)} violations=${JSON.stringify(r.violations)}`;
@@ -250,8 +281,8 @@ describe("panel: Changes, the gate, vault notes, the viewer and quick-open", { t
       assert.deepEqual(await stateOf("other-page.html"), { secret: "OTHER-SECRET" });
       assert.deepEqual(await stateOf("hostile-page.html"), { probe: "ok", n: 1 });
     } finally {
-      tcp.close();
-      udp.close();
+      for (const tcp of tcps) tcp.close();
+      for (const udp of udps) udp.close();
       await shot(page(), OUT, "P5");
     }
   });

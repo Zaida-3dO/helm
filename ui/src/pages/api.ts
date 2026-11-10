@@ -24,6 +24,8 @@ export interface PageSession {
   key: string;
   title: string;
   network: boolean;
+  /** The page's scripts run. False only offline, in a web view that cannot keep them off the network. */
+  scripts: boolean;
   revision: number;
   size: number;
   state: unknown;

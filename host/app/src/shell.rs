@@ -12,11 +12,10 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// The web view's command line. Setting it replaces the ones the web view adds by default, so they
 /// are listed in full: the defaults (no mini menu, no SmartScreen) plus audio that may start
-/// without a click, so the first chime after launch is heard. The last switch keeps WebRTC from
-/// using the machine's own network addresses: with it, a page cannot open a direct UDP path to
-/// anywhere (Helm uses WebRTC nowhere), which closes the one network route a page's content
-/// security policy does not cover.
-pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --force-webrtc-ip-handling-policy=disable_non_proxied_udp";
+/// without a click, so the first chime after launch is heard. WebView2 ignores Chromium's switch
+/// for WebRTC's network policy, so a sealed page's WebRTC is closed by a header the page server
+/// sends instead (`helm_pages::server::OFFLINE_ALLOWLIST`).
+pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required";
 
 /// Emit one event on the tagged channel, to the main window only.
 pub fn emit(app: &AppHandle, event: AppEvent) {
@@ -438,11 +437,10 @@ mod drop_tests {
     }
 
     #[test]
-    fn the_web_view_keeps_its_defaults_and_closes_webrtc() {
+    fn the_web_view_keeps_its_defaults() {
         for part in [
             "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
             "--autoplay-policy=no-user-gesture-required",
-            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
         ] {
             assert!(BROWSER_ARGS.contains(part), "{part}");
         }

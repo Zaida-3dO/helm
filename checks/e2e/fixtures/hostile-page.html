@@ -2,14 +2,15 @@
 <meta charset="utf-8">
 <title>hostile</title>
 <!-- A page that tries everything a sealed page must not manage. The side panel check fills in the
-     two loopback ports it listens on (@TCP@ and @UDP@): any connection or packet that arrives there
-     is a leak. The page writes what it saw into #out and marks it done. -->
+     loopback ports it listens on (@PORTS@), one per attempt: any connection or packet that arrives
+     on one is a leak, and its port names the attempt that got out. The page writes what it saw
+     into #out and marks it done. -->
 <pre id="out">running</pre>
 <script>
 (async () => {
-  const TCP = '@TCP@';
-  const UDP = '@UDP@';
-  const base = 'http://127.0.0.1:' + TCP;
+  const PORTS = @PORTS@;
+  const at = (name) => 'http://127.0.0.1:' + PORTS[name];
+  const ws = (name) => 'ws://127.0.0.1:' + PORTS[name];
   const violations = [];
   document.addEventListener('securitypolicyviolation', (e) => {
     violations.push(e.effectiveDirective + ' ' + String(e.blockedURI).slice(0, 80));
@@ -94,41 +95,41 @@
 
   // 4. The network, offline: fetch, XHR, sockets, beacons, elements, frames, workers, forms.
   await attempt('fetchOutside', () => fetch('https://example.com/'));
-  await attempt('fetchLoopback', () => fetch(base + '/fetch'));
+  await attempt('fetchLoopback', () => fetch(at('fetchLoopback')));
   await attempt('xhrLoopback', () => new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
-    x.open('GET', base + '/xhr');
+    x.open('GET', at('xhrLoopback'));
     x.onload = () => resolve('load');
     x.onerror = () => reject(new Error('xhr refused'));
     x.send();
   }));
   await attempt('webSocket', () => new Promise((resolve, reject) => {
-    const s = new WebSocket('ws://127.0.0.1:' + TCP + '/ws');
+    const s = new WebSocket(ws('webSocket'));
     s.onopen = () => resolve('open');
     s.onerror = () => reject(new Error('socket refused'));
   }));
   await attempt('eventSource', () => new Promise((resolve, reject) => {
-    const s = new EventSource(base + '/es');
+    const s = new EventSource(at('eventSource'));
     s.onopen = () => resolve('open');
     s.onerror = () => reject(new Error('stream refused'));
   }));
-  await note('beacon', () => navigator.sendBeacon(base + '/beacon', 'x'));
-  await attempt('imageLoopback', () => loads('img', (el) => { el.src = base + '/img.png'; }));
-  await attempt('scriptLoopback', () => loads('script', (el) => { el.src = base + '/s.js'; }));
-  await attempt('styleLoopback', () => loads('link', (el) => { el.rel = 'stylesheet'; el.href = base + '/s.css'; }));
-  await note('prefetch', () => element('link', (el) => { el.rel = 'prefetch'; el.href = base + '/prefetch'; }));
-  await note('frameLoopback', () => element('iframe', (el) => { el.src = base + '/frame'; }));
+  await note('beacon', () => navigator.sendBeacon(at('beacon'), 'x'));
+  await attempt('imageLoopback', () => loads('img', (el) => { el.src = at('imageLoopback'); }));
+  await attempt('scriptLoopback', () => loads('script', (el) => { el.src = at('scriptLoopback'); }));
+  await attempt('styleLoopback', () => loads('link', (el) => { el.rel = 'stylesheet'; el.href = at('styleLoopback'); }));
+  await note('prefetch', () => element('link', (el) => { el.rel = 'prefetch'; el.href = at('prefetch'); }));
+  await note('frameLoopback', () => element('iframe', (el) => { el.src = at('frameLoopback'); }));
   await note('frameData', () => element('iframe', (el) => {
     el.src = 'data:text/html,' + encodeURIComponent(
-      '<script>fetch("' + base + '/nested").catch(function(){});' +
-      'new Image().src="' + base + '/nestedimg";<\/script>');
+      '<script>fetch("' + at('frameData') + '").catch(function(){});' +
+      'new Image().src="' + at('frameData') + '";<\/script>');
   }));
   await note('frameSrcdoc', () => element('iframe', (el) => {
-    el.srcdoc = '<script>fetch("' + base + '/srcdoc").catch(function(){});<\/script>';
+    el.srcdoc = '<script>fetch("' + at('frameSrcdoc') + '").catch(function(){});<\/script>';
   }));
   await note('worker', () => new Promise((resolve) => {
     const url = URL.createObjectURL(new Blob(
-      ['fetch("' + base + '/worker").catch(function(){});new WebSocket("ws://127.0.0.1:' + TCP + '/wws");postMessage(1)'],
+      ['fetch("' + at('worker') + '").catch(function(){});new WebSocket("' + ws('worker') + '");postMessage(1)'],
       { type: 'text/javascript' }));
     const w = new Worker(url);
     w.onmessage = () => resolve('ran');
@@ -137,20 +138,35 @@
   }));
   await note('form', () => {
     const f = document.createElement('form');
-    f.action = base + '/form';
+    f.action = at('form');
     f.method = 'post';
     document.body.appendChild(f);
     f.submit();
     return 'submitted';
   });
-  await note('popup', () => String(window.open(base + '/popup')));
-  await note('rtc', async () => {
-    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:127.0.0.1:' + UDP }] });
+  await note('popup', () => String(window.open(at('popup'))));
+  // WebRTC gathers candidates outside every fetch rule: a STUN server over UDP, a TURN server
+  // over TCP, from this document, from a nested frame and through another frame's constructor.
+  const rtc = async (Peer, iceServers) => {
+    if (typeof Peer !== 'function') return 'no RTCPeerConnection';
+    const pc = new Peer({ iceServers });
     pc.createDataChannel('probe');
     await pc.setLocalDescription(await pc.createOffer());
     await pause(2500);
     pc.close();
     return 'offered';
+  };
+  await note('rtcStun', () => rtc(window.RTCPeerConnection, [{ urls: 'stun:127.0.0.1:' + PORTS.rtcStun }]));
+  await note('rtcTurn', () => rtc(window.RTCPeerConnection,
+    [{ urls: 'turn:127.0.0.1:' + PORTS.rtcTurn + '?transport=tcp', username: 'u', credential: 'p' }]));
+  await note('rtcFrame', () => element('iframe', (el) => {
+    el.srcdoc = '<script>(async function(){try{var pc=new RTCPeerConnection({iceServers:[{urls:"stun:127.0.0.1:' +
+      PORTS.rtcFrame + '"}]});pc.createDataChannel("p");await pc.setLocalDescription(await pc.createOffer());}catch(e){}})();<\/script>';
+  }).then(() => pause(2500)));
+  await note('rtcBorrowed', async () => {
+    const f = document.createElement('iframe');
+    document.body.appendChild(f);
+    return rtc(f.contentWindow && f.contentWindow.RTCPeerConnection, [{ urls: 'stun:127.0.0.1:' + PORTS.rtcBorrowed }]);
   });
 
   // 5. What the page is allowed: its own saved state, and nothing of another page's.
@@ -170,6 +186,6 @@
   out.setAttribute('data-done', '1');
 
   // Last, after the result is read: leaving through a link. It must go nowhere.
-  setTimeout(() => { location.href = base + '/nav'; }, 1500);
+  setTimeout(() => { location.href = at('nav'); }, 1500);
 })();
 </script>

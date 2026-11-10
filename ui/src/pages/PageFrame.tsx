@@ -5,7 +5,9 @@
 // the page has an opaque origin and no way to reach this page, Helm's IPC, cookies or storage. It
 // loads from the `helmpage` scheme under a random per-open address. It is offline until the globe
 // is switched on; that switch belongs to this open only (it is not saved) and changing it ends the
-// session and starts another, so the page reloads from its saved state.
+// session and starts another, so the page reloads from its saved state. Where the web view cannot
+// keep an offline page's scripts off the network (the host tells, per open), an offline page is
+// shown without scripts and says so, with the globe as the way to run them.
 //
 // The frame is read and polled only while the tab is shown. A rewrite of the file by an agent
 // shows up as a new revision at the next poll and the frame reloads in place, with its saved
@@ -25,7 +27,7 @@ import type { PageSession, PinnedPage } from './api.ts';
 import { PageBridge } from './bridge.ts';
 import { HandoffDialog } from './HandoffDialog.tsx';
 import type { HandoffChoice, HandoffRequest } from './HandoffDialog.tsx';
-import { checkHandoff, checkLink, checkState, composeHandoff, handoffTitle, PAGE_SANDBOX } from './protocol.ts';
+import { checkHandoff, checkLink, checkState, composeHandoff, handoffTitle, pageSandbox } from './protocol.ts';
 import { pageTheme } from './theme.ts';
 import './pages.css';
 
@@ -351,7 +353,7 @@ export function PageFrame({ api, path, chatId, visible, onTitle }: PageFrameProp
 
   const canLinkHere = Boolean(pin && chatId && pin.chatId !== chatId);
   return (
-    <div className="pg-root" data-testid="page-frame-root" data-network={network ? 'on' : 'off'}>
+    <div className="pg-root" data-testid="page-frame-root" data-network={network ? 'on' : 'off'} data-scripts={session.scripts ? 'on' : 'off'}>
       <div className="pg-toolbar" role="toolbar" aria-label="Page controls">
         <span className="pg-name" title={session.path}>
           {session.title}
@@ -395,6 +397,14 @@ export function PageFrame({ api, path, chatId, visible, onTitle }: PageFrameProp
           HTTPS network enabled for this open. The page can send and receive data over the internet.
         </div>
       )}
+      {!session.scripts && (
+        <div className="pg-notice" data-testid="page-scripts-off">
+          Scripts are off while this page is offline: this version of the web view cannot keep them from reaching the network.{' '}
+          <button type="button" className="pg-link" onClick={() => setNetwork(true)} data-testid="page-scripts-network">
+            Allow network and run scripts
+          </button>
+        </div>
+      )}
       {!network && blocked && (
         <div className="pg-notice" data-testid="page-network-hint">
           The page tried to use the network. Use the globe button to allow it for this open.
@@ -416,7 +426,7 @@ export function PageFrame({ api, path, chatId, visible, onTitle }: PageFrameProp
         className="pg-frame"
         title={session.title}
         src={`${session.url}?r=${frameRev}`}
-        sandbox={PAGE_SANDBOX}
+        sandbox={pageSandbox(session.scripts)}
         referrerPolicy="no-referrer"
         allow=""
         data-testid="page-frame"

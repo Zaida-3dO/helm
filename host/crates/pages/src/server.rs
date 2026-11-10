@@ -25,6 +25,7 @@ use helm_panel::viewer::{self, ReadError};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -99,8 +100,9 @@ fn from_io(e: std::io::Error) -> PageError {
 /// `data:` only. That last rule is also what keeps the page away from the app's own IPC address.
 /// With `network` the same, plus `https:` for loading and `https:` and `wss:` for connections.
 /// Forms, plugins and `<base>` are always off, and the `sandbox` directive makes the document
-/// itself script-only and origin-less even if something loaded it as a top-level page.
-pub fn csp(network: bool) -> String {
+/// itself origin-less even if something loaded it as a top-level page, and script-only when
+/// `scripts` is set (without it nothing on the page runs).
+pub fn csp(network: bool, scripts: bool) -> String {
     const SELF: &str = "'self' http://helmpage.localhost helmpage:";
     let net = if network { " https:" } else { "" };
     let connect = if network {
@@ -119,8 +121,32 @@ pub fn csp(network: bool) -> String {
          worker-src blob:; \
          frame-src blob: data:{net}; \
          object-src 'none'; base-uri 'none'; form-action 'none'; \
-         sandbox allow-scripts"
+         sandbox{}",
+        if scripts { " allow-scripts" } else { "" }
     )
+}
+
+/// The second fence around an offline page, sent with its document: it may connect to its own
+/// session and nowhere else. A content security policy does not cover WebRTC (a page could still
+/// send STUN packets over UDP or reach a TURN server over TCP), nor the connection a frame or a
+/// navigation opens before the policy refuses it; this header does, it also binds the frames a
+/// page makes from `srcdoc`, `data:` and `blob:`, and it leaves WebRTC blocked by default.
+pub const OFFLINE_ALLOWLIST: &str = "(response-origin)";
+
+/// The oldest WebView2 runtime the side panel check has seen enforce [`OFFLINE_ALLOWLIST`]
+/// (Chromium shipped the header in 152; this is the release it was proven on).
+pub const ALLOWLIST_SINCE: u32 = 157;
+
+/// Whether the web view with this version string keeps an offline page's scripts off the
+/// network. Only WebView2 (on Windows) is known to; any other engine, an older runtime or a
+/// version that cannot be read gets `false`, and offline pages then run without scripts.
+pub fn engine_seals_offline_scripts(windows: bool, version: &str) -> bool {
+    windows
+        && version
+            .split('.')
+            .next()
+            .and_then(|m| m.trim().parse::<u32>().ok())
+            .is_some_and(|major| major >= ALLOWLIST_SINCE)
 }
 
 /// The content type of a file served beside a page, by extension; `None` for anything else.
@@ -182,6 +208,9 @@ struct Session {
     dir: PathBuf,
     html: String,
     network: bool,
+    /// The page's scripts run: always with `network`, offline only where the web view enforces
+    /// [`OFFLINE_ALLOWLIST`].
+    scripts: bool,
     stamp: Stamp,
     revision: u64,
     touched: Instant,
@@ -215,6 +244,7 @@ pub struct Opened {
     pub key: String,
     pub title: String,
     pub network: bool,
+    pub scripts: bool,
     pub revision: u64,
     pub size: usize,
 }
@@ -229,6 +259,7 @@ impl Opened {
             "key": self.key,
             "title": self.title,
             "network": self.network,
+            "scripts": self.scripts,
             "revision": self.revision,
             "size": self.size,
         })
@@ -250,6 +281,7 @@ pub struct Status {
 pub struct PageServer {
     roots: PrivateRoots,
     sessions: Mutex<Vec<Session>>,
+    offline_scripts: AtomicBool,
 }
 
 /// Slash-normalised, lower-cased on Windows, without the verbatim prefix: the key a page's saved
@@ -336,7 +368,15 @@ impl PageServer {
         Self {
             roots,
             sessions: Mutex::new(Vec::new()),
+            offline_scripts: AtomicBool::new(false),
         }
+    }
+
+    /// Lets offline pages run their scripts, for a web view that enforces [`OFFLINE_ALLOWLIST`]
+    /// (see [`engine_seals_offline_scripts`]). Off until set: an offline page then runs without
+    /// scripts, since nothing else keeps them from WebRTC. Applies to sessions opened after.
+    pub fn set_offline_scripts(&self, on: bool) {
+        self.offline_scripts.store(on, Ordering::Relaxed);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Session>> {
@@ -433,6 +473,7 @@ impl PageServer {
             key: s.key.clone(),
             title: title_of(&s.path),
             network: s.network,
+            scripts: s.scripts,
             revision: s.revision,
             size: s.html.len(),
         }
@@ -467,6 +508,7 @@ impl PageServer {
             dir,
             html: loaded.html,
             network,
+            scripts: network || self.offline_scripts.load(Ordering::Relaxed),
             stamp: loaded.stamp,
             revision: 1,
             touched: Instant::now(),
@@ -624,12 +666,17 @@ impl PageServer {
             match rest {
                 "" | DOCUMENT_FILE => {
                     let body = document(s);
-                    return page_reply(
+                    let mut r = page_reply(
                         "text/html; charset=utf-8",
-                        Some(csp(s.network)),
+                        Some(csp(s.network, s.scripts)),
                         body.into_bytes(),
                         head,
                     );
+                    if !s.network {
+                        r.headers
+                            .push(("connection-allowlist", OFFLINE_ALLOWLIST.to_string()));
+                    }
+                    return r;
                 }
                 RUNTIME_FILE => {
                     return page_reply(
@@ -786,8 +833,13 @@ mod tests {
         let policy = header(&doc, "content-security-policy").unwrap();
         assert!(policy.contains("connect-src blob: data:;"));
         assert!(!policy.contains("https:") && !policy.contains("wss:"));
-        // Scripts only: no downloads, which would drop files on the PC without asking.
-        assert!(policy.ends_with("sandbox allow-scripts"));
+        // Until the web view is known to enforce the allowlist, an offline page runs no scripts.
+        assert!(!o.scripts && o.to_json()["scripts"] == json!(false));
+        assert!(policy.ends_with("; sandbox"));
+        assert_eq!(
+            header(&doc, "connection-allowlist"),
+            Some(OFFLINE_ALLOWLIST)
+        );
         assert!(policy.contains("form-action 'none'") && policy.contains("base-uri 'none'"));
         assert_eq!(header(&doc, "cache-control"), Some("no-store"));
         assert_eq!(header(&doc, "x-content-type-options"), Some("nosniff"));
@@ -799,14 +851,37 @@ mod tests {
             .body
             .is_empty());
 
-        // Network on widens loading and connections, nothing else.
-        let net = s.open(&dir.join("p.html").to_string_lossy(), true).unwrap();
-        let npol = header(
-            &s.respond("GET", &format!("/{}/index.html", net.session)),
-            "content-security-policy",
+        // Where it is enforced, the next offline open runs its scripts, still behind the allowlist;
+        // an open already made keeps what it had. Scripts only: no downloads, which would drop
+        // files on the PC without asking.
+        s.set_offline_scripts(true);
+        let sealed = s
+            .open(&dir.join("p.html").to_string_lossy(), false)
+            .unwrap();
+        let sdoc = s.respond("GET", &format!("/{}/index.html", sealed.session));
+        assert!(sealed.scripts);
+        assert!(header(&sdoc, "content-security-policy")
+            .unwrap()
+            .ends_with("; sandbox allow-scripts"));
+        assert_eq!(
+            header(&sdoc, "connection-allowlist"),
+            Some(OFFLINE_ALLOWLIST)
+        );
+        assert_eq!(s.respond("GET", &format!("/{}/", o.session)).body, doc.body);
+        assert!(header(
+            &s.respond("GET", &format!("/{}/", o.session)),
+            "content-security-policy"
         )
         .unwrap()
-        .to_owned();
+        .ends_with("; sandbox"));
+
+        // Network on widens loading and connections and always runs scripts, nothing else.
+        s.set_offline_scripts(false);
+        let net = s.open(&dir.join("p.html").to_string_lossy(), true).unwrap();
+        let ndoc = s.respond("GET", &format!("/{}/index.html", net.session));
+        let npol = header(&ndoc, "content-security-policy").unwrap().to_owned();
+        assert!(net.scripts && npol.ends_with("; sandbox allow-scripts"));
+        assert_eq!(header(&ndoc, "connection-allowlist"), None);
         assert!(npol.contains("connect-src blob: data: https: wss:;"));
         assert!(npol.contains("form-action 'none'") && !npol.contains("http: "));
 
@@ -986,8 +1061,25 @@ mod tests {
 
     #[test]
     fn the_policy_is_closed_by_default_and_opens_only_https_and_wss() {
-        let off = csp(false);
-        let on = csp(true);
+        let off = csp(false, true);
+        let on = csp(true, true);
+        assert_eq!(csp(false, false), off.replace(" allow-scripts", ""));
+        // Offline scripts run only in WebView2 from the runtime the allowlist was proven on.
+        for (windows, version, want) in [
+            (true, "157.0.4341.42", true),
+            (true, "160.1", true),
+            (true, "156.0.3000.1", false),
+            (true, "", false),
+            (true, "unknown", false),
+            (false, "2.48.0", false),
+            (false, "157.0", false),
+        ] {
+            assert_eq!(
+                engine_seals_offline_scripts(windows, version),
+                want,
+                "{windows} {version}"
+            );
+        }
         for p in [&off, &on] {
             assert!(p.starts_with("default-src 'none';"));
             assert!(p.contains("object-src 'none'") && p.contains("worker-src blob:;"));

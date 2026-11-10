@@ -10,6 +10,7 @@ import {
   MARK,
   MAX_PENDING,
   PAGE_SANDBOX,
+  pageSandbox,
   parseMessage,
 } from './protocol.ts';
 import { buildTheme, plainValue, THEME_VARIABLES } from './theme.ts';
@@ -97,6 +98,8 @@ test('links and saved state from a page: web links only, never Helm’s own host
 
 test('the sandbox gives a page scripts and nothing that could reach Helm or the disk', () => {
   assert.deepEqual(PAGE_SANDBOX.split(' '), ['allow-scripts']);
+  assert.equal(pageSandbox(true), PAGE_SANDBOX);
+  assert.equal(pageSandbox(false), '', 'no scripts: nothing allowed at all');
   for (const never of ['allow-same-origin', 'allow-downloads', 'allow-top-navigation', 'allow-popups', 'allow-forms', 'allow-modals']) {
     assert.ok(!PAGE_SANDBOX.includes(never), never);
   }

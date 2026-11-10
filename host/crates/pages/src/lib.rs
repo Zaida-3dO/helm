@@ -16,6 +16,10 @@
 //!   reading the app's page or any other page.
 //! - Its policy (sent with the page, see [`server::csp`]) allows no connection except `blob:` and
 //!   `data:`, which also shuts the app's IPC transport. Reaching the network is a per-open switch.
+//! - Offline, a second header ([`server::OFFLINE_ALLOWLIST`]) keeps it to its own session, WebRTC
+//!   and the connections frames and navigations open included, which the policy does not cover.
+//!   Its scripts run offline only in a web view known to enforce that header; anywhere else an
+//!   offline page is shown without scripts until its network is switched on.
 //! - It cannot call an op: ops answer only the main window, and the page is neither the main window
 //!   nor on the app's origin. Everything it may ask for goes through the renderer's bridge, which
 //!   knows the page only by the frame it created.

@@ -255,6 +255,12 @@ fn run_app(
     let media_for_scheme = media.clone();
     // Local HTML pages run sealed in the side panel; their own scheme serves each open session.
     let pages = Arc::new(helm_pages::PageServer::new(private_roots));
+    // An offline page's scripts run only where the web view enforces the header that keeps them
+    // off WebRTC; anywhere else such a page is shown without scripts.
+    pages.set_offline_scripts(helm_pages::server::engine_seals_offline_scripts(
+        cfg!(windows),
+        &tauri::webview_version().unwrap_or_default(),
+    ));
     let pages_for_scheme = pages.clone();
     let app = tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol(

@@ -79,7 +79,7 @@ export interface LaunchOptions {
 
 /** The app's own web view switches (`BROWSER_ARGS` in host/app/src/shell.rs). */
 export const APP_BROWSER_ARGS =
-  "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --force-webrtc-ip-handling-policy=disable_non_proxied_udp";
+  "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required";
 
 export async function launchApp(profileDir: string, opts: LaunchOptions = {}): Promise<App> {
   const fake = opts.fake !== false;
