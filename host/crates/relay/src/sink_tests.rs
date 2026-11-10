@@ -1040,6 +1040,7 @@ async fn a_saved_model_on_a_switched_off_server_is_left_out() {
 
 use crate::client::{VoiceSink, VoiceTurn};
 use crate::voice;
+use crate::voice_heard::{self, HeardStore};
 use crate::voice_sink as vs;
 
 fn owed_of(out: &[vs::Up]) -> vs::Owed {
@@ -1166,8 +1167,17 @@ fn vctx(e: &Env, file: voice::PolicyFile) -> vs::Ctx {
 }
 
 async fn vplace(c: &vs::Ctx, t: VoiceTurn, now: i64) -> Result<vs::Placed, String> {
-    let c = c.clone();
-    tokio::task::spawn_blocking(move || vs::place(&c, &t, &[], now))
+    vplace_with(c, t, &[], now).await
+}
+
+async fn vplace_with(
+    c: &vs::Ctx,
+    t: VoiceTurn,
+    notes: &[String],
+    now: i64,
+) -> Result<vs::Placed, String> {
+    let (c, notes) = (c.clone(), notes.to_vec());
+    tokio::task::spawn_blocking(move || vs::place(&c, &t, &notes, now))
         .await
         .unwrap()
 }
@@ -1279,6 +1289,44 @@ async fn voice_turns_enter_one_chat_with_origin_voice_a_primer_once_and_a_new_ch
         "[Voice · chat: read on screen, formatting fine · continuing what they just said]\n(sent 5 min ago, queued while Helm was offline)\nSynthetic question two."
     );
 
+    // What the phone did not hear rides along on the next message, once, and only in the
+    // conversation it belongs to.
+    set_idle(&e, &chat);
+    let store = HeardStore::at(&e.dir.path().join("prof"));
+    let spoken = "Sure thing, the build finished and everything looks fine today.";
+    store.sent("rA", &conversation, spoken, 5, t0 + 70_000);
+    store.sent("rB", "another-conversation", "Elsewhere.", 1, t0 + 70_000);
+    store.report(
+        &[
+            json!({"reply": "rA", "state": "partial", "sentence": 2, "at": 1}),
+            json!({"reply": "rB", "state": "none", "at": 1}),
+        ],
+        t0 + 80_000,
+    );
+    let pending = store.pending(Some(&conversation), t0 + 90_000);
+    let p = vplace_with(
+        &c,
+        vturn("t2b", "Synthetic question two b.", "conversation"),
+        &pending.lines,
+        t0 + 90_000,
+    )
+    .await
+    .unwrap();
+    assert_eq!(vchat(&p), (chat.clone(), conversation.clone()));
+    store.clear(&pending.ids, t0 + 90_000);
+    let carried = subs(&e.db, &chat)
+        .into_iter()
+        .find(|r| r.0 == voice::submission_id("t2b"))
+        .unwrap();
+    assert_eq!(
+        carried.4,
+        "[Voice · conversation: speak it, short, no markup]\n[Not heard by the user: your reply \"Sure thing, the build finished and everything looks…\" stopped after sentence 2 of 5]\nSynthetic question two b."
+    );
+    assert_eq!(
+        store.pending(Some(&conversation), t0 + 91_000),
+        voice_heard::Pending::default()
+    );
+
     // Idle for longer than the limit: a new chat and conversation, and the primer again. A
     // limit the user has set applies from the next turn.
     set_idle(&e, &chat);
@@ -1385,6 +1433,20 @@ async fn the_voice_sink_delivers_only_once_wired_and_stop_presence_and_fresh_act
     assert_eq!(
         (live.presence_live, live.presence_mode),
         (true, voice::Mode::Chat)
+    );
+    // What the phone reports having heard is kept for the next message, and wakes nothing: a
+    // report about an answer this PC sent counts, one about another does not.
+    let store = HeardStore::at(&e.dir.path().join("prof"));
+    let said = helm_core::now_ms();
+    store.sent("rX", &live.conversation, "Hello there, friend.", 3, said);
+    v.heard(vec![
+        json!({"reply": "rX", "state": "partial", "sentence": 2, "at": 1}),
+        json!({"reply": "rY", "state": "none", "at": 1}),
+    ])
+    .await;
+    assert_eq!(
+        store.pending(Some(&live.conversation), said).lines,
+        ["[Not heard by the user: your reply \"Hello there, friend.\" stopped after sentence 2 of 3]"]
     );
     v.fresh().await;
     assert!(voice::load_tag(&tag_path).is_none());
@@ -1549,7 +1611,10 @@ fn things_to_show_go_up_before_the_answer_and_stay_claimed_until_it_is_sent() {
         markdown: None,
         url: Some("https://example.com".into()),
     };
-    let mut out = vs::Outbox::new(wire.clone(), shown.clone(), "chat1".into());
+    let heard_dir = tempfile::tempdir().unwrap();
+    let heard = HeardStore::at(heard_dir.path());
+    let mut out = vs::Outbox::new(wire.clone(), shown.clone(), "chat1".into())
+        .with_heard(heard.clone());
     let live = vs::Live {
         turn: Some("t1".into()),
         conversation: "c1".into(),
@@ -1650,6 +1715,25 @@ fn things_to_show_go_up_before_the_answer_and_stay_claimed_until_it_is_sent() {
     out.status(&Phone, &vs::Live::default(), "Thinking");
     assert_eq!(sent().len(), 7);
     assert_eq!(sent()[6], json!({ "status": "Thinking", "turn": "t1" }));
+
+    // Every spoken answer that is offered is noted for the phone's report, under the conversation
+    // it went up in: the first (offered twice, sent once) and the next. An answer read on screen
+    // (the news above went up in chat mode), one that never went up (`[quiet]`, or not for the
+    // phone) and one this PC never made are not.
+    let reports = [
+        json!({"reply": "r1", "state": "none", "at": 1}),
+        json!({"reply": "r2", "state": "all", "at": 1}),
+        json!({"reply": "r3", "state": "none", "at": 1}),
+        json!({"reply": "r4", "state": "none", "at": 1}),
+    ];
+    assert_eq!(heard.report(&reports, 20), 2);
+    let here = heard.pending(Some("c1"), 20);
+    assert_eq!(
+        here.lines,
+        ["[Not heard by the user: your reply \"Here it is.\" was never played]"]
+    );
+    assert_eq!(here.ids, ["r1"]);
+    assert!(heard.pending(Some("c2"), 20).lines.is_empty());
 }
 
 fn a_note(chat: &str) -> voice_watch::Note {

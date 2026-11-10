@@ -77,6 +77,7 @@ pub mod voice;
 pub mod voice_sink;
 pub mod voice_show;
 pub mod voice_watch;
+pub mod voice_heard;
 
 pub use agent_settings::settings_extension;
 

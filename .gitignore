@@ -18,3 +18,5 @@ Thumbs.db
 !.vscode/extensions.json
 # Tauri generated schemas
 host/app/gen/
+# Voice benchmark results (a run's replies and timings)
+checks/voice-bench/out/

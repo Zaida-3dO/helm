@@ -36,6 +36,7 @@ use crate::notify::title_of;
 use crate::sink::{chat_facts, max_row, plain_path, snapshot, RealPort, Snap, STATUS_GAP_MS};
 use crate::telegram::{cut_chars, ChatPort};
 use crate::voice::{self, Mode, Reply, TagPolicy, WatchLevel, VOICE_ORIGIN};
+use crate::voice_heard::HeardStore;
 use crate::voice_show::{Attachment, Shown};
 use crate::voice_watch::{Note, NOTE_PREFIX};
 use helm_chats::submit::{host_send, HostSend};
@@ -512,6 +513,9 @@ pub struct Outbox {
     /// The things taken from the queue for the answer being sent, by its reply id. They stay
     /// claimed until the answer is confirmed sent, so a resend carries the same ones.
     claimed: Option<(String, Vec<Attachment>)>,
+    /// Where each answer is noted before it goes up, so the phone's report of how much of it was
+    /// heard can be matched to it.
+    heard: Option<HeardStore>,
 }
 
 impl Outbox {
@@ -521,7 +525,14 @@ impl Outbox {
             shown,
             chat,
             claimed: None,
+            heard: None,
         }
+    }
+
+    /// Note every spoken answer in `heard` as it goes up.
+    pub fn with_heard(mut self, heard: HeardStore) -> Self {
+        self.heard = Some(heard);
+        self
     }
 
     /// The working line, for the phone's own turn only.
@@ -567,6 +578,15 @@ impl Outbox {
             }
         }
         reply.attachments = things.len() as u8;
+        if let Some(heard) = &self.heard {
+            heard.sent(
+                &reply.id,
+                &reply.conversation,
+                &reply.text,
+                reply.sentences.len(),
+                now,
+            );
+        }
         let sent = self.up.reply(&reply);
         if sent {
             self.claimed = None;
@@ -974,7 +994,8 @@ impl ChatVoice {
         let task = c.handle.spawn(mirror(
             c.rt.clone(),
             c.db.clone(),
-            Outbox::new(up, self.shown.clone(), chat.to_owned()),
+            Outbox::new(up, self.shown.clone(), chat.to_owned())
+                .with_heard(HeardStore::at(&self.profile_dir)),
             baseline,
             self.live.clone(),
             c.tag_path.clone(),
@@ -992,10 +1013,22 @@ impl VoiceSink for ChatVoice {
             let c = self.ctx()?;
             let c2 = c.clone();
             let t2 = turn.clone();
-            let placed =
-                tokio::task::spawn_blocking(move || place(&c2, &t2, &[], helm_core::now_ms()))
-                    .await
-                    .map_err(|_| "The delivery did not finish.".to_owned())??;
+            let heard = HeardStore::at(&self.profile_dir);
+            let placed = tokio::task::spawn_blocking(move || {
+                let now = helm_core::now_ms();
+                // What the phone did not play of the answers so far rides along with this
+                // message, once. A message that opens a new conversation carries nothing.
+                let conversation = voice::current(&c2.tag_path, &FactsOnly(&c2.db), &c2.policy, now)
+                    .map(|t| t.conversation);
+                let notes = heard.pending(conversation.as_deref(), now);
+                let placed = place(&c2, &t2, &notes.lines, now)?;
+                if matches!(placed, Placed::Sent { .. }) {
+                    heard.clear(&notes.ids, now);
+                }
+                Ok::<_, String>(placed)
+            })
+            .await
+            .map_err(|_| "The delivery did not finish.".to_owned())??;
             let Placed::Sent {
                 chat,
                 baseline,
@@ -1033,6 +1066,16 @@ impl VoiceSink for ChatVoice {
             {
                 log::warn!("relay: stopping a voice turn failed: {}", e.message);
             }
+        })
+    }
+
+    fn heard<'a>(&'a self, reports: Vec<Value>) -> BoxFut<'a, ()> {
+        Box::pin(async move {
+            // Kept for the next message; the chat is never woken for a report.
+            let store = HeardStore::at(&self.profile_dir);
+            let _ =
+                tokio::task::spawn_blocking(move || store.report(&reports, helm_core::now_ms()))
+                    .await;
         })
     }
 
