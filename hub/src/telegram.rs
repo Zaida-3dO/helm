@@ -322,8 +322,11 @@ pub fn parse_allowed(spec: &str) -> Result<Vec<i64>, String> {
     parse_allowed_people(spec).map(|(ids, _)| ids)
 }
 
+/// Telegram user ids, and the ones that name a person.
+pub type AllowedPeople = (Vec<i64>, Vec<(i64, String)>);
+
 /// `id[:person],...`: every id, and the ones that name a person.
-pub fn parse_allowed_people(spec: &str) -> Result<(Vec<i64>, Vec<(i64, String)>), String> {
+pub fn parse_allowed_people(spec: &str) -> Result<AllowedPeople, String> {
     const BAD: &str = "HUB_TELEGRAM_ALLOWED_USERS must be numeric user ids, each optionally \
         followed by :person";
     let (mut ids, mut people) = (Vec::new(), Vec::new());
@@ -1878,7 +1881,12 @@ impl Bridge {
             | Upstream::VoiceStatus { .. }
             | Upstream::VoiceAttachment(_)
             | Upstream::VoiceFinal(_)
-            | Upstream::VoiceNotify(_) => {}
+            | Upstream::VoiceNotify(_)
+            | Upstream::Device { .. }
+            | Upstream::Dev { .. }
+            | Upstream::DevPush { .. }
+            | Upstream::KnPull { .. }
+            | Upstream::KnPut { .. } => {}
         }
     }
 

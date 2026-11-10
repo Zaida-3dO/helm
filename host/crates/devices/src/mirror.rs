@@ -110,6 +110,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// How this PC turns hub people into profiles (the profiles crate supplies it): creates the ones
 /// that are missing, links the ones that match, never deletes. `true` when anything changed.
+#[allow(clippy::type_complexity)]
 pub struct PeopleSync(pub Arc<dyn Fn(&Database, &[PersonInfo]) -> bool + Send + Sync>);
 
 impl PeopleSync {
@@ -1650,7 +1651,7 @@ pub fn devices_view(conn: &Connection, line_up: bool) -> rusqlite::Result<Value>
         .unwrap_or(true);
     let mut list = load_devices(conn).unwrap_or_default();
     list.retain(|d| d.uid != self_uid && !d.is_self);
-    list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    list.sort_by_key(|a| a.name.to_lowercase());
     let mut out = vec![json!({
         "uid": self_uid,
         "name": self_name,

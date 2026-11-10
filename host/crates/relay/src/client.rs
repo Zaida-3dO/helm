@@ -1043,10 +1043,11 @@ mod tests {
                     .contains("only available from the hub's Remote page"));
             }
         }
-        let ran = exec.ran.lock().unwrap();
-        assert_eq!(ran.len(), 2, "only the stamped call ran");
-        assert!(ran[1].1.remote && ran[1].1.tool == "app_list_waiting");
-        drop(ran);
+        {
+            let ran = exec.ran.lock().unwrap();
+            assert_eq!(ran.len(), 2, "only the stamped call ran");
+            assert!(ran[1].1.remote && ran[1].1.tool == "app_list_waiting");
+        }
 
         // Telegram: delivered, then acknowledged.
         ws.send(Message::Text(
@@ -1293,7 +1294,10 @@ mod tests {
         ))
         .await
         .unwrap();
-        assert_eq!(next(&mut ws).await, json!({"type": "voice_ack", "id": "t1"}));
+        assert_eq!(
+            next(&mut ws).await,
+            json!({"type": "voice_ack", "id": "t1"})
+        );
         assert_eq!(
             voice.got.lock().unwrap()[0],
             VoiceTurn {
@@ -1315,7 +1319,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         voice.refuse.store(false, Ordering::SeqCst);
         ws.send(send(again)).await.unwrap();
-        assert_eq!(next(&mut ws).await, json!({"type": "voice_ack", "id": "t2"}));
+        assert_eq!(
+            next(&mut ws).await,
+            json!({"type": "voice_ack", "id": "t2"})
+        );
         assert_eq!(voice.got.lock().unwrap().len(), 3);
 
         // A resend that arrives while the first is still being delivered is dropped.
@@ -1327,7 +1334,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(voice.got.lock().unwrap().len(), 4);
         voice.release.notify_one();
-        assert_eq!(next(&mut ws).await, json!({"type": "voice_ack", "id": "t3"}));
+        assert_eq!(
+            next(&mut ws).await,
+            json!({"type": "voice_ack", "id": "t3"})
+        );
 
         // The rest reach the sink and are never answered.
         for f in [
@@ -1365,8 +1375,14 @@ mod tests {
         );
         assert!(h.voice_reply(&reply));
         let f = next(&mut ws).await;
-        assert_eq!((f["type"].as_str(), f["id"].as_str()), (Some("voice_final"), Some("r1")));
-        assert_eq!(f["sentences"][1], json!({"n": 2, "text": "Want the details?"}));
+        assert_eq!(
+            (f["type"].as_str(), f["id"].as_str()),
+            (Some("voice_final"), Some("r1"))
+        );
+        assert_eq!(
+            f["sentences"][1],
+            json!({"n": 2, "text": "Want the details?"})
+        );
         reply.turn = None;
         assert!(h.voice_reply(&reply));
         assert_eq!(next(&mut ws).await["type"], "voice_notify");

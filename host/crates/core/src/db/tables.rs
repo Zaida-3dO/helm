@@ -123,6 +123,9 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("agent_feedback", Data),
     ("feedback_items", Tool),
     ("feedback_entries", Tool),
+    // A feedback item's history and its soft deletes, written through app_update_feedback.
+    ("feedback_events", Tool),
+    ("feedback_deleted", Tool),
     // Usage: the last plan-usage reading.
     ("plan_usage", Data),
     // Item links: which chats work on which board item. Stored only in Helm.
@@ -196,6 +199,14 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     (
         "device_self",
         UserOnly("This PC's device name is yours to set."),
+    ),
+    // Sealed pages: pins are made through app_pin_page; a page's saved state is its own.
+    ("pinned_pages", Tool),
+    ("page_state", Data),
+    // Dictation: which speech-to-text server the microphone button sends audio to.
+    (
+        "dictation_settings",
+        UserOnly("Where your voice is sent for dictation is yours to set."),
     ),
 ];
 

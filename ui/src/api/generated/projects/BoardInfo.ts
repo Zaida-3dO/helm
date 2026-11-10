@@ -29,7 +29,7 @@ completed: boolean,
 /**
  * A local override (name or icon) is in force.
  */
-editedLocally: boolean,
+editedLocally: boolean, 
 /**
  * A rename made in Helm has not reached the board yet; it is sent again after the next sync.
  */

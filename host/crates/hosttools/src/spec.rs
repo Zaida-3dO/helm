@@ -7,7 +7,7 @@ use serde_json::Value;
 pub const PREFIX: &str = "app_";
 /// Longest name after the prefix.
 pub const MAX_NAME_TAIL: usize = 60;
-//// The longest tool name, in bytes, accepted anywhere one enters: a host tool's own name, the
+/// The longest tool name, in bytes, accepted anywhere one enters: a host tool's own name, the
 /// name a worker asks to run, and (in the worker) a name an MCP server offers. A longer name is
 /// refused whole rather than cut, and is never echoed back.
 pub const MAX_TOOL_NAME_BYTES: usize = 256;

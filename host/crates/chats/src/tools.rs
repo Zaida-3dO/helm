@@ -463,7 +463,7 @@ fn list_chats(ctx: &ToolCtx, a: Value) -> ToolResult {
                     .into_iter()
                     .map(|m| (m.meta["updatedAt"].as_i64().unwrap_or(0), Cand::Mirror(m))),
             );
-            cands.sort_by(|a, b| b.0.cmp(&a.0));
+            cands.sort_by_key(|c| std::cmp::Reverse(c.0));
             let mut out = Vec::new();
             let mut skipped = 0i64;
             let scope = owner_scope(tx, profile.as_deref(), &caller);
@@ -609,8 +609,9 @@ async fn read_mirror_chat(
         for r in page["messages"].as_array().into_iter().flatten().rev() {
             let role = r["role"].as_str().unwrap_or("");
             let text = r["text"].as_str().unwrap_or("");
-            let kept = (role == "user" || role == "assistant" || (include_tools && role == "toolResult"))
-                && (!text.is_empty() || role == "toolResult");
+            let kept =
+                (role == "user" || role == "assistant" || (include_tools && role == "toolResult"))
+                    && (!text.is_empty() || role == "toolResult");
             if !kept {
                 continue;
             }
@@ -1389,11 +1390,9 @@ fn flag_attention(ctx: &ToolCtx, a: Value, limits: &crate::flags::FlagLimits) ->
     let (filed, muted) = rt
         .db()
         .write(|tx| {
-            Ok::<_, rusqlite::Error>(
-                crate::flags::file(tx, &chat, &question, &reason, priority, now)?
-                    .map(|f| crate::mute::is_muted(tx, &chat).map(|m| (f, m)))
-                    .transpose()?,
-            )
+            crate::flags::file(tx, &chat, &question, &reason, priority, now)?
+                .map(|f| crate::mute::is_muted(tx, &chat).map(|m| (f, m)))
+                .transpose()
         })
         .map_err(|e| ToolError::maybe(e.to_string()))?
         .ok_or_else(|| refuse("This chat no longer exists."))?;
@@ -1489,7 +1488,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::write(
             "app_create_chat",
-            format!("Start a new chat on a board and send it a first message (framed like app_send_message). projectId is the board to show it on: a board's id from app_list_projects, or the projectId in a chat's details; it defaults to this chat's own board, and a folder project's id is refused. When this chat is on the default board, or the user is talking to it from Telegram or by voice, projectId is required and the refusal lists the open boards. {MUTED_ARG} You made the chat, so you may unmute it later (or mute it) with app_update_chat; the user can always change it. Your own chat id, for the new chat to report back to, is the chatId app_this_chat returns. The chat runs in the board's folder, or in folder (an absolute path) when you name another. It nests under this chat by default; pass parentChatId to nest it under another chat on the same board, or null for top level. Chats nest at most three deep: a new chat under a chat at the deepest level goes beside it instead (under that chat's parent). Omitted model and effort use the new-chat defaults. model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>), whichever provider this chat itself runs on.{REPORT_BACK}{LINKS}{EXPLICIT}"),
+            format!("Start a new chat on a board and send it a first message (framed like app_send_message). projectId is the board to show it on: a board's id from app_list_projects, or the projectId in a chat's details; it defaults to this chat's own board, and a folder project's id is refused. When this chat is on the default board, or the user is talking to it from Telegram or by voice, projectId is required and the refusal lists the open boards. Pass muted for internal chats (see its description); you can change it later with app_update_chat. Your own chat id, for the new chat to report back to, is the chatId app_this_chat returns. The chat runs in the board's folder, or in folder (an absolute path) when you name another. It nests under this chat by default; pass parentChatId to nest it under another chat on the same board, or null for top level. Chats nest at most three deep: a new chat under a chat at the deepest level goes beside it instead (under that chat's parent). Omitted model and effort use the new-chat defaults. model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>), whichever provider this chat itself runs on.{REPORT_BACK}{LINKS}{EXPLICIT}"),
             obj(
                 json!({
                     "projectId": {"type": "string", "description": "The board to show the chat on; defaults to this chat's board."},
@@ -2151,7 +2150,7 @@ mod tests {
         let quiet_crew = id(create(&h, &t, &a, json!({"muted": true})).await);
         assert_eq!(
             h.col("SELECT chat_id FROM chat_mutes"),
-            [quiet_crew.clone()]
+            std::slice::from_ref(&quiet_crew)
         );
         assert_eq!(made(&quiet_crew, "c.created_by_chat"), a);
         assert_eq!(made(&c1, "c.created_by_chat"), a);
@@ -2347,7 +2346,7 @@ mod tests {
         assert!(rows().is_empty());
         let res = mute(&b, true).await;
         assert_eq!(res["result"]["muted"], true, "{res}");
-        assert_eq!(rows(), [a.clone()]);
+        assert_eq!(rows(), std::slice::from_ref(&a));
         let me = call(&h, &t, &a, "app_this_chat", json!({})).await;
         assert_eq!(me["result"]["muted"], true, "{me}");
         let res = mute(&b, false).await;

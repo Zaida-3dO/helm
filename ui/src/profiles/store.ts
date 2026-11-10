@@ -16,7 +16,7 @@ import {
   type Sharing,
 } from '../api/profiles.ts';
 import { hubOps } from '../api/hub.ts';
-import { belongsTo, householdTargets } from './model.ts';
+import { belongsTo, householdTargets, lastSeenMs } from './model.ts';
 
 /** The chat record fields the store reads off a `chat` event. */
 interface ChatSighting {
@@ -249,7 +249,7 @@ export class ProfilesStore {
           machineId: t.machine.id,
           machineName: t.machine.name,
           online: t.machine.online,
-          lastSeen: t.machine.lastSeen,
+          lastSeen: lastSeenMs(t.machine.lastSeen),
           sharing: t.machine.sharing,
           chats: prev?.chats ?? [],
           note: null,

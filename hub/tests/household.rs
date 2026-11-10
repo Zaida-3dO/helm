@@ -128,6 +128,17 @@ async fn connect(hub: &Hub, token: &str) -> Result<Ws, u16> {
 
 async fn next_json(ws: &mut Ws) -> Value {
     loop {
+        let f = next_any(ws).await;
+        // The hub tells every line which devices are up whenever one joins or leaves; the
+        // household checks below are about the frames that follow a call, not that list.
+        if f["type"] != "devices" {
+            return f;
+        }
+    }
+}
+
+async fn next_any(ws: &mut Ws) -> Value {
+    loop {
         let m = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
             .expect("a frame within 5 s")
@@ -163,10 +174,22 @@ async fn closed(ws: &mut Ws, within: Duration) -> bool {
     tokio::time::timeout(within, wait).await.is_ok()
 }
 
+/// Nothing but `devices` lists arrives for 250 ms.
 async fn quiet(ws: &mut Ws) -> bool {
-    tokio::time::timeout(Duration::from_millis(250), ws.next())
-        .await
-        .is_err()
+    let until = tokio::time::Instant::now() + Duration::from_millis(250);
+    loop {
+        match tokio::time::timeout_at(until, ws.next()).await {
+            Err(_) => return true,
+            Ok(Some(Ok(Message::Text(t)))) => {
+                let f: Value = serde_json::from_str(t.as_str()).unwrap();
+                if f["type"] != "devices" {
+                    return false;
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(_) => return false,
+        }
+    }
 }
 
 async fn send_json(ws: &mut Ws, v: Value) {
@@ -508,8 +531,7 @@ async fn telegram_goes_to_each_persons_own_helm_and_replies_come_back_to_them_on
     let (ann, bea) = (client("Ann", "desk"), client("Bea", "laptop"));
     let (lines, mut upstream) = Lines::new(registry.clone());
     let lines = Arc::new(lines);
-    let (ann_line, bea_line): (Arc<Line>, Arc<Line>) =
-        (lines.line_for(&ann), lines.line_for(&bea));
+    let (ann_line, bea_line): (Arc<Line>, Arc<Line>) = (lines.line_for(&ann), lines.line_for(&bea));
     let (tx_o, mut rx_o) = mpsc::unbounded_channel();
     let (tx_t, mut rx_t) = mpsc::unbounded_channel();
     ann_line.attach(tx_o);
@@ -592,7 +614,7 @@ async fn telegram_goes_to_each_persons_own_helm_and_replies_come_back_to_them_on
 /// Read frames until one of type `ty` arrives; the others (welcome, device lists) are skipped.
 async fn next_of(ws: &mut Ws, ty: &str) -> Value {
     loop {
-        let f = next_json(ws).await;
+        let f = next_any(ws).await;
         if f["type"] == ty {
             return f;
         }
@@ -633,12 +655,8 @@ async fn devices_see_each_other_and_calls_pushes_and_refusals_pass_between_them(
     let (mut bea, bea_person, _) = join(&hub, &bea_t).await;
     let (mut kit, _, _) = join(&hub, &kit_t).await;
     let (mut cy, _, _) = join(&hub, &cy_t).await;
-    let announce = |uid: &str, name: &str, run: bool| {
-        json!({ "type": "device", "uid": uid, "name": name, "run": run })
-    };
-    let call = |id: Value, to: &str, op: &str, args: Value| {
-        json!({ "type": "dev", "id": id, "to": to, "op": op, "args": args })
-    };
+    let announce = |uid: &str, name: &str, run: bool| json!({ "type": "device", "uid": uid, "name": name, "run": run });
+    let call = |id: Value, to: &str, op: &str, args: Value| json!({ "type": "dev", "id": id, "to": to, "op": op, "args": args });
     let code = |r: &Value| r["error"]["code"].as_str().unwrap_or("none").to_owned();
 
     // Two people's devices appear on both lines, each marked on its own; a token without the
@@ -746,9 +764,16 @@ async fn devices_see_each_other_and_calls_pushes_and_refusals_pass_between_them(
     // The hub's own refusals: no such device, too large, no peer scope, device not announced.
     send_json(&mut bea, call(json!("e1"), NOBODY, "hello", json!({}))).await;
     let r = next_of(&mut bea, "dev_result").await;
-    assert_eq!((r["id"].as_str(), code(&r).as_str()), (Some("e1"), "offline"));
+    assert_eq!(
+        (r["id"].as_str(), code(&r).as_str()),
+        (Some("e1"), "offline")
+    );
     let pad = "x".repeat(1024 * 1024 + 10);
-    send_json(&mut bea, call(json!("e2"), DESK, "hello", json!({ "pad": pad }))).await;
+    send_json(
+        &mut bea,
+        call(json!("e2"), DESK, "hello", json!({ "pad": pad })),
+    )
+    .await;
     assert_eq!(code(&next_of(&mut bea, "dev_result").await), "too_large");
     send_json(&mut kit, call(json!("k1"), DESK, "hello", json!({}))).await;
     assert_eq!(code(&next_of(&mut kit, "dev_result").await), "scope");
@@ -808,7 +833,10 @@ async fn devices_see_each_other_and_calls_pushes_and_refusals_pass_between_them(
 async fn knowledge_files_sync_through_the_hub_with_a_conflict_on_a_stale_base() {
     let hub = start().await;
     let all = DEFAULT_PAIRED_SCOPES;
-    let (ann_t, bea_t) = (add(&hub, "Ann", "desk", all), add(&hub, "Bea", "laptop", all));
+    let (ann_t, bea_t) = (
+        add(&hub, "Ann", "desk", all),
+        add(&hub, "Bea", "laptop", all),
+    );
     let kit_t = add(&hub, "Kit", "pc", "relay");
     let (mut ann, _, _) = join(&hub, &ann_t).await;
     let (mut bea, bea_person, _) = join(&hub, &bea_t).await;
@@ -822,9 +850,7 @@ async fn knowledge_files_sync_through_the_hub_with_a_conflict_on_a_stale_base() 
             "deleted": body.is_none(), "body": body.map(b64),
         })
     };
-    let pull = |id: &str, since: i64, limit: i64| {
-        json!({ "type": "kn_pull", "id": id, "since": since, "limit": limit })
-    };
+    let pull = |id: &str, since: i64, limit: i64| json!({ "type": "kn_pull", "id": id, "since": since, "limit": limit });
     let result = |r: &Value| {
         (
             r["id"].as_str().map(str::to_owned),
@@ -834,7 +860,11 @@ async fn knowledge_files_sync_through_the_hub_with_a_conflict_on_a_stale_base() 
     };
 
     // A file put on one line is announced to every peer line and pulled on the other.
-    send_json(&mut ann, put("p1", "everyone", "rules/style.md", 0, Some("be kind"))).await;
+    send_json(
+        &mut ann,
+        put("p1", "everyone", "rules/style.md", 0, Some("be kind")),
+    )
+    .await;
     let r = next_of(&mut ann, "kn_put_result").await;
     assert_eq!(result(&r), (Some("p1".into()), Some(true), Some(1)));
     assert_eq!(next_of(&mut bea, "kn_changed").await["seq"], 1);
@@ -857,23 +887,19 @@ async fn knowledge_files_sync_through_the_hub_with_a_conflict_on_a_stale_base() 
             f["seq"].as_i64(),
             f["size"].as_i64()
         ),
-        (
-            Some("everyone"),
-            Some("rules/style.md"),
-            Some(1),
-            Some(7)
-        )
+        (Some("everyone"), Some("rules/style.md"), Some(1), Some(7))
     );
     assert_eq!(
         (f["sha256"].as_str(), f["body"].as_str()),
-        (
-            Some(sha("be kind").as_str()),
-            Some(b64("be kind").as_str())
-        )
+        (Some(sha("be kind").as_str()), Some(b64("be kind").as_str()))
     );
 
     // A put from a stale base conflicts and reports the stored copy; from the current one it lands.
-    send_json(&mut bea, put("p2", "everyone", "rules/style.md", 0, Some("be bold"))).await;
+    send_json(
+        &mut bea,
+        put("p2", "everyone", "rules/style.md", 0, Some("be bold")),
+    )
+    .await;
     let r = next_of(&mut bea, "kn_put_result").await;
     assert_eq!(
         (
@@ -883,7 +909,11 @@ async fn knowledge_files_sync_through_the_hub_with_a_conflict_on_a_stale_base() 
         ),
         (Some(false), Some(1), Some(sha("be kind").as_str()))
     );
-    send_json(&mut bea, put("p3", "everyone", "rules/style.md", 1, Some("be bold"))).await;
+    send_json(
+        &mut bea,
+        put("p3", "everyone", "rules/style.md", 1, Some("be bold")),
+    )
+    .await;
     let r = next_of(&mut bea, "kn_put_result").await;
     assert_eq!(result(&r), (Some("p3".into()), Some(true), Some(2)));
     assert_eq!(next_of(&mut ann, "kn_changed").await["seq"], 2);
@@ -908,7 +938,11 @@ async fn knowledge_files_sync_through_the_hub_with_a_conflict_on_a_stale_base() 
     // words.
     let layer = format!("person:{bea_person}");
     let skill = "---\nname: tidy\n---";
-    send_json(&mut ann, put("p5", &layer, "skills/tidy/SKILL.md", 0, Some(skill))).await;
+    send_json(
+        &mut ann,
+        put("p5", &layer, "skills/tidy/SKILL.md", 0, Some(skill)),
+    )
+    .await;
     let r = next_of(&mut ann, "kn_put_result").await;
     assert_eq!(result(&r), (Some("p5".into()), Some(true), Some(4)));
     for (id, bad_layer, path, why) in [
@@ -958,7 +992,10 @@ async fn knowledge_files_sync_through_the_hub_with_a_conflict_on_a_stale_base() 
     send_json(&mut kit, pull("k1", 0, 10)).await;
     let r = next_of(&mut kit, "kn_files").await;
     assert!(
-        r["error"].as_str().unwrap().contains("cannot use the household"),
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("cannot use the household"),
         "{r}"
     );
     assert!(quiet(&mut kit).await);
@@ -1012,7 +1049,11 @@ async fn a_helm_acts_as_the_person_it_names_and_memories_say_who_wrote_them() {
     let tea = w["structuredContent"]["id"].as_i64().unwrap();
     let green = json!({ "query": "green" });
     let (_, r) = tool_as(&hub, &ann, None, "memory_search", green.clone()).await;
-    assert_eq!(count(&r), 0, "Ann herself does not see Bea's private memory");
+    assert_eq!(
+        count(&r),
+        0,
+        "Ann herself does not see Bea's private memory"
+    );
     let (_, r) = tool_as(&hub, &ann, Some(bea), "memory_search", green).await;
     assert_eq!((count(&r), owners(&r)), (1, vec!["Bea".to_string()]));
 
@@ -1070,7 +1111,10 @@ async fn a_helm_acts_as_the_person_it_names_and_memories_say_who_wrote_them() {
     let both = json!({ "title": "x", "body": "y", "scope": "me", "visibility": "shared" });
     let (_, r) = tool_as(&hub, &ann, Some(bea), "memory_write", both).await;
     assert_eq!(r["isError"], true);
-    assert!(r["content"][0]["text"].as_str().unwrap().contains("disagree"));
+    assert!(r["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("disagree"));
 
     // Naming nobody known is a 400, and a token without the peer scope may not act as anyone.
     for (token, who, status) in [(&ann, "999", 400), (&ann, "Nobody", 400), (&kit, bea, 403)] {

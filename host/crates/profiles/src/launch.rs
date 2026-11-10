@@ -137,9 +137,7 @@ mod tests {
         crate::register_migrations(&mut reg);
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap();
-        let text = |db: &Database| {
-            db.snapshot(|tx| who_text(tx, "c1")).unwrap()
-        };
+        let text = |db: &Database| db.snapshot(|tx| who_text(tx, "c1")).unwrap();
         db.write(|tx| -> Result<_, store::ProfileError> {
             tx.execute(
                 "INSERT INTO projects(id, kind, name, created_at) VALUES ('p1', 'folder', 'p', 1)",

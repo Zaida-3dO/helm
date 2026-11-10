@@ -56,12 +56,20 @@ const MAX_OTHER: usize = 500;
 
 pub fn register(reg: &mut OpRegistry) {
     reg.blocking("shown_images_add", OpClass::Blocking, shown_images_add)
-        .blocking("option_board_create", OpClass::Blocking, option_board_create)
+        .blocking(
+            "option_board_create",
+            OpClass::Blocking,
+            option_board_create,
+        )
         .blocking("shown_gallery_get", OpClass::Blocking, shown_gallery_get)
         .blocking("shown_image_get", OpClass::Blocking, shown_image_get)
         .blocking("shown_image_thumb", OpClass::Blocking, shown_image_thumb)
         .blocking("option_board_state", OpClass::Blocking, option_board_state)
-        .blocking("option_board_answer", OpClass::Blocking, option_board_answer);
+        .blocking(
+            "option_board_answer",
+            OpClass::Blocking,
+            option_board_answer,
+        );
 }
 
 pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
@@ -146,15 +154,16 @@ fn load(ctx: &OpCtx, raw: &str, caption: String, which: &str) -> Result<Picture,
     if !path.is_absolute() {
         return Err(refuse("bad_args", "the path must be absolute."));
     }
-    let data = helm_core::privfs::read_capped(&path, MAX_IMAGE_BYTES as u64).map_err(|e| {
-        match e.kind() {
-            std::io::ErrorKind::NotFound => refuse("not_found", "that file does not exist."),
-            std::io::ErrorKind::InvalidData => {
-                refuse("too_large", "a picture can be at most 25 MB.")
+    let data =
+        helm_core::privfs::read_capped(&path, MAX_IMAGE_BYTES as u64).map_err(|e| {
+            match e.kind() {
+                std::io::ErrorKind::NotFound => refuse("not_found", "that file does not exist."),
+                std::io::ErrorKind::InvalidData => {
+                    refuse("too_large", "a picture can be at most 25 MB.")
+                }
+                _ => refuse("unavailable", "that picture could not be read."),
             }
-            _ => refuse("unavailable", "that picture could not be read."),
-        }
-    })?;
+        })?;
     let mime = message_images::sniff(&data).ok_or_else(|| {
         refuse(
             "bad_args",
@@ -164,7 +173,10 @@ fn load(ctx: &OpCtx, raw: &str, caption: String, which: &str) -> Result<Picture,
     let (width, height) = attachments::dimensions(mime, &data)
         .ok_or_else(|| refuse("bad_args", "that file is not a readable picture."))?;
     if u64::from(width) * u64::from(height) > attachments::MAX_PIXELS {
-        return Err(refuse("too_large", "a picture can be at most 20 megapixels."));
+        return Err(refuse(
+            "too_large",
+            "a picture can be at most 20 megapixels.",
+        ));
     }
     let name = path
         .file_name()
@@ -676,12 +688,7 @@ mod tests {
             services: Arc::new(s),
             events: Arc::new(NullSink),
         };
-        Rig {
-            dir,
-            ctx,
-            db,
-            chat,
-        }
+        Rig { dir, ctx, db, chat }
     }
 
     impl Rig {
@@ -718,9 +725,7 @@ mod tests {
         assert_eq!(made["count"], 2);
         let id = made["galleryId"].as_str().unwrap().to_owned();
         std::fs::remove_file(&a).unwrap();
-        let g = r
-            .call(shown_gallery_get, json!({"galleryId": id}))
-            .unwrap();
+        let g = r.call(shown_gallery_get, json!({"galleryId": id})).unwrap();
         assert_eq!(g["title"], "Banner");
         assert_eq!(g["images"][0]["caption"], "First");
         assert_eq!(g["images"][1]["width"], 8);
@@ -741,10 +746,9 @@ mod tests {
             "image/png"
         );
         // Refusals: the bad picture is named, nothing is stored, and strangers read nothing.
-        let before: i64 = r
-            .db
-            .snapshot(|t| t.query_row("SELECT count(*) FROM shown_images", [], |x| x.get(0)))
-            .unwrap();
+        let before: i64 =
+            r.db.snapshot(|t| t.query_row("SELECT count(*) FROM shown_images", [], |x| x.get(0)))
+                .unwrap();
         for (args, code, says) in [
             (json!({"images": []}), "bad_args", "1 to 20"),
             (
@@ -760,18 +764,27 @@ mod tests {
             (json!({"images": [{"path": a}]}), "refused", "Picture 1"),
         ] {
             let e = r.call(shown_images_add, args).unwrap_err();
-            assert_eq!((e.code.as_str(), e.message.contains(says)), (code, true), "{e:?}");
+            assert_eq!(
+                (e.code.as_str(), e.message.contains(says)),
+                (code, true),
+                "{e:?}"
+            );
         }
-        let after: i64 = r
-            .db
-            .snapshot(|t| t.query_row("SELECT count(*) FROM shown_images", [], |x| x.get(0)))
-            .unwrap();
+        let after: i64 =
+            r.db.snapshot(|t| t.query_row("SELECT count(*) FROM shown_images", [], |x| x.get(0)))
+                .unwrap();
         assert_eq!(before, after);
         let mut other = json!({"chatId": "nope", "galleryId": id, "index": 0});
-        assert_eq!(shown_image_get(&r.ctx, other.clone()).unwrap_err().code, "not_found");
+        assert_eq!(
+            shown_image_get(&r.ctx, other.clone()).unwrap_err().code,
+            "not_found"
+        );
         other["chatId"] = json!(r.chat);
         other["index"] = json!(5);
-        assert_eq!(shown_image_get(&r.ctx, other).unwrap_err().code, "not_found");
+        assert_eq!(
+            shown_image_get(&r.ctx, other).unwrap_err().code,
+            "not_found"
+        );
 
         // A fork carries a gallery its history names, and only that one.
         let unnamed = r
@@ -780,10 +793,9 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        let fork = r
-            .db
-            .write(|tx| crate::store::create_chat(tx, "C:/w", None, None, 2))
-            .unwrap();
+        let fork =
+            r.db.write(|tx| crate::store::create_chat(tx, "C:/w", None, None, 2))
+                .unwrap();
         r.db.write(|tx| copy_for_fork(tx, &r.chat, &fork, &format!("{{\"galleryId\":\"{id}\"}}")))
             .unwrap();
         let in_fork = |gid: &str| {
@@ -844,7 +856,9 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        let state = r.call(option_board_state, json!({"boardId": single})).unwrap();
+        let state = r
+            .call(option_board_state, json!({"boardId": single}))
+            .unwrap();
         assert_eq!(state["options"][2]["label"], "Colour 2");
         assert_eq!(state["options"][1]["hasImage"], true);
         assert_eq!(state["allowOther"], true);
@@ -857,7 +871,10 @@ mod tests {
         for (args, says) in [
             (json!({}), "exactly one"),
             (json!({"labels": ["Colour 0", "Colour 1"]}), "exactly one"),
-            (json!({"labels": ["Colour 0"], "other": "teal"}), "exactly one"),
+            (
+                json!({"labels": ["Colour 0"], "other": "teal"}),
+                "exactly one",
+            ),
             (json!({"labels": ["Purple"]}), "not one of"),
         ] {
             let mut args = args;
@@ -876,11 +893,15 @@ mod tests {
         assert_eq!(done["answer"]["labels"], json!([]));
         assert!(done["answer"]["answeredAt"].is_i64());
         let again = r
-            .call(option_board_answer, json!({"boardId": single, "labels": ["Colour 0"]}))
+            .call(
+                option_board_answer,
+                json!({"boardId": single, "labels": ["Colour 0"]}),
+            )
             .unwrap_err();
         assert_eq!(again.code, "conflict");
         assert_eq!(
-            r.call(option_board_state, json!({"boardId": single})).unwrap()["answer"]["other"],
+            r.call(option_board_state, json!({"boardId": single}))
+                .unwrap()["answer"]["other"],
             "Teal, please"
         );
 
@@ -916,11 +937,11 @@ mod tests {
         );
 
         // A fork keeps the board and its answer.
-        let fork = r
-            .db
-            .write(|tx| crate::store::create_chat(tx, "C:/w", None, None, 2))
+        let fork =
+            r.db.write(|tx| crate::store::create_chat(tx, "C:/w", None, None, 2))
+                .unwrap();
+        r.db.write(|tx| copy_for_fork(tx, &r.chat, &fork, &single))
             .unwrap();
-        r.db.write(|tx| copy_for_fork(tx, &r.chat, &fork, &single)).unwrap();
         let kept = option_board_state(&r.ctx, json!({"chatId": fork, "boardId": single})).unwrap();
         assert_eq!(kept["answer"]["other"], "Teal, please");
         assert!(option_board_state(&r.ctx, json!({"chatId": fork, "boardId": multi})).is_err());

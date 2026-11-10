@@ -411,10 +411,9 @@ impl Pass<'_> {
                 .rep
                 .parked
                 .push(format!("{}/{rel}", layer_dir_name(&link.hub))),
-            Err(e) => self
-                .rep
-                .errors
-                .push(format!("A changed copy of {rel} could not be set aside: {e}")),
+            Err(e) => self.rep.errors.push(format!(
+                "A changed copy of {rel} could not be set aside: {e}"
+            )),
         }
     }
 
@@ -559,9 +558,10 @@ impl Pass<'_> {
         }
         let root = link.local.root(self.dir);
         let Some(abs) = safe_target(&root, &f.path) else {
-            self.rep
-                .errors
-                .push(format!("{} passes through a link and was not written.", f.path));
+            self.rep.errors.push(format!(
+                "{} passes through a link and was not written.",
+                f.path
+            ));
             return;
         };
         let kind_dir = root.join(f.path.split('/').next().unwrap_or(""));
@@ -617,7 +617,13 @@ impl Pass<'_> {
             return;
         }
         if local_sha.as_deref() == Some(sha.as_str()) {
-            self.st.files.insert(k, Known { seq: f.seq, sha256: sha });
+            self.st.files.insert(
+                k,
+                Known {
+                    seq: f.seq,
+                    sha256: sha,
+                },
+            );
             return;
         }
         if let (true, Some(bytes)) = (edited, &local) {
@@ -630,7 +636,13 @@ impl Pass<'_> {
             .and_then(|()| helm_core::privfs::write_atomic(&abs, &body));
         match written {
             Ok(()) => {
-                self.st.files.insert(k, Known { seq: f.seq, sha256: sha });
+                self.st.files.insert(
+                    k,
+                    Known {
+                        seq: f.seq,
+                        sha256: sha,
+                    },
+                );
                 self.rep.pulled += 1;
                 self.rep.touched(&link.local);
             }
@@ -822,10 +834,20 @@ mod tests {
         // Push a new rule, a skill and a person's rule from A; B pulls them, into its own folder
         // for the same person.
         write(a, &ev, "rules/style.md", "# Style\nBe brief.");
-        write(a, &ev, "skills/deploy/SKILL.md", "---\nname: deploy\n---\nsteps");
+        write(
+            a,
+            &ev,
+            "skills/deploy/SKILL.md",
+            "---\nname: deploy\n---\nsteps",
+        );
         write(a, &ev, "skills/deploy/notes/extra.txt", "extra");
         write(a, &pa, "rules/me.md", "# Me\nPrefers short answers.");
-        write(a, &Layer::Profile("local-only".into()), "rules/x.md", "# X\nstays");
+        write(
+            a,
+            &Layer::Profile("local-only".into()),
+            "rules/x.md",
+            "# X\nstays",
+        );
         write(a, &ev, ".trash/old/item", "never synced");
         let r = sync_once(a, &link_a, &*hub).await.unwrap();
         assert_eq!((r.pushed, r.pulled), (4, 0));
@@ -833,11 +855,23 @@ mod tests {
         let r = sync_once(b, &link_b, &*hub).await.unwrap();
         assert_eq!((r.pulled, r.pushed), (4, 0));
         assert_eq!(r.changed, [ev.clone(), pb.clone()]);
-        assert_eq!(read(b, &ev, "rules/style.md").unwrap(), "# Style\nBe brief.");
-        assert_eq!(read(b, &ev, "skills/deploy/notes/extra.txt").unwrap(), "extra");
-        assert_eq!(read(b, &pb, "rules/me.md").unwrap(), "# Me\nPrefers short answers.");
+        assert_eq!(
+            read(b, &ev, "rules/style.md").unwrap(),
+            "# Style\nBe brief."
+        );
+        assert_eq!(
+            read(b, &ev, "skills/deploy/notes/extra.txt").unwrap(),
+            "extra"
+        );
+        assert_eq!(
+            read(b, &pb, "rules/me.md").unwrap(),
+            "# Me\nPrefers short answers."
+        );
         // A second pass finds nothing to do, and A hears nothing new of its own pushes.
-        assert_eq!(sync_once(b, &link_b, &*hub).await.unwrap(), Report::default());
+        assert_eq!(
+            sync_once(b, &link_b, &*hub).await.unwrap(),
+            Report::default()
+        );
         let r = sync_once(a, &link_a, &*hub).await.unwrap();
         assert_eq!((r.pushed, r.pulled, r.changed.len()), (0, 0, 0));
 
@@ -847,10 +881,16 @@ mod tests {
         sync_once(a, &link_a, &*hub).await.unwrap();
         let r = sync_once(b, &link_b, &*hub).await.unwrap();
         assert_eq!(r.parked, ["everyone/rules/style.md"]);
-        assert_eq!(read(b, &ev, "rules/style.md").unwrap(), "# Style\nBe brief, always.");
+        assert_eq!(
+            read(b, &ev, "rules/style.md").unwrap(),
+            "# Style\nBe brief, always."
+        );
         assert_eq!(parked(b), ["# Style\nBe long."]);
         assert!(parked(a).is_empty());
-        assert_eq!(sync_once(b, &link_b, &*hub).await.unwrap(), Report::default());
+        assert_eq!(
+            sync_once(b, &link_b, &*hub).await.unwrap(),
+            Report::default()
+        );
 
         // A deletion travels, and the emptied skill folder goes with it.
         fs::remove_dir_all(ev.root(a).join("skills/deploy")).unwrap();
@@ -890,10 +930,16 @@ mod tests {
         assert!(!layers::knowledge_dir(b).join("escape.md").exists());
 
         // A profile linked later gets the person's earlier files, which the cursor had passed.
-        let link_b2 = links(&[("pb".into(), Some("7".into())), ("pc".into(), Some("9".into()))]);
+        let link_b2 = links(&[
+            ("pb".into(), Some("7".into())),
+            ("pc".into(), Some("9".into())),
+        ]);
         hub.inject("person:9", "rules/sam.md", b"# Sam\nhi");
         let r = sync_once(b, &link_b2, &*hub).await.unwrap();
-        assert_eq!(read(b, &Layer::Profile("pc".into()), "rules/sam.md").unwrap(), "# Sam\nhi");
+        assert_eq!(
+            read(b, &Layer::Profile("pc".into()), "rules/sam.md").unwrap(),
+            "# Sam\nhi"
+        );
         assert_eq!(r.changed, [Layer::Profile("pc".into())]);
     }
 

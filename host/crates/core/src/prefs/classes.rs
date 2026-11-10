@@ -120,7 +120,9 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     // every chat, so which model reads them is the user's call.
     (
         "backgroundModel",
-        UserOnly("Which model reads your chats for titles, completions and checks is yours to choose."),
+        UserOnly(
+            "Which model reads your chats for titles, completions and checks is yours to choose.",
+        ),
     ),
     // Reply length is the user's call (default low).
     (
@@ -275,12 +277,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_tier_has_37_keys() {
+    fn base_tier_has_36_keys() {
         let base = CLASSIFIED
             .iter()
             .filter(|(_, c)| *c == Registry(Base))
             .count();
-        assert_eq!(base, 37);
+        assert_eq!(base, 36);
     }
 
     #[test]

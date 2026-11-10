@@ -52,7 +52,8 @@ fn changed(
 }
 
 fn list(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
-    view(&ctx.services.need::<Database>()?)
+    let db = ctx.services.need::<Database>()?;
+    view(&db)
 }
 
 #[derive(Deserialize)]

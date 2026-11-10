@@ -137,7 +137,10 @@ pub struct Put<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum PutOutcome {
     /// Stored (or already stored) as `seq`; `changed` is false when nothing was written.
-    Saved { seq: i64, changed: bool },
+    Saved {
+        seq: i64,
+        changed: bool,
+    },
     /// The stored copy moved on since `baseSeq`.
     Conflict {
         seq: i64,
@@ -507,19 +510,34 @@ mod tests {
         init(&conn).unwrap();
         // New file, then an update from the seq it was read at.
         let one = save(&mut conn, "rules/a.md", 0, Some("one"));
-        assert_eq!(one, PutOutcome::Saved { seq: 1, changed: true });
+        assert_eq!(
+            one,
+            PutOutcome::Saved {
+                seq: 1,
+                changed: true
+            }
+        );
         // The same bytes again are accepted without a new seq, whatever baseSeq says.
         assert_eq!(
             save(&mut conn, "rules/a.md", 0, Some("one")),
-            PutOutcome::Saved { seq: 1, changed: false }
+            PutOutcome::Saved {
+                seq: 1,
+                changed: false
+            }
         );
         assert_eq!(
             save(&mut conn, "rules/a.md", 1, Some("two")),
-            PutOutcome::Saved { seq: 2, changed: true }
+            PutOutcome::Saved {
+                seq: 2,
+                changed: true
+            }
         );
         // A stale base conflicts and reports the stored copy; nothing is written.
-        let PutOutcome::Conflict { seq, sha256, deleted } =
-            save(&mut conn, "rules/a.md", 1, Some("mine"))
+        let PutOutcome::Conflict {
+            seq,
+            sha256,
+            deleted,
+        } = save(&mut conn, "rules/a.md", 1, Some("mine"))
         else {
             panic!("expected a conflict");
         };
@@ -535,19 +553,29 @@ mod tests {
         ));
         assert_eq!(
             save(&mut conn, "rules/a.md", 2, None),
-            PutOutcome::Saved { seq: 3, changed: true }
+            PutOutcome::Saved {
+                seq: 3,
+                changed: true
+            }
         );
         // A deleted path is written again as new; letter case may not split a name.
         assert_eq!(
             save(&mut conn, "rules/a.md", 0, Some("back")),
-            PutOutcome::Saved { seq: 4, changed: true }
+            PutOutcome::Saved {
+                seq: 4,
+                changed: true
+            }
         );
         assert!(matches!(
             save(&mut conn, "rules/A.md", 0, Some("x")),
             PutOutcome::Refused(_)
         ));
         // A wrong checksum, a bad body and a missing body are refused.
-        for (sha, body) in [("0".repeat(64), Some(b64("x"))), (String::new(), Some("!!".into())), (String::new(), None)] {
+        for (sha, body) in [
+            ("0".repeat(64), Some(b64("x"))),
+            (String::new(), Some("!!".into())),
+            (String::new(), None),
+        ] {
             let r = put(
                 &mut conn,
                 &Put {
@@ -579,7 +607,10 @@ mod tests {
         assert_eq!((rest.len(), cursor, more), (1, 6, false));
         save(&mut conn, "rules/c.md", 5, None);
         let (gone, cursor, _) = pull(&conn, 6, 10).unwrap();
-        assert_eq!((gone[0]["deleted"].as_bool(), gone[0].get("body")), (Some(true), None));
+        assert_eq!(
+            (gone[0]["deleted"].as_bool(), gone[0].get("body")),
+            (Some(true), None)
+        );
         assert_eq!(cursor, 7);
         // Nothing new: the cursor stays where it was asked from.
         assert_eq!(pull(&conn, 7, 10).unwrap(), (vec![], 7, false));

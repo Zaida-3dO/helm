@@ -285,7 +285,6 @@ mod win {
     use std::time::Duration;
     use windows::core::{IInspectable, Interface, HSTRING};
     use windows::Data::Xml::Dom::XmlDocument;
-    use windows::Foundation::Collections::IMap;
     use windows::Foundation::{IPropertyValue, TypedEventHandler};
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
     use windows::UI::Notifications::{
@@ -296,7 +295,7 @@ mod win {
     const SHOW_WAIT: Duration = Duration::from_secs(5);
 
     enum Cmd {
-        Show(ToastSpec, Sender<Result<(), String>>),
+        Show(Box<ToastSpec>, Sender<Result<(), String>>),
         Withdraw(String),
     }
 
@@ -343,7 +342,7 @@ mod win {
             self.tx
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .send(Cmd::Show(spec.clone(), reply))
+                .send(Cmd::Show(Box::new(spec.clone()), reply))
                 .map_err(|_| "the toast thread is not running".to_owned())?;
             wait.recv_timeout(SHOW_WAIT)
                 .map_err(|_| "the toast was not shown in time".to_owned())?
@@ -404,8 +403,7 @@ mod win {
     /// What was typed in the reply box, if the click carried any.
     fn typed_reply(a: &ToastActivatedEventArgs) -> Option<String> {
         let input = a.UserInput().ok()?;
-        let map: IMap<HSTRING, IInspectable> = input.cast().ok()?;
-        let value = map.Lookup(&HSTRING::from(REPLY_INPUT_ID)).ok()?;
+        let value = input.Lookup(&HSTRING::from(REPLY_INPUT_ID)).ok()?;
         let text = value.cast::<IPropertyValue>().ok()?.GetString().ok()?;
         Some(text.to_string())
     }

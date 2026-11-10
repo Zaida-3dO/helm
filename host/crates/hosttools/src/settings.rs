@@ -248,7 +248,7 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
     Ok(out)
 }
 
-//// Why a value is refused for holding an invisible or direction-changing character.
+/// Why a value is refused for holding an invisible or direction-changing character.
 fn hidden_refusal(key: &str, at: &str) -> String {
     let place = match at {
         "" => String::new(),

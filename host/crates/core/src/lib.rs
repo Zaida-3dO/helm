@@ -17,6 +17,7 @@
 pub mod credentials;
 pub mod db;
 pub mod drafts;
+pub mod hidden;
 pub mod lifecycle;
 pub mod ops;
 pub mod prefs;
@@ -24,7 +25,6 @@ pub mod privfs;
 pub mod profile;
 pub mod recovery;
 pub mod revisions;
-pub mod hidden;
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {

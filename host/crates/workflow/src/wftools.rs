@@ -222,12 +222,23 @@ pub fn workflow_call_with_gh(
             if !mode::in_effect(tx, chat, &s)? {
                 return Ok(Err(OFF.to_owned()));
             }
-            let x = Act { chat_id: chat, s: &s, kinds, now };
+            let x = Act {
+                chat_id: chat,
+                s: &s,
+                kinds,
+                now,
+            };
             ready_consented(tx, &x, args)
         })
         .map_err(|e| ToolError::maybe(e.to_string()))?
         .map_err(ToolError::refused)?;
-    let field = |k: &str| picked.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+    let field = |k: &str| {
+        picked
+            .get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
     let (run_id, repo, branch) = (field("runId"), field("repo"), field("branch"));
     match crate::land::ready(db, gh, &run_id, &repo, &branch, now) {
         Ok(Ok(state)) => Ok(json!({"state": state})),
@@ -470,7 +481,9 @@ fn ready_consented(tx: &rusqlite::Transaction<'_>, x: &Act<'_>, a: &Value) -> ac
         },
         x.now,
     )?;
-    Ok(Ok(json!({"runId": run.id, "repo": c.repo, "branch": c.branch})))
+    Ok(Ok(
+        json!({"runId": run.id, "repo": c.repo, "branch": c.branch}),
+    ))
 }
 
 /// `reopen {runId?, userQuote | grant}`: the user's Reopen of a parked or handed-off task.
@@ -478,9 +491,13 @@ fn reopen_consented(tx: &rusqlite::Transaction<'_>, x: &Act<'_>, a: &Value) -> a
     let want = a.get("runId").and_then(Value::as_str);
     let found = crate::store::open_runs(tx, x.chat_id)?
         .into_iter()
-        .find(|r| matches!(r.status.as_str(), "parked" | "handed_off") && want.is_none_or(|w| r.id == w));
+        .find(|r| {
+            matches!(r.status.as_str(), "parked" | "handed_off") && want.is_none_or(|w| r.id == w)
+        });
     let Some(run) = found else {
-        return Ok(Err("No parked or handed-off task in this chat to reopen.".into()));
+        return Ok(Err(
+            "No parked or handed-off task in this chat to reopen.".into()
+        ));
     };
     crate::user::reopen(tx, x, run, &crate::kinds::Proof::from_args(a))
 }
@@ -489,9 +506,13 @@ fn reopen_consented(tx: &rusqlite::Transaction<'_>, x: &Act<'_>, a: &Value) -> a
 /// smoketest it asks for then stops being required).
 fn clear_visual_consented(tx: &rusqlite::Transaction<'_>, x: &Act<'_>, a: &Value) -> actions::Out {
     let want = a.get("runId").and_then(Value::as_str);
-    let found = crate::store::open_runs(tx, x.chat_id)?.into_iter().find(|r| {
-        r.visual && matches!(r.status.as_str(), "active" | "parked") && want.is_none_or(|w| r.id == w)
-    });
+    let found = crate::store::open_runs(tx, x.chat_id)?
+        .into_iter()
+        .find(|r| {
+            r.visual
+                && matches!(r.status.as_str(), "active" | "parked")
+                && want.is_none_or(|w| r.id == w)
+        });
     let Some(run) = found else {
         return Ok(Err("No task in this chat is marked visual.".into()));
     };
@@ -520,5 +541,11 @@ fn clear_visual_consented(tx: &rusqlite::Transaction<'_>, x: &Act<'_>, a: &Value
         },
         x.now,
     )?;
-    crate::user::visual(tx, x, run, false, "On your words or an Allow, from the orchestrator.")
+    crate::user::visual(
+        tx,
+        x,
+        run,
+        false,
+        "On your words or an Allow, from the orchestrator.",
+    )
 }

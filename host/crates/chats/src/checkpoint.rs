@@ -18,7 +18,6 @@
 //!   and never touches a file in the project or anywhere else.
 
 use crate::archive::Refusal;
-use crate::ops::sql;
 use crate::session_log::Entry;
 use crate::types::MessageRole;
 use helm_core::db::Database;
@@ -100,9 +99,9 @@ pub fn info(
             .optional()
         })
         .map_err(|e| Refusal::new("internal", e.to_string()))?;
-    let Some((key, _, _, _, prompt)) = row.filter(|(_, role, status, active, _)| {
-        role == "user" && status == "complete" && *active
-    }) else {
+    let Some((key, _, _, _, prompt)) = row
+        .filter(|(_, role, status, active, _)| role == "user" && status == "complete" && *active)
+    else {
         return Err(Refusal::new(
             "refused",
             "Only your own sent messages are checkpoints.",
@@ -197,13 +196,28 @@ mod tests {
         }));
         let entries = vec![
             user.clone(),
-            tool("a", "Edit", json!({"file_path": "C:\\proj\\src\\a.rs"}), false),
+            tool(
+                "a",
+                "Edit",
+                json!({"file_path": "C:\\proj\\src\\a.rs"}),
+                false,
+            ),
             tool("b", "Write", json!({"file_path": "c:/PROJ/b.txt"}), false),
             tool("c", "Edit", json!({"file_path": "C:/proj/failed.rs"}), true),
             tool("d", "Read", json!({"file_path": "C:/proj/read.rs"}), false),
-            tool("e", "NotebookEdit", json!({"notebook_path": "D:/else/n.ipynb"}), false),
+            tool(
+                "e",
+                "NotebookEdit",
+                json!({"notebook_path": "D:/else/n.ipynb"}),
+                false,
+            ),
             tool("f", "Edit", json!({"file_path": "C:/proj/src/a.rs"}), false),
-            tool("g", "Edit", json!({"file_path": "C:/projector/x.rs"}), false),
+            tool(
+                "g",
+                "Edit",
+                json!({"file_path": "C:/projector/x.rs"}),
+                false,
+            ),
             entry(json!({
                 "type": "shellChanges", "id": "s:h", "timestamp": 1, "toolCallId": "h",
                 "paths": ["docs/new.md"],

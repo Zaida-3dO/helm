@@ -137,9 +137,7 @@ mod tests {
     #[test]
     fn the_call_is_checked_and_trimmed_to_known_fields() {
         let opts = |n: usize| -> Vec<Value> {
-            (0..n)
-                .map(|i| json!({"label": format!("L{i}")}))
-                .collect()
+            (0..n).map(|i| json!({"label": format!("L{i}")})).collect()
         };
         let bad = [
             (json!({"options": opts(2)}), "question is required"),

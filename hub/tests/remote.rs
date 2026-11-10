@@ -428,8 +428,8 @@ async fn what_helm_answers_comes_back_and_a_dropped_line_may_or_may_not_have_run
     for (tool, args, helm_says, want) in cases {
         let app = h.app.clone();
         let body = call_body(tool, args.clone());
-        let phone = phone.clone();
-        let caller = tokio::spawn(async move { send(&app, api(Some(&phone), &body)).await });
+        let token = phone.clone();
+        let caller = tokio::spawn(async move { send(&app, api(Some(&token), &body)).await });
         let frame = json_of(&pc.frames.recv().await.unwrap());
         assert_eq!(frame["tool"], tool);
         assert_eq!(frame["args"], args);

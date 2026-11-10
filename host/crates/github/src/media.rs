@@ -44,7 +44,7 @@ pub fn image_host_ok(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://") else {
         return false;
     };
-    if url.len() > MAX_URL || url.chars().any(|c| c.is_control() || c == ' ' || c == '\') {
+    if url.len() > MAX_URL || url.chars().any(|c| c.is_control() || c == ' ' || c == '\\') {
         return false;
     }
     let host = rest.split(['/', '?']).next().unwrap_or("");
@@ -64,7 +64,10 @@ fn attr(tag: &str, name: &str) -> Option<String> {
     let mut from = 0;
     while let Some(i) = tag[from..].find(&needle) {
         let at = from + i;
-        let alone = tag[..at].chars().next_back().is_some_and(char::is_whitespace);
+        let alone = tag[..at]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace);
         let start = at + needle.len();
         if alone {
             let end = tag[start..].find('"')?;
@@ -164,10 +167,19 @@ fn fetch(url: &str) -> GhResult<Value> {
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+        .map(|v| {
+            v.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
         .unwrap_or_default();
     if !TYPES.contains(&kind.as_str()) {
-        return Err(GhError::new(Class::Refused, "That file is not a picture Helm shows."));
+        return Err(GhError::new(
+            Class::Refused,
+            "That file is not a picture Helm shows.",
+        ));
     }
     let bytes = res
         .body_mut()
@@ -185,4 +197,3 @@ fn fetch(url: &str) -> GhResult<Value> {
         "data": base64::engine::general_purpose::STANDARD.encode(bytes),
     }))
 }
-

@@ -216,7 +216,9 @@ fn list_item(t: &str) -> Option<&str> {
             return None;
         }
         let after = &t[digits..];
-        after.strip_prefix(". ").or_else(|| after.strip_prefix(") "))?
+        after
+            .strip_prefix(". ")
+            .or_else(|| after.strip_prefix(") "))?
     };
     let rest = rest.trim_start();
     for b in ["[ ] ", "[x] ", "[X] "] {
@@ -301,7 +303,10 @@ fn html(s: &str, r: &mut Removed) -> String {
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
     while i < c.len() {
-        if c[i] == '<' && c.get(i + 1).is_some_and(|n| n.is_ascii_alphabetic() || *n == '/') {
+        if c[i] == '<'
+            && c.get(i + 1)
+                .is_some_and(|n| n.is_ascii_alphabetic() || *n == '/')
+        {
             let close = (i + 1..c.len().min(i + 120)).find(|&j| c[j] == '>' || c[j] == '<');
             if let Some(j) = close.filter(|&j| c[j] == '>') {
                 r.markup += 1;
@@ -399,7 +404,8 @@ fn words_pass(s: &str, r: &mut Removed) -> String {
                     (None, false) => "a file".to_owned(),
                 };
                 // The pieces of one path that has spaces in it say "a file" once.
-                if (prev == "file" || prev == "a file") && said.ends_with("file") && lead.is_empty() {
+                if (prev == "file" || prev == "a file") && said.ends_with("file") && lead.is_empty()
+                {
                     if let Some(last) = out.last_mut() {
                         last.push_str(trail);
                     }
@@ -449,7 +455,20 @@ fn peel(word: &str) -> (&str, &str, &str) {
         .find(|(_, c)| {
             !matches!(
                 *c,
-                ')' | ']' | '}' | '>' | '"' | '\'' | '”' | '’' | '.' | ',' | ';' | ':' | '!' | '?' | '…'
+                ')' | ']'
+                    | '}'
+                    | '>'
+                    | '"'
+                    | '\''
+                    | '”'
+                    | '’'
+                    | '.'
+                    | ','
+                    | ';'
+                    | ':'
+                    | '!'
+                    | '?'
+                    | '…'
             )
         })
         .map(|(i, c)| i + c.len_utf8())
@@ -535,10 +554,13 @@ fn path_kind(core: &str) -> Option<Option<String>> {
     if b.len() < 2 {
         return None;
     }
-    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
+    let drive =
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
     if drive
         || core.starts_with("\\\\")
-        || ["./", "../", "~/", ".\\", "..\\"].iter().any(|p| core.starts_with(p))
+        || ["./", "../", "~/", ".\\", "..\\"]
+            .iter()
+            .any(|p| core.starts_with(p))
     {
         return Some(None);
     }
@@ -555,7 +577,9 @@ fn path_kind(core: &str) -> Option<Option<String>> {
         let words_only = segments
             .iter()
             .all(|s| s.chars().all(|c| c.is_ascii_alphabetic()) && s.len() <= 4);
-        let numbers_only = segments.iter().all(|s| s.chars().all(|c| c.is_ascii_digit()));
+        let numbers_only = segments
+            .iter()
+            .all(|s| s.chars().all(|c| c.is_ascii_digit()));
         let ok = has_extension(last) || (seps >= 2 && !words_only && !numbers_only);
         return ok.then_some(None);
     }
@@ -736,7 +760,11 @@ fn split_long(s: &str) -> Vec<String> {
             .unwrap_or(MAX_SENTENCE_CHARS);
         let head: String = rest[..cut].iter().collect();
         out.push(head.trim().to_owned());
-        rest = rest[cut..].iter().skip_while(|c| c.is_whitespace()).copied().collect();
+        rest = rest[cut..]
+            .iter()
+            .skip_while(|c| c.is_whitespace())
+            .copied()
+            .collect();
     }
     let tail: String = rest.iter().collect();
     if !tail.trim().is_empty() {
@@ -807,7 +835,10 @@ mod tests {
     fn each_pass_cleans_what_it_should() {
         let cases: &[(&str, &[&str])] = &[
             // Plain text and the split.
-            ("It works. Want the details?", &["It works.", "Want the details?"]),
+            (
+                "It works. Want the details?",
+                &["It works.", "Want the details?"],
+            ),
             ("No end punctuation", &["No end punctuation."]),
             // Code, tables and what stands in for them.
             (
@@ -818,37 +849,79 @@ mod tests {
                 "Results:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nDone.",
                 &["Results.", TABLE_NOTE, "Done."],
             ),
-            ("Look.\n\n    let x = 1;\n    let y = 2;\n\nOk.", &["Look.", CODE_NOTE, "Ok."]),
+            (
+                "Look.\n\n    let x = 1;\n    let y = 2;\n\nOk.",
+                &["Look.", CODE_NOTE, "Ok."],
+            ),
             // Headings, emphasis, quotes, rules, lists.
-            ("# Title\nSome **bold** and _soft_ words", &["Title.", "Some bold and soft words."]),
+            (
+                "# Title\nSome **bold** and _soft_ words",
+                &["Title.", "Some bold and soft words."],
+            ),
             ("> quoted line\n\n---\n\nafter", &["quoted line.", "after."]),
             (
                 "Steps:\n1. Open it\n2. Press go;\n- done",
                 &["Steps.", "Open it.", "Press go.", "done."],
             ),
             // Links, addresses, emails.
-            ("See [the docs](https://example.com/a) now.", &["See the docs now."]),
-            ("Open https://example.com/a?b=1, then www.example.org.", &["Open a link, then a link."]),
-            ("Mail me at a@b.com please.", &["Mail me at a@b.com please."]),
+            (
+                "See [the docs](https://example.com/a) now.",
+                &["See the docs now."],
+            ),
+            (
+                "Open https://example.com/a?b=1, then www.example.org.",
+                &["Open a link, then a link."],
+            ),
+            (
+                "Mail me at a@b.com please.",
+                &["Mail me at a@b.com please."],
+            ),
             // Paths and file names.
-            (r"It is in D:\Docs\notes.txt now.", &["It is in a file now."]),
-            ("Edit src/ui/panel.tsx and ./run.sh.", &["Edit a file and a file."]),
-            ("Look at the README.md and main.rs.", &["Look at the README and a file."]),
+            (
+                r"It is in D:\Docs\notes.txt now.",
+                &["It is in a file now."],
+            ),
+            (
+                "Edit src/ui/panel.tsx and ./run.sh.",
+                &["Edit a file and a file."],
+            ),
+            (
+                "Look at the README.md and main.rs.",
+                &["Look at the README and a file."],
+            ),
             ("Look at your Cargo.toml.", &["Look at your file."]),
-            ("Built with Node.js, and/or Vue.js, 10/11/2026, he/she.", &["Built with Node.js, and/or Vue.js, 10/11/2026, he/she."]),
+            (
+                "Built with Node.js, and/or Vue.js, 10/11/2026, he/she.",
+                &["Built with Node.js, and/or Vue.js, 10/11/2026, he/she."],
+            ),
             // Ids.
             ("Fixed in abc1234, see (0f3a9c2d).", &["Fixed in, see."]),
             ("Merged PR #1234 and PR 77.", &["Merged the PR and the PR."]),
             ("Merged the PR #1234.", &["Merged the PR."]),
-            ("Run 7f3c2a10-1b2c-4d5e-8f90-a1b2c3d4e5f6 now.", &["Run now."]),
+            (
+                "Run 7f3c2a10-1b2c-4d5e-8f90-a1b2c3d4e5f6 now.",
+                &["Run now."],
+            ),
             ("Token Zk3Qv9Lm2Xp7Rt4Ws1 is set.", &["Token is set."]),
-            ("Step 12 of 3.5 in 0.2.0 took 1234567 ms, a deadbeef.", &["Step 12 of 3.5 in 0.2.0 took 1234567 ms, a deadbeef."]),
+            (
+                "Step 12 of 3.5 in 0.2.0 took 1234567 ms, a deadbeef.",
+                &["Step 12 of 3.5 in 0.2.0 took 1234567 ms, a deadbeef."],
+            ),
             // Splitting rules.
-            ("Use e.g. a cat vs. a dog. Then Mr. Smith left.", &["Use e.g. a cat vs. a dog.", "Then Mr. Smith left."]),
-            ("Version 0.2.0 is out. Pi is 3.14. J. Smith agreed", &["Version 0.2.0 is out.", "Pi is 3.14.", "J. Smith agreed."]),
+            (
+                "Use e.g. a cat vs. a dog. Then Mr. Smith left.",
+                &["Use e.g. a cat vs. a dog.", "Then Mr. Smith left."],
+            ),
+            (
+                "Version 0.2.0 is out. Pi is 3.14. J. Smith agreed",
+                &["Version 0.2.0 is out.", "Pi is 3.14.", "J. Smith agreed."],
+            ),
             ("Wait... what?! Really", &["Wait… what?!", "Really."]),
             // Whitespace and repeated punctuation.
-            ("Too   many   spaces ,really !!", &["Too many spaces, really!"]),
+            (
+                "Too   many   spaces ,really !!",
+                &["Too many spaces, really!"],
+            ),
             // Emoji stay.
             ("All good 🎉", &["All good 🎉"]),
             // Nothing to say.
@@ -912,7 +985,12 @@ mod tests {
         // A sentence over 400 characters is split at its last comma, or space.
         let wide = format!("{}, {}.", "a".repeat(300), run("b", 100));
         let parts = say(&wide);
-        assert!(parts.iter().all(|p| p.chars().count() <= MAX_SENTENCE_CHARS), "{parts:?}");
+        assert!(
+            parts
+                .iter()
+                .all(|p| p.chars().count() <= MAX_SENTENCE_CHARS),
+            "{parts:?}"
+        );
         assert_eq!(parts[0], format!("{},", "a".repeat(300)));
         // Many short sentences are limited to 40, the last two being the offer.
         let s = speakable(&"Ok. ".repeat(60));

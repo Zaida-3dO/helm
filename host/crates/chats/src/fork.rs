@@ -550,8 +550,10 @@ pub fn fork(
         .iter()
         .map(|e| Value::Object(e.clone()).to_string())
         .collect::<Vec<_>>()
-        .join("
-");
+        .join(
+            "
+",
+        );
     let vanished = std::cell::Cell::new(false);
     let result = db.write(|tx| {
         if project_archived(tx, &src.project)? {

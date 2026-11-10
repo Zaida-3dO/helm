@@ -88,7 +88,8 @@ mod tests {
         assert_eq!(dot_geometry(16, 16), (14.0, 14.0, 2.0));
         assert_eq!(at(&red, 16, 14, 14), RED);
         assert_eq!(at(&red, 16, 13, 13), RED);
-        assert_eq!(at(&red, 16, 15, 15), RED);
+        assert_eq!(at(&red, 16, 15, 14), RED);
+        assert_eq!(at(&red, 16, 15, 15), [0x10; 4], "the far corner is outside");
         assert_eq!(at(&amber, 16, 14, 14), AMBER);
         assert_eq!(at(&red, 16, 12, 12), [0x10; 4], "outside the dot");
         assert_eq!(at(&red, 16, 0, 0), [0x10; 4]);

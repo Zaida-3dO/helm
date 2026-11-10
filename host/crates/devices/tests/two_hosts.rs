@@ -5,7 +5,9 @@
 //! timeout cost nothing. No network, no database.
 
 use helm_chats::remote::{RemoteSlot, Routes};
-use helm_chats::types::{ChatEvent, Interaction, InteractionAttention as Att, InteractionMethod as Meth};
+use helm_chats::types::{
+    ChatEvent, Interaction, InteractionAttention as Att, InteractionMethod as Meth,
+};
 use helm_core::db::{Database, MigrationRegistry};
 use helm_devices::link::{DeviceLink, MemLink, MemRouter, Rpc};
 use helm_devices::mirror::{self, Mirror, PeopleSync};
@@ -121,9 +123,27 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     let refused: Vec<(&Watcher, &str, &str, Value, &str)> = vec![
         (&c, "dev-a", "hello", json!({}), code::SCOPE),
         (&b, "dev-zzz", "hello", json!({}), code::OFFLINE),
-        (&b, "dev-a", "consent_decide", json!({"id": "x"}), code::REFUSED),
-        (&b, "dev-a", "chat_sub", json!({"chatId": "c1", "surprise": 1}), code::BAD_ARGS),
-        (&b, "dev-a", "chat_sub", json!({"chatId": "nope"}), code::NOT_FOUND),
+        (
+            &b,
+            "dev-a",
+            "consent_decide",
+            json!({"id": "x"}),
+            code::REFUSED,
+        ),
+        (
+            &b,
+            "dev-a",
+            "chat_sub",
+            json!({"chatId": "c1", "surprise": 1}),
+            code::BAD_ARGS,
+        ),
+        (
+            &b,
+            "dev-a",
+            "chat_sub",
+            json!({"chatId": "nope"}),
+            code::NOT_FOUND,
+        ),
         (
             &b,
             "dev-a",
@@ -139,8 +159,20 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
                    "text": "y".repeat(16 * 1024 + 1), "mode": "queue"}),
             code::BAD_ARGS,
         ),
-        (&b, "dev-a", "rename", json!({"chatId": "c1", "title": big}), code::TOO_LARGE),
-        (&b, "dev-a", "create", json!({"personId": "nobody", "projectId": "proj-1"}), code::UNKNOWN_PERSON),
+        (
+            &b,
+            "dev-a",
+            "rename",
+            json!({"chatId": "c1", "title": big}),
+            code::TOO_LARGE,
+        ),
+        (
+            &b,
+            "dev-a",
+            "create",
+            json!({"personId": "nobody", "projectId": "proj-1"}),
+            code::UNKNOWN_PERSON,
+        ),
     ];
     for (w, to, op, args, want) in refused {
         let e = w.rpc.call(to, op, args).await.unwrap_err();
@@ -159,12 +191,20 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         .unwrap();
     let c1 = &list["chats"][0];
     assert_eq!(list["chats"].as_array().unwrap().len(), 1);
-    assert_eq!((c1["id"].as_str(), c1["personId"].as_str()), (Some("c1"), Some("person-a")));
+    assert_eq!(
+        (c1["id"].as_str(), c1["personId"].as_str()),
+        (Some("c1"), Some("person-a"))
+    );
     assert_eq!(c1["draft"], "");
     assert!(c1.get("profileId").is_none());
     assert_eq!(list["cursor"], 100);
     for (title, rev) in [("Renamed", 11), ("Renamed again", 12)] {
-        host.observe(&ChatEvent::Chat { chat: fake_record("c1", title, rev) }.to_app_event());
+        host.observe(
+            &ChatEvent::Chat {
+                chat: fake_record("c1", title, rev),
+            }
+            .to_app_event(),
+        );
     }
     until(|| b.heard("chats").len() == 2).await;
     let seen = b.heard("chats");
@@ -184,7 +224,10 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
         .call("dev-a", "chat_sub", json!({"chatId": "c1", "since": 5}))
         .await
         .unwrap();
-    assert_eq!((sub["rows"].as_array().unwrap().len(), &sub["more"]), (1, &json!(false)));
+    assert_eq!(
+        (sub["rows"].as_array().unwrap().len(), &sub["more"]),
+        (1, &json!(false))
+    );
     host.observe(&message(12, 2, "world!"));
     host.observe(&message(13, 2, "world!!"));
     host.observe(&message(13, 3, "new"));
@@ -196,16 +239,39 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     assert_eq!(batch.event["kind"], "message");
     let rows = batch.event["rows"].as_array().unwrap();
     assert_eq!(
-        rows.iter().map(|r| (r["id"].as_i64().unwrap(), r["text"].as_str().unwrap())).collect::<Vec<_>>(),
+        rows.iter()
+            .map(|r| (r["id"].as_i64().unwrap(), r["text"].as_str().unwrap()))
+            .collect::<Vec<_>>(),
         [(2, "world!!"), (3, "new")]
     );
-    host.observe(&ChatEvent::Pending { chat_id: "c1".into(), revision: 14, pending: vec![] }.to_app_event());
+    host.observe(
+        &ChatEvent::Pending {
+            chat_id: "c1".into(),
+            revision: 14,
+            pending: vec![],
+        }
+        .to_app_event(),
+    );
     host.observe(&refresh());
     until(|| b.heard("chat:c1").len() == 3).await;
-    let kinds: Vec<_> = b.heard("chat:c1").iter().map(|p| (p.seq, p.event["kind"].as_str().unwrap().to_owned())).collect();
-    assert_eq!(kinds, [(1, "message".to_owned()), (2, "pending".to_owned()), (3, "refresh".to_owned())]);
+    let kinds: Vec<_> = b
+        .heard("chat:c1")
+        .iter()
+        .map(|p| (p.seq, p.event["kind"].as_str().unwrap().to_owned()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (1, "message".to_owned()),
+            (2, "pending".to_owned()),
+            (3, "refresh".to_owned())
+        ]
+    );
     // A gap is mended by subscribing again from the revision held: the count starts over.
-    b.rpc.call("dev-a", "chat_sub", json!({"chatId": "c1", "since": 14})).await.unwrap();
+    b.rpc
+        .call("dev-a", "chat_sub", json!({"chatId": "c1", "since": 14}))
+        .await
+        .unwrap();
     host.observe(&refresh());
     until(|| b.heard("chat:c1").len() == 4).await;
     assert_eq!(b.heard("chat:c1")[3].seq, 1);
@@ -229,16 +295,26 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     // A send runs once however often it arrives; a refused one can be tried again.
     let id = "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b5a";
     let send = json!({"chatId": "c1", "clientId": id, "text": "hi", "mode": "steer"});
-    assert_eq!(b.rpc.call("dev-a", "send", send.clone()).await.unwrap(), json!({"accepted": true}));
+    assert_eq!(
+        b.rpc.call("dev-a", "send", send.clone()).await.unwrap(),
+        json!({"accepted": true})
+    );
     assert_eq!(
         b.rpc.call("dev-a", "send", send).await.unwrap(),
         json!({"accepted": true, "duplicate": true})
     );
-    assert_eq!(port.st().sent, [("c1".to_owned(), id.to_owned(), "hi".to_owned())]);
+    assert_eq!(
+        port.st().sent,
+        [("c1".to_owned(), id.to_owned(), "hi".to_owned())]
+    );
     let lost = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d";
     let e = b
         .rpc
-        .call("dev-a", "send", json!({"chatId": "nope", "clientId": lost, "text": "hi", "mode": "steer"}))
+        .call(
+            "dev-a",
+            "send",
+            json!({"chatId": "nope", "clientId": lost, "text": "hi", "mode": "steer"}),
+        )
         .await
         .unwrap_err();
     assert_eq!(e.code, code::NOT_FOUND);
@@ -247,10 +323,16 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     // With the switch off, only reading works.
     port.set_run(false);
     for (op, args) in [
-        ("send", json!({"chatId": "c1", "clientId": lost, "text": "hi", "mode": "steer"})),
+        (
+            "send",
+            json!({"chatId": "c1", "clientId": lost, "text": "hi", "mode": "steer"}),
+        ),
         ("stop", json!({"chatId": "c1"})),
         ("rename", json!({"chatId": "c1", "title": "x"})),
-        ("create", json!({"personId": "person-a", "projectId": "proj-1"})),
+        (
+            "create",
+            json!({"personId": "person-a", "projectId": "proj-1"}),
+        ),
         ("archive", json!({"chatId": "c1", "archived": true})),
     ] {
         let e = b.rpc.call("dev-a", op, args).await.unwrap_err();
@@ -259,10 +341,20 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     assert!(b.rpc.call("dev-a", "hello", json!({})).await.is_ok());
     port.set_run(true);
     assert_eq!(
-        b.rpc.call("dev-a", "create", json!({"personId": "person-a", "projectId": "proj-1"})).await.unwrap(),
+        b.rpc
+            .call(
+                "dev-a",
+                "create",
+                json!({"personId": "person-a", "projectId": "proj-1"})
+            )
+            .await
+            .unwrap(),
         json!({"chatId": "new-1"})
     );
-    b.rpc.call("dev-a", "stop", json!({"chatId": "c1"})).await.unwrap();
+    b.rpc
+        .call("dev-a", "stop", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
     assert_eq!(port.st().stopped, ["c1".to_owned()]);
 
     // Answers: a question, a plan and a tool permission may be answered from afar, with the
@@ -274,37 +366,129 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     let plan = ["Approve plan", "Keep planning"];
     let pick = ["A", "B"];
     let answers: Vec<(Option<Interaction>, &str, Value, Option<&str>)> = vec![
-        (Some(fake_interaction("c1", "perm", Meth::Confirm, Some(Att::Approval), None)), "perm",
-         json!({"confirmed": true, "label": "Allow"}), None),
-        (Some(fake_interaction("c1", "perm2", Meth::Confirm, Some(Att::Approval), None)), "perm2",
-         json!({"confirmed": true, "label": "Deny"}), Some(code::REFUSED)),
-        (Some(fake_interaction("c1", "plan", Meth::Select, Some(Att::Plan), Some(&plan))), "plan",
-         json!({"value": "Approve plan", "confirmed": true, "label": "Approve plan"}), None),
-        (Some(fake_interaction("c1", "plan2", Meth::Select, Some(Att::Plan), Some(&plan))), "plan2",
-         json!({"value": "Keep planning", "confirmed": true, "label": "Keep planning"}), Some(code::REFUSED)),
-        (Some(fake_interaction("c1", "trust", Meth::Confirm, Some(Att::Trust), None)), "trust",
-         json!({"confirmed": true, "label": "Allow"}), Some(code::REFUSED)),
-        (Some(secret), "secret", json!({"value": "x", "label": "Token"}), Some(code::REFUSED)),
-        (Some(fake_interaction("c1", "pick", Meth::Select, Some(Att::Question), Some(&pick))), "pick",
-         json!({"value": "B", "label": "B"}), None),
-        (Some(fake_interaction("c1", "pick2", Meth::Select, Some(Att::Question), Some(&pick))), "pick2",
-         json!({"value": "C", "label": "C"}), Some(code::REFUSED)),
-        (None, "gone", json!({"confirmed": true, "label": "Allow"}), Some(code::REFUSED)),
-        (None, "perm", json!({"confirmed": true, "label": "Allow"}), Some(code::REFUSED)),
+        (
+            Some(fake_interaction(
+                "c1",
+                "perm",
+                Meth::Confirm,
+                Some(Att::Approval),
+                None,
+            )),
+            "perm",
+            json!({"confirmed": true, "label": "Allow"}),
+            None,
+        ),
+        (
+            Some(fake_interaction(
+                "c1",
+                "perm2",
+                Meth::Confirm,
+                Some(Att::Approval),
+                None,
+            )),
+            "perm2",
+            json!({"confirmed": true, "label": "Deny"}),
+            Some(code::REFUSED),
+        ),
+        (
+            Some(fake_interaction(
+                "c1",
+                "plan",
+                Meth::Select,
+                Some(Att::Plan),
+                Some(&plan),
+            )),
+            "plan",
+            json!({"value": "Approve plan", "confirmed": true, "label": "Approve plan"}),
+            None,
+        ),
+        (
+            Some(fake_interaction(
+                "c1",
+                "plan2",
+                Meth::Select,
+                Some(Att::Plan),
+                Some(&plan),
+            )),
+            "plan2",
+            json!({"value": "Keep planning", "confirmed": true, "label": "Keep planning"}),
+            Some(code::REFUSED),
+        ),
+        (
+            Some(fake_interaction(
+                "c1",
+                "trust",
+                Meth::Confirm,
+                Some(Att::Trust),
+                None,
+            )),
+            "trust",
+            json!({"confirmed": true, "label": "Allow"}),
+            Some(code::REFUSED),
+        ),
+        (
+            Some(secret),
+            "secret",
+            json!({"value": "x", "label": "Token"}),
+            Some(code::REFUSED),
+        ),
+        (
+            Some(fake_interaction(
+                "c1",
+                "pick",
+                Meth::Select,
+                Some(Att::Question),
+                Some(&pick),
+            )),
+            "pick",
+            json!({"value": "B", "label": "B"}),
+            None,
+        ),
+        (
+            Some(fake_interaction(
+                "c1",
+                "pick2",
+                Meth::Select,
+                Some(Att::Question),
+                Some(&pick),
+            )),
+            "pick2",
+            json!({"value": "C", "label": "C"}),
+            Some(code::REFUSED),
+        ),
+        (
+            None,
+            "gone",
+            json!({"confirmed": true, "label": "Allow"}),
+            Some(code::REFUSED),
+        ),
+        (
+            None,
+            "perm",
+            json!({"confirmed": true, "label": "Allow"}),
+            Some(code::REFUSED),
+        ),
     ];
     for (waiting, request, extra, want) in answers {
         if let Some(i) = waiting {
             port.put_interaction(i);
         }
         let mut args = json!({"chatId": "c1", "requestId": request});
-        args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
         let got = b.rpc.call("dev-a", "answer", args).await;
         match want {
             None => assert!(got.is_ok(), "{request}: {got:?}"),
             Some(c) => assert_eq!(got.unwrap_err().code, c, "{request}"),
         }
     }
-    let answered: Vec<_> = port.st().answered.iter().map(|a| a.request_id.clone()).collect();
+    let answered: Vec<_> = port
+        .st()
+        .answered
+        .iter()
+        .map(|a| a.request_id.clone())
+        .collect();
     assert_eq!(answered, ["perm", "plan", "pick"]);
 
     // A device that drops off the hub loses its subscriptions, and asks again when it is back.
@@ -312,11 +496,21 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     b.link.set_up(false);
     settle().await;
     assert!(!host.watchers().contains(&"dev-b".to_owned()));
-    assert_eq!(b.rpc.call("dev-a", "hello", json!({})).await.unwrap_err().code, code::OFFLINE);
+    assert_eq!(
+        b.rpc
+            .call("dev-a", "hello", json!({}))
+            .await
+            .unwrap_err()
+            .code,
+        code::OFFLINE
+    );
     b.link.set_up(true);
     b.announce("dev-b");
     settle().await;
-    b.rpc.call("dev-a", "chats_sub", json!({"since": 100})).await.unwrap();
+    b.rpc
+        .call("dev-a", "chats_sub", json!({"since": 100}))
+        .await
+        .unwrap();
     assert!(host.watchers().contains(&"dev-b".to_owned()));
 }
 
@@ -361,17 +555,21 @@ fn side(router: &MemRouter, uid: &str, name: &str, people: Option<Arc<PeopleSync
 
 /// The rows the copy of a chat holds, newest page, as (id, text).
 fn rows_of(s: &Side, chat: &str) -> Vec<(i64, String)> {
-    let page = s
-        .db
-        .snapshot(|tx| mirror::local_page(tx, chat, None, None, None, false))
-        .unwrap()
-        .unwrap()
-        .page;
+    let page =
+        s.db.snapshot(|tx| mirror::local_page(tx, chat, None, None, None, false))
+            .unwrap()
+            .unwrap()
+            .page;
     page["messages"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|r| (r["id"].as_i64().unwrap(), r["text"].as_str().unwrap().to_owned()))
+        .map(|r| {
+            (
+                r["id"].as_i64().unwrap(),
+                r["text"].as_str().unwrap().to_owned(),
+            )
+        })
         .collect()
 }
 
@@ -381,10 +579,9 @@ fn count(s: &Side, sql: &str) -> i64 {
 }
 
 fn device_row(s: &Side, uid: &str) -> Value {
-    let v = s
-        .db
-        .snapshot(|tx| mirror::devices_view(tx, s.mirror.line_is_up()))
-        .unwrap();
+    let v =
+        s.db.snapshot(|tx| mirror::devices_view(tx, s.mirror.line_is_up()))
+            .unwrap();
     v["devices"]
         .as_array()
         .unwrap()
@@ -402,12 +599,19 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     port.put_row(fake_row("c1", 1, 5, "hello"));
     port.put_row(fake_row("c1", 2, 6, "world"));
     let link_a = router.connect("dev-a", Some("person-a"), Some("Alex"), true);
-    let host = Service::new(port.clone(), link_a.clone(), tokio::runtime::Handle::current());
+    let host = Service::new(
+        port.clone(),
+        link_a.clone(),
+        tokio::runtime::Handle::current(),
+    );
     host.announce();
     let people = Arc::new(Mutex::new(Vec::<String>::new()));
     let heard = people.clone();
     let hook = Arc::new(PeopleSync::new(move |_db, list| {
-        heard.lock().unwrap().extend(list.iter().map(|p| p.name.clone()));
+        heard
+            .lock()
+            .unwrap()
+            .extend(list.iter().map(|p| p.name.clone()));
         true
     }));
     let b = side(&router, "dev-b", "Laptop", Some(hook));
@@ -421,14 +625,21 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     })
     .await;
     let d = device_row(&b, "dev-a");
-    assert_eq!((d["name"].as_str(), d["state"].as_str()), (Some("Desk"), Some("live")));
-    let projects = b.db.snapshot(|tx| mirror::mirror_projects(tx, "dev-a")).unwrap();
+    assert_eq!(
+        (d["name"].as_str(), d["state"].as_str()),
+        (Some("Desk"), Some("live"))
+    );
+    let projects =
+        b.db.snapshot(|tx| mirror::mirror_projects(tx, "dev-a"))
+            .unwrap();
     assert_eq!(projects[0]["name"], "Work");
-    let listed = b
-        .db
-        .snapshot(|tx| mirror::mirror_chat_list(tx, "dev-a", None, false))
-        .unwrap();
-    assert_eq!((listed.len(), listed[0]["hostDeviceId"].as_str()), (1, Some("dev-a")));
+    let listed =
+        b.db.snapshot(|tx| mirror::mirror_chat_list(tx, "dev-a", None, false))
+            .unwrap();
+    assert_eq!(
+        (listed.len(), listed[0]["hostDeviceId"].as_str()),
+        (1, Some("dev-a"))
+    );
     assert_eq!(listed[0]["draft"], "");
 
     // The ops the window uses, through the dispatcher, with the check that routes them.
@@ -451,9 +662,15 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
 
     // Opening a chat starts listening to it: its rows arrive, and the window hears the events a
     // chat that runs here would raise.
-    let got = api.call_host("chat_get", json!({"chatId": "c1"})).await.unwrap();
+    let got = api
+        .call_host("chat_get", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
     assert_eq!(
-        (got["chat"]["id"].as_str(), got["chat"]["hostDeviceId"].as_str()),
+        (
+            got["chat"]["id"].as_str(),
+            got["chat"]["hostDeviceId"].as_str()
+        ),
         (Some("c1"), Some("dev-a"))
     );
     until(|| rows_of(&b, "c1").len() == 2).await;
@@ -476,7 +693,11 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         ("transcript_page", json!({"chatId": "c1"}), Ok(json!(null))),
         ("chat_warm", json!({"chatId": "c1"}), Ok(json!(null))),
         ("skills_list", json!({"chatId": "c1"}), Ok(json!([]))),
-        ("title_suggest", json!({"chatId": "c1"}), Ok(json!({"title": "", "titles": []}))),
+        (
+            "title_suggest",
+            json!({"chatId": "c1"}),
+            Ok(json!({"title": "", "titles": []})),
+        ),
         (
             "model_catalogue",
             json!({"harness": "claude", "deviceUid": "dev-a"}),
@@ -500,7 +721,10 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         }
     }
     // A chat that is not a copy is left to its own handler.
-    let own = api.call_host("chat_fork", json!({"chatId": "mine"})).await.unwrap_err();
+    let own = api
+        .call_host("chat_fork", json!({"chatId": "mine"}))
+        .await
+        .unwrap_err();
     assert!(!own.message.contains("runs on"), "{own:?}");
 
     // A send reaches the device once, as the person's own words.
@@ -508,14 +732,21 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     let send = json!({"chatId": "c1", "submissionId": id, "text": "hi", "action": "steer", "draftRevision": 0});
     let sent = api.call_host("chat_send", send.clone()).await.unwrap();
     assert_eq!(sent["submission"]["state"], "accepted");
-    assert_eq!(port.st().sent, [("c1".to_owned(), id.to_owned(), "hi".to_owned())]);
+    assert_eq!(
+        port.st().sent,
+        [("c1".to_owned(), id.to_owned(), "hi".to_owned())]
+    );
     // Its switch off: read-only, said in words, nothing sent.
     port.set_run(false);
     host.announce();
     until(|| device_row(&b, "dev-a")["state"] == "readonly").await;
     let e = api.call_host("chat_send", send.clone()).await.unwrap_err();
     assert_eq!(e.code, "not_allowed");
-    assert!(e.message.starts_with("Desk doesn't let other devices run its chats"), "{e:?}");
+    assert!(
+        e.message
+            .starts_with("Desk doesn't let other devices run its chats"),
+        "{e:?}"
+    );
     port.set_run(true);
     host.announce();
     until(|| device_row(&b, "dev-a")["state"] == "live").await;
@@ -527,18 +758,33 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     port.put_row(fake_row("c1", 4, 30, "while away"));
     let e = api.call_host("chat_send", send.clone()).await.unwrap_err();
     assert_eq!(e.code, "offline");
-    assert!(e.message.starts_with("Desk is offline (last seen "), "{e:?}");
+    assert!(
+        e.message.starts_with("Desk is offline (last seen "),
+        "{e:?}"
+    );
     assert_eq!(port.st().sent.len(), 1);
-    let page = api.call_host("transcript_page", json!({"chatId": "c1"})).await.unwrap();
-    assert_eq!(page["messages"].as_array().unwrap().len(), 3);
-    api.call_host("draft_save", json!({"chatId": "c1", "text": "note", "revision": 5}))
+    let page = api
+        .call_host("transcript_page", json!({"chatId": "c1"}))
         .await
         .unwrap();
+    assert_eq!(page["messages"].as_array().unwrap().len(), 3);
+    api.call_host(
+        "draft_save",
+        json!({"chatId": "c1", "text": "note", "revision": 5}),
+    )
+    .await
+    .unwrap();
     let again = api
-        .call_host("draft_save", json!({"chatId": "c1", "text": "old", "revision": 5}))
+        .call_host(
+            "draft_save",
+            json!({"chatId": "c1", "text": "old", "revision": 5}),
+        )
         .await;
     assert_eq!(again.unwrap_err().code, "stale");
-    let got = api.call_host("chat_get", json!({"chatId": "c1"})).await.unwrap();
+    let got = api
+        .call_host("chat_get", json!({"chatId": "c1"}))
+        .await
+        .unwrap();
     assert_eq!(got["chat"]["draft"], "note");
     assert_eq!(port.st().sent.len(), 1);
     // This PC's own line down reads differently.
@@ -558,7 +804,10 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     // The device returns: the copy catches up from the revision it holds, without repeats.
     link_a.set_up(true);
     until(|| rows_of(&b, "c1").iter().map(|r| r.0).collect::<Vec<_>>() == [1, 2, 3, 4]).await;
-    assert_eq!(count(&b, "SELECT COUNT(*) FROM mirror_rows WHERE chat_id = 'c1'"), 4);
+    assert_eq!(
+        count(&b, "SELECT COUNT(*) FROM mirror_rows WHERE chat_id = 'c1'"),
+        4
+    );
 
     // `refresh` starts the chat over from the device; a skipped push is mended by asking again.
     let before = b.sink.kinds().iter().filter(|k| *k == "refresh").count();
@@ -577,7 +826,9 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
 
     // Only the newest 3000 rows are kept, and rows of a chat nobody opens for a month are let go;
     // the chat stays in the list.
-    let many: Vec<_> = (100..3110).map(|i| fake_row("c1", i, 1000 + i, "x")).collect();
+    let many: Vec<_> = (100..3110)
+        .map(|i| fake_row("c1", i, 1000 + i, "x"))
+        .collect();
     host.observe(
         &ChatEvent::Message {
             chat_id: "c1".into(),
@@ -588,10 +839,20 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
     );
     until(|| count(&b, "SELECT COUNT(*) FROM mirror_rows WHERE chat_id = 'c1'") >= 3000).await;
     settle().await;
-    assert_eq!(count(&b, "SELECT COUNT(*) FROM mirror_rows WHERE chat_id = 'c1'"), 3000);
-    assert_eq!(count(&b, "SELECT older FROM mirror_chats WHERE chat_id = 'c1'"), 1);
+    assert_eq!(
+        count(&b, "SELECT COUNT(*) FROM mirror_rows WHERE chat_id = 'c1'"),
+        3000
+    );
+    assert_eq!(
+        count(&b, "SELECT older FROM mirror_chats WHERE chat_id = 'c1'"),
+        1
+    );
     let month = 31 * 24 * 60 * 60 * 1000;
-    b.db.write(|tx| mirror::prune_unopened(tx, helm_core::now_ms() + month)).unwrap();
-    assert_eq!(count(&b, "SELECT COUNT(*) FROM mirror_rows WHERE chat_id = 'c1'"), 0);
+    b.db.write(|tx| mirror::prune_unopened(tx, helm_core::now_ms() + month))
+        .unwrap();
+    assert_eq!(
+        count(&b, "SELECT COUNT(*) FROM mirror_rows WHERE chat_id = 'c1'"),
+        0
+    );
     assert!(b.mirror.owner("c1").is_some());
 }

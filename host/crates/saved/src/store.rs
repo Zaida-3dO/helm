@@ -857,7 +857,11 @@ mod tests {
         });
         assert!(matches!(e.unwrap_err(), StoreError::NotFound));
         let back = db.write(|tx| restore(tx, &a.id)).unwrap();
-        assert_eq!((back.note_count, back.updated_at), (1, 1000), "restored as it was");
+        assert_eq!(
+            (back.note_count, back.updated_at),
+            (1, 1000),
+            "restored as it was"
+        );
         assert_eq!(
             db.snapshot(|tx| list(tx, None, Some("button label"), 1))
                 .unwrap()
@@ -866,7 +870,10 @@ mod tests {
             1
         );
         let e = db.write(|tx| restore(tx, &a.id));
-        assert!(matches!(e.unwrap_err(), StoreError::NotFound), "nothing to undo");
+        assert!(
+            matches!(e.unwrap_err(), StoreError::NotFound),
+            "nothing to undo"
+        );
 
         // Purge: only items removed longer ago than the window go, with their notes.
         db.write(|tx| remove(tx, &a.id, None, 8000)).unwrap();
@@ -878,7 +885,10 @@ mod tests {
             assert_eq!(db.write(|tx| purge(tx, at)).unwrap(), gone, "at {at}");
         }
         let e = db.write(|tx| restore(tx, &a.id));
-        assert!(matches!(e.unwrap_err(), StoreError::NotFound), "purged for good");
+        assert!(
+            matches!(e.unwrap_err(), StoreError::NotFound),
+            "purged for good"
+        );
         let left: i64 = db
             .snapshot(|tx| {
                 tx.query_row(
@@ -991,8 +1001,14 @@ mod tests {
         assert_eq!(db.snapshot(|tx| list(tx, None, None, 1)).unwrap().total, 4);
         // A removed item does not answer a later save of the same row or key: the save is fresh.
         for (gone, again) in [
-            (&first.0.id, item(Some("chat-1"), Some(7), None, "Turn A", "once more")),
-            (&keyed.0.id, item(None, None, Some("nightly-sync"), "Sync", "once more")),
+            (
+                &first.0.id,
+                item(Some("chat-1"), Some(7), None, "Turn A", "once more"),
+            ),
+            (
+                &keyed.0.id,
+                item(None, None, Some("nightly-sync"), "Sync", "once more"),
+            ),
         ] {
             db.write(|tx| remove(tx, gone, None, 3000)).unwrap();
             let (fresh, already) = db.write(|tx| save(tx, &again, 4000)).unwrap();

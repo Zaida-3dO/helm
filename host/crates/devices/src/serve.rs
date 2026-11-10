@@ -102,7 +102,7 @@ struct Inner {
     online: Mutex<HashMap<String, bool>>,
     answered: Mutex<VecDeque<(String, String)>>,
     events: mpsc::UnboundedSender<AppEvent>,
-    handle: Handle,
+    _handle: Handle,
 }
 
 /// Serves this install's chats to other devices.
@@ -122,7 +122,7 @@ impl Service {
             online: Mutex::new(HashMap::new()),
             answered: Mutex::new(VecDeque::new()),
             events,
-            handle: handle.clone(),
+            _handle: handle.clone(),
         });
         let weak = Arc::downgrade(&inner);
         let h = handle.clone();
@@ -171,10 +171,10 @@ impl Service {
                     self.announce();
                 }
             }
-            "chat" | "chat_removed" | "thread" | "pending" | "refresh" | "message" => {
-                if !lock(&self.inner.subs).watchers().is_empty() {
-                    let _ = self.inner.events.send(ev.clone());
-                }
+            "chat" | "chat_removed" | "thread" | "pending" | "refresh" | "message"
+                if !lock(&self.inner.subs).watchers().is_empty() =>
+            {
+                let _ = self.inner.events.send(ev.clone());
             }
             _ => {}
         }
@@ -330,11 +330,7 @@ impl Inner {
         }
     }
 
-    async fn run_parsed(
-        &self,
-        uid: &str,
-        op: Op,
-    ) -> Result<(Value, Option<String>), WireError> {
+    async fn run_parsed(&self, uid: &str, op: Op) -> Result<(Value, Option<String>), WireError> {
         let done = |v: Value| -> Result<(Value, Option<String>), WireError> { Ok((v, None)) };
         match op {
             Op::Hello => done(to_value(&self.port.hello().await?)?),
@@ -458,10 +454,7 @@ impl Inner {
         }
         // Both modes are delivered the way the PC delivers any message it did not type itself:
         // an idle chat starts a turn, a working one takes it in at its next tool boundary.
-        let sent = self
-            .port
-            .send(a.chat_id, a.client_id.clone(), a.text)
-            .await;
+        let sent = self.port.send(a.chat_id, a.client_id.clone(), a.text).await;
         match sent {
             Ok(()) => Ok(json!({ "accepted": true })),
             Err(e) => {
@@ -537,7 +530,11 @@ pub(crate) fn confirm_options(i: &Interaction) -> Vec<String> {
 pub fn check_answer(i: &Interaction, a: &AnswerArgs) -> Result<(), WireError> {
     if !matches!(
         i.attention,
-        Some(InteractionAttention::Approval | InteractionAttention::Question | InteractionAttention::Plan)
+        Some(
+            InteractionAttention::Approval
+                | InteractionAttention::Question
+                | InteractionAttention::Plan
+        )
     ) || i.secret == Some(true)
     {
         return Err(WireError::elsewhere());

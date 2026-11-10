@@ -114,7 +114,7 @@ pub fn register_worker_lines(l: &mut WorkerLines) {
             }
         }
     });
-    l.register_start_line(|_chat, services| {
+    l.register_start_line(|chat, services| {
         if let Some(cell) = services.get::<ServicesCell>() {
             cell.set(services);
         }
@@ -145,14 +145,17 @@ mod tests {
     fn a_chat_starts_with_its_profiles_hub_person() {
         use helm_core::db::MigrationRegistry;
         let d = tempfile::tempdir().unwrap();
-        let db = Arc::new(Database::open(&d.path().join("t.db"), &MigrationRegistry::new()).unwrap());
+        let db =
+            Arc::new(Database::open(&d.path().join("t.db"), &MigrationRegistry::new()).unwrap());
         db.write(|tx| {
             tx.execute_batch(
                 "CREATE TABLE profiles (id TEXT PRIMARY KEY, hub_person_id TEXT, is_home INTEGER);
-                 CREATE TABLE chats (id TEXT PRIMARY KEY, profile_id TEXT);
+                 ALTER TABLE chats ADD COLUMN profile_id TEXT;
+                 INSERT INTO projects (id, name, created_at) VALUES ('p', 'P', 1);
                  INSERT INTO profiles VALUES ('home', '3', 1), ('sam', '7', 0), ('guest', NULL, 0);
-                 INSERT INTO chats VALUES ('c-sam', 'sam'), ('c-guest', 'guest'), ('c-none', ''),
-                                          ('c-gone', 'deleted');",
+                 INSERT INTO chats (id, project_id, created_at, updated_at, profile_id)
+                 VALUES ('c-sam', 'p', 1, 1, 'sam'), ('c-guest', 'p', 1, 1, 'guest'),
+                        ('c-none', 'p', 1, 1, ''), ('c-gone', 'p', 1, 1, 'deleted');",
             )
         })
         .unwrap();

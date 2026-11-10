@@ -310,7 +310,9 @@ impl ChatPort for HostPort {
                 Some(rows) if rows.len() > limit => {
                     let excess = rows.len() - limit;
                     rows.drain(..excess);
-                    rows.first().and_then(|r| r.get("id")).and_then(Value::as_i64)
+                    rows.first()
+                        .and_then(|r| r.get("id"))
+                        .and_then(Value::as_i64)
                 }
                 _ => None,
             };
@@ -444,15 +446,22 @@ impl ChatPort for HostPort {
 
     fn rename(&self, a: RenameArgs) -> BoxFut<'_, PortResult<()>> {
         Box::pin(async move {
-            self.op("chat_rename", json!({ "chatId": a.chat_id, "title": a.title }))
-                .await?;
+            self.op(
+                "chat_rename",
+                json!({ "chatId": a.chat_id, "title": a.title }),
+            )
+            .await?;
             Ok(())
         })
     }
 
     fn archive(&self, a: ArchiveArgs) -> BoxFut<'_, PortResult<()>> {
         Box::pin(async move {
-            let op = if a.archived { "chat_archive" } else { "chat_restore" };
+            let op = if a.archived {
+                "chat_archive"
+            } else {
+                "chat_restore"
+            };
             self.op(op, json!({ "chatId": a.chat_id })).await?;
             Ok(())
         })

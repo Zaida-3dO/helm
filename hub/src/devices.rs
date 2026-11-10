@@ -129,10 +129,18 @@ pub async fn route(
     size: usize,
 ) -> Value {
     if !lines.is_peer(client_id) {
-        return error_frame(&id, "scope", "This machine's token cannot use the household.");
+        return error_frame(
+            &id,
+            "scope",
+            "This machine's token cannot use the household.",
+        );
     }
     if op.is_empty() || op.len() > MAX_OP {
-        return error_frame(&id, "bad_request", "The call needs an op of 1 to 64 characters.");
+        return error_frame(
+            &id,
+            "bad_request",
+            "The call needs an op of 1 to 64 characters.",
+        );
     }
     if size > MAX_DEV_FRAME {
         return too_large(&id);
@@ -162,9 +170,7 @@ pub async fn route(
             .filter(|t| t.scopes.has(Scope::Peer));
         (from, target)
     };
-    let line = target
-        .and_then(|t| lines.get(t.id))
-        .filter(|l| l.is_up());
+    let line = target.and_then(|t| lines.get(t.id)).filter(|l| l.is_up());
     let Some(line) = line else {
         return error_frame(&id, "offline", "That device isn't connected to the hub.");
     };
@@ -225,6 +231,8 @@ pub fn push(lines: &Lines, client_id: i64, to: &str, sub: Value, seq: Value, eve
         return;
     };
     if let Some(line) = lines.get(target.id).filter(|l| l.is_up()) {
-        line.send(&json!({ "type": "dev_push", "from": from, "sub": sub, "seq": seq, "event": event }));
+        line.send(
+            &json!({ "type": "dev_push", "from": from, "sub": sub, "seq": seq, "event": event }),
+        );
     }
 }

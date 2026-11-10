@@ -449,7 +449,9 @@ pub fn launch_contributors(
     }
     let mut c = helm_workers::contrib::LaunchContributors::new();
     // Whose chat this is opens the system prompt, ahead of the addendum.
-    c.add(Arc::new(helm_profiles::launch::WhoLaunch { db: db.clone() }));
+    c.add(Arc::new(helm_profiles::launch::WhoLaunch {
+        db: db.clone(),
+    }));
     c.add(Arc::new(a));
     // The workflow's dispatch and edit gates: a launch variable, only for chats they may act in.
     c.add(Arc::new(helm_workflow::GateLaunch { db: db.clone() }));

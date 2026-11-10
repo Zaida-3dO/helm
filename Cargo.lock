@@ -1797,6 +1797,8 @@ dependencies = [
  "helm-claudechats",
  "helm-consent",
  "helm-core",
+ "helm-devices",
+ "helm-dictation",
  "helm-github",
  "helm-governor",
  "helm-hosttools",
@@ -1807,6 +1809,7 @@ dependencies = [
  "helm-pages",
  "helm-panel",
  "helm-platform",
+ "helm-profiles",
  "helm-projects",
  "helm-relay",
  "helm-saved",
@@ -1892,6 +1895,7 @@ dependencies = [
 name = "helm-consent"
 version = "1.0.1"
 dependencies = [
+ "helm-chats",
  "helm-core",
  "helm-hosttools",
  "helm-ipc",
@@ -1924,6 +1928,44 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "helm-devices"
+version = "1.0.1"
+dependencies = [
+ "getrandom 0.3.4",
+ "helm-chats",
+ "helm-core",
+ "helm-ipc",
+ "hex",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "helm-dictation"
+version = "1.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "helm-chats",
+ "helm-core",
+ "helm-hosttools",
+ "helm-ipc",
+ "helm-localmodels",
+ "helm-platform",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
  "uuid",
 ]
 
@@ -2104,6 +2146,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "helm-profiles"
+version = "1.0.1"
+dependencies = [
+ "helm-chats",
+ "helm-core",
+ "helm-devices",
+ "helm-ipc",
+ "helm-workers",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "helm-projects"
 version = "1.0.1"
 dependencies = [
@@ -2137,9 +2196,13 @@ dependencies = [
  "helm-chats",
  "helm-consent",
  "helm-core",
+ "helm-devices",
  "helm-hosttools",
  "helm-ipc",
+ "helm-mcp",
  "helm-platform",
+ "helm-profiles",
+ "helm-skills",
  "log",
  "rusqlite",
  "serde",
@@ -2148,6 +2211,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "ureq",
  "uuid",
 ]
 
@@ -2222,11 +2286,18 @@ name = "helm-skills"
 version = "1.0.1"
 dependencies = [
  "helm-core",
+ "helm-hosttools",
  "helm-ipc",
+ "helm-mcp",
+ "helm-platform",
+ "helm-workers",
  "log",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

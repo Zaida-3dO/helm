@@ -43,9 +43,7 @@ fn rename(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: RenameArgs =
         serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
     let db = ctx.services.need::<Database>()?;
-    let (uid, name) = db
-        .write(|tx| identity::rename(tx, &a.name))
-        .map_err(fail)?;
+    let (uid, name) = db.write(|tx| identity::rename(tx, &a.name)).map_err(fail)?;
     ctx.events.emit(AppEvent::new("device_changed"));
     Ok(json!({ "uid": uid, "name": name }))
 }
@@ -173,7 +171,9 @@ fn active_person(conn: &Connection) -> Option<String> {
     let profile: String = match active {
         Some(id) => id,
         None => conn
-            .query_row("SELECT id FROM profiles WHERE is_home = 1", [], |r| r.get(0))
+            .query_row("SELECT id FROM profiles WHERE is_home = 1", [], |r| {
+                r.get(0)
+            })
             .optional()
             .ok()
             .flatten()?,

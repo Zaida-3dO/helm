@@ -288,7 +288,9 @@ pub fn update(
         None => None,
     };
     if note.is_some() && status.is_none() {
-        return refuse("A note goes with a status change; use app_append_feedback to add an entry.");
+        return refuse(
+            "A note goes with a status change; use app_append_feedback to add an entry.",
+        );
     }
     db.write(|tx| {
         let cur = live_status(tx, id)?;
@@ -311,7 +313,7 @@ pub fn update(
             "UPDATE feedback_items SET status = ?2, board_item = coalesce(?3, board_item), updated_at = ?4 WHERE id = ?1",
             params![id, next, board, now],
         )?;
-        if status.is_some() && next != cur {
+        if next != cur {
             record(tx, id, "status", Some(&next), a, now)?;
         }
         Ok(())
@@ -364,17 +366,26 @@ pub fn edit(
             None
         };
         if let Some(t) = &title {
-            tx.execute("UPDATE feedback_items SET title = ?2 WHERE id = ?1", params![id, t])?;
+            tx.execute(
+                "UPDATE feedback_items SET title = ?2 WHERE id = ?1",
+                params![id, t],
+            )?;
         }
         if let (Some(b), Some(target)) = (&body, target) {
-            tx.execute("UPDATE feedback_entries SET text = ?2 WHERE id = ?1", params![target, b])?;
+            tx.execute(
+                "UPDATE feedback_entries SET text = ?2 WHERE id = ?1",
+                params![target, b],
+            )?;
         }
         let what = match (title.is_some(), body.is_some()) {
             (true, true) => "title and text",
             (true, false) => "title",
             _ => "text",
         };
-        tx.execute("UPDATE feedback_items SET updated_at = ?2 WHERE id = ?1", params![id, now])?;
+        tx.execute(
+            "UPDATE feedback_items SET updated_at = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
         record(tx, id, "edited", Some(what), a, now)?;
         Ok(())
     })
@@ -635,14 +646,25 @@ pub(crate) fn update_tool(ctx: &ToolCtx, a: Value, now: i64) -> ToolResult {
     only_keys(
         &a,
         "app_update_feedback",
-        &["id", "status", "boardItem", "note", "title", "text", "entryId", "delete"],
+        &[
+            "id",
+            "status",
+            "boardItem",
+            "note",
+            "title",
+            "text",
+            "entryId",
+            "delete",
+        ],
     )?;
     let db = db_of(ctx)?;
     let id = id_arg(&a).map_err(ToolError::refused)?;
     let who = Author::agent(&ctx.caller_chat_id, false);
     if a.get("delete").and_then(Value::as_bool).unwrap_or(false) {
         if a.as_object().is_some_and(|o| o.len() > 2) {
-            return Err(ToolError::refused("delete goes alone: give only id and delete."));
+            return Err(ToolError::refused(
+                "delete goes alone: give only id and delete.",
+            ));
         }
         delete(&db, &who, id, now).map_err(fail_to_tool)?;
         return Ok(json!({"id": id, "deleted": true}));
@@ -1023,7 +1045,8 @@ mod tests {
         // An agent can close what the user filed, but must say what shipped; the closing note
         // becomes its own entry and the status change is on the record.
         assert!(
-            refused(update_tool(&ctx, json!({"id": id, "status": "done"}), 6)).contains("needs a note")
+            refused(update_tool(&ctx, json!({"id": id, "status": "done"}), 6))
+                .contains("needs a note")
         );
         update_tool(
             &ctx,
@@ -1034,12 +1057,21 @@ mod tests {
         let closed = get(&db, id).unwrap().unwrap();
         assert_eq!(closed["status"], "done");
         assert_eq!(closed["entries"][1]["text"], "Shipped in the next release.");
-        assert_eq!(closed["entries"][1]["author"], json!({"kind": "agent", "chatId": "chat-1"}));
-        assert_eq!(closed["history"][1]["by"], json!({"kind": "agent", "chatId": "chat-1"}));
+        assert_eq!(
+            closed["entries"][1]["author"],
+            json!({"kind": "agent", "chatId": "chat-1"})
+        );
+        assert_eq!(
+            closed["history"][1]["by"],
+            json!({"kind": "agent", "chatId": "chat-1"})
+        );
         assert_eq!(closed["history"][1]["detail"], "done");
         // The user closes without a note and it is recorded as theirs.
         update(&db, &Author::human(), id, Some("wont_do"), None, None, 7).unwrap();
-        assert_eq!(get(&db, id).unwrap().unwrap()["history"][2]["by"], json!({"kind": "human"}));
+        assert_eq!(
+            get(&db, id).unwrap().unwrap()["history"][2]["by"],
+            json!({"kind": "human"})
+        );
         assert_eq!(get(&db, id).unwrap().unwrap()["boardItem"], "0f0f0f0f-aaaa");
         for bad in [
             json!({"id": id}),
@@ -1064,8 +1096,18 @@ mod tests {
         let (_d, db, ctx) = setup();
         let id = create(&db, &Author::human(), "Old title", "Old text.", 1).unwrap();
         append(&db, &Author::human(), id, "Second.", 2).unwrap();
-        update_tool(&ctx, json!({"id": id, "title": "New  title", "text": "New text."}), 3).unwrap();
-        update_tool(&ctx, json!({"id": id, "text": "Second, fixed.", "entryId": 2}), 4).unwrap();
+        update_tool(
+            &ctx,
+            json!({"id": id, "title": "New  title", "text": "New text."}),
+            3,
+        )
+        .unwrap();
+        update_tool(
+            &ctx,
+            json!({"id": id, "text": "Second, fixed.", "entryId": 2}),
+            4,
+        )
+        .unwrap();
         let got = get(&db, id).unwrap().unwrap();
         assert_eq!(got["title"], "New title");
         assert_eq!(got["entries"][0]["text"], "New text.");
@@ -1073,14 +1115,30 @@ mod tests {
         // Edits leave the original authors alone and are recorded as the agent's.
         assert_eq!(got["entries"][0]["author"], json!({"kind": "human"}));
         assert_eq!(got["history"][0]["detail"], "title and text");
-        assert_eq!(got["history"][1]["by"], json!({"kind": "agent", "chatId": "chat-1"}));
+        assert_eq!(
+            got["history"][1]["by"],
+            json!({"kind": "agent", "chatId": "chat-1"})
+        );
         assert!(edit(&db, &Author::human(), id, None, Some("x"), Some(999), 5).is_err());
 
         // Deleting hides the item from lists and from agents; the user's list shows who did it.
         update_tool(&ctx, json!({"id": id, "delete": true}), 6).unwrap();
         let ids = |f: &Filter| list(&db, f).unwrap().len();
-        assert_eq!(ids(&Filter { limit: 10, ..Default::default() }), 0);
-        assert_eq!(ids(&Filter { limit: 10, deleted: true, ..Default::default() }), 1);
+        assert_eq!(
+            ids(&Filter {
+                limit: 10,
+                ..Default::default()
+            }),
+            0
+        );
+        assert_eq!(
+            ids(&Filter {
+                limit: 10,
+                deleted: true,
+                ..Default::default()
+            }),
+            1
+        );
         assert!(get_tool(&ctx, json!({"id": id})).is_err());
         assert_eq!(
             get(&db, id).unwrap().unwrap()["deleted"]["by"],
@@ -1090,7 +1148,13 @@ mod tests {
         assert!(update_tool(&ctx, json!({"id": id, "status": "open"}), 7).is_err());
         restore(&db, &Author::human(), id, 8).unwrap();
         assert!(restore(&db, &Author::human(), id, 9).is_err());
-        assert_eq!(ids(&Filter { limit: 10, ..Default::default() }), 1);
+        assert_eq!(
+            ids(&Filter {
+                limit: 10,
+                ..Default::default()
+            }),
+            1
+        );
         assert!(get_tool(&ctx, json!({"id": id})).is_ok());
     }
 

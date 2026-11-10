@@ -288,20 +288,42 @@ mod tests {
 
         // (the report, what it should make of the answer)
         let rows: Vec<(Value, Option<(Missed, u32)>)> = vec![
-            (json!({"reply": "r1", "state": "partial", "sentence": 2, "at": 10}), Some((Missed::Partial, 2))),
+            (
+                json!({"reply": "r1", "state": "partial", "sentence": 2, "at": 10}),
+                Some((Missed::Partial, 2)),
+            ),
             // A sentence number past the end is held to the last one; none given means the first.
-            (json!({"reply": "r1", "state": "partial", "sentence": 99, "at": 11}), Some((Missed::Partial, 5))),
-            (json!({"reply": "r1", "state": "partial", "at": 12}), Some((Missed::Partial, 1))),
+            (
+                json!({"reply": "r1", "state": "partial", "sentence": 99, "at": 11}),
+                Some((Missed::Partial, 5)),
+            ),
+            (
+                json!({"reply": "r1", "state": "partial", "at": 12}),
+                Some((Missed::Partial, 1)),
+            ),
             // A report older than the latest seen is ignored.
-            (json!({"reply": "r1", "state": "none", "at": 5}), Some((Missed::Partial, 1))),
-            (json!({"reply": "r2", "state": "none", "at": 10}), Some((Missed::Unplayed, 0))),
+            (
+                json!({"reply": "r1", "state": "none", "at": 5}),
+                Some((Missed::Partial, 1)),
+            ),
+            (
+                json!({"reply": "r2", "state": "none", "at": 10}),
+                Some((Missed::Unplayed, 0)),
+            ),
             // Reports that mean nothing: an unknown answer, an unknown state, no id.
-            (json!({"reply": "nobody-made-this", "state": "none", "at": 10}), None),
+            (
+                json!({"reply": "nobody-made-this", "state": "none", "at": 10}),
+                None,
+            ),
             (json!({"reply": "r3", "state": "sideways", "at": 10}), None),
             (json!({"state": "none"}), None),
         ];
         for (i, (report, want)) in rows.into_iter().enumerate() {
-            let id = report.get("reply").and_then(Value::as_str).unwrap_or("-").to_owned();
+            let id = report
+                .get("reply")
+                .and_then(Value::as_str)
+                .unwrap_or("-")
+                .to_owned();
             let n = s.report(&[report], T0 + 10_000);
             let got = s
                 .load()
@@ -317,8 +339,17 @@ mod tests {
         }
 
         // Heard in full: forgotten. Another conversation's miss never reaches this one.
-        assert_eq!(s.report(&[json!({"reply": "r3", "state": "all", "at": 20})], T0 + 10_000), 1);
-        s.report(&[json!({"reply": "r4", "state": "none", "at": 20})], T0 + 10_000);
+        assert_eq!(
+            s.report(
+                &[json!({"reply": "r3", "state": "all", "at": 20})],
+                T0 + 10_000
+            ),
+            1
+        );
+        s.report(
+            &[json!({"reply": "r4", "state": "none", "at": 20})],
+            T0 + 10_000,
+        );
         let p = s.pending(Some("c1"), T0 + 20_000);
         assert_eq!(
             p.lines,
@@ -337,7 +368,10 @@ mod tests {
 
         // A new conversation carries nothing, and clears what it had no use for.
         s.sent("r5", "c1", "Old.", 1, T0 + 30_000);
-        s.report(&[json!({"reply": "r5", "state": "none", "at": 31})], T0 + 31_000);
+        s.report(
+            &[json!({"reply": "r5", "state": "none", "at": 31})],
+            T0 + 31_000,
+        );
         let p = s.pending(None, T0 + 32_000);
         assert_eq!((p.lines.len(), p.ids.len()), (0, 1));
     }
@@ -349,36 +383,66 @@ mod tests {
         for i in 0..5 {
             let id = format!("r{i}");
             s.sent(&id, "c1", &format!("Answer number {i}."), 2, T0 + i * 1_000);
-            s.report(&[json!({"reply": id, "state": "none", "at": 1})], T0 + 10_000);
+            s.report(
+                &[json!({"reply": id, "state": "none", "at": 1})],
+                T0 + 10_000,
+            );
         }
         let p = s.pending(Some("c1"), T0 + 20_000);
-        let said: Vec<&str> = p.lines.iter().map(|l| l.split('"').nth(1).unwrap()).collect();
-        assert_eq!(said, ["Answer number 2.", "Answer number 3.", "Answer number 4."]);
+        let said: Vec<&str> = p
+            .lines
+            .iter()
+            .map(|l| l.split('"').nth(1).unwrap())
+            .collect();
+        assert_eq!(
+            said,
+            ["Answer number 2.", "Answer number 3.", "Answer number 4."]
+        );
         assert_eq!(p.ids.len(), 5, "older ones are cleared with the rest");
         s.clear(&p.ids, T0 + 20_000);
 
         // Over the limit, answers nothing was said about go first.
         for i in 0..(MAX_ENTRIES + 10) {
-            s.sent(&format!("u{i}"), "c1", "Unreported.", 1, T0 + 100_000 + i as i64);
+            s.sent(
+                &format!("u{i}"),
+                "c1",
+                "Unreported.",
+                1,
+                T0 + 100_000 + i as i64,
+            );
         }
         s.sent("missed", "c1", "Missed.", 1, T0 + 99_000);
-        s.report(&[json!({"reply": "missed", "state": "none", "at": 1})], T0 + 200_000);
+        s.report(
+            &[json!({"reply": "missed", "state": "none", "at": 1})],
+            T0 + 200_000,
+        );
         let kept = s.load().entries;
         assert_eq!(kept.len(), MAX_ENTRIES);
         assert!(kept.iter().any(|e| e.reply == "missed"));
         assert!(!kept.iter().any(|e| e.reply == "u0"));
-        assert!(kept.iter().any(|e| e.reply == format!("u{}", MAX_ENTRIES + 9)));
+        assert!(kept
+            .iter()
+            .any(|e| e.reply == format!("u{}", MAX_ENTRIES + 9)));
 
         // Nothing is kept past a day, said about or not.
-        assert!(s.pending(Some("c1"), T0 + 200_000 + 24 * HOUR).lines.is_empty());
+        assert!(s
+            .pending(Some("c1"), T0 + 200_000 + 24 * HOUR)
+            .lines
+            .is_empty());
         assert!(s.load().entries.is_empty());
     }
 
     #[test]
     fn a_lead_is_eight_words_that_fit_in_one_quoted_bracketed_line() {
         let rows = [
-            ("One two three four five six seven eight", "One two three four five six seven eight"),
-            ("One two three four five six seven eight nine", "One two three four five six seven eight…"),
+            (
+                "One two three four five six seven eight",
+                "One two three four five six seven eight",
+            ),
+            (
+                "One two three four five six seven eight nine",
+                "One two three four five six seven eight…",
+            ),
             ("  spaced \n\n out  ", "spaced out"),
             ("He said \"stop\" [now]", "He said 'stop' now"),
             ("", ""),
@@ -398,7 +462,10 @@ mod tests {
             reported_at: 0,
         };
         let line = note_line(&e).unwrap();
-        assert!(!line.contains('\n') && line.matches(']').count() == 1, "{line}");
+        assert!(
+            !line.contains('\n') && line.matches(']').count() == 1,
+            "{line}"
+        );
         assert_eq!(note_line(&Entry { missed: None, ..e }), None);
     }
 }

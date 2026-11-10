@@ -84,7 +84,7 @@ pub fn parse_agent(text: &str) -> Option<ParsedAgent> {
             "name" => out.name = value.to_owned(),
             "description" => out.description = value.to_owned(),
             "model" => out.model = value.to_owned(),
-            "tools" => out.tools = split_list(&value),
+            "tools" => out.tools = split_list(value),
             _ => {}
         }
     }

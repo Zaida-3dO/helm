@@ -1114,6 +1114,7 @@ async fn a_saved_model_on_a_switched_off_server_is_left_out() {
 fn the_chat_is_told_of_an_undelivered_answer_only_after_the_line_stays_down() {
     let g = UNDELIVERED_GRACE_MS;
     // (when the answer was offered, whether the line took it, whether the chat is told now)
+    #[allow(clippy::type_complexity)]
     let rows: &[(&str, &[(i64, bool, bool)])] = &[
         (
             "a short drop that heals",
@@ -1941,7 +1942,8 @@ async fn notes_enter_the_voice_chat_as_the_apps_words_and_the_rows_say_what_bega
         sql(
             &e.db,
             "INSERT INTO messages(chat_id, source_key, role, text, timestamp)
-             VALUES (?1, ?2, 'user', ?3, 1)",
+             VALUES (?1, ?2, 'user', ?3, 1)
+             ON CONFLICT(chat_id, source_key) DO UPDATE SET text = excluded.text",
             &[&chat, &format!("u:{sid}"), &text],
         );
         if text == "asked" {

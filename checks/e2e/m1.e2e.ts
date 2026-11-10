@@ -236,8 +236,7 @@ describe("core scenarios end to end with the fake claude", { timeout: 15 * 60_00
       type Block = { type?: string; source?: { type?: string; media_type?: string; data?: string } };
       const records = fs
         .readFileSync(path.join(profile, "fake-claude.log"), "utf8")
-        .split("
-")
+        .split("\n")
         .filter(Boolean)
         .map((l) => JSON.parse(l) as { kind?: string; rec?: { type?: string; message?: { content?: unknown } } })
         .filter((e) => e.kind === "in" && e.rec?.type === "user");

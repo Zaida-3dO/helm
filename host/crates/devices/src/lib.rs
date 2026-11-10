@@ -76,8 +76,10 @@ pub fn register_services(
     // Chats that run on other devices: where the mirror attaches, and the check that sends the
     // ops naming such a chat to it.
     services.insert(std::sync::Arc::new(mirror::MirrorSlot::default()));
-    services.insert(std::sync::Arc::new(helm_chats::remote::RemoteSlot::default()));
-    services.insert(std::sync::Arc::new(helm_ipc::OpIntercept(std::sync::Arc::new(
-        helm_chats::remote::Routes,
-    ))));
+    services.insert(std::sync::Arc::new(
+        helm_chats::remote::RemoteSlot::default(),
+    ));
+    services.insert(std::sync::Arc::new(helm_ipc::OpIntercept(
+        std::sync::Arc::new(helm_chats::remote::Routes),
+    )));
 }

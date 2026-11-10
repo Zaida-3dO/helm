@@ -334,9 +334,9 @@ fn check_voice_changeable(patch: &Value) -> Result<(), String> {
     }
     if let Some(e) = patch.get("effort") {
         if !e.is_null() {
-            let s = e
-                .as_str()
-                .ok_or_else(|| format!("{VOICE_KEY}.effort must be one of {EFFORT_LIST} or null."))?;
+            let s = e.as_str().ok_or_else(|| {
+                format!("{VOICE_KEY}.effort must be one of {EFFORT_LIST} or null.")
+            })?;
             if !s.trim().is_empty() && !helm_chats::catalogue::is_effort(s.trim()) {
                 return Err(format!(
                     "{VOICE_KEY}.effort must be one of {EFFORT_LIST} or null."
@@ -655,7 +655,11 @@ mod tests {
         // The defaults read in full.
         let start = read();
         assert_eq!(
-            (start["model"].as_str(), start["effort"].as_str(), start["idleMinutes"].as_i64()),
+            (
+                start["model"].as_str(),
+                start["effort"].as_str(),
+                start["idleMinutes"].as_i64()
+            ),
             (Some("claude-sonnet-5-5"), Some("low"), Some(240))
         );
         assert_eq!(start["watch"], json!("flags"));
@@ -663,24 +667,46 @@ mod tests {
         // A chat sets the two fields, and the file holds them.
         let (before, after) = apply(json!({"model": "opus", "effort": "high"})).unwrap();
         assert_eq!(before["model"], json!("claude-sonnet-5-5"));
-        assert_eq!((after["model"].as_str(), after["effort"].as_str()), (Some("opus"), Some("high")));
-        assert_eq!(voice::load_file(&voice_ext.path).new_chat(), (Some("opus"), Some("high")));
+        assert_eq!(
+            (after["model"].as_str(), after["effort"].as_str()),
+            (Some("opus"), Some("high"))
+        );
+        assert_eq!(
+            voice::load_file(&voice_ext.path).new_chat(),
+            (Some("opus"), Some("high"))
+        );
         assert_eq!(read()["idleMinutes"], json!(240));
 
         // Refusals: a bad effort, a bad model, the user's fields, a stranger, a bare value.
         for bad in ["ultra", "HIGH"] {
             let err = apply(json!({"effort": bad})).unwrap_err();
-            assert!(err.contains("low, medium, high, xhigh or max"), "{bad}: {err}");
+            assert!(
+                err.contains("low, medium, high, xhigh or max"),
+                "{bad}: {err}"
+            );
         }
         assert!(apply(json!({"model": 3})).unwrap_err().contains("model id"));
-        assert!(apply(json!({"model": "ha\nku"})).unwrap_err().contains("at most 120"));
-        for field in [json!({"idleMinutes": 30}), json!({"watch": "off"}), json!({"maxTokens": 20_000})] {
+        assert!(apply(json!({"model": "ha\nku"}))
+            .unwrap_err()
+            .contains("at most 120"));
+        for field in [
+            json!({"idleMinutes": 30}),
+            json!({"watch": "off"}),
+            json!({"maxTokens": 20_000}),
+        ] {
             let err = apply(field.clone()).unwrap_err();
             let name = field.as_object().unwrap().keys().next().unwrap().clone();
-            assert!(err.contains(&name) && err.contains("Settings > Hub"), "{err}");
+            assert!(
+                err.contains(&name) && err.contains("Settings > Hub"),
+                "{err}"
+            );
         }
-        assert!(apply(json!({"idleMinutes": 5})).unwrap_err().contains("idle time"));
-        assert!(apply(json!({"token": "abc"})).unwrap_err().contains("idleMinutes"));
+        assert!(apply(json!({"idleMinutes": 5}))
+            .unwrap_err()
+            .contains("idle time"));
+        assert!(apply(json!({"token": "abc"}))
+            .unwrap_err()
+            .contains("idleMinutes"));
         assert!(apply(json!("opus")).unwrap_err().contains("object"));
         // The user's fields may be repeated as they are.
         assert!(apply(json!({"idleMinutes": 240, "watch": "flags", "model": "sonnet"})).is_ok());

@@ -215,7 +215,11 @@ async fn post_turn(State(state): State<Arc<AppState>>, req: Request) -> Response
             eprintln!(
                 "voice: {} sent a {} turn ({})",
                 client.name,
-                if audio_type.is_some() { "spoken" } else { "typed" },
+                if audio_type.is_some() {
+                    "spoken"
+                } else {
+                    "typed"
+                },
                 mode.as_str()
             );
             (

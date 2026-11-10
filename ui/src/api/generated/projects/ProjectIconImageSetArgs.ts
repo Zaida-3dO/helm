@@ -3,7 +3,7 @@
 /**
  * `project_icon_image_set`: the picture the user chose, already cut square and drawn at 64 by 64.
  */
-export type ProjectIconImageSetArgs = { projectId: string,
+export type ProjectIconImageSetArgs = { projectId: string, 
 /**
  * The PNG's bytes in base64, at most 64 KB once decoded.
  */

@@ -49,9 +49,9 @@ test('a finished chat gets a ring only when it may move, and only if the row is 
     assert.equal(r.drawn.length, t.drawn, t.name);
     assert.equal(r.queue.length, 0, t.name);
     if (t.drawn) {
-      assert.equal(r.drawn[0].effect.spray, t.spray, t.name);
-      assert.deepEqual(r.drawn[0].effect.rect, ROW, t.name);
-      assert.equal(r.drawn[0].effect.check, false, t.name);
+      assert.equal(r.drawn[0]!.effect.spray, t.spray, t.name);
+      assert.deepEqual(r.drawn[0]!.effect.rect, ROW, t.name);
+      assert.equal(r.drawn[0]!.effect.check, false, t.name);
     }
   }
 });
@@ -98,7 +98,7 @@ test('a merge rings the box and pops a check, unless things are quiet', () => {
     const r = rig(over);
     r.c.merged(box);
     assert.equal(r.drawn.length, drawn);
-    if (drawn) assert.deepEqual([r.drawn[0].effect.check, r.drawn[0].effect.rect], [true, box]);
+    if (drawn) assert.deepEqual([r.drawn[0]!.effect.check, r.drawn[0]!.effect.rect], [true, box]);
   }
   const none = rig();
   none.c.merged(null);

@@ -168,10 +168,9 @@ impl MediaServer {
         let mut live = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         // The same unchanged file keeps its token, so a viewer that re-reads it to follow edits is
         // never left holding an address the new read replaced.
-        if let Some(s) = live
-            .iter()
-            .find(|s| modified.is_some() && s.path == path && s.size == size && s.modified == modified)
-        {
+        if let Some(s) = live.iter().find(|s| {
+            modified.is_some() && s.path == path && s.size == size && s.modified == modified
+        }) {
             return Ok(Opened {
                 token: s.token.clone(),
                 mime,

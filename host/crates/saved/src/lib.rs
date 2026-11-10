@@ -52,7 +52,7 @@ pub fn start(runtime: &helm_chats::ChatRuntime, services: &Services) {
             every.tick().await;
             let svc = local.clone();
             // Items removed more than a week ago go for good: at start, then about hourly.
-            let purge = ticks % 720 == 0;
+            let purge = ticks.is_multiple_of(720);
             ticks = ticks.wrapping_add(1);
             let _ = tokio::task::spawn_blocking(move || {
                 let now = helm_core::now_ms();

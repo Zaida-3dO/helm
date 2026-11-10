@@ -138,7 +138,10 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     )?;
     // Profiles made before these columns existed.
     for (column, ddl) in [
-        ("about", "ALTER TABLE profiles ADD COLUMN about TEXT NOT NULL DEFAULT ''"),
+        (
+            "about",
+            "ALTER TABLE profiles ADD COLUMN about TEXT NOT NULL DEFAULT ''",
+        ),
         (
             "needs_name",
             "ALTER TABLE profiles ADD COLUMN needs_name INTEGER NOT NULL DEFAULT 0",
@@ -300,11 +303,13 @@ fn clean_about(raw: &str) -> Result<String, ProfileError> {
     if about.chars().count() > MAX_ABOUT_CHARS {
         return bad("A profile's about text is at most 2000 characters.");
     }
-    let odd = about.chars().any(|c| {
-        hidden::is_hidden_char(c) || (c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
-    });
+    let odd = about
+        .chars()
+        .any(|c| hidden::is_hidden_char(c) || (c.is_control() && !matches!(c, '\n' | '\r' | '\t')));
     if odd {
-        return bad("A profile's about text can't hold invisible or direction-changing characters.");
+        return bad(
+            "A profile's about text can't hold invisible or direction-changing characters.",
+        );
     }
     Ok(about.to_owned())
 }
@@ -573,10 +578,7 @@ pub fn profile_of_chat(conn: &Connection, chat_id: &str) -> rusqlite::Result<Opt
 
 /// The id of the profile a chat belongs to, for settings and tools that act for a chat's owner.
 pub fn chat_owner_profile(conn: &Connection, chat_id: &str) -> Option<String> {
-    profile_of_chat(conn, chat_id)
-        .ok()
-        .flatten()
-        .map(|p| p.id)
+    profile_of_chat(conn, chat_id).ok().flatten().map(|p| p.id)
 }
 
 /// Link the home profile to the hub person this machine was paired as. A home profile that is
@@ -662,7 +664,10 @@ pub fn sync_people(
             Ok(()) => changed = true,
             // A name that can't be used, or the limit on profiles: that person has no profile
             // here, and their chats simply stay out of the lists.
-            Err(e) => log::info!("profiles: no profile made for a hub person: {}", e.message()),
+            Err(e) => log::info!(
+                "profiles: no profile made for a hub person: {}",
+                e.message()
+            ),
         }
     }
     Ok(changed)
@@ -957,13 +962,20 @@ mod tests {
             assert_eq!(h.name, "Old home");
             assert_eq!(column(tx, "a", "profile_id"), h.id);
             assert_eq!(column(tx, "b", "profile_id"), o.id);
-            assert_eq!(column(tx, "c", "profile_id"), h.id, "an unlabelled chat goes home");
+            assert_eq!(
+                column(tx, "c", "profile_id"),
+                h.id,
+                "an unlabelled chat goes home"
+            );
             let device = helm_devices::self_uid(tx).unwrap();
             for c in ["a", "b", "c"] {
                 assert_eq!(column(tx, c, "host_device_id"), device);
             }
             // The start-up check refills a row any other path left empty.
-            tx.execute("UPDATE chats SET profile_id = '', host_device_id = '' WHERE id = 'a'", [])?;
+            tx.execute(
+                "UPDATE chats SET profile_id = '', host_device_id = '' WHERE id = 'a'",
+                [],
+            )?;
             fill_identity(tx)?;
             assert_eq!(column(tx, "a", "profile_id"), h.id);
             assert_eq!(column(tx, "a", "host_device_id"), device);

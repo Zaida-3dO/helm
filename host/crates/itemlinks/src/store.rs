@@ -33,7 +33,9 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
             |r| r.get(0),
         )?;
         if !present {
-            tx.execute_batch(&format!("ALTER TABLE item_chat_links ADD COLUMN {column} {kind}"))?;
+            tx.execute_batch(&format!(
+                "ALTER TABLE item_chat_links ADD COLUMN {column} {kind}"
+            ))?;
         }
     }
     Ok(())
@@ -651,12 +653,16 @@ pub(crate) mod tests {
                 .unwrap()
         };
         db.write::<_, rusqlite::Error>(|tx| {
-            link(tx, "a", other, false, LinkedBy::Agent, 5).map_err(rusqlite::Error::InvalidParameterName)?;
+            link(tx, "a", other, false, LinkedBy::Agent, 5)
+                .map_err(rusqlite::Error::InvalidParameterName)?;
             Ok(())
         })
         .unwrap();
         assert_eq!(claim(&db, 100), [other]);
-        assert!(claim(&db, 200).is_empty(), "the failed lookup is not retried");
+        assert!(
+            claim(&db, 200).is_empty(),
+            "the failed lookup is not retried"
+        );
         db.write::<_, rusqlite::Error>(|tx| set_title(tx, other, "Found it"))
             .unwrap();
         assert_eq!(

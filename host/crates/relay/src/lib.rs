@@ -69,10 +69,10 @@ pub mod approve;
 pub mod client;
 pub mod config;
 pub mod devlink;
-pub mod knowledge_line;
 pub mod exec;
 pub mod gate;
 pub mod household;
+pub mod knowledge_line;
 pub mod notify;
 pub mod pair;
 pub mod remote;
@@ -80,10 +80,10 @@ pub mod sink;
 pub mod speakable;
 pub mod telegram;
 pub mod voice;
-pub mod voice_sink;
-pub mod voice_show;
-pub mod voice_watch;
 pub mod voice_heard;
+pub mod voice_show;
+pub mod voice_sink;
+pub mod voice_watch;
 
 pub use agent_settings::settings_extension;
 
@@ -275,7 +275,11 @@ fn telegram_reset(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
 fn voice_view(ctx: &OpCtx) -> Result<Value, ApiError> {
     let profile = ctx.services.need::<Profile>()?;
     let db = ctx.services.need::<helm_core::db::Database>()?;
-    to_value(&voice_sink::voice_view(&db, &profile.dir, helm_core::now_ms()))
+    to_value(&voice_sink::voice_view(
+        &db,
+        &profile.dir,
+        helm_core::now_ms(),
+    ))
 }
 
 fn voice_get(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {

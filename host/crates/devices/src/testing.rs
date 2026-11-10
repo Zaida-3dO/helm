@@ -1,8 +1,8 @@
 //! Test doubles for the device wire: a [`FakePort`] standing in for a whole install's chats, and
 //! builders for the records it holds. Nothing here touches a database, a process or a network.
 
-use crate::serve::{ChatPort, ChatState, PortResult};
 use crate::link::BoxFut;
+use crate::serve::{ChatPort, ChatState, PortResult};
 use crate::wire::{
     code, AnswerArgs, ArchiveArgs, CreateArgs, DeviceInfo, Hello, PersonInfo, ProjectInfo,
     RemoteChat, RenameArgs, SetModelArgs, ShareArgs, WireError,
@@ -276,7 +276,11 @@ impl ChatPort for FakePort {
         let mut rows: Vec<&MessageRow> = st
             .rows
             .get(&chat_id)
-            .map(|r| r.iter().filter(|m| before.is_none_or(|b| m.id < b)).collect())
+            .map(|r| {
+                r.iter()
+                    .filter(|m| before.is_none_or(|b| m.id < b))
+                    .collect()
+            })
             .unwrap_or_default();
         rows.sort_by_key(|r| (r.timestamp, r.id));
         let skip = rows.len().saturating_sub(limit);
@@ -284,7 +288,9 @@ impl ChatPort for FakePort {
             .iter()
             .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
             .collect();
-        ready(Ok(json!({ "chatId": chat_id, "messages": messages, "hasOlder": skip > 0 })))
+        ready(Ok(
+            json!({ "chatId": chat_id, "messages": messages, "hasOlder": skip > 0 }),
+        ))
     }
 
     fn claim_send(&self, client_id: &str, _chat_id: &str) -> PortResult<bool> {

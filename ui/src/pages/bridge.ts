@@ -35,7 +35,11 @@ export class PageBridge {
   private lastError = -Infinity;
   private closed = false;
 
-  constructor(private readonly o: BridgeOptions) {}
+  private readonly o: BridgeOptions;
+
+  constructor(o: BridgeOptions) {
+    this.o = o;
+  }
 
   /** Stops hearing and answering. */
   close(): void {

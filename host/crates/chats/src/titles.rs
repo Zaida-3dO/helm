@@ -314,7 +314,13 @@ fn naming_context(
         let titles = |sql: &str, limit: usize| -> rusqlite::Result<Vec<String>> {
             let mut st = tx.prepare(sql)?;
             let rows = st.query_map(
-                params![project, profile, chat_id, store::DEFAULT_TITLE, limit as i64],
+                params![
+                    project,
+                    profile,
+                    chat_id,
+                    store::DEFAULT_TITLE,
+                    limit as i64
+                ],
                 |r| r.get::<_, String>(0),
             )?;
             rows.collect()

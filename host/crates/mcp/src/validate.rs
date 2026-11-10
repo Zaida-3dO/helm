@@ -99,9 +99,7 @@ pub fn validate_ref(r: &ValueRef, place: RefPlace, label: &str) -> Result<(), In
                 )));
             }
             if r.value.is_some() || r.secret_id.is_some() {
-                return Err(bad(format!(
-                    "{label}: the chat's person takes no value."
-                )));
+                return Err(bad(format!("{label}: the chat's person takes no value.")));
             }
             Ok(())
         }

@@ -183,7 +183,9 @@ mod tests {
     impl MemoryHub for Fake {
         fn call(&self, person: Option<&str>, tool: &str, args: Value) -> Result<Value, MemError> {
             if self.down {
-                return Err(MemError::Unavailable("Shared memory isn't connected.".into()));
+                return Err(MemError::Unavailable(
+                    "Shared memory isn't connected.".into(),
+                ));
             }
             let me = person.unwrap_or("3");
             let mut rows = self.rows.lock().unwrap();
@@ -239,9 +241,14 @@ mod tests {
         assert_eq!(ids(list(&hub, &ev, Some("3")).unwrap()), [1, 2]);
         let mine = list(&hub, &home, Some("3")).unwrap();
         assert_eq!(ids(mine.clone()), [3]);
-        assert_eq!((mine[0].layer.as_str(), mine[0].owner.as_str()), ("profile:home", "Person 3"));
+        assert_eq!(
+            (mine[0].layer.as_str(), mine[0].owner.as_str()),
+            ("profile:home", "Person 3")
+        );
         assert_eq!(ids(list(&hub, &sam, Some("7")).unwrap()), [4]);
-        assert!(list(&hub, &Layer::Profile("guest".into()), None).unwrap().is_empty());
+        assert!(list(&hub, &Layer::Profile("guest".into()), None)
+            .unwrap()
+            .is_empty());
 
         let persons = ["3".to_owned(), "7".to_owned()];
         // Sam's private diary goes to Everyone (found through Sam's own person), then back.
@@ -266,7 +273,10 @@ mod tests {
             down: true,
             ..Default::default()
         };
-        assert!(matches!(list(&down, &ev, None), Err(MemError::Unavailable(_))));
+        assert!(matches!(
+            list(&down, &ev, None),
+            Err(MemError::Unavailable(_))
+        ));
         assert!(matches!(
             move_to(&down, 1, &ev, None, &persons),
             Err(MemError::Unavailable(_))

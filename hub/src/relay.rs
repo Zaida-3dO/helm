@@ -284,8 +284,7 @@ impl Line {
     /// Call `hook` with `true` after a connection attaches and `false` after the current one
     /// ends. It runs with no lock of the line held.
     pub fn on_change(&self, hook: impl Fn(bool) + Send + Sync + 'static) {
-        *self.on_change.lock().unwrap_or_else(|p| p.into_inner()) =
-            Some(std::sync::Arc::new(hook));
+        *self.on_change.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::sync::Arc::new(hook));
     }
 
     fn changed(&self, up: bool) {
@@ -1118,7 +1117,10 @@ mod tests {
         let seen = changes.clone();
         line.on_change(move |now_up| seen.lock().unwrap().push(now_up));
 
-        assert!(line.receive(gen, r#"{"type":"device","uid":"u1","name":"Desk","run":true}"#));
+        assert!(line.receive(
+            gen,
+            r#"{"type":"device","uid":"u1","name":"Desk","run":true}"#
+        ));
         assert!(line.receive(gen, r#"{"type":"dev","id":"c1","to":"u2","op":"hello"}"#));
         assert!(line.receive(
             gen,
@@ -1137,7 +1139,14 @@ mod tests {
                 run: true
             }
         );
-        let Upstream::Dev { id, to, op, args, size } = up.try_recv().unwrap() else {
+        let Upstream::Dev {
+            id,
+            to,
+            op,
+            args,
+            size,
+        } = up.try_recv().unwrap()
+        else {
             panic!("expected the call");
         };
         assert_eq!(
@@ -1195,15 +1204,23 @@ mod tests {
             let line = line.clone();
             tokio::spawn(async move {
                 let from = json!({ "uid": "u1" });
-                line.dev_call(&from, "hello", &json!({ "n": 1 }), Duration::from_millis(wait))
-                    .await
+                line.dev_call(
+                    &from,
+                    "hello",
+                    &json!({ "n": 1 }),
+                    Duration::from_millis(wait),
+                )
+                .await
             })
         };
         let mut answer = |result: Value| {
             let mut rx_frames = frames(&mut rx);
             let call = rx_frames.pop().filter(|f| f["type"] == "dev_call");
             call.map(|c| {
-                assert_eq!((c["op"].as_str(), c["from"]["uid"].as_str()), (Some("hello"), Some("u1")));
+                assert_eq!(
+                    (c["op"].as_str(), c["from"]["uid"].as_str()),
+                    (Some("hello"), Some("u1"))
+                );
                 json!({ "type": "dev_result", "id": c["id"], "ok": true, "result": result })
             })
         };
@@ -1218,7 +1235,10 @@ mod tests {
         let CallOutcome::Ok(frame) = task.await.unwrap() else {
             panic!("expected the answer");
         };
-        assert_eq!((frame["ok"].as_bool(), frame["result"].clone()), (Some(true), json!({ "device": "Desk" })));
+        assert_eq!(
+            (frame["ok"].as_bool(), frame["result"].clone()),
+            (Some(true), json!({ "device": "Desk" }))
+        );
 
         let task = ask(5000);
         let reply = loop {

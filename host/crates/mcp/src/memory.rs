@@ -81,7 +81,11 @@ pub fn call_tool(server: &ResolvedServer, tool: &str, args: Value) -> Result<Val
         .map_err(|why| CallError::Failed(scrub(&why, &server.secrets)))?;
     let text = result["content"][0]["text"].as_str().unwrap_or("");
     if result["isError"].as_bool() == Some(true) {
-        let why = if text.is_empty() { "The hub refused that." } else { text };
+        let why = if text.is_empty() {
+            "The hub refused that."
+        } else {
+            text
+        };
         return Err(CallError::Failed(scrub(why, &server.secrets)));
     }
     if let Some(structured) = result.get("structuredContent").filter(|v| !v.is_null()) {
@@ -203,9 +207,18 @@ mod tests {
     #[test]
     fn a_tool_call_acts_as_the_person_and_failures_are_told_apart() {
         let (url, seen, handle) = serve(6);
-        let ok = call_tool(&server(&url, Some("7")), "memory_list", json!({ "limit": 5 })).unwrap();
+        let ok = call_tool(
+            &server(&url, Some("7")),
+            "memory_list",
+            json!({ "limit": 5 }),
+        )
+        .unwrap();
         assert_eq!(ok["results"][0]["id"], 5);
-        let no = call_tool(&server(&url, Some("7")), "memory_update", json!({ "id": 5 }));
+        let no = call_tool(
+            &server(&url, Some("7")),
+            "memory_update",
+            json!({ "id": 5 }),
+        );
         assert_eq!(
             no,
             Err(CallError::Failed("That memory is not yours.".to_owned()))

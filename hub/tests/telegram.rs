@@ -548,7 +548,7 @@ async fn a_long_message_telegram_split_arrives_whole_and_an_ordinary_one_is_neve
     );
     assert_eq!(down(&mut rx), ["telegram_stop"]);
     e.bridge.flush(T0 + window).await;
-    assert_eq!(down(&mut rx), [a.clone()]);
+    assert_eq!(down(&mut rx), std::slice::from_ref(&a));
 
     // A message that has gone takes no more parts.
     e.bridge
@@ -570,7 +570,7 @@ async fn a_long_message_telegram_split_arrives_whole_and_an_ordinary_one_is_neve
     assert_eq!(down(&mut theirs_rx), ["hi"]);
     assert!(down(&mut mine_rx).is_empty(), "still held");
     mine.bridge.flush(T0 + window).await;
-    assert_eq!(down(&mut mine_rx), [a.clone()]);
+    assert_eq!(down(&mut mine_rx), std::slice::from_ref(&a));
 }
 
 #[tokio::test]
@@ -579,7 +579,7 @@ async fn a_burst_over_the_text_limit_goes_as_a_file_and_one_past_the_limit_start
     let part = "a".repeat(4096);
     let window = JOIN_WINDOW.as_millis() as i64;
     // 25 parts of 4,096 units is 102,400: over what goes as text, under what one burst gathers.
-    assert!(25 * 4096 > MAX_JOINED && 25 * 4096 < JOIN_LIMIT);
+    const { assert!(25 * 4096 > MAX_JOINED && 25 * 4096 < JOIN_LIMIT) };
     let e = env();
     let mut rx = line_up(&e);
     for i in 0..25 {

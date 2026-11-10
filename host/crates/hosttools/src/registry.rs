@@ -86,7 +86,7 @@ pub struct ToolError {
     pub changed: Changed,
 }
 
-//// Refuse a label an agent supplies (a title, caption, option label...) that holds an invisible or
+/// Refuse a label an agent supplies (a title, caption, option label...) that holds an invisible or
 /// direction-changing character, since it could read as something it is not.
 pub(crate) fn screen_label(what: &str, s: &str) -> Result<(), ToolError> {
     if s.chars().any(helm_core::hidden::is_hidden_char) {

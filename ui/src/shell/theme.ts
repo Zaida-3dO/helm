@@ -44,7 +44,7 @@ const LEGACY_SKINS: Record<string, Skin> = {
 export function parseSkin(v: unknown): Skin {
   if (typeof v !== 'string') return SKIN_DEFAULT;
   if ((SKINS as readonly string[]).includes(v)) return v as Skin;
-  return Object.hasOwn(LEGACY_SKINS, v) ? LEGACY_SKINS[v] : SKIN_DEFAULT;
+  return (Object.hasOwn(LEGACY_SKINS, v) ? LEGACY_SKINS[v] : undefined) ?? SKIN_DEFAULT;
 }
 
 export function resolveTheme(appearance: Appearance, prefersDark: boolean): 'light' | 'dark' {

@@ -671,7 +671,14 @@ impl Switched {
                 self.config_changed |= args.iter().any(|a| {
                     matches!(
                         a.as_str(),
-                        "add" | "set-url" | "set-head" | "set-branches" | "rename" | "remove" | "rm" | "prune"
+                        "add"
+                            | "set-url"
+                            | "set-head"
+                            | "set-branches"
+                            | "rename"
+                            | "remove"
+                            | "rm"
+                            | "prune"
                     )
                 });
             }
@@ -5121,7 +5128,10 @@ pub(crate) mod tests {
     #[test]
     fn a_push_follows_the_configured_targets_and_a_config_rewrite_before_it_fails_closed() {
         let c = ctx(true);
-        let cfg = |push: &[&'static str], mode: &'static str, upstream: Option<&'static str>, unreadable: bool| Configured {
+        let cfg = |push: &[&'static str],
+                   mode: &'static str,
+                   upstream: Option<&'static str>,
+                   unreadable: bool| Configured {
             push: push.to_vec(),
             mode,
             upstream,
@@ -5182,8 +5192,16 @@ pub(crate) mod tests {
             ("gh pr ready 7 -R o/r", Some(Tier::Quote), "task_repo"),
             ("gh pr merge $N -R o/r", Some(Tier::Quote), "fail_closed"),
             // Code that only names git, with nothing in it that starts a process.
-            ("python3 -c \"import platform; print(platform.node(), 'git push')\"", Some(Tier::Reason), "names_git_code"),
-            ("python3 -c \"import os; os.system('git push origin main')\"", Some(Tier::Quote), "fail_closed"),
+            (
+                "python3 -c \"import platform; print(platform.node(), 'git push')\"",
+                Some(Tier::Reason),
+                "names_git_code",
+            ),
+            (
+                "python3 -c \"import os; os.system('git push origin main')\"",
+                Some(Tier::Quote),
+                "fail_closed",
+            ),
         ];
         for (cmd, tier, want) in rows {
             assert_eq!(tier_rule(cmd), (tier, want), "{cmd}");
@@ -5230,7 +5248,9 @@ pub(crate) mod tests {
             "git push --force origin +HEAD:refs/heads/master",
         ];
         for _ in 0..300 {
-            let mut parts: Vec<&str> = (0..1 + pick(5)).map(|_| harmless[pick(harmless.len())]).collect();
+            let mut parts: Vec<&str> = (0..1 + pick(5))
+                .map(|_| harmless[pick(harmless.len())])
+                .collect();
             let plain = parts.join(joins[pick(joins.len())]);
             assert_eq!(judge(&plain, &c, &F), Verdict::Allow, "{plain}");
             let at = pick(parts.len() + 1);
@@ -5240,11 +5260,15 @@ pub(crate) mod tests {
         }
         // Lines made of shell punctuation and half-words are judged, never a panic.
         let pieces = [
-            "git", "push", "origin", "main", "'", "\"", "$(", "`", ")", "{", "}", "&&", ";", "|", "\\\n", "<<EOF", "EOF", "-c", "--",
-            "$X", "~", " ", " ", " ", "gh", "pr", "merge", "(", "&", ">", "2>&1", "#",
+            "git", "push", "origin", "main", "'", "\"", "$(", "`", ")", "{", "}", "&&", ";", "|",
+            "\\\n", "<<EOF", "EOF", "-c", "--", "$X", "~", " ", " ", " ", "gh", "pr", "merge", "(",
+            "&", ">", "2>&1", "#",
         ];
         for _ in 0..300 {
-            let line: String = (0..1 + pick(14)).map(|_| pieces[pick(pieces.len())]).collect::<Vec<_>>().join(" ");
+            let line: String = (0..1 + pick(14))
+                .map(|_| pieces[pick(pieces.len())])
+                .collect::<Vec<_>>()
+                .join(" ");
             let _ = judge(&line, &c, &F);
             let _ = judge_as(&line, ShellKind::PowerShell, &c, &F);
         }

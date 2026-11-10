@@ -17,7 +17,7 @@ use helm_core::db::Database;
 use helm_core::profile::Profile;
 use helm_ipc::{AppEvent, EventSink, OpCtx};
 use helm_profiles::store::{self, Patch, ProfileError};
-use helm_skills::sync::{self, BoxFut, HubFile, HubKnowledge, PutReply, PutRequest, Pulled};
+use helm_skills::sync::{self, BoxFut, HubFile, HubKnowledge, Pulled, PutReply, PutRequest};
 use rusqlite::Transaction;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -249,7 +249,9 @@ pub fn link_people(
         };
         match done {
             Ok(_) => changed = true,
-            Err(ProfileError::Bad(why)) => log::info!("knowledge sync: {name} was not added: {why}"),
+            Err(ProfileError::Bad(why)) => {
+                log::info!("knowledge sync: {name} was not added: {why}")
+            }
             Err(e) => return Err(e),
         }
     }
@@ -302,7 +304,9 @@ async fn run(
                     match db.write(|tx| link_people(tx, &people, now)) {
                         Ok(true) => events.emit(AppEvent::new("profiles_changed")),
                         Ok(false) => {}
-                        Err(e) => log::warn!("knowledge sync: the hub's people were not added: {e:?}"),
+                        Err(e) => {
+                            log::warn!("knowledge sync: the hub's people were not added: {e:?}")
+                        }
                     }
                 }
                 // Without the household the profiles stay as they are; the files still sync.
@@ -376,7 +380,11 @@ mod tests {
             (json!({"ok": true, "seq": 9}), PutReply::Saved { seq: 9 }),
             (
                 json!({"ok": false, "conflict": {"seq": 4, "sha256": "x", "deleted": true}}),
-                PutReply::Conflict { seq: 4, sha256: "x".into(), deleted: true },
+                PutReply::Conflict {
+                    seq: 4,
+                    sha256: "x".into(),
+                    deleted: true,
+                },
             ),
             (
                 json!({"ok": false, "error": "This layer is full."}),
@@ -396,13 +404,13 @@ mod tests {
             "cursor": 6, "more": true,
         }))
         .unwrap();
-        assert_eq!((pulled.cursor, pulled.more, pulled.files.len()), (6, true, 2));
+        assert_eq!(
+            (pulled.cursor, pulled.more, pulled.files.len()),
+            (6, true, 2)
+        );
         assert_eq!(pulled.files[0].body.as_deref(), Some(&b"hello"[..]));
         assert!(pulled.files[1].deleted && pulled.files[1].body.is_none());
-        assert_eq!(
-            parse_pull(&json!({"error": "Nope."})).unwrap_err(),
-            "Nope."
-        );
+        assert_eq!(parse_pull(&json!({"error": "Nope."})).unwrap_err(), "Nope.");
 
         // People come as a number or as text.
         let people = people_of(&json!({"people": [
@@ -413,7 +421,10 @@ mod tests {
         ]}));
         assert_eq!(
             people,
-            [("7".to_owned(), "Sam".to_owned()), ("9".to_owned(), "Alex".to_owned())]
+            [
+                ("7".to_owned(), "Sam".to_owned()),
+                ("9".to_owned(), "Alex".to_owned())
+            ]
         );
 
         // Lined up with profiles: made when new, linked when an unlinked profile has the name,
@@ -425,7 +436,14 @@ mod tests {
         let db = Database::open(&dir.path().join("t.db"), &reg).unwrap();
         db.write(|tx| {
             let home = store::ensure_home(tx, 1)?;
-            store::update(tx, &home.id, Patch { name: Some("Me".into()), ..Default::default() })?;
+            store::update(
+                tx,
+                &home.id,
+                Patch {
+                    name: Some("Me".into()),
+                    ..Default::default()
+                },
+            )?;
             store::create(tx, "alex", None, None, 2)?;
             Ok::<_, ProfileError>(())
         })

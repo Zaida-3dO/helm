@@ -522,7 +522,10 @@ impl Actor {
             };
             match base64::engine::general_purpose::STANDARD.decode(data.as_bytes()) {
                 Ok(bytes) => decoded.push((mime, bytes)),
-                Err(e) => log::warn!("chat {}: a tool picture was not valid base64: {e}", self.chat_id),
+                Err(e) => log::warn!(
+                    "chat {}: a tool picture was not valid base64: {e}",
+                    self.chat_id
+                ),
             }
         }
         if decoded.is_empty() {
@@ -1467,7 +1470,11 @@ impl Actor {
     fn check_local_wait(&self) {
         // The launched model, not the chat's current pick: a switch queued for the next idle moment
         // must not change which server this wait is measured against.
-        let Some(server) = self.launched_local.as_ref().map(|(server, _)| server.clone()) else {
+        let Some(server) = self
+            .launched_local
+            .as_ref()
+            .map(|(server, _)| server.clone())
+        else {
             self.set_local_ahead(None);
             return;
         };
@@ -2489,7 +2496,7 @@ impl Actor {
         }
         match (result, p.sid) {
             (Ok(name), Some(sid)) => {
-                self.prepared = Some(name).filter(|_| keep_name);
+                self.prepared = keep_name.then_some(name);
                 self.opening = Some(sid.clone());
                 self.dispatch(&sid);
                 for held in p.held {
@@ -2499,7 +2506,7 @@ impl Actor {
             (Ok(name), None) => {
                 // A warm-up: no turn opens. The next worker launched for this chat asks the
                 // server for this model by name, and the loading line it showed, if any, goes.
-                self.prepared = Some(name).filter(|_| keep_name);
+                self.prepared = keep_name.then_some(name);
                 if p.line {
                     self.clear_loading();
                 }

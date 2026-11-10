@@ -165,7 +165,10 @@ pub async fn suggest(
             log::warn!("chat {}: autocomplete not run ({why})", a.chat_id);
             return Ok(empty(Some(COOLDOWN.as_millis() as i64)));
         }
-        log::warn!("chat {}: the background job stays on the default model ({why})", a.chat_id);
+        log::warn!(
+            "chat {}: the background job stays on the default model ({why})",
+            a.chat_id
+        );
     }
     {
         let mut g = rt.sh.autocomplete.lock().unwrap();

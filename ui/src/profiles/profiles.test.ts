@@ -149,7 +149,7 @@ function host(opts: { online?: boolean; listFails?: boolean } = {}) {
 }
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
-test('the store reads the active profile's chats, follows chat records, shares a chat, and follows the host', async () => {
+test("the store reads the active profile's chats, follows chat records, shares a chat, and follows the host", async () => {
   const h = host();
   h.setActive('o');
   const bus = new EventBus();

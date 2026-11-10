@@ -234,7 +234,7 @@ fn add_skill(ctx: &ToolCtx, a: Value) -> ToolResult {
     let (layer, label) = layer_of(&who, str_arg(&a, "scope"))?;
     let source =
         helm_platform::pathgate::check(path).map_err(|r| ToolError::refused(r.message()))?;
-    if helm_platform::private::PrivateRoots::new(&[data.clone()]).contains(&source) {
+    if helm_platform::private::PrivateRoots::new(std::slice::from_ref(&data)).contains(&source) {
         return Err(ToolError::refused(
             "Helm's own data folder cannot be used as a skill source.",
         ));
@@ -371,7 +371,6 @@ mod tests {
     use crate::launch::{ChatLookup, ProfileRef};
     use helm_core::db::{Database, MigrationRegistry};
     use helm_hosttools::registry::{CallOrigin, ToolHandler};
-    use helm_hosttools::SettingsExtension;
     use std::fs;
     use std::sync::Arc;
 

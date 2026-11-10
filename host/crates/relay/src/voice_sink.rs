@@ -1019,8 +1019,9 @@ impl VoiceSink for ChatVoice {
                 let now = helm_core::now_ms();
                 // What the phone did not play of the answers so far rides along with this
                 // message, once. A message that opens a new conversation carries nothing.
-                let conversation = voice::current(&c2.tag_path, &FactsOnly(&c2.db), &c2.policy, now)
-                    .map(|t| t.conversation);
+                let conversation =
+                    voice::current(&c2.tag_path, &FactsOnly(&c2.db), &c2.policy, now)
+                        .map(|t| t.conversation);
                 let notes = heard.pending(conversation.as_deref(), now);
                 let placed = place(&c2, &t2, &notes.lines, now)?;
                 if matches!(placed, Placed::Sent { .. }) {

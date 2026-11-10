@@ -5,7 +5,9 @@
 //! use, so nothing here ever touches a network. [`Rpc`] turns the link's request and result frames
 //! into an awaitable call.
 
-use crate::wire::{code, iso_utc, Caller, DeviceFrame, Frame, PeerDevice, WireError, MAX_FRAME_BYTES};
+use crate::wire::{
+    code, iso_utc, Caller, DeviceFrame, Frame, PeerDevice, WireError, MAX_FRAME_BYTES,
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -309,7 +311,12 @@ impl MemRouter {
             }
             Frame::Dev { id, to, op, args } => {
                 if !peer {
-                    st.fail(from, &id, code::SCOPE, "This line may not use the household.");
+                    st.fail(
+                        from,
+                        &id,
+                        code::SCOPE,
+                        "This line may not use the household.",
+                    );
                     return true;
                 }
                 if !st.links.get(&to).is_some_and(|t| t.up) {
@@ -335,7 +342,12 @@ impl MemRouter {
                     tokio::time::sleep(ROUTER_TIMEOUT).await;
                     let mut st = lock(&router.0);
                     if let Some((asker, id)) = st.calls.remove(&hub_id) {
-                        st.fail(&asker, &id, code::TIMEOUT, "The device did not answer in time.");
+                        st.fail(
+                            &asker,
+                            &id,
+                            code::TIMEOUT,
+                            "The device did not answer in time.",
+                        );
                     }
                 });
             }

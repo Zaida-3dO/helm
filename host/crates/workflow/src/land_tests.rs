@@ -875,16 +875,30 @@ fn check_records_pull_requests_merged_or_closed_outside_helm_and_leaves_the_rest
         ("land_failed", "MERGED", TIP, "landed", true),
         ("awaiting_merge", "CLOSED", TIP, "dropped", false),
         ("handed_off", "OPEN", TIP, "handed_off", false),
-        ("pending_land", "MERGED", "9999999999999999999999999999999999999999", "landed", true),
+        (
+            "pending_land",
+            "MERGED",
+            "9999999999999999999999999999999999999999",
+            "landed",
+            true,
+        ),
     ];
     for (state, github, head, after, landed) in rows {
         let t = setup(true, LandMode::Draft, state);
         let held = Flight::default();
         let gh = Script::default();
-        gh.say("pr view", true, &pr_json(github, head, "main", "MERGEABLE", false));
+        gh.say(
+            "pr view",
+            true,
+            &pr_json(github, head, "main", "MERGEABLE", false),
+        );
         let out = land::check(&t.db, &gh, &held, "c", 100).unwrap().unwrap();
         assert_eq!(out["checked"], 1, "{state} {github}");
-        assert_eq!(out["landed"], json!(if landed { vec!["feat-x"] } else { vec![] }), "{state} {github}");
+        assert_eq!(
+            out["landed"],
+            json!(if landed { vec!["feat-x"] } else { vec![] }),
+            "{state} {github}"
+        );
         let c = t.change();
         assert_eq!(c.state, after, "{state} {github}");
         if after == "landed" {

@@ -134,7 +134,9 @@ pub struct TagPolicy {
 
 impl Default for TagPolicy {
     fn default() -> Self {
-        PolicyFile::default().check().expect("the defaults are valid")
+        PolicyFile::default()
+            .check()
+            .expect("the defaults are valid")
     }
 }
 
@@ -258,12 +260,7 @@ pub fn expired(
 }
 
 /// The tag while it holds, `None` once it has expired or when there is none.
-pub fn current(
-    path: &Path,
-    port: &dyn ChatPort,
-    policy: &TagPolicy,
-    now: i64,
-) -> Option<VoiceTag> {
+pub fn current(path: &Path, port: &dyn ChatPort, policy: &TagPolicy, now: i64) -> Option<VoiceTag> {
     let tag = load_tag(path)?;
     expired(&tag, port.facts(&tag.chat_id), policy, now)
         .is_none()
@@ -522,20 +519,22 @@ mod tests {
         let rows = [
             (30, 1_000, false, false),
             (239, 1_500, false, false),
-            (241, 1_500, false, true),  // idle: more than 240 minutes since the last message
+            (241, 1_500, false, true), // idle: more than 240 minutes since the last message
             (10, 301_000, false, true), // tokens used since the tag: 300,000
-            (10, 2_000, true, true),    // archived
+            (10, 2_000, true, true),   // archived
         ];
         let mut now = T0;
         for (gap, tokens, archived, fresh) in rows {
             let before = load_tag(&path).unwrap();
             now += gap * MIN;
-            port.chats.borrow_mut().insert(
-                before.chat_id.clone(),
-                ChatFacts { archived, tokens },
-            );
+            port.chats
+                .borrow_mut()
+                .insert(before.chat_id.clone(), ChatFacts { archived, tokens });
             let (tag, created) = active_chat(&path, &port, &policy, now).unwrap();
-            assert_eq!(created, fresh, "gap {gap}, tokens {tokens}, archived {archived}");
+            assert_eq!(
+                created, fresh,
+                "gap {gap}, tokens {tokens}, archived {archived}"
+            );
             assert_eq!(tag.last_turn_at, now);
             assert_eq!(tag.chat_id != before.chat_id, fresh);
             assert_eq!(tag.conversation != before.conversation, fresh);
@@ -563,11 +562,41 @@ mod tests {
         let path = policy_path(dir.path());
         assert_eq!(load_file(&path), PolicyFile::default());
         let bad: [(PolicyFile, &str); 5] = [
-            (PolicyFile { idle_minutes: 5, ..Default::default() }, "idle"),
-            (PolicyFile { max_age_hours: 0, ..Default::default() }, "age"),
-            (PolicyFile { max_tokens: 5, ..Default::default() }, "token"),
-            (PolicyFile { effort: "huge".into(), ..Default::default() }, "effort"),
-            (PolicyFile { model: "a\nb".into(), ..Default::default() }, "model"),
+            (
+                PolicyFile {
+                    idle_minutes: 5,
+                    ..Default::default()
+                },
+                "idle",
+            ),
+            (
+                PolicyFile {
+                    max_age_hours: 0,
+                    ..Default::default()
+                },
+                "age",
+            ),
+            (
+                PolicyFile {
+                    max_tokens: 5,
+                    ..Default::default()
+                },
+                "token",
+            ),
+            (
+                PolicyFile {
+                    effort: "huge".into(),
+                    ..Default::default()
+                },
+                "effort",
+            ),
+            (
+                PolicyFile {
+                    model: "a\nb".into(),
+                    ..Default::default()
+                },
+                "model",
+            ),
         ];
         for (f, word) in bad {
             let e = f.check().unwrap_err();
@@ -583,7 +612,10 @@ mod tests {
         save_policy(&path, &f).unwrap();
         assert_eq!(load_file(&path), f);
         assert_eq!(f.new_chat(), (None, Some("high")));
-        assert_eq!(PolicyFile::default().new_chat(), (Some("claude-sonnet-5-5"), Some("low")));
+        assert_eq!(
+            PolicyFile::default().new_chat(),
+            (Some("claude-sonnet-5-5"), Some("low"))
+        );
         // Partial files fill in the defaults; unknown fields are refused.
         let part: PolicyFile = serde_json::from_str(r#"{"watch":"flags+done"}"#).unwrap();
         assert_eq!(part.watch, WatchLevel::FlagsDone);

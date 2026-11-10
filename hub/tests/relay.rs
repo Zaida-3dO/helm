@@ -5,7 +5,7 @@ use futures_util::{SinkExt, StreamExt};
 use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
 use helm_hub::registry::Registry;
-use helm_hub::relay::{Line, Upstream, OFFLINE};
+use helm_hub::relay::{Line, Upstream, MAX_FRAME, OFFLINE};
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
 use serde_json::{json, Value};
@@ -326,7 +326,7 @@ async fn the_hub_list_is_checked_again_at_the_call() {
 }
 
 #[tokio::test]
-async fn an_upstream_frame_up_to_two_mib_is_accepted_and_a_bigger_one_ends_the_line() {
+async fn an_upstream_frame_under_the_limit_is_accepted_and_a_bigger_one_ends_the_line() {
     let hub = start().await;
     let mut voice = hub.lines.voice_receiver();
     let mut ws = connect(&hub, LINE).await.unwrap();
@@ -348,8 +348,8 @@ async fn an_upstream_frame_up_to_two_mib_is_accepted_and_a_bigger_one_ends_the_l
     };
     assert_eq!(a.data.map(|d| d.len()), Some(1_398_104));
 
-    // A frame over 2 MiB is refused and the line is closed.
-    let big = json!({"type": "telegram_status", "text": "x".repeat(2 * 1024 * 1024 + 1)});
+    // A frame over the line's limit is refused and the line is closed.
+    let big = json!({"type": "telegram_status", "text": "x".repeat(MAX_FRAME + 1)});
     ws.send(Message::Text(big.to_string().into()))
         .await
         .unwrap();

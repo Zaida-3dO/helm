@@ -830,7 +830,11 @@ mod stamp_tests {
         assert_eq!(rows[0]["size"], 3);
         assert!(rows[0]["modified"].as_u64().unwrap() > 0);
         assert!(rows[1].is_null() && rows[2].is_null());
-        assert!(file_stat(&ctx, json!({ "paths": [] })).unwrap().as_array().unwrap().is_empty());
+        assert!(file_stat(&ctx, json!({ "paths": [] }))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
         let nine: Vec<String> = (0..=STAT_LIMIT).map(|i| format!("f{i}")).collect();
         assert!(file_stat(&ctx, json!({ "paths": nine })).is_err());
     }

@@ -128,7 +128,8 @@ pub fn deliver_rules_change(
     }
     let chats: Vec<(String, bool)> = db
         .snapshot(|tx| {
-            let mut st = tx.prepare("SELECT id FROM chats WHERE harness = 'claude' AND archived = 0")?;
+            let mut st =
+                tx.prepare("SELECT id FROM chats WHERE harness = 'claude' AND archived = 0")?;
             let ids = st
                 .query_map([], |r| r.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;

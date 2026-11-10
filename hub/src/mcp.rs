@@ -356,8 +356,9 @@ fn visibility_arg(args: &Value) -> Result<Option<Visibility>, String> {
         Some(s) => Some(match s.trim() {
             "me" => Visibility::Private,
             "everyone" => Visibility::Shared,
-            other => Visibility::parse(other)
-                .ok_or_else(|| "scope must be me or everyone".to_owned())?,
+            other => {
+                Visibility::parse(other).ok_or_else(|| "scope must be me or everyone".to_owned())?
+            }
         }),
     };
     let by_visibility = match str_arg(args, "visibility")? {

@@ -20,7 +20,12 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
 }
 
 /// Record the send; `false` when its id was recorded before.
-pub fn claim(conn: &Connection, client_id: &str, chat_id: &str, now: i64) -> rusqlite::Result<bool> {
+pub fn claim(
+    conn: &Connection,
+    client_id: &str,
+    chat_id: &str,
+    now: i64,
+) -> rusqlite::Result<bool> {
     conn.execute("DELETE FROM remote_sends WHERE at < ?1", [now - KEPT_MS])?;
     let n = conn.execute(
         "INSERT OR IGNORE INTO remote_sends(client_id, chat_id, at) VALUES (?1, ?2, ?3)",

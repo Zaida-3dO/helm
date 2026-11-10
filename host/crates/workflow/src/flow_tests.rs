@@ -367,7 +367,10 @@ fn clear_visual_reopen_and_ready_are_the_users_steps_an_agent_takes_on_their_wor
             900,
         )
         .unwrap();
-    assert_eq!((out["status"].as_str(), out["attempt"].as_i64()), (Some("active"), Some(2)));
+    assert_eq!(
+        (out["status"].as_str(), out["attempt"].as_i64()),
+        (Some("active"), Some(2))
+    );
     // Ready names a handed-off change; there is none, and no GitHub call is made for the refusal.
     let e = crate::wftools::workflow_call_with_gh(
         &t.db,
@@ -723,10 +726,19 @@ fn the_gates_act_only_with_orchestrator_on_and_a_task_active() {
     // A settled plan review is final: its agent (named by type, with or without a suffix) is not
     // messaged again, while an unsettled stage's agent still can be.
     for to in ["plan-reviewer", "Plan-Reviewer--2", "plan-reviewer_1"] {
-        deny(t.gate("SendMessage", json!({"to": to}), false), "verdict is final");
+        deny(
+            t.gate("SendMessage", json!({"to": to}), false),
+            "verdict is final",
+        );
     }
-    assert_eq!(t.gate("SendMessage", json!({"to": "reviewer"}), false), allow);
-    assert_eq!(t.gate("SendMessage", json!({"to": "planner"}), false), allow);
+    assert_eq!(
+        t.gate("SendMessage", json!({"to": "reviewer"}), false),
+        allow
+    );
+    assert_eq!(
+        t.gate("SendMessage", json!({"to": "planner"}), false),
+        allow
+    );
     assert_eq!(
         t.gate("Agent", json!({"subagent_type": "coder"}), false),
         allow
@@ -927,7 +939,13 @@ fn the_turn_end_question_blocks_a_stop_once_per_set_of_tips() {
     // Approved and not handed off: the stop is blocked once, and the row is listed.
     let got = ask();
     assert_eq!(got["block"], true, "{got}");
-    assert!(got["reason"].as_str().unwrap().contains("Built but not handed off"), "{got}");
+    assert!(
+        got["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Built but not handed off"),
+        "{got}"
+    );
     assert_eq!(ask()["block"], false, "once per set of tips");
     assert_eq!(t.events("not_handed_off"), 1);
     assert_eq!(needs().len(), 1);
@@ -935,7 +953,9 @@ fn the_turn_end_question_blocks_a_stop_once_per_set_of_tips() {
     // New tips are a new set; an agent still running (busy) says nothing.
     t.build(B).unwrap();
     t.review(B, "lgtm").unwrap();
-    let busy = t.db.write(|tx| crate::handoff::turn_end_check(tx, "c", true, 101)).unwrap();
+    let busy =
+        t.db.write(|tx| crate::handoff::turn_end_check(tx, "c", true, 101))
+            .unwrap();
     assert!(busy.is_none());
     assert_eq!(ask()["block"], true);
     assert_eq!(t.events("not_handed_off"), 2);

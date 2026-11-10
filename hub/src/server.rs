@@ -217,7 +217,10 @@ async fn post_mcp(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
             .get(mcp::ACT_AS_HEADER)
             .map(|v| v.to_str().unwrap_or("?"));
         let Ok(registry) = state.registry.lock() else {
-            return refused(StatusCode::INTERNAL_SERVER_ERROR, "the registry is unavailable");
+            return refused(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the registry is unavailable",
+            );
         };
         match mcp::act_as(&client, named, &registry) {
             Ok(acted) => acted,
@@ -319,7 +322,13 @@ async fn answer(
         let Ok(mut store) = state.store.lock() else {
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         };
-        mcp::handle_with(&mut store, acted.unwrap_or(client), &state.options, m, &people)
+        mcp::handle_with(
+            &mut store,
+            acted.unwrap_or(client),
+            &state.options,
+            m,
+            &people,
+        )
     };
     let mut reply = reply;
     if client.has(Scope::App) && method == Some("tools/list") {

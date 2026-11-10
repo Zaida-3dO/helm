@@ -49,6 +49,7 @@ impl Default for Opts {
 }
 
 /// The fake speech-to-text server: answers what it is told to and keeps what it was sent.
+#[allow(clippy::type_complexity)]
 struct FakeStt {
     url: String,
     answer: Arc<Mutex<(u16, String)>>,
@@ -460,7 +461,10 @@ async fn every_voice_route_needs_a_voice_token_and_other_routes_refuse_it() {
     .await;
     let r = http(&off, "GET", "/voice/status", Some(PHONE), "", &[]).await;
     assert_eq!(r.status, 404);
-    assert_eq!(connect(&off, "/voice/live", Some(PHONE)).await.err(), Some(404));
+    assert_eq!(
+        connect(&off, "/voice/live", Some(PHONE)).await.err(),
+        Some(404)
+    );
     let r = post_turn(&off, "turn-0001", "", "application/json", &typed("hi")).await;
     assert_eq!(r.status, 404);
 }
@@ -479,6 +483,7 @@ async fn a_turn_is_accepted_or_refused_with_the_statuses_of_the_protocol() {
     let status_ok = json!({"ok": true, "turn": "turn-0101", "already": false,
                            "helm": "offline", "queued": true});
     // (name, target, content type, body, status, a piece of the answer or the whole answer)
+    #[allow(clippy::type_complexity)]
     let rows: Vec<(&str, String, &str, Vec<u8>, u16, Value)> = vec![
         (
             "a short turn id",
@@ -627,7 +632,11 @@ async fn a_turn_is_accepted_or_refused_with_the_statuses_of_the_protocol() {
     ] {
         assert!(form.contains(part), "{part:?} in {form:?}");
     }
-    assert_eq!(hub.stt.uploads.lock().unwrap().len(), 1, "nothing else got through");
+    assert_eq!(
+        hub.stt.uploads.lock().unwrap().len(),
+        1,
+        "nothing else got through"
+    );
 
     // A WAV goes by its own name, and a hub with no speech-to-text refuses a recording and
     // still takes typed turns.
@@ -658,12 +667,19 @@ async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
     let mut helm = pc(&hub).await;
     let (mut me, welcome) = phone(&hub, PHONE, 0, true).await;
     assert_eq!(
-        (welcome["helm"].as_str(), welcome["seq"].as_u64(), welcome["version"].as_u64()),
+        (
+            welcome["helm"].as_str(),
+            welcome["seq"].as_u64(),
+            welcome["version"].as_u64()
+        ),
         (Some("online"), Some(0), Some(1))
     );
     // Helm is told the talk screen is open.
     let presence = next_where(&mut helm, "presence", is("voice_presence")).await;
-    assert_eq!((presence["live"].as_bool(), presence["mode"].as_str()), (Some(true), Some("conversation")));
+    assert_eq!(
+        (presence["live"].as_bool(), presence["mode"].as_str()),
+        (Some(true), Some("conversation"))
+    );
 
     // The recording is transcribed, the transcript told to the phone and the turn sent to Helm.
     hub.stt.says(200, "Synthetic question one.");
@@ -682,59 +698,135 @@ async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
     // the PC's graphics memory (the test line never answers, so the hub moved on after its wait).
     let room = next_where(&mut helm, "the room call", is("call")).await;
     assert_eq!(
-        (room["tool"].as_str(), room["client"].as_str(), &room["args"]),
-        (Some("app_make_room_for_speech"), Some("hub-speech"), &json!({}))
+        (
+            room["tool"].as_str(),
+            room["client"].as_str(),
+            &room["args"]
+        ),
+        (
+            Some("app_make_room_for_speech"),
+            Some("hub-speech"),
+            &json!({})
+        )
     );
     let v = next_where(&mut helm, "the voice frame", is("voice")).await;
     assert_eq!(
-        (v["id"].as_str(), v["mode"].as_str(), v["text"].as_str(), v["source"].as_str()),
-        (Some(t1.as_str()), Some("conversation"), Some("Synthetic question one."), Some("speech"))
+        (
+            v["id"].as_str(),
+            v["mode"].as_str(),
+            v["text"].as_str(),
+            v["source"].as_str()
+        ),
+        (
+            Some(t1.as_str()),
+            Some("conversation"),
+            Some("Synthetic question one."),
+            Some("speech")
+        )
     );
-    assert_eq!((&v["ageMinutes"], &v["continues"]), (&Value::Null, &Value::Null));
+    assert_eq!(
+        (&v["ageMinutes"], &v["continues"]),
+        (&Value::Null, &Value::Null)
+    );
     assert!(v["sentAt"].as_i64().unwrap() > 0);
 
     // Helm takes it and shows its working line.
     send(&mut helm, json!({"type": "voice_ack", "id": t1})).await;
     next_where(&mut me, "delivered", turn_is(t1.clone(), "delivered")).await;
-    send(&mut helm, json!({"type": "voice_status", "turn": t1, "text": "Thinking"})).await;
+    send(
+        &mut helm,
+        json!({"type": "voice_status", "turn": t1, "text": "Thinking"}),
+    )
+    .await;
     let status = next_where(&mut me, "status", is("status")).await;
-    assert_eq!((status["turn"].as_str(), status["text"].as_str()), (Some(t1.as_str()), Some("Thinking")));
+    assert_eq!(
+        (status["turn"].as_str(), status["text"].as_str()),
+        (Some(t1.as_str()), Some("Thinking"))
+    );
 
     // The answer, with one attachment sent before it, is stored under the next seq.
     let r1 = id("reply", 1);
     send(&mut helm, link(&r1, 1)).await;
-    send(&mut helm, answer(&r1, Some(t1.as_str()), "Synthetic answer one.", 1)).await;
+    send(
+        &mut helm,
+        answer(&r1, Some(t1.as_str()), "Synthetic answer one.", 1),
+    )
+    .await;
     let reply = next_where(&mut me, "reply", is("reply")).await;
-    assert_eq!((reply["seq"].as_u64(), reply["kind"].as_str(), reply["mode"].as_str()), (Some(2), Some("reply"), Some("conversation")));
-    assert_eq!((reply["id"].as_str(), reply["turn"].as_str()), (Some(r1.as_str()), Some(t1.as_str())));
-    assert_eq!(reply["sentences"][1], json!({"n": 2, "text": "Want the details?"}));
+    assert_eq!(
+        (
+            reply["seq"].as_u64(),
+            reply["kind"].as_str(),
+            reply["mode"].as_str()
+        ),
+        (Some(2), Some("reply"), Some("conversation"))
+    );
+    assert_eq!(
+        (reply["id"].as_str(), reply["turn"].as_str()),
+        (Some(r1.as_str()), Some(t1.as_str()))
+    );
+    assert_eq!(
+        reply["sentences"][1],
+        json!({"n": 2, "text": "Want the details?"})
+    );
     assert_eq!(reply["text"], "Synthetic answer one. Want the details?");
     assert_eq!(
         reply["attachments"],
         json!([{"kind": "link", "title": "The page", "url": "https://example.test/page"}])
     );
-    assert_eq!((&reply["about"], reply["conversation"].as_str()), (&Value::Null, Some("c-synthetic")));
+    assert_eq!(
+        (&reply["about"], reply["conversation"].as_str()),
+        (&Value::Null, Some("c-synthetic"))
+    );
     send(&mut me, json!({"type": "ack", "seq": 2})).await;
 
     // What the phone played goes to Helm.
     let body = json!({"reports": [{"reply": r1, "state": "partial", "sentence": 2,
                                    "charOffset": 5, "at": 1_800_000_000_000i64}]});
-    let r = http(&hub, "POST", "/voice/heard", Some(PHONE), "application/json", body.to_string().as_bytes()).await;
-    assert_eq!((r.status, &r.body), (200, &json!({"ok": true, "forwarded": 1})));
+    let r = http(
+        &hub,
+        "POST",
+        "/voice/heard",
+        Some(PHONE),
+        "application/json",
+        body.to_string().as_bytes(),
+    )
+    .await;
+    assert_eq!(
+        (r.status, &r.body),
+        (200, &json!({"ok": true, "forwarded": 1}))
+    );
     let heard = next_where(&mut helm, "voice_heard", is("voice_heard")).await;
     assert_eq!(heard["reports"][0]["state"], "partial");
     assert_eq!(heard["reports"][0]["sentence"], 2);
 
     // The screen changes reach Helm too.
-    send(&mut me, json!({"type": "presence", "live": false, "mode": "chat"})).await;
-    let presence = next_where(&mut helm, "presence", |f| f["type"] == "voice_presence" && f["live"] == false).await;
+    send(
+        &mut me,
+        json!({"type": "presence", "live": false, "mode": "chat"}),
+    )
+    .await;
+    let presence = next_where(&mut helm, "presence", |f| {
+        f["type"] == "voice_presence" && f["live"] == false
+    })
+    .await;
     assert_eq!(presence["mode"], "chat");
 
     // Helm speaks first: news carries no turn and says which chat it is about.
     let r2 = id("reply", 2);
     send(&mut helm, answer(&r2, None, "The build finished.", 0)).await;
-    let news = next_where(&mut me, "news", |f| f["type"] == "reply" && f["kind"] == "notify").await;
-    assert_eq!((news["seq"].as_u64(), news["about"].clone(), news["turn"].clone()), (Some(3), json!({"chat": "Build"}), Value::Null));
+    let news = next_where(&mut me, "news", |f| {
+        f["type"] == "reply" && f["kind"] == "notify"
+    })
+    .await;
+    assert_eq!(
+        (
+            news["seq"].as_u64(),
+            news["about"].clone(),
+            news["turn"].clone()
+        ),
+        (Some(3), json!({"chat": "Build"}), Value::Null)
+    );
 
     // Cancelling a turn Helm took tells Helm to stop it.
     send(&mut me, json!({"type": "cancel", "turn": t1})).await;
@@ -743,9 +835,19 @@ async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
 
     // Cancelling one Helm has not acknowledged drops it and tells Helm in case it was taken.
     let t2 = id("turn", 2);
-    let r = post_turn(&hub, &t2, "", "application/json", &typed("Synthetic second.")).await;
+    let r = post_turn(
+        &hub,
+        &t2,
+        "",
+        "application/json",
+        &typed("Synthetic second."),
+    )
+    .await;
     assert_eq!(r.status, 202);
-    next_where(&mut helm, "turn 2", |f| f["type"] == "voice" && f["id"] == t2.as_str()).await;
+    next_where(&mut helm, "turn 2", |f| {
+        f["type"] == "voice" && f["id"] == t2.as_str()
+    })
+    .await;
     send(&mut me, json!({"type": "cancel", "turn": t2})).await;
     let cancelled = next_where(&mut me, "cancelled", turn_is(t2.clone(), "cancelled")).await;
     assert!(cancelled["seq"].as_u64().is_some(), "kept for the phone");
@@ -755,7 +857,14 @@ async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
     // A turn Helm does not acknowledge is sent again 45 s later, and a turn that carries on
     // another says so.
     let t3 = id("turn", 3);
-    post_turn(&hub, &t3, "", "application/json", &typed("Synthetic third.")).await;
+    post_turn(
+        &hub,
+        &t3,
+        "",
+        "application/json",
+        &typed("Synthetic third."),
+    )
+    .await;
     let is_t3 = |f: &Value| f["type"] == "voice" && f["id"] == t3.as_str();
     next_where(&mut helm, "turn 3", is_t3).await;
     hub.bridge().tick(now_ms() + 46_000);
@@ -764,10 +873,23 @@ async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
     next_where(&mut me, "delivered", turn_is(t3.clone(), "delivered")).await;
     let t4 = id("turn", 4);
     let extra = format!("&continues={t3}");
-    let r = post_turn(&hub, &t4, &extra, "application/json", &typed("Synthetic fourth.")).await;
+    let r = post_turn(
+        &hub,
+        &t4,
+        &extra,
+        "application/json",
+        &typed("Synthetic fourth."),
+    )
+    .await;
     assert_eq!(r.status, 202);
-    let v = next_where(&mut helm, "turn 4", |f| f["type"] == "voice" && f["id"] == t4.as_str()).await;
-    assert_eq!((v["continues"].as_str(), v["source"].as_str()), (Some(t3.as_str()), Some("typed")));
+    let v = next_where(&mut helm, "turn 4", |f| {
+        f["type"] == "voice" && f["id"] == t4.as_str()
+    })
+    .await;
+    assert_eq!(
+        (v["continues"].as_str(), v["source"].as_str()),
+        (Some(t3.as_str()), Some("typed"))
+    );
 
     // What the speech-to-text server answers decides the turn's state, and its own words never
     // reach the phone. A failed turn can be sent again; one with nothing heard cannot.
@@ -780,14 +902,23 @@ async fn a_spoken_turn_goes_to_helm_and_the_answer_comes_back() {
         let turn = id("turn", n);
         let r = post_turn(&hub, &turn, "", "audio/ogg", &ogg(1)).await;
         assert_eq!(r.status, 202, "{state}");
-        let f = next_where(&mut me, state, |f| f["type"] == "turn" && f["turn"] == turn.as_str() && (f["state"] == state)).await;
+        let f = next_where(&mut me, state, |f| {
+            f["type"] == "turn" && f["turn"] == turn.as_str() && (f["state"] == state)
+        })
+        .await;
         assert_eq!(f["message"].as_str(), message, "{state}");
     }
     hub.stt.says(200, "Synthetic words.");
     let retry = post_turn(&hub, &id("turn", 11), "", "audio/ogg", &ogg(1)).await;
-    assert_eq!((retry.status, retry.body["already"].clone()), (202, json!(false)));
+    assert_eq!(
+        (retry.status, retry.body["already"].clone()),
+        (202, json!(false))
+    );
     let again = post_turn(&hub, &id("turn", 12), "", "audio/ogg", &ogg(1)).await;
-    assert_eq!((again.status, again.body["state"].clone()), (200, json!("empty")));
+    assert_eq!(
+        (again.status, again.body["state"].clone()),
+        (200, json!("empty"))
+    );
 }
 
 #[tokio::test]
@@ -801,17 +932,47 @@ async fn turns_wait_while_helm_is_offline_and_a_turn_helm_never_takes_expires() 
     assert_eq!(welcome["helm"], "offline");
 
     let t1 = id("turn", 1);
-    let r = post_turn(&hub, &t1, "", "application/json", &typed("Synthetic question.")).await;
-    assert_eq!((r.status, r.body["helm"].clone(), r.body["queued"].clone()), (202, json!("offline"), json!(true)));
+    let r = post_turn(
+        &hub,
+        &t1,
+        "",
+        "application/json",
+        &typed("Synthetic question."),
+    )
+    .await;
+    assert_eq!(
+        (r.status, r.body["helm"].clone(), r.body["queued"].clone()),
+        (202, json!("offline"), json!(true))
+    );
     next_where(&mut me, "queued", turn_is(t1.clone(), "queued")).await;
-    let again = post_turn(&hub, &t1, "", "application/json", &typed("Synthetic question.")).await;
-    assert_eq!((again.status, again.body["state"].clone()), (200, json!("queued")));
+    let again = post_turn(
+        &hub,
+        &t1,
+        "",
+        "application/json",
+        &typed("Synthetic question."),
+    )
+    .await;
+    assert_eq!(
+        (again.status, again.body["state"].clone()),
+        (200, json!("queued"))
+    );
 
     // Helm comes up: the phone hears of it, Helm gets the turn fresh, and its ack reaches the phone.
     let mut helm = pc(&hub).await;
-    next_where(&mut me, "helm online", |f| f["type"] == "helm" && f["state"] == "online").await;
+    next_where(&mut me, "helm online", |f| {
+        f["type"] == "helm" && f["state"] == "online"
+    })
+    .await;
     let v = next_where(&mut helm, "the turn", is("voice")).await;
-    assert_eq!((v["id"].as_str(), v["source"].as_str(), v["text"].as_str()), (Some(t1.as_str()), Some("typed"), Some("Synthetic question.")));
+    assert_eq!(
+        (v["id"].as_str(), v["source"].as_str(), v["text"].as_str()),
+        (
+            Some(t1.as_str()),
+            Some("typed"),
+            Some("Synthetic question.")
+        )
+    );
     assert_eq!(v["ageMinutes"], Value::Null);
     send(&mut helm, json!({"type": "voice_ack", "id": t1})).await;
     next_where(&mut me, "delivered", turn_is(t1.clone(), "delivered")).await;
@@ -819,21 +980,44 @@ async fn turns_wait_while_helm_is_offline_and_a_turn_helm_never_takes_expires() 
     // A turn Helm never acknowledges expires after the queue time. The phone is told, the state
     // is kept for a phone that reconnects, and the same id may be tried again.
     let t2 = id("turn", 2);
-    post_turn(&hub, &t2, "", "application/json", &typed("Synthetic unanswered.")).await;
-    next_where(&mut helm, "turn 2", |f| f["type"] == "voice" && f["id"] == t2.as_str()).await;
+    post_turn(
+        &hub,
+        &t2,
+        "",
+        "application/json",
+        &typed("Synthetic unanswered."),
+    )
+    .await;
+    next_where(&mut helm, "turn 2", |f| {
+        f["type"] == "voice" && f["id"] == t2.as_str()
+    })
+    .await;
     hub.bridge().tick(now_ms() + 61_000);
     let expired = next_where(&mut me, "expired", turn_is(t2.clone(), "expired")).await;
     assert_eq!(expired["message"], EXPIRED);
     let (mut me2, _) = phone(&hub, PHONE, 0, false).await;
     next_where(&mut me2, "expired again", turn_is(t2.clone(), "expired")).await;
-    let r = post_turn(&hub, &t2, "", "application/json", &typed("Synthetic unanswered.")).await;
+    let r = post_turn(
+        &hub,
+        &t2,
+        "",
+        "application/json",
+        &typed("Synthetic unanswered."),
+    )
+    .await;
     assert_eq!((r.status, r.body["already"].clone()), (202, json!(false)));
 
     // The line drops: the phone hears that too.
     drop(helm);
-    next_where(&mut me2, "helm offline", |f| f["type"] == "helm" && f["state"] == "offline").await;
+    next_where(&mut me2, "helm offline", |f| {
+        f["type"] == "helm" && f["state"] == "offline"
+    })
+    .await;
     let status = http(&hub, "GET", "/voice/status", Some(PHONE), "", &[]).await;
-    assert_eq!(status.body, json!({"ok": true, "helm": "offline", "version": 1, "stt": true}));
+    assert_eq!(
+        status.body,
+        json!({"ok": true, "helm": "offline", "version": 1, "stt": true})
+    );
 }
 
 #[tokio::test]
@@ -850,7 +1034,11 @@ async fn replies_wait_for_the_phone_replay_in_order_and_acks_free_them() {
     hub.bridge().tick(now_ms() + 61_000);
     send(&mut helm, answer(&r2, None, "Synthetic two.", 1)).await;
     send(&mut helm, answer(&r3, None, "Synthetic three.", 0)).await;
-    send(&mut helm, answer(&r3, None, "Synthetic three, sent again.", 0)).await;
+    send(
+        &mut helm,
+        answer(&r3, None, "Synthetic three, sent again.", 0),
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // The phone connects with nothing: it is told the newest seq and sent everything in order.
@@ -862,10 +1050,26 @@ async fn replies_wait_for_the_phone_replay_in_order_and_acks_free_them() {
     }
     let shape: Vec<(u64, &str, usize)> = got
         .iter()
-        .map(|f| (f["seq"].as_u64().unwrap(), f["id"].as_str().unwrap(), f["attachments"].as_array().unwrap().len()))
+        .map(|f| {
+            (
+                f["seq"].as_u64().unwrap(),
+                f["id"].as_str().unwrap(),
+                f["attachments"].as_array().unwrap().len(),
+            )
+        })
         .collect();
-    assert_eq!(shape, [(1, r1.as_str(), 1), (2, r2.as_str(), 0), (3, r3.as_str(), 0)]);
-    assert_eq!(got[2]["text"], "Synthetic three. Want the details?", "a reply sent again is kept once");
+    assert_eq!(
+        shape,
+        [
+            (1, r1.as_str(), 1),
+            (2, r2.as_str(), 0),
+            (3, r3.as_str(), 0)
+        ]
+    );
+    assert_eq!(
+        got[2]["text"], "Synthetic three. Want the details?",
+        "a reply sent again is kept once"
+    );
     assert!(drain(&mut me, 300).await.is_empty(), "nothing more");
 
     // An ack is cumulative; a reconnect names what it holds and the older socket is closed.
@@ -874,12 +1078,24 @@ async fn replies_wait_for_the_phone_replay_in_order_and_acks_free_them() {
     let (mut again, welcome) = phone(&hub, PHONE, 2, false).await;
     assert_eq!(welcome["seq"], 3);
     let replay = frames(&drain(&mut again, 300).await);
-    assert_eq!(replay.iter().map(|f| f["seq"].as_u64().unwrap()).collect::<Vec<_>>(), [3]);
-    assert_eq!(closed_with(&drain(&mut me, 300).await), Some((4000, "replaced".to_owned())));
+    assert_eq!(
+        replay
+            .iter()
+            .map(|f| f["seq"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [3]
+    );
+    assert_eq!(
+        closed_with(&drain(&mut me, 300).await),
+        Some((4000, "replaced".to_owned()))
+    );
     send(&mut again, json!({"type": "ack", "seq": 3})).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     let (mut empty, _) = phone(&hub, PHONE, 0, false).await;
-    assert!(frames(&drain(&mut empty, 300).await).is_empty(), "everything was acknowledged");
+    assert!(
+        frames(&drain(&mut empty, 300).await).is_empty(),
+        "everything was acknowledged"
+    );
 
     // A hub that restarted starts its seq over: its welcome is below the phone's lastSeq, which
     // is how the phone knows to start over, and the next reply arrives under seq 1.
@@ -887,7 +1103,11 @@ async fn replies_wait_for_the_phone_replay_in_order_and_acks_free_them() {
     let mut helm = pc(&fresh).await;
     let (mut me, welcome) = phone(&fresh, PHONE, 41, true).await;
     assert_eq!(welcome["seq"], 0);
-    send(&mut helm, answer(&id("reply", 7), None, "Synthetic after a restart.", 0)).await;
+    send(
+        &mut helm,
+        answer(&id("reply", 7), None, "Synthetic after a restart.", 0),
+    )
+    .await;
     let reply = next_where(&mut me, "reply", is("reply")).await;
     assert_eq!(reply["seq"], 1);
     // An entry the phone never acknowledges is forgotten after the outbox time (2 hours).
@@ -903,7 +1123,10 @@ async fn two_phones_of_one_person_keep_their_own_socket_acks_and_screen() {
     let (mut phone_a, _) = phone(&hub, PHONE, 0, true).await;
     let (mut tablet, _) = phone(&hub, TABLET, 0, true).await;
     let quiet = drain(&mut phone_a, 300).await;
-    assert!(quiet.is_empty(), "a second token did not push the first off: {quiet:?}");
+    assert!(
+        quiet.is_empty(),
+        "a second token did not push the first off: {quiet:?}"
+    );
 
     // News reaches both. The phone acking it does not free it for the tablet.
     let r1 = id("reply", 1);
@@ -913,20 +1136,40 @@ async fn two_phones_of_one_person_keep_their_own_socket_acks_and_screen() {
     send(&mut phone_a, json!({"type": "ack", "seq": 1})).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     let (mut tablet2, _) = phone(&hub, TABLET, 0, true).await;
-    assert_eq!(closed_with(&drain(&mut tablet, 300).await), Some((4000, "replaced".to_owned())));
+    assert_eq!(
+        closed_with(&drain(&mut tablet, 300).await),
+        Some((4000, "replaced".to_owned()))
+    );
     next_where(&mut tablet2, "the replay", is("reply")).await;
     send(&mut tablet2, json!({"type": "ack", "seq": 1})).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     let (mut phone_b, _) = phone(&hub, PHONE, 0, true).await;
-    assert!(frames(&drain(&mut phone_b, 300).await).is_empty(), "both have it now");
+    assert!(
+        frames(&drain(&mut phone_b, 300).await).is_empty(),
+        "both have it now"
+    );
 
     // Helm hears "not live" only when the last screen in front goes.
     drain(&mut helm, 300).await;
-    send(&mut phone_b, json!({"type": "presence", "live": false, "mode": "chat"})).await;
+    send(
+        &mut phone_b,
+        json!({"type": "presence", "live": false, "mode": "chat"}),
+    )
+    .await;
     let seen = frames(&drain(&mut helm, 400).await);
-    assert!(seen.iter().all(|f| f["type"] != "voice_presence"), "the tablet is still in front: {seen:?}");
-    send(&mut tablet2, json!({"type": "presence", "live": false, "mode": "chat"})).await;
-    let presence = next_where(&mut helm, "presence", |f| f["type"] == "voice_presence" && f["live"] == false).await;
+    assert!(
+        seen.iter().all(|f| f["type"] != "voice_presence"),
+        "the tablet is still in front: {seen:?}"
+    );
+    send(
+        &mut tablet2,
+        json!({"type": "presence", "live": false, "mode": "chat"}),
+    )
+    .await;
+    let presence = next_where(&mut helm, "presence", |f| {
+        f["type"] == "voice_presence" && f["live"] == false
+    })
+    .await;
     assert_eq!(presence["mode"], "chat");
 }
 
@@ -934,30 +1177,67 @@ async fn two_phones_of_one_person_keep_their_own_socket_acks_and_screen() {
 async fn status_fresh_and_heard_reports() {
     let hub = start(Opts::default()).await;
     let get = |target: &'static str| http(&hub, "GET", target, Some(PHONE), "", &[]);
-    assert_eq!(get("/voice/status").await.body, json!({"ok": true, "helm": "offline", "version": 1, "stt": true}));
+    assert_eq!(
+        get("/voice/status").await.body,
+        json!({"ok": true, "helm": "offline", "version": 1, "stt": true})
+    );
     let fresh = http(&hub, "POST", "/voice/fresh", Some(PHONE), "", &[]).await;
-    assert_eq!((fresh.status, fresh.body["error"].clone()), (409, json!("Helm is offline.")));
+    assert_eq!(
+        (fresh.status, fresh.body["error"].clone()),
+        (409, json!("Helm is offline."))
+    );
 
     // Reports are checked, and with Helm offline kept: the latest per reply wins (a later "all"
     // replaces an earlier "partial", an older report does not replace a newer one).
     let heard = |reports: Value| {
         let body = json!({ "reports": reports }).to_string().into_bytes();
         let hub = &hub;
-        async move { http(hub, "POST", "/voice/heard", Some(PHONE), "application/json", &body).await }
+        async move {
+            http(
+                hub,
+                "POST",
+                "/voice/heard",
+                Some(PHONE),
+                "application/json",
+                &body,
+            )
+            .await
+        }
     };
-    let many: Vec<Value> = (0..51).map(|_| json!({"reply": "reply-0001", "state": "all"})).collect();
+    let many: Vec<Value> = (0..51)
+        .map(|_| json!({"reply": "reply-0001", "state": "all"}))
+        .collect();
     for (name, bad) in [
         ("none", json!([])),
-        ("a state that does not exist", json!([{"reply": "reply-0001", "state": "most"}])),
+        (
+            "a state that does not exist",
+            json!([{"reply": "reply-0001", "state": "most"}]),
+        ),
         ("a short reply id", json!([{"reply": "x", "state": "all"}])),
         ("51 of them", json!(many)),
     ] {
         assert_eq!(heard(bad).await.status, 400, "{name}");
     }
-    let not_json = http(&hub, "POST", "/voice/heard", Some(PHONE), "application/json", b"nope").await;
+    let not_json = http(
+        &hub,
+        "POST",
+        "/voice/heard",
+        Some(PHONE),
+        "application/json",
+        b"nope",
+    )
+    .await;
     assert_eq!(not_json.status, 400);
     let huge = vec![b' '; 65 * 1024];
-    let r = http(&hub, "POST", "/voice/heard", Some(PHONE), "application/json", &huge).await;
+    let r = http(
+        &hub,
+        "POST",
+        "/voice/heard",
+        Some(PHONE),
+        "application/json",
+        &huge,
+    )
+    .await;
     assert_eq!(r.status, 413);
     for report in [
         json!({"reply": "reply-0001", "state": "partial", "sentence": 2, "at": 10}),
@@ -979,7 +1259,9 @@ async fn status_fresh_and_heard_reports() {
         .map(|r| (r["reply"].as_str().unwrap(), r["state"].as_str().unwrap()))
         .collect();
     assert_eq!(states, [("reply-0001", "all"), ("reply-0002", "none")]);
-    assert!(frames(&drain(&mut helm, 700).await).iter().all(|f| f["type"] != "voice_heard"));
+    assert!(frames(&drain(&mut helm, 700).await)
+        .iter()
+        .all(|f| f["type"] != "voice_heard"));
     let r = heard(json!([{"reply": "reply-0003", "state": "partial", "sentence": 1}])).await;
     assert_eq!(r.body["forwarded"], 1);
     next_where(&mut helm, "voice_heard", is("voice_heard")).await;
@@ -1002,7 +1284,10 @@ async fn the_live_socket_wants_a_hello_first() {
         let mut ws = connect(&hub, "/voice/live", Some(PHONE)).await.unwrap();
         send(&mut ws, first).await;
         let seen = drain(&mut ws, 1000).await;
-        assert!(closed_with(&seen).is_some_and(|(code, _)| code == 1008), "{seen:?}");
+        assert!(
+            closed_with(&seen).is_some_and(|(code, _)| code == 1008),
+            "{seen:?}"
+        );
     }
     // Frames the hub does not know are dropped quietly; a good socket stays open.
     let (mut me, _) = phone(&hub, PHONE, 0, true).await;

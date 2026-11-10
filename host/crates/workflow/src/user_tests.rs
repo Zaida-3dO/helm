@@ -238,10 +238,13 @@ fn the_user_skips_a_required_stage_and_allows_more_through_the_consent_path() {
 fn an_agent_has_no_route_to_the_users_task_actions() {
     let t = setup(|_| {});
     t.wf(json!({"action": "start", "title": "T"})).unwrap();
-    for a in ["signOff", "reopen", "end", "notVisual", "visual"] {
+    for a in ["signOff", "end", "notVisual", "visual"] {
         let e = t.wf(json!({"action": a})).unwrap_err();
         assert!(e.starts_with("action must be"), "{a}: {e}");
     }
+    // An agent's reopen is its own action and needs the user's words or a grant.
+    let e = t.wf(json!({"action": "reopen"})).unwrap_err();
+    assert!(e.contains("to reopen"), "{e}");
     // Only the user clears the visual flag.
     t.wf(json!({"action": "update", "visual": true})).unwrap();
     assert!(t.wf(json!({"action": "update", "visual": false})).is_err());

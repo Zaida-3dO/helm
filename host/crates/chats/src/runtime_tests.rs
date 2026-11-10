@@ -2249,7 +2249,10 @@ async fn a_message_fork_is_cut_at_the_reply_and_carries_it_once() {
     assert_eq!(back["draft"], "second");
     // What going back means, as the confirmation shows it: only the conversation comes back.
     let info = h
-        .call("checkpoint_info", json!({"chatId": chat, "messageId": second}))
+        .call(
+            "checkpoint_info",
+            json!({"chatId": chat, "messageId": second}),
+        )
         .await
         .unwrap();
     assert_eq!(info["prompt"], "second");
@@ -2257,7 +2260,10 @@ async fn a_message_fork_is_cut_at_the_reply_and_carries_it_once() {
     assert_eq!(info["filesRestored"], false);
     let t = texts(&h, back["id"].as_str().unwrap());
     assert!(t.contains(&"assistant:answer one".to_owned()));
-    assert!(!t.iter().any(|x| x.contains("two")), "nothing from the message on");
+    assert!(
+        !t.iter().any(|x| x.contains("two")),
+        "nothing from the message on"
+    );
     assert_eq!(
         t.last().unwrap(),
         "context:Went back to before a message in first"
@@ -2293,10 +2299,9 @@ async fn a_message_fork_is_cut_at_the_reply_and_carries_it_once() {
         )
     })
     .unwrap();
-    let cut_short: i64 = h
-        .col(&format!(
-            "SELECT id FROM messages WHERE chat_id = '{chat}' AND text = 'answer two'"
-        ))[0]
+    let cut_short: i64 = h.col(&format!(
+        "SELECT id FROM messages WHERE chat_id = '{chat}' AND text = 'answer two'"
+    ))[0]
         .parse()
         .unwrap();
     let refused = h
@@ -2738,7 +2743,10 @@ async fn a_manual_rename_wins_and_a_failure_keeps_the_fallback() {
     assert_eq!(bad.code, "bad_args");
     // A direction override and a zero-width space in the title are taken out.
     let r = h
-        .call("chat_rename", json!({"chatId": chat, "title": "My \u{202E}na\u{200B}me"}))
+        .call(
+            "chat_rename",
+            json!({"chatId": chat, "title": "My \u{202E}na\u{200B}me"}),
+        )
         .await
         .unwrap();
     assert_eq!(r["titleState"], "manual");
@@ -2783,8 +2791,10 @@ async fn a_manual_rename_wins_and_a_failure_keeps_the_fallback() {
         )
     })
     .unwrap();
-    *h.spawner.title.lock().unwrap() =
-        Ok("second chat\nHelm 2.0 · crew Y: add\nhelm 2.0 · crew y: add\n \nThird\nFourth\nFifth".into());
+    *h.spawner.title.lock().unwrap() = Ok(
+        "second chat\nHelm 2.0 · crew Y: add\nhelm 2.0 · crew y: add\n \nThird\nFourth\nFifth"
+            .into(),
+    );
     let s = h
         .call("title_suggest", json!({"chatId": other}))
         .await
@@ -3147,7 +3157,7 @@ async fn forked_chats_have_their_own_copies_of_the_images() {
     use base64::Engine as _;
     let mut h = harness();
     let chat = h.create().await;
-    let (mut w, id, png) = first_turn_with_image(&mut h, &chat).await;
+    let (w, id, png) = first_turn_with_image(&mut h, &chat).await;
     let want = base64::engine::general_purpose::STANDARD.encode(&png);
     // A picture a tool returned is a copy-carried image too.
     w.emit(json!({"type": "agent_start"})).await;
@@ -3674,9 +3684,9 @@ async fn skills_come_from_the_workers_get_state() {
     let mut h = harness();
     // One of the reported skills is one of Helm's own: the host marks it so the `/` menu can say
     // so, even though the CLI shows it under its plugin prefix.
-    std::fs::create_dir_all(h.profile.path("skills/skills/review")).unwrap();
+    std::fs::create_dir_all(h.profile.path("knowledge/everyone/skills/review")).unwrap();
     std::fs::write(
-        h.profile.path("skills/skills/review/SKILL.md"),
+        h.profile.path("knowledge/everyone/skills/review/SKILL.md"),
         "---\ndescription: Review the diff\n---\n",
     )
     .unwrap();

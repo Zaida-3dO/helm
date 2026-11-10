@@ -825,7 +825,11 @@ mod tests {
                 "Review of x: this is round {} of {cap}.",
                 done + 1
             )));
-            assert_eq!(line.contains("the last round the cap allows"), last, "{line}");
+            assert_eq!(
+                line.contains("the last round the cap allows"),
+                last,
+                "{line}"
+            );
             assert_eq!(line.contains("record one short lesson"), lesson, "{line}");
         }
     }

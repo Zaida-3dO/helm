@@ -1028,7 +1028,7 @@ fn room_is_kept_for_speech_and_made_on_request() {
         (json!(1_000_000), Some(1_000_000)),
         (json!(4_095), None),
         (json!(5_000_000), None),
-        (json!(18_446_744_073_709), None),
+        (json!(18_446_744_073_709_u64), None),
         (json!("big"), None),
     ] {
         let health = Fake::start(move |_| {

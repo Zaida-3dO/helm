@@ -180,7 +180,7 @@ fn prune(profile_dir: &Path) {
         .flatten()
         .filter_map(|e| Some((e.path(), e.metadata().ok()?.modified().ok()?)))
         .collect();
-    all.sort_by(|a, b| b.1.cmp(&a.1));
+    all.sort_by_key(|b| std::cmp::Reverse(b.1));
     let now = SystemTime::now();
     for (i, (path, at)) in all.into_iter().enumerate() {
         let old = now

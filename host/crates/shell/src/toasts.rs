@@ -320,6 +320,8 @@ mod tests {
             flagged: (0..flagged)
                 .map(|i| row(&format!("f{i}"), AttentionKind::Triage, ""))
                 .collect(),
+            muted: vec![],
+            triage: vec![],
             revision: 1,
         }
     }
@@ -427,10 +429,10 @@ mod tests {
         let a = row("c1", AttentionKind::Approval, "");
         let q = row("c2", AttentionKind::Question, "");
         assert!(
-            t.fresh(&summary(&[a.clone()], 0, 0)).is_empty(),
+            t.fresh(&summary(std::slice::from_ref(&a), 0, 0)).is_empty(),
             "already waiting at launch"
         );
-        assert!(t.fresh(&summary(&[a.clone()], 0, 0)).is_empty());
+        assert!(t.fresh(&summary(std::slice::from_ref(&a), 0, 0)).is_empty());
         let fresh = t.fresh(&summary(&[a.clone(), q.clone()], 0, 0));
         assert_eq!(
             fresh.iter().map(|r| r.chat_id.as_str()).collect::<Vec<_>>(),
@@ -460,7 +462,7 @@ mod tests {
         for (s, want) in [
             (summary(&[], 0, 0), TrayDot::None),
             (summary(&[], 2, 0), TrayDot::Amber),
-            (summary(&[ask.clone()], 0, 0), TrayDot::Red),
+            (summary(std::slice::from_ref(&ask), 0, 0), TrayDot::Red),
             (summary(&[ask], 3, 0), TrayDot::Red),
             (summary(&[], 1, 1), TrayDot::Red),
         ] {

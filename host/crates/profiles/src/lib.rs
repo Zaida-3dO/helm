@@ -45,7 +45,10 @@ pub fn people_sync() -> helm_devices::PeopleSync {
     helm_devices::PeopleSync::new(|db, people| {
         db.write(|tx| store::sync_people(tx, people, helm_core::now_ms()))
             .unwrap_or_else(|e| {
-                log::warn!("profiles: the hub's people were not synced: {}", e.message());
+                log::warn!(
+                    "profiles: the hub's people were not synced: {}",
+                    e.message()
+                );
                 false
             })
     })

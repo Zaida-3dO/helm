@@ -316,12 +316,18 @@ mod tests {
     #[test]
     fn a_saved_update_names_the_calling_chat_only_for_a_removal() {
         for (given, want) in [
-            (json!({"id": "x", "state": "done"}), Some(json!({"id": "x", "state": "done"}))),
+            (
+                json!({"id": "x", "state": "done"}),
+                Some(json!({"id": "x", "state": "done"})),
+            ),
             (
                 json!({"id": "x", "remove": true}),
                 Some(json!({"id": "x", "remove": true, "byChat": "chat-1"})),
             ),
-            (json!({"id": "x", "remove": false}), Some(json!({"id": "x", "remove": false}))),
+            (
+                json!({"id": "x", "remove": false}),
+                Some(json!({"id": "x", "remove": false})),
+            ),
             // A chat cannot name itself: the caller field is the host's alone.
             (
                 json!({"id": "x", "remove": true, "byChat": "other"}),

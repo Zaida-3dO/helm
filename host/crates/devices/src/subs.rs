@@ -154,6 +154,7 @@ impl Subs {
         self.to_lists(json!({ "kind": "chat_removed", "chatId": chat_id }))
     }
 
+    #[allow(clippy::wrong_self_convention)]
     fn to_lists(&mut self, event: Value) -> Vec<Out> {
         let mut out = Vec::new();
         for (uid, w) in &mut self.watchers {

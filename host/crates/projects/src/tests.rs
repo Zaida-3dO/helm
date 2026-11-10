@@ -558,7 +558,7 @@ fn descriptions_and_icon_pictures_are_checked_and_kept_with_the_project() {
     let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
     let png = |extra: usize| {
         let mut v = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
-        v.extend(std::iter::repeat(7u8).take(extra));
+        v.extend(std::iter::repeat_n(7u8, extra));
         v
     };
     // The picture: a PNG of at most 64 KB, in base64.

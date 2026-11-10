@@ -275,8 +275,8 @@ mod tests {
         );
         // The reloaded page has not answered yet: probed, never reloaded again.
         assert_eq!(w.tick(at(t0, 50), true), Action::Probe);
-        for s in [60, 90, 120, 300] {
-            assert_eq!(w.tick(at(t0, s), true), Action::Nothing);
+        for s in (60..=300).step_by(10) {
+            assert_eq!(w.tick(at(t0, s), true), Action::Nothing, "{s} s");
         }
     }
 

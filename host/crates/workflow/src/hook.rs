@@ -908,7 +908,13 @@ impl RepoFacts for GitFacts {
         // `git config --get-all` exits 1 and prints nothing when the key is not set.
         let key = format!("remote.{remote}.push");
         match self.git(cwd, &["config", "--get-all", &key])? {
-            (true, out) => Some(out.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect()),
+            (true, out) => Some(
+                out.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            ),
             (false, out) if out.is_empty() => Some(Vec::new()),
             _ => None,
         }
@@ -1093,8 +1099,14 @@ mod tests {
         assert_eq!(t.count("gate_denied"), 1);
         // Claude Code's Monitor tool runs a command too: it is judged like Bash, and a call with
         // no command to read is refused.
-        assert_eq!(t.ask("c", "monitor", true, "tail -f build.log", Value::Null), Answer::pass(true));
-        assert_eq!(t.ask("off", "monitor", true, MAIN, Value::Null), Answer::pass(false));
+        assert_eq!(
+            t.ask("c", "monitor", true, "tail -f build.log", Value::Null),
+            Answer::pass(true)
+        );
+        assert_eq!(
+            t.ask("off", "monitor", true, MAIN, Value::Null),
+            Answer::pass(false)
+        );
         let m = t.ask("c", "monitor", true, MAIN, Value::Null);
         assert!(!m.allow && m.reason.unwrap().contains("# helm-override:"));
         let blank = t.ask("c", "monitor", true, "  ", Value::Null);
@@ -1389,14 +1401,26 @@ mod tests {
         assert_eq!(f.configured_push(repo.path(), "origin"), Some(vec![]));
         assert_eq!(f.push_default(repo.path()).as_deref(), Some("simple"));
         git(&["config", "remote.origin.push", "HEAD:main"]);
-        git(&["config", "--add", "remote.origin.push", "refs/heads/a:refs/heads/b"]);
+        git(&[
+            "config",
+            "--add",
+            "remote.origin.push",
+            "refs/heads/a:refs/heads/b",
+        ]);
         git(&["config", "push.default", "Upstream"]);
         let f = GitFacts::default();
         assert_eq!(
             f.configured_push(repo.path(), "origin"),
-            Some(vec!["HEAD:main".to_owned(), "refs/heads/a:refs/heads/b".to_owned()])
+            Some(vec![
+                "HEAD:main".to_owned(),
+                "refs/heads/a:refs/heads/b".to_owned()
+            ])
         );
         assert_eq!(f.push_default(repo.path()).as_deref(), Some("upstream"));
-        assert_eq!(f.configured_push(repo.path(), "-x"), None, "an option is not a remote");
+        assert_eq!(
+            f.configured_push(repo.path(), "-x"),
+            None,
+            "an option is not a remote"
+        );
     }
 }

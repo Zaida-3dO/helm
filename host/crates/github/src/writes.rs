@@ -415,7 +415,11 @@ fn read_comment(c: &Client, comment_id: &str) -> GhResult<CommentFacts> {
             ))
         }
     };
-    let parent = if issue { &n["issue"] } else { &n["pullRequest"] };
+    let parent = if issue {
+        &n["issue"]
+    } else {
+        &n["pullRequest"]
+    };
     match (
         parent["number"].as_u64(),
         parent["repository"]["owner"]["login"].as_str(),
@@ -438,7 +442,9 @@ fn read_comment(c: &Client, comment_id: &str) -> GhResult<CommentFacts> {
 
 /// The comment must be on the pull request the page shows.
 fn on_this_pr(f: &CommentFacts, owner: &str, repo: &str, number: u64) -> GhResult<()> {
-    if f.number == number && f.owner.eq_ignore_ascii_case(owner) && f.repo.eq_ignore_ascii_case(repo)
+    if f.number == number
+        && f.owner.eq_ignore_ascii_case(owner)
+        && f.repo.eq_ignore_ascii_case(repo)
     {
         Ok(())
     } else {
@@ -489,7 +495,10 @@ pub fn comment_delete(c: &Client, a: &CommentDeleteArgs) -> GhResult<Answer> {
     } else {
         "deletePullRequestReviewComment"
     };
-    c.mutate(&graphql_request(id, json!({"commentId": a.comment_id}))?, id)
+    c.mutate(
+        &graphql_request(id, json!({"commentId": a.comment_id}))?,
+        id,
+    )
 }
 
 /// Toggle your reaction on a comment: added when you have not reacted with it, removed when you
@@ -507,12 +516,13 @@ pub fn react(c: &Client, a: &ReactArgs) -> GhResult<Answer> {
                 && g["viewerHasReacted"].as_bool() == Some(true)
         })
     });
-    let id = if have { "removeReaction" } else { "addReaction" };
+    let id = if have {
+        "removeReaction"
+    } else {
+        "addReaction"
+    };
     c.mutate(
-        &graphql_request(
-            id,
-            json!({"commentId": a.comment_id, "content": a.content}),
-        )?,
+        &graphql_request(id, json!({"commentId": a.comment_id, "content": a.content}))?,
         id,
     )
 }

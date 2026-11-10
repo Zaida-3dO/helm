@@ -14,7 +14,7 @@ function row(chatId: string, over: Partial<SidebarRow> = {}): SidebarRow {
 }
 
 function project(id: string, over: Partial<ProjectNode> = {}): ProjectNode {
-  return { id, kind: 'folder', name: id, path: null, parentId: null, parentSource: null, icon: null, colour: null, pinned: false, collapsed: false, position: null, archived: false, closed: false, board: null, primaryFolderProjectId: null, chatCount: 0, createdAt: 1, revision: 0, ...over };
+  return { id, kind: 'folder', name: id, path: null, parentId: null, parentSource: null, icon: null, description: null, colour: null, pinned: false, collapsed: false, position: null, archived: false, closed: false, board: null, primaryFolderProjectId: null, chatCount: 0, createdAt: 1, revision: 0, ...over };
 }
 
 test('drag starts only after 4 px', () => {

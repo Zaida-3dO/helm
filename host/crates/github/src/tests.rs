@@ -1055,7 +1055,10 @@ fn the_switch_is_compare_and_swap_and_gates_every_network_op() {
             "github_react",
             with(json!({"commentId": "IC_1", "content": "HEART"})),
         ),
-        ("github_image", with(json!({"url": "https://camo.githubusercontent.com/x"}))),
+        (
+            "github_image",
+            with(json!({"url": "https://camo.githubusercontent.com/x"})),
+        ),
     ];
     for (op, args) in &calls {
         let e = rt.block_on(api.call_host(op, args.clone())).unwrap_err();
@@ -1108,14 +1111,23 @@ fn the_switch_is_compare_and_swap_and_gates_every_network_op() {
     assert!(gate(&ctx).is_err());
 }
 
-fn comment_node(kind: &str, mine: bool, number: u64, reacted: &[&str]) -> Result<Response, TransportError> {
+fn comment_node(
+    kind: &str,
+    mine: bool,
+    number: u64,
+    reacted: &[&str],
+) -> Result<Response, TransportError> {
     let parent = json!({"number": number, "repository": {"name": "r", "owner": {"login": "o"}}});
     let groups: Vec<Value> = reacted
         .iter()
         .map(|c| json!({"content": c, "viewerHasReacted": true, "reactors": {"totalCount": 1}}))
         .collect();
     let mut node = json!({"__typename": kind, "viewerDidAuthor": mine, "reactionGroups": groups});
-    let key = if kind == "IssueComment" { "issue" } else { "pullRequest" };
+    let key = if kind == "IssueComment" {
+        "issue"
+    } else {
+        "pullRequest"
+    };
     node[key] = parent;
     ok(json!({"data": {"node": node}}))
 }
@@ -1139,21 +1151,99 @@ fn own_comments_and_reactions_are_checked_then_sent_once() {
         Option<&'static str>,
     );
     let cases: Vec<Case> = vec![
-        (Do::Edit, comment_node("IssueComment", true, 7, &[]), Some(done("updateIssueComment")), None, Some("updateIssueComment")),
-        (Do::Edit, comment_node("PullRequestReviewComment", true, 7, &[]), Some(done("updatePullRequestReviewComment")), None, Some("updatePullRequestReviewComment")),
-        (Do::Delete, comment_node("IssueComment", true, 7, &[]), Some(done("deleteIssueComment")), None, Some("deleteIssueComment")),
-        (Do::Delete, comment_node("PullRequestReviewComment", true, 7, &[]), Some(done("deletePullRequestReviewComment")), None, Some("deletePullRequestReviewComment")),
+        (
+            Do::Edit,
+            comment_node("IssueComment", true, 7, &[]),
+            Some(done("updateIssueComment")),
+            None,
+            Some("updateIssueComment"),
+        ),
+        (
+            Do::Edit,
+            comment_node("PullRequestReviewComment", true, 7, &[]),
+            Some(done("updatePullRequestReviewComment")),
+            None,
+            Some("updatePullRequestReviewComment"),
+        ),
+        (
+            Do::Delete,
+            comment_node("IssueComment", true, 7, &[]),
+            Some(done("deleteIssueComment")),
+            None,
+            Some("deleteIssueComment"),
+        ),
+        (
+            Do::Delete,
+            comment_node("PullRequestReviewComment", true, 7, &[]),
+            Some(done("deletePullRequestReviewComment")),
+            None,
+            Some("deletePullRequestReviewComment"),
+        ),
         // Someone else's comment, or one on another pull request: nothing is sent.
-        (Do::Edit, comment_node("IssueComment", false, 7, &[]), None, Some(Refused), None),
-        (Do::Delete, comment_node("IssueComment", false, 7, &[]), None, Some(Refused), None),
-        (Do::Edit, comment_node("IssueComment", true, 8, &[]), None, Some(Refused), None),
-        (Do::React("HEART"), comment_node("IssueComment", false, 8, &[]), None, Some(Refused), None),
-        (Do::Edit, ok(json!({"data": {"node": {"__typename": "Issue"}}})), None, Some(Refused), None),
+        (
+            Do::Edit,
+            comment_node("IssueComment", false, 7, &[]),
+            None,
+            Some(Refused),
+            None,
+        ),
+        (
+            Do::Delete,
+            comment_node("IssueComment", false, 7, &[]),
+            None,
+            Some(Refused),
+            None,
+        ),
+        (
+            Do::Edit,
+            comment_node("IssueComment", true, 8, &[]),
+            None,
+            Some(Refused),
+            None,
+        ),
+        (
+            Do::React("HEART"),
+            comment_node("IssueComment", false, 8, &[]),
+            None,
+            Some(Refused),
+            None,
+        ),
+        (
+            Do::Edit,
+            ok(json!({"data": {"node": {"__typename": "Issue"}}})),
+            None,
+            Some(Refused),
+            None,
+        ),
         // A reaction you already have is taken back; one you have not is added. Anyone's comment.
-        (Do::React("HEART"), comment_node("IssueComment", false, 7, &[]), Some(done("addReaction")), None, Some("addReaction")),
-        (Do::React("HEART"), comment_node("IssueComment", false, 7, &["HEART"]), Some(done("removeReaction")), None, Some("removeReaction")),
-        (Do::React("EYES"), comment_node("IssueComment", false, 7, &["HEART"]), Some(done("addReaction")), None, Some("addReaction")),
-        (Do::React("SMILE"), comment_node("IssueComment", false, 7, &[]), None, Some(Invalid), None),
+        (
+            Do::React("HEART"),
+            comment_node("IssueComment", false, 7, &[]),
+            Some(done("addReaction")),
+            None,
+            Some("addReaction"),
+        ),
+        (
+            Do::React("HEART"),
+            comment_node("IssueComment", false, 7, &["HEART"]),
+            Some(done("removeReaction")),
+            None,
+            Some("removeReaction"),
+        ),
+        (
+            Do::React("EYES"),
+            comment_node("IssueComment", false, 7, &["HEART"]),
+            Some(done("addReaction")),
+            None,
+            Some("addReaction"),
+        ),
+        (
+            Do::React("SMILE"),
+            comment_node("IssueComment", false, 7, &[]),
+            None,
+            Some(Invalid),
+            None,
+        ),
     ];
     for (i, (what, read, write, want, mutation)) in cases.into_iter().enumerate() {
         let mut answers = vec![read];
@@ -1163,20 +1253,36 @@ fn own_comments_and_reactions_are_checked_then_sent_once() {
         let pr = json!({"owner": "o", "repo": "r", "number": 7, "commentId": "IC_1"});
         let with = |extra: Value| {
             let mut v = pr.clone();
-            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
             serde_json::from_value::<Value>(v).unwrap()
         };
         let r = match what {
-            Do::Edit => writes::comment_edit(&g.client, &serde_json::from_value(with(json!({"body": "new"}))).unwrap()),
-            Do::Delete => writes::comment_delete(&g.client, &serde_json::from_value(pr.clone()).unwrap()),
-            Do::React(c) => writes::react(&g.client, &serde_json::from_value(with(json!({"content": c}))).unwrap()),
+            Do::Edit => writes::comment_edit(
+                &g.client,
+                &serde_json::from_value(with(json!({"body": "new"}))).unwrap(),
+            ),
+            Do::Delete => {
+                writes::comment_delete(&g.client, &serde_json::from_value(pr.clone()).unwrap())
+            }
+            Do::React(c) => writes::react(
+                &g.client,
+                &serde_json::from_value(with(json!({"content": c}))).unwrap(),
+            ),
         };
         assert_eq!(class(&r), want, "case {i}");
         let sent = script.sent();
         match mutation {
             Some(m) => {
                 assert_eq!(sent.len(), 2, "case {i}");
-                assert!(sent[1].body.as_ref().unwrap()["query"].as_str().unwrap().contains(&format!("{m}(input:")), "case {i}");
+                assert!(
+                    sent[1].body.as_ref().unwrap()["query"]
+                        .as_str()
+                        .unwrap()
+                        .contains(&format!("{m}(input:")),
+                    "case {i}"
+                );
             }
             None => assert!(sent.len() <= 1, "case {i}: only the read is sent"),
         }
@@ -1204,7 +1310,10 @@ fn images_come_only_from_the_pull_requests_own_text_and_github_hosts() {
         ]
     );
     for (url, ok) in [
-        ("https://private-user-images.githubusercontent.com/1/a.png?jwt=x", true),
+        (
+            "https://private-user-images.githubusercontent.com/1/a.png?jwt=x",
+            true,
+        ),
         ("https://camo.githubusercontent.com/zz", true),
         ("http://camo.githubusercontent.com/zz", false),
         ("https://evil.example/camo.githubusercontent.com", false),

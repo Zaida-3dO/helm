@@ -382,7 +382,7 @@ fn prune(base: &Path, keep: &str) {
             built.push((path, used));
         }
     }
-    built.sort_by(|a, b| b.1.cmp(&a.1));
+    built.sort_by_key(|b| std::cmp::Reverse(b.1));
     for (i, (path, used)) in built.into_iter().enumerate() {
         let recent = now
             .duration_since(used)

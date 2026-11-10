@@ -42,11 +42,11 @@ localAhead: number | null,
 /**
  * The chat holds an unsent draft: drawn as a small pencil before the age.
  */
-hasDraft: boolean,
+hasDraft: boolean, 
 /**
  * The profile the chat belongs to; left out when the chat has none.
  */
-profileId?: string,
+profileId?: string, 
 /**
  * Profile ids, besides its own, that the chat is shown to; left out with `profile_id`.
  */

@@ -690,10 +690,17 @@ fn a_busy_or_capacity_refusal_gives_the_slot_back_and_the_next_tick_retries() {
             let slot = get(&db, &s.id).next_run_at.unwrap();
             let send = Recording(
                 Mutex::new(vec![]),
-                Mutex::new(Some(ApiError::new(code, "Too many chats are already working."))),
+                Mutex::new(Some(ApiError::new(
+                    code,
+                    "Too many chats are already working.",
+                ))),
             );
             let before = sink.kinds().len();
-            assert_eq!(scheduler::tick(&svc, &send, slot), 0, "{code}: nothing claimed");
+            assert_eq!(
+                scheduler::tick(&svc, &send, slot),
+                0,
+                "{code}: nothing claimed"
+            );
             assert!(runs(&db, &s.id).is_empty(), "{code}: no receipt is left");
             let back = get(&db, &s.id);
             assert_eq!(

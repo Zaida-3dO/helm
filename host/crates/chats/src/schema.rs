@@ -281,7 +281,11 @@ fn activity_queue(tx: &Transaction<'_>) -> rusqlite::Result<()> {
 fn late_columns(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     for (table, column, definition) in [
         ("submission_meta", "afk_note", "INTEGER NOT NULL DEFAULT 0"),
-        ("chat_turn_usage", "provider", "TEXT NOT NULL DEFAULT 'claude'"),
+        (
+            "chat_turn_usage",
+            "provider",
+            "TEXT NOT NULL DEFAULT 'claude'",
+        ),
     ] {
         let has: bool = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",

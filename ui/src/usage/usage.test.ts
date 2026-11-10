@@ -75,7 +75,8 @@ test('relative times and ranges', () => {
   assert.ok(one && new Date(one.since).getHours() === 0 && new Date(one.until).getDate() === 11);
   const span = customRange('2026-03-01', '2026-03-31');
   assert.ok(span && span.until > span.since && new Date(span.until).getMonth() === 3);
-  for (const [from, to] of [['', '2026-03-10'], ['2026-03-10', ''], ['2026-03-11', '2026-03-10'], ['2026-02-31', '2026-03-10'], ['10/03/2026', '2026-03-10']]) {
+  const bad: [string, string][] = [['', '2026-03-10'], ['2026-03-10', ''], ['2026-03-11', '2026-03-10'], ['2026-02-31', '2026-03-10'], ['10/03/2026', '2026-03-10']];
+  for (const [from, to] of bad) {
     assert.equal(customRange(from, to), null, `${from} to ${to}`);
   }
 });

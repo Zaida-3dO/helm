@@ -516,7 +516,10 @@ pub fn gate_call(db: &Database, chat: &str, args: &Value, now: i64) -> Result<Va
             Ok::<_, rusqlite::Error>((s, on))
         })
         .map_err(|e| e.to_string())?;
-    if !on || ((spawn || message) && !s.dispatch_gate) || (edit && s.orchestrator_edits == EditsRule::Allow) {
+    if !on
+        || ((spawn || message) && !s.dispatch_gate)
+        || (edit && s.orchestrator_edits == EditsRule::Allow)
+    {
         return Ok(allow());
     }
     // Files and git folders are read before the transaction.

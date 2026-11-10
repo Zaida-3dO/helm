@@ -24,6 +24,7 @@ pub mod dispatch;
 pub mod feedback;
 pub mod feedback_items;
 pub mod ide;
+mod keybindings;
 pub mod lines;
 pub mod options;
 pub mod pages;
@@ -39,7 +40,6 @@ pub mod shells;
 pub mod show_images;
 pub mod spec;
 pub mod tools;
-mod keybindings;
 
 pub use addendum::{Addendum, AddendumSection, KnowledgeSection, StaticSection};
 pub use dispatch::{Caller, CallerBinding, ChatRequest, HostTools};

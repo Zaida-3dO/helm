@@ -4,7 +4,7 @@ export type ProjectUpdateArgs = { projectId: string, revision: number, name?: st
 /**
  * `null` clears.
  */
-icon?: string | null, colour?: string | null,
+icon?: string | null, colour?: string | null, 
 /**
  * One line, at most [`MAX_DESCRIPTION_CHARS`] characters; `null` or blank clears.
  */

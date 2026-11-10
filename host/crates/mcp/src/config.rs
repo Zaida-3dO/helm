@@ -349,7 +349,10 @@ impl McpStore {
                 if r.kind == RefKind::ChatPerson {
                     // Not a secret: a chat with no person simply sends no such header.
                     if let Some(p) = person {
-                        h.insert(k.clone(), format!("{}{p}", r.prefix.as_deref().unwrap_or("")));
+                        h.insert(
+                            k.clone(),
+                            format!("{}{p}", r.prefix.as_deref().unwrap_or("")),
+                        );
                     }
                     continue;
                 }
