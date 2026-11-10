@@ -23,9 +23,67 @@ pub fn is_hidden_char(c: char) -> bool {
     )
 }
 
+/// Pictographs that emoji sequences join: the emoji blocks and the older symbols drawn as emoji
+/// (an approximation of Unicode's Extended_Pictographic, generous on purpose: it only decides
+/// whether a joiner between two of them is part of one emoji).
+fn is_pictograph(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00A9 | 0x00AE | 0x203C | 0x2049 | 0x2122 | 0x2139
+        | 0x2194..=0x21AA
+        | 0x2300..=0x23FF
+        | 0x24C2
+        | 0x25AA..=0x25FE
+        | 0x2600..=0x27BF
+        | 0x2934 | 0x2935
+        | 0x2B00..=0x2BFF
+        | 0x3030 | 0x303D | 0x3297 | 0x3299
+        | 0x1F000..=0x1FAFF
+    )
+}
+
+/// True for the characters that only dress the emoji before them (variation selectors).
+fn is_emoji_dress(c: char) -> bool {
+    matches!(c as u32, 0xFE0E | 0xFE0F)
+}
+
+/// Whether the character at `i` hides something, read in its sequence: a zero-width joiner
+/// between two pictographs (`👩‍💻`) and the tag characters of a subdivision flag (`🏴` + tags +
+/// cancel tag) are parts of one emoji, not hidden text.
+fn hidden_at(chars: &[char], i: usize) -> bool {
+    let c = chars[i];
+    if !is_hidden_char(c) {
+        return false;
+    }
+    let tag = |c: char| (0xE0020..=0xE007F).contains(&(c as u32));
+    if c == '\u{200D}' {
+        let before = chars[..i].iter().rev().find(|c| !is_emoji_dress(**c));
+        let after = chars.get(i + 1);
+        return !(before.is_some_and(|c| is_pictograph(*c))
+            && after.is_some_and(|c| is_pictograph(*c)));
+    }
+    if tag(c) {
+        let start = chars[..i].iter().rposition(|c| !tag(*c));
+        let end = chars[i..]
+            .iter()
+            .position(|c| !tag(*c))
+            .map_or(chars.len(), |n| i + n);
+        let flag = start.is_some_and(|s| chars[s] == '\u{1F3F4}');
+        let cancelled = chars[end - 1] == '\u{E007F}';
+        return !(flag && cancelled && end - start.unwrap_or(0) > 2);
+    }
+    true
+}
+
+/// True when `s` holds a hidden character outside an emoji sequence (see [`hidden_at`]).
+pub fn hides(s: &str) -> bool {
+    let chars: Vec<char> = s.chars().collect();
+    (0..chars.len()).any(|i| hidden_at(&chars, i))
+}
+
 /// True when `s` has a control character or a hidden one.
 pub fn has_hidden(s: &str) -> bool {
-    s.chars().any(|c| c.is_control() || is_hidden_char(c))
+    s.chars().any(char::is_control) || hides(s)
 }
 
 /// Where a JSON value holds an invisible or direction-changing character, as a path like `a.b[2]`,
@@ -34,7 +92,7 @@ pub fn has_hidden(s: &str) -> bool {
 pub fn find_hidden(v: &serde_json::Value) -> Option<String> {
     fn walk(v: &serde_json::Value, at: &mut String) -> bool {
         match v {
-            serde_json::Value::String(s) => s.chars().any(is_hidden_char),
+            serde_json::Value::String(s) => hides(s),
             serde_json::Value::Array(a) => a.iter().enumerate().any(|(i, x)| {
                 let n = at.len();
                 at.push_str(&format!("[{i}]"));
@@ -50,7 +108,7 @@ pub fn find_hidden(v: &serde_json::Value) -> Option<String> {
                     at.push('.');
                 }
                 at.extend(k.chars().filter(|c| !c.is_control() && !is_hidden_char(*c)));
-                if k.chars().any(is_hidden_char) || walk(x, at) {
+                if hides(k) || walk(x, at) {
                     return true;
                 }
                 at.truncate(n);
@@ -81,8 +139,27 @@ mod tests {
         ] {
             assert!(has_hidden(bad), "{bad:?}");
         }
-        for ok in ["Ctrl+K", "Shortcut: ñ ü 日本語", "plain label", "🙂"] {
+        for ok in [
+            "Ctrl+K",
+            "Shortcut: ñ ü 日本語",
+            "plain label",
+            "🙂",
+            "👩\u{200d}💻 Dev",
+            "👩🏽\u{200d}💻",
+            "❤\u{fe0f}\u{200d}🔥",
+            "🏴\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f} Team",
+        ] {
             assert!(!has_hidden(ok), "{ok:?}");
+        }
+        // A joiner or tag that is not part of one emoji still hides.
+        for bad in [
+            "a\u{200d}b",
+            "👩\u{200d}",
+            "\u{200d}💻",
+            "🏴\u{e0067}\u{e0062}",
+            "x\u{e0067}\u{e007f}",
+        ] {
+            assert!(has_hidden(bad), "{bad:?}");
         }
         assert_eq!(find_hidden(&json!({"a": ["x", {"b": "y"}], "n": 3})), None);
         assert_eq!(

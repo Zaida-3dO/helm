@@ -1377,7 +1377,7 @@ const NAMES_GIT_CODE: &str = "inline interpreter code that only names git is not
 
 /// Words that make code something other than plain text handling, so naming git beside them
 /// proves nothing: they can build and run a command from pieces.
-const NOT_PLAIN_CODE: [&str; 10] = [
+const NOT_PLAIN_CODE: [&str; 14] = [
     "eval",
     "__import__",
     "getattr",
@@ -1388,7 +1388,19 @@ const NOT_PLAIN_CODE: [&str; 10] = [
     "require",
     "Function",
     "chr(",
+    "startfile",
+    "pty",
+    "os.",
+    "process.",
 ];
+
+/// Whether code names a way to start a process beyond the spawn words: any word that starts
+/// with `exec` or `spawn` or holds `spawn` (`execvp`, `posix_spawn`, `spawnv`...).
+fn names_process_start(code: &str) -> bool {
+    code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .map(str::to_ascii_lowercase)
+        .any(|t| t.starts_with("exec") || t.contains("spawn"))
+}
 
 fn gh_shape(
     words: &[String],
@@ -3432,6 +3444,7 @@ fn code_shape(
     } else if stands_alone(c, wrapped, line) {
         Shape::UnreadableIn("inline interpreter code is not read", cwd.to_path_buf())
     } else if !spawns(&text)
+        && !names_process_start(&text)
         && !modules
         && !NOT_PLAIN_CODE.iter().any(|w| text.contains(w))
         && alone(c, wrapped, line, true)
@@ -5199,6 +5212,16 @@ pub(crate) mod tests {
             ),
             (
                 "python3 -c \"import os; os.system('git push origin main')\"",
+                Some(Tier::Quote),
+                "fail_closed",
+            ),
+            (
+                "python3 -c \"import os; os.execvp('git',['git','push','origin','HEAD:main'])\"",
+                Some(Tier::Quote),
+                "fail_closed",
+            ),
+            (
+                "python3 -c \"import pty; pty.spawn(['git','push'])\"",
                 Some(Tier::Quote),
                 "fail_closed",
             ),

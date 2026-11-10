@@ -62,9 +62,7 @@ pub fn validate_name(raw: &str) -> Res<String> {
     if name == "." || name == ".." {
         return Err(bad("A project cannot be named . or .."));
     }
-    if name.chars().any(|c| {
-        c.is_control() || helm_core::hidden::is_hidden_char(c) || matches!(c, '/' | '\\' | ':')
-    }) {
+    if helm_core::hidden::has_hidden(name) || name.chars().any(|c| matches!(c, '/' | '\\' | ':')) {
         return Err(bad(
             "A project name cannot contain / \\ : or control, invisible or direction-changing characters.",
         ));
@@ -175,10 +173,7 @@ pub fn validate_description(raw: &str) -> Res<Option<String>> {
     if d.is_empty() {
         return Ok(None);
     }
-    if d.chars().count() > MAX_DESCRIPTION_CHARS
-        || d.chars()
-            .any(|c| c.is_control() || helm_core::hidden::is_hidden_char(c))
-    {
+    if d.chars().count() > MAX_DESCRIPTION_CHARS || helm_core::hidden::has_hidden(d) {
         return Err(bad("A description is one line of at most 200 characters."));
     }
     Ok(Some(d.to_owned()))

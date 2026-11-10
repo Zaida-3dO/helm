@@ -51,6 +51,24 @@ fn colour_profile(tx: &rusqlite::Connection) -> String {
     }
 }
 
+/// The profile whose colours a chat changes: the one the chat belongs to (the home profile when
+/// it has none), else the one the sidebar shows. The profiles crate depends on this one, so its
+/// tables are read directly.
+fn chat_colour_profile(tx: &rusqlite::Connection, chat_id: &str) -> String {
+    tx.query_row(
+        "SELECT COALESCE(
+             (SELECT p.id FROM profiles p
+               WHERE p.id = (SELECT NULLIF(c.profile_id, '') FROM chats c WHERE c.id = ?1)),
+             (SELECT id FROM profiles WHERE is_home = 1))",
+        [chat_id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .filter(|id| !id.is_empty() && id.len() <= 64)
+    .unwrap_or_else(|| colour_profile(tx))
+}
+
 fn sql(e: rusqlite::Error) -> ToolError {
     ToolError::maybe(e.to_string())
 }
@@ -174,7 +192,11 @@ fn update_settings(ctx: &ToolCtx, a: Value) -> ToolResult {
                     .expect("refusal() passed only agent keys");
                 let before = prefs::read(tx, k);
                 let stored = if k == settings_options::COLOURS_KEY {
-                    settings_options::merge_colours(before.as_ref(), v, &colour_profile(tx))
+                    settings_options::merge_colours(
+                        before.as_ref(),
+                        v,
+                        &chat_colour_profile(tx, &chat),
+                    )
                 } else {
                     settings_options::to_store(k, before.as_ref(), v)
                 };
@@ -717,6 +739,25 @@ mod tests {
                 ["customColours"]["merge"],
             true
         );
+        // A chat that belongs to a profile changes that profile's colours, whichever the sidebar
+        // shows.
+        e.db.write(|tx| {
+            tx.execute_batch(
+                "CREATE TABLE profiles (id TEXT PRIMARY KEY, is_home INTEGER);
+                 INSERT INTO profiles VALUES ('home', 1), ('p-2', 0);
+                 ALTER TABLE chats ADD COLUMN profile_id TEXT;
+                 INSERT INTO projects (id, name, created_at) VALUES ('pr', 'P', 1);
+                 INSERT INTO chats (id, project_id, created_at, updated_at, profile_id)
+                 VALUES ('chat-1', 'pr', 1, 1, 'p-2');",
+            )
+        })
+        .unwrap();
+        update_settings(
+            &ctx(&e),
+            json!({"changes": {"customColours": {"accentHue": 120}}}),
+        )
+        .unwrap();
+        assert_eq!(read().unwrap()["p-2"], json!({"accentHue": 120}));
     }
 
     #[test]

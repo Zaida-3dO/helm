@@ -317,7 +317,7 @@ fn table() -> Vec<Entry> {
                 ("contrast", &COLOUR_CONTRASTS),
             ]),
             default: || json!({"accentHue": null, "tint": "none", "contrast": "standard"}),
-            about: "Your own colours, on top of any skin, for the profile active on this device: accentHue is the accent's hue in degrees (0 red, 25 orange, 145 green, 235 blue, 285 violet; null uses the skin's own), tint washes the background with that hue, contrast more raises text contrast. Send only the fields to change. Colours are always adjusted to stay readable.",
+            about: "Your own colours, on top of any skin, for the profile this chat belongs to: accentHue is the accent's hue in degrees (0 red, 25 orange, 145 green, 235 blue, 285 violet; null uses the skin's own), tint washes the background with that hue, contrast more raises text contrast. Send only the fields to change. Colours are always adjusted to stay readable.",
         },
         Entry {
             key: "keepAwake",
