@@ -88,12 +88,20 @@ export function householdTargets(view: ProfilesView | null, people: readonly Pee
   );
 }
 
+/** A last-seen time as epoch milliseconds, or null when there is none or it cannot be read. */
+export function lastSeenMs(v: string | number | null | undefined): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  const ms = typeof v === 'number' ? v : Date.parse(v);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 /** "offline since 14:02" / "offline" for a machine that has not connected. */
 export function offlineText(m: PeerMachine, now: number): string {
   if (m.online) return 'online';
-  if (!m.lastSeen) return 'offline';
-  const sameDay = new Date(m.lastSeen).toDateString() === new Date(now).toDateString();
-  const when = new Date(m.lastSeen);
+  const seen = lastSeenMs(m.lastSeen);
+  if (seen === null) return 'offline';
+  const sameDay = new Date(seen).toDateString() === new Date(now).toDateString();
+  const when = new Date(seen);
   return `offline since ${sameDay ? when.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : when.toLocaleDateString()}`;
 }
 

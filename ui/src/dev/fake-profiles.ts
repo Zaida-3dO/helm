@@ -53,12 +53,12 @@ export function profilesFakeOps(): { prefixes: string[]; handler: FakeOpHandler 
     const other: Sharing =
       mode === 'hidden' ? { chats: false, transcripts: false, messages: false } : { chats: true, transcripts: true, messages: mode === 'send' };
     return [
-      { id: 'p-self', name: 'Alex', you: true, machines: [{ id: 'm1', name: 'Desk PC', online: true, lastSeen: Date.now(), sharing: normalised() }] },
+      { id: 'p-self', name: 'Alex', you: true, machines: [{ id: 'm1', name: 'Desk PC', online: true, lastSeen: new Date().toISOString(), sharing: normalised() }] },
       {
         id: 'p-other',
         name: 'Sam',
         you: false,
-        machines: [{ id: 'm2', name: "Sam's laptop", online: mode !== 'offline', lastSeen: mode === 'offline' ? t0 - 130 * MIN : Date.now(), sharing: other }],
+        machines: [{ id: 'm2', name: "Sam's laptop", online: mode !== 'offline', lastSeen: new Date(mode === 'offline' ? t0 - 130 * MIN : Date.now()).toISOString(), sharing: other }],
       },
     ];
   };

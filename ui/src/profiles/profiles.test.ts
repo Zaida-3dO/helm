@@ -4,7 +4,7 @@ import { ApiError, type Api } from '../api/client.ts';
 import { EventBus } from '../api/events.ts';
 import type { PeerPerson, ProfilesView, Sharing } from '../api/profiles.ts';
 import { profileChoices } from './menu.ts';
-import { chipText, householdTargets, initialOf, offlineText, orderPeerChats, planText, profileOfChat, rowsForProfile } from './model.ts';
+import { chipText, householdTargets, initialOf, lastSeenMs, offlineText, orderPeerChats, planText, profileOfChat, rowsForProfile } from './model.ts';
 import { ProfilesStore } from './store.ts';
 
 const NOW = Date.parse('2026-11-10T12:00:00');
@@ -74,6 +74,8 @@ test('the chip, the plan, the disc and the switcher words', () => {
   assert.equal(offlineText(people[1]!.machines[0]!, NOW), 'online');
   assert.match(offlineText(people[1]!.machines[1]!, NOW), /^offline since \d/);
   assert.equal(offlineText({ ...people[1]!.machines[1]!, lastSeen: null }, NOW), 'offline');
+  assert.deepEqual([lastSeenMs('2026-11-10T11:00:00.000Z'), lastSeenMs(5), lastSeenMs('never'), lastSeenMs(''), lastSeenMs(null)], [Date.parse('2026-11-10T11:00:00Z'), 5, null, null, null]);
+  assert.match(offlineText({ ...people[1]!.machines[1]!, lastSeen: '2026-11-10T11:00:00.000Z' }, NOW), /^offline since /);
   assert.deepEqual(
     orderPeerChats([
       { chatId: '1', title: '', status: '', updatedAt: 1 },

@@ -40,8 +40,8 @@ export interface PeerMachine {
   id: string;
   name: string;
   online: boolean;
-  /** Epoch milliseconds, or null when it never connected. */
-  lastSeen: number | null;
+  /** When it last connected: an ISO time from the hub (epoch milliseconds also read), or null if never. */
+  lastSeen: string | number | null;
   sharing: Sharing;
 }
 
