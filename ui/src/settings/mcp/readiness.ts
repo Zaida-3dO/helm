@@ -18,12 +18,25 @@ function tokenMissing(s: McpServer, presets: McpPreset[]): boolean {
   return !h || (h.kind === 'literal' && !h.secretId && !h.value);
 }
 
+/** A program preset names environment values the user types in (a sign-in client's id and secret). */
+function envMissing(s: McpServer, presets: McpPreset[]): boolean {
+  const p = presets.find((x) => x.id === s.preset);
+  if (!p?.secretEnv?.length || s.transport.type !== 'stdio') return false;
+  const env = s.transport.env ?? {};
+  return p.secretEnv.some((k) => {
+    const r = env[k];
+    if (!r) return true;
+    return r.kind === 'literal' ? !r.secretId && !r.value : !r.value;
+  });
+}
+
 export function serverReadiness(s: McpServer, status: ServerStatus | undefined, presets: McpPreset[] = []): Readiness {
   if (!s.enabled) return { state: 'off', reason: 'Turned off: chats do not use this server.', actionLabel: 'Turn on', actionTarget: s.id };
   if (status?.state === 'native') {
     return { state: 'inactive', reason: 'Claude Code already loads this server natively, so Helm leaves it to Claude Code.' };
   }
   if (tokenMissing(s, presets)) return { state: 'inactive', reason: 'Needs its token.', actionLabel: 'Add token', actionTarget: s.id };
+  if (envMissing(s, presets)) return { state: 'inactive', reason: 'Needs its client id and secret.', actionLabel: 'Edit', actionTarget: s.id };
   switch (status?.state) {
     case 'failed':
       return { state: 'inactive', reason: status.error ?? 'The last connection failed.', actionLabel: 'Edit', actionTarget: s.id };
@@ -52,6 +65,22 @@ export function pageReadiness(servers: McpServer[]): Readiness | null {
 export function draftFromPreset(p: McpPreset, taken: string[]): McpServer {
   let id = p.id;
   for (let i = 2; taken.includes(id); i++) id = `${p.id.slice(0, 21)}_${i}`;
+  if (p.transport === 'stdio') {
+    // A program preset: what to run, and an empty secret for each name the user types in.
+    return {
+      id,
+      name: p.name,
+      enabled: true,
+      preset: p.id,
+      allowPrivateHttp: false,
+      transport: {
+        type: 'stdio',
+        command: p.command ?? '',
+        args: [...(p.args ?? [])],
+        env: Object.fromEntries((p.secretEnv ?? []).map((k) => [k, { kind: 'literal' as const, value: '' }])),
+      },
+    };
+  }
   return {
     id,
     name: p.name,

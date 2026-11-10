@@ -27,6 +27,8 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
     crate::status::ServerStatus::export_all_to(dir).map_err(|e| e.to_string())?;
     crate::repo_gate::RepoServer::export_all_to(dir).map_err(|e| e.to_string())?;
     crate::repo_gate::LaunchGate::export_all_to(dir).map_err(|e| e.to_string())?;
+    crate::google::GoogleAccountList::export_all_to(dir).map_err(|e| e.to_string())?;
+    crate::google::GoogleSignIn::export_all_to(dir).map_err(|e| e.to_string())?;
     let mut names = vec![
         McpEditorSnapshot::ident(),
         McpServer::ident(),
@@ -48,6 +50,10 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         crate::repo_gate::RepoServer::ident(),
         crate::repo_gate::RepoServerState::ident(),
         crate::repo_gate::LaunchGate::ident(),
+        crate::google::GoogleAccount::ident(),
+        crate::google::GoogleAccountList::ident(),
+        crate::google::GooglePermission::ident(),
+        crate::google::GoogleSignIn::ident(),
     ];
     names.sort();
     let mut index = String::from(

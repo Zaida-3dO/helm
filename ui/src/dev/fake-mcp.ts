@@ -6,6 +6,7 @@
 
 import { ApiError } from '../api/client.ts';
 import type { McpPreset, McpServer, RepoServer, ServerStatus } from '../api/mcp.ts';
+import type { GoogleAccount, GoogleAccountList, GooglePermission } from '../api/generated/mcp/index.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
 
 const PRESETS: McpPreset[] = [
@@ -24,6 +25,21 @@ const PRESETS: McpPreset[] = [
   expectTools: expectTools as string[],
   guidance: '',
 }));
+PRESETS.push({
+  id: 'google_accounts',
+  name: 'Google accounts (Gmail)',
+  description: 'Several Gmail accounts, signed in with your own Google client.',
+  transport: 'stdio',
+  urlPlaceholder: '',
+  tokenHeader: '',
+  tokenPrefix: '',
+  suggestPrivateHttp: false,
+  expectTools: [],
+  guidance: '',
+  command: 'uvx.exe',
+  args: ['workspace-mcp', '--tools', 'gmail', '--permissions', 'gmail:drafts'],
+  secretEnv: ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET'],
+});
 
 export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   let rev = 1;
@@ -48,6 +64,13 @@ export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
     { folder: 'C:/work/repo', file: 'C:/work/repo/.mcp.json', name: 'github', hash: 'b'.repeat(64), state: 'approved' },
   ];
   const snap = () => ({ revision: revision(), servers: structuredClone(servers) });
+  // The Google accounts block: a few addresses in memory, and a sign-in that lands after 4 s.
+  const accounts: GoogleAccount[] = [];
+  const googleList = (): GoogleAccountList => {
+    const level = servers.find((x) => x.preset === 'google_accounts')?.transport.args?.find((x) => x.startsWith('gmail:'))?.slice(6);
+    const permission = (['readonly', 'drafts', 'send'] as GooglePermission[]).find((p) => p === level);
+    return { accounts: structuredClone(accounts), ...(permission ? { permission } : {}), uvFound: true, signingIn: false };
+  };
   const check = (a: Record<string, unknown>) => {
     if (typeof a.revision === 'string' && a.revision !== revision()) throw new ApiError('conflict', 'The MCP settings changed since they were read.');
   };
@@ -104,6 +127,36 @@ export function mcpFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         const s = servers.find((x) => x.id === a.serverId);
         if (!s) throw new ApiError('bad_args', 'That server no longer exists.');
         s.enabled = a.enabled === true;
+        rev++;
+        return snap();
+      }
+      case 'mcp_google_accounts':
+        return googleList();
+      case 'mcp_google_add': {
+        const email = String(a.email);
+        if (accounts.some((x) => x.email.toLowerCase() === email.toLowerCase())) throw new ApiError('bad_args', 'That account is already added. Remove it first to sign in again.');
+        setTimeout(() => accounts.push({ email }), 4000);
+        return { authUrl: 'https://accounts.google.com/o/oauth2/auth?fake=1' };
+      }
+      case 'mcp_google_remove': {
+        const i = accounts.findIndex((x) => x.email.toLowerCase() === String(a.email).toLowerCase());
+        if (i < 0) throw new ApiError('bad_args', 'That account is not signed in.');
+        accounts.splice(i, 1);
+        return googleList();
+      }
+      case 'mcp_google_label': {
+        const acc = accounts.find((x) => x.email.toLowerCase() === String(a.email).toLowerCase());
+        if (!acc) throw new ApiError('bad_args', 'That account is not signed in.');
+        const label = String(a.label).trim();
+        if (label) acc.label = label;
+        else delete acc.label;
+        return googleList();
+      }
+      case 'mcp_google_permission': {
+        const s = servers.find((x) => x.id === a.serverId && x.preset === 'google_accounts');
+        if (!s) throw new ApiError('bad_args', 'That is not a Google accounts server.');
+        const args = (s.transport.args ?? []).filter((x) => !x.startsWith('gmail:'));
+        s.transport.args = [...args, `gmail:${String(a.permission)}`];
         rev++;
         return snap();
       }

@@ -7,7 +7,7 @@ export type McpPreset = {
  */
 id: string, name: string, description: string, 
 /**
- * Always `http` for the built-in presets.
+ * `http` for most presets; `stdio` for a program on this computer.
  */
 transport: TransportKind, 
 /**
@@ -30,4 +30,4 @@ expectTools: Array<string>,
 /**
  * Given to the agent with this server's discovered tools.
  */
-guidance: string, };
+guidance: string, command?: string, args?: Array<string>, secretEnv?: Array<string>, };

@@ -301,6 +301,11 @@ impl McpStore {
             }
             Err(msg) => out.error = Some(msg),
         }
+        if s.preset.as_deref() == Some(crate::google::PRESET_ID) && out.error.is_none() {
+            if let Some(profile_dir) = self.path.parent() {
+                crate::google::prepare(profile_dir, &mut out);
+            }
+        }
         out
     }
 

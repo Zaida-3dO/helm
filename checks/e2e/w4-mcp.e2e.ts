@@ -40,7 +40,7 @@ describe("Settings → MCP", { timeout: 10 * 60_000 }, () => {
       const empty = await page().textContent(tid("mcp-empty"));
       assert.match(String(empty), /No MCP servers yet/);
       const presets = (await api(page(), "mcp_presets_list", {})) as { id: string; urlPlaceholder: string }[];
-      assert.deepEqual(presets.map((p) => p.id), ["agent_standup", "home_assistant", "helm_hub"]);
+      assert.deepEqual(presets.map((p) => p.id), ["agent_standup", "home_assistant", "helm_hub", "google_accounts"]);
       assert.equal(await page().locator(tid("mcp-add-preset-helm_hub")).count(), 1);
       assert.equal(await page().isChecked(tid("mcp-native-switch")), true, "native servers default on");
     } finally {

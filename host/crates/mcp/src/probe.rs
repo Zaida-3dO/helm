@@ -90,7 +90,7 @@ pub fn scrub(text: &str, secrets: &[String]) -> String {
     out
 }
 
-fn init_request() -> Value {
+pub(crate) fn init_request() -> Value {
     json!({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {
@@ -101,7 +101,7 @@ fn init_request() -> Value {
     })
 }
 
-fn initialized_note() -> Value {
+pub(crate) fn initialized_note() -> Value {
     json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
 }
 
@@ -345,7 +345,11 @@ fn test_http(r: &ResolvedServer) -> TestOutcome {
 // ---- programs on this computer --------------------------------------------------------------
 
 /// The next JSON-RPC answer with `id` on `rx`, before `deadline`.
-fn wait_for(rx: &mpsc::Receiver<String>, id: i64, deadline: Instant) -> Result<Value, String> {
+pub(crate) fn wait_for(
+    rx: &mpsc::Receiver<String>,
+    id: i64,
+    deadline: Instant,
+) -> Result<Value, String> {
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
@@ -370,7 +374,7 @@ fn wait_for(rx: &mpsc::Receiver<String>, id: i64, deadline: Instant) -> Result<V
 }
 
 /// Never handed to a program (as for the claude child, and as the chats' own client does).
-const STRIPPED_ENV: [&str; 5] = [
+pub(crate) const STRIPPED_ENV: [&str; 5] = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",

@@ -8,6 +8,8 @@ import { useShell } from '../../shell/context.ts';
 import { Button, Checkbox, Segmented, TextArea, TextInput } from '../../ui/index.ts';
 import { IconCheck, IconWarning } from '../../ui/icons.tsx';
 import { WheelMark } from '../../ui/status/index.ts';
+import { GoogleAccounts, SetUpOnce } from './GoogleAccounts.tsx';
+import { googleOps, isGoogleServer } from './google.ts';
 import { blankServer, draftFromPreset, isPlainRemoteHttp, pageReadiness, serverReadiness, toSaveable } from './readiness.ts';
 
 type Refs = { [key in string]?: ValueRef };
@@ -109,6 +111,12 @@ function Editor({
     <div className="mcp-editor" data-testid="mcp-editor">
       <h4>{isNew ? 'Add a server' : `Edit ${draft.name}`}</h4>
       {preset && <p className="mcp-help">{preset.description}</p>}
+      {preset?.secretEnv?.length ? (
+        <>
+          <p className="mcp-help">Under Environment, enter {preset.secretEnv.join(' and ')} as secrets.</p>
+          <SetUpOnce open={isNew} />
+        </>
+      ) : null}
       <label className="mcp-field">
         <span>Name</span>
         <TextInput data-testid="mcp-name" value={draft.name} onChange={(e) => onChange({ ...draft, name: e.target.value })} />
@@ -223,6 +231,7 @@ function Editor({
 export function McpPane() {
   const shell = useShell();
   const ops = useMemo(() => mcpOps(shell.api), [shell.api]);
+  const google = useMemo(() => googleOps(shell.api), [shell.api]);
   const [servers, setServers] = useState<McpServer[]>([]);
   const [revision, setRevision] = useState<string | undefined>();
   const [presets, setPresets] = useState<McpPreset[]>([]);
@@ -350,6 +359,17 @@ export function McpPane() {
             );
           })}
         </ul>
+        {servers.filter(isGoogleServer).map((s) => (
+          <GoogleAccounts
+            key={s.id}
+            server={s}
+            ops={google}
+            onSnapshot={(snap) => {
+              setServers(snap.servers);
+              setRevision(snap.revision);
+            }}
+          />
+        ))}
         {error && (
           <p className="mcp-error" role="alert">
             {error}

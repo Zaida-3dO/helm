@@ -14,6 +14,7 @@
 //! | `mcp_repo_servers_list` | blocking | `{}` → [`RepoServer`](crate::repo_gate::RepoServer)`[]` (seen since launch) |
 //! | `mcp_repo_approve` | maintenance | `{file, name, hash}` → the list |
 //! | `mcp_repo_revoke` | maintenance | `{file, name}` → the list |
+//! | `mcp_google_*` | | the Google accounts block's ops, listed in [`crate::google`] |
 //!
 //! Every save emits the `mcp_config {revision}` event (a signal to re-read).
 
@@ -57,6 +58,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
                 .map_err(|e| ApiError::internal(e.0))?;
             to_value(&g.seen())
         });
+    crate::google::register_ops(reg);
 }
 
 #[derive(serde::Deserialize)]

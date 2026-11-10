@@ -9,7 +9,8 @@
 //! | `ops` | the Settings → MCP `api` ops |
 //! | [`lines`] | the `mcp_config` start line and re-send, and `mcp_status` from workers |
 //! | [`probe`] | Settings → MCP's Test connection: one handshake and a tool count |
-//! | [`presets`] | Agent Standup, Home Assistant and hub presets (MC7) |
+//! | [`presets`] | Agent Standup, Home Assistant, hub and Google accounts presets |
+//! | [`google`] | several Google accounts through `workspace-mcp`: the account list, sign-in and the permission level |
 //! | [`repo_gate`] | the repository-server gate and its seeding from Claude Code |
 //! | [`status`] | the newest per-server status across workers (MC3) |
 //! | [`tools`] | their registration with the host-tool registry |
@@ -22,6 +23,7 @@
 pub mod admin;
 pub mod bindings;
 pub mod config;
+pub mod google;
 pub mod lines;
 mod ops;
 pub mod presets;
