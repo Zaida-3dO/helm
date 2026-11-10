@@ -562,6 +562,8 @@ export class NewChatController {
         ...(boardId ? { boardId } : {}),
         ...(d.model ? { model: d.model } : {}),
         ...(d.effort ? { effort: d.effort } : {}),
+        // The user starts this chat: it begins in the permission mode they last picked.
+        startInLastMode: true,
       });
       made = { chat, key, uploads: new Map() };
       this.made = made;

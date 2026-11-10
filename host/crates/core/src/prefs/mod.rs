@@ -46,6 +46,11 @@ pub const SEND_SHORTCUT: PrefKey = PrefKey::classified("sendShortcut");
 pub const NATIVE_MCP: PrefKey = PrefKey::classified("nativeMcp");
 /// Settings > MCP: the master switch. Off, no chat loads any MCP server (default on).
 pub const MCP_ENABLED: PrefKey = PrefKey::classified("mcpEnabled");
+/// Settings > Devices: whether the user's other devices may run chats on this PC (on when unset).
+pub const DEVICE_RUN_FROM_OTHERS: PrefKey = PrefKey::classified("deviceRunFromOthers");
+/// Settings > Devices: whether people in the household may run their own chats on this PC (on
+/// when unset).
+pub const DEVICE_HOUSEHOLD_RUN: PrefKey = PrefKey::classified("deviceHouseholdRun");
 /// Settings > Chat: whether agents may read the code editor's open file and selection.
 pub const IDE_CONTEXT: PrefKey = PrefKey::classified("ideContext");
 /// Settings > Chat: whether sending a message scrolls the chat to the newest message (on when missing).
@@ -112,6 +117,8 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     SEND_SHORTCUT,
     NATIVE_MCP,
     MCP_ENABLED,
+    DEVICE_RUN_FROM_OTHERS,
+    DEVICE_HOUSEHOLD_RUN,
     IDE_CONTEXT,
     SCROLL_ON_SEND,
     DOUBLE_SHIFT,
@@ -220,7 +227,7 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
             }
         }
         "nativeMcp" | "mcpEnabled" | "ideContext" | "scrollOnSend" | "doubleShift"
-        | "pauseAnimationsOnScroll" => {
+        | "pauseAnimationsOnScroll" | "deviceRunFromOthers" | "deviceHouseholdRun" => {
             if value.is_boolean() {
                 Ok(())
             } else {

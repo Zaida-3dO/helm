@@ -796,6 +796,9 @@ async fn afk_policy_answers_questions_and_defers_cards() {
     .await;
     w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
         .await;
+    // The turn has ended before the next message, so that one opens a turn of its own.
+    h.until("the turn ends", |h| h.status(&chat) == "idle")
+        .await;
     let (_, _) = h.send(&chat, "next", "default").await;
     let p = w.expect("prompt").await;
     assert_eq!(p["context"], "[AFK] away");
@@ -3704,7 +3707,9 @@ async fn skills_come_from_the_workers_get_state() {
         &c,
         json!({"capabilities": {}, "skills": [
             {"name": "helm:review", "description": "Review the diff"},
-            {"name": "deploy", "description": "Ship it"}
+            {"name": "deploy", "description": "Ship it"},
+            {"name": "Personal:notes", "description": "Mine"},
+            {"name": "project:lint", "description": "This repo's"}
         ]}),
     )
     .await;
@@ -3717,7 +3722,9 @@ async fn skills_come_from_the_workers_get_state() {
         s,
         json!([
             {"name": "helm:review", "description": "Review the diff", "scope": "helm-skill"},
-            {"name": "deploy", "description": "Ship it", "scope": ""}
+            {"name": "deploy", "description": "Ship it", "scope": ""},
+            {"name": "Personal:notes", "description": "Mine", "scope": "personal"},
+            {"name": "project:lint", "description": "This repo's", "scope": "project"}
         ])
     );
 }
@@ -4396,6 +4403,25 @@ async fn a_picked_permission_mode_reaches_the_worker_and_its_successors() {
     .unwrap();
     kept(&other, Some("bypassPermissions"));
     assert_eq!(start(&other), line("acceptEdits"));
+    // The last pick (plan mode aside) is where a chat the user starts from the new-chat page
+    // begins, and Settings shows it; a chat started any other way (an agent, a crew, another
+    // device, Telegram) begins in the launch mode.
+    let s = h.call("runtime_settings_get", json!({})).await.unwrap();
+    assert_eq!(s["permissionMode"], "acceptEdits");
+    let cwd = h.work.to_string_lossy().into_owned();
+    let made = |last: Option<bool>| {
+        let mut args = json!({"cwd": cwd});
+        if let Some(l) = last {
+            args["startInLastMode"] = json!(l);
+        }
+        h.call("chat_create", args)
+    };
+    let mine = made(Some(true)).await.unwrap();
+    assert_eq!(start(mine["id"].as_str().unwrap()), line("acceptEdits"));
+    let theirs = made(None).await.unwrap();
+    assert_eq!(start(theirs["id"].as_str().unwrap()), None);
+    // No chat can move the stored pick: the preference is the user's alone.
+    assert!(helm_hosttools::settings_allow::refusal("newChatPermissionMode", true).is_some());
     let err = h
         .call(
             "chat_set_permission_mode",

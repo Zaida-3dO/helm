@@ -192,6 +192,19 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         "deviceRunFromOthers",
         UserOnly("Whether other devices may run chats on this PC is yours to choose."),
     ),
+    // The permission mode chats the user starts from the new-chat page begin in: the last one
+    // picked with a chat's chip.
+    (
+        "newChatPermissionMode",
+        UserOnly("The permission mode new chats start in is yours to choose."),
+    ),
+    // Whether people in the household may run their own chats on this PC (on when missing).
+    (
+        "deviceHouseholdRun",
+        UserOnly(
+            "Whether people in your household may run their chats on this PC is yours to choose.",
+        ),
+    ),
 ];
 
 /// Dynamic keys under fixed prefixes: all internal.

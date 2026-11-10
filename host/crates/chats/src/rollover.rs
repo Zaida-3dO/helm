@@ -246,6 +246,10 @@ async fn finish(
         .map_err(|e| e.to_string())?
         .map_err(|e| e.message)?;
     let new_id = made["id"].as_str().unwrap_or_default().to_owned();
+    // The successor carries on in the mode the old chat was in.
+    if let Some(m) = crate::submit::picked_mode(&chat.id) {
+        crate::submit::seed_mode(&new_id, &m);
+    }
     let title: String = chat.title.chars().take(200).collect();
     let _ = crate::titles::rename(rt, &new_id, &format!("{title} (continued)"));
     let sent = crate::submit::chat_send(
@@ -323,9 +327,15 @@ fn take_place(
     now: i64,
 ) -> rusqlite::Result<Vec<String>> {
     tx.execute(
-        "UPDATE chats SET (parent_chat_id, position, pinned) =
-             (SELECT parent_chat_id, position, pinned FROM chats WHERE id = ?1)
+        "UPDATE chats SET (parent_chat_id, position, pinned, profile_id) =
+             (SELECT parent_chat_id, position, pinned, profile_id FROM chats WHERE id = ?1)
          WHERE id = ?2",
+        [old, new],
+    )?;
+    // Shown to the same profiles as the old chat.
+    tx.execute(
+        "INSERT OR IGNORE INTO chat_shares(chat_id, profile_id)
+         SELECT ?2, profile_id FROM chat_shares WHERE chat_id = ?1",
         [old, new],
     )?;
     let children: Vec<String> = {
@@ -374,6 +384,14 @@ mod tests {
                 "UPDATE chats SET parent_chat_id = ?1 WHERE id = ?2",
                 [&old, &kid],
             )?;
+            tx.execute(
+                "UPDATE chats SET profile_id = 'p-sam' WHERE id = ?1",
+                [&old],
+            )?;
+            tx.execute(
+                "INSERT INTO chat_shares(chat_id, profile_id) VALUES (?1, 'p-ann')",
+                [&old],
+            )?;
             crate::mute::set_muted(tx, &old, true, 5)?;
             crate::mute::set_created_by(tx, &old, &maker)
         })
@@ -392,6 +410,17 @@ mod tests {
             .unwrap()
         };
         assert_eq!(row(&new), (Some(parent), Some(3), true, true, Some(maker)));
+        let owner_and_shares: (String, String) = db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT profile_id, (SELECT group_concat(profile_id) FROM chat_shares
+                                         WHERE chat_id = ?1) FROM chats WHERE id = ?1",
+                    [&new],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(owner_and_shares, ("p-sam".to_owned(), "p-ann".to_owned()));
         assert_eq!(
             row(&kid).0,
             Some(new),

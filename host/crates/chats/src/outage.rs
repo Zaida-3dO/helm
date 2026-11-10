@@ -390,15 +390,29 @@ struct Look {
     status: HashMap<String, Option<ChatStatus>>,
 }
 
-fn read_look(rt: &ChatRuntime, tracked: &[String], since: i64) -> rusqlite::Result<Look> {
-    rt.db().snapshot(|tx| {
+/// A stopped chat's stamp: its latest run (a draft save, which also moves `updated_at`, leaves it
+/// alone), or its `updated_at` when it has no run.
+const RUN_STAMP: &str = "COALESCE(
+    (SELECT r.rowid FROM runs r WHERE r.chat_id = c.id ORDER BY r.started_at DESC, r.rowid DESC
+     LIMIT 1),
+    c.updated_at)";
+
+fn read_look(
+    db: &helm_core::db::Database,
+    tracked: &[String],
+    since: i64,
+) -> rusqlite::Result<Look> {
+    db.snapshot(|tx| {
         let mut look = Look::default();
-        let mut st = tx.prepare(
-            "SELECT id, status, error, updated_at, model FROM chats
-             WHERE archived = 0
-               AND (status IN ('starting', 'running') OR (status = 'interrupted' AND updated_at >= ?1))
-             ORDER BY updated_at DESC LIMIT 300",
-        )?;
+        let mut st = tx.prepare(&format!(
+            "SELECT c.id, c.status, c.error, {RUN_STAMP}, c.provider, c.draft FROM chats c
+             WHERE c.archived = 0
+               AND (c.status IN ('starting', 'running')
+                    OR (c.status = 'interrupted'
+                        AND COALESCE((SELECT MAX(r.ended_at) FROM runs r WHERE r.chat_id = c.id),
+                                     c.updated_at) >= ?1))
+             ORDER BY c.updated_at DESC LIMIT 300"
+        ))?;
         let rows = st.query_map([since], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -406,17 +420,20 @@ fn read_look(rt: &ChatRuntime, tracked: &[String], since: i64) -> rusqlite::Resu
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, i64>(3)?,
                 r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
             ))
         })?;
         for row in rows {
-            let (id, status, error, updated_at, model) = row?;
+            let (id, status, error, stamp, provider, draft) = row?;
             // A chat on a local model server does not depend on the internet.
-            if model.as_deref().is_some_and(|m| crate::local::split(m).is_some()) {
+            if provider.is_some_and(|p| !p.is_empty()) {
                 continue;
             }
             if status == "interrupted" {
-                let cause = error.as_deref().and_then(classify);
-                look.interrupted.push((id, updated_at, cause));
+                // A chat the user is writing in is theirs to carry on.
+                let typing = draft.is_some_and(|d| !d.trim().is_empty());
+                let cause = error.as_deref().and_then(classify).filter(|_| !typing);
+                look.interrupted.push((id, stamp, cause));
             } else {
                 look.working.push(id);
             }
@@ -444,15 +461,20 @@ fn send_continuation(rt: &ChatRuntime, due: &Due) -> Result<bool, ApiError> {
     let sent = rt
         .db()
         .write(|tx| {
-            let row: Option<(String, i64, bool)> = tx
+            let row: Option<(String, i64, bool, String)> = tx
                 .query_row(
-                    "SELECT status, updated_at, archived FROM chats WHERE id = ?1",
+                    &format!(
+                        "SELECT c.status, {RUN_STAMP}, c.archived, COALESCE(c.draft, '')
+                         FROM chats c WHERE c.id = ?1"
+                    ),
                     [&due.chat_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()?;
             match row {
-                Some((status, stamp, false)) if status == "interrupted" && stamp == due.stamp => {}
+                Some((status, stamp, false, draft))
+                    if status == "interrupted" && stamp == due.stamp && draft.trim().is_empty() => {
+                }
                 _ => return Ok(false),
             }
             insert_submission(
@@ -579,12 +601,12 @@ impl OutageWatch {
         let tracked = self.state.lock().unwrap().tracked();
         let rt = self.rt.clone();
         let since = helm_core::now_ms() - RECENT_MS;
-        let look = match tokio::task::spawn_blocking(move || read_look(&rt, &tracked, since)).await
-        {
-            Ok(Ok(l)) => l,
-            Ok(Err(e)) => return log::warn!("outage watch could not read the chats: {e}"),
-            Err(_) => return,
-        };
+        let look =
+            match tokio::task::spawn_blocking(move || read_look(rt.db(), &tracked, since)).await {
+                Ok(Ok(l)) => l,
+                Ok(Err(e)) => return log::warn!("outage watch could not read the chats: {e}"),
+                Err(_) => return,
+            };
         let probe_now = {
             let mut t = self.state.lock().unwrap();
             t.begin_look();
@@ -636,6 +658,60 @@ mod tests {
     use super::*;
 
     const MIN: i64 = 60_000;
+
+    #[test]
+    fn only_recent_internet_chats_stopped_by_an_outage_are_picked_up() {
+        let (_d, db) = crate::schema::tests::temp_db();
+        db.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO projects (id, name, created_at) VALUES ('p', 'P', 1);
+                 INSERT INTO chats (id, project_id, title, status, error, provider, draft,
+                                    created_at, updated_at)
+                 VALUES ('net', 'p', 't', 'interrupted', 'fetch failed', NULL, '', 1, 900),
+                        ('local', 'p', 't', 'interrupted', 'fetch failed', 'srv', '', 1, 900),
+                        ('typing', 'p', 't', 'interrupted', 'fetch failed', NULL, 'half a thou', 1, 900),
+                        ('other', 'p', 't', 'interrupted', 'bad request', NULL, '', 1, 900),
+                        ('busy', 'p', 't', 'running', NULL, NULL, '', 1, 900);
+                 INSERT INTO runs (id, chat_id, cwd, model, thinking, status, started_at, ended_at)
+                 VALUES ('r1', 'net', '.', NULL, NULL, 'interrupted', 100, 800);",
+            )
+        })
+        .unwrap();
+        let look = read_look(&db, &[], 500).unwrap();
+        let mut got: Vec<_> = look
+            .interrupted
+            .iter()
+            .map(|(id, _, c)| (id.as_str(), c.is_some()))
+            .collect();
+        got.sort();
+        // A local model's chat is not tracked at all; one the user is typing in, or that stopped
+        // for another reason, is seen but not continued.
+        assert_eq!(got, [("net", true), ("other", false), ("typing", false)]);
+        assert_eq!(look.working, ["busy"]);
+        // The stamp is the run, so a draft save (which moves `updated_at`) does not renew it.
+        let stamp = |look: &Look| {
+            look.interrupted
+                .iter()
+                .find(|(i, ..)| i == "net")
+                .unwrap()
+                .1
+        };
+        let before = stamp(&look);
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE chats SET updated_at = 950, draft = '' WHERE id = 'net'",
+                [],
+            )
+        })
+        .unwrap();
+        assert_eq!(stamp(&read_look(&db, &[], 500).unwrap()), before);
+        // A stop long ago is not picked up, however recently the chat was touched.
+        assert!(read_look(&db, &[], 850)
+            .unwrap()
+            .interrupted
+            .iter()
+            .all(|(i, ..)| i != "net"));
+    }
 
     #[test]
     fn errors_are_read_as_connection_service_or_neither() {

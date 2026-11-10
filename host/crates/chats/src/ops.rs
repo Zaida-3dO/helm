@@ -453,7 +453,10 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 ApiError::new("refused", "That board is no longer on Agent Standup.")
             }
         })?;
-    crate::runtime_settings::start_in_default_mode(&db, &id);
+    // Only a chat the user starts from the new-chat page takes the mode they last picked.
+    if a.start_in_last_mode == Some(true) {
+        crate::runtime_settings::start_in_default_mode(&db, &id);
+    }
     let rev = clock.next();
     let chat = db
         .snapshot(|tx| store::get_chat(tx, &id, rev))

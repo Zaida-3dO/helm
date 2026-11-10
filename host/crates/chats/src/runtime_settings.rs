@@ -14,9 +14,11 @@
 //!   next worker start.
 //! - `model` and `effort` for new chats: the `newChat` preference (`{model, effort}`), read by
 //!   `chat_create` through [`new_chat_defaults`]; an unset effort is the catalogue's default.
-//!   The same preference holds `permissionMode`, the mode the user last picked with the composer's
-//!   chip in any chat ([`default_permission_mode`]); a new chat starts in it, and it survives a
-//!   restart. Unset, a chat starts in the launch mode (`skipPermissions`).
+//! - `permissionMode`: the mode the user last picked with the composer's chip in any chat
+//!   ([`default_permission_mode`]), kept in the user-only preference `newChatPermissionMode` so no
+//!   chat can change it. A chat the user starts from the new-chat page starts in it, and it
+//!   survives a restart. Unset, a chat starts in the launch mode (`skipPermissions`). A
+//!   `permissionMode` left inside `newChat` by an earlier version is ignored.
 //! - `responseVerbosity`: the user-only preference of that name (low by default).
 
 use crate::catalogue;
@@ -44,7 +46,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
 }
 
 const NEW_CHAT: &str = "newChat";
-const PERMISSION_MODE: &str = "permissionMode";
+const PERMISSION_MODE: &str = "newChatPermissionMode";
 const VERBOSITY: &str = "responseVerbosity";
 const VERBOSITIES: [&str; 3] = ["low", "medium", "high"];
 const MAX_MODEL_BYTES: usize = 200;
@@ -69,16 +71,14 @@ pub fn new_chat_defaults(conn: &rusqlite::Connection) -> (Option<String>, String
 
 /// The permission mode the user last picked in a chat's chip, if they have picked one.
 pub fn default_permission_mode(conn: &rusqlite::Connection) -> Option<String> {
-    helm_core::prefs::read(conn, NEW_CHAT)?
-        .get(PERMISSION_MODE)
-        .and_then(Value::as_str)
+    helm_core::prefs::read(conn, PERMISSION_MODE)?
+        .as_str()
         .filter(|m| *m != "plan" && crate::submit::PERMISSION_MODES.contains(m))
         .map(str::to_owned)
 }
 
-/// Remembers a chip pick as the mode new chats start in. Other fields of `newChat` are kept. Plan
-/// mode is for planning in one chat, so it is never carried to new chats (the earlier default
-/// stays).
+/// Remembers a chip pick as the mode new chats start in. Plan mode is for planning in one chat,
+/// so it is never carried to new chats (the earlier default stays).
 pub fn save_default_permission_mode(
     tx: &rusqlite::Transaction<'_>,
     mode: &str,
@@ -86,11 +86,7 @@ pub fn save_default_permission_mode(
     if mode == "plan" {
         return Ok(());
     }
-    let mut stored = helm_core::prefs::read(tx, NEW_CHAT)
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}));
-    stored[PERMISSION_MODE] = json!(mode);
-    helm_core::prefs::set_raw(tx, NEW_CHAT, &stored).map_err(|e| match e {
+    helm_core::prefs::set_raw(tx, PERMISSION_MODE, &json!(mode)).map_err(|e| match e {
         helm_core::prefs::PrefError::Sql(e) => e,
         other => rusqlite::Error::InvalidParameterName(other.to_string()),
     })
@@ -479,28 +475,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(c["effort"], "low");
-        // The chip's last pick (plan mode aside) is the mode a new chat's first worker starts in,
-        // kept beside the model and effort.
+        // The chip's pick lives in a preference of its own; one an earlier version kept inside
+        // `newChat` is ignored.
         assert_eq!(s["permissionMode"], Value::Null);
-        let chip = |mode: &'static str| {
-            api(
-                "chat_set_permission_mode",
-                json!({"chatId": c["id"], "mode": mode}),
-            )
-        };
-        chip("acceptEdits").await.unwrap();
-        chip("plan").await.unwrap();
-        let s = api("runtime_settings_get", json!({})).await.unwrap();
-        assert_eq!(s["permissionMode"], "acceptEdits");
-        assert_eq!(s["model"], "sonnet", "the model is kept");
-        let fresh = api("chat_create", json!({"cwd": h.work.to_string_lossy()}))
-            .await
-            .unwrap();
-        let id = fresh["id"].as_str().unwrap();
-        assert_eq!(
-            crate::submit::permission_start_line(id),
-            Some(crate::submit::permission_mode_line("acceptEdits"))
-        );
         // An empty model goes back to Claude Code's default.
         let s = api("runtime_settings_save", json!({"model": ""}))
             .await
@@ -517,7 +494,8 @@ mod tests {
             helm_core::prefs::set_raw(
                 tx,
                 NEW_CHAT,
-                &json!({"harness": "claude", "model": null, "effort": "high"}),
+                &json!({"harness": "claude", "model": null, "effort": "high",
+                        "permissionMode": "bypassPermissions"}),
             )
             .map_err(|_| rusqlite::Error::InvalidQuery)
         })
@@ -531,8 +509,11 @@ mod tests {
                 .unwrap();
         assert_eq!(
             stored,
-            json!({"harness": "claude", "model": null, "effort": "low"})
+            json!({"harness": "claude", "model": null, "effort": "low",
+                   "permissionMode": "bypassPermissions"})
         );
+        let s = api("runtime_settings_get", json!({})).await.unwrap();
+        assert_eq!(s["permissionMode"], Value::Null, "a stale pick is ignored");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

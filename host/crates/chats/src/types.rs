@@ -953,6 +953,11 @@ pub struct ChatCreateArgs {
     #[serde(default)]
     #[ts(optional)]
     pub effort: Option<String>,
+    /// The new-chat page: start in the permission mode the user last picked with a chat's chip.
+    /// Unset for chats that agents, crews, roll overs, other devices and Telegram start.
+    #[serde(default)]
+    #[ts(optional)]
+    pub start_in_last_mode: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

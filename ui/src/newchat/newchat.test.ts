@@ -305,7 +305,7 @@ test('which board a new chat goes on: the one picked, the board over its folder,
   h.ctl.closeDialog();
   h.ctl.move('helm');
   await draftOps(h.env.ops, h.ctl).send('x', 's', 'hi', 'default', 1);
-  assert.deepEqual(h.calls.find((c) => c.op === 'chat_create')!.args[0], { cwd: 'C:/code/helm', projectId: 'helm', boardId: 'b-default' });
+  assert.deepEqual(h.calls.find((c) => c.op === 'chat_create')!.args[0], { cwd: 'C:/code/helm', projectId: 'helm', boardId: 'b-default', startInLastMode: true });
   assert.equal(h.storage.getItem(LAST_PROJECT_KEY), 'b-default');
 
   // "Ask each time": a new draft starts with nothing chosen (the last project is not reloaded) and
@@ -371,7 +371,7 @@ test('the first send creates the chat on the chosen board, moves the images and 
   const seen = h.calls.map((c) => c.op);
   assert.deepEqual(seen, ['chat_create', 'storeChat', 'attach', 'send', 'select']);
   // A board is not a folder project, so the host is told the board and finds the folder's own project.
-  assert.deepEqual(h.calls[0]!.args[0], { cwd: 'C:/code/site', boardId: 'b-site', model: 'opus', effort: 'high' });
+  assert.deepEqual(h.calls[0]!.args[0], { cwd: 'C:/code/site', boardId: 'b-site', model: 'opus', effort: 'high', startInLastMode: true });
   const chatId = (h.calls[1]!.args[0] as string);
   assert.deepEqual(h.calls[3]!.args, [chatId, 'sub-1', 'hello', ['att-shot.png']]);
   assert.equal(h.selected.id, chatId);
@@ -403,7 +403,7 @@ test('a folder project over the folder is named to the host, and the chat is not
   const h = harness();
   h.ctl.show({ projectId: 'helm' });
   await draftOps(h.env.ops, h.ctl).send('x', 's', 'hi', 'default', 1);
-  assert.deepEqual(h.calls[0]!.args[0], { cwd: 'C:/code/helm', projectId: 'helm' });
+  assert.deepEqual(h.calls[0]!.args[0], { cwd: 'C:/code/helm', projectId: 'helm', startInLastMode: true });
   assert.ok(!h.calls.some((c) => c.op === 'chat_organize'));
 });
 

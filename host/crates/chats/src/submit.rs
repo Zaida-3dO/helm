@@ -77,8 +77,12 @@ pub(crate) fn insert_submission(
         "INSERT INTO submission_meta(submission_id, origin, priority) VALUES (?1, ?2, ?3)",
         params![id, origin.as_str(), priority],
     )?;
-    // The user writing in the chat answers anything its agent flagged for them.
-    if matches!(origin, SubmissionOrigin::Typed | SubmissionOrigin::Answer) {
+    // The user writing in the chat (here or on another of their devices) answers anything its
+    // agent flagged for them.
+    if matches!(
+        origin,
+        SubmissionOrigin::Typed | SubmissionOrigin::Answer | SubmissionOrigin::Remote
+    ) {
         crate::flags::clear(tx, chat_id)?;
     }
     Ok(())
@@ -107,6 +111,12 @@ pub(crate) fn text_to_draft(
         params![merged, next, helm_core::now_ms(), chat_id],
     )?;
     Ok(next)
+}
+
+/// Tell the window and the devices that watch this PC that a chat's record changed (another
+/// crate changed a column of it, such as its profile or who it is shared with).
+pub fn announce_chat(rt: &ChatRuntime, chat_id: &str) {
+    emit_chat(rt, chat_id);
 }
 
 pub(crate) fn emit_chat(rt: &ChatRuntime, chat_id: &str) -> Option<ChatRecord> {

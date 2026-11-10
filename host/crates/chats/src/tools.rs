@@ -561,7 +561,10 @@ async fn read_chat(ctx: ToolCtx, a: Value) -> ToolResult {
         .filter(|r| r.owns(&id).is_some());
     match remote {
         Some(r) => read_mirror_chat(&ctx, r, &id, &a).await,
-        None => read_local_chat(&ctx, a),
+        // The reads are plain SQLite: off the async runtime.
+        None => tokio::task::spawn_blocking(move || read_local_chat(&ctx, a))
+            .await
+            .map_err(|e| ToolError::maybe(e.to_string()))?,
     }
 }
 
@@ -582,13 +585,18 @@ async fn read_mirror_chat(
         .get("includeTools")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let chat = db(ctx)?
-        .snapshot(|tx| Ok::<_, rusqlite::Error>(mirror_metas(tx, None, None, Some(id))))
-        .map_err(|e| ToolError::maybe(e.to_string()))?
-        .into_iter()
-        .next()
-        .map(|m| m.meta)
-        .ok_or_else(|| refuse("There is no chat with that id."))?;
+    let store = db(ctx)?;
+    let wanted = id.to_owned();
+    let chat = tokio::task::spawn_blocking(move || {
+        store.snapshot(|tx| Ok::<_, rusqlite::Error>(mirror_metas(tx, None, None, Some(&wanted))))
+    })
+    .await
+    .map_err(|e| ToolError::maybe(e.to_string()))?
+    .map_err(|e| ToolError::maybe(e.to_string()))?
+    .into_iter()
+    .next()
+    .map(|m| m.meta)
+    .ok_or_else(|| refuse("There is no chat with that id."))?;
     let mut cursor = a
         .get("beforeMessageId")
         .and_then(Value::as_i64)
@@ -1163,6 +1171,13 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
     // The chat that makes a chat is the only one besides the user that may mute or unmute it.
     db.write(|tx| {
         crate::mute::set_created_by(tx, &id, &ctx.caller_chat_id)?;
+        // The new chat belongs to the caller's profile, not to whichever the sidebar shows.
+        tx.execute(
+            "UPDATE chats SET profile_id =
+                 COALESCE((SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1), profile_id)
+             WHERE id = ?2",
+            params![ctx.caller_chat_id, id],
+        )?;
         if let Some(p) = &placed.parent {
             tx.execute(
                 "UPDATE chats SET parent_chat_id = ?1 WHERE id = ?2",
@@ -1178,8 +1193,15 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
     }
     // Muted before its first message, so nothing the new chat does before then is announced.
     if muted {
-        ctx.op("chat_mute", json!({"chatId": id, "muted": true}))
-            .await?;
+        if let Err(e) = ctx
+            .op("chat_mute", json!({"chatId": id, "muted": true}))
+            .await
+        {
+            // Not muted: discard the untouched chat rather than leave it announcing itself.
+            let _ = ctx.op("chat_archive", json!({"chatId": id})).await;
+            let _ = ctx.op("chat_delete", json!({"chatId": id})).await;
+            return Err(e);
+        }
     }
     if let Err(e) = send_framed(&ctx, &id, &body) {
         // The first message failed: discard the untouched chat.
@@ -1317,6 +1339,8 @@ async fn set_archived(ctx: ToolCtx, a: Value) -> ToolResult {
         .and_then(Value::as_bool)
         .ok_or_else(|| refuse("archived is required."))?;
     if !archived {
+        // Only a chat of this PC: a chat that runs on another device is restored there.
+        meta(&ctx, &id)?;
         ctx.op("chat_restore", json!({"chatId": id})).await?;
         return meta(&ctx, &id);
     }
@@ -2138,6 +2162,11 @@ mod tests {
         for (chat, parent) in [(&c1, &a), (&c2, &c1), (&c3, &c1), (&c4, &c1)] {
             assert_eq!(&made(chat, "c.parent_chat_id"), parent);
         }
+        // A chat belongs to its maker's profile, whichever the sidebar shows.
+        h.db.write(|tx| tx.execute("UPDATE chats SET profile_id = 'p-sam' WHERE id = ?1", [&c1]))
+            .unwrap();
+        let c5 = id(create(&h, &t, &c1, json!({})).await);
+        assert_eq!(made(&c5, "c.profile_id"), "p-sam");
         assert_eq!(made(&c1, "c.title"), "Child");
         // The first message is framed as another chat's.
         let n = h.col(&format!(
@@ -2408,6 +2437,35 @@ mod tests {
         assert_eq!(h.col("SELECT count(*) FROM chat_flags"), ["1"]);
         h.send(&a, "Yes, go ahead.", "default").await;
         assert_eq!(h.col("SELECT count(*) FROM chat_flags"), ["0"]);
+        // So does the user writing from another of their devices; a Telegram line does not.
+        for (origin, left) in [
+            (crate::types::SubmissionOrigin::Telegram, "1"),
+            (crate::types::SubmissionOrigin::Remote, "0"),
+        ] {
+            call(
+                &h,
+                &t,
+                &a,
+                "app_flag_attention",
+                flag(&format!("{origin:?}?")),
+            )
+            .await;
+            crate::submit::host_send(
+                &h.rt,
+                crate::submit::HostSend {
+                    chat_id: &a,
+                    submission_id: &uuid::Uuid::new_v4().to_string(),
+                    text: "ok",
+                    origin,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                h.col("SELECT count(*) FROM chat_flags"),
+                [left],
+                "{origin:?}"
+            );
+        }
         // Six an hour.
         let mut last = Value::Null;
         for i in 0..crate::flags::PER_HOUR + 1 {

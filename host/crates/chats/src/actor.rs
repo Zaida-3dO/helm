@@ -444,12 +444,17 @@ fn set_report(s: &mut Subagent, report: Option<&str>, max: usize) {
 }
 
 /// The scope a reported skill carries: `helm-skill` when it is one of Helm's own (the CLI may
-/// show it under the plugin's own prefix, e.g. `helm:run-tests`), empty for every other source.
+/// show it under the plugin's own prefix, e.g. `helm:run-tests`), `personal` or `project` for a
+/// name under those prefixes, empty for every other source.
 fn helm_skill_scope(own: &[String], name: &str) -> &'static str {
     let lower = name.to_lowercase();
     let bare = lower.strip_prefix("helm:").unwrap_or(&lower);
     if own.iter().any(|o| o == bare || o == &lower) {
         "helm-skill"
+    } else if lower.starts_with("personal:") {
+        "personal"
+    } else if lower.starts_with("project:") {
+        "project"
     } else {
         ""
     }
@@ -1197,6 +1202,9 @@ impl Actor {
                 .load(std::sync::atomic::Ordering::SeqCst)
             {
                 helm_core::recovery::INTERRUPTED_ERROR.to_owned()
+            } else if self.stopping.is_some() {
+                // Stopped on purpose: never read as an outage to carry on from.
+                not_an_outage(self.worker_error.clone().unwrap_or(reason))
             } else {
                 self.worker_error.clone().unwrap_or(reason)
             };
@@ -3716,7 +3724,9 @@ impl Actor {
                     ChatStatus::Interrupted
                 };
                 let err = if status == ChatStatus::Interrupted {
-                    error.or_else(|| self.worker_error.clone())
+                    error
+                        .or_else(|| self.worker_error.clone())
+                        .map(not_an_outage)
                 } else {
                     None
                 };
@@ -3767,6 +3777,16 @@ impl Actor {
 }
 
 /// Subagents on the live thread and on their tool row, against the in-process fake worker.
+/// The error kept for a turn that was stopped on purpose: what the worker said, unless that reads
+/// as a lost connection or a service outage, which would have Helm carry the chat on by itself.
+fn not_an_outage(error: String) -> String {
+    if crate::outage::classify(&error).is_some() {
+        "Stopped before the turn finished.".to_owned()
+    } else {
+        error
+    }
+}
+
 #[cfg(test)]
 mod subagent_tests {
     use crate::runtime_tests::{harness, FakeWorker, H};

@@ -10,4 +10,9 @@ projectId?: string,
  * The board to show the chat under. Without it the chat goes to the one board whose folder
  * it runs in, else to the default board.
  */
-boardId?: string, model?: string, effort?: string, };
+boardId?: string, model?: string, effort?: string, 
+/**
+ * The new-chat page: start in the permission mode the user last picked with a chat's chip.
+ * Unset for chats that agents, crews, roll overs, other devices and Telegram start.
+ */
+startInLastMode?: boolean, };

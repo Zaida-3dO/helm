@@ -178,7 +178,13 @@ pub fn read(
 pub fn copy_file(dir: &Path, old_id: &str, new_id: &str) -> std::io::Result<()> {
     helm_core::privfs::create_private_dir_all(dir)?;
     let (from, to) = (dir.join(old_id), dir.join(new_id));
-    std::fs::hard_link(&from, &to).or_else(|_| std::fs::copy(&from, &to).map(|_| ()))
+    std::fs::hard_link(&from, &to).or_else(|_| std::fs::copy(&from, &to).map(|_| ()))?;
+    // A link keeps the old file's time: mark it new, so the sweep of unclaimed files does not
+    // take it for an old orphan before its row is written.
+    std::fs::File::options()
+        .write(true)
+        .open(&to)?
+        .set_modified(std::time::SystemTime::now())
 }
 
 /// Record `new_id` as `to_chat`'s own sent image, a copy of the row of `old_id` that is a sent image

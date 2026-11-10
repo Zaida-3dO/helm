@@ -38,6 +38,9 @@ pub const USER_ONLY: &[(&str, &str)] = &[
     ("scrollOnSend", "Settings > Chat"),
     ("doubleShift", "Settings > Chat"),
     ("backgroundModel", "Settings > Chat"),
+    ("deviceRunFromOthers", "Settings > Devices"),
+    ("deviceHouseholdRun", "Settings > Devices"),
+    ("newChatPermissionMode", "Settings > Runtime"),
 ];
 
 /// Where the user changes a user-only setting, or `None` when it is not user-only.

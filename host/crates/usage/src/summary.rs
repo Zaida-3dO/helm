@@ -951,8 +951,15 @@ pub fn cost_report(
         })?;
     // Chats on local models are reported apart: Claude's chats first, costliest first, then the
     // local ones, heaviest first.
-    let (mut lines, mut local_lines): (Vec<Line>, Vec<Line>) =
-        lines.into_iter().partition(|l| !l.5);
+    let (mut lines, local_split): (Vec<Line>, Vec<Line>) = lines.into_iter().partition(|l| !l.5);
+    // A chat that used several local servers is one line.
+    let mut local_lines: Vec<Line> = Vec::new();
+    for l in local_split {
+        match local_lines.iter_mut().find(|m| m.0 == l.0) {
+            Some(m) => m.3.add(&l.3),
+            None => local_lines.push(l),
+        }
+    }
     lines.sort_by(|a, b| {
         b.3.cost
             .total_cmp(&a.3.cost)
@@ -984,6 +991,11 @@ pub fn cost_report(
     let mut chats = chats;
     for (chat_id, title, archived, s, _, _) in local_lines {
         local_sum.add(&s);
+        // A chat that ran on Claude and on a local model is one line holding both.
+        if let Some(c) = chats.iter_mut().find(|c| c.chat_id == chat_id) {
+            c.local = Some(track(&s, &p));
+            continue;
+        }
         archived_chats += u32::from(archived);
         chats.push(ChatCost {
             chat_id,
@@ -1541,6 +1553,21 @@ mod tests {
         assert!(old.weekly.is_none() && old.chats[0].weekly_pct.is_none());
         assert!(cost_report(&db, CostScope::Chat, "zz", week, "sonnet", now).is_err());
         assert!(cost_report(&db, CostScope::Project, "zz", None, "sonnet", now).is_err());
+        // A chat that ran on Claude and later on a local model is one line holding both.
+        db.write(|tx| {
+            let usage = json!({"inputTokens": 40, "outputTokens": 4, "cacheReadTokens": 0,
+                               "cacheWriteTokens": 0, "costUsd": 0.0});
+            let raw = json!({"type": "usage", "id": "b:local", "timestamp": 10 * DAY_MS,
+                             "nativeSession": "b-local", "usage": usage, "running": usage,
+                             "provider": "local"});
+            helm_chats::session_log::project(tx, dir.path(), "b", raw.as_object().unwrap(), 1)
+        })
+        .unwrap();
+        let p = cost_report(&db, CostScope::Project, "p", week, "sonnet", now).unwrap();
+        let b: Vec<&ChatCost> = p.chats.iter().filter(|c| c.chat_id == "b").collect();
+        assert_eq!(b.len(), 1, "one line for the chat");
+        assert!(b[0].totals.total_tokens > 0 && b[0].local.as_ref().unwrap().total_tokens == 44);
+        assert_eq!(p.archived_chats, 1);
         // Bad input is refused with nothing read.
         for bad in [
             json!({"range": "year"}),
