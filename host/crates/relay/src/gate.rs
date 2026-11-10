@@ -72,7 +72,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_list_schedules", Class::Denied(SCHEDULES)),
     ("app_list_tools", Class::Denied(TOOLS)),
     ("app_list_waiting", Class::Allowed),
-    // The hub asks it before it transcribes: it only unloads idle local models.
+    // The hub asks it before it transcribes: it only unloads idle local models, and only the
+    // hub's own speech caller may ask ([`HUB_ONLY`]).
     ("app_make_room_for_speech", Class::Allowed),
     ("app_mcp_call", Class::Denied(MCP)),
     ("app_mcp_tools", Class::Denied(MCP)),
@@ -169,6 +170,19 @@ pub const MAX_ANSWER_TEXT: usize = 4000;
 pub const MAX_LABEL: usize = 400;
 /// The tools only the hub's Remote page may call.
 pub const REMOTE_ONLY: &[&str] = &["app_answer_waiting", "app_list_waiting"];
+/// The tools only the hub itself calls, each with the caller name the hub uses for it. Any other
+/// caller (an agent on the hub's MCP, the household) is refused.
+pub const HUB_ONLY: &[(&str, &str)] = &[("app_make_room_for_speech", "hub-speech")];
+
+/// Refuse a call to one of the hub's own tools from anyone but the hub.
+pub fn check_caller(tool: &str, caller: &str) -> Result<(), String> {
+    match HUB_ONLY.iter().find(|(t, _)| *t == tool) {
+        Some((_, only)) if *only != caller => {
+            Err(format!("{tool} is only called by the hub itself."))
+        }
+        _ => Ok(()),
+    }
+}
 /// Longest caller name shown in the frame.
 const MAX_CALLER: usize = 64;
 
@@ -388,6 +402,15 @@ mod tests {
                 e.contains("not available to callers outside Helm"),
                 "{t}: {e}"
             );
+        }
+        // The hub's own tool is for the hub's own caller only; other tools are for anyone.
+        for (tool, caller, ok) in [
+            ("app_make_room_for_speech", "hub-speech", true),
+            ("app_make_room_for_speech", "some-agent", false),
+            ("app_make_room_for_speech", "", false),
+            ("app_list_chats", "some-agent", true),
+        ] {
+            assert_eq!(check_caller(tool, caller).is_ok(), ok, "{tool} {caller}");
         }
     }
 

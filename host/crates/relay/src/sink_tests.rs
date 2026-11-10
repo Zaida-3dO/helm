@@ -1232,6 +1232,17 @@ fn the_voice_mirror_gives_a_working_line_then_one_answer_and_keeps_an_unsent_one
     m.ack(&owed.id, true);
     assert!(m.done);
 
+    // A mirror carried on for a message that came in as the last one finished: it answers a turn
+    // that starts, and finishes without a word when nothing does (the message was answered).
+    let mut quiet = vs::Mirror::resumed(9, T0);
+    assert!(quiet.step(&idle(None), T0 + 1_000).is_empty() && !quiet.done);
+    assert!(quiet.step(&idle(None), T0 + 5_000).is_empty() && quiet.done);
+    let mut carried = vs::Mirror::resumed(9, T0);
+    let mut done = busy(&[], &[]);
+    done.turn_done = Some((12, "Yes.".into()));
+    let answer = owed_of(&carried.step(&done, T0 + 500));
+    assert_eq!(answer.what, vs::What::Answer("Yes.".into()));
+
     // The reply is made for the mode the phone is in, under the answer's own id.
     let live = vs::Live {
         turn: Some("t1".into()),
@@ -1309,6 +1320,38 @@ fn vchat(p: &vs::Placed) -> (String, String) {
     }
 }
 
+/// Wait until the chat's actor has dealt with the turn just sent. There is no worker in these
+/// tests, so the turn is turned down and the chat stops being busy; waiting on that, not on a
+/// fixed time, keeps a status the test writes next from being overwritten under load.
+async fn until_turned_down(e: &Env, chat: &str, submission: &str) {
+    use rusqlite::OptionalExtension as _;
+    for _ in 0..600 {
+        let (state, status): (Option<String>, Option<String>) =
+            e.db.snapshot(|tx| {
+                Ok::<_, rusqlite::Error>((
+                    tx.query_row(
+                        "SELECT state FROM submissions WHERE id = ?1",
+                        [submission],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+                    tx.query_row("SELECT status FROM chats WHERE id = ?1", [chat], |r| {
+                        r.get(0)
+                    })
+                    .optional()?,
+                ))
+            })
+            .unwrap();
+        let settled = state.as_deref() != Some("saved")
+            && status.is_some_and(|s| !helm_chats::types::ChatStatus::parse(&s).is_busy());
+        if settled {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the chat never dealt with the turn");
+}
+
 fn set_idle(e: &Env, chat: &str) {
     sql(
         &e.db,
@@ -1364,6 +1407,7 @@ async fn voice_turns_enter_one_chat_with_origin_voice_a_primer_once_and_a_new_ch
 
     // The hub resends it while its turn runs (Helm restarted before the acknowledgement): stored
     // once, and the turn is watched. Once the turn is over, there is nothing more to do.
+    until_turned_down(&e, &chat, &voice::submission_id("t1")).await;
     sql(
         &e.db,
         "UPDATE chats SET status = 'running' WHERE id = ?1",
@@ -1782,7 +1826,11 @@ fn things_to_show_go_up_before_the_answer_and_stay_claimed_until_it_is_sent() {
         (Some("r1"), Some("t1"), Some(2))
     );
 
-    // The next answer takes what was queued since; another chat's queue is not touched.
+    // The next turn's answer takes what was queued since; another chat's queue is not touched.
+    let live = vs::Live {
+        turn: Some("t2".into()),
+        ..live
+    };
     let next = vs::Owed::unrowed("r2", vs::What::Answer("Next.".into()));
     assert!(out.send(&Phone, &live, None, &next, 7));
     let got = sent();
@@ -1793,6 +1841,23 @@ fn things_to_show_go_up_before_the_answer_and_stay_claimed_until_it_is_sent() {
     );
     assert_eq!(got[4]["attachments"].as_i64(), Some(1));
     assert_eq!(shown.count("other"), 1);
+
+    // A turn has one `voice_final`: a second answer for it (it said it was waiting on an
+    // approval, then finished) goes up as news about the voice chat.
+    out.set_title(Some("Voice 2026-01-01".into()));
+    let later = vs::Owed::unrowed("r2b", vs::What::Answer("Approved and done.".into()));
+    assert!(out.send(&Phone, &live, Some("c1"), &later, 7));
+    let f = sent().pop().unwrap();
+    assert_eq!(
+        (f["type"].as_str(), f["turn"].clone(), f["text"].as_str()),
+        (
+            Some("voice_notify"),
+            Value::Null,
+            Some("Approved and done.")
+        )
+    );
+    assert_eq!(f["about"], json!({ "chat": "Voice 2026-01-01" }));
+    wire.sent.lock().unwrap().pop();
 
     // An answer that is not going up empties the queue and sends nothing.
     shown.add("chat1", item("never")).unwrap();
@@ -1832,7 +1897,7 @@ fn things_to_show_go_up_before_the_answer_and_stay_claimed_until_it_is_sent() {
     out.status(&route, &live, "Thinking");
     out.status(&Phone, &vs::Live::default(), "Thinking");
     assert_eq!(sent().len(), 7);
-    assert_eq!(sent()[6], json!({ "status": "Thinking", "turn": "t1" }));
+    assert_eq!(sent()[6], json!({ "status": "Thinking", "turn": "t2" }));
 
     // Every spoken answer that is offered is noted for the phone's report, under the conversation
     // it went up in: the first (offered twice, sent once) and the next. An answer read on screen
@@ -1919,7 +1984,7 @@ async fn notes_enter_the_voice_chat_as_the_apps_words_and_the_rows_say_what_bega
     assert_eq!(s.len(), 2);
     let n = s
         .iter()
-        .find(|r| r.0 == voice::submission_id(&note.key))
+        .find(|r| r.0 == voice::note_submission_id(&note.key))
         .unwrap();
     assert_eq!(n.1, "app");
     assert!(
@@ -1934,10 +1999,14 @@ async fn notes_enter_the_voice_chat_as_the_apps_words_and_the_rows_say_what_bega
         tag.last_turn_at
     );
 
-    // The transcript's user rows say how each message entered, in order, after any row.
+    // The transcript's user rows say how each message entered, in order, after any row. The rows
+    // are written here, once the chat has dealt with the note, over any row the chat wrote for
+    // it itself.
+    until_turned_down(&e, &chat, &voice::note_submission_id(&note.key)).await;
+    sql(&e.db, "DELETE FROM messages WHERE chat_id = ?1", &[&chat]);
     for (sid, text) in [
         (voice::submission_id("t1"), "asked"),
-        (voice::submission_id(&note.key), "noted"),
+        (voice::note_submission_id(&note.key), "noted"),
     ] {
         sql(
             &e.db,

@@ -311,8 +311,18 @@ pub fn new_conversation() -> String {
 /// The submission id for a turn id from the phone: the same turn delivered twice maps to the
 /// same submission. A UUID, as workers require (version 8, from a SHA-256 of the turn id).
 pub fn submission_id(turn: &str) -> String {
+    hashed_id(&format!("helm-voice/{turn}"))
+}
+
+/// The submission id for a note from the attention watch, in a namespace of its own, so a note's
+/// key can never stand for a turn from the phone.
+pub fn note_submission_id(key: &str) -> String {
+    hashed_id(&format!("helm-voice-note/{key}"))
+}
+
+fn hashed_id(name: &str) -> String {
     use sha2::Digest;
-    let h = sha2::Sha256::digest(format!("helm-voice/{turn}"));
+    let h = sha2::Sha256::digest(name);
     let mut b = [0u8; 16];
     b.copy_from_slice(&h[..16]);
     uuid::Uuid::new_v8(b).to_string()
@@ -645,6 +655,7 @@ mod tests {
         );
         assert_eq!(submission_id("t1"), submission_id("t1"));
         assert_ne!(submission_id("t1"), submission_id("t2"));
+        assert_ne!(submission_id("k1"), note_submission_id("k1"));
         assert_eq!(Mode::parse("chat"), Mode::Chat);
         assert_eq!(Mode::parse("anything"), Mode::Conversation);
 

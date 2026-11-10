@@ -34,12 +34,12 @@ use crate::gate;
 use crate::household::{self, Sharing};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
@@ -207,10 +207,25 @@ impl LineState {
 /// Shared with the rest of the app: the line's state, and the way up to the hub.
 pub struct LineHandle {
     state: AtomicU8,
-    up: mpsc::UnboundedSender<Value>,
+    /// Frames for the hub, each with the line it belongs to ([`ANY_LINE`] for any).
+    up: mpsc::UnboundedSender<(u64, Value)>,
+    /// Which line is up now: it counts up by one with every new connection.
+    generation: AtomicU64,
     /// Requests to other people's Helms waiting for the hub's answer, by request id.
     peers: std::sync::Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>,
+    /// The voice frames sent lately, with when. Taking a frame into the queue is not the hub
+    /// receiving it: a line that drops can lose what was on its way, so a new line offers these
+    /// again. The hub keeps the reply ids it has seen and stores each reply once.
+    recent_voice: std::sync::Mutex<VecDeque<(Instant, Value)>>,
 }
+
+/// A frame that may go up on any line, the next one included.
+const ANY_LINE: u64 = 0;
+/// How long a voice answer is offered again on a new line. A dead line can take
+/// [`SILENCE`] to notice, so this is longer than that.
+const VOICE_REOFFER: Duration = Duration::from_secs(150);
+/// The most recent voice frames kept to offer again.
+const VOICE_KEPT: usize = 16;
 
 /// How long a household request may wait for the hub's answer.
 const PEER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -221,6 +236,38 @@ impl LineHandle {
     }
     fn set(&self, s: LineState) {
         self.state.store(s as u8, Ordering::SeqCst);
+    }
+
+    /// Queue a frame for the hub; `false` when the queue is gone.
+    fn push(&self, line: u64, frame: Value) -> bool {
+        self.up.send((line, frame)).is_ok()
+    }
+
+    /// The line up now, for a frame that means nothing on any other.
+    fn this_line(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Queue a voice frame while the line is up, and keep it to offer again on the next line.
+    fn push_voice(&self, frame: Value) -> bool {
+        if self.state() != LineState::Online {
+            return false;
+        }
+        {
+            let mut kept = self.recent_voice.lock().unwrap_or_else(|p| p.into_inner());
+            kept.push_back((Instant::now(), frame.clone()));
+            while kept.len() > VOICE_KEPT {
+                kept.pop_front();
+            }
+        }
+        self.push(ANY_LINE, frame)
+    }
+
+    /// The voice frames to offer again on a new line: those sent lately, oldest first.
+    fn voice_to_reoffer(&self) -> Vec<Value> {
+        let mut kept = self.recent_voice.lock().unwrap_or_else(|p| p.into_inner());
+        kept.retain(|(at, _)| at.elapsed() < VOICE_REOFFER);
+        kept.iter().map(|(_, f)| f.clone()).collect()
     }
 
     /// Ask the hub for something about the household (`op`: `people`, `list_chats`, `read_chat`
@@ -236,11 +283,10 @@ impl LineHandle {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(id.clone(), tx);
-        if self
-            .up
-            .send(json!({ "type": "peer", "id": id, "op": op, "args": args }))
-            .is_err()
-        {
+        if !self.push(
+            self.this_line(),
+            json!({ "type": "peer", "id": id, "op": op, "args": args }),
+        ) {
             self.peers
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -284,67 +330,63 @@ impl LineHandle {
         }
     }
     /// A device frame for the hub. `false` when the line is down and it was not sent: device
-    /// requests are never queued for a later line.
+    /// requests are never queued for a later line, and one still queued when its line drops is
+    /// dropped with it.
     pub fn device_frame(&self, frame: Value) -> bool {
-        self.state() == LineState::Online && self.up.send(frame).is_ok()
+        self.state() == LineState::Online && self.push(self.this_line(), frame)
     }
     /// The one live status message on Telegram, edited in place by the hub.
     pub fn telegram_status(&self, text: &str) {
-        let _ = self
-            .up
-            .send(json!({ "type": "telegram_status", "text": text }));
+        let _ = self.push(ANY_LINE, json!({ "type": "telegram_status", "text": text }));
     }
     /// A message Helm starts (an alert). Sent only while the line is up, so it never waits in
     /// the queue for a later line; `false` when it was not sent.
     pub fn telegram_notify(&self, text: &str) -> bool {
         self.state() == LineState::Online
-            && self
-                .up
-                .send(json!({ "type": "telegram_notify", "text": text }))
-                .is_ok()
+            && self.push(ANY_LINE, json!({ "type": "telegram_notify", "text": text }))
     }
     /// An approval ask: a new message with one button per option. Only a tap on one of them
     /// comes back (`telegram_answer`); `false` when it was not sent.
     pub fn telegram_ask(&self, id: &str, text: &str, options: &[String]) -> bool {
         self.state() == LineState::Online
-            && self
-                .up
-                .send(json!({ "type": "telegram_ask", "id": id, "text": text, "options": options }))
-                .is_ok()
+            && self.push(
+                ANY_LINE,
+                json!({ "type": "telegram_ask", "id": id, "text": text, "options": options }),
+            )
     }
     /// The ask was settled in Helm or went away: the hub takes its buttons down.
     pub fn telegram_ask_done(&self, id: &str, text: &str) {
-        let _ = self
-            .up
-            .send(json!({ "type": "telegram_ask_done", "id": id, "text": text }));
+        let _ = self.push(
+            ANY_LINE,
+            json!({ "type": "telegram_ask_done", "id": id, "text": text }),
+        );
     }
     /// The turn's answer, sent by the hub as a new message; the status message goes.
     /// `false` when the line is down and it was not sent, so the mirror can try again.
     pub fn telegram_final(&self, text: &str) -> bool {
         self.state() == LineState::Online
-            && self
-                .up
-                .send(json!({ "type": "telegram_final", "text": text }))
-                .is_ok()
+            && self.push(ANY_LINE, json!({ "type": "telegram_final", "text": text }))
     }
 
     /// The voice chat's working line for a turn. The hub passes it to the phone if it is
     /// listening and drops it otherwise, so it is sent only while the line is up.
     pub fn voice_status(&self, turn: &str, text: &str) {
         if self.state() == LineState::Online {
-            let _ = self
-                .up
-                .send(json!({ "type": "voice_status", "turn": turn, "text": text }));
+            let _ = self.push(
+                self.this_line(),
+                json!({ "type": "voice_status", "turn": turn, "text": text }),
+            );
         }
     }
     /// An answer to a turn (`voice_final`), or news (`voice_notify`). `false` when the line is
-    /// down and it was not sent, so the mirror can try again.
+    /// down and it was not sent, so the mirror can try again. One that was taken is offered
+    /// again on the next line for a while, in case the line dropped with it on the way.
     pub fn voice_reply(&self, reply: &crate::voice::Reply) -> bool {
-        self.state() == LineState::Online && self.up.send(reply.frame()).is_ok()
+        self.push_voice(reply.frame())
     }
     /// One attachment, sent just before the reply it belongs to. `false` when it was not sent.
     pub fn voice_attachment(&self, frame: Value) -> bool {
-        self.state() == LineState::Online && self.up.send(frame).is_ok()
+        self.push_voice(frame)
     }
 }
 
@@ -359,7 +401,7 @@ pub struct Client {
     /// Where the hub's knowledge frames go; they are ignored until it is attached.
     knowledge: std::sync::OnceLock<Arc<dyn KnowledgeSink>>,
     handle: Arc<LineHandle>,
-    up_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Value>>,
+    up_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<(u64, Value)>>,
     /// Hub ids of Telegram messages being delivered now: the hub's resend of one of them is
     /// dropped, since the delivery under way acknowledges it.
     delivering: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
@@ -413,7 +455,9 @@ impl Client {
             handle: Arc::new(LineHandle {
                 state: AtomicU8::new(LineState::Off as u8),
                 up,
+                generation: AtomicU64::new(ANY_LINE),
                 peers: Default::default(),
+                recent_voice: Default::default(),
             }),
             up_rx: tokio::sync::Mutex::new(up_rx),
             delivering: Arc::default(),
@@ -457,7 +501,7 @@ impl Client {
     pub fn set_sharing(&self, s: Sharing) {
         let s = s.normalised();
         *self.sharing.lock().unwrap_or_else(|p| p.into_inner()) = s;
-        let _ = self.handle.up.send(s.frame());
+        let _ = self.handle.push(ANY_LINE, s.frame());
     }
 
     /// Set the switches at start-up, before any line: nothing to send yet.
@@ -522,6 +566,10 @@ impl Client {
             match connected {
                 Some(ws) => {
                     backoff = Duration::from_secs(1);
+                    // A new line: frames queued for an older one are stale from here on. It is
+                    // counted before the line shows as up, so a frame sent for it is never taken
+                    // for an old one.
+                    self.handle.generation.fetch_add(1, Ordering::SeqCst);
                     self.handle.set(LineState::Online);
                     log::info!("relay: line up");
                     self.serve(ws).await;
@@ -538,11 +586,13 @@ impl Client {
         }
     }
 
-    /// Serve one connection until it ends (or the configuration changes).
+    /// Serve one connection until it ends (or the configuration changes). Frames queued for an
+    /// earlier line that only meant something on it (device frames, a working line) are dropped.
     pub async fn serve(&self, ws: Ws) {
         let (mut sink_ws, mut stream) = ws.split();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Value>();
         let mut up_rx = self.up_rx.lock().await;
+        let line = self.handle.this_line();
         // The hub enforces the household switches too, so it hears them before anything else.
         if sink_ws
             .send(Message::Text(self.sharing().frame().to_string().into()))
@@ -557,6 +607,10 @@ impl Client {
         }
         if let Some(k) = self.knowledge.get() {
             k.line_up();
+        }
+        // Answers sent lately may have been lost with the old line; the hub stores each once.
+        for v in self.handle.voice_to_reoffer() {
+            let _ = out_tx.send(v);
         }
         let silence = tokio::time::sleep(SILENCE);
         tokio::pin!(silence);
@@ -573,7 +627,8 @@ impl Client {
                 Some(v) = out_rx.recv() => {
                     if sink_ws.send(Message::Text(v.to_string().into())).await.is_err() { break; }
                 }
-                Some(v) = up_rx.recv() => {
+                Some((for_line, v)) = up_rx.recv() => {
+                    if for_line != ANY_LINE && for_line != line { continue; }
                     if sink_ws.send(Message::Text(v.to_string().into())).await.is_err() { break; }
                 }
                 _ = &mut silence => break,
@@ -607,11 +662,13 @@ impl Client {
                 let executor = self.executor.clone();
                 let out = out.clone();
                 tokio::spawn(async move {
-                    let admitted = if remote {
-                        gate::admit_remote(&tool, &args)
-                    } else {
-                        gate::admit(&tool, &args)
-                    };
+                    let admitted = gate::check_caller(&tool, &caller).and_then(|()| {
+                        if remote {
+                            gate::admit_remote(&tool, &args)
+                        } else {
+                            gate::admit(&tool, &args)
+                        }
+                    });
                     let reply = match admitted {
                         Err(text) => refusal(&id, text),
                         Ok(admitted) => answer(&id, executor.run(&caller, admitted).await),
@@ -1414,8 +1471,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_frames_go_up_after_the_switches_and_come_down_to_the_sink() {
-        let (url, hub) = fake_hub().await;
+    async fn device_frames_go_up_after_the_switches_come_down_to_the_sink_and_stay_on_their_line() {
+        // A hub that takes the line twice.
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/relay", l.local_addr().unwrap());
         let devices = Arc::new(Devices::default());
         let c = client(
             (&url, ""),
@@ -1424,19 +1483,36 @@ mod tests {
         );
         c.attach_devices(devices.clone());
         let task = tokio::spawn(c.clone().run());
-        let (_, mut ws) = hub.await.unwrap();
+        let accept = || async {
+            let (s, _) = tokio::time::timeout(Duration::from_secs(10), l.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            tokio_tungstenite::accept_async(s).await.unwrap()
+        };
+        let ups = |n: usize| {
+            let devices = devices.clone();
+            async move {
+                for _ in 0..200 {
+                    if *devices.ups.lock().unwrap() == n {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert_eq!(*devices.ups.lock().unwrap(), n);
+            }
+        };
+        let mut ws = accept().await;
         // The switches come first; the device is told the line is up right after them.
         assert_eq!(next(&mut ws).await["type"], "sharing");
-        for _ in 0..200 {
-            if *devices.ups.lock().unwrap() == 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(*devices.ups.lock().unwrap(), 1);
+        ups(1).await;
         let hello = json!({"type": "device", "uid": "u1", "name": "Desk", "run": true});
         assert!(c.handle().device_frame(hello.clone()));
         assert_eq!(next(&mut ws).await, hello);
+        // A voice answer goes up at once.
+        let shown = json!({"type": "voice_attachment", "reply": "r1", "n": 1});
+        assert!(c.handle().voice_attachment(shown.clone()));
+        assert_eq!(next(&mut ws).await, shown);
 
         // Device frames reach the sink as sent; other frames and unknown types do not.
         let send = |v: Value| Message::Text(v.to_string().into());
@@ -1479,7 +1555,21 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(!c.handle().device_frame(hello));
+        assert!(!c.handle().device_frame(hello.clone()));
+
+        // On the next line, a frame left over for the old one never goes up, and the voice answer
+        // sent lately is offered again, since the old line may have lost it (the hub stores each
+        // reply once).
+        let old = c.handle().this_line();
+        assert!(c
+            .handle()
+            .push(old, json!({"type": "dev_result", "id": "stale"})));
+        let mut ws = accept().await;
+        assert_eq!(next(&mut ws).await["type"], "sharing");
+        assert_eq!(next(&mut ws).await, shown);
+        ups(2).await;
+        assert!(c.handle().device_frame(hello.clone()));
+        assert_eq!(next(&mut ws).await, hello);
         task.abort();
     }
 

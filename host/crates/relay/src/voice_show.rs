@@ -263,16 +263,40 @@ pub fn parse(a: &Value) -> Result<Request, ToolError> {
 
 /// Whether a path looks like somewhere secrets are kept. These are never sent to a phone,
 /// whatever the agent was asked.
+///
+/// Each part of the path is read the way Windows opens it: trailing dots and spaces are dropped
+/// (`server.pem.` opens `server.pem`), and a short 8.3 name (`KUBE~1`) is refused outright, since
+/// it could stand for any folder.
 pub fn sensitive(path: &Path) -> bool {
     const FOLDERS: [&str; 9] = [
         ".ssh", ".aws", ".gnupg", ".azure", ".kube", ".docker", ".claude", ".gcloud", ".config",
     ];
     const ENDS: [&str; 7] = [".pem", ".key", ".pfx", ".p12", ".kdbx", ".ppk", ".keystore"];
+    const NAMES: [&str; 7] = [
+        ".netrc",
+        "_netrc",
+        ".pgpass",
+        ".pypirc",
+        ".claude.json",
+        ".mcp.json",
+        ".git-credentials",
+    ];
     let lower = path.to_string_lossy().to_lowercase().replace('\\', "/");
-    let mut parts = lower.split('/').filter(|p| !p.is_empty()).peekable();
-    while let Some(p) = parts.next() {
-        let last = parts.peek().is_none();
+    let parts: Vec<&str> = lower
+        .split('/')
+        .map(|p| p.trim_end_matches(['.', ' ']))
+        .filter(|p| !p.is_empty())
+        .collect();
+    for (i, &p) in parts.iter().enumerate() {
+        let last = i + 1 == parts.len();
+        if short_name(p) || p.contains("credentials") || p.contains("secret") {
+            return true;
+        }
         if !last && FOLDERS.contains(&p) {
+            return true;
+        }
+        // The GitHub CLI keeps its sign-in in `gh\hosts.yml` (`GitHub CLI\hosts.yml` on Windows).
+        if last && p == "hosts.yml" && i > 0 && matches!(parts[i - 1], "gh" | "github cli") {
             return true;
         }
         if last
@@ -280,15 +304,32 @@ pub fn sensitive(path: &Path) -> bool {
                 || p.starts_with("id_rsa")
                 || p.starts_with("id_ed25519")
                 || p.starts_with("id_ecdsa")
-                || p.contains("credentials")
-                || p.contains("secret")
                 || p.ends_with(".npmrc")
+                || NAMES.contains(&p)
                 || ENDS.iter().any(|e| p.ends_with(e)))
         {
             return true;
         }
     }
     false
+}
+
+/// Whether a path part is a Windows short name: one to six characters, `~`, digits, and an
+/// extension of up to three characters (`KUBE~1`, `SERVER~1.PEM`).
+fn short_name(p: &str) -> bool {
+    let (stem, ext) = match p.rsplit_once('.') {
+        Some((s, e)) if s.contains('~') => (s, Some(e)),
+        _ => (p, None),
+    };
+    let Some((head, digits)) = stem.split_once('~') else {
+        return false;
+    };
+    let head_len = head.chars().count();
+    (1..=6).contains(&head_len)
+        && !head.contains('~')
+        && !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && ext.is_none_or(|e| e.chars().count() <= 3)
 }
 
 /// The path a picture or file may be read from, or the refusal. Nothing is read here: the side
@@ -300,7 +341,10 @@ pub fn admit(raw: &str, roots: &PrivateRoots) -> Result<PathBuf, ToolError> {
     if roots.contains(&path) {
         return Err(refused("Helm's own data is not shown."));
     }
-    if sensitive(&path) {
+    // The name as written, then the name the file system resolves it to, so a short name or
+    // any other alias of a secret is caught too.
+    let resolved = std::fs::canonicalize(&path).ok();
+    if sensitive(&path) || resolved.as_deref().is_some_and(sensitive) {
         return Err(refused(
             "That file may hold secrets, so it is not sent to the phone.",
         ));
@@ -671,6 +715,26 @@ mod tests {
             r"C:\work\server.pem",
             r"C:\work\my credentials.txt",
             r"C:\work\Secrets.json",
+            // Windows drops trailing dots and spaces, so these open the files above.
+            r"D:\Home\a\.kube.\config",
+            r"C:\work\server.pem.",
+            r"C:\work\server.pem . ",
+            // Short 8.3 names could stand for anything.
+            r"D:\Home\a\KUBE~1\config",
+            r"C:\work\SERVER~1.PEM",
+            // Every part is looked at, not just the file's own name.
+            r"C:\work\credentials\notes.txt",
+            r"C:\work\secrets\a.png",
+            // Sign-in files by name.
+            r"C:\Users\a\.netrc",
+            r"C:\Users\a\_netrc",
+            "/home/a/.pgpass",
+            "/home/a/.pypirc",
+            r"C:\Users\a\.claude.json",
+            r"C:\work\.mcp.json",
+            "/home/a/.git-credentials",
+            r"C:\Users\a\AppData\Roaming\GitHub CLI\hosts.yml",
+            "/home/a/x/gh/hosts.yml",
         ] {
             assert!(sensitive(Path::new(p)), "{p}");
         }
@@ -678,6 +742,9 @@ mod tests {
             r"C:\work\report.pdf",
             "/home/a/notes/chart.png",
             r"C:\work\.github\x.md",
+            r"C:\work\hosts.yml",
+            r"C:\work\a~b\notes~draft.txt",
+            r"C:\work\report.v2.pdf",
         ] {
             assert!(!sensitive(Path::new(p)), "{p}");
         }

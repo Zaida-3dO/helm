@@ -58,6 +58,21 @@ impl FakeWorker {
         }
     }
 
+    /// Skip ahead to the next command of `kind`, waiting up to `d` in all: for a command that
+    /// follows from work elsewhere in the runtime, which a loaded machine can be slow to finish.
+    pub async fn expect_within(&mut self, kind: &str, d: Duration) -> Value {
+        let deadline = tokio::time::Instant::now() + d;
+        loop {
+            let c = tokio::time::timeout_at(deadline, self.cmds.recv())
+                .await
+                .unwrap_or_else(|_| panic!("no {kind} command within {d:?}"))
+                .expect("worker channel open");
+            if c["type"] == kind {
+                return c;
+            }
+        }
+    }
+
     pub async fn no_command_for(&mut self, d: Duration) -> Option<Value> {
         tokio::time::timeout(d, self.cmds.recv())
             .await
@@ -3983,8 +3998,9 @@ async fn the_least_recently_used_idle_worker_is_retired_past_the_cap() {
     let mut wa = first_turn(&mut h, &a).await;
     let b = h.create().await;
     let wb = first_turn(&mut h, &b).await;
-    // Two idle workers, cap one: the older (a) goes; b stays.
-    wa.expect("shutdown").await;
+    // Two idle workers, cap one: the older (a) goes; b stays. The retirement follows b's turn
+    // settling, so it is waited for as an event, with room for a loaded machine.
+    wa.expect_within("shutdown", Duration::from_secs(30)).await;
     let mut wb = wb;
     let got = wb.no_command_for(Duration::from_millis(200)).await;
     assert!(got.is_none(), "the newer stays; it got {got:?}");

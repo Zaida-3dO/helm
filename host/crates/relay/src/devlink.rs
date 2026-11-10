@@ -18,7 +18,8 @@ use helm_devices::{EventTap, Service};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
-type Hook = Box<dyn Fn() + Send + Sync>;
+type Hook = Arc<dyn Fn() + Send + Sync>;
+type Cb = Arc<dyn Fn(Frame) + Send + Sync>;
 type PersonFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -32,7 +33,9 @@ pub struct HubLink {
     /// That person, read when the link was made and again on every new line (a new pairing
     /// always brings a new line).
     person: Mutex<Option<String>>,
-    frames: Mutex<Vec<FrameCb>>,
+    // Callbacks are kept as `Arc`s and copied out before they run, so one that calls back into
+    // the link (to subscribe, or to send) never finds its locks held.
+    frames: Mutex<Vec<Cb>>,
     ups: Mutex<Vec<Hook>>,
     downs: Mutex<Vec<Hook>>,
 }
@@ -52,12 +55,12 @@ impl HubLink {
 
     /// Run `hook` whenever a new line comes up, after the household switches went up.
     pub fn on_up(&self, hook: impl Fn() + Send + Sync + 'static) {
-        lock(&self.ups).push(Box::new(hook));
+        lock(&self.ups).push(Arc::new(hook));
     }
 
     /// Run `hook` whenever the line goes down.
     pub fn on_down(&self, hook: impl Fn() + Send + Sync + 'static) {
-        lock(&self.downs).push(Box::new(hook));
+        lock(&self.downs).push(Arc::new(hook));
     }
 }
 
@@ -67,7 +70,7 @@ impl DeviceLink for HubLink {
     }
 
     fn subscribe(&self, cb: FrameCb) {
-        lock(&self.frames).push(cb);
+        lock(&self.frames).push(Arc::from(cb));
     }
 
     fn up(&self) -> bool {
@@ -85,20 +88,24 @@ impl DeviceSink for HubLink {
         let Some(f) = Frame::from_value(frame) else {
             return;
         };
-        for cb in lock(&self.frames).iter() {
+        let cbs = lock(&self.frames).clone();
+        for cb in cbs {
             cb(f.clone());
         }
     }
 
     fn line_up(&self) {
-        *lock(&self.person) = (self.read_person)();
-        for h in lock(&self.ups).iter() {
+        let person = (self.read_person)();
+        *lock(&self.person) = person;
+        let hooks = lock(&self.ups).clone();
+        for h in hooks {
             h();
         }
     }
 
     fn line_down(&self) {
-        for h in lock(&self.downs).iter() {
+        let hooks = lock(&self.downs).clone();
+        for h in hooks {
             h();
         }
     }
