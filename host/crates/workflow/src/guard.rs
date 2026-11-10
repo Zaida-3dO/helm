@@ -743,6 +743,16 @@ fn config_writes(args: &[&String]) -> bool {
         "--get-color",
         "--get-colorbool",
     ]);
+    // The newer form names its action first: `git config get <key>`, `git config set <key> <v>`.
+    match args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|a| a.as_str())
+    {
+        Some("get" | "list") => return writes,
+        Some("set" | "unset" | "rename-section" | "remove-section" | "edit") => return true,
+        _ => {}
+    }
     let operands = args.iter().filter(|a| !a.starts_with('-')).count();
     writes || (!reads && operands >= 2)
 }
@@ -1108,6 +1118,13 @@ fn git_shape(
                 if set.is_empty() {
                     let branch = match facts.push_default(cwd).as_deref() {
                         Some("simple" | "current" | "nothing") => current,
+                        // A branch switched to on the line has an upstream git cannot show
+                        // yet: what it would push to is unknown.
+                        Some("upstream" | "tracking") if !sw.branches.is_empty() => {
+                            return Shape::Unreadable(
+                                "git push with push.default upstream after a branch switch on the line",
+                            )
+                        }
                         // The upstream branch's own name, wherever it is not the current one's.
                         Some("upstream" | "tracking") => facts
                             .upstream(cwd)
@@ -5165,6 +5182,8 @@ pub(crate) mod tests {
             // push.default.
             (cfg(&[], "upstream", Some("origin/main"), false), "git push", "task_repo"),
             (cfg(&[], "upstream", Some("origin/feat-x"), false), "git push", "allow"),
+            // After a switch on the line, the branch's upstream is not the one git shows now.
+            (cfg(&[], "upstream", Some("origin/feat-x"), false), "git checkout other && git push", "fail_closed"),
             (cfg(&[], "matching", None, false), "git push", "fail_closed"),
             (cfg(&[], "bogus", None, false), "git push", "fail_closed"),
             // Settings git could not read.
@@ -5172,6 +5191,7 @@ pub(crate) mod tests {
             // A rewrite of the configuration earlier on the same line.
             (plain(), "git config remote.origin.push HEAD:main && git push", "fail_closed"),
             (plain(), "git config --add remote.origin.push HEAD:main; git push origin", "fail_closed"),
+            (plain(), "git config set remote.origin.push HEAD:main; git push origin", "fail_closed"),
             (plain(), "git remote set-url origin https://x/y.git && git push origin feat-x", "fail_closed"),
             (plain(), "git branch --set-upstream-to=origin/main && git push", "fail_closed"),
             (plain(), "sed -i 's|feat-x|main|' .git/config && git push origin HEAD", "fail_closed"),
@@ -5180,6 +5200,7 @@ pub(crate) mod tests {
             // Reading the configuration is not a rewrite.
             (plain(), "git config --get remote.origin.push && git push", "allow"),
             (plain(), "git config user.name; git config --list | head; cat .git/config; git push origin feat-x", "allow"),
+            (plain(), "git config get user.name; git config list; git push origin feat-x", "allow"),
             (plain(), "git remote -v && git push", "allow"),
         ];
         for (facts, cmd, want) in rows {
