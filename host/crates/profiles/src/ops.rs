@@ -13,6 +13,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("profiles_delete", OpClass::Maintenance, delete)
         .blocking("profiles_set_active", OpClass::Maintenance, set_active)
         .blocking("profiles_assign_chats", OpClass::Maintenance, assign_chats)
+        .blocking("profiles_share_chats", OpClass::Maintenance, share_chats)
         .blocking("profiles_chat_ids", OpClass::Blocking, chat_ids);
 }
 
@@ -97,6 +98,8 @@ struct UpdateArgs {
     colour: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     hub_person_id: Option<Option<String>>,
+    #[serde(default)]
+    about: Option<String>,
 }
 
 fn update(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
@@ -109,6 +112,7 @@ fn update(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 name: a.name,
                 colour: a.colour,
                 hub_person_id: a.hub_person_id,
+                about: a.about,
             },
         )?;
         Ok(json!({ "profile": p }))
@@ -155,6 +159,22 @@ fn assign_chats(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     changed(ctx, |tx| {
         let n = store::assign(tx, &a.chat_ids, &a.profile_id)?;
         Ok(json!({ "assigned": n }))
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareArgs {
+    chat_ids: Vec<String>,
+    profile_id: String,
+    shared: bool,
+}
+
+fn share_chats(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ShareArgs = parse(args)?;
+    changed(ctx, |tx| {
+        let n = store::share(tx, &a.chat_ids, &a.profile_id, a.shared)?;
+        Ok(json!({ "changed": n }))
     })
 }
 

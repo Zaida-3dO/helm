@@ -534,8 +534,9 @@ pub fn fork(
             return Ok(Err(refuse("Restore this chat before forking it.")));
         }
         tx.execute(
-            "INSERT INTO chats(id, project_id, title, status, harness, model, thinking, created_at, updated_at, draft, draft_revision, side_source_id, provider)
-             VALUES (?1, ?2, ?3, 'idle', 'claude', ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO chats(id, project_id, title, status, harness, model, thinking, created_at, updated_at, draft, draft_revision, side_source_id, provider, profile_id)
+             VALUES (?1, ?2, ?3, 'idle', 'claude', ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10,
+                     COALESCE((SELECT s.profile_id FROM chats s WHERE s.id = ?11), ''))",
             params![
                 fork_id_chat,
                 src.project,
@@ -546,7 +547,8 @@ pub fn fork(
                 draft,
                 if draft.is_empty() { 0 } else { now },
                 req.side.then_some(req.source),
-                src.provider
+                src.provider,
+                req.source
             ],
         )?;
         tx.execute(

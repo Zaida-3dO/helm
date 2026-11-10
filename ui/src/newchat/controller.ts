@@ -376,6 +376,9 @@ export class NewChatController {
       stalled: false,
       localAhead: null,
       started: false,
+      profileId: '',
+      hostDeviceId: '',
+      sharedWith: [],
     };
   }
 

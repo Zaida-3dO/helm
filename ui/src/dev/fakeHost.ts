@@ -224,6 +224,9 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         stalled: false,
         localAhead: null,
         started: false,
+        profileId: '',
+        hostDeviceId: '',
+        sharedWith: [],
       },
       thread: {
         chatId: id,

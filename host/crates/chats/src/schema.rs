@@ -11,6 +11,7 @@
 //! | `chat_activity` | per chat: the last worker output time, the stalled flag, and how many local chats stand ahead in the model server's queue while this chat's turn waits on it |
 //! | `chat_attention` | per chat: when its attention was marked addressed, and a snooze |
 //! | `chat_triage` | per chat: the idle check's last verdict, and the activity it was made for |
+//! | `chat_shares` | the profiles besides its own that a chat is shown to; the chat row itself carries its `profile_id` and `host_device_id` |
 //! | `chat_flags` | per chat: the question its agent flagged for the user ([`crate::flags`]) |
 //! | trigger `restart_cancel_changed_chat` | drops a pending continuation on archive or a project, harness, model or effort change |
 //! | `chat_forks` | fork ids and what they were asked for, for idempotent forks |
@@ -43,6 +44,7 @@ pub fn register(reg: &mut MigrationRegistry) {
         .initializer("chats-shown-images", crate::shown_images::init)
         .initializer("chats-activity-queue", activity_queue)
         .initializer("chats-triage-tries", triage_tries)
+        .initializer("chats-identity", identity)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)
@@ -265,6 +267,36 @@ fn activity_queue(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// Every chat carries the profile it belongs to and the device it runs on, as columns on the row.
+/// Both are filled when the chat is made (by the profiles crate's insert trigger, or by the code
+/// that makes the chat) and again at start-up for any row still empty. `chat_shares` lists the
+/// profiles besides its own that a chat is shown to; it lives here so every chat read can name
+/// them. Older databases get the columns here.
+fn identity(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    for column in ["profile_id", "host_device_id"] {
+        let has: bool = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('chats') WHERE name = ?1",
+            [column],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )?;
+        if !has {
+            tx.execute(
+                &format!("ALTER TABLE chats ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"),
+                [],
+            )?;
+        }
+    }
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS chats_profile ON chats(profile_id);
+         CREATE TABLE IF NOT EXISTS chat_shares (
+             chat_id     TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+             profile_id  TEXT NOT NULL,
+             PRIMARY KEY (chat_id, profile_id)
+         );
+         CREATE INDEX IF NOT EXISTS chat_shares_profile ON chat_shares(profile_id);",
+    )
 }
 
 /// `chat_triage` gained the tries column after the first table was written; older databases get

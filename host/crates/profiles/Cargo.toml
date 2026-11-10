@@ -1,6 +1,6 @@
 [package]
 name = "helm-profiles"
-description = "Profiles: the people who use this Helm, the profile label each chat carries, and which profile the sidebar shows. A label for filtering, never a credential."
+description = "Profiles: the people who use this Helm, the profile and device every chat carries, what is shared between profiles, and which profile the sidebar shows. A label for filtering, never a credential."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 helm-core.workspace = true
 helm-ipc.workspace = true
+helm-devices = { path = "../devices" }
+helm-workers.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
@@ -16,4 +18,5 @@ uuid.workspace = true
 log.workspace = true
 
 [dev-dependencies]
+helm-chats.workspace = true
 tempfile.workspace = true

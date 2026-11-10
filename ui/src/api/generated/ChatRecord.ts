@@ -40,4 +40,16 @@ localAhead: number | null,
  * tell a chat whose conversation exists and will carry across a model change; a started chat
  * can still move between any models, the relaunch keeps the conversation.
  */
-started: boolean, };
+started: boolean,
+/**
+ * The profile the chat belongs to (never empty once the chat is stored).
+ */
+profileId: string,
+/**
+ * The device the chat runs on: its worker, sign-in and plan are that device's.
+ */
+hostDeviceId: string,
+/**
+ * Profile ids, besides its own, that the chat is shown to.
+ */
+sharedWith: Array<string>, };

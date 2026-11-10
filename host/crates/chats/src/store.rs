@@ -21,7 +21,9 @@ const CHAT_COLUMNS: &str = concat!(
      MAX(c.updated_at, COALESCE(a.last_activity_at, 0)), \
      CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN COALESCE(a.stalled, 0) ELSE 0 END, \
      CASE WHEN c.status IN ('starting', 'running', 'stopping') THEN a.local_ahead ELSE NULL END, ",
-    crate::local::started_sql!()
+    crate::local::started_sql!(),
+    ", c.profile_id, c.host_device_id, ",
+    "(SELECT json_group_array(s.profile_id) FROM chat_shares s WHERE s.chat_id = c.id)"
 );
 
 /// The joins [`CHAT_COLUMNS`] needs, after `FROM chats c`.
@@ -59,6 +61,12 @@ fn chat_from_row(r: &Row<'_>, revision: i64) -> rusqlite::Result<ChatRecord> {
         stalled: r.get(21)?,
         local_ahead: r.get(22)?,
         started: r.get(23)?,
+        profile_id: r.get(24)?,
+        host_device_id: r.get(25)?,
+        shared_with: r
+            .get::<_, Option<String>>(26)?
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
     })
 }
 

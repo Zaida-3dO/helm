@@ -41,6 +41,7 @@ helm-governor = { path = "../crates/governor" }
 helm-localmodels = { path = "../crates/localmodels" }
 helm-relay = { path = "../crates/relay" }
 helm-profiles = { path = "../crates/profiles" }
+helm-devices = { path = "../crates/devices" }
 helm-updates = { path = "../crates/updates" }
 helm-waits = { path = "../crates/waits" }
 helm-github = { path = "../crates/github" }

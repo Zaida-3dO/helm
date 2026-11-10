@@ -177,6 +177,15 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
         "chat_profiles",
         UserOnly("Which profile a chat belongs to is yours to set."),
     ),
+    (
+        "chat_shares",
+        UserOnly("Which profiles a chat is shared with is yours to set."),
+    ),
+    // This install's own device id and name; written by Helm and the user's rename alone.
+    (
+        "device_self",
+        UserOnly("This PC's device name is yours to set."),
+    ),
 ];
 
 /// The class of a table, or None when it is unclassified.

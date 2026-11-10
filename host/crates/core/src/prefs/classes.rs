@@ -176,6 +176,14 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     ),
     // The profile whose chats the sidebar shows (a profile id, or "all").
     ("activeProfile", Internal),
+    // The device whose chats New creates and the sidebar toggle shows (a device uid); unset is
+    // this device.
+    ("selectedDevice", Internal),
+    // Whether other devices may run chats on this PC (on when missing).
+    (
+        "deviceRunFromOthers",
+        UserOnly("Whether other devices may run chats on this PC is yours to choose."),
+    ),
 ];
 
 /// Dynamic keys under fixed prefixes: all internal.

@@ -37,6 +37,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_backup::register_ops(reg);
     helm_profiles::register_ops(reg);
     helm_pages::register_ops(reg);
+    helm_devices::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -61,6 +62,7 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_saved::register_migrations(reg);
     helm_profiles::register_migrations(reg);
     helm_pages::register_migrations(reg);
+    helm_devices::register_migrations(reg);
 }
 
 /// Shared services a crate adds for op handlers (`ctx.services.need::<T>()`), called once at
@@ -423,6 +425,8 @@ pub fn launch_contributors(
     .register_section(Arc::new(helm_itemlinks::ItemLinksSection))
     .register_section(Arc::new(helm_workflow::WorkflowSection { db: db.clone() }));
     let mut c = helm_workers::contrib::LaunchContributors::new();
+    // Whose chat this is opens the system prompt, ahead of the addendum.
+    c.add(Arc::new(helm_profiles::launch::WhoLaunch { db: db.clone() }));
     c.add(Arc::new(a));
     // The workflow's dispatch and edit gates: a launch variable, only for chats they may act in.
     c.add(Arc::new(helm_workflow::GateLaunch { db: db.clone() }));

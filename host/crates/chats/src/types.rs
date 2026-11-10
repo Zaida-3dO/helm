@@ -109,6 +109,12 @@ pub struct ChatRecord {
     /// tell a chat whose conversation exists and will carry across a model change; a started chat
     /// can still move between any models, the relaunch keeps the conversation.
     pub started: bool,
+    /// The profile the chat belongs to (never empty once the chat is stored).
+    pub profile_id: String,
+    /// The device the chat runs on: its worker, sign-in and plan are that device's.
+    pub host_device_id: String,
+    /// Profile ids, besides its own, that the chat is shown to.
+    pub shared_with: Vec<String>,
 }
 
 /// Where the chat's title came from. A manual rename always wins.
