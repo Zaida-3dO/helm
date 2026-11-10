@@ -9,8 +9,11 @@
 //!   helper through its environment (`ProcessSpawner::run_helper` moves it there out of the job),
 //!   exactly as a worker launch does; the helper builds the child's environment with the worker's
 //!   own loopback-only rule.
-//! - Nothing here can fail a job: a missing field, a chat with no server, or a server that does
-//!   not resolve leaves the job untouched, and the job runs on the default it would have used.
+//! - A missing field or a chat with no name chosen leaves the job untouched, and the job runs on
+//!   the default it would have used. A name that is chosen but cannot be used (a server that does
+//!   not resolve) is reported to the caller: [`decorate_checked`] answers the reason, and a job
+//!   about a local chat's own words (autocomplete) does not run rather than fall back to Claude.
+//!   [`decorate`] logs it and carries on, for jobs that have a harmless default.
 //! - The job does not run a turn's model preparation: a configured local variant that is not
 //!   loaded may load slowly or be refused, and the job's own timeout covers that (a title still
 //!   has its fallback). Choosing a variant that stays loaded is the person's decision.
@@ -39,10 +42,25 @@ fn names(pref: Option<Value>) -> (Option<String>, Option<String>) {
     (name(m.get("claude")), name(m.get("local")))
 }
 
-/// Add the chosen model to one job for one chat. A Claude chat takes the `claude` name; a chat
-/// on a local server takes the `local` name resolved against its own server. No match leaves the
-/// job as it was.
+/// Whether a model is chosen for jobs on local chats.
+pub(crate) fn local_name_chosen(tx: &rusqlite::Transaction<'_>) -> bool {
+    names(helm_core::prefs::read(tx, PREF_KEY)).1.is_some()
+}
+
+/// [`decorate_checked`] for a job that runs on the default model when the chosen one cannot be
+/// used: the reason is logged and the job stays as it was.
 pub(crate) fn decorate(sh: &Shared, chat_id: &str, job: &mut Value) {
+    if let Err(why) = decorate_checked(sh, chat_id, job) {
+        log::warn!("chat {chat_id}: the background job stays on the default model ({why})");
+    }
+}
+
+/// Add the chosen model to one job for one chat. A Claude chat takes the `claude` name; a chat
+/// on a local server takes the `local` name resolved against its own server. No name chosen leaves
+/// the job as it was. A name that is chosen but cannot be used (no model support, a server that
+/// does not resolve) is an error, so a job that must not fall back to Claude (a local chat's draft)
+/// can refuse to run.
+pub(crate) fn decorate_checked(sh: &Shared, chat_id: &str, job: &mut Value) -> Result<(), String> {
     let read = sh.db.snapshot(|tx| {
         let pref = helm_core::prefs::read(tx, PREF_KEY);
         let provider: Option<String> = tx
@@ -55,34 +73,29 @@ pub(crate) fn decorate(sh: &Shared, chat_id: &str, job: &mut Value) {
         Ok::<_, rusqlite::Error>((pref, provider))
     });
     let Ok((pref, provider)) = read else {
-        return;
+        return Err("the chat could not be read".into());
     };
     let (claude, local) = names(pref);
     match (provider, claude, local) {
         (None, Some(m), _) => job["model"] = json!(m),
         (Some(server), _, Some(m)) => {
             let Some(lm) = sh.local.get().cloned() else {
-                return;
+                return Err("local models are not available".into());
             };
-            match lm.server(&server, &m) {
-                Ok(s) => {
-                    job["model"] = json!(m);
-                    job["localBaseUrl"] = json!(s.base_url);
-                    job["localKey"] = json!(s.key);
-                    if let Some(n) = s.context_tokens {
-                        job["localContextTokens"] = json!(n);
-                    }
-                    if let Some(n) = s.max_output_tokens {
-                        job["localMaxOutputTokens"] = json!(n);
-                    }
-                }
-                Err(why) => log::warn!(
-                    "chat {chat_id}: the background job stays on the default model ({why})"
-                ),
+            let s = lm.server(&server, &m)?;
+            job["model"] = json!(m);
+            job["localBaseUrl"] = json!(s.base_url);
+            job["localKey"] = json!(s.key);
+            if let Some(n) = s.context_tokens {
+                job["localContextTokens"] = json!(n);
+            }
+            if let Some(n) = s.max_output_tokens {
+                job["localMaxOutputTokens"] = json!(n);
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 #[cfg(test)]

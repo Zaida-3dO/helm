@@ -229,10 +229,10 @@ fn read_rows(
         };
         let mut st = tx.prepare(&format!(
             "SELECT c.id, c.title, COALESCE(c.model, 'default'), (u.timestamp + ?1) / 86400000,
-                    COUNT(*), {SUMS}, c.provider IS NOT NULL
+                    COUNT(*), {SUMS}, u.provider <> 'claude'
              FROM chat_turn_usage u JOIN chats c ON c.id = u.chat_id
              WHERE {OWN_USAGE} AND u.timestamp >= ?2 AND u.timestamp < ?3 AND {pred}
-             GROUP BY c.id, 3, 4"
+             GROUP BY c.id, 3, 4, u.provider"
         ))?;
         let mut args: Vec<&dyn ToSql> = vec![&off, &since, &until];
         if let Some(ids) = chats {
@@ -660,7 +660,7 @@ fn week_costs(db: &Database, ids: &[String], from: i64) -> Result<(f64, f64), ru
             &format!(
                 "SELECT COALESCE(SUM(u.cost_usd), 0.0)
                  FROM chat_turn_usage u JOIN chats c ON c.id = u.chat_id
-                 WHERE {OWN_USAGE} AND c.provider IS NULL AND u.timestamp >= ?1
+                 WHERE {OWN_USAGE} AND u.provider = 'claude' AND u.timestamp >= ?1
                    AND c.id IN ({ph})"
             ),
             rusqlite::params_from_iter(args.iter()),
@@ -670,7 +670,7 @@ fn week_costs(db: &Database, ids: &[String], from: i64) -> Result<(f64, f64), ru
             &format!(
                 "SELECT COALESCE(SUM(u.cost_usd), 0.0)
                  FROM chat_turn_usage u JOIN chats c ON c.id = u.chat_id
-                 WHERE u.timestamp >= ?1 AND {OWN_USAGE} AND c.provider IS NULL"
+                 WHERE u.timestamp >= ?1 AND {OWN_USAGE} AND u.provider = 'claude'"
             ),
             [from],
             |r| r.get(0),
@@ -896,10 +896,10 @@ pub fn cost_report(
         let mut st = tx.prepare(&format!(
             "SELECT c.id, c.title, c.archived, COUNT(*), {SUMS},
                     SUM(CASE WHEN u.timestamp >= ?2 THEN u.cost_usd ELSE 0.0 END),
-                    c.provider IS NOT NULL
+                    u.provider <> 'claude'
              FROM chat_turn_usage u JOIN chats c ON c.id = u.chat_id
              WHERE {chats} AND {OWN_USAGE}
-             GROUP BY c.id"
+             GROUP BY c.id, u.provider"
         ))?;
         let lines = st
             .query_map(rusqlite::params![id, since], |r| {
@@ -924,7 +924,7 @@ pub fn cost_report(
             &format!(
                 "SELECT COALESCE(SUM(u.cost_usd), 0.0)
                  FROM chat_turn_usage u JOIN chats c ON c.id = u.chat_id
-                 WHERE u.timestamp >= ?1 AND {OWN_USAGE} AND c.provider IS NULL"
+                 WHERE u.timestamp >= ?1 AND {OWN_USAGE} AND u.provider = 'claude'"
             ),
             [since],
             |r| r.get(0),
@@ -1065,8 +1065,20 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
             let compare = crate::prices::compare_key(&ctx.services);
             let now = helm_core::now_ms();
             let svc = ctx.services.get::<crate::service::UsageService>();
-            let weekly = svc.as_ref().and_then(|s| {
-                let w = s.snapshot(now).reading?.weekly?;
+            let fresh = a.get("fresh").and_then(Value::as_bool).unwrap_or(false);
+            // The reading comes first, a fresh one when asked for, so the weekly share below is
+            // worked from the same numbers the plan block shows.
+            let read = svc.as_ref().map(|s| {
+                if fresh {
+                    let (snap, outcome) =
+                        s.fresh_read(now, std::time::Duration::from_secs(FRESH_BUDGET_SECS));
+                    (snap, Some(outcome))
+                } else {
+                    (s.snapshot(now), None)
+                }
+            });
+            let weekly = read.as_ref().and_then(|(snap, _)| {
+                let w = snap.reading.as_ref()?.weekly.as_ref()?;
                 Some((w.pct?, w.resets_at?))
             });
             let lw = local_windows(&ctx.services);
@@ -1077,22 +1089,13 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                 local_window: &lw,
             };
             let mut out = digest(&db, &a, &compare, &env)?;
-            let fresh = a.get("fresh").and_then(Value::as_bool).unwrap_or(false);
             if fresh || a.get("plan").and_then(Value::as_bool).unwrap_or(false) {
-                out["plan"] = match svc {
+                out["plan"] = match read {
                     None => json!({
                         "meterState": "inactive",
                         "meterReason": "The plan-usage meter is not running here.",
                     }),
-                    Some(svc) => {
-                        let (snap, outcome) = if fresh {
-                            let (s, o) = svc.fresh_read(now, std::time::Duration::from_secs(FRESH_BUDGET_SECS));
-                            (s, Some(o))
-                        } else {
-                            (svc.snapshot(now), None)
-                        };
-                        plan_block(&snap, now, outcome)
-                    }
+                    Some((snap, outcome)) => plan_block(&snap, now, outcome),
                 };
                 trim(&mut out);
             }
@@ -1135,8 +1138,9 @@ mod tests {
                     w: i64| {
             let usage = json!({"inputTokens": i, "outputTokens": 5, "cacheReadTokens": r,
                                "cacheWriteTokens": w, "costUsd": 0.0});
+            let provider = if chat == "loc" { "local" } else { "claude" };
             let raw = json!({"type": "usage", "id": key, "timestamp": ts, "nativeSession": "s",
-                             "usage": usage, "running": usage});
+                             "usage": usage, "running": usage, "provider": provider});
             // The context reading comes from the turn's reply row, as the chat shows it.
             tx.execute(
                 "INSERT INTO messages(chat_id, source_key, role, timestamp, details)
@@ -1355,8 +1359,10 @@ mod tests {
                     c: f64| {
             let usage = json!({"inputTokens": i, "outputTokens": o, "cacheReadTokens": 1,
                                "cacheWriteTokens": 2, "costUsd": c});
+            // The provider is the one the turn ran on, which a fixture's local chat is.
+            let provider = if chat == "loc" { "local" } else { "claude" };
             let raw = json!({"type": "usage", "id": key, "timestamp": ts, "nativeSession": sess,
-                             "usage": usage, "running": usage});
+                             "usage": usage, "running": usage, "provider": provider});
             helm_chats::session_log::project(tx, dir.path(), chat, raw.as_object().unwrap(), 1)
         };
         db.write(|tx| {
@@ -1590,8 +1596,10 @@ mod tests {
                     c: f64| {
             let usage = json!({"inputTokens": i, "outputTokens": o, "cacheReadTokens": 1,
                                "cacheWriteTokens": 2, "costUsd": c});
+            // The provider is the one the turn ran on, which a fixture's local chat is.
+            let provider = if chat == "loc" { "local" } else { "claude" };
             let raw = json!({"type": "usage", "id": key, "timestamp": ts, "nativeSession": sess,
-                             "usage": usage, "running": usage});
+                             "usage": usage, "running": usage, "provider": provider});
             // The context reading comes from the turn's reply row, as the chat shows it.
             tx.execute(
                 "INSERT INTO messages(chat_id, source_key, role, timestamp, details)

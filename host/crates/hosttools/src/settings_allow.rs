@@ -37,6 +37,7 @@ pub const USER_ONLY: &[(&str, &str)] = &[
     ("ideContext", "Settings > Chat"),
     ("scrollOnSend", "Settings > Chat"),
     ("doubleShift", "Settings > Chat"),
+    ("backgroundModel", "Settings > Chat"),
 ];
 
 /// Where the user changes a user-only setting, or `None` when it is not user-only.
@@ -111,10 +112,10 @@ mod tests {
 
     #[test]
     fn the_tiers_and_the_floor() {
-        // Base 37 (responseVerbosity left Base for user-only; backgroundModel and customColours
+        // Base 36 (responseVerbosity and backgroundModel left Base for user-only; customColours
         // joined it), plus keybindings.
-        assert_eq!(agent_keys(false).len(), 37);
-        assert_eq!(agent_keys(true).len(), 38);
+        assert_eq!(agent_keys(false).len(), 36);
+        assert_eq!(agent_keys(true).len(), 37);
         assert!(agent_keys(true).contains(&"keybindings"));
         assert!(!agent_keys(false).contains(&"keybindings"));
         assert!(refusal("theme", false).is_none());

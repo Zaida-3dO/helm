@@ -412,15 +412,6 @@ fn table() -> Vec<Entry> {
             about: "Composer autocomplete: {enabled: true or false}.",
         },
         Entry {
-            key: "backgroundModel",
-            kind: Kind::Fields(&[
-                ("claude", &Kind::TextOrNull { max: 200 }),
-                ("local", &Kind::TextOrNull { max: 200 }),
-            ]),
-            default: || json!({"claude": null, "local": null}),
-            about: "The model short background jobs ask (chat titles, composer autocomplete, the idle check). {claude, local}: a Claude model name for jobs on Claude chats, and a model name on the chat's own local model server for jobs on chats that run on one; null each keeps the small built-in default. Send the whole object: it replaces the stored one.",
-        },
-        Entry {
             key: "taskTriage",
             kind: Kind::Fields(&[
                 ("enabled", &BOOL),
@@ -836,18 +827,6 @@ mod tests {
         assert!(check("chatElements", &json!({"tokens": "hidden"})).is_ok());
         assert!(check("chatElements", &json!({"tokens": "off"})).is_err());
         assert!(check("taskTriage", &json!({"prompt": null, "delayMinutes": 0})).is_ok());
-        assert!(check(
-            "backgroundModel",
-            &json!({"claude": "haiku", "local": "qwen-helm-4k"})
-        )
-        .is_ok());
-        assert!(check("backgroundModel", &json!({"claude": null, "local": null})).is_ok());
-        let e = check("backgroundModel", &json!({"local": "x".repeat(201)})).unwrap_err();
-        assert!(e.contains("backgroundModel.local"), "{e}");
-        assert!(check("backgroundModel", &json!({"claude": 5})).is_err());
-        assert!(check("backgroundModel", &json!({"model": "haiku"}))
-            .unwrap_err()
-            .contains("no field"));
         assert!(check("dopamine", &json!("zen")).is_ok());
         assert!(check("dopamine", &json!({"version": 1})).is_ok());
         assert!(check("dopamine", &json!("calm")).is_err());

@@ -37,6 +37,12 @@ pub(crate) enum Cmd {
     Stop {
         reply: oneshot::Sender<ChatStatus>,
     },
+    /// Stop, and do not send again what Claude had not read: it reads "not sent" instead. For a
+    /// stop that is not the user's own (a roll over, the usage governor), which must not start
+    /// the next turn by itself.
+    StopNoResend {
+        reply: oneshot::Sender<ChatStatus>,
+    },
     /// An `extension_ui_response` (fields without `type`).
     Answer(Map<String, Value>),
     ApplyModel {
@@ -171,6 +177,9 @@ struct LiveToolRec {
 
 struct StopState {
     replies: Vec<oneshot::Sender<ChatStatus>>,
+    /// Unread messages go to Claude again once the stop settles. Any stop that asks for no resend
+    /// turns it off for all the stops waiting on this one.
+    resend: bool,
 }
 
 struct Actor {
@@ -250,6 +259,8 @@ struct Actor {
     prepared: Option<String>,
     /// The server and model name the running worker was launched for; `None` for a Claude chat.
     launched_local: Option<(String, String)>,
+    /// The prompt carrying a message fork's saved history, until the worker answers it.
+    carry_in_flight: Option<String>,
     /// A model warm-up ran (or was attempted) since this chat's last turn started; typing does
     /// not start another until one does.
     warmed: bool,
@@ -386,6 +397,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         opening: None,
         prepared: None,
         launched_local: None,
+        carry_in_flight: None,
         warmed: false,
         last_warm: None,
     };
@@ -941,6 +953,7 @@ impl Actor {
         for (_, p) in std::mem::take(&mut self.pending) {
             match p {
                 Pending::Prompt { submission_id } => {
+                    self.finish_carry(&submission_id, false);
                     self.set_submission(&submission_id, SubmissionState::Rejected)
                 }
                 Pending::Withdraw { reply, .. } | Pending::ToolStop { reply } => {
@@ -1075,6 +1088,7 @@ impl Actor {
                     let _ = reply.send(Err("the worker stopped".into()));
                 }
                 Pending::Prompt { submission_id } => {
+                    self.finish_carry(&submission_id, false);
                     self.set_submission(&submission_id, SubmissionState::Uncertain);
                 }
                 _ => {}
@@ -1112,7 +1126,7 @@ impl Actor {
             }
             self.emit_pending();
             if let Some(s) = self.stopping.take() {
-                self.settle_dropped();
+                self.settle_dropped(s.resend);
                 for r in s.replies {
                     let _ = r.send(ChatStatus::Interrupted);
                 }
@@ -1369,7 +1383,9 @@ impl Actor {
     /// model that answers one request at a time? Says so on the record when it is. Only asks the
     /// server while a turn of ours is open against it, and only every [`QUEUE_STALE`].
     fn check_local_wait(&self) {
-        let Some((server, _)) = self.chat().and_then(|c| local_of(&c)) else {
+        // The launched model, not the chat's current pick: a switch queued for the next idle moment
+        // must not change which server this wait is measured against.
+        let Some(server) = self.launched_local.as_ref().map(|(server, _)| server.clone()) else {
             self.set_local_ahead(None);
             return;
         };
@@ -1508,11 +1524,12 @@ impl Actor {
     /// After a Stop: everything Claude had not read goes to it again right away — the first
     /// message opens the next turn, the rest are steered in at its first boundary. Nothing is
     /// held and nothing is dropped.
-    fn settle_dropped(&mut self) {
+    fn settle_dropped(&mut self, resend: bool) {
         let chat = self.chat_id.clone();
-        if self.archived {
-            // An archived chat sends nothing: what Claude had not read reads "not sent", so the
-            // text can be taken back after a restore.
+        if self.archived || !resend {
+            // An archived chat sends nothing, and neither does a stop that asked for none: what
+            // Claude had not read reads "not sent", so the text can be taken back (after a
+            // restore, for an archived chat).
             self.write(|t| {
                 t.execute(
                     "UPDATE submissions SET state = 'uncertain'
@@ -1593,7 +1610,8 @@ impl Actor {
                 }
                 self.emit_thread();
             }
-            Cmd::Stop { reply } => self.stop(reply),
+            Cmd::Stop { reply } => self.stop(reply, true),
+            Cmd::StopNoResend { reply } => self.stop(reply, false),
             Cmd::Answer(mut fields) => {
                 let rid = fields
                     .get("id")
@@ -1830,7 +1848,7 @@ impl Actor {
         }
         self.retiring = true;
         let (reply, _) = oneshot::channel();
-        self.stop(reply);
+        self.stop(reply, false);
         if self.stopping.is_some() {
             self.clear_timer(|t| matches!(t, Timer::StopDeadline));
             let lim = self.sh.cfg.limits.archive_stop;
@@ -1993,6 +2011,7 @@ impl Actor {
         let id = self.chat_id.clone();
         let rev = self.sh.clock.next();
         let artifacts = self.sh.cfg.artifacts();
+        let carry_in_flight = self.carry_in_flight.is_some();
         let carry: Option<String> = self
             .write(|t| {
                 if !busy {
@@ -2012,19 +2031,24 @@ impl Actor {
                     "UPDATE submission_meta SET run_id = ?1 WHERE submission_id = ?2",
                     rusqlite::params![run, sid],
                 )?;
-                // A message fork's carried history goes once, with its first prompt.
+                // A message fork's carried history goes once, with its first prompt. It stays saved
+                // until the worker takes that prompt (see `Pending::Prompt`), and no second prompt
+                // carries it while the first is still waiting for its answer.
                 use rusqlite::OptionalExtension;
-                let c: Option<String> = t
-                    .query_row(
-                        "SELECT text FROM fork_carry WHERE chat_id = ?1",
-                        [&id],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                t.execute("DELETE FROM fork_carry WHERE chat_id = ?1", [&id])?;
-                Ok(c)
+                if carry_in_flight {
+                    return Ok(None);
+                }
+                t.query_row(
+                    "SELECT text FROM fork_carry WHERE chat_id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .optional()
             })
             .flatten();
+        if carry.is_some() {
+            self.carry_in_flight = Some(sid.to_owned());
+        }
         if !busy {
             self.after_status(ChatStatus::Starting);
         }
@@ -2062,11 +2086,22 @@ impl Actor {
             (a, b) => a.or(b),
         };
         // While AFK is on, every turn says so (AFK's own notes already say it).
+        let afk_note: bool = self
+            .sh
+            .db
+            .snapshot(|t| {
+                t.query_row(
+                    "SELECT afk_note <> 0 FROM submission_meta WHERE submission_id = ?1",
+                    [sid],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap_or(false);
         let afk_text = self
             .sh
             .afk
             .get()
-            .filter(|_| !sid.starts_with("afk-note:"))
+            .filter(|_| !afk_note)
             .and_then(|p| p.turn_text(&self.chat_id));
         let context = match (context, afk_text) {
             (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
@@ -2350,9 +2385,29 @@ impl Actor {
         let Some(p) = self.prepare.take_if(|p| p.token == token) else {
             return; // stopped or replaced meanwhile
         };
+        // The chat may have been pointed at another model while this one was made ready. A
+        // preparation for the old model cannot answer for the send: prepare the current one with
+        // the same send waiting, or (the chat no longer on a local model) drop the answer.
+        let current = self.chat().and_then(|c| local_of(&c));
+        let mut keep_name = true;
+        if current.as_ref() != Some(&p.target) {
+            match (current, self.sh.local.get().cloned()) {
+                (Some((server, model)), Some(seam)) if result.is_ok() => {
+                    let (line, held) = (p.line, p.held);
+                    self.prepare_start(seam, server, model, p.sid);
+                    if let Some(n) = self.prepare.as_mut() {
+                        n.line = line;
+                        n.held = held;
+                    }
+                    return;
+                }
+                // Not a local chat any more (or no server seam): the name is no use to a launch.
+                _ => keep_name = false,
+            }
+        }
         match (result, p.sid) {
             (Ok(name), Some(sid)) => {
-                self.prepared = Some(name);
+                self.prepared = Some(name).filter(|_| keep_name);
                 self.opening = Some(sid.clone());
                 self.dispatch(&sid);
                 for held in p.held {
@@ -2362,7 +2417,7 @@ impl Actor {
             (Ok(name), None) => {
                 // A warm-up: no turn opens. The next worker launched for this chat asks the
                 // server for this model by name, and the loading line it showed, if any, goes.
-                self.prepared = Some(name);
+                self.prepared = Some(name).filter(|_| keep_name);
                 if p.line {
                     self.clear_loading();
                 }
@@ -2390,7 +2445,7 @@ impl Actor {
         self.emit_pending();
     }
 
-    fn stop(&mut self, reply: oneshot::Sender<ChatStatus>) {
+    fn stop(&mut self, reply: oneshot::Sender<ChatStatus>, resend: bool) {
         let status = self.status();
         if !status.is_busy() {
             let _ = reply.send(status);
@@ -2405,10 +2460,12 @@ impl Actor {
         }
         if let Some(s) = self.stopping.as_mut() {
             s.replies.push(reply);
+            s.resend &= resend;
             return;
         }
         self.stopping = Some(StopState {
             replies: vec![reply],
+            resend,
         });
         self.set_status(ChatStatus::Stopping, None);
         let lim = self.sh.cfg.limits.stop;
@@ -2419,6 +2476,19 @@ impl Actor {
             return;
         }
         self.request(json!({"type": "abort"}), Pending::Abort);
+    }
+
+    /// The worker answered (or can no longer answer) the prompt that carried a message fork's
+    /// saved history. Taken: the history is dropped. Otherwise it stays saved for the next prompt.
+    fn finish_carry(&mut self, sid: &str, taken: bool) {
+        if self.carry_in_flight.as_deref() != Some(sid) {
+            return;
+        }
+        self.carry_in_flight = None;
+        if taken {
+            let id = self.chat_id.clone();
+            self.write(|t| t.execute("DELETE FROM fork_carry WHERE chat_id = ?1", [&id]));
+        }
     }
 
     fn deliver_now(&mut self, sid: &str, reason: &'static str) {
@@ -2456,6 +2526,7 @@ impl Actor {
                 Timer::Ack(id) => {
                     if let Some(Pending::Prompt { submission_id }) = self.pending.remove(&id) {
                         // No answer at all: the outcome is unknown, so never resend.
+                        self.finish_carry(&submission_id, false);
                         self.set_submission(&submission_id, SubmissionState::Uncertain);
                         if self.status() == ChatStatus::Starting {
                             // The turn never began: end it rather than wait on a Stop.
@@ -3026,6 +3097,9 @@ impl Actor {
         if self.retiring && !self.finished {
             // An archived chat's turn is over: close its worker (on_exit ends the actor).
             if let Some(l) = &self.link {
+                // Closing, so a send arriving before the exit starts a fresh worker rather than
+                // reaching this one.
+                self.link_closing = true;
                 l.send(&json!({"type": "shutdown"}));
             } else {
                 self.finished = true;
@@ -3137,6 +3211,7 @@ impl Actor {
             native_session: self.native_session.clone(),
             usage: turn,
             running: self.cost_base.clone(),
+            provider: Some(if local { "local" } else { "claude" }.to_owned()),
         }));
     }
 
@@ -3388,6 +3463,7 @@ impl Actor {
                 } else {
                     SubmissionState::Rejected
                 };
+                self.finish_carry(&submission_id, state == SubmissionState::Accepted);
                 // Delivery may already have been reported for a turn-opening prompt.
                 let cur = self.submission(&submission_id).map(|s| s.state);
                 if cur != Some(SubmissionState::Delivered) {
@@ -3556,7 +3632,7 @@ impl Actor {
                 // The stop's answer is how the turn ended; what Claude had not read is sent
                 // again right after, which may open the next turn at once.
                 let final_status = self.status();
-                self.settle_dropped();
+                self.settle_dropped(stop.resend);
                 self.emit_pending();
                 for r in stop.replies {
                     let _ = r.send(final_status);

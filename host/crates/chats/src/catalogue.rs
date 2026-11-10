@@ -157,7 +157,7 @@ pub fn cached_skills(profile_dir: &Path, cwd: &str) -> Vec<SkillInfo> {
         .unwrap_or_default()
 }
 
-/// Remember `skills` as `cwd`'s folder's list (a no-op when it is unchanged or empty).
+/// Remember `skills` as `cwd`'s folder's list, stamped `now` (a no-op when the report is empty).
 pub fn remember_skills(
     profile_dir: &Path,
     cwd: &str,
@@ -170,9 +170,8 @@ pub fn remember_skills(
     let key = folder_key(cwd);
     let mut all = read_skills(profile_dir);
     let list: Vec<SkillInfo> = skills.iter().take(SKILLS_EACH).cloned().collect();
-    if all.get(&key).is_some_and(|f| f.skills == list) {
-        return Ok(());
-    }
+    // The same list seen again still refreshes its folder's time, so a folder in use is never the
+    // oldest one that goes.
     all.insert(
         key,
         FolderSkills {
@@ -239,6 +238,12 @@ mod tests {
             "the oldest folder went"
         );
         assert_eq!(cached_skills(p, "C:/f0"), [skill("x")]);
+        // The same list reported again counts as use: f0 is the oldest, but seen again it stays
+        // and the next oldest goes.
+        remember_skills(p, "C:/f0", &[skill("x")], 1000).unwrap();
+        remember_skills(p, "C:/new", &[skill("y")], 1001).unwrap();
+        assert_eq!(cached_skills(p, "C:/f0"), [skill("x")]);
+        assert!(cached_skills(p, "C:/f1").is_empty());
     }
 
     #[test]

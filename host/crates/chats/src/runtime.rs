@@ -1224,7 +1224,11 @@ pub(crate) enum Lane {
 
 pub(crate) fn lane(cmd: &Cmd) -> Lane {
     match cmd {
-        Cmd::Stop { .. } | Cmd::ToolStop { .. } | Cmd::Terminate | Cmd::Archived => Lane::Interrupt,
+        Cmd::Stop { .. }
+        | Cmd::StopNoResend { .. }
+        | Cmd::ToolStop { .. }
+        | Cmd::Terminate
+        | Cmd::Archived => Lane::Interrupt,
         Cmd::Dispatch(_) | Cmd::ApplyEdit => Lane::Soon,
         _ => Lane::Other,
     }

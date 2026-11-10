@@ -291,22 +291,32 @@ pub fn apply(
     revision: i64,
 ) -> Result<Option<String>, Refusal> {
     let internal = |e: String| Refusal::new("internal", e);
-    let row: Option<(String, String, String, String)> = db
+    let row: Option<(String, String, String, String, i64)> = db
         .snapshot(|tx| {
             tx.query_row(
-                "SELECT p.submission_id, p.entry_id, p.marker_id, COALESCE(pr.path, '')
+                "SELECT p.submission_id, p.entry_id, p.marker_id, COALESCE(pr.path, ''), p.log_len
                  FROM pending_edits p JOIN chats c ON c.id = p.chat_id
                  JOIN projects pr ON pr.id = c.project_id WHERE p.chat_id = ?1",
                 [chat_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()
         })
         .map_err(|e| internal(e.to_string()))?;
-    let Some((sid, entry_id, marker_id, cwd)) = row else {
+    let Some((sid, entry_id, marker_id, cwd, staged_len)) = row else {
         return Ok(None);
     };
     let sessions = profile_dir.join("sessions");
+    // The log only grows after an edit is staged (a message that arrived while the worker closed).
+    // One shorter than it was then is not the log the edit point was chosen in.
+    let now_len = std::fs::metadata(session_log::log_path(&sessions, chat_id))
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
+    if now_len < staged_len {
+        return Err(internal(
+            "the session log is shorter than when the edit was staged".into(),
+        ));
+    }
     let artifacts = profile_dir.join("artifacts");
     let header = Header {
         version: session_log::FORMAT_VERSION.into(),
@@ -410,7 +420,20 @@ pub fn recover_all(db: &Database, profile_dir: &Path, revision: i64) {
                 log::info!("chat {id}: a staged edit was applied after a restart");
             }
             Ok(None) => {}
-            Err(e) => log::error!("chat {id}: staged edit not applied: {}", e.message),
+            Err(e) => {
+                log::error!("chat {id}: staged edit not applied: {}", e.message);
+                // Left staged it would fail the same way at every start and hold the chat's next
+                // edit off: the message is kept for Recover and the staging row goes.
+                let _ = db.write(|tx| {
+                    tx.execute(
+                        "UPDATE submissions SET state = 'rejected'
+                         WHERE id = (SELECT submission_id FROM pending_edits WHERE chat_id = ?1)
+                           AND state = 'saved'",
+                        [&id],
+                    )?;
+                    tx.execute("DELETE FROM pending_edits WHERE chat_id = ?1", [&id])
+                });
+            }
         }
     }
 }

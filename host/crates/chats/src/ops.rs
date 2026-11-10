@@ -9,6 +9,7 @@
 //! | `chat_find` | heavy | [`ChatFindArgs`] → [`ChatFindResult`] (find in chat over the whole history, one step) |
 //! | `chat_send` | maintenance | [`ChatSendArgs`] → [`ChatSendResult`] |
 //! | `chat_stop` | async | [`ChatStopArgs`] → [`ChatStopResult`] |
+//! | `chat_stop_no_resend` | async | [`ChatStopArgs`] → [`ChatStopResult`] |
 //! | `submission_action` | maintenance | [`SubmissionActionArgs`] → [`SubmissionActionResult`] |
 //! | `interaction_answer` | async | [`InteractionAnswerArgs`] → `null` |
 //! | `draft_save` | blocking | [`DraftSaveArgs`] → [`DraftSaveResult`] |
@@ -43,6 +44,7 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("chat_find", OpClass::Heavy, chat_find)
         .blocking("chat_send", OpClass::Maintenance, chat_send)
         .async_op("chat_stop", chat_stop)
+        .async_op("chat_stop_no_resend", chat_stop_no_resend)
         .blocking("submission_action", OpClass::Maintenance, submission_action)
         .async_op("interaction_answer", interaction_answer)
         .blocking("draft_save", OpClass::Blocking, draft_save)
@@ -77,7 +79,9 @@ pub fn register_ops(reg: &mut OpRegistry) {
     crate::checkpoint::register(reg); // checkpoint_info
 }
 
-/// `skills_list`: what the chat's worker reported; empty until it has run once.
+/// `skills_list`: the commands and skills for the chat's `/` menu: its own worker's list, else a
+/// live worker's in the same folder, else the last list reported for that folder; empty only for a
+/// folder no worker has reported on.
 fn skills_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ChatIdArgs = parse_args(args)?;
     to_value(&runtime(ctx)?.skills(&a.chat_id))
@@ -175,6 +179,21 @@ async fn chat_stop(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
         .ask(
             &a.chat_id,
             |reply| Cmd::Stop { reply },
+            rt.limits().stop + std::time::Duration::from_secs(5),
+        )
+        .await?;
+    to_value(&ChatStopResult { status })
+}
+
+/// `chat_stop_no_resend`: as `chat_stop`, but what Claude had not read is not sent again. For
+/// callers that stop a chat on their own account (a roll over, the usage governor).
+async fn chat_stop_no_resend(ctx: OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatStopArgs = parse_args(args)?;
+    let rt = runtime(&ctx)?;
+    let status = rt
+        .ask(
+            &a.chat_id,
+            |reply| Cmd::StopNoResend { reply },
             rt.limits().stop + std::time::Duration::from_secs(5),
         )
         .await?;
@@ -664,6 +683,7 @@ pub(crate) mod tests {
             ("chat_find", OpClass::Heavy),
             ("chat_send", OpClass::Maintenance),
             ("chat_stop", OpClass::Async),
+            ("chat_stop_no_resend", OpClass::Async),
             ("submission_action", OpClass::Maintenance),
             ("interaction_answer", OpClass::Async),
             ("draft_save", OpClass::Blocking),

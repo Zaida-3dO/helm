@@ -287,8 +287,8 @@ pub fn project_fit(
 }
 
 /// An untouched new chat ("an untouched draft is discarded"): idle, nothing sent,
-/// typed, attached, run or titled, no child, fork or side chat, not pinned, archived or a side chat
-/// itself. `None` when the chat does not exist. Only such a chat may be discarded without asking.
+/// typed, sent with attachments, run or titled, no child, fork or side chat, no panel review
+/// comment, board item link or workflow run, not pinned, archived or a side chat itself. `None` when the chat does not exist. Only such a chat may be discarded without asking.
 pub fn untouched(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Option<bool>> {
     let row: Option<(String, String, String, bool, bool, Option<String>)> = tx
         .query_row(
@@ -309,17 +309,34 @@ pub fn untouched(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Option
     {
         return Ok(Some(false));
     }
-    let any: bool = tx.query_row(
+    // Attachments and references still waiting in the composer (not on a sent message) do not
+    // count: discarding the chat removes them and queues their files in the same transaction.
+    let mut sql = String::from(
         "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ?1)
              OR EXISTS(SELECT 1 FROM submissions WHERE chat_id = ?1)
              OR EXISTS(SELECT 1 FROM runs WHERE chat_id = ?1)
-             OR EXISTS(SELECT 1 FROM chat_attachments WHERE chat_id = ?1)
+             OR EXISTS(SELECT 1 FROM chat_attachments WHERE chat_id = ?1 AND submission_id IS NOT NULL)
+             OR EXISTS(SELECT 1 FROM chat_attachment_refs WHERE chat_id = ?1 AND submission_id IS NOT NULL)
              OR EXISTS(SELECT 1 FROM chat_titles WHERE chat_id = ?1 AND state != 'fallback')
              OR EXISTS(SELECT 1 FROM chats WHERE parent_chat_id = ?1 OR side_source_id = ?1)
              OR EXISTS(SELECT 1 FROM chat_forks WHERE chat_id = ?1 OR source_chat_id = ?1)",
-        [chat_id],
-        |r| r.get(0),
-    )?;
+    );
+    // Work other crates keep against a chat: review comments on its panel, the board items it is
+    // linked to and its workflow runs. Their tables belong to those crates, so one that has not
+    // been made yet (a database without them) holds nothing.
+    for table in ["review_comments", "item_chat_links", "workflow_runs"] {
+        let made: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |r| r.get(0),
+        )?;
+        if made {
+            sql.push_str(&format!(
+                "\n             OR EXISTS(SELECT 1 FROM {table} WHERE chat_id = ?1)"
+            ));
+        }
+    }
+    let any: bool = tx.query_row(&sql, [chat_id], |r| r.get(0))?;
     Ok(Some(!any))
 }
 
@@ -765,8 +782,10 @@ fn parse_mode(s: &str) -> SubmissionMode {
     }
 }
 
+/// A submission with no origin row reads as `unknown`, which parses to `app`: never the user's own
+/// typing, so it cannot pass for consent.
 const SUBMISSION_SELECT: &str = "SELECT s.id, s.chat_id, s.text, s.mode, s.state, \
-     COALESCE(m.origin, 'typed'), s.created_at, m.priority \
+     COALESCE(m.origin, 'unknown'), s.created_at, m.priority \
      FROM submissions s LEFT JOIN submission_meta m ON m.submission_id = s.id";
 
 fn submission_from_row(r: &Row<'_>) -> rusqlite::Result<Submission> {
@@ -906,7 +925,16 @@ mod tests {
         assert_eq!(is("missing"), None);
         let bare = chat(&db);
         assert_eq!(is(&bare), Some(true));
-        let touched: [&str; 12] = [
+        // The tables other crates own, reduced to the column the check reads.
+        db.write(|tx| {
+            tx.execute_batch(
+                "CREATE TABLE review_comments(chat_id TEXT);
+                 CREATE TABLE item_chat_links(chat_id TEXT);
+                 CREATE TABLE workflow_runs(chat_id TEXT);",
+            )
+        })
+        .unwrap();
+        let touched: [&str; 16] = [
             "UPDATE chats SET draft = 'typed' WHERE id = ?1",
             "UPDATE chats SET title = 'Renamed' WHERE id = ?1",
             "UPDATE chats SET pinned = 1 WHERE id = ?1",
@@ -915,20 +943,33 @@ mod tests {
             "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('s-' || ?1, ?1, 't', 'saved', 1)",
             "INSERT INTO messages(chat_id, source_key, role, timestamp) VALUES (?1, 'k', 'user', 1)",
             "INSERT INTO runs(id, chat_id, status, started_at) VALUES ('r-' || ?1, ?1, 'done', 1)",
-            "INSERT INTO chat_attachments(id, chat_id, name, mime, bytes, width, height, created_at) VALUES ('a-' || ?1, ?1, 'i', 'image/png', 1, 1, 1, 1)",
+            "INSERT INTO chat_attachments(id, chat_id, name, mime, bytes, width, height, submission_id, created_at) VALUES ('a-' || ?1, ?1, 'i', 'image/png', 1, 1, 1, 's', 1)",
+            "INSERT INTO chat_attachment_refs(id, chat_id, kind, target, name, submission_id, created_at) VALUES ('r-' || ?1, ?1, 'path', 't', 'n', 's', 1)",
             "INSERT INTO chat_titles(chat_id, state, updated_at) VALUES (?1, 'generated', 1)",
             "INSERT INTO chats(id, project_id, title, created_at, updated_at, parent_chat_id) SELECT 'child-' || id, project_id, 'x', 1, 1, id FROM chats WHERE id = ?1",
             "INSERT INTO chat_forks(fork_id, source_chat_id, chat_id, created_at) VALUES ('f-' || ?1, ?1, ?1, 1)",
+            "INSERT INTO review_comments(chat_id) VALUES (?1)",
+            "INSERT INTO item_chat_links(chat_id) VALUES (?1)",
+            "INSERT INTO workflow_runs(chat_id) VALUES (?1)",
         ];
         for sql in touched {
             let c = chat(&db);
             db.write(|tx| tx.execute(sql, [&c])).unwrap();
             assert_eq!(is(&c), Some(false), "{sql}");
         }
-        // A whitespace-only draft and the fallback title state still count as untouched.
+        // A whitespace-only draft, the fallback title state and an attachment or file reference
+        // not yet on a sent message still count as untouched.
         let c = chat(&db);
         db.write(|tx| {
             tx.execute("UPDATE chats SET draft = '  ' WHERE id = ?1", [&c])?;
+            tx.execute(
+                "INSERT INTO chat_attachments(id, chat_id, name, mime, bytes, width, height, created_at) VALUES ('u-' || ?1, ?1, 'i', 'image/png', 1, 1, 1, 1)",
+                [&c],
+            )?;
+            tx.execute(
+                "INSERT INTO chat_attachment_refs(id, chat_id, kind, target, name, created_at) VALUES ('ur-' || ?1, ?1, 'path', 't', 'n', 1)",
+                [&c],
+            )?;
             tx.execute(
                 "INSERT INTO chat_titles(chat_id, state, updated_at) VALUES (?1, 'fallback', 1)",
                 [&c],

@@ -536,10 +536,13 @@ mod tests {
         let (svc, reader, sink, _d) = service(vec![reading(7.0), reading(9.0)]);
         let t0 = 1_000_000;
         let first = svc.refresh(t0);
+        // The op answers at once and the read finishes on its own thread, which may already be
+        // done by the time the snapshot is taken: either way a read was started and not lost.
         assert!(
-            first.refreshing,
-            "the op answers at once; the read finishes on its own thread"
+            first.refreshing || first.reading.is_some(),
+            "a read was started"
         );
+        assert_eq!(first.next_refresh_at, Some(t0 + MIN_GAP_MS));
         let done = wait_until(&svc, |s| s.reading.is_some());
         assert_eq!(
             done.reading

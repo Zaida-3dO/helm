@@ -99,6 +99,10 @@ pub struct UsageEntry {
     pub usage: Usage,
     /// Claude Code's running totals after the turn, which the next turn's share is measured from.
     pub running: Usage,
+    /// Which provider ran the turn: `claude` or `local`. Entries written before it was recorded
+    /// have none, and read as `claude`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 /// The files a shell command changed, found by comparing the checkout before and after it ran.
@@ -745,8 +749,9 @@ pub fn project(
             let t = &u.usage;
             tx.execute(
                 "INSERT OR IGNORE INTO chat_turn_usage(chat_id, entry_id, timestamp, native_session,
-                     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, running)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, running,
+                     provider)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
                     chat_id,
                     u.id,
@@ -758,6 +763,7 @@ pub fn project(
                     t.cache_write_tokens,
                     t.cost_usd,
                     serde_json::to_string(&u.running).unwrap_or_default(),
+                    u.provider.as_deref().unwrap_or("claude"),
                 ],
             )?;
         }

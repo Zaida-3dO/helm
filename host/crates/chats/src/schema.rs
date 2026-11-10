@@ -47,6 +47,7 @@ pub fn register(reg: &mut MigrationRegistry) {
         .initializer("chats-identity", identity)
         .initializer("chats-triage-priority", crate::triage::init)
         .initializer("chats-created-by", crate::mute::init)
+        .initializer("chats-late-columns", late_columns)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)
@@ -59,7 +60,8 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              submission_id  TEXT PRIMARY KEY REFERENCES submissions(id) ON DELETE CASCADE,
              origin         TEXT NOT NULL DEFAULT 'user',
              priority       TEXT,
-             run_id         TEXT
+             run_id         TEXT,
+             afk_note       INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS restart_continuations (
              chat_id     TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
@@ -189,6 +191,7 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              cache_write_tokens  INTEGER NOT NULL,
              cost_usd            REAL NOT NULL,
              running             TEXT NOT NULL,
+             provider            TEXT NOT NULL DEFAULT 'claude',
              PRIMARY KEY (chat_id, entry_id)
          );
          CREATE INDEX IF NOT EXISTS chat_turn_usage_session ON chat_turn_usage(native_session, timestamp);
@@ -267,6 +270,39 @@ fn activity_queue(tx: &Transaction<'_>) -> rusqlite::Result<()> {
             "ALTER TABLE chat_activity ADD COLUMN local_ahead INTEGER",
             [],
         )?;
+    }
+    Ok(())
+}
+
+/// Columns added after their tables were first written; older databases get them here.
+/// `submission_meta.afk_note` marks an app note that already says AFK is on, so it does not carry
+/// the turn text as well. `chat_turn_usage.provider` says which provider ran the turn (`claude` or
+/// `local`), so a chat that switched provider reports each turn under the right one.
+fn late_columns(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    for (table, column, definition) in [
+        ("submission_meta", "afk_note", "INTEGER NOT NULL DEFAULT 0"),
+        ("chat_turn_usage", "provider", "TEXT NOT NULL DEFAULT 'claude'"),
+    ] {
+        let has: bool = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+            [table, column],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )?;
+        if !has {
+            tx.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+            if column == "provider" {
+                // Turns recorded before the column existed ran on whatever their chat runs on now:
+                // the best that can be told.
+                tx.execute(
+                    "UPDATE chat_turn_usage SET provider = 'local'
+                     WHERE chat_id IN (SELECT id FROM chats WHERE provider IS NOT NULL)",
+                    [],
+                )?;
+            }
+        }
     }
     Ok(())
 }

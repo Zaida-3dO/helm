@@ -237,6 +237,34 @@ fn carry_images(
     pairs
 }
 
+/// What `chat_forks` recorded for a fork id: the source chat, the cut message, whether it was a
+/// side chat, and the chat made.
+type PriorFork = (String, Option<i64>, bool, String);
+
+fn prior_fork(db: &helm_core::db::Database, fork_id: &str) -> rusqlite::Result<Option<PriorFork>> {
+    db.snapshot(|tx| {
+        tx.query_row(
+            "SELECT source_chat_id, message_id, side, chat_id FROM chat_forks WHERE fork_id = ?1",
+            [fork_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+    })
+}
+
+/// A request repeating a recorded fork id answers that fork; a different request is refused.
+fn answer_prior(req: &ForkRequest<'_>, prior: PriorFork) -> Result<Forked, Refusal> {
+    let (src, msg, side, chat) = prior;
+    if src == req.source && msg == req.message_id && side == req.side {
+        return Ok(Forked {
+            chat_id: chat,
+            moved: vec![],
+            existing: true,
+        });
+    }
+    Err(refuse("That fork id is already in use."))
+}
+
 /// Create the fork. `project_archived` is the projects crate's gate (see `crate::seams`).
 pub fn fork(
     db: &helm_core::db::Database,
@@ -264,25 +292,8 @@ pub fn fork(
     }
     let sql = |e: rusqlite::Error| Refusal::new("internal", e.to_string());
     // Idempotency first: the same request answers the same fork.
-    let prior: Option<(String, Option<i64>, bool, String)> = db
-        .snapshot(|tx| {
-            tx.query_row(
-                "SELECT source_chat_id, message_id, side, chat_id FROM chat_forks WHERE fork_id = ?1",
-                [req.fork_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .optional()
-        })
-        .map_err(sql)?;
-    if let Some((src, msg, side, chat)) = prior {
-        if src == req.source && msg == req.message_id && side == req.side {
-            return Ok(Forked {
-                chat_id: chat,
-                moved: vec![],
-                existing: true,
-            });
-        }
-        return Err(refuse("That fork id is already in use."));
+    if let Some(prior) = prior_fork(db, req.fork_id).map_err(sql)? {
+        return answer_prior(req, prior);
     }
     // The source and the cut point.
     struct Src {
@@ -345,7 +356,7 @@ pub fn fork(
                 .map_err(sql)?;
             match row {
                 Some((key, role, status, true, _)) if role == "assistant" => {
-                    if status == "streaming" {
+                    if status != "complete" {
                         return Err(refuse(
                             "That reply is still being saved; try again in a moment.",
                         ));
@@ -618,6 +629,15 @@ pub fn fork(
                 return Err(refuse(
                     "An image in this chat is no longer available; try forking again.",
                 ));
+            }
+            // The same fork id was recorded by a request that got in first: answer that fork.
+            if matches!(
+                e.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            ) {
+                if let Some(prior) = prior_fork(db, req.fork_id).map_err(sql)? {
+                    return answer_prior(req, prior);
+                }
             }
             return Err(sql(e));
         }

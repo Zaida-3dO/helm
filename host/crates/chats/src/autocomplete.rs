@@ -2,9 +2,10 @@
 //!
 //! - **Off by default.** The `autocomplete` preference (`{enabled}`) turns it on; while off, a
 //!   request answers an empty completion and starts nothing.
-//! - **Claude chats only.** A chat on a local model server answers an empty completion and starts
-//!   nothing: the completion is written by a Claude helper, not by the chat's own model, so a local
-//!   chat's draft is never sent to it.
+//! - **Local chats** are completed only by the model chosen for them under `backgroundModel`
+//!   (`local`), on the chat's own server. With none chosen, or when that server cannot be used, a
+//!   local chat's request answers an empty completion and starts nothing: its draft is never sent
+//!   to the Claude helper.
 //! - `autocomplete_suggest {chatId, requestId, draft}` answers `{completion, retryAfterMs?}`. The
 //!   draft is 4–8,000 characters after trimming; the request id is a UUID.
 //! - **Budget per chat**, persisted under `autocompleteBudget:<chat>` and updated in one
@@ -72,14 +73,19 @@ pub fn take_slot(
     Ok(Ok(()))
 }
 
-/// Whether this chat's draft may be completed: the chat is open, and its answers come from Claude
-/// rather than a local model server (a local chat keeps its server id in `provider`).
-pub fn suggestable(tx: &rusqlite::Transaction<'_>, chat_id: &str) -> rusqlite::Result<bool> {
+/// Whether this chat's draft may be completed, and whether the chat runs on a local model server
+/// (it keeps the server's id in `provider`): `None` when the chat is missing or put away.
+pub fn suggestable(
+    tx: &rusqlite::Transaction<'_>,
+    chat_id: &str,
+) -> rusqlite::Result<Option<bool>> {
+    use rusqlite::OptionalExtension;
     tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1 AND archived = 0 AND provider IS NULL)",
+        "SELECT provider IS NOT NULL AND provider != '' FROM chats WHERE id = ?1 AND archived = 0",
         [chat_id],
         |r| r.get(0),
     )
+    .optional()
 }
 
 /// The recent turns sent with the draft.
@@ -131,19 +137,36 @@ pub async fn suggest(
     let prep = rt
         .db()
         .write(|tx| {
-            if !suggestable(tx, &a.chat_id)? || !enabled(tx) {
+            let Some(local) = suggestable(tx, &a.chat_id)? else {
+                return Ok(Err(None));
+            };
+            if !enabled(tx) {
+                return Ok(Err(None));
+            }
+            // A local chat's draft goes only to the model chosen for local chats; with none
+            // chosen it goes nowhere.
+            if local && !crate::background::local_name_chosen(tx) {
                 return Ok(Err(None));
             }
             if let Err(wait) = take_slot(tx, &a.chat_id, now)? {
                 return Ok(Err(Some(wait)));
             }
-            Ok(Ok(context(tx, &a.chat_id)?))
+            Ok(Ok((context(tx, &a.chat_id)?, local)))
         })
         .map_err(crate::ops::sql)?;
-    let ctx = match prep {
+    let (ctx, local) = match prep {
         Ok(c) => c,
         Err(retry) => return Ok(empty(retry)),
     };
+    let mut job = json!({"draft": a.draft, "context": ctx});
+    if let Err(why) = crate::background::decorate_checked(&rt.sh, &a.chat_id, &mut job) {
+        if local {
+            // The chosen server cannot be used: say so, and do not hand the draft to Claude.
+            log::warn!("chat {}: autocomplete not run ({why})", a.chat_id);
+            return Ok(empty(Some(COOLDOWN.as_millis() as i64)));
+        }
+        log::warn!("chat {}: the background job stays on the default model ({why})", a.chat_id);
+    }
     {
         let mut g = rt.sh.autocomplete.lock().unwrap();
         if g.cooldown_until.is_some_and(|t| t > Instant::now()) {
@@ -166,8 +189,6 @@ pub async fn suggest(
         }
     }
     let release = Release(&rt.sh.autocomplete);
-    let mut job = json!({"draft": a.draft, "context": ctx});
-    crate::background::decorate(&rt.sh, &a.chat_id, &mut job);
     let spawner = rt.sh.spawner.clone();
     let out = tokio::time::timeout(
         DEADLINE,
@@ -216,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_chat_on_claude_is_suggestable() {
+    fn an_open_chat_is_suggestable_and_says_whether_it_is_local() {
         let (_d, db) = temp_db();
         db.write(|tx| {
             tx.execute(
@@ -235,15 +256,31 @@ mod tests {
             Ok::<(), rusqlite::Error>(())
         })
         .unwrap();
-        // A chat whose model lives on a local server gets nothing: the completion would be written
-        // by a Claude helper, not by that model.
+        // A chat on a local server is suggestable too (the request then needs a model chosen for
+        // local chats); a put-away or missing chat is not.
         for (id, want) in [
-            ("claude", true),
-            ("local", false),
-            ("put_away", false),
-            ("missing", false),
+            ("claude", Some(false)),
+            ("local", Some(true)),
+            ("put_away", None),
+            ("missing", None),
         ] {
             assert_eq!(db.snapshot(|tx| suggestable(tx, id)).unwrap(), want, "{id}");
+        }
+        // Only a name under `local` counts as a model chosen for local chats.
+        for (pref, want) in [
+            (None, false),
+            (Some(json!({"claude": "haiku"})), false),
+            (Some(json!({"local": "qwen-helm-4k"})), true),
+        ] {
+            db.write(|tx| match &pref {
+                Some(v) => helm_core::prefs::set_raw(tx, crate::background::PREF_KEY, v),
+                None => Ok(()),
+            })
+            .unwrap();
+            let chosen = db
+                .snapshot(|tx| Ok::<_, rusqlite::Error>(crate::background::local_name_chosen(tx)))
+                .unwrap();
+            assert_eq!(chosen, want, "{pref:?}");
         }
     }
 

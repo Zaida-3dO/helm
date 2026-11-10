@@ -90,7 +90,7 @@ impl AfkHooks for RuntimeHooks {
     }
 
     fn note(&self, chat_id: &str, submission_id: &str, text: &str) -> Result<(), (String, String)> {
-        helm_chats::submit::host_send(
+        helm_chats::submit::host_send_afk_note(
             &self.rt,
             helm_chats::submit::HostSend {
                 chat_id,

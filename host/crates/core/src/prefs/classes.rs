@@ -83,8 +83,6 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
     ("newChat", Registry(Base)),
     ("autocomplete", Registry(Base)),
     ("taskTriage", Registry(Base)),
-    // The model background jobs ask (titles, autocomplete, the idle check).
-    ("backgroundModel", Registry(Base)),
     ("chatElements", Registry(Base)),
     ("desktopPet", Registry(Base)),
     ("projectsMode", Registry(Base)),
@@ -118,6 +116,12 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         UserOnly("The shell your terminal runs is yours to choose."),
     ),
     // User-only.
+    // The model background jobs ask (titles, autocomplete, the idle check) sees the words of
+    // every chat, so which model reads them is the user's call.
+    (
+        "backgroundModel",
+        UserOnly("Which model reads your chats for titles, completions and checks is yours to choose."),
+    ),
     // Reply length is the user's call (default low).
     (
         "responseVerbosity",

@@ -402,9 +402,18 @@ pub fn resolve_across(
     if !own.is_empty() {
         return Ok(candidates(chosen, own));
     }
-    let same = |a: &VaultInfo, b: &VaultInfo| a.path.to_lowercase() == b.path.to_lowercase();
+    // A vault is told apart by its folder, not its name: two vaults may share a name, and one
+    // folder may be listed twice (added by hand and found in Obsidian's own list), which would
+    // otherwise make one note look like several hits.
+    let key = |v: &VaultInfo| {
+        v.path
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_lowercase()
+    };
+    let mut seen = std::collections::HashSet::from([key(chosen)]);
     let mut hits: Vec<NoteCandidate> = Vec::new();
-    for v in vaults.iter().filter(|v| !same(v, chosen)) {
+    for v in vaults.iter().filter(|v| seen.insert(key(v))) {
         hits.extend(
             hits_in(v, note, None)
                 .into_iter()

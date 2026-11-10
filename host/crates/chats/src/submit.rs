@@ -427,6 +427,22 @@ pub fn host_send_with_attachments(
     images: &[HostImage<'_>],
     files: &[HostFile<'_>],
 ) -> Result<HostSent, ApiError> {
+    host_send_inner(rt, s, images, files, false)
+}
+
+/// [`host_send`] for a note that itself says AFK is on: it is marked, so the AFK turn text is not
+/// added to it a second time.
+pub fn host_send_afk_note(rt: &ChatRuntime, s: HostSend<'_>) -> Result<HostSent, ApiError> {
+    host_send_inner(rt, s, &[], &[], true)
+}
+
+fn host_send_inner(
+    rt: &ChatRuntime,
+    s: HostSend<'_>,
+    images: &[HostImage<'_>],
+    files: &[HostFile<'_>],
+    afk_note: bool,
+) -> Result<HostSent, ApiError> {
     if s.text.trim().is_empty() {
         return Err(ApiError::bad_args("The message is empty."));
     }
@@ -523,6 +539,12 @@ pub fn host_send_with_attachments(
                     now,
                 },
             )?;
+            if afk_note {
+                tx.execute(
+                    "UPDATE submission_meta SET afk_note = 1 WHERE submission_id = ?1",
+                    [s.submission_id],
+                )?;
+            }
             if !ids.is_empty() {
                 if let Err(r) = crate::attachments::link(tx, s.chat_id, s.submission_id, &ids)? {
                     tx.execute("DELETE FROM submissions WHERE id = ?1", [s.submission_id])?;

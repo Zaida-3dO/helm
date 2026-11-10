@@ -421,8 +421,8 @@ async fn a_turn_streams_and_settles() {
         ["12/400"]
     );
     assert_eq!(
-        h.col("SELECT input_tokens || '/' || output_tokens || '/' || cache_read_tokens || '/' || cache_write_tokens || '/' || cost_usd FROM chat_turn_usage"),
-        ["20/40/500/60/0.05"]
+        h.col("SELECT input_tokens || '/' || output_tokens || '/' || cache_read_tokens || '/' || cache_write_tokens || '/' || cost_usd || '/' || provider FROM chat_turn_usage"),
+        ["20/40/500/60/0.05/claude"]
     );
     let streamed = h
         .events("message")
@@ -630,6 +630,42 @@ async fn stop_hands_the_unread_messages_to_the_next_turn_at_once() {
     assert_eq!(p["streamingBehavior"], "steer");
 }
 
+/// A stop made on the app's own account (a roll over, the usage governor) sends nothing again:
+/// what Claude had not read reads "not sent", and no turn opens by itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_that_asks_for_no_resend_leaves_the_unread_messages_unsent() {
+    let mut h = harness();
+    let (chat, _, mut w) = running_turn(&mut h).await;
+    h.db.write(|tx| {
+        tx.execute(
+            "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('late', ?1, 't', 'saved', 9)",
+            [&chat],
+        )
+    })
+    .unwrap();
+    let api = h.api.clone();
+    let c2 = chat.clone();
+    let stop = tokio::spawn(async move {
+        api.call(&main(), "chat_stop_no_resend", json!({"chatId": c2}))
+            .await
+    });
+    let abort = w.expect("abort").await;
+    w.respond(
+        &abort,
+        json!({"state": "stopping", "cancelledSubmissionIds": []}),
+    )
+    .await;
+    w.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+        .await;
+    let r = stop.await.unwrap().unwrap();
+    assert_eq!(r["status"], "stopped");
+    assert_eq!(h.state("late"), "uncertain");
+    assert!(
+        w.no_command_for(Duration::from_millis(150)).await.is_none(),
+        "nothing is sent again"
+    );
+}
+
 /// A failed turn holds nothing back: the chat is simply interrupted, and the next message
 /// starts a turn at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -657,9 +693,14 @@ async fn a_stop_that_never_settles_closes_the_worker() {
     let _abort = w.expect("abort").await;
     let r = stop.await.unwrap().unwrap();
     assert_eq!(r["status"], "interrupted");
-    let err = h.col(&format!("SELECT error FROM chats WHERE id = '{chat}'"));
-    assert_eq!(err, [crate::actor::STOP_TIMEOUT_ERROR]);
-    assert_eq!(h.col("SELECT status FROM runs"), ["interrupted"]);
+    // The reply and the rows it describes are written a moment apart on a loaded machine: wait
+    // for them against a deadline instead of reading them at once.
+    let error_sql = format!("SELECT error FROM chats WHERE id = '{chat}'");
+    h.until("the interruption is recorded", |h| {
+        h.col(&error_sql) == [crate::actor::STOP_TIMEOUT_ERROR]
+            && h.col("SELECT status FROM runs") == ["interrupted"]
+    })
+    .await;
 }
 
 /// Interactions are held per chat, answered through the op, and dismissed on settle.
@@ -758,6 +799,23 @@ async fn afk_policy_answers_questions_and_defers_cards() {
     let (_, _) = h.send(&chat, "next", "default").await;
     let p = w.expect("prompt").await;
     assert_eq!(p["context"], "[AFK] away");
+    // A note that itself says AFK is on does not carry the turn text a second time.
+    ack(&w, &p).await;
+    w.emit(json!({"type": "agent_settled", "outcome": "complete"}))
+        .await;
+    h.until("idle", |h| h.status(&chat) == "idle").await;
+    crate::submit::host_send_afk_note(
+        &h.rt,
+        crate::submit::HostSend {
+            chat_id: &chat,
+            submission_id: &uuid::Uuid::new_v4().to_string(),
+            text: "AFK just turned on.",
+            origin: crate::types::SubmissionOrigin::App,
+        },
+    )
+    .unwrap();
+    let p = w.expect("prompt").await;
+    assert!(p.get("context").is_none(), "the note says it itself");
 }
 
 /// Tool start and end are written as they happen, with the live tool on the thread.
@@ -2199,6 +2257,28 @@ async fn a_message_fork_is_cut_at_the_reply_and_carries_it_once() {
         .await
         .unwrap_err();
     assert_eq!(bad.code, "refused");
+    // A reply that did not finish is no fork point either.
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE messages SET status = 'interrupted' WHERE chat_id = ?1 AND role = 'assistant' AND text = 'answer two'",
+            [&chat],
+        )
+    })
+    .unwrap();
+    let cut_short: i64 = h
+        .col(&format!(
+            "SELECT id FROM messages WHERE chat_id = '{chat}' AND text = 'answer two'"
+        ))[0]
+        .parse()
+        .unwrap();
+    let refused = h
+        .call(
+            "chat_fork",
+            json!({"chatId": chat, "forkId": uuid::Uuid::new_v4().to_string(), "messageId": cut_short}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, "refused");
 }
 
 /// Placement and creation: a fork lands right below its source and later rows shift; a
@@ -2416,6 +2496,34 @@ async fn a_crash_between_stage_and_apply_is_repaired_at_startup() {
         marker["parentId"].is_null(),
         "the branch starts where the first message did"
     );
+    // A staged edit that cannot be applied (its session log is shorter than when it was staged)
+    // is rejected and its staging row removed, not left to fail at every start.
+    let broken = h.create().await;
+    let _w2 = first_turn(&mut h, &broken).await;
+    let first = user_row(&h, &broken, "first");
+    let o = crate::edit::open(&h.db, &broken, first).unwrap();
+    let sid = uuid::Uuid::new_v4().to_string();
+    crate::edit::stage(
+        &h.db,
+        &h.profile.path("sessions"),
+        &h.profile.path("attachments"),
+        &crate::types::MessageResendArgs {
+            chat_id: broken.clone(),
+            message_id: first,
+            revision: o.revision,
+            submission_id: sid.clone(),
+            text: "first, edited".into(),
+        },
+    )
+    .unwrap();
+    std::fs::remove_file(crate::session_log::log_path(
+        &h.profile.path("sessions"),
+        &broken,
+    ))
+    .unwrap();
+    crate::edit::recover_all(&h.db, &h.profile.path(""), 3);
+    assert!(h.col("SELECT chat_id FROM pending_edits").is_empty());
+    assert_eq!(h.state(&sid), "rejected");
 }
 
 /// Edits are refused while the chat works, and only for the user's sent messages.
@@ -4903,9 +5011,9 @@ async fn a_local_chat_is_prepared_launched_and_costs_nothing() {
     h.until("chat idle", |h| h.status(&chat) == "idle").await;
     assert_eq!(
         h.col(
-            "SELECT input_tokens || '/' || output_tokens || '/' || cost_usd FROM chat_turn_usage"
+            "SELECT input_tokens || '/' || output_tokens || '/' || cost_usd || '/' || provider FROM chat_turn_usage"
         ),
-        ["12/30/0.0"]
+        ["12/30/0.0/local"]
     );
     h.until("the keep-alive is set again", |_| {
         !local.finished.lock().unwrap().is_empty()
