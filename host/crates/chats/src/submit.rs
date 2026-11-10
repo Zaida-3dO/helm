@@ -396,6 +396,15 @@ fn drop_stored(
     for id in ids {
         tx.execute("DELETE FROM chat_attachments WHERE id = ?1", [id])?;
         tx.execute("DELETE FROM chat_attachment_refs WHERE id = ?1", [id])?;
+    }
+    remove_stored_files(dir, ids);
+    Ok(())
+}
+
+/// Delete the files (or folders) saved under `dir` for these attachment ids. A missing one is not
+/// an error: this is also how a send that did not commit cleans up after itself.
+fn remove_stored_files(dir: &std::path::Path, ids: &[String]) {
+    for id in ids {
         let path = dir.join(id);
         let _ = if path.is_dir() {
             std::fs::remove_dir_all(path)
@@ -403,7 +412,147 @@ fn drop_stored(
             std::fs::remove_file(path)
         };
     }
-    Ok(())
+}
+
+/// What a host send finds before it stores anything.
+enum Intake {
+    /// Refused as it stands: the chat is gone, archived or stopping, or too many others work.
+    Refused(ApiError),
+    /// This submission id is recorded already. A row still unsent (the hand-off never ran, e.g. the
+    /// host stopped first) is handed over now, so a caller retrying under one id heals instead of
+    /// staying stuck; `hand_off` says so. An archived or stopping chat answers exactly as a new
+    /// send to it would ("refused" / "busy"): a retrier like the consent upkeep must not read a
+    /// retry that handed nothing over as a delivery, or a decision made while the chat was
+    /// momentarily stopping is never sent again.
+    Already { hand_off: bool },
+    /// Free to store; whether the chat is working now (the message then steers it).
+    Open { busy: bool },
+}
+
+fn host_intake(
+    tx: &Transaction<'_>,
+    s: &HostSend<'_>,
+    max_active: usize,
+) -> rusqlite::Result<Intake> {
+    let existing = store::get_submission(tx, s.submission_id)?;
+    let Some((status, archived)) = chat_status(tx, s.chat_id)? else {
+        return Ok(Intake::Refused(crate::ops::not_found()));
+    };
+    if archived {
+        return Ok(Intake::Refused(ApiError::new(
+            "refused",
+            "That chat is archived.",
+        )));
+    }
+    if status == ChatStatus::Stopping {
+        return Ok(Intake::Refused(ApiError::new(
+            "busy",
+            "That chat is stopping; try again in a moment.",
+        )));
+    }
+    if let Some(existing) = existing {
+        return Ok(Intake::Already {
+            hand_off: existing.state == SubmissionState::Saved,
+        });
+    }
+    let busy = status.is_busy();
+    if !busy {
+        let active: i64 = tx.query_row(
+            "SELECT count(*) FROM chats WHERE status IN ('starting', 'running', 'stopping')",
+            [],
+            |r| r.get(0),
+        )?;
+        if active as usize >= max_active {
+            return Ok(Intake::Refused(ApiError::new(
+                "capacity",
+                "Too many chats are already working.",
+            )));
+        }
+    }
+    Ok(Intake::Open { busy })
+}
+
+/// The attachment ids of the files a send has saved so far.
+fn staged_ids(
+    images: &[crate::attachments::StagedImage],
+    files: &[crate::attachments::StagedFile],
+) -> Vec<String> {
+    images
+        .iter()
+        .map(|i| i.id.clone())
+        .chain(files.iter().map(|f| f.id.clone()))
+        .collect()
+}
+
+/// An attachment file this young may belong to a send that is still being made.
+const ORPHAN_GRACE_MS: i64 = 60 * 60 * 1000;
+
+/// Delete the files in `dir` that no attachment row names and that are older than
+/// [`ORPHAN_GRACE_MS`]: what a send killed between writing its files and committing its rows left
+/// behind. Only entries named like an attachment id are touched. The number removed.
+pub fn sweep_orphan_attachments(
+    db: &helm_core::db::Database,
+    dir: &std::path::Path,
+    now: i64,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let old: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let parsed = uuid::Uuid::parse_str(&name).ok()?;
+            if parsed.to_string() != name {
+                return None;
+            }
+            let modified = e.metadata().ok()?.modified().ok()?;
+            let ms = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|d| i64::try_from(d.as_millis()).ok())?;
+            (now - ms >= ORPHAN_GRACE_MS).then_some(name)
+        })
+        .collect();
+    if old.is_empty() {
+        return 0;
+    }
+    let known: std::collections::HashSet<String> = match db.snapshot(|tx| {
+        let mut st = tx
+            .prepare("SELECT id FROM chat_attachments UNION SELECT id FROM chat_attachment_refs")?;
+        let ids = st
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<std::collections::HashSet<String>, _>>()?;
+        Ok::<_, rusqlite::Error>(ids)
+    }) {
+        Ok(ids) => ids,
+        // Without the list nothing is known to be an orphan.
+        Err(_) => return 0,
+    };
+    let orphans: Vec<String> = old.into_iter().filter(|n| !known.contains(n)).collect();
+    remove_stored_files(dir, &orphans);
+    orphans.len()
+}
+
+/// The attachments folders already swept in this process: the sweep runs once per folder, at the
+/// first host send, which is soon after start-up.
+static SWEPT: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn sweep_once(rt: &ChatRuntime, dir: &std::path::Path) {
+    {
+        let mut swept = SWEPT.lock().unwrap_or_else(|p| p.into_inner());
+        if swept.iter().any(|d| d == dir) {
+            return;
+        }
+        swept.push(dir.to_path_buf());
+    }
+    let (db, dir) = (rt.db().clone(), dir.to_path_buf());
+    std::thread::spawn(move || {
+        let n = sweep_orphan_attachments(&db, &dir, helm_core::now_ms());
+        if n > 0 {
+            log::info!("chats: removed {n} attachment file(s) no message owned");
+        }
+    });
 }
 
 pub fn host_send(rt: &ChatRuntime, s: HostSend<'_>) -> Result<HostSent, ApiError> {
@@ -450,120 +599,118 @@ fn host_send_inner(
         return Err(ApiError::new("too_large", "The message is too large."));
     }
     let now = helm_core::now_ms();
-    let limits = rt.limits().clone();
-    let out = rt
+    let max_active = rt.limits().max_active;
+    let dir = rt.sh.cfg.profile_dir.join("attachments");
+    sweep_once(rt, &dir);
+    // Look first, with nothing written: a send that is refused as it stands, or already stored (the
+    // hub sends a message again every 45 s until it is acknowledged), must not save its files.
+    let mut staged_images = Vec::new();
+    let mut staged_files = Vec::new();
+    match rt
         .db()
-        .write(|tx| {
-            if let Some(existing) = store::get_submission(tx, s.submission_id)? {
-                // Already recorded: say whether it has been handed to Claude yet. A row still
-                // unsent (the hand-off never ran, e.g. the host stopped first) is handed over
-                // now, so a caller retrying under one id heals instead of staying stuck. An
-                // archived or stopping chat answers exactly as a new send to it would
-                // ("refused" / "busy"): a retrier like the consent upkeep must not read a
-                // retry that handed nothing over as a delivery, or a decision made while the
-                // chat was momentarily stopping is never sent again.
-                let Some((status, archived)) = chat_status(tx, s.chat_id)? else {
-                    return Ok(Err(crate::ops::not_found()));
-                };
-                if archived {
-                    return Ok(Err(ApiError::new("refused", "That chat is archived.")));
-                }
-                if status == ChatStatus::Stopping {
-                    return Ok(Err(ApiError::new(
-                        "busy",
-                        "That chat is stopping; try again in a moment.",
-                    )));
-                }
-                let hand_off = existing.state == SubmissionState::Saved;
-                return Ok(Ok((hand_off || existing.state != SubmissionState::Saved, hand_off)));
-            }
-            let Some((status, archived)) = chat_status(tx, s.chat_id)? else {
-                return Ok(Err(crate::ops::not_found()));
-            };
-            if archived {
-                return Ok(Err(ApiError::new("refused", "That chat is archived.")));
-            }
-            if status == ChatStatus::Stopping {
-                return Ok(Err(ApiError::new("busy", "That chat is stopping; try again in a moment.")));
-            }
-            let busy = status.is_busy();
-            if !busy {
-                let active: i64 = tx.query_row(
-                    "SELECT count(*) FROM chats WHERE status IN ('starting', 'running', 'stopping')",
-                    [],
-                    |r| r.get(0),
-                )?;
-                if active as usize >= limits.max_active {
-                    return Ok(Err(ApiError::new("capacity", "Too many chats are already working.")));
-                }
-            }
-            let (mode, state) = if busy {
-                (SubmissionMode::Steer, SubmissionState::Saved)
-            } else {
-                (SubmissionMode::Prompt, SubmissionState::Saved)
-            };
-            let dir = rt.sh.cfg.profile_dir.join("attachments");
-            let mut ids = Vec::new();
+        .snapshot(|tx| host_intake(tx, &s, max_active))
+        .map_err(sql)?
+    {
+        Intake::Refused(e) => return Err(e),
+        Intake::Already { .. } => {}
+        Intake::Open { .. } => {
+            // The files are saved before the transaction, so a large write never holds the
+            // writer lock; they are deleted again if the transaction does not commit.
             for img in images {
-                match crate::attachments::put(tx, &dir, s.chat_id, img.name, img.mime, img.bytes, now)? {
-                    Ok(stored) => ids.push(stored.id),
+                match crate::attachments::stage_image(&dir, img.name, img.mime, img.bytes) {
+                    Ok(st) => staged_images.push(st),
                     Err(r) => {
-                        drop_stored(tx, &dir, &ids)?;
-                        return Ok(Err(ApiError::new(IMAGE_REFUSED, r.message)));
+                        remove_stored_files(&dir, &staged_ids(&staged_images, &staged_files));
+                        return Err(ApiError::new(IMAGE_REFUSED, r.message));
                     }
                 }
             }
-            let mut refs = Vec::new();
             for f in files {
-                match crate::attachments::put_file(tx, &dir, s.chat_id, f.name, f.bytes, now)? {
-                    Ok(r) => {
-                        ids.push(r.id.clone());
-                        refs.push(r);
-                    }
+                match crate::attachments::stage_file(&dir, f.name, f.bytes) {
+                    Ok(st) => staged_files.push(st),
                     Err(r) => {
-                        drop_stored(tx, &dir, &ids)?;
-                        return Ok(Err(ApiError::new(FILE_REFUSED, r.message)));
+                        remove_stored_files(&dir, &staged_ids(&staged_images, &staged_files));
+                        return Err(ApiError::new(FILE_REFUSED, r.message));
                     }
                 }
             }
-            insert_submission(
-                tx,
-                &NewSubmission {
-                    id: s.submission_id,
-                    chat_id: s.chat_id,
-                    text: s.text,
-                    mode,
-                    state,
-                    origin: s.origin,
-                    priority: None,
-                    now,
-                },
+        }
+    }
+    let stored_by_this_send = std::cell::Cell::new(false);
+    let written: Result<Result<(bool, bool), ApiError>, rusqlite::Error> = rt.db().write(|tx| {
+        // The same look again, now that nothing else can write: it may have changed.
+        let busy = match host_intake(tx, &s, max_active)? {
+            Intake::Refused(e) => return Ok(Err(e)),
+            // Already recorded: it is handed to Claude now if that never happened.
+            Intake::Already { hand_off } => return Ok(Ok((true, hand_off))),
+            Intake::Open { busy } => busy,
+        };
+        let (mode, state) = if busy {
+            (SubmissionMode::Steer, SubmissionState::Saved)
+        } else {
+            (SubmissionMode::Prompt, SubmissionState::Saved)
+        };
+        let mut ids = Vec::new();
+        for st in &staged_images {
+            ids.push(crate::attachments::record_image(tx, s.chat_id, st, now)?.id);
+        }
+        let mut refs = Vec::new();
+        for st in &staged_files {
+            let r = crate::attachments::record_file(tx, s.chat_id, st, now)?;
+            ids.push(r.id.clone());
+            refs.push(r);
+        }
+        insert_submission(
+            tx,
+            &NewSubmission {
+                id: s.submission_id,
+                chat_id: s.chat_id,
+                text: s.text,
+                mode,
+                state,
+                origin: s.origin,
+                priority: None,
+                now,
+            },
+        )?;
+        if afk_note {
+            tx.execute(
+                "UPDATE submission_meta SET afk_note = 1 WHERE submission_id = ?1",
+                [s.submission_id],
             )?;
-            if afk_note {
-                tx.execute(
-                    "UPDATE submission_meta SET afk_note = 1 WHERE submission_id = ?1",
-                    [s.submission_id],
-                )?;
+        }
+        if !ids.is_empty() {
+            if let Err(r) = crate::attachments::link(tx, s.chat_id, s.submission_id, &ids)? {
+                tx.execute("DELETE FROM submissions WHERE id = ?1", [s.submission_id])?;
+                drop_stored(tx, &dir, &ids)?;
+                let code = if refs.is_empty() {
+                    IMAGE_REFUSED
+                } else {
+                    FILE_REFUSED
+                };
+                return Ok(Err(ApiError::new(code, r.message)));
             }
-            if !ids.is_empty() {
-                if let Err(r) = crate::attachments::link(tx, s.chat_id, s.submission_id, &ids)? {
-                    tx.execute("DELETE FROM submissions WHERE id = ?1", [s.submission_id])?;
-                    drop_stored(tx, &dir, &ids)?;
-                    let code = if refs.is_empty() { IMAGE_REFUSED } else { FILE_REFUSED };
-                    return Ok(Err(ApiError::new(code, r.message)));
-                }
-            }
-            // The files are listed for the agent beside the prompt, as data.
-            if let Some(section) = crate::attachments::refs_section(&refs) {
-                tx.execute(
-                    "INSERT INTO submission_context(submission_id, text) VALUES (?1, ?2)",
-                    params![s.submission_id, section],
-                )?;
-            }
-            tx.execute("UPDATE chats SET updated_at = ?1 WHERE id = ?2", params![now, s.chat_id])?;
-            Ok(Ok((true, true)))
-        })
-        .map_err(sql)??;
+        }
+        // The files are listed for the agent beside the prompt, as data.
+        if let Some(section) = crate::attachments::refs_section(&refs) {
+            tx.execute(
+                "INSERT INTO submission_context(submission_id, text) VALUES (?1, ?2)",
+                params![s.submission_id, section],
+            )?;
+        }
+        tx.execute(
+            "UPDATE chats SET updated_at = ?1 WHERE id = ?2",
+            params![now, s.chat_id],
+        )?;
+        stored_by_this_send.set(true);
+        Ok(Ok((true, true)))
+    });
+    // A failed row, a failed commit, a refusal or a resend that raced in: the files this send
+    // saved have no row, so they go.
+    if !(stored_by_this_send.get() && matches!(written, Ok(Ok(_)))) {
+        remove_stored_files(&dir, &staged_ids(&staged_images, &staged_files));
+    }
+    let out = written.map_err(sql)??;
     let (dispatch, fresh) = out;
     if fresh {
         rt.command(s.chat_id, Cmd::Dispatch(s.submission_id.to_owned()))?;

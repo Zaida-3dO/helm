@@ -623,6 +623,58 @@ async fn a_message_starts_the_telegram_chat_with_origin_telegram_and_is_stored_o
         assert_eq!(std::fs::read(path).unwrap(), sent.as_bytes(), "{target}");
         assert!(context.contains(target.as_str()), "{context}");
     }
+    // A send that is refused as it stands (here: the chat was archived meanwhile) saves no files.
+    let attachments = e.dir.path().join("prof").join("attachments");
+    let count = || std::fs::read_dir(&attachments).unwrap().count();
+    let before = count();
+    let chat: String =
+        e.db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT chat_id FROM submissions WHERE id = ?1",
+                [&sid],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    sql(
+        &e.db,
+        "UPDATE chats SET archived = 1 WHERE id = ?1",
+        &[&chat],
+    );
+    let later = uuid::Uuid::new_v4().to_string();
+    let refused = host_send_with_attachments(
+        &e.ctx.rt,
+        HostSend {
+            chat_id: &chat,
+            submission_id: &later,
+            text: "one more",
+            origin: helm_chats::types::SubmissionOrigin::App,
+        },
+        &[],
+        &[HostFile {
+            name: "again.txt",
+            bytes: b"again",
+        }],
+    );
+    assert_eq!(refused.unwrap_err().code, "refused");
+    assert_eq!(count(), before, "a refused send writes nothing");
+    // The sweep removes the files nothing names once they are old, and nothing else: not a young
+    // one (its send may still be running), not one a row names, not a stranger's file.
+    let orphan = attachments.join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join("x.txt"), b"x").unwrap();
+    let stranger = attachments.join("notes.txt");
+    std::fs::write(&stranger, b"mine").unwrap();
+    let now = helm_core::now_ms();
+    let sweep = |at: i64| helm_chats::submit::sweep_orphan_attachments(&e.db, &attachments, at);
+    assert_eq!((sweep(now), orphan.exists()), (0, true), "young");
+    assert_eq!((sweep(now + 2 * 3_600_000), orphan.exists()), (1, false));
+    assert!(stranger.exists());
+    assert_eq!(
+        count(),
+        before + 1,
+        "every named file stays, and the stranger's"
+    );
     drop(e.dir);
 }
 
@@ -645,7 +697,7 @@ async fn a_saved_model_and_effort_reach_the_new_telegram_chat() {
         let p = place_async(&ctx, msg("hub-m", "which model?"))
             .await
             .unwrap();
-        assert!(matches!(p, Placed::Sent { .. }));
+        assert!(matches!(p, Placed::Sent { ignored: None, .. }));
         let calls = e.ops.calls.lock().unwrap().clone();
         let (_, args) = calls.iter().find(|(o, _)| o == "chat_create").unwrap();
         assert_eq!(args.get("model").and_then(Value::as_str), model);
@@ -670,7 +722,21 @@ async fn a_refused_model_opens_the_chat_on_the_app_default() {
     let p = place_async(&ctx, msg("hub-m", "still answering?"))
         .await
         .unwrap();
-    assert!(matches!(p, Placed::Sent { .. }));
+    // The chat and the phone are told: the chat in its first message, the phone by the caller.
+    let Placed::Sent { chat, ignored, .. } = p else {
+        panic!("expected a placed message");
+    };
+    let why = ignored.expect("the refusal is told");
+    assert!(
+        why.contains("refused") && why.contains("app default"),
+        "{why}"
+    );
+    let sent = subs(&e.db, &chat);
+    assert!(
+        sent[0].4.ends_with(&format!("[Helm] {why}")),
+        "{}",
+        sent[0].4
+    );
     let calls = e.ops.calls.lock().unwrap().clone();
     let creates: Vec<&Value> = calls
         .iter()
@@ -1026,7 +1092,10 @@ async fn a_saved_model_on_a_switched_off_server_is_left_out() {
     let p = place_async(&ctx, msg("hub-off", "anyone home?"))
         .await
         .unwrap();
-    assert!(matches!(p, Placed::Sent { .. }));
+    assert!(
+        matches!(&p, Placed::Sent { ignored: Some(w), .. } if w.contains("not available")),
+        "{p:?}"
+    );
     let calls = e.ops.calls.lock().unwrap().clone();
     let creates: Vec<&Value> = calls
         .iter()
@@ -1036,6 +1105,52 @@ async fn a_saved_model_on_a_switched_off_server_is_left_out() {
     assert_eq!(creates.len(), 1, "{calls:?}");
     assert!(creates[0].get("model").is_none(), "{}", creates[0]);
     assert_eq!(creates[0]["effort"].as_str(), Some("high"));
+}
+
+/// The chat is told its answer did not reach the phone only when the line stays down: an answer
+/// the line takes again within the grace delivers itself, and the note would only make the agent
+/// send it a second time. The note is sent once.
+#[test]
+fn the_chat_is_told_of_an_undelivered_answer_only_after_the_line_stays_down() {
+    let g = UNDELIVERED_GRACE_MS;
+    // (when the answer was offered, whether the line took it, whether the chat is told now)
+    let rows: &[(&str, &[(i64, bool, bool)])] = &[
+        (
+            "a short drop that heals",
+            &[
+                (0, false, false),
+                (500, false, false),
+                (g - 1, false, false),
+                (g + 500, true, false),
+            ],
+        ),
+        (
+            "down for good: told once",
+            &[
+                (0, false, false),
+                (g - 1, false, false),
+                (g, false, true),
+                (g + 500, false, false),
+            ],
+        ),
+        (
+            "a break restarts the wait",
+            &[
+                (0, false, false),
+                (g - 500, true, false),
+                (g, false, false),
+                (g + g - 1, false, false),
+                (g + g, false, true),
+            ],
+        ),
+        ("taken at once", &[(0, true, false)]),
+    ];
+    for (name, offers) in rows {
+        let mut late = Undelivered::default();
+        for (now, ok, told) in *offers {
+            assert_eq!(late.offered(*ok, *now), *told, "{name} at {now}");
+        }
+    }
 }
 
 // ------------------------------------------------------------------ the voice chat
@@ -1615,8 +1730,8 @@ fn things_to_show_go_up_before_the_answer_and_stay_claimed_until_it_is_sent() {
     };
     let heard_dir = tempfile::tempdir().unwrap();
     let heard = HeardStore::at(heard_dir.path());
-    let mut out = vs::Outbox::new(wire.clone(), shown.clone(), "chat1".into())
-        .with_heard(heard.clone());
+    let mut out =
+        vs::Outbox::new(wire.clone(), shown.clone(), "chat1".into()).with_heard(heard.clone());
     let live = vs::Live {
         turn: Some("t1".into()),
         conversation: "c1".into(),

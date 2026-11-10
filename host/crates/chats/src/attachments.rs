@@ -138,6 +138,19 @@ pub struct Stored {
     pub id: String,
 }
 
+/// An image that was checked and saved to its private file, waiting for its row
+/// ([`record_image`]). Until the row is made the file belongs to the caller, who deletes it when
+/// the row is not made.
+#[derive(Debug)]
+pub struct StagedImage {
+    pub id: String,
+    name: String,
+    mime: String,
+    len: usize,
+    width: u32,
+    height: u32,
+}
+
 /// Validate and store one image.
 pub fn put(
     tx: &Transaction<'_>,
@@ -159,38 +172,57 @@ pub fn put(
             "That chat does not exist or is archived.",
         )));
     }
+    let staged = match stage_image(dir, name, mime, bytes) {
+        Ok(s) => s,
+        Err(r) => return Ok(Err(r)),
+    };
+    match record_image(tx, chat_id, &staged, now) {
+        Ok(stored) => Ok(Ok(stored)),
+        Err(e) => {
+            // No row: the file would be left behind with nothing to name it.
+            let _ = std::fs::remove_file(dir.join(&staged.id));
+            Err(e)
+        }
+    }
+}
+
+/// The checks of [`put`] and the write of the image's file, with no database: the caller can do
+/// it before it opens a transaction, so a large write never holds the writer lock.
+pub fn stage_image(
+    dir: &Path,
+    name: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<StagedImage, Refusal> {
     if !matches!(
         mime,
         "image/png" | "image/jpeg" | "image/gif" | "image/webp"
     ) {
-        return Ok(Err(Refusal::new(
+        return Err(Refusal::new(
             "bad_args",
             "Only PNG, JPEG, GIF and WebP images can be attached.",
-        )));
+        ));
     }
     if bytes.len() > MAX_IMAGE_BYTES {
-        return Ok(Err(Refusal::new(
-            "too_large",
-            "An image can be at most 25 MB.",
-        )));
+        return Err(Refusal::new("too_large", "An image can be at most 25 MB."));
     }
     let Some((w, h)) = dimensions(mime, bytes) else {
-        return Ok(Err(Refusal::new(
+        return Err(Refusal::new(
             "bad_args",
             "That file is not a readable image.",
-        )));
+        ));
     };
     if (w as u64) * (h as u64) > MAX_PIXELS {
-        return Ok(Err(Refusal::new(
+        return Err(Refusal::new(
             "too_large",
             "An image can be at most 20 megapixels.",
-        )));
+        ));
     }
     if is_animated(mime, bytes) {
-        return Ok(Err(Refusal::new(
+        return Err(Refusal::new(
             "bad_args",
             "Animated images cannot be attached; only still ones.",
-        )));
+        ));
     }
     let name: String = name
         .chars()
@@ -205,17 +237,46 @@ pub fn put(
         helm_core::privfs::write_atomic(&dir.join(&id), bytes)
     };
     if let Err(e) = write() {
-        return Ok(Err(Refusal::new(
+        let _ = std::fs::remove_file(dir.join(&id));
+        return Err(Refusal::new(
             "internal",
             format!("The image could not be saved: {e}"),
-        )));
+        ));
     }
+    Ok(StagedImage {
+        id,
+        name,
+        mime: mime.to_owned(),
+        len: bytes.len(),
+        width: w,
+        height: h,
+    })
+}
+
+/// The row of an image [`stage_image`] saved. The caller has checked the chat exists and is open.
+pub fn record_image(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    staged: &StagedImage,
+    now: i64,
+) -> rusqlite::Result<Stored> {
     tx.execute(
         "INSERT INTO chat_attachments(id, chat_id, name, mime, bytes, width, height, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![id, chat_id, name, mime, bytes.len() as i64, w, h, now],
+        params![
+            staged.id,
+            chat_id,
+            staged.name,
+            staged.mime,
+            staged.len as i64,
+            staged.width,
+            staged.height,
+            now
+        ],
     )?;
-    Ok(Ok(Stored { id }))
+    Ok(Stored {
+        id: staged.id.clone(),
+    })
 }
 
 /// Link the send's attachments to its submission, checking the per-message limits.
@@ -635,11 +696,34 @@ pub fn put_file(
             "That chat does not exist or is archived.",
         )));
     }
+    let staged = match stage_file(dir, name, bytes) {
+        Ok(s) => s,
+        Err(r) => return Ok(Err(r)),
+    };
+    match record_file(tx, chat_id, &staged, now) {
+        Ok(r) => Ok(Ok(r)),
+        Err(e) => {
+            // No row: the folder would be left behind with nothing to name it.
+            let _ = std::fs::remove_dir_all(dir.join(&staged.id));
+            Err(e)
+        }
+    }
+}
+
+/// A file that was saved to its private folder, waiting for its row ([`record_file`]). Until the
+/// row is made the folder belongs to the caller, who deletes it when the row is not made.
+#[derive(Debug)]
+pub struct StagedFile {
+    pub id: String,
+    name: String,
+    target: String,
+}
+
+/// The size check and the write of [`put_file`], with no database: the caller can do it before it
+/// opens a transaction, so a large write never holds the writer lock.
+pub fn stage_file(dir: &Path, name: &str, bytes: &[u8]) -> Result<StagedFile, Refusal> {
     if bytes.len() > MAX_FILE_BYTES {
-        return Ok(Err(Refusal::new(
-            "too_large",
-            "A file can be at most 25 MB.",
-        )));
+        return Err(Refusal::new("too_large", "A file can be at most 25 MB."));
     }
     let id = uuid::Uuid::new_v4().to_string();
     let name = safe_file_name(name);
@@ -651,30 +735,41 @@ pub fn put_file(
     };
     if let Err(e) = write() {
         let _ = std::fs::remove_dir_all(&folder);
-        return Ok(Err(Refusal::new(
+        return Err(Refusal::new(
             "internal",
             format!("The file could not be saved: {e}"),
-        )));
+        ));
     }
     let shown = path.to_string_lossy();
     let target = shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_owned();
+    Ok(StagedFile { id, name, target })
+}
+
+/// The reference row of a file [`stage_file`] saved. The caller has checked the chat exists and
+/// is open.
+pub fn record_file(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    staged: &StagedFile,
+    now: i64,
+) -> rusqlite::Result<Ref> {
     tx.execute(
         "INSERT INTO chat_attachment_refs(id, chat_id, kind, target, name, created_at)
          VALUES (?1, ?2, 'file', ?3, ?4, ?5)",
         params![
-            id,
+            staged.id,
             chat_id,
-            target,
-            cut_to_bytes(&name, MAX_NAME_BYTES),
+            staged.target,
+            cut_to_bytes(&staged.name, MAX_NAME_BYTES),
             now
         ],
     )?;
-    Ok(Ok(Ref {
-        id,
+    Ok(Ref {
+        id: staged.id.clone(),
         kind: "file".to_owned(),
-        target,
-        name,
-    }))
+        target: staged.target.clone(),
+        name: staged.name.clone(),
+    })
 }
 
 /// The folder a file saved by [`put_file`] lives in, as a path under the profile

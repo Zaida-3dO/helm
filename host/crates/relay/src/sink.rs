@@ -264,6 +264,9 @@ pub(crate) struct RealPort<'a> {
     /// the chat opens on the new-chat default as before.
     pub(crate) new_chat_model: Option<String>,
     pub(crate) new_chat_effort: Option<String>,
+    /// Set by `create` when the saved model or effort could not be used and the chat opened on
+    /// the app default: what the chat and the phone are told, in plain words.
+    pub(crate) ignored: Mutex<Option<String>>,
 }
 
 /// Whether the chat is archived and the tokens it has used; `None` when it no longer exists.
@@ -373,6 +376,15 @@ impl RealPort<'_> {
         };
         self.rt.local_models().is_none_or(|l| l.available(server))
     }
+
+    /// Keep the word for the chat and the phone that a saved setting was not used. The first
+    /// reason stands: a model left out and then a refusal of the effort say one thing.
+    fn say_ignored(&self, note: String) {
+        self.ignored
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_or_insert(note);
+    }
 }
 
 impl ChatPort for RealPort<'_> {
@@ -397,6 +409,10 @@ impl ChatPort for RealPort<'_> {
                     "relay: the saved {} model is on a local server that is not available; opening on the app default",
                     self.label
                 );
+                self.say_ignored(format!(
+                    "The model saved for new {} chats is on a local server that is not available, so this chat opened on the app default.",
+                    self.label
+                ));
             }
             usable
         });
@@ -419,6 +435,11 @@ impl ChatPort for RealPort<'_> {
                     self.label,
                     e.message
                 );
+                self.say_ignored(format!(
+                    "The model or effort saved for new {} chats was refused ({}), so this chat opened on the app default.",
+                    self.label,
+                    crate::telegram::cut_chars(&e.message, 160).0
+                ));
                 self.handle
                     .block_on(
                         self.ops
@@ -439,8 +460,14 @@ impl ChatPort for RealPort<'_> {
 /// What a delivery did.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Placed {
-    /// Stored as a Telegram-origin submission.
-    Sent { chat: String, baseline: i64 },
+    /// Stored as a Telegram-origin submission. `ignored` says, for a chat this message just
+    /// opened, that the saved model or effort could not be used (the chat has been told; the
+    /// phone is told by the caller).
+    Sent {
+        chat: String,
+        baseline: i64,
+        ignored: Option<String>,
+    },
     /// Answered the chat's waiting question with `value`.
     Answered {
         chat: String,
@@ -539,7 +566,11 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         let busy = status.is_some_and(|s| ChatStatus::parse(&s).is_busy());
         return Ok(if busy {
             let baseline = row.unwrap_or_else(|| max_row(&c.db, &chat));
-            Placed::Sent { chat, baseline }
+            Placed::Sent {
+                chat,
+                baseline,
+                ignored: None,
+            }
         } else {
             Placed::Already
         });
@@ -560,9 +591,15 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         label: "Telegram",
         new_chat_model: c.new_chat_model.clone(),
         new_chat_effort: c.new_chat_effort.clone(),
+        ignored: Mutex::new(None),
     };
     let (chat, _created) =
         telegram::active_chat(&c.tag_path, &port, &c.policy, msg.bot.as_deref(), now)?;
+    let ignored = port
+        .ignored
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
     let baseline = max_row(&c.db, &chat);
     // A picture or file is never an answer to a question: the message goes in as an ordinary one.
     // A voice note is: the hub attaches the recording, but what answers is its transcript.
@@ -595,7 +632,12 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
         });
     }
     let sent = telegram::load_sent(&c.sent_path);
-    let text = telegram::delivered_text(&msg.text, msg.age_minutes, &sent);
+    let mut text = telegram::delivered_text(&msg.text, msg.age_minutes, &sent);
+    // The chat opened without the model or effort saved for it: say so in the chat, where the
+    // agent and the user can see it.
+    if let Some(why) = &ignored {
+        text.push_str(&format!("\n\n[Helm] {why}"));
+    }
     // The pictures go in as the composer's do, checked by the same rules; other files are saved
     // where the agent can read them and attached by reference. One the chat will not take does not
     // hold the message back: the text goes without it, saying so.
@@ -656,7 +698,11 @@ pub fn place(c: &Ctx, msg: &TelegramMessage, now: i64) -> Result<Placed, String>
                 if !sent.is_empty() && telegram::clear_sent(&c.sent_path).is_err() {
                     log::warn!("relay: the notes of alerts sent could not be cleared");
                 }
-                return Ok(Placed::Sent { chat, baseline });
+                return Ok(Placed::Sent {
+                    chat,
+                    baseline,
+                    ignored,
+                });
             }
             Err(e)
                 if matches!(e.code.as_str(), "busy" | "capacity")
@@ -809,6 +855,37 @@ pub fn snapshot(
     }
 }
 
+/// How long a final answer may go on being refused by the line before the chat is asked to send
+/// it again. The mirror offers the answer every half second, so a line that is back within this
+/// delivers it itself, and asking sooner would give the phone the answer twice.
+pub const UNDELIVERED_GRACE_MS: i64 = 90_000;
+
+/// Decides when the chat is told that its answer did not reach the phone: once, and only after
+/// the line has refused the answer for [`UNDELIVERED_GRACE_MS`] without a break.
+#[derive(Debug, Default)]
+pub struct Undelivered {
+    /// When the current run of refusals began.
+    since: Option<i64>,
+    told: bool,
+}
+
+impl Undelivered {
+    /// One offer of an answer to the line: `ok` says it was taken. True when the chat is to be
+    /// told now.
+    pub fn offered(&mut self, ok: bool, now: i64) -> bool {
+        if ok {
+            self.since = None;
+            return false;
+        }
+        let since = *self.since.get_or_insert(now);
+        if self.told || now - since < UNDELIVERED_GRACE_MS {
+            return false;
+        }
+        self.told = true;
+        true
+    }
+}
+
 /// Watch a chat until its Telegram turn has ended.
 pub async fn mirror(
     rt: ChatRuntime,
@@ -819,9 +896,10 @@ pub async fn mirror(
     policy: PathBuf,
 ) {
     let mut m = Mirror::new(baseline, helm_core::now_ms());
-    // Whether the chat has been told its answer could not reach the phone. Once per exchange:
-    // the message has a fixed id, so it is stored once however often failures come after it.
-    let mut told = false;
+    // When the chat is told its answer could not reach the phone: once per exchange (the message
+    // has a fixed id, so it is stored once however often failures come after it), and only when
+    // the line stays down, see [`Undelivered`].
+    let mut late = Undelivered::default();
     while !m.done {
         tokio::time::sleep(POLL).await;
         let (rt2, db2, chat2, base) = (rt.clone(), db.clone(), chat.clone(), m.baseline);
@@ -840,13 +918,12 @@ pub async fn mirror(
                 Up::Final(t) => {
                     let ok = up.final_answer(&t);
                     m.ack(&t, ok);
-                    if ok || told {
+                    if !late.offered(ok, helm_core::now_ms()) {
                         continue;
                     }
-                    // The user cannot see an answer the line would not take. Say so inside the
-                    // chat, where the agent can act on it: it can send the answer again, and
-                    // until it does the user simply has no reply.
-                    told = true;
+                    // The line has stayed down, so the user cannot see an answer it would not
+                    // take. Say so inside the chat, where the agent can act on it: it can send the
+                    // answer again, and until it does the user simply has no reply.
                     let note = "[Helm] Your last reply did not reach the user's phone: the Telegram line was down. Only the final message of each turn reaches them. While the user has not answered, send your reply again as your final message.";
                     let sid = telegram::submission_id(&format!("undelivered/{chat}/{baseline}"));
                     let _ = host_send(
@@ -1020,7 +1097,18 @@ impl TelegramSink for ChatSink {
                 .map_err(|_| "The delivery did not finish.".to_owned())??;
             let (chat, baseline) = match placed {
                 Placed::Already => return Ok(()),
-                Placed::Sent { chat, baseline } => (chat, baseline),
+                Placed::Sent {
+                    chat,
+                    baseline,
+                    ignored,
+                } => {
+                    // The phone is told too: the first message of a chat that opened without its
+                    // saved model would otherwise be answered by a model nobody chose.
+                    if let (Some(why), Some(up)) = (ignored, self.up.get()) {
+                        up.notify(&why);
+                    }
+                    (chat, baseline)
+                }
                 Placed::Answered {
                     chat,
                     baseline,

@@ -719,6 +719,7 @@ pub fn place(c: &Ctx, turn: &VoiceTurn, notes: &[String], now: i64) -> Result<Pl
         label: "voice",
         new_chat_model: model.map(str::to_owned),
         new_chat_effort: effort.map(str::to_owned),
+        ignored: std::sync::Mutex::new(None),
     };
     let (mut tag, _created) = voice::active_chat(&c.tag_path, &port, &c.policy, now)?;
     let baseline = max_row(&c.db, &tag.chat_id);
