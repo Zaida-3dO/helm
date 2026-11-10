@@ -14,6 +14,8 @@
 //! | [`sink`] | Telegram messages into the active chat, and the status and answer mirrored back |
 //! | [`notify`] | Helm speaking first: the `app_telegram_send` tool and alerts while the user is away |
 //! | [`approve`] | approving from Telegram: buttons for permission prompts and plan approvals, off by default |
+//! | [`pair`] | pairing with the hub by a one-time code: token, names, the shared-memory server and the home profile in one step |
+//! | [`household`] | other people's Helms through the hub: the three sharing switches, serving their calls, and asking theirs |
 //!
 //! Wiring: [`register_services`] adds the line (its [`client::LineHandle`] and
 //! [`client::Client`]) and [`start`] connects it once the host-tool dispatcher exists;
@@ -29,6 +31,23 @@
 //! `relay_telegram_reset` (drop the tag, so the next message starts a new chat). The same policy
 //! reaches chats through [`agent_settings`]: the `telegram` key of `app_get_settings` and
 //! `app_update_settings`, where chats may change only the new chat's model and effort.
+//!
+//! Identity and the household (Settings → Hub, the sidebar's profile popover). All of these are
+//! the user's own; no agent tool reaches them.
+//!
+//! - `hub_pair {address, fallback?, code}` ([`pair`]): answers `{connection, personId,
+//!   personName, machineId, machineName, memoryServer, profileId}`. `relay_connection_get` now
+//!   also carries `personName` and `machineName` (empty unless paired by code).
+//! - `household_get` → `{chats, transcripts, messages}` and `household_set` (the same keys, each
+//!   optional; answers the values now in force; event `household_changed`). All three are off
+//!   until turned on; a switch counts only while the one before it is on.
+//! - `peer_people {}` → the hub's `{people: [{personId, name, machines: [{machineId, name,
+//!   online, ...}]}]}`; `peer_list_chats {personId, machineId?, limit?, offset?}` → `{chats:
+//!   [{chatId, title, status, projectName, profileName, updatedAt, needsAttention}],
+//!   nextOffset?}`; `peer_read_chat {personId, machineId?, chatId, beforeMessageId?, limit?}` →
+//!   the same page `app_read_chat` gives; `peer_send {personId, machineId?, chatId, message}`.
+//!   They fail with code `unavailable` and a plain sentence while the line is down or the other
+//!   person is not sharing. Profiles' own ops are in `helm-profiles`.
 
 pub mod agent_settings;
 pub mod approve;
@@ -36,7 +55,9 @@ pub mod client;
 pub mod config;
 pub mod exec;
 pub mod gate;
+pub mod household;
 pub mod notify;
+pub mod pair;
 pub mod sink;
 pub mod telegram;
 
@@ -86,6 +107,10 @@ pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) 
         sink.clone(),
     );
     sink.attach_line(client.handle());
+    // The household switches the user last chose (all off until they choose).
+    if let Some(db) = services.get::<helm_core::db::Database>() {
+        client.restore_sharing(household::load(&db));
+    }
     services.insert(sink);
     services.insert(client.handle());
     services.insert(executor);
@@ -141,6 +166,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("relay_telegram_get", OpClass::Blocking, telegram_get)
         .blocking("relay_telegram_save", OpClass::Blocking, telegram_save)
         .blocking("relay_telegram_reset", OpClass::Blocking, telegram_reset);
+    pair::register_ops(reg);
+    household::register_ops(reg);
 }
 
 fn to_value<T: serde::Serialize>(v: &T) -> Result<Value, ApiError> {

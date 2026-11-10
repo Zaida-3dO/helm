@@ -26,6 +26,17 @@ pub struct RelayConfig {
     pub fallback_url: String,
     #[serde(default)]
     pub token: String,
+    /// Who this machine is on the hub, when it was paired with a code: the hub's names and ids for
+    /// the person and the machine. Not secret, but kept in the same envelope so one write keeps
+    /// the token and the identity together.
+    #[serde(default)]
+    pub person_id: String,
+    #[serde(default)]
+    pub person_name: String,
+    #[serde(default)]
+    pub machine_id: String,
+    #[serde(default)]
+    pub machine_name: String,
 }
 
 impl std::fmt::Debug for RelayConfig {
@@ -63,6 +74,9 @@ pub struct RelayConnectionView {
     pub has_token: bool,
     /// `off` (not configured), `connecting`, `online` or `offline`.
     pub state: String,
+    /// The hub's name for the person and for this machine, empty unless paired with a code.
+    pub person_name: String,
+    pub machine_name: String,
 }
 
 /// The save op's arguments: each field absent keeps the stored value; an empty string clears it.
@@ -156,8 +170,8 @@ pub fn effective(creds: &CredentialStore) -> RelayConfig {
         if let (Some(url), Some(token)) = (url, token) {
             return RelayConfig {
                 lan_url: url,
-                fallback_url: String::new(),
                 token,
+                ..Default::default()
             };
         }
     }
@@ -188,6 +202,13 @@ pub fn save(creds: &CredentialStore, args: RelaySaveArgs) -> Result<RelayConfig,
                 "The relay token must be at least {MIN_TOKEN} characters with no spaces."
             ));
         }
+        // A token typed by hand is not the paired one: the stored identity no longer applies.
+        if c.token != t {
+            c.person_id.clear();
+            c.person_name.clear();
+            c.machine_id.clear();
+            c.machine_name.clear();
+        }
         c.token = t.to_owned();
     }
     if c == RelayConfig::default() {
@@ -203,8 +224,19 @@ pub fn save(creds: &CredentialStore, args: RelaySaveArgs) -> Result<RelayConfig,
     Ok(c)
 }
 
+/// Store a connection made by pairing: the addresses, the token and who the hub says this is.
+/// Replaces whatever was stored. Errors are fixed sentences.
+pub fn save_paired(creds: &CredentialStore, c: &RelayConfig) -> Result<(), String> {
+    let bytes = serde_json::to_vec(c).map_err(|_| "unreachable".to_owned())?;
+    creds
+        .write(CRED_NAME, CRED_IDENTITY, &bytes)
+        .map_err(|_| "The hub connection could not be saved in the credential store.".to_owned())
+}
+
 pub fn view(c: &RelayConfig, state: &str) -> RelayConnectionView {
     RelayConnectionView {
+        person_name: c.person_name.clone(),
+        machine_name: c.machine_name.clone(),
         has_address: !c.lan_url.is_empty(),
         has_fallback: !c.fallback_url.is_empty(),
         has_token: !c.token.is_empty(),

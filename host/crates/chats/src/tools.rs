@@ -140,7 +140,26 @@ fn chat_meta(tx: &Transaction<'_>, boards: &Boards, id: &str) -> rusqlite::Resul
     };
     m["projectId"] = json!(board.as_ref().map(|b| b.id.as_str()));
     m["projectName"] = json!(board.as_ref().map(|b| b.name.as_str()));
+    let profile = chat_profile(tx, id);
+    m["profileId"] = json!(profile.as_ref().map(|p| p.0.as_str()));
+    m["profileName"] = json!(profile.as_ref().map(|p| p.1.as_str()));
     Ok(Some(m))
+}
+
+/// The profile a chat belongs to as `(id, name)`: its label, else the home profile. None while
+/// no profile exists (the tables belong to another crate, so a database without them has none).
+/// The label only filters what the user sees; the chat runs under this computer's sign-in.
+fn chat_profile(tx: &Transaction<'_>, id: &str) -> Option<(String, String)> {
+    tx.query_row(
+        "SELECT p.id, p.name FROM profiles p WHERE p.id = COALESCE(
+             (SELECT profile_id FROM chat_profiles WHERE chat_id = ?1),
+             (SELECT id FROM profiles WHERE is_home = 1))",
+        [id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+    .optional()
+    .ok()
+    .flatten()
 }
 
 fn meta(ctx: &ToolCtx, id: &str) -> Result<Value, ToolError> {
@@ -210,6 +229,7 @@ fn list_chats(ctx: &ToolCtx, a: Value) -> ToolResult {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let project = str_arg(&a, "projectId").map(str::to_owned);
+    let profile = str_arg(&a, "profile").map(str::to_lowercase);
     let caller = ctx.caller_chat_id.clone();
     let boards = Boards::of(&ctx.services);
     let words: Vec<String> = query
@@ -238,6 +258,13 @@ fn list_chats(ctx: &ToolCtx, a: Value) -> ToolResult {
                     if m["projectId"].as_str() != Some(p)
                         && m["folderProjectId"].as_str() != Some(p)
                     {
+                        continue;
+                    }
+                }
+                // A profile's id or name (any case).
+                if let Some(p) = profile.as_deref() {
+                    let is = |k: &str| m[k].as_str().map(str::to_lowercase).as_deref() == Some(p);
+                    if !is("profileId") && !is("profileName") {
                         continue;
                     }
                 }
@@ -940,7 +967,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_this_chat",
-            format!("This chat's own details: its chatId (give it to a chat you start so it can report back to you with app_send_message), title, the board it is shown on (projectId, projectName), the folder it runs in, its parent chat (parentChatId), model and effort.{LINKS}"),
+            format!("This chat's own details: its chatId (give it to a chat you start so it can report back to you with app_send_message), title, the board it is shown on (projectId, projectName), the folder it runs in, its parent chat (parentChatId), model and effort, and the profile it belongs to (profileId, profileName).{LINKS}"),
             obj(json!({}), &[]),
         ),
         this_chat,
@@ -948,11 +975,12 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .blocking(
         ToolSpec::read(
             "app_list_chats",
-            format!("List recent Helm chats, newest first, or search their titles and messages (all query words must match). Excludes this chat unless includeCurrent is true. Each chat has its id, title, the board it is shown on (projectId, projectName; null while it is on none), the folder it runs in (folderProjectId, folderPath), its status and whether it is archived. projectId lists one board's chats (a folder project's id lists the chats running in that folder).{LINKS}"),
+            format!("List recent Helm chats, newest first, or search their titles and messages (all query words must match). Excludes this chat unless includeCurrent is true. Each chat has its id, title, the board it is shown on (projectId, projectName; null while it is on none), the folder it runs in (folderProjectId, folderPath), its status, whether it is archived and the profile it belongs to (profileId, profileName). projectId lists one board's chats (a folder project's id lists the chats running in that folder); profile lists one profile's chats (its name or id).{LINKS}"),
             obj(
                 json!({
                     "query": {"type": "string", "maxLength": 512},
                     "projectId": {"type": "string"},
+                    "profile": {"type": "string"},
                     "archived": {"type": "boolean"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                     "offset": {"type": "integer", "minimum": 0, "maximum": 100000},
@@ -1295,6 +1323,43 @@ mod tests {
         assert_eq!(me["result"]["chatId"], b);
         assert_eq!(me["result"]["link"], format!("helm://chats/{b}"));
         assert!(me["result"].get("parentChatId").is_some() && me["result"].get("model").is_some());
+        // Without profiles a chat names none; with them an unlabelled chat is the home profile's
+        // and `profile` filters the list by name or id, in any case.
+        assert!(me["result"]["profileName"].is_null());
+        h.db.write(|tx| {
+            tx.execute_batch(&format!(
+                "CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, is_home INTEGER NOT NULL);
+                 CREATE TABLE chat_profiles (chat_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL);
+                 INSERT INTO profiles VALUES ('p-home', 'First', 1), ('p-two', 'Second', 0);
+                 INSERT INTO chat_profiles VALUES ('{b}', 'p-two');"
+            ))
+        })
+        .unwrap();
+        let me = call(&h, &t, &b, "app_this_chat", json!({})).await;
+        assert_eq!(
+            (
+                me["result"]["profileId"].as_str(),
+                me["result"]["profileName"].as_str()
+            ),
+            (Some("p-two"), Some("Second"))
+        );
+        for (profile, want) in [("SECOND", &b), ("p-two", &b), ("first", &a)] {
+            let r = call(
+                &h,
+                &t,
+                &a,
+                "app_list_chats",
+                json!({"profile": profile, "includeCurrent": true}),
+            )
+            .await;
+            let ids: Vec<&str> = r["result"]["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["chatId"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids, [want.as_str()], "{profile}");
+        }
     }
 
     /// Boards for the tool tests, kept in memory: the sidebar tables live in the projects crate.

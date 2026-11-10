@@ -168,6 +168,15 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     // Web search: the Claude-chats switch (agents may change it through the settings tools) and
     // the last settings file imported from. The Brave key is in the credential store, not here.
     ("web_search_settings", Tool),
+    // Profiles (the people who use Helm) and the label each chat carries; chats never change them.
+    (
+        "profiles",
+        UserOnly("Who uses this Helm, and which chats are theirs, is yours to set."),
+    ),
+    (
+        "chat_profiles",
+        UserOnly("Which profile a chat belongs to is yours to set."),
+    ),
 ];
 
 /// The class of a table, or None when it is unclassified.

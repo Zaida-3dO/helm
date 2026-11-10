@@ -159,6 +159,13 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         "githubPrView",
         UserOnly("Whether Helm reads and writes GitHub for you is yours to choose."),
     ),
+    // What the household may see of this install's chats; all three switches default to off.
+    (
+        "householdSharing",
+        UserOnly("What other people in your household may see of your chats is yours to choose."),
+    ),
+    // The profile whose chats the sidebar shows (a profile id, or "all").
+    ("activeProfile", Internal),
 ];
 
 /// Dynamic keys under fixed prefixes: all internal.

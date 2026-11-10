@@ -10,16 +10,22 @@
 //!   Each outside caller also gets the chats crate's per-target limit (the same count and window
 //!   as one chat messaging another), and a send counts against either limit only once it is
 //!   stored, so a refused send never uses up the allowance.
+//! - **Household calls** (another person's Helm, through the hub) run the same way as
+//!   `peer:<person>` ([`AppExecutor::run_peer`]): the list answers with the shared fields only,
+//!   a chat page leaves the folder out, and a message arrives framed as another person's
+//!   ([`crate::household::frame`]), under the same send limits. Which of these the user allows is
+//!   decided before they get here ([`crate::household::admit_peer`]).
 //! - **Telegram** delivery into chats is [`crate::sink::ChatSink`].
 
 use crate::client::{BoxFut, Executor, ToolFailure};
 use crate::gate::{self, Admitted};
+use crate::household;
 use helm_chats::submit::{host_send, HostSend};
 use helm_chats::types::SubmissionOrigin;
 use helm_hosttools::{Caller, CallerBinding, ChatRequest, HostTools};
 use helm_ipc::{EventSink, Services};
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -57,6 +63,16 @@ pub fn external_id(client: &str) -> String {
         .take(64)
         .collect();
     format!("external:{clean}")
+}
+
+/// The caller id a household member runs under. Never a real chat id.
+pub fn peer_id(person: &str) -> String {
+    let clean: String = person
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .take(64)
+        .collect();
+    format!("peer:{clean}")
 }
 
 impl AppExecutor {
@@ -113,7 +129,14 @@ impl AppExecutor {
         log.push_back((now, caller.to_owned(), to.to_owned()));
     }
 
-    fn send_message(&self, w: &Wiring, caller: &str, args: &Value) -> Result<Value, ToolFailure> {
+    /// `framed` wraps the message in the fixed frame for this kind of caller.
+    fn send_message(
+        &self,
+        w: &Wiring,
+        caller: &str,
+        args: &Value,
+        framed: &dyn Fn(&str) -> String,
+    ) -> Result<Value, ToolFailure> {
         let to = args["chatId"].as_str().unwrap_or("");
         if uuid::Uuid::parse_str(to).is_err() || to.len() != 36 {
             return Err(refused("chatId must be a chat's exact 36-character id."));
@@ -148,7 +171,7 @@ impl AppExecutor {
             .services
             .get::<helm_chats::ChatRuntime>()
             .ok_or_else(|| refused("Helm's chats are not available."))?;
-        let text = gate::frame(caller, args["message"].as_str().unwrap_or(""));
+        let text = framed(args["message"].as_str().unwrap_or(""));
         let sid = uuid::Uuid::new_v4().to_string();
         let sent = host_send(
             &rt,
@@ -182,8 +205,21 @@ impl AppExecutor {
             .filter(|t| *t != "app_send_message")
             .map(str::to_owned)
             .collect();
+        self.dispatch_as(w, external_id(caller), restricted, call)
+            .await
+    }
+
+    /// Run one tool through Helm's dispatcher as the restricted caller `chat_id`, which may use
+    /// only the tools in `restricted`.
+    async fn dispatch_as(
+        &self,
+        w: &Wiring,
+        chat_id: String,
+        restricted: Vec<String>,
+        call: Admitted,
+    ) -> Result<Value, ToolFailure> {
         let who = Caller {
-            chat_id: external_id(caller),
+            chat_id,
             restricted: Some(restricted),
         };
         let req = ChatRequest {
@@ -208,6 +244,40 @@ impl AppExecutor {
             })
         }
     }
+
+    /// The chats an agent has flagged for the user's attention. A database without the table (the
+    /// chats crate owns it) has none.
+    fn flagged(w: &Wiring) -> HashSet<String> {
+        let Some(db) = w.services.get::<helm_core::db::Database>() else {
+            return HashSet::new();
+        };
+        db.snapshot(|tx| {
+            let mut st = tx.prepare("SELECT chat_id FROM chat_flags")?;
+            let ids = st
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<HashSet<_>, _>>()?;
+            Ok::<_, rusqlite::Error>(ids)
+        })
+        .unwrap_or_default()
+    }
+
+    async fn peer(&self, w: &Wiring, person: &str, call: Admitted) -> Result<Value, ToolFailure> {
+        if call.tool == "app_send_message" {
+            let key = format!("peer:{person}");
+            return self.send_message(w, &key, &call.args, &|b| household::frame(person, b));
+        }
+        let tool = call.tool.clone();
+        let r = self
+            .dispatch_as(w, peer_id(person), vec![tool.clone()], call)
+            .await?;
+        match tool.as_str() {
+            "app_list_chats" => Ok(household::shared_chat_list(&r, &Self::flagged(w))),
+            "app_read_chat" => Ok(household::shared_transcript(r)),
+            _ => Err(refused(
+                "That is not something household callers can ask for.",
+            )),
+        }
+    }
 }
 
 impl Executor for AppExecutor {
@@ -221,10 +291,23 @@ impl Executor for AppExecutor {
                 return Err(refused("Helm is still starting; try again in a moment."));
             };
             if call.tool == "app_send_message" {
-                self.send_message(w, caller, &call.args)
+                self.send_message(w, caller, &call.args, &|b| gate::frame(caller, b))
             } else {
                 self.dispatch(w, caller, call).await
             }
+        })
+    }
+
+    fn run_peer<'a>(
+        &'a self,
+        person: &'a str,
+        call: Admitted,
+    ) -> BoxFut<'a, Result<Value, ToolFailure>> {
+        Box::pin(async move {
+            let Some(w) = self.wiring.get() else {
+                return Err(refused("Helm is still starting; try again in a moment."));
+            };
+            self.peer(w, person, call).await
         })
     }
 }
@@ -238,6 +321,9 @@ mod tests {
         assert_eq!(external_id("remote"), "external:remote");
         assert_eq!(external_id("a b/../c"), "external:abc");
         assert!(uuid::Uuid::parse_str(&external_id("x")).is_err());
+        assert_eq!(peer_id("Mary Ann"), "peer:MaryAnn");
+        assert_eq!(peer_id("../x"), "peer:x");
+        assert!(uuid::Uuid::parse_str(&peer_id("x")).is_err());
     }
 
     #[test]
@@ -280,6 +366,11 @@ mod tests {
     #[tokio::test]
     async fn an_unwired_executor_refuses_and_changes_nothing() {
         let e = AppExecutor::default();
+        let p = e
+            .run_peer("Pat", gate::admit("app_list_chats", &json!({})).unwrap())
+            .await
+            .unwrap_err();
+        assert!(!p.changed);
         let r = e
             .run("remote", gate::admit("app_list_chats", &json!({})).unwrap())
             .await

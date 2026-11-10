@@ -9,19 +9,27 @@
 //! - `telegram`: handed to the [`TelegramSink`]; acknowledged only once the sink took it, so a
 //!   message is never lost to a drop between the hub and the chat.
 //! - `telegram_stop`: the sink stops the running turn.
+//! - `peer_call`: another person's Helm, through the hub, asks this one for its shared chat list,
+//!   a chat's messages or to deliver a message. [`crate::household::admit_peer`] checks the
+//!   sharing switches and the arguments first; the answer is a `result` frame like a call's.
+//! - `peer_result`: the hub's answer to a `peer` request this Helm sent ([`LineHandle::peer`]).
+//! - The first frame up on every line is `sharing` (the household switches), and another goes
+//!   whenever the user changes one.
 //! - Upward, [`LineHandle`] sends the Telegram status and final answer, and alerts Helm starts
 //!   ([`crate::notify`]).
 
 use crate::config::RelayConfig;
 use crate::gate;
+use crate::household::{self, Sharing};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -41,6 +49,22 @@ pub trait Executor: Send + Sync {
         caller: &'a str,
         call: gate::Admitted,
     ) -> BoxFut<'a, Result<Value, ToolFailure>>;
+
+    /// Runs an admitted household call on the PC. `person` is the asking person's name, from the
+    /// hub. An executor that serves no household refuses.
+    fn run_peer<'a>(
+        &'a self,
+        person: &'a str,
+        call: gate::Admitted,
+    ) -> BoxFut<'a, Result<Value, ToolFailure>> {
+        let _ = (person, call);
+        Box::pin(async {
+            Err(ToolFailure {
+                text: "Household calls are not available here.".into(),
+                changed: false,
+            })
+        })
+    }
 }
 
 /// A picture or file that came with a Telegram message: base64, as the hub sent it. It prints as
@@ -119,7 +143,12 @@ impl LineState {
 pub struct LineHandle {
     state: AtomicU8,
     up: mpsc::UnboundedSender<Value>,
+    /// Requests to other people's Helms waiting for the hub's answer, by request id.
+    peers: std::sync::Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>,
 }
+
+/// How long a household request may wait for the hub's answer.
+const PEER_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl LineHandle {
     pub fn state(&self) -> LineState {
@@ -127,6 +156,67 @@ impl LineHandle {
     }
     fn set(&self, s: LineState) {
         self.state.store(s as u8, Ordering::SeqCst);
+    }
+
+    /// Ask the hub for something about the household (`op`: `people`, `list_chats`, `read_chat`
+    /// or `send_message`) and wait for its answer. Fails at once while the line is down, and when
+    /// the line drops or the hub is silent for 30 seconds before it answers.
+    pub async fn peer(&self, op: &str, args: Value) -> Result<Value, String> {
+        if self.state() != LineState::Online {
+            return Err("Helm is not connected to the hub.".into());
+        }
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let (tx, rx) = oneshot::channel();
+        self.peers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id.clone(), tx);
+        if self
+            .up
+            .send(json!({ "type": "peer", "id": id, "op": op, "args": args }))
+            .is_err()
+        {
+            self.peers
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&id);
+            return Err("Helm is not connected to the hub.".into());
+        }
+        match tokio::time::timeout(PEER_TIMEOUT, rx).await {
+            Ok(Ok(answer)) => answer,
+            Ok(Err(_)) => Err("The hub line dropped before the answer came.".into()),
+            Err(_) => {
+                self.peers
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&id);
+                Err("The hub did not answer in time.".into())
+            }
+        }
+    }
+
+    fn resolve_peer(&self, id: &str, answer: Result<Value, String>) {
+        let tx = self
+            .peers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(id);
+        if let Some(tx) = tx {
+            let _ = tx.send(answer);
+        }
+    }
+
+    /// The line is gone: every request still waiting fails now.
+    fn fail_peers(&self) {
+        let waiting: Vec<_> = self
+            .peers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .drain()
+            .collect();
+        for (_, tx) in waiting {
+            let _ = tx.send(Err("The hub line dropped before the answer came.".into()));
+        }
     }
     /// The one live status message on Telegram, edited in place by the hub.
     pub fn telegram_status(&self, text: &str) {
@@ -178,6 +268,8 @@ pub struct Client {
     /// Hub ids of Telegram messages being delivered now: the hub's resend of one of them is
     /// dropped, since the delivery under way acknowledges it.
     delivering: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// What the household may see of this install; told to the hub on every new line.
+    sharing: std::sync::Mutex<Sharing>,
     /// Woken when the saved connection changes, so a new address or token applies at once.
     pub reconfigured: tokio::sync::Notify,
 }
@@ -195,6 +287,20 @@ const MAX_FRAME: usize = 80 * 1024 * 1024;
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// The `result` frame for a call the gate refused: nothing ran, so nothing changed.
+fn refusal(id: &str, text: String) -> Value {
+    json!({ "type": "result", "id": id, "ok": false, "error": text, "changed": "no" })
+}
+
+/// The `result` frame for a call that ran.
+fn answer(id: &str, r: Result<Value, ToolFailure>) -> Value {
+    match r {
+        Ok(r) => json!({ "type": "result", "id": id, "ok": true, "result": r }),
+        Err(f) => json!({ "type": "result", "id": id, "ok": false, "error": f.text,
+                          "changed": if f.changed { "maybe" } else { "no" } }),
+    }
+}
+
 impl Client {
     pub fn new(
         config: Arc<dyn Fn() -> RelayConfig + Send + Sync>,
@@ -209,15 +315,35 @@ impl Client {
             handle: Arc::new(LineHandle {
                 state: AtomicU8::new(LineState::Off as u8),
                 up,
+                peers: Default::default(),
             }),
             up_rx: tokio::sync::Mutex::new(up_rx),
             delivering: Arc::default(),
+            sharing: Default::default(),
             reconfigured: tokio::sync::Notify::new(),
         })
     }
 
     pub fn handle(&self) -> Arc<LineHandle> {
         self.handle.clone()
+    }
+
+    /// What the household may see now.
+    pub fn sharing(&self) -> Sharing {
+        *self.sharing.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The user changed the household switches: keep them, and tell the hub on the live line (a
+    /// line that comes up later is told as it starts).
+    pub fn set_sharing(&self, s: Sharing) {
+        let s = s.normalised();
+        *self.sharing.lock().unwrap_or_else(|p| p.into_inner()) = s;
+        let _ = self.handle.up.send(s.frame());
+    }
+
+    /// Set the switches at start-up, before any line: nothing to send yet.
+    pub fn restore_sharing(&self, s: Sharing) {
+        *self.sharing.lock().unwrap_or_else(|p| p.into_inner()) = s.normalised();
     }
 
     async fn connect(url: &str, token: &str) -> Result<Ws, String> {
@@ -280,6 +406,7 @@ impl Client {
                     self.handle.set(LineState::Online);
                     log::info!("relay: line up");
                     self.serve(ws).await;
+                    self.handle.fail_peers();
                     log::info!("relay: line down");
                     self.handle.set(LineState::Offline);
                 }
@@ -297,6 +424,14 @@ impl Client {
         let (mut sink_ws, mut stream) = ws.split();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Value>();
         let mut up_rx = self.up_rx.lock().await;
+        // The hub enforces the household switches too, so it hears them before anything else.
+        if sink_ws
+            .send(Message::Text(self.sharing().frame().to_string().into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
         let silence = tokio::time::sleep(SILENCE);
         tokio::pin!(silence);
         loop {
@@ -338,18 +473,40 @@ impl Client {
                 let out = out.clone();
                 tokio::spawn(async move {
                     let reply = match gate::admit(&tool, &args) {
-                        Err(text) => json!({ "type": "result", "id": id, "ok": false,
-                                             "error": text, "changed": "no" }),
-                        Ok(admitted) => match executor.run(&caller, admitted).await {
-                            Ok(r) => json!({ "type": "result", "id": id, "ok": true, "result": r }),
-                            Err(f) => {
-                                json!({ "type": "result", "id": id, "ok": false, "error": f.text,
-                                              "changed": if f.changed { "maybe" } else { "no" } })
-                            }
-                        },
+                        Err(text) => refusal(&id, text),
+                        Ok(admitted) => answer(&id, executor.run(&caller, admitted).await),
                     };
                     let _ = out.send(reply);
                 });
+            }
+            Some("peer_call") => {
+                let (Some(id), Some(op)) = (s("id"), s("op")) else {
+                    return;
+                };
+                let person = s("person").unwrap_or_default();
+                let args = v.get("args").cloned().unwrap_or(Value::Null);
+                // Checked against the switches as they are now, not as the hub last heard them.
+                let admitted = household::admit_peer(&op, &args, self.sharing());
+                let executor = self.executor.clone();
+                let out = out.clone();
+                tokio::spawn(async move {
+                    let reply = match admitted {
+                        Err(text) => refusal(&id, text),
+                        Ok(admitted) => answer(&id, executor.run_peer(&person, admitted).await),
+                    };
+                    let _ = out.send(reply);
+                });
+            }
+            Some("peer_result") => {
+                let Some(id) = s("id") else {
+                    return;
+                };
+                let answer = if v.get("ok").and_then(Value::as_bool) == Some(true) {
+                    Ok(v.get("result").cloned().unwrap_or(Value::Null))
+                } else {
+                    Err(s("error").unwrap_or_else(|| "The hub could not answer.".into()))
+                };
+                self.handle.resolve_peer(&id, answer);
             }
             Some("telegram") => {
                 let (Some(id), Some(text)) = (s("id"), s("text")) else {
@@ -436,8 +593,18 @@ mod tests {
     #[derive(Default)]
     struct Exec {
         ran: Mutex<Vec<(String, gate::Admitted)>>,
+        peer: Mutex<Vec<(String, gate::Admitted)>>,
     }
     impl Executor for Exec {
+        fn run_peer<'a>(
+            &'a self,
+            person: &'a str,
+            call: gate::Admitted,
+        ) -> BoxFut<'a, Result<Value, ToolFailure>> {
+            self.peer.lock().unwrap().push((person.to_owned(), call));
+            Box::pin(async { Ok(json!({ "chats": [] })) })
+        }
+
         fn run<'a>(
             &'a self,
             caller: &'a str,
@@ -524,6 +691,7 @@ mod tests {
             lan_url: urls.0.to_owned(),
             fallback_url: urls.1.to_owned(),
             token: TOKEN.to_owned(),
+            ..Default::default()
         };
         Client::new(Arc::new(move || cfg.clone()), exec, sink)
     }
@@ -544,6 +712,11 @@ mod tests {
         let task = tokio::spawn(c.clone().run());
         let (auth, mut ws) = hub.await.unwrap();
         assert_eq!(auth.as_deref(), Some(format!("Bearer {TOKEN}").as_str()));
+        // The household switches come first, all off by default.
+        assert_eq!(
+            next(&mut ws).await,
+            json!({"type": "sharing", "chats": false, "transcripts": false, "messages": false})
+        );
 
         // A denied tool is refused by the PC's gate and never runs.
         ws.send(Message::Text(
@@ -657,6 +830,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_household_is_told_the_switches_asks_through_the_hub_and_answers_within_them() {
+        let (url, hub) = fake_hub().await;
+        let exec = Arc::new(Exec::default());
+        let c = client((&url, ""), exec.clone(), Arc::new(Sink::default()));
+        c.restore_sharing(Sharing {
+            chats: true,
+            transcripts: true,
+            messages: false,
+        });
+        let task = tokio::spawn(c.clone().run());
+        let (_, mut ws) = hub.await.unwrap();
+        let send = |v: Value| Message::Text(v.to_string().into());
+
+        // The switches are the first thing the hub hears.
+        assert_eq!(
+            next(&mut ws).await,
+            json!({"type": "sharing", "chats": true, "transcripts": true, "messages": false})
+        );
+
+        // A household call inside the switches runs as the asking person; one outside is refused
+        // here, whatever the hub thinks, and runs nothing.
+        ws.send(send(
+            json!({"type": "peer_call", "id": "p1", "person": "Pat", "op": "list_chats",
+                            "args": {"limit": 3}}),
+        ))
+        .await
+        .unwrap();
+        let r = next(&mut ws).await;
+        assert_eq!(
+            (r["id"].as_str(), r["ok"].as_bool()),
+            (Some("p1"), Some(true))
+        );
+        ws.send(send(
+            json!({"type": "peer_call", "id": "p2", "person": "Pat", "op": "send_message",
+                            "args": {"chatId": "c", "message": "hi"}}),
+        ))
+        .await
+        .unwrap();
+        let r = next(&mut ws).await;
+        assert_eq!(
+            (r["ok"].as_bool(), r["changed"].as_str()),
+            (Some(false), Some("no"))
+        );
+        assert!(r["error"].as_str().unwrap().contains("message their chats"));
+        assert_eq!(exec.peer.lock().unwrap().len(), 1);
+        assert_eq!(exec.peer.lock().unwrap()[0].0, "Pat");
+        assert_eq!(exec.peer.lock().unwrap()[0].1.tool, "app_list_chats");
+        assert!(exec.ran.lock().unwrap().is_empty(), "not an outside call");
+
+        // Turning a switch on tells the hub at once and lets the call through.
+        c.set_sharing(Sharing {
+            chats: true,
+            transcripts: true,
+            messages: true,
+        });
+        assert_eq!(next(&mut ws).await["messages"], true);
+        ws.send(send(
+            json!({"type": "peer_call", "id": "p3", "person": "Pat", "op": "send_message",
+                            "args": {"chatId": "c", "message": "hi"}}),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(next(&mut ws).await["ok"], true);
+        assert_eq!(exec.peer.lock().unwrap()[1].1.args["mode"], "steer");
+
+        // Asking the hub: the answer, or the hub's refusal, comes back to the asker.
+        let h = c.handle();
+        let ask = tokio::spawn(async move { h.peer("people", json!({})).await });
+        let req = next(&mut ws).await;
+        assert_eq!(
+            (req["type"].as_str(), req["op"].as_str()),
+            (Some("peer"), Some("people"))
+        );
+        ws.send(send(
+            json!({"type": "peer_result", "id": req["id"], "ok": true,
+                            "result": {"people": []}}),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(ask.await.unwrap(), Ok(json!({"people": []})));
+        let h = c.handle();
+        let ask = tokio::spawn(async move { h.peer("list_chats", json!({"personId": "x"})).await });
+        let req = next(&mut ws).await;
+        ws.send(send(
+            json!({"type": "peer_result", "id": req["id"], "ok": false,
+                            "error": "They are offline."}),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(ask.await.unwrap(), Err("They are offline.".to_owned()));
+
+        // A request still waiting when the line drops fails at once.
+        let h = c.handle();
+        let ask = tokio::spawn(async move { h.peer("people", json!({})).await });
+        next(&mut ws).await;
+        drop(ws);
+        assert!(ask.await.unwrap().is_err());
+        // And with no line there is nothing to ask.
+        for _ in 0..200 {
+            if c.handle().state() != LineState::Online {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(c.handle().peer("people", json!({})).await.is_err());
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn an_undelivered_telegram_message_is_not_acknowledged() {
         let (url, hub) = fake_hub().await;
         let sink = Arc::new(Sink {
@@ -666,6 +948,7 @@ mod tests {
         let c = client((&url, ""), Arc::new(Exec::default()), sink.clone());
         let task = tokio::spawn(c.clone().run());
         let (_, mut ws) = hub.await.unwrap();
+        assert_eq!(next(&mut ws).await["type"], "sharing");
         ws.send(Message::Text(
             json!({"type": "telegram", "id": "m1", "text": "hi"})
                 .to_string()
