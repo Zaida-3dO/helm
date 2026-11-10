@@ -3,7 +3,7 @@
 // you, quiet chats the idle check thinks still need you (with its reason), chats that may be
 // stuck, and unread results. Mark addressed and Snooze take a chat out until new activity.
 
-import type { AttentionRow, AttentionSummary } from '../api/types.ts';
+import type { AttentionRow, AttentionSummary, MutedKind, MutedRow, TriageRow } from '../api/types.ts';
 
 export type InboxGroup = 'needsYou' | 'flagged' | 'stalled' | 'unread';
 
@@ -105,6 +105,27 @@ export function groupLabel(g: InboxGroup): string {
 export function flagFor(s: AttentionSummary | null, chatId: string, enabled = true): AttentionRow | null {
   if (!s || !enabled) return null;
   return s.flagged.find((r) => r.chatId === chatId) ?? null;
+}
+
+/** What the idle check judged about one listed chat: its priority chip, or null (an older verdict has none). */
+export function priorityFor(s: AttentionSummary | null, chatId: string): 'normal' | 'high' | null {
+  const p = s?.triage?.find((r) => r.chatId === chatId && !r.failed)?.priority;
+  return p === 'high' || p === 'normal' ? p : null;
+}
+
+/** Chats whose idle check gave up, each with a Retry button; not counted in the badge, and left out while the check is off. */
+export function failedChecks(s: AttentionSummary | null, enabled = true): TriageRow[] {
+  return s && enabled ? (s.triage ?? []).filter((r) => r.failed) : [];
+}
+
+/** Muted chats holding a flag, question, approval or plan: the inbox's collapsed "Muted" group. They raise no notice and are not counted. */
+export function mutedRows(s: AttentionSummary | null): MutedRow[] {
+  return s?.muted ?? [];
+}
+
+/** The word on a muted row. */
+export function mutedKindLabel(k: MutedKind): string {
+  return k === 'approval' ? 'Approval' : k === 'question' ? 'Question' : k === 'plan' ? 'Plan' : 'Flag';
 }
 
 /** The longest quiet time the idle check can wait, in minutes. */

@@ -482,7 +482,7 @@ impl AfkService {
     }
 
     fn deliver_one(&self, row: &store::DigestRow, template: Option<&str>, now: i64) -> bool {
-        let (sub_state, available, span, deferred) = match self.db.snapshot(|tx| {
+        let (sub_state, available, muted, span, deferred) = match self.db.snapshot(|tx| {
             let s = match &row.submission_id {
                 Some(id) => store::submission_state(tx, id)?,
                 None => None,
@@ -496,7 +496,13 @@ impl AfkService {
                 ),
                 None => vec![],
             };
-            Ok::<_, rusqlite::Error>((s, store::chat_available(tx, &row.chat_id)?, span, deferred))
+            Ok::<_, rusqlite::Error>((
+                s,
+                store::chat_available(tx, &row.chat_id)?,
+                digest::is_muted(tx, &row.chat_id),
+                span,
+                deferred,
+            ))
         }) {
             Ok(v) => v,
             Err(e) => {
@@ -510,7 +516,8 @@ impl AfkService {
                 .map_err(|e| log::warn!("AFK digest update failed: {e}"))
                 .is_ok()
         };
-        match digest::step(row.attempts, row.next_attempt_at, sub_state.as_deref(), now) {
+        let step = digest::step(row.attempts, row.next_attempt_at, sub_state.as_deref(), now);
+        match digest::for_muted(step, muted) {
             Step::Wait => false,
             Step::Mark(state, err) => mark(state, err),
             Step::Send { attempt } => {

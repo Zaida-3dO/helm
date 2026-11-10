@@ -699,6 +699,7 @@ pub(crate) mod tests {
             ("message_output_save", OpClass::Blocking),
             ("side_chat_resolve", OpClass::Maintenance),
             ("chat_mute", OpClass::Maintenance),
+            ("triage_retry", OpClass::Maintenance),
             ("attention_address", OpClass::Maintenance),
             ("attention_snooze", OpClass::Maintenance),
             ("chat_discard_untouched", OpClass::Maintenance),

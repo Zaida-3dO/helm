@@ -15,7 +15,8 @@
 //! | `attachment_discard` | maintenance | `{chatId, attachmentId}` → `{discarded}`: one unsent image or reference removed with its stored file |
 //! | `attachment_recover` | maintenance | `{chatId, messageId}` → `{images, refs}`: a sent message's attachments copied back to that unstaged set |
 //! | `side_chat_resolve` | maintenance | [`SideChatResolveArgs`] → `ChatRecord` (promote) / `null` (discard) |
-//! | `chat_mute` | maintenance | [`ChatMuteArgs`] → [`ChatRecord`] (user-only) |
+//! | `chat_mute` | maintenance | [`ChatMuteArgs`] → [`ChatRecord`] (the user's; a chat reaches it only through `app_create_chat` / `app_update_chat`, for chats it made; see [`crate::mute`]) |
+//! | `triage_retry` | maintenance | [`ChatIdArgs`] → `{queued}` (user-only: a chat whose idle check gave up is checked again; see [`crate::triage::retry`]) |
 //! | `attention_address` | maintenance | [`ChatIdArgs`] → `null` (out of the attention groups until new activity) |
 //! | `attention_snooze` | maintenance | [`AttentionSnoozeArgs`] → `null` (out until the time, or new activity) |
 //! | `unread_mark` | maintenance | [`ChatIdArgs`] → [`ChatRecord`] (a fresh token; re-marking replaces it) |
@@ -52,6 +53,7 @@ pub fn register(reg: &mut OpRegistry) {
         .blocking("attachment_put", OpClass::Maintenance, attachment_put)
         .blocking("side_chat_resolve", OpClass::Maintenance, side_chat_resolve)
         .blocking("chat_mute", OpClass::Maintenance, chat_mute)
+        .blocking("triage_retry", OpClass::Maintenance, triage_retry)
         .blocking("attention_address", OpClass::Maintenance, attention_address)
         .blocking("attention_snooze", OpClass::Maintenance, attention_snooze)
         .blocking(
@@ -448,14 +450,7 @@ fn chat_mute(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             if !exists(tx, &a.chat_id)? {
                 return Ok(false);
             }
-            if a.muted {
-                tx.execute(
-                    "INSERT OR IGNORE INTO chat_mutes(chat_id, muted_at) VALUES (?1, ?2)",
-                    params![a.chat_id, helm_core::now_ms()],
-                )?;
-            } else {
-                tx.execute("DELETE FROM chat_mutes WHERE chat_id = ?1", [&a.chat_id])?;
-            }
+            crate::mute::set_muted(tx, &a.chat_id, a.muted, helm_core::now_ms())?;
             Ok::<_, rusqlite::Error>(true)
         })
         .map_err(sql)?;
@@ -463,6 +458,20 @@ fn chat_mute(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         return Err(not_found());
     }
     to_value(&changed(ctx, &a.chat_id)?)
+}
+
+/// `triage_retry`: a chat whose idle check gave up is checked again at the next pass.
+fn triage_retry(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: ChatIdArgs = parse_args(args)?;
+    let queued = ctx
+        .services
+        .need::<Database>()?
+        .write(|tx| crate::triage::retry(tx, &a.chat_id))
+        .map_err(sql)?;
+    if let Some(rt) = ctx.services.get::<ChatRuntime>() {
+        rt.publish_attention();
+    }
+    Ok(serde_json::json!({ "queued": queued }))
 }
 
 /// The longest snooze.
@@ -582,12 +591,7 @@ pub fn record_completion(
              completed_at = excluded.completed_at, read = 0, dismissed = 0",
         params![chat_id, id, preview, now],
     )?;
-    let muted: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM chat_mutes WHERE chat_id = ?1)",
-        [chat_id],
-        |r| r.get(0),
-    )?;
-    if side.is_some() || muted {
+    if side.is_some() || crate::mute::is_muted(tx, chat_id)? {
         // Kept as the chat's read state, but never announced (no toast for a muted chat).
         return Ok(None);
     }

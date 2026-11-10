@@ -24,6 +24,8 @@ export type {
   MessageRow,
   MessageStatus,
   ModelCatalogue,
+  MutedKind,
+  MutedRow,
   RetryState,
   RunSummary as Run,
   SendAction,
@@ -36,6 +38,7 @@ export type {
   ThreadState,
   TitleState,
   TranscriptPage,
+  TriageRow,
   UnreadState,
 } from './generated/index.ts';
 

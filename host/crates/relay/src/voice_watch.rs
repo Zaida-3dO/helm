@@ -431,6 +431,8 @@ mod tests {
             unread: vec![],
             stalled,
             flagged,
+            muted: vec![],
+            triage: vec![],
             revision,
         }
     }

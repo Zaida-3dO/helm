@@ -9,7 +9,10 @@
 //! - The badge counts **chats**, each once, that have any of: a manual unread mark; an unread
 //!   completion while idle with no error; a pending blocking request (approval, question or plan,
 //!   from the waiting tracker: the live interactions). Stopped or failed chats count only when
-//!   manually marked. Nothing is muted yet.
+//!   manually marked. A muted chat counts for nothing and is in no group but `busy`; what it holds
+//!   (a live request or its agent's flag) is listed in `muted` so the user can still find it.
+//!   `triage` carries the idle check's priority for the chats it listed, and the chats it gave up
+//!   on; it is never counted.
 //! - `busy` counts starting, running and stopping chats.
 //! - The running, stalled and unread groups list at most [`MAX_ROWS`], newest activity first. The
 //!   needs-you and flagged groups are never cut short: each row there is a flag drawn on a
@@ -84,6 +87,15 @@ pub fn reason(kind: AttentionKind, marked: bool) -> &'static str {
         AttentionKind::Unread => "Finished; not read yet",
         AttentionKind::Stalled => "No output for a while; it may be stuck",
         AttentionKind::Triage => "May still need you",
+    }
+}
+
+/// What a muted chat's live request is, for the Muted group.
+fn muted_kind(k: AttentionKind) -> MutedKind {
+    match k {
+        AttentionKind::Approval => MutedKind::Approval,
+        AttentionKind::Plan => MutedKind::Plan,
+        _ => MutedKind::Question,
     }
 }
 
@@ -198,6 +210,12 @@ pub fn compute(
         unread: vec![],
         stalled: vec![],
         flagged: vec![],
+        muted: vec![],
+        triage: if triage_on {
+            crate::triage::rows(tx, now)?
+        } else {
+            vec![]
+        },
         revision,
     };
     for c in &cands {
@@ -208,9 +226,32 @@ pub fn compute(
                 s.running.push(row(c, AttentionKind::Running));
             }
         }
-        // A muted chat is out of the badge and every group but Running's busy count; a
-        // chat marked addressed or snoozed is out until something happens in it.
-        if c.muted || c.quiet {
+        // A chat marked addressed or snoozed is out until something happens in it.
+        if c.quiet {
+            continue;
+        }
+        // A muted chat is out of the badge and every group but Running's busy count. What it holds
+        // (a live request, or the question its agent flagged) is kept in the Muted group, where the
+        // user can find it; it raises no notice.
+        if c.muted {
+            let live = needs.get(&c.id).copied();
+            let held = match (live, &c.asked) {
+                (Some(k), _) => Some((muted_kind(k), reason(k, false).to_owned())),
+                (None, Some((question, why))) => Some((
+                    MutedKind::Flag,
+                    format!("Asked by the agent: {question} (Why it blocks the work: {why})"),
+                )),
+                (None, None) => None,
+            };
+            if let Some((kind, reason)) = held {
+                s.muted.push(MutedRow {
+                    chat_id: c.id.clone(),
+                    title: c.title.clone(),
+                    project: c.project.clone(),
+                    kind,
+                    reason,
+                });
+            }
             continue;
         }
         // A live request (approval, question, plan) comes first; else the agent's own flag.
@@ -465,6 +506,122 @@ mod tests {
             0,
             "decided: no longer waiting"
         );
+    }
+
+    #[test]
+    fn a_muted_chat_keeps_what_it_holds_out_of_the_badge_and_the_idle_check_lists_its_priority() {
+        let (_d, db) = temp_db();
+        let (flag, ask, plain, quiet) = (
+            chat(&db, "flagged"),
+            chat(&db, "asks"),
+            chat(&db, "plain"),
+            chat(&db, "quiet"),
+        );
+        for c in [&flag, &ask, &plain, &quiet] {
+            exec(
+                &db,
+                "INSERT INTO chat_mutes(chat_id, muted_at) VALUES (?1, 1)",
+                &[c],
+            );
+        }
+        exec(
+            &db,
+            "INSERT INTO chat_flags(chat_id, question, reason, priority, created_at) VALUES (?1, 'Ship it?', 'Blocked', 'normal', 1)",
+            &[&flag],
+        );
+        // An unread result on a muted chat is not held for the user: it is just kept as read state.
+        exec(
+            &db,
+            "INSERT INTO chat_completions(chat_id, id, completed_at) VALUES (?1, 'k1', 1)",
+            &[&plain],
+        );
+        let mut needs = Needs::new();
+        needs.insert(ask.clone(), AttentionKind::Approval);
+        let s = summary(&db, &needs);
+        assert_eq!(s.badge, 0, "muted chats raise nothing");
+        assert!(s.needs_you.is_empty() && s.unread.is_empty() && s.flagged.is_empty());
+        let held: Vec<(&str, MutedKind)> =
+            s.muted.iter().map(|r| (r.title.as_str(), r.kind)).collect();
+        assert_eq!(held.len(), 2, "{held:?}");
+        assert!(held.contains(&("flagged", MutedKind::Flag)));
+        assert!(held.contains(&("asks", MutedKind::Approval)));
+        assert!(s
+            .muted
+            .iter()
+            .any(|r| r.reason.contains("Asked by the agent: Ship it?")));
+        // Unmuting moves the same flag into Needs you, and the badge counts it.
+        exec(&db, "DELETE FROM chat_mutes WHERE chat_id = ?1", &[&flag]);
+        let s = summary(&db, &needs);
+        assert_eq!((s.badge, s.needs_you.len(), s.muted.len()), (1, 1, 1));
+        // Set aside, a muted chat's held request is out too.
+        exec(
+            &db,
+            "INSERT INTO chat_attention(chat_id, addressed_at) VALUES (?1, 9999999999999)",
+            &[&ask],
+        );
+        assert!(summary(&db, &needs).muted.is_empty());
+
+        // The idle check: a flagged chat carries its priority; a check that gave up is listed
+        // with Retry; a retry takes it off the list until it fails again.
+        let tri = |c: &str,
+                   needs: i64,
+                   failed: i64,
+                   tries: i64,
+                   reason: &str,
+                   priority: Option<&str>| {
+            db.write(|tx| {
+                tx.execute(
+                    "INSERT OR REPLACE INTO chat_triage(chat_id, stamp, checked_at, needs, reason, failed, tries, priority)
+                     SELECT id, MAX(updated_at, COALESCE((SELECT last_activity_at FROM chat_activity WHERE chat_id = ?1), 0)), 1, ?2, ?3, ?4, ?5, ?6
+                     FROM chats WHERE id = ?1",
+                    rusqlite::params![c, needs, reason, failed, tries, priority],
+                )
+            })
+            .unwrap();
+        };
+        tri(&plain, 1, 0, 1, "Tests were never run", Some("high"));
+        tri(
+            &quiet,
+            0,
+            1,
+            crate::triage::MAX_TRIES,
+            crate::triage::GAVE_UP,
+            None,
+        );
+        exec(
+            &db,
+            "DELETE FROM chat_mutes WHERE chat_id IN (?1, ?2)",
+            &[&plain, &quiet],
+        );
+        let s = summary(&db, &Needs::new());
+        let mut rows: Vec<(String, Option<String>, bool)> = s
+            .triage
+            .iter()
+            .map(|r| (r.title.clone(), r.priority.clone(), r.failed))
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            [
+                ("plain".to_owned(), Some("high".to_owned()), false),
+                ("quiet".to_owned(), None, true)
+            ]
+        );
+        assert_eq!(
+            s.flagged.len(),
+            1,
+            "a failed check is not a flag, and not in the badge"
+        );
+        db.write(|tx| {
+            assert!(crate::triage::retry(tx, &quiet)?);
+            assert!(
+                !crate::triage::retry(tx, &plain)?,
+                "only a failed check is retried"
+            );
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+        assert_eq!(summary(&db, &Needs::new()).triage.len(), 1);
     }
 
     #[test]

@@ -607,6 +607,8 @@ mod tests {
                 .collect(),
             stalled: vec![],
             flagged: vec![],
+            muted: vec![],
+            triage: vec![],
             revision: 1,
         }
     }

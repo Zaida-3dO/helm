@@ -20,8 +20,12 @@
 //!   is the chat's activity stamp: the later of its last update and its last worker output, so
 //!   new activity ends the stretch and clears the flag.
 //! - **Limits:** one check at a time, one chat per pass, a pass per maintenance tick.
-//! - **The verdict** carries a priority (none, normal or high) and a next step beside the reason;
-//!   the flag shows them as one line. A helper that gives neither (an older one) still works.
+//! - **The verdict** carries a priority (none, normal or high) and a next step beside the reason.
+//!   The priority is its own column (`chat_triage.priority`, shown as a chip); the flag's line is
+//!   the reason and the next step. A helper that gives neither (an older one) still works.
+//! - **A check that gave up** (all [`MAX_TRIES`] ended without a verdict) is listed in the
+//!   summary's `triage` rows as failed, with a Retry button: `triage_retry` ([`retry`]) resets its
+//!   tries so the next pass checks it again.
 //! - **A check** is claimed first (the row is written as failed), so a crash or a timeout never
 //!   replays it; the verdict is written only if the chat's stamp is still the one it was made
 //!   for and triage is still on. A helper failure leaves the claim and is retried
@@ -98,7 +102,30 @@ pub enum Priority {
     High,
 }
 
+/// `chat_triage` gained the priority column after the first table was written; older databases get
+/// it here.
+pub(crate) fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let has: bool = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('chat_triage') WHERE name = 'priority'",
+        [],
+        |r| r.get::<_, i64>(0).map(|n| n > 0),
+    )?;
+    if !has {
+        tx.execute("ALTER TABLE chat_triage ADD COLUMN priority TEXT", [])?;
+    }
+    Ok(())
+}
+
 impl Priority {
+    /// The stored and shown word; `None` has none (a chat that does not need you has no priority).
+    pub fn as_str(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Normal => Some("normal"),
+            Self::High => Some("high"),
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "none" => Some(Self::None),
@@ -130,15 +157,11 @@ impl Verdict {
     }
 }
 
-/// The one line the flag shows: the reason, led by `High priority:` when it is, and followed by
-/// the next step when there is one.
+/// The one line the flag shows: the reason, followed by the next step when there is one. The
+/// priority is not in the line; it is stored beside it.
 pub fn display_reason(v: &Verdict) -> String {
     let cut = |s: &str| -> String { s.chars().take(MAX_REASON_CHARS).collect() };
-    let mut out = String::new();
-    if v.priority == Some(Priority::High) {
-        out.push_str("High priority: ");
-    }
-    out.push_str(&cut(&v.reason));
+    let mut out = cut(&v.reason);
     let step = cut(v.next_step.trim());
     if !step.is_empty() {
         out.push_str(" Next: ");
@@ -356,7 +379,7 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
         tx.execute(
             "INSERT INTO chat_triage(chat_id, stamp, checked_at, needs, reason, failed, tries) VALUES (?1, ?2, ?3, 0, '', 1, 1)
              ON CONFLICT(chat_id) DO UPDATE SET tries = CASE WHEN stamp = ?2 THEN tries + 1 ELSE 1 END,
-                 stamp = ?2, checked_at = ?3, needs = 0, reason = '', failed = 1",
+                 stamp = ?2, checked_at = ?3, needs = 0, reason = '', priority = NULL, failed = 1",
             params![c.id, c.stamp, now],
         )?;
         let mut job = json!({
@@ -389,14 +412,17 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
         .await;
         match out {
             Ok(Ok(Ok(verdict))) => finish(&sh, &chat, stamp, &verdict),
-            other => log::warn!(
-                "chat {chat}: the idle check did not finish ({})",
-                match other {
-                    Ok(Ok(Err(e))) => e,
-                    Err(_) => "timed out".into(),
-                    _ => "the helper did not run".into(),
-                }
-            ),
+            other => {
+                log::warn!(
+                    "chat {chat}: the idle check did not finish ({})",
+                    match other {
+                        Ok(Ok(Err(e))) => e,
+                        Err(_) => "timed out".into(),
+                        _ => "the helper did not run".into(),
+                    }
+                );
+                gave_up(&sh, &chat, stamp);
+            }
         }
         sh.triage.lock().unwrap_or_else(|p| p.into_inner()).running = false;
     });
@@ -414,12 +440,18 @@ fn finish(sh: &Arc<Shared>, chat_id: &str, stamp: i64, verdict: &Verdict) {
                 return Ok(false);
             }
             let n = tx.execute(
-                "UPDATE chat_triage SET needs = ?1, reason = ?2, failed = 0
+                "UPDATE chat_triage SET needs = ?1, reason = ?2, priority = ?5, failed = 0
                  WHERE chat_id = ?3 AND stamp = ?4
                    AND (SELECT archived FROM chats WHERE id = ?3) = 0
                    AND stamp = (SELECT MAX(c.updated_at, COALESCE(a.last_activity_at, 0)) FROM chats c
                                 LEFT JOIN chat_activity a ON a.chat_id = c.id WHERE c.id = ?3)",
-                params![needs && !reason.is_empty(), reason, chat_id, stamp],
+                params![
+                    needs && !reason.is_empty(),
+                    reason,
+                    chat_id,
+                    stamp,
+                    verdict.priority.and_then(Priority::as_str)
+                ],
             )?;
             Ok::<_, rusqlite::Error>(n > 0)
         })
@@ -427,6 +459,69 @@ fn finish(sh: &Arc<Shared>, chat_id: &str, stamp: i64, verdict: &Verdict) {
     if wrote {
         crate::attention::publish(sh);
     }
+}
+
+/// What a check that gave up says in its row, so the summary can list it with a Retry button.
+pub(crate) const GAVE_UP: &str = "The idle check could not finish for this chat.";
+
+/// A check ended without a verdict: note it on the claimed row (its `failed` flag is already set),
+/// unless the chat has moved on and the claim is no longer for its current stretch.
+fn gave_up(sh: &Arc<Shared>, chat_id: &str, stamp: i64) {
+    let wrote = sh
+        .db
+        .write(|tx| {
+            tx.execute(
+                "UPDATE chat_triage SET reason = ?1 WHERE chat_id = ?2 AND stamp = ?3 AND failed = 1",
+                params![GAVE_UP, chat_id, stamp],
+            )
+        })
+        .is_ok_and(|n| n > 0);
+    if wrote {
+        crate::attention::publish(sh);
+    }
+}
+
+/// `triage_retry`: queue a check that gave up. Its tries are reset, so the next pass checks the
+/// chat again; false when the chat has no failed check.
+pub fn retry(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<bool> {
+    Ok(tx.execute(
+        "UPDATE chat_triage SET tries = 0, checked_at = 0, reason = '' WHERE chat_id = ?1 AND failed = 1",
+        [chat_id],
+    )? > 0)
+}
+
+/// The summary's `triage` rows: chats listed because of the idle check, with the check's priority,
+/// and chats whose check gave up (all [`MAX_TRIES`] without a verdict, for the quiet stretch they
+/// are in). Chats that are archived, muted, side chats or set aside are left out.
+pub fn rows(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<Vec<TriageRow>> {
+    let mut st = tx.prepare(concat!(
+        "SELECT c.id, c.title, COALESCE(p.name, ''), t.priority, t.failed \
+         FROM chat_triage t JOIN chats c ON c.id = t.chat_id JOIN projects p ON p.id = c.project_id \
+         WHERE c.archived = 0 AND c.side_source_id IS NULL \
+           AND NOT EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id) \
+           AND NOT ",
+        crate::quiet_sql!(),
+        " AND t.stamp = MAX(c.updated_at, COALESCE((SELECT a.last_activity_at FROM chat_activity a WHERE a.chat_id = c.id), 0)) \
+           AND ((t.needs = 1 AND t.failed = 0) OR (t.failed = 1 AND t.reason <> '' AND t.tries >= ?2)) \
+         ORDER BY c.updated_at DESC, c.id"
+    ))?;
+    let out = st
+        .query_map(params![now, MAX_TRIES], |r| {
+            let title: String = r.get(1)?;
+            Ok(TriageRow {
+                chat_id: r.get(0)?,
+                title: if title.trim().is_empty() {
+                    "Untitled".into()
+                } else {
+                    title
+                },
+                project: r.get(2)?,
+                priority: r.get(3)?,
+                failed: r.get(4)?,
+            })
+        })?
+        .collect();
+    out
 }
 
 #[cfg(test)]
@@ -612,7 +707,16 @@ mod tests {
         assert_eq!(said(None, "It failed.", ""), "It failed.");
         assert_eq!(
             said(Some(Priority::High), "It failed.", " Rerun the test. "),
-            "High priority: It failed. Next: Rerun the test."
+            "It failed. Next: Rerun the test.",
+            "the priority is its own field, not part of the line"
+        );
+        assert_eq!(
+            (
+                Priority::High.as_str(),
+                Priority::Normal.as_str(),
+                Priority::None.as_str()
+            ),
+            (Some("high"), Some("normal"), None)
         );
         assert_eq!(said(Some(Priority::Normal), "Ask.", ""), "Ask.");
         assert_eq!(Priority::parse(" High "), Some(Priority::High));

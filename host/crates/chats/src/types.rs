@@ -193,6 +193,42 @@ pub struct AttentionRow {
     pub reason: String,
 }
 
+/// What a muted chat is holding for the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum MutedKind {
+    Approval,
+    Question,
+    Plan,
+    /// A question its agent flagged with `app_flag_attention`.
+    Flag,
+}
+
+/// A muted chat with something waiting: listed in the inbox's Muted group, never counted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MutedRow {
+    pub chat_id: String,
+    pub title: String,
+    pub project: String,
+    pub kind: MutedKind,
+    /// What it is waiting for, in plain words.
+    pub reason: String,
+}
+
+/// What the idle check holds about a chat it listed or gave up on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TriageRow {
+    pub chat_id: String,
+    pub title: String,
+    pub project: String,
+    /// `normal` or `high` when the check judged the chat needs you; otherwise `null`.
+    pub priority: Option<String>,
+    /// All its tries ended without a verdict: the inbox offers Retry.
+    pub failed: bool,
+}
+
 /// The one attention summary: the badge count (each chat once), the
 /// busy count, and at most 8 rows per group. Published as an `attention` event on every
 /// change and read by `attention_get`.
@@ -208,6 +244,13 @@ pub struct AttentionSummary {
     pub stalled: Vec<AttentionRow>,
     /// Quiet chats the idle check thinks still need you; the reason is the check's own.
     pub flagged: Vec<AttentionRow>,
+    /// Muted chats with a flag, question, approval or plan waiting. Kept so the user can find
+    /// them; they raise nothing and are not in the badge.
+    #[serde(default)]
+    pub muted: Vec<MutedRow>,
+    /// The idle check's priority for chats it listed, and the chats it gave up on.
+    #[serde(default)]
+    pub triage: Vec<TriageRow>,
     #[ts(type = "number")]
     pub revision: i64,
 }

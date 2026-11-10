@@ -12,7 +12,7 @@ import { projectOps } from '../api/projects.ts';
 import { panelStore, togglePanel } from '../panel/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, layers, TextInput, toast, useBinding, useHint } from '../ui/index.ts';
-import { IconArchive, IconChevronRight, IconFolder, IconFork, IconPanelLeft, IconPanelRight, IconPin, IconRestore } from '../ui/icons.tsx';
+import { IconArchive, IconChevronRight, IconFolder, IconFork, IconMute, IconPanelLeft, IconPanelRight, IconPin, IconRestore } from '../ui/icons.tsx';
 import { TitleSuggestions } from '../chat/TitleSuggestions.tsx';
 import { sidebarLayout } from '../shell/layout.ts';
 import { SidebarActions } from '../sidebar/actions.ts';
@@ -152,6 +152,12 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
             >
               {chat?.title ?? (chatId ? '' : 'New chat')}
             </button>
+          )}
+          {/* A muted chat says so beside its title: it raises no notices and no flags. The chat menu's Mute / Unmute chat changes it. */}
+          {chat?.muted && (
+            <span className="crumb-muted" data-testid="topbar-muted" role="img" aria-label="Muted: no notices or flags" title="Muted: no notices or flags">
+              <IconMute size={13} />
+            </span>
           )}
           {/* A busy chat on a local model server says which half of its wait it is in: queued
               behind other work, or being answered. The model server answers one request at a time. */}

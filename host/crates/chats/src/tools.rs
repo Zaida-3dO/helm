@@ -46,6 +46,9 @@ const LINKS: &str = " Each chat in the answer has a link field: when you point t
 /// What the creating agent should put at the end of a first message, and do afterwards.
 const REPORT_BACK: &str = " The other chat does not report back by itself: end your message with an explicit report instruction saying what to report, when (on finishing, when blocked, when it finds something that changes the plan) and that the report goes to your own chat id with app_send_message; then end your turn. Its report arrives here as a new message. If it might finish or fail without reporting, also declare app_wait_for with kind chat_idle on it as a backstop.";
 
+/// What `app_create_chat` says about `muted`: the rule for when an agent mutes the chat it makes.
+const MUTED_ARG: &str = "Set muted for internal chats that another agent creates, manages and archives (crews, reviewers, planners, helpers): they never notify the user or raise flags. Leave it unset for any chat the user is expected to read or talk to.";
+
 const EXPLICIT: &str = " Act only when the user explicitly asked for this change; confirm an ambiguous target with app_list_chats first; report what changed. If the reply is lost, check the current state before trying again and never retry automatically.";
 
 fn obj(props: Value, required: &[&str]) -> Value {
@@ -104,7 +107,7 @@ fn chat_meta(tx: &Transaction<'_>, boards: &Boards, id: &str) -> rusqlite::Resul
             &format!(
                 "SELECT c.id, c.title, c.project_id, p.path, c.archived, c.status, c.created_at,
                         c.updated_at, c.harness, {}, c.thinking, c.parent_chat_id, c.pinned,
-                        c.side_source_id
+                        c.side_source_id, EXISTS(SELECT 1 FROM chat_mutes m WHERE m.chat_id = c.id)
                  FROM chats c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
                 crate::local::MODEL_ID_SQL
             ),
@@ -127,6 +130,7 @@ fn chat_meta(tx: &Transaction<'_>, boards: &Boards, id: &str) -> rusqlite::Resul
                     "parentChatId": r.get::<_, Option<String>>(11)?,
                     "pinned": r.get::<_, bool>(12)?,
                     "sideChatOf": r.get::<_, Option<String>>(13)?,
+                    "muted": r.get::<_, bool>(14)?,
                 }))
             },
         )
@@ -170,9 +174,11 @@ fn chat_profile(tx: &Transaction<'_>, id: &str) -> Option<(String, String)> {
 /// the chat records none (an older row, or a database without the device table).
 fn chat_device(tx: &Transaction<'_>, id: &str) -> Option<(String, Option<String>)> {
     let host: String = tx
-        .query_row("SELECT host_device_id FROM chats WHERE id = ?1", [id], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT host_device_id FROM chats WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
         .ok()?;
     let this = this_device(tx);
     let host = if host.is_empty() {
@@ -220,9 +226,7 @@ fn owner_scope(tx: &Transaction<'_>, arg: Option<&str>, caller: &str) -> OwnerSc
             .ok()
             .flatten()
             .map_or(OwnerScope::Nobody, OwnerScope::Profile),
-        None => {
-            chat_profile(tx, caller).map_or(OwnerScope::Everyone, |p| OwnerScope::Profile(p.0))
-        }
+        None => chat_profile(tx, caller).map_or(OwnerScope::Everyone, |p| OwnerScope::Profile(p.0)),
     }
 }
 
@@ -663,6 +667,75 @@ fn parent_on(
     })
 }
 
+/// The chat a new chat is placed as: a side chat is not shown in the sidebar, so it starts chats
+/// as the chat it was opened from.
+fn acting_chat(tx: &Transaction<'_>, caller: &str) -> rusqlite::Result<String> {
+    Ok(match chat_row(tx, caller)? {
+        Some((_, _, Some(source))) => source,
+        _ => caller.to_owned(),
+    })
+}
+
+/// Whether `caller` has to name the board for a new chat: it is shown on the default board (where
+/// chats with no other home go, so "this chat's board" says nothing about the new chat's), or the
+/// user is talking to it from Telegram or the voice line (no board is on their screen).
+fn must_name_board(tx: &Transaction<'_>, boards: &Boards, caller: &str) -> rusqlite::Result<bool> {
+    let caller = acting_chat(tx, caller)?;
+    let own = boards.chat_board(tx, &caller)?;
+    if own.is_some() && own == boards.default_board(tx)? {
+        return Ok(true);
+    }
+    // The user's latest message to this chat: where the conversation is happening.
+    let origin: Option<String> = tx
+        .query_row(
+            "SELECT m.origin FROM submissions s JOIN submission_meta m ON m.submission_id = s.id
+             WHERE s.chat_id = ?1 AND m.origin NOT IN ('other_chat', 'app', 'schedule')
+             ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1",
+            [&caller],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(matches!(origin.as_deref(), Some("telegram" | "voice")))
+}
+
+/// The open boards as "name (id): description" lines, at most 20, for the refusal that asks an
+/// agent to pick one. Empty when the project list cannot be read here.
+async fn open_boards(ctx: &ToolCtx) -> Vec<String> {
+    let Ok(all) = ctx
+        .op(
+            "project_list",
+            json!({"includeArchived": false, "includeClosed": false}),
+        )
+        .await
+    else {
+        return vec![];
+    };
+    all.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| {
+            p["kind"] == "board"
+                && p["archived"] != true
+                && p["closed"] != true
+                && p["board"]["stale"] != true
+        })
+        .take(20)
+        .map(|p| {
+            let line = format!(
+                "- {} (projectId {})",
+                p["name"].as_str().unwrap_or("Untitled"),
+                p["id"].as_str().unwrap_or("")
+            );
+            match p["board"]["headline"].as_str().map(str::trim) {
+                Some(d) if !d.is_empty() => {
+                    format!("{line}: {}", d.chars().take(160).collect::<String>())
+                }
+                _ => line,
+            }
+        })
+        .collect()
+}
+
 /// Where `app_create_chat` puts a new chat, settled before anything is made.
 struct Placement {
     board: String,
@@ -682,11 +755,7 @@ fn place(
     folder: Option<&str>,
     parent: Option<Option<String>>,
 ) -> rusqlite::Result<Result<Placement, ToolError>> {
-    // A side chat is not shown in the sidebar: it starts chats as the chat it was opened from.
-    let caller = match chat_row(tx, caller)? {
-        Some((_, _, Some(source))) => source,
-        _ => caller.to_owned(),
-    };
+    let caller = acting_chat(tx, caller)?;
     let board = match project {
         Some(p) => match board_arg(tx, boards, p)? {
             Ok(b) => b,
@@ -809,8 +878,29 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
                 .to_owned(),
         )),
     };
+    let muted = match a.get("muted") {
+        None | Some(Value::Null) => false,
+        Some(m) => m
+            .as_bool()
+            .ok_or_else(|| refuse("muted must be true or false."))?,
+    };
     let boards = Boards::of(&ctx.services);
     let db = db(&ctx)?;
+    if str_arg(&a, "projectId").is_none()
+        && db
+            .snapshot(|tx| must_name_board(tx, &boards, &ctx.caller_chat_id))
+            .map_err(|e| ToolError::maybe(e.to_string()))?
+    {
+        let mut m = String::from(
+            "Pass projectId: this chat is on the default board, or the user is talking to it from Telegram or by voice, so there is no board of its own to default to.",
+        );
+        let open = open_boards(&ctx).await;
+        if !open.is_empty() {
+            m.push_str(" The open boards are:\n");
+            m.push_str(&open.join("\n"));
+        }
+        return Err(refuse(m));
+    }
     let placed = db
         .snapshot(|tx| {
             place(
@@ -836,17 +926,25 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
     }
     let chat = ctx.op("chat_create", args).await?;
     let id = chat["id"].as_str().unwrap_or_default().to_owned();
-    if let Some(p) = &placed.parent {
-        db.write(|tx| {
+    // The chat that makes a chat is the only one besides the user that may mute or unmute it.
+    db.write(|tx| {
+        crate::mute::set_created_by(tx, &id, &ctx.caller_chat_id)?;
+        if let Some(p) = &placed.parent {
             tx.execute(
                 "UPDATE chats SET parent_chat_id = ?1 WHERE id = ?2",
                 params![p, id],
-            )
-        })
-        .map_err(|e| ToolError::maybe(e.to_string()))?;
-    }
+            )?;
+        }
+        Ok::<_, rusqlite::Error>(())
+    })
+    .map_err(|e| ToolError::maybe(e.to_string()))?;
     if let Some(t) = title {
         ctx.op("chat_rename", json!({"chatId": id, "title": t}))
+            .await?;
+    }
+    // Muted before its first message, so nothing the new chat does before then is announced.
+    if muted {
+        ctx.op("chat_mute", json!({"chatId": id, "muted": true}))
             .await?;
     }
     if let Err(e) = send_framed(&ctx, &id, &body) {
@@ -885,10 +983,23 @@ async fn update_chat(ctx: ToolCtx, a: Value) -> ToolResult {
             )));
         }
     }
-    if a.get("muted").is_some() {
-        return Err(refuse(
-            "Muting a chat is the user's call, so a chat cannot do it; ask the user to mute it from the sidebar.",
-        ));
+    // Only the chat that made this chat, or the user, may mute or unmute it.
+    let muted = match a.get("muted") {
+        None => None,
+        Some(m) => Some(
+            m.as_bool()
+                .ok_or_else(|| refuse("muted must be true or false."))?,
+        ),
+    };
+    if muted.is_some() {
+        let by = db(&ctx)?
+            .snapshot(|tx| crate::mute::created_by(tx, &id))
+            .map_err(|e| ToolError::maybe(e.to_string()))?;
+        if by.as_deref() != Some(ctx.caller_chat_id.as_str()) {
+            return Err(refuse(
+                "Only the chat that created this chat, or the user, can mute it; ask the user to mute it from the chat's menu.",
+            ));
+        }
     }
     let m = meta(&ctx, &id)?;
     if m["archived"] == true {
@@ -942,6 +1053,10 @@ async fn update_chat(ctx: ToolCtx, a: Value) -> ToolResult {
             }
         }
         ctx.op("chat_set_model", args).await?;
+    }
+    if let Some(muted) = muted {
+        ctx.op("chat_mute", json!({"chatId": id, "muted": muted}))
+            .await?;
     }
     meta(&ctx, &id)
 }
@@ -1038,9 +1153,15 @@ fn flag_attention(ctx: &ToolCtx, a: Value, limits: &crate::flags::FlagLimits) ->
     let now = helm_core::now_ms();
     let chat = ctx.caller_chat_id.clone();
     limits.check(&chat, Instant::now()).map_err(refuse)?;
-    let filed = rt
+    let (filed, muted) = rt
         .db()
-        .write(|tx| crate::flags::file(tx, &chat, &question, &reason, priority, now))
+        .write(|tx| {
+            Ok::<_, rusqlite::Error>(
+                crate::flags::file(tx, &chat, &question, &reason, priority, now)?
+                    .map(|f| crate::mute::is_muted(tx, &chat).map(|m| (f, m)))
+                    .transpose()?,
+            )
+        })
         .map_err(|e| ToolError::maybe(e.to_string()))?
         .ok_or_else(|| refuse("This chat no longer exists."))?;
     // A repeat of the open flag changes nothing, so it is not counted.
@@ -1048,8 +1169,16 @@ fn flag_attention(ctx: &ToolCtx, a: Value, limits: &crate::flags::FlagLimits) ->
         limits.record(&chat, Instant::now());
         rt.publish_attention();
     }
+    if muted {
+        // Kept, but nobody is told: the summary lists it in the Muted group, not in Needs you.
+        return Ok(
+            json!({"status": filed.as_str(), "recorded": true, "muted": true, "note": MUTED_FLAG_NOTE}),
+        );
+    }
     Ok(json!({"status": filed.as_str()}))
 }
+
+const MUTED_FLAG_NOTE: &str = "This chat is muted, so the user is not notified; the flag stays in the chat and in the inbox's Muted group.";
 
 /// Register the chat tools.
 pub fn register_host_tools(r: &mut HostToolRegistry) {
@@ -1058,7 +1187,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_this_chat",
-            format!("This chat's own details: its chatId (give it to a chat you start so it can report back to you with app_send_message), title, the board it is shown on (projectId, projectName), the folder it runs in, its parent chat (parentChatId), model and effort, the profile it belongs to (profileId, profileName) and the device it runs on (deviceName).{LINKS}"),
+            format!("This chat's own details: its chatId (give it to a chat you start so it can report back to you with app_send_message), title, the board it is shown on (projectId, projectName), the folder it runs in, its parent chat (parentChatId), model and effort, whether it is muted (muted), the profile it belongs to (profileId, profileName) and the device it runs on (deviceName).{LINKS}"),
             obj(json!({}), &[]),
         ),
         this_chat,
@@ -1127,7 +1256,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::write(
             "app_create_chat",
-            format!("Start a new chat on a board and send it a first message (framed like app_send_message). projectId is the board to show it on: a board's id from app_list_projects, or the projectId in a chat's details; it defaults to this chat's own board, and a folder project's id is refused. Your own chat id, for the new chat to report back to, is the chatId app_this_chat returns. The chat runs in the board's folder, or in folder (an absolute path) when you name another. It nests under this chat by default; pass parentChatId to nest it under another chat on the same board, or null for top level. Chats nest at most three deep: a new chat under a chat at the deepest level goes beside it instead (under that chat's parent). Omitted model and effort use the new-chat defaults. model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>), whichever provider this chat itself runs on.{REPORT_BACK}{LINKS}{EXPLICIT}"),
+            format!("Start a new chat on a board and send it a first message (framed like app_send_message). projectId is the board to show it on: a board's id from app_list_projects, or the projectId in a chat's details; it defaults to this chat's own board, and a folder project's id is refused. When this chat is on the default board, or the user is talking to it from Telegram or by voice, projectId is required and the refusal lists the open boards. {MUTED_ARG} You made the chat, so you may unmute it later (or mute it) with app_update_chat; the user can always change it. Your own chat id, for the new chat to report back to, is the chatId app_this_chat returns. The chat runs in the board's folder, or in folder (an absolute path) when you name another. It nests under this chat by default; pass parentChatId to nest it under another chat on the same board, or null for top level. Chats nest at most three deep: a new chat under a chat at the deepest level goes beside it instead (under that chat's parent). Omitted model and effort use the new-chat defaults. model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>), whichever provider this chat itself runs on.{REPORT_BACK}{LINKS}{EXPLICIT}"),
             obj(
                 json!({
                     "projectId": {"type": "string", "description": "The board to show the chat on; defaults to this chat's board."},
@@ -1136,7 +1265,8 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                     "title": {"type": "string", "minLength": 1, "maxLength": 512},
                     "parentChatId": {"type": ["string", "null"], "minLength": 36, "maxLength": 36, "description": "Defaults to this chat; null for top level."},
                     "model": {"type": "string", "description": "A Claude model id (sonnet, opus, ...) or a local model id (local/<server>/<model>)."},
-                    "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}
+                    "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
+                    "muted": {"type": "boolean", "description": MUTED_ARG}
                 }),
                 &["message"],
             ),
@@ -1162,7 +1292,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .async_tool(
         ToolSpec::write(
             "app_update_chat",
-            format!("Rename, pin or unpin a chat, change its model or effort (from its next turn), show it on another board (projectId: a board's id, never a folder project's; where it runs does not change), or nest it under another chat on that board (parentChatId) or make it top level (parentChatId null). model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>): a chat can move between its current provider and the other at any time and the conversation carries over. Say why in one sentence (reason) and it shows in the transcript. Muting, the harness and the provider are the user's to change.{EXPLICIT}"),
+            format!("Rename, pin or unpin a chat, change its model or effort (from its next turn), show it on another board (projectId: a board's id, never a folder project's; where it runs does not change), or nest it under another chat on that board (parentChatId) or make it top level (parentChatId null). model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>): a chat can move between its current provider and the other at any time and the conversation carries over. Say why in one sentence (reason) and it shows in the transcript. muted mutes or unmutes a chat, and only for a chat you created with app_create_chat (a muted chat never notifies the user or raises flags); the user can always change it. The harness and the provider are the user's to change.{EXPLICIT}"),
             obj(
                 json!({
                     "chatId": id,
@@ -1208,7 +1338,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .blocking(
         ToolSpec::write(
             "app_flag_attention",
-            "Flag this chat for the user's attention: file one question in Needs attention, with the reason it blocks your work. Use it only when you cannot go on without the user (a decision, a credential, a choice only they can make); never for progress or finished work. One flag per chat: filing again replaces it. It clears when the user next writes in this chat or marks it addressed. At most 6 per hour. Then end your turn instead of waiting.",
+            "Flag this chat for the user's attention: file one question in Needs attention, with the reason it blocks your work. Use it only when you cannot go on without the user (a decision, a credential, a choice only they can make); never for progress or finished work. One flag per chat: filing again replaces it. It clears when the user next writes in this chat or marks it addressed. At most 6 per hour. In a muted chat the flag is only recorded: the user is not notified and finds it in the inbox's Muted group. Then end your turn instead of waiting.",
             obj(
                 json!({
                     "question": {"type": "string", "minLength": 1, "maxLength": 500},
@@ -1462,8 +1592,16 @@ mod tests {
             (&a, json!({}), vec![a.clone()]),
             (&b, json!({}), vec![b.clone()]),
             (&b, json!({"profile": "any"}), both.clone()),
-            (&a, json!({"profile": "any", "device": "DESK"}), both.clone()),
-            (&a, json!({"profile": "any", "device": "dev-1"}), both.clone()),
+            (
+                &a,
+                json!({"profile": "any", "device": "DESK"}),
+                both.clone(),
+            ),
+            (
+                &a,
+                json!({"profile": "any", "device": "dev-1"}),
+                both.clone(),
+            ),
             (&a, json!({"profile": "any", "device": "any"}), both.clone()),
             (&a, json!({"profile": "any", "device": "Laptop"}), vec![]),
         ] {
@@ -1480,7 +1618,14 @@ mod tests {
             )
         })
         .unwrap();
-        let r = call(&h, &t, &a, "app_list_chats", json!({"includeCurrent": true})).await;
+        let r = call(
+            &h,
+            &t,
+            &a,
+            "app_list_chats",
+            json!({"includeCurrent": true}),
+        )
+        .await;
         assert_eq!(ids_of(&r), both);
     }
 
@@ -1489,9 +1634,43 @@ mod tests {
     struct FakeBoards {
         boards: Mutex<Vec<BoardSummary>>,
         groups: Mutex<std::collections::HashMap<String, String>>,
+        /// The default board's id, while the test names one.
+        default: Mutex<Option<String>>,
+    }
+
+    /// The projects crate answers `project_list`; here a fixed list of boards does.
+    struct Listing(Arc<helm_ipc::Dispatcher>);
+
+    impl helm_hosttools::OpInvoker for Listing {
+        fn invoke<'a>(
+            &'a self,
+            op: &'a str,
+            args: Value,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Value, helm_ipc::ApiError>> + Send + 'a>,
+        > {
+            if op == "project_list" {
+                return Box::pin(async {
+                    Ok(json!([
+                        {"id": "b-home", "kind": "board", "name": "Home", "archived": false, "closed": false,
+                         "board": {"headline": "The main work", "stale": false}},
+                        {"id": "b-other", "kind": "board", "name": "Other", "archived": false, "closed": false,
+                         "board": {"headline": null, "stale": false}},
+                        {"id": "b-old", "kind": "board", "name": "Old", "archived": true, "closed": false,
+                         "board": {"headline": "Retired", "stale": false}},
+                        {"id": "f-1", "kind": "folder", "name": "Folder", "archived": false, "closed": false, "board": null}
+                    ]))
+                });
+            }
+            self.0.invoke(op, args)
+        }
     }
 
     impl crate::seams::ProjectGate for FakeBoards {
+        fn default_board(&self, _tx: &Transaction<'_>) -> rusqlite::Result<Option<String>> {
+            Ok(self.default.lock().unwrap().clone())
+        }
+
         fn project_archived(&self, _tx: &Transaction<'_>, _id: &str) -> rusqlite::Result<bool> {
             Ok(false)
         }
@@ -1734,6 +1913,60 @@ mod tests {
              WHERE s.chat_id = '{c1}' AND m.origin = 'other_chat'"
         ));
         assert_eq!(n, ["1"]);
+        // A chat made muted is muted before its first message, and records its creator; one made
+        // without `muted` is not muted. `muted` must be a boolean.
+        let quiet_crew = id(create(&h, &t, &a, json!({"muted": true})).await);
+        assert_eq!(
+            h.col("SELECT chat_id FROM chat_mutes"),
+            [quiet_crew.clone()]
+        );
+        assert_eq!(made(&quiet_crew, "c.created_by_chat"), a);
+        assert_eq!(made(&c1, "c.created_by_chat"), a);
+        let r = create(&h, &t, &a, json!({"muted": "yes"})).await;
+        assert_eq!(r["ok"], false, "muted must be a boolean: {r}");
+        // Where the user is on the default board, or talking by Telegram, the board must be
+        // named, and the refusal lists the open boards (never a folder, an archived board).
+        let mut r = HostToolRegistry::new();
+        register_host_tools(&mut r);
+        let listing = HostTools::new(Arc::new(r)).with_ops(Arc::new(Listing(h.api.clone())));
+        *fake.default.lock().unwrap() = Some("b-home".into());
+        let r = create(&h, &listing, &a, json!({})).await;
+        let said = r["error"].as_str().unwrap();
+        assert!(said.contains("Pass projectId"), "{r}");
+        assert!(
+            said.contains("- Home (projectId b-home): The main work"),
+            "{r}"
+        );
+        assert!(said.contains("- Other (projectId b-other)"), "{r}");
+        assert!(!said.contains("Old") && !said.contains("Folder"), "{r}");
+        let r = create(&h, &listing, &a, json!({"projectId": "b-home"})).await;
+        assert_eq!(r["ok"], true, "{r}");
+        *fake.default.lock().unwrap() = None;
+        h.db
+            .write(|tx| {
+                tx.execute_batch(&format!(
+                    "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('s-tg', '{a}', 'hi', 'complete', 90000);
+                     INSERT INTO submission_meta(submission_id, origin) VALUES ('s-tg', 'telegram');"
+                ))
+            })
+            .unwrap();
+        let r = create(&h, &listing, &a, json!({})).await;
+        assert!(
+            r["error"].as_str().unwrap().contains("Pass projectId"),
+            "{r}"
+        );
+        let r = create(&h, &listing, &a, json!({"projectId": "b-home"})).await;
+        assert_eq!(r["ok"], true, "{r}");
+        h.db
+            .write(|tx| {
+                tx.execute_batch(&format!(
+                    "INSERT INTO submissions(id, chat_id, text, state, created_at) VALUES ('s-ty', '{a}', 'back', 'complete', 90001);
+                     INSERT INTO submission_meta(submission_id, origin) VALUES ('s-ty', 'typed');"
+                ))
+            })
+            .unwrap();
+        let r = create(&h, &listing, &a, json!({})).await;
+        assert_eq!(r["ok"], true, "typing at the desk again: {r}");
         // app_list_chats filters by board.
         let r = call(
             &h,
@@ -1772,7 +2005,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn update_chat_regroups_and_nests_in_one_step_and_leaves_muting_to_the_user() {
+    async fn update_chat_regroups_and_nests_in_one_step_and_mutes_only_what_the_caller_made() {
         let (h, fake) = gated();
         let stub = Arc::new(Organize {
             inner: h.api.clone(),
@@ -1817,7 +2050,12 @@ mod tests {
                 "",
                 None,
             ),
-            (json!({"muted": true}), "user's call", None),
+            // Not made by the caller: only the creator, or the user, may mute it.
+            (
+                json!({"muted": true}),
+                "Only the chat that created this chat, or the user, can mute it",
+                None,
+            ),
             (json!({"harness": "codex"}), "cannot be changed", None),
             (json!({"parentChatId": "short"}), "parentChatId", None),
         ];
@@ -1851,6 +2089,37 @@ mod tests {
             h.col(&format!("SELECT title FROM chats WHERE id = '{a}'")),
             ["Renamed"]
         );
+        // The chat that created `a` may mute and unmute it; a third chat may not; `app_this_chat`
+        // reports it.
+        let c = h.create().await;
+        h.db.write(|tx| crate::mute::set_created_by(tx, &a, &b))
+            .unwrap();
+        let mute = |who: &str, muted: bool| {
+            let (who, a) = (who.to_owned(), a.clone());
+            let (h, t) = (&h, &t);
+            async move {
+                call(
+                    h,
+                    t,
+                    &who,
+                    "app_update_chat",
+                    json!({"chatId": a, "muted": muted}),
+                )
+                .await
+            }
+        };
+        let rows = || h.col("SELECT chat_id FROM chat_mutes");
+        let denied = mute(&c, true).await;
+        assert_eq!(denied["ok"], false, "{denied}");
+        assert!(rows().is_empty());
+        let res = mute(&b, true).await;
+        assert_eq!(res["result"]["muted"], true, "{res}");
+        assert_eq!(rows(), [a.clone()]);
+        let me = call(&h, &t, &a, "app_this_chat", json!({})).await;
+        assert_eq!(me["result"]["muted"], true, "{me}");
+        let res = mute(&b, false).await;
+        assert_eq!(res["result"]["muted"], false, "{res}");
+        assert!(rows().is_empty());
         // The model row in the transcript carries the agent's reason, so the change reads with
         // its explanation to anyone looking at the chat.
         assert_eq!(
@@ -1923,5 +2192,32 @@ mod tests {
             last["error"].as_str().unwrap().contains("last hour"),
             "{last}"
         );
+        // A muted chat's flag is recorded and answered as such, and listed in the Muted group
+        // instead of Needs you.
+        let m = h.create().await;
+        h.call("chat_mute", json!({"chatId": m, "muted": true}))
+            .await
+            .unwrap();
+        let r = call(&h, &t, &m, "app_flag_attention", flag("Ship it?")).await;
+        assert_eq!(r["result"]["recorded"], true, "{r}");
+        assert_eq!(r["result"]["muted"], true, "{r}");
+        assert!(r["result"]["note"].as_str().unwrap().contains("is muted"));
+        assert_eq!(
+            h.col(&format!(
+                "SELECT count(*) FROM chat_flags WHERE chat_id = '{m}'"
+            )),
+            ["1"]
+        );
+        let s = h.call("attention_get", json!({})).await.unwrap();
+        let held = s["muted"].as_array().unwrap();
+        assert_eq!(
+            (held.len(), &held[0]["chatId"], &held[0]["kind"]),
+            (1, &json!(m), &json!("flag"))
+        );
+        assert!(s["needsYou"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["chatId"] != m.as_str()));
     }
 }

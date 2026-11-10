@@ -93,17 +93,16 @@ pub fn deferred_lines(
         .iter()
         .map(|m| format!("- Waiting for your Merge: {}", short(m)))
         .collect();
-    out.extend(events.iter()
-        .map(|e| {
-            let t = short(&e.title);
-            let at = hhmm(e.at);
-            match e.kind.as_str() {
-                "question" => format!("- {at} Answered a question automatically: \"{t}\""),
-                "plan_approved" => format!("- {at} Approved the plan automatically."),
-                "plan_deferred" => format!("- {at} Waiting for you: plan approval. {t}"),
-                _ => format!("- {at} Waiting for you: {t}"),
-            }
-        }));
+    out.extend(events.iter().map(|e| {
+        let t = short(&e.title);
+        let at = hhmm(e.at);
+        match e.kind.as_str() {
+            "question" => format!("- {at} Answered a question automatically: \"{t}\""),
+            "plan_approved" => format!("- {at} Approved the plan automatically."),
+            "plan_deferred" => format!("- {at} Waiting for you: plan approval. {t}"),
+            _ => format!("- {at} Waiting for you: {t}"),
+        }
+    }));
     out.extend(
         left.overrides
             .iter()
@@ -114,12 +113,11 @@ pub fn deferred_lines(
             .iter()
             .map(|a| format!("- Allow request waiting for you: {}", short(a))),
     );
-    out.extend(left.handoffs.iter().map(|h| {
-        format!(
-            "- Handed over and not yet verified as landed: {}",
-            short(h)
-        )
-    }));
+    out.extend(
+        left.handoffs
+            .iter()
+            .map(|h| format!("- Handed over and not yet verified as landed: {}", short(h))),
+    );
     out
 }
 
@@ -201,6 +199,26 @@ pub fn step(
     Step::Send {
         attempt: attempts + 1,
     }
+}
+
+/// A muted chat is never sent a digest: it belongs to an agent's crew, nobody reads its update, and
+/// the turn would be a notice by another name. A send that is due becomes dismissed; a delivery
+/// already in flight (or finished) is left as it is.
+pub fn for_muted(step: Step, muted: bool) -> Step {
+    match step {
+        Step::Send { .. } if muted => Step::Mark("dismissed", None),
+        other => other,
+    }
+}
+
+/// Whether the chat is muted. The chats crate owns the table; a database without it has none.
+pub fn is_muted(tx: &rusqlite::Connection, chat_id: &str) -> bool {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chat_mutes WHERE chat_id = ?1)",
+        [chat_id],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
 }
 
 /// When to try again after the `attempts`-th failed send.
@@ -303,6 +321,15 @@ mod tests {
             Step::Mark("failed", Some("Gave up after 5 tries."))
         );
         assert_eq!(step(4, None, None, 0), Step::Send { attempt: 5 });
+        // A muted chat gets no digest; one already sent or in flight is left alone.
+        let due = step(0, None, None, 0);
+        assert_eq!(for_muted(due.clone(), true), Step::Mark("dismissed", None));
+        assert_eq!(for_muted(due.clone(), false), due);
+        assert_eq!(for_muted(Step::Wait, true), Step::Wait);
+        assert_eq!(
+            for_muted(Step::Mark("sent", None), true),
+            Step::Mark("sent", None)
+        );
     }
 
     #[test]

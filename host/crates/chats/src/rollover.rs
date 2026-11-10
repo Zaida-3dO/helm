@@ -277,6 +277,17 @@ async fn finish(
             e.message
         ));
     }
+    // The successor stands where the old chat stood, and keeps what it was (muted or not, and
+    // who made it): its place in the sidebar, and the chats started under the old one.
+    match rt
+        .db()
+        .write(|tx| take_place(tx, &chat.id, &new_id, helm_core::now_ms()))
+    {
+        Ok(changed) => ctx
+            .events
+            .emit(AppEvent::new("sidebar").with("chatIds", json!(changed))),
+        Err(e) => log::warn!("roll over of {}: the successor kept no place: {e}", chat.id),
+    }
     // Stop first: the old chat should be idle, but never archive over a working one.
     if !settled(rt, &chat.id) {
         let _ = rt
@@ -303,6 +314,35 @@ async fn finish(
     Ok(())
 }
 
+/// Give `new` the old chat's parent, position and pin, move the old chat's children under it, and
+/// copy its mute and creator. Returns the chats whose sidebar rows changed.
+fn take_place(
+    tx: &rusqlite::Transaction<'_>,
+    old: &str,
+    new: &str,
+    now: i64,
+) -> rusqlite::Result<Vec<String>> {
+    tx.execute(
+        "UPDATE chats SET (parent_chat_id, position, pinned) =
+             (SELECT parent_chat_id, position, pinned FROM chats WHERE id = ?1)
+         WHERE id = ?2",
+        [old, new],
+    )?;
+    let children: Vec<String> = {
+        let mut st = tx.prepare("SELECT id FROM chats WHERE parent_chat_id = ?1 AND id <> ?2")?;
+        let rows = st.query_map([old, new], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    tx.execute(
+        "UPDATE chats SET parent_chat_id = ?2 WHERE parent_chat_id = ?1 AND id <> ?2",
+        [old, new],
+    )?;
+    crate::mute::inherit(tx, old, new, now)?;
+    let mut changed = vec![new.to_owned(), old.to_owned()];
+    changed.extend(children);
+    Ok(changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +355,47 @@ mod tests {
         let c = cut(&s, 5);
         assert!(c.starts_with("éé") && c.contains("cut here"));
         assert_eq!(cut("short", 100), "short");
+    }
+
+    #[test]
+    fn the_successor_takes_the_old_chats_place_children_mute_and_creator() {
+        let (_d, db) = crate::schema::tests::temp_db();
+        let mk = || {
+            db.write(|tx| crate::store::create_chat(tx, "C:/w/proj", None, None, 1))
+                .unwrap()
+        };
+        let (parent, old, new, kid, maker) = (mk(), mk(), mk(), mk(), mk());
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE chats SET parent_chat_id = ?1, position = 3, pinned = 1 WHERE id = ?2",
+                [&parent, &old],
+            )?;
+            tx.execute(
+                "UPDATE chats SET parent_chat_id = ?1 WHERE id = ?2",
+                [&old, &kid],
+            )?;
+            crate::mute::set_muted(tx, &old, true, 5)?;
+            crate::mute::set_created_by(tx, &old, &maker)
+        })
+        .unwrap();
+        let changed = db.write(|tx| take_place(tx, &old, &new, 9)).unwrap();
+        assert_eq!(changed, [new.clone(), old.clone(), kid.clone()]);
+        let row = |id: &str| -> (Option<String>, Option<i64>, bool, bool, Option<String>) {
+            db.snapshot(|tx| {
+                tx.query_row(
+                    "SELECT parent_chat_id, position, pinned, EXISTS(SELECT 1 FROM chat_mutes WHERE chat_id = chats.id), created_by_chat
+                     FROM chats WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+            })
+            .unwrap()
+        };
+        assert_eq!(row(&new), (Some(parent), Some(3), true, true, Some(maker)));
+        assert_eq!(
+            row(&kid).0,
+            Some(new),
+            "the old chat's children move under the successor"
+        );
     }
 }

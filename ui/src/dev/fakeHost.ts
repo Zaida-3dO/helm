@@ -110,6 +110,9 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   const chats = new Map<string, FakeChat>();
   /** Chats the idle check has flagged, with its reason. A prompt containing "flag" leaves one after its turn; new activity, snooze or mark complete clears it. */
   const flags = new Map<string, string>();
+  /** The idle check's priority for a flagged chat ("high" when the prompt says so), and chats whose check gave up (a prompt containing "gave up"; Retry clears it). */
+  const flagPriority = new Map<string, string>();
+  const gaveUp = new Set<string>();
   let sendBehavior: SendBehavior = { ...HOME_SEND_BEHAVIOR };
   const prefs = new Map<string, unknown>();
   const answers = new Map<string, (a: Record<string, unknown>) => void>();
@@ -378,6 +381,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     const cancelled = () => stopped;
     c.turn = { cancel: () => (stopped = true) };
     flags.delete(c.chat.id);
+    gaveUp.delete(c.chat.id);
     c.chat = { ...c.chat, started: true };
     // "[loading]" on a local model: the host's "Loading <model>…" line while the server brings it up.
     if (isLocal(c) && /\[loading\]/i.test(text)) {
@@ -398,6 +402,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       }
     }
     if (/flag/i.test(text)) flags.set(c.chat.id, `You asked for "${text.slice(0, 40)}" and the last reply stopped before the tests were run. It looks unfinished: nobody has confirmed the change works.`);
+    if (/flag/i.test(text)) flagPriority.set(c.chat.id, /high/i.test(text) ? 'high' : 'normal');
+    if (/gave ?up/i.test(text)) gaveUp.add(c.chat.id);
     setStatus(c, 'running');
     try {
       await sleep(step * 2, cancelled);
@@ -516,6 +522,16 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       running: busy.slice(0, 8).map((c) => row(c, 'running')),
       unread: unread.slice(0, 8).map((c) => row(c, 'unread')),
       stalled: [],
+      muted: all
+        .filter((c) => c.chat.muted && c.thread.interactions.some((i) => i.attention))
+        .map((c) => {
+          const a = c.thread.interactions.find((i) => i.attention)?.attention;
+          return { ...row(c, a === 'trust' ? 'approval' : String(a)), reason: a === 'plan' ? 'Has a plan for you to review' : 'Waiting for your approval' };
+        }),
+      triage: [
+        ...list.filter((c) => flags.has(c.chat.id) && !gaveUp.has(c.chat.id)).map((c) => ({ chatId: c.chat.id, title: c.chat.title || 'Untitled', project: folderName(c.chat.cwd), priority: flagPriority.get(c.chat.id) ?? null, failed: false })),
+        ...list.filter((c) => gaveUp.has(c.chat.id)).map((c) => ({ chatId: c.chat.id, title: c.chat.title || 'Untitled', project: folderName(c.chat.cwd), priority: null, failed: true })),
+      ],
       flagged: list
         .filter((c) => flags.has(c.chat.id) && !['starting', 'running', 'stopping'].includes(c.chat.status) && !needs.includes(c) && !unread.includes(c))
         .slice(0, 8)
@@ -821,6 +837,11 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       flags.delete(String(a.chatId));
       emitAttention();
       return null;
+    },
+    triage_retry: (a) => {
+      const queued = gaveUp.delete(String(a.chatId));
+      emitAttention();
+      return { queued };
     },
     autocomplete_suggest: (a) => {
       const words = ['component', 'composer', 'completion', 'transcript', 'thinking'];

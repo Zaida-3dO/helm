@@ -1579,6 +1579,13 @@ dd {
 .crumb-title:focus-visible {
   outline-offset: 3px;
 }
+.crumb-muted {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  color: var(--muted);
+}
 .crumb-rename {
   font-size: calc(12 * var(--ui-unit));
   padding: 3px 6px !important;

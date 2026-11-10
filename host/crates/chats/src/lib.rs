@@ -66,6 +66,7 @@ mod latency_tests;
 pub mod local;
 pub mod manage;
 pub mod message_images;
+pub mod mute;
 pub mod ops;
 pub mod outage;
 pub mod output_save;

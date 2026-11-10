@@ -1745,6 +1745,8 @@ fn a_note(chat: &str) -> voice_watch::Note {
         unread: vec![],
         stalled: vec![],
         flagged: vec![],
+        muted: vec![],
+        triage: vec![],
         revision: 1,
     };
     let mut full = empty.clone();

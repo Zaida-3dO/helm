@@ -158,6 +158,8 @@ export function chatOps(api: Api) {
     markAddressed: (chatId: string) => api<null>('attention_address', { chatId }),
     /** Out of the attention groups until `until` (Unix ms) or new activity; null unsnoozes. */
     snooze: (chatId: string, until: number | null) => api<null>('attention_snooze', { chatId, until }),
+    /** User-only: check a chat again whose idle check gave up. */
+    triageRetry: (chatId: string) => api<{ queued: boolean }>('triage_retry', { chatId }),
     /** Whether the idle check is on (it is until switched off). */
     triageEnabled: async () => (await api<{ enabled?: boolean } | null>('preference_get', { key: 'taskTriage' }))?.enabled !== false,
     /** The idle check's switch, alert delay (minutes) and custom prompt ('' for the built-in one). */

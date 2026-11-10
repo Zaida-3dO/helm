@@ -45,6 +45,8 @@ pub fn register(reg: &mut MigrationRegistry) {
         .initializer("chats-activity-queue", activity_queue)
         .initializer("chats-triage-tries", triage_tries)
         .initializer("chats-identity", identity)
+        .initializer("chats-triage-priority", crate::triage::init)
+        .initializer("chats-created-by", crate::mute::init)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)

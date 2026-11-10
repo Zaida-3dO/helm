@@ -3,5 +3,5 @@
 export { ATTENTION_DIALOG, AttentionInbox } from './AttentionInbox.tsx';
 export type { AttentionActions, AttentionInboxProps } from './AttentionInbox.tsx';
 export { FlagNote } from './FlagNote.tsx';
-export { countText, flagFor, inboxCount, inboxRows, nextAttention, parseDelayMinutes, snoozeChoices, whenText } from './model.ts';
+export { countText, failedChecks, flagFor, inboxCount, inboxRows, mutedKindLabel, mutedRows, nextAttention, parseDelayMinutes, priorityFor, snoozeChoices, whenText } from './model.ts';
 export type { InboxGroup, InboxRow, SnoozeChoice, TriageSettings } from './model.ts';

@@ -6,8 +6,8 @@
 import { useEffect, useState } from 'react';
 import type { AttentionSummary } from '../api/types.ts';
 import { Button, Checkbox, ContextMenu, Dialog, TextArea, TextInput, toast, type MenuItem } from '../ui/index.ts';
-import { IconCheck, IconClock, IconExternalLink, IconFlag } from '../ui/icons.tsx';
-import { groupLabel, inboxRows, parseDelayMinutes, snoozeChoices, type InboxRow, type TriageSettings } from './model.ts';
+import { IconCheck, IconClock, IconExternalLink, IconFlag, IconMute } from '../ui/icons.tsx';
+import { failedChecks, groupLabel, inboxRows, mutedKindLabel, mutedRows, parseDelayMinutes, priorityFor, snoozeChoices, type InboxRow, type TriageSettings } from './model.ts';
 import './attention.css';
 
 export const ATTENTION_DIALOG = 'attention';
@@ -16,6 +16,8 @@ export interface AttentionActions {
   markAddressed: (chatId: string) => Promise<unknown>;
   snooze: (chatId: string, until: number | null) => Promise<unknown>;
   /** Whether the idle check is on, and a way to switch it. */
+  /** Check a chat again whose idle check gave up. */
+  triageRetry?: (chatId: string) => Promise<unknown>;
   triageEnabled: () => Promise<boolean>;
   setTriageEnabled: (enabled: boolean) => Promise<unknown>;
   /** The alert delay and the custom prompt, read and saved together with the switch. */
@@ -34,6 +36,9 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
   // Null until the setting is read; the host's rows stand until then.
   const [triageOn, setTriageOn] = useState<boolean | null>(null);
   const rows = inboxRows(summary, { flagged: triageOn !== false });
+  // Chats whose idle check gave up (each with Retry), and muted chats holding something: neither is counted.
+  const failed = failedChecks(summary, triageOn !== false);
+  const muted = mutedRows(summary);
   useEffect(() => {
     let live = true;
     ops
@@ -112,7 +117,7 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
     >
       <div className="att-body">
         {!summary && <p className="att-note">Checking chats…</p>}
-        {summary && rows.length === 0 && (
+        {summary && rows.length === 0 && failed.length === 0 && (
           <div className="att-empty">
             <IconCheck size={20} />
             <strong>Nothing needs you</strong>
@@ -135,6 +140,11 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
                   <IconFlag size={11} filled />
                   {groupLabel(r.group)}
                 </span>
+                {r.group === 'flagged' && priorityFor(summary, r.chatId) && (
+                  <span className="att-chip" data-testid="triage-priority" data-priority={priorityFor(summary, r.chatId)}>
+                    {priorityFor(summary, r.chatId) === 'high' ? 'High priority' : 'Normal priority'}
+                  </span>
+                )}
               </header>
               <div className="att-card-project">{r.project}</div>
               <p className="att-card-reason">{r.reason}</p>
@@ -168,7 +178,77 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
               </div>
             </article>
           ))}
+          {failed.map((r) => (
+            <article
+              key={r.chatId}
+              className="att-card"
+              data-testid="attention-card"
+              data-chat-id={r.chatId}
+              data-group="triageFailed"
+              aria-busy={busy === r.chatId ? true : undefined}
+            >
+              <header className="att-card-head">
+                <span className="att-card-title">{r.title || 'Untitled'}</span>
+                <span className="att-card-kind">
+                  <IconFlag size={11} />
+                  Idle check failed
+                </span>
+              </header>
+              <div className="att-card-project">{r.project}</div>
+              <p className="att-card-reason">The idle check could not finish for this chat. Retry it, or open the chat to see where it stands.</p>
+              <div className="att-card-actions">
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    onOpen(r.chatId);
+                    onClose();
+                  }}
+                >
+                  <IconExternalLink size={13} />
+                  Open
+                </Button>
+                {ops.triageRetry && (
+                  <Button variant="ghost" disabled={busy === r.chatId} data-testid="triage-retry" onClick={() => void act(r.chatId, () => ops.triageRetry!(r.chatId))}>
+                    <IconClock size={13} />
+                    Retry
+                  </Button>
+                )}
+              </div>
+            </article>
+          ))}
         </div>
+        {muted.length > 0 && (
+          <details className="att-muted" data-testid="attention-muted">
+            <summary>
+              <IconMute size={12} />
+              Muted ({muted.length})
+            </summary>
+            <p className="att-foot">These chats are muted, so they raised no notice. What they are waiting for is kept here.</p>
+            <ul className="att-muted-list">
+              {muted.map((r) => (
+                <li key={r.chatId} className="att-muted-row" data-testid="attention-muted-row" data-chat-id={r.chatId} data-kind={r.kind}>
+                  <div className="att-muted-text">
+                    <span className="att-card-title">{r.title || 'Untitled'}</span>
+                    <span className="att-card-project">
+                      {r.project} · {mutedKindLabel(r.kind)}
+                    </span>
+                    <span className="att-card-reason">{r.reason}</span>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      onOpen(r.chatId);
+                      onClose();
+                    }}
+                  >
+                    <IconExternalLink size={13} />
+                    Open
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         <p className="att-foot">
           Mark addressed or Snooze takes a chat out of this list until something new happens in it. The conversation and its unread
           state are not changed.

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AttentionRow, AttentionSummary } from '../api/types.ts';
-import { countText, flagFor, inboxCount, inboxRows, nextAttention, parseDelayMinutes, snoozeChoices, whenText } from './model.ts';
+import { countText, failedChecks, flagFor, inboxCount, inboxRows, mutedKindLabel, mutedRows, nextAttention, parseDelayMinutes, priorityFor, snoozeChoices, whenText } from './model.ts';
 
 const row = (chatId: string, kind: AttentionRow['kind'] = 'question'): AttentionRow => ({ chatId, title: chatId, project: 'p', kind, reason: 'r' });
 const summary = (over: Partial<AttentionSummary> = {}): AttentionSummary => ({
@@ -12,6 +12,8 @@ const summary = (over: Partial<AttentionSummary> = {}): AttentionSummary => ({
   unread: [],
   stalled: [],
   flagged: [],
+  muted: [],
+  triage: [],
   revision: 1,
   ...over,
 });
@@ -90,6 +92,40 @@ test('a chat shows the note only while the host lists it as flagged and the chec
   assert.equal(flagFor(s, 'f', false), null, 'switching the check off hides it at once');
   assert.equal(flagFor(summary(), 'f'), null, 'once the flag clears, the note goes');
   assert.equal(flagFor(null, 'f'), null);
+});
+
+test('muted chats are kept in their own group, out of the rows and the count; the idle check adds a priority chip and Retry rows', () => {
+  const s = summary({
+    badge: 1,
+    needsYou: [row('a')],
+    flagged: [row('f', 'triage')],
+    muted: [
+      { chatId: 'm1', title: 'Crew', project: 'p', kind: 'flag', reason: 'Asked by the agent: Ship it?' },
+      { chatId: 'm2', title: 'Reviewer', project: 'p', kind: 'approval', reason: 'Waiting for your approval' },
+    ],
+    triage: [
+      { chatId: 'f', title: 'f', project: 'p', priority: 'high', failed: false },
+      { chatId: 'n', title: 'n', project: 'p', priority: null, failed: false },
+      { chatId: 'x', title: 'x', project: 'p', priority: null, failed: true },
+    ],
+  });
+  assert.deepEqual(
+    inboxRows(s).map((r) => r.chatId),
+    ['a', 'f'],
+    'a muted chat is not an inbox row',
+  );
+  assert.equal(inboxCount(s), 2);
+  assert.deepEqual(
+    mutedRows(s).map((r) => `${r.chatId}:${mutedKindLabel(r.kind)}`),
+    ['m1:Flag', 'm2:Approval'],
+  );
+  assert.deepEqual(mutedRows(null), []);
+  assert.equal(priorityFor(s, 'f'), 'high');
+  assert.equal(priorityFor(s, 'n'), null, 'a verdict without a priority shows no chip');
+  assert.equal(priorityFor(s, 'x'), null, 'a failed check has no priority');
+  assert.deepEqual(failedChecks(s).map((r) => r.chatId), ['x']);
+  assert.deepEqual(failedChecks(s, false), [], 'with the idle check off, Retry rows go at once');
+  assert.deepEqual(failedChecks(null), []);
 });
 
 test('the alert delay is a whole number of minutes from 0 to 1,440', () => {
