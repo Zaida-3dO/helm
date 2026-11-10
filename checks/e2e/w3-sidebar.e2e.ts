@@ -74,11 +74,13 @@ describe("sidebar: Agent Standup sync, groups and nesting", { timeout: 10 * 60_0
       await page().waitForSelector(`[data-testid="sidebar-group"][data-project-id="${c.id}"][data-depth="2"]`, { timeout: 15_000 });
       const depth = (id: string) => page().getAttribute(`[data-testid="sidebar-group"][data-project-id="${id}"]`, "data-depth");
       assert.deepEqual([await depth(a.id), await depth(b.id), await depth(c.id)], ["0", "1", "2"]);
-      // Rename locally, then sync again: the local name stays and the board was not written.
+      // Rename locally, then sync again: the new name is written back to the board once and stays.
       await api(page(), "project_update", { projectId: c.id, revision: c1.revision, name: "My home automations" });
       await waitBoardSync(page());
       await page().waitForFunction((id) => document.querySelector(`[data-testid="sidebar-group"][data-project-id="${id}"] .sb-title`)?.textContent === "My home automations", c.id, { timeout: 15_000 });
       assert.equal(await depth(c.id), "2", "nesting survives the sync");
+      for (let i = 0; i < 100 && board!.titles.length === 0; i++) await new Promise((r) => setTimeout(r, 100));
+      assert.deepEqual(board!.titles, [{ id: "fb-home", title: "My home automations" }], "one title write");
       assert.deepEqual(board!.violations, []);
     } finally {
       await shot(page(), OUT, "S2");
@@ -160,7 +162,8 @@ describe("sidebar: Agent Standup sync, groups and nesting", { timeout: 10 * 60_0
       const draft = (await page().textContent(tid("composer"))) ?? "";
       assert.ok(draft.includes("Task board item") && draft.includes("Fix the merge queue"), draft);
 
-      assert.deepEqual(board!.violations, [], "no request but GET reached the board");
+      assert.deepEqual(board!.violations, [], "no request but GET and the one title write reached the board");
+      assert.equal(board!.titles.length, 1, "the rename was written once, never again");
       assert.ok(board!.requests.every((r) => r.authorized || r.path === "/api/ready"), "every request but readiness carried the token");
       assert.deepEqual(await app!.cspViolations(), []);
     } finally {

@@ -21,7 +21,7 @@ const probeFile = path.join(scratchDir("helm-w3v-probe-"), "probe.jsonl");
 const W3_FIXTURE = path.join(REPO, "fakes", "claude", "fixtures", "w3-visual.json");
 
 let app: App | undefined;
-let board: { url: string; token: string; violations: unknown[]; requests: unknown[]; close(): Promise<void> } | undefined;
+let board: { url: string; token: string; violations: unknown[]; requests: unknown[]; titles: { id: string; title: string }[]; close(): Promise<void> } | undefined;
 let vault: string | undefined;
 const page = () => app!.page;
 
@@ -171,7 +171,9 @@ describe("visual check and the host probes", { timeout: 15 * 60_000 }, () => {
       await api(page(), "project_update", { projectId: parent, revision: target.revision, name: "Renamed in Helm" });
       await waitBoardSync(page());
       await page().waitForFunction((id) => (document.querySelector(`[data-testid="sidebar-group"][data-project-id="${id}"]`)?.textContent ?? "").includes("Renamed in Helm"), parent, { timeout: 10_000 });
-      assert.deepEqual(board!.violations, [], "only GETs went to the board");
+      for (let i = 0; i < 100 && board!.titles.length === 0; i++) await new Promise((r) => setTimeout(r, 100));
+      assert.deepEqual(board!.titles.map((x) => x.title), ["Renamed in Helm"], "the rename went to the board once");
+      assert.deepEqual(board!.violations, [], "only GETs and the title write went to the board");
       await readable(`${tid("sidebar-group")} .sb-name`);
     });
   });

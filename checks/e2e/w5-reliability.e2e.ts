@@ -81,13 +81,15 @@ describe("failure modes in the running app", { timeout: 10 * 60_000 }, () => {
     const cdp = await page().context().newCDPSession(page());
     void cdp.send("Page.crash").catch(() => undefined);
 
-    // The watchdog probes every 10 s and gives up after 30 s unanswered; allow for both.
+    // The crash handler reloads a page whose renderer exited at once; the watchdog (probes every
+    // 10 s, gives up after 30 s unanswered) catches a page that hangs instead. Either line will do.
     const log = path.join(profile, "diagnostics", "ui-process.log");
-    await until("the diagnostic line", () => fs.existsSync(log) && fs.readFileSync(log, "utf8").includes("reloaded it"), 90_000).catch(async (e) => {
+    const reloaded = /did not answer for \d+ s; reloaded it|the page's renderer exited; reloaded the page/;
+    await until("the diagnostic line", () => fs.existsSync(log) && reloaded.test(fs.readFileSync(log, "utf8")), 90_000).catch(async (e) => {
       const alive = await Promise.race([page().evaluate(() => "alive").catch((x) => `dead: ${x}`), new Promise((r) => setTimeout(() => r("no answer"), 3_000))]);
       throw new Error(`${(e as Error).message}; page after crash: ${alive}; app log: ${app!.log().slice(-1500)}`);
     });
-    assert.match(fs.readFileSync(log, "utf8"), /did not answer for \d+ s; reloaded it/);
+    assert.match(fs.readFileSync(log, "utf8"), reloaded);
 
     // Reconnect: the crashed page object is dead to Playwright; find the reloaded app page.
     await app!.browser.close().catch(() => undefined);

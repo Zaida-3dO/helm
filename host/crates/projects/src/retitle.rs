@@ -5,7 +5,9 @@
 //! off the calling thread, with the standup client's own short deadline. When the board takes it,
 //! the local override is dropped and the project reads as the board's again. When it cannot (no
 //! connection, a refused token, a slow board) the local name stays and the flag stays set, the row
-//! says so, and the next board sync sends it again.
+//! says so, and the next board sync sends it again. When the board answers that the request itself
+//! is wrong (a 4xx other than a refused token, a timeout or too many requests), sending it again
+//! would only fail again: the local name stays and is no longer owed.
 //!
 //! Only the title travels. Icon and colour stay local: the board has no field for them.
 
@@ -113,11 +115,28 @@ pub(crate) fn send_owed(
                     Err(e) => log::warn!("board rename sent, but not recorded: {e:?}"),
                 }
             }
+            Err(StandupError::Status(code)) if refused_for_good(code) => {
+                log::warn!("the board refused a rename ({code}); the name stays local");
+                let kept = db.write(|tx| -> store::Res<_> {
+                    store::title_refused(tx, &p.project_id, &p.title)?;
+                    store::get_project(tx, &p.project_id)
+                });
+                match kept {
+                    Ok(node) => done(&node),
+                    Err(e) => log::warn!("board rename refusal not recorded: {e:?}"),
+                }
+            }
             // The sentence names the cause without the token; the rename stays owed.
             Err(e) => log::info!("board rename waits for the next sync: {e}"),
         }
     }
     taken
+}
+
+/// A board answer that will not change on a retry: a client error other than a refused token,
+/// a timeout or too many requests.
+fn refused_for_good(code: u16) -> bool {
+    (400..500).contains(&code) && !matches!(code, 401 | 403 | 408 | 429)
 }
 
 fn client_for(ctx: &OpCtx, db: &Database) -> Option<Client> {

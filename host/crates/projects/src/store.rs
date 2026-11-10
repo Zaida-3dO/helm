@@ -826,6 +826,17 @@ pub fn title_sent(tx: &Transaction<'_>, id: &str, title: &str) -> rusqlite::Resu
     Ok(())
 }
 
+/// The board refused the title for good (it answered that the request itself is wrong): stop
+/// owing it. The local name stays.
+pub fn title_refused(tx: &Transaction<'_>, id: &str, title: &str) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE project_local SET title_pending = 0, revision = revision + 1
+         WHERE project_id = ?1 AND title_pending = 1 AND title_override = ?2",
+        params![id, title],
+    )?;
+    Ok(())
+}
+
 fn has_chats_running_here(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<bool> {
     Ok(tx
         .query_row(

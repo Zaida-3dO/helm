@@ -645,7 +645,9 @@ fn a_board_rename_is_owed_to_the_board_and_forgiven_once_sent() {
     use std::sync::Mutex;
     struct Fake {
         sent: Mutex<Vec<(String, String)>>,
-        refuse: bool,
+        /// `None` takes the title; `Some(0)` cannot reach the board; another number is the
+        /// board's answer.
+        refuse: Option<u16>,
     }
     impl TitleSender for Fake {
         fn send(
@@ -654,8 +656,10 @@ fn a_board_rename_is_owed_to_the_board_and_forgiven_once_sent() {
             id: &str,
             title: &str,
         ) -> Result<(), helm_standup::StandupError> {
-            if self.refuse {
-                return Err(helm_standup::StandupError::Unreachable("down".into()));
+            match self.refuse {
+                Some(0) => return Err(helm_standup::StandupError::Unreachable("down".into())),
+                Some(code) => return Err(helm_standup::StandupError::Status(code)),
+                None => {}
             }
             self.sent.lock().unwrap().push((id.into(), title.into()));
             Ok(())
@@ -694,7 +698,7 @@ fn a_board_rename_is_owed_to_the_board_and_forgiven_once_sent() {
     // The board cannot be reached: the local names stay and stay owed.
     let down = Fake {
         sent: Mutex::new(vec![]),
-        refuse: true,
+        refuse: Some(0),
     };
     assert_eq!(send_owed(&db, &client, &down, None, |_| {}), 0);
     assert_eq!(node(&db, &a).name, "Alpha 3");
@@ -703,7 +707,7 @@ fn a_board_rename_is_owed_to_the_board_and_forgiven_once_sent() {
     // Back up (the next sync): both go, once each, and read as the board's own afterwards.
     let up = Fake {
         sent: Mutex::new(vec![]),
-        refuse: false,
+        refuse: None,
     };
     let mut shown = vec![];
     assert_eq!(
@@ -746,6 +750,23 @@ fn a_board_rename_is_owed_to_the_board_and_forgiven_once_sent() {
     )
     .unwrap();
     assert_eq!(send_owed(&db, &other, &up, None, |_| {}), 0);
+    // A board that refuses the request itself is not asked again; one that refuses the token,
+    // or is busy, is.
+    for (code, owed_after) in [(401, true), (429, true), (405, false), (422, false)] {
+        rename(&b, &format!("Beta {code}"));
+        let refusing = Fake {
+            sent: Mutex::new(vec![]),
+            refuse: Some(code),
+        };
+        assert_eq!(send_owed(&db, &client, &refusing, Some(&b), |_| {}), 0);
+        let n = node(&db, &b);
+        assert_eq!(
+            n.name,
+            format!("Beta {code}"),
+            "{code}: the local name stays"
+        );
+        assert_eq!(n.board.unwrap().title_pending, owed_after, "{code}");
+    }
 }
 
 /// "Ask each time" is a setting value, not a board: it reads as no board chosen, the fallback

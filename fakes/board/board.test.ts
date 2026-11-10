@@ -22,13 +22,23 @@ test('the fake board pages GET /api/projects in the live shape behind the token'
   }
 });
 
-test('any non-GET is refused and recorded as a violation', async () => {
+test('any non-GET but a title write is refused and recorded as a violation', async () => {
   const board = await startFakeBoard();
   try {
     const r = await fetch(`${board.url}/api/projects`, { method: 'POST', headers: auth, body: '{}' });
     assert.equal(r.status, 405);
     assert.equal(board.violations.length, 1);
     assert.equal(board.violations[0]!.method, 'POST');
+    // A project's new title is taken, recorded and served from then on; anything more is refused.
+    const id = fixtureProjects()[0]!.id;
+    const t = await fetch(`${board.url}/api/items/${id}`, { method: 'PATCH', headers: auth, body: JSON.stringify({ title: 'Renamed' }) });
+    assert.equal(t.status, 200);
+    assert.deepEqual(board.titles, [{ id, title: 'Renamed' }]);
+    const listed = (await (await fetch(`${board.url}/api/projects`, { headers: auth })).json()) as { projects: { id: string; title: string }[] };
+    assert.equal(listed.projects.find((p) => p.id === id)!.title, 'Renamed');
+    const more = await fetch(`${board.url}/api/items/${id}`, { method: 'PATCH', headers: auth, body: JSON.stringify({ title: 'x', state: 'done' }) });
+    assert.equal(more.status, 400);
+    assert.equal(board.violations.length, 2);
   } finally {
     await board.close();
   }

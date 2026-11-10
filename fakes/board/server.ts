@@ -1,8 +1,10 @@
 // A fake Agent Standup read server. It serves the routes Helm's read-only client calls, in the
 // live response shapes: projects (paged by `limit` and `cursor`), the four board columns, items
 // (summary, detail, history, evidence, open loops), the fleet, readiness and search, behind a
-// made-up bearer token (`/api/ready` needs none). Every non-GET request is answered 405 and
-// recorded as a violation, so a test fails on any write. `GET /__fake/requests` returns the log.
+// made-up bearer token (`/api/ready` needs none). The one write Helm makes, a project's new title
+// (`PATCH /api/items/<id>` with `{title}`), is taken, applied and recorded in `titles`. Every other
+// non-GET request is answered 405 and recorded as a violation, so a test fails on any other
+// write. `GET /__fake/requests` returns the log.
 //
 // CLI: `node fakes/board/server.ts [--port N] [--token T]` prints
 // `fake-board listening http://127.0.0.1:<port>`. Point a debug Helm at it with
@@ -53,8 +55,10 @@ export interface FakeBoard {
   url: string;
   token: string;
   requests: LoggedRequest[];
-  /** Every request that was not a GET: must stay empty. */
+  /** Every request that was not a GET or a title write: must stay empty. */
   violations: LoggedRequest[];
+  /** The titles Helm wrote back, in order: the item (project) id and the new title. */
+  titles: { id: string; title: string }[];
   /** Replace the projects the board serves (to test re-syncs). */
   setProjects(p: BoardProjectFixture[]): void;
   /** Replace the items the board serves. */
@@ -149,6 +153,7 @@ export async function startFakeBoard(opts: { port?: number; token?: string; proj
   let items = opts.items ?? fixtureItems();
   const requests: LoggedRequest[] = [];
   const violations: LoggedRequest[] = [];
+  const titles: { id: string; title: string }[] = [];
 
   const send = (res: ServerResponse, status: number, body: unknown) => {
     res.writeHead(status, { 'content-type': 'application/json' });
@@ -180,8 +185,32 @@ export async function startFakeBoard(opts: { port?: number; token?: string; proj
     const url = new URL(req.url ?? '/', 'http://fake');
     const authorized = req.headers.authorization === `Bearer ${token}`;
     const entry = { method: req.method ?? '', path: url.pathname + url.search, authorized };
-    if (url.pathname === '/__fake/requests') return send(res, 200, { requests, violations });
+    if (url.pathname === '/__fake/requests') return send(res, 200, { requests, violations, titles });
     requests.push(entry);
+    const titleOf = /^\/api\/items\/([^/]+)$/.exec(url.pathname);
+    if (req.method === 'PATCH' && titleOf && authorized) {
+      const id = decodeURIComponent(titleOf[1]!);
+      let body = '';
+      req.on('data', (c: Buffer) => (body += c.toString('utf8')));
+      req.on('end', () => {
+        let title: unknown;
+        try {
+          title = (JSON.parse(body) as { title?: unknown }).title;
+        } catch {
+          title = undefined;
+        }
+        const known = projects.some((p) => p.id === id) || items.some((i) => i.id === id);
+        if (typeof title !== 'string' || !title.trim() || Object.keys(JSON.parse(body || '{}')).length !== 1) {
+          violations.push(entry);
+          return send(res, 400, { error: { code: 'invalid_input', message: 'Only a title is taken.' } });
+        }
+        if (!known) return send(res, 404, { error: { code: 'not_found', message: 'No such item.' } });
+        titles.push({ id, title: title.trim() });
+        projects = projects.map((p) => (p.id === id ? { ...p, title: title.trim() } : p));
+        return send(res, 200, { item: { id, title: title.trim() } });
+      });
+      return;
+    }
     if (req.method !== 'GET') {
       violations.push(entry);
       return send(res, 405, { error: { code: 'method_not_allowed', message: 'The fake board is read-only.' } });
@@ -273,6 +302,7 @@ export async function startFakeBoard(opts: { port?: number; token?: string; proj
     token,
     requests,
     violations,
+    titles,
     setProjects: (p) => {
       projects = p;
     },
