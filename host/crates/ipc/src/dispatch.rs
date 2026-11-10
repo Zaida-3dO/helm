@@ -1,7 +1,7 @@
 //! Dispatch for the one `api(op, args)` command.
 
 use crate::authority::{is_trusted_origin, Caller, MAIN_WINDOW};
-use crate::registry::{ApiError, Handler, OpClass, OpCtx, OpRegistry, OpResult};
+use crate::registry::{ApiError, Handler, OpClass, OpCtx, OpIntercept, OpRegistry, OpResult};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -82,6 +82,11 @@ impl Dispatcher {
             return Err(ApiError::refused());
         };
         let ctx = self.ctx.clone();
+        if let Some(i) = ctx.services.get::<OpIntercept>() {
+            if let Some(answer) = i.0.intercept(&ctx, op, &args) {
+                return answer.await;
+            }
+        }
         match (entry.class, entry.handler) {
             (_, Handler::Async(f)) => f(ctx, args).await,
             (OpClass::Maintenance, Handler::Blocking(f)) => {

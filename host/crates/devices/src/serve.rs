@@ -519,7 +519,7 @@ fn fit_rows_newest(rows: &mut Vec<Value>, more: &mut bool) {
 
 /// The labels a confirmation shows: the request's own options, or Allow and Deny (Approve plan
 /// and Keep planning for a plan).
-fn confirm_options(i: &Interaction) -> Vec<String> {
+pub(crate) fn confirm_options(i: &Interaction) -> Vec<String> {
     match i.options.as_deref() {
         Some(o) if !o.is_empty() => o.to_vec(),
         _ if i.attention == Some(InteractionAttention::Plan) => {

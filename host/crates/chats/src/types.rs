@@ -1171,6 +1171,10 @@ pub struct ModelCatalogueArgs {
     #[serde(default)]
     #[ts(optional)]
     pub refresh: Option<bool>,
+    /// Another device's id: the models that device last reported, read from this PC's copy.
+    #[serde(default)]
+    #[ts(optional)]
+    pub device_uid: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]

@@ -61,6 +61,17 @@ pub struct OpCtx {
 
 pub type OpResult = Result<Value, ApiError>;
 pub type BoxFuture = Pin<Box<dyn Future<Output = OpResult> + Send>>;
+
+/// A check the dispatcher makes before an op's own handler: it may answer the call itself (the
+/// future it returns is the op's result) or return `None` to let the handler run. A crate that
+/// serves some calls from elsewhere (chats that run on another device) installs one as the
+/// [`OpIntercept`] service. It must be quick and never block: it runs on the async runtime.
+pub trait OpInterceptor: Send + Sync {
+    fn intercept(&self, ctx: &OpCtx, op: &str, args: &Value) -> Option<BoxFuture>;
+}
+
+/// The service that holds the app's interceptor.
+pub struct OpIntercept(pub Arc<dyn OpInterceptor>);
 pub(crate) type BlockingFn = Arc<dyn Fn(&OpCtx, Value) -> OpResult + Send + Sync>;
 pub(crate) type AsyncFn = Arc<dyn Fn(OpCtx, Value) -> BoxFuture + Send + Sync>;
 

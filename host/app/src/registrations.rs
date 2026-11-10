@@ -91,6 +91,8 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_relay::register_services(services, events);
     // Where chat events reach the service that answers other devices.
     helm_devices::register_services(services, events);
+    // The people the hub names become profiles here.
+    services.insert(Arc::new(helm_profiles::people_sync()));
     helm_updates::register_services(services, events);
     helm_github::register_services(services, events);
     // The Brave key and the gate that tells launches whether to list web search.

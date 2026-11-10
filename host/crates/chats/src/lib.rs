@@ -30,6 +30,7 @@
 //! | [`checkpoint`] | going back to before one of the user's messages: what it means, as a fork |
 //! | [`manage`] | archive, restore, delete, unread marks and completion acks |
 //! | [`seams`] | traits other crates implement (panel context, project gate) |
+//! | [`remote`] | chats that run on another device: the ops that name one are answered from the mirror kept for it |
 //! | [`local`] | chats on local model servers: the model id, the thinking budget and the server seam |
 //! | [`search_source`] | the searchable message text the search crate indexes |
 //! | `timeline` | one log line per turn-opening send, from saved to first output |
@@ -70,6 +71,7 @@ pub mod mute;
 pub mod ops;
 pub mod outage;
 pub mod output_save;
+pub mod remote;
 pub mod rollover;
 pub mod runtime;
 pub mod runtime_settings;

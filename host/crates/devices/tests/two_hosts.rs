@@ -4,11 +4,15 @@
 //! hears back, and every refusal. Time is paused, so the 250 ms batching and the hub's 30 second
 //! timeout cost nothing. No network, no database.
 
+use helm_chats::remote::{RemoteSlot, Routes};
 use helm_chats::types::{ChatEvent, Interaction, InteractionAttention as Att, InteractionMethod as Meth};
+use helm_core::db::{Database, MigrationRegistry};
 use helm_devices::link::{DeviceLink, MemLink, MemRouter, Rpc};
+use helm_devices::mirror::{self, Mirror, PeopleSync};
 use helm_devices::testing::{fake_interaction, fake_record, fake_row, FakePort};
 use helm_devices::wire::{code, DeviceFrame, Frame, Push};
 use helm_devices::Service;
+use helm_ipc::{Dispatcher, OpCtx, OpIntercept, OpRegistry, RecordingSink, Services};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -314,4 +318,280 @@ async fn a_watcher_reads_and_drives_a_chat_on_another_device() {
     settle().await;
     b.rpc.call("dev-a", "chats_sub", json!({"since": 100})).await.unwrap();
     assert!(host.watchers().contains(&"dev-b".to_owned()));
+}
+
+/// A device that only watches: its own database, its end of the hub, and the events it raises.
+struct Side {
+    mirror: Mirror,
+    db: Arc<Database>,
+    sink: Arc<RecordingSink>,
+    link: Arc<MemLink>,
+    _dir: tempfile::TempDir,
+}
+
+fn side(router: &MemRouter, uid: &str, name: &str, people: Option<Arc<PeopleSync>>) -> Side {
+    let dir = tempfile::tempdir().unwrap();
+    let mut reg = MigrationRegistry::new();
+    helm_devices::register_migrations(&mut reg);
+    let db = Arc::new(Database::open(&dir.path().join("watcher.sqlite3"), &reg).unwrap());
+    db.write(|tx| tx.execute("UPDATE device_self SET uid = ?1", [uid]))
+        .unwrap();
+    let link = router.connect(uid, Some("person-b"), Some("Sam"), true);
+    let sink = Arc::new(RecordingSink::default());
+    let mirror = Mirror::new(
+        db.clone(),
+        link.clone(),
+        sink.clone(),
+        tokio::runtime::Handle::current(),
+        people,
+    );
+    link.send(Frame::Device(DeviceFrame {
+        uid: uid.to_owned(),
+        name: name.to_owned(),
+        run: true,
+    }));
+    Side {
+        mirror,
+        db,
+        sink,
+        link,
+        _dir: dir,
+    }
+}
+
+/// The rows the copy of a chat holds, newest page, as (id, text).
+fn rows_of(s: &Side, chat: &str) -> Vec<(i64, String)> {
+    let page = s
+        .db
+        .snapshot(|tx| mirror::local_page(tx, chat, None, None, None, false))
+        .unwrap()
+        .unwrap()
+        .page;
+    page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["id"].as_i64().unwrap(), r["text"].as_str().unwrap().to_owned()))
+        .collect()
+}
+
+fn count(s: &Side, sql: &str) -> i64 {
+    s.db.snapshot(|tx| tx.query_row(sql, [], |r| r.get::<_, i64>(0)))
+        .unwrap()
+}
+
+fn device_row(s: &Side, uid: &str) -> Value {
+    let v = s
+        .db
+        .snapshot(|tx| mirror::devices_view(tx, s.mirror.line_is_up()))
+        .unwrap();
+    v["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["uid"] == uid)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
+    let router = MemRouter::new();
+    let port = Arc::new(FakePort::new("dev-a", "Desk"));
+    port.add_chat("c1", "First", 10);
+    port.put_row(fake_row("c1", 1, 5, "hello"));
+    port.put_row(fake_row("c1", 2, 6, "world"));
+    let link_a = router.connect("dev-a", Some("person-a"), Some("Alex"), true);
+    let host = Service::new(port.clone(), link_a.clone(), tokio::runtime::Handle::current());
+    host.announce();
+    let people = Arc::new(Mutex::new(Vec::<String>::new()));
+    let heard = people.clone();
+    let hook = Arc::new(PeopleSync::new(move |_db, list| {
+        heard.lock().unwrap().extend(list.iter().map(|p| p.name.clone()));
+        true
+    }));
+    let b = side(&router, "dev-b", "Laptop", Some(hook));
+
+    // The list arrives by itself once the hub shows the device up; the hub's people become
+    // profiles, and the device reads as live.
+    until(|| b.mirror.owner("c1").is_some()).await;
+    until(|| {
+        let p = people.lock().unwrap();
+        p.contains(&"Alex".to_owned()) && p.contains(&"Person person-a".to_owned())
+    })
+    .await;
+    let d = device_row(&b, "dev-a");
+    assert_eq!((d["name"].as_str(), d["state"].as_str()), (Some("Desk"), Some("live")));
+    let projects = b.db.snapshot(|tx| mirror::mirror_projects(tx, "dev-a")).unwrap();
+    assert_eq!(projects[0]["name"], "Work");
+    let listed = b
+        .db
+        .snapshot(|tx| mirror::mirror_chat_list(tx, "dev-a", None, false))
+        .unwrap();
+    assert_eq!((listed.len(), listed[0]["hostDeviceId"].as_str()), (1, Some("dev-a")));
+    assert_eq!(listed[0]["draft"], "");
+
+    // The ops the window uses, through the dispatcher, with the check that routes them.
+    let mut services = Services::new();
+    let routes = Arc::new(RemoteSlot::default());
+    routes.attach(Arc::new(b.mirror.clone()));
+    services.insert(routes);
+    services.insert(Arc::new(OpIntercept(Arc::new(Routes))));
+    let mut ops = OpRegistry::new();
+    helm_chats::register_ops(&mut ops);
+    helm_devices::register_ops(&mut ops);
+    let api = Dispatcher::new(
+        ops,
+        OpCtx {
+            services: Arc::new(services),
+            events: b.sink.clone(),
+        },
+        false,
+    );
+
+    // Opening a chat starts listening to it: its rows arrive, and the window hears the events a
+    // chat that runs here would raise.
+    let got = api.call_host("chat_get", json!({"chatId": "c1"})).await.unwrap();
+    assert_eq!(
+        (got["chat"]["id"].as_str(), got["chat"]["hostDeviceId"].as_str()),
+        (Some("c1"), Some("dev-a"))
+    );
+    until(|| rows_of(&b, "c1").len() == 2).await;
+    let kinds = b.sink.kinds();
+    for k in ["chat", "thread", "pending", "refresh"] {
+        assert!(kinds.iter().any(|x| x == k), "no {k} event in {kinds:?}");
+    }
+    port.put_row(fake_row("c1", 2, 12, "world!"));
+    port.put_row(fake_row("c1", 3, 13, "new"));
+    host.observe(&message(12, 2, "world!"));
+    host.observe(&message(13, 3, "new"));
+    until(|| rows_of(&b, "c1").len() == 3).await;
+    assert_eq!(rows_of(&b, "c1")[1], (2, "world!".to_owned()));
+    assert!(b.sink.kinds().iter().any(|k| k == "message"));
+
+    // Every chat op on a copied chat: answered from the copy, sent to the device, answered
+    // quietly, or refused with the sentence that says where to do it.
+    let elsewhere = "This chat runs on Desk. Do that there.";
+    let table: Vec<(&str, Value, Result<Value, &str>)> = vec![
+        ("transcript_page", json!({"chatId": "c1"}), Ok(json!(null))),
+        ("chat_warm", json!({"chatId": "c1"}), Ok(json!(null))),
+        ("skills_list", json!({"chatId": "c1"}), Ok(json!([]))),
+        ("title_suggest", json!({"chatId": "c1"}), Ok(json!({"title": "", "titles": []}))),
+        (
+            "model_catalogue",
+            json!({"harness": "claude", "deviceUid": "dev-a"}),
+            Ok(json!({"models": []})),
+        ),
+        ("chat_fork", json!({"chatId": "c1"}), Err(elsewhere)),
+        ("chat_delete", json!({"chatId": "c1"}), Err(elsewhere)),
+        ("message_edit_open", json!({"chatId": "c1"}), Err(elsewhere)),
+        (
+            "interaction_answer",
+            json!({"chatId": "c1", "requestId": "x", "confirmed": true}),
+            Err("That request is no longer waiting."),
+        ),
+    ];
+    for (op, args, want) in table {
+        let got = api.call_host(op, args).await;
+        match want {
+            Ok(v) if v.is_null() => assert!(got.is_ok(), "{op}: {got:?}"),
+            Ok(v) => assert_eq!(got.unwrap(), v, "{op}"),
+            Err(m) => assert_eq!(got.unwrap_err().message, m, "{op}"),
+        }
+    }
+    // A chat that is not a copy is left to its own handler.
+    let own = api.call_host("chat_fork", json!({"chatId": "mine"})).await.unwrap_err();
+    assert!(!own.message.contains("runs on"), "{own:?}");
+
+    // A send reaches the device once, as the person's own words.
+    let id = "7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b5a";
+    let send = json!({"chatId": "c1", "submissionId": id, "text": "hi", "action": "steer", "draftRevision": 0});
+    let sent = api.call_host("chat_send", send.clone()).await.unwrap();
+    assert_eq!(sent["submission"]["state"], "accepted");
+    assert_eq!(port.st().sent, [("c1".to_owned(), id.to_owned(), "hi".to_owned())]);
+    // Its switch off: read-only, said in words, nothing sent.
+    port.set_run(false);
+    host.announce();
+    until(|| device_row(&b, "dev-a")["state"] == "readonly").await;
+    let e = api.call_host("chat_send", send.clone()).await.unwrap_err();
+    assert_eq!(e.code, "not_allowed");
+    assert!(e.message.starts_with("Desk doesn't let other devices run its chats"), "{e:?}");
+    port.set_run(true);
+    host.announce();
+    until(|| device_row(&b, "dev-a")["state"] == "live").await;
+
+    // The device goes offline: the copy still reads, a send is refused at once, a draft is kept
+    // here and never sent.
+    link_a.set_up(false);
+    until(|| device_row(&b, "dev-a")["state"] == "offline").await;
+    port.put_row(fake_row("c1", 4, 30, "while away"));
+    let e = api.call_host("chat_send", send.clone()).await.unwrap_err();
+    assert_eq!(e.code, "offline");
+    assert!(e.message.starts_with("Desk is offline (last seen "), "{e:?}");
+    assert_eq!(port.st().sent.len(), 1);
+    let page = api.call_host("transcript_page", json!({"chatId": "c1"})).await.unwrap();
+    assert_eq!(page["messages"].as_array().unwrap().len(), 3);
+    api.call_host("draft_save", json!({"chatId": "c1", "text": "note", "revision": 5}))
+        .await
+        .unwrap();
+    let again = api
+        .call_host("draft_save", json!({"chatId": "c1", "text": "old", "revision": 5}))
+        .await;
+    assert_eq!(again.unwrap_err().code, "stale");
+    let got = api.call_host("chat_get", json!({"chatId": "c1"})).await.unwrap();
+    assert_eq!(got["chat"]["draft"], "note");
+    assert_eq!(port.st().sent.len(), 1);
+    // This PC's own line down reads differently.
+    b.mirror.line_down();
+    b.link.set_up(false);
+    assert_eq!(device_row(&b, "dev-a")["state"], "reconnecting");
+    let e = api.call_host("chat_send", send.clone()).await.unwrap_err();
+    assert_eq!(e.code, "reconnecting");
+    b.link.set_up(true);
+    b.mirror.line_up();
+    b.link.send(Frame::Device(DeviceFrame {
+        uid: "dev-b".into(),
+        name: "Laptop".into(),
+        run: true,
+    }));
+
+    // The device returns: the copy catches up from the revision it holds, without repeats.
+    link_a.set_up(true);
+    until(|| rows_of(&b, "c1").iter().map(|r| r.0).collect::<Vec<_>>() == [1, 2, 3, 4]).await;
+    assert_eq!(count(&b, "SELECT COUNT(*) FROM mirror_rows WHERE chat_id = 'c1'"), 4);
+
+    // `refresh` starts the chat over from the device; a skipped push is mended by asking again.
+    let before = b.sink.kinds().iter().filter(|k| *k == "refresh").count();
+    host.observe(&refresh());
+    until(|| b.sink.kinds().iter().filter(|k| *k == "refresh").count() > before).await;
+    until(|| rows_of(&b, "c1").len() == 4).await;
+    port.put_row(fake_row("c1", 5, 40, "unpushed"));
+    link_a.send(Frame::DevPush(Push {
+        to: Some("dev-b".into()),
+        from: None,
+        sub: "chat:c1".into(),
+        seq: 99,
+        event: json!({"kind": "message", "chatId": "c1", "revision": 50, "rows": []}),
+    }));
+    until(|| rows_of(&b, "c1").len() == 5).await;
+
+    // Only the newest 3000 rows are kept, and rows of a chat nobody opens for a month are let go;
+    // the chat stays in the list.
+    let many: Vec<_> = (100..3110).map(|i| fake_row("c1", i, 1000 + i, "x")).collect();
+    host.observe(
+        &ChatEvent::Message {
+            chat_id: "c1".into(),
+            revision: 5000,
+            rows: many,
+        }
+        .to_app_event(),
+    );
+    until(|| count(&b, "SELECT COUNT(*) FROM mirror_rows WHERE chat_id = 'c1'") >= 3000).await;
+    settle().await;
+    assert_eq!(count(&b, "SELECT COUNT(*) FROM mirror_rows WHERE chat_id = 'c1'"), 3000);
+    assert_eq!(count(&b, "SELECT older FROM mirror_chats WHERE chat_id = 'c1'"), 1);
+    let month = 31 * 24 * 60 * 60 * 1000;
+    b.db.write(|tx| mirror::prune_unopened(tx, helm_core::now_ms() + month)).unwrap();
+    assert_eq!(count(&b, "SELECT COUNT(*) FROM mirror_rows WHERE chat_id = 'c1'"), 0);
+    assert!(b.mirror.owner("c1").is_some());
 }

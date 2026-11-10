@@ -185,6 +185,13 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ),
     // Messages other devices sent here, kept a week so a repeat runs once.
     ("remote_sends", Data),
+    // This PC's copy of the other devices of the household and the chats they run: what the hub
+    // and those devices said, never a setting.
+    ("devices", Data),
+    ("mirror_projects", Data),
+    ("mirror_chats", Data),
+    ("mirror_rows", Data),
+    ("mirror_cursor", Data),
     // This install's own device id and name; written by Helm and the user's rename alone.
     (
         "device_self",

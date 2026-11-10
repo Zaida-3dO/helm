@@ -110,6 +110,27 @@ pub fn attach(dispatcher: &Arc<helm_ipc::Dispatcher>) {
     );
     let announce = service.clone();
     link.on_up(move || announce.announce());
+    // The watching side: this PC's copy of the other devices' chats, and the routing of the
+    // chat ops that name one.
+    if let (Some(db), Some(slot), Some(routes)) = (
+        services.get::<helm_core::db::Database>(),
+        services.get::<helm_devices::MirrorSlot>(),
+        services.get::<helm_chats::remote::RemoteSlot>(),
+    ) {
+        let mirror = helm_devices::Mirror::new(
+            db,
+            link.clone(),
+            dispatcher.ctx().events.clone(),
+            rt.handle().clone(),
+            services.get::<helm_devices::PeopleSync>(),
+        );
+        let up = mirror.clone();
+        link.on_up(move || up.line_up());
+        let down = mirror.clone();
+        link.on_down(move || down.line_down());
+        routes.attach(Arc::new(mirror.clone()));
+        slot.attach(mirror);
+    }
     tap.attach(service.clone());
     client.attach_devices(link);
     // A line that came up before this ran has already passed its announcement.

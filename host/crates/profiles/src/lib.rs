@@ -40,6 +40,17 @@ pub mod store;
 pub use ops::register_ops;
 pub use store::chat_owner_profile;
 
+/// How the devices crate turns the people the hub names into profiles here.
+pub fn people_sync() -> helm_devices::PeopleSync {
+    helm_devices::PeopleSync::new(|db, people| {
+        db.write(|tx| store::sync_people(tx, people, helm_core::now_ms()))
+            .unwrap_or_else(|e| {
+                log::warn!("profiles: the hub's people were not synced: {}", e.message());
+                false
+            })
+    })
+}
+
 pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
     reg.initializer("profiles", store::init)
         .one_time("profiles-chat-identity", store::fill_identity)

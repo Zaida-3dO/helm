@@ -19,5 +19,7 @@ pub mod services;
 pub use authority::{is_trusted_origin, Caller, MAIN_WINDOW};
 pub use dispatch::Dispatcher;
 pub use events::{AppEvent, EventSink, NullSink, RecordingSink, EVENT_CHANNEL};
-pub use registry::{ApiError, OpClass, OpCtx, OpRegistry};
+pub use registry::{
+    ApiError, BoxFuture, OpClass, OpCtx, OpIntercept, OpInterceptor, OpRegistry, OpResult,
+};
 pub use services::Services;

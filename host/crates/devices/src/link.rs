@@ -42,11 +42,19 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(32);
 
 type Waiting = oneshot::Sender<Result<Value, WireError>>;
+type Arrival = Box<dyn FnOnce() + Send>;
+
+struct Pend {
+    tx: Waiting,
+    /// Run on the link's own task the moment the result arrives, before whatever follows it on
+    /// the line is heard: it marks where in the stream of frames the result fell.
+    arrival: Option<Arrival>,
+}
 
 /// Requests to other devices and the results that come back for them.
 pub struct Rpc {
     link: Arc<dyn DeviceLink>,
-    pending: Mutex<HashMap<String, Waiting>>,
+    pending: Mutex<HashMap<String, Pend>>,
 }
 
 impl Rpc {
@@ -72,8 +80,12 @@ impl Rpc {
                 } else {
                     Err(error.unwrap_or_else(|| WireError::internal("The device did not say why.")))
                 };
-                if let Some(tx) = lock(&rpc.pending).remove(&id) {
-                    let _ = tx.send(r);
+                let found = lock(&rpc.pending).remove(&id);
+                if let Some(p) = found {
+                    if let Some(arrived) = p.arrival {
+                        arrived();
+                    }
+                    let _ = p.tx.send(r);
                 }
             }
         }));
@@ -83,6 +95,29 @@ impl Rpc {
     /// Ask the device `to` to run `op`. Fails at once while the line is down, and with the
     /// hub's `offline`, `timeout`, `scope` or `too_large` or the device's own error otherwise.
     pub async fn call(&self, to: &str, op: &str, args: Value) -> Result<Value, WireError> {
+        self.request(to, op, args, None).await
+    }
+
+    /// As [`Rpc::call`], and `arrival` runs the moment the result comes down the line, before
+    /// any frame that follows it is heard (a subscription's first news comes right behind its
+    /// result, so the caller can tell which news belongs to it).
+    pub async fn call_then(
+        &self,
+        to: &str,
+        op: &str,
+        args: Value,
+        arrival: impl FnOnce() + Send + 'static,
+    ) -> Result<Value, WireError> {
+        self.request(to, op, args, Some(Box::new(arrival))).await
+    }
+
+    async fn request(
+        &self,
+        to: &str,
+        op: &str,
+        args: Value,
+        arrival: Option<Arrival>,
+    ) -> Result<Value, WireError> {
         if !self.link.up() {
             return Err(WireError::new(
                 code::OFFLINE,
@@ -91,7 +126,7 @@ impl Rpc {
         }
         let id = uuid::Uuid::new_v4().simple().to_string();
         let (tx, rx) = oneshot::channel();
-        lock(&self.pending).insert(id.clone(), tx);
+        lock(&self.pending).insert(id.clone(), Pend { tx, arrival });
         let sent = self.link.send(Frame::Dev {
             id: id.clone(),
             to: to.to_owned(),
@@ -123,9 +158,9 @@ impl Rpc {
 
     /// The line is gone: every request still waiting fails now.
     pub fn fail_all(&self, e: WireError) {
-        let waiting: Vec<Waiting> = lock(&self.pending).drain().map(|(_, tx)| tx).collect();
-        for tx in waiting {
-            let _ = tx.send(Err(e.clone()));
+        let waiting: Vec<Pend> = lock(&self.pending).drain().map(|(_, p)| p).collect();
+        for p in waiting {
+            let _ = p.tx.send(Err(e.clone()));
         }
     }
 }

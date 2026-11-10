@@ -18,6 +18,8 @@
 //! | [`serve`] | the host side: [`serve::Service`] answers other devices through a [`serve::ChatPort`] |
 //! | [`subs`] | per-watcher subscriptions: sequence numbers, 250 ms batching, trimming of heavy rows |
 //! | [`host`] | the production [`serve::ChatPort`] over this install's chats, profiles and ops |
+//! | [`mirror`] | the watcher side: this PC's copy of other devices' chats (tables, subscriptions, catch-up, events) |
+//! | [`route`] | the chat ops for a copied chat: reads from the copy, changes sent to the device, refusals in words |
 //! | [`sends`] | the `remote_sends` table that makes a repeated send run once |
 //! | [`testing`] | a fake port and builders for tests |
 //!
@@ -27,6 +29,13 @@
 //! |---|---|---|
 //! | `device_get` | blocking | `{}` → `{uid, name}` |
 //! | `device_rename` | maintenance | `{name}` (1 to 40 characters) → `{uid, name}` |
+//! | `devices_list` | blocking | `{}` → `{self, devices: [{uid, name, person, personId?, online, lastSeenAt, run, isSelf, state}]}`; `state` is `live`, `readonly`, `offline` or `reconnecting`; event `devices_changed` |
+//! | `devices_chats` | blocking | `{deviceUid, profileId?, archived?, offset?, limit? (≤ 200)}` → `{chats, projects: [{id, name, colour, kind}], more}`; for another device the chats are read from the copy and carry `personId`, `sharedWithPeople`, `projectName`, `needsAttention`; event `devices_chats_changed {deviceUid}` |
+//! | `devices_create_chat` | async | `{deviceUid, projectId, model?, effort?}` → `{chatId}`: starts the chat for the active profile's person on that device, then opens it here |
+//! | `devices_open_chat` | async | `{chatId}` → `{}`: listen to a copied chat; its rows arrive as `chat`, `thread`, `pending`, `message` and `refresh` events |
+//!
+//! `model_catalogue` also takes `deviceUid` (the models that device last reported). Every other
+//! chat op that names a copied chat is answered by [`route`] (see `helm_chats::remote`).
 //!
 //! What another device may ask of this one (`wire::Op`): `hello`, `chats_sub`, `chat_sub`,
 //! `chat_unsub`, `chats_unsub`, `page` (reads, which need only the pairing), and `send`, `stop`,
@@ -37,7 +46,9 @@
 pub mod host;
 pub mod identity;
 pub mod link;
+pub mod mirror;
 mod ops;
+pub mod route;
 pub mod sends;
 pub mod serve;
 pub mod subs;
@@ -45,13 +56,15 @@ pub mod testing;
 pub mod wire;
 
 pub use identity::{self_name, self_uid, DeviceError};
+pub use mirror::{Mirror, MirrorSlot, PeopleSync};
 pub use ops::register_ops;
 pub use serve::{ChatPort, EventTap, Service};
 
 pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
     reg.initializer("devices-self", identity::init)
         .one_time("devices-make-self", identity::ensure_self)
-        .initializer("devices-remote-sends", sends::init);
+        .initializer("devices-remote-sends", sends::init)
+        .initializer("devices-mirror", mirror::init);
 }
 
 /// The place the app's event tap hands chat events to the service once one is running.
@@ -60,4 +73,11 @@ pub fn register_services(
     _events: &std::sync::Arc<dyn helm_ipc::EventSink>,
 ) {
     services.insert(std::sync::Arc::new(EventTap::default()));
+    // Chats that run on other devices: where the mirror attaches, and the check that sends the
+    // ops naming such a chat to it.
+    services.insert(std::sync::Arc::new(mirror::MirrorSlot::default()));
+    services.insert(std::sync::Arc::new(helm_chats::remote::RemoteSlot::default()));
+    services.insert(std::sync::Arc::new(helm_ipc::OpIntercept(std::sync::Arc::new(
+        helm_chats::remote::Routes,
+    ))));
 }

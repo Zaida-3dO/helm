@@ -617,6 +617,57 @@ pub fn link_home_to_person(
     )
 }
 
+/// Make sure each person the hub names has a profile here. A person already linked is left as
+/// they are; an unlinked profile of the same name is linked to them; otherwise a profile is made
+/// (with their colour when it is a usable one). Nothing is ever deleted or renamed. `true` when
+/// anything changed.
+pub fn sync_people(
+    tx: &Transaction<'_>,
+    people: &[helm_devices::wire::PersonInfo],
+    now: i64,
+) -> Result<bool, ProfileError> {
+    let mut changed = false;
+    for p in people {
+        let id = p.person_id.trim();
+        if id.is_empty() || p.name.trim().is_empty() {
+            continue;
+        }
+        let profiles = list(tx)?;
+        if profiles
+            .iter()
+            .any(|e| e.hub_person_id.as_deref() == Some(id))
+        {
+            continue;
+        }
+        let name = p.name.trim().to_lowercase();
+        let same_name = profiles
+            .iter()
+            .find(|e| e.hub_person_id.is_none() && e.name.to_lowercase() == name);
+        let done = match same_name {
+            Some(e) => update(
+                tx,
+                &e.id,
+                Patch {
+                    hub_person_id: Some(Some(id.to_owned())),
+                    ..Default::default()
+                },
+            )
+            .map(|_| ()),
+            None => {
+                let colour = Some(p.colour.as_str()).filter(|c| clean_colour(c).is_ok());
+                create(tx, &p.name, colour, Some(id), now).map(|_| ())
+            }
+        };
+        match done {
+            Ok(()) => changed = true,
+            // A name that can't be used, or the limit on profiles: that person has no profile
+            // here, and their chats simply stay out of the lists.
+            Err(e) => log::info!("profiles: no profile made for a hub person: {}", e.message()),
+        }
+    }
+    Ok(changed)
+}
+
 fn counts(conn: &Connection) -> HashMap<String, (i64, i64, i64)> {
     let mut m: HashMap<String, (i64, i64, i64)> = HashMap::new();
     let home = "(SELECT id FROM profiles WHERE is_home = 1)";

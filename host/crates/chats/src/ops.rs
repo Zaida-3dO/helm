@@ -22,7 +22,8 @@
 //! | `attention_get` | blocking | `{}` → [`AttentionSummary`] |
 //!
 //! Argument parsing is strict (an unknown field is `bad_args`). Ops that touch a running chat go
-//! through the [`ChatRuntime`] service.
+//! through the [`ChatRuntime`] service. A call that names a chat running on another device never
+//! reaches these handlers: the dispatcher asks [`crate::remote::Routes`] first.
 
 use crate::actor::Cmd;
 use crate::clock::Clock;

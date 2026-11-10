@@ -4,6 +4,7 @@
 // itself.
 
 import type { Api } from '../api/client.ts';
+import type { DeviceState } from '../api/devices.ts';
 import type { ChatRecord } from '../api/types.ts';
 
 /** One computer on the hub, as `devices_list` reports it. */
@@ -18,6 +19,8 @@ export interface DeviceInfo {
   /** Whether it lets other devices run its chats. */
   run: boolean;
   isSelf: boolean;
+  /** How it reads right now: live, read-only, offline, or reconnecting (this PC's line is down). */
+  state?: DeviceState;
 }
 
 export interface DevicesList {
