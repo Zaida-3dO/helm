@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
-import { deviceOps } from './api.ts';
+import type { ChatRecord } from '../api/types.ts';
+import { deviceOps, type DeviceInfo } from './api.ts';
+import { composerFor, remoteChatState, remoteHostOf, type RemoteChatState, type RemoteComposer } from './state.ts';
 import { devicesStoreFor, RemoteList, type DevicesSnapshot, type DevicesStore, type RemoteListSnapshot } from './store.ts';
 
 /** The one store for this app, started, and its latest snapshot. */
@@ -14,6 +16,26 @@ export function useDevices(api: Api, bus: EventBus): { store: DevicesStore; snap
   }, [store]);
   const snap = useSyncExternalStore(store.subscribe, () => store.snapshot);
   return { store, snap };
+}
+
+/** A chat that runs on another device, as the chat view needs it. */
+export interface RemoteView {
+  uid: string;
+  device: DeviceInfo | null;
+  state: RemoteChatState;
+  composer: RemoteComposer;
+}
+
+/** The device a chat runs on and how it reads right now; null for a chat that runs here. */
+export function useRemoteChat(api: Api, bus: EventBus, chat: Pick<ChatRecord, 'hostDeviceId'> | null): RemoteView | null {
+  const { snap } = useDevices(api, bus);
+  const uid = remoteHostOf(chat, snap.list);
+  return useMemo(() => {
+    if (!uid) return null;
+    const device = snap.list?.devices.find((d) => d.uid === uid) ?? null;
+    const state = remoteChatState(device, Date.now());
+    return { uid, device, state, composer: composerFor(uid, state) };
+  }, [uid, snap.list]);
 }
 
 /** How long a burst of events waits before the other computer's list is read again. */

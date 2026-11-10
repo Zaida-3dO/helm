@@ -24,6 +24,7 @@ import type { ChatOps } from '../api/ops.ts';
 import type { ChatRecord, ModelCatalogue } from '../api/types.ts';
 import { DEFAULT_MODEL, VERBOSITY_OPTIONS, type RuntimeSettings } from '../settings/runtime/model.ts';
 import { useShell } from '../shell/context.ts';
+import { remoteChatOps } from '../api/devices.ts';
 import { rollOverChat } from '../sidebar/actions.ts';
 import { ConfirmDialog, Segmented, type ConfirmSpec } from '../ui/index.ts';
 import { useBinding } from '../ui/hooks.ts';
@@ -66,11 +67,13 @@ function verbosityTitle(level: string | null): string {
 /** The chat's model and effort picker. A chat can change its model at any time; where the host
  *  says the conversation will not fit the chosen model's window, the offer beside the error rolls
  *  the chat over into it. */
-export function ModelPicker({ chat, ops, loading = false }: { chat: ChatRecord; ops: ChatOps; loading?: boolean }) {
+export function ModelPicker({ chat, ops, loading = false, deviceUid }: { chat: ChatRecord; ops: ChatOps; loading?: boolean; deviceUid?: string }) {
   const shell = useShell();
   const [verbosity, setVerbosity] = useState<{ level: string; own: boolean } | null>(null);
   const [saved, setSaved] = useState<RuntimeSettings | null>(null);
   useEffect(() => {
+    // The reply length and the saved default belong to the PC the chat runs on: not read for a chat on another device.
+    if (deviceUid) return;
     let live = true;
     shell
       .api<{ level: string; own: boolean }>('chat_verbosity_get', { chatId: chat.id })
@@ -83,7 +86,7 @@ export function ModelPicker({ chat, ops, loading = false }: { chat: ChatRecord; 
     return () => {
       live = false;
     };
-  }, [shell, chat.id]);
+  }, [shell, chat.id, deviceUid]);
   const isDefault =
     !!saved &&
     !!chat.model &&
@@ -113,7 +116,7 @@ export function ModelPicker({ chat, ops, loading = false }: { chat: ChatRecord; 
         }
       : undefined,
   };
-  return <ModelEffortPicker chat={chat} ops={ops} source={source} shortcut={!chat.sideSourceId} loading={loading} />;
+  return <ModelEffortPicker chat={chat} ops={ops} source={source} shortcut={!chat.sideSourceId} loading={loading} deviceUid={deviceUid} />;
 }
 
 /** Settings → Runtime's "Model and effort for new chats": the same picker, saving the default. */
@@ -146,6 +149,7 @@ function ModelEffortPicker({
   shortcut = false,
   settingsRow = false,
   loading = false,
+  deviceUid,
 }: {
   chat?: ChatRecord;
   ops: ChatOps;
@@ -156,7 +160,10 @@ function ModelEffortPicker({
   settingsRow?: boolean;
   /** The app is still checking its runtimes: the chip says so, muted, instead of a model name. */
   loading?: boolean;
+  /** The chat runs on another device: its models, and nothing that belongs to this PC (reply length, the saved default, the local servers). */
+  deviceUid?: string;
 }) {
+  const shell = useShell();
   const [catalogue, setCatalogue] = useState<ModelCatalogue | null>(null);
   const [error, setError] = useState<string | null>(null);
   // A model change the host refused as too large for the target's window: the id it refused, so
@@ -172,6 +179,16 @@ function ModelEffortPicker({
 
   useEffect(() => {
     let live = true;
+    if (deviceUid) {
+      // Another device's list is kept apart from this PC's cached one.
+      remoteChatOps(shell.api)
+        .catalogue(deviceUid)
+        .then((c) => live && setCatalogue(c))
+        .catch((e: unknown) => live && setError(String((e as Error).message ?? e)));
+      return () => {
+        live = false;
+      };
+    }
     cached ??= ops.catalogue();
     cached.then((c) => live && setCatalogue(c)).catch(() => {
       cached = null;
@@ -179,7 +196,7 @@ function ModelEffortPicker({
     return () => {
       live = false;
     };
-  }, [ops]);
+  }, [ops, deviceUid, shell.api]);
 
   const efforts = catalogue?.efforts?.length ? catalogue.efforts : FALLBACK_EFFORTS;
   // A chat with no model of its own shows the catalogue's first; the new-chat default with none
@@ -283,7 +300,7 @@ function ModelEffortPicker({
           const dir = e.key === 'ArrowRight' ? 1 : -1;
           if (e.altKey) {
             const next = stepEffort(LEVELS, source.verbosity ?? 'low', dir);
-            if (next !== source.verbosity) setLength(next);
+            if (!deviceUid && next !== source.verbosity) setLength(next);
           } else {
             setEffortDraft((x) => stepEffort(efforts, x || effort, dir));
           }
@@ -344,11 +361,13 @@ function ModelEffortPicker({
           onPick={(id) => commit(id)}
           extraHint={
             <span>
-              ← → {local ? 'thinking' : 'effort'} · Alt ← → replies
+              ← → {local ? 'thinking' : 'effort'}
+              {!deviceUid && ' · Alt ← → replies'}
             </span>
           }
           footer={
             <>
+              {!deviceUid && (
               <div className="model-picker-local" data-testid="local-check">
                 <span className="model-picker-local-hint" data-testid="local-hint">
                   {localHint(catalogue, checked, notes)}
@@ -357,6 +376,7 @@ function ModelEffortPicker({
                   {checking ? 'Checking…' : 'Check servers'}
                 </button>
               </div>
+              )}
               <div className="model-picker-effort" data-testid="effort-picker">
                 <span className="model-picker-caption">
                   {local ? 'Thinking' : 'Effort'} <kbd>←</kbd> <kbd>→</kbd>
@@ -382,6 +402,7 @@ function ModelEffortPicker({
                 </span>
                 <span className="model-picker-effort-value">{stopLabel(effortDraft || effort)}</span>
               </div>
+              {!deviceUid && (
               <div className="model-picker-verbosity" data-testid="verbosity-picker">
                 <span className="model-picker-caption">Replies</span>
                 <Segmented<string>
@@ -405,8 +426,9 @@ function ModelEffortPicker({
                   </button>
                 )}
               </div>
-              {source.verbosityNote && <div className="model-picker-note">{source.verbosityNote}</div>}
-              {source.makeDefault && (
+              )}
+              {!deviceUid && source.verbosityNote && <div className="model-picker-note">{source.verbosityNote}</div>}
+              {!deviceUid && source.makeDefault && (
                 <div className="model-picker-default">
                   <button
                     type="button"

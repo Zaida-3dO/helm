@@ -7,6 +7,8 @@ import type { MessageRow } from './api/types.ts';
 import { HOME_SEND_BEHAVIOR } from './api/types.ts';
 import { FlagNote } from './attention/index.ts';
 import { Composer, isBusy } from './composer/Composer.tsx';
+import { useRemoteChat } from './devices/hooks.ts';
+import { RemoteChatBar } from './devices/RemoteChatBar.tsx';
 import type { SendShortcut } from './composer/keymap.ts';
 import { QueueList } from './composer/QueueList.tsx';
 import { LOCAL_WORKING_LABEL, isLocalModelId, localWaitLabel } from './state/localModel.ts';
@@ -61,6 +63,8 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
 
   useEffect(() => store.watch(chatId), [store, chatId]);
   const shell = useShell();
+  // A chat on another device is read from this PC's copy; what only the host can do is left alone.
+  const remote = useRemoteChat(shell.api, shell.bus, view.chat);
   // Pictures on disk named in replies and tool cards come from the host.
   useEffect(() => setLocalImageLoader((path) => shell.api<{ mime: string; bytes: string }>('local_image_get', { path })), [shell]);
   // Transcript element toggles, read once and followed on change.
@@ -123,10 +127,10 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   const unreadToken = chat?.unread.markToken ?? null;
   const completionId = chat?.unread.completionId ?? null;
   useEffect(() => {
-    if (!unreadToken || cleared.current !== null) return;
+    if (!unreadToken || cleared.current !== null || remote) return;
     cleared.current = unreadToken;
     void ops.clearUnread(chatId, unreadToken).catch(() => undefined);
-  }, [unreadToken, ops, chatId]);
+  }, [unreadToken, ops, chatId, remote]);
   const loaded = chat !== null;
   useEffect(() => {
     // Loaded without a mark: any mark made from now on is one the user made while here.
@@ -134,10 +138,10 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   }, [loaded, unreadToken]);
   const status = chat?.status;
   useEffect(() => {
-    if (!completionId || !status || isBusy(status)) return;
+    if (!completionId || !status || isBusy(status) || remote) return;
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     void ops.ackCompletion(chatId, completionId).catch(() => undefined);
-  }, [completionId, status, ops, chatId]);
+  }, [completionId, status, ops, chatId, remote]);
   const behavior = thread?.sendBehavior ?? HOME_SEND_BEHAVIOR;
   const busy = chat ? isBusy(chat.status) : false;
 
@@ -146,7 +150,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   // reading taken mid-turn is stale by half the turn, and the row's own usage covers the gap.
   const [ctxRead, setCtxRead] = useState<ChatContextReading | null>(null);
   useEffect(() => {
-    if (busy) return;
+    if (busy || remote) return;
     let live = true;
     void shell
       .api<ChatContextReading>('chat_context', { chatId })
@@ -155,7 +159,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
     return () => {
       live = false;
     };
-  }, [chatId, busy, chat?.model, shell]);
+  }, [chatId, busy, chat?.model, shell, remote]);
 
   const stopTool = useCallback(
     (toolCallId: string) => {
@@ -165,7 +169,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   );
   const latestAssistantId = useMemo(() => [...view.rows].reverse().find((r) => r.role === 'assistant')?.id ?? null, [view.rows]);
   const interactionOpen = (thread?.interactions.length ?? 0) > 0;
-  const mentionRepo = useMentionRepo(shell.api, chat?.cwd);
+  const mentionRepo = useMentionRepo(shell.api, remote ? undefined : chat?.cwd);
   const ctx: RowContext = useMemo(
     () => ({
       chatId,
@@ -175,7 +179,10 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       interactionOpen,
       elements,
       editing,
-      onEdit: (row: MessageRow) => {
+      remoteDevice: remote?.state.deviceName,
+      onEdit: remote
+        ? undefined
+        : (row: MessageRow) => {
         ops
           .editOpen(chatId, row.id)
           .then((o) => setEditing({ rowId: o.messageId, revision: o.revision, text: o.text }))
@@ -188,13 +195,13 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       },
       onCancelEdit: () => setEditing(null),
       canStopTool: (row: MessageRow) =>
-        behavior.toolStop && Boolean(thread?.capabilities.stopTool) && Boolean(row.details?.stoppable) && row.status === 'streaming',
+        !remote && behavior.toolStop && Boolean(thread?.capabilities.stopTool) && Boolean(row.details?.stoppable) && row.status === 'streaming',
       onStopTool: stopTool,
       // Every link click goes through the panel's gate, which validates it before acting and
       // shows any refusal in the shell's toast slot itself.
       onLink: (t: LinkTarget) => void handleLink(t, { chatId }),
     }),
-    [behavior.toolStop, thread?.capabilities.stopTool, stopTool, chatId, latestAssistantId, busy, interactionOpen, editing, ops, elements, mentionRepo],
+    [behavior.toolStop, thread?.capabilities.stopTool, stopTool, chatId, latestAssistantId, busy, interactionOpen, editing, ops, elements, mentionRepo, remote?.state.deviceName],
   );
 
   // Escape while the chat works stops the turn; whatever it had not read goes back to it at
@@ -253,7 +260,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   rowsRef.current = view.rows;
   useEffect(() => setSideChatOps(ops), [ops]);
   useEffect(() => {
-    if (view.chat?.sideSourceId) return;
+    if (view.chat?.sideSourceId || remote) return;
     return registerSelectionAction({
       id: 'side-chat',
       label: 'Side chat',
@@ -271,7 +278,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
           .catch((e: unknown) => setNotice(`Could not open a side chat: ${e instanceof Error ? e.message : String(e)}`));
       },
     });
-  }, [ops, chatId, view.chat?.sideSourceId]);
+  }, [ops, chatId, view.chat?.sideSourceId, remote]);
 
   if (!chat) return <div className="chat-loading muted">{notice ?? 'Loading the chat…'}</div>;
 
@@ -292,6 +299,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
           {chat.localAhead != null ? localWaitLabel(chat.localAhead) : LOCAL_WORKING_LABEL}
         </span>
       )}
+      {remote && <RemoteChatBar state={remote.state} />}
       {notice && (
         <div className="notice" role="status">
           {notice}
@@ -324,7 +332,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
       />
       </div>
       {thread?.interactions.map((i) => (
-        <InteractionCard key={i.id} interaction={i} onAnswer={(id, a) => void ops.answer(chatId, id, a).catch(() => undefined)} />
+        <InteractionCard key={i.id} interaction={i} lock={remote && !remote.state.live ? remote.state.text : null} onAnswer={(id, a) => void ops.answer(chatId, id, a).catch(() => undefined)} />
       ))}
       {/* The composer dock: banners, then other areas' dock items (the
           review tray), then the in-flight list, in one capped, scrolling live region above the box. */}
@@ -383,7 +391,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         busy={busy}
         onRollOver={() => setRollConfirm(rollOverConfirm(chat.title, () => rollOverChat(ops, chatId, (m) => setNotice(m))))}
       />
-      {accessoriesAt('consent').map((a) => (
+      {!remote && accessoriesAt('consent').map((a) => (
         <div key={a.id} className="composer-accessory" data-accessory={a.id}>
           {a.render({ chat, thread, busy, draftEmpty: !chat.draft })}
         </div>
@@ -393,7 +401,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
           {a.render({ chat, thread, busy, draftEmpty: !chat.draft })}
         </div>
       ))}
-      {!chat.sideSourceId && <FlagNote chatId={chatId} ops={ops} />}
+      {!chat.sideSourceId && !remote && <FlagNote chatId={chatId} ops={ops} />}
       <QueueList pending={view.pending} thread={thread} ops={ops} chatId={chatId} />
       </div>
       {/* The activity line sits directly on the box, below the in-flight messages. */}
@@ -407,6 +415,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         ops={ops}
         flushers={flushers}
         sendShortcut={sendShortcut}
+        remote={remote?.composer}
         registerSetText={(f) => {
           setTextRef.current = f;
         }}

@@ -35,6 +35,8 @@ export interface RowContext {
   interactionOpen: boolean;
   /** Transcript element toggles; a missing key is shown. */
   elements?: { tokens?: 'shown' | 'hidden'; turnTime?: 'shown' | 'hidden'; fileChanges?: 'shown' | 'hidden'; timeline?: 'shown' | 'hidden' };
+  /** The chat runs on another device (its name): Allow requests wait there, not here. */
+  remoteDevice?: string;
   /** Edit and resend: the message being edited, if any. */
   editing?: EditState | null;
   onEdit?: (row: MessageRow) => void;
@@ -174,7 +176,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
     }
     return (
       <div className={`row row-tool${place}`} {...common}>
-        <ToolCard row={row} canStop={ctx.canStopTool(row)} onStop={ctx.onStopTool} />
+        <ToolCard row={row} canStop={ctx.canStopTool(row)} onStop={ctx.onStopTool} remoteDevice={ctx.remoteDevice} />
       </div>
     );
   }

@@ -31,6 +31,7 @@ import { isLongPaste, linkedPaste, pastedFileName } from './paste.ts';
 import { applyMention, MENTION_ROWS, mentionAt, mentionText, type Mention } from './mentions.ts';
 import { useScrollOnSend } from './scrollOnSend.ts';
 import { MicButton } from './MicButton.tsx';
+import { unconfirmedText, type RemoteComposer } from '../devices/state.ts';
 import { useHiddenSkills } from '../settings/applied.ts';
 import { accessoriesAt, accessorySide, announceSent, collectSendContributions, mountComposer, type AccessoryContext } from './slots.ts';
 import './composer.css';
@@ -50,7 +51,14 @@ export interface ComposerProps {
   recall?: string[];
   /** The user turned autocomplete on (off by default). */
   autocomplete?: boolean;
+  /**
+   * The chat runs on another device (or a new chat will). Only text can be sent, nothing is read
+   * from or written to this PC for it, and `blocked` turns the box off with that sentence.
+   */
+  remote?: RemoteComposer | null;
 }
+
+const NO_REMOTE_FILES = 'Images and files can’t be sent to a chat on another device yet.';
 
 const uid = () => globalThis.crypto.randomUUID();
 
@@ -65,9 +73,12 @@ export function isBusy(status: ChatRecord['status']): boolean {
   return status === 'running' || status === 'starting' || status === 'stopping';
 }
 
-export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, registerSetText, recall = [], autocomplete = false }: ComposerProps) {
+export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, registerSetText, recall = [], autocomplete = false, remote = null }: ComposerProps) {
   const editor = useRef<EditorHandle>(null);
   const [error, setError] = useState<string | null>(null);
+  // A send the device never confirmed: it may have arrived, so the text stays and nothing is resent.
+  const [unconfirmed, setUnconfirmed] = useState<string | null>(null);
+  const offBy = remote?.blocked ?? null;
   const [empty, setEmpty] = useState(!chat.draft);
   const stopping = useRef(false);
   // True while a send is on its way to the host: a second press does not send the message twice.
@@ -84,7 +95,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const checking = !runtime.checked;
   const starting = chat.status === 'starting' && pending.length === 0;
   // An archived chat cannot be sent to; restoring it (the banner above the box) is the way back.
-  const blocked = runtime.blocked || checking || starting || chat.archived;
+  const blocked = runtime.blocked || checking || starting || chat.archived || offBy !== null;
   const blockedRef = useRef(blocked);
   blockedRef.current = blocked;
   const scrollOnSendRef = useRef(true);
@@ -139,6 +150,10 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   useEffect(() => () => attachedRef.current.forEach((a) => URL.revokeObjectURL(a.url)), []);
   const addFiles = useCallback(
     async (files: File[]) => {
+      if (remote) {
+        setError(NO_REMOTE_FILES);
+        return;
+      }
       for (const f of files) {
         if (roomLeft(attachedRef.current.length, refsRef.current.length) === 0) {
           setError('A message can carry at most 20 attachments.');
@@ -164,7 +179,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
         }
       }
     },
-    [ops, chat.id],
+    [ops, chat.id, remote],
   );
   // Files, folders and chats by reference.
   const [refs, setRefs] = useState<AttachedRef[]>([]);
@@ -172,6 +187,10 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   refsRef.current = refs;
   const addRefs = useCallback(
     async (kind: 'path' | 'chat', targets: string[]) => {
+      if (remote) {
+        setError(NO_REMOTE_FILES);
+        return;
+      }
       for (const t of targets) {
         if (roomLeft(attachedRef.current.length, refsRef.current.length) === 0) {
           setError('A message can carry at most 20 attachments.');
@@ -186,7 +205,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
         }
       }
     },
-    [ops, chat.id],
+    [ops, chat.id, remote],
   );
   const pickFiles = async () => {
     setError(null);
@@ -229,7 +248,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       if ([...data.files].some((f) => f.type.startsWith('image/'))) return null;
       const text = data.getData('text/plain');
       if (!text) return null;
-      if (isLongPaste(text) && roomLeft(attachedRef.current.length, refsRef.current.length) > 0) {
+      if (!remote && isLongPaste(text) && roomLeft(attachedRef.current.length, refsRef.current.length) > 0) {
         setError(null);
         void attachPasted(text);
         return true;
@@ -237,13 +256,14 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       const html = data.getData('text/html');
       return html ? linkedPaste(text, html) : null;
     },
-    [attachPasted],
+    [attachPasted, remote],
   );
-  const full = roomLeft(attached.length, refs.length) === 0;
+  const full = !!remote || roomLeft(attached.length, refs.length) === 0;
   // Stage what the host holds unstaged for this chat: images and files staged before this window
   // opened (a restart), and the ones a taken-back send (withdrawn, recovered, refused, or never
   // sent at all) gave back. Ids already shown are left alone, so this never doubles an attachment.
   const restage = useCallback(async () => {
+    if (remote) return;
     try {
       const list = await ops.stagedAttachments(chat.id);
       for (const img of unstagedOnly(list.images, attachedRef.current)) {
@@ -261,7 +281,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     } catch {
       // The host is not reachable: the composer keeps whatever it already shows.
     }
-  }, [ops, chat.id]);
+  }, [ops, chat.id, remote]);
   const restoreRef = useRef<() => void>(() => undefined);
   restoreRef.current = () => void restage();
   // A reopened chat stages the attachments it is holding again.
@@ -351,6 +371,10 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       if (!text.trim() && images.length === 0 && sentRefs.length === 0) return;
       if (sendingRef.current) return;
       // A Helm command is run here, not sent to Claude; the draft clears only once it has started.
+      if (helmCommand(text)?.name === 'rollover' && remote) {
+        setError('Rolling a chat over can only be done on the PC it runs on.');
+        return;
+      }
       if (helmCommand(text)?.name === 'rollover') {
         sendingRef.current = true;
         setSending(true);
@@ -366,6 +390,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
         }
         return;
       }
+      setUnconfirmed(null);
       sendingRef.current = true;
       setSending(true);
       const token = saver.beginSend();
@@ -390,15 +415,16 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
           prevText.current = '';
         }
       } catch (e) {
-        // Refused: the text stays in the draft.
-        setError(e instanceof ApiError ? e.message : String(e));
+        // Refused: the text stays in the draft. A send nobody confirmed is told apart: it may have arrived.
+        if (e instanceof ApiError && e.code === 'unconfirmed') setUnconfirmed(e.message || unconfirmedText(remote?.deviceName ?? 'The device'));
+        else setError(e instanceof ApiError ? e.message : String(e));
       } finally {
         sendingRef.current = false;
         setSending(false);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [chat.id, ops, saver, pending],
+    [chat.id, ops, saver, pending, remote],
   );
 
   const stop = useCallback(
@@ -456,7 +482,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const asked = useRef<string>('');
   useEffect(() => {
     setGhost((g) => (g && g.base === draftText ? g : null));
-    if (!autocomplete || isLocalModel(chat.model) || skillPrefix !== null || draftText.trim().length < 4 || asked.current === draftText) return;
+    if (!autocomplete || remote || isLocalModel(chat.model) || skillPrefix !== null || draftText.trim().length < 4 || asked.current === draftText) return;
     const t = setTimeout(() => {
       if (document.visibilityState !== 'visible' || !document.hasFocus()) return;
       asked.current = draftText;
@@ -474,7 +500,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     }, 350);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autocomplete, chat.model, draftText, skillPrefix, ops, chat.id]);
+  }, [autocomplete, remote, chat.model, draftText, skillPrefix, ops, chat.id]);
   // A dim marker says suggestions are not coming, with the reason on hover. It stays until the
   // next suggestion that works, and at least AUTOCOMPLETE_MARKER_MS.
   const [acFail, setAcFail] = useState<{ reason: string; at: number } | null>(null);
@@ -504,7 +530,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const [mentionShut, setMentionShut] = useState<string | null>(null);
   const mentionQuery = mention?.query ?? '';
   useEffect(() => {
-    if (!mentionQuery) {
+    // Files are looked up on this PC; a chat on another device has its own.
+    if (!mentionQuery || remote) {
       setMentionHits(null);
       return;
     }
@@ -523,7 +550,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       live = false;
       clearTimeout(t);
     };
-  }, [mentionQuery, panel, chat.id]);
+  }, [mentionQuery, remote, panel, chat.id]);
   const mentionOpen = mention !== null && mentionHits !== null && mentionHits.q === mention.query && mentionHits.items.length > 0 && mentionShut !== draftText;
   const pickMention = (item: QuickItem) => {
     const text = editor.current?.getText() ?? '';
@@ -617,7 +644,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
     (text: string) => {
       // The first keystroke in a local chat starts loading its model now (host-side rules keep
       // this to once between turns, at most once every five minutes); a later send joins it.
-      if (!prevText.current.trim() && text.trim() && isLocalModel(chat.model)) {
+      if (!remote && !prevText.current.trim() && text.trim() && isLocalModel(chat.model)) {
         void ops.warm(chat.id).catch(() => undefined);
       }
       prevText.current = text;
@@ -627,7 +654,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       const caret = editor.current?.caretOffset();
       setMention(caret == null ? null : mentionAt(text, caret));
     },
-    [saver, chat.id, chat.model, ops],
+    [saver, chat.id, chat.model, ops, remote],
   );
 
   const actx: AccessoryContext = { chat, thread, busy, draftEmpty: empty };
@@ -670,6 +697,11 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       {error && (
         <div className="composer-error error" data-testid="composer-error">
           {error}
+        </div>
+      )}
+      {unconfirmed && (
+        <div className="composer-unconfirmed" role="status" data-testid="composer-unconfirmed">
+          {unconfirmed}
         </div>
       )}
       {menu && (
@@ -799,11 +831,17 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
             ))}
           </div>
         )}
-        <ContextStatus chatId={chat.id} />
+        {!remote && <ContextStatus chatId={chat.id} />}
+        {offBy && (
+          <span className="visually-hidden" data-testid="composer-remote-blocked">
+            {offBy}
+          </span>
+        )}
         <Editor
           key={chat.id}
           initialText={chat.draft}
-          placeholder={busy ? 'Steer the running task…' : 'Message Claude…'}
+          placeholder={offBy ?? (busy ? 'Steer the running task…' : 'Message Claude…')}
+          editable={offBy === null}
           onChange={onChange}
           onKey={onKey}
           handle={editor}
@@ -825,8 +863,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
         />
         <div className="composer-bar">
           <div className="composer-selects">
-            <ModelPicker chat={chat} ops={ops} loading={checking} />
-            <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} busy={busy} ops={ops} />
+            <ModelPicker chat={chat} ops={ops} loading={checking} deviceUid={remote?.deviceUid} />
+            {!remote && <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} busy={busy} ops={ops} />}
             {toolbarStart.map((a) => (
               <span key={a.id} className="composer-accessory" data-accessory={a.id}>
                 {a.render(actx)}
@@ -839,12 +877,12 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
                 {a.render(actx)}
               </span>
             ))}
-            <MicButton editor={editor} />
+            {offBy === null && <MicButton editor={editor} />}
             <Button
               variant="icon"
               className="composer-attach"
               label="Attach files or folders"
-              title={full ? 'A message can carry at most 20 attachments' : 'Attach files or folders · up to 20, including images'}
+              title={remote ? 'Images and files can’t be sent to a chat on another device yet' : full ? 'A message can carry at most 20 attachments' : 'Attach files or folders · up to 20, including images'}
               disabled={full}
               aria-haspopup="menu"
               aria-expanded={attachMenu !== null}
@@ -884,7 +922,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
               data-testid="send"
               disabled={blocked || sending || (empty && attached.length === 0 && refs.length === 0)}
               aria-busy={sending || undefined}
-              title={chat.archived ? 'Restore this chat to send' : runtime.blocked ? 'Connect Claude Code to send' : checking ? 'Starting Claude Code…' : starting ? 'Claude Code is starting' : sendTooltip(ctx, busy)}
+              title={offBy ?? (chat.archived ? 'Restore this chat to send' : runtime.blocked ? 'Connect Claude Code to send' : checking ? 'Starting Claude Code…' : starting ? 'Claude Code is starting' : sendTooltip(ctx, busy))}
               onClick={() => void send('default')}
             />
           </div>

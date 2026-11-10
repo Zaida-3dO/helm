@@ -68,6 +68,8 @@ export function deviceOps(api: Api) {
     list: () => api<DevicesList>('devices_list', {}),
     /** One page of a computer's chats for a profile (own and shared). */
     chats: (a: { deviceUid: string; profileId: string; archived?: boolean; offset?: number; limit?: number }) => api<DeviceChats>('devices_chats', a),
+    /** The projects a computer last said it has (every one, not only those holding chats shown to this profile). */
+    projects: (deviceUid: string) => api<DeviceChats>('devices_chats', { deviceUid, limit: 1 }).then((r) => r.projects),
     createChat: (a: { deviceUid: string; projectId: string; model?: string; effort?: string }) => api<{ chatId: string }>('devices_create_chat', a),
     self: () => api<ThisDevice>('device_get', {}),
     rename: (name: string) => api<ThisDevice>('device_rename', { name }),

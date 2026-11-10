@@ -31,7 +31,7 @@ import { updatesFakeOps } from './fake-updates.ts';
 import { itemLinksFakeOps } from './fake-itemlinks.ts';
 import { hubFakeOps } from './fake-hub.ts';
 import { profilesFakeOps } from './fake-profiles.ts';
-import { devicesFakeOps } from './fake-devices.ts';
+import { devicesFakeOps, remoteFakeCatalogue, remoteFakeChat, remoteFakeRefusal } from './fake-devices.ts';
 import { knowledgeFakeOps } from './fake-knowledge.ts';
 import { githubFakeOps } from './fake-github.ts';
 import { webSearchFakeOps } from './fake-websearch.ts';
@@ -552,9 +552,25 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   ];
 
   function find(chatId: unknown): FakeChat {
-    const c = chats.get(String(chatId));
+    let c = chats.get(String(chatId));
+    // A chat of another device is made here the first time it is asked for (fake-devices.ts).
+    const remote = c ? null : remoteFakeChat(String(chatId));
+    if (remote) {
+      c = newChat(remote.cwd, remote.model ?? undefined, remote.effort ?? undefined);
+      chats.delete(c.chat.id);
+      c.chat = { ...remote };
+      c.thread = { ...c.thread, chatId: remote.id, status: remote.status };
+      chats.set(remote.id, c);
+      seed(c, 3);
+    }
     if (!c) throw { code: 'not_found', message: 'No such chat.' };
     return c;
+  }
+
+  /** A change to a chat on a device that cannot take it now is refused in the host's words. */
+  function remoteGuard(c: FakeChat) {
+    const refusal = c.chat.hostDeviceId ? remoteFakeRefusal(c.chat.hostDeviceId) : null;
+    if (refusal) throw refusal;
   }
 
   function page(c: FakeChat, a: Record<string, unknown>): TranscriptPage {
@@ -602,7 +618,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       if (typeof a.boardId === 'string') fakeOpFor('chat_organize')?.('chat_organize', { chatId: chat.id, groupProjectId: a.boardId }, { emit, call: (o, x = {}) => ops[o]?.(x) });
       return chat;
     },
-    chat_list: () => [...chats.values()].map((c) => c.chat).filter((c) => !c.archived && !c.sideSourceId).sort((x, y) => y.createdAt - x.createdAt),
+    chat_list: () => [...chats.values()].map((c) => c.chat).filter((c) => !c.archived && !c.sideSourceId && !c.hostDeviceId).sort((x, y) => y.createdAt - x.createdAt),
     chat_get: (a) => {
       const c = find(a.chatId);
       return { chat: c.chat, thread: c.thread };
@@ -622,6 +638,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     },
     chat_send: (a) => {
       const c = find(a.chatId);
+      remoteGuard(c);
       const text = String(a.text ?? '');
       const ids = (a.attachments as string[] | undefined) ?? [];
       const sentImages: { id: string; name: string; mime: string; width: number; height: number }[] = [];
@@ -701,6 +718,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     },
     chat_stop: (a) => {
       const c = find(a.chatId);
+      remoteGuard(c);
       if (!c.turn) return { status: c.chat.status };
       setStatus(c, 'stopping');
       c.turn.cancel();
@@ -749,6 +767,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     },
     chat_set_model: (a) => {
       const c = find(a.chatId);
+      remoteGuard(c);
       c.chat = { ...c.chat, model: (a.model as string) ?? c.chat.model, effort: (a.effort as string) ?? c.chat.effort };
       emitChat(c);
       addRow(c, { role: 'context', text: `Model set to ${c.chat.model} · ${c.chat.effort}`, details: { contextKind: 'modelChange' } });
@@ -761,7 +780,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       emitThread(c);
       return { mode: String(a.mode) };
     },
-    model_catalogue: () => ({
+    model_catalogue: (a) => typeof a.deviceUid === 'string' ? remoteFakeCatalogue(a.deviceUid) : ({
       harness: 'claude',
       models: [
         { id: 'claude-opus-5-5', name: 'Opus 5.5', description: 'Most capable' },

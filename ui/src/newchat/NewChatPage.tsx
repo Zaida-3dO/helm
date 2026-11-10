@@ -10,7 +10,10 @@ import type { SendShortcut } from '../composer/keymap.ts';
 import type { Flushers } from '../shell/quit.ts';
 import { useShell } from '../shell/context.ts';
 import { Checkbox, ContextMenu, Picker, toast, useBinding, type MenuItem, type PickerOption } from '../ui/index.ts';
-import { IconCheck, IconCopy } from '../ui/icons.tsx';
+import { IconCheck, IconCopy, IconMonitor } from '../ui/icons.tsx';
+import { deviceOps } from '../devices/api.ts';
+import { useDevices } from '../devices/hooks.ts';
+import { composerFor, remoteChatState, type RemoteChatState } from '../devices/state.ts';
 import { isFinished } from '../sidebar/model.ts';
 import { syncOnOpen } from '../sidebar/sync.ts';
 import { pickFolder } from './api.ts';
@@ -71,6 +74,35 @@ export function NewChatHost({ flushers, sendShortcut }: { flushers: Flushers; se
     };
   }, [pops, shell.api, shell.bus]);
 
+  // New creates on the device whose chats the sidebar shows; another device brings its own projects.
+  const { snap: devices } = useDevices(shell.api, shell.bus);
+  const deviceUid = devices.remote?.uid ?? null;
+  const deviceName = devices.remote?.name ?? '';
+  useEffect(() => {
+    newChat.setDevice(deviceUid ? { uid: deviceUid, name: deviceName } : null);
+  }, [deviceUid, deviceName]);
+  useEffect(() => {
+    if (!deviceUid) return;
+    let live = true;
+    const load = () => {
+      void deviceOps(shell.api)
+        .projects(deviceUid)
+        .then((l) => live && newChat.setDeviceProjects(l))
+        .catch(() => undefined);
+    };
+    load();
+    const offs = [
+      shell.bus.on('devices_chats_changed', (e) => {
+        if ((e as { deviceUid?: unknown }).deviceUid === deviceUid) load();
+      }),
+      shell.bus.on('devices_changed', load),
+    ];
+    return () => {
+      live = false;
+      offs.forEach((o) => o());
+    };
+  }, [deviceUid, shell.api, shell.bus]);
+
   useBinding({ id: 'chat.new', title: 'New chat', defaultKeys: 'Ctrl+N', run: () => newChat.show() });
   useBinding({ id: 'project.add', title: 'New project', defaultKeys: 'Ctrl+O', run: () => newChat.newProject() });
 
@@ -110,7 +142,10 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
   const [showCompleted, setShowCompleted] = useState(false);
 
   // "Ask each time": a new draft with no project opens the picker, search field focused, once.
-  const askFirst = newChat.boards.ask && !boardId;
+  const device = newChat.device;
+  const { snap: devices } = useDevices(shell.api, shell.bus);
+  const hostState = device ? remoteChatState(devices.list?.devices.find((d) => d.uid === device.uid) ?? null, Date.now()) : null;
+  const askFirst = newChat.boards.ask && !boardId && !device;
   const asked = useRef<string | null>(null);
   useEffect(() => {
     if (!askFirst || asked.current === draft.id) return;
@@ -190,6 +225,38 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
         <div className="nc-column">
           <div className="nc-perch" aria-hidden="true" />
           <h1 className="nc-title">What are we building?</h1>
+          {device && hostState ? (
+            <div className="nc-card" data-testid="newchat-card">
+              <div className="nc-device" data-testid="newchat-device" data-tone={hostState.tone}>
+                <IconMonitor size={13} />
+                <span>New chat on {device.name}</span>
+              </div>
+              <div className="nc-project">
+                <Picker
+                  value={newChat.remoteProjectId}
+                  options={newChat.deviceProjects.map((p) => ({ value: p.id, title: p.name, text: p.name }))}
+                  onChange={(v) => newChat.pickRemoteProject(v)}
+                  label={`Project on ${device.name}`}
+                  display={newChat.deviceProjects.find((p) => p.id === newChat.remoteProjectId)?.name}
+                  heading={`Start the chat on ${device.name} in`}
+                  searchable
+                  placeholder="Choose a project"
+                  testId="newchat-project"
+                />
+              </div>
+              {hostState.text ? (
+                <div className="nc-device-note" data-testid="newchat-device-note" data-tone={hostState.tone}>
+                  {newChatBlocked(hostState)}
+                </div>
+              ) : (
+                newChat.deviceProjects.length === 0 && (
+                  <div className="nc-device-note" data-testid="newchat-device-note">
+                    {device.name} has no projects to start a chat in yet. Add one there first.
+                  </div>
+                )
+              )}
+            </div>
+          ) : (
           <div className="nc-card" data-testid="newchat-card">
             <div className="nc-project">
               <Picker
@@ -233,6 +300,7 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
               {hintFor(source, folder) && <span className="nc-hint">· {hintFor(source, folder)}</span>}
             </div>
           </div>
+          )}
         </div>
       </div>
       <div className="composer-dock nc-dock" role="region" aria-label="Composer">
@@ -244,11 +312,20 @@ function NewChatPage({ flushers, sendShortcut }: { flushers: Flushers; sendShort
           flushers={flushers}
           sendShortcut={sendShortcut}
           registerSetText={() => undefined}
+          remote={device && hostState ? { ...composerFor(device.uid, hostState), blocked: newChatBlocked(hostState) } : null}
         />
       </div>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems()} onClose={() => setMenu(null)} label="Folder" testId="newchat-folder-menu" />}
     </div>
   );
+}
+
+/** Why a new chat cannot start on a device right now; null when it can. */
+function newChatBlocked(st: RemoteChatState): string | null {
+  if (st.live) return null;
+  if (st.state === 'offline') return `${st.deviceName} is offline. Pick another device or try later.`;
+  if (st.state === 'readonly') return `${st.deviceName} doesn’t let other devices run its chats.`;
+  return st.text;
 }
 
 async function copyPath(path: string): Promise<boolean> {

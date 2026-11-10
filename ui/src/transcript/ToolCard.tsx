@@ -5,6 +5,7 @@
 import { useEffect, useState } from 'react';
 import type { MessageRow } from '../api/types.ts';
 import { consentOps } from '../api/consent.ts';
+import { waitingForApproval } from '../devices/state.ts';
 import { useShell } from '../shell/context.ts';
 import { IconCopy, IconWrap } from '../ui/icons.tsx';
 import { Glyph, Spinner } from './icons.tsx';
@@ -37,6 +38,8 @@ export interface ToolCardProps {
   /** The Stop button shows only when the setting is on, the worker can stop one call, and this call is stoppable. */
   canStop: boolean;
   onStop: (toolCallId: string) => void;
+  /** The chat runs on another device (its name): an Allow request waits for approval there. */
+  remoteDevice?: string;
 }
 
 function useElapsed(since: number, live: boolean): number {
@@ -54,10 +57,12 @@ const STATUS_TITLE: Record<ToolStatus, string> = { running: 'Running', complete:
 const ALLOW_CHIP_TEXT = { waiting: 'Waiting for you', allowed: 'Allowed', refused: 'Refused' } as const;
 
 /** Where an Allow request stands, read from the consent list: waiting, allowed or refused. Nothing when the list no longer holds it. */
-function AllowChip({ chatId, requestId }: { chatId: string; requestId: string }) {
+function AllowChip({ chatId, requestId, remoteDevice, running }: { chatId: string; requestId: string; remoteDevice?: string; running: boolean }) {
   const shell = useShell();
   const [state, setState] = useState<string | undefined>();
   useEffect(() => {
+    // The request lives on the device the chat runs on, and only someone there can decide it.
+    if (remoteDevice) return;
     let live = true;
     const load = () => {
       consentOps(shell.api)
@@ -75,7 +80,14 @@ function AllowChip({ chatId, requestId }: { chatId: string; requestId: string })
       live = false;
       off();
     };
-  }, [shell.api, shell.bus, chatId, requestId]);
+  }, [shell.api, shell.bus, chatId, requestId, remoteDevice]);
+  if (remoteDevice) {
+    return running ? (
+      <span className="allow-chip allow-chip-remote" data-testid="tool-allow-state" data-state="remote">
+        {waitingForApproval(remoteDevice)}
+      </span>
+    ) : null;
+  }
   const chip = allowChipState(state);
   if (!chip) return null;
   return (
@@ -85,7 +97,7 @@ function AllowChip({ chatId, requestId }: { chatId: string; requestId: string })
   );
 }
 
-export function ToolCard({ row, canStop, onStop }: ToolCardProps) {
+export function ToolCard({ row, canStop, onStop, remoteDevice }: ToolCardProps) {
   const kind = toolKind(row.toolName);
   const status = toolStatus(row);
   const id = toolIdentity(row);
@@ -169,7 +181,7 @@ export function ToolCard({ row, canStop, onStop }: ToolCardProps) {
           {status === 'interrupted' && <Glyph name="pause" size={12} />}
           {status === 'complete' && id.source !== 'native' && <Glyph name="check" size={12} />}
         </span>
-        {allowId && <AllowChip chatId={row.chatId} requestId={allowId} />}
+        {allowId && <AllowChip chatId={row.chatId} requestId={allowId} remoteDevice={remoteDevice} running={status === 'running'} />}
         {status === 'running' && <span className="tool-elapsed muted">{formatElapsed(elapsed)}</span>}
         {status === 'running' && canStop && row.toolCallId && (
           <button

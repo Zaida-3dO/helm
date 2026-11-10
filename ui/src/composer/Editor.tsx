@@ -68,6 +68,17 @@ export interface EditorProps {
   onPaste?: (data: DataTransfer) => string | true | null;
   /** Drawn inside the editor box, over its bottom right corner (the autocomplete marker). */
   trailing?: ReactNode;
+  /** False makes the draft read-only (a chat on a device that cannot take a message now). */
+  editable?: boolean;
+}
+
+/** Follows the `editable` prop. */
+function Editable({ on }: { on: boolean }) {
+  const [editor] = useLexicalComposerContext();
+  useEffect(() => {
+    editor.setEditable(on);
+  }, [editor, on]);
+  return null;
 }
 
 /** Drafts longer than this are drawn plain: styling re-reads the whole draft on every key. */
@@ -402,7 +413,7 @@ function markupKey(editor: LexicalEditor, e: KeyboardEvent): boolean {
   return false;
 }
 
-export function Editor({ initialText, placeholder, onChange, onKey, handle, ghost, commands, onPaste, trailing }: EditorProps) {
+export function Editor({ initialText, placeholder, onChange, onKey, handle, ghost, commands, onPaste, trailing, editable = true }: EditorProps) {
   const config = {
     namespace: 'helm-composer',
     onError: (e: Error) => console.error(e),
@@ -427,6 +438,7 @@ export function Editor({ initialText, placeholder, onChange, onKey, handle, ghos
           onChange={(state: EditorState) => onChange(state.read(() => $getRoot().getTextContent()))}
         />
         <LiveStyle commands={commands} />
+        <Editable on={editable} />
         <Bridge onKey={onKey} handle={handle} onPaste={onPaste} />
         {ghost && <Ghost ghost={ghost} />}
         {trailing}

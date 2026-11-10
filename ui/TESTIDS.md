@@ -253,3 +253,13 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 | `icon-colour-none` / `icon-colour-<name>` / `icon-colour-hex` / `icon-colour-hex-use` | The colour row under the tabs: no colour, a named colour (`red` `orange` `yellow` `green` `teal` `blue` `purple` `pink`), the custom hex field (`#rrggbb`) and its Use button | |
 | `icon-remove` / `icon-done` / `icon-error` | Remove icon (back to the default glyph), Done, and the plain-words error line (`role="alert"`) | |
 | `setting-notifications` | Settings → Shell: the Windows notifications row (Off by default) | `[data-value]` on its segments: `off` `native` |
+
+## Chats on another device
+
+| Hook | Element | Attributes |
+|---|---|---|
+| `remote-chat-bar` / `remote-chat-state` | The strip at the top of a chat that runs on another device ("Runs on <device>"), and the sentence for a device that cannot take a change (not drawn while live) | bar: `data-state` (`live` `readonly` `offline` `reconnecting`), `data-tone` (`neutral` `amber` `grey`) |
+| `composer-remote-blocked` / `composer-unconfirmed` | The composer's off-reason (hidden text; the same words are the placeholder, and the box is read-only) and the note after a send the device never confirmed | |
+| `interaction-locked` | The line on an answer card that cannot be answered while the chat's device is away (its choices are disabled) | the card has `data-locked="true"` |
+| `tool-allow-state` (remote) | On a chat of another device, an Allow request still waiting reads "Waiting for approval on <device>" | `data-state="remote"` |
+| `newchat-device` / `newchat-device-note` | The new-chat page aimed at another device: "New chat on <device>", and the line saying it is offline, read-only, reconnecting or has no project | `newchat-device`: `data-tone`; `newchat-project` lists that device's folder projects |

@@ -1,0 +1,78 @@
+/* The strip at the top of a chat that runs on another device. */
+.remote-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-alt);
+  color: var(--muted);
+  font-size: 12px;
+  flex: none;
+}
+.remote-bar-glyph {
+  display: inline-flex;
+  flex: none;
+}
+.remote-bar-device {
+  color: var(--text);
+  white-space: nowrap;
+}
+.remote-bar-state {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.remote-bar[data-tone='amber'] {
+  color: var(--warning-text);
+}
+.remote-bar[data-tone='grey'] {
+  opacity: 0.85;
+}
+
+/* A note under the composer's box: a send nobody confirmed. */
+.composer-unconfirmed {
+  padding: 6px 10px;
+  border: 1px solid var(--warning);
+  border-radius: 8px;
+  color: var(--warning-text);
+  font-size: 12px;
+}
+
+/* An Allow request waiting on the device the chat runs on. */
+.allow-chip-remote {
+  color: var(--muted);
+}
+
+/* An answer card that cannot be answered from here right now. */
+.ia-lock {
+  margin: 4px 0 0;
+  padding: 6px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.ia-card[data-locked='true'] .ia-option {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* The new-chat page aimed at another device. */
+.nc-device {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.nc-device[data-tone='amber'],
+.nc-device-note[data-tone='amber'] {
+  color: var(--warning-text);
+}
+.nc-device-note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}

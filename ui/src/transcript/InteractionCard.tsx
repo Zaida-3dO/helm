@@ -23,6 +23,8 @@ export interface InteractionCardProps {
   onAnswer: (requestId: string, answer: InteractionAnswer) => void;
   /** Shown inside the answer popup: a question's default option takes focus, so Enter sends it. */
   popup?: boolean;
+  /** Why the card cannot be answered from here now (the chat's device is away); its choices are shown off. */
+  lock?: string | null;
 }
 
 function Context({ i }: { i: Interaction }) {
@@ -47,14 +49,16 @@ function Badge({ kind }: { kind: string }) {
   );
 }
 
-export function InteractionCard({ interaction: i, onAnswer, popup }: InteractionCardProps) {
+export function InteractionCard({ interaction: i, onAnswer, popup, lock = null }: InteractionCardProps) {
   const [other, setOther] = useState(i.prefill ?? '');
   const shownAt = useRef(performance.now());
   const card = useRef<HTMLDivElement>(null);
   useEffect(() => {
     shownAt.current = performance.now();
   }, [i.id, i.step]);
-  const answer = (a: InteractionAnswer) => onAnswer(i.id, a);
+  const answer = (a: InteractionAnswer) => {
+    if (!lock) onAnswer(i.id, a);
+  };
   const kind = i.attention ?? 'approval';
   const options = i.options ?? [];
   const testId = kind === 'plan' ? 'plan-button' : kind === 'question' ? 'question-button' : 'approval-button';
@@ -86,7 +90,7 @@ export function InteractionCard({ interaction: i, onAnswer, popup }: Interaction
 
   return (
     <div className={`ia-wrap${popup ? ' ia-in-popup' : ''}`}>
-      <div ref={card} className={`ia-card ia-${kind}`} data-testid="interaction-card" data-attention={kind} onKeyDown={onKey}>
+      <div ref={card} className={`ia-card ia-${kind}`} data-testid="interaction-card" data-attention={kind} data-locked={lock ? 'true' : undefined} onKeyDown={onKey}>
         <div className="ia-head">
           <Badge kind={kind} />
           <span className="ia-eyebrow">{eyebrowOf(kind)}</span>
@@ -105,6 +109,11 @@ export function InteractionCard({ interaction: i, onAnswer, popup }: Interaction
             </div>
           )}
           <Context i={i} />
+          {lock && (
+            <div className="ia-lock" role="status" data-testid="interaction-locked">
+              {lock}
+            </div>
+          )}
 
           {options.length > 0 && (
             <div className="ia-options" role="group" aria-label="Choices">
@@ -121,6 +130,7 @@ export function InteractionCard({ interaction: i, onAnswer, popup }: Interaction
                     data-option={o}
                     data-autofocus={focusAt === n ? '' : undefined}
                     title={i.optionDescriptions?.[n]}
+                    disabled={!!lock}
                     onClick={() => answer(optionAnswer(kind, o))}
                   >
                     <span className="ia-num">{n < 9 ? n + 1 : ''}</span>
@@ -155,7 +165,7 @@ export function InteractionCard({ interaction: i, onAnswer, popup }: Interaction
                 data-testid="question-other"
                 aria-label="Your own answer"
               />
-              <button type="submit" className="ia-send" data-testid="question-button" data-option="(other)" aria-label="Answer" disabled={!other.trim()}>
+              <button type="submit" className="ia-send" data-testid="question-button" data-option="(other)" aria-label="Answer" disabled={!other.trim() || !!lock}>
                 <IconSend size={14} />
               </button>
             </form>
@@ -163,10 +173,10 @@ export function InteractionCard({ interaction: i, onAnswer, popup }: Interaction
 
           {confirmOnly && (
             <div className="ia-footer-buttons">
-              <button type="button" className="ui-btn" data-testid="approval-button" data-option="no" onClick={() => answer({ confirmed: false })}>
+              <button type="button" className="ui-btn" data-testid="approval-button" data-option="no" disabled={!!lock} onClick={() => answer({ confirmed: false })}>
                 No
               </button>
-              <button type="button" className="ui-btn ui-btn-primary" data-testid="approval-button" data-option="yes" onClick={() => answer({ confirmed: true })}>
+              <button type="button" className="ui-btn ui-btn-primary" data-testid="approval-button" data-option="yes" disabled={!!lock} onClick={() => answer({ confirmed: true })}>
                 Confirm
               </button>
             </div>

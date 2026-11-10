@@ -11,6 +11,7 @@ import type { ChatOps, SendExtras } from '../api/ops.ts';
 import type { ProjectNode, SidebarRow } from '../api/projects.ts';
 import type { ChatRecord, SendAction, Submission } from '../api/types.ts';
 import { appendBlock, withItemContext } from '../tasks/context.ts';
+import { deviceOps, type RemoteProject } from '../devices/api.ts';
 import { discardUntouched } from './api.ts';
 import { NO_DEFAULT_BOARD, type DefaultBoardState } from './boards.ts';
 import { boardFor, folderProjectFor, isOpenBoard, needsFolder, pushRecent, readRecents, resolveFolder, samePath, type ResolvedFolder } from './places.ts';
@@ -85,6 +86,14 @@ export const DRAFT_PREFIX = 'draft:';
 export const LAST_PROJECT_KEY = 'helm.newchat.lastProject';
 /** The typed text of the open draft, so it survives a restart (images and the place do not). */
 export const DRAFT_TEXT_KEY = 'helm.newchat.draftText';
+/** The project last used on another device (the device's uid is added). */
+export const REMOTE_PROJECT_KEY = 'helm.newchat.remoteProject.';
+
+/** Another device the new chat is aimed at. */
+export interface NewChatDevice {
+  uid: string;
+  name: string;
+}
 
 /** The dialogs the new-chat area draws (New project, Add folder, Primary folder…). */
 export type NewChatDialog =
@@ -109,6 +118,8 @@ export class NewChatController {
    * asks the host to discard it, which it does only while the chat is still untouched.
    */
   private made: { chat: ChatRecord; key: string; uploads: Map<string, string> } | null = null;
+  /** The same for a chat made on another device: the next try sends to it instead of making another. */
+  private madeRemote: { chatId: string; key: string } | null = null;
 
   open = false;
   dialog: NewChatDialog | null = null;
@@ -121,6 +132,14 @@ export class NewChatController {
   boardConnected = false;
   /** The folder of the chat that was open when the page opened (folder resolution step 4). */
   openChatFolder: string | null = null;
+  /** The device the chat will run on, when it is not this PC. */
+  device: NewChatDevice | null = null;
+  /** That device's folder projects, as it last listed them. */
+  deviceProjects: RemoteProject[] = [];
+  /** The device's project the chat is made in. */
+  remoteProjectId: string | null = null;
+  private remoteModel: string | null = null;
+  private remoteEffort: string | null = null;
   version = 0;
 
   subscribe = (l: Listener): (() => void) => {
@@ -173,6 +192,49 @@ export class NewChatController {
 
   setProjects(list: ProjectNode[]): void {
     this.projects = list;
+    this.changed();
+  }
+
+  /**
+   * Aim the page at another device (null for this PC). A different device starts with its own
+   * project, model and effort: the ones chosen here mean nothing there.
+   */
+  setDevice(d: NewChatDevice | null): void {
+    if ((this.device?.uid ?? null) === (d?.uid ?? null)) {
+      if (this.device && d && this.device.name !== d.name) {
+        this.device = d;
+        this.changed();
+      }
+      return;
+    }
+    this.device = d;
+    this.deviceProjects = [];
+    this.remoteProjectId = null;
+    this.remoteModel = null;
+    this.remoteEffort = null;
+    this.madeRemote = null;
+    this.changed();
+  }
+
+  /** The device's projects (only folders can hold a new chat); keeps the choice while it is still listed. */
+  setDeviceProjects(list: RemoteProject[]): void {
+    const dev = this.device;
+    if (!dev) return;
+    this.deviceProjects = list.filter((p) => p.kind === 'folder');
+    if (!this.deviceProjects.some((p) => p.id === this.remoteProjectId)) {
+      let last: string | null = null;
+      try {
+        last = this.env?.storage.getItem(REMOTE_PROJECT_KEY + dev.uid) ?? null;
+      } catch {
+        // Storage off: the first project is used.
+      }
+      this.remoteProjectId = this.deviceProjects.find((p) => p.id === last)?.id ?? this.deviceProjects[0]?.id ?? null;
+    }
+    this.changed();
+  }
+
+  pickRemoteProject(id: string): void {
+    this.remoteProjectId = id;
     this.changed();
   }
 
@@ -261,6 +323,7 @@ export class NewChatController {
     this.draft?.refs.clear();
     if (this.made && this.made.chat.id === opening) this.made = null;
     this.dropMade();
+    this.madeRemote = null;
     if (this.untouched()) this.draft = null;
     this.changed();
   }
@@ -359,8 +422,8 @@ export class NewChatController {
       status: 'idle',
       error: null,
       harness: 'claude',
-      model: d.model,
-      effort: d.effort,
+      model: this.device ? this.remoteModel : d.model,
+      effort: this.device ? this.remoteEffort : d.effort,
       draft: d.text,
       draftRevision: d.revision,
       createdAt: d.createdAt,
@@ -378,7 +441,7 @@ export class NewChatController {
       localAhead: null,
       started: false,
       profileId: '',
-      hostDeviceId: '',
+      hostDeviceId: this.device?.uid ?? '',
       sharedWith: [],
     };
   }
@@ -403,8 +466,14 @@ export class NewChatController {
   setModel(model?: string, effort?: string): ChatRecord {
     const d = this.draft;
     if (d) {
-      if (model !== undefined) d.model = model;
-      if (effort !== undefined) d.effort = effort;
+      // On another device the choice is made from that device's list and kept apart from this PC's.
+      if (this.device) {
+        if (model !== undefined) this.remoteModel = model;
+        if (effort !== undefined) this.remoteEffort = effort;
+      } else {
+        if (model !== undefined) d.model = model;
+        if (effort !== undefined) d.effort = effort;
+      }
       this.changed();
     }
     const r = this.record();
@@ -474,6 +543,7 @@ export class NewChatController {
     const env = this.env;
     const d = this.draft;
     if (!env || !d) throw new ApiError('not_found', 'The new chat was closed.');
+    if (this.device) return this.doFirstSendRemote(env, this.device, submissionId, text, action, extras);
     const { folder } = this.place();
     if (!folder) throw new ApiError('needs_folder', 'Choose a folder for this chat first.');
     if (this.boards.ask && !this.board()) throw new ApiError('needs_board', 'Choose a project for this chat first.');
@@ -541,6 +611,46 @@ export class NewChatController {
     }
     this.lastSelected = chat.id;
     env.select(chat.id);
+    this.changed();
+    return result;
+  }
+
+  /**
+   * The first send aimed at another device: it makes the chat there, then sends the text. Text
+   * only. When the send is refused after the chat was made, the next try sends to that chat.
+   */
+  private async doFirstSendRemote(env: NewChatEnv, dev: NewChatDevice, submissionId: string, text: string, action: SendAction, extras: SendExtras): Promise<{ submission: Submission; chat: ChatRecord }> {
+    const projectId = this.remoteProjectId;
+    if (!projectId) throw new ApiError('needs_folder', `Choose a project on ${dev.name} first.`);
+    const key = `${dev.uid}:${projectId}`;
+    if (this.madeRemote && this.madeRemote.key !== key) this.madeRemote = null;
+    let made = this.madeRemote;
+    if (!made) {
+      const r = await deviceOps(env.api).createChat({
+        deviceUid: dev.uid,
+        projectId,
+        ...(this.remoteModel ? { model: this.remoteModel } : {}),
+        ...(this.remoteEffort ? { effort: this.remoteEffort } : {}),
+      });
+      made = { chatId: r.chatId, key };
+      this.madeRemote = made;
+    }
+    const result = await env.ops.send(made.chatId, submissionId, text, action, 0, { ...extras, attachments: [] });
+    try {
+      env.storage.setItem(REMOTE_PROJECT_KEY + dev.uid, projectId);
+    } catch {
+      // As above.
+    }
+    this.draft = null;
+    this.madeRemote = null;
+    this.open = false;
+    try {
+      env.storage.setItem(DRAFT_TEXT_KEY, '');
+    } catch {
+      // As above.
+    }
+    this.lastSelected = made.chatId;
+    env.select(made.chatId);
     this.changed();
     return result;
   }

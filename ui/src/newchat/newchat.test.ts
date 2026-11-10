@@ -175,6 +175,7 @@ function harness(opts: { open?: { id: string; cwd: string; projectId: string }; 
     // The host's folder project is the named one, else "fp:<cwd>".
     if (op === 'chat_create') return chatRecord(`chat-${++n}`, a.cwd!, a.projectId ?? `fp:${a.cwd}`);
     if (op === 'chat_discard_untouched') return { discarded: true };
+    if (op === 'devices_create_chat') return { chatId: 'remote-1' };
     if (op === 'sidebar_rows') return Object.entries(opts.groups ?? {}).map(([chatId, groupProjectId]) => ({ chatId, groupProjectId }));
     return null;
   }) as Api;
@@ -428,6 +429,40 @@ test('a refused send keeps the draft open, and the retry sends to the chat alrea
   const sends = h.calls.filter((c) => c.op === 'send');
   assert.equal(sends.length, 2);
   assert.equal(sends[0]!.args[0], sends[1]!.args[0]);
+});
+
+test('aimed at another device: its folder projects, its own model choice, create there then send text, a retry reuses the chat', async () => {
+  const h = harness();
+  h.ctl.setDevice({ uid: 'lap', name: 'Laptop' });
+  h.ctl.show();
+  // Only folders can hold a chat; the project used last time on that device comes back first.
+  h.storage.setItem('helm.newchat.remoteProject.lap', 'p2');
+  h.ctl.setDeviceProjects([
+    { id: 'b1', name: 'Board', colour: null, kind: 'board' },
+    { id: 'p1', name: 'Shop', colour: null, kind: 'folder' },
+    { id: 'p2', name: 'Notes', colour: null, kind: 'folder' },
+  ]);
+  assert.deepEqual(h.ctl.deviceProjects.map((p) => p.id), ['p1', 'p2']);
+  assert.equal(h.ctl.remoteProjectId, 'p2');
+  const ops = draftOps(h.env.ops, h.ctl);
+  // The model chosen is the device's own and never touches this PC's draft model.
+  await ops.setModel(h.ctl.draft!.id, 'claude-haiku-5', 'low');
+  assert.deepEqual([h.ctl.record()!.model, h.ctl.record()!.effort, h.ctl.record()!.hostDeviceId, h.ctl.draft!.model], ['claude-haiku-5', 'low', 'lap', null]);
+  h.failSends.n = 1;
+  await assert.rejects(ops.send('x', 's1', 'hi', 'default', 1, { attachments: ['ignored'] }), /no/);
+  assert.equal(h.ctl.open, true);
+  await ops.send('x', 's2', 'hi', 'default', 1);
+  const made = h.calls.filter((c) => c.op === 'devices_create_chat');
+  assert.equal(made.length, 1);
+  assert.deepEqual(made[0]!.args[0], { deviceUid: 'lap', projectId: 'p2', model: 'claude-haiku-5', effort: 'low' });
+  assert.equal(h.calls.some((c) => c.op === 'chat_create'), false);
+  const sends = h.calls.filter((c) => c.op === 'send');
+  assert.deepEqual(sends.map((s) => s.args), [['remote-1', 's1', 'hi', []], ['remote-1', 's2', 'hi', []]]);
+  assert.equal(h.selected.id, 'remote-1');
+  assert.equal(h.storage.getItem('helm.newchat.remoteProject.lap'), 'p2');
+  // Back on this PC the remote choices are gone.
+  h.ctl.setDevice(null);
+  assert.deepEqual([h.ctl.device, h.ctl.deviceProjects, h.ctl.remoteProjectId], [null, [], null]);
 });
 
 test('without any folder the send is refused and nothing is created', async () => {

@@ -6,6 +6,7 @@ import { chat } from '../dev/fixtures.ts';
 import type { DeviceChats, DeviceInfo, DevicesList, RemoteChatRecord } from './api.ts';
 import { menuLabel, menuOrder, remoteDevice, remoteList, resolveSelected, scopeNote, showToggle, stateText } from './model.ts';
 import { DevicesStore, RemoteList } from './store.ts';
+import { composerFor, remoteChatState, remoteHostOf, seenText, unconfirmedText, waitingForApproval } from './state.ts';
 
 const NOW = Date.parse('2026-11-10T12:00:00');
 const device = (uid: string, name: string, over: Partial<DeviceInfo> = {}): DeviceInfo => ({
@@ -167,4 +168,34 @@ test("another device's chat list pages, refreshes from the first page, and ignor
   assert.deepEqual([rl.snapshot.error, rl.snapshot.rows.length], ['Laptop is offline.', 0]);
   rl.clear();
   assert.deepEqual([rl.snapshot.error, rl.snapshot.more], [null, false]);
+});
+
+test('a chat on another device reads by the device state: the words, the tone, whether it can be changed', () => {
+  const lap = (over: Partial<DeviceInfo> = {}) => device('lap', 'Laptop', over);
+  const seen = '2026-11-10T11:02:00';
+  const rows: [string, DeviceInfo | null, string, string | null, string, boolean][] = [
+    ['live', lap(), 'live', null, 'neutral', true],
+    ['read-only: its switch is off', lap({ run: false }), 'readonly', "Laptop doesn't let other devices run its chats. You can read this one.", 'neutral', false],
+    ['offline: the hub says it is not up', lap({ online: false, lastSeenAt: null }), 'offline', "Laptop is offline (last seen never). You can read this chat; sending is off until it's back.", 'grey', false],
+    ['reconnecting: the host says so, whatever the flags', lap({ state: 'reconnecting' }), 'reconnecting', 'Reconnecting to the hub… showing the copy on this PC.', 'amber', false],
+    ['the host word wins over the flags', lap({ state: 'live', online: false }), 'live', null, 'neutral', true],
+    ['a device that left the hub reads as offline', null, 'offline', "Another device is offline (last seen never). You can read this chat; sending is off until it's back.", 'grey', false],
+  ];
+  for (const [what, d, state, text, tone, live] of rows) {
+    const s = remoteChatState(d, NOW);
+    assert.deepEqual([s.state, s.text, s.tone, s.live], [state, text, tone, live], what);
+  }
+  // The last seen time reads as a time today and a date and time another day.
+  const today = remoteChatState(lap({ online: false, lastSeenAt: seen }), NOW).text!;
+  assert.match(today, /^Laptop is offline \(last seen \d{1,2}[:.]\d\d/);
+  assert.doesNotMatch(seenText(seen, NOW), /Nov/);
+  assert.ok(seenText(seen, NOW + 3 * 24 * 3600_000).length > seenText(seen, NOW).length, 'another day adds the date');
+  // The composer is off with the same words, and only for a chat that runs elsewhere.
+  const off = remoteChatState(lap({ run: false }), NOW);
+  assert.deepEqual(composerFor('lap', off), { deviceUid: 'lap', deviceName: 'Laptop', blocked: off.text });
+  assert.equal(composerFor('lap', remoteChatState(lap(), NOW)).blocked, null);
+  const l = list(lap());
+  assert.deepEqual([remoteHostOf({ hostDeviceId: 'lap' }, l), remoteHostOf({ hostDeviceId: 'me' }, l), remoteHostOf({ hostDeviceId: '' }, l), remoteHostOf({ hostDeviceId: 'lap' }, null), remoteHostOf(null, l)], ['lap', null, null, null, null]);
+  assert.equal(unconfirmedText('Laptop'), "Laptop didn't confirm this message. It may or may not have arrived.");
+  assert.equal(waitingForApproval('Laptop'), 'Waiting for approval on Laptop');
 });
