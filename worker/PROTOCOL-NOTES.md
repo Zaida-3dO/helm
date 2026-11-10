@@ -71,8 +71,10 @@ steering and tool control" for why it is delivery and not the acknowledgement.
 
 - **Flags:** `-p`, stream-json in and out, `--verbose`, `--include-partial-messages`,
   `--replay-user-messages`, `--permission-prompt-tool stdio`, `--setting-sources user,project,local`
-  (overridable), `--model`, `--effort` (omitted for haiku models), and when asked
-  `--permission-mode bypassPermissions`, `--resume`, `--append-system-prompt`, `--settings`.
+  (`claude.settingSources` overrides it: a chat for someone other than the PC's own person gets
+  `project,local`), `--model`, `--effort` (omitted for haiku models), and when asked
+  `--permission-mode bypassPermissions`, `--resume`, `--append-system-prompt`, `--settings`,
+  `--plugin-dir` (once per entry of `claude.pluginDirs`) and `--agents` (`claude.agentsFile`).
 - **Submission ack:** the CLI echoes each user message (with our uuid) because of
   `--replay-user-messages`; that echo is the acknowledgement. No echo within 30 s: the prompt is
   answered `{success:false, uncertain:true}` and never written again. A repeated `prompt` with a
@@ -272,6 +274,18 @@ public Agent SDK type definitions; no SDK code is used or copied.
   `hello-probe` reported as `probe:hello-probe`, description `(probe) …`). So Helm's own skills
   plugin, named `helm`, shows its skills as `helm:<name>`; the host matches those names back to
   its skills folder and marks them `scope: "helm-skill"` for the `/` menu.
+- **Knowledge layers.** Helm keeps rules, skills and agents in layers under `<profile>/knowledge/`:
+  `everyone` and one folder per profile. A chat's launch builds up to three plugin folders from
+  them, named `helm` (the Everyone layer), `personal` (the chat's profile) and `project` (linked
+  folders scoped to the chat's project), so the CLI reports `helm:<name>`, `personal:<name>` and
+  `project:<name>`; a plugin with no skills is not passed. The folders are plain copies under
+  `<profile>/launch-plugins/<hash>/<plugin>/`, named by a hash of the skills' contents and reused
+  while it holds. The same folder carries `agents.json`, the Everyone and the profile agents
+  merged (the profile wins a name clash), passed with `--agents`; agents keep their plain names.
+  Rules are not a CLI feature here: they reach the chat inside `--append-system-prompt`, in a
+  `rules` section. A chat whose profile is not the PC's home profile is launched with
+  `--setting-sources project,local`, so the owner's `~/.claude` rules, skills and settings are not
+  read for it; its project's own `CLAUDE.md` and `.claude/skills` load as usual.
 
 ## Delivery, steering and tool control
 

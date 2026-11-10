@@ -68,6 +68,12 @@ pub struct ClaudeLaunch {
     /// Absent when that folder has no agents.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agents_file: Option<String>,
+    /// The Claude Code setting sources the chat may read (`--setting-sources`). Absent leaves the
+    /// worker's default of all three (`user`, `project`, `local`); a chat for someone other than
+    /// this PC's own person is held to `project` and `local`, so the owner's personal rules,
+    /// skills and settings stay out of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setting_sources: Option<Vec<String>>,
 }
 
 /// Where a local chat's model lives and how far it may think. `baseUrl` is a loopback address;
@@ -306,6 +312,7 @@ pub fn claude_launch(
         local: None,
         plugin_dirs: Vec::new(),
         agents_file: None,
+        setting_sources: None,
     };
     if let Some(t) = test {
         c.command = Some(t.command.clone());
@@ -509,5 +516,10 @@ mod tests {
         with_plugin.agents_file = Some("C:/profile/agents-launch.json".into());
         let v = serde_json::to_value(&with_plugin).unwrap();
         assert_eq!(v["agentsFile"], "C:/profile/agents-launch.json");
+        // The setting sources likewise: absent keeps the worker's default of all three.
+        assert!(v.get("settingSources").is_none());
+        with_plugin.setting_sources = Some(vec!["project".into(), "local".into()]);
+        let v = serde_json::to_value(&with_plugin).unwrap();
+        assert_eq!(v["settingSources"], serde_json::json!(["project", "local"]));
     }
 }

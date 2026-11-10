@@ -1,7 +1,7 @@
 //! The example agents and skills Helm offers.
 //!
 //! The files sit beside this crate in `examples/` and are compiled in. Each is copied into the
-//! profile once, the first time Helm sees it, and is the user's from then on: edit it, replace
+//! Everyone layer once, the first time Helm sees it, and is the user's from then on: edit it, replace
 //! it or remove it, and it stays that way. A small record in the profile lists what has already
 //! been offered, so a removed example does not come back, while an example added by a later
 //! version is offered once. A file of the same name that is already there is never overwritten.
@@ -62,9 +62,11 @@ fn offered(record: &Value, key: &str) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-/// Copy in every example not offered before. Never fails the caller: a problem is logged and the
-/// example is tried again next time.
+/// Bring the earlier skills and agents folders into the Everyone layer ([`crate::layers::migrate`]),
+/// then copy in every example not offered before. Never fails the caller: a problem is logged and
+/// the example is tried again next time.
 pub fn seed(profile: &Path) {
+    crate::layers::migrate(profile);
     if let Err(e) = try_seed(profile) {
         log::warn!("skills: could not offer the example agents and skills: {e}");
     }
@@ -76,6 +78,7 @@ fn try_seed(profile: &Path) -> io::Result<()> {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_else(|| json!({}));
+    let root = crate::layers::Layer::Everyone.root(profile);
     let mut agents = offered(&record, "agents");
     let mut skills = offered(&record, "skills");
     let before = (agents.len(), skills.len());
@@ -84,9 +87,9 @@ fn try_seed(profile: &Path) -> io::Result<()> {
         if agents.contains(*name) {
             continue;
         }
-        let dest = crate::agents::agents_dir(profile).join(format!("{name}.md"));
+        let dest = crate::agents::agents_dir(&root).join(format!("{name}.md"));
         if !dest.exists() {
-            helm_core::privfs::create_private_dir_all(&crate::agents::agents_dir(profile))?;
+            helm_core::privfs::create_private_dir_all(&crate::agents::agents_dir(&root))?;
             helm_core::privfs::write_atomic(&dest, text.as_bytes())?;
         }
         agents.insert((*name).to_owned());
@@ -95,7 +98,7 @@ fn try_seed(profile: &Path) -> io::Result<()> {
         if skills.contains(*name) {
             continue;
         }
-        let dest = crate::skills_dir(profile).join(name);
+        let dest = crate::skills_dir(&root).join(name);
         if !dest.exists() {
             helm_core::privfs::create_private_dir_all(&dest)?;
             helm_core::privfs::write_atomic(&dest.join("SKILL.md"), text.as_bytes())?;

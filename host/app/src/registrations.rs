@@ -114,6 +114,8 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
         extensions.push(helm_relay::settings_extension(&profile.dir));
         // A chat's edits to the repository list, which Undo puts back.
         extensions.push(helm_projects::repo_undo::settings_extension(&profile.dir));
+        // A chat's edits to the rules and skills, which Undo puts back.
+        extensions.push(helm_skills::undo::settings_extension(&profile.dir));
     }
     services.insert(Arc::new(helm_hosttools::SettingsExtensions(extensions)));
     services.insert(Arc::new(worker_lines()));
@@ -219,6 +221,7 @@ pub fn host_tools() -> helm_hosttools::HostToolRegistry {
     helm_waits::register_host_tools(&mut reg);
     helm_usage::register_host_tools(&mut reg);
     helm_webtools::register_host_tools(&mut reg);
+    helm_skills::register_host_tools(&mut reg);
     reg
 }
 
@@ -424,6 +427,16 @@ pub fn launch_contributors(
     .register_section(Arc::new(knowledge_section(db)))
     .register_section(Arc::new(helm_itemlinks::ItemLinksSection))
     .register_section(Arc::new(helm_workflow::WorkflowSection { db: db.clone() }));
+    // The knowledge layers: who a chat is for (its profile and project), and the rules of everyone
+    // and of that person.
+    if let Some(profile_dir) = db.path().parent() {
+        let lookup = Arc::new(helm_skills::launch::DbLookup { db: db.clone() });
+        helm_skills::launch::set_lookup(lookup.clone());
+        a.register_section(Arc::new(helm_skills::launch::RulesSection::new(
+            profile_dir.to_path_buf(),
+            lookup,
+        )));
+    }
     let mut c = helm_workers::contrib::LaunchContributors::new();
     // Whose chat this is opens the system prompt, ahead of the addendum.
     c.add(Arc::new(helm_profiles::launch::WhoLaunch { db: db.clone() }));
@@ -514,6 +527,11 @@ mod host_tool_tests {
             "app_wait_for",
             "app_background_result",
             "app_usage_summary",
+            "app_list_knowledge",
+            "app_save_rule",
+            "app_remove_rule",
+            "app_add_skill",
+            "app_remove_skill",
         ];
         assert_eq!(names(Default::default()), base);
         let delta = |k: helm_hosttools::LaunchKeys| -> Vec<String> {

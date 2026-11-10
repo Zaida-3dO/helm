@@ -1,6 +1,6 @@
 [package]
 name = "helm-skills"
-description = "Helm's own skills folder: a Claude Code plugin in the profile that every chat loads, plus the Settings > Skills ops that list, add, remove and reveal it."
+description = "Helm's knowledge layers: the rules, skills and agents that apply to everyone and to one profile, the folders linked in, the per-chat plugin folders a launch loads, and the Settings and agent tools that manage them."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,8 +9,14 @@ publish.workspace = true
 [dependencies]
 helm-core.workspace = true
 helm-ipc.workspace = true
+helm-platform.workspace = true
+helm-workers.workspace = true
+helm-hosttools = { path = "../hosttools" }
+helm-profiles = { path = "../profiles" }
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
 log.workspace = true
 
 [dev-dependencies]

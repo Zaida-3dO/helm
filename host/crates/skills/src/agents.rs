@@ -1,14 +1,15 @@
-//! Helm's own agents folder.
+//! Agents.
 //!
-//! `<profile>/agents` holds one Markdown file per agent: a front matter block (`name`,
+//! A layer's `agents/` folder holds one Markdown file per agent: a front matter block (`name`,
 //! `description`, optionally `tools` and `model`) and then the agent's instructions. Every chat
-//! launch hands the whole folder to the Claude Code CLI as one `--agents` file, so the agents are
+//! launch merges the Everyone layer's agents with the chat's profile layer (the profile wins on a
+//! name clash) and hands them to the Claude Code CLI as one `--agents` file, so the agents are
 //! known by their plain names (`planner`, `reviewer`, …) in every chat, whatever its project. The
 //! plain names are what Settings > Orchestrator's stages point at. A plugin folder would give them
 //! a `helm:` prefix, which no stage names.
 //!
-//! The folder lives beside the skills plugin, not inside it, so the CLI never loads the same
-//! agent twice under two names.
+//! Agents are not part of the skills plugins, so the CLI never loads the same agent twice under
+//! two names. Every function here takes a layer's root folder.
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -24,14 +25,9 @@ const MAX_AGENTS: usize = 64;
 /// uses the chat's own model.
 const MODEL_ALIASES: [&str; 4] = ["sonnet", "opus", "haiku", "inherit"];
 
-/// The agents folder inside the profile.
-pub fn agents_dir(profile: &Path) -> PathBuf {
-    profile.join("agents")
-}
-
-/// The file a launch hands to the CLI. Rewritten at each launch from the folder.
-fn launch_file(profile: &Path) -> PathBuf {
-    profile.join("agents-launch.json")
+/// The agents folder inside a layer's root.
+pub fn agents_dir(root: &Path) -> PathBuf {
+    root.join("agents")
 }
 
 /// One agent as Settings sees it.
@@ -120,8 +116,8 @@ fn read_agent(path: &Path) -> Option<ParsedAgent> {
 
 /// Every agent in the folder, by name. A missing folder simply means none; a file that is not an
 /// agent file (no front matter, no description, a bad name) is not listed.
-pub fn list(profile: &Path) -> Vec<AgentEntry> {
-    let Ok(read) = fs::read_dir(agents_dir(profile)) else {
+pub fn list(root: &Path) -> Vec<AgentEntry> {
+    let Ok(read) = fs::read_dir(agents_dir(root)) else {
         return Vec::new();
     };
     let mut out: Vec<AgentEntry> = read
@@ -148,8 +144,8 @@ pub fn list(profile: &Path) -> Vec<AgentEntry> {
 }
 
 /// The agent names, for matching against what a stage or a chat asks for.
-pub fn agent_names(profile: &Path) -> Vec<String> {
-    list(profile).into_iter().map(|a| a.name).collect()
+pub fn agent_names(root: &Path) -> Vec<String> {
+    list(root).into_iter().map(|a| a.name).collect()
 }
 
 /// What an import brought in, and what it left out.
@@ -163,9 +159,9 @@ pub struct Added {
 /// Import `source`: one agent file, or a folder whose `.md` files (not its subfolders) are each
 /// tried. A single bad file is an error; in a folder it is skipped and reported, and the import
 /// fails only when nothing at all was taken.
-pub fn add(profile: &Path, source: &Path) -> io::Result<Added> {
+pub fn add(root: &Path, source: &Path) -> io::Result<Added> {
     if !source.is_dir() {
-        let one = add_file(profile, source)?;
+        let one = add_file(root, source)?;
         return Ok(Added {
             names: vec![one.name],
             skipped: Vec::new(),
@@ -179,7 +175,7 @@ pub fn add(profile: &Path, source: &Path) -> io::Result<Added> {
     files.sort();
     let mut out = Added::default();
     for f in files {
-        match add_file(profile, &f) {
+        match add_file(root, &f) {
             Ok(a) => out.names.push(a.name),
             Err(e) => out.skipped.push(format!(
                 "{}: {e}",
@@ -199,7 +195,7 @@ pub fn add(profile: &Path, source: &Path) -> io::Result<Added> {
 
 /// Copy one agent file in as a new agent. The agent takes the name in its front matter, or else the
 /// file's own name.
-pub fn add_file(profile: &Path, source: &Path) -> io::Result<AgentEntry> {
+pub fn add_file(root: &Path, source: &Path) -> io::Result<AgentEntry> {
     let bytes = helm_core::privfs::read_capped(source, MAX_AGENT_FILE).map_err(|e| {
         if e.kind() == ErrorKind::InvalidData {
             io::Error::new(ErrorKind::InvalidInput, "the agent file is too large")
@@ -209,6 +205,11 @@ pub fn add_file(profile: &Path, source: &Path) -> io::Result<AgentEntry> {
     })?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     let bad = |why: &str| io::Error::new(ErrorKind::InvalidInput, why.to_owned());
+    if helm_core::hidden::find_hidden(&Value::String(text.clone())).is_some() {
+        return Err(bad(
+            "the file holds invisible or direction-changing characters",
+        ));
+    }
     let parsed = parse_agent(&text).ok_or_else(|| bad("the file has no front matter block"))?;
     if parsed.description.is_empty() {
         return Err(bad("the front matter needs a description"));
@@ -228,14 +229,14 @@ pub fn add_file(profile: &Path, source: &Path) -> io::Result<AgentEntry> {
     if !crate::is_valid_name(&name) {
         return Err(bad("name must be lower-case letters, digits and hyphens"));
     }
-    let dest = agents_dir(profile).join(format!("{name}.md"));
+    let dest = agents_dir(root).join(format!("{name}.md"));
     if dest.exists() {
         return Err(io::Error::new(
             ErrorKind::AlreadyExists,
             "an agent of that name is already in the folder",
         ));
     }
-    helm_core::privfs::create_private_dir_all(&agents_dir(profile))?;
+    helm_core::privfs::create_private_dir_all(&agents_dir(root))?;
     helm_core::privfs::write_atomic(&dest, text.as_bytes())?;
     Ok(AgentEntry {
         name,
@@ -245,11 +246,11 @@ pub fn add_file(profile: &Path, source: &Path) -> io::Result<AgentEntry> {
 }
 
 /// Remove one agent. Only a plain file in the folder can go, never through a link.
-pub fn remove(profile: &Path, name: &str) -> io::Result<()> {
+pub fn remove(root: &Path, name: &str) -> io::Result<()> {
     if !crate::is_valid_name(name) {
         return Err(io::Error::new(ErrorKind::InvalidInput, "not an agent name"));
     }
-    let path = agents_dir(profile).join(format!("{name}.md"));
+    let path = agents_dir(root).join(format!("{name}.md"));
     match fs::symlink_metadata(&path) {
         Err(e) if e.kind() == ErrorKind::NotFound => {
             Err(io::Error::new(ErrorKind::NotFound, "no such agent"))
@@ -262,42 +263,34 @@ pub fn remove(profile: &Path, name: &str) -> io::Result<()> {
     }
 }
 
-/// The `--agents` document for what is in the folder: `{name: {description, prompt, tools?, model?}}`.
-pub fn launch_json(profile: &Path) -> Value {
+/// The `--agents` document for the layers' folders, earliest first (a later layer's agent replaces
+/// an earlier one of the same name): `{name: {description, prompt, tools?, model?}}`.
+pub fn launch_json(roots: &[&Path]) -> Value {
     let mut map = Map::new();
-    for entry in list(profile).into_iter().take(MAX_AGENTS) {
-        let Some(p) = read_agent(Path::new(&entry.path)) else {
-            continue;
-        };
-        if p.prompt.is_empty() {
-            continue;
+    for root in roots {
+        for entry in list(root) {
+            let Some(p) = read_agent(Path::new(&entry.path)) else {
+                continue;
+            };
+            if p.prompt.is_empty() {
+                continue;
+            }
+            let mut def = Map::new();
+            def.insert("description".into(), json!(p.description));
+            def.insert("prompt".into(), json!(p.prompt));
+            if !p.tools.is_empty() {
+                def.insert("tools".into(), json!(p.tools));
+            }
+            if MODEL_ALIASES.contains(&p.model.to_ascii_lowercase().as_str()) {
+                def.insert("model".into(), json!(p.model.to_ascii_lowercase()));
+            }
+            map.insert(entry.name, Value::Object(def));
         }
-        let mut def = Map::new();
-        def.insert("description".into(), json!(p.description));
-        def.insert("prompt".into(), json!(p.prompt));
-        if !p.tools.is_empty() {
-            def.insert("tools".into(), json!(p.tools));
-        }
-        if MODEL_ALIASES.contains(&p.model.to_ascii_lowercase().as_str()) {
-            def.insert("model".into(), json!(p.model.to_ascii_lowercase()));
-        }
-        map.insert(entry.name, Value::Object(def));
+    }
+    // A launch carries a bounded number of agents; the earliest names stay.
+    if map.len() > MAX_AGENTS {
+        let keep: Vec<String> = map.keys().take(MAX_AGENTS).cloned().collect();
+        map.retain(|k, _| keep.contains(k));
     }
     Value::Object(map)
-}
-
-/// The file to pass as `--agents`, or None when the folder has no agents. Written fresh at each
-/// launch, so an edit to an agent file reaches the chat's next start.
-pub fn launch_agents_file(profile: &Path) -> Option<String> {
-    let doc = launch_json(profile);
-    if doc.as_object().is_none_or(|o| o.is_empty()) {
-        return None;
-    }
-    let path = launch_file(profile);
-    let bytes = serde_json::to_vec(&doc).ok()?;
-    if let Err(e) = helm_core::privfs::write_atomic(&path, &bytes) {
-        log::warn!("agents: could not write the launch file: {e}");
-        return None;
-    }
-    Some(path.to_string_lossy().into_owned())
 }

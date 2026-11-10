@@ -128,6 +128,8 @@ test("stream-json both ways, partial messages, replayed user messages, stdio per
   assert.ok(a.includes("--replay-user-messages"));
   assert.equal(flag(a, "--permission-prompt-tool"), "stdio");
   assert.equal(flag(a, "--setting-sources"), "user,project,local");
+  // A chat for someone other than the PC's own person leaves the owner's personal settings out.
+  assert.equal(flag(buildClaudeArgs({ settingSources: ["project", "local"] }), "--setting-sources"), "project,local");
 });
 
 test("effort defaults to xhigh; haiku gets none; an unknown effort falls back to the default", () => {
