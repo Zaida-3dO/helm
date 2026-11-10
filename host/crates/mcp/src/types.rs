@@ -55,6 +55,11 @@ pub enum RefKind {
     File,
     /// The secret itself, kept in the credential store under `secretId`.
     Literal,
+    /// The hub person the chat belongs to, resolved for each chat when it starts: the person its
+    /// profile is linked to. A header only; it carries no value, and a chat whose profile is not
+    /// linked to a person gets no such header.
+    #[serde(rename = "chatPerson")]
+    ChatPerson,
 }
 
 /// An env or header value.

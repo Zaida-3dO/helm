@@ -16,6 +16,7 @@ helm-afk = { path = "../afk" }
 helm-mcp = { path = "../mcp" }
 helm-profiles = { path = "../profiles" }
 helm-devices = { path = "../devices" }
+helm-skills = { path = "../skills" }
 tokio.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

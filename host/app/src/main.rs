@@ -331,6 +331,9 @@ fn run_app(
             if let Some(tap) = services.get::<helm_devices::EventTap>() {
                 tapped.attach_devices(tap);
             }
+            if let Some(trigger) = services.get::<helm_skills::sync::Trigger>() {
+                tapped.attach_knowledge(trigger);
+            }
             let ctx = OpCtx {
                 services: Arc::new(services),
                 events,

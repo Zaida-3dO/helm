@@ -8,6 +8,7 @@
 //! | [`admin`] | the `app_` MCP admin tool bodies |
 //! | `ops` | the Settings → MCP `api` ops |
 //! | [`lines`] | the `mcp_config` start line and re-send, and `mcp_status` from workers |
+//! | [`memory`] | one tool call to the hub's memory server from the host (Settings' memory lists) |
 //! | [`probe`] | Settings → MCP's Test connection: one handshake and a tool count |
 //! | [`presets`] | Agent Standup, Home Assistant, hub and Google accounts presets |
 //! | [`google`] | several Google accounts through `workspace-mcp`: the account list, sign-in and the permission level |
@@ -25,6 +26,7 @@ pub mod bindings;
 pub mod config;
 pub mod google;
 pub mod lines;
+pub mod memory;
 mod ops;
 pub mod presets;
 pub mod probe;
@@ -61,6 +63,10 @@ pub fn register_services(services: &mut Services, events: &Arc<dyn EventSink>) {
         platform.keychain.clone(),
     );
     let store = Arc::new(McpStore::new(&profile.dir, creds));
+    // A hub memory server saved before chats had a person gets the header that names it. Nothing
+    // listens yet and no worker is running, so this needs no announcement; a failure only leaves
+    // chats acting as this PC's own person.
+    let _ = store.add_person_headers();
     let status = Arc::new(McpStatusStore::default());
     let ev = events.clone();
     let st = status.clone();

@@ -180,13 +180,13 @@ pub fn rpc_result(body: &str, id: i64) -> Result<Value, String> {
 
 // ---- URL servers ----------------------------------------------------------------------------
 
-struct Reply {
-    status: u16,
-    body: String,
-    session: Option<String>,
+pub(crate) struct Reply {
+    pub(crate) status: u16,
+    pub(crate) body: String,
+    pub(crate) session: Option<String>,
 }
 
-fn agent() -> ureq::Agent {
+pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
@@ -196,7 +196,7 @@ fn agent() -> ureq::Agent {
         .new_agent()
 }
 
-fn post(
+pub(crate) fn post(
     agent: &ureq::Agent,
     target: &Target,
     headers: &BTreeMap<String, String>,
@@ -240,7 +240,7 @@ fn post(
 
 /// Where a request goes: the URL to connect to and, when the URL was pinned to one address, the
 /// original `Host` header.
-struct Target {
+pub(crate) struct Target {
     url: String,
     host: Option<String>,
 }
@@ -249,7 +249,7 @@ struct Target {
 /// (with the server's opt-in) the private network. The request then goes to the one address that
 /// was checked, with the original `Host` header, so the address that was checked is the address
 /// connected to (no second lookup that could answer differently).
-fn pin_target(url: &url::Url, allow_private: bool) -> Result<Target, String> {
+pub(crate) fn pin_target(url: &url::Url, allow_private: bool) -> Result<Target, String> {
     let plain = Target {
         url: url.to_string(),
         host: None,

@@ -136,6 +136,12 @@ impl McpStore {
         }
         let mut after = before.clone();
         f(&mut after)?;
+        // A hub memory server made now sends the chat's person from the start.
+        for s in after.iter_mut() {
+            if !before.iter().any(|b| b.id == s.id) {
+                add_person_header(s);
+            }
+        }
         validate_list(&after)?;
         // A kept secret id must be one this same server already had.
         let owned: BTreeMap<&str, BTreeSet<String>> = before
@@ -235,24 +241,78 @@ impl McpStore {
         &self,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<(String, Vec<ResolvedServer>), StoreError> {
+        self.resolve_enabled_for(env, None)
+    }
+
+    /// [`McpStore::resolve_enabled`] for one chat: a header that names the chat's person is sent
+    /// with `person` (the hub's id for the person its profile is linked to), or left out when
+    /// there is none.
+    pub fn resolve_enabled_for(
+        &self,
+        env: &dyn Fn(&str) -> Option<String>,
+        person: Option<&str>,
+    ) -> Result<(String, Vec<ResolvedServer>), StoreError> {
         let servers = self.load()?;
         let revision = revision_of(&servers);
         let resolved = servers
             .iter()
             .filter(|s| s.enabled)
-            .map(|s| self.resolve_one(s, env))
+            .map(|s| self.resolve_one(s, env, person))
             .collect();
         Ok((revision, resolved))
+    }
+
+    /// Whether any enabled server sends the chat's person, so its config differs per chat.
+    pub fn uses_chat_person(&self) -> bool {
+        self.load()
+            .map(|l| l.iter().any(|s| s.enabled && sends_chat_person(s)))
+            .unwrap_or(false)
+    }
+
+    /// One enabled server by id, resolved for `person` (see [`McpStore::resolve_enabled_for`]).
+    pub fn resolve_server(
+        &self,
+        id: &str,
+        person: Option<&str>,
+    ) -> Result<Option<ResolvedServer>, StoreError> {
+        Ok(self
+            .load()?
+            .iter()
+            .find(|s| s.enabled && s.id == id)
+            .map(|s| self.resolve_one(s, &|k| std::env::var(k).ok(), person)))
     }
 
     /// One draft server with its references resolved, for a connection test. A literal secret
     /// that was typed but not saved yet is used as typed; saved ones are read from the credential
     /// store as usual.
     pub fn resolve_draft(&self, s: &McpServer) -> ResolvedServer {
-        self.resolve_one(s, &|k| std::env::var(k).ok())
+        self.resolve_one(s, &|k| std::env::var(k).ok(), None)
     }
 
-    fn resolve_one(&self, s: &McpServer, env: &dyn Fn(&str) -> Option<String>) -> ResolvedServer {
+    /// Give an existing hub memory server the person header, once: chats that belong to another
+    /// person then use that person's memories. Returns whether it changed anything. A person who
+    /// removes the header afterwards is not given it again.
+    pub fn add_person_headers(&self) -> Result<bool, StoreError> {
+        let marker = self.path.with_file_name(PERSON_MARKER);
+        if marker.exists() || !self.load()?.iter().any(wants_person_header) {
+            return Ok(false);
+        }
+        self.mutate(None, |l| {
+            l.iter_mut().for_each(|s| {
+                add_person_header(s);
+            });
+            Ok(())
+        })?;
+        let _ = helm_core::privfs::write_atomic(&marker, b"1\n");
+        Ok(true)
+    }
+
+    fn resolve_one(
+        &self,
+        s: &McpServer,
+        env: &dyn Fn(&str) -> Option<String>,
+        person: Option<&str>,
+    ) -> ResolvedServer {
         let t = &s.transport;
         let mut out = ResolvedServer {
             id: s.id.clone(),
@@ -286,6 +346,13 @@ impl McpStore {
             }
             let mut h = BTreeMap::new();
             for (k, r) in &t.headers {
+                if r.kind == RefKind::ChatPerson {
+                    // Not a secret: a chat with no person simply sends no such header.
+                    if let Some(p) = person {
+                        h.insert(k.clone(), format!("{}{p}", r.prefix.as_deref().unwrap_or("")));
+                    }
+                    continue;
+                }
                 h.insert(
                     k.clone(),
                     self.resolve_ref(&s.id, r, true, &format!("Header {k}"), env, &mut secrets)?,
@@ -331,6 +398,11 @@ impl McpStore {
             {
                 // Typed in the editor and not saved yet (only a connection test sees this form).
                 r.value.clone().unwrap_or_default()
+            }
+            RefKind::ChatPerson => {
+                return Err(format!(
+                    "{label}: the chat's person is only sent as a header."
+                ))
             }
             RefKind::Literal => {
                 let id = r.secret_id.as_deref().unwrap_or("");
@@ -380,6 +452,46 @@ pub(crate) fn refs(s: &McpServer) -> impl Iterator<Item = &ValueRef> {
 fn refs_mut(s: &mut McpServer) -> impl Iterator<Item = &mut ValueRef> {
     let t = &mut s.transport;
     t.env.values_mut().chain(t.headers.values_mut())
+}
+
+/// The header that tells the hub whose memories a chat's calls are for.
+pub const PERSON_HEADER: &str = "X-Helm-Person";
+/// Written beside the config once existing hub servers have been given [`PERSON_HEADER`].
+const PERSON_MARKER: &str = ".mcp-person-header";
+
+fn sends_chat_person(s: &McpServer) -> bool {
+    s.transport
+        .headers
+        .values()
+        .any(|r| r.kind == RefKind::ChatPerson)
+}
+
+/// A hub memory server (the preset's, or one that took its id) over the network that does not
+/// send the person header yet.
+fn wants_person_header(s: &McpServer) -> bool {
+    let hub = s.preset.as_deref() == Some("helm_hub") || s.id == "helm_hub";
+    hub && s.transport.kind.is_remote()
+        && !s
+            .transport
+            .headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case(PERSON_HEADER))
+}
+
+fn add_person_header(s: &mut McpServer) -> bool {
+    if !wants_person_header(s) {
+        return false;
+    }
+    s.transport.headers.insert(
+        PERSON_HEADER.to_owned(),
+        ValueRef {
+            kind: RefKind::ChatPerson,
+            value: None,
+            secret_id: None,
+            prefix: None,
+        },
+    );
+    true
 }
 
 fn secret_ids(s: &McpServer) -> BTreeSet<String> {
@@ -602,6 +714,60 @@ pub(crate) mod tests {
         let (_, r) = st.resolve_enabled(&no_env).unwrap();
         assert!(r[0].error.as_deref().unwrap().contains("HUB_TOKEN"));
         assert!(r[0].headers.is_empty());
+    }
+
+    #[test]
+    fn the_hub_server_sends_the_chats_person_when_it_has_one() {
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        let memory = |id: &str, preset: Option<&str>| {
+            let mut s = hub("tok-abc");
+            s.id = id.into();
+            s.preset = preset.map(Into::into);
+            s
+        };
+        // A hub server made now has the header; another server does not.
+        st.mutate(None, |l| {
+            l.push(memory("helm_hub", Some("helm_hub")));
+            l.push(memory("plain", None));
+            Ok(())
+        })
+        .unwrap();
+        let made = st.load().unwrap();
+        assert!(sends_chat_person(&made[0]) && !sends_chat_person(&made[1]));
+        // One saved before the header existed is given it once, and only that one.
+        st.mutate(None, |l| {
+            l[0].transport.headers.remove(PERSON_HEADER);
+            Ok(())
+        })
+        .unwrap();
+        assert!(!st.uses_chat_person());
+        assert!(st.add_person_headers().unwrap());
+        let after = st.load().unwrap();
+        assert!(sends_chat_person(&after[0]) && !sends_chat_person(&after[1]));
+        assert!(st.uses_chat_person());
+        assert!(!st.add_person_headers().unwrap(), "only once");
+        // A person who takes the header off keeps it off; a hub server made later has it.
+        st.mutate(None, |l| {
+            l[0].transport.headers.remove(PERSON_HEADER);
+            l.push(memory("memories", Some("helm_hub")));
+            Ok(())
+        })
+        .unwrap();
+        assert!(!st.add_person_headers().unwrap());
+        let now = st.load().unwrap();
+        assert!(!sends_chat_person(&now[0]) && sends_chat_person(&now[2]));
+
+        // Resolved per chat: the person's id when there is one, no header when there is not, and
+        // nothing about it is a secret.
+        let (_, with) = st.resolve_enabled_for(&no_env, Some("7")).unwrap();
+        let (_, without) = st.resolve_enabled_for(&no_env, None).unwrap();
+        assert_eq!(with[2].headers[PERSON_HEADER], "7");
+        assert!(!without[2].headers.contains_key(PERSON_HEADER));
+        assert_eq!(with[2].secrets, ["tok-abc"]);
+        let one = st.resolve_server("memories", Some("9")).unwrap().unwrap();
+        assert_eq!(one.headers[PERSON_HEADER], "9");
+        assert!(st.resolve_server("nope", None).unwrap().is_none());
     }
 
     #[test]

@@ -78,6 +78,8 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_terminal::register_services(services, events);
     helm_panel::register_services(services, events);
     helm_mcp::register_services(services, events);
+    // Knowledge layers changing on this PC wake the knowledge sync (the relay hangs on it).
+    services.insert(Arc::new(helm_skills::sync::Trigger::default()));
     helm_usage::register_services(services, events);
     helm_schedules::register_services(services, events);
     helm_waits::register_services(services, events);

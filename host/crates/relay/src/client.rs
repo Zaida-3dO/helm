@@ -21,6 +21,9 @@
 //!   hub never needs them answered.
 //! - `devices`, `dev_call`, `dev_result` and `dev_push`: the household's devices (`crate::devlink`).
 //!   They are handed to the [`DeviceSink`] as they came, and ignored until one is attached.
+//! - `kn_files`, `kn_put_result` and `kn_changed`: the household's knowledge files
+//!   (`crate::knowledge_line`), handed to the [`KnowledgeSink`] as they came and ignored until one
+//!   is attached.
 //! - The first frame up on every line is `sharing` (the household switches), and another goes
 //!   whenever the user changes one. The device announces itself right after it.
 //! - Upward, [`LineHandle`] sends the Telegram status and final answer, and alerts Helm starts
@@ -159,6 +162,16 @@ pub trait DeviceSink: Send + Sync {
     /// A `devices`, `dev_call`, `dev_result` or `dev_push` frame, as the hub sent it.
     fn frame(&self, frame: Value);
     /// A new line is up and the household switches have been sent: frames may go up now.
+    fn line_up(&self) {}
+    /// The line is gone.
+    fn line_down(&self) {}
+}
+
+/// Where the hub's knowledge frames go on the PC (`crate::knowledge_line`).
+pub trait KnowledgeSink: Send + Sync {
+    /// A `kn_files`, `kn_put_result` or `kn_changed` frame, as the hub sent it.
+    fn frame(&self, frame: Value);
+    /// A new line is up: knowledge may be exchanged now.
     fn line_up(&self) {}
     /// The line is gone.
     fn line_down(&self) {}
@@ -343,6 +356,8 @@ pub struct Client {
     voice: std::sync::OnceLock<Arc<dyn VoiceSink>>,
     /// Where the household's device frames go; they are ignored until it is attached.
     devices: std::sync::OnceLock<Arc<dyn DeviceSink>>,
+    /// Where the hub's knowledge frames go; they are ignored until it is attached.
+    knowledge: std::sync::OnceLock<Arc<dyn KnowledgeSink>>,
     handle: Arc<LineHandle>,
     up_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Value>>,
     /// Hub ids of Telegram messages being delivered now: the hub's resend of one of them is
@@ -394,6 +409,7 @@ impl Client {
             sink,
             voice: std::sync::OnceLock::new(),
             devices: std::sync::OnceLock::new(),
+            knowledge: std::sync::OnceLock::new(),
             handle: Arc::new(LineHandle {
                 state: AtomicU8::new(LineState::Off as u8),
                 up,
@@ -418,6 +434,11 @@ impl Client {
     /// Give the line the sink for the household's device frames.
     pub fn attach_devices(&self, sink: Arc<dyn DeviceSink>) {
         let _ = self.devices.set(sink);
+    }
+
+    /// Give the line the sink for the hub's knowledge frames.
+    pub fn attach_knowledge(&self, sink: Arc<dyn KnowledgeSink>) {
+        let _ = self.knowledge.set(sink);
     }
 
     /// What the household may see now.
@@ -528,6 +549,9 @@ impl Client {
         if let Some(d) = self.devices.get() {
             d.line_up();
         }
+        if let Some(k) = self.knowledge.get() {
+            k.line_up();
+        }
         let silence = tokio::time::sleep(SILENCE);
         tokio::pin!(silence);
         loop {
@@ -553,6 +577,9 @@ impl Client {
         let _ = sink_ws.close().await;
         if let Some(d) = self.devices.get() {
             d.line_down();
+        }
+        if let Some(k) = self.knowledge.get() {
+            k.line_down();
         }
     }
 
@@ -745,6 +772,11 @@ impl Client {
             Some("devices" | "dev_call" | "dev_result" | "dev_push") => {
                 if let Some(d) = self.devices.get() {
                     d.frame(v.clone());
+                }
+            }
+            Some("kn_files" | "kn_put_result" | "kn_changed") => {
+                if let Some(k) = self.knowledge.get() {
+                    k.frame(v.clone());
                 }
             }
             Some("telegram_stop") => {

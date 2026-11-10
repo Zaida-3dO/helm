@@ -58,12 +58,33 @@ impl ChatLookup for DbLookup {
     fn of_chat(&self, chat_id: &str) -> ChatKnowledge {
         self.db
             .snapshot(|tx| {
-                let profile =
-                    helm_profiles::store::profile_of_chat(tx, chat_id)?.map(|p| ProfileRef {
-                        id: p.id,
-                        name: p.name,
-                        is_home: p.is_home,
-                    });
+                // The chat's own profile, else the home profile. (Read here rather than through the
+                // profiles crate, which sits above the chats crate that loads this one.)
+                let row = |r: &rusqlite::Row<'_>| {
+                    Ok::<_, rusqlite::Error>(ProfileRef {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        is_home: r.get(2)?,
+                    })
+                };
+                let own = tx
+                    .query_row(
+                        "SELECT id, name, is_home FROM profiles
+                         WHERE id = (SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1)",
+                        [chat_id],
+                        row,
+                    )
+                    .optional()?;
+                let profile = match own {
+                    Some(p) => Some(p),
+                    None => tx
+                        .query_row(
+                            "SELECT id, name, is_home FROM profiles WHERE is_home = 1",
+                            [],
+                            row,
+                        )
+                        .optional()?,
+                };
                 let project_id = tx
                     .query_row(
                         "SELECT project_id FROM chats WHERE id = ?1",

@@ -7,15 +7,54 @@
 
 use crate::config::McpStore;
 use crate::status::{McpStatusStore, ServerStatus};
+use helm_core::db::Database;
 use helm_hosttools::lines::{Broadcaster, WorkerLines};
 use helm_ipc::{AppEvent, Services};
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex, Weak};
 
 /// The `mcp_config` line for the current config, or `None` when it cannot be read.
 pub fn config_line(store: &McpStore) -> Option<Value> {
-    let (revision, servers) = store.resolve_enabled(&|k| std::env::var(k).ok()).ok()?;
+    config_line_for(store, None)
+}
+
+/// The `mcp_config` line for one chat: a header that names the chat's person carries `person`.
+pub fn config_line_for(store: &McpStore, person: Option<&str>) -> Option<Value> {
+    let (revision, servers) = store
+        .resolve_enabled_for(&|k| std::env::var(k).ok(), person)
+        .ok()?;
     Some(json!({ "type": "mcp_config", "revision": revision, "servers": servers }))
+}
+
+/// The hub person a chat belongs to: the one its profile is linked to (the home profile's when
+/// the chat has none of its own), or `None` when that profile is not linked to a hub person.
+pub fn chat_person(services: &Services, chat_id: &str) -> Option<String> {
+    let db = services.get::<Database>()?;
+    db.snapshot(|tx| {
+        let own = tx
+            .query_row(
+                "SELECT hub_person_id FROM profiles
+                 WHERE id = (SELECT NULLIF(profile_id, '') FROM chats WHERE id = ?1)",
+                [chat_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        match own {
+            Some(person) => Ok::<_, rusqlite::Error>(person),
+            None => tx
+                .query_row(
+                    "SELECT hub_person_id FROM profiles WHERE is_home = 1",
+                    [],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map(Option::flatten),
+        }
+    })
+    .ok()
+    .flatten()
+    .filter(|p| !p.is_empty())
 }
 
 /// Remembers the app's services the first time a worker starts, so a config save (which happens
@@ -41,6 +80,19 @@ impl ServicesCell {
         let (Some(store), Some(b)) = (s.get::<McpStore>(), s.get::<Broadcaster>()) else {
             return;
         };
+        // A config that sends the chat's person differs from chat to chat.
+        if store.uses_chat_person() {
+            let running = b.0.running_chats();
+            if !running.is_empty() {
+                for chat in running {
+                    let person = chat_person(&s, &chat);
+                    if let Some(line) = config_line_for(&store, person.as_deref()) {
+                        b.0.send_to_worker(&chat, &line);
+                    }
+                }
+                return;
+            }
+        }
         if let Some(line) = config_line(&store) {
             b.0.broadcast_to_workers(&line);
         }
@@ -66,7 +118,8 @@ pub fn register_worker_lines(l: &mut WorkerLines) {
         if let Some(cell) = services.get::<ServicesCell>() {
             cell.set(services);
         }
-        config_line(&*services.get::<McpStore>()?)
+        let person = chat_person(services, chat);
+        config_line_for(&*services.get::<McpStore>()?, person.as_deref())
     });
 }
 
@@ -85,6 +138,52 @@ mod tests {
         }
         fn send_to_worker(&self, _: &str, _: &Value) -> bool {
             false
+        }
+    }
+
+    #[test]
+    fn a_chat_starts_with_its_profiles_hub_person() {
+        use helm_core::db::MigrationRegistry;
+        let d = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(&d.path().join("t.db"), &MigrationRegistry::new()).unwrap());
+        db.write(|tx| {
+            tx.execute_batch(
+                "CREATE TABLE profiles (id TEXT PRIMARY KEY, hub_person_id TEXT, is_home INTEGER);
+                 CREATE TABLE chats (id TEXT PRIMARY KEY, profile_id TEXT);
+                 INSERT INTO profiles VALUES ('home', '3', 1), ('sam', '7', 0), ('guest', NULL, 0);
+                 INSERT INTO chats VALUES ('c-sam', 'sam'), ('c-guest', 'guest'), ('c-none', ''),
+                                          ('c-gone', 'deleted');",
+            )
+        })
+        .unwrap();
+        let st = Arc::new(store(d.path()));
+        st.mutate(None, |l| {
+            let mut s = hub("tok-123456");
+            s.preset = Some("helm_hub".into());
+            s.id = "helm_hub".into();
+            l.push(s);
+            Ok(())
+        })
+        .unwrap();
+        let mut services = Services::new();
+        services.insert(db);
+        services.insert(st);
+        let services = Arc::new(services);
+        let mut l = WorkerLines::new();
+        register_worker_lines(&mut l);
+        // The home person's chats, a chat with no profile and one whose profile is gone send
+        // the home person; a chat of a profile with no hub person sends none.
+        for (chat, want) in [
+            ("c-sam", Some("7")),
+            ("c-guest", None),
+            ("c-none", Some("3")),
+            ("c-gone", Some("3")),
+            ("unknown", Some("3")),
+        ] {
+            let start = l.start_lines(chat, &services);
+            let headers = &start[0]["servers"][0]["headers"];
+            assert_eq!(headers["X-Helm-Person"].as_str(), want, "{chat}");
+            assert_eq!(headers["Authorization"], "Bearer tok-123456");
         }
     }
 

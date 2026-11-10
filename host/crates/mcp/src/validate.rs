@@ -92,6 +92,19 @@ pub fn validate_ref(r: &ValueRef, place: RefPlace, label: &str) -> Result<(), In
                 "{label}: a literal needs either a new value or the saved secret's id."
             ))),
         },
+        RefKind::ChatPerson => {
+            if place != RefPlace::Header {
+                return Err(bad(format!(
+                    "{label}: the chat's person can only be sent as a header."
+                )));
+            }
+            if r.value.is_some() || r.secret_id.is_some() {
+                return Err(bad(format!(
+                    "{label}: the chat's person takes no value."
+                )));
+            }
+            Ok(())
+        }
         RefKind::Environment | RefKind::File => {
             if r.secret_id.is_some() {
                 return Err(bad(format!(
@@ -592,6 +605,16 @@ mod tests {
             prefix: None,
         };
         assert!(validate_ref(&kept, RefPlace::Env, "x").is_ok());
+        // The chat's person: a header with no value.
+        let person = |value: Option<&str>| ValueRef {
+            kind: RefKind::ChatPerson,
+            value: value.map(Into::into),
+            secret_id: None,
+            prefix: None,
+        };
+        assert!(validate_ref(&person(None), RefPlace::Header, "x").is_ok());
+        assert!(validate_ref(&person(None), RefPlace::Env, "x").is_err());
+        assert!(validate_ref(&person(Some("7")), RefPlace::Header, "x").is_err());
     }
 
     #[test]

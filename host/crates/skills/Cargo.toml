@@ -12,7 +12,7 @@ helm-ipc.workspace = true
 helm-platform.workspace = true
 helm-workers.workspace = true
 helm-hosttools = { path = "../hosttools" }
-helm-profiles = { path = "../profiles" }
+helm-mcp = { path = "../mcp" }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,3 +21,4 @@ log.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio.workspace = true

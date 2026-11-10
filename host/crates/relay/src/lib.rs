@@ -22,6 +22,7 @@
 //! | [`voice_show`] | the `app_voice_show` tool: pictures, tables, lists, links, text and files queued for the phone's screen |
 //! | [`pair`] | pairing with the hub by a one-time code: token, names, the shared-memory server and the home profile in one step |
 //! | [`household`] | other people's Helms through the hub: the three sharing switches, serving their calls, and asking theirs |
+//! | [`knowledge_line`] | the household's knowledge files over the line: pull and push, the hub's people as profiles, and the sync loop |
 //! | [`devlink`] | the household's devices over the line: the device crate's frames up and down, and the service that answers other devices |
 //!
 //! Wiring: [`register_services`] adds the line (its [`client::LineHandle`] and
@@ -68,6 +69,7 @@ pub mod approve;
 pub mod client;
 pub mod config;
 pub mod devlink;
+pub mod knowledge_line;
 pub mod exec;
 pub mod gate;
 pub mod household;
@@ -163,6 +165,7 @@ pub fn start(handle: &tokio::runtime::Handle, ctx: &OpCtx, tools: Arc<helm_hostt
         tools,
     });
     let line = client.handle();
+    knowledge_line::start(handle, ctx, &client);
     handle.spawn(client.run());
     if let (Some(rt), Some(afk), Some(profile), Some(sink)) = (
         ctx.services.get::<helm_chats::ChatRuntime>(),

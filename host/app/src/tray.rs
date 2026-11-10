@@ -51,6 +51,7 @@ pub struct TappedEvents {
     shell: OnceLock<Arc<ShellService>>,
     voice: OnceLock<Arc<helm_relay::voice_watch::VoiceWatch>>,
     devices: OnceLock<Arc<helm_devices::EventTap>>,
+    knowledge: OnceLock<Arc<helm_skills::sync::Trigger>>,
 }
 
 impl TappedEvents {
@@ -60,6 +61,7 @@ impl TappedEvents {
             shell: OnceLock::new(),
             voice: OnceLock::new(),
             devices: OnceLock::new(),
+            knowledge: OnceLock::new(),
         }
     }
 
@@ -76,6 +78,11 @@ impl TappedEvents {
     pub fn attach_devices(&self, tap: Arc<helm_devices::EventTap>) {
         let _ = self.devices.set(tap);
     }
+
+    /// A change to a knowledge layer wakes the knowledge sync.
+    pub fn attach_knowledge(&self, trigger: Arc<helm_skills::sync::Trigger>) {
+        let _ = self.knowledge.set(trigger);
+    }
 }
 
 impl EventSink for TappedEvents {
@@ -90,6 +97,9 @@ impl EventSink for TappedEvents {
         }
         if let Some(d) = self.devices.get() {
             d.observe(&event);
+        }
+        if let Some(k) = self.knowledge.get() {
+            k.observe(&event);
         }
         self.inner.emit(event);
     }

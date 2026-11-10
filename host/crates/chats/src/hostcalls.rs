@@ -197,6 +197,17 @@ impl helm_hosttools::WorkerBroadcast for crate::ChatRuntime {
             _ => false,
         }
     }
+
+    fn running_chats(&self) -> Vec<String> {
+        self.sh
+            .actors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, h)| h.live.lock().unwrap().has_worker)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
 }
 
 #[cfg(test)]

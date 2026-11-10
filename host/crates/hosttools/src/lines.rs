@@ -125,6 +125,12 @@ pub trait WorkerBroadcast: Send + Sync {
     fn broadcast_to_workers(&self, line: &Value);
     /// Send `line` to one chat's worker; false when it is not running.
     fn send_to_worker(&self, chat_id: &str, line: &Value) -> bool;
+    /// The chats that have a running worker now. A line that differs from chat to chat (the MCP
+    /// config, when it names the chat's person) is sent to each of them in turn; an implementer
+    /// that cannot list them answers none, and such a line goes to every worker alike.
+    fn running_chats(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The shared service wrapping the runtime's [`WorkerBroadcast`].

@@ -12,6 +12,9 @@
 //! | `knowledge_delete` | maintenance | `{layer, kind: rule\|skill\|agent, name}` → the layer as `knowledge_get` |
 //! | `knowledge_move` | maintenance | `{kind, name, from, to}` → `{moved}`; refused when the name is taken there |
 //! | `knowledge_reveal` | blocking | `{layer, kind?}` → `{revealed}` |
+//! | `knowledge_skill_read` | blocking | `{layer, name}` → `{text}` (the skill's `SKILL.md`; `file_read` refuses Helm's data folder) |
+//! | `knowledge_memories_list` | blocking | `{layer}` → `{memories: [{id, title, owner, layer}]}` from the hub; code `unavailable` when it is not connected |
+//! | `knowledge_memory_move` | maintenance | `{id, to}` (`to` a layer) → `{moved}`; the same `unavailable` |
 //! | `skill_sources_get` | blocking | `{}` → `{sources, revision}` |
 //! | `skill_sources_save` | maintenance | `{source, revision?}` → `{sources, revision}` |
 //! | `skill_sources_remove` | maintenance | `{id, revision?}` → `{sources, revision}` |
@@ -20,6 +23,7 @@
 //! (and the older `skills-changed` or `agents-changed` for the older ops).
 
 use crate::layers::{Kind, Layer};
+use crate::memories::{self, HubMemory, MemError};
 use crate::sources::{self, SkillSource};
 use crate::undo::item_path;
 use crate::{agents, examples, plugins, rules, SkillEntry};
@@ -475,6 +479,110 @@ fn reveal_folder(_path: &Path) -> std::io::Result<()> {
     Err(std::io::Error::other("not supported here"))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SkillReadArgs {
+    layer: String,
+    name: String,
+}
+
+fn knowledge_skill_read(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
+    let a: SkillReadArgs = parse(v, "a layer and a skill name")?;
+    if !crate::is_valid_name(&a.name) {
+        return Err(ApiError::bad_args("That is not a skill name."));
+    }
+    let (_, _, root) = layer_root(ctx, Some(&a.layer))?;
+    let path = crate::skills_dir(&root).join(&a.name).join("SKILL.md");
+    let bytes = helm_core::privfs::read_capped(&path, crate::MAX_SKILL_FILE)
+        .map_err(|e| api_error(e, "The skill could not be read."))?;
+    Ok(json!({ "text": String::from_utf8_lossy(&bytes) }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MemoriesListArgs {
+    layer: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MemoryMoveArgs {
+    /// The memory's number, as text or as a number.
+    id: Value,
+    to: String,
+}
+
+fn memory_hub(ctx: &OpCtx) -> Result<HubMemory, ApiError> {
+    let store = ctx
+        .services
+        .get::<helm_mcp::McpStore>()
+        .ok_or_else(|| ApiError::new("unavailable", "Shared memory isn't connected."))?;
+    Ok(HubMemory { store })
+}
+
+fn memory_error(e: MemError) -> ApiError {
+    match e {
+        MemError::Unavailable(m) => ApiError::new("unavailable", m),
+        MemError::Refused(m) => ApiError::bad_args(m),
+    }
+}
+
+/// The hub person a layer's memories are read as, and every linked person (this Helm's own first).
+fn memory_people(ctx: &OpCtx, layer: &Layer) -> Result<(Option<String>, Vec<String>), ApiError> {
+    let db = ctx
+        .services
+        .need::<helm_core::db::Database>()
+        .map_err(|_| ApiError::internal("Helm has no database."))?;
+    // (profile id, hub person, is home); read here because the profiles crate sits above the
+    // chats crate that loads this one.
+    let mut all: Vec<(String, Option<String>, bool)> = db
+        .snapshot(|tx| {
+            let mut st = tx.prepare("SELECT id, hub_person_id, is_home FROM profiles")?;
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .map_err(|_| ApiError::internal("The profiles could not be read."))?;
+    all.sort_by_key(|p| !p.2);
+    let person = |p: &(String, Option<String>, bool)| p.1.clone().filter(|x| !x.is_empty());
+    let of_layer = match layer {
+        Layer::Everyone => all.iter().find(|p| p.2).and_then(person),
+        Layer::Profile(id) => all.iter().find(|p| &p.0 == id).and_then(person),
+    };
+    let mut linked: Vec<String> = Vec::new();
+    for p in all.iter().filter_map(person) {
+        if !linked.contains(&p) {
+            linked.push(p);
+        }
+    }
+    Ok((of_layer, linked))
+}
+
+fn knowledge_memories_list(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
+    let a: MemoriesListArgs = parse(v, "a layer")?;
+    let layer = layer_of(Some(&a.layer))?;
+    let hub = memory_hub(ctx)?;
+    let (person, _) = memory_people(ctx, &layer)?;
+    let rows = memories::list(&hub, &layer, person.as_deref()).map_err(memory_error)?;
+    Ok(json!({ "memories": rows }))
+}
+
+fn knowledge_memory_move(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
+    let a: MemoryMoveArgs = parse(v, "a memory id and a layer to move it to")?;
+    let id = match &a.id {
+        Value::Number(n) => n.as_i64(),
+        Value::String(t) => t.trim().parse().ok(),
+        _ => None,
+    }
+    .ok_or_else(|| ApiError::bad_args("Expected a memory id."))?;
+    let to = layer_of(Some(&a.to))?;
+    let hub = memory_hub(ctx)?;
+    let (to_person, linked) = memory_people(ctx, &to)?;
+    memories::move_to(&hub, id, &to, to_person.as_deref(), &linked).map_err(memory_error)?;
+    Ok(json!({ "moved": id.to_string() }))
+}
+
 pub fn register_ops(reg: &mut OpRegistry) {
     reg.blocking("helm_skills_list", OpClass::Blocking, list)
         .blocking("helm_skills_add", OpClass::Maintenance, add)
@@ -498,6 +606,21 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("knowledge_delete", OpClass::Maintenance, knowledge_delete)
         .blocking("knowledge_move", OpClass::Maintenance, knowledge_move)
         .blocking("knowledge_reveal", OpClass::Blocking, knowledge_reveal)
+        .blocking(
+            "knowledge_skill_read",
+            OpClass::Blocking,
+            knowledge_skill_read,
+        )
+        .blocking(
+            "knowledge_memories_list",
+            OpClass::Blocking,
+            knowledge_memories_list,
+        )
+        .blocking(
+            "knowledge_memory_move",
+            OpClass::Maintenance,
+            knowledge_memory_move,
+        )
         .blocking("skill_sources_get", OpClass::Blocking, skill_sources_get)
         .blocking(
             "skill_sources_save",
