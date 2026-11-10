@@ -36,6 +36,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_claudechats::register_ops(reg);
     helm_backup::register_ops(reg);
     helm_profiles::register_ops(reg);
+    helm_pages::register_ops(reg);
 }
 
 pub fn migrations(reg: &mut MigrationRegistry) {
@@ -59,6 +60,7 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_webtools::register_migrations(reg);
     helm_saved::register_migrations(reg);
     helm_profiles::register_migrations(reg);
+    helm_pages::register_migrations(reg);
 }
 
 /// Shared services a crate adds for op handlers (`ctx.services.need::<T>()`), called once at
@@ -467,6 +469,8 @@ mod host_tool_tests {
             "app_ide_context",
             "app_show_images",
             "app_offer_options",
+            "app_pin_page",
+            "app_list_pages",
             "app_request_allow",
             "app_list_mcp_servers",
             "app_add_mcp_server",

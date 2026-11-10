@@ -6,6 +6,7 @@ import type { FileView } from '../../api/panel.ts';
 import { panelOps } from '../../api/panel.ts';
 import { driveForm, isRemoteOrDevicePath } from '../../markdown/paths.ts';
 import { ExternalIcon, FileTextIcon, FolderOpenIcon } from '../icons.tsx';
+import { IconPlay } from '../../ui/icons.tsx';
 import { registerLinkRoute } from '../links.ts';
 import type { PanelTab } from '../model.ts';
 import { openInPanel, panelStore, registerPanelKind, registerPanelSlot, showSlot } from '../registry.ts';
@@ -15,6 +16,8 @@ import type { Location } from './FileViewer.tsx';
 import { useLayer } from '../../ui/index.ts';
 import { report } from '../context/store.ts';
 import { basename, displayPath, pathKey } from './paths.ts';
+import { openPageTab } from '../../pages/open.ts';
+import '../../pages/register.tsx';
 
 interface FileTabData extends Location {
   /** What the body shows now; it can navigate away from `path`. */
@@ -105,6 +108,24 @@ function OpenInApp({ path, loaded }: { path: string; loaded: boolean }) {
   );
 }
 
+/** Header action "Run page": an HTML file previews inertly; this opens it as a sealed page that runs its scripts. */
+function RunPage({ path }: { path: string }) {
+  return (
+    <button
+      type="button"
+      className="fv-button"
+      data-testid="run-page"
+      title="Run this page with its scripts in a sealed frame"
+      onClick={() => {
+        if (!openPageTab(path)) panelStore.showNotice('The side panel has no room for another tab.');
+      }}
+    >
+      <IconPlay size={13} />
+      <span>Run page</span>
+    </button>
+  );
+}
+
 registerPanelKind({
   kind: 'file',
   title: (tab) => basename((tab.data as FileTabData).current ?? (tab.data as FileTabData).path),
@@ -112,7 +133,12 @@ registerPanelKind({
   render: (tab, ctx) => <FileTabBody tab={tab as PanelTab} ctx={ctx} />,
   headerActions: (tab) => {
     const d = tab.data as FileTabData;
-    return <OpenInApp path={d.current ?? d.path} loaded={d.currentKind !== undefined} />;
+    return (
+      <>
+        {d.currentKind === 'html' && <RunPage path={d.current ?? d.path} />}
+        <OpenInApp path={d.current ?? d.path} loaded={d.currentKind !== undefined} />
+      </>
+    );
   },
   persist: {
     version: 1,

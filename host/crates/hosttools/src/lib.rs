@@ -25,6 +25,7 @@ pub mod feedback_items;
 pub mod ide;
 pub mod lines;
 pub mod options;
+pub mod pages;
 pub mod registry;
 pub mod reserved;
 pub mod schedule_tools;
@@ -64,6 +65,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     ide::register_host_tools(r);
     show_images::register_host_tools(r);
     options::register_host_tools(r);
+    pages::register_host_tools(r);
 }
 
 /// The settings change ring (`settings_changes`).

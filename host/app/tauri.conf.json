@@ -28,7 +28,7 @@
         "connect-src": "ipc: http://ipc.localhost",
         "base-uri": "'none'",
         "form-action": "'none'",
-        "frame-src": "http://helmfile.localhost helmfile:",
+        "frame-src": "http://helmfile.localhost helmfile: http://helmpage.localhost helmpage:",
         "object-src": "'none'",
         "media-src": "http://helmfile.localhost helmfile:"
       },

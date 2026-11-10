@@ -169,3 +169,15 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 | `tasks-card` / `tasks-card-checkpoint` | A card, and the latest checkpoint line under it (read when the card scrolls into view) | `tasks-card`: `data-item-id`, `data-selected` |
 | `tasks-drawer` / `tasks-drawer-close` / `tasks-drawer-body` / `tasks-drawer-section` | The item drawer, its close button, the description, and a paged section | `tasks-drawer`: `data-item-id`; `tasks-drawer-section`: `data-section` (the heading) |
 | `tasks-open-chat` / `tasks-chat-menu` / `tasks-chat-menu-list` | The drawer's Open chat button (disabled while no chat is linked), its chevron, and the menu with New chat in this task | |
+
+## Sealed pages
+
+| Hook | Element | Attributes |
+|---|---|---|
+| `nav-pages` / `nav-pages-count` | The sidebar footer's Pages entry and its pinned-page count | |
+| `pages-list` / `pages-row` / `pages-empty` | The Pages dialog, one pinned page in it (click opens it as a tab), and the empty note | |
+| `page-frame-root` / `page-frame` / `page-error` | A page tab's body (`data-network` is `on` or `off`), its sandboxed frame, and the error shown when the page could not open | |
+| `page-reload` / `page-network` / `page-pin` / `page-link-chat` / `page-reset` | The toolbar's Reload, network globe (`aria-pressed`), Pin and Unpin (`aria-pressed`), "send messages to the chat in view" and Reset storage buttons | |
+| `page-network-notice` / `page-network-hint` / `page-runtime-error` | The notice while the network is on, the hint after an offline page tried the network, and the dismissible script-error strip | |
+| `page-handoff` / `page-handoff-text` / `page-handoff-send` / `page-handoff-add` / `page-handoff-cancel` / `page-handoff-open` / `page-handoff-url` | Helm's confirmation for a page's message or link: the dialog, the editable text, Send to agent, Add to message, Cancel, Open link and the address | |
+| `run-page` | The file tab's "Run page" button, shown for an HTML file | |

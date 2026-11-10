@@ -121,6 +121,23 @@ fn quit_dialogs(platform: &Platform, debug: bool) -> Arc<dyn helm_platform::Dial
     }
 }
 
+/// A custom-scheme answer from a served reply.
+fn scheme_response(
+    reply: helm_panel::serve::Reply,
+) -> tauri::http::Response<std::borrow::Cow<'static, [u8]>> {
+    let mut b = tauri::http::Response::builder().status(reply.status);
+    for (k, v) in &reply.headers {
+        b = b.header(*k, v.as_str());
+    }
+    b.body(std::borrow::Cow::Owned(reply.body))
+        .unwrap_or_else(|_| {
+            tauri::http::Response::builder()
+                .status(500)
+                .body(std::borrow::Cow::Owned(Vec::new()))
+                .expect("an empty response builds")
+        })
+}
+
 fn test_confirm(debug: bool, value: Option<&str>) -> bool {
     debug && value == Some("ok")
 }
@@ -185,16 +202,18 @@ fn run_app(
     let debug = cfg!(debug_assertions);
     // Previewed PDFs, audio, video and fonts are served in ranges through one custom scheme; the
     // same server is the `file_read` op's way of issuing the short-lived addresses.
-    let media = Arc::new(helm_panel::serve::MediaServer::new(
-        helm_panel::private::PrivateRoots::new(&{
-            let mut roots = vec![profile.dir.clone()];
-            if let Ok(d) = helm_core::profile::default_profile_dir() {
-                roots.push(d);
-            }
-            roots
-        }),
-    ));
+    let private_roots = helm_panel::private::PrivateRoots::new(&{
+        let mut roots = vec![profile.dir.clone()];
+        if let Ok(d) = helm_core::profile::default_profile_dir() {
+            roots.push(d);
+        }
+        roots
+    });
+    let media = Arc::new(helm_panel::serve::MediaServer::new(private_roots.clone()));
     let media_for_scheme = media.clone();
+    // Local HTML pages run sealed in the side panel; their own scheme serves each open session.
+    let pages = Arc::new(helm_pages::PageServer::new(private_roots));
+    let pages_for_scheme = pages.clone();
     let app = tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol(
             helm_panel::serve::SCHEME,
@@ -209,19 +228,18 @@ fn run_app(
                         .and_then(|v| v.to_str().ok())
                         .map(str::to_owned);
                     let reply = media.respond(request.method().as_str(), &token, range.as_deref());
-                    let mut b = tauri::http::Response::builder().status(reply.status);
-                    for (k, v) in &reply.headers {
-                        b = b.header(*k, v.as_str());
-                    }
-                    let response =
-                        b.body(std::borrow::Cow::Owned(reply.body))
-                            .unwrap_or_else(|_| {
-                                tauri::http::Response::builder()
-                                    .status(500)
-                                    .body(std::borrow::Cow::Owned(Vec::new()))
-                                    .expect("an empty response builds")
-                            });
-                    responder.respond(response);
+                    responder.respond(scheme_response(reply));
+                });
+            },
+        )
+        .register_asynchronous_uri_scheme_protocol(
+            helm_pages::server::SCHEME,
+            move |_ctx, request, responder| {
+                let pages = pages_for_scheme.clone();
+                // A page is served from memory, but its assets are read from disk.
+                std::thread::spawn(move || {
+                    let reply = pages.respond(request.method().as_str(), request.uri().path());
+                    responder.respond(scheme_response(reply));
                 });
             },
         )
@@ -270,6 +288,7 @@ fn run_app(
             let mut services = Services::new();
             services.insert(Arc::new(profile.clone()));
             services.insert(media.clone());
+            services.insert(pages.clone());
             services.insert(db.clone());
             services.insert(clock.clone());
             services.insert(Arc::new(QuitCoordinator::new()));
