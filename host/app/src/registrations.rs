@@ -88,6 +88,12 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     helm_github::register_services(services, events);
     // The Brave key and the gate that tells launches whether to list web search.
     helm_webtools::register_services(services, events);
+    // A page pinned from a chat is filed under that chat's profile.
+    if let Some(db) = services.get::<helm_core::db::Database>() {
+        services.insert(Arc::new(helm_pages::ChatProfileLookup(Arc::new(
+            PageProfiles { db },
+        ))));
+    }
     services.insert(Arc::new(host_tools()));
     // Settings that live outside the preference table but that chats read and change.
     let mut extensions = vec![
@@ -129,6 +135,21 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
         ))));
     } else {
         log::warn!("MCP launch gate unavailable: launches keep native MCP on and disable nothing");
+    }
+}
+
+/// Tells the pages crate which profile a chat belongs to.
+struct PageProfiles {
+    db: Arc<helm_core::db::Database>,
+}
+
+impl helm_pages::ChatProfiles for PageProfiles {
+    fn profile_of(&self, chat_id: &str) -> Option<String> {
+        self.db
+            .snapshot(|tx| helm_profiles::store::profile_of_chat(tx, chat_id))
+            .ok()
+            .flatten()
+            .map(|p| p.id)
     }
 }
 
