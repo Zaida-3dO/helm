@@ -1,7 +1,8 @@
 //! HTTP routes: `/health` (open), `/mcp` (bearer token), `/relay` (a machine's line, a token with
 //! the `relay` scope), `/pair` (a one-time code) and `/telegram/update` (Telegram updates posted
 //! by another service that already runs the bot, a `telegram`-scope token). The household
-//! questions travel over the relay lines (`peer.rs`), not over HTTP.
+//! questions travel over the relay lines (`peer.rs`), not over HTTP. The phone's `/voice/*`
+//! routes (a `voice`-scope token) are in `voice_http.rs`.
 
 use crate::apptools;
 use crate::auth::{Client, Scope};
@@ -12,6 +13,7 @@ use crate::relay::{Line, MAX_FRAME};
 use crate::store::Store;
 use crate::telegram::{self, Telegram};
 use crate::voice::VoiceBridge;
+use crate::voice_http;
 use axum::body::Bytes;
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -113,6 +115,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/pair", post(pair))
         .route("/telegram/update", post(telegram_update))
         .layer(DefaultBodyLimit::max(MAX_REQUEST))
+        // The voice routes read their own bodies to their own limits (a recording may be 8 MiB),
+        // so they are merged in after the 4 MiB limit and stay outside it.
+        .merge(voice_http::routes())
         .with_state(state)
 }
 
@@ -141,7 +146,7 @@ async fn no_stream() -> Response {
     (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "POST")]).into_response()
 }
 
-fn unauthorized() -> Response {
+pub(crate) fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         [(header::WWW_AUTHENTICATE, "Bearer")],
@@ -150,13 +155,13 @@ fn unauthorized() -> Response {
         .into_response()
 }
 
-fn refused(code: StatusCode, why: &str) -> Response {
+pub(crate) fn refused(code: StatusCode, why: &str) -> Response {
     (code, Json(json!({ "error": why }))).into_response()
 }
 
 /// The client a request's bearer token belongs to. Read from the registry on every request, so
 /// a revoke is felt at once.
-fn client_of(state: &AppState, headers: &HeaderMap) -> Option<Client> {
+pub(crate) fn client_of(state: &AppState, headers: &HeaderMap) -> Option<Client> {
     let auth = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());

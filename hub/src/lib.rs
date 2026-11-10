@@ -17,3 +17,4 @@ pub mod store;
 pub mod stt;
 pub mod telegram;
 pub mod voice;
+pub mod voice_http;

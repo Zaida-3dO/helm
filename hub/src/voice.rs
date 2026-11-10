@@ -7,7 +7,9 @@
 //!
 //! State is kept per person, so one person's phone never sees another person's replies, and in
 //! memory only: a restart drops it (the outbox's `seq` starts over, and the phone is told by a
-//! `welcome.seq` below its own `lastSeq`).
+//! `welcome.seq` below its own `lastSeq`). The live socket is kept per phone, one for each voice
+//! token: a newer socket of the same token replaces the older, and two phones of one person each
+//! keep their own socket, their own acked `seq` and their own screen state.
 //!
 //! - **Turn queue** (phone to Helm). A turn is made by the phone with an id of its own. Spoken
 //!   turns wait in `transcribing` until the speech-to-text result arrives ([`Transcript`]); a turn
@@ -17,14 +19,16 @@
 //!   has not taken within the queue time expires. At most `queue_max` turns wait at once.
 //! - **Outbox** (Helm to phone). Replies, news and the final states of turns get the next `seq`
 //!   and wait there until the phone acks a `seq` (cumulative) or they outlive the outbox time,
-//!   whichever is first. A reconnecting phone is sent everything above the `lastSeq` it names.
+//!   whichever is first. A reconnecting phone is sent everything above the `lastSeq` it names. An
+//!   entry is kept until every phone that has connected lately has acked it.
 //!   Attachment bytes are capped; the oldest bytes go first and the attachment is marked dropped.
 //! - **Held attachments.** A `voice_attachment` arrives before its reply and waits up to
 //!   [`HELD_MS`] for it.
 //! - **Heard reports.** The latest report per reply is kept (a later `all` replaces an earlier
 //!   `partial`) and forwarded to Helm as `voice_heard` whenever a line is up.
-//! - **Presence.** The phone's latest screen state is forwarded as `voice_presence` and repeated
-//!   to every new relay connection.
+//! - **Presence.** The phones' screen state is forwarded as `voice_presence` (live when any phone
+//!   is in front, with the mode of the one that changed last) and repeated to every new relay
+//!   connection.
 //!
 //! Every time-dependent step takes `now` (epoch milliseconds), so tests drive time by hand.
 //! [`VoiceBridge::tick`] runs the steps that depend on time or on a line coming up; it runs every
@@ -688,6 +692,18 @@ struct Live {
     tx: UnboundedSender<Out>,
 }
 
+/// One phone, which is one voice token. A person may have several.
+#[derive(Default)]
+struct Phone {
+    live: Option<Live>,
+    /// Everything up to this `seq` is stored on the phone.
+    acked: u64,
+    /// Whether the talk screen is in front, its mode, and when that was set (an order, not a time).
+    screen: Option<(bool, Mode, u64)>,
+    /// When the phone last connected, disconnected or acked.
+    last: i64,
+}
+
 #[derive(Default)]
 struct Person {
     turns: HashMap<String, TurnRec>,
@@ -698,10 +714,13 @@ struct Person {
     held: Vec<Held>,
     seen: VecDeque<String>,
     heard: VecDeque<HeardEntry>,
+    /// What Helm is told: the screen state of the phones together.
     presence: Option<(bool, Mode)>,
     /// The connection the presence was last sent down.
     presence_gen: Option<u64>,
-    live: Option<Live>,
+    /// By the registry id of the voice token.
+    phones: HashMap<i64, Phone>,
+    screen_clock: u64,
     helm_up: Option<bool>,
     last_status: i64,
 }
@@ -722,10 +741,16 @@ fn attachment_bytes(frame: &Value) -> usize {
 }
 
 impl Person {
+    /// Send a frame down every open socket of the person's phones.
     fn send_live(&self, frame: &Value) {
-        if let Some(l) = &self.live {
-            let _ = l.tx.send(Out::Frame(frame.to_string()));
+        let text = frame.to_string();
+        for l in self.phones.values().filter_map(|p| p.live.as_ref()) {
+            let _ = l.tx.send(Out::Frame(text.clone()));
         }
+    }
+
+    fn has_live(&self) -> bool {
+        self.phones.values().any(|p| p.live.is_some())
     }
 
     /// Store a frame for the phone under the next `seq`, and send it if a socket is open.
@@ -760,11 +785,39 @@ impl Person {
         self.order.retain(|o| o != id);
     }
 
-    fn set_presence(&mut self, live: bool, mode: Mode) {
-        if self.presence != Some((live, mode)) {
-            self.presence = Some((live, mode));
+    /// A phone's screen opened, closed or changed mode.
+    fn set_screen(&mut self, phone: i64, live: bool, mode: Mode) {
+        self.screen_clock += 1;
+        let at = self.screen_clock;
+        self.phones.entry(phone).or_default().screen = Some((live, mode, at));
+        self.refresh_presence();
+    }
+
+    /// Helm is told "live" when any phone is in front, with the mode of the phone that changed
+    /// last among them; otherwise the phone that changed last.
+    fn refresh_presence(&mut self) {
+        let newest = |only_live: bool| {
+            self.phones
+                .values()
+                .filter_map(|p| p.screen)
+                .filter(|s| s.0 || !only_live)
+                .max_by_key(|s| s.2)
+                .map(|s| (s.0, s.1))
+        };
+        let now = newest(true).or_else(|| newest(false));
+        if self.presence != now {
+            self.presence = now;
             self.presence_gen = None;
         }
+    }
+
+    /// The phone stored everything up to `seq`. An entry goes when every phone has it.
+    fn ack_seq(&mut self, phone: i64, seq: u64, now: i64) {
+        let ph = self.phones.entry(phone).or_default();
+        ph.acked = ph.acked.max(seq);
+        ph.last = now;
+        let floor = self.phones.values().map(|p| p.acked).min().unwrap_or(0);
+        self.outbox.retain(|e| e.seq > floor);
     }
 
     fn record(&mut self, r: Report) {
@@ -798,7 +851,7 @@ impl Person {
     }
 
     fn status(&mut self, turn: &str, text: &str, now: i64) {
-        if self.live.is_none() || now - self.last_status < STATUS_MIN_MS {
+        if !self.has_live() || now - self.last_status < STATUS_MIN_MS {
             return;
         }
         self.last_status = now;
@@ -986,6 +1039,13 @@ impl Person {
         // Housekeeping.
         self.held.retain(|h| now - h.at < HELD_MS);
         let keep_ms = cfg.outbox_lifetime.as_millis() as i64;
+        // A phone that has not been seen for the outbox time no longer holds entries back.
+        let phones = self.phones.len();
+        self.phones
+            .retain(|_, p| p.live.is_some() || now - p.last < keep_ms);
+        if self.phones.len() != phones {
+            self.refresh_presence();
+        }
         while self.outbox.front().is_some_and(|e| now - e.at >= keep_ms) {
             self.outbox.pop_front();
         }
@@ -1257,23 +1317,29 @@ impl VoiceBridge {
     // ----- the live socket -----
 
     /// A phone opens the live socket: it gets `welcome` and then everything above its `lastSeq`.
-    /// An older socket of the same person is closed with code 4000. Returns this socket's
-    /// generation, which the other live calls name.
+    /// `phone` is the registry id of its voice token. An older socket of the same token is closed
+    /// with code 4000; the person's other phones keep theirs. Returns this socket's generation,
+    /// which the other live calls name.
     pub fn attach_live(
         &self,
         person: i64,
+        phone: i64,
         hello: &Hello,
         tx: UnboundedSender<Out>,
         now: i64,
     ) -> u64 {
         let gen = self.live_gen.fetch_add(1, Ordering::SeqCst) + 1;
         self.with(person, now, |p, line| {
-            if let Some(old) = p.live.take() {
+            let me = tx.clone();
+            let send = |frame: &Value| {
+                let _ = me.send(Out::Frame(frame.to_string()));
+            };
+            let entry = p.phones.entry(phone).or_default();
+            if let Some(old) = entry.live.replace(Live { gen, tx }) {
                 let _ = old.tx.send(Out::Close(4000, "replaced"));
             }
-            p.live = Some(Live { gen, tx });
             p.helm_up = Some(line.is_some());
-            p.send_live(&json!({
+            send(&json!({
                 "type": "welcome",
                 "version": VERSION,
                 "helm": if line.is_some() { "online" } else { "offline" },
@@ -1287,34 +1353,56 @@ impl VoiceBridge {
                 hello.last_seq
             };
             for e in p.outbox.iter().filter(|e| e.seq > after) {
-                p.send_live(&e.frame);
+                send(&e.frame);
             }
-            p.set_presence(hello.live, hello.mode);
+            if let Some(ph) = p.phones.get_mut(&phone) {
+                ph.acked = after;
+                ph.last = now;
+            }
+            p.set_screen(phone, hello.live, hello.mode);
         });
         gen
     }
 
-    /// The socket of generation `gen` ended. Its presence goes with it; a newer socket is left.
-    pub fn detach_live(&self, person: i64, gen: u64, now: i64) {
+    /// The socket of generation `gen` ended. That phone's screen goes with it; a newer socket of
+    /// the same token, and the person's other phones, are left.
+    pub fn detach_live(&self, person: i64, phone: i64, gen: u64, now: i64) {
         self.with(person, now, |p, _| {
-            if p.live.as_ref().is_some_and(|l| l.gen == gen) {
-                p.live = None;
-                let mode = p.presence.map_or(Mode::Conversation, |(_, m)| m);
-                p.set_presence(false, mode);
+            let Some(ph) = p.phones.get_mut(&phone) else {
+                return;
+            };
+            if ph.live.as_ref().is_some_and(|l| l.gen == gen) {
+                ph.live = None;
+                ph.last = now;
+                let mode = ph.screen.map_or(Mode::Conversation, |s| s.1);
+                p.set_screen(phone, false, mode);
             }
         });
     }
 
-    /// The phone stored everything up to `seq`.
-    pub fn live_ack(&self, person: i64, seq: u64, now: i64) {
-        self.with(person, now, |p, _| p.outbox.retain(|e| e.seq > seq));
+    /// The phone stored everything up to `seq`. The hub drops an entry once every phone has it.
+    pub fn live_ack(&self, person: i64, phone: i64, seq: u64, now: i64) {
+        self.with(person, now, |p, _| p.ack_seq(phone, seq, now));
     }
 
     /// The talk screen opened or closed, or the mode changed. Ignored from a replaced socket.
-    pub fn live_presence(&self, person: i64, gen: u64, live: bool, mode: Mode, now: i64) {
+    pub fn live_presence(
+        &self,
+        person: i64,
+        phone: i64,
+        gen: u64,
+        live: bool,
+        mode: Mode,
+        now: i64,
+    ) {
         self.with(person, now, |p, _| {
-            if p.live.as_ref().is_some_and(|l| l.gen == gen) {
-                p.set_presence(live, mode);
+            let current = p
+                .phones
+                .get(&phone)
+                .and_then(|ph| ph.live.as_ref())
+                .is_some_and(|l| l.gen == gen);
+            if current {
+                p.set_screen(phone, live, mode);
             }
         });
     }
@@ -1373,6 +1461,8 @@ mod tests {
 
     const T0: i64 = 1_800_000_000_000;
     const PERSON: i64 = 10;
+    /// The registry id of the phone's voice token.
+    const PHONE: i64 = 100;
 
     fn id(n: u32) -> String {
         format!("synthetic-{n:04}")
@@ -1420,6 +1510,17 @@ mod tests {
 
     /// A phone opens the live socket.
     fn phone(r: &Rig, last_seq: u64, live: bool, now: i64) -> (u64, mpsc::UnboundedReceiver<Out>) {
+        phone_of(r, PHONE, last_seq, live, now)
+    }
+
+    /// The phone with this voice token opens the live socket.
+    fn phone_of(
+        r: &Rig,
+        token: i64,
+        last_seq: u64,
+        live: bool,
+        now: i64,
+    ) -> (u64, mpsc::UnboundedReceiver<Out>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let hello = Hello {
             last_seq,
@@ -1427,7 +1528,7 @@ mod tests {
             mode: Mode::Conversation,
             app: "test/1".into(),
         };
-        (r.bridge.attach_live(PERSON, &hello, tx, now), rx)
+        (r.bridge.attach_live(PERSON, token, &hello, tx, now), rx)
     }
 
     fn frames(rx: &mut mpsc::UnboundedReceiver<Out>) -> Vec<Value> {
@@ -1836,8 +1937,8 @@ mod tests {
             (Some("notify"), Some(2))
         );
         assert_eq!(got[0]["about"], json!({"chat": "Build"}));
-        r.bridge.live_ack(PERSON, 1, T0 + 321_000);
-        r.bridge.detach_live(PERSON, g1, T0 + 322_000);
+        r.bridge.live_ack(PERSON, PHONE, 1, T0 + 321_000);
+        r.bridge.detach_live(PERSON, PHONE, g1, T0 + 322_000);
         let (_g2, mut again) = phone(&r, 0, false, T0 + 330_000);
         let replay = frames(&mut again);
         assert_eq!(types(&replay), ["welcome", "reply"]);
@@ -2080,7 +2181,7 @@ mod tests {
         let (_g2, mut again) = phone(&r, 0, false, T0 + 40);
         assert_eq!(seqs(frames(&mut again)), [5, 6, 7, 8, 9]);
         // A cumulative ack frees everything up to it, and a reconnect names what it holds.
-        r.bridge.live_ack(PERSON, 7, T0 + 41);
+        r.bridge.live_ack(PERSON, PHONE, 7, T0 + 41);
         let (_g3, mut third) = phone(&r, 6, false, T0 + 42);
         assert_eq!(seqs(frames(&mut third)), [8, 9]);
         // A phone that remembers a seq the hub never issued (the hub restarted) gets it all.
@@ -2190,14 +2291,14 @@ mod tests {
         r.bridge.tick(T0 + 3);
         assert!(drain_json(&mut helm).is_empty());
         r.bridge
-            .live_presence(PERSON, g2, false, Mode::Chat, T0 + 4);
+            .live_presence(PERSON, PHONE, g2, false, Mode::Chat, T0 + 4);
         let f = drain_json(&mut helm);
         assert_eq!(
             (f[0]["live"].as_bool(), f[0]["mode"].as_str()),
             (Some(false), Some("chat"))
         );
         r.bridge
-            .live_presence(PERSON, g2 - 1, true, Mode::Conversation, T0 + 5);
+            .live_presence(PERSON, PHONE, g2 - 1, true, Mode::Conversation, T0 + 5);
         assert!(drain_json(&mut helm).is_empty());
 
         // The PC reconnects: the latest presence is repeated to the new line, and the phone
@@ -2223,12 +2324,68 @@ mod tests {
         assert!(!r.bridge.status(PERSON + 1).helm_online);
 
         // Closing the socket takes the presence with it.
-        r.bridge.live_presence(PERSON, g2, true, Mode::Chat, T0 + 8);
-        r.bridge.detach_live(PERSON, g2, T0 + 9);
+        r.bridge
+            .live_presence(PERSON, PHONE, g2, true, Mode::Chat, T0 + 8);
+        r.bridge.detach_live(PERSON, PHONE, g2, T0 + 9);
         let live: Vec<bool> = drain_json(&mut helm2)
             .iter()
             .map(|f| f["live"].as_bool().unwrap())
             .collect();
         assert_eq!(live, [true, false]);
+    }
+
+    #[tokio::test]
+    async fn two_phones_of_one_person_keep_their_own_socket_acks_and_screen() {
+        let r = rig(VoiceConfig::default());
+        let (_gh, mut helm) = helm_up(&r);
+        let (_ga, mut a) = phone_of(&r, PHONE, 0, true, T0);
+        let (gb, mut b) = phone_of(&r, PHONE + 1, 0, false, T0 + 1);
+        assert_eq!(types(&frames(&mut a)), ["welcome"]);
+        assert_eq!(types(&frames(&mut b)), ["welcome"]);
+        let kept = a.try_recv().is_err();
+        assert!(kept, "the second token did not replace the first");
+        let up = drain_json(&mut helm);
+        assert_eq!(types(&up), ["voice_presence"]);
+        assert_eq!(up[0]["live"], true);
+
+        // A reply reaches both. One acking it does not free it for the other.
+        r.bridge.on_upstream(PERSON, answer(1, 50), T0 + 2);
+        assert_eq!(types(&frames(&mut a)), ["reply"]);
+        assert_eq!(types(&frames(&mut b)), ["reply"]);
+        r.bridge.live_ack(PERSON, PHONE + 1, 1, T0 + 3);
+        let (ga2, mut again) = phone_of(&r, PHONE, 0, true, T0 + 4);
+        assert_eq!(a.try_recv().unwrap(), Out::Close(4000, "replaced"));
+        assert_eq!(types(&frames(&mut again)), ["welcome", "reply"]);
+        r.bridge.live_ack(PERSON, PHONE, 1, T0 + 5);
+        let (_gb2, mut other) = phone_of(&r, PHONE + 1, 0, false, T0 + 6);
+        assert_eq!(b.try_recv().unwrap(), Out::Close(4000, "replaced"));
+        assert_eq!(types(&frames(&mut other)), ["welcome"], "both have it now");
+
+        // Helm hears "live" while any phone is in front, with the mode of the one that moved
+        // last, and "not live" only when the last one goes.
+        drain_json(&mut helm);
+        r.bridge
+            .live_presence(PERSON, PHONE + 1, gb, true, Mode::Chat, T0 + 7);
+        assert!(
+            drain_json(&mut helm).is_empty(),
+            "a replaced socket's change is ignored"
+        );
+        let (gb3, _rx) = phone_of(&r, PHONE + 1, 0, false, T0 + 8);
+        r.bridge
+            .live_presence(PERSON, PHONE + 1, gb3, true, Mode::Chat, T0 + 9);
+        let f = drain_json(&mut helm);
+        assert_eq!(
+            (f[0]["live"].as_bool(), f[0]["mode"].as_str()),
+            (Some(true), Some("chat"))
+        );
+        r.bridge.detach_live(PERSON, PHONE, ga2, T0 + 10);
+        let quiet = drain_json(&mut helm);
+        assert!(quiet.is_empty(), "the other phone is in front");
+        r.bridge.detach_live(PERSON, PHONE + 1, gb3, T0 + 11);
+        let f = drain_json(&mut helm);
+        assert_eq!(
+            (f[0]["live"].as_bool(), f[0]["mode"].as_str()),
+            (Some(false), Some("chat"))
+        );
     }
 }
