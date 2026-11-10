@@ -6,6 +6,7 @@ import { GLOBAL_HOTKEY_BINDING, shellOps, type AudioInput, type ShellSettings, t
 import { useShell } from '../../shell/context.ts';
 import { Button, keys, normaliseChord, Picker, Segmented, SettingRow, TextInput } from '../../ui/index.ts';
 import { registerSettingsPane } from '../registry.ts';
+import { DictationRows } from './DictationRows.tsx';
 import { hotkeyProblem } from './hotkey.ts';
 
 const AUTO = '__automatic__';
@@ -118,7 +119,7 @@ function ShellPane() {
           onChange={(v) => save({ ...s, notifications: v })}
         />
       </SettingRow>
-      <SettingRow title="Microphone" description="Used for dictation when it arrives. Also in the tray menu.">
+      <SettingRow title="Microphone" description="Used for dictation. Also in the tray menu.">
         <Picker
           label="Microphone"
           settings
@@ -131,6 +132,7 @@ function ShellPane() {
           }}
         />
       </SettingRow>
+      <DictationRows />
       <SettingRow title="Terminal shell" description="The shell new terminal tabs start.">
         <Segmented
           label="Terminal shell"

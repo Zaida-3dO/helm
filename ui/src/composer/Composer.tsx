@@ -30,6 +30,7 @@ import { panelOps, type QuickItem } from '../api/panel.ts';
 import { isLongPaste, linkedPaste, pastedFileName } from './paste.ts';
 import { applyMention, MENTION_ROWS, mentionAt, mentionText, type Mention } from './mentions.ts';
 import { useScrollOnSend } from './scrollOnSend.ts';
+import { MicButton } from './MicButton.tsx';
 import { useHiddenSkills } from '../settings/applied.ts';
 import { accessoriesAt, accessorySide, announceSent, collectSendContributions, mountComposer, type AccessoryContext } from './slots.ts';
 import './composer.css';
@@ -838,6 +839,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
                 {a.render(actx)}
               </span>
             ))}
+            <MicButton editor={editor} />
             <Button
               variant="icon"
               className="composer-attach"

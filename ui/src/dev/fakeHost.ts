@@ -35,6 +35,7 @@ import { devicesFakeOps } from './fake-devices.ts';
 import { knowledgeFakeOps } from './fake-knowledge.ts';
 import { githubFakeOps } from './fake-github.ts';
 import { webSearchFakeOps } from './fake-websearch.ts';
+import { dictationFakeOps } from './fake-dictation.ts';
 import { localModelsFakeOps } from './fake-localmodels.ts';
 import { orchestratorFakeOps } from './fake-orchestrator.ts';
 import { newChatFakeOps } from '../newchat/fake.ts';
@@ -82,6 +83,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const kn = knowledgeFakeOps(); registerFakeOps(kn.prefixes, kn.handler); }
 { const gh = githubFakeOps(); registerFakeOps(gh.prefixes, gh.handler); }
 { const ws = webSearchFakeOps(); registerFakeOps(ws.prefixes, ws.handler); }
+{ const dc = dictationFakeOps(); registerFakeOps(dc.prefixes, dc.handler); }
 // Local models: the catalogue holds nothing until a refresh asks the (made-up) servers, as in the real host.
 const localModels = localModelsFakeOps();
 registerFakeOps(localModels.prefixes, localModels.handler);
