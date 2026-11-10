@@ -907,3 +907,38 @@ fn a_finished_land_wraps_up_its_worktree_and_queues_follow_ups() {
     crate::postland::after_step(&t.db, &before, 22).unwrap();
     assert_eq!(t.events("stage_due"), 1);
 }
+
+#[test]
+fn the_turn_end_question_blocks_a_stop_once_per_set_of_tips() {
+    let t = setup(|s| s.stages.cleanup.use_ = StageUse::Off);
+    let services = helm_ipc::Services::new();
+    let ask = || crate::gates::turn_end_call(&t.db, &services, "c", 100);
+    let needs = || t.db.snapshot(|tx| crate::hook::needs_you(tx, "c")).unwrap();
+    // No task, nothing to say.
+    assert_eq!(ask()["block"], false);
+    t.trees.set(A, "t1");
+    t.trees.set(B, "t2");
+    t.wf(json!({"action": "start", "title": "One"})).unwrap();
+    t.approved_plan();
+    t.build(A).unwrap();
+    // Built but not reviewed is not the check's business: an unreviewed change is still in work.
+    assert_eq!(ask()["block"], false);
+    t.review(A, "lgtm").unwrap();
+    // Approved and not handed off: the stop is blocked once, and the row is listed.
+    let got = ask();
+    assert_eq!(got["block"], true, "{got}");
+    assert!(got["reason"].as_str().unwrap().contains("Built but not handed off"), "{got}");
+    assert_eq!(ask()["block"], false, "once per set of tips");
+    assert_eq!(t.events("not_handed_off"), 1);
+    assert_eq!(needs().len(), 1);
+    assert_eq!(needs()[0].gate, "handoff");
+    // New tips are a new set; an agent still running (busy) says nothing.
+    t.build(B).unwrap();
+    t.review(B, "lgtm").unwrap();
+    let busy = t.db.write(|tx| crate::handoff::turn_end_check(tx, "c", true, 101)).unwrap();
+    assert!(busy.is_none());
+    assert_eq!(ask()["block"], true);
+    assert_eq!(t.events("not_handed_off"), 2);
+    // Only the row for the tips that still stand is listed.
+    assert_eq!(needs().len(), 1);
+}

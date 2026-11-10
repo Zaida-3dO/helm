@@ -10,8 +10,10 @@ import type { RequestChannel } from "../../hosttools/channel.ts";
 import type { Json } from "../../protocol/types.ts";
 
 export const WORKFLOW_GATE_HOOK_ID = "helm-workflow-gates";
+export const WORKFLOW_STOP_HOOK_ID = "helm-workflow-stop";
 export const GATES_ENV = "HELM_WORKFLOW_GATES";
 export const GATE_OPERATION = "app_workflow_gate";
+export const TURN_END_OPERATION = "app_workflow_turn_end";
 export const SPAWN_TOOLS = ["Agent", "Task"];
 export const MESSAGE_TOOLS = ["SendMessage"];
 export const EDIT_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
@@ -24,6 +26,11 @@ export function gatesWanted(env: Record<string, string | undefined>): boolean {
 /** The PreToolUse registration for the gated tools. */
 export function gateHook(): Json {
   return { matcher: [...SPAWN_TOOLS, ...MESSAGE_TOOLS, ...EDIT_TOOLS].join("|"), hookCallbackIds: [WORKFLOW_GATE_HOOK_ID] };
+}
+
+/** The Stop registration: asked when the orchestrator's turn is about to end. */
+export function stopHook(): Json {
+  return { hookCallbackIds: [WORKFLOW_STOP_HOOK_ID] };
 }
 
 function obj(v: unknown): Json {
@@ -57,6 +64,24 @@ export async function decideGate(channel: Pick<RequestChannel, "call">, input: J
     }
   } catch {
     // Soft: an unanswered gate lets the call through.
+  }
+  return {};
+}
+
+/**
+ * The Stop hook's answer. The host says whether the turn would end with approved changes nobody
+ * handed off, and blocks the stop once per set of tips with the words to tell the agent. A stop
+ * that is already the continuation of a block (`stop_hook_active`) is never blocked again, and an
+ * unanswered question lets the turn end: the host's Needs you row is the fallback.
+ */
+export async function decideStop(channel: Pick<RequestChannel, "call">, input: Json): Promise<Json> {
+  if (input.stop_hook_active === true) return {};
+  try {
+    const r = await channel.call(TURN_END_OPERATION, {}, { limitBytes: 32 * 1024, timeoutMs: GATE_TIMEOUT_MS, mutating: false, caller: { child: false } });
+    const res = r.ok ? obj(r.result) : {};
+    if (res.block === true && typeof res.reason === "string" && res.reason) return { decision: "block", reason: res.reason };
+  } catch {
+    // Soft: an unanswered question lets the turn end.
   }
   return {};
 }

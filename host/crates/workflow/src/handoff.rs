@@ -11,6 +11,7 @@ use crate::store::{self, Event};
 use crate::types::*;
 use rusqlite::Transaction;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 pub const MAX_SUMMARY: usize = 8000;
 
@@ -252,4 +253,101 @@ pub fn finish(tx: &Transaction<'_>, x: &Act<'_>) -> Out {
         )?;
     }
     Ok(Ok(json!({"runId": run.id, "status": run.status})))
+}
+
+/// What the turn-end check has to say about a chat: the key that makes it once-per-state, and
+/// the words. Changes that hold (approved at their latest commit) but are not handed off, or every
+/// change handed off with the task still open. Unreviewed work is not this check's business: a
+/// turn that ends with a question about it is nothing to flag.
+pub struct TurnEndFinding {
+    pub key: String,
+    pub body: String,
+    run: store::Run,
+}
+
+/// Read-only: the finding for a chat's active task, if there is one.
+pub fn turn_end_finding(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+) -> rusqlite::Result<Option<TurnEndFinding>> {
+    let s = crate::settings::load(tx)?;
+    if !s.enabled || !crate::mode::in_effect(tx, chat_id, &s)? {
+        return Ok(None);
+    }
+    let Some(run) = store::active_run(tx, chat_id)? else {
+        return Ok(None);
+    };
+    let all = store::changes(tx, &run.id)?;
+    let built: Vec<_> = all
+        .iter()
+        .filter(|c| c.state == "open" && c.tip.is_some() && engine::approval_holds(c))
+        .collect();
+    let (key, body) = if !built.is_empty() {
+        let mut tips: Vec<String> = built
+            .iter()
+            .map(|c| format!("{}@{}", c.branch, c.tip.as_deref().unwrap_or("")))
+            .collect();
+        tips.sort();
+        let names: Vec<&str> = built.iter().map(|c| c.branch.as_str()).collect();
+        (
+            hex::encode(Sha256::digest(tips.join("|").as_bytes()))[..16].to_owned(),
+            format!(
+                "Built but not handed off: {}. Hand them off with app_workflow hand_off, or say what is holding them back.",
+                names.join(", ")
+            ),
+        )
+    } else if all.iter().any(|c| c.state != "dropped") && all.iter().all(|c| c.state != "open") {
+        (
+            format!("task:{}", run.attempt),
+            "Every change is handed off, landed or dropped, but the task is still open. Close it with app_workflow finish.".to_owned(),
+        )
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(TurnEndFinding { key, body, run }))
+}
+
+/// The turn-end check, for the worker's Stop hook. When the orchestrator's turn ends with
+/// approved changes not handed off (and no agent still running), or with every change handed off
+/// but the task itself still open, one `not_handed_off` row is written, which the panel lists
+/// under Needs you. It is written once per set of tips (once per attempt for the second case), so
+/// a quiet chat is not nagged. Returns the words the agent is told when the row was newly written
+/// (the hook blocks the stop once with them), and `None` otherwise.
+pub fn turn_end_check(
+    tx: &Transaction<'_>,
+    chat_id: &str,
+    agents_busy: bool,
+    now: i64,
+) -> rusqlite::Result<Option<String>> {
+    if agents_busy {
+        return Ok(None);
+    }
+    let Some(f) = turn_end_finding(tx, chat_id)? else {
+        return Ok(None);
+    };
+    if store::count_events(
+        tx,
+        &f.run.id,
+        "not_handed_off",
+        Some(f.run.attempt),
+        None,
+        None,
+        Some(&f.key),
+    )? > 0
+    {
+        return Ok(None);
+    }
+    store::event(
+        tx,
+        chat_id,
+        Some(&f.run),
+        &Event {
+            kind: "not_handed_off",
+            verdict: Some(&f.key),
+            body: Some(&f.body),
+            ..Default::default()
+        },
+        now,
+    )?;
+    Ok(Some(f.body))
 }

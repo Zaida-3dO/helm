@@ -21,7 +21,7 @@ import { SHELL_CHANGES_HOOK_ID, ShellChangeCapture } from "./shellchanges.ts";
 import { StreamTranslator } from "./translate.ts";
 import { Attribution } from "../../hosttools/attribution.ts";
 import { fileSaver, DEFAULT_MAX_CHARS } from "../../hosttools/cap.ts";
-import { decideGate, gateHook, gatesWanted, WORKFLOW_GATE_HOOK_ID } from "./gates.ts";
+import { decideGate, decideStop, gateHook, gatesWanted, stopHook, WORKFLOW_GATE_HOOK_ID, WORKFLOW_STOP_HOOK_ID } from "./gates.ts";
 import { RequestChannel } from "../../hosttools/channel.ts";
 import { HostToolServer, SERVER_NAME, sdkMcpConfig, toolPrefix } from "../../hosttools/server.ts";
 import { planUsageFromRateLimit } from "../../usage/rateLimit.ts";
@@ -284,7 +284,11 @@ export class ClaudeDriver implements Driver {
     if (this.budget.enabled) preToolUse.push({ matcher: ".*", hookCallbackIds: [BUDGET_HOOK_ID] });
     if (this.shellChanges) preToolUse.push({ matcher: "Bash", hookCallbackIds: [SHELL_CHANGES_HOOK_ID] });
     if (this.launch.claude?.scheduleTools === true) preToolUse.push({ matcher: NATIVE_SCHEDULE_MATCHER, hookCallbackIds: [SCHEDULE_REDIRECT_HOOK_ID] });
-    if (preToolUse.length > 0) initRequest.hooks = { PreToolUse: preToolUse };
+    const hooks: Json = {};
+    if (preToolUse.length > 0) hooks.PreToolUse = preToolUse;
+    // The turn-end check rides on the same switch as the gates: a chat the workflow may act in.
+    if (this.gateChannel) hooks.Stop = [stopHook()];
+    if (Object.keys(hooks).length > 0) initRequest.hooks = hooks;
     const init = await this.control(initRequest, this.limits.controlTimeoutMs);
     markLaunch("initialized");
     const models = Array.isArray(init.models)
@@ -775,6 +779,10 @@ export class ClaudeDriver implements Driver {
       const id = String(req.tool_use_id ?? input.tool_use_id ?? "");
       const child = (typeof input.agent_id === "string" && input.agent_id !== "") || this.subagentTools.has(id);
       void decideGate(this.gateChannel, input, child).then((r) => this.controlReply(requestId, r));
+      return;
+    }
+    if (req.callback_id === WORKFLOW_STOP_HOOK_ID && this.gateChannel) {
+      void decideStop(this.gateChannel, input).then((r) => this.controlReply(requestId, r));
       return;
     }
     if (req.callback_id === DUPLICATE_MCP_HOOK_ID) {

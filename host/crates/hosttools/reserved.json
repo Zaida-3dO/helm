@@ -79,6 +79,7 @@
     "app_workflow_gate",
     "app_workflow_report",
     "app_workflow_take_over",
+    "app_workflow_turn_end",
     "app_worktree_status"
   ],
   "dropped": [

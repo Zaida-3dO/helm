@@ -48,6 +48,8 @@ use std::sync::Arc;
 /// registered only then.
 pub const GATES_ENV: &str = "HELM_WORKFLOW_GATES";
 pub const GATE_TOOL: &str = "app_workflow_gate";
+/// The worker's Stop hook asks this when the orchestrator's turn is about to end.
+pub const TURN_END_TOOL: &str = "app_workflow_turn_end";
 pub const SPAWN_TOOLS: [&str; 2] = ["Agent", "Task"];
 pub const MESSAGE_TOOLS: [&str; 1] = ["SendMessage"];
 pub const EDIT_TOOLS: [&str; 4] = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
@@ -613,6 +615,43 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
             out
         },
     );
+    r.blocking(
+        ToolSpec::read(
+            TURN_END_TOOL,
+            TURN_END_DESCRIPTION,
+            json!({"type": "object", "properties": {}}),
+        )
+        .when(Condition::Worker)
+        .self_locking(),
+        |ctx, _| {
+            let Some(db) = ctx.services.get::<Database>() else {
+                return Ok(json!({"block": false}));
+            };
+            let out = turn_end_call(&db, &ctx.services, &ctx.caller_chat_id, helm_core::now_ms());
+            crate::store::emit_touched(&*ctx.events);
+            Ok(out)
+        },
+    );
+}
+
+pub const TURN_END_DESCRIPTION: &str = "Helm's own question when the orchestrator's turn is about to end, in a chat under the orchestrator workflow. The worker asks it; agents never see it.";
+
+/// The turn-end question: `{block, reason?}`. `block` is true once per set of tips, when the turn
+/// would end with approved changes not handed off (or every change handed off and the task
+/// open); an agent still running, or no active task, answers `{block: false}`.
+pub fn turn_end_call(db: &Database, services: &helm_ipc::Services, chat: &str, now: i64) -> Value {
+    let busy = services
+        .get::<helm_chats::ChatRuntime>()
+        .and_then(|rt| rt.live_thread(chat))
+        .is_some_and(|t| t.subagents_running > 0 || !t.background_tasks.is_empty());
+    match db.write(|tx| crate::handoff::turn_end_check(tx, chat, busy, now)) {
+        Ok(Some(reason)) => json!({"block": true, "reason": reason}),
+        Ok(None) => json!({"block": false}),
+        Err(e) => {
+            log::warn!("chat {chat}: the turn-end check failed: {e}");
+            json!({"block": false})
+        }
+    }
 }
 
 /// Puts [`GATES_ENV`] on the launch of a chat the gates may act in: master switch on, a Claude

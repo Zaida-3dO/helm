@@ -691,7 +691,8 @@ fn mcp(db: &Database, chat: &str, c: &Check, f: &InForce, now: i64) -> rusqlite:
 
 // ---- the panel's Needs you ------------------------------------------------------------------
 
-/// The guard's overrides and refusals, and the PR view's Merge anyway / Mark ready anyway, since
+/// The guard's overrides and refusals, the PR view's Merge anyway / Mark ready anyway, and the
+/// turn-end check's "built but not handed off" row while it still holds (gate `handoff`), since
 /// the user last typed in this chat, newest first (at most 8): the workflow panel lists them
 /// under Needs you.
 pub fn needs_you(
@@ -709,7 +710,7 @@ pub fn needs_you(
         .unwrap_or(0);
     let mut st = tx.prepare(
         "SELECT kind, verdict, body FROM workflow_events
-         WHERE chat_id = ?1 AND kind IN ('guard_override', 'gate_denied', 'pr_view_override') AND created_at > ?2
+         WHERE chat_id = ?1 AND kind IN ('guard_override', 'gate_denied', 'pr_view_override', 'not_handed_off') AND created_at > ?2
          ORDER BY id DESC LIMIT 8",
     )?;
     let rows = st.query_map(params![chat, since], |r| {
@@ -720,8 +721,22 @@ pub fn needs_you(
         ))
     })?;
     let mut out = Vec::new();
+    // The row stands only while the state it describes does: once the work is handed off, it goes.
+    let standing = crate::handoff::turn_end_finding(tx, chat)?.map(|f| f.key);
     for row in rows {
         let (kind, verdict, body) = row?;
+        if kind == "not_handed_off" {
+            if standing.is_some() && standing == verdict {
+                out.push(crate::types::GuardNoteView {
+                    overridden: false,
+                    gate: "handoff".to_owned(),
+                    rule: "not_handed_off".to_owned(),
+                    command: body.unwrap_or_default().chars().take(120).collect(),
+                    verified: false,
+                });
+            }
+            continue;
+        }
         let body: Value = body
             .as_deref()
             .and_then(|b| serde_json::from_str(b).ok())

@@ -28,6 +28,7 @@
 //! | prompt section `workflow` | the generated Workflow rules, plus the Move fast block when on |
 //! | host tools `app_workflow`, `app_workflow_report` | tasks, changes, plan of record, rounds and caps, commit-bound approval, hand-off, take-over ([`claims`]), post-land reports and follow-ups ([`postland`]) |
 //! | host tool `app_workflow_gate` (never listed) | the worker's dispatch, message and edit gate questions ([`gates`]); launch variable `HELM_WORKFLOW_GATES` |
+//! | host tool `app_workflow_turn_end` (never listed) | the worker's Stop hook question: approved changes not handed off block the stop once per set of tips, and the turn-end row lands under Needs you ([`handoff::turn_end_check`]) |
 //! | table `workflow_followups` | queued follow-ups per task |
 //! | tables `workflow_runs`, `workflow_changes`, `workflow_events` | per task / per change / per event |
 //! | allow kinds | `land`, `ready`, `skip`, `allowMore`, `drop`, `reopen`, `takeOver`, `clearVisual` on `helm_consent` |

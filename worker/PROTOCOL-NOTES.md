@@ -48,7 +48,7 @@ suppressed in `HostChannel` and logged to stderr.
 | `message_update` | `messageId, index, delta {type: text_delta \| thinking_delta \| toolcall_delta, text}` |
 | `message_end` | `message {id, role, content, model?, stopReason?, usage?, status: complete \| error \| interrupted, errorMessage?, submissionId? (user rows)}`; `usage` is the request's own, in the API's spelling (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`): input and cache counts from `message_start`, the output count from `message_delta` |
 | `tool_execution_start` | `toolCallId, toolName, args` |
-| `tool_execution_end` | `toolCallId, toolName, result {text, content?}, isError` |
+| `tool_execution_end` | `toolCallId, toolName, result {text, content?, images?}, isError`. `images` is `[{mimeType, data}]` (base64): the pictures a tool result carried, at most 6, none over 25 MB decoded; absent when there are none. The host keeps them as the chat's own images on the tool row |
 | `usage` | `inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd, durationMs, numTurns, running?`. The token counts are the result line's `usage`: this turn's main conversation only. `costUsd` is `total_cost_usd`, a running total for the whole process. `running {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd}` is the process's running totals, subagents included (`total_cost_usd` and the sum of `modelUsage`); a resumed session starts from its saved totals, and a `/clear` starts them over. The host records each turn's share of them |
 | `auto_retry_start` | `attempt, maxAttempts, delayMs, errorStatus, errorMessage, waiting:false` |
 | `auto_retry_end` | `state: recovered \| retried \| cancelled \| failed, attempt` |
@@ -480,3 +480,19 @@ The host answers at once with `allow:true, active:false` in any chat without Orc
 an active task, or with the guard switched off. No answer within `limits.guardTimeoutMs` (10 s):
 the call is refused with a try-again note if the last answer said `active`, and let through with a
 logged warning otherwise.
+
+## Turn-end (Stop) hook
+
+Registered only when the launch carries `HELM_WORKFLOW_GATES=1` (the chat may be under the
+orchestrator workflow): `initialize` takes `hooks.Stop = [{hookCallbackIds:["helm-workflow-stop"]}]`
+beside the `PreToolUse` entries. When the main agent is about to stop, the CLI sends
+`hook_callback` with `input.stop_hook_active` (true when this stop already follows a block).
+
+- `stop_hook_active: true`: answered `{}` at once, so a stop is blocked at most once in a row.
+- Otherwise the worker asks the host on the gate channel (the `app_workflow_turn_end` operation,
+  no arguments, 5 s, soft). The host answers `{block, reason?}`: `block` is true once per set of
+  tips, when the turn would end with approved changes nobody handed off (or every change handed
+  off with the task open), and no sub-agent or background task is running. The worker answers
+  `{decision:"block", reason}`; the agent reads the reason and carries on.
+- Any other answer, a failure or no answer in time: `{}`. The host also writes the "Needs you"
+  row when it blocks, and that row is the fallback after the one block.

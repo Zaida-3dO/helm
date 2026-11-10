@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildClaudeArgs, disallowedTools } from "../src/drivers/claude/args.ts";
-import { decideGate, gateHook } from "../src/drivers/claude/gates.ts";
+import { decideGate, decideStop, gateHook, stopHook } from "../src/drivers/claude/gates.ts";
 import { cronTiming, NATIVE_SCHEDULE_TOOLS, scheduleRedirect } from "../src/drivers/claude/schedulecalls.ts";
 import { assertLoopbackHttp, buildClaudeEnv, contextRefusalNote, STRIPPED_UNLESS_API_KEY_MODE, takeLocalKey } from "../src/drivers/claude/env.ts";
 
@@ -240,4 +240,18 @@ test("a chat the workflow gates may act in loses the workflow runner and the REP
   const out = await decideGate(channel, { tool_name: "SendMessage", tool_input: { to: "reviewer", message: "secret words" } }, true);
   assert.deepEqual(asked, [["app_workflow_gate", { tool: "SendMessage", input: { to: "reviewer" }, child: true }]]);
   assert.deepEqual(out, { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "only the orchestrator messages agents" } });
+  // The Stop hook: a block from the host stops the turn from ending once; a stop that already
+  // follows a block, a plain answer and a failed question all let it end.
+  assert.deepEqual(stopHook(), { hookCallbackIds: ["helm-workflow-stop"] });
+  const stopAsked: unknown[][] = [];
+  const stopWith = (answer: () => unknown) =>
+    ({ call: async (op: string, args: unknown) => (stopAsked.push([op, args]), answer()) }) as unknown as Parameters<typeof decideStop>[0];
+  const blocking = stopWith(() => ({ ok: true, result: { block: true, reason: "Built but not handed off: feat-x." } }));
+  assert.deepEqual(await decideStop(blocking, {}), { decision: "block", reason: "Built but not handed off: feat-x." });
+  assert.deepEqual(stopAsked, [["app_workflow_turn_end", {}]]);
+  assert.deepEqual(await decideStop(blocking, { stop_hook_active: true }), {});
+  assert.equal(stopAsked.length, 1, "a continuation is not asked");
+  assert.deepEqual(await decideStop(stopWith(() => ({ ok: true, result: { block: false } })), {}), {});
+  assert.deepEqual(await decideStop(stopWith(() => ({ ok: false, error: "no" })), {}), {});
+  assert.deepEqual(await decideStop(stopWith(() => { throw new Error("timeout"); }), {}), {});
 });

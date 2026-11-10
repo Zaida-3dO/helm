@@ -120,6 +120,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_workflow_gate", Class::Denied(CONSENT)),
     ("app_workflow_report", Class::Denied(CONSENT)),
     ("app_workflow_take_over", Class::Denied(CONSENT)),
+    ("app_workflow_turn_end", Class::Denied(CONSENT)),
 ];
 
 /// The argument names each allowed tool takes from an outside caller.
