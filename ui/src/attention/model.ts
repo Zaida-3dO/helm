@@ -106,3 +106,22 @@ export function flagFor(s: AttentionSummary | null, chatId: string, enabled = tr
   if (!s || !enabled) return null;
   return s.flagged.find((r) => r.chatId === chatId) ?? null;
 }
+
+/** The longest quiet time the idle check can wait, in minutes. */
+export const TRIAGE_MAX_DELAY_MINUTES = 1440;
+
+/** The alert delay as typed: a whole number of minutes from 0 to 1,440, or null when it is not. */
+export function parseDelayMinutes(text: string): number | null {
+  const t = text.trim();
+  if (!/^\d{1,4}$/.test(t)) return null;
+  const n = Number(t);
+  return n <= TRIAGE_MAX_DELAY_MINUTES ? n : null;
+}
+
+/** What Settings holds for the idle check. */
+export interface TriageSettings {
+  enabled: boolean;
+  delayMinutes: number;
+  /** The person's own wording for the decision; empty uses the built-in one. */
+  prompt: string;
+}

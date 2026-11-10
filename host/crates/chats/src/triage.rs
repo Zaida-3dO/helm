@@ -7,7 +7,8 @@
 //! reason. A yes shows as a flag on the chat's row and as an entry in Needs attention.
 //!
 //! - **On by default**, switched by the `taskTriage` preference (`{enabled, delayMinutes, prompt}`;
-//!   only `enabled` and `delayMinutes` are read, 0 to 1,440 minutes, default 15). A check costs a
+//!   `prompt` is the person's own wording for the decision, up to [`MAX_PROMPT_CHARS`] characters,
+//!   0 to 1,440 minutes for the delay, default 15). A check costs a
 //!   few hundred tokens of the small model, at most [`MAX_PER_HOUR`] an hour and [`MIN_GAP_MS`]
 //!   apart, so the spend is small and bounded; the Needs attention dialog says so and holds the
 //!   switch.
@@ -19,10 +20,13 @@
 //!   is the chat's activity stamp: the later of its last update and its last worker output, so
 //!   new activity ends the stretch and clears the flag.
 //! - **Limits:** one check at a time, one chat per pass, a pass per maintenance tick.
+//! - **The verdict** carries a priority (none, normal or high) and a next step beside the reason;
+//!   the flag shows them as one line. A helper that gives neither (an older one) still works.
 //! - **A check** is claimed first (the row is written as failed), so a crash or a timeout never
 //!   replays it; the verdict is written only if the chat's stamp is still the one it was made
-//!   for and triage is still on. A helper failure leaves the claim: no retry until the chat has
-//!   new activity.
+//!   for and triage is still on. A helper failure leaves the claim and is retried
+//!   once the chat has been quiet for [`RETRY_AFTER_MS`] more, at most [`MAX_TRIES`] times in all
+//!   for one stretch; after that only new activity starts another.
 //! - The conversation is data: triage never sends a prompt to a chat and never changes read state.
 
 use crate::attention::{live_needs, Needs};
@@ -44,6 +48,10 @@ pub const HOST_TIMEOUT: Duration = Duration::from_secs(115);
 /// The most of one turn that is sent (the end is kept; the helper trims the middle further).
 pub const TURN_CHARS: usize = 6_000;
 pub const MAX_REASON_CHARS: usize = 160;
+pub const MAX_PROMPT_CHARS: usize = 2_000;
+/// A failed check is tried again after this long, up to [`MAX_TRIES`] checks per quiet stretch.
+pub const RETRY_AFTER_MS: i64 = 20 * 60_000;
+pub const MAX_TRIES: i64 = 3;
 
 /// One check at a time.
 #[derive(Default)]
@@ -64,10 +72,12 @@ impl Gate {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub enabled: bool,
     pub delay_ms: i64,
+    /// The person's own wording for the decision; the helper's built-in one when none.
+    pub prompt: Option<String>,
 }
 
 impl Default for Settings {
@@ -75,8 +85,66 @@ impl Default for Settings {
         Self {
             enabled: true,
             delay_ms: DEFAULT_DELAY_MINUTES * 60_000,
+            prompt: None,
         }
     }
+}
+
+/// How urgent the helper judged a chat that needs the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Priority {
+    None,
+    Normal,
+    High,
+}
+
+impl Priority {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "normal" => Some(Self::Normal),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
+/// What one check decided.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Verdict {
+    pub needs: bool,
+    pub reason: String,
+    pub priority: Option<Priority>,
+    pub next_step: String,
+}
+
+impl Verdict {
+    /// The older helper answer: a yes or no and a reason.
+    pub fn plain(needs: bool, reason: String) -> Self {
+        Self {
+            needs,
+            reason,
+            priority: None,
+            next_step: String::new(),
+        }
+    }
+}
+
+/// The one line the flag shows: the reason, led by `High priority:` when it is, and followed by
+/// the next step when there is one.
+pub fn display_reason(v: &Verdict) -> String {
+    let cut = |s: &str| -> String { s.chars().take(MAX_REASON_CHARS).collect() };
+    let mut out = String::new();
+    if v.priority == Some(Priority::High) {
+        out.push_str("High priority: ");
+    }
+    out.push_str(&cut(&v.reason));
+    let step = cut(v.next_step.trim());
+    if !step.is_empty() {
+        out.push_str(" Next: ");
+        out.push_str(&step);
+    }
+    out
 }
 
 /// The stored setting, leniently: missing or malformed parts fall back to the defaults.
@@ -88,6 +156,12 @@ pub fn settings(tx: &Transaction<'_>) -> Settings {
         }
         if let Some(d) = m.get("delayMinutes").and_then(Value::as_f64) {
             s.delay_ms = (d.clamp(0.0, MAX_DELAY_MINUTES as f64) as i64) * 60_000;
+        }
+        if let Some(Value::String(p)) = m.get("prompt") {
+            let p = p.trim();
+            if !p.is_empty() {
+                s.prompt = Some(p.chars().take(MAX_PROMPT_CHARS).collect());
+            }
         }
     }
     s
@@ -116,6 +190,11 @@ pub struct Cand {
     pub stamp: i64,
     /// The stamp of the last check.
     pub checked_stamp: Option<i64>,
+    /// When the last check was claimed, and whether it ended without a verdict.
+    pub checked_at: i64,
+    pub failed: bool,
+    /// Checks claimed for this stretch of quiet so far.
+    pub tries: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,7 +241,9 @@ pub fn decide(c: &Cand, s: &Settings, now: i64) -> Result<(), Skip> {
         Err(Skip::TooSoon)
     } else if age > WINDOW_MS {
         Err(Skip::TooOld)
-    } else if c.checked_stamp == Some(c.stamp) {
+    } else if c.checked_stamp == Some(c.stamp)
+        && !(c.failed && c.tries < MAX_TRIES && now - c.checked_at >= RETRY_AFTER_MS)
+    {
         Err(Skip::AlreadyChecked)
     } else {
         Ok(())
@@ -178,7 +259,7 @@ fn candidates(tx: &Transaction<'_>, needs: &Needs, now: i64) -> rusqlite::Result
                   OR EXISTS(SELECT 1 FROM chat_completions k WHERE k.chat_id = c.id AND k.read = 0), ",
         crate::quiet_sql!(),
         ", EXISTS(SELECT 1 FROM messages x WHERE x.chat_id = c.id AND x.role = 'user' AND x.active = 1 AND x.text <> ''), \
-           MAX(c.updated_at, COALESCE(a.last_activity_at, 0)), t.stamp, c.provider IS NOT NULL \
+           MAX(c.updated_at, COALESCE(a.last_activity_at, 0)), t.stamp, c.provider IS NOT NULL,            COALESCE(t.checked_at, 0), COALESCE(t.failed, 0), COALESCE(t.tries, 0) \
          FROM chats c LEFT JOIN chat_activity a ON a.chat_id = c.id \
                       LEFT JOIN chat_triage t ON t.chat_id = c.id \
          WHERE MAX(c.updated_at, COALESCE(a.last_activity_at, 0)) > ?1 - ?2 \
@@ -201,6 +282,9 @@ fn candidates(tx: &Transaction<'_>, needs: &Needs, now: i64) -> rusqlite::Result
             stamp: r.get(9)?,
             checked_stamp: r.get(10)?,
             local: r.get(11)?,
+            checked_at: r.get(12)?,
+            failed: r.get(13)?,
+            tries: r.get(14)?,
         })
     })?;
     rows.collect()
@@ -270,16 +354,20 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
             return Ok(None);
         };
         tx.execute(
-            "INSERT INTO chat_triage(chat_id, stamp, checked_at, needs, reason, failed) VALUES (?1, ?2, ?3, 0, '', 1)
-             ON CONFLICT(chat_id) DO UPDATE SET stamp = ?2, checked_at = ?3, needs = 0, reason = '', failed = 1",
+            "INSERT INTO chat_triage(chat_id, stamp, checked_at, needs, reason, failed, tries) VALUES (?1, ?2, ?3, 0, '', 1, 1)
+             ON CONFLICT(chat_id) DO UPDATE SET tries = CASE WHEN stamp = ?2 THEN tries + 1 ELSE 1 END,
+                 stamp = ?2, checked_at = ?3, needs = 0, reason = '', failed = 1",
             params![c.id, c.stamp, now],
         )?;
-        let job = json!({
+        let mut job = json!({
             "title": c.title,
             "status": c.status.as_str(),
             "idleMinutes": (now - c.stamp) / 60_000,
             "turns": turns(tx, &c.id)?,
         });
+        if let Some(p) = &s.prompt {
+            job["customPrompt"] = json!(p);
+        }
         Ok::<_, rusqlite::Error>(Some((c.id, c.stamp, job)))
     });
     let Ok(Some((chat, stamp, mut job))) = claimed else {
@@ -296,11 +384,11 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
         let spawner = sh.spawner.clone();
         let out = tokio::time::timeout(
             HOST_TIMEOUT,
-            tokio::task::spawn_blocking(move || spawner.run_triage(&job)),
+            tokio::task::spawn_blocking(move || spawner.run_triage_verdict(&job)),
         )
         .await;
         match out {
-            Ok(Ok(Ok((needs, reason)))) => finish(&sh, &chat, stamp, needs, &reason),
+            Ok(Ok(Ok(verdict))) => finish(&sh, &chat, stamp, &verdict),
             other => log::warn!(
                 "chat {chat}: the idle check did not finish ({})",
                 match other {
@@ -316,8 +404,9 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
 
 /// Write a verdict, unless the chat has moved on since the check was claimed or triage was
 /// switched off meanwhile.
-fn finish(sh: &Arc<Shared>, chat_id: &str, stamp: i64, needs: bool, reason: &str) {
-    let reason: String = reason.chars().take(MAX_REASON_CHARS).collect();
+fn finish(sh: &Arc<Shared>, chat_id: &str, stamp: i64, verdict: &Verdict) {
+    let reason = display_reason(verdict);
+    let needs = verdict.needs && verdict.priority != Some(Priority::None);
     let wrote = sh
         .db
         .write(|tx| {
@@ -361,11 +450,15 @@ mod tests {
             local: false,
             stamp: 1_000_000_000,
             checked_stamp: None,
+            checked_at: 0,
+            failed: false,
+            tries: 0,
         }
     }
 
     #[test]
     fn the_idle_pass_decision() {
+        // (The setting's custom prompt is read with the others in `settings`.)
         let s = Settings::default();
         let now = cand().stamp + 20 * MIN;
         type Edit = fn(&mut Cand);
@@ -436,6 +529,35 @@ mod tests {
                 Err(Skip::AlreadyChecked),
             ),
             (
+                "a failed check is not retried at once",
+                |c| {
+                    c.checked_stamp = Some(c.stamp);
+                    c.failed = true;
+                    c.tries = 1;
+                    c.checked_at = c.stamp + 15 * MIN;
+                },
+                Err(Skip::AlreadyChecked),
+            ),
+            (
+                "a failed check is retried after the wait",
+                |c| {
+                    c.checked_stamp = Some(c.stamp);
+                    c.failed = true;
+                    c.tries = 1;
+                    c.checked_at = c.stamp;
+                },
+                Ok(()),
+            ),
+            (
+                "a check that failed three times stays failed",
+                |c| {
+                    c.checked_stamp = Some(c.stamp);
+                    c.failed = true;
+                    c.tries = MAX_TRIES;
+                },
+                Err(Skip::AlreadyChecked),
+            ),
+            (
                 "checked before the last activity",
                 |c| c.checked_stamp = Some(c.stamp - MIN),
                 Ok(()),
@@ -452,7 +574,7 @@ mod tests {
                 &c,
                 &Settings {
                     enabled: false,
-                    ..s
+                    ..s.clone()
                 },
                 now
             ),
@@ -479,6 +601,22 @@ mod tests {
             "the oldest has aged out"
         );
         let eager = Settings { delay_ms: 0, ..s };
+        let said = |p, r: &str, n: &str| {
+            display_reason(&Verdict {
+                needs: true,
+                reason: r.into(),
+                priority: p,
+                next_step: n.into(),
+            })
+        };
+        assert_eq!(said(None, "It failed.", ""), "It failed.");
+        assert_eq!(
+            said(Some(Priority::High), "It failed.", " Rerun the test. "),
+            "High priority: It failed. Next: Rerun the test."
+        );
+        assert_eq!(said(Some(Priority::Normal), "Ask.", ""), "Ask.");
+        assert_eq!(Priority::parse(" High "), Some(Priority::High));
+        assert_eq!(Priority::parse("urgent"), None);
         assert_eq!(
             decide(&c, &eager, c.stamp),
             Ok(()),

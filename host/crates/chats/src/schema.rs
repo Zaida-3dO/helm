@@ -40,6 +40,7 @@ pub fn register(reg: &mut MigrationRegistry) {
         .initializer("chats-attachment-refs", crate::attachments::init)
         .initializer("chats-flags", crate::flags::init)
         .initializer("chats-activity-queue", activity_queue)
+        .initializer("chats-triage-tries", triage_tries)
         .one_time("chats-origin-user-is-typed", origin_user_is_typed)
         .recovery_capture("chats-restart-capture", capture_continuations)
         .recovery_step("chats-retry-leftovers", cancel_retry_leftovers)
@@ -118,7 +119,8 @@ fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              checked_at  INTEGER NOT NULL,
              needs       INTEGER NOT NULL DEFAULT 0,
              reason      TEXT NOT NULL DEFAULT '',
-             failed      INTEGER NOT NULL DEFAULT 0
+             failed      INTEGER NOT NULL DEFAULT 0,
+             tries       INTEGER NOT NULL DEFAULT 0
          );
          -- A pending restart continuation goes when its chat is archived or its project,
          -- harness, provider, model or effort changes; deletion cascades.
@@ -257,6 +259,23 @@ fn activity_queue(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     if !has {
         tx.execute(
             "ALTER TABLE chat_activity ADD COLUMN local_ahead INTEGER",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// `chat_triage` gained the tries column after the first table was written; older databases get
+/// it here.
+fn triage_tries(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let has: bool = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('chat_triage') WHERE name = 'tries'",
+        [],
+        |r| r.get::<_, i64>(0).map(|n| n > 0),
+    )?;
+    if !has {
+        tx.execute(
+            "ALTER TABLE chat_triage ADD COLUMN tries INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }

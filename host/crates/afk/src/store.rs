@@ -444,3 +444,112 @@ pub fn undecided_allows(tx: &Transaction<'_>, chat_id: &str, since: i64) -> Vec<
         .map(|rows| rows.filter_map(Result::ok).collect())
         .unwrap_or_default()
 }
+
+/// What other parts of Helm left for the user in one chat, as ready-made text. Each list is empty
+/// when the tables behind it are missing.
+#[derive(Default)]
+pub struct Left {
+    /// Changes waiting for the user's own Merge.
+    pub merges: Vec<String>,
+    /// Guard and pull request view overrides, and Allow grants that were used.
+    pub overrides: Vec<String>,
+    /// Changes handed over that have not landed.
+    pub handoffs: Vec<String>,
+}
+
+fn one_line(s: &str, max: usize) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max)
+        .collect()
+}
+
+/// The changes of one chat's tasks in `state`, one line each.
+fn changes_in(tx: &Transaction<'_>, chat_id: &str, state: &str) -> Vec<String> {
+    let Ok(mut st) = tx.prepare(
+        "SELECT r.title, c.repo, c.branch, c.pr FROM workflow_changes c
+         JOIN workflow_runs r ON r.id = c.run_id
+         WHERE r.chat_id = ?1 AND c.state = ?2 ORDER BY r.created_at, c.branch LIMIT 10",
+    ) else {
+        return vec![];
+    };
+    let rows = st.query_map(params![chat_id, state], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, Option<String>>(3)?,
+        ))
+    });
+    let lines = rows
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|(title, repo, branch, pr)| {
+            let pr = pr.map(|p| format!(" (PR {p})")).unwrap_or_default();
+            format!("{} on {repo} {branch}{pr}", one_line(&title, 80))
+        })
+        .collect();
+    lines
+}
+
+/// Merges awaiting the user, overrides since `since`, and unlanded hand-offs for one chat. The
+/// workflow and consent tables belong to other crates; a missing table answers none.
+pub fn left_for_user(tx: &Transaction<'_>, chat_id: &str, since: i64) -> Left {
+    let mut out = Left {
+        merges: changes_in(tx, chat_id, "awaiting_merge"),
+        handoffs: changes_in(tx, chat_id, "handed_off"),
+        ..Left::default()
+    };
+    if let Ok(mut st) = tx.prepare(
+        "SELECT kind, verdict, body FROM workflow_events
+         WHERE chat_id = ?1 AND created_at >= ?2 AND kind IN ('guard_override', 'pr_view_override')
+         ORDER BY id LIMIT 10",
+    ) {
+        let rows = st.query_map(params![chat_id, since], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        });
+        for (kind, verdict, body) in rows.into_iter().flatten().flatten() {
+            let body: serde_json::Value = body
+                .as_deref()
+                .and_then(|b| serde_json::from_str(b).ok())
+                .unwrap_or(serde_json::Value::Null);
+            let what = if kind == "pr_view_override" {
+                format!(
+                    "Pull request {} went past its task",
+                    verdict.as_deref().unwrap_or("change")
+                )
+            } else {
+                format!("Guard waived {}", verdict.as_deref().unwrap_or("a rule"))
+            };
+            let why = body
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .map(|s| one_line(s, 120))
+                .filter(|s| !s.is_empty());
+            out.overrides.push(match why {
+                Some(w) => format!("{what}: {w}"),
+                None => what,
+            });
+        }
+    }
+    if let Ok(mut st) = tx.prepare(
+        "SELECT summary FROM consent_requests
+         WHERE chat_id = ?1 AND state = 'used' AND used_at >= ?2 ORDER BY used_at LIMIT 10",
+    ) {
+        let rows = st.query_map(params![chat_id, since], |r| r.get::<_, String>(0));
+        for summary in rows.into_iter().flatten().flatten() {
+            out.overrides.push(format!(
+                "Allow you gave was used: {}",
+                one_line(&summary, 120)
+            ));
+        }
+    }
+    out
+}

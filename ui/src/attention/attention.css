@@ -111,6 +111,19 @@
   margin-top: 6px;
 }
 
+.att-triage-fields {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.att-field {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 /* The note in a chat, above the composer: the idle check's reason in the app's warning colours. */
 .flag-note {
   padding: 10px 12px 8px 14px;

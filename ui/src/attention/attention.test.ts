@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AttentionRow, AttentionSummary } from '../api/types.ts';
-import { countText, flagFor, inboxCount, inboxRows, nextAttention, snoozeChoices, whenText } from './model.ts';
+import { countText, flagFor, inboxCount, inboxRows, nextAttention, parseDelayMinutes, snoozeChoices, whenText } from './model.ts';
 
 const row = (chatId: string, kind: AttentionRow['kind'] = 'question'): AttentionRow => ({ chatId, title: chatId, project: 'p', kind, reason: 'r' });
 const summary = (over: Partial<AttentionSummary> = {}): AttentionSummary => ({
@@ -90,4 +90,18 @@ test('a chat shows the note only while the host lists it as flagged and the chec
   assert.equal(flagFor(s, 'f', false), null, 'switching the check off hides it at once');
   assert.equal(flagFor(summary(), 'f'), null, 'once the flag clears, the note goes');
   assert.equal(flagFor(null, 'f'), null);
+});
+
+test('the alert delay is a whole number of minutes from 0 to 1,440', () => {
+  const cases: [string, number | null][] = [
+    ['15', 15],
+    [' 0 ', 0],
+    ['1440', 1440],
+    ['1441', null],
+    ['-1', null],
+    ['1.5', null],
+    ['', null],
+    ['ten', null],
+  ];
+  for (const [text, want] of cases) assert.equal(parseDelayMinutes(text), want, text);
 });

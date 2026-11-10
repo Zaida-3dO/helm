@@ -166,6 +166,13 @@ pub trait Spawner: Send + Sync {
         Err("triage is not available".into())
     }
 
+    /// Run the triage helper and answer the whole verdict, with the priority and next step when
+    /// the helper gives them. A spawner that only answers a yes or no keeps working.
+    fn run_triage_verdict(&self, job: &Value) -> Result<crate::triage::Verdict, String> {
+        self.run_triage(job)
+            .map(|(needs, reason)| crate::triage::Verdict::plain(needs, reason))
+    }
+
     /// Run the autocomplete helper on one job and answer the completion ([`crate::autocomplete`]).
     fn run_autocomplete(&self, _job: &Value) -> Result<String, String> {
         Err("autocomplete is not available".into())
@@ -380,6 +387,31 @@ impl Spawner for ProcessSpawner {
             out.get("error").and_then(Value::as_str),
         ) {
             (Some(n), reason, _) => Ok((n, reason.unwrap_or_default().to_owned())),
+            (_, _, Some(e)) => Err(e.to_owned()),
+            _ => Err("the helper gave no verdict".into()),
+        }
+    }
+
+    fn run_triage_verdict(&self, job: &Value) -> Result<crate::triage::Verdict, String> {
+        let out = self.run_helper("triage", job, crate::triage::HOST_TIMEOUT)?;
+        match (
+            out.get("needs").and_then(Value::as_bool),
+            out.get("reason").and_then(Value::as_str),
+            out.get("error").and_then(Value::as_str),
+        ) {
+            (Some(needs), reason, _) => Ok(crate::triage::Verdict {
+                needs,
+                reason: reason.unwrap_or_default().to_owned(),
+                priority: out
+                    .get("priority")
+                    .and_then(Value::as_str)
+                    .and_then(crate::triage::Priority::parse),
+                next_step: out
+                    .get("nextStep")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            }),
             (_, _, Some(e)) => Err(e.to_owned()),
             _ => Err("the helper gave no verdict".into()),
         }

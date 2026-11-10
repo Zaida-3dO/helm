@@ -79,12 +79,21 @@ pub fn substitute(template: &str, vals: &[(&str, &str)]) -> String {
     out
 }
 
-/// The `{deferred}` lines for one chat: what AFK answered or left waiting, then the Allow requests
-/// nobody decided.
-pub fn deferred_lines(events: &[crate::store::EventRow], allows: &[String]) -> Vec<String> {
+/// The `{deferred}` lines for one chat: changes waiting for the user's Merge first, then what AFK
+/// answered or left waiting, the guard and Allow overrides, the Allow requests nobody decided,
+/// and the hand-offs that have not landed.
+pub fn deferred_lines(
+    events: &[crate::store::EventRow],
+    allows: &[String],
+    left: &crate::store::Left,
+) -> Vec<String> {
     let short = |s: &str| -> String { s.chars().take(200).collect() };
-    let mut out: Vec<String> = events
+    let mut out: Vec<String> = left
+        .merges
         .iter()
+        .map(|m| format!("- Waiting for your Merge: {}", short(m)))
+        .collect();
+    out.extend(events.iter()
         .map(|e| {
             let t = short(&e.title);
             let at = hhmm(e.at);
@@ -94,13 +103,23 @@ pub fn deferred_lines(events: &[crate::store::EventRow], allows: &[String]) -> V
                 "plan_deferred" => format!("- {at} Waiting for you: plan approval. {t}"),
                 _ => format!("- {at} Waiting for you: {t}"),
             }
-        })
-        .collect();
+        }));
+    out.extend(
+        left.overrides
+            .iter()
+            .map(|o| format!("- Went past a rule: {}", short(o))),
+    );
     out.extend(
         allows
             .iter()
             .map(|a| format!("- Allow request waiting for you: {}", short(a))),
     );
+    out.extend(left.handoffs.iter().map(|h| {
+        format!(
+            "- Handed over and not yet verified as landed: {}",
+            short(h)
+        )
+    }));
     out
 }
 
@@ -229,6 +248,29 @@ mod tests {
         assert!(d.contains("- [question] x (10:00)"));
         assert!(!d.contains("{deferred}"));
         assert!(d.contains("never mark a pull request ready"));
+    }
+
+    #[test]
+    fn deferred_lines_put_merges_first_and_hand_offs_last() {
+        use crate::store::{EventRow, Left};
+        let ev = [EventRow {
+            kind: "question".into(),
+            title: "Which branch?".into(),
+            at: 0,
+        }];
+        let left = Left {
+            merges: vec!["Fix the form on app/web main".into()],
+            overrides: vec!["Guard waived push: needed it".into()],
+            handoffs: vec!["Tidy up on app/web tidy".into()],
+        };
+        let lines = deferred_lines(&ev, &["Run the tests".into()], &left);
+        assert_eq!(lines.len(), 5, "{lines:?}");
+        assert!(lines[0].starts_with("- Waiting for your Merge: Fix the form"));
+        assert!(lines[1].contains("Answered a question automatically"));
+        assert!(lines[2].starts_with("- Went past a rule: Guard waived push"));
+        assert!(lines[3].starts_with("- Allow request waiting for you"));
+        assert!(lines[4].starts_with("- Handed over and not yet verified"));
+        assert!(deferred_lines(&[], &[], &Left::default()).is_empty());
     }
 
     #[test]

@@ -157,6 +157,13 @@ export function chatOps(api: Api) {
     snooze: (chatId: string, until: number | null) => api<null>('attention_snooze', { chatId, until }),
     /** Whether the idle check is on (it is until switched off). */
     triageEnabled: async () => (await api<{ enabled?: boolean } | null>('preference_get', { key: 'taskTriage' }))?.enabled !== false,
+    /** The idle check's switch, alert delay (minutes) and custom prompt ('' for the built-in one). */
+    triageSettings: async () => {
+      const v = await api<{ enabled?: boolean; delayMinutes?: number; prompt?: string | null } | null>('preference_get', { key: 'taskTriage' });
+      return { enabled: v?.enabled !== false, delayMinutes: v?.delayMinutes ?? 15, prompt: v?.prompt ?? '' };
+    },
+    setTriageSettings: (s: { enabled: boolean; delayMinutes: number; prompt: string }) =>
+      api<null>('preference', { key: 'taskTriage', value: { enabled: s.enabled, delayMinutes: s.delayMinutes, prompt: s.prompt.trim() || null } }),
     /** Switch the idle check; the delay and prompt already stored are kept. */
     setTriageEnabled: async (enabled: boolean) => {
       const was = await api<{ delayMinutes?: number; prompt?: string | null } | null>('preference_get', { key: 'taskTriage' });

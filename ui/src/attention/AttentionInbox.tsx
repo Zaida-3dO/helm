@@ -5,9 +5,9 @@
 
 import { useEffect, useState } from 'react';
 import type { AttentionSummary } from '../api/types.ts';
-import { Button, Checkbox, ContextMenu, Dialog, toast, type MenuItem } from '../ui/index.ts';
+import { Button, Checkbox, ContextMenu, Dialog, TextArea, TextInput, toast, type MenuItem } from '../ui/index.ts';
 import { IconCheck, IconClock, IconExternalLink, IconFlag } from '../ui/icons.tsx';
-import { groupLabel, inboxRows, snoozeChoices, type InboxRow } from './model.ts';
+import { groupLabel, inboxRows, parseDelayMinutes, snoozeChoices, type InboxRow, type TriageSettings } from './model.ts';
 import './attention.css';
 
 export const ATTENTION_DIALOG = 'attention';
@@ -18,6 +18,9 @@ export interface AttentionActions {
   /** Whether the idle check is on, and a way to switch it. */
   triageEnabled: () => Promise<boolean>;
   setTriageEnabled: (enabled: boolean) => Promise<unknown>;
+  /** The alert delay and the custom prompt, read and saved together with the switch. */
+  triageSettings?: () => Promise<TriageSettings>;
+  setTriageSettings?: (s: TriageSettings) => Promise<unknown>;
 }
 
 export interface AttentionInboxProps {
@@ -47,6 +50,35 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
       setTriageOn(!on);
       toast.show({ kind: 'error', text: `Could not change this setting: ${String((e as Error)?.message ?? e)}` });
     });
+  };
+  // The delay and prompt as typed, and as last saved.
+  const [saved, setSaved] = useState<TriageSettings | null>(null);
+  const [delayText, setDelayText] = useState('15');
+  const [promptText, setPromptText] = useState('');
+  useEffect(() => {
+    let live = true;
+    ops
+      .triageSettings?.()
+      .then((s) => {
+        if (!live) return;
+        setSaved(s);
+        setDelayText(String(s.delayMinutes));
+        setPromptText(s.prompt);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [ops]);
+  const delay = parseDelayMinutes(delayText);
+  const changed = saved !== null && (delay !== saved.delayMinutes || promptText.trim() !== saved.prompt.trim());
+  const saveTriage = () => {
+    if (!saved || delay === null || !ops.setTriageSettings) return;
+    const next = { enabled: triageOn !== false, delayMinutes: delay, prompt: promptText.trim() };
+    ops.setTriageSettings(next).then(
+      () => setSaved(next),
+      (e) => toast.show({ kind: 'error', text: `Could not change this setting: ${String((e as Error)?.message ?? e)}` }),
+    );
   };
   const [busy, setBusy] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; row: InboxRow } | null>(null);
@@ -149,11 +181,39 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
             onChange={switchTriage}
           />
           <p className="att-foot">
-            About 15 minutes after a chat goes quiet, Helm asks a small Claude model, under your own sign-in, whether the end of the
+            About {saved?.delayMinutes ?? 15} minutes after a chat goes quiet, Helm asks a small Claude model, under your own sign-in, whether the end of the
             conversation still needs you. It sends the last few messages, never drafts, files or tool output, checks each quiet
             stretch once, runs a dozen checks an hour at most, and counts toward your plan usage. A flag is a suggestion, not proof;
             opening the chat does not clear it.
           </p>
+          {saved && ops.setTriageSettings && (
+            <div className="att-triage-fields" data-testid="attention-triage-fields">
+              <label className="att-field">
+                <span>Wait this many minutes (0 to 1,440)</span>
+                <TextInput
+                  inputMode="numeric"
+                  value={delayText}
+                  invalid={delay === null ? 'Use a whole number from 0 to 1,440.' : null}
+                  onChange={(e) => setDelayText(e.target.value)}
+                  data-testid="attention-triage-delay"
+                />
+              </label>
+              <label className="att-field">
+                <span>Your own guidance for the check (optional)</span>
+                <TextArea
+                  rows={3}
+                  maxLength={2000}
+                  value={promptText}
+                  placeholder="For example: only flag chats where a test or build failed."
+                  onChange={(e) => setPromptText(e.target.value)}
+                  data-testid="attention-triage-prompt"
+                />
+              </label>
+              <Button variant="secondary" disabled={!changed || delay === null} onClick={saveTriage} data-testid="attention-triage-save">
+                Save
+              </Button>
+            </div>
+          )}
         </div>
       </div>
       {menu && (

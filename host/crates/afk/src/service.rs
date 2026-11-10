@@ -492,6 +492,7 @@ impl AfkService {
                 Some(sp) => digest::deferred_lines(
                     &store::chat_events(tx, &sp.id, &row.chat_id)?,
                     &store::undecided_allows(tx, &row.chat_id, sp.started_at),
+                    &store::left_for_user(tx, &row.chat_id, sp.started_at),
                 ),
                 None => vec![],
             };
