@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildClaudeArgs, disallowedTools } from "../src/drivers/claude/args.ts";
+import { decideGate, gateHook } from "../src/drivers/claude/gates.ts";
 import { cronTiming, NATIVE_SCHEDULE_TOOLS, scheduleRedirect } from "../src/drivers/claude/schedulecalls.ts";
 import { assertLoopbackHttp, buildClaudeEnv, contextRefusalNote, STRIPPED_UNLESS_API_KEY_MODE, takeLocalKey } from "../src/drivers/claude/env.ts";
 
@@ -216,4 +217,22 @@ test("a too-long refusal names the window and the roll over; other faults and an
     assert.equal(contextRefusalNote(other, 262_144), null, other);
   }
   assert.equal(contextRefusalNote("Prompt is too long", undefined), null, "an unknown window has nothing to name");
+});
+
+test("a chat the workflow gates may act in loses the workflow runner and the REPL, and its messages to agents are asked of the host", async () => {
+  const gated = { HELM_WORKFLOW_GATES: "1" };
+  assert.ok(["Workflow", "REPL"].every((t) => disallowedTools({}, gated).includes(t)));
+  assert.ok(["Workflow", "REPL"].every((t) => !disallowedTools({}, {}).includes(t)), "other chats keep them");
+  assert.ok((gateHook().matcher as string).split("|").includes("SendMessage"));
+  const asked: Array<[string, unknown]> = [];
+  const channel = {
+    call: async (op: string, args: unknown) => {
+      asked.push([op, args]);
+      return { ok: true, result: { allow: false, reason: "only the orchestrator messages agents" } };
+    },
+  } as unknown as Parameters<typeof decideGate>[0];
+  // A sub-agent's message is asked too (unlike its edit); only the target goes to the host, never the text.
+  const out = await decideGate(channel, { tool_name: "SendMessage", tool_input: { to: "reviewer", message: "secret words" } }, true);
+  assert.deepEqual(asked, [["app_workflow_gate", { tool: "SendMessage", input: { to: "reviewer" }, child: true }]]);
+  assert.deepEqual(out, { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "only the orchestrator messages agents" } });
 });

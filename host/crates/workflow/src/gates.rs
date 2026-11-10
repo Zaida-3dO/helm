@@ -18,6 +18,11 @@
 //!   approved (and signed off if configured), and is refused when every unapproved change is at
 //!   its review cap. A stage whose use is off is not gated.
 //!
+//! **Message gate** (`SendMessage`), during a task: only the orchestrator messages agents, so a
+//! sub-agent's message is refused. A verdict stage's agent whose verdict is settled (the plan
+//! approved, or every live change approved at its latest commit) is not messaged again: the
+//! verdict is final, and new work goes to a fresh agent. The dispatch gate's switch covers it.
+//!
 //! **Edit gate** (`Write`, `Edit`, `MultiEdit`, `NotebookEdit` on the main thread), during a task
 //! with Orchestrator edits on deny: an edit to a file inside the task's repositories (its live
 //! changes' repositories, plus the chat folder's unless that is a home repository) is refused,
@@ -44,6 +49,7 @@ use std::sync::Arc;
 pub const GATES_ENV: &str = "HELM_WORKFLOW_GATES";
 pub const GATE_TOOL: &str = "app_workflow_gate";
 pub const SPAWN_TOOLS: [&str; 2] = ["Agent", "Task"];
+pub const MESSAGE_TOOLS: [&str; 1] = ["SendMessage"];
 pub const EDIT_TOOLS: [&str; 4] = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
 pub const MAX_GRANTS: i64 = 32;
 pub const MAX_FILE: usize = 2000;
@@ -325,6 +331,60 @@ pub fn spawn_refusal(
     }
 }
 
+// ---- the message gate -------------------------------------------------------------------------
+
+/// The verdict stage a message's target names: the stage's agent name, alone or with a `-` / `_` /
+/// `--` suffix (an orchestrator names its agents after their type).
+fn verdict_stage_of(s: &WorkflowSettings, to: &str) -> Option<&'static str> {
+    let to = to.to_lowercase();
+    let base = to.split("--").next().unwrap_or(&to);
+    [
+        ("planReview", s.stages.plan_review.agent.to_lowercase()),
+        ("review", s.stages.review.agent.to_lowercase()),
+    ]
+    .into_iter()
+    .find(|(_, agent)| {
+        !agent.is_empty()
+            && (base == agent
+                || base
+                    .strip_prefix(agent.as_str())
+                    .is_some_and(|rest| rest.starts_with(['-', '_'])))
+    })
+    .map(|(stage, _)| stage)
+}
+
+/// Why the message to an agent is refused, or `None`. `input` is the message tool's input.
+pub fn message_refusal(
+    tx: &Transaction<'_>,
+    s: &WorkflowSettings,
+    run: &Run,
+    input: &Value,
+    child: bool,
+) -> rusqlite::Result<Option<(String, String)>> {
+    let deny = |why: String| Ok(Some(("message".to_owned(), why)));
+    if child {
+        return deny("during a task only the task's orchestrator messages agents. Finish your work and say in your reply what the orchestrator should pass on".into());
+    }
+    let to = input.get("to").and_then(Value::as_str).unwrap_or("");
+    let Some(stage) = verdict_stage_of(s, to) else {
+        return Ok(None);
+    };
+    let settled = match stage {
+        "planReview" => run.plan_approved,
+        _ => {
+            let live: Vec<_> = store::changes(tx, &run.id)?
+                .into_iter()
+                .filter(|c| !engine::is_terminal(&c.state) && c.tip.is_some())
+                .collect();
+            !live.is_empty() && live.iter().all(engine::approval_holds)
+        }
+    };
+    if settled {
+        return deny(format!("{to} has already reported its verdict and the verdict is final: a follow-up question to a settled reviewer is not taken. Read its report, or dispatch a fresh {stage} agent if the work changed"));
+    }
+    Ok(None)
+}
+
 // ---- the edit gate --------------------------------------------------------------------------
 
 fn granted(tx: &Transaction<'_>, run: &Run, key: &str) -> rusqlite::Result<bool> {
@@ -442,8 +502,9 @@ pub fn gate_call(db: &Database, chat: &str, args: &Value, now: i64) -> Result<Va
     let input = args.get("input").cloned().unwrap_or(Value::Null);
     let child = args.get("child").and_then(Value::as_bool).unwrap_or(true);
     let spawn = SPAWN_TOOLS.contains(&tool);
+    let message = MESSAGE_TOOLS.contains(&tool);
     let edit = EDIT_TOOLS.contains(&tool) && !child;
-    if !spawn && !edit {
+    if !spawn && !message && !edit {
         return Ok(allow());
     }
     let (s, on) = db
@@ -453,7 +514,7 @@ pub fn gate_call(db: &Database, chat: &str, args: &Value, now: i64) -> Result<Va
             Ok::<_, rusqlite::Error>((s, on))
         })
         .map_err(|e| e.to_string())?;
-    if !on || (spawn && !s.dispatch_gate) || (edit && s.orchestrator_edits == EditsRule::Allow) {
+    if !on || ((spawn || message) && !s.dispatch_gate) || (edit && s.orchestrator_edits == EditsRule::Allow) {
         return Ok(allow());
     }
     // Files and git folders are read before the transaction.
@@ -490,6 +551,13 @@ pub fn gate_call(db: &Database, chat: &str, args: &Value, now: i64) -> Result<Va
                         format!("Helm's dispatch gate refused this dispatch: {why}. {OFF_SWITCH}"),
                     )
                 })
+            } else if message {
+                message_refusal(tx, &s, &run, &input, child)?.map(|(gate, why)| {
+                    (
+                        gate,
+                        format!("Helm's message gate refused this message: {why}. {OFF_SWITCH}"),
+                    )
+                })
             } else if let Some(f) = &file {
                 edit_refusal(tx, &s, &run, f, file_repo.as_deref(), cwd_repo.as_deref())?
                     .map(|why| ("edit".to_owned(), why))
@@ -517,7 +585,7 @@ pub fn gate_call(db: &Database, chat: &str, args: &Value, now: i64) -> Result<Va
     Ok(out)
 }
 
-pub const GATE_DESCRIPTION: &str = "Helm's own question before an agent spawn or a file edit in a chat under the orchestrator workflow. The worker asks it; agents never see it.";
+pub const GATE_DESCRIPTION: &str = "Helm's own question before an agent spawn, a message to an agent or a file edit in a chat under the orchestrator workflow. The worker asks it; agents never see it.";
 
 pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(

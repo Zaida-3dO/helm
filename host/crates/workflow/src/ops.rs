@@ -198,10 +198,15 @@ fn settings_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 return Ok(Err(ApiError::conflict(TOGGLE_WHILE_RUNNING)));
             }
             settings::store(tx, &next, helm_core::now_ms())?;
-            Ok::<_, rusqlite::Error>(Ok(next))
+            Ok::<_, rusqlite::Error>(Ok((prev, next)))
         })
         .map_err(sql)??;
+    let (prev, saved) = saved;
     ctx.events.emit(AppEvent::new("workflow_settings"));
+    // Running chats hear a changed rules paragraph; their workers keep the one they launched with.
+    if let Some(rt) = ctx.services.get::<helm_chats::ChatRuntime>() {
+        crate::notes::deliver_rules_change(&db, &rt, &prev, &saved, helm_core::now_ms());
+    }
     to_value(&saved)
 }
 

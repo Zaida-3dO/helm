@@ -112,6 +112,52 @@ pub fn deliver(rt: &helm_chats::ChatRuntime, chat_id: &str, d: Delivery) {
     }
 }
 
+/// Settings changed the Workflow rules: every chat the workflow is on in hears it. An idle chat is
+/// retired so its next send relaunches with the new paragraph; a chat in a turn is handed the rules
+/// as a framed note, read at the turn's next tool boundary. One fixed id per chat and save, so a
+/// retry never delivers a note twice.
+pub fn deliver_rules_change(
+    db: &helm_core::db::Database,
+    rt: &helm_chats::ChatRuntime,
+    prev: &WorkflowSettings,
+    next: &WorkflowSettings,
+    at: i64,
+) {
+    if !next.enabled || rules::workflow_rules(prev) == rules::workflow_rules(next) {
+        return;
+    }
+    let chats: Vec<(String, bool)> = db
+        .snapshot(|tx| {
+            let mut st = tx.prepare("SELECT id FROM chats WHERE harness = 'claude' AND archived = 0")?;
+            let ids = st
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut out = Vec::new();
+            for id in ids {
+                if crate::mode::in_effect(tx, &id, next)? {
+                    let busy = crate::mode::facts(tx, &id)?.is_some_and(|f| f.busy);
+                    out.push((id, busy));
+                }
+            }
+            Ok::<_, rusqlite::Error>(out)
+        })
+        .unwrap_or_default();
+    for (id, busy) in chats {
+        let d = if busy {
+            Delivery::Note {
+                submission_id: format!("wf-rules-{id}-{at}"),
+                text: format!(
+                    "{FRAME} The Workflow rules were changed in Settings. From now on follow these. {}",
+                    rules::workflow_rules(next)
+                ),
+            }
+        } else {
+            Delivery::Retire
+        };
+        deliver(rt, &id, d);
+    }
+}
+
 thread_local! {
     /// Workflow notes written on this thread since the last [`take_pending`]: a take-over tells
     /// both chats, a finished land tells the orchestrator. They are delivered after the

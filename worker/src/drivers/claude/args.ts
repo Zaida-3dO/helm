@@ -3,6 +3,7 @@
 
 import { DEFAULT_EFFORT, isEffort, type ClaudeLaunch } from "../../protocol/types.ts";
 import { localPinnedEnv } from "./env.ts";
+import { gatesWanted } from "./gates.ts";
 
 /** Haiku models take no effort setting, and neither does a local model: its effort is a thinking budget instead. */
 export function modelTakesEffort(model: string | undefined, local = false): boolean {
@@ -25,14 +26,23 @@ const WORKTREE_TOOLS = ["EnterWorktree", "ExitWorktree"];
 const SCHEDULE_TOOLS = ["CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "RemoteTrigger"];
 
 /**
+ * Tools that run work outside the orchestrator workflow's checks: Claude Code's own workflow
+ * runner and its REPL (which can reach every other tool without the hooks seeing it). They are off
+ * in a chat whose Orchestrator may be on, which is the chat a launch carries the gate switch for.
+ */
+const TASK_CHAT_DISALLOWED_TOOLS = ["Workflow", "REPL"];
+
+/**
  * The tools to disallow. The worktree tools come off the list only when the launch asks for them
  * and no repository has worktrees switched off (Helm then sets HELM_WORKTREE_OFF_LIST for the chat).
- * The schedule tools come off it when the launch asks for them.
+ * The schedule tools come off it when the launch asks for them. A chat the workflow gates may act
+ * in (`HELM_WORKFLOW_GATES`) also loses the workflow runner and the REPL.
  */
 export function disallowedTools(c: ClaudeLaunch, env: Record<string, string | undefined> = process.env): string[] {
   const allowWorktrees = c.worktreeTools === true && !env.HELM_WORKTREE_OFF_LIST;
   const allowSchedules = c.scheduleTools === true;
-  const off = DISALLOWED_TOOLS.filter((t) => !(allowWorktrees && WORKTREE_TOOLS.includes(t)) && !(allowSchedules && SCHEDULE_TOOLS.includes(t)));
+  const off: string[] = DISALLOWED_TOOLS.filter((t) => !(allowWorktrees && WORKTREE_TOOLS.includes(t)) && !(allowSchedules && SCHEDULE_TOOLS.includes(t)));
+  if (gatesWanted(env)) off.push(...TASK_CHAT_DISALLOWED_TOOLS);
   return c.local ? [...off, ...LOCAL_DISALLOWED_TOOLS] : off;
 }
 

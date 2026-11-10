@@ -963,3 +963,154 @@ pub fn ready(
         }
     })
 }
+
+/// The states whose pull request may have been merged or closed without Helm: everything from a
+/// hand-off up to a land that has not finished.
+const CHECKED: [&str; 6] = [
+    "handed_off",
+    "awaiting_merge",
+    "land_failed",
+    "landing_draft",
+    "landing",
+    "pending_land",
+];
+
+/// Record what GitHub says about a change's pull request when the PR was merged or closed outside
+/// Helm. The change is re-read first, so an action taken in between wins. This is the one place a
+/// change reaches `landed` or `dropped` from a state the land step's own edges do not cover: the
+/// PR's final state on GitHub is the truth, not an edge. `None` when nothing was recorded.
+fn settle_outside(
+    tx: &Transaction<'_>,
+    before: &Change,
+    pr: &Value,
+    now: i64,
+) -> rusqlite::Result<Option<&'static str>> {
+    let Some(mut c) = store::change(tx, &before.run_id, &before.repo, &before.branch)? else {
+        return Ok(None);
+    };
+    let Some(run) = store::run(tx, &c.run_id)? else {
+        return Ok(None);
+    };
+    if c.state != before.state || c.approved_tip != before.approved_tip {
+        return Ok(None);
+    }
+    c.failed_mode = None;
+    match s(pr, "state").as_str() {
+        "MERGED" => {
+            // A squash or rebase merge writes new commits, so the reviewed commit is compared with
+            // the PR's own head, never with the merge commit.
+            c.error = review_warning(&c, &s(pr, "headRefOid"))
+                .map(|w| format!("Merged outside Helm. {w}"));
+            c.landed_sha = pr
+                .get("mergeCommit")
+                .map(|m| s(m, "oid"))
+                .filter(|x| !x.is_empty());
+            c.state = "landed".into();
+            store::upsert_change(tx, &c, now)?;
+            clear_wait(tx, &c)?;
+            result_event(
+                tx,
+                &run,
+                &c,
+                "landed",
+                c.landed_sha.clone().as_deref(),
+                Some("The PR was merged outside Helm; the check recorded it as landed."),
+                now,
+            )?;
+            Ok(Some("landed"))
+        }
+        "CLOSED" => {
+            c.error = None;
+            c.state = "dropped".into();
+            store::upsert_change(tx, &c, now)?;
+            clear_wait(tx, &c)?;
+            store::event(
+                tx,
+                &run.chat_id,
+                Some(&run),
+                &Event {
+                    kind: "change_dropped",
+                    repo: Some(&c.repo),
+                    branch: Some(&c.branch),
+                    verdict: Some("closed"),
+                    body: Some("The PR was closed outside Helm; the check dropped the change."),
+                    ..Default::default()
+                },
+                now,
+            )?;
+            Ok(Some("dropped"))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The orchestrator's on-demand `check`: read every pull request of the chat's open tasks that is
+/// handed off, waiting, failed or mid-land, and record the ones merged or closed outside Helm (a
+/// squash-merged approved PR counts as landed; a land row that nothing else could clear is
+/// settled by what GitHub says). GitHub is asked with no transaction open, and a change the land
+/// driver holds (`held`) is left alone. Returns the branches by outcome.
+pub fn check(
+    db: &Database,
+    gh: &dyn Gh,
+    held: &Flight,
+    chat_id: &str,
+    now: i64,
+) -> rusqlite::Result<Result<Value, String>> {
+    let (chat_on, rows) = db.snapshot(|tx| {
+        let st = crate::settings::load(tx)?;
+        let on = st.enabled && crate::mode::in_effect(tx, chat_id, &st)?;
+        let mut rows = Vec::new();
+        for run in store::open_runs(tx, chat_id)? {
+            for c in store::changes(tx, &run.id)? {
+                if CHECKED.contains(&c.state.as_str()) && c.pr.is_some() {
+                    rows.push(c);
+                }
+            }
+        }
+        Ok::<_, rusqlite::Error>((on, rows))
+    })?;
+    if !chat_on {
+        return Ok(Err(crate::user::CHAT_OFF.into()));
+    }
+    let (mut landed, mut dropped, mut open) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut unreadable, mut busy) = (Vec::new(), Vec::new());
+    let checked = rows.len();
+    for c in rows {
+        let k = key(&c);
+        if !held.take(&k) {
+            busy.push(c.branch.clone());
+            continue;
+        }
+        let target = gh_repo(&c.repo).zip(c.pr.as_deref().and_then(pr_number));
+        match target.and_then(|(repo, n)| view(gh, &repo, &n).ok()) {
+            None => unreadable.push(c.branch.clone()),
+            Some(pr) if matches!(s(&pr, "state").as_str(), "MERGED" | "CLOSED") => {
+                match db.write(|tx| settle_outside(tx, &c, &pr, now)) {
+                    Ok(Some("landed")) => {
+                        landed.push(c.branch.clone());
+                        // The wrap-up and the post-land due check, as after any land.
+                        if let Err(e) = crate::postland::after_step(db, &c, now) {
+                            log::warn!("post-land step for {}: {e}", c.branch);
+                        }
+                    }
+                    Ok(Some(_)) => dropped.push(c.branch.clone()),
+                    Ok(None) => open.push(c.branch.clone()),
+                    Err(e) => {
+                        held.give(&k);
+                        return Err(e);
+                    }
+                }
+            }
+            Some(_) => open.push(c.branch.clone()),
+        }
+        held.give(&k);
+    }
+    Ok(Ok(serde_json::json!({
+        "checked": checked,
+        "landed": landed,
+        "dropped": dropped,
+        "stillOpen": open,
+        "unreadable": unreadable,
+        "busy": busy,
+    })))
+}

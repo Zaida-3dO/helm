@@ -316,7 +316,56 @@ pub fn status(tx: &Transaction<'_>, x: &Act<'_>) -> Out {
     let run = store::active_run(tx, x.chat_id)?;
     let mut v = run_json(tx, x.s, run.as_ref(), &open)?;
     crate::postland::add_to_status(tx, x.chat_id, &mut v)?;
+    if let Some(run) = &run {
+        add_round_lines(tx, x.s, run, &mut v)?;
+    }
     Ok(Ok(v))
+}
+
+/// The line that frames the next round of a verdict stage for the agent that will run it ("round 2
+/// of 3"), with the near-cap sentence on the last round. The orchestrator copies it into the stage
+/// agent's brief; `done` rounds are those already used and `cap` the limit now.
+pub fn round_line(what: &str, done: i64, cap: i64) -> String {
+    let n = done + 1;
+    let mut line = format!("{what}: this is round {n} of {cap}.");
+    if n >= cap {
+        line.push_str(" This is the last round the cap allows: report only the problems that make the work wrong or unsafe, and leave small nits as notes with an approval.");
+    }
+    line
+}
+
+/// `roundLines` on the task's status: one framing line per verdict stage that can still run.
+fn add_round_lines(
+    tx: &Transaction<'_>,
+    s: &WorkflowSettings,
+    run: &Run,
+    v: &mut Value,
+) -> rusqlite::Result<()> {
+    let mut lines: Vec<Value> = Vec::new();
+    if s.stages.plan_review.use_ != StageUse::Off && run.plan_id.is_some() && !run.plan_approved {
+        let cap = engine::cap(tx, s, run, CapStage::PlanReview, None)?;
+        if run.plan_rounds < cap {
+            lines.push(json!({"stage": "planReview", "line": round_line("Plan review", run.plan_rounds, cap)}));
+        }
+    }
+    if s.stages.review.use_ != StageUse::Off {
+        for c in store::changes(tx, &run.id)? {
+            if c.state != "open" || c.tip.is_none() || engine::approval_holds(&c) {
+                continue;
+            }
+            let cap = engine::cap(tx, s, run, CapStage::Review, Some((&c.repo, &c.branch)))?;
+            if c.review_rounds < cap {
+                let what = format!("Review of {}", c.branch);
+                lines.push(json!({"stage": "review", "repo": c.repo, "branch": c.branch, "line": round_line(&what, c.review_rounds, cap)}));
+            }
+        }
+    }
+    if !lines.is_empty() {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("roundLines".into(), Value::Array(lines));
+        }
+    }
+    Ok(())
 }
 
 /// The UI's view of a chat's workflow (`workflow_run_get`): the `status` shape around the chat's
@@ -352,7 +401,7 @@ pub fn update(tx: &Transaction<'_>, x: &Act<'_>, a: &Value) -> Out {
         Err(e) => return Ok(Err(e)),
     };
     match a.get("visual").and_then(Value::as_bool) {
-        Some(false) => return Ok(Err("Only the user can clear the visual flag.".into())),
+        Some(false) => return Ok(Err("Only the user can clear the visual flag: ask them to send \"Clear the visual flag.\" and call app_workflow clear_visual with their words as userQuote.".into())),
         Some(true) if !run.visual => {
             run.visual = true;
             store::save_run(tx, &run, None, x.now)?;
@@ -470,7 +519,7 @@ pub fn skip_with(tx: &Transaction<'_>, x: &Act<'_>, a: &Value, proof: Proof) -> 
         )));
     }
     if stage == "smoketest" && run.visual {
-        return Ok(Err("This task is marked visual, so its smoketest can't be skipped; only the user can clear the visual flag.".into()));
+        return Ok(Err("This task is marked visual, so its smoketest can't be skipped; only the user can clear the visual flag (app_workflow clear_visual, on their words).".into()));
     }
     if engine::skipped(&run, stage) {
         return Ok(Ok(json!({"skipped": stage, "changed": false})));

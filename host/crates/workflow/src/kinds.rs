@@ -20,7 +20,8 @@ pub fn register_allow_kinds(k: &mut AllowKinds) {
             "takeOver",
             "Take over a change",
             crate::claims::canonical,
-        ));
+        ))
+        .register(kind("clearVisual", "Clear the visual flag", clear_visual));
 }
 
 fn kind(
@@ -70,7 +71,7 @@ fn active(tx: &Transaction<'_>, chat: &str) -> Result<store::Run, String> {
 }
 
 /// A change of this chat's tasks, newest task first.
-fn change_target(
+pub(crate) fn change_target(
     tx: &Transaction<'_>,
     chat: &str,
     t: &Value,
@@ -187,6 +188,24 @@ fn reopen(tx: &Transaction<'_>, chat: &str, t: &Value) -> Result<Canonical, Stri
     })
 }
 
+fn clear_visual(tx: &Transaction<'_>, chat: &str, t: &Value) -> Result<Canonical, String> {
+    let runs = store::open_runs(tx, chat).map_err(|e| e.to_string())?;
+    let run = match t.get("runId").and_then(Value::as_str) {
+        Some(id) => runs.into_iter().find(|r| r.id == id),
+        None => runs.into_iter().find(|r| r.status == "active"),
+    }
+    .filter(|r| r.visual)
+    .ok_or("No task in this chat is marked visual.")?;
+    Ok(Canonical {
+        target: json!({"runId": run.id, "attempt": run.attempt}),
+        summary: format!(
+            "Clear the visual flag of task \"{}\"",
+            crate::mode::tooltip_reason(&run.title)
+        ),
+        fixed_form: "Clear the visual flag.".into(),
+    })
+}
+
 /// The proof for a consented step: an agent's (the user's words or an Allow grant), or the user's
 /// own click.
 #[derive(Clone, Debug, Default)]
@@ -267,7 +286,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_seven_kinds_register_once() {
+    fn the_eight_kinds_register_once() {
         let mut k = AllowKinds::new();
         register_allow_kinds(&mut k);
         assert_eq!(
@@ -279,7 +298,8 @@ mod tests {
                 "skip",
                 "allowMore",
                 "reopen",
-                "takeOver"
+                "takeOver",
+                "clearVisual"
             ]
         );
     }

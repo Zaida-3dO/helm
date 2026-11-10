@@ -106,7 +106,13 @@ pub fn task_action(
         }
         "park" => actions::park(tx, &x, &json!({"reason": "You parked it."})),
         "reopen" => reopen(tx, &x, run, &Proof::user()),
-        "visual" | "notVisual" => visual(tx, &x, run, action == "visual"),
+        "visual" | "notVisual" => visual(
+            tx,
+            &x,
+            run,
+            action == "visual",
+            "By you, from the workflow panel.",
+        ),
         _ => end(tx, &x, run),
     }
 }
@@ -184,6 +190,10 @@ pub fn afk_sign_off(tx: &Transaction<'_>, chat_id: &str, now: i64) -> rusqlite::
     let review_needed = review == StageUse::Required
         || (review == StageUse::Auto && !engine::skipped(&run, "planReview"));
     if run.plan_signed_off || (review_needed && !run.plan_approved) {
+        return Ok(false);
+    }
+    // A reopened task is one the user took back: nothing signs its plan off for them again.
+    if run.attempt > 1 {
         return Ok(false);
     }
     run.plan_signed_off = true;
@@ -264,6 +274,14 @@ pub fn reopen(tx: &Transaction<'_>, x: &Act<'_>, mut run: Run, proof: &Proof) ->
         x.now,
     )? {
         return Ok(Err(e));
+    }
+    // A sign-off made for the user while they were away is taken back by reopening; one they made
+    // themselves stays.
+    if run.plan_signed_off
+        && store::count_events(tx, &run.id, "afk_plan_signed_off", None, None, None, None)? > 0
+        && store::count_events(tx, &run.id, "consent", None, None, None, Some("signOff"))? == 0
+    {
+        run.plan_signed_off = false;
     }
     run.status = "active".into();
     run.park_reason = None;
@@ -346,7 +364,14 @@ fn end(tx: &Transaction<'_>, x: &Act<'_>, mut run: Run) -> actions::Out {
 
 /// Mark visual / Not visual. Only the user can clear the flag (the agent's `update` can
 /// only set it).
-fn visual(tx: &Transaction<'_>, x: &Act<'_>, mut run: Run, on: bool) -> actions::Out {
+/// `note` says who changed it and how (the panel's click, or the user's words or an Allow).
+pub(crate) fn visual(
+    tx: &Transaction<'_>,
+    x: &Act<'_>,
+    mut run: Run,
+    on: bool,
+    note: &str,
+) -> actions::Out {
     if !matches!(run.status.as_str(), "active" | "parked") {
         return Ok(Err(
             "Only an active or parked task can be marked visual or not.".into(),
@@ -363,7 +388,7 @@ fn visual(tx: &Transaction<'_>, x: &Act<'_>, mut run: Run, on: bool) -> actions:
         x.chat_id,
         Some(&run),
         &Event {
-            body: Some("By you, from the workflow panel."),
+            body: Some(note),
             ..ev(kind)
         },
         x.now,

@@ -327,6 +327,64 @@ fn the_users_own_words_let_a_consented_step_through_once() {
 }
 
 #[test]
+fn clear_visual_reopen_and_ready_are_the_users_steps_an_agent_takes_on_their_words() {
+    struct NoGh;
+    impl crate::gh::Gh for NoGh {
+        fn run(&self, _: &[String]) -> Result<crate::gh::Out, crate::gh::GhError> {
+            Err(crate::gh::GhError::Timeout)
+        }
+    }
+    let t = setup(|_| {});
+    t.wf_at(json!({"action": "start", "title": "One"}), 100)
+        .unwrap();
+    t.wf_at(json!({"action": "update", "visual": true}), 110)
+        .unwrap();
+    // The update action still cannot clear it, and names the way through.
+    let e = t
+        .wf_at(json!({"action": "update", "visual": false}), 120)
+        .unwrap_err();
+    assert!(e.contains("clear_visual"), "{e}");
+    let e = t.wf_at(json!({"action": "clear_visual"}), 200).unwrap_err();
+    assert!(e.contains("Clear the visual flag."), "{e}");
+    t.user_says("s1", "Clear the visual flag.", 300);
+    t.wf_at(
+        json!({"action": "clear_visual", "userQuote": "Clear the visual flag."}),
+        400,
+    )
+    .unwrap();
+    assert_eq!(t.events("visual_cleared"), 1);
+    let e = t.wf_at(json!({"action": "clear_visual"}), 500).unwrap_err();
+    assert!(e.contains("marked visual"), "{e}");
+    // A parked task comes back only on the user's words.
+    t.wf_at(json!({"action": "park", "reason": "later"}), 600)
+        .unwrap();
+    let e = t.wf_at(json!({"action": "reopen"}), 700).unwrap_err();
+    assert!(e.contains("Reopen the task."), "{e}");
+    t.user_says("s2", "Reopen the task.", 800);
+    let out = t
+        .wf_at(
+            json!({"action": "reopen", "userQuote": "Reopen the task."}),
+            900,
+        )
+        .unwrap();
+    assert_eq!((out["status"].as_str(), out["attempt"].as_i64()), (Some("active"), Some(2)));
+    // Ready names a handed-off change; there is none, and no GitHub call is made for the refusal.
+    let e = crate::wftools::workflow_call_with_gh(
+        &t.db,
+        &t.kinds,
+        &NoGh,
+        "c",
+        false,
+        &json!({"action": "ready", "repo": REPO, "branch": "feat-x"}),
+        950,
+        &|_| true,
+    )
+    .unwrap_err()
+    .text();
+    assert!(e.contains("No task in this chat has the change"), "{e}");
+}
+
+#[test]
 fn dropping_a_handed_off_change_needs_consent_bound_to_its_own_task() {
     let t = setup(|s| s.stages.cleanup.use_ = StageUse::Off);
     t.trees.set(A, "t1");
@@ -636,6 +694,15 @@ fn the_gates_act_only_with_orchestrator_on_and_a_task_active() {
         ),
         ("Agent", json!({"subagent_type": "Explore"}), true, None),
         ("Bash", json!({"command": "ls"}), false, None),
+        // Only the orchestrator messages agents; a reviewer with no verdict yet can be asked.
+        (
+            "SendMessage",
+            json!({"to": "reviewer"}),
+            true,
+            Some("only the task's orchestrator messages agents"),
+        ),
+        ("SendMessage", json!({"to": "reviewer"}), false, None),
+        ("SendMessage", json!({"to": "plan-reviewer"}), false, None),
         ("Write", json!({"file_path": f}), false, Some("allow_edit")),
         ("Edit", json!({"file_path": f}), true, None),
         ("Write", json!({"file_path": outside}), false, None),
@@ -649,10 +716,17 @@ fn the_gates_act_only_with_orchestrator_on_and_a_task_active() {
     }
     assert_eq!(
         t.count("SELECT count(*) FROM workflow_events WHERE kind = 'gate_denied'"),
-        9
+        10
     );
     // The ways through: an approved plan opens the build gate; allow_edit opens one file.
     t.approved_plan();
+    // A settled plan review is final: its agent (named by type, with or without a suffix) is not
+    // messaged again, while an unsettled stage's agent still can be.
+    for to in ["plan-reviewer", "Plan-Reviewer--2", "plan-reviewer_1"] {
+        deny(t.gate("SendMessage", json!({"to": to}), false), "verdict is final");
+    }
+    assert_eq!(t.gate("SendMessage", json!({"to": "reviewer"}), false), allow);
+    assert_eq!(t.gate("SendMessage", json!({"to": "planner"}), false), allow);
     assert_eq!(
         t.gate("Agent", json!({"subagent_type": "coder"}), false),
         allow

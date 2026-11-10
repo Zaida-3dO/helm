@@ -183,6 +183,11 @@ fn sign_off_binds_to_the_plan_shown_and_waits_for_the_review() {
         0,
         "not the user's own sign-off"
     );
+    // Reopening takes a sign-off made while away back, and nothing signs the reopened task off again.
+    t.user(&run, json!({"action": "park"})).unwrap();
+    t.user(&run, json!({"action": "reopen"})).unwrap();
+    assert!(!t.run(&run).plan_signed_off);
+    assert!(!afk(&t), "a reopened task is the user's to sign off");
     // With sign-off by review only, there is nothing to sign.
     let t = setup(|_| {});
     t.wf(json!({"action": "plan", "text": "x"})).unwrap();

@@ -98,7 +98,7 @@ pub fn workflow_rules(s: &WorkflowSettings) -> String {
             "Smoketests are off, except that a task marked visual needs a pass.".into()
         }
     });
-    out.push("Tell each stage agent to report its verdict with app_workflow_report; only that report counts, never its reply text.".into());
+    out.push("Tell each stage agent to report its verdict with app_workflow_report; only that report counts, never its reply text. A verdict is final: a reviewer that has reported is not asked again (Helm refuses the message); a fresh agent takes the next round. app_workflow status lists a roundLines entry for each review round that can still run: put its line, unchanged, at the top of that agent's brief.".into());
     if st.plan_review.use_ != StageUse::Off
         || st.review.use_ != StageUse::Off
         || st.smoketest.use_ != StageUse::Off
@@ -144,6 +144,7 @@ mod tests {
             "the board-outage rule is part of the rules"
         );
         assert!(!r.contains("signs it off"));
+        assert!(r.contains("roundLines") && r.contains("A verdict is final"));
         let mut s = d.clone();
         s.stages.review.max_rounds = 7;
         s.plan_sign_off = SignOff::Me;

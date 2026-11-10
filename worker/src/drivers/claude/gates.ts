@@ -1,5 +1,5 @@
-// The orchestrator workflow's dispatch and edit gates, asked of the host before an agent spawn or
-// a main-thread file edit.
+// The orchestrator workflow's dispatch, message and edit gates, asked of the host before an agent
+// spawn, a message to an agent or a main-thread file edit.
 //
 // The hook is registered only when the launch carries HELM_WORKFLOW_GATES=1, which the host sets
 // for a chat whose Orchestrator may be on; every other chat launches exactly as before. The host
@@ -13,6 +13,7 @@ export const WORKFLOW_GATE_HOOK_ID = "helm-workflow-gates";
 export const GATES_ENV = "HELM_WORKFLOW_GATES";
 export const GATE_OPERATION = "app_workflow_gate";
 export const SPAWN_TOOLS = ["Agent", "Task"];
+export const MESSAGE_TOOLS = ["SendMessage"];
 export const EDIT_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
 export const GATE_TIMEOUT_MS = 5_000;
 
@@ -22,7 +23,7 @@ export function gatesWanted(env: Record<string, string | undefined>): boolean {
 
 /** The PreToolUse registration for the gated tools. */
 export function gateHook(): Json {
-  return { matcher: [...SPAWN_TOOLS, ...EDIT_TOOLS].join("|"), hookCallbackIds: [WORKFLOW_GATE_HOOK_ID] };
+  return { matcher: [...SPAWN_TOOLS, ...MESSAGE_TOOLS, ...EDIT_TOOLS].join("|"), hookCallbackIds: [WORKFLOW_GATE_HOOK_ID] };
 }
 
 function obj(v: unknown): Json {
@@ -31,7 +32,11 @@ function obj(v: unknown): Json {
 
 /** Only what the host decides on: never a prompt or a file's content. */
 function slim(tool: string, input: Json): Json {
-  const keep = SPAWN_TOOLS.includes(tool) ? ["subagent_type", "isolation", "run_in_background"] : ["file_path", "notebook_path"];
+  const keep = SPAWN_TOOLS.includes(tool)
+    ? ["subagent_type", "isolation", "run_in_background"]
+    : MESSAGE_TOOLS.includes(tool)
+      ? ["to"]
+      : ["file_path", "notebook_path"];
   const out: Json = {};
   for (const k of keep) if (input[k] !== undefined) out[k] = input[k];
   return out;
@@ -40,8 +45,8 @@ function slim(tool: string, input: Json): Json {
 /** The hook's answer for one PreToolUse input: `{}` lets the call through. */
 export async function decideGate(channel: Pick<RequestChannel, "call">, input: Json, child: boolean): Promise<Json> {
   const tool = String(input.tool_name ?? "");
-  const spawn = SPAWN_TOOLS.includes(tool);
-  if (!spawn && !(EDIT_TOOLS.includes(tool) && !child)) return {};
+  const asksHost = SPAWN_TOOLS.includes(tool) || MESSAGE_TOOLS.includes(tool);
+  if (!asksHost && !(EDIT_TOOLS.includes(tool) && !child)) return {};
   const args: Json = { tool, input: slim(tool, obj(input.tool_input)), child };
   if (typeof input.cwd === "string" && input.cwd) args.cwd = input.cwd;
   try {

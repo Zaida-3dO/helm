@@ -5,6 +5,7 @@
 //! archived, state on. So with the workflow off they write nothing.
 
 use crate::actions::{self, Act};
+use crate::gh::Gh;
 use crate::git::{GitTrees, TreeReader};
 use crate::{handoff, mode, reports, settings};
 use helm_consent::AllowKinds;
@@ -17,13 +18,13 @@ use std::sync::Arc;
 
 pub const OFF: &str = "Orchestrator is off for this chat, so the workflow tools do nothing here. The user can turn it on with the Orchestrator switch in the composer.";
 
-pub const WORKFLOW_DESCRIPTION: &str = "The orchestrator workflow for THIS chat (only while Orchestrator is on). action is one of: start {title, itemId?, new?}; plan {text | path, title?, itemId?}; status; update {repo, branch, pr?, base?, visual?}; skip {stage, reason}; park {reason}; drop {repo, branch, reason} or drop {queued} (discard a queued follow-up); hand_off {changes?, final?, summary?}; finish; allowMore {stage, repo?, branch?, reason}; land {repo, branch} (the user's Merge of a change waiting for it; needs userQuote or grant); take_over {repo, branch, reason, check?} (move a change another chat holds into this task; check: true only reports); allow_edit {file, reason} (edit that one file yourself until the task ends). repo is host/owner/name. Steps only the user could take accept userQuote (the user's exact words) or grant (an Allow request id); never claim consent the user did not give. Only the chat's own agent may call it.";
+pub const WORKFLOW_DESCRIPTION: &str = "The orchestrator workflow for THIS chat (only while Orchestrator is on). action is one of: start {title, itemId?, new?}; plan {text | path, title?, itemId?}; status; update {repo, branch, pr?, base?, visual?}; skip {stage, reason}; park {reason}; drop {repo, branch, reason} or drop {queued} (discard a queued follow-up); hand_off {changes?, final?, summary?}; finish; allowMore {stage, repo?, branch?, reason}; land {repo, branch} (the user's Merge of a change waiting for it; needs userQuote or grant); take_over {repo, branch, reason, check?} (move a change another chat holds into this task; check: true only reports); allow_edit {file, reason} (edit that one file yourself until the task ends); ready {repo, branch} (the user's Ready for review of a handed-off change; needs userQuote or grant); reopen {runId?} (the user's Reopen of a parked or handed-off task; needs userQuote or grant); clear_visual {runId?} (the user's clearing of the visual flag; needs userQuote or grant); check (read the pull requests of this chat's handed-off, waiting or failed changes and record the ones merged or closed outside Helm). repo is host/owner/name. Steps only the user could take accept userQuote (the user's exact words) or grant (an Allow request id); never claim consent the user did not give. Only the chat's own agent may call it.";
 
 pub const REPORT_DESCRIPTION: &str = "Report a stage verdict to Helm. Only stage agents the orchestrator dispatched may call it, and only this report counts. kind: plan_review {verdict: approve|changes_required, findings?}; build {repo, branch, tip, base?, pr?}; code_review {repo, branch, tip, base, verdict: lgtm|lgtm_with_nits|changes_required, findings?, followUps?}; cleanup {repo, branch, tip, pr}; visual_review {repo, branch, verdict: pass|fail|pending, evidence?}; after_land {verdict: done|awaiting_merge|not_done, followUps?} (post-land work on a task that finished landing). Every report has summary (at most 8000 characters). tip is the full 40-character commit sha. Unknown fields are refused. If a refusal says Correctable, fix the report and send it once more; if it says Permanent, state the refusal in your reply.";
 
 fn workflow_schema() -> Value {
     json!({"type": "object", "properties": {
-        "action": {"type": "string", "enum": ["start", "plan", "status", "update", "skip", "park", "drop", "hand_off", "finish", "allowMore", "land", "take_over", "allow_edit"]},
+        "action": {"type": "string", "enum": ["start", "plan", "status", "update", "skip", "park", "drop", "hand_off", "finish", "allowMore", "land", "take_over", "allow_edit", "ready", "reopen", "clear_visual", "check"]},
         "title": {"type": "string"}, "itemId": {"type": "string"}, "new": {"type": "boolean"},
         "text": {"type": "string"}, "path": {"type": "string"},
         "repo": {"type": "string"}, "branch": {"type": "string"}, "pr": {"type": "string"}, "base": {"type": "string"},
@@ -31,7 +32,7 @@ fn workflow_schema() -> Value {
         "changes": {"type": "array", "items": {"type": "object", "properties": {"repo": {"type": "string"}, "branch": {"type": "string"}}}},
         "final": {"type": "boolean"}, "summary": {"type": "string"}, "n": {"type": "integer"},
         "userQuote": {"type": "string"}, "grant": {"type": "string"},
-        "check": {"type": "boolean"}, "file": {"type": "string"}, "queued": {"type": "string"}
+        "check": {"type": "boolean"}, "file": {"type": "string"}, "queued": {"type": "string"}, "runId": {"type": "string"}
     }, "required": ["action"]})
 }
 
@@ -177,11 +178,64 @@ pub fn workflow_call_with(
             "land" => land_consented(tx, &x, args),
             "take_over" => crate::claims::take_over(tx, &x, args, &agents_live),
             "allow_edit" => crate::gates::allow_edit(tx, &x, args, edit_file.as_deref(), edit_repo.as_deref(), cwd_repo.as_deref()),
-            _ => Ok(Err("action must be start, plan, status, update, skip, park, drop, hand_off, finish, allowMore, land, take_over or allow_edit.".into())),
+            "reopen" => reopen_consented(tx, &x, args),
+            "clear_visual" => clear_visual_consented(tx, &x, args),
+            "ready" | "check" => Ok(Err("ready and check ask GitHub, so they run outside this call.".into())),
+            _ => Ok(Err("action must be start, plan, status, update, skip, park, drop, hand_off, finish, allowMore, land, take_over, allow_edit, ready, reopen, clear_visual or check.".into())),
         }
     })
     .map_err(|e| ToolError::maybe(e.to_string()))?
     .map_err(ToolError::refused)
+}
+
+/// [`workflow_call_with`] plus the two actions that ask GitHub, which must hold no transaction
+/// while they do: `ready` (consent first, then the flip, as the user's own button does) and
+/// `check` (reconcile pull requests merged or closed outside Helm).
+#[allow(clippy::too_many_arguments)]
+pub fn workflow_call_with_gh(
+    db: &Database,
+    kinds: &AllowKinds,
+    gh: &dyn Gh,
+    chat: &str,
+    is_child: bool,
+    args: &Value,
+    now: i64,
+    agents_running: &dyn Fn(&str) -> bool,
+) -> Result<Value, ToolError> {
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("");
+    if !matches!(action, "ready" | "check") {
+        return workflow_call_with(db, kinds, chat, is_child, args, now, agents_running);
+    }
+    if is_child {
+        return Err(ToolError::refused(
+            "Only the orchestrator (the chat's own agent) can call app_workflow; ask it.",
+        ));
+    }
+    if action == "check" {
+        return crate::land::check(db, gh, &crate::land::flight(), chat, now)
+            .map_err(|e| ToolError::maybe(e.to_string()))?
+            .map_err(ToolError::refused);
+    }
+    let picked = db
+        .write(|tx| {
+            let s = settings::load(tx)?;
+            if !mode::in_effect(tx, chat, &s)? {
+                return Ok(Err(OFF.to_owned()));
+            }
+            let x = Act { chat_id: chat, s: &s, kinds, now };
+            ready_consented(tx, &x, args)
+        })
+        .map_err(|e| ToolError::maybe(e.to_string()))?
+        .map_err(ToolError::refused)?;
+    let field = |k: &str| picked.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+    let (run_id, repo, branch) = (field("runId"), field("repo"), field("branch"));
+    match crate::land::ready(db, gh, &run_id, &repo, &branch, now) {
+        Ok(Ok(state)) => Ok(json!({"state": state})),
+        Ok(Err(why)) => Err(ToolError::refused(format!(
+            "{why} The user's permission for this step was used; ask for it again to retry."
+        ))),
+        Err(e) => Err(ToolError::maybe(e.to_string())),
+    }
 }
 
 /// One `app_workflow_report` call; the tree is read from git first, outside the transaction.
@@ -256,9 +310,10 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                         .is_some_and(|t| t.subagents_running > 0 || !t.background_tasks.is_empty())
                 })
             };
-            let out = workflow_call_with(
+            let out = workflow_call_with_gh(
                 &db,
                 &kinds_of(ctx),
+                &crate::gh::GhCli,
                 &ctx.caller_chat_id,
                 ctx.is_child,
                 &args,
@@ -368,4 +423,102 @@ fn land_consented(tx: &rusqlite::Transaction<'_>, x: &Act<'_>, a: &Value) -> act
         )),
         Err(e) => Ok(Err(e)),
     }
+}
+
+/// `ready {repo, branch, userQuote | grant}`: the consent half of the user's Ready for review of a
+/// handed-off change. Answers the task and change the flip is then run on.
+fn ready_consented(tx: &rusqlite::Transaction<'_>, x: &Act<'_>, a: &Value) -> actions::Out {
+    let (repo, branch) = match actions::target(a) {
+        Ok(t) => t,
+        Err(e) => return Ok(Err(e)),
+    };
+    let target = json!({"repo": repo, "branch": branch});
+    let (run, c) = match crate::kinds::change_target(tx, x.chat_id, &target) {
+        Ok(v) => v,
+        Err(e) => return Ok(Err(e)),
+    };
+    if c.state != "handed_off" {
+        return Ok(Err(format!(
+            "{branch} is {}, not handed off; ready applies to a handed-off change.",
+            c.state
+        )));
+    }
+    let t = json!({"runId": run.id, "repo": c.repo, "branch": c.branch});
+    let proof = crate::kinds::Proof::from_args(a);
+    if let Err(e) = crate::kinds::consent(
+        tx,
+        x.kinds,
+        x.chat_id,
+        "ready",
+        &t,
+        &proof,
+        "Marking a pull request ready for review is the user's step.",
+        x.now,
+    )? {
+        return Ok(Err(e));
+    }
+    crate::store::event(
+        tx,
+        x.chat_id,
+        Some(&run),
+        &crate::store::Event {
+            kind: "consent",
+            repo: Some(&c.repo),
+            branch: Some(&c.branch),
+            verdict: Some("ready"),
+            ..Default::default()
+        },
+        x.now,
+    )?;
+    Ok(Ok(json!({"runId": run.id, "repo": c.repo, "branch": c.branch})))
+}
+
+/// `reopen {runId?, userQuote | grant}`: the user's Reopen of a parked or handed-off task.
+fn reopen_consented(tx: &rusqlite::Transaction<'_>, x: &Act<'_>, a: &Value) -> actions::Out {
+    let want = a.get("runId").and_then(Value::as_str);
+    let found = crate::store::open_runs(tx, x.chat_id)?
+        .into_iter()
+        .find(|r| matches!(r.status.as_str(), "parked" | "handed_off") && want.is_none_or(|w| r.id == w));
+    let Some(run) = found else {
+        return Ok(Err("No parked or handed-off task in this chat to reopen.".into()));
+    };
+    crate::user::reopen(tx, x, run, &crate::kinds::Proof::from_args(a))
+}
+
+/// `clear_visual {runId?, userQuote | grant}`: only the user can clear a task's visual flag (the
+/// smoketest it asks for then stops being required).
+fn clear_visual_consented(tx: &rusqlite::Transaction<'_>, x: &Act<'_>, a: &Value) -> actions::Out {
+    let want = a.get("runId").and_then(Value::as_str);
+    let found = crate::store::open_runs(tx, x.chat_id)?.into_iter().find(|r| {
+        r.visual && matches!(r.status.as_str(), "active" | "parked") && want.is_none_or(|w| r.id == w)
+    });
+    let Some(run) = found else {
+        return Ok(Err("No task in this chat is marked visual.".into()));
+    };
+    let t = json!({"runId": run.id, "attempt": run.attempt});
+    let proof = crate::kinds::Proof::from_args(a);
+    if let Err(e) = crate::kinds::consent(
+        tx,
+        x.kinds,
+        x.chat_id,
+        "clearVisual",
+        &t,
+        &proof,
+        "Clearing the visual flag is the user's step.",
+        x.now,
+    )? {
+        return Ok(Err(e));
+    }
+    crate::store::event(
+        tx,
+        x.chat_id,
+        Some(&run),
+        &crate::store::Event {
+            kind: "consent",
+            verdict: Some("clearVisual"),
+            ..Default::default()
+        },
+        x.now,
+    )?;
+    crate::user::visual(tx, x, run, false, "On your words or an Allow, from the orchestrator.")
 }

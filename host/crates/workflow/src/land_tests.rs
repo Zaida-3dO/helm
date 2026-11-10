@@ -866,3 +866,46 @@ fn the_land_step_fast_forwards_only_when_the_repository_rule_says_so() {
     // landing.method is never a fast-forward: only a repository's own rule picks it.
     assert!(crate::settings::validate(json!({"landing": {"method": "fast_forward"}})).is_err());
 }
+
+#[test]
+fn check_records_pull_requests_merged_or_closed_outside_helm_and_leaves_the_rest() {
+    // (state the change is in, what GitHub says, head GitHub shows, change after, branches landed)
+    let rows = [
+        ("handed_off", "MERGED", TIP, "landed", true),
+        ("land_failed", "MERGED", TIP, "landed", true),
+        ("awaiting_merge", "CLOSED", TIP, "dropped", false),
+        ("handed_off", "OPEN", TIP, "handed_off", false),
+        ("pending_land", "MERGED", "9999999999999999999999999999999999999999", "landed", true),
+    ];
+    for (state, github, head, after, landed) in rows {
+        let t = setup(true, LandMode::Draft, state);
+        let held = Flight::default();
+        let gh = Script::default();
+        gh.say("pr view", true, &pr_json(github, head, "main", "MERGEABLE", false));
+        let out = land::check(&t.db, &gh, &held, "c", 100).unwrap().unwrap();
+        assert_eq!(out["checked"], 1, "{state} {github}");
+        assert_eq!(out["landed"], json!(if landed { vec!["feat-x"] } else { vec![] }), "{state} {github}");
+        let c = t.change();
+        assert_eq!(c.state, after, "{state} {github}");
+        if after == "landed" {
+            assert_eq!(c.landed_sha.as_deref(), Some(SHA));
+            // A merge at the reviewed head is recorded plainly; one at another head carries the nudge.
+            assert_eq!(c.error.is_some(), head != TIP, "{state} {github}");
+        }
+    }
+    // A change the land driver holds is left alone, an unreadable PR is reported, and a chat with
+    // Orchestrator off checks nothing.
+    let t = setup(true, LandMode::Draft, "handed_off");
+    let gh = Script::default();
+    let held = Flight::default();
+    assert!(held.take("r1|github.com/o/r|feat-x"));
+    let out = land::check(&t.db, &gh, &held, "c", 100).unwrap().unwrap();
+    held.give("r1|github.com/o/r|feat-x");
+    assert_eq!(out["busy"], json!(["feat-x"]));
+    assert!(gh.calls().is_empty());
+    let out = land::check(&t.db, &gh, &held, "c", 100).unwrap().unwrap();
+    assert_eq!(out["unreadable"], json!(["feat-x"]));
+    assert_eq!(t.change().state, "handed_off");
+    let off = setup(false, LandMode::Draft, "handed_off");
+    assert!(land::check(&off.db, &gh, &held, "c", 100).unwrap().is_err());
+}

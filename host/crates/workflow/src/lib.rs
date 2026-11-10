@@ -27,10 +27,10 @@
 //! | host tool `app_orchestrator_on {reason}` | an Auto chat's root agent turns it on |
 //! | prompt section `workflow` | the generated Workflow rules, plus the Move fast block when on |
 //! | host tools `app_workflow`, `app_workflow_report` | tasks, changes, plan of record, rounds and caps, commit-bound approval, hand-off, take-over ([`claims`]), post-land reports and follow-ups ([`postland`]) |
-//! | host tool `app_workflow_gate` (never listed) | the worker's dispatch and edit gate questions ([`gates`]); launch variable `HELM_WORKFLOW_GATES` |
+//! | host tool `app_workflow_gate` (never listed) | the worker's dispatch, message and edit gate questions ([`gates`]); launch variable `HELM_WORKFLOW_GATES` |
 //! | table `workflow_followups` | queued follow-ups per task |
 //! | tables `workflow_runs`, `workflow_changes`, `workflow_events` | per task / per change / per event |
-//! | allow kinds | `land`, `ready`, `skip`, `allowMore`, `drop`, `reopen`, `takeOver` on `helm_consent` |
+//! | allow kinds | `land`, `ready`, `skip`, `allowMore`, `drop`, `reopen`, `takeOver`, `clearVisual` on `helm_consent` |
 //! | worker line `guard_check` → `guard_verdict` | the landing guard on Bash, PowerShell and MCP calls ([`hook`]): only in a chat with Orchestrator on and an active task, while Settings → Orchestrator → Landing guard is on (default on); overrides recorded as `guard_override`, refusals as `gate_denied`, both listed under Needs you |
 //! | table `workflow_standup_outbox` | stage records written to Agent Standup, with an "outcome unknown" read-back before any resend |
 //! | land step | `gh` merge pinned to the head GitHub showed, readback must say MERGED; review state at the head nudges, never blocks; draft land |
