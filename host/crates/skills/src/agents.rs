@@ -31,7 +31,7 @@ pub fn agents_dir(root: &Path) -> PathBuf {
 }
 
 /// One agent as Settings sees it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentEntry {
     /// The file name without `.md`: what a chat's Agent tool and a stage setting call it.

@@ -28,12 +28,13 @@ pub fn rules_dir(root: &Path) -> PathBuf {
 }
 
 /// One rule as Settings and the launch see it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RuleEntry {
     /// `rules/<file>.md`: what the tools and ops take back.
     pub path: String,
     pub title: String,
+    #[ts(type = "number")]
     pub size: u64,
     /// A hash of the file's text, for an edit that must not overwrite a newer one. Empty when the
     /// file is too large to load.

@@ -17,6 +17,7 @@ serde_json.workspace = true
 rusqlite.workspace = true
 uuid.workspace = true
 log.workspace = true
+ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
 
 [dev-dependencies]
 tempfile.workspace = true

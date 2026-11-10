@@ -37,6 +37,10 @@
 //! `model_catalogue` also takes `deviceUid` (the models that device last reported). Every other
 //! chat op that names a copied chat is answered by [`route`] (see `helm_chats::remote`).
 //!
+//! These answers are built as JSON in `ops`, and the UI's copy of them (`ui/src/devices/api.ts`) is
+//! typed by hand from the table above: there is no Rust type to generate bindings from. The
+//! serialised types in [`wire`] are the device-to-device frames, which the UI never sees.
+//!
 //! What another device may ask of this one (`wire::Op`): `hello`, `chats_sub`, `chat_sub`,
 //! `chat_unsub`, `chats_unsub`, `page` (reads, which need only the pairing), and `send`, `stop`,
 //! `answer`, `create`, `set_model`, `rename`, `archive`, `share` (which need the switch "Let other

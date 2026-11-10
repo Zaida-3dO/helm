@@ -14,6 +14,7 @@
 //! `agents/`).
 
 pub mod agents;
+pub mod bindings;
 pub mod examples;
 pub mod launch;
 pub mod layers;
@@ -46,7 +47,7 @@ pub fn skills_dir(root: &Path) -> PathBuf {
 }
 
 /// One skill as Settings sees it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillEntry {
     pub name: String,

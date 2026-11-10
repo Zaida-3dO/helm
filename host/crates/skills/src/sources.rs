@@ -75,7 +75,7 @@ impl Projects {
 }
 
 /// One linked folder.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SkillSource {
     /// Made when a source is first saved without one.
@@ -84,12 +84,13 @@ pub struct SkillSource {
     pub path: String,
     /// `everyone` or `profile:<profileId>`.
     pub layer: String,
+    #[ts(type = "\"all\" | Array<string>")]
     pub projects: Projects,
     pub enabled: bool,
 }
 
 /// The list as stored, with its revision.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     pub sources: Vec<SkillSource>,

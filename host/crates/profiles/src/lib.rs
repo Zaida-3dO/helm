@@ -33,6 +33,7 @@
 //! Agents never change profiles (the tables are user-only). They see a chat's profile in
 //! `app_this_chat` and can filter `app_list_chats` by it.
 
+pub mod bindings;
 pub mod launch;
 mod ops;
 pub mod store;

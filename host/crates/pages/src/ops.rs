@@ -13,6 +13,9 @@
 //! | `page_link_chat` | blocking | `{id, chatId?}` → `{linked}` |
 //! | `page_list` | blocking | `{profileId?, chatId?}` → `{pages}` (a chat's profile stands in for `profileId`) |
 //!
+//! The answers are built as JSON here, and the UI's copy of them (`ui/src/pages/`) is typed by hand
+//! from this table: there is no Rust type to generate bindings from.
+//!
 //! These answer the main window and the host's own tools; a page itself can call none of them,
 //! and it never names a session, a key or a path: the open frame's bridge quotes the session it
 //! was given, and the session fixes which page's state a save touches.

@@ -33,6 +33,7 @@
 //!
 //! The `dictation` event tells the page the settings changed.
 
+pub mod bindings;
 mod ops;
 pub mod settings;
 #[cfg(test)]

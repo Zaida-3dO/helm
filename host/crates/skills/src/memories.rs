@@ -74,7 +74,7 @@ impl MemoryHub for HubMemory {
 }
 
 /// One memory in a layer's list.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryRow {
     /// The hub's number, as text.

@@ -53,7 +53,7 @@ pub struct PluginSkill {
 }
 
 /// A skill name two sources both gave the same plugin: the first is loaded.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Clash {
     pub plugin: String,
@@ -175,7 +175,7 @@ pub fn collect(profile_dir: &Path, who: &ChatKnowledge) -> Collected {
 }
 
 /// One skill in a layer as Settings shows it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewSkill {
     pub name: String,
@@ -184,6 +184,7 @@ pub struct ViewSkill {
     pub path: String,
     /// `folder` or `linked:<id>`.
     pub source: String,
+    #[ts(type = "\"all\" | Array<string>")]
     pub projects: Projects,
 }
 

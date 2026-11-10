@@ -72,7 +72,7 @@ fn bad<T>(m: &str) -> Result<T, ProfileError> {
     Err(ProfileError::Bad(m.into()))
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Profile {
     pub id: String,
@@ -89,18 +89,21 @@ pub struct Profile {
 }
 
 /// A profile with the counts the profile view and the popover show (not archived chats).
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileSummary {
     #[serde(flatten)]
     pub profile: Profile,
+    #[ts(type = "number")]
     pub chats: i64,
+    #[ts(type = "number")]
     pub running: i64,
+    #[ts(type = "number")]
     pub attention: i64,
 }
 
 /// Everything the UI needs to draw the footer chip and the popover.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfilesView {
     pub profiles: Vec<ProfileSummary>,

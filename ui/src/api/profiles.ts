@@ -1,5 +1,6 @@
 // Profiles (host crate `profiles`) and the people on the hub a profile can be linked to (host
-// crate `relay`). Typed by hand: these ops have no generated bindings. Every profiles change
+// crate `relay`). Typed by hand; the host's own shapes are generated in `./generated/profiles/`
+// and kept current by a host test, so a change to them shows there first. Every profiles change
 // answers with the whole view and emits `profiles_changed`.
 
 import type { Api } from './client.ts';

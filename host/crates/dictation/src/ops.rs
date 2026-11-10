@@ -17,8 +17,9 @@ use std::sync::Arc;
 pub const EVENT: &str = "dictation";
 
 /// What the page may see of the settings.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "DictationSettings")]
 pub struct View {
     pub stt_url: Option<String>,
     pub allow_private_network: bool,
