@@ -136,6 +136,12 @@ impl Spawner for FakeSpawner {
         self.title.lock().unwrap().clone()
     }
 
+    /// The configured answer, one option per line.
+    fn run_title_suggestions(&self, job: &Value) -> Result<Vec<String>, String> {
+        self.run_title(job)
+            .map(|t| t.lines().map(str::to_owned).collect())
+    }
+
     fn run_triage(&self, job: &Value) -> Result<(bool, String), String> {
         self.triage_jobs.lock().unwrap().push(job.clone());
         self.triage.lock().unwrap().clone()
@@ -2628,7 +2634,36 @@ async fn a_manual_rename_wins_and_a_failure_keeps_the_fallback() {
         .await
         .unwrap();
     assert_eq!(s["title"], "Suggested");
+    assert_eq!(s["titles"], json!(["Suggested"]));
     assert_eq!(title_of(&h, &other).0, "second chat");
+    // Several options come back cleaned: no repeat (ignoring case), nothing equal to the current
+    // title, at most three. The job carries the titles (only) of the siblings, archived ones
+    // included, and none of their messages.
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET title = 'Helm 2.0 · crew X: fix', archived = 1 WHERE id = ?1",
+            [&chat],
+        )
+    })
+    .unwrap();
+    *h.spawner.title.lock().unwrap() =
+        Ok("second chat\nHelm 2.0 · crew Y: add\nhelm 2.0 · crew y: add\n \nThird\nFourth\nFifth".into());
+    let s = h
+        .call("title_suggest", json!({"chatId": other}))
+        .await
+        .unwrap();
+    assert_eq!(
+        s["titles"],
+        json!(["Helm 2.0 · crew Y: add", "Third", "Fourth"])
+    );
+    assert_eq!(s["title"], "Helm 2.0 · crew Y: add");
+    let jobs = h.spawner.title_jobs.lock().unwrap().clone();
+    let job = jobs.last().unwrap();
+    assert_eq!(job["suggest"], 3);
+    assert_eq!(job["currentTitle"], "second chat");
+    assert_eq!(job["siblingTitles"], json!(["Helm 2.0 · crew X: fix"]));
+    assert_eq!(job["profileTitles"], json!([]));
+    assert!(!job.to_string().contains("do the thing"));
 }
 
 /// An attached image rides the prompt as an image block; an image-only send is allowed.

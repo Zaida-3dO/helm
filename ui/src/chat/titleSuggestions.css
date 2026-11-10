@@ -1,0 +1,52 @@
+/* Name suggestions under a chat's title field (TitleSuggestions.tsx). */
+.title-suggest {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: calc(11 * var(--ui-unit, 1px));
+  color: var(--muted);
+}
+.title-suggest-loading {
+  min-height: 22px;
+  align-items: center;
+}
+.title-suggest-option {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  font: inherit;
+  color: var(--text, inherit);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-button, 7px);
+  cursor: pointer;
+}
+.title-suggest-option:hover {
+  border-color: var(--accent);
+}
+.title-suggest-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* The top bar's rename box: the options hang under the field instead of moving the bar. */
+.crumb-rename-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.crumb-rename-wrap > .title-suggest {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  width: max-content;
+  max-width: min(480px, 70vw);
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 18%);
+}

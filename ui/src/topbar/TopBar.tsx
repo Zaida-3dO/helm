@@ -12,7 +12,8 @@ import { projectOps } from '../api/projects.ts';
 import { panelStore, togglePanel } from '../panel/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, layers, TextInput, toast, useBinding, useHint } from '../ui/index.ts';
-import { IconArchive, IconChevronRight, IconFolder, IconFork, IconPanelLeft, IconPanelRight, IconPin, IconRestore, IconSparkles } from '../ui/icons.tsx';
+import { IconArchive, IconChevronRight, IconFolder, IconFork, IconPanelLeft, IconPanelRight, IconPin, IconRestore } from '../ui/icons.tsx';
+import { TitleSuggestions } from '../chat/TitleSuggestions.tsx';
 import { sidebarLayout } from '../shell/layout.ts';
 import { SidebarActions } from '../sidebar/actions.ts';
 import { SidebarData } from '../sidebar/data.ts';
@@ -64,21 +65,12 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
     shell.api('chat_rename', { chatId: chat.id, title: t }).catch(err);
   };
   const edit = useRef<RenameEdit | null>(null);
+  // What the box held when it opened: the name suggestions under it show only while it is unchanged.
+  const renameFrom = useRef('');
   const startRename = (title: string) => {
     edit.current = new RenameEdit(rename);
+    renameFrom.current = title;
     setRenaming(title);
-  };
-  // "Suggest a title" while renaming: the host names the chat from what was asked in it; the
-  // suggestion fills the box for the reader to keep or change, and nothing is saved until Enter.
-  const [suggesting, setSuggesting] = useState(false);
-  const suggest = () => {
-    if (!chat || suggesting) return;
-    setSuggesting(true);
-    shell
-      .api<{ title: string }>('title_suggest', { chatId: chat.id })
-      .then((r) => setRenaming((cur) => (cur === null ? cur : r.title)))
-      .catch(err)
-      .finally(() => setSuggesting(false));
   };
   const fork = () => {
     if (chat) shell.ops.fork(chat.id).then((c) => shell.select(c.id)).catch(err);
@@ -125,7 +117,7 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
             </>
           )}
           {renaming !== null ? (
-            <>
+            <span className="crumb-rename-wrap">
               <TextInput
                 className="crumb-rename"
                 autoFocus
@@ -142,20 +134,8 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
                   }
                 }}
               />
-              {/* Pressing the button must not take focus from the box, or the rename would be saved first. */}
-              <Button
-                variant="icon"
-                label="Suggest a title"
-                title="Suggest a title from what this chat is about"
-                data-testid="topbar-suggest-title"
-                busy={suggesting}
-                disabled={suggesting}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={suggest}
-              >
-                <IconSparkles size={14} />
-              </Button>
-            </>
+              {chat && <TitleSuggestions api={shell.api} chatId={chat.id} value={renaming} opened={renameFrom.current} onPick={setRenaming} />}
+            </span>
           ) : (
             <button
               type="button"

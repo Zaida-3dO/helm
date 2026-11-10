@@ -278,7 +278,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     if (at < 0 || to < 0 || to >= sibs.length) return;
     void act.reorderProject(p, dir < 0 ? sibs[to]!.id : (sibs[to + 1]?.id ?? null));
   };
-  const promptRename = (row: SidebarRow) => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, onSave: (t) => act.renameChat(row, t) });
+  const promptRename = (row: SidebarRow) => setPrompt({ title: 'Rename chat', label: 'Title', value: row.title, suggestFor: row.chatId, onSave: (t) => act.renameChat(row, t) });
   const rowMenuItems = (row: SidebarRow): MenuItem[] => {
     // A chat on another device is renamed here; everything else is done on that device.
     if (remote) return withChatIcons([{ id: 'rename', label: 'Rename chat…', onSelect: () => promptRename(row) }]);

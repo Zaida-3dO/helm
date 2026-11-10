@@ -87,7 +87,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `settings-scroll-on-send` | Settings → Chat: scroll to the latest message when I send | |
 | `user-bubble` | The reader's own message bubble in the transcript; its `title` is the time tooltip ("Today at 3:41 PM · 5 minutes ago") | |
 | `dock-compacting` | The activity dock's second line while the chat compacts its conversation: what is happening and how long it has taken | |
-| `topbar-suggest-title` | The Suggest a title button beside the chat title box while it is being renamed; the suggestion fills the box and is saved only on Enter | `aria-busy` while the host works |
+| `title-suggestions` / `title-suggestion` | The name suggestions under the chat title field, in the top bar's rename box and the sidebar's Rename chat dialog: the container (a loading line, then up to three options) and one option button; a click fills the field, which is saved only on Enter or Save | `data-state` = `loading` or `ready` |
 | `settings-double-shift` | Settings → Chat: tap Shift twice to open Go to file | |
 | `attachment-thumb` | An attached image's thumbnail in the composer: a button (click, Enter or Space) that opens the image viewer, `attachment-viewer` (its image is `image-viewer-image`); the corner button only removes | |
 | `composer-refs` | The tray of file, folder and chat chips in the composer box; each chip is `.composer-ref` | `data-kind` = `file`, `folder` or `chat` |

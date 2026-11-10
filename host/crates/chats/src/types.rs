@@ -1207,7 +1207,10 @@ pub struct ChatRenameArgs {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TitleSuggestResult {
+    /// The first option.
     pub title: String,
+    /// Up to three options, best first.
+    pub titles: Vec<String>,
 }
 
 /// `attachment_put`: one image, base64. PNG, JPEG, GIF or WebP.

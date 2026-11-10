@@ -3,6 +3,8 @@
 // adds to the rename dialog (a hint under the field, suggested titles) extends this file.
 
 import { useRef, useState } from 'react';
+import { TitleSuggestions } from '../chat/TitleSuggestions.tsx';
+import { useShell } from '../shell/context.ts';
 import { Button, Dialog, TextInput } from '../ui/index.ts';
 
 export type Prompt = {
@@ -11,11 +13,14 @@ export type Prompt = {
   value: string;
   /** The field's length limit (120 when absent). */
   maxLength?: number;
+  /** A chat's id: Rename chat shows name suggestions for it under the field. */
+  suggestFor?: string;
   /** Answers with why it failed (the dialog stays open and shows it), or nothing on success. */
   onSave: (v: string) => Promise<string | null | void> | void;
 };
 
 export function PromptDialog({ prompt, onClose }: { prompt: Prompt; onClose: () => void }) {
+  const shell = useShell();
   const [value, setValue] = useState(prompt.value);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,6 +79,19 @@ export function PromptDialog({ prompt, onClose }: { prompt: Prompt; onClose: () 
           }}
         />
       </label>
+      {prompt.suggestFor && (
+        <TitleSuggestions
+          api={shell.api}
+          chatId={prompt.suggestFor}
+          value={value}
+          opened={prompt.value}
+          onPick={(t) => {
+            setValue(t);
+            setError(null);
+            field.current?.focus();
+          }}
+        />
+      )}
     </Dialog>
   );
 }

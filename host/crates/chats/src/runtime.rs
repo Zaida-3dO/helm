@@ -161,6 +161,12 @@ pub trait Spawner: Send + Sync {
         Err("titles are not available".into())
     }
 
+    /// Run the titles helper in suggestion mode and answer up to three options, best first
+    /// ([`crate::titles::suggest`]). A spawner that only answers one title keeps working.
+    fn run_title_suggestions(&self, job: &Value) -> Result<Vec<String>, String> {
+        self.run_title(job).map(|t| vec![t])
+    }
+
     /// Run the triage helper on one job and answer `(needs you, reason)` ([`crate::triage`]).
     fn run_triage(&self, _job: &Value) -> Result<(bool, String), String> {
         Err("triage is not available".into())
@@ -380,6 +386,20 @@ impl Spawner for ProcessSpawner {
             (Some(t), _) => Ok(t.to_owned()),
             (_, Some(e)) => Err(e.to_owned()),
             _ => Err("the helper gave no title".into()),
+        }
+    }
+
+    fn run_title_suggestions(&self, job: &Value) -> Result<Vec<String>, String> {
+        let out = self.run_helper("titles", job, crate::titles::SUGGEST_TIMEOUT)?;
+        let list: Vec<String> = out
+            .get("titles")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .unwrap_or_default();
+        match (list.is_empty(), out.get("error").and_then(Value::as_str)) {
+            (false, _) => Ok(list),
+            (true, Some(e)) => Err(e.to_owned()),
+            (true, None) => Err("the helper gave no titles".into()),
         }
     }
 

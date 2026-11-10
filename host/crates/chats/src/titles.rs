@@ -12,7 +12,9 @@
 //!   chat's own cold start. A greeting ("Hello", "hi there") is never titled: the job is parked as
 //!   `greeting` and the chat's next send starts a fresh one from that message.
 //! - `chat_rename {chatId, title}` (1–512 bytes) sets the title and marks it manual.
-//!   `title_suggest {chatId}` runs the helper and answers a suggestion without writing it.
+//!   `title_suggest {chatId}` runs the helper and answers up to three suggestions without writing
+//!   any; the helper also sees the titles (only) of the chat's siblings and of its profile's recent
+//!   chats, so the options follow the person's naming habits.
 
 use crate::runtime::ChatRuntime;
 use crate::store;
@@ -271,8 +273,77 @@ pub fn rename(
     crate::submit::emit_chat(rt, chat_id).ok_or_else(crate::ops::not_found)
 }
 
-/// `title_suggest`: run the helper on the chat's first and latest requests; nothing is written.
-pub async fn suggest(rt: &ChatRuntime, chat_id: &str) -> Result<String, helm_ipc::ApiError> {
+/// How many other titles a suggestion job may see: the chat's siblings in the same board or
+/// folder (archived included), and the same profile's most recent titles elsewhere. Titles only.
+pub const MAX_SIBLING_TITLES: usize = 30;
+pub const MAX_PROFILE_TITLES: usize = 20;
+pub const MAX_SUGGESTIONS: usize = 3;
+/// A suggestion is a quick look, not a title job: one attempt, no retry.
+pub const SUGGEST_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// The naming habits a suggestion should match: `(siblings, profile)`. Both are only this chat's
+/// own profile's chats (side chats and untitled ones left out, newest first), and the second list
+/// leaves out the first's folder so nothing repeats.
+fn naming_context(
+    rt: &ChatRuntime,
+    chat_id: &str,
+) -> rusqlite::Result<(String, Vec<String>, Vec<String>)> {
+    rt.db().snapshot(|tx| {
+        let (project, profile, title): (String, String, String) = tx.query_row(
+            "SELECT project_id, profile_id, title FROM chats WHERE id = ?1",
+            [chat_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let titles = |sql: &str, limit: usize| -> rusqlite::Result<Vec<String>> {
+            let mut st = tx.prepare(sql)?;
+            let rows = st.query_map(
+                params![project, profile, chat_id, store::DEFAULT_TITLE, limit as i64],
+                |r| r.get::<_, String>(0),
+            )?;
+            rows.collect()
+        };
+        let siblings = titles(
+            "SELECT title FROM chats WHERE project_id = ?1 AND profile_id = ?2 AND id != ?3
+               AND side_source_id IS NULL AND trim(title) != '' AND title != ?4
+             ORDER BY updated_at DESC, id LIMIT ?5",
+            MAX_SIBLING_TITLES,
+        )?;
+        let profile_titles = titles(
+            "SELECT title FROM chats WHERE project_id != ?1 AND profile_id = ?2 AND id != ?3
+               AND side_source_id IS NULL AND trim(title) != '' AND title != ?4
+             ORDER BY updated_at DESC, id LIMIT ?5",
+            MAX_PROFILE_TITLES,
+        )?;
+        Ok((title, siblings, profile_titles))
+    })
+}
+
+/// A helper line as an option: one line, no control characters, at most the title limit.
+fn clean_suggestion(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    (!t.is_empty() && t.len() <= MAX_TITLE_BYTES && !t.chars().any(char::is_control))
+        .then(|| t.to_owned())
+}
+
+/// The options to show: cleaned, no repeats (ignoring case), none equal to the current title, at
+/// most [`MAX_SUGGESTIONS`].
+fn pick_suggestions(raw: Vec<String>, current: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in raw.iter().filter_map(|t| clean_suggestion(t)) {
+        let same = |o: &str| o.to_lowercase() == t.to_lowercase();
+        if !same(current.trim()) && !out.iter().any(|o| same(o)) {
+            out.push(t);
+        }
+    }
+    out.truncate(MAX_SUGGESTIONS);
+    out
+}
+
+/// `title_suggest`: run the helper on the chat's first and latest requests, plus the titles of its
+/// siblings and of the profile's recent chats so the options follow the person's naming habits;
+/// answers up to three options and writes nothing. The context is titles only: no message text
+/// from any other chat reaches the model.
+pub async fn suggest(rt: &ChatRuntime, chat_id: &str) -> Result<Vec<String>, helm_ipc::ApiError> {
     let texts: Vec<String> = rt
         .db()
         .snapshot(|tx| {
@@ -290,17 +361,29 @@ pub async fn suggest(rt: &ChatRuntime, chat_id: &str) -> Result<String, helm_ipc
             "There is nothing to name yet: send a message first.",
         ));
     };
+    let (current, siblings, profile) = naming_context(rt, chat_id).map_err(crate::ops::sql)?;
     let latest = texts.last().filter(|_| texts.len() > 1);
     let mut body = job(first, latest.map(String::as_str), false);
+    body["suggest"] = json!(MAX_SUGGESTIONS);
+    body["currentTitle"] = json!(current);
+    body["siblingTitles"] = json!(siblings);
+    body["profileTitles"] = json!(profile);
+    body["timeoutMs"] = json!(SUGGEST_TIMEOUT.as_millis() as u64 - 2_000);
     crate::background::decorate(&rt.sh, chat_id, &mut body);
     let spawner = rt.sh.spawner.clone();
     let r = tokio::time::timeout(
-        HOST_TIMEOUT,
-        tokio::task::spawn_blocking(move || spawner.run_title(&body)),
+        SUGGEST_TIMEOUT,
+        tokio::task::spawn_blocking(move || spawner.run_title_suggestions(&body)),
     )
     .await;
     match r {
-        Ok(Ok(Ok(t))) => Ok(t),
+        Ok(Ok(Ok(raw))) => match pick_suggestions(raw, &current) {
+            list if list.is_empty() => Err(helm_ipc::ApiError::new(
+                "unavailable",
+                "No suggestion: the helper gave nothing new.",
+            )),
+            list => Ok(list),
+        },
         Ok(Ok(Err(e))) => Err(helm_ipc::ApiError::new(
             "unavailable",
             format!("No suggestion: {e}"),

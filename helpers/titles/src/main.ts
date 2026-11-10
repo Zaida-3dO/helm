@@ -1,6 +1,6 @@
 // Entry point: read one title job (JSON) from stdin, write one JSON answer to stdout, exit.
 
-import { makeTitle, type TitleJob } from "./title.ts";
+import { makeSuggestions, makeTitle, type TitleJob } from "./title.ts";
 
 const MAX_JOB_BYTES = 256 * 1024;
 
@@ -22,7 +22,7 @@ process.stdin.on("end", () => {
     process.stdout.write(JSON.stringify({ error: "the job is not valid JSON" }) + "\n");
     process.exit(2);
   }
-  void makeTitle(job).then((r) => {
+  void (job.suggest ? makeSuggestions(job) : makeTitle(job)).then((r) => {
     process.stdout.write(JSON.stringify(r) + "\n");
     process.exit(0);
   });
