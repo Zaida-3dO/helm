@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { PanelTab } from './model.ts';
 import { MAX_DATA_BYTES, MAX_ENTRIES, MAX_TOTAL_BYTES, restoreTabs, serializeTabs } from './persist.ts';
 import type { Persistable } from './persist.ts';
+import { restoreFileTab, saveFileTab } from './viewer/tabdata.ts';
 
 const kinds: Record<string, Persistable> = {
   file: {
@@ -108,4 +109,19 @@ test('restore is lenient about a value that is not panelTabs v1', () => {
   for (const v of [null, 1, 'x', {}, { version: 2, sets: {} }, { version: 1, sets: 3 }]) {
     assert.deepEqual(restoreTabs(v, kindOf), []);
   }
+});
+
+test('a file tab keeps its path, line, mode, position and origin, and drops what is invalid', () => {
+  const full = { path: String.raw`C:\p\a.md`, line: 7, mode: 'source' as const, top: 120, fromFiles: true };
+  assert.deepEqual(saveFileTab({ ...full, current: String.raw`C:\other`, currentKind: 'text' } as never), full);
+  assert.deepEqual(saveFileTab({ path: String.raw`C:\p\a.md`, mode: 'preview' }), { path: String.raw`C:\p\a.md`, mode: 'preview' });
+  assert.deepEqual(restoreFileTab(full), full);
+  const rows: Array<[unknown, unknown]> = [
+    [{ path: String.raw`C:\p\a.md`, mode: 'wide', top: -3, line: 1.5, fromFiles: 'yes' }, { path: String.raw`C:\p\a.md` }],
+    [{ path: String.raw`relative\a.md` }, null],
+    [{ path: String.raw`\\server\share\a.md` }, null],
+    [{ mode: 'source' }, null],
+    [null, null],
+  ];
+  for (const [stored, want] of rows) assert.deepEqual(restoreFileTab(stored), want, JSON.stringify(stored));
 });

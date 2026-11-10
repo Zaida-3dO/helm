@@ -29,6 +29,8 @@ interface Pending {
   key: string;
   /** Streaming snapshots are transient, so they are not worth a cache slot. */
   cacheable: boolean;
+  /** The sequence this request belongs to: a newer one on the same sequence replaces it. */
+  seq?: string;
 }
 
 export interface RenderRequest {
@@ -85,9 +87,15 @@ export class RenderOffloader {
     this.store(cacheKey(text, options), html);
   }
 
-  /** Renders in the worker. Rejects on timeout (the worker is reset) or worker error. */
-  render(text: string, options: RenderOptions = {}): Promise<string> {
+  /**
+   * Renders in the worker. Rejects on timeout (the worker is reset) or worker error. Requests that
+   * share a `seq` (one consumer's successive texts) are a sequence: the latest wins, and an older one
+   * still waiting is rejected as superseded, so a stale render can never time out and reset the
+   * worker under the newest, or answer after it.
+   */
+  render(text: string, options: RenderOptions = {}, seq?: string): Promise<string> {
     const key = cacheKey(text, options);
+    if (seq !== undefined) this.supersede(seq);
     const hit = this.cached(text, options);
     if (hit !== undefined) return Promise.resolve(hit);
 
@@ -103,10 +111,19 @@ export class RenderOffloader {
       const timer = this.setTimer(() => {
         this.reset(new Error(`markdown render timed out after ${this.timeoutMs} ms`));
       }, this.timeoutMs);
-      this.pending.set(id, { resolve, reject, timer, key, cacheable: !options.streaming });
+      this.pending.set(id, { resolve, reject, timer, key, cacheable: !options.streaming, seq });
       const request: RenderRequest = { id, text, options };
       worker.postMessage(request);
     });
+  }
+
+  private supersede(seq: string): void {
+    for (const [id, p] of [...this.pending]) {
+      if (p.seq !== seq) continue;
+      this.pending.delete(id);
+      this.clearTimer(p.timer);
+      p.reject(new Error('markdown render superseded'));
+    }
   }
 
   /** Terminates the worker and fails everything in flight; the next render starts a fresh one. */

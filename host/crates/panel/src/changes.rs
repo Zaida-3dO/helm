@@ -15,12 +15,13 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use ts_rs::TS;
 
 pub const MAX_RECORDS: usize = 2000;
 pub const DIFF_CAP: usize = 512 * 1024;
 pub const MAX_REL_PATH: usize = 4096;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum Section {
     Staged,
@@ -28,7 +29,7 @@ pub enum Section {
     Conflicts,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeRecord {
     /// Relative to the repository top, with forward slashes.
@@ -37,17 +38,20 @@ pub struct ChangeRecord {
     /// unmerged letters for a conflict).
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub from: Option<String>,
     pub section: Section,
     /// Also present in the other of staged/unstaged.
     pub partial: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
     pub added: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
     pub removed: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangesView {
     pub repo_top: String,
@@ -266,7 +270,7 @@ pub enum Side {
     Unstaged,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffView {
     pub patch: String,

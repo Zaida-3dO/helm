@@ -1,105 +1,39 @@
-// The side panel's host ops (host/crates/panel). Hand-written shapes for now:
-// the panel crate's generated bindings follow once the chats generator tolerates per-crate folders.
+// The side panel's host ops (host/crates/panel). The shapes the host sends are generated from its
+// Rust types into ./generated/panel/; the few that only the renderer builds or narrows are written here.
 
 import type { Api } from './client.ts';
+import type {
+  ArchiveEntry,
+  ArchiveView,
+  ChangeRecord,
+  ChangesView,
+  DiffView,
+  DirEntry,
+  FileStamp,
+  FileView,
+  Handler,
+  QuickItem,
+  QuickResult,
+  Refusal,
+  Section,
+  TurnChanges,
+  TurnDiff,
+  TurnFile,
+  ViewKind,
+} from './generated/panel/index.ts';
 
-export type ViewKind = 'text' | 'image' | 'dir' | 'html' | 'binary' | 'pdf' | 'audio' | 'video' | 'font' | 'archive';
+export type { ArchiveEntry, ArchiveView, ChangeRecord, ChangesView, DiffView, DirEntry, FileStamp, FileView, Handler, QuickItem, QuickResult, TurnChanges, TurnDiff, TurnFile, ViewKind };
 
-export interface DirEntry {
-  name: string;
-  kind: 'dir' | 'file' | 'link';
-  size?: number;
-}
-
-export interface FileView {
-  path: string;
-  kind: ViewKind;
-  size: number;
-  text?: string;
-  /** Base64 image bytes. */
-  bytes?: string;
-  mime?: string;
-  entries?: DirEntry[];
-  /** Where a PDF, audio, video or font loads from: a short-lived address served in byte ranges. */
-  url?: string;
-  truncated: boolean;
-  language?: string;
-}
-
-export interface ArchiveEntry {
-  path: string;
-  /** Absent when the archive keeps the size only in a ZIP64 extra field. */
-  size?: number;
-  compressedSize?: number;
-  dir: boolean;
-  encrypted: boolean;
-}
-
-/** A ZIP's central directory (names and sizes only; nothing is extracted). */
-export interface ArchiveView {
-  path: string;
-  size: number;
-  entries: ArchiveEntry[];
-  /** Every entry the archive declares, listed or not. */
-  total: number;
-  truncated: boolean;
-}
-
-export interface Handler {
-  name: string;
-  appPath: string;
-}
-
-export interface HandlerRefusal {
-  step: 'path' | 'private' | 'executable' | 'launchType' | 'noHandler' | 'deniedHandler' | 'untrustedHandler';
-  reason: string;
-}
+export type HandlerRefusal = Refusal;
 
 export interface DefaultHandlerResult {
   handler: Handler | null;
   refusal: HandlerRefusal | null;
 }
 
-export interface QuickItem {
-  path: string;
-  label: string;
-  kind: 'dir' | 'file' | 'link';
-  score: number;
-}
-
-export interface QuickResult {
-  mode: 'path' | 'files';
-  items: QuickItem[];
-  partial: boolean;
-}
-
-export type ChangeSection = 'staged' | 'unstaged' | 'conflicts';
-
-export interface ChangeRecord {
-  /** Relative to the repository top, forward slashes. */
-  path: string;
-  status: string;
-  from?: string;
-  section: ChangeSection;
-  partial: boolean;
-  added?: number;
-  removed?: number;
-}
-
-export interface ChangesView {
-  repoTop: string;
-  branch: string | null;
-  records: ChangeRecord[];
-  truncated: boolean;
-}
+export type ChangeSection = Section;
 
 export type DiffSide = 'head' | 'staged' | 'unstaged';
-
-export interface DiffView {
-  patch: string;
-  fullContext: boolean;
-  truncated: boolean;
-}
 
 export interface ReviewComment {
   id: string;
@@ -132,34 +66,12 @@ export type ContextItem =
   | { kind: 'diff'; repoTop: string; path: string; side: DiffSide; startLine: number; endLine: number; rows: Array<{ sign: '+' | '-' | ' '; text: string }> }
   | { kind: 'reviewComment'; id: string; path: string; side: 'left' | 'right'; startLine: number; endLine: number; quote: string; body: string };
 
-export interface TurnFile {
-  path: string;
-  repositoryRoot: string | null;
-  repositoryPath: string;
-  added: number | null;
-  removed: number | null;
-  completeCounts: boolean;
-}
-
-export interface TurnChanges {
-  messageId: number;
-  files: TurnFile[];
-  truncated: boolean;
-}
-
-/** One file's recorded diff in a finished turn (the edits the agent made, not the working tree). */
-export interface TurnDiff {
-  patch: string;
-  /** False when some edit could not be verified or the file's earlier text is unknown. */
-  complete: boolean;
-  /** The stored timestamp of the file's last change in the turn. */
-  time: number | null;
-}
-
 export function panelOps(api: Api) {
   return {
     fileRead: (path: string, chatId?: string | null) =>
       api<FileView>('file_read', chatId ? { chatId, path } : { path }),
+    /** Change stamps for up to 8 open files, in order; null for one that is gone or not readable. */
+    fileStat: (paths: string[]) => api<Array<FileStamp | null>>('file_stat', { paths }),
     archiveList: (path: string, chatId?: string | null) =>
       api<ArchiveView>('archive_list', chatId ? { chatId, path } : { path }),
     defaultHandler: (path: string) => api<DefaultHandlerResult>('default_handler', { path }),

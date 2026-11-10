@@ -4,36 +4,40 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FileView } from '../../api/panel.ts';
 import { panelOps } from '../../api/panel.ts';
-import { driveForm, isRemoteOrDevicePath } from '../../markdown/paths.ts';
 import { ExternalIcon, FileTextIcon, FolderOpenIcon } from '../icons.tsx';
 import { IconPlay } from '../../ui/icons.tsx';
+import { forgetBadge } from '../badges.ts';
 import { registerLinkRoute } from '../links.ts';
 import type { PanelTab } from '../model.ts';
-import { openInPanel, panelStore, registerPanelKind, registerPanelSlot, showSlot } from '../registry.ts';
+import { openInPanel, panelStore, registerPanelKind, registerPanelSlot } from '../registry.ts';
 import type { TabContext } from '../registry.ts';
 import { FileViewer } from './FileViewer.tsx';
 import type { Location } from './FileViewer.tsx';
+import { FilesTree } from './FilesTree.tsx';
 import { useLayer } from '../../ui/index.ts';
 import { report } from '../context/store.ts';
-import { basename, displayPath, pathKey } from './paths.ts';
+import { basename, displayPath, joinPath, pathKey } from './paths.ts';
 import { openPageTab } from '../../pages/open.ts';
 import '../../pages/register.tsx';
+import { chatRoot, requestReveal, revealRefusal, useChatRoot } from './reveal.ts';
+import { restoreFileTab, saveFileTab } from './tabdata.ts';
+import type { ViewMode } from './tabdata.ts';
 
 interface FileTabData extends Location {
   /** What the body shows now; it can navigate away from `path`. */
   current?: string;
   currentKind?: FileView['kind'];
+  /** Preview or Source as the person last chose it, and the first visible line of the source. */
+  mode?: ViewMode;
+  top?: number;
+  /** Opened from the Files tree, so the viewer offers a way back to it. */
+  fromFiles?: boolean;
 }
 
 function ops() {
   const api = panelStore.api;
   if (!api) throw new Error('The side panel is not connected to the host yet.');
   return panelOps(api);
-}
-
-/** Only a complete local path survives a restore. */
-function validLocalPath(p: unknown): p is string {
-  return typeof p === 'string' && p.length <= 8192 && driveForm(p) === 'absolute' && !isRemoteOrDevicePath(p);
 }
 
 function FileTabBody({ tab, ctx }: { tab: PanelTab; ctx: TabContext }) {
@@ -56,6 +60,33 @@ function FileTabBody({ tab, ctx }: { tab: PanelTab; ctx: TabContext }) {
     [tab],
   );
   const o = useMemo(() => ops(), []);
+  const chatId = tab.set === '' ? null : tab.set;
+  const root = useChatRoot(o, chatId);
+  const shownPath = data.current ?? data.path;
+  const filesLink = useMemo(
+    () =>
+      chatId
+        ? {
+            refusal: revealRefusal(root, shownPath),
+            fromFiles: data.fromFiles === true,
+            show: (path: string) => requestReveal(chatId, path),
+          }
+        : undefined,
+    [chatId, root, shownPath, data.fromFiles],
+  );
+  const onMode = useCallback(
+    (mode: ViewMode) => ctx.setData({ ...(tab.data as FileTabData), mode }),
+    // ctx changes every render; the tab identity is what matters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tab],
+  );
+  // The reading position changes as the person scrolls: kept on the tab without redrawing the panel.
+  const onTop = useCallback(
+    (line: number) => {
+      (tab.data as FileTabData).top = line;
+    },
+    [tab],
+  );
   const onSelection = useCallback(
     (sel: { startLine: number; endLine: number; text: string } | null) => {
       const d = tab.data as FileTabData;
@@ -64,7 +95,22 @@ function FileTabBody({ tab, ctx }: { tab: PanelTab; ctx: TabContext }) {
     },
     [tab],
   );
-  return <FileViewer ops={o} start={start} chatId={tab.set === '' ? null : tab.set} visible={ctx.visible} onLocation={onLocation} onSelection={onSelection} />;
+  return (
+    <FileViewer
+      ops={o}
+      start={start}
+      chatId={chatId}
+      visible={ctx.visible}
+      live={ctx.focused}
+      initialMode={data.mode}
+      initialTop={data.top}
+      onMode={onMode}
+      onTop={onTop}
+      filesLink={filesLink}
+      onLocation={onLocation}
+      onSelection={onSelection}
+    />
+  );
 }
 
 type AppState = { state: 'idle' } | { state: 'ready'; name: string } | { state: 'none' } | { state: 'refused'; reason: string };
@@ -140,21 +186,11 @@ registerPanelKind({
       </>
     );
   },
+  onClose: (tab) => forgetBadge(tab.id),
   persist: {
     version: 1,
-    save: (tab) => {
-      const d = tab.data as FileTabData;
-      const out: Location = { path: d.path };
-      if (d.line) out.line = d.line;
-      return out;
-    },
-    restore: (data) => {
-      const d = data as Partial<Location> | null;
-      if (!d || !validLocalPath(d.path)) return null;
-      const out: Location = { path: d.path };
-      if (typeof d.line === 'number' && d.line >= 1) out.line = d.line;
-      return out;
-    },
+    save: (tab) => saveFileTab(tab.data as FileTabData),
+    restore: (data) => restoreFileTab(data),
   },
 });
 
@@ -190,58 +226,28 @@ registerLinkRoute('path', async (req, ctx) => {
   }
 });
 
-/** A path asked to show in the Files slot, as the folder holding it, relative to the chat's project folder. */
-let reveal: { dir: string; nonce: number } | null = null;
-let revealNonce = 0;
-const revealListeners = new Set<() => void>();
-
-/** Opens the Files slot in the folder that holds `rel`, a path inside the chat's project folder. */
+/** Shows `rel`, a path inside the current chat's project folder, in the Files tab. False when the path is not a plain relative one. */
 export function revealInFiles(rel: string): boolean {
+  const chatId = panelStore.current;
   const parts = rel.split(/[\\/]/);
-  if (parts.some((s) => s === '' || s === '.' || s === '..')) return false;
-  reveal = { dir: parts.slice(0, -1).join('/'), nonce: ++revealNonce };
-  revealListeners.forEach((l) => l());
-  showSlot('files');
+  if (!chatId || parts.some((s) => s === '' || s === '.' || s === '..')) return false;
+  void chatRoot(ops(), chatId).then((root) => {
+    if (root) requestReveal(chatId, joinPath(root, parts.join('/')));
+    else panelStore.showNotice('This chat has no project folder to browse.');
+  });
   return true;
 }
 
-/** The Inspector's Files slot: the chat's project folder, one level at a time, or the folder a path was revealed in. */
+/** The Inspector's Files slot: the chat's project folder as a tree. */
 function FilesSlot({ chatId, visible }: { chatId: string | null; visible: boolean }) {
-  const [root, setRoot] = useState<string | null | undefined>(undefined);
-  const [asked, setAsked] = useState(reveal);
-  useEffect(() => {
-    const on = () => setAsked(reveal);
-    revealListeners.add(on);
-    return () => {
-      revealListeners.delete(on);
-      reveal = null;
-    };
-  }, []);
-  useEffect(() => {
-    setRoot(undefined);
-    if (!chatId || !visible) return;
-    let cancelled = false;
-    ops()
-      .chatFolder(chatId)
-      .then((r) => !cancelled && setRoot(r.path))
-      .catch(() => !cancelled && setRoot(null));
-    return () => {
-      cancelled = true;
-    };
-  }, [chatId, visible]);
-  const start = useMemo<Location | null>(() => {
-    if (!root) return null;
-    return asked?.dir ? { path: `${root.replace(/[\\/]+$/, '')}/${asked.dir}` } : { path: root };
-    // A new nonce is a new reveal, even of the same folder.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [root, asked?.nonce]);
   const o = useMemo(() => ops(), []);
+  const root = useChatRoot(o, chatId);
   if (!chatId) return <div className="sp-empty">Pick a chat to browse its project files.</div>;
   if (root === undefined) return <div className="sp-empty">Loading…</div>;
-  if (!start) return <div className="sp-empty">This chat has no project folder to browse.</div>;
+  if (!root) return <div className="sp-empty">This chat has no project folder to browse.</div>;
   return (
     <div className="sp-tab-body" data-testid="files-slot">
-      <FileViewer ops={o} start={start} chatId={chatId} visible={visible} root={root ?? undefined} compact />
+      <FilesTree ops={o} chatId={chatId} root={root} visible={visible} />
     </div>
   );
 }
@@ -268,7 +274,7 @@ export function ViewerModal() {
             ×
           </button>
         </div>
-        <FileViewer ops={panelOps(panelStore.api)} start={start} chatId={modal.chatId} visible />
+        <FileViewer ops={panelOps(panelStore.api)} start={start} chatId={modal.chatId} visible live />
       </div>
     </div>
   );

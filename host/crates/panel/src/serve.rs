@@ -164,6 +164,20 @@ impl MediaServer {
                 "The file is too large to preview here. Open it in its default app instead.",
             ));
         }
+        let modified = meta.modified().ok();
+        let mut live = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        // The same unchanged file keeps its token, so a viewer that re-reads it to follow edits is
+        // never left holding an address the new read replaced.
+        if let Some(s) = live
+            .iter()
+            .find(|s| modified.is_some() && s.path == path && s.size == size && s.modified == modified)
+        {
+            return Ok(Opened {
+                token: s.token.clone(),
+                mime,
+                size,
+            });
+        }
         let token = uuid::Uuid::new_v4().simple().to_string();
         let session = Session {
             token: token.clone(),
@@ -171,9 +185,8 @@ impl MediaServer {
             mime,
             kind,
             size,
-            modified: meta.modified().ok(),
+            modified,
         };
-        let mut live = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         live.retain(|s| s.path != session.path);
         while live.len() >= MAX_SESSIONS {
             live.pop_front();
@@ -354,6 +367,12 @@ mod tests {
         // A changed file is refused rather than served.
         std::fs::write(&wav, [1u8; 7]).unwrap();
         assert_eq!(s.respond("GET", &o.token, None).status, 410);
+
+        // Opening the same unchanged file again keeps its token; the changed file got a new one.
+        let renewed = s.open(&wav.to_string_lossy()).unwrap().token;
+        assert_ne!(renewed, o.token);
+        assert_eq!(s.open(&wav.to_string_lossy()).unwrap().token, renewed);
+        assert_eq!(s.respond("GET", &renewed, None).status, 200);
 
         // Other kinds and missing files never get a token.
         let txt = dir.path().join("a.txt");

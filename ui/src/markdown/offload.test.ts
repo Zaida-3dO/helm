@@ -158,3 +158,31 @@ test('the cache evicts the least recently used entry', async () => {
   assert.equal(offloader.cached('a'), 'A');
   assert.equal(offloader.cached('c'), 'C');
 });
+
+/** Fails the test instead of hanging it when a promise never settles. */
+function within<T>(p: Promise<T>, ms = 500): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const hung = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('hung')), ms);
+  });
+  return Promise.race([p, hung]).finally(() => clearTimeout(timer));
+}
+
+test('on one sequence the latest request wins: an older one settles as superseded and its late reply is ignored', async () => {
+  const { offloader, workers, c } = setup();
+  const old = offloader.render('first', { streaming: true }, 'chat-1');
+  const other = offloader.render('elsewhere', {}, 'chat-2');
+  const latest = offloader.render('second', { streaming: true }, 'chat-1');
+  // Only the stale request is dropped: its timer is gone, the others' remain.
+  await assert.rejects(within(old), /superseded/);
+  assert.equal(c.count(), 2);
+  workers[0]?.reply(0, 'stale');
+  workers[0]?.reply(1, 'other');
+  workers[0]?.reply(2, 'fresh');
+  assert.equal(await within(latest), 'fresh');
+  assert.equal(await within(other), 'other');
+  // A cached answer for the newest text still replaces an older request that is waiting.
+  const waiting = offloader.render('third', {}, 'chat-3');
+  assert.equal(await within(offloader.render('elsewhere', {}, 'chat-3')), 'other');
+  await assert.rejects(within(waiting), /superseded/);
+});

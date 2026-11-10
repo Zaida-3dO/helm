@@ -8,6 +8,7 @@ import { panelOps } from '../api/panel.ts';
 import { ContextMenu, useBinding, useLayer } from '../ui/index.ts';
 import type { MenuItem } from '../ui/index.ts';
 import { CloseIcon, FileDiffIcon, FolderTreeIcon, MaximizeIcon, PlusIcon, QuestionIcon, RestoreIcon } from './icons.tsx';
+import { badged, useTabBadges } from './badges.ts';
 import { configureLinks } from './links.ts';
 import { entrySlot, SLOTS, slotEntry } from './model.ts';
 import type { PanelTab, SlotId } from './model.ts';
@@ -15,6 +16,7 @@ import { kindTitle, panelStore, togglePanel } from './registry.ts';
 import type { TabContext } from './registry.ts';
 import { startTabSync } from './sync.ts';
 import { ViewerModal } from './viewer/kinds.tsx';
+import { chatRoot, requestReveal, revealRefusal } from './viewer/reveal.ts';
 import { QuickOpen } from './quickopen/QuickOpen.tsx';
 import './panel.css';
 
@@ -34,10 +36,17 @@ function useWindowFocused(): boolean {
   const [focused, setFocused] = useState(() => (typeof document === 'undefined' ? true : document.hasFocus()));
   useEffect(() => {
     const on = () => setFocused(true);
-    const off = () => setFocused(false);
+    // Clicking into a sealed frame blurs the window while the page still has focus, so a blur is
+    // only believed once the focus has settled.
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const off = () => {
+      clearTimeout(settle);
+      settle = setTimeout(() => setFocused(document.hasFocus()), 0);
+    };
     window.addEventListener('focus', on);
     window.addEventListener('blur', off);
     return () => {
+      clearTimeout(settle);
       window.removeEventListener('focus', on);
       window.removeEventListener('blur', off);
     };
@@ -99,6 +108,28 @@ export function SidePanel({ api, chatId }: SidePanelProps) {
   const activeSlot = active ? entrySlot(active) : null;
   const activeTab = active && !activeSlot ? (displayed.find((t) => t.id === active) ?? null) : null;
   const mounted = activeSlot ? [] : m.mounted(chatId, (k) => Boolean(panelStore.kinds.get(k)?.keepMounted));
+
+  // File tabs that change on disk while another tab is open get a dot.
+  const hostOps = useMemo(() => panelOps(api), [api]);
+  useTabBadges(hostOps, displayed, active, visible && windowFocused);
+
+  // Ctrl+Shift+E: show the open file in the Files tab (refused with a reason outside the workspace).
+  useBinding({
+    id: 'panel.reveal',
+    title: 'Show the open file in Files',
+    defaultKeys: 'Ctrl+Shift+E',
+    enabled: () => visible && activeTab?.kind === 'file' && chatId !== null,
+    run: () => {
+      if (!activeTab || !chatId) return;
+      const d = activeTab.data as { path: string; current?: string };
+      const path = d.current ?? d.path;
+      void chatRoot(hostOps, chatId).then((root) => {
+        const why = revealRefusal(root, path);
+        if (why) panelStore.showNotice(why);
+        else requestReveal(chatId, path);
+      });
+    },
+  });
 
   const contextFor = useCallback(
     (tab: PanelTab): TabContext => {
@@ -401,6 +432,7 @@ function TabStrip({ chatId, displayed, active }: { chatId: string | null; displa
             <span className="sp-tab-content">
               {kind?.icon?.(tab) ?? <QuestionIcon />}
               <span className="sp-tab-title">{title}</span>
+              {badged.has(tab.id) && <span className="sp-tab-badge" data-testid="panel-tab-badge" role="img" aria-label="Changed on disk" title="Changed on disk" />}
             </span>
             <button
               type="button"

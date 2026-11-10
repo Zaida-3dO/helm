@@ -3,6 +3,7 @@
 //! | op | class | args → result |
 //! |---|---|---|
 //! | `file_read` / `dir_list` | heavy | `{chatId?, path}` → [`FileView`](crate::viewer::FileView) (a PDF, audio, video or font comes back with a short-lived `url` served in ranges by [`crate::serve`]) |
+//! | `file_stat` | blocking | `{paths[≤8]}` → one `{modified, size}` or `null` per path (milliseconds since the epoch): how the viewer notices an edit on disk. Contents never travel |
 //! | `archive_list` | heavy | `{chatId?, path}` → [`ArchiveView`](crate::archive::ArchiveView): a ZIP's central directory, never its data |
 //! | `default_handler` | blocking | `{path}` → `{handler: {name, appPath} \| null, refusal: {step, reason} \| null}` |
 //! | `file_open_default` | maintenance | `{path}` → `null`: re-runs every check, then opens |
@@ -30,7 +31,7 @@
 
 use crate::handler::{self, Decision};
 use crate::private::PrivateRoots;
-use crate::viewer::{self, ReadError, ViewKind};
+use crate::viewer::{self, FileStamp, ReadError, ViewKind};
 use crate::{changes, comments, context, git, pathgate, quick, resolve, tabs, turns, vault};
 use helm_core::db::Database;
 use helm_core::profile::Profile;
@@ -42,6 +43,7 @@ use serde_json::{json, Value};
 
 pub fn register_ops(reg: &mut OpRegistry) {
     reg.blocking("file_read", OpClass::Heavy, file_read)
+        .blocking("file_stat", OpClass::Blocking, file_stat)
         .blocking("archive_list", OpClass::Heavy, archive_list)
         .blocking("dir_list", OpClass::Heavy, file_read)
         .blocking("default_handler", OpClass::Blocking, default_handler)
@@ -116,8 +118,53 @@ struct PathArgs {
     path: String,
 }
 
+/// How many paths one `file_stat` call may ask about.
+const STAT_LIMIT: usize = 8;
+
+/// A file's change stamp: modified time in milliseconds since the epoch, and size. No contents.
+fn stamp_of(path: &std::path::Path) -> Option<FileStamp> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    let ms = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    Some(FileStamp {
+        modified: u64::try_from(ms).unwrap_or(u64::MAX),
+        size: meta.len(),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StatArgs {
+    paths: Vec<String>,
+}
+
+/// Change stamps for the files the viewer has open. Every path passes the same gate as a read; one
+/// that fails it, or is gone, comes back `null` so the answer names nothing about it.
+fn file_stat(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let a: StatArgs = parse(args)?;
+    if a.paths.len() > STAT_LIMIT {
+        return Err(refused("Too many files to watch at once."));
+    }
+    let roots = private_roots(ctx);
+    let out: Vec<Option<FileStamp>> = a
+        .paths
+        .iter()
+        .map(|raw| viewer::admit(raw, &roots).ok().and_then(|p| stamp_of(&p)))
+        .collect();
+    serde_json::to_value(out).map_err(|e| ApiError::internal(e.to_string()))
+}
+
 fn file_read(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: PathArgs = parse(args)?;
+    // Stamped before the read, so an edit that lands mid-read shows up as a change on the next look.
+    let modified = viewer::admit(&a.path, &private_roots(ctx))
+        .ok()
+        .and_then(|p| stamp_of(&p))
+        .map(|stamp| stamp.modified);
     let mut view = viewer::read(&a.path, &private_roots(ctx)).map_err(read_error)?;
     if matches!(
         view.kind,
@@ -130,6 +177,7 @@ fn file_read(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             view.url = Some(crate::serve::url_for(&opened.token));
         }
     }
+    view.modified = modified;
     serde_json::to_value(view).map_err(|e| ApiError::internal(e.to_string()))
 }
 
@@ -744,4 +792,46 @@ fn review_turns_op(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         })
         .map_err(db_err)?;
     serde_json::to_value(out).map_err(|e| ApiError::internal(e.to_string()))
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::*;
+
+    #[test]
+    fn a_stamp_follows_size_and_goes_away_with_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "one").unwrap();
+        assert_eq!(stamp_of(&f).unwrap().size, 3);
+        std::fs::write(&f, "three").unwrap();
+        assert_eq!(stamp_of(&f).unwrap().size, 5);
+        // A folder has a stamp too, so a listing can be refreshed when entries come and go.
+        assert!(stamp_of(dir.path()).is_some());
+        std::fs::remove_file(&f).unwrap();
+        assert!(stamp_of(&f).is_none());
+    }
+
+    #[test]
+    fn file_stat_answers_each_path_in_order_and_refuses_a_long_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "one").unwrap();
+        let ctx = OpCtx {
+            services: std::sync::Arc::new(helm_ipc::Services::new()),
+            events: std::sync::Arc::new(helm_ipc::NullSink),
+        };
+        let here = f.to_string_lossy().into_owned();
+        let gone = dir.path().join("none.txt").to_string_lossy().into_owned();
+        // A relative path fails the gate: it comes back null like a missing file, naming nothing.
+        let answer = file_stat(&ctx, json!({ "paths": [here, gone, "a.txt"] })).unwrap();
+        let rows = answer.as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["size"], 3);
+        assert!(rows[0]["modified"].as_u64().unwrap() > 0);
+        assert!(rows[1].is_null() && rows[2].is_null());
+        assert!(file_stat(&ctx, json!({ "paths": [] })).unwrap().as_array().unwrap().is_empty());
+        let nine: Vec<String> = (0..=STAT_LIMIT).map(|i| format!("f{i}")).collect();
+        assert!(file_stat(&ctx, json!({ "paths": nine })).is_err());
+    }
 }

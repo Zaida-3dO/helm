@@ -19,8 +19,10 @@
 //! | [`tabs`] | saved panel tabs in a per-chat side table |
 //! | [`vault`] | Obsidian vaults, note resolution, confined reads, Open in Obsidian, the agent link instructions |
 //! | [`ops`] | the `api` ops |
+//! | [`bindings`] | generated TypeScript in `ui/src/api/generated/panel/` |
 
 pub mod archive;
+pub mod bindings;
 pub mod changes;
 pub mod comments;
 pub mod context;

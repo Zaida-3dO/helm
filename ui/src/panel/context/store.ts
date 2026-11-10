@@ -8,7 +8,7 @@ import { panelStore } from '../registry.ts';
 
 /** The per-chat eye toggle, as last read from or written to the host. */
 export const contextOn = new Map<string, boolean>();
-/** A body's own item, keyed by tab id or `changes:<chat>`. */
+/** A body's own item, keyed by tab id, `changes:<chat>` or `files:<chat>`. */
 const reported = new Map<string, ContextItem | null>();
 /** Pending review comments per chat. */
 export const pendingComments = new Map<string, ReviewComment[]>();
@@ -34,7 +34,7 @@ export function focusComment(chatId: string, id: string | null): void {
   panelStore.changed();
 }
 
-/** The item open next to `chatId`: the shown tab or the Changes slot's selection or comment. */
+/** The item open next to `chatId`: the shown tab, the Changes slot's selection or comment, or the Files row selected. */
 export function currentItem(chatId: string): ContextItem | null {
   const m = panelStore.model;
   if (!m.visible(chatId)) return null;
@@ -48,7 +48,7 @@ export function currentItem(chatId: string): ContextItem | null {
     }
     return reported.get(`changes:${chatId}`) ?? null;
   }
-  if (entrySlot(entry)) return null;
+  if (entrySlot(entry) === 'files') return reported.get(`files:${chatId}`) ?? null;
   return reported.get(entry) ?? null;
 }
 

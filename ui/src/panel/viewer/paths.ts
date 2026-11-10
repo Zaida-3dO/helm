@@ -28,6 +28,27 @@ export function basename(p: string): string {
   return at < 0 ? s : s.slice(at + 1) || s;
 }
 
+/** True when `path` is `root` or below it (compared the way tabs are: case-insensitively). */
+export function isInside(root: string, path: string): boolean {
+  const r = pathKey(root);
+  const p = pathKey(path);
+  if (p === r) return true;
+  return p.startsWith(r.endsWith('\\') ? r : `${r}\\`);
+}
+
+/** The folders from `root` down to the parent of `path` (root first); empty when `path` is outside `root`. */
+export function ancestorsWithin(root: string, path: string): string[] {
+  if (!isInside(root, path) || pathKey(root) === pathKey(path)) return [];
+  const out: string[] = [];
+  let at = dirname(path);
+  while (at && isInside(root, at)) {
+    out.unshift(at);
+    if (pathKey(at) === pathKey(root)) break;
+    at = dirname(at);
+  }
+  return out;
+}
+
 /** Joins a relative path onto a folder, resolving `.` and `..` lexically (never above the drive). */
 export function joinPath(base: string, rel: string): string {
   const parts = displayPath(base).split('\\');

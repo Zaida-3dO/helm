@@ -10,6 +10,7 @@ use crate::private::PrivateRoots;
 use crate::viewer::{self, ReadError, ViewKind};
 use serde::Serialize;
 use std::io::{Read, Seek, SeekFrom};
+use ts_rs::TS;
 
 pub const MAX_ENTRIES: usize = 10_000;
 pub const MAX_DIRECTORY: u64 = 8 * 1024 * 1024;
@@ -22,26 +23,30 @@ const EOCD_SEARCH: u64 = EOCD_LEN as u64 + 65_535;
 const CENTRAL_SIG: [u8; 4] = [0x50, 0x4b, 0x01, 0x02];
 const CENTRAL_LEN: usize = 46;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchiveEntry {
     pub path: String,
     /// Uncompressed size; absent when the archive stores it only in a ZIP64 extra field.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
     pub size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
     pub compressed_size: Option<u64>,
     pub dir: bool,
     pub encrypted: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchiveView {
     pub path: String,
+    #[ts(type = "number")]
     pub size: u64,
     pub entries: Vec<ArchiveEntry>,
     /// Every entry the directory declares, listed or not.
+    #[ts(type = "number")]
     pub total: usize,
     pub truncated: bool,
 }

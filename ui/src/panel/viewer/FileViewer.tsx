@@ -1,17 +1,22 @@
 // The file viewer body, shared by `file` tabs, the Inspector's Files
 // slot and the modal viewer. It reads only while it is shown (a restored tab reads nothing until it
-// is selected), keeps its own back/forward history, and never executes what it previews.
+// is selected), keeps its own back/forward history, follows the file on disk while it is on screen
+// (a cheap check of the modified time, then a re-read that keeps the reading position), and never
+// executes what it previews.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FileView, PanelOps } from '../../api/panel.ts';
 import { Markdown } from '../../markdown/index.ts';
+import { Button } from '../../ui/index.ts';
 import type { LinkTarget } from '../../markdown/index.ts';
-import { BackIcon, BrowseFolderIcon, ChevronIcon, CopyIcon, EyeIcon, EyeOffIcon, FileTextIcon, FolderOpenIcon, ForwardIcon, ReloadIcon, UpIcon, WrapIcon } from '../icons.tsx';
+import { BackIcon, BrowseFolderIcon, ChevronIcon, CopyIcon, EyeIcon, EyeOffIcon, FileTextIcon, FolderOpenIcon, FolderTreeIcon, ForwardIcon, ReloadIcon, UpIcon, WrapIcon } from '../icons.tsx';
 import { gateTarget, handleLink } from '../links.ts';
 import { openInPanel } from '../registry.ts';
 import { CodeView } from './CodeView.tsx';
 import { dirname, displayPath, joinPath, pathKey, splitSegments } from './paths.ts';
+import { changedSince, LIVE_POLL_MS, noteShown, sameContent, UPDATED_DOT_MS, updatedLabel } from './live.ts';
 import { sizeLabel } from './preview.ts';
+import type { ViewMode } from './tabdata.ts';
 import { ArchivePreview, canPreview, FontPreview, ImagePreview, JsonPreview, MediaPreview, PdfPreview, TablePreview } from './previews.tsx';
 
 export interface Location {
@@ -83,9 +88,19 @@ export interface FileViewerProps {
   compact?: boolean;
   /** The source view's highlighted lines, for the side panel context. */
   onSelection?: (sel: { startLine: number; endLine: number; text: string } | null) => void;
+  /** Follow the file on disk: checked about once a second, only while true (shown, window focused). */
+  live?: boolean;
+  /** Preview or Source to start in, and the first visible line to come back to (a restored tab). */
+  initialMode?: ViewMode | null;
+  initialTop?: number;
+  /** The person chose a mode / scrolled the start file's source: the tab keeps it. */
+  onMode?: (mode: ViewMode) => void;
+  onTop?: (line: number) => void;
+  /** The tab's link to the Files tree: why Show in Files is unavailable (null: it is), whether the tab was opened from the tree, and the action. */
+  filesLink?: { refusal: string | null; fromFiles: boolean; show: (path: string) => void };
 }
 
-export function FileViewer({ ops, start, chatId, visible, onLocation, root, compact, onSelection }: FileViewerProps) {
+export function FileViewer({ ops, start, chatId, visible, onLocation, root, compact, onSelection, live, initialMode, initialTop, onMode, onTop, filesLink }: FileViewerProps) {
   const [history, setHistory] = useState<{ stack: Location[]; index: number }>({ stack: [start], index: 0 });
   const [view, setView] = useState<FileView | null>(null);
   const [loadedFor, setLoadedFor] = useState<Location | null>(null);
@@ -93,12 +108,27 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
   const [loading, setLoading] = useState(false);
   const [reload, setReload] = useState(0);
   const [wrap, setWrap] = useState(false);
-  const [mode, setMode] = useState<'preview' | 'source' | null>(null);
+  const [mode, setMode] = useState<ViewMode | null>(initialMode ?? null);
+  // When the file last changed under the person's eyes (the breadcrumb's dot), and a tick to age it.
+  const [updated, setUpdated] = useState<{ path: string; at: number } | null>(null);
+  const [, setAge] = useState(0);
+  // A live refresh keeps what is on screen and shows no spinner.
+  const quietRead = useRef(false);
+  const shownView = useRef<FileView | null>(null);
+  const hasError = useRef(false);
+  // The modified time of what is on screen: a later one on disk means the file changed.
+  const baseline = useRef<number | undefined>(undefined);
   const [copied, setCopied] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
 
+  shownView.current = view;
+  hasError.current = error !== null;
+
   // A new start (the same file reopened at another line) resets the history.
+  const lastStart = useRef(start);
   useEffect(() => {
+    if (lastStart.current === start) return;
+    lastStart.current = start;
     setHistory({ stack: [start], index: 0 });
     setMode(null);
   }, [start]);
@@ -109,17 +139,27 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
     if (!visible) return;
     if (loadedFor === loc && reload === 0) return;
     let cancelled = false;
-    setLoading(true);
+    const quiet = quietRead.current && loadedFor === loc;
+    quietRead.current = false;
+    if (!quiet) setLoading(true);
     ops
       .fileRead(loc.path, chatId)
       .then((v) => {
         if (cancelled) return;
+        baseline.current = v.modified;
+        noteShown(loc.path, v.modified);
+        // A re-read that shows the same thing redraws nothing.
+        if (quiet && sameContent(shownView.current, v)) return;
+        if (quiet) setUpdated({ path: loc.path, at: Date.now() });
         setView(v);
         setError(null);
         setLoadedFor(loc);
       })
       .catch((e: unknown) => {
         if (cancelled) return;
+        // A file caught mid-write or just removed keeps the last good view until the next change.
+        if (quiet) return;
+        baseline.current = undefined;
         setView(null);
         setError(e instanceof Error ? e.message : String(e));
         setLoadedFor(loc);
@@ -140,6 +180,57 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
   useEffect(() => {
     onLocation?.(loc, loadedFor === loc ? view : null);
   }, [loc, view, loadedFor, onLocation]);
+
+  // Following the file: while it is on screen, ask the host about its modified time (never its
+  // contents) and re-read quietly when it moved. A file that was missing and comes back is read too.
+  useEffect(() => {
+    if (!live || !visible || loadedFor !== loc) return;
+    let stopped = false;
+    let busy = false;
+    const refresh = () => {
+      quietRead.current = true;
+      setReload((n) => n + 1);
+    };
+    const tick = () => {
+      if (busy) return;
+      busy = true;
+      ops
+        .fileStat([loc.path])
+        .then(([stamp]) => {
+          if (stopped || !stamp) return;
+          const before = baseline.current;
+          if (before === undefined) {
+            baseline.current = stamp.modified;
+            if (hasError.current) refresh();
+          } else if (changedSince(before, stamp)) {
+            baseline.current = stamp.modified;
+            refresh();
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          busy = false;
+        });
+    };
+    const timer = setInterval(tick, LIVE_POLL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [live, visible, loc, loadedFor, ops]);
+
+  // The dot ages in whole seconds and goes after a few.
+  const updatedAt = updated && updated.path === loc.path ? updated.at : null;
+  useEffect(() => {
+    if (updatedAt === null) return;
+    const timer = setInterval(() => {
+      if (Date.now() - updatedAt >= UPDATED_DOT_MS) {
+        clearInterval(timer);
+        setUpdated(null);
+      } else setAge((n) => n + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [updatedAt]);
 
   const imageUrl = useObjectUrl(view);
 
@@ -184,11 +275,28 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
   const name = segments[segments.length - 1]?.name ?? loc.path;
   const showWrap = view?.kind === 'text' && (!renderable || effectiveMode === 'source');
   const canGoBack = history.index > 0;
+  const chooseMode = (m: ViewMode) => {
+    setMode(m);
+    onMode?.(m);
+  };
   const toolbar = (
     <div className={compact ? 'fv-toolbar compact' : 'fv-toolbar'}>
       <span className="fv-label">
         {compact && canGoBack && (
           <button type="button" className="fv-icon-btn" aria-label="Back" title="Back" onClick={() => setHistory((h) => ({ ...h, index: h.index - 1 }))}>
+            <BackIcon />
+          </button>
+        )}
+        {filesLink?.fromFiles && (
+          <button
+            type="button"
+            className="fv-icon-btn"
+            data-testid="back-to-files"
+            aria-label="Back to files"
+            title="Back to files"
+            disabled={filesLink.refusal !== null}
+            onClick={() => filesLink.show(loc.path)}
+          >
             <BackIcon />
           </button>
         )}
@@ -200,10 +308,10 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
       <span className="fv-tools">
         {renderable && (
           <span className="fv-segmented" role="group" aria-label="View mode">
-            <button type="button" aria-pressed={effectiveMode === 'preview'} onClick={() => setMode('preview')}>
+            <button type="button" aria-pressed={effectiveMode === 'preview'} onClick={() => chooseMode('preview')}>
               Preview
             </button>
-            <button type="button" aria-pressed={effectiveMode === 'source'} onClick={() => setMode('source')}>
+            <button type="button" aria-pressed={effectiveMode === 'source'} onClick={() => chooseMode('source')}>
               Source
             </button>
           </span>
@@ -225,20 +333,21 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
             <WrapIcon />
           </button>
         )}
-        <button
-          type="button"
-          className={loading ? 'fv-icon-btn is-loading' : 'fv-icon-btn'}
-          aria-label="Reload"
-          aria-busy={loading || undefined}
-          title="Reload"
-          onClick={() => setReload((n) => n + 1)}
-        >
-          <ReloadIcon />
-        </button>
+        {filesLink && (
+          <Button
+            className="fv-tool"
+            data-testid="show-in-files"
+            disabled={filesLink.refusal !== null}
+            title={filesLink.refusal ?? 'Show this file in the Files tab'}
+            onClick={() => filesLink.show(loc.path)}
+          >
+            <FolderTreeIcon />
+            <span className="fv-btn-text">Show in Files</span>
+          </Button>
+        )}
         {view?.text !== undefined && (
-          <button
-            type="button"
-            className="fv-button bordered"
+          <Button
+            className="fv-tool"
             title={view.truncated ? 'Copy the excerpt shown' : 'Copy the file contents'}
             onClick={() => {
               void navigator.clipboard?.writeText(view.text ?? '').then(() => setCopied(true));
@@ -247,15 +356,15 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
           >
             <CopyIcon />
             <span className="fv-btn-text">{copied ? 'Copied' : view.truncated ? 'Copy preview' : 'Copy'}</span>
-          </button>
+          </Button>
         )}
         <button type="button" className="fv-icon-btn" aria-label="Show in File Explorer" title="Show in File Explorer" onClick={() => void ops.reveal(loc.path).catch(() => undefined)}>
           <FolderOpenIcon />
         </button>
-        <button type="button" className="fv-button bordered" title="Copy path" onClick={() => void navigator.clipboard?.writeText(displayPath(loc.path))}>
+        <Button className="fv-tool" title="Copy path" onClick={() => void navigator.clipboard?.writeText(displayPath(loc.path))}>
           <CopyIcon />
           <span className="fv-btn-text">Copy path</span>
-        </button>
+        </Button>
       </span>
     </div>
   );
@@ -292,6 +401,12 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
           </span>
         ))}
       </nav>
+      {updatedAt !== null && (
+        <span className="fv-live" data-testid="live-dot" role="status">
+          <span className="fv-live-dot" aria-hidden />
+          {updatedLabel(Date.now() - updatedAt)}
+        </span>
+      )}
       {loc.line ? (
         <span className="fv-line">
           {loc.endLine && loc.endLine > loc.line ? `Lines ${loc.line}–${loc.endLine}` : `Line ${loc.line}`}
@@ -312,6 +427,10 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
     body = (
       <div className="fv-message" role="alert" data-testid="file-error">
         {error}
+        <Button className="fv-tool" data-testid="file-retry" onClick={() => setReload((n) => n + 1)}>
+          <ReloadIcon />
+          <span className="fv-btn-text">Try again</span>
+        </Button>
       </div>
     );
   } else if (!view) {
@@ -391,7 +510,18 @@ export function FileViewer({ ops, start, chatId, visible, onLocation, root, comp
     );
   } else {
     body = (
-      <CodeView text={view.text ?? ''} language={view.language} wrap={wrap} line={loc.line} endLine={loc.endLine} column={loc.column} onSelection={onSelection} />
+      <CodeView
+        text={view.text ?? ''}
+        language={view.language}
+        wrap={wrap}
+        line={loc.line}
+        endLine={loc.endLine}
+        column={loc.column}
+        onSelection={onSelection}
+        fileKey={loc.path}
+        topLine={loc.path === start.path ? initialTop : undefined}
+        onTopLine={onTop && loc.path === start.path ? onTop : undefined}
+      />
     );
   }
 

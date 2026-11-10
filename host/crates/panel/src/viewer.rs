@@ -13,6 +13,7 @@ use base64::Engine;
 use serde::Serialize;
 use std::io::Read;
 use std::path::Path;
+use ts_rs::TS;
 
 pub const TEXT_LIMIT: u64 = 512 * 1024;
 pub const IMAGE_LIMIT: u64 = 8 * 1024 * 1024;
@@ -20,7 +21,7 @@ pub const DIR_LIMIT: usize = 1000;
 /// Bytes inspected for a NUL to call a file binary.
 const SNIFF: usize = 8 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum ViewKind {
     Text,
@@ -35,37 +36,61 @@ pub enum ViewKind {
     Archive,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DirEntry {
     pub name: String,
     /// `dir`, `file` or `link`.
+    #[ts(type = "'dir' | 'file' | 'link'")]
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
     pub size: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct FileView {
     pub path: String,
     pub kind: ViewKind,
+    #[ts(type = "number")]
     pub size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub text: Option<String>,
     /// Base64 image bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub bytes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string")]
     pub mime: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub entries: Option<Vec<DirEntry>>,
     /// Where the renderer loads a PDF, audio, video or font from (a short-lived address).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub url: Option<String>,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string")]
     pub language: Option<&'static str>,
+    /// When the file last changed on disk (milliseconds since the epoch), read just before its
+    /// contents. Set by the `file_read` op.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub modified: Option<u64>,
+}
+
+/// A file's change stamp: modified time (milliseconds since the epoch) and size. No contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStamp {
+    #[ts(type = "number")]
+    pub modified: u64,
+    #[ts(type = "number")]
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +258,7 @@ pub fn read(raw: &str, roots: &PrivateRoots) -> Result<FileView, ReadError> {
             url: None,
             truncated,
             language: None,
+            modified: None,
         });
     }
     let size = meta.len();
@@ -255,6 +281,7 @@ pub fn read(raw: &str, roots: &PrivateRoots) -> Result<FileView, ReadError> {
             url: None,
             truncated: false,
             language: None,
+            modified: None,
         });
     }
     if let Some((kind, mime)) = stream_kind(&ext) {
@@ -275,6 +302,7 @@ pub fn read(raw: &str, roots: &PrivateRoots) -> Result<FileView, ReadError> {
             url: None,
             truncated: false,
             language: None,
+            modified: None,
         });
     }
     let f = helm_platform::fs::open_regular_no_follow(&path).map_err(io_err)?;
@@ -295,6 +323,7 @@ pub fn read(raw: &str, roots: &PrivateRoots) -> Result<FileView, ReadError> {
             url: None,
             truncated: false,
             language: None,
+            modified: None,
         });
     }
     let truncated = size > TEXT_LIMIT || buf.len() as u64 > TEXT_LIMIT;
@@ -311,6 +340,7 @@ pub fn read(raw: &str, roots: &PrivateRoots) -> Result<FileView, ReadError> {
         url: None,
         truncated,
         language: language_for(&path),
+        modified: None,
     })
 }
 

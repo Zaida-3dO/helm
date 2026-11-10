@@ -15,6 +15,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use ts_rs::TS;
 
 pub const MAX_RESULTS: usize = 50;
 pub const INDEX_LIMIT: usize = 100_000;
@@ -33,19 +34,22 @@ const SKIP_DIRS: &[&str] = &[
     "vendor",
 ];
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct QuickItem {
     pub path: String,
     /// Shown text: relative to the project in fuzzy mode, the entry name in path mode.
     pub label: String,
+    #[ts(type = "'dir' | 'file' | 'link'")]
     pub kind: &'static str,
+    #[ts(type = "number")]
     pub score: i64,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct QuickResult {
+    #[ts(type = "'path' | 'files'")]
     pub mode: &'static str,
     pub items: Vec<QuickItem>,
     pub partial: bool,

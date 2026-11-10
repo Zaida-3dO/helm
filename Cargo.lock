@@ -2084,6 +2084,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "ts-rs",
  "uuid",
  "windows-sys 0.59.0",
 ]

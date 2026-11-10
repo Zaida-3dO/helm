@@ -62,6 +62,11 @@ pub fn find_git(skip: Option<&Path>) -> Option<PathBuf> {
 }
 
 /// The hardening flags that precede every subcommand.
+///
+/// These switch off the pager, the file system monitor, the external diff and colour. They do not
+/// switch off `clean` and `process` filters: those come from the repository's own configuration and
+/// attributes, and git runs them itself when it compares a working file with the index. A repository
+/// that defines one is trusted to that extent, as it is for any `git status` run in it.
 pub fn base_args() -> Vec<&'static str> {
     vec![
         "--no-pager",

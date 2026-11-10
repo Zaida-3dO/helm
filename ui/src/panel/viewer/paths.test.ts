@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { basename, dirname, displayPath, joinPath, matchSegments, pathKey, splitSegments } from './paths.ts';
+import { ancestorsWithin, basename, dirname, displayPath, isInside, joinPath, matchSegments, pathKey, splitSegments } from './paths.ts';
 
 const r = String.raw;
 const ROOT = 'C:\\';
@@ -41,4 +41,19 @@ test('matchSegments marks a contiguous match, else in-order letters, else nothin
   assert.deepEqual(marks('Composer.tsx', 'zzz'), []);
   assert.deepEqual(matchSegments('abc', ''), [{ text: 'abc', hit: false }]);
   assert.equal(matchSegments('Composer.tsx', 'cmpsr').map((x) => x.text).join(''), 'Composer.tsx');
+});
+
+test('isInside and ancestorsWithin compare case-insensitively and never match a sibling prefix', () => {
+  const inside: Array<[string, string, boolean]> = [
+    [r`C:\proj`, r`C:\proj`, true],
+    [r`C:\proj`, r`c:/PROJ/src/a.ts`, true],
+    [r`C:\proj`, r`C:\project\a.ts`, false],
+    [r`C:\proj`, r`C:\other\proj\a.ts`, false],
+    [ROOT, r`C:\a`, true],
+  ];
+  for (const [root, path, want] of inside) assert.equal(isInside(root, path), want, `${root} ${path}`);
+  assert.deepEqual(ancestorsWithin(r`C:\proj`, r`C:\proj\src\ui\a.ts`), [r`C:\proj`, r`C:\proj\src`, r`C:\proj\src\ui`]);
+  assert.deepEqual(ancestorsWithin(r`C:\proj`, r`C:\proj\a.ts`), [r`C:\proj`]);
+  assert.deepEqual(ancestorsWithin(r`C:\proj`, r`C:\elsewhere\a.ts`), []);
+  assert.deepEqual(ancestorsWithin(r`C:\proj`, r`C:\proj`), []);
 });

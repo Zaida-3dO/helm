@@ -15,26 +15,30 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use ts_rs::TS;
 
 pub const MAX_IDS: usize = 600;
 pub const MAX_TURNS: usize = 64;
 pub const MAX_EVENTS_PER_TURN: usize = 512;
 pub const MAX_EVENTS: usize = 2048;
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnFile {
     pub path: String,
     pub repository_root: Option<String>,
     pub repository_path: String,
+    #[ts(type = "number | null")]
     pub added: Option<u64>,
+    #[ts(type = "number | null")]
     pub removed: Option<u64>,
     pub complete_counts: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnChanges {
+    #[ts(type = "number")]
     pub message_id: i64,
     pub files: Vec<TurnFile>,
     pub truncated: bool,
@@ -57,7 +61,7 @@ pub fn events_of(tool: &str, args: &Value, result: &str) -> Option<(String, Vec<
         // Claude Code's Write result says whether it created the file or updated it.
         "Write" => vec![Event::Write {
             content: s(args, "content")?,
-            created: result.to_ascii_lowercase().contains("created"),
+            created: result.starts_with("File created"),
         }],
         "Edit" => vec![Event::Edit {
             old: s(args, "old_string")?,
@@ -369,7 +373,7 @@ pub fn review_turns(
 }
 
 /// One file's recorded change in a turn, as a unified diff of the edits the agent made.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnDiff {
     /// Empty when the history cannot be turned into a diff (see `complete`).
@@ -377,6 +381,7 @@ pub struct TurnDiff {
     /// False when some edit could not be verified or the file's earlier text is unknown.
     pub complete: bool,
     /// The `timestamp` of the last change to the file, as stored.
+    #[ts(type = "number | null")]
     pub time: Option<i64>,
 }
 
@@ -613,6 +618,9 @@ mod tests {
         };
         assert!(created("File created successfully at: C:/a"));
         assert!(!created("The file C:/a has been updated."));
+        // Only the start of the result says so: a word inside a path or a message does not.
+        assert!(!created("The file C:/created/a.txt has been updated."));
+        assert!(!created("Error: File created elsewhere"));
         assert!(events_of("Read", &json!({"file_path": "C:/a"}), "").is_none());
         assert!(events_of("Edit", &json!({"file_path": "C:/a"}), "").is_none());
     }

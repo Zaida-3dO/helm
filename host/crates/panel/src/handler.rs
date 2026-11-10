@@ -17,6 +17,7 @@ use crate::viewer::{admit, ReadError};
 use serde::Serialize;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use ts_rs::TS;
 
 pub const LAUNCH_EXTENSIONS: &[&str] = &[
     "exe",
@@ -105,7 +106,7 @@ pub const DENIED_HANDLERS: &[&str] = &[
     "hh.exe",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Handler {
     pub name: String,
@@ -113,7 +114,7 @@ pub struct Handler {
 }
 
 /// Which check refused, in the order they run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase", tag = "step", content = "reason")]
 pub enum Refusal {
     Path(String),

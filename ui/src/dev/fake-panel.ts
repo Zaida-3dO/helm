@@ -54,6 +54,7 @@ function read(path: string): FileView {
       text,
       truncated: false,
       language: language(fileKey),
+      modified: 1,
     };
   }
   const prefix = rel ? `${rel}\\` : '';
@@ -181,6 +182,18 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       case 'file_read':
       case 'dir_list':
         return read(String(args.path ?? ''));
+      case 'file_stat': {
+        // Every readable path is stamped with the same time, so nothing looks changed.
+        const paths = Array.isArray(args.paths) ? (args.paths as string[]) : [];
+        return paths.map((p) => {
+          try {
+            const v = read(String(p));
+            return { modified: 1, size: v.size };
+          } catch {
+            return null;
+          }
+        });
+      }
       case 'archive_list':
         return {
           path: String(args.path ?? ''),
