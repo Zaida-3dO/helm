@@ -9,9 +9,13 @@
 //!   symlinks), because a recursive delete could follow one into a shared folder. The message
 //!   says to take the links out as directory entries first.
 //!
+//! Helm reaches it two ways: the `PATH` prefix (PowerShell, `cmd`, programs that start `git` by
+//! name) and, for bash, an exported `git` function, because Git Bash's login profile puts its own
+//! `git.exe` ahead of the inherited `PATH`.
+//!
 //! Not covered: git aliases and autocorrected spellings of `worktree`, programs that do not use
-//! `git.exe` (libgit2 and the like), and a git called by its full path. It is a guard against
-//! accidents, not a sandbox.
+//! `git.exe` (libgit2 and the like), `command git` in bash, and a git called by its full path. It
+//! is a guard against accidents, not a sandbox.
 //!
 //! Environment (set by Helm when it starts a chat):
 //! - `HELM_REAL_GIT`: the real git. Without it the stand-in walks `PATH` itself, skipping its own

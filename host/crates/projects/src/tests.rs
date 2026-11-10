@@ -1600,11 +1600,49 @@ fn the_git_stand_in_is_on_the_path_only_while_a_repository_is_off() {
         .env
         .iter()
         .any(|(k, v)| k == "HELM_WORKTREE_OFF_LIST" && v.ends_with("worktrees-off.tsv")));
+    // Bash's login profile puts Git's own folder ahead of the inherited `PATH`, so bash also gets
+    // `git` as an exported function that calls the stand-in.
+    let function = x
+        .env
+        .iter()
+        .find(|(k, _)| k == crate::guard::BASH_GIT_FUNCTION_VAR)
+        .map(|(_, v)| v.as_str())
+        .expect("bash gets a git function");
+    assert!(function.starts_with("() {") && function.ends_with("\n}"));
+    assert!(function.contains("git") && function.contains("\"$@\""));
     std::fs::write(&list, "").unwrap();
     assert!(
         guard.contribute(&ctx).is_empty(),
         "switched back on: untouched again"
     );
+}
+
+/// The exported `git` function names the stand-in the way bash writes paths.
+#[test]
+fn the_bash_git_function_writes_the_path_the_way_bash_does() {
+    use crate::guard::bash_git_function;
+    use std::path::Path;
+    let cases = [
+        (
+            r"C:\Users\me\AppData\Local\Helm\agent-bin\git.exe",
+            "() {  '/c/Users/me/AppData/Local/Helm/agent-bin/git.exe' \"$@\"\n}",
+        ),
+        (
+            "d:/profile/agent-bin/git.exe",
+            "() {  '/d/profile/agent-bin/git.exe' \"$@\"\n}",
+        ),
+        (
+            "/home/me/agent-bin/git",
+            "() {  '/home/me/agent-bin/git' \"$@\"\n}",
+        ),
+        (
+            "/home/o'brien/git",
+            "() {  '/home/o'\\''brien/git' \"$@\"\n}",
+        ),
+    ];
+    for (shim, want) in cases {
+        assert_eq!(bash_git_function(Path::new(shim)), want, "{shim}");
+    }
 }
 
 // ---- Boards as where chats are shown ---------------------------------------------------------
