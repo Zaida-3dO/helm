@@ -688,6 +688,7 @@ pub(crate) mod tests {
             ("attachment_get", OpClass::Blocking),
             ("local_image_get", OpClass::Blocking),
             ("attachment_ref", OpClass::Maintenance),
+            ("attachment_text_put", OpClass::Maintenance),
             ("attachment_list", OpClass::Blocking),
             ("attachment_recover", OpClass::Maintenance),
             ("attachment_discard", OpClass::Maintenance),

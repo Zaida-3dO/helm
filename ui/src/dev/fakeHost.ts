@@ -841,6 +841,14 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       sentRefList.set(attachmentId, { chatId, kind, name, target, sent: null });
       return { attachmentId, kind, name };
     },
+    attachment_text_put: (a) => {
+      const attachmentId = uid();
+      const name = String(a.name);
+      const target = `C:/Users/me/AppData/Local/Helm/attachments/${attachmentId}/${name}`;
+      sentRefList.set(attachmentId, { chatId: String(a.chatId), kind: 'file', name, target, sent: null });
+      return { attachmentId, kind: 'file', name, target };
+    },
+    title_suggest: () => ({ title: 'Suggested chat title' }),
     files_pick: () => ({ paths: ['C:\\Users\\me\\Documents\\notes.md', 'C:\\Users\\me\\Pictures\\shot.png'] }),
     attachment_put: (a) => {
       const attachmentId = uid();

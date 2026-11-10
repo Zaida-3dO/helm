@@ -32,6 +32,8 @@ export interface VirtualListProps {
   jumpTo?: string | null;
   /** Reports whether the reader is following the end (the store trims the other end). */
   onFollowChange?: (following: boolean) => void;
+  /** When this changes (not on the first render) the list jumps to the newest row and follows it. */
+  scrollSignal?: number;
   /** A height guess for a row not yet measured (virtual.ts `estimateHeight`). */
   estimate?: (key: string) => number;
 }
@@ -54,7 +56,7 @@ interface Rows {
   refs: Map<string, RowRef>;
 }
 
-export function VirtualList({ keys, render, hasOlder, onLoadOlder, onJumpLatest, jumpTo, onFollowChange, estimate }: VirtualListProps) {
+export function VirtualList({ keys, render, hasOlder, onLoadOlder, onJumpLatest, jumpTo, onFollowChange, scrollSignal, estimate }: VirtualListProps) {
   const scroller = useRef<HTMLDivElement>(null);
   const geometry = useRef<Geometry | null>(null);
   geometry.current ??= new Geometry(sharedHeights);
@@ -290,6 +292,15 @@ export function VirtualList({ keys, render, hasOlder, onLoadOlder, onJumpLatest,
       if (el) el.scrollTop = el.scrollHeight;
     });
   };
+
+  const signalSeen = useRef(scrollSignal);
+  useEffect(() => {
+    if (scrollSignal === signalSeen.current) return;
+    signalSeen.current = scrollSignal;
+    jumpLatest();
+    // jumpLatest only reads props that stay the same for this effect's purpose.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollSignal]);
 
   return (
     <div className="transcript-wrap">

@@ -18,13 +18,15 @@ export interface TranscriptProps {
   onJumpLatest: () => Promise<void>;
   onFollowChange: (following: boolean) => void;
   jumpToRowId?: number | null;
+  /** Changes when the transcript should jump to the newest message and follow it (the reader sent one). */
+  scrollSignal?: number;
 }
 
 function itemKey(i: Item): string {
   return i.kind === 'row' ? `r:${i.row.id}` : i.key;
 }
 
-export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLatest, onFollowChange, jumpToRowId }: TranscriptProps) {
+export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLatest, onFollowChange, jumpToRowId, scrollSignal }: TranscriptProps) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const items = useMemo(() => layout(rows, live, expanded), [rows, live, expanded]);
   // A row inside a subagent group is found under the group's key.
@@ -80,6 +82,7 @@ export function Transcript({ rows, live, hasOlder, ctx, onLoadOlder, onJumpLates
       onJumpLatest={onJumpLatest}
       onFollowChange={onFollowChange}
       jumpTo={jumpKey}
+      scrollSignal={scrollSignal}
       estimate={(k) => estimateItem(byKey.get(k))} // height guesses for unmeasured rows
       render={(k) => {
         const item = byKey.get(k);

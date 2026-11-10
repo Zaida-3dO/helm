@@ -30,7 +30,7 @@ let cached: Promise<ModelCatalogue> | null = null;
 /** The chat's model and effort picker. A chat can change its model at any time; where the host
  *  says the conversation will not fit the chosen model's window, the offer beside the error rolls
  *  the chat over into it. */
-export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
+export function ModelPicker({ chat, ops, loading = false }: { chat: ChatRecord; ops: ChatOps; loading?: boolean }) {
   const [catalogue, setCatalogue] = useState<ModelCatalogue | null>(null);
   const [error, setError] = useState<string | null>(null);
   // A model change the host refused as too large for the target's window: the id it refused, so
@@ -67,7 +67,8 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
   // The chat's effort is a thinking level when the model is a local one.
   const local = isLocalModel(model);
   const stopLabel = local ? thinkingLabel : effortLabel;
-  const label = triggerLabel(current?.title ?? (model || 'Default'), effort, local);
+  // While the app is still checking its runtimes the chip says so, muted, instead of a model name.
+  const label = loading ? 'Loading…' : triggerLabel(current?.title ?? (model || 'Default'), effort, local);
 
   const close = (focus = true) => {
     setOpen(false);
@@ -151,7 +152,7 @@ export function ModelPicker({ chat, ops }: { chat: ChatRecord; ops: ChatOps }) {
       <button
         ref={trigger}
         type="button"
-        className="ui-picker-trigger compact"
+        className={`ui-picker-trigger compact${loading ? ' loading' : ''}`}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={`Model and effort: ${label}`}

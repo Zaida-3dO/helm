@@ -12,7 +12,7 @@ import { projectOps } from '../api/projects.ts';
 import { panelStore, togglePanel } from '../panel/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, layers, TextInput, toast, useBinding, useHint } from '../ui/index.ts';
-import { IconArchive, IconChevronRight, IconFolder, IconFork, IconPanelLeft, IconPanelRight, IconPin, IconRestore } from '../ui/icons.tsx';
+import { IconArchive, IconChevronRight, IconFolder, IconFork, IconPanelLeft, IconPanelRight, IconPin, IconRestore, IconSparkles } from '../ui/icons.tsx';
 import { sidebarLayout } from '../shell/layout.ts';
 import { SidebarActions } from '../sidebar/actions.ts';
 import { SidebarData } from '../sidebar/data.ts';
@@ -68,6 +68,18 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
     edit.current = new RenameEdit(rename);
     setRenaming(title);
   };
+  // "Suggest a title" while renaming: the host names the chat from what was asked in it; the
+  // suggestion fills the box for the reader to keep or change, and nothing is saved until Enter.
+  const [suggesting, setSuggesting] = useState(false);
+  const suggest = () => {
+    if (!chat || suggesting) return;
+    setSuggesting(true);
+    shell
+      .api<{ title: string }>('title_suggest', { chatId: chat.id })
+      .then((r) => setRenaming((cur) => (cur === null ? cur : r.title)))
+      .catch(err)
+      .finally(() => setSuggesting(false));
+  };
   const fork = () => {
     if (chat) shell.ops.fork(chat.id).then((c) => shell.select(c.id)).catch(err);
   };
@@ -113,22 +125,37 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
             </>
           )}
           {renaming !== null ? (
-            <TextInput
-              className="crumb-rename"
-              autoFocus
-              aria-label="Chat title"
-              value={renaming}
-              onChange={(e) => setRenaming(e.target.value)}
-              onBlur={() => edit.current?.commit(renaming)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') edit.current?.commit(renaming);
-                if (e.key === 'Escape') {
-                  e.stopPropagation();
-                  edit.current?.cancel();
-                  setRenaming(null);
-                }
-              }}
-            />
+            <>
+              <TextInput
+                className="crumb-rename"
+                autoFocus
+                aria-label="Chat title"
+                value={renaming}
+                onChange={(e) => setRenaming(e.target.value)}
+                onBlur={() => edit.current?.commit(renaming)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') edit.current?.commit(renaming);
+                  if (e.key === 'Escape') {
+                    e.stopPropagation();
+                    edit.current?.cancel();
+                    setRenaming(null);
+                  }
+                }}
+              />
+              {/* Pressing the button must not take focus from the box, or the rename would be saved first. */}
+              <Button
+                variant="icon"
+                label="Suggest a title"
+                title="Suggest a title from what this chat is about"
+                data-testid="topbar-suggest-title"
+                busy={suggesting}
+                disabled={suggesting}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={suggest}
+              >
+                <IconSparkles size={14} />
+              </Button>
+            </>
           ) : (
             <button
               type="button"

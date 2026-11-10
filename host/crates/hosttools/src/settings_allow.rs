@@ -35,6 +35,8 @@ pub const USER_ONLY: &[(&str, &str)] = &[
     ("terminalShell", "Settings > Shell"),
     ("sendBehavior", "Settings > Chat"),
     ("ideContext", "Settings > Chat"),
+    ("scrollOnSend", "Settings > Chat"),
+    ("doubleShift", "Settings > Chat"),
 ];
 
 /// Where the user changes a user-only setting, or `None` when it is not user-only.

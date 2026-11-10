@@ -98,6 +98,24 @@ export function mountComposer(chatId: string, handle: MountedComposer): () => vo
   };
 }
 
+const sendListeners = new Map<string, Set<() => void>>();
+
+/** Told each time the composer of `chatId` sends a message the reader typed (the chat view scrolls to it). */
+export function onComposerSent(chatId: string, f: () => void): () => void {
+  let set = sendListeners.get(chatId);
+  if (!set) sendListeners.set(chatId, (set = new Set()));
+  set.add(f);
+  return () => {
+    set.delete(f);
+    if (set.size === 0 && sendListeners.get(chatId) === set) sendListeners.delete(chatId);
+  };
+}
+
+/** The composer calls this once a send was accepted. */
+export function announceSent(chatId: string): void {
+  sendListeners.get(chatId)?.forEach((f) => f());
+}
+
 export function composerApi(chatId: string) {
   return {
     /** Append text to the draft (after a blank line when the draft has text). Never sends. */

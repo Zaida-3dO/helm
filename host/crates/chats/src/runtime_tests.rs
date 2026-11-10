@@ -1031,8 +1031,33 @@ async fn a_withdrawn_steer_returns_as_a_newer_draft() {
         .as_str()
         .unwrap()
         .to_owned();
+    // Pasted text is saved as a file under the chat's attachments and attached by reference.
+    let pasted = h
+        .call(
+            "attachment_text_put",
+            json!({"chatId": chat, "name": "pasted-2-lines.txt", "text": "one\ntwo"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pasted["kind"], "file");
+    assert_eq!(pasted["name"], "pasted-2-lines.txt");
+    assert!(pasted["target"]
+        .as_str()
+        .unwrap()
+        .ends_with("pasted-2-lines.txt"));
+    let pasted = pasted["attachmentId"].as_str().unwrap().to_owned();
+    assert_eq!(
+        std::fs::read_to_string(
+            h.profile
+                .path("attachments")
+                .join(&pasted)
+                .join("pasted-2-lines.txt")
+        )
+        .unwrap(),
+        "one\ntwo"
+    );
     assert!(h.profile.path("attachments").join(&extra).is_file());
-    for id in [&extra, &by_ref] {
+    for id in [&extra, &by_ref, &pasted] {
         let r = h
             .call(
                 "attachment_discard",

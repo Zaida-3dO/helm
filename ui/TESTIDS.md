@@ -80,7 +80,15 @@ breaks those checks, so change them only together with the checks. Everything el
 | `effort-picker` | The effort row in that popover's footer: `[role="radio"]` stops | |
 | `local-check`, `local-hint`, `check-servers` | The popover's footer row for local models: "Local models: not checked yet" (or "none found", or just "Local models") and the Check servers button, the only thing in the picker that contacts a local server: opening it asks nothing and the list shows what the servers said last time | |
 | `permission-chip` | Permission-mode chip (wraps `permission-picker`, the picker trigger) | `data-mode` = the live mode, empty when none reported; `data-picked` = a pick not yet live |
-| `attach-files` / `attach-folder` | The composer's Attach files (native multi-file dialog) and Attach a folder buttons | disabled at 20 attachments |
+| `attach-files` | The composer's one Attach files or folders button (opens `attach-menu`: Files… for the native multi-file dialog, Folder… for the folder dialog) | disabled at 20 attachments |
+| `attach-menu` | The menu under the attach button | |
+| `mention-menu` | The `@` file list above the box while an `@word` is typed | rows are `role="option"` with `data-path` |
+| `autocomplete-unavailable` | The dim marker at the editor's bottom right after autocomplete failed | the reason is its `title` |
+| `settings-scroll-on-send` | Settings → Chat: scroll to the latest message when I send | |
+| `user-bubble` | The reader's own message bubble in the transcript; its `title` is the time tooltip ("Today at 3:41 PM · 5 minutes ago") | |
+| `dock-compacting` | The activity dock's second line while the chat compacts its conversation: what is happening and how long it has taken | |
+| `topbar-suggest-title` | The Suggest a title button beside the chat title box while it is being renamed; the suggestion fills the box and is saved only on Enter | `aria-busy` while the host works |
+| `settings-double-shift` | Settings → Chat: tap Shift twice to open Go to file | |
 | `attachment-thumb` | An attached image's thumbnail in the composer: a button (click, Enter or Space) that opens the image viewer, `attachment-viewer` (its image is `image-viewer-image`); the corner button only removes | |
 | `composer-refs` | The tray of file, folder and chat chips in the composer box; each chip is `.composer-ref` | `data-kind` = `file`, `folder` or `chat` |
 | `composer-setup` / `composer-setup-details` / `composer-setup-open` | The setup card above the box while Claude Code cannot be found (Send is disabled), its details toggle and its Set up button | |

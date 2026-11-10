@@ -87,6 +87,31 @@ export function compactCount(n: number): string {
   return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
 }
 
+/** How long ago, in words: "just now", "5 minutes ago", "3 hours ago", "2 days ago". */
+export function agoText(ms: number): string {
+  const s = Math.max(0, ms) / 1000;
+  const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'} ago`;
+  if (s < 45) return 'just now';
+  if (s < 90 * 60) return plural(Math.max(1, Math.round(s / 60)), 'minute');
+  if (s < 36 * 3600) return plural(Math.round(s / 3600), 'hour');
+  return plural(Math.round(s / 86_400), 'day');
+}
+
+/** A message's tooltip: "Today at 3:41 PM · 5 minutes ago" (Yesterday, a weekday within the week, then the date). */
+export function messageTimeLabel(timestamp: number, now: number): string {
+  const d = new Date(timestamp);
+  const n = new Date(now);
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((startOfDay(n) - startOfDay(d)) / 86_400_000);
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  let day: string;
+  if (days <= 0) day = 'Today';
+  else if (days === 1) day = 'Yesterday';
+  else if (days < 7) day = d.toLocaleDateString([], { weekday: 'long' });
+  else day = d.toLocaleDateString([], { day: 'numeric', month: 'short', year: d.getFullYear() === n.getFullYear() ? undefined : 'numeric' });
+  return `${day} at ${time} · ${agoText(now - timestamp)}`;
+}
+
 /** The chip text ("12k tokens") and its tooltip, which says what was left out. */
 export function tokenChip(u: Usage): { text: string; title: string } {
   const n = newTokens(u);

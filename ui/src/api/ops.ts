@@ -127,6 +127,9 @@ export function chatOps(api: Api) {
     /** A file or folder (`path`, absolute) or another chat (`chat`, its id) by reference. */
     attachRef: (chatId: string, kind: 'path' | 'chat', target: string) =>
       api<{ attachmentId: string; kind: 'file' | 'folder' | 'chat'; name: string }>('attachment_ref', { chatId, kind, target }),
+    /** Pasted text kept as a file for the next send (a very long paste), attached by reference. */
+    attachText: (chatId: string, name: string, text: string) =>
+      api<{ attachmentId: string; kind: 'file' | 'folder' | 'chat'; name: string; target: string }>('attachment_text_put', { chatId, name, text }),
     /** The attachments this chat holds unstaged: what a reopened composer stages again. */
     stagedAttachments: (chatId: string) =>
       api<StagedAttachments>('attachment_list', { chatId }),

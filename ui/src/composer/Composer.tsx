@@ -11,7 +11,7 @@ import { DraftSaver } from './drafts.ts';
 import { Editor, type EditorHandle } from './Editor.tsx';
 import { resolveKey, sendLabel, sendTooltip, stopTooltip, type KeyContext, type SendShortcut } from './keymap.ts';
 import { Button } from '../ui/controls.tsx';
-import { IconAttach, IconChat, IconFileText as IconFile, IconFolder, IconFolderPlus, IconX } from '../ui/icons.tsx';
+import { IconAttach, IconChat, IconFileText as IconFile, IconFolder, IconFolderPlus, IconSparkles, IconX } from '../ui/icons.tsx';
 import { SetupBanner, useRuntimeCheck } from './SetupBanner.tsx';
 import { ContextStatus } from './ContextStatus.tsx';
 import { useShell } from '../shell/context.ts';
@@ -26,9 +26,13 @@ import { Recall } from './recall.ts';
 import { ImageViewer } from '../transcript/ImageViewer.tsx';
 import { commandWithArgs, helmCommand, matchesHidden, moveActive, SCOPE_LABEL, skillMenu, skillQuery, withHelmCommands, type Skill } from './skills.ts';
 import { rollOverChat } from '../sidebar/actions.ts';
-import { toast } from '../ui/index.ts';
+import { ContextMenu, toast } from '../ui/index.ts';
+import { panelOps, type QuickItem } from '../api/panel.ts';
+import { isLongPaste, linkedPaste, pastedFileName } from './paste.ts';
+import { applyMention, MENTION_ROWS, mentionAt, mentionText, type Mention } from './mentions.ts';
+import { useScrollOnSend } from './scrollOnSend.ts';
 import { useHiddenSkills } from '../settings/applied.ts';
-import { accessoriesAt, accessorySide, collectSendContributions, mountComposer, type AccessoryContext } from './slots.ts';
+import { accessoriesAt, accessorySide, announceSent, collectSendContributions, mountComposer, type AccessoryContext } from './slots.ts';
 import './composer.css';
 // The dock items and banners above the box share the dock sheet (ChatView mounts this composer).
 import './dock.css';
@@ -50,6 +54,13 @@ export interface ComposerProps {
 
 const uid = () => globalThis.crypto.randomUUID();
 
+/** The Attach menu opens above its button: about two rows tall. */
+const ATTACH_MENU_HEIGHT = 84;
+/** The autocomplete marker stays at least this long after a failure. */
+const AUTOCOMPLETE_MARKER_MS = 30_000;
+/** When the host asks for a pause this long or longer the helper failed (a short pause is only the rate limit or a busy helper). */
+const AUTOCOMPLETE_FAILED_MS = 10_000;
+
 export function isBusy(status: ChatRecord['status']): boolean {
   return status === 'running' || status === 'starting' || status === 'stopping';
 }
@@ -67,13 +78,17 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const [sending, setSending] = useState(false);
   const behavior = thread?.sendBehavior ?? HOME_SEND_BEHAVIOR;
   const busy = isBusy(chat.status);
-  // Send waits while Claude Code cannot be found, and while the agent starts with nothing in flight.
+  // Send waits while Claude Code cannot be found, while the app is still checking for it at
+  // start-up, and while the agent starts with nothing in flight.
   const runtime = useRuntimeCheck();
+  const checking = !runtime.checked;
   const starting = chat.status === 'starting' && pending.length === 0;
   // An archived chat cannot be sent to; restoring it (the banner above the box) is the way back.
-  const blocked = runtime.blocked || starting || chat.archived;
+  const blocked = runtime.blocked || checking || starting || chat.archived;
   const blockedRef = useRef(blocked);
   blockedRef.current = blocked;
+  const scrollOnSendRef = useRef(true);
+  scrollOnSendRef.current = useScrollOnSend();
   const ctx: KeyContext = useMemo(
     () => ({ sendShortcut, mode: behavior.mode, showChoices: behavior.showChoices }),
     [sendShortcut, behavior.mode, behavior.showChoices],
@@ -191,6 +206,39 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       setError(e instanceof ApiError ? e.message : String(e));
     }
   };
+  const [attachMenu, setAttachMenu] = useState<{ x: number; y: number } | null>(null);
+  // A very long paste is kept as a text file and attached, not poured into the draft. If the host
+  // cannot keep it, the text goes into the draft after all so nothing the reader pasted is lost.
+  const attachPasted = useCallback(
+    async (text: string) => {
+      try {
+        const name = pastedFileName(text);
+        const r = await ops.attachText(chat.id, name, text);
+        refsRef.current = addRef(refsRef.current, { id: r.attachmentId, kind: r.kind, name: r.name, target: r.target });
+        setRefs(refsRef.current);
+      } catch (e) {
+        setError(`${e instanceof ApiError ? e.message : String(e)} The text was pasted into the message instead.`);
+        editor.current?.insert(text);
+      }
+    },
+    [ops, chat.id],
+  );
+  const onPasteData = useCallback(
+    (data: DataTransfer): string | true | null => {
+      // Images go through the attachment pipeline below.
+      if ([...data.files].some((f) => f.type.startsWith('image/'))) return null;
+      const text = data.getData('text/plain');
+      if (!text) return null;
+      if (isLongPaste(text) && roomLeft(attachedRef.current.length, refsRef.current.length) > 0) {
+        setError(null);
+        void attachPasted(text);
+        return true;
+      }
+      const html = data.getData('text/html');
+      return html ? linkedPaste(text, html) : null;
+    },
+    [attachPasted],
+  );
   const full = roomLeft(attached.length, refs.length) === 0;
   // Stage what the host holds unstaged for this chat: images and files staged before this window
   // opened (a restart), and the ones a taken-back send (withdrawn, recovered, refused, or never
@@ -329,6 +377,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
           context: extra.context,
           attachments: [...images.map((a) => a.id), ...sentRefs.map((r) => r.id)],
         });
+        if (scrollOnSendRef.current) announceSent(chat.id);
         // The host now owns these attachments (linked to the send); if the send ever comes
         // back unread, it returns them to the chat's unstaged set and `restage` picks them up.
         images.forEach((a) => URL.revokeObjectURL(a.url));
@@ -415,12 +464,79 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       void ops
         .autocomplete(chat.id, base)
         .then((r) => {
+          if (r.completion) markAutocomplete(null);
+          else if (r.retryAfterMs !== null && r.retryAfterMs >= AUTOCOMPLETE_FAILED_MS) {
+            markAutocomplete(`The suggestion model did not answer, or the request limit was reached. Trying again in ${Math.ceil(r.retryAfterMs / 1000)} s.`);
+          }
           if (r.completion && (editor.current?.getText() ?? '') === base && editor.current?.caretAtEnd()) setGhost({ base, completion: r.completion });
         })
-        .catch(() => undefined);
+        .catch((e: unknown) => markAutocomplete(e instanceof ApiError ? e.message : 'The request could not be sent.'));
     }, 350);
     return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autocomplete, chat.model, draftText, skillPrefix, ops, chat.id]);
+  // A dim marker says suggestions are not coming, with the reason on hover. It stays until the
+  // next suggestion that works, and at least AUTOCOMPLETE_MARKER_MS.
+  const [acFail, setAcFail] = useState<{ reason: string; at: number } | null>(null);
+  const acClear = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const markAutocomplete = (reason: string | null) => {
+    if (acClear.current) clearTimeout(acClear.current);
+    acClear.current = null;
+    if (reason !== null) {
+      setAcFail((f) => (f && f.reason === reason ? f : { reason, at: Date.now() }));
+      return;
+    }
+    setAcFail((f) => {
+      if (!f) return f;
+      const left = f.at + AUTOCOMPLETE_MARKER_MS - Date.now();
+      if (left > 0) acClear.current = setTimeout(() => setAcFail(null), left);
+      return left > 0 ? f : null;
+    });
+  };
+  useEffect(() => () => void (acClear.current && clearTimeout(acClear.current)), []);
+
+  // `@` file mentions: the word at the caret, and the project's files that fit it.
+  const panel = useMemo(() => panelOps(shell.api), [shell]);
+  const [mention, setMention] = useState<Mention | null>(null);
+  const [mentionHits, setMentionHits] = useState<{ q: string; mode: 'path' | 'files'; items: QuickItem[] } | null>(null);
+  const [mentionActive, setMentionActive] = useState(0);
+  // Escape closes the menu until the draft changes.
+  const [mentionShut, setMentionShut] = useState<string | null>(null);
+  const mentionQuery = mention?.query ?? '';
+  useEffect(() => {
+    if (!mentionQuery) {
+      setMentionHits(null);
+      return;
+    }
+    let live = true;
+    const t = setTimeout(() => {
+      panel
+        .quickOpen(mentionQuery, chat.id)
+        .then((r) => {
+          if (!live) return;
+          setMentionHits({ q: mentionQuery, mode: r.mode, items: r.items.slice(0, MENTION_ROWS) });
+          setMentionActive(0);
+        })
+        .catch(() => live && setMentionHits(null));
+    }, 120);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [mentionQuery, panel, chat.id]);
+  const mentionOpen = mention !== null && mentionHits !== null && mentionHits.q === mention.query && mentionHits.items.length > 0 && mentionShut !== draftText;
+  const pickMention = (item: QuickItem) => {
+    const text = editor.current?.getText() ?? '';
+    const at = mentionAt(text, editor.current?.caretOffset() ?? text.length);
+    if (!at || !mentionHits) return;
+    const next = applyMention(text, at, mentionText(item, mentionHits.mode === 'path'), item.kind === 'dir');
+    editor.current?.setTextAt(next.text, next.caret);
+    saver.edit(next.text);
+    setEmpty(!next.text);
+    setDraftText(next.text);
+    prevText.current = next.text;
+    editor.current?.focus();
+  };
   const showText = (t: string) => {
     editor.current?.setText(t);
     saver.edit(t);
@@ -431,6 +547,21 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
   const onKey = useCallback(
     (e: KeyboardEvent): boolean => {
       const plain = !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.isComposing;
+      if (mentionOpen && mentionHits) {
+        if (e.key === 'Escape') {
+          setMentionShut(editor.current?.getText() ?? '');
+          return true;
+        }
+        if (plain && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+          setMentionActive((a) => moveActive(a, mentionHits.items.length, e.key === 'ArrowDown' ? 1 : -1));
+          return true;
+        }
+        if (plain && (e.key === 'Tab' || e.key === 'Enter')) {
+          const item = mentionHits.items[mentionActive] ?? mentionHits.items[0];
+          if (item) pickMention(item);
+          return true;
+        }
+      }
       if (menu && e.key === 'Escape') {
         setMenuShut(editor.current?.getText() ?? '');
         return true;
@@ -479,7 +610,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       return false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [ctx, send, stop, busy, recall, ghost, menu, active],
+    [ctx, send, stop, busy, recall, ghost, menu, active, mentionOpen, mentionHits, mentionActive],
   );
 
   const onChange = useCallback(
@@ -493,6 +624,8 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
       setEmpty(!text);
       saver.edit(text);
       setDraftText(text);
+      const caret = editor.current?.caretOffset();
+      setMention(caret == null ? null : mentionAt(text, caret));
     },
     [saver, chat.id, chat.model, ops],
   );
@@ -569,6 +702,41 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
           </div>
         </div>
       )}
+      {mentionOpen && mentionHits && (
+        <div className="skill-menu mention-menu" data-testid="mention-menu" data-mode={mentionHits.mode}>
+          <div className="skill-menu-head">
+            <span>Files</span>
+            <span className="skill-menu-keys">↑ ↓ choose · ↵ insert · esc close</span>
+          </div>
+          <div className="skill-menu-list" role="listbox" aria-label="Files">
+            {mentionHits.items.map((it, n) => {
+              const shown = it.label.replace(/\\/g, '/');
+              const cut = shown.replace(/\/$/, '').lastIndexOf('/');
+              return (
+                <button
+                  key={it.path}
+                  type="button"
+                  role="option"
+                  aria-selected={n === mentionActive}
+                  className={`skill-row${n === mentionActive ? ' active' : ''}`}
+                  data-path={it.path}
+                  onMouseEnter={() => setMentionActive(n)}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => pickMention(it)}
+                >
+                  <span className="composer-ref-icon" aria-hidden="true">
+                    {it.kind === 'dir' ? <IconFolder size={14} /> : <IconFile size={14} />}
+                  </span>
+                  <span className="skill-text">
+                    <span className="skill-name">{cut >= 0 && mentionHits.mode === 'files' ? shown.slice(cut + 1) : shown}</span>
+                    {cut >= 0 && mentionHits.mode === 'files' && <span className="skill-desc">{shown.slice(0, cut)}</span>}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <div className="composer-box" data-testid="composer-box" ref={box} data-drop={dropHint ? dropHint.kind : undefined}>
         {dropHint && (
           <div className={`composer-drop composer-drop-${dropHint.kind}`} data-testid="composer-drop" aria-hidden="true">
@@ -641,10 +809,23 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
           handle={editor}
           ghost={ghost}
           commands={commands}
+          onPaste={onPasteData}
+          trailing={
+            <>
+              {acFail && (
+                <span className="editor-unavailable" title={acFail.reason} data-testid="autocomplete-unavailable">
+                  <IconSparkles size={12} className="editor-unavailable-icon" /> Autocomplete unavailable
+                </span>
+              )}
+              <span className="visually-hidden" role="status" aria-live="polite">
+                {acFail ? `Autocomplete unavailable. ${acFail.reason}` : ''}
+              </span>
+            </>
+          }
         />
         <div className="composer-bar">
           <div className="composer-selects">
-            <ModelPicker chat={chat} ops={ops} />
+            <ModelPicker chat={chat} ops={ops} loading={checking} />
             <DefaultStar chat={chat} />
             <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} busy={busy} ops={ops} />
             {toolbarStart.map((a) => (
@@ -659,12 +840,35 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
                 {a.render(actx)}
               </span>
             ))}
-            <Button variant="icon" className="composer-attach" label="Attach files" title={full ? 'A message can carry at most 20 attachments' : 'Attach files · up to 20, including images'} disabled={full} data-testid="attach-files" onClick={() => void pickFiles()}>
+            <Button
+              variant="icon"
+              className="composer-attach"
+              label="Attach files or folders"
+              title={full ? 'A message can carry at most 20 attachments' : 'Attach files or folders · up to 20, including images'}
+              disabled={full}
+              aria-haspopup="menu"
+              aria-expanded={attachMenu !== null}
+              data-testid="attach-files"
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setAttachMenu({ x: r.left, y: r.top - ATTACH_MENU_HEIGHT });
+              }}
+            >
               <IconAttach size={16} />
             </Button>
-            <Button variant="icon" className="composer-attach" label="Attach a folder" title={full ? 'A message can carry at most 20 attachments' : 'Attach a folder'} disabled={full} data-testid="attach-folder" onClick={() => void pickFolder()}>
-              <IconFolderPlus size={16} />
-            </Button>
+            {attachMenu && (
+              <ContextMenu
+                x={attachMenu.x}
+                y={attachMenu.y}
+                label="Attach"
+                testId="attach-menu"
+                onClose={() => setAttachMenu(null)}
+                items={[
+                  { id: 'files', label: 'Files…', icon: <IconFile size={14} />, onSelect: () => void pickFiles() },
+                  { id: 'folder', label: 'Folder…', icon: <IconFolderPlus size={14} />, onSelect: () => void pickFolder() },
+                ]}
+              />
+            )}
             {busy && (
               <Button
                 variant="stop"
@@ -680,7 +884,7 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
               data-testid="send"
               disabled={blocked || sending || (empty && attached.length === 0 && refs.length === 0)}
               aria-busy={sending || undefined}
-              title={chat.archived ? 'Restore this chat to send' : runtime.blocked ? 'Connect Claude Code to send' : starting ? 'Claude Code is starting' : sendTooltip(ctx, busy)}
+              title={chat.archived ? 'Restore this chat to send' : runtime.blocked ? 'Connect Claude Code to send' : checking ? 'Starting Claude Code…' : starting ? 'Claude Code is starting' : sendTooltip(ctx, busy)}
               onClick={() => void send('default')}
             />
           </div>

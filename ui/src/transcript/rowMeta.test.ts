@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compactCount, contextSize, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, tokenChip, turnTimes } from './rowMeta.ts';
+import { agoText, compactCount, contextSize, messageTimeLabel, contextTokens, formatTurnTime, isTooLargeRefusal, newTokens, tokenChip, turnTimes } from './rowMeta.ts';
 
 const usage = { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 40_000, cacheWriteTokens: 500, costUsd: 0 };
 
@@ -96,5 +96,32 @@ test('a too-large-for-the-window refusal is recognised; other faults and no erro
   }
   for (const e of [null, undefined, '', "You've hit your weekly limit", 'Connection error.', 'claude did not settle after Stop']) {
     assert.equal(isTooLargeRefusal(e), false, String(e));
+  }
+});
+
+test('a message tooltip names the day and time and how long ago, and the age reads in plain words', () => {
+  const at = (y: number, m: number, d: number, h: number, min: number) => new Date(y, m - 1, d, h, min).getTime();
+  const now = at(2026, 11, 10, 15, 41);
+  for (const [ms, want] of [
+    [0, 'just now'],
+    [30_000, 'just now'],
+    [60_000, '1 minute ago'],
+    [5 * 60_000, '5 minutes ago'],
+    [80 * 60_000, '80 minutes ago'],
+    [3 * 3_600_000, '3 hours ago'],
+    [2 * 86_400_000, '2 days ago'],
+    [-5000, 'just now'],
+  ] as const) {
+    assert.equal(agoText(ms), want, String(ms));
+  }
+  for (const [stamp, start, end] of [
+    [at(2026, 11, 10, 15, 36), 'Today at ', ' · 5 minutes ago'],
+    [at(2026, 11, 9, 23, 30), 'Yesterday at ', ' · 16 hours ago'],
+    [at(2026, 11, 7, 9, 0), '', ' · 3 days ago'],
+    [at(2026, 10, 1, 9, 0), '', ' · 40 days ago'],
+  ] as const) {
+    const label = messageTimeLabel(stamp, now);
+    assert.ok(label.startsWith(start) && label.endsWith(end), label);
+    assert.match(label, / at .*\d/, label);
   }
 });

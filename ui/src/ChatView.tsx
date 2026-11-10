@@ -26,7 +26,7 @@ import { rollOverChat, rollOverConfirm } from './sidebar/actions.ts';
 import { ContextBar } from './transcript/ContextBar.tsx';
 import { isTooLargeRefusal, type ChatContextReading } from './transcript/rowMeta.ts';
 import { IconFork } from './ui/icons.tsx';
-import { accessoriesAt, composerApi } from './composer/slots.ts';
+import { accessoriesAt, composerApi, onComposerSent } from './composer/slots.ts';
 import { recallPrompts } from './composer/recall.ts';
 import { SelectionToolbar } from './transcript/SelectionToolbar.tsx';
 import { useMentionRepo } from './pr/mentionRepo.ts';
@@ -232,6 +232,9 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
     },
     [],
   );
+  // Sending a message from this chat's composer scrolls to it (the composer decides, by its setting).
+  const [scrollSignal, setScrollSignal] = useState(0);
+  useEffect(() => onComposerSent(chatId, () => setScrollSignal((n) => n + 1)), [chatId]);
   const [autocompleteOn, setAutocompleteOn] = useState(false);
   useEffect(() => {
     void shell
@@ -307,6 +310,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         hasOlder={view.hasOlder}
         ctx={ctx}
         jumpToRowId={jumpTo}
+        scrollSignal={scrollSignal}
         onLoadOlder={async () => {
           if (!view.olderCursor) return;
           store.page(await ops.page(chatId, { before: view.olderCursor }), 'older');

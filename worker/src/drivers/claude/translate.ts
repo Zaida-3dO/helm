@@ -502,6 +502,9 @@ export class StreamTranslator {
         return true;
       }
       case "status": {
+        // The CLI compacts on its own when the conversation nears the window: the host shows it as
+        // it does a manual one (the driver drops a second start when it began the compaction itself).
+        if (rec.status === "compacting") this.h.emit({ type: "compaction_start" });
         const mode = typeof rec.permissionMode === "string" ? rec.permissionMode : undefined;
         if (mode && mode !== this.permissionMode) {
           this.permissionMode = mode;

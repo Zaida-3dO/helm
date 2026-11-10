@@ -291,6 +291,22 @@ describe("withdraw, stop_tool, compact and abort", () => {
     }
   });
 
+  test("a compaction the CLI starts on its own is reported as a start and an end", async () => {
+    const s = startWithFixture("auto-compact");
+    try {
+      await s.host.ready();
+      await prompt(s.host, "keep going", {}, uuid());
+      const end = await s.host.waitForType("compaction_end", 5000, 0);
+      assert.deepEqual([end.trigger, end.ok], ["auto", true]);
+      assert.equal(s.host.ofType("compaction_start").length, 1);
+      const startAt = s.host.events.findIndex((e) => e.type === "compaction_start");
+      assert.ok(startAt !== -1 && startAt < s.host.events.findIndex((e) => e.type === "compaction_end"), "the start comes first");
+      await s.host.waitForType("agent_settled", 5000, 0);
+    } finally {
+      await s.done();
+    }
+  });
+
   test("compact while idle sends /compact and reports start and end; refused while a turn runs", async () => {
     const s = startWithFixture("compact");
     try {

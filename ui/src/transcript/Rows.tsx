@@ -13,6 +13,7 @@ import { MessageRefs } from './MessageRefs.tsx';
 import { OptionBoardCard } from './OptionBoard.tsx';
 import { RecapCard } from './RecapCard.tsx';
 import { bubbleText, fromTelegram, peerMessage } from './origin.ts';
+import { messageTimeLabel } from './rowMeta.ts';
 import { IconPaperPlane } from '../ui/icons.tsx';
 import { ReplyActions, UserActions } from './MessageActions.tsx';
 import { rowFootersFor, type SlotContext } from './slots.ts';
@@ -122,7 +123,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
   if (row.role === 'user') {
     const peer = peerMessage(row);
     return (
-      <div className={`row row-user status-${row.status}`} {...common} title={new Date(row.timestamp).toLocaleString()}>
+      <div className={`row row-user status-${row.status}`} {...common}>
         {fromTelegram(row) && (
           <div className="row-origin muted" data-testid="row-origin" data-origin="telegram" title="Sent from Telegram">
             <IconPaperPlane size={12} /> Telegram
@@ -142,7 +143,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
             <div className="peer-card-note muted">Sent by another chat. You did not write this.</div>
           </div>
         ) : (
-          <div className="bubble">
+          <div className="bubble" title={messageTimeLabel(row.timestamp, Date.now())} data-testid="user-bubble">
             <MessageImages chatId={ctx.chatId} images={row.details?.images} />
             <MessageRefs refs={row.details?.refs} />
             <Markdown text={bubbleText(row)} onLink={ctx.onLink} />

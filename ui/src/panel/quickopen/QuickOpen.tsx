@@ -2,7 +2,7 @@
 // looks like a path completes folders (with `~`); any other query ranks the chat's project files.
 // Open tabs and recently opened paths come first and need no disk access. Enter opens (a folder
 // opens as a folder view), Tab completes the path, Escape clears the input first, then closes.
-// Double-Shift is not bound (that setting is off by default).
+// Tapping Shift twice opens it too, from anywhere in the window (Settings → Chat can turn that off).
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { QuickItem } from '../../api/panel.ts';
@@ -11,6 +11,7 @@ import { Dialog, useBinding, useLayer } from '../../ui/index.ts';
 import { FileTextIcon, FolderOpenIcon, ReloadIcon } from '../icons.tsx';
 import { openInPanel, panelStore } from '../registry.ts';
 import { basename, displayPath, matchSegments, pathKey } from '../viewer/paths.ts';
+import { DoubleShift, useDoubleShift } from './doubleShift.ts';
 import { addRecent, recentPaths } from './recent.ts';
 
 const MAX_ROWS = 50;
@@ -56,6 +57,26 @@ function openPath(path: string, chatId: string | null) {
 export function QuickOpen({ chatId }: { chatId: string | null }) {
   const [open, setOpen] = useState(false);
   useBinding({ id: 'panel.quickOpen', title: 'Go to file', defaultKeys: 'Ctrl+P', run: () => setOpen((o) => !o) });
+  const doubleShift = useDoubleShift();
+  useEffect(() => {
+    if (!doubleShift) return;
+    const taps = new DoubleShift();
+    const down = (e: KeyboardEvent) => taps.down(e);
+    const up = (e: KeyboardEvent) => {
+      if (taps.up(e, performance.now())) setOpen((o) => !o);
+    };
+    const reset = () => taps.reset();
+    window.addEventListener('keydown', down, true);
+    window.addEventListener('keyup', up, true);
+    window.addEventListener('blur', reset);
+    window.addEventListener('mousedown', reset, true);
+    return () => {
+      window.removeEventListener('keydown', down, true);
+      window.removeEventListener('keyup', up, true);
+      window.removeEventListener('blur', reset);
+      window.removeEventListener('mousedown', reset, true);
+    };
+  }, [doubleShift]);
   if (!open || !panelStore.api) return null;
   return <QuickOpenDialog chatId={chatId} onClose={() => setOpen(false)} />;
 }

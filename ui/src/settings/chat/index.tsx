@@ -7,6 +7,8 @@ import { Checkbox, Picker, SettingRow, TextArea, TextInput, toast } from '../../
 import type { SendBehavior } from '../../api/generated/index.ts';
 import { HOME_SEND_BEHAVIOR } from '../../api/types.ts';
 import { parseSendShortcut } from '../../hosttools/sendShortcut.ts';
+import { useScrollOnSend } from '../../composer/scrollOnSend.ts';
+import { useDoubleShift } from '../../panel/quickopen/doubleShift.ts';
 import type { SendShortcut } from '../../composer/keymap.ts';
 import { registerSettingsPane } from '../registry.ts';
 import { ELEMENTS, isShown, parseChatElements, type ChatElements } from './elements.ts';
@@ -19,6 +21,9 @@ function ChatPane() {
   const [ac, setAc] = useState(false);
   // Whether agents may read the code editor's open file and selection (off by default).
   const [ide, setIde] = useState(false);
+  // Read live (and updated through the preference event this page dispatches on a change).
+  const scrollOnSend = useScrollOnSend();
+  const doubleShift = useDoubleShift();
   const [sendKey, setSendKey] = useState<SendShortcut>('mod-enter');
   const [sb, setSb] = useState<SendBehavior>(HOME_SEND_BEHAVIOR);
   const [hiddenSkills, setHiddenSkills] = useState('');
@@ -150,6 +155,42 @@ function ChatPane() {
       </SettingRow>
       <SettingRow title="Show send choices" description="Offer extra send keys and buttons for a message sent while Claude is working: Send now, or Steer in Interrupt mode." testId="setting-send-choices">
         <Checkbox checked={sb.showChoices} onChange={(showChoices) => setSendBehavior({ showChoices })} />
+      </SettingRow>
+      <SettingRow
+        title="Scroll to the latest message when I send"
+        description="Sending jumps the chat to the bottom. Off: the chat stays where you are reading, and the Latest button brings you back."
+        testId="setting-scroll-on-send"
+      >
+        <Checkbox
+          checked={scrollOnSend}
+          aria-label="Scroll to the latest message when I send"
+          data-testid="settings-scroll-on-send"
+          onChange={(on) => {
+            shell.bus.dispatch({ kind: 'preferences', changed: { scrollOnSend: on } });
+            void shell.api('preference', { key: 'scrollOnSend', value: on }).catch((err: unknown) => {
+              shell.bus.dispatch({ kind: 'preferences', changed: { scrollOnSend: !on } });
+              saveError(err);
+            });
+          }}
+        />
+      </SettingRow>
+      <SettingRow
+        title="Tap Shift twice to go to a file"
+        description="Opens Go to file from anywhere in the window, as Ctrl+P does. Typing a capital letter never counts."
+        testId="setting-double-shift"
+      >
+        <Checkbox
+          checked={doubleShift}
+          aria-label="Tap Shift twice to go to a file"
+          data-testid="settings-double-shift"
+          onChange={(on) => {
+            shell.bus.dispatch({ kind: 'preferences', changed: { doubleShift: on } });
+            void shell.api('preference', { key: 'doubleShift', value: on }).catch((err: unknown) => {
+              shell.bus.dispatch({ kind: 'preferences', changed: { doubleShift: !on } });
+              saveError(err);
+            });
+          }}
+        />
       </SettingRow>
       <SettingRow
         title="Wait limit"

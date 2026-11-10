@@ -157,6 +157,8 @@ export class ClaudeDriver implements Driver {
   /** A send-now interrupt is in flight: the turn ends superseded, not stopped by the user. */
   private superseding = false;
   private compacting: { boundary: boolean } | undefined;
+  /** The CLI began a compaction of its own (not our /compact) and has not reported the boundary yet. */
+  private autoCompacting = false;
   /** Helm's in-process MCP server, when the launch lists host tools. */
   private readonly hostTools: HostToolServer | undefined;
   /** Helm's own MCP client (the bridge), reached through the helm server's tools. */
@@ -345,7 +347,12 @@ export class ClaudeDriver implements Driver {
       this.liveTools.delete(String(e.toolCallId));
       this.reportShellChanges(String(e.toolCallId));
     }
+    if (e.type === "compaction_start") {
+      if (this.compacting || this.autoCompacting) return;
+      this.autoCompacting = true;
+    }
     if (e.type === "compaction_end") {
+      this.autoCompacting = false;
       if (this.compacting) this.compacting.boundary = true;
       this.ch.emit({ ...e, ok: true });
       return;
@@ -829,6 +836,7 @@ export class ClaudeDriver implements Driver {
     this.guard?.endTurn();
     this.shellChanges?.clear();
     this.attribution.clear();
+    this.autoCompacting = false;
     if (this.compacting) {
       if (!this.compacting.boundary) this.ch.emit({ type: "compaction_end", trigger: "manual", ok: false });
       this.compacting = undefined;

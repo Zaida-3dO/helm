@@ -123,6 +123,11 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows }: 
                   <span>Waiting for the model server</span>
                   <span className="ad-tool-time">{formatElapsed(Math.max(0, now - loading.startedAt))}</span>
                 </span>
+              ) : state.key === 'compacting' && thread.compacting ? (
+                <span className="ad-phase" data-phase="compacting" data-testid="dock-compacting">
+                  <span>Summarising the conversation so far</span>
+                  <span className="ad-tool-time">{formatElapsed(Math.max(0, now - thread.compacting.startedAt))}</span>
+                </span>
               ) : latest ? (
                 <span className="ad-tool">
                   <ToolIcon name={latest.name} />

@@ -30,6 +30,7 @@ import {
   type LexicalNode,
   COMMAND_PRIORITY_HIGH,
   KEY_DOWN_COMMAND,
+  PASTE_COMMAND,
   type EditorState,
   type LexicalEditor,
 } from 'lexical';
@@ -41,6 +42,12 @@ export interface EditorHandle {
   focus(): void;
   /** True when the caret is collapsed at the very end of the draft. */
   caretAtEnd(): boolean;
+  /** The caret's place in the draft, in characters; null when text is selected or nothing is. */
+  caretOffset(): number | null;
+  /** Replace the draft and put the caret `caret` characters in. */
+  setTextAt(text: string, caret: number): void;
+  /** Insert text at the caret (replacing a selection), as a paste would. */
+  insert(text: string): void;
 }
 
 export interface EditorProps {
@@ -54,6 +61,13 @@ export interface EditorProps {
   ghost?: { base: string; completion: string } | null;
   /** Names of the commands and skills the CLI knows; a draft that starts with one shows it as a chip. */
   commands?: ReadonlySet<string>;
+  /**
+   * Called first on a paste. Return a string to insert in place of what was pasted, `true` when
+   * the paste is dealt with, or null to let the editor paste as usual.
+   */
+  onPaste?: (data: DataTransfer) => string | true | null;
+  /** Drawn inside the editor box, over its bottom right corner (the autocomplete marker). */
+  trailing?: ReactNode;
 }
 
 /** Drafts longer than this are drawn plain: styling re-reads the whole draft on every key. */
@@ -158,6 +172,47 @@ function $setText(text: string) {
   p.selectEnd();
 }
 
+/** The caret's character offset in the draft (one paragraph holds the whole draft). */
+function caretOffset(): number | null {
+  const sel = $getSelection();
+  if (!$isRangeSelection(sel) || !sel.isCollapsed()) return null;
+  const p = $getRoot().getFirstChild();
+  if (!(p instanceof ParagraphNode)) return null;
+  return offsetIn(p, sel.anchor.key, sel.anchor.offset, sel.anchor.type === 'element');
+}
+
+/** Replace the draft and put the caret `caret` characters in. */
+function $setTextAt(text: string, caret: number) {
+  $setText(text);
+  const p = $getRoot().getFirstChild();
+  if (!(p instanceof ParagraphNode)) return;
+  let left = Math.max(0, Math.min(caret, text.length));
+  const kids = p.getChildren();
+  for (let i = 0; i < kids.length; i++) {
+    const k = kids[i]!;
+    const size = k.getTextContentSize();
+    if ($isTextNode(k) && left <= size) {
+      k.select(left, left);
+      return;
+    }
+    if (!$isTextNode(k) && left === 0) {
+      p.select(i, i);
+      return;
+    }
+    left -= size;
+  }
+  p.selectEnd();
+}
+
+function $insertRaw(text: string) {
+  let sel = $getSelection();
+  if (!$isRangeSelection(sel)) {
+    $getRoot().selectEnd();
+    sel = $getSelection();
+  }
+  if ($isRangeSelection(sel)) sel.insertRawText(text);
+}
+
 function caretAtEnd(): boolean {
   const sel = $getSelection();
   if (!$isRangeSelection(sel) || !sel.isCollapsed()) return false;
@@ -168,7 +223,7 @@ function caretAtEnd(): boolean {
   return Boolean(parent) && sel.anchor.type === 'element' && sel.anchor.key === parent!.getKey() && sel.anchor.offset === parent!.getChildrenSize();
 }
 
-function Bridge({ onKey, handle }: Pick<EditorProps, 'onKey' | 'handle'>) {
+function Bridge({ onKey, handle, onPaste }: Pick<EditorProps, 'onKey' | 'handle' | 'onPaste'>) {
   const [editor] = useLexicalComposerContext();
 
   useImperativeHandle(
@@ -178,6 +233,9 @@ function Bridge({ onKey, handle }: Pick<EditorProps, 'onKey' | 'handle'>) {
       setText: (text: string) => editor.update(() => $setText(text)),
       focus: () => editor.focus(),
       caretAtEnd: () => editor.getEditorState().read(() => caretAtEnd()),
+      caretOffset: () => editor.getEditorState().read(() => caretOffset()),
+      setTextAt: (text: string, caret: number) => editor.update(() => $setTextAt(text, caret)),
+      insert: (text: string) => editor.update(() => $insertRaw(text)),
     }),
     [editor],
   );
@@ -197,6 +255,23 @@ function Bridge({ onKey, handle }: Pick<EditorProps, 'onKey' | 'handle'>) {
         COMMAND_PRIORITY_HIGH,
       ),
     [editor, onKey],
+  );
+
+  useEffect(
+    () =>
+      editor.registerCommand(
+        PASTE_COMMAND,
+        (e) => {
+          const data = 'clipboardData' in e ? e.clipboardData : null;
+          const r = data ? onPaste?.(data) : null;
+          if (r === null || r === undefined) return false;
+          e.preventDefault();
+          if (typeof r === 'string') editor.update(() => $insertRaw(r));
+          return true;
+        },
+        COMMAND_PRIORITY_HIGH,
+      ),
+    [editor, onPaste],
   );
   return null;
 }
@@ -327,7 +402,7 @@ function markupKey(editor: LexicalEditor, e: KeyboardEvent): boolean {
   return false;
 }
 
-export function Editor({ initialText, placeholder, onChange, onKey, handle, ghost, commands }: EditorProps) {
+export function Editor({ initialText, placeholder, onChange, onKey, handle, ghost, commands, onPaste, trailing }: EditorProps) {
   const config = {
     namespace: 'helm-composer',
     onError: (e: Error) => console.error(e),
@@ -352,8 +427,9 @@ export function Editor({ initialText, placeholder, onChange, onKey, handle, ghos
           onChange={(state: EditorState) => onChange(state.read(() => $getRoot().getTextContent()))}
         />
         <LiveStyle commands={commands} />
-        <Bridge onKey={onKey} handle={handle} />
+        <Bridge onKey={onKey} handle={handle} onPaste={onPaste} />
         {ghost && <Ghost ghost={ghost} />}
+        {trailing}
       </div>
     </LexicalComposer>
   );

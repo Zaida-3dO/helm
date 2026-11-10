@@ -149,6 +149,16 @@ pub const CLASSIFIED: &[(&str, PrefClass)] = &[
         "ideContext",
         UserOnly("What your editor shares with agents is yours to choose."),
     ),
+    // Whether sending a message scrolls the chat to its newest message (on when missing).
+    (
+        "scrollOnSend",
+        UserOnly("How your own window scrolls when you send is yours to choose."),
+    ),
+    // Whether tapping Shift twice opens Go to file (on when missing).
+    (
+        "doubleShift",
+        UserOnly("How your own keyboard shortcuts behave is yours to choose."),
+    ),
     // The board chats with no other home are shown on (a board project id).
     (
         "defaultBoard",

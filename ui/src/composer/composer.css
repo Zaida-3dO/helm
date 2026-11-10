@@ -541,6 +541,29 @@
   vertical-align: 1px;
 }
 
+/* Autocomplete failure marker: dim, at the editor's bottom right, never focusable, never moves the text. */
+.composer-dock .editor-unavailable {
+  position: absolute;
+  right: 10px;
+  bottom: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--muted);
+  cursor: default;
+  user-select: none;
+}
+.composer-dock .editor-unavailable-icon {
+  position: relative;
+  opacity: 0.5;
+}
+
+/* The model chip while the app is still checking its runtimes. */
+.composer-dock .ui-picker-trigger.loading .ui-picker-value {
+  color: var(--muted);
+}
+
 /* Setup card above the box. */
 .composer-dock .composer-setup {
   display: flex;

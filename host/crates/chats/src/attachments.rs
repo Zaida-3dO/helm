@@ -13,6 +13,9 @@
 //!   records a file or folder (an absolute local path, never its contents) or another chat, and
 //!   answers `{attachmentId, kind: file|folder|chat, name}`. They share the per-message count with
 //!   images; on send the agent gets a section listing them as data ([`refs_section`]).
+//! - `attachment_text_put {chatId, name, text}` saves pasted text as a file in the same private
+//!   folder ([`put_file`]) and answers like `attachment_ref` plus the saved file's absolute `target`: the composer turns a very long paste
+//!   into an attachment this way.
 //! - `attachment_list {chatId}` answers the chat's attachments not sent yet — the composer's
 //!   staged set, `{images: […], refs: […]}` — so a reopened chat stages them again.
 //! - When a send comes back without having been read (withdrawn, recovered, refused, or never
@@ -708,6 +711,11 @@ fn comparable(p: &Path) -> String {
 /// `attachment_recover`.
 pub fn register(reg: &mut OpRegistry) {
     reg.blocking("attachment_ref", OpClass::Maintenance, attachment_ref);
+    reg.blocking(
+        "attachment_text_put",
+        OpClass::Maintenance,
+        attachment_text_put,
+    );
     reg.blocking("attachment_list", OpClass::Blocking, attachment_list);
     reg.blocking(
         "attachment_recover",
@@ -821,6 +829,35 @@ fn attachment_ref(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         .map_err(|e| ApiError::internal(e.to_string()))?
         .map_err(ApiError::from)?;
     Ok(json!({"attachmentId": r.id, "kind": r.kind, "name": r.name}))
+}
+
+/// Save pasted text as a file for the chat's next message and answer like a file reference.
+fn attachment_text_put(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct TextArgs {
+        chat_id: String,
+        name: String,
+        text: String,
+    }
+    let a: TextArgs = crate::ops::parse_args(args)?;
+    let db = ctx.services.need::<Database>()?;
+    let profile = ctx.services.need::<Profile>()?;
+    let dir = profile.path("attachments");
+    let r = db
+        .write(|tx| {
+            put_file(
+                tx,
+                &dir,
+                &a.chat_id,
+                &a.name,
+                a.text.as_bytes(),
+                helm_core::now_ms(),
+            )
+        })
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(ApiError::from)?;
+    Ok(json!({"attachmentId": r.id, "kind": r.kind, "name": r.name, "target": r.target}))
 }
 
 fn attachment_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {

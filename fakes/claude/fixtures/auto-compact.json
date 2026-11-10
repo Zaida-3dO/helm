@@ -1,0 +1,41 @@
+{
+  "description": "The CLI compacts on its own in the middle of a turn: it reports a compacting status, then the boundary, then carries on.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p"
+    },
+    {
+      "init": {
+        "tools": []
+      }
+    },
+    {
+      "emit": {
+        "type": "system",
+        "subtype": "status",
+        "status": "compacting",
+        "session_id": "fake-session"
+      }
+    },
+    {
+      "emit": {
+        "type": "system",
+        "subtype": "compact_boundary",
+        "session_id": "fake-session",
+        "compact_metadata": {
+          "trigger": "auto",
+          "pre_tokens": 180000
+        }
+      }
+    },
+    {
+      "text": "Carried on after compacting."
+    },
+    {
+      "result": ""
+    }
+  ]
+}

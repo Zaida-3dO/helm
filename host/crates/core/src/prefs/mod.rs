@@ -48,6 +48,10 @@ pub const NATIVE_MCP: PrefKey = PrefKey::classified("nativeMcp");
 pub const MCP_ENABLED: PrefKey = PrefKey::classified("mcpEnabled");
 /// Settings > Chat: whether agents may read the code editor's open file and selection.
 pub const IDE_CONTEXT: PrefKey = PrefKey::classified("ideContext");
+/// Settings > Chat: whether sending a message scrolls the chat to the newest message (on when missing).
+pub const SCROLL_ON_SEND: PrefKey = PrefKey::classified("scrollOnSend");
+/// Settings > Chat: whether tapping Shift twice opens Go to file (on when missing).
+pub const DOUBLE_SHIFT: PrefKey = PrefKey::classified("doubleShift");
 /// Send behaviour. Stored as the keys that differ from the defaults, which
 /// live in `helm-chats` (`send_behavior::HOME_DEFAULTS`); validated here by shape.
 pub const SEND_BEHAVIOR: PrefKey = PrefKey::classified("sendBehavior");
@@ -96,6 +100,8 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     SEND_SHORTCUT,
     NATIVE_MCP,
     IDE_CONTEXT,
+    SCROLL_ON_SEND,
+    DOUBLE_SHIFT,
     SEND_BEHAVIOR,
     SELECTION,
     APPEARANCE,
@@ -181,7 +187,7 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
                 })
             }
         }
-        "nativeMcp" | "mcpEnabled" | "ideContext" => {
+        "nativeMcp" | "mcpEnabled" | "ideContext" | "scrollOnSend" | "doubleShift" => {
             if value.is_boolean() {
                 Ok(())
             } else {
@@ -548,6 +554,8 @@ mod tests {
             ("nativeMcp", json!(false), json!("no")),
             ("mcpEnabled", json!(false), json!("no")),
             ("ideContext", json!(true), json!(1)),
+            ("scrollOnSend", json!(false), json!("no")),
+            ("doubleShift", json!(false), json!("no")),
             (
                 "fontSizes",
                 json!({"interface": 14, "response": 16}),
