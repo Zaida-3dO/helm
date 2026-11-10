@@ -523,6 +523,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   }
 
   // Settings → Runtime's stored settings.
+  const chatVerbosity = new Map<string, string>();
   const runtimeSettings: Record<string, unknown> = { executable: '', skipPermissions: true, fastMode: true, worktreeTools: false, scheduleTools: false, shellChanges: true, subagentLimits: 'orchestrator', subagentHardStop: false, subagentSoftTurns: 100, toolOutputCap: true, model: null, effort: 'xhigh', responseVerbosity: 'low', problem: null };
 
   // Settings → Runtime's repositories.
@@ -764,6 +765,17 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     runtime_settings_save: (a) => {
       Object.assign(runtimeSettings, a, 'model' in a ? { model: a.model ? String(a.model) : null } : {});
       return { ...runtimeSettings };
+    },
+    // A chat's own reply length; a chat without one follows the new-chat default.
+    chat_verbosity_get: (a) => {
+      const own = chatVerbosity.get(String(a.chatId));
+      return { level: own ?? runtimeSettings.responseVerbosity, own: own !== undefined, default: runtimeSettings.responseVerbosity };
+    },
+    chat_verbosity_set: (a) => {
+      if (a.level === null || a.level === undefined) chatVerbosity.delete(String(a.chatId));
+      else chatVerbosity.set(String(a.chatId), String(a.level));
+      const own = chatVerbosity.get(String(a.chatId));
+      return { level: own ?? runtimeSettings.responseVerbosity, own: own !== undefined, default: runtimeSettings.responseVerbosity };
     },
     repo_list: () => ({ entries: repos }),
     repo_set_worktrees: (a) => {

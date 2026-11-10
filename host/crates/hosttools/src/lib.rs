@@ -19,6 +19,7 @@
 //!   start, and the broadcast service.
 
 pub mod addendum;
+pub mod chat_verbosity;
 pub mod dispatch;
 pub mod feedback;
 pub mod feedback_items;
@@ -75,6 +76,7 @@ pub fn register_migrations(reg: &mut helm_core::db::MigrationRegistry) {
     reg.initializer("hosttools-settings-changes", settings::init);
     reg.initializer("hosttools-agent-feedback", feedback::init);
     reg.initializer("hosttools-feedback-items", feedback_items::init);
+    reg.initializer("hosttools-chat-verbosity", chat_verbosity::init);
 }
 
 /// `settings_changes_list` and `settings_undo`.
@@ -82,4 +84,5 @@ pub fn register_ops(reg: &mut helm_ipc::OpRegistry) {
     settings::register_ops(reg);
     feedback::register_ops(reg);
     feedback_items::register_ops(reg);
+    chat_verbosity::register_ops(reg);
 }

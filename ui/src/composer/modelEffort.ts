@@ -150,6 +150,16 @@ export function modelRows(catalogue: ModelCatalogue | null, current: string | nu
   return rows;
 }
 
+/**
+ * "Claude Code's default" as the first row, under Claude when the list has headings. The new-chat
+ * default offers it: choosing it stores no model, so Claude Code picks its own.
+ */
+export function withDefaultRow(rows: ModelRow[], id: string): ModelRow[] {
+  const row: ModelRow = { id, title: "Claude Code's default", detail: 'Claude Code picks the model', disabled: false };
+  if (rows.some((r) => r.group)) row.group = 'Claude';
+  return [row, ...rows];
+}
+
 /** Rows whose title, id or detail contains the query (case-insensitive). */
 export function filterRows(rows: ModelRow[], q: string): ModelRow[] {
   const s = q.trim().toLowerCase();

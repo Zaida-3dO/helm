@@ -889,6 +889,27 @@ pub fn permission_start_line(chat_id: &str) -> Option<serde_json::Value> {
     Some(permission_mode_line(&pick.mode))
 }
 
+/// The mode a chat's next worker will start in, when one was picked or carried over for it.
+pub fn picked_mode(chat_id: &str) -> Option<String> {
+    picks().lock().unwrap().get(chat_id).map(|p| p.mode.clone())
+}
+
+/// Starts a new chat in `mode` (the mode the user last picked elsewhere), unless it already has a
+/// pick of its own. The first worker gets it as its start line.
+pub fn seed_mode(chat_id: &str, mode: &str) {
+    if !PERMISSION_MODES.contains(&mode) {
+        return;
+    }
+    picks()
+        .lock()
+        .unwrap()
+        .entry(chat_id.to_owned())
+        .or_insert_with(|| Pick {
+            mode: mode.to_owned(),
+            delivered: false,
+        });
+}
+
 /// A worker's `permission_mode_kept` line: after a pick, the mode the chat is really in (Claude Code
 /// left plan mode, or refused the pick and stayed where it was); `None` drops a pick that never took.
 /// The next worker starts there rather than re-entering the old pick. A pick the user made since,
@@ -940,6 +961,10 @@ pub fn chat_set_permission_mode(
         .snapshot(|t| store::get_chat(t, &a.chat_id, 0))
         .map_err(sql)?
         .ok_or_else(crate::ops::not_found)?;
+    // New chats start in the mode picked last, also after a restart.
+    rt.db()
+        .write(|tx| crate::runtime_settings::save_default_permission_mode(tx, &a.mode))
+        .map_err(sql)?;
     // A chat with a live worker hears it now; otherwise its next worker gets it at start.
     let live_worker = rt
         .sh

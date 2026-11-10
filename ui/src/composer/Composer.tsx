@@ -18,7 +18,6 @@ import { useShell } from '../shell/context.ts';
 import { addRef, dropLandsIn, parseFileDrop, roomLeft, type AttachedRef } from './refs.ts';
 import { ModelPicker } from './ModelPicker.tsx';
 import { isLocalModel } from './modelEffort.ts';
-import { DefaultStar } from './DefaultStar.tsx';
 import { PermissionChip } from './PermissionChip.tsx';
 import { bytesToBase64, isAnimated, refusal, unstagedOnly, type Attached } from './attachments.ts';
 import { bytesFromBase64 } from '../transcript/messageImages.ts';
@@ -826,7 +825,6 @@ export function Composer({ chat, thread, pending, ops, flushers, sendShortcut, r
         <div className="composer-bar">
           <div className="composer-selects">
             <ModelPicker chat={chat} ops={ops} loading={checking} />
-            <DefaultStar chat={chat} />
             <PermissionChip chatId={chat.id} mode={thread?.permissionMode ?? null} busy={busy} ops={ops} />
             {toolbarStart.map((a) => (
               <span key={a.id} className="composer-accessory" data-accessory={a.id}>

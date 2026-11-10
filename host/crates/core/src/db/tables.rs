@@ -118,6 +118,8 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ("consent_records", Data),
     // Host tools: the "Changed by chats" ring with Undo.
     ("settings_changes", Data),
+    // A chat's own reply length; follows the chat's deletion.
+    ("chat_verbosity", Data),
     ("agent_feedback", Data),
     ("feedback_items", Tool),
     ("feedback_entries", Tool),

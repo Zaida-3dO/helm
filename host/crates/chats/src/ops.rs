@@ -431,6 +431,7 @@ pub(crate) fn chat_create(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
                 ApiError::new("refused", "That board is no longer on Agent Standup.")
             }
         })?;
+    crate::runtime_settings::start_in_default_mode(&db, &id);
     let rev = clock.next();
     let chat = db
         .snapshot(|tx| store::get_chat(tx, &id, rev))
@@ -458,7 +459,8 @@ pub fn stored_thread(
     Ok(ThreadState {
         chat_id: chat.id.clone(),
         status: chat.status,
-        permission_mode: None,
+        // With no worker yet, the mode the next one starts in, if one was picked or carried over.
+        permission_mode: crate::submit::picked_mode(&chat.id),
         interactions: Vec::new(),
         live_tools: Vec::new(),
         background_tasks: Vec::new(),

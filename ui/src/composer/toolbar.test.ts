@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { commitPatch, effortLabel, filterRows, formatContext, isLocalModel, localHint, localModelChoices, localModelName, localServerId, modelRows, shortName, stepEffort, thinkingLabel, triggerLabel } from './modelEffort.ts';
+import { commitPatch, effortLabel, filterRows, formatContext, isLocalModel, localHint, localModelChoices, localModelName, localServerId, modelRows, shortName, stepEffort, thinkingLabel, triggerLabel, withDefaultRow } from './modelEffort.ts';
 import { afterTurn, newPick, permissionTooltip, pickedMode, setPickedMode, shownMode } from './permission.ts';
 import { sendLabel } from './keymap.ts';
 import type { ModelCatalogue } from '../api/types.ts';
@@ -115,6 +115,13 @@ test('local models: their own group with server and context, greyed only when th
   // Settings → Runtime's plain list gets the same models, with the server in the description.
   assert.deepEqual(localModelChoices(localCat.local).map((c) => [c.name, c.description]).slice(0, 2), [['Qwen Flash', 'Strata · 256k · loaded'], ['Qwen Coder', 'Strata · 128k']]);
   assert.deepEqual(localModelChoices(undefined), []);
+  // The new-chat default can be "Claude Code's default": a first row, under Claude when the list has headings.
+  const withDefault = withDefaultRow(modelRows(localCat, null), 'default');
+  assert.deepEqual([withDefault[0]!.id, withDefault[0]!.title, withDefault[0]!.group, withDefault.length], ['default', "Claude Code's default", 'Claude', modelRows(localCat, null).length + 1]);
+  assert.equal(withDefaultRow(modelRows(cat, null), 'default')[0]!.group, undefined, 'no headings when the list has none');
+  // Reply length steps along its three stops and stops at the ends, like the effort.
+  const levels = ['low', 'medium', 'high'];
+  assert.deepEqual([stepEffort(levels, 'low', -1), stepEffort(levels, 'low', 1), stepEffort(levels, 'high', 1), stepEffort(levels, 'unknown', 1)], ['low', 'medium', 'high', 'low']);
 });
 
 test('a commit sends only what changed, and nothing when nothing did', () => {

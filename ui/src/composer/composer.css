@@ -247,6 +247,31 @@
   color: var(--muted);
   cursor: var(--cursor-default);
 }
+.model-picker-verbosity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  padding: 0 14px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+}
+.model-picker-note {
+  padding: 0 14px 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.model-picker-default {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 14px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+}
+.model-picker-default .model-picker-link:disabled {
+  color: var(--muted);
+}
 .model-picker-effort {
   display: flex;
   align-items: center;
@@ -736,15 +761,6 @@
   border-radius: 6px;
 }
 
-/* The make-default star after the model control. */
-.composer-dock .composer-default-star {
-  width: 24px;
-  height: 24px;
-  color: var(--muted);
-}
-.composer-dock .composer-default-star.on {
-  color: var(--accent);
-}
 .skill-scope {
   flex: none;
   align-self: center;
@@ -758,7 +774,6 @@
 /* Pressed states for the composer's small buttons (hover and keyboard focus come from the kit). */
 .composer-dock .composer-attach:active:not(:disabled),
 .composer-dock .composer-ref-x:active:not(:disabled),
-.composer-dock .composer-default-star:active:not(:disabled),
 .composer-dock .attachment-thumb-x:active:not(:disabled) {
   background: color-mix(in srgb, var(--text) 14%, transparent);
 }

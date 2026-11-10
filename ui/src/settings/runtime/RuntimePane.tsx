@@ -3,19 +3,15 @@
 // (`runtime_settings_save`); the executable saves with its button.
 
 import { useCallback, useEffect, useState } from 'react';
-import type { LocalModelInfo } from '../../api/types.ts';
-import { localModelChoices } from '../../composer/modelEffort.ts';
+import { DefaultModelPicker } from '../../composer/ModelPicker.tsx';
 import { useShell } from '../../shell/context.ts';
 import { Button, Checkbox, Picker, SettingRow, TextInput, toast } from '../../ui/index.ts';
 import {
   DEFAULT_MODEL,
-  EFFORT_OPTIONS,
-  modelOptions,
   PERMISSION_OPTIONS,
   statusLine,
   SUBAGENT_SCOPE_OPTIONS,
   turnOptions,
-  VERBOSITY_OPTIONS,
   repoSummary,
   type Found,
   type RepoRow,
@@ -48,7 +44,6 @@ export function RuntimePane() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [checking, setChecking] = useState(false);
   const [settings, setSettings] = useState<RuntimeSettings | null>(null);
-  const [models, setModels] = useState<{ id: string; name: string; description?: string }[]>([]);
   const [exe, setExe] = useState('');
   const [repos, setRepos] = useState<RepoRow[] | null>(null);
 
@@ -70,15 +65,20 @@ export function RuntimePane() {
         setExe(s.executable);
       })
       .catch(() => undefined);
-    void shell
-      .api<{ entries: RepoRow[] }>('repo_list', {})
-      .then((r) => setRepos(r.entries))
-      .catch(() => setRepos([]));
-    void shell
-      .api<{ models: { id: string; name: string; description?: string }[]; local?: LocalModelInfo[] }>('model_catalogue', { harness: 'claude' })
-      .then((c) => setModels([...c.models, ...localModelChoices(c.local)]))
-      .catch(() => undefined);
   }, [shell, check]);
+
+  // The repository list loads now and again when a chat edits an entry or the user undoes that.
+  useEffect(() => {
+    const load = (failed: () => void) =>
+      void shell
+        .api<{ entries: RepoRow[] }>('repo_list', {})
+        .then((r) => setRepos(r.entries))
+        .catch(failed);
+    load(() => setRepos([]));
+    const reload = () => load(() => undefined);
+    const offs = [shell.bus.on('external_settings', reload), shell.bus.on('repositories', reload)];
+    return () => offs.forEach((off) => off());
+  }, [shell]);
 
   const save = (patch: SettingsPatch, after?: () => void) => {
     const before = settings;
@@ -92,6 +92,21 @@ export function RuntimePane() {
       .catch((e: unknown) => {
         setSettings(before);
         toast.show({ kind: 'error', text: `Could not save: ${String((e as Error).message ?? e)}` });
+      });
+  };
+
+  /** Save new-chat defaults from the picker: shown at once, put back and rethrown if the save fails. */
+  const saveNow = (patch: { model?: string; effort?: string; responseVerbosity?: string }) => {
+    const before = settings;
+    // The picker's "default" model is Claude Code's own choice, stored as empty.
+    const body: SettingsPatch = { ...patch, ...(patch.model === undefined ? {} : { model: patch.model === DEFAULT_MODEL ? '' : patch.model }) };
+    if (settings) setSettings({ ...settings, ...body, model: body.model === undefined ? settings.model : body.model || null });
+    return shell
+      .api<RuntimeSettings>('runtime_settings_save', body)
+      .then(setSettings)
+      .catch((e: unknown) => {
+        setSettings(before);
+        throw e;
       });
   };
 
@@ -238,38 +253,11 @@ export function RuntimePane() {
 
       <section className="rt-section">
         <h3>New chats</h3>
-        <SettingRow title="Model" description="The model a new chat starts with. Change it for one chat from its composer.">
-          <Picker
-            settings
-            label="Model for new chats"
-            testId="runtime-model"
-            value={s ? (s.model ?? DEFAULT_MODEL) : null}
-            options={modelOptions(models, s?.model ?? null)}
-            disabled={!s}
-            onChange={(v: string) => save({ model: v === DEFAULT_MODEL ? '' : v })}
-          />
-        </SettingRow>
-        <SettingRow title="Effort" description="How hard Claude thinks before it answers. Higher is slower; Extra high is Claude Code's own default.">
-          <Picker
-            settings
-            label="Effort for new chats"
-            testId="runtime-effort"
-            value={s?.effort ?? null}
-            options={EFFORT_OPTIONS}
-            disabled={!s}
-            onChange={(v: string) => save({ effort: v })}
-          />
-        </SettingRow>
-        <SettingRow title="Response length" description="How long the agent's replies are, in every chat.">
-          <Picker
-            settings
-            label="Response length"
-            testId="runtime-verbosity"
-            value={s?.responseVerbosity ?? null}
-            options={VERBOSITY_OPTIONS}
-            disabled={!s}
-            onChange={(v: string) => save({ responseVerbosity: v })}
-          />
+        <SettingRow
+          title="Model and effort"
+          description="The model, how hard it thinks and how long its replies are for a new chat. Change them for one chat from its composer."
+        >
+          <DefaultModelPicker ops={shell.ops} settings={s} save={saveNow} />
         </SettingRow>
       </section>
     </div>

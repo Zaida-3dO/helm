@@ -1,7 +1,7 @@
 //! The addendum sections Helm registers itself.
 //!
-//! - `verbosity` (order 10): how long replies should be, from the user-only `responseVerbosity`
-//!   (low by default; high adds nothing).
+//! - `verbosity` (order 10): how long replies should be: the chat's own level, else the user-only
+//!   `responseVerbosity` (low by default; high adds nothing).
 //! - `links` (order 20): the link teaching (vault notes and `file:line`, the panel crate's
 //!   fragment), adopted unchanged through [`AdoptedSection`] so it is taught once.
 //! - `tools.guidelines` (order 30): usage guidelines registered with host tools.
@@ -39,8 +39,9 @@ impl AddendumSection for VerbositySection {
     fn order(&self) -> i32 {
         10
     }
-    fn text(&self, _ctx: &LaunchCtx<'_>) -> Option<String> {
-        match verbosity(&self.db).as_str() {
+    fn text(&self, ctx: &LaunchCtx<'_>) -> Option<String> {
+        // The chat's own level when it has one, else the new-chat default.
+        match crate::chat_verbosity::level_for(&self.db, ctx.chat_id).as_str() {
             "low" => Some(VERBOSITY_LOW.into()),
             "medium" => Some(VERBOSITY_MEDIUM.into()),
             _ => None,
