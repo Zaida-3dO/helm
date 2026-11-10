@@ -1,4 +1,4 @@
-// The landing guard, worker side. Before Claude Code runs a Bash, PowerShell or MCP tool call,
+// The landing guard, worker side. Before Claude Code runs a Bash, PowerShell, Monitor or MCP tool call,
 // the PreToolUse hook asks the host with one `guard_check` line and waits for its
 // `guard_verdict` (worker/PROTOCOL-NOTES.md, "Landing guard"). The host decides everything: it
 // answers at once, and lets the call through, in any chat without Orchestrator on and an active
@@ -14,7 +14,7 @@ import type { Json } from "../../protocol/types.ts";
 /** The callback id the worker registers for the landing guard. */
 export const LANDING_GUARD_HOOK_ID = "helm-landing-guard";
 /** The tools the guard sees. */
-export const LANDING_GUARD_MATCHER = "Bash|PowerShell|mcp__.*";
+export const LANDING_GUARD_MATCHER = "Bash|PowerShell|Monitor|mcp__.*";
 export const GUARD_TIMEOUT_MS = 10_000;
 /** Longer commands are sent cut just past the guard's own limit, which it refuses as too large. */
 const MAX_COMMAND_CHARS = 1024 * 1024 + 1;
@@ -69,7 +69,8 @@ export class LandingGuard {
 
   /** The hook's answer for one call: `{}` lets it through. */
   async decide(call: GuardCall): Promise<Json> {
-    const kind = call.tool === "Bash" ? "bash" : call.tool === "PowerShell" ? "powershell" : call.tool.startsWith("mcp__") ? "mcp" : undefined;
+    const kind =
+      call.tool === "Bash" ? "bash" : call.tool === "PowerShell" ? "powershell" : call.tool === "Monitor" ? "monitor" : call.tool.startsWith("mcp__") ? "mcp" : undefined;
     if (!kind) return {};
     const id = randomUUID();
     const line: Json = { type: "guard_check", id, kind, root: call.root, turn: `${this.session}:${this.turn}` };
@@ -80,6 +81,7 @@ export class LandingGuard {
       // An input too large to send is judged as nothing; the host still sees the tool's name.
       line.input = text.length <= MAX_INPUT_CHARS ? call.input : {};
     } else {
+      // A Monitor call without command text is sent as an empty command, which the host refuses.
       const command = typeof call.input.command === "string" ? call.input.command : "";
       line.command = command.slice(0, MAX_COMMAND_CHARS);
     }

@@ -453,13 +453,13 @@ tool output is not capped by Helm; the CLI's own limits apply.
 
 ## Landing guard
 
-Registered in every chat with host tools: one `PreToolUse` entry, matcher `Bash|PowerShell|mcp__.*`,
+Registered in every chat with host tools: one `PreToolUse` entry, matcher `Bash|PowerShell|Monitor|mcp__.*`,
 callback `helm-landing-guard`, after the other entries (Claude Code runs every matching hook; any
 deny wins).
 
 | Line | Direction | Fields and behaviour |
 |---|---|---|
-| `guard_check` | worker → host | `id`, `kind` (`bash`, `powershell`, `mcp`), `root` (false when the hook input has an `agent_id` or the call came in a subagent's message), `turn` (changes when a turn ends), `cwd` (the hook input's), and `command` (cut just past 1 MiB) or `tool` and `input` (an input over 256 KiB is sent as `{}`). |
+| `guard_check` | worker → host | `id`, `kind` (`bash`, `powershell`, `monitor`, `mcp`; a Monitor call carries the command it runs, or an empty one the host refuses), `root` (false when the hook input has an `agent_id` or the call came in a subagent's message), `turn` (changes when a turn ends), `cwd` (the hook input's), and `command` (cut just past 1 MiB) or `tool` and `input` (an input over 256 KiB is sent as `{}`). |
 | `guard_verdict` | host → worker, no response | `id`, `allow`, `reason?` (the deny reason the agent reads), `context?` (added to an allowed call as `additionalContext`), `active` (the guard is in force for this chat). |
 
 The host answers at once with `allow:true, active:false` in any chat without Orchestrator on and

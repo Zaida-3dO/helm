@@ -209,7 +209,7 @@ test("the landing guard asks the host before Bash and MCP calls, and fails close
   try {
     await s.host.ready();
     const init = s.received().find((r) => r.type === "control_request" && (r.request as Json).subtype === "initialize")?.request as Json;
-    assert.ok(((init.hooks as Json).PreToolUse as Json[]).some((m) => m.matcher === "Bash|PowerShell|mcp__.*" && (m.hookCallbackIds as string[])[0] === "helm-landing-guard"));
+    assert.ok(((init.hooks as Json).PreToolUse as Json[]).some((m) => m.matcher === "Bash|PowerShell|Monitor|mcp__.*" && (m.hookCallbackIds as string[])[0] === "helm-landing-guard"));
     await prompt(s.host, "land it");
     // Play the host: the first three checks get answers, the fourth none (the guard was in force),
     // the fifth says the guard is off for this chat, the sixth again none.

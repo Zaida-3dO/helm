@@ -3,8 +3,10 @@
 //! Before Claude Code runs a Bash, PowerShell or MCP tool call, the chat's worker sends one
 //! `guard_check` line and waits for the `guard_verdict` the host sends back:
 //!
-//! - `guard_check {id, kind: "bash" | "powershell" | "mcp", root, turn, cwd?, command?, tool?,
-//!   input?}`: `root` is false for a sub-agent's call; `turn` changes with every turn.
+//! - `guard_check {id, kind: "bash" | "powershell" | "monitor" | "mcp", root, turn, cwd?,
+//!   command?, tool?, input?}`: `root` is false for a sub-agent's call; `turn` changes with every
+//!   turn. A `monitor` call (Claude Code's Monitor tool, which starts a command and watches its
+//!   output) is judged as the Bash command it runs; one with no command to read is refused.
 //! - `guard_verdict {id, allow, reason?, context?, active}`: `reason` is the refusal the agent
 //!   reads, `context` a note added to an allowed call, `active` whether the guard is in force for
 //!   the chat (the worker uses it to decide what to do when no answer comes in time).
@@ -239,7 +241,11 @@ pub fn check(db: &Database, chat: &str, c: &Check, facts: &dyn RepoFacts, now: i
         }
     };
     let result = match c.kind.as_str() {
-        "bash" | "powershell" => bash(db, chat, c, &f, facts, now),
+        // A Monitor call with no command text is a shape the guard can't read.
+        "monitor" if c.command.as_deref().is_none_or(|x| x.trim().is_empty()) => Ok(Answer::refuse(format!(
+            "Helm could not read this Monitor call (it has no command), so it did not run. Monitor a plain command instead. {TURN_OFF}"
+        ))),
+        "bash" | "powershell" | "monitor" => bash(db, chat, c, &f, facts, now),
         "mcp" => mcp(db, chat, c, &f, now),
         _ => Ok(Answer::pass(true)),
     };
@@ -880,6 +886,25 @@ impl RepoFacts for GitFacts {
             &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
         )
     }
+    fn configured_push(&self, cwd: &Path, remote: &str) -> Option<Vec<String>> {
+        if remote.starts_with('-') || remote.contains(['\n', '=']) {
+            return None;
+        }
+        // `git config --get-all` exits 1 and prints nothing when the key is not set.
+        let key = format!("remote.{remote}.push");
+        match self.git(cwd, &["config", "--get-all", &key])? {
+            (true, out) => Some(out.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect()),
+            (false, out) if out.is_empty() => Some(Vec::new()),
+            _ => None,
+        }
+    }
+    fn push_default(&self, cwd: &Path) -> Option<String> {
+        match self.git(cwd, &["config", "--get", "push.default"])? {
+            (true, v) if !v.is_empty() => Some(v.to_ascii_lowercase()),
+            (_, v) if v.is_empty() => Some("simple".into()),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1051,6 +1076,14 @@ mod tests {
             assert!(why.contains(part), "{part} in {why}");
         }
         assert_eq!(t.count("gate_denied"), 1);
+        // Claude Code's Monitor tool runs a command too: it is judged like Bash, and a call with
+        // no command to read is refused.
+        assert_eq!(t.ask("c", "monitor", true, "tail -f build.log", Value::Null), Answer::pass(true));
+        assert_eq!(t.ask("off", "monitor", true, MAIN, Value::Null), Answer::pass(false));
+        let m = t.ask("c", "monitor", true, MAIN, Value::Null);
+        assert!(!m.allow && m.reason.unwrap().contains("# helm-override:"));
+        let blank = t.ask("c", "monitor", true, "  ", Value::Null);
+        assert!(!blank.allow && blank.reason.unwrap().contains("no command"));
         // A sub-agent is told to go back to the orchestrator, even with an override line.
         let sub = t.ask(
             "c",
@@ -1331,5 +1364,18 @@ mod tests {
             "a missing folder can't be told"
         );
         assert_eq!(f.upstream(repo.path()), None);
+        // The push settings a bare push follows: none set, then set (a fresh reader sees them).
+        assert_eq!(f.configured_push(repo.path(), "origin"), Some(vec![]));
+        assert_eq!(f.push_default(repo.path()).as_deref(), Some("simple"));
+        git(&["config", "remote.origin.push", "HEAD:main"]);
+        git(&["config", "--add", "remote.origin.push", "refs/heads/a:refs/heads/b"]);
+        git(&["config", "push.default", "Upstream"]);
+        let f = GitFacts::default();
+        assert_eq!(
+            f.configured_push(repo.path(), "origin"),
+            Some(vec!["HEAD:main".to_owned(), "refs/heads/a:refs/heads/b".to_owned()])
+        );
+        assert_eq!(f.push_default(repo.path()).as_deref(), Some("upstream"));
+        assert_eq!(f.configured_push(repo.path(), "-x"), None, "an option is not a remote");
     }
 }

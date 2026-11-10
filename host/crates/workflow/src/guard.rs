@@ -29,6 +29,16 @@ pub trait RepoFacts {
     fn upstream(&self, _cwd: &Path) -> Option<String> {
         None
     }
+    /// The refspecs `remote.<remote>.push` configures, which a push with no refspec of its own
+    /// uses. Empty when none is set; `None` when git could not say (fail closed). The default
+    /// knows of none.
+    fn configured_push(&self, _cwd: &Path, _remote: &str) -> Option<Vec<String>> {
+        Some(Vec::new())
+    }
+    /// `push.default`, lower case; `simple` when unset. `None` when git could not say.
+    fn push_default(&self, _cwd: &Path) -> Option<String> {
+        Some("simple".into())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -541,6 +551,10 @@ struct Switched {
     /// A switch whose target can't be read (`-`, `@{-1}`, a computed name): the current branch is
     /// unknown from then on, and the guard fails closed on anything that needs it.
     unknown: bool,
+    /// The git configuration was written earlier on the line (`git config`, `git remote set-url`,
+    /// a redirect into `.git/config`...), so the settings a later push reads are not the ones git
+    /// shows now. A push after it fails closed.
+    config_changed: bool,
 }
 
 impl Switched {
@@ -652,7 +666,24 @@ impl Switched {
                     self.to(b);
                 }
             }
+            "config" => self.config_changed |= config_writes(args),
+            "remote" => {
+                self.config_changed |= args.iter().any(|a| {
+                    matches!(
+                        a.as_str(),
+                        "add" | "set-url" | "set-head" | "set-branches" | "rename" | "remove" | "rm" | "prune"
+                    )
+                });
+            }
             "branch" => {
+                // `--set-upstream-to`, `-u` and `--unset-upstream` rewrite the branch's settings.
+                self.config_changed |= args.iter().any(|a| {
+                    let a = a.as_str();
+                    a.starts_with("--set-upstream")
+                        || a == "--unset-upstream"
+                        || a == "--edit-description"
+                        || (a.starts_with('-') && !a.starts_with("--") && a.contains('u'))
+                });
                 let renames = args.iter().any(|a| {
                     a.as_str() == "--move"
                         || (a.starts_with('-') && !a.starts_with("--") && a.contains(['m', 'M']))
@@ -676,6 +707,65 @@ impl Switched {
             _ => {}
         }
     }
+}
+
+/// Whether a `git config` command writes: a key with a value, or one of the options that change
+/// or remove settings. Reading (`--get`, `--list`, a key alone) does not.
+fn config_writes(args: &[&String]) -> bool {
+    let has = |names: &[&str]| args.iter().any(|a| names.contains(&a.as_str()));
+    let writes = has(&[
+        "--unset",
+        "--unset-all",
+        "--add",
+        "--replace-all",
+        "--rename-section",
+        "--remove-section",
+        "--edit",
+        "-e",
+    ]);
+    let reads = has(&[
+        "--get",
+        "--get-all",
+        "--get-regexp",
+        "--get-urlmatch",
+        "--list",
+        "-l",
+        "--show-origin",
+        "--show-scope",
+        "--name-only",
+        "--get-color",
+        "--get-colorbool",
+    ]);
+    let operands = args.iter().filter(|a| !a.starts_with('-')).count();
+    writes || (!reads && operands >= 2)
+}
+
+/// Commands that only read a file, so naming a git config file does not write it.
+const READS_FILES: [&str; 14] = [
+    "cat", "grep", "egrep", "fgrep", "rg", "head", "tail", "less", "more", "wc", "diff", "ls",
+    "stat", "file",
+];
+
+/// Whether a path is a git configuration file.
+fn names_git_config(path: &str) -> bool {
+    let p = path.replace('\\', "/").to_ascii_lowercase();
+    p.contains(".git/config")
+        || p.ends_with(".gitconfig")
+        || p.ends_with("/gitconfig")
+        || p == "config.worktree"
+}
+
+/// Whether the command writes a git configuration file other than through `git config`: a
+/// redirect into it, or a tool other than a plain reader given its name.
+fn writes_git_config(c: &Simple) -> bool {
+    let into = c
+        .redirs
+        .iter()
+        .any(|r| r.starts_with('>') && names_git_config(r.trim_start_matches(['>', '|', '&'])));
+    let name = c.words.first().map(|w| base(w)).unwrap_or_default();
+    into || (name != "git"
+        && !READS_FILES.contains(&name.as_str())
+        && c.words.iter().skip(1).any(|w| names_git_config(w)))
 }
 
 /// Lines where a command can run after a switch written later: a loop body runs again, a
@@ -989,17 +1079,56 @@ fn git_shape(
                 Err(why) => return Shape::Unreadable(why),
             };
             let positional = &parsed.positional;
-            let refspecs = positional.get(1..).unwrap_or(&[]);
-            let repo = match positional.first().or(parsed.repo.as_ref()) {
+            let mut refspecs = positional.get(1..).unwrap_or(&[]);
+            let remote = positional.first().or(parsed.repo.as_ref());
+            let remote_name = remote.map_or("origin", String::as_str);
+            let repo = match remote {
                 Some(remote) if remote.as_str() != "origin" => facts.remote_repo(cwd, remote),
                 _ => repo,
             };
+            if sw.config_changed {
+                return Shape::Unreadable(
+                    "a push after the git configuration was rewritten earlier on the line",
+                );
+            }
+            // With no refspec on the command line, git pushes what the configuration says:
+            // `remote.<name>.push` if set, else `push.default`.
+            let configured: Vec<String>;
             if refspecs.is_empty() {
-                return Shape::Into {
-                    repo,
-                    branch: current,
-                    at: cwd.clone(),
+                let Some(set) = facts.configured_push(cwd, remote_name) else {
+                    return Shape::Unreadable("the folder's push settings could not be read");
                 };
+                if set.is_empty() {
+                    let branch = match facts.push_default(cwd).as_deref() {
+                        Some("simple" | "current" | "nothing") => current,
+                        // The upstream branch's own name, wherever it is not the current one's.
+                        Some("upstream" | "tracking") => facts
+                            .upstream(cwd)
+                            .and_then(|u| u.split_once('/').map(|(_, b)| b.to_owned()))
+                            .map(|b| match &current {
+                                Some(c) => format!("{c}\n{b}"),
+                                None => b,
+                            })
+                            .or(current),
+                        Some("matching") => {
+                            return Shape::Unreadable(
+                                "git push with push.default matching names no single branch",
+                            )
+                        }
+                        _ => {
+                            return Shape::Unreadable(
+                                "git push with a push.default the guard does not know",
+                            )
+                        }
+                    };
+                    return Shape::Into {
+                        repo,
+                        branch,
+                        at: cwd.clone(),
+                    };
+                }
+                configured = set;
+                refspecs = &configured;
             }
             // The first refspec that lands on a protected branch decides; the caller checks each.
             let mut dsts = Vec::new();
@@ -1056,7 +1185,7 @@ fn git_shape(
                 at: cwd.clone(),
             }
         }
-        v @ ("checkout" | "switch" | "branch" | "symbolic-ref") => {
+        v @ ("checkout" | "switch" | "branch" | "symbolic-ref" | "config" | "remote") => {
             sw.record(v, &args);
             Shape::None
         }
@@ -1231,6 +1360,29 @@ fn pr_selector(s: &str) -> PrSel {
     PrSel::Other
 }
 
+/// What a ready flip of a computed PR number is called: [`judge_in`] lowers its refusal to the
+/// reason tier, since the repository is named and only the number is not.
+const COMPUTED_FLIP: &str = "a ready flip of a PR whose number is computed";
+
+/// What a refused program that names git but does nothing else the guard can't read is called: its
+/// refusal is lowered to the reason tier.
+const NAMES_GIT_CODE: &str = "inline interpreter code that only names git is not read";
+
+/// Words that make code something other than plain text handling, so naming git beside them
+/// proves nothing: they can build and run a command from pieces.
+const NOT_PLAIN_CODE: [&str; 10] = [
+    "eval",
+    "__import__",
+    "getattr",
+    "importlib",
+    "compile",
+    "ctypes",
+    "base64",
+    "require",
+    "Function",
+    "chr(",
+];
+
 fn gh_shape(
     words: &[String],
     cwd: &Path,
@@ -1252,10 +1404,23 @@ fn gh_shape(
             | (Some("api"), _)
             | (Some("repo"), Some("sync"))
     );
+    let rest: &[&String] = args.get(2..).unwrap_or(&[]);
     if landing_sub && args.iter().any(|w| w.contains('$')) {
+        // A flip of a PR whose number is the only computed word, in a repository the command
+        // names: the repository decides what is at stake, so it is judged by that.
+        let computed_words = args.iter().filter(|w| w.contains('$')).count();
+        let number_only = matches!((first, second), (Some("pr"), Some("ready")))
+            && computed_words == 1
+            && rest.iter().any(|w| w.contains('$') && !w.starts_with('-'));
+        if let (true, Some(repo)) = (number_only, flag_repo.clone().filter(|r| !r.contains('$'))) {
+            return Shape::GitHub {
+                repo: Some(repo),
+                pr: None,
+                what: COMPUTED_FLIP,
+            };
+        }
         return Shape::Unreadable("a gh landing command with a computed argument");
     }
-    let rest: &[&String] = args.get(2..).unwrap_or(&[]);
     let sel = gh_selectors(rest);
     // The PR the command acts on, and the repository: a URL names its own, and a `--repo` beside
     // a URL that names another one can't be told apart.
@@ -1631,6 +1796,9 @@ fn simple_shape(
     } else {
         c
     };
+    if writes_git_config(c) {
+        sw.config_changed = true;
+    }
     let Some(cmd) = c.words.first() else {
         return Shape::None;
     };
@@ -2754,6 +2922,11 @@ fn names_landing(text: &str) -> bool {
 /// neither it nor any heredoc it reads names git, gh, curl, hub or a landing verb. Then only the
 /// folder it runs in is at stake.
 fn stands_alone(c: &Simple, wrapped: bool, line: &LineFacts) -> bool {
+    alone(c, wrapped, line, false)
+}
+
+/// [`stands_alone`], optionally ignoring that the code names git, gh, curl, hub or a landing verb.
+fn alone(c: &Simple, wrapped: bool, line: &LineFacts, names_ok: bool) -> bool {
     !wrapped
         && !line.whole
         && c.assigns.is_empty()
@@ -2769,10 +2942,10 @@ fn stands_alone(c: &Simple, wrapped: bool, line: &LineFacts) -> bool {
         && !c
             .words
             .iter()
-            .any(|w| w.contains(['$', '`']) || names_landing(w))
-        && c.heredocs
-            .iter()
-            .all(|h| (h.quoted || !h.body.contains(['$', '`'])) && !names_landing(&h.body))
+            .any(|w| w.contains(['$', '`']) || (!names_ok && names_landing(w)))
+        && c.heredocs.iter().all(|h| {
+            (h.quoted || !h.body.contains(['$', '`'])) && (names_ok || !names_landing(&h.body))
+        })
 }
 
 /// Python modules simple file-editing code may import.
@@ -3251,6 +3424,12 @@ fn code_shape(
         Shape::None
     } else if stands_alone(c, wrapped, line) {
         Shape::UnreadableIn("inline interpreter code is not read", cwd.to_path_buf())
+    } else if !spawns(&text)
+        && !modules
+        && !NOT_PLAIN_CODE.iter().any(|w| text.contains(w))
+        && alone(c, wrapped, line, true)
+    {
+        Shape::Unreadable(NAMES_GIT_CODE)
     } else {
         Shape::Unreadable("inline interpreter code is not read")
     }
@@ -3433,9 +3612,16 @@ fn judge_in(
             Shape::None => continue,
             Shape::Unreadable(why) => {
                 if at_stake {
+                    // Code that only names git is unreadable all the same, but its refusal is
+                    // lowerable: the reason tier is enough to go ahead.
+                    let (tier, rule) = if why == NAMES_GIT_CODE {
+                        (Tier::Reason, "names_git_code")
+                    } else {
+                        (unknown, "fail_closed")
+                    };
                     let v = deny(
-                        unknown,
-                        "fail_closed",
+                        tier,
+                        rule,
                         format!("Part of the command can't be checked: {why}."),
                     );
                     if let Some(v) = keep(v, &mut soft) {
@@ -3526,11 +3712,17 @@ fn judge_in(
             }
             Shape::NonDraftPr { repo } => match &repo {
                 Some(r) if ctx.draft_repos.iter().any(|d| same_repo(d, r)) && at_stake => {
-                    return deny(
-                        Tier::Quote,
+                    // Lowerable: opening a PR that is not a draft where the rule is draft is
+                    // undone by converting it, so the reason tier is enough to go ahead.
+                    let v = deny(
+                        Tier::Reason,
                         "draft_rule",
                         format!("{r} lands by the draft rule; open PRs there with --draft."),
                     );
+                    if let Some(v) = keep(v, &mut soft) {
+                        return v;
+                    }
+                    continue;
                 }
                 _ => continue,
             },
@@ -3549,7 +3741,17 @@ fn judge_in(
             continue;
         };
         if task_repo(&repo) {
-            return deny(Tier::Quote, "task_repo", format!("{what} in {repo}, a repository of the active task: Helm lands this task's changes itself"));
+            // Lowerable: a flip whose repository is named and only its number is computed.
+            let (tier, rule) = if what == COMPUTED_FLIP {
+                (Tier::Reason, "computed_flip")
+            } else {
+                (Tier::Quote, "task_repo")
+            };
+            let v = deny(tier, rule, format!("{what} in {repo}, a repository of the active task: Helm lands this task's changes itself"));
+            if let Some(v) = keep(v, &mut soft) {
+                return v;
+            }
+            continue;
         }
         if has_tracked(&repo) {
             return deny(
@@ -4858,6 +5060,10 @@ pub(crate) mod tests {
             ("/h/git/app".into(), format!("cd {} && sed -i \"s/expected: 3/expected: 4/\" src/a.test.ts && node -e \"const d=require('./report.json');console.log(d.pass,d.failures)\"", wt(34)), "AA", false),
             ("/h/git/app".into(), format!("cd /tmp/prs && python3 - <<'EOF'\n{PY_OTHER}\nEOF\ncd {} && gh pr edit 204 --body-file /tmp/prs/204.md >/dev/null && echo updated; git -C {} rev-parse HEAD", wt(31), wt(31)), "AA", false),
             ("/h/git/app".into(), format!("W={}; git -C $W push -q -u origin u/wt30-followups 2>&1 | tail -2; gh label list -R owner/app 2>/dev/null | grep -iE \"review|draft\"", wt(30)), "AA", false),
+            // A push after the git configuration is rewritten on the same line is not read; reading it is fine.
+            (wt(33), "git config remote.origin.push HEAD:main && git push".into(), "DD", false),
+            (wt(33), "sed -i 's|a|b|' .git/config && git push origin HEAD".into(), "DD", false),
+            (wt(33), "git config --get remote.origin.push; cat .git/config; git push origin u/feature".into(), "AA", false),
         ];
         let v = |v: &Verdict| if *v == Verdict::Allow { 'A' } else { 'D' };
         let mut reached = 0;
@@ -4879,8 +5085,169 @@ pub(crate) mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
-        assert_eq!(rows.len(), 102);
-        assert_eq!(reached, 100);
+        assert_eq!(rows.len(), 105);
+        assert_eq!(reached, 103);
+    }
+
+    /// A folder whose push settings are the fields (the real facts read `git config`).
+    struct Configured {
+        push: Vec<&'static str>,
+        mode: &'static str,
+        upstream: Option<&'static str>,
+        unreadable: bool,
+    }
+
+    impl RepoFacts for Configured {
+        fn repo(&self, _cwd: &Path) -> Option<String> {
+            Some("github.com/o/r".into())
+        }
+        fn current_branch(&self, _cwd: &Path) -> Option<String> {
+            Some("feat-x".into())
+        }
+        fn default_branch(&self, _cwd: &Path) -> Option<String> {
+            Some("trunk".into())
+        }
+        fn upstream(&self, _cwd: &Path) -> Option<String> {
+            self.upstream.map(str::to_owned)
+        }
+        fn configured_push(&self, _cwd: &Path, _remote: &str) -> Option<Vec<String>> {
+            (!self.unreadable).then(|| self.push.iter().map(|s| s.to_string()).collect())
+        }
+        fn push_default(&self, _cwd: &Path) -> Option<String> {
+            Some(self.mode.into())
+        }
+    }
+
+    #[test]
+    fn a_push_follows_the_configured_targets_and_a_config_rewrite_before_it_fails_closed() {
+        let c = ctx(true);
+        let cfg = |push: &[&'static str], mode: &'static str, upstream: Option<&'static str>, unreadable: bool| Configured {
+            push: push.to_vec(),
+            mode,
+            upstream,
+            unreadable,
+        };
+        let plain = || cfg(&[], "simple", None, false);
+        // (facts, command, the rule it is refused by, or "allow")
+        let rows: Vec<(Configured, &str, &str)> = vec![
+            (plain(), "git push", "allow"),
+            (cfg(&[], "current", None, false), "git push origin", "allow"),
+            // remote.<name>.push sends a push with no refspec of its own where it says.
+            (cfg(&["HEAD:main"], "simple", None, false), "git push", "task_repo"),
+            (cfg(&["refs/heads/feat-x:refs/heads/trunk"], "simple", None, false), "git push origin", "task_repo"),
+            (cfg(&["HEAD"], "simple", None, false), "git push", "allow"),
+            (cfg(&["refs/heads/*:refs/heads/*"], "simple", None, false), "git push", "fail_closed"),
+            // A refspec on the command line wins over the configuration.
+            (cfg(&["HEAD:main"], "simple", None, false), "git push origin feat-x", "allow"),
+            // push.default.
+            (cfg(&[], "upstream", Some("origin/main"), false), "git push", "task_repo"),
+            (cfg(&[], "upstream", Some("origin/feat-x"), false), "git push", "allow"),
+            (cfg(&[], "matching", None, false), "git push", "fail_closed"),
+            (cfg(&[], "bogus", None, false), "git push", "fail_closed"),
+            // Settings git could not read.
+            (cfg(&[], "simple", None, true), "git push", "fail_closed"),
+            // A rewrite of the configuration earlier on the same line.
+            (plain(), "git config remote.origin.push HEAD:main && git push", "fail_closed"),
+            (plain(), "git config --add remote.origin.push HEAD:main; git push origin", "fail_closed"),
+            (plain(), "git remote set-url origin https://x/y.git && git push origin feat-x", "fail_closed"),
+            (plain(), "git branch --set-upstream-to=origin/main && git push", "fail_closed"),
+            (plain(), "sed -i 's|feat-x|main|' .git/config && git push origin HEAD", "fail_closed"),
+            (plain(), "printf '[remote \"origin\"]\\n push = HEAD:main\\n' >> .git/config; git push", "fail_closed"),
+            (plain(), "cd sub && echo x > ../.git/config && git push", "fail_closed"),
+            // Reading the configuration is not a rewrite.
+            (plain(), "git config --get remote.origin.push && git push", "allow"),
+            (plain(), "git config user.name; git config --list | head; cat .git/config; git push origin feat-x", "allow"),
+            (plain(), "git remote -v && git push", "allow"),
+        ];
+        for (facts, cmd, want) in rows {
+            assert_eq!(rule(judge(cmd, &c, &facts)), want, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn the_lowerable_shapes_need_only_a_reason() {
+        let c = ctx(true);
+        let tier_rule = |cmd: &str| match judge(cmd, &c, &F) {
+            Verdict::Allow => (None, "allow"),
+            Verdict::Deny { tier, rule, .. } => (Some(tier), rule),
+        };
+        // (command, tier, rule): the four lowerable shapes, beside the neighbours that stay Quote.
+        let rows = [
+            // A PR opened without --draft where the repository's rule is draft.
+            ("gh pr create --title x", Some(Tier::Reason), "draft_rule"),
+            // A ready flip whose repository is named and only its number is computed.
+            ("gh pr ready $N -R o/r", Some(Tier::Reason), "computed_flip"),
+            ("gh pr ready $N", Some(Tier::Quote), "fail_closed"),
+            ("gh pr ready $N -R $R", Some(Tier::Quote), "fail_closed"),
+            ("gh pr ready 7 -R o/r", Some(Tier::Quote), "task_repo"),
+            ("gh pr merge $N -R o/r", Some(Tier::Quote), "fail_closed"),
+            // Code that only names git, with nothing in it that starts a process.
+            ("python3 -c \"import platform; print(platform.node(), 'git push')\"", Some(Tier::Reason), "names_git_code"),
+            ("python3 -c \"import os; os.system('git push origin main')\"", Some(Tier::Quote), "fail_closed"),
+        ];
+        for (cmd, tier, want) in rows {
+            assert_eq!(tier_rule(cmd), (tier, want), "{cmd}");
+        }
+        // A reason-tier refusal does not hide a quote-tier one later on the line.
+        assert_eq!(
+            tier_rule("gh pr create --title x; git push origin HEAD:main"),
+            (Some(Tier::Quote), "task_repo")
+        );
+    }
+
+    /// A small deterministic generator, so a failing line repeats.
+    fn lcg(seed: u64) -> impl FnMut(usize) -> usize {
+        let mut s = seed;
+        move |n: usize| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s % n as u64) as usize
+        }
+    }
+
+    #[test]
+    fn fuzzed_lines_never_panic_and_a_landing_among_harmless_commands_is_always_refused() {
+        let c = ctx(true);
+        let mut pick = lcg(0x2545_F491_4F6C_DD1D);
+        let harmless = [
+            "ls -la",
+            "echo hi",
+            "cd sub",
+            "git status",
+            "git log --oneline -3",
+            "cat README.md",
+            "grep -rn foo src",
+            "git diff",
+            "pwd",
+            "git fetch origin",
+        ];
+        let joins = [" ; ", " && ", "\n", " || "];
+        let landings = [
+            "git push origin HEAD:main",
+            "git push origin feat-x:main",
+            "gh pr merge 7 --squash",
+            "git push --force origin +HEAD:refs/heads/master",
+        ];
+        for _ in 0..300 {
+            let mut parts: Vec<&str> = (0..1 + pick(5)).map(|_| harmless[pick(harmless.len())]).collect();
+            let plain = parts.join(joins[pick(joins.len())]);
+            assert_eq!(judge(&plain, &c, &F), Verdict::Allow, "{plain}");
+            let at = pick(parts.len() + 1);
+            parts.insert(at, landings[pick(landings.len())]);
+            let line = parts.join(joins[pick(joins.len())]);
+            assert!(judge(&line, &c, &F) != Verdict::Allow, "{line}");
+        }
+        // Lines made of shell punctuation and half-words are judged, never a panic.
+        let pieces = [
+            "git", "push", "origin", "main", "'", "\"", "$(", "`", ")", "{", "}", "&&", ";", "|", "\\\n", "<<EOF", "EOF", "-c", "--",
+            "$X", "~", " ", " ", " ", "gh", "pr", "merge", "(", "&", ">", "2>&1", "#",
+        ];
+        for _ in 0..300 {
+            let line: String = (0..1 + pick(14)).map(|_| pieces[pick(pieces.len())]).collect::<Vec<_>>().join(" ");
+            let _ = judge(&line, &c, &F);
+            let _ = judge_as(&line, ShellKind::PowerShell, &c, &F);
+        }
     }
 
     #[test]
