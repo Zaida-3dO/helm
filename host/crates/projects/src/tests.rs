@@ -1892,21 +1892,22 @@ fn the_bash_git_function_writes_the_path_the_way_bash_does() {
     use std::path::Path;
     let cases = [
         (
-            r"C:\Users\me\AppData\Local\Helm\agent-bin\git.exe",
-            "() {  '/c/Users/me/AppData/Local/Helm/agent-bin/git.exe' \"$@\"\n}",
+            r"D:\HelmProfile\agent-bin\git.exe",
+            "() {  '/d/HelmProfile/agent-bin/git.exe' \"$@\"\n}",
+        ),
+        (
+            r"C:\HelmProfile\agent-bin\git.exe",
+            "() {  '/c/HelmProfile/agent-bin/git.exe' \"$@\"\n}",
         ),
         (
             "d:/profile/agent-bin/git.exe",
             "() {  '/d/profile/agent-bin/git.exe' \"$@\"\n}",
         ),
         (
-            "/home/me/agent-bin/git",
-            "() {  '/home/me/agent-bin/git' \"$@\"\n}",
+            "/opt/helm/agent-bin/git",
+            "() {  '/opt/helm/agent-bin/git' \"$@\"\n}",
         ),
-        (
-            "/home/o'brien/git",
-            "() {  '/home/o'\\''brien/git' \"$@\"\n}",
-        ),
+        ("/srv/o'brien/git", "() {  '/srv/o'\\''brien/git' \"$@\"\n}"),
     ];
     for (shim, want) in cases {
         assert_eq!(bash_git_function(Path::new(shim)), want, "{shim}");

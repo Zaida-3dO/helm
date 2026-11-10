@@ -662,10 +662,10 @@ mod tests {
     fn files_are_admitted_read_and_sized_only_when_safe() {
         // Places and names secrets live in are never sent, whatever the file holds.
         for p in [
-            r"C:\Users\a\.ssh\id_rsa",
-            r"C:\Users\a\.aws\config",
+            r"D:\Home\a\.ssh\id_rsa",
+            r"D:\Home\a\.aws\config",
             "/home/a/.claude/notes.txt",
-            r"C:\Users\a\.config\x\y.json",
+            r"D:\Home\a\.config\x\y.json",
             r"C:\work\.env",
             r"C:\work\.env.local",
             r"C:\work\server.pem",
@@ -688,7 +688,7 @@ mod tests {
             "//host/share/a.png",
             r"C:\a\..\b.png",
             r"C:\x\nul.png",
-            r"C:\Users\a\.ssh\id_rsa",
+            r"D:\Home\a\.ssh\id_rsa",
         ] {
             assert!(admit(raw, &roots).is_err(), "{raw}");
         }
