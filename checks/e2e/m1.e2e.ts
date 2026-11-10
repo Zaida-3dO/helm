@@ -211,6 +211,44 @@ describe("core scenarios end to end with the fake claude", { timeout: 15 * 60_00
     });
   });
 
+  test("Paste: a pasted image shows as a thumbnail, sends with the message, and reaches claude as an image block", async () => {
+    await failShot("paste-image", async () => {
+      // A 1x1 PNG.
+      const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+      await newChat(page(), folder());
+      await page().locator(tid("composer")).click();
+      // A synthetic clipboard event carrying the image file, fired on the focused composer.
+      await page().evaluate((b64) => {
+        const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+        const dt = new DataTransfer();
+        dt.items.add(new File([bytes], "pasted.png", { type: "image/png" }));
+        const target = document.activeElement ?? document.querySelector('[data-testid="composer"]')!;
+        target.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+      }, PNG_B64);
+      await page().waitForSelector(tid("attachment-thumb"), { timeout: 15_000 });
+      await send(page(), "what is in this picture");
+      await page().waitForSelector(tid("message-image"), { timeout: 20_000 });
+      assert.equal(await page().locator(tid("attachment-thumb")).count(), 0, "the composer's thumbnails clear once sent");
+      await waitText(page(), "You said: what is in this picture");
+      await waitStatus(page(), "idle");
+
+      // What claude's stdin received: one user record whose content carries a base64 PNG image block.
+      type Block = { type?: string; source?: { type?: string; media_type?: string; data?: string } };
+      const records = fs
+        .readFileSync(path.join(profile, "fake-claude.log"), "utf8")
+        .split("
+")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { kind?: string; rec?: { type?: string; message?: { content?: unknown } } })
+        .filter((e) => e.kind === "in" && e.rec?.type === "user");
+      const images = records.flatMap((e) => (Array.isArray(e.rec?.message?.content) ? (e.rec!.message!.content as Block[]) : [])).filter((b) => b.type === "image");
+      assert.equal(images.length, 1, "exactly one image block reached claude");
+      assert.equal(images[0].source?.type, "base64");
+      assert.equal(images[0].source?.media_type, "image/png");
+      assert.equal(images[0].source?.data, PNG_B64, "the bytes are the pasted ones");
+    });
+  });
+
   test("Markdown: a Mermaid diagram and a callout render under the production CSP", async () => {
     await failShot("markdown", async () => {
       await newChat(page(), folder());
