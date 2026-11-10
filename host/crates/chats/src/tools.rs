@@ -47,7 +47,7 @@ const LINKS: &str = " Each chat in the answer has a link field: when you point t
 const REPORT_BACK: &str = " The other chat does not report back by itself: end your message with an explicit report instruction saying what to report, when (on finishing, when blocked, when it finds something that changes the plan) and that the report goes to your own chat id with app_send_message; then end your turn. Its report arrives here as a new message. If it might finish or fail without reporting, also declare app_wait_for with kind chat_idle on it as a backstop.";
 
 /// What `app_create_chat` says about `muted`: the rule for when an agent mutes the chat it makes.
-const MUTED_ARG: &str = "Set muted for internal chats that another agent creates, manages and archives (crews, reviewers, planners, helpers): they never notify the user or raise flags. Leave it unset for any chat the user is expected to read or talk to.";
+const MUTED_ARG: &str = "Set muted for internal chats that another agent creates, manages and archives (crews, reviewers, planners, helpers): they never notify the user or raise flags. They may still message the user on Telegram when told to. Leave it unset for any chat the user is expected to read or talk to.";
 
 const EXPLICIT: &str = " Act only when the user explicitly asked for this change; confirm an ambiguous target with app_list_chats first; report what changed. If the reply is lost, check the current state before trying again and never retry automatically.";
 

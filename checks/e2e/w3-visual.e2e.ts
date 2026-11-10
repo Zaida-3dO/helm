@@ -262,13 +262,16 @@ describe("visual check and the host probes", { timeout: 15 * 60_000 }, () => {
 
   test("V8 and C4: a background completion raises the badge and no in-window notice; reading the chat clears it; keep-awake follows", async () => {
     await step("V8", async () => {
+      // Only what this chat raises counts: earlier steps left badge probes of their own.
+      const before = probes("badge").length;
       const bg = await newChat(page(), scratchDir("helm-w3v-chat-"));
       await send(page(), "finish quickly");
       // Move away before it finishes, so the completion lands in a background chat.
       await newChat(page(), scratchDir("helm-w3v-chat-"));
       const end0 = Date.now() + 30_000;
-      while (Date.now() < end0 && !probes("badge").some((p) => Number(p.count) >= 1)) await new Promise((r) => setTimeout(r, 200));
-      const badges = probes("badge").map((p) => Number(p.count));
+      const done = () => probes("toast").some((p) => p.chatId === bg) && probes("badge").slice(before).some((p) => Number(p.count) >= 1);
+      while (Date.now() < end0 && !done()) await new Promise((r) => setTimeout(r, 200));
+      const badges = probes("badge").slice(before).map((p) => Number(p.count));
       assert.ok(badges.some((c) => c >= 1), `badge reached 1 (${badges})`);
       // The in-window completion stack is gone: the flags are the one place a chat asks for you.
       assert.equal(await page().locator(tid("toast", "[data-chat-id]")).count(), 0, "no in-window completion notice");

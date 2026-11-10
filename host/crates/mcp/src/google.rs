@@ -207,26 +207,52 @@ fn clean_email(raw: &str) -> Result<String, String> {
     }
 }
 
-/// The addresses that have a sign-in in `dir`, sorted, at most [`MAX_ACCOUNTS`]. Only file names
-/// are read: a file's contents are never opened.
-pub fn list_accounts(dir: &Path) -> Vec<String> {
+/// A file name's `%XX` escapes read back (the server escapes every character of the address but
+/// letters, digits and `@._-`); `None` when an escape is malformed or the result is not text.
+fn unescape(stem: &str) -> Option<String> {
+    let b = stem.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The sign-ins in `dir`: the address each holds, and its file's own stem (escaped as the server
+/// wrote it), sorted, at most [`MAX_ACCOUNTS`]. Only file names are read: a file's contents are
+/// never opened.
+fn account_files(dir: &Path) -> Vec<(String, String)> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut out: Vec<String> = rd
+    let mut out: Vec<(String, String)> = rd
         .take(MAX_SCAN)
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .filter_map(|e| e.file_name().into_string().ok())
         .filter_map(|name| {
             let stem = name.strip_suffix(".json")?;
-            valid_email(stem).then(|| stem.to_owned())
+            let email = unescape(stem)?;
+            valid_email(&email).then(|| (email, stem.to_owned()))
         })
         .collect();
-    out.sort_by_key(|e| (e.to_ascii_lowercase(), e.clone()));
-    out.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    out.sort_by_key(|(e, _)| (e.to_ascii_lowercase(), e.clone()));
+    out.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
     out.truncate(MAX_ACCOUNTS);
     out
+}
+
+/// The addresses that have a sign-in in `dir` (see [`account_files`]).
+pub fn list_accounts(dir: &Path) -> Vec<String> {
+    account_files(dir).into_iter().map(|(e, _)| e).collect()
 }
 
 fn has_account(dir: &Path, email: &str) -> bool {
@@ -286,13 +312,13 @@ fn set_label(profile_dir: &Path, email: &str, label: &str) -> Result<(), String>
 /// Delete one address's sign-in. The name deleted is the listed one, never the typed text.
 fn remove_account(profile_dir: &Path, email: &str) -> Result<(), String> {
     let dir = credentials_dir(profile_dir);
-    let Some(found) = list_accounts(&dir)
+    let Some((found, stem)) = account_files(&dir)
         .into_iter()
-        .find(|e| e.eq_ignore_ascii_case(email))
+        .find(|(e, _)| e.eq_ignore_ascii_case(email))
     else {
         return Err("That account is not signed in.".into());
     };
-    std::fs::remove_file(dir.join(format!("{found}.json")))
+    std::fs::remove_file(dir.join(format!("{stem}.json")))
         .map_err(|_| "The sign-in could not be removed.".to_owned())?;
     let _g = SETTINGS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mut s = read_settings(profile_dir);
@@ -640,12 +666,14 @@ fn start_sign_in(
             return Err(why);
         }
     };
-    let email = email.to_owned();
+    // Google says which address signed in, which may not be the one typed: any new sign-in
+    // file ends the wait.
+    let before = list_accounts(&dir);
     std::thread::spawn(move || {
         let end = Instant::now() + SIGN_IN_WINDOW;
         while Instant::now() < end {
             while session.rx.try_recv().is_ok() {}
-            if has_account(&dir, &email) {
+            if list_accounts(&dir).iter().any(|e| !before.contains(e)) {
                 // Let the browser's page finish before the program goes.
                 std::thread::sleep(Duration::from_secs(2));
                 break;
@@ -1044,6 +1072,13 @@ mod tests {
         }
         remove_account(p, "A@x.com").unwrap();
         assert_eq!(list_accounts(&credentials_dir(p)), ["b@y.org"]);
+        // The server escapes an address's other characters in its file name: listed as the
+        // address, removed by the file's own name; a malformed escape is not an account.
+        sign_in(p, "a%2Bb@x.com.json");
+        sign_in(p, "c%zz@x.com.json");
+        assert_eq!(list_accounts(&credentials_dir(p)), ["a+b@x.com", "b@y.org"]);
+        remove_account(p, "a+b@x.com").unwrap();
+        assert!(!credentials_dir(p).join("a%2Bb@x.com.json").exists());
         assert!(credentials_dir(p).join("keep.json").is_file());
         assert!(read_settings(p).labels.is_empty());
     }

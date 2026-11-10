@@ -169,6 +169,35 @@ fn host_of(url: Option<&str>) -> Option<String> {
 /// Applies an edit to one server.
 fn apply_edit(s: &mut McpServer, e: EditArgs) -> Result<(), StoreError> {
     let bad = |m: &str| Err(StoreError::Invalid(m.to_owned()));
+    // Which hub person a chat acts as is Helm's to set, from the chat's profile.
+    let names_person = |k: &String| k.eq_ignore_ascii_case(crate::config::PERSON_HEADER);
+    if e.headers
+        .as_ref()
+        .is_some_and(|h| h.keys().any(names_person))
+        || e.remove_headers
+            .as_ref()
+            .is_some_and(|h| h.iter().any(names_person))
+    {
+        return bad("Helm sets the person header itself; change it in Settings > MCP.");
+    }
+    // The Google accounts' program, its arguments (which hold the mail permission level) and its
+    // sign-in settings are the user's to change.
+    if s.preset.as_deref() == Some(crate::google::PRESET_ID) {
+        let sign_in = |k: &String| {
+            let u = k.to_ascii_uppercase();
+            ["WORKSPACE_MCP_", "GOOGLE_OAUTH_", "OAUTHLIB_"]
+                .iter()
+                .any(|p| u.starts_with(p))
+        };
+        if e.command.is_some()
+            || e.args.is_some()
+            || e.kind.is_some()
+            || e.env.as_ref().is_some_and(|m| m.keys().any(sign_in))
+            || e.remove_env.as_ref().is_some_and(|l| l.iter().any(sign_in))
+        {
+            return bad("The Google accounts' program, arguments and sign-in settings are changed in Settings > MCP.");
+        }
+    }
     if let Some(n) = e.name {
         s.name = n;
     }
@@ -677,6 +706,63 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let st = store(d.path());
         add_stdio(&st, "fake");
+        // The person header is Helm's, and the Google preset's program, arguments and sign-in
+        // settings are the user's: an agent's edit of them is refused, other edits pass.
+        call(
+            &st,
+            ADD,
+            json!({"revision": rev(&st), "server": {"id": "google", "name": "Google", "enabled": true,
+                "transport": {"type": "stdio", "command": "uvx.exe", "args": ["workspace-mcp"]}}}),
+        )
+        .unwrap();
+        st.mutate(None, |l| {
+            if let Some(g) = l.iter_mut().find(|s| s.id == "google") {
+                g.preset = Some(crate::google::PRESET_ID.into());
+            }
+            Ok(())
+        })
+        .unwrap();
+        for (id, edit, ok) in [
+            (
+                "fake",
+                json!({"headers": {"x-helm-person": {"kind": "literal", "value": "7"}}}),
+                false,
+            ),
+            ("fake", json!({"removeHeaders": ["X-Helm-Person"]}), false),
+            (
+                "google",
+                json!({"args": ["workspace-mcp", "--permissions", "gmail:send"]}),
+                false,
+            ),
+            ("google", json!({"command": "evil.exe"}), false),
+            (
+                "google",
+                json!({"env": {"WORKSPACE_MCP_PORT": {"kind": "literal", "value": "1"}}}),
+                false,
+            ),
+            (
+                "google",
+                json!({"removeEnv": ["oauthlib_insecure_transport"]}),
+                false,
+            ),
+            ("google", json!({"name": "Mail"}), true),
+            (
+                "google",
+                json!({"env": {"TZ": {"kind": "literal", "value": "UTC"}}}),
+                true,
+            ),
+        ] {
+            let mut args = json!({"revision": rev(&st), "serverId": id});
+            args.as_object_mut()
+                .unwrap()
+                .extend(edit.as_object().unwrap().clone());
+            assert_eq!(call(&st, EDIT, args).is_ok(), ok, "{id} {edit}");
+        }
+        st.mutate(None, |l| {
+            l.retain(|s| s.id != "google");
+            Ok(())
+        })
+        .unwrap();
         // Off stdio without a url is refused.
         assert!(call(
             &st,
