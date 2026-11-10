@@ -10,9 +10,16 @@
 //!   only write the two agent kinds, and their input has no field that could claim otherwise.
 //! - Tools: `app_create_feedback`, `app_list_feedback`, `app_get_feedback`,
 //!   `app_append_feedback`, `app_update_feedback`. Ops for Settings: `feedback_items`,
-//!   `feedback_item`, `feedback_create`, `feedback_append`, `feedback_update`.
+//!   `feedback_item`, `feedback_create`, `feedback_append`, `feedback_update`, `feedback_edit`,
+//!   `feedback_delete`, `feedback_restore`.
+//! - Agents manage any item, not only their own: `app_update_feedback` sets any status (a closing
+//!   note saying what shipped or why not is required for done and won't-do and is kept as an entry),
+//!   edits the title or an entry's text, and deletes. Entries keep the author of whoever first wrote
+//!   them. A separate history records who changed a status, edited, deleted or restored an item, so
+//!   Settings can show it. Deleting is soft: the item leaves every list and can be restored until
+//!   the store is full, when deleted items are dropped first.
 //! - Limits, for everyone and with no per-chat or per-day allowance: 2,000 items, 200 entries
-//!   per item. Nothing is ever pruned silently, a full store refuses instead.
+//!   per item. Nothing live is ever pruned silently, a full store refuses instead.
 //! - Local only. Entries returned to an agent are labelled as data, not instructions.
 
 use crate::feedback::{parse_since, text};
@@ -53,7 +60,23 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
              at          INTEGER NOT NULL
          );
          CREATE INDEX IF NOT EXISTS feedback_entries_item ON feedback_entries(item_id, id);
-         CREATE INDEX IF NOT EXISTS feedback_entries_chat ON feedback_entries(chat_id, at);",
+         CREATE INDEX IF NOT EXISTS feedback_entries_chat ON feedback_entries(chat_id, at);
+         CREATE TABLE IF NOT EXISTS feedback_events (
+             id          INTEGER PRIMARY KEY AUTOINCREMENT,
+             item_id     INTEGER NOT NULL,
+             action      TEXT NOT NULL,
+             detail      TEXT,
+             author_kind TEXT NOT NULL,
+             chat_id     TEXT,
+             at          INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS feedback_events_item ON feedback_events(item_id, id);
+         CREATE TABLE IF NOT EXISTS feedback_deleted (
+             item_id     INTEGER PRIMARY KEY,
+             author_kind TEXT NOT NULL,
+             chat_id     TEXT,
+             at          INTEGER NOT NULL
+         );",
     )
 }
 
@@ -152,11 +175,50 @@ fn insert_entry(
     Ok(())
 }
 
+fn record(
+    tx: &Transaction<'_>,
+    item: i64,
+    action: &str,
+    detail: Option<&str>,
+    a: &Author,
+    now: i64,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO feedback_events(item_id, action, detail, author_kind, chat_id, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![item, action, detail, a.kind, a.chat, now],
+    )?;
+    Ok(())
+}
+
+/// The item's status, or a refusal when it does not exist or has been deleted.
+fn live_status(tx: &Transaction<'_>, id: i64) -> Result<String, Fail> {
+    let cur: Option<(String, bool)> = tx
+        .query_row(
+            "SELECT status, EXISTS (SELECT 1 FROM feedback_deleted d WHERE d.item_id = feedback_items.id) FROM feedback_items WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match cur {
+        None => refuse(format!("There is no feedback item {id}.")),
+        Some((_, true)) => refuse(format!("Feedback item {id} was deleted. Restore it first.")),
+        Some((s, false)) => Ok(s),
+    }
+}
+
 /// File a new item with its first entry; answers the new id.
 pub fn create(db: &Database, a: &Author, title: &str, body: &str, now: i64) -> Result<i64, Fail> {
     let title = clean_title(title)?;
     let body = clean_text(body)?;
     db.write(|tx| {
+        if count(tx, "SELECT count(*) FROM feedback_items", &[])? >= MAX_ITEMS {
+            // Deleted items only wait for an Undo: make room by dropping them for good.
+            tx.execute_batch(
+                "DELETE FROM feedback_items WHERE id IN (SELECT item_id FROM feedback_deleted);
+                 DELETE FROM feedback_events WHERE item_id IN (SELECT item_id FROM feedback_deleted);
+                 DELETE FROM feedback_deleted;",
+            )?;
+        }
         if count(tx, "SELECT count(*) FROM feedback_items", &[])? >= MAX_ITEMS {
             return refuse(format!(
                 "The feedback store is full ({MAX_ITEMS} items). Ask the user to clear out finished items."
@@ -177,9 +239,7 @@ pub fn create(db: &Database, a: &Author, title: &str, body: &str, now: i64) -> R
 pub fn append(db: &Database, a: &Author, id: i64, body: &str, now: i64) -> Result<(), Fail> {
     let body = clean_text(body)?;
     db.write(|tx| {
-        if count(tx, "SELECT count(*) FROM feedback_items WHERE id = ?1", &[&id])? == 0 {
-            return refuse(format!("There is no feedback item {id}."));
-        }
+        live_status(tx, id)?;
         if count(tx, "SELECT count(*) FROM feedback_entries WHERE item_id = ?1", &[&id])?
             >= MAX_ENTRIES_PER_ITEM
         {
@@ -194,11 +254,15 @@ pub fn append(db: &Database, a: &Author, id: i64, body: &str, now: i64) -> Resul
 }
 
 /// Change the status and/or attach a board item id. Attaching one to an `open` item files it.
+/// A `note` is added as an entry by `a` (agents must give one when closing). A status that
+/// actually changes is written to the item's history.
 pub fn update(
     db: &Database,
+    a: &Author,
     id: i64,
     status: Option<&str>,
     board_item: Option<&str>,
+    note: Option<&str>,
     now: i64,
 ) -> Result<(), Fail> {
     if let Some(s) = status {
@@ -210,22 +274,129 @@ pub fn update(
     if status.is_none() && board.is_none() {
         return refuse("Give a status, a boardItem or both.");
     }
+    let closing = matches!(status, Some("done" | "wont_do"));
+    let note = match note {
+        Some(n) => Some(clean_text(n)?),
+        None if closing && a.kind != "human" => {
+            return refuse(
+                "Closing an item needs a note: say what shipped (done) or why not (wont_do).",
+            )
+        }
+        None => None,
+    };
+    if note.is_some() && status.is_none() {
+        return refuse("A note goes with a status change; use app_append_feedback to add an entry.");
+    }
     db.write(|tx| {
-        let cur: Option<String> = tx
-            .query_row("SELECT status FROM feedback_items WHERE id = ?1", [id], |r| r.get(0))
-            .optional()?;
-        let Some(cur) = cur else {
-            return refuse(format!("There is no feedback item {id}."));
-        };
+        let cur = live_status(tx, id)?;
         let next = match (status, &board) {
             (Some(s), _) => s.to_owned(),
             (None, Some(_)) if cur == "open" => "filed".to_owned(),
-            _ => cur,
+            _ => cur.clone(),
         };
+        if let Some(n) = &note {
+            if count(tx, "SELECT count(*) FROM feedback_entries WHERE item_id = ?1", &[&id])?
+                >= MAX_ENTRIES_PER_ITEM
+            {
+                return refuse(format!(
+                    "Feedback item {id} already has {MAX_ENTRIES_PER_ITEM} entries. File a new item and refer to this one."
+                ));
+            }
+            insert_entry(tx, id, n, a, now)?;
+        }
         tx.execute(
             "UPDATE feedback_items SET status = ?2, board_item = coalesce(?3, board_item), updated_at = ?4 WHERE id = ?1",
             params![id, next, board, now],
         )?;
+        if status.is_some() && next != cur {
+            record(tx, id, "status", Some(&next), a, now)?;
+        }
+        Ok(())
+    })
+}
+
+/// Change the title and/or the text of one entry (the first one unless `entry` names another).
+/// The entry keeps its original author; the edit goes into the item's history.
+pub fn edit(
+    db: &Database,
+    a: &Author,
+    id: i64,
+    title: Option<&str>,
+    body: Option<&str>,
+    entry: Option<i64>,
+    now: i64,
+) -> Result<(), Fail> {
+    let title = title.map(clean_title).transpose()?;
+    let body = body.map(clean_text).transpose()?;
+    if title.is_none() && body.is_none() {
+        return refuse("Give a new title, new text or both.");
+    }
+    if entry.is_some() && body.is_none() {
+        return refuse("entryId only goes with new text.");
+    }
+    db.write(|tx| {
+        live_status(tx, id)?;
+        let target: Option<i64> = if body.is_some() {
+            let found = match entry {
+                Some(e) => tx
+                    .query_row(
+                        "SELECT id FROM feedback_entries WHERE id = ?1 AND item_id = ?2",
+                        params![e, id],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+                None => tx
+                    .query_row(
+                        "SELECT id FROM feedback_entries WHERE item_id = ?1 ORDER BY id LIMIT 1",
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+            };
+            match found {
+                Some(t) => Some(t),
+                None => return refuse(format!("Feedback item {id} has no such entry.")),
+            }
+        } else {
+            None
+        };
+        if let Some(t) = &title {
+            tx.execute("UPDATE feedback_items SET title = ?2 WHERE id = ?1", params![id, t])?;
+        }
+        if let (Some(b), Some(target)) = (&body, target) {
+            tx.execute("UPDATE feedback_entries SET text = ?2 WHERE id = ?1", params![target, b])?;
+        }
+        let what = match (title.is_some(), body.is_some()) {
+            (true, true) => "title and text",
+            (true, false) => "title",
+            _ => "text",
+        };
+        tx.execute("UPDATE feedback_items SET updated_at = ?2 WHERE id = ?1", params![id, now])?;
+        record(tx, id, "edited", Some(what), a, now)?;
+        Ok(())
+    })
+}
+
+/// Take an item out of every list. `restore` brings it back.
+pub fn delete(db: &Database, a: &Author, id: i64, now: i64) -> Result<(), Fail> {
+    db.write(|tx| {
+        live_status(tx, id)?;
+        tx.execute(
+            "INSERT INTO feedback_deleted(item_id, author_kind, chat_id, at) VALUES (?1, ?2, ?3, ?4)",
+            params![id, a.kind, a.chat, now],
+        )?;
+        record(tx, id, "deleted", None, a, now)?;
+        Ok(())
+    })
+}
+
+/// Bring a deleted item back.
+pub fn restore(db: &Database, a: &Author, id: i64, now: i64) -> Result<(), Fail> {
+    db.write(|tx| {
+        if tx.execute("DELETE FROM feedback_deleted WHERE item_id = ?1", [id])? == 0 {
+            return refuse(format!("Feedback item {id} is not deleted."));
+        }
+        record(tx, id, "restored", None, a, now)?;
         Ok(())
     })
 }
@@ -243,6 +414,8 @@ pub struct Filter {
     pub author: Option<String>,
     pub since: Option<i64>,
     pub text: Option<String>,
+    /// Show only deleted items instead of only live ones.
+    pub deleted: bool,
     pub limit: usize,
 }
 
@@ -268,12 +441,13 @@ pub fn list(db: &Database, f: &Filter) -> Result<Vec<Value>, Fail> {
              FROM feedback_items i
              WHERE (?1 IS NULL OR i.status = ?1) AND (?2 IS NULL OR i.author_kind = ?2)
                AND (?3 IS NULL OR i.updated_at >= ?3)
+               AND (EXISTS (SELECT 1 FROM feedback_deleted d WHERE d.item_id = i.id)) = ?6
                AND (?4 IS NULL OR i.title LIKE ?4 ESCAPE '\\'
                     OR EXISTS (SELECT 1 FROM feedback_entries e WHERE e.item_id = i.id AND e.text LIKE ?4 ESCAPE '\\'))
              ORDER BY i.updated_at DESC, i.id DESC LIMIT ?5",
         )?;
         let rows = st
-            .query_map(params![f.status, f.author, f.since, pattern, f.limit as i64], |r| {
+            .query_map(params![f.status, f.author, f.since, pattern, f.limit as i64, f.deleted], |r| {
                 let first: String = r.get(9)?;
                 Ok(json!({
                     "id": r.get::<_, i64>(0)?,
@@ -316,6 +490,28 @@ pub fn get(db: &Database, id: i64) -> Result<Option<Value>, Fail> {
         let Some(mut head) = head else {
             return Ok(None);
         };
+        head["deleted"] = tx
+            .query_row(
+                "SELECT author_kind, chat_id, at FROM feedback_deleted WHERE item_id = ?1",
+                [id],
+                |r| Ok(json!({"by": author_json(r.get(0)?, r.get(1)?), "at": r.get::<_, i64>(2)?})),
+            )
+            .optional()?
+            .unwrap_or(Value::Null);
+        let mut ev = tx.prepare(
+            "SELECT action, detail, author_kind, chat_id, at FROM feedback_events WHERE item_id = ?1 ORDER BY id",
+        )?;
+        let history = ev
+            .query_map([id], |r| {
+                Ok(json!({
+                    "action": r.get::<_, String>(0)?,
+                    "detail": r.get::<_, Option<String>>(1)?,
+                    "by": author_json(r.get(2)?, r.get(3)?),
+                    "at": r.get::<_, i64>(4)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        head["history"] = json!(history);
         let mut st = tx.prepare(
             "SELECT id, text, author_kind, chat_id, at FROM feedback_entries WHERE item_id = ?1 ORDER BY id",
         )?;
@@ -383,6 +579,7 @@ fn filter_from(a: &Value) -> Result<Filter, String> {
         author,
         since,
         text,
+        deleted: a.get("deleted").and_then(Value::as_bool).unwrap_or(false),
         limit,
     })
 }
@@ -432,36 +629,40 @@ pub(crate) fn append_tool(ctx: &ToolCtx, a: Value, now: i64) -> ToolResult {
 }
 
 pub(crate) fn update_tool(ctx: &ToolCtx, a: Value, now: i64) -> ToolResult {
-    only_keys(&a, "app_update_feedback", &["id", "status", "boardItem"])?;
+    only_keys(
+        &a,
+        "app_update_feedback",
+        &["id", "status", "boardItem", "note", "title", "text", "entryId", "delete"],
+    )?;
     let db = db_of(ctx)?;
     let id = id_arg(&a).map_err(ToolError::refused)?;
-    // Closing an item the user filed is the user's call; an agent may file it and link a board item.
-    if matches!(opt_str(&a, "status"), Some("done" | "wont_do")) {
-        let human: bool = db
-            .snapshot(|tx| {
-                tx.query_row(
-                    "SELECT author_kind = 'human' FROM feedback_items WHERE id = ?1",
-                    [id],
-                    |r| r.get(0),
-                )
-                .optional()
-            })
-            .map_err(|e| ToolError::refused(e.to_string()))?
-            .unwrap_or(false);
-        if human {
-            return Err(ToolError::refused(
-                "Feedback the user filed is closed by the user. Append a note or attach the board item instead.",
-            ));
+    let who = Author::agent(&ctx.caller_chat_id, false);
+    if a.get("delete").and_then(Value::as_bool).unwrap_or(false) {
+        if a.as_object().is_some_and(|o| o.len() > 2) {
+            return Err(ToolError::refused("delete goes alone: give only id and delete."));
         }
+        delete(&db, &who, id, now).map_err(fail_to_tool)?;
+        return Ok(json!({"id": id, "deleted": true}));
     }
-    update(
-        &db,
-        id,
-        opt_str(&a, "status"),
-        opt_str(&a, "boardItem"),
-        now,
-    )
-    .map_err(fail_to_tool)?;
+    let (status, board) = (opt_str(&a, "status"), opt_str(&a, "boardItem"));
+    let (title, body) = (opt_str(&a, "title"), opt_str(&a, "text"));
+    if status.is_none() && board.is_none() && title.is_none() && body.is_none() {
+        return Err(ToolError::refused(
+            "Give a status, a boardItem, a new title or new text.",
+        ));
+    }
+    if opt_str(&a, "note").is_some() && status.is_none() {
+        return Err(ToolError::refused(
+            "note goes with a status change; use app_append_feedback to add an entry.",
+        ));
+    }
+    if title.is_some() || body.is_some() {
+        let entry = a.get("entryId").and_then(Value::as_i64);
+        edit(&db, &who, id, title, body, entry, now).map_err(fail_to_tool)?;
+    }
+    if status.is_some() || board.is_some() {
+        update(&db, &who, id, status, board, opt_str(&a, "note"), now).map_err(fail_to_tool)?;
+    }
     Ok(json!({"id": id, "updated": true}))
 }
 
@@ -483,6 +684,7 @@ fn get_tool(ctx: &ToolCtx, a: Value) -> ToolResult {
     let id = id_arg(&a).map_err(ToolError::refused)?;
     let mut item = get(&db, id)
         .map_err(fail_to_tool)?
+        .filter(|i| i["deleted"].is_null())
         .ok_or_else(|| ToolError::refused(format!("There is no feedback item {id}.")))?;
     // Keep the first entry and the newest ones when the thread is too long to return whole.
     let entries = item["entries"].as_array().cloned().unwrap_or_default();
@@ -550,12 +752,41 @@ fn op_update(ctx: &OpCtx, a: Value) -> Result<Value, ApiError> {
     let id = op_id(&a)?;
     update(
         &*op_db(ctx)?,
+        &Author::human(),
         id,
         opt_str(&a, "status"),
         opt_str(&a, "boardItem"),
+        opt_str(&a, "note"),
         helm_core::now_ms(),
     )
     .map_err(fail_to_api)?;
+    Ok(json!({"id": id}))
+}
+
+fn op_edit(ctx: &OpCtx, a: Value) -> Result<Value, ApiError> {
+    let id = op_id(&a)?;
+    edit(
+        &*op_db(ctx)?,
+        &Author::human(),
+        id,
+        opt_str(&a, "title"),
+        opt_str(&a, "text"),
+        a.get("entryId").and_then(Value::as_i64),
+        helm_core::now_ms(),
+    )
+    .map_err(fail_to_api)?;
+    Ok(json!({"id": id}))
+}
+
+fn op_delete(ctx: &OpCtx, a: Value) -> Result<Value, ApiError> {
+    let id = op_id(&a)?;
+    delete(&*op_db(ctx)?, &Author::human(), id, helm_core::now_ms()).map_err(fail_to_api)?;
+    Ok(json!({"id": id}))
+}
+
+fn op_restore(ctx: &OpCtx, a: Value) -> Result<Value, ApiError> {
+    let id = op_id(&a)?;
+    restore(&*op_db(ctx)?, &Author::human(), id, helm_core::now_ms()).map_err(fail_to_api)?;
     Ok(json!({"id": id}))
 }
 
@@ -564,7 +795,10 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("feedback_item", OpClass::Blocking, op_item)
         .blocking("feedback_create", OpClass::Blocking, op_create)
         .blocking("feedback_append", OpClass::Blocking, op_append)
-        .blocking("feedback_update", OpClass::Blocking, op_update);
+        .blocking("feedback_update", OpClass::Blocking, op_update)
+        .blocking("feedback_edit", OpClass::Blocking, op_edit)
+        .blocking("feedback_delete", OpClass::Blocking, op_delete)
+        .blocking("feedback_restore", OpClass::Blocking, op_restore);
 }
 
 pub fn register_host_tools(r: &mut HostToolRegistry) {
@@ -608,13 +842,18 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .blocking(
         ToolSpec::write(
             "app_update_feedback",
-            "Set a feedback item's status (open, filed, done, wont_do) and/or attach the board item it was triaged into (boardItem). Attaching a board item to an open item marks it filed. You cannot set done or wont_do on feedback the user filed; the user closes those.",
+            "Manage any feedback item, whoever filed it. Set its status (open, filed, done, wont_do); when you set done or wont_do, give note saying what shipped (or why it will not), which is added to the thread as your entry. Attach the board item it was triaged into with boardItem (attaching one to an open item marks it filed). Fix a title or text with title and text (text rewrites the first entry, or the entry named by entryId; entries keep their original author, and the edit is recorded as yours). Remove an item with delete: true, alone; the user can undo that in Settings. Everything you change is recorded under your chat for the user to see.",
             json!({
                 "type": "object",
                 "properties": {
                     "id": {"type": "integer", "minimum": 1},
                     "status": {"type": "string", "enum": STATUSES},
-                    "boardItem": {"type": "string", "minLength": 1, "maxLength": 64}
+                    "note": {"type": "string", "minLength": 1, "maxLength": 4000},
+                    "boardItem": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "title": {"type": "string", "minLength": 1, "maxLength": 120},
+                    "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+                    "entryId": {"type": "integer", "minimum": 1},
+                    "delete": {"type": "boolean"}
                 },
                 "required": ["id"],
                 "additionalProperties": false
@@ -778,22 +1017,34 @@ mod tests {
             (got["status"].as_str(), got["boardItem"].as_str()),
             (Some("filed"), Some("0f0f0f0f-aaaa"))
         );
-        // An agent cannot close what the user filed; the user can.
+        // An agent can close what the user filed, but must say what shipped; the closing note
+        // becomes its own entry and the status change is on the record.
         assert!(
-            refused(update_tool(&ctx, json!({"id": id, "status": "done"}), 6))
-                .contains("closed by the user")
+            refused(update_tool(&ctx, json!({"id": id, "status": "done"}), 6)).contains("needs a note")
         );
-        update(&db, id, Some("done"), None, 6).unwrap();
-        let mine = create_tool(&ctx, json!({"title": "mine", "text": "x"}), 6).unwrap()["id"]
-            .as_i64()
-            .unwrap();
-        update_tool(&ctx, json!({"id": mine, "status": "wont_do"}), 7).unwrap();
+        update_tool(
+            &ctx,
+            json!({"id": id, "status": "done", "note": "Shipped in the next release."}),
+            6,
+        )
+        .unwrap();
+        let closed = get(&db, id).unwrap().unwrap();
+        assert_eq!(closed["status"], "done");
+        assert_eq!(closed["entries"][1]["text"], "Shipped in the next release.");
+        assert_eq!(closed["entries"][1]["author"], json!({"kind": "agent", "chatId": "chat-1"}));
+        assert_eq!(closed["history"][1]["by"], json!({"kind": "agent", "chatId": "chat-1"}));
+        assert_eq!(closed["history"][1]["detail"], "done");
+        // The user closes without a note and it is recorded as theirs.
+        update(&db, &Author::human(), id, Some("wont_do"), None, None, 7).unwrap();
+        assert_eq!(get(&db, id).unwrap().unwrap()["history"][2]["by"], json!({"kind": "human"}));
         assert_eq!(get(&db, id).unwrap().unwrap()["boardItem"], "0f0f0f0f-aaaa");
         for bad in [
             json!({"id": id}),
             json!({"id": id, "status": "nope"}),
             json!({"id": id, "boardItem": "a b"}),
-            json!({"id": 99, "status": "done"}),
+            json!({"id": id, "note": "alone"}),
+            json!({"id": id, "delete": true, "status": "open"}),
+            json!({"id": 99, "status": "done", "note": "x"}),
         ] {
             assert!(update_tool(&ctx, bad, 7).is_err());
         }
@@ -803,6 +1054,41 @@ mod tests {
         );
         assert!(create_tool(&ctx, json!({"title": " ", "text": "x"}), 9).is_err());
         assert!(create_tool(&ctx, json!({"title": "t", "text": "x".repeat(4001)}), 9).is_err());
+    }
+
+    #[test]
+    fn agents_edit_and_delete_any_item_and_the_user_can_undo() {
+        let (_d, db, ctx) = setup();
+        let id = create(&db, &Author::human(), "Old title", "Old text.", 1).unwrap();
+        append(&db, &Author::human(), id, "Second.", 2).unwrap();
+        update_tool(&ctx, json!({"id": id, "title": "New  title", "text": "New text."}), 3).unwrap();
+        update_tool(&ctx, json!({"id": id, "text": "Second, fixed.", "entryId": 2}), 4).unwrap();
+        let got = get(&db, id).unwrap().unwrap();
+        assert_eq!(got["title"], "New title");
+        assert_eq!(got["entries"][0]["text"], "New text.");
+        assert_eq!(got["entries"][1]["text"], "Second, fixed.");
+        // Edits leave the original authors alone and are recorded as the agent's.
+        assert_eq!(got["entries"][0]["author"], json!({"kind": "human"}));
+        assert_eq!(got["history"][0]["detail"], "title and text");
+        assert_eq!(got["history"][1]["by"], json!({"kind": "agent", "chatId": "chat-1"}));
+        assert!(edit(&db, &Author::human(), id, None, Some("x"), Some(999), 5).is_err());
+
+        // Deleting hides the item from lists and from agents; the user's list shows who did it.
+        update_tool(&ctx, json!({"id": id, "delete": true}), 6).unwrap();
+        let ids = |f: &Filter| list(&db, f).unwrap().len();
+        assert_eq!(ids(&Filter { limit: 10, ..Default::default() }), 0);
+        assert_eq!(ids(&Filter { limit: 10, deleted: true, ..Default::default() }), 1);
+        assert!(get_tool(&ctx, json!({"id": id})).is_err());
+        assert_eq!(
+            get(&db, id).unwrap().unwrap()["deleted"]["by"],
+            json!({"kind": "agent", "chatId": "chat-1"})
+        );
+        assert!(append(&db, &Author::human(), id, "late", 7).is_err());
+        assert!(update_tool(&ctx, json!({"id": id, "status": "open"}), 7).is_err());
+        restore(&db, &Author::human(), id, 8).unwrap();
+        assert!(restore(&db, &Author::human(), id, 9).is_err());
+        assert_eq!(ids(&Filter { limit: 10, ..Default::default() }), 1);
+        assert!(get_tool(&ctx, json!({"id": id})).is_ok());
     }
 
     #[test]

@@ -8,6 +8,7 @@ import {
   type FeedbackAuthor,
   type FeedbackAuthorKind,
   type FeedbackFilter,
+  type FeedbackHistoryRow,
   type FeedbackItemRow,
   type FeedbackStatus,
   type FeedbackThread,
@@ -41,6 +42,19 @@ function AuthorBadge({ author }: { author: FeedbackAuthor }) {
   );
 }
 
+function historyText(h: FeedbackHistoryRow): string {
+  switch (h.action) {
+    case 'status':
+      return `Marked ${STATUS_LABEL[(h.detail ?? 'open') as FeedbackStatus] ?? h.detail}`;
+    case 'edited':
+      return `Edited the ${h.detail ?? 'item'}`;
+    case 'deleted':
+      return 'Deleted';
+    case 'restored':
+      return 'Restored';
+  }
+}
+
 function when(ms: number): string {
   return new Date(ms).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 }
@@ -56,6 +70,7 @@ export function HelmFeedbackTab() {
   const [open, setOpen] = useState<number | null>(null);
   const [filing, setFiling] = useState(false);
   const [rev, setRev] = useState(0);
+  const [deleted, setDeleted] = useState(false);
 
   const reload = useCallback(() => setRev((n) => n + 1), []);
 
@@ -65,6 +80,7 @@ export function HelmFeedbackTab() {
       ...(status !== 'any' ? { status } : {}),
       ...(author !== 'any' ? { author } : {}),
       ...(query.trim() ? { text: query.trim() } : {}),
+      ...(deleted ? { deleted: true } : {}),
     };
     // Typing in the search box waits a moment so each key does not hit the host.
     const t = setTimeout(
@@ -85,9 +101,9 @@ export function HelmFeedbackTab() {
       live = false;
       clearTimeout(t);
     };
-  }, [ops, status, author, query, rev]);
+  }, [ops, status, author, query, deleted, rev]);
 
-  const unfiltered = status === 'any' && author === 'any' && !query.trim();
+  const unfiltered = status === 'any' && author === 'any' && !query.trim() && !deleted;
   return (
     <section data-testid="helm-feedback">
       <div className="usage-pane-head">
@@ -95,6 +111,9 @@ export function HelmFeedbackTab() {
         <span className="hf-head-actions">
           <Button variant="text" onClick={reload} data-testid="helm-feedback-refresh">
             Refresh
+          </Button>
+          <Button variant="text" onClick={() => setDeleted((v) => !v)} pressed={deleted} data-testid="helm-feedback-show-deleted">
+            Deleted
           </Button>
           <Button variant="text" onClick={() => setFiling((v) => !v)} pressed={filing} data-testid="helm-feedback-new">
             New feedback
@@ -211,6 +230,7 @@ function Thread({ id, ops, onChanged }: { id: number; ops: Ops; onChanged: () =>
   const [reply, setReply] = useState('');
   const [board, setBoard] = useState('');
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState<{ title: string; text: string } | null>(null);
 
   const load = useCallback(() => {
     void ops.item(id).then(
@@ -245,8 +265,50 @@ function Thread({ id, ops, onChanged }: { id: number; ops: Ops; onChanged: () =>
     );
   }
   if (!thread) return <p className="usage-fine">Loading…</p>;
+
+  const removeItem = () =>
+    run(ops.remove(id), () =>
+      toast.show({
+        kind: 'undo',
+        text: 'Feedback deleted.',
+        ttlMs: 8000,
+        action: { label: 'Undo', run: () => void ops.restore(id).then(onChanged, (e) => toast.show({ kind: 'error', text: errorText(e) })) },
+      }),
+    );
+  const startEdit = () => setEditing({ title: thread.title, text: thread.entries[0]?.text ?? '' });
+  const saveEdit = () => {
+    if (!editing) return;
+    const change: { title?: string; text?: string } = {};
+    if (editing.title.trim() !== thread.title) change.title = editing.title.trim();
+    if (editing.text.trim() !== (thread.entries[0]?.text ?? '')) change.text = editing.text.trim();
+    if (!change.title && !change.text) return setEditing(null);
+    run(ops.edit(id, change), () => setEditing(null));
+  };
+
   return (
     <div className="hf-thread" data-testid="helm-feedback-thread">
+      {thread.deleted && (
+        <p className="usage-notice" data-state="inactive" data-testid="helm-feedback-deleted">
+          Deleted by <AuthorBadge author={thread.deleted.by} /> · {when(thread.deleted.at)}{' '}
+          <Button variant="text" disabled={busy} onClick={() => run(ops.restore(id))} data-testid="helm-feedback-restore">
+            Restore
+          </Button>
+        </p>
+      )}
+      {editing && (
+        <div className="hf-form" data-testid="helm-feedback-edit-form">
+          <TextInput value={editing.title} maxLength={MAX_TITLE} onChange={(e) => setEditing({ ...editing, title: e.target.value })} aria-label="Feedback title" data-testid="helm-feedback-edit-title" />
+          <TextArea value={editing.text} maxLength={MAX_TEXT} onChange={(e) => setEditing({ ...editing, text: e.target.value })} aria-label="First entry" data-testid="helm-feedback-edit-text" />
+          <div className="hf-actions">
+            <Button variant="text" onClick={() => setEditing(null)}>
+              Cancel
+            </Button>
+            <Button variant="primary" disabled={busy || !editing.title.trim() || !editing.text.trim()} onClick={saveEdit} data-testid="helm-feedback-edit-save">
+              Save changes
+            </Button>
+          </div>
+        </div>
+      )}
       <ol className="hf-entries">
         {thread.entries.map((e) => (
           <li key={e.id} data-testid="helm-feedback-entry">
@@ -258,6 +320,16 @@ function Thread({ id, ops, onChanged }: { id: number; ops: Ops; onChanged: () =>
           </li>
         ))}
       </ol>
+      {thread.history.length > 0 && (
+        <ul className="hf-history" data-testid="helm-feedback-history">
+          {thread.history.map((h, i) => (
+            <li key={i}>
+              {historyText(h)} by <AuthorBadge author={h.by} /> · <span className="usage-fine">{when(h.at)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {!thread.deleted && (
       <div className="hf-form">
         <TextArea value={reply} maxLength={MAX_TEXT} onChange={(e) => setReply(e.target.value)} placeholder="Add to this feedback" aria-label="Add an entry" data-testid="helm-feedback-reply" />
         <div className="hf-actions">
@@ -266,21 +338,32 @@ function Thread({ id, ops, onChanged }: { id: number; ops: Ops; onChanged: () =>
           </Button>
         </div>
       </div>
-      <div className="hf-admin">
-        <Segmented<FeedbackStatus>
-          label="Status"
-          testId="helm-feedback-set-status"
-          value={thread.status}
-          options={(Object.keys(STATUS_LABEL) as FeedbackStatus[]).map((s) => ({ value: s, label: STATUS_LABEL[s] }))}
-          onChange={(s) => run(ops.update(id, { status: s }))}
-        />
-        <span className="hf-board">
-          <TextInput value={board} onChange={(e) => setBoard(e.target.value)} placeholder={thread.boardItem ? `Board item ${thread.boardItem}` : 'Board item id'} aria-label="Board item id" data-testid="helm-feedback-board" />
-          <Button variant="text" disabled={!board.trim() || busy} onClick={() => run(ops.update(id, { boardItem: board.trim() }), () => setBoard(''))}>
-            {thread.boardItem ? 'Change' : 'Attach'}
-          </Button>
-        </span>
-      </div>
+      )}
+      {!thread.deleted && (
+        <div className="hf-admin">
+          <Segmented<FeedbackStatus>
+            label="Status"
+            testId="helm-feedback-set-status"
+            value={thread.status}
+            options={(Object.keys(STATUS_LABEL) as FeedbackStatus[]).map((s) => ({ value: s, label: STATUS_LABEL[s] }))}
+            onChange={(s) => run(ops.update(id, { status: s }))}
+          />
+          <span className="hf-board">
+            <TextInput value={board} onChange={(e) => setBoard(e.target.value)} placeholder={thread.boardItem ? `Board item ${thread.boardItem}` : 'Board item id'} aria-label="Board item id" data-testid="helm-feedback-board" />
+            <Button variant="text" disabled={!board.trim() || busy} onClick={() => run(ops.update(id, { boardItem: board.trim() }), () => setBoard(''))}>
+              {thread.boardItem ? 'Change' : 'Attach'}
+            </Button>
+          </span>
+          <span className="hf-head-actions">
+            <Button variant="text" disabled={busy} onClick={startEdit} data-testid="helm-feedback-edit">
+              Edit
+            </Button>
+            <Button variant="text" disabled={busy} onClick={removeItem} data-testid="helm-feedback-delete">
+              Delete
+            </Button>
+          </span>
+        </div>
+      )}
     </div>
   );
 }

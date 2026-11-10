@@ -57,18 +57,18 @@ export function usageFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   const threads: FeedbackThread[] = [
     {
       id: 2, title: 'Search takes three seconds on a big repo', status: 'open', boardItem: null, author: { kind: 'agent', chatId: 'c-fake-1' }, createdAt: t0 - 3 * HOUR, updatedAt: t0 - HOUR,
-      entries: [
+      history: [], deleted: null, entries: [
         { id: 3, text: 'quick_open was slow in a repo with 40k files.', author: { kind: 'agent', chatId: 'c-fake-1' }, at: t0 - 3 * HOUR },
         { id: 4, text: 'Same here. <b>plain text only</b>', author: { kind: 'human' }, at: t0 - HOUR },
       ],
     },
     {
       id: 1, title: 'Sidebar jumps when the window is resized', status: 'filed', boardItem: '0f0f0f0f-aaaa', author: { kind: 'human' }, createdAt: t0 - 30 * HOUR, updatedAt: t0 - 30 * HOUR,
-      entries: [{ id: 1, text: 'It jumps back to the top.', author: { kind: 'human' }, at: t0 - 30 * HOUR }],
+      history: [], deleted: null, entries: [{ id: 1, text: 'It jumps back to the top.', author: { kind: 'human' }, at: t0 - 30 * HOUR }],
     },
     {
       id: 3, title: 'Wants a darker map view', status: 'open', boardItem: null, author: { kind: 'agent_for_user', chatId: 'c-fake-2' }, createdAt: t0 - 5 * HOUR, updatedAt: t0 - 5 * HOUR,
-      entries: [{ id: 2, text: 'The user said the map is too bright at night.', author: { kind: 'agent_for_user', chatId: 'c-fake-2' }, at: t0 - 5 * HOUR }],
+      history: [], deleted: null, entries: [{ id: 2, text: 'The user said the map is too bright at night.', author: { kind: 'agent_for_user', chatId: 'c-fake-2' }, at: t0 - 5 * HOUR }],
     },
   ];
   let nextEntry = 10;
@@ -83,7 +83,7 @@ export function usageFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
     switch (op) {
       case 'feedback_items': {
         const text = typeof a.text === 'string' ? a.text.toLowerCase() : '';
-        const hits = threads.filter((t) => (!a.status || t.status === a.status) && (!a.author || t.author.kind === a.author) && (!text || t.title.toLowerCase().includes(text) || t.entries.some((e) => e.text.toLowerCase().includes(text))));
+        const hits = threads.filter((t) => !!t.deleted === (a.deleted === true) && (!a.status || t.status === a.status) && (!a.author || t.author.kind === a.author) && (!text || t.title.toLowerCase().includes(text) || t.entries.some((e) => e.text.toLowerCase().includes(text))));
         return { items: hits.sort((x, y) => y.updatedAt - x.updatedAt).map(row) };
       }
       case 'feedback_item':
@@ -93,7 +93,7 @@ export function usageFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         const text = String(a.text ?? '').trim();
         if (!title || !text) throw new ApiError('bad_args', 'A feedback item needs a title and some text.');
         const id = Math.max(0, ...threads.map((t) => t.id)) + 1;
-        threads.push({ id, title, status: 'open', boardItem: null, author: { kind: 'human' }, createdAt: now, updatedAt: now, entries: [{ id: nextEntry++, text, author: { kind: 'human' }, at: now }] });
+        threads.push({ id, title, status: 'open', boardItem: null, author: { kind: 'human' }, createdAt: now, updatedAt: now, history: [], deleted: null, entries: [{ id: nextEntry++, text, author: { kind: 'human' }, at: now }] });
         return { id };
       }
       case 'feedback_append': {
@@ -105,8 +105,28 @@ export function usageFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         t.updatedAt = now;
         return { id: t.id };
       }
+      case 'feedback_edit': {
+        const t = thread(a.id);
+        if (typeof a.title === 'string') t.title = a.title.trim();
+        if (typeof a.text === 'string' && t.entries[0]) t.entries[0].text = a.text.trim();
+        t.history.push({ action: 'edited', detail: 'text', by: { kind: 'human' }, at: now });
+        return { id: t.id };
+      }
+      case 'feedback_delete': {
+        const t = thread(a.id);
+        t.deleted = { by: { kind: 'human' }, at: now };
+        t.history.push({ action: 'deleted', detail: null, by: { kind: 'human' }, at: now });
+        return { id: t.id };
+      }
+      case 'feedback_restore': {
+        const t = thread(a.id);
+        t.deleted = null;
+        t.history.push({ action: 'restored', detail: null, by: { kind: 'human' }, at: now });
+        return { id: t.id };
+      }
       default: {
         const t = thread(a.id);
+        if (typeof a.status === 'string' && a.status !== t.status) t.history.push({ action: 'status', detail: a.status, by: { kind: 'human' }, at: now });
         if (typeof a.status === 'string') t.status = a.status as FeedbackStatus;
         if (typeof a.boardItem === 'string') {
           t.boardItem = a.boardItem;
@@ -124,6 +144,9 @@ export function usageFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       case 'feedback_create':
       case 'feedback_append':
       case 'feedback_update':
+      case 'feedback_edit':
+      case 'feedback_delete':
+      case 'feedback_restore':
         return feedbackOp(op, a);
       case 'usage_get':
         return snapshot();

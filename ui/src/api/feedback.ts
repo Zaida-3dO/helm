@@ -32,14 +32,28 @@ export interface FeedbackEntryRow {
   at: number;
 }
 
+/** One thing done to an item after it was filed: a status change, an edit, a delete or a restore. */
+export interface FeedbackHistoryRow {
+  action: 'status' | 'edited' | 'deleted' | 'restored';
+  /** The new status for `status`; what was edited (title, text, title and text) for `edited`. */
+  detail: string | null;
+  by: FeedbackAuthor;
+  at: number;
+}
+
 export interface FeedbackThread extends Omit<FeedbackItemRow, 'entryCount' | 'snippet'> {
   entries: FeedbackEntryRow[];
+  history: FeedbackHistoryRow[];
+  /** Set while the item is deleted: who did it and when. */
+  deleted: { by: FeedbackAuthor; at: number } | null;
 }
 
 export interface FeedbackFilter {
   status?: FeedbackStatus;
   author?: FeedbackAuthorKind;
   text?: string;
+  /** List deleted items instead of live ones. */
+  deleted?: boolean;
 }
 
 export function feedbackOps(api: Api) {
@@ -49,6 +63,9 @@ export function feedbackOps(api: Api) {
     create: (title: string, text: string) => api<{ id: number }>('feedback_create', { title, text }),
     append: (id: number, text: string) => api<{ id: number }>('feedback_append', { id, text }),
     update: (id: number, change: { status?: FeedbackStatus; boardItem?: string }) => api<{ id: number }>('feedback_update', { id, ...change }),
+    edit: (id: number, change: { title?: string; text?: string; entryId?: number }) => api<{ id: number }>('feedback_edit', { id, ...change }),
+    remove: (id: number) => api<{ id: number }>('feedback_delete', { id }),
+    restore: (id: number) => api<{ id: number }>('feedback_restore', { id }),
   };
 }
 
