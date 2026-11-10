@@ -117,17 +117,7 @@ const SIDEBAR_ITEMS: &[&str] = &[
     "archived",
     "coder",
 ];
-const THEME_EFFECTS: &[&str] = &[
-    "trail",
-    "cursors",
-    "cursorGlow",
-    "edgeLights",
-    "particles",
-    "gloss",
-    "frames",
-    "typing",
-    "results",
-];
+const THEME_EFFECTS: &[&str] = helm_core::prefs::THEME_EFFECT_IDS;
 
 const SIDEBAR_ITEM: Kind = Kind::Choice(SIDEBAR_ITEMS);
 const FONT_SIZE_RESPONSE: Kind = Kind::Int {

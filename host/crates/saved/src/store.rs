@@ -500,10 +500,11 @@ pub fn remove(
 }
 
 /// Bring back an item removed within the undo window, exactly as it was.
-pub fn restore(tx: &Transaction<'_>, id: &str) -> Result<SavedItem, StoreError> {
+pub fn restore(tx: &Transaction<'_>, id: &str, now: i64) -> Result<SavedItem, StoreError> {
     let back = tx.execute(
-        "UPDATE saved_items SET removed_at = NULL WHERE id = ?1 AND removed_at IS NOT NULL",
-        params![id],
+        "UPDATE saved_items SET removed_at = NULL
+         WHERE id = ?1 AND removed_at IS NOT NULL AND removed_at >= ?2",
+        params![id, now.saturating_sub(UNDO_WINDOW_MS)],
     )?;
     if back == 0 {
         return Err(StoreError::NotFound);
@@ -856,7 +857,7 @@ mod tests {
             )
         });
         assert!(matches!(e.unwrap_err(), StoreError::NotFound));
-        let back = db.write(|tx| restore(tx, &a.id)).unwrap();
+        let back = db.write(|tx| restore(tx, &a.id, 7004)).unwrap();
         assert_eq!(
             (back.note_count, back.updated_at),
             (1, 1000),
@@ -869,14 +870,20 @@ mod tests {
                 .len(),
             1
         );
-        let e = db.write(|tx| restore(tx, &a.id));
+        let e = db.write(|tx| restore(tx, &a.id, 7005));
         assert!(
             matches!(e.unwrap_err(), StoreError::NotFound),
             "nothing to undo"
         );
 
-        // Purge: only items removed longer ago than the window go, with their notes.
+        // Purge: only items removed longer ago than the window go, with their notes. Past the
+        // window an item cannot be brought back even before the purge runs.
         db.write(|tx| remove(tx, &a.id, None, 8000)).unwrap();
+        let late = db.write(|tx| restore(tx, &a.id, 8000 + UNDO_WINDOW_MS + 1));
+        assert!(
+            matches!(late.unwrap_err(), StoreError::NotFound),
+            "too late"
+        );
         for (at, gone) in [
             (8000 + UNDO_WINDOW_MS, 0),
             (8000 + UNDO_WINDOW_MS + 1, 1),
@@ -884,7 +891,7 @@ mod tests {
         ] {
             assert_eq!(db.write(|tx| purge(tx, at)).unwrap(), gone, "at {at}");
         }
-        let e = db.write(|tx| restore(tx, &a.id));
+        let e = db.write(|tx| restore(tx, &a.id, 8000));
         assert!(
             matches!(e.unwrap_err(), StoreError::NotFound),
             "purged for good"

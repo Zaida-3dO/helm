@@ -438,20 +438,25 @@ fn image_bytes(
     index: i64,
     thumb: bool,
 ) -> rusqlite::Result<Option<(String, Vec<u8>)>> {
+    // The thumbnail alone when there is one, so a large picture is not read for it.
+    if thumb {
+        let small = t
+            .query_row(
+                "SELECT thumb_mime, thumb FROM shown_images
+                 WHERE chat_id = ?1 AND set_id = ?2 AND idx = ?3
+                   AND thumb IS NOT NULL AND thumb_mime IS NOT NULL",
+                params![chat_id, id, index],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        if small.is_some() {
+            return Ok(small);
+        }
+    }
     t.query_row(
-        "SELECT mime, data, thumb_mime, thumb FROM shown_images
-         WHERE chat_id = ?1 AND set_id = ?2 AND idx = ?3",
+        "SELECT mime, data FROM shown_images WHERE chat_id = ?1 AND set_id = ?2 AND idx = ?3",
         params![chat_id, id, index],
-        |r| {
-            let thumbed: Option<(String, Vec<u8>)> = match (
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, Option<Vec<u8>>>(3)?,
-            ) {
-                (Some(m), Some(b)) if thumb => Some((m, b)),
-                _ => None,
-            };
-            Ok(thumbed.unwrap_or((r.get(0)?, r.get(1)?)))
-        },
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )
     .optional()
 }
@@ -612,13 +617,15 @@ fn option_board_answer(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
 
 /// Give a fork the galleries and boards its carried history names: every gallery or board of
 /// `from` whose id appears in `history` (the fork's entries, as text) is copied to `to` under the
-/// same id, answer included. The fork's own tool cards then resolve against the fork.
+/// same id, answer included. The fork's own tool cards then resolve against the fork. The
+/// pictures themselves are copied by [`copy_pictures_for_fork`] after the fork is written, so the
+/// fork's transaction never holds their bytes; the ids of the sets to copy are returned.
 pub fn copy_for_fork(
     tx: &Transaction<'_>,
     from: &str,
     to: &str,
     history: &str,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<Vec<String>> {
     let ids = |query: &str| -> rusqlite::Result<Vec<String>> {
         let mut st = tx.prepare(query)?;
         let rows = st.query_map([from], |r| r.get::<_, String>(0))?;
@@ -644,15 +651,37 @@ pub fn copy_for_fork(
             params![from, to, id],
         )?;
     }
-    for id in galleries.iter().chain(&boards) {
-        tx.execute(
-            "INSERT OR IGNORE INTO shown_images(chat_id, set_id, idx, name, caption, mime, width, height, data, thumb_mime, thumb)
-             SELECT ?2, set_id, idx, name, caption, mime, width, height, data, thumb_mime, thumb
-             FROM shown_images WHERE chat_id = ?1 AND set_id = ?3",
-            params![from, to, id],
-        )?;
+    Ok(galleries.into_iter().chain(boards).collect())
+}
+
+/// Copy the pictures of the sets [`copy_for_fork`] named, one short transaction per picture, so
+/// other writers are never held up behind a large gallery. A picture that fails to copy is
+/// logged; its card shows it missing.
+pub fn copy_pictures_for_fork(db: &Database, from: &str, to: &str, sets: &[String]) {
+    for id in sets {
+        let count: i64 = db
+            .snapshot(|tx| {
+                tx.query_row(
+                    "SELECT COALESCE(MAX(idx), -1) FROM shown_images WHERE chat_id = ?1 AND set_id = ?2",
+                    params![from, id],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap_or(-1);
+        for idx in 0..=count {
+            let copied = db.write(|tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO shown_images(chat_id, set_id, idx, name, caption, mime, width, height, data, thumb_mime, thumb)
+                     SELECT ?2, set_id, idx, name, caption, mime, width, height, data, thumb_mime, thumb
+                     FROM shown_images WHERE chat_id = ?1 AND set_id = ?3 AND idx = ?4",
+                    params![from, to, id, idx],
+                )
+            });
+            if let Err(e) = copied {
+                log::warn!("fork {to}: picture {idx} of {id} was not copied: {e}");
+            }
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -796,8 +825,11 @@ mod tests {
         let fork =
             r.db.write(|tx| crate::store::create_chat(tx, "C:/w", None, None, 2))
                 .unwrap();
-        r.db.write(|tx| copy_for_fork(tx, &r.chat, &fork, &format!("{{\"galleryId\":\"{id}\"}}")))
+        let sets = r
+            .db
+            .write(|tx| copy_for_fork(tx, &r.chat, &fork, &format!("{{\"galleryId\":\"{id}\"}}")))
             .unwrap();
+        copy_pictures_for_fork(&r.db, &r.chat, &fork, &sets);
         let in_fork = |gid: &str| {
             shown_gallery_get(&r.ctx, json!({"chatId": fork, "galleryId": gid})).is_ok()
         };
@@ -940,8 +972,10 @@ mod tests {
         let fork =
             r.db.write(|tx| crate::store::create_chat(tx, "C:/w", None, None, 2))
                 .unwrap();
-        r.db.write(|tx| copy_for_fork(tx, &r.chat, &fork, &single))
-            .unwrap();
+        let sets =
+            r.db.write(|tx| copy_for_fork(tx, &r.chat, &fork, &single))
+                .unwrap();
+        copy_pictures_for_fork(&r.db, &r.chat, &fork, &sets);
         let kept = option_board_state(&r.ctx, json!({"chatId": fork, "boardId": single})).unwrap();
         assert_eq!(kept["answer"]["other"], "Teal, please");
         assert!(option_board_state(&r.ctx, json!({"chatId": fork, "boardId": multi})).is_err());

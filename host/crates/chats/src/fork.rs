@@ -362,7 +362,10 @@ pub fn fork(
             let row: Option<(String, String, String, bool, String)> = db
                 .snapshot(|tx| {
                     tx.query_row(
-                        "SELECT source_key, role, status, active, text FROM messages WHERE chat_id = ?1 AND id = ?2",
+                        &format!(
+                    "SELECT source_key, {}, status, active, text FROM messages WHERE chat_id = ?1 AND id = ?2",
+                    crate::checkpoint::OWN_ROLE
+                ),
                         params![req.source, mid],
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                     )
@@ -550,11 +553,9 @@ pub fn fork(
         .iter()
         .map(|e| Value::Object(e.clone()).to_string())
         .collect::<Vec<_>>()
-        .join(
-            "
-",
-        );
+        .join("\n");
     let vanished = std::cell::Cell::new(false);
+    let picture_sets = std::cell::RefCell::new(Vec::new());
     let result = db.write(|tx| {
         if project_archived(tx, &src.project)? {
             return Ok(Err(refuse("This chat's project is archived; restore it first.")));
@@ -590,7 +591,8 @@ pub fn fork(
                 params![fork_id_chat, c],
             )?;
         }
-        crate::shown_images::copy_for_fork(tx, req.source, &fork_id_chat, &history)?;
+        *picture_sets.borrow_mut() =
+            crate::shown_images::copy_for_fork(tx, req.source, &fork_id_chat, &history)?;
         for (old, new) in &carried {
             // The fork's log already names the copy, so a source image that vanished since it was
             // checked fails the fork (the transaction rolls back and nothing is kept) rather than
@@ -634,7 +636,15 @@ pub fn fork(
         Ok::<_, rusqlite::Error>(Ok(moved))
     });
     let moved = match result {
-        Ok(Ok(m)) => m,
+        Ok(Ok(m)) => {
+            crate::shown_images::copy_pictures_for_fork(
+                db,
+                req.source,
+                &fork_id_chat,
+                &picture_sets.borrow(),
+            );
+            m
+        }
         Ok(Err(r)) => {
             let _ = std::fs::remove_file(&log);
             drop_carried(&carried);

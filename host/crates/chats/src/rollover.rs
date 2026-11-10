@@ -250,6 +250,17 @@ async fn finish(
     if let Some(m) = crate::submit::picked_mode(&chat.id) {
         crate::submit::seed_mode(&new_id, &m);
     }
+    // Muted (and made by the same chat) before its brief, so nothing it does is announced
+    // when the old chat was not.
+    if let Err(e) = rt
+        .db()
+        .write(|tx| crate::mute::inherit(tx, &chat.id, &new_id, helm_core::now_ms()))
+    {
+        log::warn!(
+            "roll over of {}: the successor's mute was not set: {e}",
+            chat.id
+        );
+    }
     let title: String = chat.title.chars().take(200).collect();
     let _ = crate::titles::rename(rt, &new_id, &format!("{title} (continued)"));
     let sent = crate::submit::chat_send(

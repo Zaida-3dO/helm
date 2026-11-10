@@ -144,11 +144,11 @@ pub struct Stored {
 #[derive(Debug)]
 pub struct StagedImage {
     pub id: String,
-    name: String,
-    mime: String,
+    pub name: String,
+    pub mime: String,
     len: usize,
-    width: u32,
-    height: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Validate and store one image.

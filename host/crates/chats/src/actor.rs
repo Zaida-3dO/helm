@@ -540,29 +540,37 @@ impl Actor {
         let owner = self.chat_id.clone();
         let link = format!("tool:{call_id}");
         let at = now();
-        let kept = self
-            .write(|t| {
-                let mut kept = Vec::new();
-                for (n, (mime, bytes)) in decoded.iter().enumerate() {
-                    let name = format!("Picture {}", n + 1);
-                    match crate::attachments::put(t, &dir, &owner, &name, mime, bytes, at)? {
-                        Ok(stored) => {
-                            t.execute(
-                                "UPDATE chat_attachments SET submission_id = ?1 WHERE id = ?2",
-                                rusqlite::params![link, stored.id],
-                            )?;
-                            let (width, height) =
-                                crate::attachments::dimensions(mime, bytes).unwrap_or((0, 0));
-                            kept.push(MessageImage {
-                                id: stored.id,
-                                name,
-                                mime: mime.clone(),
-                                width,
-                                height,
-                            });
-                        }
-                        Err(_) => log::warn!("chat {owner}: a tool picture could not be kept"),
+        // The files are written before the transaction, so a large picture never holds the
+        // writer lock; only their rows are written inside it.
+        let staged: Vec<crate::attachments::StagedImage> = decoded
+            .iter()
+            .enumerate()
+            .filter_map(|(n, (mime, bytes))| {
+                let name = format!("Picture {}", n + 1);
+                match crate::attachments::stage_image(&dir, &name, mime, bytes) {
+                    Ok(s) => Some(s),
+                    Err(_) => {
+                        log::warn!("chat {owner}: a tool picture could not be kept");
+                        None
                     }
+                }
+            })
+            .collect();
+        let written = self.write(|t| {
+                let mut kept = Vec::new();
+                for st in &staged {
+                    let stored = crate::attachments::record_image(t, &owner, st, at)?;
+                    t.execute(
+                        "UPDATE chat_attachments SET submission_id = ?1 WHERE id = ?2",
+                        rusqlite::params![link, stored.id],
+                    )?;
+                    kept.push(MessageImage {
+                        id: stored.id,
+                        name: st.name.clone(),
+                        mime: st.mime.clone(),
+                        width: st.width,
+                        height: st.height,
+                    });
                 }
                 // The oldest tool pictures past the cap go, rows and files.
                 let old: Vec<String> = {
@@ -578,8 +586,14 @@ impl Actor {
                     t.execute("DELETE FROM chat_attachments WHERE id = ?1", [id])?;
                 }
                 Ok((kept, old))
-            })
-            .unwrap_or_default();
+            });
+        let kept = written.unwrap_or_else(|| {
+            // No rows: the staged files would be left with nothing to name them.
+            for st in &staged {
+                let _ = std::fs::remove_file(dir.join(&st.id));
+            }
+            Default::default()
+        });
         for id in &kept.1 {
             let _ = std::fs::remove_file(dir.join(id));
         }

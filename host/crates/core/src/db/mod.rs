@@ -6,7 +6,8 @@
 //! still locked out after that falls back to reading on the writer, which waits its 3 s and then
 //! fails with an error. Nothing retries in a loop. Opening runs the core migrations, refuses a newer schema, then runs every
 //! registered feature initializer and pending one-time migration, then trims the growing tables
-//! listed in [`caps`]. Deleted content is overwritten (`secure_delete`), not left in free pages.
+//! listed in [`caps`]. Deleted content is overwritten in the database file (`secure_delete`); the
+//! write-ahead log may hold older copies until its next checkpoint.
 
 pub mod caps;
 pub mod registry;
@@ -194,8 +195,8 @@ fn configure_writer(conn: &Connection) -> Result<(), DbError> {
     }
     conn.pragma_update(None, "synchronous", "FULL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
-    // Deleted content is overwritten, not left in free pages and the write-ahead log: a deleted
-    // chat or message does not stay readable in the file.
+    // Deleted content is overwritten in the database file rather than left in free pages. Copies
+    // in the write-ahead log last until it is checkpointed.
     conn.pragma_update(None, "secure_delete", true)?;
     Ok(())
 }

@@ -400,6 +400,13 @@ pub fn apply(
 }
 
 /// Startup: apply every edit a crash left staged; their submissions wait for Recover.
+/// Whether an error reads as the database being busy for a moment, rather than one that would
+/// come back at every try.
+fn is_transient(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("database is locked") || m.contains("database is busy") || m.contains("busy")
+}
+
 pub fn recover_all(db: &Database, profile_dir: &Path, revision: i64) {
     let ids: Vec<String> = db
         .snapshot(|tx| {
@@ -420,6 +427,10 @@ pub fn recover_all(db: &Database, profile_dir: &Path, revision: i64) {
                 log::info!("chat {id}: a staged edit was applied after a restart");
             }
             Ok(None) => {}
+            Err(e) if is_transient(&e.message) => {
+                // The database was busy: the edit stays staged for the next start.
+                log::warn!("chat {id}: staged edit not applied yet: {}", e.message);
+            }
             Err(e) => {
                 log::error!("chat {id}: staged edit not applied: {}", e.message);
                 // Left staged it would fail the same way at every start and hold the chat's next

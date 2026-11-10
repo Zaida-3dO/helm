@@ -29,6 +29,14 @@ use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::path::Path;
 
+/// A message row's role, with the user rows Helm itself wrote (a continuation, a notification, a
+/// schedule, another chat's message) read as `helm`: only the user's own messages are places to
+/// go back to.
+pub(crate) const OWN_ROLE: &str = "CASE WHEN role = 'user'
+     AND COALESCE(CASE WHEN json_valid(details) THEN json_extract(details, '$.origin') END, 'typed')
+         IN ('app', 'notification', 'schedule', 'other_chat')
+     THEN 'helm' ELSE role END";
+
 /// The most changed files named in one answer; the rest are counted.
 pub const MAX_LISTED: usize = 40;
 /// The edit tools whose arguments name the file they change.
@@ -92,7 +100,10 @@ pub fn info(
     let row: Option<(String, String, String, bool, String)> = db
         .snapshot(|tx| {
             tx.query_row(
-                "SELECT source_key, role, status, active, text FROM messages WHERE chat_id = ?1 AND id = ?2",
+                &format!(
+                    "SELECT source_key, {}, status, active, text FROM messages WHERE chat_id = ?1 AND id = ?2",
+                    crate::checkpoint::OWN_ROLE
+                ),
                 params![chat_id, message_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )

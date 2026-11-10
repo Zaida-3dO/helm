@@ -165,7 +165,9 @@ fn update(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: UpdateArgs = parse(args)?;
     let db = ctx.services.need::<Database>()?;
     if a.restore {
-        let item = db.write(|tx| store::restore(tx, &a.id)).map_err(fail)?;
+        let item = db
+            .write(|tx| store::restore(tx, &a.id, helm_core::now_ms()))
+            .map_err(fail)?;
         ctx.events
             .emit(AppEvent::new("saved").with("ids", json!([item.id.clone()])));
         return Ok(json!({"item": item}));

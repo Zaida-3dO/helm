@@ -490,7 +490,7 @@ fn validate_desktop_pet(value: &Value) -> Result<(), PrefError> {
     };
     let coordinate = |v: Option<&Value>| {
         v.and_then(Value::as_i64)
-            .is_some_and(|n| n.abs() <= 100_000)
+            .is_some_and(|n| (-100_000..=100_000).contains(&n))
     };
     for (name, v) in map {
         let ok = match name.as_str() {

@@ -2294,6 +2294,28 @@ async fn a_message_fork_is_cut_at_the_reply_and_carries_it_once() {
         .await
         .unwrap_err();
     assert_eq!(bad.code, "refused");
+    // A user row Helm wrote itself (a continuation, another chat's message) is no place to go
+    // back to.
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE messages SET details = json_set(COALESCE(details, '{}'), '$.origin', 'app')
+             WHERE id = ?1",
+            [second],
+        )
+    })
+    .unwrap();
+    for (op, args) in [
+        (
+            "chat_fork",
+            json!({"chatId": chat, "forkId": uuid::Uuid::new_v4().to_string(), "messageId": second}),
+        ),
+        (
+            "checkpoint_info",
+            json!({"chatId": chat, "messageId": second}),
+        ),
+    ] {
+        assert_eq!(h.call(op, args).await.unwrap_err().code, "refused", "{op}");
+    }
     // A reply that did not finish is no fork point either.
     h.db.write(|tx| {
         tx.execute(

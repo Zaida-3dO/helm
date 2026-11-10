@@ -278,11 +278,11 @@ pub fn ensure_home(tx: &Transaction<'_>, now: i64) -> Result<Profile, ProfileErr
 
 fn clean_name(raw: &str) -> Result<String, ProfileError> {
     let name = raw.trim();
-    if name.is_empty()
-        || name.chars().count() > MAX_NAME_CHARS
-        || name.chars().any(char::is_control)
-    {
+    if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
         return bad("A profile's name is 1 to 40 characters.");
+    }
+    if hidden::has_hidden(name) {
+        return bad("A profile's name can't hold invisible or direction-changing characters.");
     }
     Ok(name.to_owned())
 }
@@ -818,6 +818,7 @@ mod tests {
                 assert!(!home.needs_name && home.name == "First");
                 assert!(create(tx, "first", None, None, 2).is_err());
                 assert!(create(tx, "", None, None, 2).is_err());
+                assert!(create(tx, "Sam\u{202e}", None, None, 2).is_err());
                 assert!(create(tx, "Bad colour", Some("red"), None, 2).is_err());
                 let other = create(tx, "Second", Some("#AABBCC"), Some("person-2"), 2)?;
                 assert!(!other.is_home);
