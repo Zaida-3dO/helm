@@ -109,6 +109,8 @@ pub struct FakeState {
     pub people: Vec<String>,
     pub claimed: HashSet<String>,
     pub sent: Vec<(String, String, String)>,
+    /// For each send, the household member it came from when the chat was not theirs.
+    pub sent_from: Vec<Option<String>>,
     pub stopped: Vec<String>,
     pub answered: Vec<AnswerArgs>,
     pub created: Vec<CreateArgs>,
@@ -124,6 +126,7 @@ pub struct FakePort {
     uid: String,
     name: String,
     run: AtomicBool,
+    household: AtomicBool,
     pub state: Mutex<FakeState>,
 }
 
@@ -133,6 +136,7 @@ impl FakePort {
             uid: uid.to_owned(),
             name: name.to_owned(),
             run: AtomicBool::new(true),
+            household: AtomicBool::new(true),
             state: Mutex::new(FakeState {
                 people: vec!["person-a".to_owned()],
                 cursor: 100,
@@ -145,6 +149,10 @@ impl FakePort {
         self.run.store(on, Ordering::SeqCst);
     }
 
+    pub fn set_household(&self, on: bool) {
+        self.household.store(on, Ordering::SeqCst);
+    }
+
     pub fn st(&self) -> std::sync::MutexGuard<'_, FakeState> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -152,6 +160,19 @@ impl FakePort {
     /// Add a chat to the list (as `person-a`'s).
     pub fn add_chat(&self, id: &str, title: &str, revision: i64) {
         let rc = self.remote_chat(fake_record(id, title, revision));
+        self.st().chats.push(rc);
+    }
+
+    /// Add a chat that belongs to `person` and is shared with `shared`.
+    pub fn add_chat_of(&self, id: &str, title: &str, revision: i64, person: &str, shared: &[&str]) {
+        let rc = RemoteChat::from_record(
+            &fake_record(id, title, revision),
+            Some(person.to_owned()),
+            shared.iter().map(|p| (*p).to_owned()).collect(),
+            "Work",
+            "#aabbcc",
+            false,
+        );
         self.st().chats.push(rc);
     }
 
@@ -188,6 +209,14 @@ impl ChatPort for FakePort {
 
     fn run_allowed(&self) -> bool {
         self.run.load(Ordering::SeqCst)
+    }
+
+    fn household_run(&self) -> bool {
+        self.household.load(Ordering::SeqCst)
+    }
+
+    fn person_known(&self, person_id: &str) -> bool {
+        self.st().people.iter().any(|p| p == person_id)
     }
 
     fn hello(&self) -> BoxFut<'_, PortResult<Hello>> {
@@ -301,10 +330,17 @@ impl ChatPort for FakePort {
         self.st().claimed.remove(client_id);
     }
 
-    fn send(&self, chat_id: String, client_id: String, text: String) -> BoxFut<'_, PortResult<()>> {
+    fn send(
+        &self,
+        chat_id: String,
+        client_id: String,
+        text: String,
+        from: Option<String>,
+    ) -> BoxFut<'_, PortResult<()>> {
         let mut st = self.st();
         let r = if st.chats.iter().any(|c| c.id() == chat_id) {
             st.sent.push((chat_id, client_id, text));
+            st.sent_from.push(from);
             Ok(())
         } else {
             Err(WireError::not_found())

@@ -157,10 +157,21 @@ struct AssignArgs {
 
 fn assign_chats(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: AssignArgs = parse(args)?;
-    changed(ctx, |tx| {
+    let out = changed(ctx, |tx| {
         let n = store::assign(tx, &a.chat_ids, &a.profile_id)?;
         Ok(json!({ "assigned": n }))
-    })
+    })?;
+    announce(ctx, &a.chat_ids);
+    Ok(out)
+}
+
+/// The chats' records changed: the window and the devices watching this PC hear each one.
+fn announce(ctx: &OpCtx, chat_ids: &[String]) {
+    if let Some(rt) = ctx.services.get::<helm_chats::ChatRuntime>() {
+        for id in chat_ids {
+            helm_chats::submit::announce_chat(&rt, id);
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -173,10 +184,12 @@ struct ShareArgs {
 
 fn share_chats(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ShareArgs = parse(args)?;
-    changed(ctx, |tx| {
+    let out = changed(ctx, |tx| {
         let n = store::share(tx, &a.chat_ids, &a.profile_id, a.shared)?;
         Ok(json!({ "changed": n }))
-    })
+    })?;
+    announce(ctx, &a.chat_ids);
+    Ok(out)
 }
 
 #[derive(Deserialize)]

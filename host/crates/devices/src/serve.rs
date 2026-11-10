@@ -1,11 +1,16 @@
 //! The host side: answering other devices about the chats that run here.
 //!
 //! A [`Service`] hears requests (`dev_call` frames) from the [`DeviceLink`], runs them against a
-//! [`ChatPort`] (the chats and profiles of this install), and sends the result back. Requests that
-//! only read need nothing but the pairing; requests that run something (send, stop, answer, create,
-//! change a chat) need the switch "Let other devices use chats on this PC". What a watcher may do
-//! is exactly the list in [`Op`]; anything else is refused, and the sentences say to do it on the
-//! PC the chat runs on.
+//! [`ChatPort`] (the chats and profiles of this install), and sends the result back. What a
+//! watcher may do is exactly the list in [`Op`]; anything else is refused, and the sentences say
+//! to do it on the PC the chat runs on.
+//!
+//! Who asks decides the rest. A PC that is not paired with a person on the hub answers no one.
+//! A device of the same person reads freely and runs chats while the switch "Let other devices
+//! use chats on this PC" is on. A device of another person in the household needs the switch
+//! "Let people in my household run their chats on this PC" and a profile here linked to them; it
+//! then sees and runs only that person's own chats and the chats shared with them, answers what
+//! waits only on their own chats, and starts chats only for themselves.
 //!
 //! Chat events from this install reach the service through [`Service::observe`] (the app's event
 //! tap), and go to the watchers that subscribed as pushes ([`crate::subs`]).
@@ -46,8 +51,12 @@ pub struct ChatState {
 pub trait ChatPort: Send + Sync {
     /// This device's id and name.
     fn device(&self) -> DeviceInfo;
-    /// Whether other devices may run chats here.
+    /// Whether this person's other devices may run chats here.
     fn run_allowed(&self) -> bool;
+    /// Whether people in the household may run their own chats here.
+    fn household_run(&self) -> bool;
+    /// Whether a profile on this install is linked to the hub person.
+    fn person_known(&self, person_id: &str) -> bool;
     fn hello(&self) -> BoxFut<'_, PortResult<Hello>>;
     /// A chat record as other devices see it.
     fn remote_chat(&self, record: ChatRecord) -> RemoteChat;
@@ -74,8 +83,16 @@ pub trait ChatPort: Send + Sync {
     fn claim_send(&self, client_id: &str, chat_id: &str) -> PortResult<bool>;
     /// Forget a claim whose send was refused, so the same id can be tried again.
     fn release_send(&self, client_id: &str);
-    /// Send the text to the chat as the person's own words (origin `remote`).
-    fn send(&self, chat_id: String, client_id: String, text: String) -> BoxFut<'_, PortResult<()>>;
+    /// Send the text to the chat as the person's own words (origin `remote`). `from` names the
+    /// household member who sent it when the chat is not theirs: then it is delivered as a
+    /// message from them, never as the owner's words.
+    fn send(
+        &self,
+        chat_id: String,
+        client_id: String,
+        text: String,
+        from: Option<String>,
+    ) -> BoxFut<'_, PortResult<()>>;
     fn stop(&self, chat_id: String) -> BoxFut<'_, PortResult<()>>;
     fn answer(&self, a: AnswerArgs) -> BoxFut<'_, PortResult<()>>;
     /// Start a chat for the local profile linked to the person; `unknown_person` if none is.
@@ -88,6 +105,15 @@ pub trait ChatPort: Send + Sync {
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Who a request comes from, as this PC sees it.
+#[derive(Clone, Debug, PartialEq)]
+enum Asker {
+    /// A device of the person this PC is paired as.
+    Own,
+    /// A device of another person in the household: their hub id and name.
+    Household { person_id: String, name: String },
 }
 
 /// Requests answered once are remembered, so a second answer to one is refused even in the
@@ -320,27 +346,129 @@ impl Inner {
             Ok(op) => op,
             Err(e) => return (Err(e), None),
         };
-        if op.is_run() && !self.port.run_allowed() {
-            return (Err(WireError::not_allowed()), None);
-        }
-        let uid = from.uid.as_str();
-        match self.run_parsed(uid, op).await {
+        let run = async {
+            let asker = self.asker(from)?;
+            let op = match &asker {
+                Asker::Own => {
+                    if op.is_run() && !self.port.run_allowed() {
+                        return Err(WireError::not_allowed());
+                    }
+                    op
+                }
+                Asker::Household { person_id, .. } => self.household_op(person_id, op).await?,
+            };
+            self.run_parsed(&from.uid, &asker, op).await
+        };
+        match run.await {
             Ok((v, sub)) => (Ok(v), sub),
             Err(e) => (Err(e), None),
         }
     }
 
-    async fn run_parsed(&self, uid: &str, op: Op) -> Result<(Value, Option<String>), WireError> {
+    /// Who is asking. A PC paired with no person answers no one; a caller with no person is
+    /// refused too.
+    fn asker(&self, from: &Caller) -> Result<Asker, WireError> {
+        let Some(me) = self.link.person_id().filter(|p| !p.is_empty()) else {
+            return Err(WireError::new(
+                code::NOT_ALLOWED,
+                "This PC is not paired with a person on the hub, so other devices can't use its chats.",
+            ));
+        };
+        match from.person_id.as_deref().filter(|p| !p.is_empty()) {
+            Some(p) if p == me => Ok(Asker::Own),
+            Some(p) => Ok(Asker::Household {
+                person_id: p.to_owned(),
+                name: from
+                    .person
+                    .clone()
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| "someone in the household".to_owned()),
+            }),
+            None => Err(WireError::new(
+                code::NOT_ALLOWED,
+                "This PC only answers devices paired with a person on the hub.",
+            )),
+        }
+    }
+
+    /// Check a household member's request against the switch and their own chats, and pin a
+    /// new chat to them.
+    async fn household_op(&self, person_id: &str, op: Op) -> Result<Op, WireError> {
+        if !self.port.household_run() {
+            return Err(WireError::new(
+                code::NOT_ALLOWED,
+                "This PC doesn't let people in the household run their chats here.",
+            ));
+        }
+        if !self.port.person_known(person_id) {
+            return Err(WireError::new(
+                code::NOT_ALLOWED,
+                "No one on this PC is linked to you, so you can't use its chats.",
+            ));
+        }
+        let (chat_id, own_only) = match op {
+            Op::Hello | Op::ChatsSub(_) | Op::ChatsUnsub | Op::ChatUnsub(_) => return Ok(op),
+            Op::Create(mut a) => {
+                a.person_id = person_id.to_owned();
+                return Ok(Op::Create(a));
+            }
+            Op::ChatSub(ref a) => (a.chat_id.clone(), false),
+            Op::Page(ref a) => (a.chat_id.clone(), false),
+            Op::Send(ref a) => (a.chat_id.clone(), false),
+            Op::Stop(ref a) => (a.chat_id.clone(), false),
+            Op::SetModel(ref a) => (a.chat_id.clone(), false),
+            Op::Rename(ref a) => (a.chat_id.clone(), false),
+            Op::Archive(ref a) => (a.chat_id.clone(), false),
+            // What a chat waits on, and who it is shared with, are for the person whose chat it is.
+            Op::Answer(ref a) => (a.chat_id.clone(), true),
+            Op::Share(ref a) => (a.chat_id.clone(), true),
+        };
+        let chat = self.port.chat(chat_id).await?.chat.to_value();
+        if !subs::visible_to(&chat, person_id) {
+            return Err(WireError::new(
+                code::NOT_FOUND,
+                "That chat is not on this device, or not shared with you.",
+            ));
+        }
+        if own_only && !subs::owned_by(&chat, person_id) {
+            return Err(WireError::new(
+                code::REFUSED,
+                "Only the person whose chat this is can do that from another device.",
+            ));
+        }
+        Ok(op)
+    }
+
+    async fn run_parsed(
+        &self,
+        uid: &str,
+        asker: &Asker,
+        op: Op,
+    ) -> Result<(Value, Option<String>), WireError> {
         let done = |v: Value| -> Result<(Value, Option<String>), WireError> { Ok((v, None)) };
+        let scope = match asker {
+            Asker::Own => None,
+            Asker::Household { person_id, .. } => Some(person_id.as_str()),
+        };
         match op {
             Op::Hello => done(to_value(&self.port.hello().await?)?),
             Op::ChatsSub(a) => {
-                lock(&self.subs).add_chats(uid);
+                {
+                    let mut subs = lock(&self.subs);
+                    subs.set_scope(uid, scope);
+                    subs.add_chats(uid);
+                }
                 match self.port.chats(a.since).await {
-                    Ok((chats, cursor)) => Ok((
-                        json!({ "chats": chats, "cursor": cursor }),
-                        Some(CHATS_SUB.to_owned()),
-                    )),
+                    Ok((mut chats, cursor)) => {
+                        if let Some(p) = scope {
+                            chats.retain(|c| subs::visible_to(&c.to_value(), p));
+                            lock(&self.subs).listed(uid, chats.iter().map(|c| c.id().to_owned()));
+                        }
+                        Ok((
+                            json!({ "chats": chats, "cursor": cursor }),
+                            Some(CHATS_SUB.to_owned()),
+                        ))
+                    }
                     Err(e) => {
                         lock(&self.subs).remove_chats(uid);
                         Err(e)
@@ -348,7 +476,11 @@ impl Inner {
                 }
             }
             Op::ChatSub(a) => {
-                lock(&self.subs).add_chat(uid, &a.chat_id);
+                {
+                    let mut subs = lock(&self.subs);
+                    subs.set_scope(uid, scope);
+                    subs.add_chat(uid, &a.chat_id);
+                }
                 let read = async {
                     let state = self.port.chat(a.chat_id.clone()).await?;
                     let (rows, more) = self
@@ -392,7 +524,17 @@ impl Inner {
                 done(json!({}))
             }
             Op::Page(a) => done(self.page(a).await?),
-            Op::Send(a) => done(self.send(a).await?),
+            Op::Send(a) => {
+                // A household member's words on a chat that is not theirs are marked as theirs.
+                let from = match asker {
+                    Asker::Household { person_id, name } => {
+                        let chat = self.port.chat(a.chat_id.clone()).await?.chat.to_value();
+                        (!subs::owned_by(&chat, person_id)).then(|| name.clone())
+                    }
+                    Asker::Own => None,
+                };
+                done(self.send(a, from).await?)
+            }
             Op::Stop(a) => {
                 self.port.stop(a.chat_id).await?;
                 done(json!({}))
@@ -436,7 +578,7 @@ impl Inner {
         Ok(page)
     }
 
-    async fn send(&self, a: SendArgs) -> Result<Value, WireError> {
+    async fn send(&self, a: SendArgs, from: Option<String>) -> Result<Value, WireError> {
         if a.text.trim().is_empty() {
             return Err(WireError::bad_args("There is nothing to send."));
         }
@@ -454,7 +596,10 @@ impl Inner {
         }
         // Both modes are delivered the way the PC delivers any message it did not type itself:
         // an idle chat starts a turn, a working one takes it in at its next tool boundary.
-        let sent = self.port.send(a.chat_id, a.client_id.clone(), a.text).await;
+        let sent = self
+            .port
+            .send(a.chat_id, a.client_id.clone(), a.text, from)
+            .await;
         match sent {
             Ok(()) => Ok(json!({ "accepted": true })),
             Err(e) => {

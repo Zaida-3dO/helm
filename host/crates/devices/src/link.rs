@@ -29,6 +29,9 @@ pub trait DeviceLink: Send + Sync {
     fn subscribe(&self, cb: FrameCb);
     /// Whether the line to the hub is up.
     fn up(&self) -> bool;
+    /// The hub person this machine is paired as, if it is paired with one. A request from a
+    /// device of another person is a household request, scoped to that person's own chats.
+    fn person_id(&self) -> Option<String>;
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -281,6 +284,7 @@ impl MemRouter {
         Arc::new(MemLink {
             router: self.clone(),
             uid: uid.to_owned(),
+            person_id: person_id.map(str::to_owned),
             cbs,
         })
     }
@@ -409,6 +413,7 @@ impl MemRouter {
 pub struct MemLink {
     router: MemRouter,
     uid: String,
+    person_id: Option<String>,
     cbs: Arc<Mutex<Vec<FrameCb>>>,
 }
 
@@ -430,5 +435,9 @@ impl DeviceLink for MemLink {
 
     fn up(&self) -> bool {
         self.router.is_up(&self.uid)
+    }
+
+    fn person_id(&self) -> Option<String> {
+        self.person_id.clone()
     }
 }

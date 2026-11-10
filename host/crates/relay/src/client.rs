@@ -426,6 +426,12 @@ impl Client {
         self.handle.clone()
     }
 
+    /// The hub person this machine was paired as, if it was paired with a code.
+    pub fn paired_person(&self) -> Option<String> {
+        let person = (self.config)().person_id;
+        (!person.is_empty()).then_some(person)
+    }
+
     /// Give the line the sink for voice turns.
     pub fn attach_voice(&self, sink: Arc<dyn VoiceSink>) {
         let _ = self.voice.set(sink);

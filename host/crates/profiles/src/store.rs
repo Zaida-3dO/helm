@@ -503,10 +503,13 @@ pub fn assign(
 ) -> Result<usize, ProfileError> {
     let p = get(tx, profile_id)?.ok_or(ProfileError::NotFound)?;
     check_chats(tx, chat_ids)?;
+    let now = helm_core::now_ms();
     for id in chat_ids {
+        // A changed chat moves its `updated_at`, so other devices catching up hear of it.
         tx.execute(
-            "UPDATE chats SET profile_id = ?2 WHERE id = ?1 AND profile_id <> ?2",
-            params![id, p.id],
+            "UPDATE chats SET profile_id = ?2, updated_at = MAX(updated_at, ?3)
+             WHERE id = ?1 AND profile_id <> ?2",
+            params![id, p.id, now],
         )?;
         tx.execute(
             "DELETE FROM chat_shares WHERE chat_id = ?1 AND profile_id = ?2",
@@ -526,17 +529,25 @@ pub fn share(
 ) -> Result<usize, ProfileError> {
     let p = get(tx, profile_id)?.ok_or(ProfileError::NotFound)?;
     check_chats(tx, chat_ids)?;
+    let now = helm_core::now_ms();
     for id in chat_ids {
-        if shared {
+        let n = if shared {
             tx.execute(
                 "INSERT OR IGNORE INTO chat_shares(chat_id, profile_id)
                  SELECT ?1, ?2 WHERE NOT EXISTS (SELECT 1 FROM chats WHERE id = ?1 AND profile_id = ?2)",
                 params![id, p.id],
-            )?;
+            )?
         } else {
             tx.execute(
                 "DELETE FROM chat_shares WHERE chat_id = ?1 AND profile_id = ?2",
                 params![id, p.id],
+            )?
+        };
+        // A changed chat moves its `updated_at`, so other devices catching up hear of it.
+        if n > 0 {
+            tx.execute(
+                "UPDATE chats SET updated_at = MAX(updated_at, ?2) WHERE id = ?1",
+                params![id, now],
             )?;
         }
     }

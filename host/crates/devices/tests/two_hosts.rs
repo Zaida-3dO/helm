@@ -27,8 +27,21 @@ struct Watcher {
 }
 
 impl Watcher {
+    /// A device of the host's own person.
     fn new(router: &MemRouter, uid: &str, name: &str, peer: bool) -> Watcher {
-        let link = router.connect(uid, Some("person-b"), Some("Sam"), peer);
+        Watcher::of(router, uid, name, peer, "person-a", "Alex")
+    }
+
+    /// A device of `person`.
+    fn of(
+        router: &MemRouter,
+        uid: &str,
+        name: &str,
+        peer: bool,
+        person: &str,
+        person_name: &str,
+    ) -> Watcher {
+        let link = router.connect(uid, Some(person), Some(person_name), peer);
         let pushes = Arc::new(Mutex::new(Vec::new()));
         let seen = pushes.clone();
         link.subscribe(Box::new(move |f| {
@@ -530,7 +543,7 @@ fn side(router: &MemRouter, uid: &str, name: &str, people: Option<Arc<PeopleSync
     let db = Arc::new(Database::open(&dir.path().join("watcher.sqlite3"), &reg).unwrap());
     db.write(|tx| tx.execute("UPDATE device_self SET uid = ?1", [uid]))
         .unwrap();
-    let link = router.connect(uid, Some("person-b"), Some("Sam"), true);
+    let link = router.connect(uid, Some("person-a"), Some("Alex"), true);
     let sink = Arc::new(RecordingSink::default());
     let mirror = Mirror::new(
         db.clone(),
@@ -855,4 +868,162 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         0
     );
     assert!(b.mirror.owner("c1").is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_household_member_sees_and_runs_only_their_own_and_shared_chats() {
+    let router = MemRouter::new();
+    let port = Arc::new(FakePort::new("dev-a", "Desk"));
+    port.st().people.push("person-b".to_owned());
+    port.add_chat("mine", "The owner's", 10);
+    port.add_chat_of("hers", "Sam's", 11, "person-b", &[]);
+    port.add_chat_of("shared", "Shared with Sam", 12, "person-a", &["person-b"]);
+    let link_a = router.connect("dev-a", Some("person-a"), Some("Alex"), true);
+    let host = Service::new(port.clone(), link_a, tokio::runtime::Handle::current());
+    host.announce();
+    let sam = Watcher::of(&router, "dev-s", "Sam's laptop", true, "person-b", "Sam");
+    let own = Watcher::new(&router, "dev-o", "Alex's laptop", true);
+    settle().await;
+
+    // The list holds only Sam's chat and the one shared with her; the owner's device sees all.
+    let ids = |v: Value| -> Vec<String> {
+        v["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let list = sam
+        .rpc
+        .call("dev-a", "chats_sub", json!({"since": 0}))
+        .await;
+    assert_eq!(ids(list.unwrap()), ["hers", "shared"]);
+    let list = own
+        .rpc
+        .call("dev-a", "chats_sub", json!({"since": 0}))
+        .await;
+    assert_eq!(ids(list.unwrap()), ["mine", "hers", "shared"]);
+    // A change to the owner's chat never reaches her; a chat no longer shared is taken out.
+    host.observe(
+        &ChatEvent::Chat {
+            chat: fake_record("mine", "Renamed", 13),
+        }
+        .to_app_event(),
+    );
+    // (The fake reads every changed record as the owner's own, shared with no one.)
+    host.observe(
+        &ChatEvent::Chat {
+            chat: fake_record("shared", "No longer shared", 14),
+        }
+        .to_app_event(),
+    );
+    until(|| own.heard("chats").len() == 2).await;
+    settle().await;
+    let heard: Vec<(String, String)> = sam
+        .heard("chats")
+        .iter()
+        .map(|p| {
+            (
+                p.event["kind"].as_str().unwrap().to_owned(),
+                p.event["chatId"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(heard, [("chat_removed".to_owned(), "shared".to_owned())]);
+    port.st().chats.retain(|c| c.id() != "shared");
+    port.add_chat_of("shared", "Shared again", 15, "person-a", &["person-b"]);
+
+    // What she may do, chat by chat, in one table.
+    port.put_interaction(fake_interaction(
+        "hers",
+        "q1",
+        Meth::Select,
+        Some(Att::Question),
+        Some(&["A", "B"]),
+    ));
+    port.put_interaction(fake_interaction(
+        "shared",
+        "q2",
+        Meth::Select,
+        Some(Att::Question),
+        Some(&["A", "B"]),
+    ));
+    let send = |chat: &str, n: u8| {
+        json!({"chatId": chat, "clientId": format!("7f0f2f0e-6b0e-4d52-8d3a-1f0e2d3c4b{n:02x}"),
+               "text": "hi", "mode": "steer"})
+    };
+    let cases: Vec<(&str, Value, Option<&str>)> = vec![
+        ("chat_sub", json!({"chatId": "hers", "since": 0}), None),
+        ("chat_sub", json!({"chatId": "shared", "since": 0}), None),
+        (
+            "chat_sub",
+            json!({"chatId": "mine", "since": 0}),
+            Some(code::NOT_FOUND),
+        ),
+        ("page", json!({"chatId": "mine"}), Some(code::NOT_FOUND)),
+        ("send", send("hers", 1), None),
+        ("send", send("shared", 2), None),
+        ("send", send("mine", 3), Some(code::NOT_FOUND)),
+        ("stop", json!({"chatId": "mine"}), Some(code::NOT_FOUND)),
+        (
+            "answer",
+            json!({"chatId": "hers", "requestId": "q1", "value": "A", "label": "A"}),
+            None,
+        ),
+        (
+            "answer",
+            json!({"chatId": "shared", "requestId": "q2", "value": "A", "label": "A"}),
+            Some(code::REFUSED),
+        ),
+        ("consent_decide", json!({"id": "x"}), Some(code::REFUSED)),
+        (
+            "create",
+            json!({"personId": "person-a", "projectId": "proj-1"}),
+            None,
+        ),
+    ];
+    for (op, args, want) in cases {
+        let got = sam.rpc.call("dev-a", op, args.clone()).await;
+        match want {
+            None => assert!(got.is_ok(), "{op} {args}: {got:?}"),
+            Some(c) => assert_eq!(got.unwrap_err().code, c, "{op} {args}"),
+        }
+    }
+    {
+        let st = port.st();
+        // Her words on her own chat are hers; on a shared chat they arrive marked as hers.
+        assert_eq!(st.sent_from, [None, Some("Sam".to_owned())]);
+        assert_eq!(
+            st.answered
+                .iter()
+                .map(|a| a.request_id.as_str())
+                .collect::<Vec<_>>(),
+            ["q1"]
+        );
+        // A chat she starts is hers, whoever she names.
+        assert_eq!(st.created[0].person_id, "person-b");
+    }
+
+    // With the household switch off she is refused, even reading; the owner's devices are not.
+    port.set_household(false);
+    let e = sam.rpc.call("dev-a", "hello", json!({})).await.unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED);
+    assert!(own.rpc.call("dev-a", "hello", json!({})).await.is_ok());
+    port.set_household(true);
+    // Someone with no profile on this PC is refused.
+    port.st().people.retain(|p| p != "person-b");
+    let e = sam.rpc.call("dev-a", "hello", json!({})).await.unwrap_err();
+    assert_eq!(e.code, code::NOT_ALLOWED);
+
+    // A PC paired with no person answers no one.
+    let lone = Arc::new(FakePort::new("dev-l", "Lone"));
+    let link_l = router.connect("dev-l", None, None, true);
+    let lone_host = Service::new(lone, link_l, tokio::runtime::Handle::current());
+    lone_host.announce();
+    settle().await;
+    for w in [&sam, &own] {
+        let e = w.rpc.call("dev-l", "hello", json!({})).await.unwrap_err();
+        assert_eq!(e.code, code::NOT_ALLOWED);
+    }
 }

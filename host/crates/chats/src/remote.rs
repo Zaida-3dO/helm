@@ -81,6 +81,10 @@ fn parse<T: DeserializeOwned>(args: Value) -> Result<T, ApiError> {
 
 impl OpInterceptor for Routes {
     fn intercept(&self, ctx: &OpCtx, op: &str, args: &Value) -> Option<BoxFuture> {
+        // The device ops read this PC's copy of other devices' chats themselves.
+        if op.starts_with("devices_") {
+            return None;
+        }
         let remote = ctx.services.get::<RemoteSlot>()?.get()?;
         if op == "model_catalogue" {
             let uid = args.get("deviceUid").and_then(Value::as_str)?;

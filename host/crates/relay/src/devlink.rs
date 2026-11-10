@@ -19,6 +19,7 @@ use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
 type Hook = Box<dyn Fn() + Send + Sync>;
+type PersonFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -26,15 +27,23 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 pub struct HubLink {
     line: Arc<LineHandle>,
+    /// Reads the hub person this machine is paired as from the saved connection.
+    read_person: PersonFn,
+    /// That person, read when the link was made and again on every new line (a new pairing
+    /// always brings a new line).
+    person: Mutex<Option<String>>,
     frames: Mutex<Vec<FrameCb>>,
     ups: Mutex<Vec<Hook>>,
     downs: Mutex<Vec<Hook>>,
 }
 
 impl HubLink {
-    pub fn new(line: Arc<LineHandle>) -> Arc<HubLink> {
+    pub fn new(line: Arc<LineHandle>, read_person: PersonFn) -> Arc<HubLink> {
+        let person = read_person();
         Arc::new(HubLink {
             line,
+            read_person,
+            person: Mutex::new(person),
             frames: Mutex::new(Vec::new()),
             ups: Mutex::new(Vec::new()),
             downs: Mutex::new(Vec::new()),
@@ -64,6 +73,10 @@ impl DeviceLink for HubLink {
     fn up(&self) -> bool {
         self.line.state() == LineState::Online
     }
+
+    fn person_id(&self) -> Option<String> {
+        lock(&self.person).clone()
+    }
 }
 
 impl DeviceSink for HubLink {
@@ -78,6 +91,7 @@ impl DeviceSink for HubLink {
     }
 
     fn line_up(&self) {
+        *lock(&self.person) = (self.read_person)();
         for h in lock(&self.ups).iter() {
             h();
         }
@@ -102,7 +116,8 @@ pub fn attach(dispatcher: &Arc<helm_ipc::Dispatcher>) {
         return;
     };
     let line = client.handle();
-    let link = HubLink::new(line.clone());
+    let reader = client.clone();
+    let link = HubLink::new(line.clone(), Arc::new(move || reader.paired_person()));
     let service = Service::new(
         HostPort::new(dispatcher.clone()),
         link.clone(),

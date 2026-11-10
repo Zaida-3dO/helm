@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 helm-core.workspace = true
 helm-ipc.workspace = true
+helm-chats.workspace = true
 helm-devices = { path = "../devices" }
 helm-workers.workspace = true
 serde.workspace = true
@@ -18,5 +19,4 @@ uuid.workspace = true
 log.workspace = true
 
 [dev-dependencies]
-helm-chats.workspace = true
 tempfile.workspace = true
