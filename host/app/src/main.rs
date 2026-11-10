@@ -194,6 +194,46 @@ fn start_ui_watchdog(app: tauri::AppHandle, diagnostics: std::path::PathBuf) {
     });
 }
 
+/// Item titles from the task board, for the links nobody named.
+struct BoardTitles(Arc<helm_standup::BoardLink>);
+
+impl helm_itemlinks::titles::TitleSource for BoardTitles {
+    fn title(&self, item_id: &str) -> Result<Option<String>, helm_itemlinks::titles::Unavailable> {
+        use helm_itemlinks::titles::Unavailable;
+        use helm_standup::StandupError;
+        let client = self.0.attach_only().map_err(|_| Unavailable)?;
+        // Links keep ids without hyphens; the board writes a full id with them.
+        let id = if item_id.len() == 32 {
+            format!(
+                "{}-{}-{}-{}-{}",
+                &item_id[..8],
+                &item_id[8..12],
+                &item_id[12..16],
+                &item_id[16..20],
+                &item_id[20..]
+            )
+        } else {
+            item_id.to_owned()
+        };
+        match client.item(&id) {
+            Ok(v) => Ok(v
+                .get("item")
+                .unwrap_or(&v)
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)),
+            Err(
+                StandupError::NotConfigured
+                | StandupError::NotStarted
+                | StandupError::Unreachable(_)
+                | StandupError::Unauthorized,
+            ) => Err(Unavailable),
+            Err(StandupError::Status(s)) if s == 429 || s >= 500 => Err(Unavailable),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
 fn run_app(
     profile: Profile,
     db: Arc<Database>,
@@ -345,6 +385,15 @@ fn run_app(
             pet::allow_ops(&mut dispatcher);
             let dispatcher = Arc::new(dispatcher);
             registrations::attach_host_tools(&runtime, &dispatcher);
+            // Items linked to chats that nobody named are looked up on the board, while one is
+            // connected, through the same board connection the board tools use.
+            if let Some(board) = dispatcher.ctx().services.get::<helm_standup::BoardLink>() {
+                helm_itemlinks::titles::start(
+                    db.clone(),
+                    Arc::new(BoardTitles(board)),
+                    dispatcher.ctx().events.clone(),
+                );
+            }
             app.manage(dispatcher);
             pet::start(&handle, &db, profile.path("webview"), debug);
 

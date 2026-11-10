@@ -10,16 +10,18 @@
 //! | [`types`] | shapes shared with the sidebar and the picker |
 //! | `ops` | `item_links_for_chats`, `item_links_for_item`, `item_link_set_main`, `item_open` |
 //! | [`tool`] | the `app_link_item` host tool and the `itemlinks` prompt section |
+//! | [`titles`] | looking up, in the background, the titles of items nobody named |
 //! | [`bindings`] | generated TypeScript in `ui/src/api/generated/itemlinks/` |
 //!
 //! Event `item_links {itemIds}` tells the UI to re-read. A board item's title shows when the item is
-//! a board project the mirror holds; any other item shows its first 8 characters (the mirror holds
-//! projects only).
+//! a board project the mirror holds, when the agent that linked it named it, or once the app has
+//! looked it up on the board ([`titles`]); until then it shows its first 8 characters.
 
 pub mod bindings;
 pub mod ids;
 mod ops;
 pub mod store;
+pub mod titles;
 pub mod tool;
 pub mod types;
 

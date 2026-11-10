@@ -25,6 +25,7 @@ helm-chats.workspace = true
 helm-workers.workspace = true
 helm-actions = { path = "../crates/actions" }
 helm-projects = { path = "../crates/projects" }
+helm-standup = { path = "../crates/standup" }
 helm-panel = { path = "../crates/panel" }
 helm-search = { path = "../crates/search" }
 helm-shell = { path = "../crates/shell" }

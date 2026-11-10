@@ -13,6 +13,7 @@ helm-workers.workspace = true
 helm-hosttools = { path = "../hosttools" }
 serde.workspace = true
 serde_json.workspace = true
+log.workspace = true
 rusqlite.workspace = true
 ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
 

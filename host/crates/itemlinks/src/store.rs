@@ -72,11 +72,16 @@ pub fn set_title(tx: &Transaction<'_>, item_id: &str, raw_title: &str) -> rusqli
     Ok(())
 }
 
+/// How long after a lookup that found no title the item is looked up again (it may have been
+/// made since, or the board may have been unreachable).
+pub const TITLE_RETRY_MS: i64 = 6 * 60 * 60 * 1000;
+
 /// Items that have no title anywhere (neither stored with a link nor in the board mirror) and
-/// that nobody has tried to look up yet, at most `limit`. Each one handed back is marked as tried
-/// in the same transaction, so a lookup that fails or finds nothing is not repeated on the next
-/// read. The caller asks the board for each id outside the transaction and stores what it gets
-/// with [`set_title`]. This crate itself never talks to the board.
+/// that nobody has tried to look up in the last [`TITLE_RETRY_MS`], newest link first, at most
+/// `limit`. Each one handed back is marked as tried in the same transaction, so a lookup that
+/// fails or finds nothing is not repeated on the next read. The caller asks the board for each id
+/// outside the transaction and stores what it gets with [`set_title`] ([`crate::titles`]). This
+/// crate itself never talks to the board.
 pub fn claim_untitled(
     tx: &Transaction<'_>,
     now: i64,
@@ -84,11 +89,12 @@ pub fn claim_untitled(
 ) -> rusqlite::Result<Vec<String>> {
     let mut st = tx.prepare(
         "SELECT item_id FROM item_chat_links GROUP BY item_id
-         HAVING count(title) = 0 AND count(title_tried_at) = 0
+         HAVING count(title) = 0
+            AND (max(title_tried_at) IS NULL OR max(title_tried_at) <= ?1)
          ORDER BY max(linked_at) DESC",
     )?;
     let candidates = st
-        .query_map([], |r| r.get::<_, String>(0))?
+        .query_map([now - TITLE_RETRY_MS], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     let mut claimed = Vec::new();
     for id in candidates {
@@ -105,6 +111,18 @@ pub fn claim_untitled(
         claimed.push(id);
     }
     Ok(claimed)
+}
+
+/// Hand claimed items back untried: the board could not be asked, so they are looked up again at
+/// the next chance rather than after [`TITLE_RETRY_MS`].
+pub fn unclaim(tx: &Transaction<'_>, items: &[String]) -> rusqlite::Result<()> {
+    for id in items {
+        tx.execute(
+            "UPDATE item_chat_links SET title_tried_at = NULL WHERE item_id = ?1",
+            [id],
+        )?;
+    }
+    Ok(())
 }
 
 /// The newest stored title among an item's links.
@@ -645,8 +663,9 @@ pub(crate) mod tests {
         db.write::<_, rusqlite::Error>(|tx| set_title(tx, ITEM_ID, &"x".repeat(500)))
             .unwrap();
         assert_eq!(title(&db, "b").unwrap().chars().count(), MAX_TITLE);
-        // An untitled item is handed out for one lookup, once: a lookup that finds nothing is not
-        // asked again, and an item that already has a title is never handed out.
+        // An untitled item is handed out for one lookup: a lookup that finds nothing is asked again
+        // only after the retry time (or at once when it is handed back unasked), and an item that
+        // already has a title is never handed out.
         let other = "b2c3d4e5f6a74b8c9d0e1f2a3b4c5d6e";
         let claim = |db: &Database, now: i64| {
             db.write::<_, rusqlite::Error>(|tx| claim_untitled(tx, now, 10))
@@ -661,8 +680,12 @@ pub(crate) mod tests {
         assert_eq!(claim(&db, 100), [other]);
         assert!(
             claim(&db, 200).is_empty(),
-            "the failed lookup is not retried"
+            "the failed lookup is not retried at once"
         );
+        assert_eq!(claim(&db, 100 + TITLE_RETRY_MS), [other]);
+        db.write::<_, rusqlite::Error>(|tx| unclaim(tx, &[other.to_owned()]))
+            .unwrap();
+        assert_eq!(claim(&db, 100 + TITLE_RETRY_MS + 1), [other]);
         db.write::<_, rusqlite::Error>(|tx| set_title(tx, other, "Found it"))
             .unwrap();
         assert_eq!(
