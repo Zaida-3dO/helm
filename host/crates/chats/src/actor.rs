@@ -1686,9 +1686,13 @@ impl Actor {
     // ------------------------------------------------------------------ commands
 
     fn on_cmd(&mut self, c: Cmd) {
-        // The runtime's own housekeeping is not use: a tick or a retirement must not make this
-        // worker look newer than another's, or the idle cap retires the wrong one.
-        if !matches!(c, Cmd::Retire | Cmd::StallCheck { .. }) {
+        // The runtime's own housekeeping is not use: a tick, the send behaviour every tick hands
+        // to every chat, an AFK sweep or a retirement must not make this worker look newer than
+        // another's, or the idle cap retires the wrong one.
+        if !matches!(
+            c,
+            Cmd::Retire | Cmd::StallCheck { .. } | Cmd::SendBehavior(_) | Cmd::AfkSweep
+        ) {
             self.touch();
         }
         if self.archived {
