@@ -1,19 +1,26 @@
 //! The relay line.
 //!
-//! Helm on the PC opens one outbound WebSocket to `/relay`, authenticated with
-//! a `relay`-scope token, and keeps it open. Everything the hub needs Helm for
-//! travels down that line: forwarded tool calls from MCP callers and
-//! messages from the Telegram bot. The PC needs no inbound port.
+//! Each machine running Helm opens one outbound WebSocket to `/relay`, authenticated with
+//! its own client token (the `relay` scope), and keeps it open. Everything the hub needs Helm
+//! for travels down that line: forwarded tool calls from MCP callers, household calls from other
+//! people's Helms and messages from the Telegram bot. The PC needs no inbound port.
+//!
+//! The hub keeps one [`Line`] per client (see `lines.rs`): a newer connection from the *same*
+//! client replaces the older one, and different clients' lines coexist.
 //!
 //! Line protocol: one JSON object per text frame, `type` names it.
 //!
 //! | direction | type | fields |
 //! |---|---|---|
-//! | hub → Helm | `welcome` | `version` |
-//! | hub → Helm | `call` | `id`, `client`, `tool`, `args` |
+//! | hub → Helm | `welcome` | `version`, and who this line is: `personId`, `person`, `machineId`, `machine` |
+//! | hub → Helm | `call` | `id`, `client`, `tool`, `args`. `client` names the caller: a client's name, or `peer:<person>` for a household member's call |
 //! | hub → Helm | `telegram` | `id`, `text`, `sentAt` (ms), `ageMinutes` (null when fresh), `bot`. A voice note's `text` is `[Voice note] <transcript>`; a reply or quote puts `Replying to: "<quoted text>"` on the first line. With files: `images` (pictures Helm shows) and `files` (anything else), each a list of `name`, `mediaType` and base64 `data`; at most 10 files and 50 MB in all |
 //! | hub → Helm | `telegram_stop` | — |
 //! | hub → Helm | `telegram_answer` | `id`, `index`: the user tapped button `index` (from 0) of the ask `id`. Sent once per ask |
+//! | Helm → hub | `sharing` | `chats`, `transcripts`, `messages` (booleans, absent means false): what the household may do with this machine's chats. Sent on connect and whenever a switch changes; reset to all false when the line drops |
+//! | Helm → hub | `peer` | `id`, `op` (`people`, `list_chats`, `read_chat` or `send_message`), `args` (`personId`, optional `machineId`, and the op's own): a question about the household, answered with `peer_result` (see `peer.rs`) |
+//! | hub → Helm | `peer_result` | `id` (the `peer` frame's), `ok`, `result` or `error` (a plain sentence) |
+//! | hub → Helm | `peer_call` | `id`, `person` (the asker's display name), `op` (`list_chats`, `read_chat` or `send_message`), `args` (`limit`, `offset` / `chatId`, `beforeMessageId`, `limit` / `chatId`, `message`): another person's Helm asking about this machine's chats. Answered with an ordinary `result` frame |
 //! | Helm → hub | `result` | `id`, `ok`, `result` or `error`, `changed` (`no` or `maybe`) |
 //! | Helm → hub | `telegram_ack` | `id` |
 //! | Helm → hub | `telegram_status` | `text`: the one live status message, edited in place |
@@ -22,7 +29,10 @@
 //! | Helm → hub | `telegram_ask` | `id` (16-32 lowercase hex), `text`, `options` (1-4 strings): a new message with one button per option |
 //! | Helm → hub | `telegram_ask_done` | `id`, `text`: the ask was settled in Helm; its message gains `text` and loses its buttons |
 //!
-//! A newer line replaces an older one (the PC reconnected before the old
+//! New frames go in the table above, a `match` arm in [`Line::receive`] and, for what Helm sends
+//! up that is not a call result, an [`Upstream`] variant.
+//!
+//! A newer line from the same client replaces an older one (the PC reconnected before the old
 //! socket timed out). When the line drops, calls waiting on it are answered
 //! "may or may not have run": they were sent, so the hub cannot say nothing
 //! changed.
@@ -61,6 +71,13 @@ pub enum Upstream {
         id: String,
         text: String,
     },
+    /// A question about the household. The line's owner (`lines.rs`) answers it; the Telegram
+    /// bridge never sees it.
+    Peer {
+        id: Value,
+        op: String,
+        args: Value,
+    },
 }
 
 /// An ask's id: 16 to 32 lowercase hex characters, so it fits a button's callback data.
@@ -83,6 +100,34 @@ pub enum CallOutcome {
     Unknown(String),
 }
 
+/// What the household may do with one machine's chats. All off until Helm says otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Sharing {
+    /// Others may list this machine's chats.
+    pub chats: bool,
+    /// Others may read their transcripts.
+    pub transcripts: bool,
+    /// Others may send messages into them.
+    pub messages: bool,
+}
+
+/// Where the Telegram bridge sends frames and learns whether anyone can receive them: one
+/// [`Line`], or all of a person's machines (see `lines.rs`).
+pub trait Route: Send + Sync {
+    fn is_up(&self) -> bool;
+    /// Identifies the connection frames go down, so an unacknowledged message can be resent when
+    /// the connection changes.
+    fn generation(&self) -> Option<u64>;
+    fn send(&self, frame: &Value) -> bool;
+}
+
+/// Orders lines by how recently they did something worth routing to.
+static ACTIVITY: AtomicU64 = AtomicU64::new(0);
+
+fn next_activity() -> u64 {
+    ACTIVITY.fetch_add(1, Ordering::SeqCst) + 1
+}
+
 struct Conn {
     generation: u64,
     tx: mpsc::UnboundedSender<String>,
@@ -97,7 +142,12 @@ struct Inner {
 /// The hub's end of the line. One per hub.
 pub struct Line {
     inner: Mutex<Inner>,
+    /// Keeps generations of different clients' lines apart: the high 32 bits of every one.
+    namespace: u64,
     generation: AtomicU64,
+    /// When this line last attached or handled a Telegram frame ([`next_activity`]); 0 never.
+    activity: AtomicU64,
+    sharing: Mutex<Sharing>,
     upstream: mpsc::UnboundedSender<Upstream>,
     /// Woken when a line comes up (the Telegram queue flushes on it).
     pub up: tokio::sync::Notify,
@@ -106,11 +156,19 @@ pub struct Line {
 impl Line {
     /// The line, plus the receiver for what Helm sends that is not a call result.
     pub fn new() -> (Self, mpsc::UnboundedReceiver<Upstream>) {
+        Self::in_namespace(0)
+    }
+
+    /// A line whose generations never equal another namespace's (one namespace per client).
+    pub fn in_namespace(namespace: u64) -> (Self, mpsc::UnboundedReceiver<Upstream>) {
         let (upstream, rx) = mpsc::unbounded_channel();
         (
             Line {
                 inner: Mutex::new(Inner::default()),
+                namespace: namespace & 0x7fff_ffff,
                 generation: AtomicU64::new(0),
+                activity: AtomicU64::new(0),
+                sharing: Mutex::new(Sharing::default()),
                 upstream,
                 up: tokio::sync::Notify::new(),
             },
@@ -135,10 +193,43 @@ impl Line {
             .map(|c| c.generation)
     }
 
+    /// What the household may do with this machine's chats, as the current line last said.
+    pub fn sharing(&self) -> Sharing {
+        *self.sharing.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn set_sharing(&self, s: Sharing) {
+        *self.sharing.lock().unwrap_or_else(|p| p.into_inner()) = s;
+    }
+
+    /// How recently this line attached or handled a Telegram frame; higher is later.
+    pub fn activity(&self) -> u64 {
+        self.activity.load(Ordering::SeqCst)
+    }
+
+    fn bump(&self) {
+        self.activity.store(next_activity(), Ordering::SeqCst);
+    }
+
     /// Install a new connection; returns its generation. Replaces (and so closes) any older one.
     pub fn attach(&self, tx: mpsc::UnboundedSender<String>) -> u64 {
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let _ = tx.send(json!({ "type": "welcome", "version": PROTOCOL_VERSION }).to_string());
+        self.attach_as(tx, json!({}))
+    }
+
+    /// [`Line::attach`], with `who` (an object) merged into the welcome frame.
+    pub fn attach_as(&self, tx: mpsc::UnboundedSender<String>, who: Value) -> u64 {
+        let generation =
+            (self.namespace << 32) | (self.generation.fetch_add(1, Ordering::SeqCst) + 1);
+        let mut welcome = json!({ "type": "welcome", "version": PROTOCOL_VERSION });
+        if let (Some(w), Some(extra)) = (welcome.as_object_mut(), who.as_object()) {
+            for (k, v) in extra {
+                w.insert(k.clone(), v.clone());
+            }
+        }
+        let _ = tx.send(welcome.to_string());
+        // A new connection starts private until its Helm says what is shared.
+        self.set_sharing(Sharing::default());
+        self.bump();
         let old = {
             let mut g = self.lock();
             let old = g.conn.replace(Conn { generation, tx });
@@ -171,6 +262,7 @@ impl Line {
                 return;
             }
             g.conn = None;
+            self.set_sharing(Sharing::default());
             let ids: Vec<String> = g
                 .pending
                 .iter()
@@ -208,6 +300,30 @@ impl Line {
         args: &Value,
         timeout: Duration,
     ) -> CallOutcome {
+        self.request(
+            timeout,
+            |id| json!({ "type": "call", "id": id, "client": client, "tool": tool, "args": args }),
+        )
+        .await
+    }
+
+    /// Ask this machine's Helm a household question for `person` and wait for its answer.
+    pub async fn peer_call(
+        &self,
+        person: &str,
+        op: &str,
+        args: &Value,
+        timeout: Duration,
+    ) -> CallOutcome {
+        self.request(
+            timeout,
+            |id| json!({ "type": "peer_call", "id": id, "person": person, "op": op, "args": args }),
+        )
+        .await
+    }
+
+    /// Send the frame `build` makes for a fresh id and wait for the `result` frame with that id.
+    async fn request(&self, timeout: Duration, build: impl FnOnce(&str) -> Value) -> CallOutcome {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         {
@@ -215,8 +331,7 @@ impl Line {
             let Some(conn) = g.conn.as_ref() else {
                 return CallOutcome::Offline;
             };
-            let frame = json!({ "type": "call", "id": id, "client": client,
-                                "tool": tool, "args": args });
+            let frame = build(&id);
             let generation = conn.generation;
             if conn.tx.send(frame.to_string()).is_err() {
                 return CallOutcome::Offline;
@@ -271,20 +386,57 @@ impl Line {
                 let _ = sender.send(outcome);
                 true
             }
+            Some("sharing") => {
+                let flag = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+                self.set_sharing(Sharing {
+                    chats: flag("chats"),
+                    transcripts: flag("transcripts"),
+                    messages: flag("messages"),
+                });
+                true
+            }
+            Some("peer") => match (v.get("id"), s("op")) {
+                (Some(id), Some(op)) if id.is_string() || id.is_number() => {
+                    let args = match v.get("args") {
+                        Some(a) if a.is_object() => a.clone(),
+                        _ => json!({}),
+                    };
+                    self.upstream
+                        .send(Upstream::Peer {
+                            id: id.clone(),
+                            op,
+                            args,
+                        })
+                        .is_ok()
+                }
+                _ => false,
+            },
             Some("telegram_ack") => match s("id") {
-                Some(id) => self.upstream.send(Upstream::TelegramAck(id)).is_ok(),
+                Some(id) => {
+                    self.bump();
+                    self.upstream.send(Upstream::TelegramAck(id)).is_ok()
+                }
                 None => false,
             },
             Some("telegram_status") => match s("text") {
-                Some(t) => self.upstream.send(Upstream::TelegramStatus(t)).is_ok(),
+                Some(t) => {
+                    self.bump();
+                    self.upstream.send(Upstream::TelegramStatus(t)).is_ok()
+                }
                 None => false,
             },
             Some("telegram_final") => match s("text") {
-                Some(t) => self.upstream.send(Upstream::TelegramFinal(t)).is_ok(),
+                Some(t) => {
+                    self.bump();
+                    self.upstream.send(Upstream::TelegramFinal(t)).is_ok()
+                }
                 None => false,
             },
             Some("telegram_notify") => match s("text") {
-                Some(t) => self.upstream.send(Upstream::TelegramNotify(t)).is_ok(),
+                Some(t) => {
+                    self.bump();
+                    self.upstream.send(Upstream::TelegramNotify(t)).is_ok()
+                }
                 None => false,
             },
             Some("telegram_ask") => {
@@ -300,6 +452,7 @@ impl Line {
                             && (1..=4).contains(&options.len())
                             && options.iter().all(|o| !o.trim().is_empty()) =>
                     {
+                        self.bump();
                         self.upstream
                             .send(Upstream::TelegramAsk { id, text, options })
                             .is_ok()
@@ -316,6 +469,20 @@ impl Line {
             },
             _ => false,
         }
+    }
+}
+
+impl Route for Line {
+    fn is_up(&self) -> bool {
+        Line::is_up(self)
+    }
+
+    fn generation(&self) -> Option<u64> {
+        Line::generation(self)
+    }
+
+    fn send(&self, frame: &Value) -> bool {
+        Line::send(self, frame)
     }
 }
 
@@ -480,6 +647,84 @@ mod tests {
             }
         );
         assert!(up.try_recv().is_err(), "nothing malformed went upstream");
+    }
+
+    #[tokio::test]
+    async fn household_frames_sharing_peer_questions_and_peer_calls() {
+        let (line, mut up) = Line::in_namespace(5);
+        let line = std::sync::Arc::new(line);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let gen = line.attach_as(tx, json!({ "person": "Sam" }));
+        assert_eq!(gen >> 32, 5, "generations carry their client's namespace");
+        let welcome = frames(&mut rx).remove(0);
+        assert_eq!(
+            (welcome["type"].as_str(), welcome["person"].as_str()),
+            (Some("welcome"), Some("Sam"))
+        );
+
+        // Nothing is shared until Helm says so; a drop takes it back.
+        assert_eq!(line.sharing(), Sharing::default());
+        assert!(line.receive(gen, r#"{"type":"sharing","chats":true,"messages":true}"#));
+        let shared = Sharing {
+            chats: true,
+            transcripts: false,
+            messages: true,
+        };
+        assert_eq!(line.sharing(), shared);
+        line.detach(gen);
+        assert_eq!(line.sharing(), Sharing::default());
+
+        // A household question goes upstream with its id as sent; malformed ones are dropped.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let gen = line.attach(tx);
+        assert!(line.receive(
+            gen,
+            r#"{"type":"peer","id":7,"op":"people","args":{"personId":3}}"#
+        ));
+        assert_eq!(
+            up.try_recv().unwrap(),
+            Upstream::Peer {
+                id: json!(7),
+                op: "people".into(),
+                args: json!({ "personId": 3 })
+            }
+        );
+        assert!(!line.receive(gen, r#"{"type":"peer","id":"q"}"#));
+        assert!(!line.receive(gen, r#"{"type":"peer","id":[1],"op":"people"}"#));
+        assert!(up.try_recv().is_err());
+
+        // A peer_call is answered by an ordinary result frame.
+        let l2 = line.clone();
+        let task = tokio::spawn(async move {
+            l2.peer_call(
+                "Bea",
+                "list_chats",
+                &json!({ "limit": 5 }),
+                Duration::from_secs(5),
+            )
+            .await
+        });
+        let call = loop {
+            if let Some(f) = frames(&mut rx)
+                .into_iter()
+                .find(|f| f["type"] == "peer_call")
+            {
+                break f;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(
+            (
+                call["person"].as_str(),
+                call["op"].as_str(),
+                call["args"].clone()
+            ),
+            (Some("Bea"), Some("list_chats"), json!({ "limit": 5 }))
+        );
+        let r =
+            json!({ "type": "result", "id": call["id"], "ok": true, "result": { "chats": [] } });
+        assert!(line.receive(gen, &r.to_string()));
+        assert_eq!(task.await.unwrap(), CallOutcome::Ok(json!({ "chats": [] })));
     }
 
     #[tokio::test]

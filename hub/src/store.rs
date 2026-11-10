@@ -6,6 +6,12 @@
 //! rows whose dimension (and model, when given) match the query vector, which
 //! is fast enough well past the tens of thousands of rows a personal memory
 //! store will hold.
+//!
+//! Every memory has an owner (a person id) and a visibility, `private` (the default: only its
+//! owner sees it) or `shared` (the whole household sees it). Reads that pass a viewer see their
+//! own memories plus shared ones; only the owner changes or deletes a memory. A memory with no
+//! owner (stored before owners existed) is adopted by one person at start-up ([`Store::adopt_orphans`])
+//! and is invisible to everyone until then.
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::Serialize;
@@ -57,6 +63,30 @@ pub struct Embedding {
     pub values: Vec<f32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    #[default]
+    Private,
+    Shared,
+}
+
+impl Visibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Visibility::Private => "private",
+            Visibility::Shared => "shared",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "private" => Some(Visibility::Private),
+            "shared" => Some(Visibility::Shared),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct NewMemory {
     pub name: Option<String>,
@@ -68,6 +98,9 @@ pub struct NewMemory {
     pub source: Option<String>,
     pub links: Vec<String>,
     pub embedding: Option<Embedding>,
+    /// The person it belongs to; `None` takes the store's default owner.
+    pub owner: Option<i64>,
+    pub visibility: Visibility,
 }
 
 /// Fields a `memory_update` may change; `None` leaves a field alone.
@@ -79,6 +112,7 @@ pub struct MemoryPatch {
     pub tags: Option<Vec<String>>,
     pub source: Option<String>,
     pub embedding: Option<Embedding>,
+    pub visibility: Option<Visibility>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -97,6 +131,11 @@ pub struct Memory {
     pub dim: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
+    pub visibility: String,
+    /// Whether the viewer owns it (false when no viewer was given).
+    pub mine: bool,
+    #[serde(skip)]
+    pub owner_person: Option<i64>,
 }
 
 /// A row in a list or search result: everything but the body.
@@ -110,6 +149,18 @@ pub struct Summary {
     pub kind: Option<String>,
     pub tags: Vec<String>,
     pub updated_at: String,
+    pub visibility: String,
+    /// Whether the viewer owns it (false when no viewer was given).
+    pub mine: bool,
+    #[serde(skip)]
+    pub owner_person: Option<i64>,
+}
+
+impl Summary {
+    fn mark(mut self, viewer: Option<i64>) -> Self {
+        self.mine = viewer.is_some() && self.owner_person == viewer;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,10 +181,14 @@ pub struct SearchQuery {
     pub vector: Option<Vec<f32>>,
     pub model: Option<String>,
     pub tags: Vec<String>,
+    /// Whose memories may be returned: their own and shared ones. `None` sees everything.
+    pub viewer: Option<i64>,
 }
 
 pub struct Store {
     conn: Connection,
+    /// The owner given to a memory stored with none (the importer's person).
+    default_owner: Option<i64>,
 }
 
 const SCHEMA: &str = r#"
@@ -151,7 +206,9 @@ CREATE TABLE IF NOT EXISTS memories (
     model       TEXT,
     dim         INTEGER,
     created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    updated_at  TEXT NOT NULL,
+    owner_person INTEGER,
+    visibility  TEXT NOT NULL DEFAULT 'private'
 );
 CREATE INDEX IF NOT EXISTS memories_updated ON memories(updated_at);
 CREATE TABLE IF NOT EXISTS memory_tags (
@@ -182,7 +239,8 @@ END;
 "#;
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
-const SUMMARY_COLS: &str = "m.id, m.name, m.title, m.description, m.kind, m.tags, m.updated_at";
+const SUMMARY_COLS: &str =
+    "m.id, m.name, m.title, m.description, m.kind, m.tags, m.updated_at, m.visibility, m.owner_person";
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
@@ -200,7 +258,37 @@ impl Store {
         // Keep the page cache small: the hub's RAM budget is tens of MB.
         conn.pragma_update(None, "cache_size", -2000)?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Store { conn })
+        // A store made before owners existed gains the columns; its memories have no owner yet.
+        let has_owner = conn
+            .prepare("SELECT 1 FROM pragma_table_info('memories') WHERE name = 'owner_person'")?
+            .exists([])?;
+        if !has_owner {
+            conn.execute_batch(
+                "ALTER TABLE memories ADD COLUMN owner_person INTEGER;
+                 ALTER TABLE memories ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private';",
+            )?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS memories_owner ON memories(owner_person, visibility);",
+        )?;
+        Ok(Store {
+            conn,
+            default_owner: None,
+        })
+    }
+
+    /// The owner a memory gets when its writer names none: the importer's person.
+    pub fn set_default_owner(&mut self, person: Option<i64>) {
+        self.default_owner = person;
+    }
+
+    /// Give every memory with no owner to `person`, private. Returns how many moved.
+    pub fn adopt_orphans(&mut self, person: i64) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE memories SET owner_person = ?1, visibility = 'private'
+             WHERE owner_person IS NULL",
+            [person],
+        )?)
     }
 
     pub fn count(&self) -> Result<i64> {
@@ -235,8 +323,8 @@ impl Store {
         tx.execute(
             &format!(
                 "INSERT INTO memories (name, title, description, kind, body, tags, source, links,
-                 vector, model, dim, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, {NOW}, {NOW})"
+                 vector, model, dim, owner_person, visibility, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, {NOW}, {NOW})"
             ),
             params![
                 m.name,
@@ -250,6 +338,8 @@ impl Store {
                 blob,
                 model,
                 dim,
+                m.owner.or(self.default_owner),
+                m.visibility.as_str(),
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -266,12 +356,24 @@ impl Store {
         self.get_where("name = ?1", rusqlite::types::Value::Text(name.to_owned()))
     }
 
+    /// One memory as `viewer` may see it: their own or a shared one, else "not found" (the same
+    /// answer for a memory that does not exist, so nothing says what others hold).
+    pub fn get_visible(&self, id: i64, viewer: i64) -> Result<Memory> {
+        self.get(id).and_then(|m| visible_to(m, viewer))
+    }
+
+    /// [`Store::get_visible`], by name.
+    pub fn get_by_name_visible(&self, name: &str, viewer: i64) -> Result<Memory> {
+        self.get_by_name(name).and_then(|m| visible_to(m, viewer))
+    }
+
     fn get_where(&self, cond: &str, arg: rusqlite::types::Value) -> Result<Memory> {
         self.conn
             .query_row(
                 &format!(
                     "SELECT id, name, title, description, kind, body, tags, source, links,
-                     model, dim, created_at, updated_at FROM memories WHERE {cond}"
+                     model, dim, created_at, updated_at, visibility, owner_person
+                     FROM memories WHERE {cond}"
                 ),
                 [arg],
                 |r| {
@@ -289,6 +391,9 @@ impl Store {
                         dim: r.get(10)?,
                         created_at: r.get(11)?,
                         updated_at: r.get(12)?,
+                        visibility: r.get(13)?,
+                        mine: false,
+                        owner_person: r.get(14)?,
                     })
                 },
             )
@@ -304,8 +409,20 @@ impl Store {
         since: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Summary>> {
+        self.list_for(None, tag, since, limit)
+    }
+
+    /// [`Store::list`] as `viewer` sees it: their own memories and shared ones.
+    pub fn list_for(
+        &self,
+        viewer: Option<i64>,
+        tag: Option<&str>,
+        since: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Summary>> {
         let mut sql = format!("SELECT {SUMMARY_COLS} FROM memories m WHERE 1=1");
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
+        sql.push_str(&visible_filter(viewer, &mut args));
         if let Some(t) = tag {
             args.push(t.trim().to_lowercase().into());
             sql.push_str(&format!(
@@ -323,7 +440,9 @@ impl Store {
             args.len()
         ));
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(args), summary_from_row)?;
+        let rows = stmt.query_map(params_from_iter(args), |r| {
+            Ok(summary_from_row(r)?.mark(viewer))
+        })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
@@ -333,13 +452,15 @@ impl Store {
         let fts = self.keyword_search(
             &q.query,
             &tags,
+            q.viewer,
             if q.vector.is_some() { CANDIDATES } else { k },
         )?;
         let Some(vector) = &q.vector else {
             return Ok(fts.into_iter().take(k).collect());
         };
         check_vector(vector)?;
-        let vec_hits = self.vector_search(vector, q.model.as_deref(), &tags, CANDIDATES)?;
+        let vec_hits =
+            self.vector_search(vector, q.model.as_deref(), &tags, q.viewer, CANDIDATES)?;
 
         // Reciprocal-rank fusion: robust to the two rankers' scores living on
         // unrelated scales, and needs no tuning.
@@ -374,7 +495,13 @@ impl Store {
         Ok(hits)
     }
 
-    fn keyword_search(&self, query: &str, tags: &[String], limit: usize) -> Result<Vec<Hit>> {
+    fn keyword_search(
+        &self,
+        query: &str,
+        tags: &[String],
+        viewer: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<Hit>> {
         let Some(match_expr) = fts_query(query) else {
             return Ok(Vec::new());
         };
@@ -386,17 +513,18 @@ impl Store {
              WHERE memories_fts MATCH ?1"
         );
         sql.push_str(&tag_filter(tags, &mut args));
+        sql.push_str(&visible_filter(viewer, &mut args));
         args.push((limit as i64).into());
         sql.push_str(&format!(" ORDER BY rank LIMIT ?{}", args.len()));
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(args), |r| {
-            let bm25: f64 = r.get(7)?;
+            let bm25: f64 = r.get(9)?;
             Ok(Hit {
-                summary: summary_from_row(r)?,
+                summary: summary_from_row(r)?.mark(viewer),
                 // bm25() is lower-is-better; flip it so higher is better everywhere.
                 score: -bm25,
                 matched: vec!["keyword"],
-                snippet: Some(r.get(8)?),
+                snippet: Some(r.get(10)?),
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -407,6 +535,7 @@ impl Store {
         query: &[f32],
         model: Option<&str>,
         tags: &[String],
+        viewer: Option<i64>,
         limit: usize,
     ) -> Result<Vec<(Summary, f64)>> {
         let qnorm = norm(query);
@@ -423,11 +552,12 @@ impl Store {
             sql.push_str(&format!(" AND m.model = ?{}", args.len()));
         }
         sql.push_str(&tag_filter(tags, &mut args));
+        sql.push_str(&visible_filter(viewer, &mut args));
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(args))?;
         let mut scored: Vec<(Summary, f64)> = Vec::new();
         while let Some(r) = rows.next()? {
-            let blob: Vec<u8> = r.get(7)?;
+            let blob: Vec<u8> = r.get(9)?;
             let v = decode_vector(&blob);
             let vn = norm(&v);
             if vn == 0.0 {
@@ -438,7 +568,7 @@ impl Store {
                 .zip(&v)
                 .map(|(a, b)| *a as f64 * *b as f64)
                 .sum();
-            scored.push((summary_from_row(r)?, dot / (qnorm * vn)));
+            scored.push((summary_from_row(r)?.mark(viewer), dot / (qnorm * vn)));
         }
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(limit);
@@ -480,6 +610,12 @@ impl Store {
             tx.execute(
                 "UPDATE memories SET vector = NULL, model = NULL, dim = NULL WHERE id = ?1",
                 [id],
+            )?;
+        }
+        if let Some(v) = p.visibility {
+            tx.execute(
+                "UPDATE memories SET visibility = ?2 WHERE id = ?1",
+                params![id, v.as_str()],
             )?;
         }
         write_tags(&tx, id, &tags)?;
@@ -590,7 +726,34 @@ fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Summary> {
         kind: r.get(4)?,
         tags: parse_list(&r.get::<_, String>(5)?),
         updated_at: r.get(6)?,
+        visibility: r.get(7)?,
+        mine: false,
+        owner_person: r.get(8)?,
     })
+}
+
+/// The memory if `viewer` owns it or it is shared, else "not found".
+fn visible_to(mut m: Memory, viewer: i64) -> Result<Memory> {
+    if m.owner_person == Some(viewer) {
+        m.mine = true;
+        Ok(m)
+    } else if m.visibility == Visibility::Shared.as_str() {
+        Ok(m)
+    } else {
+        Err(StoreError::NotFound)
+    }
+}
+
+/// Restrict to the viewer's own memories and shared ones.
+fn visible_filter(viewer: Option<i64>, args: &mut Vec<rusqlite::types::Value>) -> String {
+    let Some(v) = viewer else {
+        return String::new();
+    };
+    args.push(v.into());
+    format!(
+        " AND (m.owner_person = ?{} OR m.visibility = 'shared')",
+        args.len()
+    )
 }
 
 /// Restrict to memories carrying every one of `tags`.
@@ -996,6 +1159,67 @@ mod tests {
             !s.has_vector(id).unwrap(),
             "a body change drops the stale vector"
         );
+    }
+
+    #[test]
+    fn owners_see_their_own_and_shared_memories_and_old_ones_wait_for_adoption() {
+        let mut s = Store::open_in_memory().unwrap();
+        // A memory stored with no owner is invisible to every viewer until someone adopts it.
+        let old = s.insert(mem("old", "legacy words", &[])).unwrap();
+        let q = |s: &Store, viewer| {
+            s.search(&SearchQuery {
+                query: "words".into(),
+                k: 10,
+                viewer,
+                ..Default::default()
+            })
+            .unwrap()
+            .len()
+        };
+        assert_eq!((q(&s, None), q(&s, Some(1)), q(&s, Some(2))), (1, 0, 0));
+        assert_eq!(s.adopt_orphans(1).unwrap(), 1);
+        assert_eq!((q(&s, Some(1)), q(&s, Some(2))), (1, 0));
+
+        // Shared is seen by everyone, and marked as theirs only for its owner.
+        let mut m = mem("shared one", "more words", &[]);
+        m.owner = Some(2);
+        m.visibility = Visibility::Shared;
+        let shared = s.insert(m).unwrap();
+        assert_eq!((q(&s, Some(1)), q(&s, Some(2))), (2, 1));
+        assert!(matches!(s.get_visible(old, 2), Err(StoreError::NotFound)));
+        assert!(!s.get_visible(shared, 1).unwrap().mine);
+        assert!(s.get_visible(shared, 2).unwrap().mine);
+        let listed = s.list_for(Some(1), None, None, 10).unwrap();
+        assert_eq!(listed.iter().filter(|m| m.mine).count(), 1);
+
+        // A store default fills in the owner for writers that name none.
+        s.set_default_owner(Some(3));
+        let id = s.insert(mem("d", "words", &[])).unwrap();
+        assert_eq!(s.get(id).unwrap().owner_person, Some(3));
+    }
+
+    #[test]
+    fn a_store_from_before_owners_gains_the_columns_and_keeps_its_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id INTEGER PRIMARY KEY, name TEXT UNIQUE, title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '', kind TEXT, body TEXT NOT NULL,
+                tags TEXT NOT NULL DEFAULT '[]', source TEXT, links TEXT NOT NULL DEFAULT '[]',
+                vector BLOB, model TEXT, dim INTEGER, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL);
+             INSERT INTO memories (title, body, created_at, updated_at)
+                VALUES ('kept', 'body', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+        let mut s = Store::init(conn).unwrap();
+        assert_eq!(s.adopt_orphans(7).unwrap(), 1);
+        let m = s.get_visible(1, 7).unwrap();
+        assert_eq!(
+            (m.title.as_str(), m.visibility.as_str()),
+            ("kept", "private")
+        );
+        assert!(matches!(s.get_visible(1, 8), Err(StoreError::NotFound)));
     }
 
     #[test]

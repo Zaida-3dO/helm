@@ -1,5 +1,6 @@
 # Service block for the home server's MCP compose group. The host port and
-# the memory-folder path are placeholders. HUB_TOKENS (client:token[:scope],...),
+# the memory-folder path are placeholders. HUB_TOKENS (client:token[:scope],...; optional,
+# machines are normally paired with `helm-hub pair`), HUB_LEGACY_PERSON,
 # HUB_TELEGRAM_BOT_TOKEN and HUB_TELEGRAM_ALLOWED_USERS live in the env file,
 # which is never committed. Without a bot token the Telegram bot stays off.
 # On a bot another service already runs, set HUB_TELEGRAM_RECEIVE=off and give

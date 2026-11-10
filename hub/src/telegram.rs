@@ -10,6 +10,12 @@
 //!   `update_id` once (a forwarder's retry, or the two inputs overlapping).
 //!   `/helm <text>` is read as `<text>`, so a forwarder on a shared bot can
 //!   route Helm's messages by that one command.
+//! - **One bot, several people.** `HUB_TELEGRAM_ALLOWED_USERS` entries may name a person
+//!   (`<telegram id>:<person>`). Each person gets a [`Bridge`] of their own: their messages go
+//!   to that person's most recently active line, and the replies, status edits and approval
+//!   buttons go back to that person's Telegram user only. An id with no person belongs to the
+//!   hub's legacy person (the owner). [`Telegram`] hands each update to the bridge that allows
+//!   its sender.
 //! - **Deny by default.** A message whose sender is not on the allow-list is
 //!   dropped: nothing is forwarded to Helm and nothing is sent back, so the bot
 //!   does not even confirm it exists.
@@ -60,7 +66,8 @@
 //! The queue and the waiting asks live in memory: a container restart drops them.
 
 use crate::images;
-use crate::relay::{valid_ask_id, Line, Upstream, OFFLINE};
+use crate::lines::{Lines, PersonRoute, PersonUpstream};
+use crate::relay::{valid_ask_id, Line, Route, Upstream, OFFLINE};
 use base64::Engine as _;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -198,7 +205,10 @@ pub struct SttConfig {
 #[derive(Debug, Clone)]
 pub struct TelegramConfig {
     pub token: Option<String>,
+    /// Every allowed Telegram user id, named or not.
     pub allowed: Vec<i64>,
+    /// The allowed ids that name a person: `(telegram id, person)`. The rest are the owner's.
+    pub people: Vec<(i64, String)>,
     pub api_base: String,
     pub queue_lifetime: Duration,
     pub queue_max: usize,
@@ -216,7 +226,8 @@ impl TelegramConfig {
     /// (default `en`) and `HUB_TELEGRAM_STT_TIMEOUT_MINUTES` (1-60, default 10).
     pub fn from_env() -> Result<Self, String> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-        let allowed = parse_allowed(&var("HUB_TELEGRAM_ALLOWED_USERS").unwrap_or_default())?;
+        let (allowed, people) =
+            parse_allowed_people(&var("HUB_TELEGRAM_ALLOWED_USERS").unwrap_or_default())?;
         let receive = parse_receive(var("HUB_TELEGRAM_RECEIVE").as_deref())?;
         let minutes = match var("HUB_TELEGRAM_QUEUE_MINUTES") {
             Some(m) => m
@@ -265,6 +276,7 @@ impl TelegramConfig {
         Ok(TelegramConfig {
             token: var("HUB_TELEGRAM_BOT_TOKEN").map(|t| t.trim().to_owned()),
             allowed,
+            people,
             api_base: var("HUB_TELEGRAM_API")
                 .unwrap_or_else(|| "https://api.telegram.org".into())
                 .trim_end_matches('/')
@@ -297,16 +309,36 @@ pub fn parse_receive(value: Option<&str>) -> Result<Receive, String> {
 }
 
 pub fn parse_allowed(spec: &str) -> Result<Vec<i64>, String> {
-    spec.split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            s.parse::<i64>()
-                .ok()
-                .filter(|n| *n > 0)
-                .ok_or_else(|| "HUB_TELEGRAM_ALLOWED_USERS must be numeric user ids".to_owned())
-        })
-        .collect()
+    parse_allowed_people(spec).map(|(ids, _)| ids)
+}
+
+/// `id[:person],...`: every id, and the ones that name a person.
+pub fn parse_allowed_people(spec: &str) -> Result<(Vec<i64>, Vec<(i64, String)>), String> {
+    const BAD: &str = "HUB_TELEGRAM_ALLOWED_USERS must be numeric user ids, each optionally \
+        followed by :person";
+    let (mut ids, mut people) = (Vec::new(), Vec::new());
+    for part in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (id, person) = match part.split_once(':') {
+            Some((id, person)) => (id.trim(), Some(person.trim())),
+            None => (part, None),
+        };
+        let id = id
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| BAD.to_owned())?;
+        if ids.contains(&id) {
+            return Err(format!("Telegram user {id} is listed twice"));
+        }
+        ids.push(id);
+        if let Some(p) = person {
+            if p.is_empty() || p.chars().count() > 64 || p.chars().any(char::is_control) {
+                return Err(BAD.to_owned());
+            }
+            people.push((id, p.to_owned()));
+        }
+    }
+    Ok((ids, people))
 }
 
 #[derive(Debug, Clone)]
@@ -552,7 +584,7 @@ impl Handled {
 
 pub struct Bridge {
     api: Arc<dyn TelegramApi>,
-    line: Arc<Line>,
+    line: Arc<dyn Route>,
     allowed: Vec<i64>,
     lifetime_ms: i64,
     queue_max: usize,
@@ -802,6 +834,15 @@ pub fn split_text(s: &str, max: usize) -> Vec<String> {
 
 impl Bridge {
     pub fn new(api: Arc<dyn TelegramApi>, line: Arc<Line>, cfg: &TelegramConfig) -> Self {
+        Self::with_route(api, line, cfg)
+    }
+
+    /// A bridge whose frames go down `line`: one line, or all of a person's machines.
+    pub fn with_route(
+        api: Arc<dyn TelegramApi>,
+        line: Arc<dyn Route>,
+        cfg: &TelegramConfig,
+    ) -> Self {
         Bridge {
             api,
             line,
@@ -1651,7 +1692,23 @@ impl Bridge {
             Upstream::TelegramNotify(t) => self.on_notify(&t).await,
             Upstream::TelegramAsk { id, text, options } => self.on_ask(&id, &text, &options).await,
             Upstream::TelegramAskDone { id, text } => self.on_ask_done(&id, &text).await,
+            // Household questions are answered where the line is kept, never here.
+            Upstream::Peer { .. } => {}
         }
+    }
+
+    /// Tick the queue and the pending status edit, for as long as the hub runs.
+    fn start_ticks(self: &Arc<Self>) {
+        let ticker = self.clone();
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(TICK);
+            loop {
+                iv.tick().await;
+                let now = now_ms();
+                ticker.flush(now).await;
+                ticker.flush_status(now).await;
+            }
+        });
     }
 
     /// Run the bot: tick the queue and status, consume Helm's frames, and long-poll for updates
@@ -1663,16 +1720,7 @@ impl Bridge {
         if let Err(e) = self.identify().await {
             eprintln!("telegram: getMe failed: {}", e.description);
         }
-        let ticker = self.clone();
-        tokio::spawn(async move {
-            let mut iv = tokio::time::interval(TICK);
-            loop {
-                iv.tick().await;
-                let now = now_ms();
-                ticker.flush(now).await;
-                ticker.flush_status(now).await;
-            }
-        });
+        self.start_ticks();
         let up = self.clone();
         tokio::spawn(async move {
             while let Some(u) = upstream.recv().await {
@@ -1682,33 +1730,185 @@ impl Bridge {
         if self.receive == Receive::Off {
             return;
         }
-        let mut offset: i64 = 0;
-        let mut backoff = Duration::from_secs(1);
+        let mut poller = Poller::default();
         loop {
-            let r = self
-                .api
-                .call(
-                    "getUpdates",
-                    json!({ "offset": offset, "timeout": POLL_SECONDS,
-                            "allowed_updates": ["message", "callback_query"] }),
-                )
-                .await;
-            match r {
-                Ok(Value::Array(updates)) => {
-                    backoff = Duration::from_secs(1);
-                    for u in updates {
-                        if let Some(id) = u.get("update_id").and_then(Value::as_i64) {
-                            offset = offset.max(id + 1);
-                        }
-                        self.on_update(&u, now_ms()).await;
+            for u in poller.next(self.api.as_ref()).await {
+                self.on_update(&u, now_ms()).await;
+            }
+        }
+    }
+}
+
+/// `getUpdates` with the offset and the back-off after a failure.
+struct Poller {
+    offset: i64,
+    backoff: Duration,
+}
+
+impl Default for Poller {
+    fn default() -> Self {
+        Poller {
+            offset: 0,
+            backoff: Duration::from_secs(1),
+        }
+    }
+}
+
+impl Poller {
+    /// The next batch of updates (empty after an error, once the back-off has passed).
+    async fn next(&mut self, api: &dyn TelegramApi) -> Vec<Value> {
+        let r = api
+            .call(
+                "getUpdates",
+                json!({ "offset": self.offset, "timeout": POLL_SECONDS,
+                        "allowed_updates": ["message", "callback_query"] }),
+            )
+            .await;
+        match r {
+            Ok(Value::Array(updates)) => {
+                self.backoff = Duration::from_secs(1);
+                for u in &updates {
+                    if let Some(id) = u.get("update_id").and_then(Value::as_i64) {
+                        self.offset = self.offset.max(id + 1);
                     }
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("telegram: getUpdates failed: {}", e.description);
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(60));
-                }
+                updates
+            }
+            Ok(_) => Vec::new(),
+            Err(e) => {
+                eprintln!("telegram: getUpdates failed: {}", e.description);
+                tokio::time::sleep(self.backoff).await;
+                self.backoff = (self.backoff * 2).min(Duration::from_secs(60));
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// The bot for the whole household: one [`Bridge`] per person who has a Telegram user, sharing
+/// one bot and one poll. An update goes to the bridge that allows its sender, and what a
+/// person's machines send up goes to that person's bridge.
+pub struct Telegram {
+    api: Arc<dyn TelegramApi>,
+    receive: Receive,
+    /// `(person id, bridge)`.
+    bridges: Vec<(i64, Arc<Bridge>)>,
+}
+
+impl Telegram {
+    pub fn new(
+        api: Arc<dyn TelegramApi>,
+        receive: Receive,
+        bridges: Vec<(i64, Arc<Bridge>)>,
+    ) -> Self {
+        Telegram {
+            api,
+            receive,
+            bridges,
+        }
+    }
+
+    /// The bot for one bridge alone (person id 0): a hub with no household, and tests.
+    pub fn single(bridge: Arc<Bridge>) -> Self {
+        Telegram {
+            api: bridge.api.clone(),
+            receive: bridge.receive,
+            bridges: vec![(0, bridge)],
+        }
+    }
+
+    /// One bridge per person. `resolve` turns a person's name into their id (making the person
+    /// if needed); ids that name nobody belong to `owner`. `decorate` adds files and voice.
+    pub fn build(
+        api: Arc<dyn TelegramApi>,
+        lines: &Arc<Lines>,
+        cfg: &TelegramConfig,
+        owner: i64,
+        resolve: &mut dyn FnMut(&str) -> Result<i64, String>,
+        decorate: &dyn Fn(Bridge) -> Bridge,
+    ) -> Result<Telegram, String> {
+        let mut groups: Vec<(i64, Vec<i64>)> = Vec::new();
+        let mut add = |person: i64, id: i64| match groups.iter_mut().find(|(p, _)| *p == person) {
+            Some((_, ids)) => ids.push(id),
+            None => groups.push((person, vec![id])),
+        };
+        for (id, name) in &cfg.people {
+            add(resolve(name)?, *id);
+        }
+        for id in &cfg.allowed {
+            if !cfg.people.iter().any(|(named, _)| named == id) {
+                add(owner, *id);
+            }
+        }
+        let bridges = groups
+            .into_iter()
+            .map(|(person, ids)| {
+                let c = TelegramConfig {
+                    allowed: ids,
+                    people: Vec::new(),
+                    ..cfg.clone()
+                };
+                let route = Arc::new(PersonRoute::new(lines.clone(), person));
+                let bridge = decorate(Bridge::with_route(api.clone(), route, &c));
+                (person, Arc::new(bridge))
+            })
+            .collect();
+        Ok(Telegram::new(api, cfg.receive, bridges))
+    }
+
+    /// The bridge that allows an update's sender, if any does.
+    fn bridge_of(&self, update: &Value) -> Option<&Arc<Bridge>> {
+        let sender = update
+            .pointer("/message/from/id")
+            .or_else(|| update.pointer("/callback_query/from/id"))
+            .and_then(Value::as_i64)?;
+        self.bridges
+            .iter()
+            .find(|(_, b)| b.allowed.contains(&sender))
+            .map(|(_, b)| b)
+    }
+
+    /// One update, from `getUpdates` or posted to `/telegram/update`. A sender nobody allows gets
+    /// nothing, as before.
+    pub async fn on_update(&self, update: &Value, now: i64) -> Handled {
+        match self.bridge_of(update) {
+            Some(b) => b.on_update(update, now).await,
+            None => Handled::Ignored,
+        }
+    }
+
+    /// Handle one frame a person's machine sent up.
+    pub async fn on_upstream(&self, person: i64, u: Upstream) {
+        if let Some((_, b)) = self.bridges.iter().find(|(p, _)| *p == person) {
+            b.on_upstream(u).await;
+        }
+    }
+
+    /// Run the bot for everyone: identify, tick every bridge, route what the lines send up, and
+    /// poll once for all of them (unless a forwarder posts the updates).
+    pub async fn run(
+        self: Arc<Self>,
+        mut upstream: tokio::sync::mpsc::UnboundedReceiver<PersonUpstream>,
+    ) {
+        for (_, b) in &self.bridges {
+            if let Err(e) = b.identify().await {
+                eprintln!("telegram: getMe failed: {}", e.description);
+            }
+            b.start_ticks();
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            while let Some((person, u)) = upstream.recv().await {
+                me.on_upstream(person, u).await;
+            }
+        });
+        if self.receive == Receive::Off {
+            return;
+        }
+        let mut poller = Poller::default();
+        loop {
+            for u in poller.next(self.api.as_ref()).await {
+                self.on_update(&u, now_ms()).await;
             }
         }
     }

@@ -1,0 +1,574 @@
+//! More than one person on one hub: pairing, a line per machine, revoking, who sees which
+//! memory, the household questions and Telegram routing per person.
+
+use futures_util::{SinkExt, StreamExt};
+use helm_hub::auth::{Scopes, DEFAULT_PAIRED_SCOPES};
+use helm_hub::lines::Lines;
+use helm_hub::mcp::Options;
+use helm_hub::registry::{display_code, Registry};
+use helm_hub::relay::{Line, Upstream};
+use helm_hub::server::{router, AppState, PAIR_MAX_FAILURES};
+use helm_hub::store::Store;
+use helm_hub::telegram::{
+    now_ms, ApiError, ApiFuture, Bridge, Handled, Receive, Telegram, TelegramApi, TelegramConfig,
+};
+use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::Message;
+
+#[derive(Clone)]
+struct Hub {
+    addr: String,
+    lines: Arc<Lines>,
+    registry: Arc<Mutex<Registry>>,
+}
+
+async fn start() -> Hub {
+    let registry = Arc::new(Mutex::new(Registry::open_in_memory().unwrap()));
+    let (lines, _upstream) = Lines::new(registry.clone());
+    let lines = Arc::new(lines);
+    let app = router(Arc::new(AppState::new(
+        Store::open_in_memory().unwrap(),
+        registry.clone(),
+        Options { allow_mutate: true },
+        lines.clone(),
+        None,
+    )));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    Hub {
+        addr,
+        lines,
+        registry,
+    }
+}
+
+/// A machine for `person` (made if new); returns its token.
+fn add(hub: &Hub, person: &str, machine: &str, scopes: &str) -> String {
+    let scopes = Scopes::parse_list(scopes).unwrap();
+    let mut r = hub.registry.lock().unwrap();
+    r.add_client(person, machine, &scopes).unwrap().token
+}
+
+/// A tiny HTTP/1.1 client over the socket, so the test needs no HTTP client crate.
+async fn post(hub: &Hub, path: &str, token: Option<&str>, body: Value) -> (u16, Value) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let body = body.to_string();
+    let auth = token
+        .map(|t| format!("authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let mut s = tokio::net::TcpStream::connect(&hub.addr).await.unwrap();
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nhost: hub\r\n{auth}content-type: application/json\r\n\
+         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    let status: u16 = out[9..12].parse().unwrap();
+    let json = out
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b)
+        .unwrap_or("")
+        .trim();
+    (status, serde_json::from_str(json).unwrap_or(Value::Null))
+}
+
+async fn tool(hub: &Hub, token: &str, name: &str, args: Value) -> Value {
+    let (status, v) = post(
+        hub,
+        "/mcp",
+        Some(token),
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": name, "arguments": args } }),
+    )
+    .await;
+    assert_eq!(status, 200, "{v}");
+    v["result"].clone()
+}
+
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn connect(hub: &Hub, token: &str) -> Result<Ws, u16> {
+    let mut req = format!("ws://{}/relay", hub.addr)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    match tokio_tungstenite::connect_async(req).await {
+        Ok((ws, _)) => Ok(ws),
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => Err(resp.status().as_u16()),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+async fn next_json(ws: &mut Ws) -> Value {
+    loop {
+        let m = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("a frame within 5 s")
+            .unwrap()
+            .unwrap();
+        if let Message::Text(t) = m {
+            return serde_json::from_str(t.as_str()).unwrap();
+        }
+    }
+}
+
+/// Connect, read the welcome and return the socket with its ids.
+async fn join(hub: &Hub, token: &str) -> (Ws, i64, i64) {
+    let mut ws = connect(hub, token).await.expect("the token opens the line");
+    let welcome = next_json(&mut ws).await;
+    assert_eq!(welcome["type"], "welcome");
+    let ids = (
+        welcome["personId"].as_i64().unwrap(),
+        welcome["machineId"].as_i64().unwrap(),
+    );
+    (ws, ids.0, ids.1)
+}
+
+async fn closed(ws: &mut Ws, within: Duration) -> bool {
+    let wait = async {
+        loop {
+            match ws.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => {}
+            }
+        }
+    };
+    tokio::time::timeout(within, wait).await.is_ok()
+}
+
+async fn quiet(ws: &mut Ws) -> bool {
+    tokio::time::timeout(Duration::from_millis(250), ws.next())
+        .await
+        .is_err()
+}
+
+async fn send_json(ws: &mut Ws, v: Value) {
+    ws.send(Message::Text(v.to_string().into())).await.unwrap();
+}
+
+#[tokio::test]
+async fn pairing_connects_machines_side_by_side_and_a_revoke_drops_only_that_one() {
+    let hub = start().await;
+    let ann = add(&hub, "Ann", "desk", DEFAULT_PAIRED_SCOPES);
+    let scopes = Scopes::parse_list(DEFAULT_PAIRED_SCOPES).unwrap();
+    let new_code = |machine: &str| {
+        let mut r = hub.registry.lock().unwrap();
+        r.create_pairing("Bea", machine, &scopes, now_ms())
+            .unwrap()
+            .0
+    };
+    let code = new_code("laptop");
+
+    // A wrong code is refused; the right one, typed any way, pairs once.
+    let (status, _) = post(&hub, "/pair", None, json!({ "code": "AAAA-AAAA" })).await;
+    assert_eq!(status, 403);
+    let typed = display_code(&code).to_lowercase();
+    let (status, paired) = post(&hub, "/pair", None, json!({ "code": typed })).await;
+    assert_eq!(status, 200, "{paired}");
+    assert_eq!(paired["personName"], "Bea");
+    assert_eq!(paired["machineName"], "laptop");
+    let bea = paired["token"].as_str().unwrap().to_owned();
+    let (status, _) = post(&hub, "/pair", None, json!({ "code": code })).await;
+    assert_eq!(status, 403, "a code works once");
+
+    // Both machines are on at once; a reconnect replaces only that machine's own line.
+    let (mut ann_ws, ann_person, ann_id) = join(&hub, &ann).await;
+    let (mut bea_ws, bea_person, bea_id) = join(&hub, &bea).await;
+    assert_ne!(ann_person, bea_person);
+    assert_eq!(bea_id, paired["machineId"].as_i64().unwrap());
+    let (_second_ws, _, again) = join(&hub, &ann).await;
+    assert_eq!(again, ann_id);
+    assert!(closed(&mut ann_ws, Duration::from_secs(5)).await);
+    assert!(hub.lines.get(ann_id).unwrap().is_up());
+    assert!(hub.lines.get(bea_id).unwrap().is_up());
+
+    // Revoking her machine drops her line within seconds, with no restart, and leaves his.
+    hub.registry.lock().unwrap().revoke("laptop", None).unwrap();
+    assert!(
+        closed(&mut bea_ws, Duration::from_secs(10)).await,
+        "the revoked line stayed up"
+    );
+    assert_eq!(connect(&hub, &bea).await.err(), Some(401));
+    let (status, _) = post(&hub, "/mcp", Some(&bea), json!({})).await;
+    assert_eq!(status, 401);
+    assert!(hub.lines.get(ann_id).unwrap().is_up());
+
+    // Wrong codes run into a limit that even a good code does not get past.
+    let mut seen = vec![];
+    for _ in 0..PAIR_MAX_FAILURES {
+        seen.push(
+            post(&hub, "/pair", None, json!({ "code": "BBBB-BBBB" }))
+                .await
+                .0,
+        );
+    }
+    assert_eq!((seen[0], seen[PAIR_MAX_FAILURES - 1]), (403, 429));
+    let good = new_code("tablet");
+    let (status, _) = post(&hub, "/pair", None, json!({ "code": good })).await;
+    assert_eq!(status, 429);
+}
+
+#[tokio::test]
+async fn memories_are_private_unless_shared_and_only_the_owner_changes_them() {
+    let hub = start().await;
+    let ann = add(&hub, "Ann", "desk", "memory:rw");
+    let bea = add(&hub, "Bea", "laptop", "memory:rw");
+    let id_of = |r: &Value| r["structuredContent"]["id"].as_i64().unwrap();
+    let count = |r: &Value| r["structuredContent"]["count"].as_i64().unwrap();
+
+    let secret = id_of(
+        &tool(
+            &hub,
+            &ann,
+            "memory_write",
+            json!({ "title": "Gift plan", "body": "ring size secret" }),
+        )
+        .await,
+    );
+    let shared = id_of(
+        &tool(
+            &hub,
+            &ann,
+            "memory_write",
+            json!({ "title": "Garden notes", "body": "tomatoes in May", "visibility": "shared" }),
+        )
+        .await,
+    );
+    let hers = id_of(
+        &tool(
+            &hub,
+            &bea,
+            "memory_write",
+            json!({ "title": "Her list", "body": "tomatoes too" }),
+        )
+        .await,
+    );
+
+    // Her searches, lists and reads find her own and the shared one, never his private one.
+    let found = tool(&hub, &bea, "memory_search", json!({ "query": "secret" })).await;
+    assert_eq!(count(&found), 0);
+    let found = tool(&hub, &bea, "memory_search", json!({ "query": "tomatoes" })).await;
+    assert_eq!(count(&found), 2, "{found}");
+    assert_eq!(count(&tool(&hub, &bea, "memory_list", json!({})).await), 2);
+    assert_eq!(count(&tool(&hub, &ann, "memory_list", json!({})).await), 2);
+    let read = tool(&hub, &bea, "memory_read", json!({ "id": secret })).await;
+    assert_eq!(read["isError"], true);
+    let read = tool(&hub, &bea, "memory_read", json!({ "id": shared })).await;
+    assert_eq!(read["structuredContent"]["mine"], false);
+    assert_eq!(read["structuredContent"]["visibility"], "shared");
+
+    // Only the owner changes or deletes; a private memory looks absent to anyone else.
+    for (name, id) in [
+        ("memory_update", shared),
+        ("memory_update", secret),
+        ("memory_delete", shared),
+        ("memory_delete", secret),
+    ] {
+        let r = tool(&hub, &bea, name, json!({ "id": id, "body": "mine now" })).await;
+        assert_eq!(r["isError"], true, "{name} {id}: {r}");
+    }
+    let r = tool(
+        &hub,
+        &ann,
+        "memory_update",
+        json!({ "id": secret, "visibility": "shared" }),
+    )
+    .await;
+    assert_eq!(r["isError"], false, "{r}");
+    let read = tool(&hub, &bea, "memory_read", json!({ "id": secret })).await;
+    assert_eq!(read["structuredContent"]["title"], "Gift plan");
+    let read = tool(&hub, &ann, "memory_read", json!({ "id": hers })).await;
+    assert_eq!(
+        read["isError"], true,
+        "his search never shows her private memory"
+    );
+}
+
+#[tokio::test]
+async fn app_calls_stay_with_the_callers_machines_and_household_questions_obey_the_switches() {
+    let hub = start().await;
+    let all = DEFAULT_PAIRED_SCOPES;
+    let (ann_t, bea_t) = (
+        add(&hub, "Ann", "desk", all),
+        add(&hub, "Bea", "laptop", all),
+    );
+    let kit_t = add(&hub, "Kit", "pc", "relay");
+    let (mut ann, ann_person, ann_id) = join(&hub, &ann_t).await;
+    let (mut bea, bea_person, _) = join(&hub, &bea_t).await;
+    let (mut kit, _, _) = join(&hub, &kit_t).await;
+
+    // Her app call goes down her line, named as her machine, and never down his.
+    let h = hub.clone();
+    let caller = tokio::spawn(async move {
+        tool(
+            &h,
+            &bea_t,
+            "app_list_chats",
+            json!({ "query": "x", "machine": "laptop" }),
+        )
+        .await
+    });
+    let frame = next_json(&mut bea).await;
+    assert_eq!(
+        (frame["type"].as_str(), frame["client"].as_str()),
+        (Some("call"), Some("laptop"))
+    );
+    assert_eq!(
+        frame["args"],
+        json!({ "query": "x" }),
+        "the machine name is not forwarded"
+    );
+    send_json(
+        &mut bea,
+        json!({ "type": "result", "id": frame["id"], "ok": true, "result": { "chats": [] } }),
+    )
+    .await;
+    assert_eq!(caller.await.unwrap()["isError"], false);
+    assert!(quiet(&mut ann).await);
+
+    // The household: everyone is listed with who is online; nothing is shared yet.
+    let ask = |id: &str, op: &str, args: Value| json!({ "type": "peer", "id": id, "op": op, "args": args });
+    send_json(&mut bea, ask("q1", "people", json!({}))).await;
+    let r = next_json(&mut bea).await;
+    assert_eq!(
+        (r["type"].as_str(), r["id"].as_str(), r["ok"].as_bool()),
+        (Some("peer_result"), Some("q1"), Some(true))
+    );
+    let people = r["result"]["people"].as_array().unwrap();
+    assert_eq!(people.len(), 3);
+    let him = people.iter().find(|p| p["id"] == ann_person).unwrap();
+    assert_eq!(him["machines"][0]["online"], true);
+    assert_eq!(him["machines"][0]["sharing"]["chats"], false);
+    assert_eq!(
+        people.iter().find(|p| p["id"] == bea_person).unwrap()["you"],
+        true
+    );
+
+    // Each op is refused, in words, until the switch it needs is on.
+    let refusal = |r: &Value, needle: &str| {
+        assert_eq!(r["ok"], false, "{r}");
+        let e = r["error"].as_str().unwrap();
+        assert!(e.contains(needle), "{e}");
+    };
+    send_json(
+        &mut bea,
+        ask("q2", "list_chats", json!({ "personId": ann_person })),
+    )
+    .await;
+    refusal(&next_json(&mut bea).await, "not shared their chats");
+    send_json(&mut kit, ask("k1", "people", json!({}))).await;
+    refusal(&next_json(&mut kit).await, "cannot use the household");
+
+    let flip = |chats, transcripts, messages| json!({ "type": "sharing", "chats": chats, "transcripts": transcripts, "messages": messages });
+    send_json(&mut ann, flip(true, false, false)).await;
+    for _ in 0..100 {
+        if hub.lines.get(ann_id).unwrap().sharing().chats {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    send_json(
+        &mut bea,
+        ask(
+            "q3",
+            "read_chat",
+            json!({ "personId": ann_person, "chatId": "c1" }),
+        ),
+    )
+    .await;
+    refusal(&next_json(&mut bea).await, "not shared their transcripts");
+    send_json(
+        &mut bea,
+        ask(
+            "q4",
+            "send_message",
+            json!({ "personId": ann_person, "chatId": "c1", "message": "hi" }),
+        ),
+    )
+    .await;
+    refusal(&next_json(&mut bea).await, "message their chats");
+
+    // With the chat list shared, her question reaches his Helm as a peer_call, with only the
+    // arguments the op knows, and his answer comes back to her unchanged.
+    let (answer, _) = tokio::join!(
+        async {
+            send_json(
+                &mut bea,
+                ask(
+                    "q5",
+                    "list_chats",
+                    json!({ "personId": ann_person, "limit": 5, "extra": "x" }),
+                ),
+            )
+            .await;
+            next_json(&mut bea).await
+        },
+        async {
+            let f = next_json(&mut ann).await;
+            assert_eq!(
+                (f["type"].as_str(), f["person"].as_str(), f["op"].as_str()),
+                (Some("peer_call"), Some("Bea"), Some("list_chats"))
+            );
+            assert_eq!(f["args"], json!({ "limit": 5 }));
+            send_json(
+                &mut ann,
+                json!({ "type": "result", "id": f["id"], "ok": true, "result": { "chats": [] } }),
+            )
+            .await;
+        }
+    );
+    assert_eq!(
+        (answer["id"].as_str(), answer["ok"].as_bool()),
+        (Some("q5"), Some(true))
+    );
+    assert_eq!(answer["result"], json!({ "chats": [] }));
+
+    // Once his machine is gone she is told so.
+    drop(ann);
+    for _ in 0..100 {
+        if !hub.lines.get(ann_id).unwrap().is_up() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    send_json(
+        &mut bea,
+        ask("q6", "list_chats", json!({ "personId": ann_person })),
+    )
+    .await;
+    refusal(&next_json(&mut bea).await, "offline");
+}
+
+#[derive(Default)]
+struct FakeApi {
+    calls: Mutex<Vec<(String, Value)>>,
+}
+
+impl TelegramApi for FakeApi {
+    fn call<'a>(&'a self, method: &'a str, body: Value) -> ApiFuture<'a> {
+        self.calls.lock().unwrap().push((method.to_owned(), body));
+        Box::pin(async { Ok::<Value, ApiError>(json!({ "message_id": 1 })) })
+    }
+}
+
+fn message(from: i64, text: &str) -> Value {
+    static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+    json!({ "update_id": NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), "message": {
+        "message_id": 9, "date": now_ms() / 1000, "text": text,
+        "from": { "id": from, "is_bot": false, "first_name": "x" },
+        "chat": { "id": from, "type": "private" } } })
+}
+
+fn frames(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<Value> {
+    let mut out: Vec<Value> = vec![];
+    while let Ok(f) = rx.try_recv() {
+        out.push(serde_json::from_str(&f).unwrap());
+    }
+    out.into_iter().filter(|f| f["type"] != "welcome").collect()
+}
+
+#[tokio::test]
+async fn telegram_goes_to_each_persons_own_helm_and_replies_come_back_to_them_only() {
+    const ANN_TG: i64 = 11;
+    const BEA_TG: i64 = 22;
+    let registry = Arc::new(Mutex::new(Registry::open_in_memory().unwrap()));
+    let scopes = Scopes::parse_list(DEFAULT_PAIRED_SCOPES).unwrap();
+    let client = |person: &str, machine: &str| {
+        let mut r = registry.lock().unwrap();
+        let token = r.add_client(person, machine, &scopes).unwrap().token;
+        r.authenticate(Some(&format!("Bearer {token}"))).unwrap()
+    };
+    let (ann, bea) = (client("Ann", "desk"), client("Bea", "laptop"));
+    let (lines, mut upstream) = Lines::new(registry.clone());
+    let lines = Arc::new(lines);
+    let (ann_line, bea_line): (Arc<Line>, Arc<Line>) =
+        (lines.line_for(&ann), lines.line_for(&bea));
+    let (tx_o, mut rx_o) = mpsc::unbounded_channel();
+    let (tx_t, mut rx_t) = mpsc::unbounded_channel();
+    ann_line.attach(tx_o);
+    let bea_gen = bea_line.attach(tx_t);
+
+    // 11 is the owner's; 22 is named as Bea's.
+    let cfg = TelegramConfig {
+        token: Some("t".into()),
+        allowed: vec![ANN_TG, BEA_TG],
+        people: vec![(BEA_TG, "Bea".into())],
+        api_base: "http://fake".into(),
+        queue_lifetime: Duration::from_secs(1800),
+        queue_max: 5,
+        receive: Receive::Off,
+        stt: None,
+    };
+    let api = Arc::new(FakeApi::default());
+    let mut resolve = |name: &str| -> Result<i64, String> {
+        let mut r = registry.lock().unwrap();
+        r.ensure_person(name)
+            .map(|p| p.id)
+            .map_err(|e| e.to_string())
+    };
+    let tg = Telegram::build(
+        api.clone(),
+        &lines,
+        &cfg,
+        ann.person_id,
+        &mut resolve,
+        &|b: Bridge| b,
+    )
+    .unwrap();
+
+    let sent = |rx: &mut mpsc::UnboundedReceiver<String>| -> Vec<String> {
+        frames(rx)
+            .iter()
+            .filter(|f| f["type"] == "telegram")
+            .map(|f| f["text"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        tg.on_update(&message(ANN_TG, "for ann"), now_ms()).await,
+        Handled::Forwarded
+    );
+    assert_eq!(
+        tg.on_update(&message(BEA_TG, "for bea"), now_ms()).await,
+        Handled::Forwarded
+    );
+    assert_eq!(
+        tg.on_update(&message(33, "stranger"), now_ms()).await,
+        Handled::Ignored
+    );
+    assert_eq!(sent(&mut rx_o), ["for ann"]);
+    assert_eq!(sent(&mut rx_t), ["for bea"]);
+
+    // What her machine sends up reaches her Telegram user only.
+    assert!(bea_line.receive(bea_gen, r#"{"type":"telegram_final","text":"done"}"#));
+    let (person, frame) = upstream.recv().await.unwrap();
+    assert_eq!(
+        (person, &frame),
+        (bea.person_id, &Upstream::TelegramFinal("done".into()))
+    );
+    tg.on_upstream(person, frame).await;
+    let texts: Vec<(i64, String)> = api
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| m == "sendMessage")
+        .map(|(_, b)| {
+            (
+                b["chat_id"].as_i64().unwrap(),
+                b["text"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(texts, [(BEA_TG, "done".to_owned())]);
+}

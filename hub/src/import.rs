@@ -186,6 +186,7 @@ pub fn import_dir(
             source: Some(source.clone()),
             links: p.links,
             embedding: None,
+            ..Default::default()
         };
         match store.upsert_named(&m) {
             Ok(Upsert::Inserted) => report.inserted += 1,

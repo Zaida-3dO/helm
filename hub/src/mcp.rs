@@ -6,8 +6,8 @@
 //! issued on `initialize` for clients that expect one, but no state hangs off
 //! it.
 
-use crate::auth::{Client, Scope};
-use crate::store::{Embedding, MemoryPatch, NewMemory, SearchQuery, Store, StoreError};
+use crate::auth::Client;
+use crate::store::{Embedding, MemoryPatch, NewMemory, SearchQuery, Store, StoreError, Visibility};
 use serde_json::{json, Value};
 
 pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -37,8 +37,10 @@ pub fn handle(store: &mut Store, client: &Client, opts: &Options, msg: &Value) -
                 "protocolVersion": version,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "helm-hub", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Shared memory. memory_search finds memories by keywords; pass `vector` \
-                    (with `model`) for a hybrid keyword + similarity search. Read a hit in full with memory_read."
+                "instructions": "Memory for the household. You see your own memories and the ones \
+                    others shared. memory_search finds memories by keywords; pass `vector` (with `model`) \
+                    for a hybrid keyword + similarity search. Read a hit in full with memory_read. A \
+                    new memory is private unless written with visibility \"shared\"."
             }))
         }
         "ping" => Ok(json!({})),
@@ -78,6 +80,13 @@ fn tool_error(message: impl Into<String>) -> Value {
 const READ_TOOLS: &[&str] = &["memory_search", "memory_read", "memory_list"];
 
 fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
+    if !client.scopes.can_read_memory() {
+        return Vec::new();
+    }
+    let visibility = json!({
+        "type": "string", "enum": ["private", "shared"],
+        "description": "private (default): only you see it. shared: everyone in the household sees it."
+    });
     let vector = json!({
         "type": "array", "items": { "type": "number" },
         "description": "Embedding computed by the caller (the hub never computes one)."
@@ -114,16 +123,17 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
             "annotations": { "readOnlyHint": true }
         }),
     ];
-    if client.scope == Scope::ReadWrite {
+    if client.scopes.can_write_memory() {
         tools.push(json!({
             "name": "memory_write",
-            "description": "Store a new memory. Pass `vector` and `model` together to make it findable by similarity.",
+            "description": "Store a new memory, private unless `visibility` is shared. Pass `vector` and `model` together to make it findable by similarity.",
             "inputSchema": { "type": "object", "properties": {
                 "title": { "type": "string" },
                 "body": { "type": "string" },
                 "tags": { "type": "array", "items": { "type": "string" } },
                 "source": { "type": "string" },
                 "name": { "type": "string", "description": "Optional unique key." },
+                "visibility": visibility,
                 "vector": vector,
                 "model": { "type": "string" }
             }, "required": ["title", "body"] }
@@ -131,7 +141,7 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
         if opts.allow_mutate {
             tools.push(json!({
                 "name": "memory_update",
-                "description": "Change fields of a memory. A new body without a new vector clears the old vector.",
+                "description": "Change fields of one of your memories. A new body without a new vector clears the old vector.",
                 "inputSchema": { "type": "object", "properties": {
                     "id": { "type": "integer" },
                     "title": { "type": "string" },
@@ -139,13 +149,14 @@ fn tool_list(client: &Client, opts: &Options) -> Vec<Value> {
                     "description": { "type": "string" },
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "source": { "type": "string" },
+                    "visibility": visibility,
                     "vector": vector,
                     "model": { "type": "string" }
                 }, "required": ["id"] }
             }));
             tools.push(json!({
                 "name": "memory_delete",
-                "description": "Delete a memory permanently.",
+                "description": "Delete one of your memories permanently.",
                 "inputSchema": { "type": "object", "properties": {
                     "id": { "type": "integer" }
                 }, "required": ["id"] },
@@ -164,19 +175,22 @@ fn call_tool(
     args: &Value,
 ) -> Value {
     let writes = !READ_TOOLS.contains(&name);
-    if writes && client.scope != Scope::ReadWrite {
+    if !client.scopes.can_read_memory() {
+        return tool_error(format!("{name} needs a token with the memory scope"));
+    }
+    if writes && !client.scopes.can_write_memory() {
         return tool_error(format!("{name} needs a read-write token"));
     }
     let r = match name {
-        "memory_search" => search(store, args),
-        "memory_read" => read(store, args),
-        "memory_list" => list(store, args),
-        "memory_write" => write(store, args),
+        "memory_search" => search(store, client, args),
+        "memory_read" => read(store, client, args),
+        "memory_list" => list(store, client, args),
+        "memory_write" => write(store, client, args),
         "memory_update" | "memory_delete" if !opts.allow_mutate => {
             return tool_error(format!("{name} is turned off on this hub"));
         }
-        "memory_update" => update(store, args),
-        "memory_delete" => delete(store, args),
+        "memory_update" => update(store, client, args),
+        "memory_delete" => delete(store, client, args),
         _ => return tool_error(format!("unknown tool {name:?}")),
     };
     match r {
@@ -250,13 +264,36 @@ fn store_err(e: StoreError) -> String {
     e.to_string()
 }
 
-fn search(store: &mut Store, args: &Value) -> ToolResult {
+fn visibility_arg(args: &Value) -> Result<Option<Visibility>, String> {
+    match str_arg(args, "visibility")? {
+        None => Ok(None),
+        Some(v) => Visibility::parse(&v)
+            .map(Some)
+            .ok_or_else(|| "visibility must be private or shared".to_owned()),
+    }
+}
+
+/// A memory the caller may change: their own. Someone else's shared memory answers that only its
+/// owner can change it; someone else's private one is "not found", as for a read.
+fn owned_by(store: &Store, client: &Client, id: i64) -> Result<(), String> {
+    let m = store.get(id).map_err(store_err)?;
+    if m.owner_person == Some(client.person_id) {
+        Ok(())
+    } else if m.visibility == Visibility::Shared.as_str() {
+        Err("only the person who wrote this memory can change it".into())
+    } else {
+        Err(store_err(StoreError::NotFound))
+    }
+}
+
+fn search(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
     let q = SearchQuery {
         query: str_arg(args, "query")?.unwrap_or_default(),
         k: int_arg(args, "k")?.unwrap_or(10).max(1) as usize,
         vector: vector_arg(args)?,
         model: str_arg(args, "model")?,
         tags: tags_arg(args, "tags")?.unwrap_or_default(),
+        viewer: Some(client.person_id),
     };
     let mode = if q.vector.is_some() {
         "hybrid"
@@ -267,29 +304,35 @@ fn search(store: &mut Store, args: &Value) -> ToolResult {
     Ok(json!({ "mode": mode, "count": hits.len(), "results": hits }))
 }
 
-fn read(store: &mut Store, args: &Value) -> ToolResult {
+fn read(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
+    let me = client.person_id;
     let m = match args.get("id") {
-        Some(Value::Number(n)) => store.get(n.as_i64().ok_or("id must be an integer")?),
+        Some(Value::Number(n)) => store.get_visible(n.as_i64().ok_or("id must be an integer")?, me),
         Some(Value::String(s)) => match s.parse::<i64>() {
-            Ok(n) => store.get(n),
-            Err(_) => store.get_by_name(s),
+            Ok(n) => store.get_visible(n, me),
+            Err(_) => store.get_by_name_visible(s, me),
         },
         _ => return Err("id is required".into()),
     };
     m.map(|m| json!(m)).map_err(store_err)
 }
 
-fn list(store: &mut Store, args: &Value) -> ToolResult {
+fn list(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
     let tag = str_arg(args, "tag")?;
     let since = str_arg(args, "since")?;
     let limit = int_arg(args, "limit")?.unwrap_or(50).max(1) as usize;
     let rows = store
-        .list(tag.as_deref(), since.as_deref(), limit)
+        .list_for(
+            Some(client.person_id),
+            tag.as_deref(),
+            since.as_deref(),
+            limit,
+        )
         .map_err(store_err)?;
     Ok(json!({ "count": rows.len(), "results": rows }))
 }
 
-fn write(store: &mut Store, args: &Value) -> ToolResult {
+fn write(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
     let m = NewMemory {
         name: str_arg(args, "name")?,
         title: str_arg(args, "title")?.ok_or("title is required")?,
@@ -300,13 +343,17 @@ fn write(store: &mut Store, args: &Value) -> ToolResult {
         source: str_arg(args, "source")?,
         links: crate::import::wiki_links(args.get("body").and_then(Value::as_str).unwrap_or("")),
         embedding: embedding_arg(args)?,
+        // The owner is the caller's person, never something the caller can claim.
+        owner: Some(client.person_id),
+        visibility: visibility_arg(args)?.unwrap_or_default(),
     };
     let id = store.insert(m).map_err(store_err)?;
     Ok(json!({ "id": id, "has_vector": store.has_vector(id).map_err(store_err)? }))
 }
 
-fn update(store: &mut Store, args: &Value) -> ToolResult {
+fn update(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
     let id = int_arg(args, "id")?.ok_or("id is required")?;
+    owned_by(store, client, id)?;
     let patch = MemoryPatch {
         title: str_arg(args, "title")?,
         body: str_arg(args, "body")?,
@@ -314,13 +361,15 @@ fn update(store: &mut Store, args: &Value) -> ToolResult {
         tags: tags_arg(args, "tags")?,
         source: str_arg(args, "source")?,
         embedding: embedding_arg(args)?,
+        visibility: visibility_arg(args)?,
     };
     let m = store.update(id, patch).map_err(store_err)?;
     Ok(json!({ "id": m.id, "updated_at": m.updated_at, "has_vector": m.dim.is_some() }))
 }
 
-fn delete(store: &mut Store, args: &Value) -> ToolResult {
+fn delete(store: &mut Store, client: &Client, args: &Value) -> ToolResult {
     let id = int_arg(args, "id")?.ok_or("id is required")?;
+    owned_by(store, client, id)?;
     store.delete(id).map_err(store_err)?;
     Ok(json!({ "id": id, "deleted": true }))
 }

@@ -1,14 +1,16 @@
 # Helm hub
 
-The always-on service that runs on a home server, beside the PC that runs Helm. It serves three
-things:
+The always-on service that runs on a home server, beside the PCs that run Helm. It is shared by
+the people of one household, each with one or more machines. It serves:
 
-- **Shared memory**: SQLite with an FTS5 index and optional vectors, as MCP over streamable
-  HTTP.
-- **The relay line**: Helm on the PC keeps one outbound WebSocket open to `/relay`. Helm
-  tools the hub offers over MCP travel down it, so the PC needs no inbound port.
-- **Helm's Telegram bot**: messages from the allowed user go down the same line; the live
-  status and the answers come back up it.
+- **Memory**: SQLite with an FTS5 index and optional vectors, as MCP over streamable HTTP. Each
+  memory belongs to one person and is private to them unless they share it.
+- **The relay lines**: every machine running Helm keeps its own outbound WebSocket open to
+  `/relay`. Helm tools the hub offers over MCP travel down it, so the PC needs no inbound port.
+- **The household view**: one person's Helm asks the hub about another person's chats, over the
+  same lines (below).
+- **Helm's Telegram bot**: one bot for everyone; each person's messages go to that person's Helm,
+  and the live status and the answers come back to that person only.
 
 It is its own Cargo workspace and builds from `hub/` alone, so the container build needs nothing
 else from the repo.
@@ -19,50 +21,138 @@ else from the repo.
 |---|---|
 | `memory_search {query, k?, vector?, model?, tags?}` | Keyword search (FTS5, porter stemming, bm25 with title > description > tags > body). With `vector`, a hybrid: keyword and cosine rankings fused by reciprocal rank. Only vectors of the same dimension (and `model`, if given) are compared. Every listed tag must match. |
 | `memory_read {id}` | One memory in full, by numeric id or by name |
-| `memory_write {title, body, tags?, source?, name?, vector?, model?}` | New memory. A vector must come with the id of the model that made it |
+| `memory_write {title, body, tags?, source?, name?, visibility?, vector?, model?}` | New memory, owned by the caller's person and `private` unless `visibility` is `shared`. A vector must come with the id of the model that made it |
 | `memory_list {tag?, since?, limit?}` | Newest first; `since` is an ISO-8601 date or UTC timestamp |
-| `memory_update`, `memory_delete` | Only when `HUB_ALLOW_MUTATE=1`. A new body without a new vector clears the old vector |
+| `memory_update`, `memory_delete` | Only when `HUB_ALLOW_MUTATE=1`, and only on the caller's own memories (`memory_update` may also change `visibility`). A new body without a new vector clears the old vector |
+
+**Whose memories.** `memory_search`, `memory_read` and `memory_list` return the caller's own
+memories plus the ones other people marked `shared`; each result says its `visibility` and whether
+it is `mine`. Someone else's private memory answers exactly like one that does not exist. The owner
+is always the caller's person, never something a caller can set. A memory's optional `name` is a
+key shared by the whole hub, so pick names that will not collide. Memories stored before people
+existed (no owner) become private to the legacy person (`HUB_LEGACY_PERSON`, default `owner`) the
+first time the hub starts.
 
 **The hub never computes an embedding.** Callers that have one (Helm on the PC) pass it; callers
 that do not (another assistant, or anyone while the PC is asleep) get keyword search.
 
-## Auth
+## People, machines and tokens
 
-`HUB_TOKENS=client:token[:scope],...`. Tokens are at least 24 characters, unique per client, held
-only as SHA-256 digests and compared in constant time.
+A **person** is a human; a **machine** (a *client*) is one Helm install, or one outside caller,
+that belongs to one person and has its own token. The registry lives in the hub's SQLite file and
+is read on every request, so a revoke takes effect at once.
 
 | Scope | Reaches |
 |---|---|
-| `rw` (default) | the memory tools |
-| `ro` | the three memory read tools |
-| `rw+app`, `ro+app` | the above, plus the Helm tools forwarded down the line (below) |
-| `relay` | `/relay` only: Helm's own line. It cannot call `/mcp`, and no other token can open the line |
-| `telegram` | `POST /telegram/update` only: for a forwarder on a bot another service already runs (below). It cannot call `/mcp` or open the line, and no other token can post updates |
+| `memory:ro` | the three memory read tools |
+| `memory:rw` | the memory tools |
+| `relay` | `/relay`: this machine's own line |
+| `app` | the Helm tools forwarded down the caller's own person's lines (below) |
+| `peer` | the household questions a machine's line may ask (below) |
+| `telegram` | `POST /telegram/update` only: a forwarder for a shared bot (below). It stands alone |
 
-`GET /health` is the one open route and reports only status and version. The server refuses to
-start with no tokens configured.
+A paired machine gets `memory:rw,relay,app,peer`. `/mcp` needs a memory or `app` scope, `/relay`
+needs `relay`, and a token with neither cannot reach what it has no scope for. A new kind of
+caller is a new scope in `src/auth.rs` that its route checks with `Client::has`.
+
+Tokens are held only as SHA-256 digests and compared in constant time. `GET /health` is the one
+open route and reports only status and version.
+
+### Admin commands
+
+Run on the server, for example `docker exec helm-hub helm-hub pair --person Sam --machine laptop`.
+They need no restart.
+
+```
+helm-hub person add <name> | person list
+helm-hub client add --person P --machine M [--scopes S]   # prints the token once
+helm-hub client list
+helm-hub client revoke <machine or id> [--person P]
+helm-hub pair --person P --machine M [--scopes S]         # prints a one-time code
+```
+
+A person that does not exist yet is made by `client add` and `pair`. Scopes are comma separated
+(`memory:rw,relay,app,peer`, the default). A machine name is unique per person while it is active.
+`client revoke` stops the token at once; an open line of that machine drops within 5 seconds.
+
+### Pairing
+
+`helm-hub pair` prints an 8-character code (`ABCD-EFGH`, no look-alike characters) that works once,
+for 15 minutes. The new machine posts it:
+
+```
+POST /pair   {"code": "ABCD-EFGH"}
+200 {"token", "personId", "personName", "machineId", "machineName", "scopes"}
+```
+
+The token is shown only in that answer and is not stored in the clear. Any other 4xx means the code
+is bad (403 wrong, expired or already used, all alike; 409 the machine name is taken); 429 means too
+many wrong codes in the last minute (10), which locks even a good code out for a while. The route
+answers only callers on this machine, the home network or Tailscale (loopback, private, link-local
+and 100.64.0.0/10 addresses).
+
+### `HUB_TOKENS` (legacy)
+
+`HUB_TOKENS=client:token[:scope],...` still works and is optional. Each entry becomes a client of
+the person named by `HUB_LEGACY_PERSON` (default `owner`), with its entry name as the machine
+name. The scope is `rw` (the default), `ro`, `relay`, `app`, `peer` or `telegram`, joined with `+`
+for several (`rw+app`, `rw+relay+app+peer`). The environment is the only place these are added or
+removed: the hub mirrors it into the registry at start-up, revokes entries no longer listed, and
+`client revoke` refuses them. Tokens are at least 24 characters and unique. A list that does not
+parse stops the hub from starting. With no clients at all the hub starts and says so; nobody can
+connect until one is added.
 
 ## Relay line and Helm tools
 
-Helm connects to `ws://<hub>/relay` with its `relay` token (both are set in Helm's Settings →
-Hub, which also shows whether the line is up); a newer line replaces an older one. The
-frames are listed in `src/relay.rs`. A client with `+app` sees six Helm tools: `app_list_chats`,
+Helm connects to `ws://<hub>/relay` with its machine's token (set in Helm's Settings → Hub, which
+also shows whether the line is up). Each machine has its own line: a newer connection from the
+*same* machine replaces its older one, and different machines coexist. The frames are listed in
+`src/relay.rs`; the `welcome` frame says which person and machine the line is, and a Helm sends a
+`sharing` frame first on every line. New frames go in that table and in `Line::receive`; the
+lines of all machines are kept by `src/lines.rs`. A client with the `app` scope sees six Helm tools: `app_list_chats`,
 `app_read_chat`, `app_list_projects`, `app_list_attention`, `app_send_message` and
-`app_stop_chat`. The hub never forwards any other name, and Helm checks every call again on the PC
+`app_stop_chat`, each with an optional `machine` argument (the hub removes it before forwarding).
+A call goes only down a line of the caller's *own person*: the named machine's, or with no name
+the person's most recently active one. It can never reach another person's Helm. The hub never
+forwards any other name, and Helm checks every call again on the PC
 (its outside-caller deny-list and argument refusals, `host/crates/relay/src/gate.rs`). A message
 sent this way reaches the chat framed as sent by another agent, never as the user and never as
 approval.
 
-- **Line down:** the call answers "Helm offline, nothing sent or changed." and nothing is sent.
+- **Line down (or the person has no machine online):** the call answers "Helm offline, nothing
+  sent or changed." and nothing is sent.
 - **Line drops mid-call, or no answer in 60 s:** "may or may not have run; check the current state
   before trying again".
+
+## The household view
+
+Chats stay on the machine that runs them; the hub only passes questions. A Helm sends a `peer`
+frame on its line and gets a `peer_result` back (`src/peer.rs` has the rules):
+
+| `op` | args | answer |
+|---|---|---|
+| `people` | none | `{people: [{id, name, you, machines: [{id, name, online, lastSeen, sharing}]}]}` for everyone |
+| `list_chats` | `personId`, `machineId?`, `limit?`, `offset?` | the other Helm's own answer |
+| `read_chat` | `personId`, `machineId?`, `chatId`, `beforeMessageId?`, `limit?` | likewise |
+| `send_message` | `personId`, `machineId?`, `chatId`, `message` | likewise |
+
+The hub turns the last three into a `peer_call` frame on the target machine's line (`person` is the
+asker's display name) and relays that Helm's ordinary `result` as `peer_result`. With no
+`machineId` it uses the person's most recently active machine that allows the op.
+
+Each Helm says what the household may do with its chats in `sharing` frames (`chats`,
+`transcripts`, `messages`; all off until sent, and reset when the line drops). The hub enforces
+them for other people's machines: `list_chats` needs `chats`, `read_chat` needs `chats` and
+`transcripts`, `send_message` needs `transcripts` and `messages`. A person's own other machines need
+no switch. A refusal is always a plain sentence (`ok: false, error`), never silence; the asker's
+token needs the `peer` scope; an offline machine says it is offline. Nothing is stored on the hub.
 
 ## Telegram bot
 
 | Variable | |
 |---|---|
 | `HUB_TELEGRAM_BOT_TOKEN` | The bot's token from BotFather. Without it the bot is off |
-| `HUB_TELEGRAM_ALLOWED_USERS` | Comma-separated numeric Telegram user ids. Empty: the bot is off (it denies everyone) |
+| `HUB_TELEGRAM_ALLOWED_USERS` | Comma-separated numeric Telegram user ids, each optionally followed by `:person` (`123456:Sam`). A person's messages go to that person's Helm and the replies, status and approval buttons go back to that Telegram user only; an id with no person belongs to `HUB_LEGACY_PERSON`. Empty: the bot is off (it denies everyone) |
 | `HUB_TELEGRAM_API` | Bot API base, default the public API (tests point it at `fakes/telegram`) |
 | `HUB_TELEGRAM_QUEUE_MINUTES` | How long a message waits while Helm is offline (default 120) |
 | `HUB_TELEGRAM_QUEUE_MAX` | How many messages wait (default 50) |
@@ -78,6 +168,9 @@ about 67 MB as base64) and ignores the `files` list, so files would be lost or s
 `HUB_TELEGRAM_STT_TIMEOUT_MINUTES` is new and optional; nothing else in the env file changes.
 
 - A sender not on the allow-list gets nothing: no forward and no reply.
+- With several machines, a person's message goes to their most recently active connected line (it
+  attached, or handled a Telegram frame, last). Each person has their own queue, status message and
+  asks.
 - While Helm is offline a message is queued in order and the sender is told at once. On reconnect
   the queue is delivered, each message carrying its age so Helm marks it "sent N min ago". An
   expired message is dropped and the user is told how many. `/cancel` drops the queue; `/stop`
@@ -171,8 +264,9 @@ Update or an array of them: 400. The endpoint exists in both modes.
 ## Commands
 
 ```
-helm-hub serve                       # HUB_DB, HUB_BIND, HUB_TOKENS, HUB_ALLOW_MUTATE, HUB_TELEGRAM_*
+helm-hub serve                       # HUB_DB, HUB_BIND, HUB_TOKENS, HUB_LEGACY_PERSON, HUB_ALLOW_MUTATE, HUB_TELEGRAM_*
 helm-hub import <dir> --source S [--prune]   # S: the source tag the imported memories carry (required)
+helm-hub person|client|pair ...      # people, machines and pairing codes (see above)
 ```
 
 `import` reads the `*.md` files of a folder and its subfolders (hidden folders such as `.git` are left out). Frontmatter `name`,
@@ -183,7 +277,7 @@ files are updated in place, and a changed body drops that memory's stored vector
 described the old text. `MEMORY.md` and `README.md` are index files and are skipped. Two files
 claiming one name are reported as failures rather than overwriting each other. Imported memories
 are tagged `imported`, the source tag, and their type, and carry the file's path below the folder
-as their source (`<tag>:sub/a.md`).
+as their source (`<tag>:sub/a.md`). They are private to `HUB_LEGACY_PERSON`.
 
 `--source` is required, so a re-import cannot re-tag memories under another source by accident; keep
 using the same tag for the same folder. `--prune` then removes the memories of that source (and
@@ -207,6 +301,7 @@ the container: `docker exec helm-hub helm-hub import /mnt/memory --source my-mem
 
 ## Budget
 
-One-thread runtime, one SQLite connection, a 2 MB page cache. A release build idles at about 7 MB
+One-thread runtime, two SQLite connections (memories, and the registry that token checks read), a
+2 MB page cache. A release build idles at about 7 MB
 of working set with ~340 memories loaded (measured on Windows). Vector search is a brute-force
 scan, which is fine below roughly 50k rows.

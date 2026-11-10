@@ -4,16 +4,17 @@
 
 use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderMap, Request, StatusCode};
-use helm_hub::auth::Tokens;
+use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
+use helm_hub::registry::Registry;
 use helm_hub::relay::{Line, Upstream, OFFLINE};
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
 use helm_hub::telegram::{
     now_ms, parse_allowed, parse_receive, size_text, ApiError, ApiFuture, Bridge, Files, Handled,
-    HttpFiles, HttpVoice, Receive, SttConfig, TelegramApi, TelegramConfig, Voice, VoiceFuture,
-    FILES_OFF, HELLO, IMAGE_FAILED, POLL_SECONDS, QUEUED, STT_DOWN, STT_DOWN_AFTER, TAP_OFFLINE,
-    TAP_SENT, TAP_STALE, TEXT_ONLY, VOICE_OFF,
+    HttpFiles, HttpVoice, Receive, SttConfig, Telegram, TelegramApi, TelegramConfig, Voice,
+    VoiceFuture, FILES_OFF, HELLO, IMAGE_FAILED, POLL_SECONDS, QUEUED, STT_DOWN, STT_DOWN_AFTER,
+    TAP_OFFLINE, TAP_SENT, TAP_STALE, TEXT_ONLY, VOICE_OFF,
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
@@ -167,6 +168,7 @@ fn cfg() -> TelegramConfig {
     TelegramConfig {
         token: Some("t".into()),
         allowed: vec![OWNER],
+        people: vec![],
         api_base: "http://fake".into(),
         queue_lifetime: Duration::from_secs(30 * 60),
         queue_max: 3,
@@ -305,19 +307,21 @@ fn frames(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<Value> {
 /// The hub's routes over this bridge (or with the bot off), with a memory token, Helm's line
 /// token and a forwarder's telegram token.
 fn hub(e: &Env, bot_on: bool) -> axum::Router {
-    let tokens = Tokens::parse(&format!(
-        "helm:{RW}, helm-line:{LINE}:relay, forwarder:{FORWARDER}:telegram"
-    ))
+    let registry = Registry::from_legacy_spec(
+        &format!("helm:{RW}, helm-line:{LINE}:relay, forwarder:{FORWARDER}:telegram"),
+        "owner",
+    )
     .unwrap();
-    router(Arc::new(AppState {
-        store: Mutex::new(Store::open_in_memory().unwrap()),
-        tokens,
-        options: Options {
+    let registry = Arc::new(Mutex::new(registry));
+    router(Arc::new(AppState::new(
+        Store::open_in_memory().unwrap(),
+        registry.clone(),
+        Options {
             allow_mutate: false,
         },
-        line: e.line.clone(),
-        telegram: bot_on.then(|| e.bridge.clone()),
-    }))
+        Arc::new(Lines::new(registry).0),
+        bot_on.then(|| Arc::new(Telegram::single(e.bridge.clone()))),
+    )))
 }
 
 async fn post_update(app: &axum::Router, token: Option<&str>, body: String) -> (StatusCode, Value) {

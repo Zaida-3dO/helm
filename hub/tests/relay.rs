@@ -2,8 +2,9 @@
 //! offline answer when it is down (trust-boundary items b, d and f).
 
 use futures_util::{SinkExt, StreamExt};
-use helm_hub::auth::Tokens;
+use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
+use helm_hub::registry::Registry;
 use helm_hub::relay::{Line, OFFLINE};
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
@@ -18,34 +19,41 @@ const REMOTE: &str = "remote-token-0123456789abcdefghi";
 const MEMORY_ONLY: &str = "memory-token-0123456789abcdefgh";
 const FORWARDER: &str = "forwarder-token-0123456789abcdef";
 
+/// The person who owns every client the legacy token list makes (the first person made).
+const OWNER: i64 = 1;
+
 struct Hub {
     addr: String,
-    line: Arc<Line>,
+    lines: Arc<Lines>,
 }
 
 async fn start() -> Hub {
-    let tokens = Tokens::parse(&format!(
-        "helm-line:{LINE}:relay, remote:{REMOTE}:ro+app, notes:{MEMORY_ONLY}:rw, \
-         forwarder:{FORWARDER}:telegram"
-    ))
+    let registry = Registry::from_legacy_spec(
+        &format!(
+            "helm-line:{LINE}:relay, remote:{REMOTE}:ro+app, notes:{MEMORY_ONLY}:rw, \
+             forwarder:{FORWARDER}:telegram"
+        ),
+        "owner",
+    )
     .unwrap();
-    let (line, _upstream) = Line::new();
-    let line = Arc::new(line);
-    let app = router(Arc::new(AppState {
-        store: Mutex::new(Store::open_in_memory().unwrap()),
-        tokens,
-        options: Options {
+    let registry = Arc::new(Mutex::new(registry));
+    let (lines, _upstream) = Lines::new(registry.clone());
+    let lines = Arc::new(lines);
+    let app = router(Arc::new(AppState::new(
+        Store::open_in_memory().unwrap(),
+        registry,
+        Options {
             allow_mutate: false,
         },
-        line: line.clone(),
-        telegram: None,
-    }));
+        lines.clone(),
+        None,
+    )));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    Hub { addr, line }
+    Hub { addr, lines }
 }
 
 type Ws =
@@ -106,7 +114,7 @@ fn call(tool: &str, args: Value) -> Value {
 
 async fn wait_up(hub: &Hub, up: bool) {
     for _ in 0..100 {
-        if hub.line.is_up() == up {
+        if hub.lines.best_up(OWNER).is_some() == up {
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -170,7 +178,7 @@ async fn app_tools_are_listed_only_for_app_clients() {
     wait_up(&hub, true).await;
     let addr = Hub {
         addr: hub.addr.clone(),
-        line: hub.line.clone(),
+        lines: hub.lines.clone(),
     };
     let caller =
         tokio::spawn(
@@ -212,7 +220,7 @@ async fn a_forwarded_call_goes_down_the_line_and_its_answer_comes_back() {
     wait_up(&hub, true).await;
     let addr = Hub {
         addr: hub.addr.clone(),
-        line: hub.line.clone(),
+        lines: hub.lines.clone(),
     };
     let caller = tokio::spawn(async move {
         mcp(
@@ -270,7 +278,7 @@ async fn a_line_that_drops_mid_call_answers_may_or_may_not_have_run() {
     wait_up(&hub, true).await;
     let addr = Hub {
         addr: hub.addr.clone(),
-        line: hub.line.clone(),
+        lines: hub.lines.clone(),
     };
     let caller = tokio::spawn(async move {
         mcp(

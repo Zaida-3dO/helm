@@ -2,8 +2,9 @@
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use helm_hub::auth::Tokens;
+use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
+use helm_hub::registry::Registry;
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
 use http_body_util::BodyExt;
@@ -15,14 +16,16 @@ const RW: &str = "rw-token-0123456789abcdefghij";
 const RO: &str = "ro-token-0123456789abcdefghij";
 
 fn app(allow_mutate: bool) -> axum::Router {
-    let tokens = Tokens::parse(&format!("helm:{RW},remote:{RO}:ro")).unwrap();
-    router(Arc::new(AppState {
-        store: Mutex::new(Store::open_in_memory().unwrap()),
-        tokens,
-        options: Options { allow_mutate },
-        line: Arc::new(helm_hub::relay::Line::new().0),
-        telegram: None,
-    }))
+    let registry =
+        Registry::from_legacy_spec(&format!("helm:{RW},remote:{RO}:ro"), "owner").unwrap();
+    let registry = Arc::new(Mutex::new(registry));
+    router(Arc::new(AppState::new(
+        Store::open_in_memory().unwrap(),
+        registry.clone(),
+        Options { allow_mutate },
+        Arc::new(Lines::new(registry).0),
+        None,
+    )))
 }
 
 async fn post(app: &axum::Router, token: Option<&str>, body: Value) -> (StatusCode, Value) {

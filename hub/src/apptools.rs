@@ -3,7 +3,10 @@
 //! The hub keeps its own fixed list: a name not on it is never forwarded,
 //! whatever Helm would accept. Helm checks every call again on the PC (its
 //! external-caller deny-list and argument refusals), so this list is the outer
-//! wall, not the only one. Only clients whose token carries `+app` see these.
+//! wall, not the only one. Only clients whose token carries the `app` scope see these, and a call
+//! only ever goes down a line of the caller's own person (see `server.rs`): the most recently
+//! active one, or the machine named by the optional `machine` argument, which is removed before
+//! the call is forwarded.
 
 use crate::relay::{CallOutcome, Line, OFFLINE};
 use serde_json::{json, Value};
@@ -18,11 +21,17 @@ pub const FORWARDED: &[&str] = &[
     "app_stop_chat",
 ];
 
-const NOTE: &str = " Runs in Helm on the user's PC through the hub. When Helm is offline the \
-    call answers that nothing was sent or changed.";
+const NOTE: &str = " Runs in Helm on one of the caller's own computers through the hub. When Helm \
+    is offline the call answers that nothing was sent or changed.";
 
 pub fn tool_list() -> Vec<Value> {
-    let obj = |props: Value, required: &[&str]| json!({ "type": "object", "properties": props, "required": required });
+    let obj = |mut props: Value, required: &[&str]| {
+        props["machine"] = json!({
+            "type": "string",
+            "description": "Which of your computers; default the one used most recently."
+        });
+        json!({ "type": "object", "properties": props, "required": required })
+    };
     let chat_id = json!({ "type": "string", "description": "A Helm chat id from app_list_chats." });
     vec![
         json!({
@@ -120,6 +129,11 @@ pub async fn call(line: &Line, client: &str, name: &str, args: &Value) -> Value 
         CallOutcome::Offline => error(OFFLINE.to_owned()),
         CallOutcome::Unknown(text) => error(text),
     }
+}
+
+/// The answer when the caller has no connected machine to run the call on.
+pub fn offline_result() -> Value {
+    error(OFFLINE.to_owned())
 }
 
 fn error(text: String) -> Value {
