@@ -506,6 +506,7 @@ mod host_tool_tests {
             "app_workflow_report",
             "app_telegram_ask",
             "app_telegram_send",
+            "app_voice_show",
             "app_wait_for",
             "app_background_result",
             "app_usage_summary",

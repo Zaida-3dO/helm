@@ -19,6 +19,7 @@ pub const TRAY_ID: &str = "helm";
 pub struct TappedEvents {
     inner: Arc<dyn EventSink>,
     shell: OnceLock<Arc<ShellService>>,
+    voice: OnceLock<Arc<helm_relay::voice_watch::VoiceWatch>>,
 }
 
 impl TappedEvents {
@@ -26,11 +27,17 @@ impl TappedEvents {
         Self {
             inner,
             shell: OnceLock::new(),
+            voice: OnceLock::new(),
         }
     }
 
     pub fn attach(&self, shell: Arc<ShellService>) {
         let _ = self.shell.set(shell);
+    }
+
+    /// The voice chat's watch also sees attention, finished replies and busy chats.
+    pub fn attach_voice(&self, watch: Arc<helm_relay::voice_watch::VoiceWatch>) {
+        let _ = self.voice.set(watch);
     }
 }
 
@@ -40,6 +47,9 @@ impl EventSink for TappedEvents {
             if matches!(event.kind.as_str(), "attention" | "completion") {
                 s.observe(&event);
             }
+        }
+        if let Some(v) = self.voice.get() {
+            v.observe(&event);
         }
         self.inner.emit(event);
     }

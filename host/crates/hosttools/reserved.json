@@ -63,6 +63,7 @@
     "app_update_schedule",
     "app_update_settings",
     "app_usage_summary",
+    "app_voice_show",
     "app_wait_for",
     "app_web_search",
     "app_workflow",

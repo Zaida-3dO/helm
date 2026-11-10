@@ -149,7 +149,7 @@ impl Away {
     }
 }
 
-fn title_of(db: &Database, chat: &str) -> Option<String> {
+pub(crate) fn title_of(db: &Database, chat: &str) -> Option<String> {
     db.snapshot(|tx| {
         tx.query_row("SELECT title FROM chats WHERE id = ?1", [chat], |r| {
             r.get::<_, Option<String>>(0)

@@ -17,6 +17,8 @@
 //! | [`voice`] | the voice chat: its tag and limits, the notes it is given, and the replies sent up for the phone |
 //! | [`voice_sink`] | voice turns into the voice chat, and the working line and answers mirrored back |
 //! | [`speakable`] | an answer cleaned, split and cut so it is good to hear |
+//! | [`voice_watch`] | the voice chat watching the other chats: attention notes, coalesced and rate-limited, and telling the sink when the chat wakes |
+//! | [`voice_show`] | the `app_voice_show` tool: pictures, tables, lists, links, text and files queued for the phone's screen |
 //! | [`pair`] | pairing with the hub by a one-time code: token, names, the shared-memory server and the home profile in one step |
 //! | [`household`] | other people's Helms through the hub: the three sharing switches, serving their calls, and asking theirs |
 //!
@@ -73,6 +75,8 @@ pub mod speakable;
 pub mod telegram;
 pub mod voice;
 pub mod voice_sink;
+pub mod voice_show;
+pub mod voice_watch;
 
 pub use agent_settings::settings_extension;
 
@@ -131,7 +135,9 @@ pub fn register_services(services: &mut Services, _events: &Arc<dyn EventSink>) 
         client.restore_sharing(household::load(&db));
     }
     services.insert(sink);
+    services.insert(voice.shown());
     services.insert(voice);
+    services.insert(Arc::new(voice_watch::VoiceWatch::default()));
     services.insert(client.handle());
     services.insert(executor);
     services.insert(client);
@@ -161,11 +167,19 @@ pub fn start(handle: &tokio::runtime::Handle, ctx: &OpCtx, tools: Arc<helm_hostt
     ) {
         notify::watch_away(handle, (*rt).clone(), afk, line, sink, profile.dir.clone());
     }
+    if let (Some(watch), Some(voice)) = (
+        ctx.services.get::<voice_watch::VoiceWatch>(),
+        ctx.services.get::<voice_sink::ChatVoice>(),
+    ) {
+        voice_watch::start(handle, &watch, voice);
+    }
 }
 
-/// This crate's host tool: `app_telegram_send` ([`notify`]).
+/// This crate's host tools: `app_telegram_send` and `app_telegram_ask` ([`notify`]) and
+/// `app_voice_show` ([`voice_show`]).
 pub fn register_host_tools(r: &mut helm_hosttools::HostToolRegistry) {
     notify::register_host_tools(r);
+    voice_show::register_host_tools(r);
 }
 
 /// Give the Telegram sink the op dispatcher: it creates the Telegram chat, stops it on `/stop`

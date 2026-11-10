@@ -1126,7 +1126,10 @@ fn the_voice_mirror_gives_a_working_line_then_one_answer_and_keeps_an_unsent_one
     );
     assert_eq!(
         r.sentences,
-        ["Helm has not started that yet.", "It is saved in the voice chat."]
+        [
+            "Helm has not started that yet.",
+            "It is saved in the voice chat."
+        ]
     );
     let chat = vs::Live {
         mode: voice::Mode::Chat,
@@ -1238,9 +1241,13 @@ async fn voice_turns_enter_one_chat_with_origin_voice_a_primer_once_and_a_new_ch
         "UPDATE chats SET status = 'running' WHERE id = ?1",
         &[&chat],
     );
-    let running = vplace(&c, vturn("t1", "Synthetic question one.", "conversation"), t0 + 1)
-        .await
-        .unwrap();
+    let running = vplace(
+        &c,
+        vturn("t1", "Synthetic question one.", "conversation"),
+        t0 + 1,
+    )
+    .await
+    .unwrap();
     assert_eq!(vchat(&running), (chat.clone(), conversation.clone()));
     set_idle(&e, &chat);
     assert_eq!(
@@ -1389,4 +1396,392 @@ async fn the_voice_sink_delivers_only_once_wired_and_stop_presence_and_fresh_act
         (view.model.as_str(), view.idle_minutes),
         ("claude-sonnet-5-5", 240)
     );
+}
+
+// ------------------------------------------------------------------ whose answer, and what to show
+
+use crate::voice_show::{Attachment, Kind, Shown};
+use crate::voice_watch;
+use helm_chats::types::{AttentionKind, AttentionRow, AttentionSummary, SubmissionOrigin};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+fn starter(origin: SubmissionOrigin, text: &str) -> vs::Starter {
+    vs::Starter {
+        origin,
+        text: text.into(),
+    }
+}
+
+#[test]
+fn an_answer_goes_where_the_message_that_began_the_exchange_says() {
+    use vs::Route::{Phone, Silent};
+    use SubmissionOrigin::{App, OtherChat, Typed, Voice};
+    let titles = |id: &str| (id == "c-build").then(|| "Build".to_owned());
+    let news = |about: Option<&str>| vs::Route::News {
+        about: about.map(str::to_owned),
+    };
+    let wait_build = "[Wait finished] Wait w1 on chat c-build: chat idle.\nThis message is from Helm's wait watcher.";
+    let wait_file = "[Wait finished] Wait w2 on file C:/w/out.txt: file changed.\nDetail: x";
+    let wait_gone = "[Wait finished] Wait w3 on chat c-gone: chat idle.";
+    let other = "[Message from another chat: \"Docs: \"v2\" notes\" (c-docs)]\nSent by another Helm chat.\n\nIt passed.";
+    let one = "[Attention] Build: Waiting for an approval\n(This came from Helm's watcher.)";
+    let two = "[Attention] Build: Waiting\n[Attention] Docs: Looks unfinished\n(This came from Helm's watcher.)";
+    // (the messages of the exchange, who it is for while none are in the transcript, the route)
+    let rows: Vec<(Vec<vs::Starter>, vs::Route, vs::Route)> = vec![
+        (vec![], Phone, Phone),
+        (vec![], Silent, Silent),
+        (vec![], news(None), news(None)),
+        (vec![starter(Voice, "hello")], Silent, Phone),
+        (vec![starter(Typed, "hi")], Phone, Silent),
+        (vec![starter(App, wait_build)], Silent, news(Some("Build"))),
+        (vec![starter(App, wait_file)], Silent, news(None)),
+        (vec![starter(App, wait_gone)], Silent, news(None)),
+        (
+            vec![starter(OtherChat, other)],
+            Silent,
+            news(Some("Docs: \"v2\" notes")),
+        ),
+        (vec![starter(App, one)], Silent, news(Some("Build"))),
+        (vec![starter(App, two)], Silent, news(None)),
+        // The app's other notes to itself, and typed words that only look like news, are not news.
+        (
+            vec![starter(
+                App,
+                "[Helm] Your last reply did not reach the phone.",
+            )],
+            Phone,
+            Silent,
+        ),
+        (vec![starter(Typed, wait_build)], Phone, Silent),
+        // The phone wins over everything; otherwise the latest news names the chat.
+        (
+            vec![starter(App, wait_build), starter(Voice, "hello")],
+            Silent,
+            Phone,
+        ),
+        (
+            vec![starter(Typed, "hi"), starter(App, wait_build)],
+            Silent,
+            news(Some("Build")),
+        ),
+        (
+            vec![starter(App, wait_build), starter(OtherChat, other)],
+            Silent,
+            news(Some("Docs: \"v2\" notes")),
+        ),
+    ];
+    for (i, (began, fallback, want)) in rows.into_iter().enumerate() {
+        assert_eq!(vs::route_of(&began, &fallback, &titles), want, "row {i}");
+    }
+
+    // What becomes of an answer: news says nothing when the chat says `[quiet]` or has nothing to
+    // say, but a prompt only Helm's window can answer is still worth telling.
+    let answer = |t: &str| vs::What::Answer(t.into());
+    let build = news(Some("Build"));
+    let told = Some("Build".to_owned());
+    let rows: Vec<(vs::Route, vs::What, vs::Delivery)> = vec![
+        (Phone, answer("Hi."), vs::Delivery::Phone),
+        (Phone, vs::What::Nothing, vs::Delivery::Phone),
+        (Silent, answer("Hi."), vs::Delivery::Skip),
+        (Silent, vs::What::Waiting, vs::Delivery::Skip),
+        (
+            build.clone(),
+            answer("It passed."),
+            vs::Delivery::News(told.clone()),
+        ),
+        (build.clone(), answer(" [Quiet]\n"), vs::Delivery::Skip),
+        (build.clone(), answer("[ QUIET ]"), vs::Delivery::Skip),
+        (
+            build,
+            answer("[quiet] but not only"),
+            vs::Delivery::News(told),
+        ),
+        (news(None), vs::What::Waiting, vs::Delivery::News(None)),
+        (news(None), vs::What::Nothing, vs::Delivery::Skip),
+        (news(None), vs::What::NotStarted, vs::Delivery::Skip),
+    ];
+    for (i, (route, what, want)) in rows.into_iter().enumerate() {
+        let owed = vs::Owed::unrowed("r", what);
+        assert_eq!(vs::decide(&route, &owed), want, "row {i}");
+    }
+}
+
+/// A line that records what goes up, and can be down.
+#[derive(Default)]
+struct Wire {
+    sent: Mutex<Vec<Value>>,
+    up: AtomicBool,
+}
+
+impl vs::VoiceUpstream for Wire {
+    fn status(&self, turn: &str, text: &str) {
+        self.sent
+            .lock()
+            .unwrap()
+            .push(json!({ "status": text, "turn": turn }));
+    }
+    fn reply(&self, reply: &voice::Reply) -> bool {
+        let up = self.up.load(AtomicOrdering::SeqCst);
+        if up {
+            self.sent.lock().unwrap().push(reply.frame());
+        }
+        up
+    }
+    fn attachment(&self, frame: &Value) -> bool {
+        let up = self.up.load(AtomicOrdering::SeqCst);
+        if up {
+            self.sent.lock().unwrap().push(frame.clone());
+        }
+        up
+    }
+}
+
+#[test]
+fn things_to_show_go_up_before_the_answer_and_stay_claimed_until_it_is_sent() {
+    use vs::Route::{Phone, Silent};
+    let wire = Arc::new(Wire::default());
+    let shown = Arc::new(Shown::default());
+    let item = |t: &str| Attachment {
+        kind: Kind::Link,
+        title: t.into(),
+        media_type: None,
+        data: None,
+        markdown: None,
+        url: Some("https://example.com".into()),
+    };
+    let mut out = vs::Outbox::new(wire.clone(), shown.clone(), "chat1".into());
+    let live = vs::Live {
+        turn: Some("t1".into()),
+        conversation: "c1".into(),
+        ..Default::default()
+    };
+    let sent = || wire.sent.lock().unwrap().clone();
+    let kinds = |v: &[Value]| -> Vec<String> {
+        v.iter()
+            .map(|f| f["type"].as_str().unwrap_or("status").to_owned())
+            .collect()
+    };
+    shown.add("chat1", item("one")).unwrap();
+    shown.add("chat1", item("two")).unwrap();
+    shown.add("other", item("elsewhere")).unwrap();
+
+    // The line is down: nothing goes, the answer stays owed and its things stay claimed, so one
+    // queued meanwhile belongs to the next answer.
+    let owed = vs::Owed::unrowed("r1", vs::What::Answer("Here it is.".into()));
+    assert!(!out.send(&Phone, &live, None, &owed, 5));
+    assert!(sent().is_empty());
+    shown.add("chat1", item("late")).unwrap();
+    wire.up.store(true, AtomicOrdering::SeqCst);
+    assert!(out.send(&Phone, &live, None, &owed, 6));
+    let got = sent();
+    assert_eq!(
+        kinds(&got),
+        ["voice_attachment", "voice_attachment", "voice_final"]
+    );
+    assert_eq!(
+        (
+            got[0]["reply"].as_str(),
+            got[0]["n"].as_i64(),
+            got[0]["title"].as_str()
+        ),
+        (Some("r1"), Some(1), Some("one"))
+    );
+    assert_eq!(
+        (got[1]["n"].as_i64(), got[1]["title"].as_str()),
+        (Some(2), Some("two"))
+    );
+    assert_eq!(
+        (
+            got[2]["id"].as_str(),
+            got[2]["turn"].as_str(),
+            got[2]["attachments"].as_i64()
+        ),
+        (Some("r1"), Some("t1"), Some(2))
+    );
+
+    // The next answer takes what was queued since; another chat's queue is not touched.
+    let next = vs::Owed::unrowed("r2", vs::What::Answer("Next.".into()));
+    assert!(out.send(&Phone, &live, None, &next, 7));
+    let got = sent();
+    assert_eq!(kinds(&got[3..]), ["voice_attachment", "voice_final"]);
+    assert_eq!(
+        (got[3]["title"].as_str(), got[3]["reply"].as_str()),
+        (Some("late"), Some("r2"))
+    );
+    assert_eq!(got[4]["attachments"].as_i64(), Some(1));
+    assert_eq!(shown.count("other"), 1);
+
+    // An answer that is not going up empties the queue and sends nothing.
+    shown.add("chat1", item("never")).unwrap();
+    assert!(out.send(&Silent, &live, None, &next, 8));
+    assert_eq!((shown.count("chat1"), sent().len()), (0, 5));
+
+    // News: no turn, the mode the phone's screen is in, the chat's own conversation, and the chat
+    // it is about. `[quiet]` says nothing.
+    let screen = vs::Live {
+        presence_mode: voice::Mode::Chat,
+        conversation: "old".into(),
+        ..live.clone()
+    };
+    let route = vs::Route::News {
+        about: Some("Build".into()),
+    };
+    let news = vs::Owed::unrowed("r3", vs::What::Answer("It passed.".into()));
+    assert!(out.send(&route, &screen, Some("c2"), &news, 9));
+    let f = sent().pop().unwrap();
+    assert_eq!(f["type"], "voice_notify");
+    assert_eq!(
+        (
+            f["turn"].clone(),
+            f["mode"].as_str(),
+            f["conversation"].as_str(),
+            f["text"].as_str()
+        ),
+        (Value::Null, Some("chat"), Some("c2"), Some("It passed."))
+    );
+    assert_eq!(f["about"], json!({ "chat": "Build" }));
+    let quiet = vs::Owed::unrowed("r4", vs::What::Answer("[quiet]".into()));
+    assert!(out.send(&route, &screen, Some("c2"), &quiet, 10));
+    assert_eq!(sent().len(), 6);
+
+    // The working line is the phone's own turn's alone.
+    out.status(&Phone, &live, "Thinking");
+    out.status(&route, &live, "Thinking");
+    out.status(&Phone, &vs::Live::default(), "Thinking");
+    assert_eq!(sent().len(), 7);
+    assert_eq!(sent()[6], json!({ "status": "Thinking", "turn": "t1" }));
+}
+
+fn a_note(chat: &str) -> voice_watch::Note {
+    let empty = AttentionSummary {
+        badge: 0,
+        busy: 0,
+        needs_you: vec![],
+        running: vec![],
+        unread: vec![],
+        stalled: vec![],
+        flagged: vec![],
+        revision: 1,
+    };
+    let mut full = empty.clone();
+    full.revision = 2;
+    full.needs_you.push(AttentionRow {
+        chat_id: chat.into(),
+        title: "Build".into(),
+        project: "p".into(),
+        kind: AttentionKind::Approval,
+        reason: "Waiting for an approval".into(),
+    });
+    let mut w = voice_watch::Watch::default();
+    w.summary(&empty, Some("v"), 0);
+    w.summary(&full, Some("v"), 1);
+    w.due(1 + voice_watch::COALESCE_MS).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notes_enter_the_voice_chat_as_the_apps_words_and_the_rows_say_what_began_a_turn() {
+    let e = env();
+    let prof = e.dir.path().join("prof");
+    let v = wired_voice(&e);
+    v.attach_ops(e.ops.clone());
+    v.attach_line(Arc::new(Rec));
+    let note = a_note("c-build");
+    let now = helm_core::now_ms();
+
+    // No voice chat yet: nobody to tell.
+    assert_eq!(v.deliver_note(&note, now).await, vs::Noted::Skipped);
+    assert_eq!(v.active_chat(now).await, None);
+    assert_eq!(v.watch_level(), voice::WatchLevel::Flags);
+
+    // The phone's first turn starts the chat and the tag.
+    v.deliver(vturn("t1", "Synthetic question one.", "conversation"))
+        .await
+        .unwrap();
+    let tag = voice::load_tag(&voice::tag_path(&prof)).unwrap();
+    let chat = tag.chat_id.clone();
+    assert!(v.is_voice_chat(&chat) && !v.is_voice_chat("c-other"));
+    set_idle(&e, &chat);
+    assert_eq!(v.active_chat(now).await.as_deref(), Some(chat.as_str()));
+    // Idle for longer than the limit, nobody is told.
+    let later = now + 5 * 3_600_000;
+    assert_eq!(v.active_chat(later).await, None);
+    assert_eq!(v.deliver_note(&note, later).await, vs::Noted::Skipped);
+
+    // The note goes in as the app's message, once however often it is delivered, and the phone's
+    // idle time does not move.
+    assert_eq!(v.deliver_note(&note, now).await, vs::Noted::Sent);
+    let _ = v.deliver_note(&note, now).await;
+    let s = subs(&e.db, &chat);
+    assert_eq!(s.len(), 2);
+    let n = s
+        .iter()
+        .find(|r| r.0 == voice::submission_id(&note.key))
+        .unwrap();
+    assert_eq!(n.1, "app");
+    assert!(
+        n.4.starts_with("[Attention] Build: Waiting for an approval"),
+        "{}",
+        n.4
+    );
+    assert_eq!(
+        voice::load_tag(&voice::tag_path(&prof))
+            .unwrap()
+            .last_turn_at,
+        tag.last_turn_at
+    );
+
+    // The transcript's user rows say how each message entered, in order, after any row.
+    for (sid, text) in [
+        (voice::submission_id("t1"), "asked"),
+        (voice::submission_id(&note.key), "noted"),
+    ] {
+        sql(
+            &e.db,
+            "INSERT INTO messages(chat_id, source_key, role, text, timestamp)
+             VALUES (?1, ?2, 'user', ?3, 1)",
+            &[&chat, &format!("u:{sid}"), &text],
+        );
+        if text == "asked" {
+            assert_eq!(
+                vs::starters(&e.db, &chat, 0),
+                vec![starter(SubmissionOrigin::Voice, "asked")]
+            );
+        }
+    }
+    let all = vs::starters(&e.db, &chat, 0);
+    assert_eq!(
+        all.iter()
+            .map(|s| (s.origin, s.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (SubmissionOrigin::Voice, "asked"),
+            (SubmissionOrigin::App, "noted")
+        ]
+    );
+    assert_eq!(vs::starters(&e.db, &chat, max_row(&e.db, &chat)), vec![]);
+
+    // A turn that starts after the last answer began an exchange nobody on the phone waits on.
+    assert_eq!(vs::last_answer_row(&e.db, &chat), 0);
+    for (key, reason) in [
+        ("a:1", "tool_use"),
+        ("a:2", "end_turn"),
+        ("a:3", "tool_use"),
+    ] {
+        sql(
+            &e.db,
+            "INSERT INTO messages(chat_id, source_key, role, text, timestamp, details)
+             VALUES (?1, ?2, 'assistant', 'x', 1, ?3)",
+            &[&chat, &key, &format!("{{\"stopReason\":\"{reason}\"}}")],
+        );
+    }
+    let ended: i64 =
+        e.db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT id FROM messages WHERE chat_id = ?1 AND source_key = 'a:2'",
+                [&chat],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(vs::last_answer_row(&e.db, &chat), ended);
 }

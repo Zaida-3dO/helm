@@ -323,6 +323,9 @@ fn run_app(
             if let Some(svc) = &shell_svc {
                 tapped.attach(svc.clone());
             }
+            if let Some(watch) = services.get::<helm_relay::voice_watch::VoiceWatch>() {
+                tapped.attach_voice(watch);
+            }
             let ctx = OpCtx {
                 services: Arc::new(services),
                 events,

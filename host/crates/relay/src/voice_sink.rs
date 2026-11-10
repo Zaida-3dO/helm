@@ -16,25 +16,39 @@
 //! when the turn ends: those are only ever answered in Helm's window.
 //!
 //! The mirror answers the latest turn: a turn that arrives while the chat is mid-turn is a steer,
-//! and the answer that follows is the one for it. A turn the mirror was not started for (news the
-//! chat is woken with) is not routed here yet; [`Live`] is where that will hang.
+//! and the answer that follows is the one for it.
+//!
+//! **Whose answer.** The mirror watches every turn of the voice chat, not only those the phone
+//! started, and what started a turn decides where its answer goes ([`Route`]): a turn the phone
+//! started answers as that turn's `voice_final`; a turn the chat was woken for (a declared wait
+//! that fired, a note from the attention watch, a message from another chat) goes up as
+//! `voice_notify` news, unless the chat answers exactly `[quiet]`; a turn nobody on the phone
+//! started, such as one typed in Helm's window, goes nowhere. Things the chat queued with
+//! `app_voice_show` go up just before the answer ([`Outbox`]).
+//!
+//! The event tap tells the sink whenever the voice chat becomes busy ([`ChatVoice::woken`]), so a
+//! turn the chat was woken for is mirrored like any other. [`ChatVoice::deliver_note`] puts a
+//! note from the attention watch into the chat.
 
 use crate::client::{BoxFut, LineHandle, VoiceSink, VoiceTurn};
 use crate::exec::AppExecutor;
+use crate::notify::title_of;
 use crate::sink::{chat_facts, max_row, plain_path, snapshot, RealPort, Snap, STATUS_GAP_MS};
 use crate::telegram::{cut_chars, ChatPort};
 use crate::voice::{self, Mode, Reply, TagPolicy, WatchLevel, VOICE_ORIGIN};
+use crate::voice_show::{Attachment, Shown};
+use crate::voice_watch::{Note, NOTE_PREFIX};
 use helm_chats::submit::{host_send, HostSend};
-use helm_chats::types::ChatStatus;
+use helm_chats::types::{ChatStatus, SubmissionOrigin};
 use helm_chats::ChatRuntime;
 use helm_core::db::Database;
 use helm_hosttools::OpInvoker;
 use rusqlite::OptionalExtension;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How often the mirror looks at the chat.
 const POLL: Duration = Duration::from_millis(500);
@@ -59,6 +73,10 @@ pub trait VoiceUpstream: Send + Sync {
     fn status(&self, turn: &str, text: &str);
     /// `false` when the reply was not sent (the line is down); the mirror then offers it again.
     fn reply(&self, reply: &Reply) -> bool;
+    /// One thing to show, sent just before the reply it belongs to. `false` when it was not sent.
+    fn attachment(&self, _frame: &Value) -> bool {
+        true
+    }
 }
 
 impl VoiceUpstream for LineHandle {
@@ -67,6 +85,9 @@ impl VoiceUpstream for LineHandle {
     }
     fn reply(&self, reply: &Reply) -> bool {
         self.voice_reply(reply)
+    }
+    fn attachment(&self, frame: &Value) -> bool {
+        self.voice_attachment(frame.clone())
     }
 }
 
@@ -108,6 +129,15 @@ pub struct Owed {
 }
 
 impl Owed {
+    /// An answer that answers no transcript row in particular.
+    pub fn unrowed(id: impl Into<String>, what: What) -> Self {
+        Owed {
+            id: id.into(),
+            row: None,
+            what,
+        }
+    }
+
     /// The text it is made into a reply from.
     pub fn text(&self) -> &str {
         match &self.what {
@@ -172,6 +202,12 @@ impl Mirror {
             closing: false,
             done: false,
         }
+    }
+
+    /// The transcript row after which the exchange being answered began: the baseline, or the
+    /// last answer already sent when the mirror has carried on past one.
+    pub fn route_base(&self) -> i64 {
+        self.baseline.max(self.sent_through)
     }
 
     fn owe(&mut self, row: Option<i64>, what: What, closing: bool) -> Vec<Up> {
@@ -292,37 +328,292 @@ pub fn reply_for(live: &Live, owed: &Owed, now: i64) -> Reply {
     )
 }
 
-/// Watch a chat until the turn it was started for has ended.
+/// Unprompted news, in the mode the phone's screen is in. `conversation` is the voice chat's
+/// current one when it is known, else the last the phone was told.
+pub fn news_for(
+    live: &Live,
+    conversation: Option<&str>,
+    owed: &Owed,
+    about: Option<String>,
+    now: i64,
+) -> Reply {
+    let mut r = Reply::from_text(
+        owed.id.clone(),
+        None,
+        live.presence_mode,
+        owed.text(),
+        conversation
+            .map(str::to_owned)
+            .unwrap_or_else(|| live.conversation.clone()),
+        now,
+    );
+    r.about = about;
+    r
+}
+
+// ---- whose answer ----------------------------------------------------------------------
+
+/// Who an exchange in the voice chat is for.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Route {
+    /// The phone started it: its answer is that turn's reply.
+    Phone,
+    /// Nobody asked: a declared wait finished, the attention watch noted something, or another
+    /// chat wrote to this one. What the chat says goes up as news, about that chat if one is named.
+    News { about: Option<String> },
+    /// Typed in Helm's window, or the app's own note: nothing goes up.
+    Silent,
+}
+
+/// A user message of the exchange: how it entered the chat, and what it said.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Starter {
+    pub origin: SubmissionOrigin,
+    pub text: String,
+}
+
+const WAIT_PREFIX: &str = "[Wait finished]";
+const OTHER_CHAT_PREFIX: &str = "[Message from another chat: \"";
+
+fn is_news(s: &Starter) -> bool {
+    let t = s.text.trim_start();
+    match s.origin {
+        SubmissionOrigin::OtherChat => true,
+        SubmissionOrigin::App => t.starts_with(WAIT_PREFIX) || t.starts_with(NOTE_PREFIX),
+        _ => false,
+    }
+}
+
+/// The title of the chat a piece of news is about, when it names one.
+fn about_of(text: &str, title_of: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let text = text.trim_start();
+    if let Some(rest) = text.strip_prefix(OTHER_CHAT_PREFIX) {
+        // `[Message from another chat: "<title>" (<id>)]`: the title may hold quotes itself.
+        let head = rest.lines().next().unwrap_or_default();
+        return head
+            .rsplit_once("\" (")
+            .map(|(t, _)| t.to_owned())
+            .filter(|t| !t.is_empty());
+    }
+    if let Some(rest) = text.strip_prefix(WAIT_PREFIX) {
+        // `Wait <id> on chat <chat id>: ...`; waits on a file, process or pull request name none.
+        let id = rest.split_once(" on chat ")?.1.split(':').next()?.trim();
+        return title_of(id).filter(|t| !t.trim().is_empty());
+    }
+    if text.starts_with(NOTE_PREFIX) {
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with(NOTE_PREFIX))
+            .collect();
+        if let [only] = lines.as_slice() {
+            // `[Attention] <title>: <reason>`; the note never leaves a ": " in a title.
+            let body = only[NOTE_PREFIX.len()..].trim_start();
+            return body.split_once(": ").map(|(t, _)| t.to_owned());
+        }
+    }
+    None
+}
+
+/// Who the exchange is for, from the messages that began it. A message from the phone wins over
+/// everything; otherwise the latest piece of news names what the answer is about. `fallback` is
+/// for an exchange whose messages are not in the transcript yet.
+pub fn route_of(
+    starters: &[Starter],
+    fallback: &Route,
+    title_of: &dyn Fn(&str) -> Option<String>,
+) -> Route {
+    if starters.iter().any(|s| s.origin == SubmissionOrigin::Voice) {
+        return Route::Phone;
+    }
+    match starters.iter().rev().find(|s| is_news(s)) {
+        Some(s) => Route::News {
+            about: about_of(&s.text, title_of),
+        },
+        None if starters.is_empty() => fallback.clone(),
+        None => Route::Silent,
+    }
+}
+
+/// The messages of the chat after transcript row `after`, with how each entered it (blocking).
+pub fn starters(db: &Database, chat: &str, after: i64) -> Vec<Starter> {
+    db.snapshot(|tx| {
+        let mut st = tx.prepare(
+            "SELECT COALESCE(sm.origin, 'app'), m.text FROM messages m
+             JOIN submissions s ON m.source_key = 'u:' || s.id AND s.chat_id = m.chat_id
+             LEFT JOIN submission_meta sm ON sm.submission_id = s.id
+             WHERE m.chat_id = ?1 AND m.id > ?2 AND m.role = 'user' ORDER BY m.id",
+        )?;
+        let rows = st
+            .query_map(rusqlite::params![chat, after], |r| {
+                Ok(Starter {
+                    origin: SubmissionOrigin::parse(&r.get::<_, String>(0)?),
+                    text: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok::<_, rusqlite::Error>(rows)
+    })
+    .unwrap_or_default()
+}
+
+/// The last transcript row that ended a turn, or 0: a turn that starts after it begins an
+/// exchange nobody on the phone is waiting on (blocking).
+pub fn last_answer_row(db: &Database, chat: &str) -> i64 {
+    db.snapshot(|tx| {
+        tx.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?1 AND role = 'assistant'
+             AND active = 1 AND json_valid(details)
+             AND json_extract(details, '$.stopReason') = 'end_turn'",
+            [chat],
+            |r| r.get(0),
+        )
+    })
+    .unwrap_or(0)
+}
+
+/// What becomes of an answer owed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Delivery {
+    /// As the reply to the phone's turn.
+    Phone,
+    /// As news.
+    News(Option<String>),
+    /// Not at all.
+    Skip,
+}
+
+/// An answer that is only `[quiet]`, in any case and spacing: the chat's way of saying the news
+/// was not worth telling.
+pub fn is_quiet(text: &str) -> bool {
+    text.split_whitespace()
+        .collect::<String>()
+        .eq_ignore_ascii_case("[quiet]")
+}
+
+/// Where an answer goes. News says nothing for a turn that gave nothing to say, and nothing for
+/// `[quiet]`; a turn blocked on a prompt only Helm's window can answer is still worth telling.
+pub fn decide(route: &Route, owed: &Owed) -> Delivery {
+    match route {
+        Route::Phone => Delivery::Phone,
+        Route::Silent => Delivery::Skip,
+        Route::News { about } => match &owed.what {
+            What::Answer(t) if !is_quiet(t) => Delivery::News(about.clone()),
+            What::Waiting => Delivery::News(about.clone()),
+            _ => Delivery::Skip,
+        },
+    }
+}
+
+/// What the mirror sends with: the line, the things queued to be shown, and the claim on them.
+pub struct Outbox {
+    up: Arc<dyn VoiceUpstream>,
+    shown: Arc<Shown>,
+    chat: String,
+    /// The things taken from the queue for the answer being sent, by its reply id. They stay
+    /// claimed until the answer is confirmed sent, so a resend carries the same ones.
+    claimed: Option<(String, Vec<Attachment>)>,
+}
+
+impl Outbox {
+    pub fn new(up: Arc<dyn VoiceUpstream>, shown: Arc<Shown>, chat: String) -> Self {
+        Outbox {
+            up,
+            shown,
+            chat,
+            claimed: None,
+        }
+    }
+
+    /// The working line, for the phone's own turn only.
+    pub fn status(&self, route: &Route, live: &Live, text: &str) {
+        if *route == Route::Phone {
+            if let Some(turn) = &live.turn {
+                self.up.status(turn, text);
+            }
+        }
+    }
+
+    /// Send one answer owed, with what was queued to be shown just before it. `true` when it is
+    /// dealt with: sent, or deliberately not sent (the queue is then emptied). `false` leaves it
+    /// owed, and the next try sends the same things again.
+    pub fn send(
+        &mut self,
+        route: &Route,
+        live: &Live,
+        conversation: Option<&str>,
+        owed: &Owed,
+        now: i64,
+    ) -> bool {
+        let mut reply = match decide(route, owed) {
+            Delivery::Skip => {
+                self.shown.clear(&self.chat);
+                self.claimed = None;
+                return true;
+            }
+            Delivery::Phone => reply_for(live, owed, now),
+            Delivery::News(about) => news_for(live, conversation, owed, about, now),
+        };
+        if self.claimed.as_ref().is_none_or(|(id, _)| *id != owed.id) {
+            self.claimed = Some((owed.id.clone(), self.shown.take(&self.chat)));
+        }
+        let things = self
+            .claimed
+            .as_ref()
+            .map(|(_, t)| t.as_slice())
+            .unwrap_or_default();
+        for (i, a) in things.iter().enumerate() {
+            if !self.up.attachment(&a.frame(&owed.id, i + 1)) {
+                return false;
+            }
+        }
+        reply.attachments = things.len() as u8;
+        let sent = self.up.reply(&reply);
+        if sent {
+            self.claimed = None;
+        }
+        sent
+    }
+}
+
+/// Watch a chat until the exchange it is in has ended. `fallback` says who an exchange is for
+/// while its messages are not in the transcript yet.
 pub async fn mirror(
     rt: ChatRuntime,
     db: Arc<Database>,
-    up: Arc<dyn VoiceUpstream>,
-    chat: String,
+    mut out: Outbox,
     baseline: i64,
     live: Arc<Mutex<Live>>,
+    tag_path: PathBuf,
+    fallback: Route,
 ) {
+    let chat = out.chat.clone();
     let mut m = Mirror::new(baseline, helm_core::now_ms());
     while !m.done {
         tokio::time::sleep(POLL).await;
-        let (rt2, db2, chat2, base) = (rt.clone(), db.clone(), chat.clone(), m.baseline);
+        let (rt2, db2, chat2) = (rt.clone(), db.clone(), chat.clone());
+        let (mark, base, fb) = (m.baseline, m.route_base(), fallback.clone());
         // Nothing is ever approved by voice: a prompt that is not a plain question blocks.
-        let Ok(s) =
-            tokio::task::spawn_blocking(move || snapshot(&rt2, &db2, &chat2, base, false)).await
+        let Ok((s, route)) = tokio::task::spawn_blocking(move || {
+            let s = snapshot(&rt2, &db2, &chat2, mark, false);
+            let began = starters(&db2, &chat2, base);
+            let route = route_of(&began, &fb, &|id| title_of(&db2, id));
+            (s, route)
+        })
+        .await
         else {
             return;
         };
-        for out in m.step(&s, helm_core::now_ms()) {
+        for item in m.step(&s, helm_core::now_ms()) {
             let now = helm_core::now_ms();
             let state = live.lock().unwrap_or_else(|p| p.into_inner()).clone();
-            match out {
-                Up::Status(t) => {
-                    if let Some(turn) = &state.turn {
-                        up.status(turn, &t);
-                    }
-                }
+            match item {
+                Up::Status(t) => out.status(&route, &state, &t),
                 Up::Final(owed) => {
-                    let ok = up.reply(&reply_for(&state, &owed, now));
-                    m.ack(&owed.id, ok);
+                    let conversation = voice::load_tag(&tag_path)
+                        .filter(|t| t.chat_id == chat)
+                        .map(|t| t.conversation);
+                    let sent = out.send(&route, &state, conversation.as_deref(), &owed, now);
+                    m.ack(&owed.id, sent);
                 }
             }
         }
@@ -469,6 +760,48 @@ pub struct ChatVoice {
     serial: tokio::sync::Mutex<()>,
     live: Arc<Mutex<Live>>,
     watching: Mutex<Option<(String, tokio::task::JoinHandle<()>)>>,
+    /// What `app_voice_show` queued for the next answer.
+    shown: Arc<Shown>,
+    /// The voice chat's id as the tag file last said, and when it was read; the event tap asks on
+    /// every busy chat, so the file is read at most every [`TAG_RECHECK`].
+    tagged: Mutex<(Option<Instant>, Option<String>)>,
+}
+
+/// How long the voice chat's id is trusted before the tag file is read again.
+const TAG_RECHECK: Duration = Duration::from_secs(5);
+
+/// What delivering a note to the voice chat came to.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Noted {
+    Sent,
+    /// There is no voice chat to tell (none yet, or it has expired).
+    Skipped,
+    Failed(String),
+}
+
+/// Put a note into the voice chat as a message from the app (blocking). `None` when no voice
+/// chat holds the tag. A note is not a turn from the phone, so the idle time does not move.
+pub fn place_note(
+    c: &Ctx,
+    submission_id: &str,
+    text: &str,
+    now: i64,
+) -> Result<Option<(String, i64)>, String> {
+    let Some(tag) = voice::current(&c.tag_path, &FactsOnly(&c.db), &c.policy, now) else {
+        return Ok(None);
+    };
+    let baseline = max_row(&c.db, &tag.chat_id);
+    host_send(
+        &c.rt,
+        HostSend {
+            chat_id: &tag.chat_id,
+            submission_id,
+            text,
+            origin: SubmissionOrigin::App,
+        },
+    )
+    .map_err(|e| e.message)?;
+    Ok(Some((tag.chat_id, baseline)))
 }
 
 impl ChatVoice {
@@ -481,6 +814,107 @@ impl ChatVoice {
             serial: tokio::sync::Mutex::new(()),
             live: Arc::default(),
             watching: Mutex::new(None),
+            shown: Arc::default(),
+            tagged: Mutex::new((None, None)),
+        }
+    }
+
+    /// The queue `app_voice_show` fills.
+    pub fn shown(&self) -> Arc<Shown> {
+        self.shown.clone()
+    }
+
+    fn remember_chat(&self, chat: &str) {
+        *self.tagged.lock().unwrap_or_else(|p| p.into_inner()) =
+            (Some(Instant::now()), Some(chat.to_owned()));
+    }
+
+    /// The chat the tag file names, expired or not: news for it is still mirrored until the next
+    /// turn from the phone starts another.
+    fn tagged_chat(&self) -> Option<String> {
+        let mut t = self.tagged.lock().unwrap_or_else(|p| p.into_inner());
+        if t.0.is_none_or(|at| at.elapsed() > TAG_RECHECK) {
+            *t = (
+                Some(Instant::now()),
+                voice::load_tag(&voice::tag_path(&self.profile_dir)).map(|g| g.chat_id),
+            );
+        }
+        t.1.clone()
+    }
+
+    /// Whether `chat` is the one the voice screen talks to.
+    pub fn is_voice_chat(&self, chat: &str) -> bool {
+        self.tagged_chat().as_deref() == Some(chat)
+    }
+
+    /// What the attention watch wakes the chat for, as Settings last saved it.
+    pub fn watch_level(&self) -> WatchLevel {
+        voice::load_file(&voice::policy_path(&self.profile_dir)).watch
+    }
+
+    /// The voice chat while its tag holds (not idle, old, full or gone), else `None`.
+    pub async fn active_chat(&self, now: i64) -> Option<String> {
+        let db = self.exec.wiring()?.services.get::<Database>()?;
+        let policy = voice::load_file(&voice::policy_path(&self.profile_dir))
+            .check()
+            .unwrap_or_default();
+        let path = voice::tag_path(&self.profile_dir);
+        tokio::task::spawn_blocking(move || {
+            voice::current(&path, &FactsOnly(&db), &policy, now).map(|t| t.chat_id)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// The voice chat became busy. If no turn of it is being mirrored (it was woken: a wait
+    /// finished, a note arrived, another chat wrote to it, or the user typed in Helm), mirror this
+    /// one, so its answer goes where it belongs.
+    pub async fn woken(&self, chat: &str) {
+        if !self.is_voice_chat(chat) {
+            return;
+        }
+        let watched = self
+            .watching
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_some_and(|(id, h)| id == chat && !h.is_finished());
+        if watched {
+            return;
+        }
+        let Ok(c) = self.ctx() else { return };
+        let (db, id) = (c.db.clone(), chat.to_owned());
+        let Ok(baseline) = tokio::task::spawn_blocking(move || last_answer_row(&db, &id)).await
+        else {
+            return;
+        };
+        self.watch(&c, chat, baseline, Route::Silent);
+    }
+
+    /// Put a note from the attention watch into the voice chat, and mirror the turn it starts.
+    pub async fn deliver_note(&self, note: &Note, now: i64) -> Noted {
+        // Behind the phone's own deliveries, and never holding them up for long: a chat that is
+        // busy or full fails the note, which the watch tries again after a while.
+        let _turn = self.serial.lock().await;
+        let c = match self.ctx() {
+            Ok(c) => c,
+            Err(e) => return Noted::Failed(e),
+        };
+        let (c2, text, sid) = (
+            c.clone(),
+            note.text.clone(),
+            voice::submission_id(&note.key),
+        );
+        match tokio::task::spawn_blocking(move || place_note(&c2, &sid, &text, now)).await {
+            Ok(Ok(Some((chat, baseline)))) => {
+                self.remember_chat(&chat);
+                self.watch(&c, &chat, baseline, Route::News { about: None });
+                Noted::Sent
+            }
+            Ok(Ok(None)) => Noted::Skipped,
+            Ok(Err(e)) => Noted::Failed(e),
+            Err(_) => Noted::Failed("The delivery did not finish.".into()),
         }
     }
 
@@ -524,8 +958,9 @@ impl ChatVoice {
         })
     }
 
-    /// Watch `chat` unless it is already being watched.
-    fn watch(&self, c: &Ctx, chat: &str, baseline: i64) {
+    /// Watch `chat` unless it is already being watched. `fallback` says who an exchange is for
+    /// until its messages are in the transcript.
+    fn watch(&self, c: &Ctx, chat: &str, baseline: i64, fallback: Route) {
         let Some(up) = self.up.get().cloned() else {
             return;
         };
@@ -539,10 +974,11 @@ impl ChatVoice {
         let task = c.handle.spawn(mirror(
             c.rt.clone(),
             c.db.clone(),
-            up,
-            chat.to_owned(),
+            Outbox::new(up, self.shown.clone(), chat.to_owned()),
             baseline,
             self.live.clone(),
+            c.tag_path.clone(),
+            fallback,
         ));
         *w = Some((chat.to_owned(), task));
     }
@@ -574,7 +1010,8 @@ impl VoiceSink for ChatVoice {
                 l.mode = Mode::parse(&turn.mode);
                 l.conversation = conversation;
             }
-            self.watch(&c, &chat, baseline);
+            self.remember_chat(&chat);
+            self.watch(&c, &chat, baseline, Route::Phone);
             Ok(())
         })
     }
@@ -610,6 +1047,7 @@ impl VoiceSink for ChatVoice {
             if voice::save_tag(&voice::tag_path(&self.profile_dir), None).is_err() {
                 log::warn!("relay: the voice chat tag could not be removed");
             }
+            *self.tagged.lock().unwrap_or_else(|p| p.into_inner()) = (None, None);
         })
     }
 }

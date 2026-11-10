@@ -97,6 +97,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_update_schedule", Class::Denied(SCHEDULES)),
     ("app_update_settings", Class::Denied(SETTINGS)),
     ("app_usage_summary", Class::Denied(LOCAL)),
+    ("app_voice_show", Class::Denied(LOCAL)),
     ("app_worktree_status", Class::Denied(LOCAL)),
     ("app_wait_for", Class::Denied(LOCAL)),
     ("app_web_search", Class::Denied(SEARCH)),
