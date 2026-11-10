@@ -256,18 +256,13 @@ pub fn append(db: &Database, a: &Author, id: i64, body: &str, now: i64) -> Resul
     })
 }
 
-/// Change the status and/or attach a board item id. Attaching one to an `open` item files it.
-/// A `note` is added as an entry by `a` (agents must give one when closing). A status that
-/// actually changes is written to the item's history.
-pub fn update(
-    db: &Database,
+/// Check a status change before anything is written: the cleaned board item and note.
+fn check_update(
     a: &Author,
-    id: i64,
     status: Option<&str>,
     board_item: Option<&str>,
     note: Option<&str>,
-    now: i64,
-) -> Result<(), Fail> {
+) -> Result<(Option<String>, Option<String>), Fail> {
     if let Some(s) = status {
         if !STATUSES.contains(&s) {
             return refuse("status must be open, filed, done or wont_do.");
@@ -292,6 +287,22 @@ pub fn update(
             "A note goes with a status change; use app_append_feedback to add an entry.",
         );
     }
+    Ok((board, note))
+}
+
+/// Change the status and/or attach a board item id. Attaching one to an `open` item files it.
+/// A `note` is added as an entry by `a` (agents must give one when closing). A status that
+/// actually changes is written to the item's history.
+pub fn update(
+    db: &Database,
+    a: &Author,
+    id: i64,
+    status: Option<&str>,
+    board_item: Option<&str>,
+    note: Option<&str>,
+    now: i64,
+) -> Result<(), Fail> {
+    let (board, note) = check_update(a, status, board_item, note)?;
     db.write(|tx| {
         let cur = live_status(tx, id)?;
         let next = match (status, &board) {
@@ -321,7 +332,8 @@ pub fn update(
 }
 
 /// Change the title and/or the text of one entry (the first one unless `entry` names another).
-/// The entry keeps its original author; the edit goes into the item's history.
+/// The entry keeps its original author; the edit goes into the item's history. An agent may not
+/// rewrite what the user wrote: their title or their entries.
 pub fn edit(
     db: &Database,
     a: &Author,
@@ -365,6 +377,23 @@ pub fn edit(
         } else {
             None
         };
+        if a.kind != "human" {
+            let users = |sql: &str, key: i64| -> rusqlite::Result<bool> {
+                tx.query_row(sql, [key], |r| r.get::<_, String>(0))
+                    .map(|k| k == "human")
+            };
+            let theirs = (title.is_some()
+                && users("SELECT author_kind FROM feedback_items WHERE id = ?1", id)?)
+                || match target {
+                    Some(t) => users("SELECT author_kind FROM feedback_entries WHERE id = ?1", t)?,
+                    None => false,
+                };
+            if theirs {
+                return refuse(
+                    "That is the user's own writing; add an entry with app_append_feedback instead.",
+                );
+            }
+        }
         if let Some(t) = &title {
             tx.execute(
                 "UPDATE feedback_items SET title = ?2 WHERE id = ?1",
@@ -680,6 +709,10 @@ pub(crate) fn update_tool(ctx: &ToolCtx, a: Value, now: i64) -> ToolResult {
         return Err(ToolError::refused(
             "note goes with a status change; use app_append_feedback to add an entry.",
         ));
+    }
+    // A status change that would be refused is refused before any edit is written.
+    if status.is_some() || board.is_some() {
+        check_update(&who, status, board, opt_str(&a, "note")).map_err(fail_to_tool)?;
     }
     if title.is_some() || body.is_some() {
         let entry = a.get("entryId").and_then(Value::as_i64);
@@ -1094,17 +1127,38 @@ mod tests {
     #[test]
     fn agents_edit_and_delete_any_item_and_the_user_can_undo() {
         let (_d, db, ctx) = setup();
-        let id = create(&db, &Author::human(), "Old title", "Old text.", 1).unwrap();
+        let made =
+            create_tool(&ctx, json!({"title": "Old title", "text": "Old text."}), 1).unwrap();
+        let id = made["id"].as_i64().unwrap();
         append(&db, &Author::human(), id, "Second.", 2).unwrap();
+        // A status change that would be refused stops the whole update before the edit.
+        assert!(update_tool(
+            &ctx,
+            json!({"id": id, "title": "Sneaky", "status": "done"}),
+            3
+        )
+        .is_err());
+        assert_eq!(get(&db, id).unwrap().unwrap()["title"], "Old title");
         update_tool(
             &ctx,
             json!({"id": id, "title": "New  title", "text": "New text."}),
             3,
         )
         .unwrap();
-        update_tool(
+        // The user's own words are theirs: an agent cannot rewrite them, the user can.
+        let theirs = update_tool(
             &ctx,
             json!({"id": id, "text": "Second, fixed.", "entryId": 2}),
+            4,
+        );
+        assert!(refused(theirs).contains("user's own writing"));
+        edit(
+            &db,
+            &Author::human(),
+            id,
+            None,
+            Some("Second, fixed."),
+            Some(2),
             4,
         )
         .unwrap();
@@ -1113,12 +1167,13 @@ mod tests {
         assert_eq!(got["entries"][0]["text"], "New text.");
         assert_eq!(got["entries"][1]["text"], "Second, fixed.");
         // Edits leave the original authors alone and are recorded as the agent's.
-        assert_eq!(got["entries"][0]["author"], json!({"kind": "human"}));
+        assert_eq!(got["entries"][1]["author"], json!({"kind": "human"}));
         assert_eq!(got["history"][0]["detail"], "title and text");
         assert_eq!(
-            got["history"][1]["by"],
+            got["history"][0]["by"],
             json!({"kind": "agent", "chatId": "chat-1"})
         );
+        assert_eq!(got["history"][1]["by"], json!({"kind": "human"}));
         assert!(edit(&db, &Author::human(), id, None, Some("x"), Some(999), 5).is_err());
 
         // Deleting hides the item from lists and from agents; the user's list shows who did it.
