@@ -299,8 +299,11 @@ impl H {
         (sid, r)
     }
 
+    /// The next worker the chat starts. The wait is long because under a whole workspace's test
+    /// load a start (staging, the launch line) can take several seconds; a test that expects no
+    /// worker checks for that itself.
     pub async fn worker(&mut self) -> FakeWorker {
-        tokio::time::timeout(Duration::from_secs(5), self.workers.recv())
+        tokio::time::timeout(Duration::from_secs(30), self.workers.recv())
             .await
             .expect("a worker was spawned")
             .unwrap()
