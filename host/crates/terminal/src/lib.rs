@@ -98,17 +98,31 @@ struct Launch {
     session_shell: String,
     /// Variables to remove besides the app-internal ones.
     strip: &'static [&'static str],
+    /// The whole environment to start from (a worker's), instead of Helm's own; `None` keeps Helm's.
+    base_env: Option<Vec<(String, String)>>,
 }
 
 /// `<claude> auth login`: the fixed arguments, and the environment a worker would strip.
-fn sign_in_launch(claude: PathBuf) -> Launch {
+fn sign_in_launch(claude: PathBuf, base_env: Vec<(String, String)>) -> Launch {
     Launch {
         program: claude,
         args: vec!["auth".into(), "login".into()],
         title: SIGN_IN_TITLE.into(),
         session_shell: "claude".into(),
         strip: &SIGN_IN_STRIP_ENV,
+        base_env: Some(base_env),
     }
+}
+
+/// The complete environment of a launch that brings its own base, with the stripped names left
+/// out; `None` when the launch starts from Helm's own environment.
+fn launch_env(launch: &Launch) -> Option<Vec<(String, String)>> {
+    launch.base_env.as_ref().map(|base| {
+        base.iter()
+            .filter(|(k, _)| !strips(k, launch.strip))
+            .cloned()
+            .collect()
+    })
 }
 
 /// Whether a variable is left out of a session's environment.
@@ -169,6 +183,9 @@ pub struct TerminalManager {
     events: Arc<dyn EventSink>,
     default_cwd: PathBuf,
     shell_pref: Box<dyn Fn() -> String + Send + Sync>,
+    /// The sign-in session, while there is one, so a second request shows it instead of starting
+    /// another login.
+    sign_in: Mutex<Option<String>>,
 }
 
 impl TerminalManager {
@@ -182,6 +199,7 @@ impl TerminalManager {
             events,
             default_cwd,
             shell_pref,
+            sign_in: Mutex::new(None),
         }
     }
 
@@ -211,6 +229,7 @@ impl TerminalManager {
                 title: sh.title.clone(),
                 session_shell: sh.title,
                 strip: &[],
+                base_env: None,
             },
             a.cols,
             a.rows,
@@ -222,9 +241,23 @@ impl TerminalManager {
     pub fn open_sign_in(
         &self,
         claude: PathBuf,
+        env: Vec<(String, String)>,
         cols: u16,
         rows: u16,
     ) -> Result<TerminalSession, String> {
+        let mut current = self.sign_in.lock().unwrap();
+        if let Some(id) = current.as_ref() {
+            let running = self
+                .sessions
+                .lock()
+                .unwrap()
+                .get(id)
+                .map(|s| s.snapshot())
+                .filter(|m| m.running);
+            if let Some(m) = running {
+                return Ok(m);
+            }
+        }
         if self.sessions.lock().unwrap().len() >= SESSIONS_MAX {
             return Err(format!(
                 "At most {SESSIONS_MAX} terminals can be open; close one first."
@@ -234,7 +267,9 @@ impl TerminalManager {
         if !cwd.is_dir() {
             return Err(format!("{} is not a folder.", cwd.display()));
         }
-        self.spawn(cwd, sign_in_launch(claude), cols, rows)
+        let s = self.spawn(cwd, sign_in_launch(claude, env), cols, rows)?;
+        *current = Some(s.id.clone());
+        Ok(s)
     }
 
     fn spawn(
@@ -257,10 +292,20 @@ impl TerminalManager {
             cmd.arg(arg);
         }
         cmd.cwd(&cwd);
-        for (k, _) in std::env::vars_os() {
-            if let Some(k) = k.to_str() {
-                if strips(k, launch.strip) {
-                    cmd.env_remove(k);
+        match launch_env(&launch) {
+            Some(env) => {
+                cmd.env_clear();
+                for (k, v) in env {
+                    cmd.env(k, v);
+                }
+            }
+            None => {
+                for (k, _) in std::env::vars_os() {
+                    if let Some(k) = k.to_str() {
+                        if strips(k, launch.strip) {
+                            cmd.env_remove(k);
+                        }
+                    }
                 }
             }
         }
@@ -589,8 +634,14 @@ fn op_claude_sign_in(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let (claude, _) =
         helm_workers::status::resolve_claude(&env, &runtime.executable, home.as_deref())
             .map_err(bad)?;
+    // The environment a chat's claude gets, so the login is written where chats look for it.
+    let pairs = env
+        .into_pairs()
+        .into_iter()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
     let s = mgr(ctx)?
-        .open_sign_in(claude, n("cols", 100), n("rows", 24))
+        .open_sign_in(claude, pairs, n("cols", 100), n("rows", 24))
         .map_err(bad)?;
     serde_json::to_value(s).map_err(|e| ApiError::internal(e.to_string()))
 }
@@ -669,29 +720,41 @@ mod tests {
         assert!(m.sessions().is_empty());
     }
 
-    /// The sign-in runs exactly `auth login`, as a titled session, and drops the variables that
-    /// would make the login write an override instead of the normal sign-in.
+    /// The sign-in runs exactly `auth login`, as a titled session, and starts from the given
+    /// (worker) environment minus the variables that would make the login write an override.
     #[test]
-    fn the_sign_in_launch_is_fixed_and_strips_credential_variables() {
-        let l = sign_in_launch(PathBuf::from("claude.exe"));
-        assert_eq!(l.program, PathBuf::from("claude.exe"));
-        assert_eq!(l.args, ["auth", "login"]);
-        assert_eq!(l.title, "Claude sign-in");
-        for k in [
+    fn the_sign_in_launch_is_fixed_and_its_environment_is_stripped() {
+        let base: Vec<(String, String)> = [
+            "PATH",
+            "USERPROFILE",
+            "CLAUDE_CONFIG_DIR",
+            "ANTHROPIC_FOO",
             "ANTHROPIC_API_KEY",
             "anthropic_auth_token",
             "ANTHROPIC_BASE_URL",
             "CLAUDE_CODE_OAUTH_TOKEN",
             "CLAUDECODE",
             "HELM_LOCAL_MODEL_KEY",
-        ] {
-            assert!(strips(k, l.strip), "{k}");
-        }
-        for k in ["PATH", "USERPROFILE", "ANTHROPIC_FOO"] {
-            assert!(!strips(k, l.strip), "{k}");
-        }
-        // A shell session strips only the app-internal variables.
+        ]
+        .iter()
+        .map(|k| (k.to_string(), "x".to_string()))
+        .collect();
+        let l = sign_in_launch(PathBuf::from("claude.exe"), base);
+        assert_eq!(l.program, PathBuf::from("claude.exe"));
+        assert_eq!(l.args, ["auth", "login"]);
+        assert_eq!(l.title, "Claude sign-in");
+        let kept: Vec<String> = launch_env(&l)
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            kept,
+            ["PATH", "USERPROFILE", "CLAUDE_CONFIG_DIR", "ANTHROPIC_FOO"]
+        );
+        // A shell launch brings no base and strips only the app-internal variables.
         assert!(!strips("ANTHROPIC_API_KEY", &[]));
+        assert!(strips("HELM_LOCAL_MODEL_KEY", &[]));
     }
 
     #[test]

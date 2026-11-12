@@ -16,8 +16,6 @@ const SIGN_IN_TEXTS = [
 export function isSignInError(text: string | null | undefined): boolean {
   if (!text) return false;
   const t = text.toLowerCase();
-  // A sign-in problem with an MCP server is that server's, not Claude's.
-  if (/\bmcp\b/.test(t)) return false;
   if (SIGN_IN_TEXTS.some((s) => t.includes(s))) return true;
   return t.includes('invalid api key') && t.includes('/login');
 }

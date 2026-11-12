@@ -28,6 +28,7 @@ export function TerminalDock() {
   const [query, setQuery] = useState('');
   const views = useRef(new Map<string, XtermHandle>());
   const starting = useRef(false);
+  const tabsNow = useRef<DockTab[]>([]);
   const dock = useRef<HTMLDivElement>(null);
   const chat = useSyncExternalStore(shell.store.subscribe, () =>
     chatId ? (shell.store.view(chatId).chat ?? shell.store.chatList().find((c) => c.id === chatId) ?? null) : null,
@@ -45,6 +46,7 @@ export function TerminalDock() {
   // has not been opened yet, so adopting never hides them.
   const everLoaded = useRef(false);
   everLoaded.current = loaded;
+  tabsNow.current = tabs;
   useEffect(
     () =>
       onAdoptSession((s) => {
@@ -98,10 +100,17 @@ export function TerminalDock() {
       void ops
         .sessions()
         .then((list) => {
+          // A session adopted while this list was loading is already a tab; keep it.
           if (list.length) {
-            setTabs(list.map((s) => ({ id: s.id, title: s.title, cwd: s.cwd, state: s.running ? 'idle' : 'exited' })));
-            setActive(list[0]?.id ?? null);
-          } else return newSession();
+            setTabs((t) => {
+              const known = new Set(t.map((x) => x.id));
+              const older = list
+                .filter((x) => !known.has(x.id))
+                .map((x): DockTab => ({ id: x.id, title: x.title, cwd: x.cwd, state: x.running ? 'idle' : 'exited' }));
+              return [...older, ...t];
+            });
+            setActive((a) => a ?? list[0]?.id ?? null);
+          } else if (tabsNow.current.length === 0) return newSession();
         })
         .catch(() => newSession())
         .finally(() => (starting.current = false));
