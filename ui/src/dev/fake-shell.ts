@@ -33,6 +33,15 @@ export function shellFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         setTimeout(() => out(ctx, id, `PS ${cwd}> `), 10);
         return { id, shell: 'pwsh', cwd, title: 'pwsh', running: true };
       }
+      case 'claude_sign_in': {
+        // The real op starts `claude auth login`; this one prints a line and exits cleanly.
+        const id = `term-${nextId++}`;
+        const cwd = 'C:\\Users\\demo';
+        terms.set(id, { seq: 0, line: '', cwd });
+        setTimeout(() => out(ctx, id, 'Opening your browser to sign in to Claude...\r\nLogin successful.\r\n'), 10);
+        setTimeout(() => ctx.emit({ kind: 'terminal_exit', id, code: 0 }), 1500);
+        return { id, shell: 'claude', cwd, title: 'Claude sign-in', running: true };
+      }
       case 'terminal_attach': {
         const t = terms.get(String(args.id));
         if (!t) throw new Error('That terminal is closed.');
@@ -78,5 +87,5 @@ export function shellFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         throw new Error(`fake shell: unknown op ${op}`);
     }
   };
-  return { prefixes: ['shell_settings_', 'audio_inputs', 'window_zoom', 'open_external', 'terminal_'], handler };
+  return { prefixes: ['shell_settings_', 'audio_inputs', 'window_zoom', 'open_external', 'terminal_', 'claude_sign_in'], handler };
 }

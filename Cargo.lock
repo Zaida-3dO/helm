@@ -2321,6 +2321,7 @@ version = "2.0.0"
 dependencies = [
  "helm-core",
  "helm-ipc",
+ "helm-workers",
  "log",
  "portable-pty",
  "rusqlite",

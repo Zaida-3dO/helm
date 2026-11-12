@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 helm-core.workspace = true
 helm-ipc.workspace = true
+helm-workers.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
