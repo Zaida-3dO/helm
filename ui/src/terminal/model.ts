@@ -30,6 +30,20 @@ export interface DockTab {
   exitCode?: number;
   /** Opened by this dock (not reattached after a reload). */
   fresh?: boolean;
+  /** The Claude sign-in session: labelled by its title alone, and its clean exit is announced. */
+  signIn?: boolean;
+}
+
+/** What a tab shows: a sign-in tab is its title; a shell tab is its folder and shell. */
+export function dockLabel(t: Pick<DockTab, 'title' | 'cwd' | 'signIn'>): string {
+  return t.signIn ? t.title : tabLabel(t.title, t.cwd);
+}
+
+export const SIGN_IN_DONE = 'Signed in. Send your message again.';
+
+/** The toast for a session that exited: only a sign-in that ended cleanly has one. */
+export function exitNotice(t: Pick<DockTab, 'signIn'>, code: number): string | null {
+  return t.signIn && code === 0 ? SIGN_IN_DONE : null;
 }
 
 /**

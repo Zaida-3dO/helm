@@ -18,6 +18,8 @@ import { IconPaperPlane } from '../ui/icons.tsx';
 import { ReplyActions, UserActions } from './MessageActions.tsx';
 import { rowFootersFor, type SlotContext } from './slots.ts';
 import { Glyph } from './icons.tsx';
+import { SignInAgain } from './SignInAgain.tsx';
+import { isSignInError } from './signin.ts';
 import { ToolCard } from './ToolCard.tsx';
 import { usePacedText, useThinkingPreview } from './usePaced.ts';
 import { formatElapsed, type RowFlags } from './workBlocks.ts';
@@ -33,6 +35,8 @@ export interface RowContext {
   latestAssistantId: number | null;
   running: boolean;
   interactionOpen: boolean;
+  /** Offer "Sign in again" under a sign-in failure. False for a chat on a local model; missing means offer. */
+  canSignIn?: boolean;
   /** Transcript element toggles; a missing key is shown. */
   elements?: { tokens?: 'shown' | 'hidden'; turnTime?: 'shown' | 'hidden'; fileChanges?: 'shown' | 'hidden'; timeline?: 'shown' | 'hidden' };
   /** The chat runs on another device (its name): Allow requests wait there, not here. */
@@ -212,6 +216,7 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
           <span>{row.details?.errorMessage ?? 'The request failed.'}</span>
         </div>
       )}
+      {row.status === 'error' && ctx.canSignIn !== false && isSignInError(row.details?.errorMessage) && <SignInAgain />}
       {row.status === 'interrupted' && (
         <div className="interrupted-row muted" data-testid="interrupted-row">
           <Glyph name="pause" size={14} />

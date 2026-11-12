@@ -9,6 +9,11 @@
 //! | `terminal_resize` | blocking | `{id, cols, rows}` |
 //! | `terminal_close` | blocking | `{id}`: close the pseudo console, then end the Job after 2 s |
 //! | `terminal_sessions` | blocking | → [`TerminalSession`]`[]` |
+//! | `claude_sign_in` | blocking | `{cols?, rows?}` → [`TerminalSession`]: the unmodified `claude auth login` in a new session |
+//!
+//! `claude_sign_in` is the only way a session runs something other than a shell, and it takes no
+//! program or arguments from the renderer: the host finds Claude Code the way a worker does and
+//! starts it with the fixed arguments `auth login`.
 //!
 //! Output rides the one event channel as `terminal {id, seq, data}` in UTF-8-safe
 //! chunks of at most 64 KiB, and `terminal_exit {id, code}`. Output pauses past 1 MiB of
@@ -36,6 +41,18 @@ use stream::{split_chunks, utf16_units, FlowGate, Replay, Utf8Carry, CHUNK_MAX};
 use ts_rs::TS;
 
 pub const SESSIONS_MAX: usize = 16;
+/// Variables a Claude sign-in must not inherit, so the login writes the normal sign-in and not an
+/// override from the environment (the names a worker strips for the claude child).
+pub const SIGN_IN_STRIP_ENV: [&str; 5] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDECODE",
+];
+/// The tab title of the sign-in session.
+pub const SIGN_IN_TITLE: &str = "Claude sign-in";
+
 /// How long a closed shell gets to exit before its Job is ended.
 pub const CLOSE_GRACE: Duration = Duration::from_secs(2);
 
@@ -69,6 +86,34 @@ pub struct TerminalAttachResult {
     pub replay: String,
     #[ts(type = "number")]
     pub seq: u64,
+}
+
+/// What a session runs: a shell, or (only through [`sign_in_launch`]) the Claude sign-in.
+struct Launch {
+    program: PathBuf,
+    args: Vec<String>,
+    /// The tab title.
+    title: String,
+    /// The session's `shell` field.
+    session_shell: String,
+    /// Variables to remove besides the app-internal ones.
+    strip: &'static [&'static str],
+}
+
+/// `<claude> auth login`: the fixed arguments, and the environment a worker would strip.
+fn sign_in_launch(claude: PathBuf) -> Launch {
+    Launch {
+        program: claude,
+        args: vec!["auth".into(), "login".into()],
+        title: SIGN_IN_TITLE.into(),
+        session_shell: "claude".into(),
+        strip: &SIGN_IN_STRIP_ENV,
+    }
+}
+
+/// Whether a variable is left out of a session's environment.
+fn strips(name: &str, extra: &[&str]) -> bool {
+    shell::is_internal_env(name) || extra.iter().any(|e| name.eq_ignore_ascii_case(e))
 }
 
 struct Session {
@@ -158,22 +203,63 @@ impl TerminalManager {
             "No shell found: install PowerShell 7, or choose another shell in Settings → Shell."
                 .to_owned()
         })?;
+        self.spawn(
+            cwd,
+            Launch {
+                program: sh.program,
+                args: sh.args,
+                title: sh.title.clone(),
+                session_shell: sh.title,
+                strip: &[],
+            },
+            a.cols,
+            a.rows,
+        )
+    }
+
+    /// A session running the unmodified `claude auth login` in the default folder. The caller
+    /// finds the program; the arguments are fixed here.
+    pub fn open_sign_in(
+        &self,
+        claude: PathBuf,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TerminalSession, String> {
+        if self.sessions.lock().unwrap().len() >= SESSIONS_MAX {
+            return Err(format!(
+                "At most {SESSIONS_MAX} terminals can be open; close one first."
+            ));
+        }
+        let cwd = self.default_cwd.clone();
+        if !cwd.is_dir() {
+            return Err(format!("{} is not a folder.", cwd.display()));
+        }
+        self.spawn(cwd, sign_in_launch(claude), cols, rows)
+    }
+
+    fn spawn(
+        &self,
+        cwd: PathBuf,
+        launch: Launch,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TerminalSession, String> {
         let pty = native_pty_system()
             .openpty(PtySize {
-                rows: a.rows.clamp(2, 1000),
-                cols: a.cols.clamp(2, 1000),
+                rows: rows.clamp(2, 1000),
+                cols: cols.clamp(2, 1000),
                 pixel_width: 0,
                 pixel_height: 0,
             })
             .map_err(|e| format!("could not open a terminal: {e}"))?;
-        let mut cmd = CommandBuilder::new(&sh.program);
-        for arg in &sh.args {
+        let mut cmd = CommandBuilder::new(&launch.program);
+        for arg in &launch.args {
             cmd.arg(arg);
         }
         cmd.cwd(&cwd);
         for (k, _) in std::env::vars_os() {
             if let Some(k) = k.to_str() {
-                if shell::is_internal_env(k) {
+                if strips(k, launch.strip) {
                     cmd.env_remove(k);
                 }
             }
@@ -182,7 +268,7 @@ impl TerminalManager {
         let child = pty
             .slave
             .spawn_command(cmd)
-            .map_err(|e| format!("could not start {}: {e}", sh.title))?;
+            .map_err(|e| format!("could not start {}: {e}", launch.title))?;
         drop(pty.slave);
         #[cfg(windows)]
         let job = match child.process_id() {
@@ -206,9 +292,9 @@ impl TerminalManager {
         let id = uuid::Uuid::new_v4().to_string();
         let meta = TerminalSession {
             id: id.clone(),
-            shell: sh.title.clone(),
+            shell: launch.session_shell.clone(),
             cwd: cwd.display().to_string(),
-            title: sh.title.clone(),
+            title: launch.title.clone(),
             running: true,
         };
         let session = Arc::new(Session {
@@ -388,7 +474,8 @@ pub fn register_ops(reg: &mut OpRegistry) {
         .blocking("terminal_ack", OpClass::Blocking, op_ack)
         .blocking("terminal_resize", OpClass::Blocking, op_resize)
         .blocking("terminal_close", OpClass::Blocking, op_close)
-        .blocking("terminal_sessions", OpClass::Blocking, op_sessions);
+        .blocking("terminal_sessions", OpClass::Blocking, op_sessions)
+        .blocking("claude_sign_in", OpClass::Blocking, op_claude_sign_in);
 }
 
 /// Adds the [`TerminalManager`]. The shell preference is read from the database on each open.
@@ -483,6 +570,31 @@ fn op_sessions(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
     Ok(json!(mgr(ctx)?.sessions()))
 }
 
+/// Start `claude auth login` in a new session. Claude Code is found as a worker finds it; Helm
+/// never reads the sign-in it writes.
+fn op_claude_sign_in(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let n = |k: &str, d: u16| {
+        args.get(k)
+            .and_then(Value::as_u64)
+            .map(|v| v.min(1000) as u16)
+            .unwrap_or(d)
+    };
+    let profile = ctx.services.need::<helm_core::profile::Profile>()?;
+    let env = helm_workers::env::base_environment();
+    let (runtime, _) = helm_workers::launch::ClaudeRuntime::load(&profile.dir);
+    let home = env
+        .get("USERPROFILE")
+        .or_else(|| env.get("HOME"))
+        .map(PathBuf::from);
+    let (claude, _) =
+        helm_workers::status::resolve_claude(&env, &runtime.executable, home.as_deref())
+            .map_err(bad)?;
+    let s = mgr(ctx)?
+        .open_sign_in(claude, n("cols", 100), n("rows", 24))
+        .map_err(bad)?;
+    serde_json::to_value(s).map_err(|e| ApiError::internal(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,6 +667,31 @@ mod tests {
         assert!(!att.session.running);
         m.close(&s.id).unwrap();
         assert!(m.sessions().is_empty());
+    }
+
+    /// The sign-in runs exactly `auth login`, as a titled session, and drops the variables that
+    /// would make the login write an override instead of the normal sign-in.
+    #[test]
+    fn the_sign_in_launch_is_fixed_and_strips_credential_variables() {
+        let l = sign_in_launch(PathBuf::from("claude.exe"));
+        assert_eq!(l.program, PathBuf::from("claude.exe"));
+        assert_eq!(l.args, ["auth", "login"]);
+        assert_eq!(l.title, "Claude sign-in");
+        for k in [
+            "ANTHROPIC_API_KEY",
+            "anthropic_auth_token",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDECODE",
+            "HELM_LOCAL_MODEL_KEY",
+        ] {
+            assert!(strips(k, l.strip), "{k}");
+        }
+        for k in ["PATH", "USERPROFILE", "ANTHROPIC_FOO"] {
+            assert!(!strips(k, l.strip), "{k}");
+        }
+        // A shell session strips only the app-internal variables.
+        assert!(!strips("ANTHROPIC_API_KEY", &[]));
     }
 
     #[test]

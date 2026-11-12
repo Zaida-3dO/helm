@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AckBatcher, ACK_EVERY, clampHeight, nextTabState, tabLabel, routeKey, SeqFilter, stripQueries } from './model.ts';
+import { AckBatcher, ACK_EVERY, clampHeight, dockLabel, exitNotice, nextTabState, tabLabel, routeKey, SeqFilter, SIGN_IN_DONE, stripQueries } from './model.ts';
 
 const k = (code: string, mods: { ctrl?: boolean; shift?: boolean; alt?: boolean } = {}, key = '') => ({
   key,
@@ -78,4 +78,12 @@ test('a tab is labelled with its folder and shell, never the whole path', () => 
     ['bash', '', 'bash'],
   ];
   for (const [title, cwd, want] of rows) assert.equal(tabLabel(title, cwd), want);
+});
+
+test('a sign-in tab is named by its title and only a clean sign-in exit is announced', () => {
+  assert.equal(dockLabel({ title: 'Claude sign-in', cwd: 'C:\Users\me', signIn: true }), 'Claude sign-in');
+  assert.equal(dockLabel({ title: 'pwsh', cwd: 'C:\Users\me' }), 'me pwsh');
+  assert.equal(exitNotice({ signIn: true }, 0), SIGN_IN_DONE);
+  assert.equal(exitNotice({ signIn: true }, 1), null);
+  assert.equal(exitNotice({}, 0), null);
 });

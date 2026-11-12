@@ -9,7 +9,8 @@ import { terminalOps } from '../api/terminal.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, toast, useBinding, useLayer } from '../ui/index.ts';
 import { IconChevronDown, IconMaximize, IconMinimize, IconPlus, IconSearch, IconX } from '../ui/icons.tsx';
-import { clampHeight, HEIGHT_DEFAULT, nextTabState, SESSIONS_MAX, tabLabel, type DockTab } from './model.ts';
+import { onAdoptSession } from './adopt.ts';
+import { clampHeight, dockLabel, exitNotice, HEIGHT_DEFAULT, nextTabState, SESSIONS_MAX, type DockTab } from './model.ts';
 import './terminal.css';
 import { XtermView, type XtermHandle } from './XtermView.tsx';
 
@@ -38,6 +39,40 @@ export function TerminalDock() {
       .then((v) => typeof v === 'number' && setHeight(v))
       .catch(() => undefined);
   }, [shell]);
+
+  // Another part of the app hands over a session it opened (the Claude sign-in): show it as a tab,
+  // open the dock and focus it. Sessions that survived a reload are listed first when the dock
+  // has not been opened yet, so adopting never hides them.
+  const everLoaded = useRef(false);
+  everLoaded.current = loaded;
+  useEffect(
+    () =>
+      onAdoptSession((s) => {
+        const tab: DockTab = { id: s.id, title: s.title, cwd: s.cwd, state: 'idle', fresh: true, signIn: true };
+        const first = !everLoaded.current && !starting.current;
+        if (first) starting.current = true;
+        setLoaded(true);
+        setOpen(true);
+        setTabs((t) => (t.some((x) => x.id === s.id) ? t : [...t, tab]));
+        setActive(s.id);
+        if (first) {
+          void ops
+            .sessions()
+            .then((list) =>
+              setTabs((t) => {
+                const known = new Set(t.map((x) => x.id));
+                const older = list
+                  .filter((x) => !known.has(x.id))
+                  .map((x): DockTab => ({ id: x.id, title: x.title, cwd: x.cwd, state: x.running ? 'idle' : 'exited' }));
+                return [...older, ...t];
+              }),
+            )
+            .catch(() => undefined)
+            .finally(() => (starting.current = false));
+        }
+      }),
+    [ops],
+  );
 
   const newSession = async (from?: DockTab) => {
     if (tabs.length >= SESSIONS_MAX) {
@@ -161,7 +196,7 @@ export function TerminalDock() {
               onAuxClick={(e) => e.button === 1 && close(t.id)}
             >
               <span className={`term-dot ${t.state}`} aria-hidden="true" />
-              <span className="term-title">{tabLabel(t.title, t.cwd)}</span>
+              <span className="term-title">{dockLabel(t)}</span>
               <button
                 type="button"
                 className="term-x"
@@ -228,7 +263,11 @@ export function TerminalDock() {
               })
             }
             onAttached={() => t.fresh && setTabs((all) => all.map((y) => (y.id === t.id ? { ...y, fresh: false } : y)))}
-            onExit={(code) => setTabs((all) => all.map((y) => (y.id === t.id ? { ...y, state: 'exited', exitCode: code } : y)))}
+            onExit={(code) => {
+              setTabs((all) => all.map((y) => (y.id === t.id ? { ...y, state: 'exited', exitCode: code } : y)));
+              const text = exitNotice(t, code);
+              if (text) toast.show({ kind: 'info', text });
+            }}
             onCommand={(cmd) => command(cmd, t)}
             openLink={openLink}
           />

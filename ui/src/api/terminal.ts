@@ -14,6 +14,8 @@ export function terminalOps(api: Api) {
     resize: (id: string, cols: number, rows: number) => api<null>('terminal_resize', { id, cols, rows }),
     close: (id: string) => api<null>('terminal_close', { id }),
     sessions: () => api<TerminalSession[]>('terminal_sessions'),
+    /** A new session running `claude auth login`; the host takes no program from here. */
+    claudeSignIn: (cols = 100, rows = 24) => api<TerminalSession>('claude_sign_in', { cols, rows }),
   };
 }
 

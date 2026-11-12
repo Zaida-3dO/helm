@@ -1,6 +1,6 @@
 // A fake host for checking the UI in a plain browser. It implements the host's ops and
 // events with a scripted turn: streamed text, a tool card, and an approval, question or plan
-// card when the prompt asks for one ("approve", "question", "plan"). "todo" keeps a live checklist across the turn (a recap card follows any turn with a checklist or three tool steps), "pictures" shows a gallery card, "board" offers an option board ("board multi" lets several be picked) and "code" streams a fenced code block. "options" ends the reply with a numbered list of choices. "long" in a prompt adds a
+// card when the prompt asks for one ("approve", "question", "plan"). "signin" fails the turn with an expired-sign-in error. "todo" keeps a live checklist across the turn (a recap card follows any turn with a checklist or three tool steps), "pictures" shows a gallery card, "board" offers an option board ("board multi" lets several be picked) and "code" streams a fenced code block. "options" ends the reply with a numbered list of choices. "long" in a prompt adds a
 // background task. A steer sent mid-turn shows as Pending and is read about 1.5 s later.
 //
 // Dev builds only: main.tsx imports it behind `import.meta.env.DEV`, so production drops it.
@@ -402,6 +402,24 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
         c.thread = rest;
         emitThread(c);
       }
+    }
+    // "signin": the turn fails the way an expired Claude sign-in does, so the row offers "Sign in again".
+    if (/signin/i.test(text)) {
+      setStatus(c, 'running');
+      try {
+        await sleep(step, cancelled);
+        addRow(c, {
+          role: 'assistant',
+          status: 'error',
+          details: { errorMessage: 'Failed to authenticate: OAuth session expired and could not be refreshed' },
+        });
+        setStatus(c, 'idle');
+      } catch {
+        setStatus(c, 'stopped');
+      } finally {
+        c.turn = null;
+      }
+      return;
     }
     if (/flag/i.test(text)) flags.set(c.chat.id, `You asked for "${text.slice(0, 40)}" and the last reply stopped before the tests were run. It looks unfinished: nobody has confirmed the change works.`);
     if (/flag/i.test(text)) flagPriority.set(c.chat.id, /high/i.test(text) ? 'high' : 'normal');
