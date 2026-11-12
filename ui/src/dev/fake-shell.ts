@@ -39,7 +39,7 @@ export function shellFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         const cwd = 'C:\\Users\\demo';
         terms.set(id, { seq: 0, line: '', cwd });
         setTimeout(() => out(ctx, id, 'Opening your browser to sign in to Claude...\r\nLogin successful.\r\n'), 10);
-        setTimeout(() => ctx.emit({ kind: 'terminal_exit', id, code: 0 }), 1500);
+        setTimeout(() => ctx.emit({ kind: 'terminal_exit', id, code: 0 }), 2000);
         return { id, shell: 'claude', cwd, title: 'Claude sign-in', running: true };
       }
       case 'terminal_attach': {

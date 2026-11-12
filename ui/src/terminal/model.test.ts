@@ -70,19 +70,19 @@ test('replayed terminal queries are stripped so a reattached view never answers 
   assert.equal(stripQueries(`${E}[31mred${E}[0m`), `${E}[31mred${E}[0m`, 'colours stay');
 });
 
-test('a tab is labelled with its folder and shell, never the whole path', () => {
-  const rows: Array<[string, string, string]> = [
-    ['pwsh', 'C:\\Users\\me\\helm', 'helm pwsh'],
-    ['zsh', '/home/me/helm/', 'helm zsh'],
-    ['pwsh', 'C:\\', 'C:\\ pwsh'],
-    ['bash', '', 'bash'],
+test('a tab is labelled with its folder and shell, never the whole path; a sign-in tab by its title', () => {
+  const rows: Array<[string, string, boolean, string]> = [
+    ['pwsh', 'C:\\Users\\me\\helm', false, 'helm pwsh'],
+    ['zsh', '/home/me/helm/', false, 'helm zsh'],
+    ['pwsh', 'C:\\', false, 'C:\\ pwsh'],
+    ['bash', '', false, 'bash'],
+    ['Claude sign-in', 'C:\\Users\\me\\helm', true, 'Claude sign-in'],
   ];
-  for (const [title, cwd, want] of rows) assert.equal(tabLabel(title, cwd), want);
+  for (const [title, cwd, signIn, want] of rows) assert.equal(dockLabel({ title, cwd, signIn }), want);
+  assert.equal(tabLabel('pwsh', '/a/b'), 'b pwsh');
 });
 
-test('a sign-in tab is named by its title and only a clean sign-in exit is announced', () => {
-  assert.equal(dockLabel({ title: 'Claude sign-in', cwd: 'C:\Users\me', signIn: true }), 'Claude sign-in');
-  assert.equal(dockLabel({ title: 'pwsh', cwd: 'C:\Users\me' }), 'me pwsh');
+test('only a clean sign-in exit is announced', () => {
   assert.equal(exitNotice({ signIn: true }, 0), SIGN_IN_DONE);
   assert.equal(exitNotice({ signIn: true }, 1), null);
   assert.equal(exitNotice({}, 0), null);

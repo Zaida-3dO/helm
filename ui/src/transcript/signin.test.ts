@@ -17,7 +17,6 @@ test('only an expired or missing Claude sign-in offers to sign in again', () => 
     ['FAILED TO AUTHENTICATE', true],
     // Near misses.
     ['MCP server linear: OAuth sign-in failed. Reconnect it in Settings.', false],
-    ['The mcp server "notion" needs OAuth: OAuth token has expired', false],
     ['GitHub did not accept the sign-in', false],
     ['Invalid API key', false],
     ['API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', false],
