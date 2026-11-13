@@ -189,6 +189,26 @@ test("Claude Code's schedule tools come off the disallowed list only on request,
   assert.ok(scheduleRedirect("RemoteTrigger", {}).includes("app_create_schedule"));
 });
 
+test("a local chat also loses the built-ins it will not use, and no name is listed twice", () => {
+  const local = { baseUrl: "http://127.0.0.1:40731", model: "qwen:8b" };
+  const localOnly = ["WebSearch", "SendMessage", "Workflow", "EnterPlanMode", "ExitPlanMode", "NotebookEdit", "ReportFindings", "ListAgents"];
+  const on = disallowedTools({ local }, {});
+  assert.ok(localOnly.every((t) => on.includes(t)), "a local chat loses them all");
+  assert.equal(new Set(on).size, on.length, "no name listed twice");
+  // A local chat the gates act in has already lost Workflow: it is still listed once.
+  const gated = disallowedTools({ local }, { HELM_WORKFLOW_GATES: "1" });
+  assert.equal(gated.filter((t) => t === "Workflow").length, 1, "deduped with the gate list");
+  assert.ok(gated.includes("REPL"), "the gate list still applies beside the local one");
+  // A Claude chat keeps them: a gated one loses only the workflow runner and the REPL.
+  for (const t of localOnly) assert.equal(disallowedTools({}, {}).includes(t), false, `${t} stays for a plain Claude chat`);
+  const claudeGated = disallowedTools({}, { HELM_WORKFLOW_GATES: "1" });
+  assert.ok(["Workflow", "REPL"].every((t) => claudeGated.includes(t)));
+  assert.ok(localOnly.filter((t) => t !== "Workflow").every((t) => !claudeGated.includes(t)), "the rest stay for a gated Claude chat");
+  // The flag carries the whole local set.
+  const flagValue = (flag(buildClaudeArgs({ local }), "--disallowedTools") ?? "").split(",");
+  assert.ok(localOnly.every((t) => flagValue.includes(t)), "the --disallowedTools list holds them");
+});
+
 test("a fork's first launch resumes as a new session; --fork-session needs a session to resume", () => {
   const a = buildClaudeArgs({ resumeSessionId: "s-1", forkSession: true });
   assert.equal(flag(a, "--resume"), "s-1");
