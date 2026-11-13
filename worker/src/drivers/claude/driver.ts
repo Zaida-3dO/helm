@@ -3,6 +3,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import os from "node:os";
 import type { HostChannel, ResponseBody } from "../../protocol/channel.ts";
 import { describeFault, LineReader, MAX_RECORD_BYTES } from "../../protocol/lines.ts";
 import type { Driver } from "../../protocol/server.ts";
@@ -17,6 +18,7 @@ import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE, SHELL_TOOLS_MATCHER
 import { LANDING_GUARD_HOOK_ID, LANDING_GUARD_MATCHER, LandingGuard } from "./guard.ts";
 import { assertNotShim, resolveClaude, type Resolved } from "./resolve.ts";
 import { NATIVE_SCHEDULE_MATCHER, SCHEDULE_REDIRECT_HOOK_ID, scheduleRedirect } from "./schedulecalls.ts";
+import { SUBAGENT_MODEL_HOOK_ID, SUBAGENT_MODEL_MATCHER, SubagentModelGuard } from "./subagentmodel.ts";
 import { SHELL_CHANGES_HOOK_ID, ShellChangeCapture } from "./shellchanges.ts";
 import { StreamTranslator } from "./translate.ts";
 import { Attribution } from "../../hosttools/attribution.ts";
@@ -53,6 +55,11 @@ export const LONG_COMMAND_HOOK_ID = "helm-long-commands";
 export const HOST_TOOL_HOOK_ID = "helm-host-tools";
 /** PreToolUse hook on every MCP tool: refuses Claude Code's copy of a server Helm also has. */
 export const DUPLICATE_MCP_HOOK_ID = "helm-duplicate-mcp";
+
+/** Told to a local chat, whose tool list holds only the common Helm tools: the rest stay one
+ * search and one call away. */
+export const LOCAL_TOOL_RULE =
+  "Helm's tools: your list has the common ones. To find any other Helm tool (schedules, feedback, settings, projects, pages, voice, Telegram, MCP servers…), search with app_list_tools, then call it with app_mcp_call.";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -183,6 +190,8 @@ export class ClaudeDriver implements Driver {
   private readonly gateChannel: RequestChannel | undefined;
   /** Finds the files each Bash call changed, when the launch asks for it and has a folder. */
   private readonly shellChanges: ShellChangeCapture | undefined;
+  /** Refuses a sub-agent that asks for a Claude model in a local chat (local chats only). */
+  private readonly subagentModel: SubagentModelGuard | undefined;
 
   constructor(launch: Launch, channel: HostChannel, deps: DriverDeps) {
     this.launch = launch;
@@ -193,6 +202,7 @@ export class ClaudeDriver implements Driver {
     this.model = c.model;
     this.effort = isEffort(c.effort) ? c.effort : DEFAULT_EFFORT;
     this.isLocal = c.local !== undefined;
+    this.subagentModel = this.isLocal ? new SubagentModelGuard({ agentsFile: c.agentsFile, cwd: launch.cwd, home: os.homedir() }) : undefined;
     this.budget = new SubagentBudget({ softTurns: typeof c.subagentSoftTurns === "number" && c.subagentSoftTurns > 0 ? c.subagentSoftTurns : 0, hardStop: c.subagentHardStop === true });
     if (c.shellChanges === true) this.shellChanges = new ShellChangeCapture();
     const level = launch.sendBehavior?.longCommands;
@@ -221,6 +231,7 @@ export class ClaudeDriver implements Driver {
       this.hostTools = new HostToolServer({
         bridge: asHostToolBridge(this.mcp),
         hostTools: launch.hostTools,
+        lean: c.local !== undefined,
         outputCap: c.toolOutputCap === true ? { maxChars: DEFAULT_MAX_CHARS, save: fileSaver(launch.chatId) } : undefined,
         channel,
         notify: (text) => this.ch.emit({ type: "notice", text }),
@@ -301,6 +312,7 @@ export class ClaudeDriver implements Driver {
     if (this.budget.enabled) preToolUse.push({ matcher: ".*", hookCallbackIds: [BUDGET_HOOK_ID] });
     if (this.shellChanges) preToolUse.push({ matcher: "Bash", hookCallbackIds: [SHELL_CHANGES_HOOK_ID] });
     if (this.launch.claude?.scheduleTools === true) preToolUse.push({ matcher: NATIVE_SCHEDULE_MATCHER, hookCallbackIds: [SCHEDULE_REDIRECT_HOOK_ID] });
+    if (this.subagentModel) preToolUse.push({ matcher: SUBAGENT_MODEL_MATCHER, hookCallbackIds: [SUBAGENT_MODEL_HOOK_ID] });
     const hooks: Json = {};
     if (preToolUse.length > 0) hooks.PreToolUse = preToolUse;
     // The turn-end check rides on the same switch as the gates: a chat the workflow may act in.
@@ -771,12 +783,16 @@ export class ClaudeDriver implements Driver {
 
   /** The rules appended to the chat's own agent's instructions: long commands, sub-agent limits. */
   private promptRule(): string | undefined {
-    const parts = [this.longCommands.enabled ? PROMPT_RULE : "", this.budget.enabled ? subagentRule(this.budget.softTurns) : ""].filter(Boolean);
+    const parts = [this.longCommands.enabled ? PROMPT_RULE : "", this.budget.enabled ? subagentRule(this.budget.softTurns) : "", this.isLocal ? LOCAL_TOOL_RULE : ""].filter(Boolean);
     return parts.length > 0 ? parts.join("\n\n") : undefined;
   }
 
   private onHook(requestId: string, req: Json): void {
     const input = obj(req.input);
+    if (req.callback_id === SUBAGENT_MODEL_HOOK_ID && this.subagentModel) {
+      const reason = this.subagentModel.decide(obj(input.tool_input));
+      return this.controlReply(requestId, reason ? { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } } : {});
+    }
     if (req.callback_id === BUDGET_HOOK_ID) {
       const d = this.budget.decide(input, String(req.tool_use_id ?? input.tool_use_id ?? ""));
       if (d.kind === "note") return this.controlReply(requestId, { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: d.text } });
