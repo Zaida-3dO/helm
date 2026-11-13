@@ -1,99 +1,131 @@
 # Helm
 
-Helm is a desktop workspace for running and supervising AI coding agents. Each chat drives a real
-Claude Code session in a project folder, and Helm keeps those sessions organised, visible and
-recoverable: many chats side by side, a live view of what each agent and its subagents are doing,
-and the tools around them (files, diffs, a terminal, search) in the same window.
+**One window for all your AI coding agents.**
 
-It is Windows-first. Linux is a secondary target (CI checks that the host compiles there); macOS
-is not supported.
+Helm is a desktop app for running, watching and steering many Claude Code agents at once. Every chat
+is a real Claude Code session working in a real folder. Helm keeps them organised and visible, keeps
+them going when you look away, and puts everything they need around them: files, diffs, a terminal,
+pull requests, notes, search and a browser for pages they make.
 
-## What it does
+Start a chat, give it a job, and move on to the next one. Helm tells you when an agent needs you,
+shows you what it did, and keeps the session alive through quits, crashes, restarts and sleep.
 
-- **Chats with Claude Code.** One worker process per active chat drives the unmodified `claude`
-  binary under the user's own sign-in. A chat survives a quit, a crash or a relaunch, and resumes
-  its Claude Code session.
-- **A composer built for agents.** Model and effort, permission mode (including plan mode),
-  attachments and dropped files, references to other chats, a `/` menu, quick replies and action
-  buttons.
-- **Visibility.** Streaming replies, a timeline of the work, approval, question and plan cards,
-  subagents shown as cards that can be stopped one at a time, a Needs attention inbox, and a
-  plan-usage meter.
-- **The side panel.** Files, Changes with diffs, staging and review comments, notes from local
-  vaults, and quick open. A terminal dock sits under the transcript.
-- **Host tools and MCP.** Tools Helm offers the agent, each behind a consent step, and an MCP
-  client for the user's own servers.
-- **Running unattended.** Schedules that send a prompt into a chat, an away mode and a usage
-  governor.
-- **An orchestrator workflow.** A per-chat switch and a workflow panel for a chat that coordinates
-  other agents through plan, build, review and landing.
-- **The hub** (optional, `hub/`): a small always-on service for a home server. It holds a shared
-  memory store served over MCP, relays a few Helm tools to other agents over an outbound line, and
-  runs a Telegram bot that talks to Helm's chats.
+> Windows-first. Linux is a secondary target; macOS is not supported.
 
-## How it is built
+## Why Helm
 
-| Part | Technology |
-|---|---|
-| App shell and host | Rust and Tauri 2. One `api(op, args)` command, SQLite (WAL) for state, a per-user profile folder |
-| Renderer | React and TypeScript, built with Vite, in WebView2 on Windows |
-| Chat worker | Node, run straight from TypeScript (erasable syntax only, no build step), speaking line-delimited JSON over stdio |
-| Helpers | Short-lived Node processes for chat titles, composer suggestions and plan usage |
-| Hub | A separate Rust service, built and shipped as a container image |
+- **Run many agents without losing track.** Chats sit on project boards with titles, icons, unread
+  marks and a Needs attention inbox, so you always know which agent is waiting on you and why.
+- **See the work, not only the words.** Live checklists while an agent works, a recap card when it
+  finishes, every tool call and subagent on a timeline, and diffs one click away.
+- **Your own sign-in, your own machine.** Helm drives the unmodified `claude` binary under your own
+  Claude Code login. Nothing is proxied; your chats live in a profile folder on your PC.
+- **Agents that can run the show.** Agents can start chats, hand work to each other, wait on builds
+  and pull requests, and report back, with a workflow that takes a plan through build, review and
+  merge.
+- **Local models when you want them.** Run a chat on a model server on your own machine (Ollama,
+  Strata) and switch between it and Claude mid-conversation.
+- **Away from your desk, still in charge.** Reply from Telegram, talk to your agents by voice, and
+  let Helm keep work moving while you are away.
 
-## Requirements
+## Features
 
-- Windows (developed on Windows 11).
-- Rust stable with `rustfmt` and `clippy` (`rust-toolchain.toml`; minimum 1.89).
-- Node 22.19 or newer, with npm. The repo uses npm workspaces, not pnpm.
-- The Tauri 2 prerequisites: on Windows, the Visual Studio 2022 C++ build tools and WebView2.
-- Claude Code installed and signed in. Helm finds it through `HELM_CLAUDE_PATH`, `claude.exe` on
-  `PATH`, `~/.local/bin/claude.exe`, or the VS Code extension's native binary. Wrapper scripts
-  (`.cmd`, `.bat`, `.ps1`) are refused.
+### Chats
+- Every chat is a Claude Code session in a project folder, with its own worker process. It
+  survives a quit, a crash or a relaunch and picks up where it left off.
+- Model and effort picker, permission modes (including plan mode), and a model switch at any
+  point in a chat, between Claude models or to and from a local model.
+- Fork from any message, **Go back** to before a message, roll a long chat over into a fresh one with
+  a hand-off, and suggested titles.
+- Messages you send while an agent is working are delivered at its next safe point: nothing waits
+  in a queue.
+- Chat cost: tokens, estimated dollars and share of your weekly plan, per chat and per project.
 
-## Build, test and run
+### The composer
+- Attach files, folders and screenshots (paste or drop), mention other chats with `@`, paste long
+  text as an attachment, and use a `/` menu for skills and commands.
+- Dictation: speak into the composer through your own speech-to-text server.
+- Autocomplete as you type, and Send or Steer while an agent is busy.
 
-```sh
-npm ci                              # install every workspace
+### Seeing the work
+- Streaming replies, a work timeline, and subagents as cards you can stop one at a time.
+- A live checklist during a turn and a recap card at its end.
+- Agents can show you images as swipeable galleries and offer **option boards** you answer with a
+  tap.
+- Approval, question and plan cards, a Needs attention inbox, find in chat, and a plan-usage meter
+  with your live 5-hour and weekly limits.
 
-npm run dev                         # run the app: Vite on 127.0.0.1:1420 plus `cargo run`
-npm run build:debug                 # debug app with the production CSP: target/debug/helm.exe
-npm run build:installer             # per-user NSIS installer under target/release/bundle/nsis/
+### Projects and boards
+- Project boards group chats by what they are for; each project can have notes every chat reads.
+- Projects can be closed and reopened, chats can be muted, nested, pinned, shared and archived.
+- Git worktrees per chat when a repository wants them, and a guard that keeps agents out of the
+  main checkout when it does not.
+- Search everything with Mod+K, and browse, open and fork your Claude Code and Claude Desktop
+  chats from inside Helm.
 
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace              # the Rust host
-npm run typecheck -w ui
-npm test                            # every workspace's tests
-npm run e2e -w checks               # end to end against the debug app (build it first)
-```
+### The side panel
+- Files with a live tree, Changes with diffs, staging and review comments, and quick open
+  (Ctrl+P, or tap Shift twice).
+- Pull requests: read, comment, react and review, with split diffs.
+- Notes from your Obsidian vaults, with links that open the right note.
+- **Pages:** HTML pages your agents build run in a sealed-off frame, with their network off unless
+  you allow it, and can be pinned to come back to.
+- A terminal dock under the transcript.
 
-The UI also runs on its own, without Tauri, against a fake host: `npx vite --port <port>` in `ui/`.
-Add `?seed=250` to the URL to preload a long chat.
+### Agents that coordinate
+- An orchestrator workflow: plan, build, review and land, with review rounds capped and lessons
+  recorded when a run goes badly.
+- Ready-made agents (planner, coder, reviewer, plan reviewer, PR clean-up, smoke tester) and skills,
+  editable in Settings.
+- Agents can start and message other chats, declare waits (a build, a pull request, another chat)
+  and let Helm do the waiting, flag you for attention, schedule prompts and change settings, each
+  behind a consent step you control.
+- Skills, rules and memories in layers (yours, a project's, shared), kept in sync across your
+  machines.
 
-Helm keeps its data in `%LOCALAPPDATA%\Helm` on Windows. Set `HELM_PROFILE_DIR` to a scratch folder
-to run a build without touching it.
+### Tools and models
+- An MCP client for your own servers, with per-server switches and a Google accounts block for
+  Gmail.
+- Web search as a Helm tool, with your own Brave key.
+- Local model servers on your machine (Ollama, Strata): started on send, unloaded when idle, shown
+  in the model picker, and usable for background jobs such as titles.
+- Your editor's current selection, through a small VS Code extension.
 
-The hub builds from its own folder: `cd hub && cargo test`, and `docker build -t helm-hub:latest .`
-for the image. See `hub/README.md`.
+### Running while you are away
+- Schedules and reminders that send a prompt into a chat on time.
+- Away mode: a digest of what happened, triage of idle chats, and retries for chats that stalled.
+- A usage governor that slows down before you hit your plan limits.
+- Recovery from sleep, network outages and renderer crashes, with automatic continue.
 
-Tests that talk to the real Claude Code are opt-in, because they spend plan usage:
-`HELM_LIVE_CLAUDE=1 npm run test:live` in `worker/`.
+### The hub (optional)
+A small always-on service for a home server:
+- A shared memory store over MCP, private per person or shared.
+- A Telegram bot that talks to your chats, including pictures, files, voice notes and long
+  messages.
+- Voice from your phone, with replies spoken back.
+- A Remote page to answer waiting prompts from a browser.
+- Several machines and people: pair each PC, run chats on another of your machines, and give
+  each person in a household their own private space.
 
-## Layout
+### Comfort
+- Themes, your own colours with contrast checked for you, motion and sounds you can turn down.
+- Native notifications with Reply and Continue, a tray icon, an optional desktop pet, and small
+  celebrations when work finishes.
+- Backup, staged restore and export of your whole profile, and updates installed from a folder.
+- A feedback store: tell Helm (or let your agents tell it) what got in the way.
 
-| Path | What |
-|---|---|
-| `host/` | The Rust host: library crates under `host/crates/` and the Tauri app under `host/app/`. See `host/README.md` |
-| `ui/` | The React renderer. Stable test hooks are listed in `ui/TESTIDS.md` |
-| `worker/` | The Node chat worker and its Claude Code driver. See `worker/PROTOCOL-NOTES.md` |
-| `helpers/` | Short-lived Node helpers: `titles`, `autocomplete`, `usage` |
-| `fakes/` | Test doubles: a fake `claude` that replays stream-json fixtures, a fake host, a fake MCP server, a fake Telegram API and others |
-| `checks/` | End-to-end checks (Playwright over WebView2's DevTools port), live checks and a renderer benchmark |
-| `hub/` | The optional home-server service, its own Cargo workspace |
-| `docs/` | The roadmap |
+## Getting started
 
-## CI
+1. Install Claude Code and sign in.
+2. Build and install Helm (see [`docs/setup.md`](docs/setup.md)); the installer is per user and
+   needs no admin rights.
+3. Open Helm, pick a project folder, and start a chat.
 
-The `checkpoint` workflow runs only when started by hand or on a pull request labelled
-`checkpoint`. It runs the full check set on Windows, a Linux `cargo check`, and the hub's own build.
+From there: press **Mod+K** to find anything, open the side panel for files and diffs, and watch
+the sidebar for chats that need you. Settings has a page for every part above.
+
+## Documentation
+
+- [`docs/setup.md`](docs/setup.md): requirements, building, testing and the repository layout.
+- [`docs/roadmap.md`](docs/roadmap.md): where Helm is going next.
+- [`hub/README.md`](hub/README.md): setting up the hub on a home server.
