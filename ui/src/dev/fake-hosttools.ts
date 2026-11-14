@@ -1,6 +1,7 @@
 // Dev fake for the host-tools ops (consent cards, settings Undo), so the Allow cards can be seen
-// in a plain browser. Every chat starts with one pending Allow request whose reason carries a
-// right-to-left override and a zero-width space, to show the inert rendering.
+// in a plain browser. Every chat starts with two pending cards: an Allow request whose reason
+// carries a right-to-left override and a zero-width space, to show the inert rendering, and a
+// staged-settings card that Helm applies on Approve.
 
 import type { FakeOpHandler } from './fakeHost.ts';
 
@@ -27,7 +28,28 @@ export function hosttoolsFakeOps(): { prefixes: string[]; handler: FakeOpHandler
     decidedAt: null,
     grantExpiresAt: null,
     note: null,
+    appliesOnAllow: false,
+    outcome: null,
   });
+  // A staged-settings card: Helm applies it on Approve, one row per change.
+  const stagedCard = (chatId: string) => ({
+    ...card(chatId),
+    id: `fake-staged-${chatId}`,
+    kind: 'staged_settings',
+    label: 'Change settings',
+    summary: [
+      'Change 3 settings',
+      'Update folder: none → \\\\server\\share\\helm\\dist',
+      'Let other devices use chats on this PC: on → off',
+      'Pair with the hub at 192.168.1.10:8000 as Sam on Laptop, using the one-time code in \\\\server\\share\\pair.txt',
+    ].join('\n'),
+    reason: 'The user asked me to set up the update folder and pair this PC.',
+    appliesOnAllow: true,
+  });
+  const cardFor = (id: string) => {
+    const chatId = id.replace(/^fake-(allow|staged)-/, '');
+    return id.startsWith('fake-staged-') ? stagedCard(chatId) : card(chatId);
+  };
   // Two sample changes so Settings → General has something to show and undo.
   const changes = [
     { changeId: 2, chatId: 'fake', key: 'compactSidebar', before: null, after: true, at: Date.now() - 3_600_000, undone: false },
@@ -37,16 +59,16 @@ export function hosttoolsFakeOps(): { prefixes: string[]; handler: FakeOpHandler
     switch (op) {
       case 'consent_list': {
         const chatId = String(args.chatId ?? '');
-        const c = card(chatId);
-        return { pending: decided.has(c.id) ? [] : [c], decided: [] };
+        const open = [card(chatId), stagedCard(chatId)].filter((c) => !decided.has(c.id));
+        return { pending: open, decided: [] };
       }
       case 'consent_decide': {
         const id = String(args.requestId ?? '');
         if (decided.has(id)) throw { code: 'conflict', message: 'This request was already answered or has expired.' };
-        const chatId = id.replace(/^fake-allow-/, '');
-        decided.set(id, { id, chatId, state: args.decision === 'allow' ? 'allowed' : 'denied' });
-        ctx.emit({ kind: 'consent', chatId });
-        return { ...card(chatId), state: decided.get(id)?.state };
+        const c = cardFor(id);
+        decided.set(id, { id, chatId: c.chatId, state: args.decision === 'allow' ? 'allowed' : 'denied' });
+        ctx.emit({ kind: 'consent', chatId: c.chatId });
+        return { ...c, state: decided.get(id)?.state };
       }
       case 'settings_undo': {
         for (const id of (args.changeIds as number[]) ?? []) {
