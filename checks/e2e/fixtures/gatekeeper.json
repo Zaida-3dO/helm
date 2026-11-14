@@ -1,0 +1,153 @@
+{
+  "description": "The question gate end to end. One script serves every claude the app starts. The gatekeeper helper's prompt (it carries a <card> block) is answered by the tag in the card's option descriptions: [GATE-DECIDE] takes Rename it, [GATE-ASK] escalates with a brief, [GATE-HANG] never answers. The titles helper gets a fixed title and the idle check says nothing is needed. A chat asked for one of the three flows asks one question; any other message is echoed.",
+  "steps": [
+    {
+      "repeat": [
+        { "await": { "type": "user" }, "as": "p", "timeoutMs": 600000 },
+        {
+          "if": { "saved": "p", "contains": "<card>" },
+          "then": [
+            {
+              "if": { "saved": "p", "contains": "[GATE-DECIDE]" },
+              "then": [
+                {
+                  "result": "{\"verdict\": \"decide\", \"choice\": \"Rename it\", \"reason\": \"renaming a scratch note is easy to undo and nothing depends on the old name\", \"confidence\": 0.9, \"risk\": \"low\", \"reversible\": true}"
+                }
+              ],
+              "else": [
+                {
+                  "if": { "saved": "p", "contains": "[GATE-HANG]" },
+                  "then": [{ "hang": true }],
+                  "else": [
+                    {
+                      "result": "{\"verdict\": \"escalate\", \"reason\": \"Removing the backups cannot be undone.\", \"confidence\": 0.4, \"risk\": \"high\", \"reversible\": false, \"brief\": {\"problem\": \"The chat wants to remove the old backups and only you know whether they are still needed.\", \"options\": [{\"label\": \"Remove them\", \"means\": \"The old copies go away for good.\", \"pros\": \"Frees the disk.\", \"cons\": \"Nothing can be brought back.\", \"cost\": \"A few gigabytes.\"}, {\"label\": \"Keep them\", \"means\": \"Nothing is removed.\", \"pros\": \"Safe.\", \"cons\": \"The disk stays full.\", \"cost\": \"No effort.\"}], \"recommendation\": \"Keep them\", \"why\": \"Removing cannot be undone, and keeping costs nothing.\"}}"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "else": [
+            {
+              "if": { "saved": "p", "contains": "<first_request>" },
+              "then": [{ "result": "Gate check chat" }],
+              "else": [
+                {
+                  "if": { "saved": "p", "contains": "<conversation>" },
+                  "then": [{ "result": "{\"needs\": false, \"reason\": \"\"}" }],
+                  "else": [
+                    { "init": { "tools": [] } },
+                    {
+                      "if": { "saved": "p", "contains": "gate flow one" },
+                      "then": [
+                        {
+                          "emit": {
+                            "type": "control_request",
+                            "request_id": "q-decide",
+                            "request": {
+                              "subtype": "can_use_tool",
+                              "tool_name": "AskUserQuestion",
+                              "input": {
+                                "questions": [
+                                  {
+                                    "question": "Rename the scratch note?",
+                                    "header": "Naming",
+                                    "options": [
+                                      { "label": "Rename it", "description": "[GATE-DECIDE] New name: plan.md" },
+                                      { "label": "Keep it", "description": "Leave the file as it is" }
+                                    ],
+                                    "multiSelect": false
+                                  }
+                                ]
+                              },
+                              "tool_use_id": "tu_decide"
+                            }
+                          }
+                        },
+                        { "await": { "type": "control_response", "response": { "request_id": "q-decide" } }, "as": "ans", "timeoutMs": 600000 },
+                        { "text": "Renamed, carrying on." },
+                        { "result": "done" }
+                      ],
+                      "else": [
+                        {
+                          "if": { "saved": "p", "contains": "gate flow two" },
+                          "then": [
+                            {
+                              "emit": {
+                                "type": "control_request",
+                                "request_id": "q-ask",
+                                "request": {
+                                  "subtype": "can_use_tool",
+                                  "tool_name": "AskUserQuestion",
+                                  "input": {
+                                    "questions": [
+                                      {
+                                        "question": "What should happen to the old backups?",
+                                        "header": "Backups",
+                                        "options": [
+                                          { "label": "Remove them", "description": "[GATE-ASK] They go away for good" },
+                                          { "label": "Keep them", "description": "Leave them where they are" }
+                                        ],
+                                        "multiSelect": false
+                                      }
+                                    ]
+                                  },
+                                  "tool_use_id": "tu_ask"
+                                }
+                              }
+                            },
+                            { "await": { "type": "control_response", "response": { "request_id": "q-ask" } }, "as": "ans", "timeoutMs": 600000 },
+                            { "text": "Kept the backups." },
+                            { "result": "done" }
+                          ],
+                          "else": [
+                            {
+                              "if": { "saved": "p", "contains": "gate flow three" },
+                              "then": [
+                                {
+                                  "emit": {
+                                    "type": "control_request",
+                                    "request_id": "q-hang",
+                                    "request": {
+                                      "subtype": "can_use_tool",
+                                      "tool_name": "AskUserQuestion",
+                                      "input": {
+                                        "questions": [
+                                          {
+                                            "question": "Which folder should the export go to?",
+                                            "header": "Export",
+                                            "options": [
+                                              { "label": "Reports", "description": "[GATE-HANG] The usual place" },
+                                              { "label": "Downloads", "description": "Somewhere else" }
+                                            ],
+                                            "multiSelect": false
+                                          }
+                                        ]
+                                      },
+                                      "tool_use_id": "tu_hang"
+                                    }
+                                  }
+                                },
+                                { "await": { "type": "control_response", "response": { "request_id": "q-hang" } }, "as": "ans", "timeoutMs": 600000 },
+                                { "text": "Exported." },
+                                { "result": "done" }
+                              ],
+                              "else": [
+                                { "text": "You said: {{p.message.content.0.text}}" },
+                                { "result": "done" }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
