@@ -1,10 +1,13 @@
-// Settings → Schedules: the ready-made schedules (off until turned on for a chat), then your own.
-// Every change goes to the host; the list follows its `schedules` event.
+// The schedules list, shown in the main area by the sidebar's Schedules tile: the ready-made
+// schedules (off until turned on for a chat), then your own. Every change goes to the host; the
+// list follows its `schedules` event. Settings → Schedules only says where they are and what
+// time zone they run in.
 
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { Run, RunStatus, Schedule, Template } from '../../schedules/api.ts';
 import { destinationText, statusText, timingText } from '../../schedules/model.ts';
 import { scheduleStoreFor, type ScheduleStore } from '../../schedules/store.ts';
+import { schedulesView } from '../../schedules/view.ts';
 import { useSelection, useShell } from '../../shell/context.ts';
 import { Button, Checkbox, Picker, toast } from '../../ui/index.ts';
 import { IconCheck, IconClock, IconRemind } from '../../ui/icons.tsx';
@@ -37,6 +40,33 @@ function errorText(e: unknown): string {
 
 function requestId(): string {
   return globalThis.crypto.randomUUID();
+}
+
+/** Settings → Schedules: what schedules are, the time zone they use, and the way to the list. */
+export function SchedulesSettings() {
+  const shell = useShell();
+  return (
+    <div className="sched-pane" data-testid="schedules-settings">
+      <p className="sched-intro">
+        A schedule sends a saved message into a chat on a timer, starts a new chat with it each time, or just reminds you. Your schedules and the ready-made ones are in the
+        sidebar's Schedules view.
+      </p>
+      <p className="sched-fine">Times are in your computer's time zone ({timeZoneText()}).</p>
+      <div>
+        <Button
+          variant="secondary"
+          onClick={() => {
+            shell.closeDialog();
+            schedulesView.show();
+          }}
+          data-testid="schedules-open-view"
+        >
+          <IconClock size={14} />
+          Open schedules
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 export function SchedulesPane() {

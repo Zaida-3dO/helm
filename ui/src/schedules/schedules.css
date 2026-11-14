@@ -20,3 +20,36 @@
   font-size: 12px;
   color: var(--secondary);
 }
+
+/* The schedules view: it replaces whatever else the chat area shows while it is open. */
+.shell-chat:has(> .sched-view) > :not(.sched-view) {
+  display: none;
+}
+.sched-view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.sched-view-head,
+.sched-view-body {
+  width: 100%;
+  max-width: calc(var(--chat-column) + 2 * 28px);
+  margin: 0 auto;
+  padding: 0 28px;
+}
+.sched-view-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 22px;
+  padding-bottom: 14px;
+}
+.sched-view-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.sched-view-body {
+  padding-bottom: 28px;
+}

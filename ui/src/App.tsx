@@ -53,6 +53,7 @@ import { followSendShortcut } from './hosttools/sendShortcut.ts';
 import './hosttools/index.ts'; // the Allow cards
 import { NewChatHost } from './newchat/index.ts';
 import { IconPickerHost } from './projects/index.ts';
+import { SchedulesViewHost } from './schedules/SchedulesView.tsx';
 import { FrameStats } from './perf/index.ts'; // the frame-stats overlay (Mod+Shift+P)
 import { ErrorBoundary } from './safety/ErrorBoundary.tsx';
 import { Delight } from './delight/index.tsx'; // celebrations, the first-run intro, the pet's settings
@@ -207,6 +208,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
           </ErrorBoundary>
           <NewChatHost flushers={flushers} sendShortcut={sendShortcut} /> {/* the new-chat page */}
           <IconPickerHost /> {/* the project icon picker */}
+          <SchedulesViewHost /> {/* the schedules view */}
         </div>
         <TerminalDock />
         <SavedDueNotice /> {/* the one notice for saved items that came due */}

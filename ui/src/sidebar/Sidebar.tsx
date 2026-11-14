@@ -59,6 +59,7 @@ import { useSubagentsRunning } from '../transcript/subagents/counts.ts';
 import { startSyncTriggers, syncOnOpen, type SyncHost } from './sync.ts';
 import { sidebarUndo } from './undo.ts';
 import { CostDialog, type CostTarget } from '../usage/CostDialog.tsx';
+import { schedulesView } from '../schedules/view.ts';
 import { layout, visibleRange } from './virtual.ts';
 import './sidebar.css';
 
@@ -92,7 +93,10 @@ export function Sidebar() {
       store={shell.store}
       ops={shell.ops}
       selected={chatId}
-      onSelect={(id) => shell.select(id)}
+      onSelect={(id) => {
+        schedulesView.close(); // opening a chat, even the one already selected, leaves the schedules view
+        shell.select(id);
+      }}
       openSettings={() => shell.openDialog(SETTINGS_DIALOG)}
       openSearch={() => shell.openDialog(SEARCH_DIALOG)}
     />
@@ -574,7 +578,6 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         onSearch={openSearch}
         onAttention={() => setInboxOpen(true)}
         onOpenChat={onSelect}
-        openSettings={openSettings}
       />
       {(error ?? snap.error) && (
         <p className="sb-error" role="alert">

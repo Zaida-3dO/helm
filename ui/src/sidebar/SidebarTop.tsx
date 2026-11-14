@@ -40,7 +40,6 @@ export interface SidebarTopProps {
   onSearch?: () => void;
   onAttention: () => void;
   onOpenChat: (chatId: string) => void;
-  openSettings?: () => void;
 }
 
 function useCommand(id: string): (() => void) | null {
@@ -57,14 +56,14 @@ export function flaggedBadge(attention: AttentionSummary | null): string {
   return n > 99 ? '99+' : countText(attention);
 }
 
-export function SidebarTop({ api, bus, attention, inboxOpen, onNewChat, onSearch, onAttention, onOpenChat, openSettings }: SidebarTopProps) {
+export function SidebarTop({ api, bus, attention, inboxOpen, onNewChat, onSearch, onAttention, onOpenChat }: SidebarTopProps) {
   const hide = useCommand(SIDEBAR_TOGGLE);
   const hideChord = useChord(SIDEBAR_TOGGLE);
   const newChord = useChord(NEW_CHAT_COMMAND);
   const searchChord = useChord(SEARCH_COMMAND);
   const count = inboxCount(attention);
   const tasks = useTasksEntry(api, bus);
-  const schedules = useSchedulesEntry(api, bus, openSettings ?? (() => undefined), onOpenChat);
+  const schedules = useSchedulesEntry(api, bus, onOpenChat);
   const [saved, setSaved] = useState<string[]>(() => readOrder());
 
   const lead: TileSpec[] = [
@@ -84,17 +83,16 @@ export function SidebarTop({ api, bus, attention, inboxOpen, onNewChat, onSearch
       disabled: attention === null,
     },
     tasks: tasks.ready ? { id: 'tasks', label: 'Tasks', icon: <IconBoard size={20} />, testId: 'nav-tasks', title: 'Tasks', onActivate: tasks.open } : null,
-    schedules: openSettings
-      ? {
-          id: 'schedules',
-          label: 'Schedules',
-          icon: <IconClock size={20} />,
-          testId: 'nav-schedules',
-          title: 'Schedules',
-          onActivate: schedules.open,
-          badge: schedules.waiting > 0 ? { text: String(schedules.waiting), label: `${schedules.waiting} reminders waiting`, testId: 'nav-schedules-count' } : null,
-        }
-      : null,
+    schedules: {
+      id: 'schedules',
+      label: 'Schedules',
+      icon: <IconClock size={20} />,
+      testId: 'nav-schedules',
+      title: 'Schedules',
+      onActivate: schedules.toggle,
+      pressed: schedules.open,
+      badge: schedules.waiting > 0 ? { text: String(schedules.waiting), label: `${schedules.waiting} reminders waiting`, testId: 'nav-schedules-count' } : null,
+    },
   };
   const available = DEFAULT_VIEW_ORDER.filter((id) => all[id] !== null);
   const order = orderViews(saved, available);

@@ -63,8 +63,8 @@ const runsOf = async (id: string): Promise<Run[]> => ((await api(page(), "schedu
 
 async function openSchedulesPane(): Promise<void> {
   if ((await page().locator(tid("schedules-pane")).count()) > 0) return;
-  await page().keyboard.press("Control+Comma");
-  await page().getByRole("tab", { name: "Schedules", exact: true }).click();
+  // The Schedules tile opens the list in the main area.
+  await page().click(tid("nav-schedules"));
   await page().waitForSelector(tid("schedules-pane"), { timeout: 20_000 });
 }
 
