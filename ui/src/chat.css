@@ -966,6 +966,25 @@ button.danger {
   --tone: var(--error);
 }
 
+/* A queued message is the transcript's last item, in the user bubble's place. */
+.row-queued {
+  padding-bottom: 14px;
+}
+
+.row-queued .queue-item {
+  width: 100%;
+}
+
+.queue-reason {
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.queue-reason::before {
+  content: '·';
+  margin-right: 5px;
+}
+
 .queue-item.dragging {
   opacity: 0.4;
 }

@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveKey, sendTooltip, stopTooltip, type KeyContext, type KeyShape } from './keymap.ts';
 import { DRAFT_DEBOUNCE_MS, DraftSaver, nextRevision, type Timers } from './drafts.ts';
-import { inFlightView } from './inFlight.ts';
-import { submission } from '../dev/fixtures.ts';
+import { inFlightView, waitReason } from './inFlight.ts';
+import { row, submission } from '../dev/fixtures.ts';
 import { liveRuns, wrapMarker } from './markup.ts';
 import { permissionLabel } from './permission.ts';
 
@@ -138,6 +138,23 @@ test('in flight: order, states, labels, tones and actions in one list', () => {
   // Withdraw is hidden when the worker cannot withdraw.
   const v2 = inFlightView([submission({ id: 's2', mode: 'steer', state: 'accepted' })], { capabilities: { ...caps, withdraw: false } });
   assert.deepEqual(v2[0]!.actions, []);
+  // Only an unread message says why it waits.
+  assert.deepEqual(v.map((i) => i.reason), [null, 'Claude reads it at its next step', 'Claude reads it at its next step', null, null]);
+  assert.equal(inFlightView(pending, { capabilities: caps, reason: 'Waiting for Bash to finish' })[1]!.reason, 'Waiting for Bash to finish');
+});
+
+test('wait reason: the running tool of this turn, else the next step', () => {
+  const user = row({ id: 1, role: 'user', text: 'go' });
+  const steer = row({ id: 4, role: 'user', text: 'also', details: { mode: 'steer' } });
+  const running = (name: string, id = 2) => row({ id, role: 'toolResult', toolName: name, status: 'streaming' });
+  for (const [rows, want] of [
+    [[], 'Claude reads it at its next step'],
+    [[user, row({ id: 2, role: 'toolResult', toolName: 'Read' })], 'Claude reads it at its next step'],
+    [[user, running('Bash')], 'Waiting for Bash to finish'],
+    [[user, running('mcp__helm__app_wait_for')], 'Waiting for helm · app_wait_for to finish'],
+    [[user, running('Bash', 2), steer, row({ id: 5, role: 'assistant', text: 'ok' })], 'Waiting for Bash to finish'],
+    [[row({ id: 0, role: 'toolResult', toolName: 'Bash', status: 'streaming' }), user], 'Claude reads it at its next step'],
+  ] as const) assert.equal(waitReason(rows as never), want, JSON.stringify(rows.map((r) => r.id)));
 });
 
 test('formatting keys wrap, unwrap, and leave the caret between empty markers', () => {

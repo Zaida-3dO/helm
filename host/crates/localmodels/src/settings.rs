@@ -13,6 +13,7 @@ use helm_chats::types::LocalServerKind;
 use rusqlite::{OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use ts_rs::TS;
 
 pub const STRATA_URL: &str = "http://127.0.0.1:18731";
@@ -40,6 +41,11 @@ pub const MAX_GAME_NAME: usize = 100;
 pub const MIN_GAME_LIFT: u32 = 1;
 pub const MAX_GAME_LIFT: u32 = 60;
 pub const DEFAULT_GAME_LIFT: u32 = 5;
+/// Names the user gave local models: at most this many, each 1 to 40 characters.
+pub const MAX_ALIASES: usize = 64;
+pub const MAX_ALIAS: usize = 40;
+/// The longest a model id may be, as a key of the names.
+const MAX_MODEL_ID: usize = 300;
 /// The longest a restart task name and a pause file path may be.
 pub const MAX_TASK: usize = 200;
 pub const MAX_PAUSE_FILE: usize = 500;
@@ -130,6 +136,9 @@ pub struct LocalSettings {
     /// Process names (`game.exe`) that unload local models while they run. Empty: nothing is
     /// watched.
     pub games: Vec<String>,
+    /// The names the user gave models, by model id (`local/<server>/<model>`). A model with none
+    /// goes by its default name (`names::default_alias`).
+    pub aliases: BTreeMap<String, String>,
     /// Minutes after the last listed game closes before local models come back.
     pub game_lift_minutes: u32,
     /// A Windows scheduled task that restarts a model server: ended while local models are
@@ -186,6 +195,7 @@ impl Default for LocalSettings {
             tools: ToolsSetup::Lean,
             compare_with: CompareModel::Sonnet,
             games: Vec::new(),
+            aliases: BTreeMap::new(),
             game_lift_minutes: DEFAULT_GAME_LIFT,
             restart_task: None,
             pause_file: None,
@@ -331,6 +341,14 @@ fn game_list<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
     out
 }
 
+fn alias_key_ok(k: &str) -> bool {
+    k.starts_with("local/") && plain_text(k, MAX_MODEL_ID)
+}
+
+fn alias_ok(a: &str) -> bool {
+    plain_text(a, MAX_ALIAS)
+}
+
 fn task_ok(t: &str) -> bool {
     plain_text(t, MAX_TASK) && !t.contains('"')
 }
@@ -439,6 +457,15 @@ pub fn read_lenient(v: &Value) -> LocalSettings {
         s.games = game_list(list.iter().filter_map(Value::as_str));
         s.games.truncate(MAX_GAMES);
     }
+    if let Some(map) = o.get("aliases").and_then(Value::as_object) {
+        s.aliases = map
+            .iter()
+            .filter_map(|(k, v)| Some((k.as_str(), v.as_str()?.trim())))
+            .filter(|(k, v)| alias_key_ok(k) && alias_ok(v))
+            .take(MAX_ALIASES)
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+    }
     if let Some(n) = o
         .get("gameLiftMinutes")
         .and_then(|v| int_in(v, MIN_GAME_LIFT, MAX_GAME_LIFT))
@@ -518,6 +545,8 @@ pub struct Changes {
     pub compare_with: Option<CompareModel>,
     /// Replaces the whole list.
     pub games: Option<Vec<String>>,
+    /// Model id to name: sets those names and leaves the others. Empty text clears a name.
+    pub aliases: Option<BTreeMap<String, String>>,
     pub game_lift_minutes: Option<u32>,
     /// Empty text clears it.
     pub restart_task: Option<String>,
@@ -677,6 +706,31 @@ pub fn apply_changes(current: &LocalSettings, changes: &Changes) -> Result<Local
             return Err(format!("At most {MAX_GAMES} games can be listed."));
         }
         s.games = games;
+    }
+    if let Some(map) = &changes.aliases {
+        for (id, name) in map {
+            if !alias_key_ok(id) {
+                return Err("That is not a local model.".to_owned());
+            }
+            match name.trim() {
+                "" => {
+                    s.aliases.remove(id);
+                }
+                n if alias_ok(n) => {
+                    s.aliases.insert(id.clone(), n.to_owned());
+                }
+                _ => {
+                    return Err(format!(
+                        "A model's name must be one line of text, up to {MAX_ALIAS} characters."
+                    ))
+                }
+            }
+        }
+        if s.aliases.len() > MAX_ALIASES {
+            return Err(format!(
+                "At most {MAX_ALIASES} models can have a name of your own."
+            ));
+        }
     }
     if let Some(n) = changes.game_lift_minutes {
         if !(MIN_GAME_LIFT..=MAX_GAME_LIFT).contains(&n) {

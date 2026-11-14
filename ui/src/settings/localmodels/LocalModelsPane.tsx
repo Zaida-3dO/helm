@@ -331,6 +331,27 @@ export function LocalModelsPane() {
         </div>
       </section>
 
+      <section className="lm-section" data-testid="localmodels-names">
+        <h3>Model names</h3>
+        <p className="lm-help">
+          What each model is called in the model picker and on a chat's chip. The grey text is the name Helm makes from the model's own; type a name of your own to replace it, or clear the field to go back. The list is what the servers last said: use Check servers to refresh it.
+        </p>
+        {(s?.modelNames ?? []).length === 0 && <p className="lm-help">No models listed yet.</p>}
+        {(s?.modelNames ?? []).map((m) => (
+          <TextRow
+            key={m.id}
+            testId={`localmodels-name-${m.id}`}
+            title={m.model}
+            description={m.server}
+            placeholder={m.defaultName}
+            value={m.alias ?? ''}
+            maxLength={s?.aliasMax}
+            disabled={!s || busy}
+            onSave={(v) => void saveSettings({ aliases: { [m.id]: v } })}
+          />
+        ))}
+      </section>
+
       <section className="lm-section" data-testid="localmodels-gpu">
         <h3>Graphics card</h3>
         <p className="lm-help">
@@ -501,6 +522,7 @@ function TextRow({
   description,
   placeholder,
   value,
+  maxLength,
   disabled,
   onSave,
 }: {
@@ -509,6 +531,7 @@ function TextRow({
   description: string;
   placeholder: string;
   value: string;
+  maxLength?: number;
   disabled: boolean;
   onSave: (v: string) => void;
 }) {
@@ -527,6 +550,7 @@ function TextRow({
         placeholder={placeholder}
         aria-label={title}
         data-testid={`${testId}-input`}
+        maxLength={maxLength}
         disabled={disabled}
         value={text ?? value}
         onChange={(e) => setText(e.target.value)}

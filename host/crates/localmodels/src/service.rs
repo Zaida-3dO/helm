@@ -30,12 +30,15 @@
 use crate::games::{self, Action, ProcessNames, Watch};
 use crate::gpu::Gpu;
 use crate::lock::{self as gpulock, LockState};
+use crate::names;
 use crate::net::{self, Conn, Http};
 use crate::servers::{self as srv, CallError};
 use crate::settings::{self, LocalSettings, Server, ToolsSetup};
 use crate::starter::{Stopped, StrataStarter};
 use crate::task::RestartTask;
-use crate::types::{LocalModelsState, LockKind, LockView, Range, ServerView, TestResult};
+use crate::types::{
+    LocalModelsState, LockKind, LockView, ModelNameView, Range, ServerView, TestResult,
+};
 use helm_chats::local::{LocalModels, LocalServer, LocalTurn, QueueInfo};
 use helm_chats::types::{LocalModelInfo, LocalServerKind};
 use helm_core::credentials::CredentialStore;
@@ -422,6 +425,18 @@ impl LocalService {
                 settings::MAX_GAME_LIFT,
                 settings::DEFAULT_GAME_LIFT,
             ),
+            model_names: self
+                .listed(&s, &seen)
+                .into_iter()
+                .map(|(server, model, id, default_name)| ModelNameView {
+                    alias: s.aliases.get(&id).cloned(),
+                    id,
+                    model,
+                    server,
+                    default_name,
+                })
+                .collect(),
+            alias_max: settings::MAX_ALIAS as u32,
             restart_task: s.restart_task.clone(),
             pause_file: s.pause_file.clone(),
         }
@@ -788,20 +803,55 @@ impl LocalService {
         }
     }
 
+    /// The models the enabled servers last listed, as (server name, model, id, default name).
+    /// Default names that clash take their next distinguishing word, across servers.
+    fn listed(&self, st: &LocalSettings, seen: &Seen) -> Vec<(String, String, String, String)> {
+        let mut out: Vec<(String, String, String)> = Vec::new();
+        for s in st.servers.iter().filter(|s| s.enabled) {
+            for m in seen.servers.get(&s.id).into_iter().flat_map(|l| &l.models) {
+                out.push((
+                    s.name.clone(),
+                    m.model.clone(),
+                    helm_chats::local::id(&s.id, &m.model),
+                ));
+            }
+        }
+        let defaults =
+            names::default_aliases(&out.iter().map(|o| o.1.as_str()).collect::<Vec<_>>());
+        out.into_iter()
+            .zip(defaults)
+            .map(|((server, model, id), d)| (server, model, id, d))
+            .collect()
+    }
+
     /// The picker's rows. While local models are unloaded every row shows as down and unloaded.
     fn rows(&self, st: &LocalSettings, seen: &Seen) -> Vec<LocalModelInfo> {
         let locked = self.locked();
+        let defaults: BTreeMap<String, String> = self
+            .listed(st, seen)
+            .into_iter()
+            .map(|(_, _, id, d)| (id, d))
+            .collect();
         st.servers
             .iter()
             .filter(|s| s.enabled)
             .flat_map(|s| {
                 let last = seen.servers.get(&s.id);
                 let reachable = !locked && last.is_some_and(|l| l.reachable);
+                let (aliases, defaults) = (&st.aliases, &defaults);
                 last.into_iter()
                     .flat_map(move |l| l.models.iter())
                     .map(move |m| LocalModelInfo {
                         id: helm_chats::local::id(&s.id, &m.model),
-                        name: m.model.clone(),
+                        name: {
+                            let id = helm_chats::local::id(&s.id, &m.model);
+                            aliases
+                                .get(&id)
+                                .or_else(|| defaults.get(&id))
+                                .cloned()
+                                .unwrap_or_else(|| m.model.clone())
+                        },
+                        model: m.model.clone(),
                         server: s.name.clone(),
                         kind: s.kind,
                         context_tokens: m.context_tokens,

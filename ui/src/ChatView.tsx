@@ -10,6 +10,7 @@ import { Composer, isBusy } from './composer/Composer.tsx';
 import { useRemoteChat } from './devices/hooks.ts';
 import { RemoteChatBar } from './devices/RemoteChatBar.tsx';
 import type { SendShortcut } from './composer/keymap.ts';
+import { waitReason } from './composer/inFlight.ts';
 import { QueueList } from './composer/QueueList.tsx';
 import { LOCAL_WORKING_LABEL, isLocalModelId, localWaitLabel } from './state/localModel.ts';
 import type { Flushers } from './shell/quit.ts';
@@ -170,6 +171,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
   const latestAssistantId = useMemo(() => [...view.rows].reverse().find((r) => r.role === 'assistant')?.id ?? null, [view.rows]);
   const interactionOpen = (thread?.interactions.length ?? 0) > 0;
   const mentionRepo = useMentionRepo(shell.api, remote ? undefined : chat?.cwd);
+  const queue = useMemo(() => (view.hasNewer ? undefined : { pending: view.pending, thread, ops, readOnly: !!remote }), [view.hasNewer, view.pending, thread, ops, remote]);
   const ctx: RowContext = useMemo(
     () => ({
       chatId,
@@ -320,6 +322,7 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         ctx={ctx}
         jumpToRowId={jumpTo}
         scrollSignal={scrollSignal}
+        queue={queue}
         onLoadOlder={async () => {
           if (!view.olderCursor) return;
           store.page(await ops.page(chatId, { before: view.olderCursor }), 'older');
@@ -403,7 +406,8 @@ export function ChatView({ chatId, store, ops, flushers, sendShortcut }: ChatVie
         </div>
       ))}
       {!chat.sideSourceId && !remote && <FlagNote chatId={chatId} ops={ops} />}
-      <QueueList pending={view.pending} thread={thread} ops={ops} chatId={chatId} readOnly={!!remote} />
+      {/* A transcript that is not at its newest page cannot end with them, so they stack here. */}
+      {view.hasNewer && <QueueList pending={view.pending} thread={thread} ops={ops} chatId={chatId} readOnly={!!remote} reason={waitReason(view.rows)} />}
       </div>
       {/* The activity line sits directly on the box, below the in-flight messages. */}
       {thread && <ActivityDock chat={chat} thread={thread} turnStartedAt={turnStartedAt} onStopTool={remote ? undefined : stopTool} rows={view.hasNewer ? undefined : view.rows} runEndedAt={view.lastRunEndedAt} />}

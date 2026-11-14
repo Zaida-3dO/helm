@@ -57,12 +57,12 @@ test('rows: the catalogue, then the chat model as a disabled row when it is not 
 const localCat: ModelCatalogue = {
   ...cat,
   local: [
-    { id: 'local/strata/qwen-flash', name: 'Qwen Flash', server: 'Strata', kind: 'strata', contextTokens: 262144, loaded: true, reachable: true, startable: false },
-    { id: 'local/strata/qwen-coder', name: 'Qwen Coder', server: 'Strata', kind: 'strata', contextTokens: 131072, reachable: true, startable: false },
+    { id: 'local/strata/qwen-flash', name: 'Qwen Flash', model: 'qwen-flash', server: 'Strata', kind: 'strata', contextTokens: 262144, loaded: true, reachable: true, startable: false },
+    { id: 'local/strata/qwen-coder', name: 'Qwen Coder', model: 'qwen-coder', server: 'Strata', kind: 'strata', contextTokens: 131072, reachable: true, startable: false },
     // Down, but Helm can start this Strata: the row stays choosable.
-    { id: 'local/strata/down:14b', name: 'Qwen 14B', server: 'Strata', kind: 'strata', contextTokens: 131072, reachable: false, startable: true },
-    { id: 'local/ollama/org/llama:3b', name: 'Llama 3B', server: 'Ollama', kind: 'ollama', contextTokens: 8192, reachable: true, startable: false },
-    { id: 'local/office/big:30b', name: 'Big 30B', server: 'Ollama (office)', kind: 'ollama', reachable: false, startable: false },
+    { id: 'local/strata/down:14b', name: 'Qwen 14B', model: 'down:14b', server: 'Strata', kind: 'strata', contextTokens: 131072, reachable: false, startable: true },
+    { id: 'local/ollama/org/llama:3b', name: 'Llama 3B', model: 'org/llama:3b', server: 'Ollama', kind: 'ollama', contextTokens: 8192, reachable: true, startable: false },
+    { id: 'local/office/big:30b', name: 'Big 30B', model: 'big:30b', server: 'Ollama (office)', kind: 'ollama', reachable: false, startable: false },
   ],
 };
 
@@ -71,7 +71,8 @@ test('local models: their own group with server and context, greyed only when th
   assert.deepEqual([isLocalModel('local/ollama/org/llama:3b'), isLocalModel('opus'), isLocalModel(null)], [true, false, false]);
   assert.deepEqual([localServerId('local/ollama/org/llama:3b'), localServerId('opus'), localServerId('local/x')], ['ollama', null, null]);
   assert.deepEqual([262144, 131072, 8192, 1_000_000, 512, undefined].map(formatContext), ['256k', '128k', '8k', '1M', '512', '']);
-  assert.equal(triggerLabel('Qwen Flash', 'high', true), 'Qwen Flash · High thinking');
+  assert.equal(triggerLabel('Qwen Flash', 'xhigh', true), 'Qwen Flash · Extra high');
+  assert.equal(triggerLabel('Qwen 3.8 (fast)', 'high', true), 'Qwen 3.8 (fast) · High', 'a local alias is kept whole');
   assert.equal(triggerLabel('Qwen Flash', 'low', true), 'Qwen Flash · No thinking');
   assert.equal(thinkingLabel('xhigh'), 'Extra high thinking');
 
@@ -82,11 +83,11 @@ test('local models: their own group with server and context, greyed only when th
     [
       ['opus', 'Claude', 'Claude Code · Most capable', false],
       ['haiku', 'Claude', 'Claude Code', false],
-      ['local/strata/qwen-flash', 'Local', 'Strata · 256k · loaded', false],
-      ['local/strata/qwen-coder', 'Local', 'Strata · 128k', false],
-      ['local/strata/down:14b', 'Local', 'Strata · 128k · not running, starts when you use it', false],
-      ['local/ollama/org/llama:3b', 'Local', 'Ollama · 8k', false],
-      ['local/office/big:30b', 'Local', 'Ollama (office) · not answering', true],
+      ['local/strata/qwen-flash', 'Local', 'qwen-flash · Strata · 256k · loaded', false],
+      ['local/strata/qwen-coder', 'Local', 'qwen-coder · Strata · 128k', false],
+      ['local/strata/down:14b', 'Local', 'down:14b · Strata · 128k · not running, starts when you use it', false],
+      ['local/ollama/org/llama:3b', 'Local', 'org/llama:3b · Ollama · 8k', false],
+      ['local/office/big:30b', 'Local', 'big:30b · Ollama (office) · not answering', true],
     ],
   );
   assert.match(open[6]!.hint ?? '', /Ollama \(office\) did not answer/);
@@ -113,7 +114,7 @@ test('local models: their own group with server and context, greyed only when th
   assert.equal(localHint(localCat, true, ['Strata answered but listed no models.']), 'Strata answered but listed no models.');
   assert.equal(localHint(localCat, false, ['', '  ', 'Strata could not be started.']), 'Strata could not be started.', 'the first real note wins');
   // Settings → Runtime's plain list gets the same models, with the server in the description.
-  assert.deepEqual(localModelChoices(localCat.local).map((c) => [c.name, c.description]).slice(0, 2), [['Qwen Flash', 'Strata · 256k · loaded'], ['Qwen Coder', 'Strata · 128k']]);
+  assert.deepEqual(localModelChoices(localCat.local).map((c) => [c.name, c.description]).slice(0, 2), [['Qwen Flash', 'qwen-flash · Strata · 256k · loaded'], ['Qwen Coder', 'qwen-coder · Strata · 128k']]);
   assert.deepEqual(localModelChoices(undefined), []);
   // The new-chat default can be "Claude Code's default": a first row, under Claude when the list has headings.
   const withDefault = withDefaultRow(modelRows(localCat, null), 'default');
