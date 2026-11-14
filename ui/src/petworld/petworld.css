@@ -1,0 +1,78 @@
+/* The roaming pet: a transparent page exactly the size of the sprite. The host moves the window;
+   the page only bends the creature to its body's state. Facing and the held tilt are poses and
+   always show; the walk bob and the landing squash are motion and follow the motion setting. */
+
+html[data-window='petworld'],
+html[data-window='petworld'] body,
+html[data-window='petworld'] #root {
+  background: transparent !important;
+  margin: 0;
+  overflow: hidden;
+  height: 100%;
+}
+
+.petworld-stage {
+  position: fixed;
+  inset: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.petworld-creature {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: grab;
+  touch-action: none;
+}
+.petworld-stage[data-body='held'] .petworld-creature {
+  cursor: grabbing;
+}
+.petworld-creature:focus-visible {
+  outline: none;
+}
+
+.petworld-body {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: 50% 100%;
+}
+.petworld-stage[data-facing='left'] .pet-svg {
+  transform: scaleX(-1);
+}
+.petworld-stage[data-body='held'] .petworld-body {
+  transform: rotate(-8deg);
+  transform-origin: 50% 20%;
+}
+.petworld-stage[data-body='fall'] .petworld-body {
+  transform: scale(0.94, 1.06);
+}
+
+[data-pet-motion='on'].petworld-stage[data-body='walk'] .petworld-body {
+  animation: petworld-bob 0.42s ease-in-out infinite;
+}
+[data-pet-motion='on'].petworld-stage[data-body='land'] .petworld-body {
+  animation: petworld-squash 0.15s ease-out;
+}
+
+@keyframes petworld-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4%);
+  }
+}
+@keyframes petworld-squash {
+  0% {
+    transform: scale(1.18, 0.8);
+  }
+  100% {
+    transform: scale(1, 1);
+  }
+}
