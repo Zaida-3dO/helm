@@ -52,7 +52,7 @@ function valid(s: PathSuffix): boolean {
   return true;
 }
 
-function hasExtension(name: string): boolean {
+export function hasExtension(name: string): boolean {
   const lower = name.toLowerCase();
   if (EXTENSIONS.has(lower)) return true; // Dockerfile, Makefile
   const dot = lower.lastIndexOf('.');

@@ -561,6 +561,47 @@ mod tests {
         );
         assert!(summary(&db, &needs).muted.is_empty());
 
+        // A muted chat that is interrupted, errored, unread, stalled and flagged at once is still
+        // listed only in Muted: it adds nothing to the badge or to any other group.
+        let (cut, stuck) = (chat(&db, "cut"), chat(&db, "stuck"));
+        for (c, status) in [(&cut, "interrupted"), (&stuck, "running")] {
+            exec(
+                &db,
+                "INSERT INTO chat_mutes(chat_id, muted_at) VALUES (?1, 1)",
+                &[c],
+            );
+            exec(
+                &db,
+                "UPDATE chats SET status = ?2, error = 'boom' WHERE id = ?1",
+                &[c.as_str(), status],
+            );
+            exec(
+                &db,
+                "INSERT INTO chat_completions(chat_id, id, completed_at) VALUES (?1, ?1, 1)",
+                &[c],
+            );
+            exec(
+                &db,
+                "INSERT INTO chat_flags(chat_id, question, reason, priority, created_at) VALUES (?1, 'Ship it?', 'Blocked', 'normal', 1)",
+                &[c],
+            );
+        }
+        exec(
+            &db,
+            "INSERT INTO chat_activity(chat_id, last_activity_at, stalled) VALUES (?1, 0, 1)",
+            &[&stuck],
+        );
+        let s = summary(&db, &needs);
+        assert_eq!(s.muted.len(), 2);
+        assert!(s.muted.iter().all(|r| r.kind == MutedKind::Flag));
+        assert_eq!(s.badge, 1, "only the unmuted chat's request counts");
+        assert!(s.stalled.is_empty() && s.unread.is_empty() && s.flagged.is_empty());
+        assert!(
+            s.running.is_empty(),
+            "a muted chat is not in Running either"
+        );
+        assert_eq!(s.busy, 1, "keep-awake still counts it");
+
         // The idle check: a flagged chat carries its priority; a check that gave up is listed
         // with Retry; a retry takes it off the list until it fails again.
         let tri = |c: &str,
