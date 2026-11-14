@@ -1901,6 +1901,7 @@ dependencies = [
  "helm-hosttools",
  "helm-ipc",
  "hex",
+ "log",
  "rusqlite",
  "serde",
  "serde_json",

@@ -21,7 +21,19 @@
 //! Kinds register through `registrations::allow_kinds` (one [`AllowKinds::register`] line per
 //! kind). The MCP crate has `mcp_repo_server` and, in tests and debug builds only,
 //! [`kinds::test_kind`].
+//!
+//! **Applying kinds** ([`AllowKinds::register_applying`], [`apply`]): a change Helm makes itself
+//! the moment the user clicks Approve, so nothing can drift between the card and the change. The
+//! kind's own tool stages the request (host-built target and card lines; `app_request_allow`
+//! refuses these kinds), the card says Approve and lists one line per change, and
+//! [`apply::decide_and_apply`], the one decide path every surface calls, spends the grant and
+//! runs the kind's [`apply::Applier`] under the maintenance lock. Two columns serve them:
+//! `outcome` (what applying did, sent to the agent as the decision note) and `decided_via`
+//! (where the user answered; `app` for this PC's main window). Upkeep holds an applying
+//! request's note until its outcome is written, or reports after ten minutes that Helm stopped
+//! while applying.
 
+pub mod apply;
 pub mod bindings;
 pub mod kinds;
 mod ops;
@@ -30,6 +42,7 @@ pub mod tool;
 pub mod types;
 pub mod words;
 
+pub use apply::{decide_and_apply, Applier, ApplyJob, MaintenanceLock};
 pub use kinds::{AllowKind, AllowKinds, Canonical};
 pub use ops::register_ops;
 pub use store::{ConsentRecord, Delivery, NewRequest, Refusal, Upkeep};

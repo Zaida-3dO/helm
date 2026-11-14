@@ -2,13 +2,14 @@
 //!
 //! | Table | Holds |
 //! |---|---|
-//! | `consent_requests` | Allow requests and, once allowed, their grant (pending → allowed/denied/expired; allowed → used/expired) |
+//! | `consent_requests` | Allow requests and, once allowed, their grant (pending → allowed/denied/expired; allowed → used/expired); for an applying kind also `outcome` (what applying did) and `decided_via` (where the user answered: `app`) |
 //! | `consent_asks` | refusals the app recorded itself; each opens a 2 h words episode for (chat, kind, target) |
 //! | `consent_records` | one row per use of a proof (grant or words); a submission is spent at most once |
 //!
 //! Only [`decide`] mints a grant, and it is reached only through the main-window `consent_decide`
 //! op. [`spend_grant`] and [`spend_words`] run on the caller's own transaction, after every check
-//! that needs no action, so the spend and the action's first change commit together.
+//! that needs no action, so the spend and the action's first change commit together. An applying
+//! kind's grant is spent only by [`spend_for_apply`], by request id, just before Helm applies it.
 
 use crate::kinds::{first_difference, target_hash, AllowKind, AllowKinds, Canonical, MAX_TARGET};
 use crate::types::{ConsentList, ConsentRequest, Decision, RequestState};
@@ -93,7 +94,21 @@ pub fn init(tx: &Transaction<'_>) -> rusqlite::Result<()> {
          );
          CREATE UNIQUE INDEX IF NOT EXISTS consent_records_submission
              ON consent_records(submission_id) WHERE submission_id IS NOT NULL;",
-    )
+    )?;
+    // Columns added after the table first shipped: added once, checked on every open.
+    for (column, ty) in [("outcome", "TEXT"), ("decided_via", "TEXT")] {
+        let has: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('consent_requests') WHERE name = ?1)",
+            [column],
+            |r| r.get(0),
+        )?;
+        if !has {
+            tx.execute_batch(&format!(
+                "ALTER TABLE consent_requests ADD COLUMN {column} {ty}"
+            ))?;
+        }
+    }
+    Ok(())
 }
 
 /// Why consent was not given. The text is safe to show the agent.
@@ -144,6 +159,27 @@ fn build(
 
 fn cut(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
+}
+
+/// A summary as stored: an ordinary kind's on one line; an applying kind's as lines, each cut to
+/// 240 characters and the whole to 1,200.
+fn card_summary(summary: &str, applying: bool) -> String {
+    use crate::kinds::{MAX_SUMMARY, MAX_SUMMARY_LINE};
+    if !applying {
+        return cut(&summary.replace(['\r', '\n'], " "), MAX_SUMMARY_LINE);
+    }
+    let lines: Vec<String> = summary
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| cut(l, MAX_SUMMARY_LINE))
+        .collect();
+    cut(&lines.join("\n"), MAX_SUMMARY)
+}
+
+/// The first line of a summary: the card's title.
+pub fn summary_title(summary: &str) -> &str {
+    summary.lines().next().unwrap_or("")
 }
 
 /// What an agent asks for (`app_request_allow`).
@@ -238,7 +274,7 @@ pub fn request(
                 k.id,
                 crate::kinds::canonical_json(&c.target),
                 hash,
-                cut(&c.summary, crate::kinds::MAX_SUMMARY),
+                card_summary(&c.summary, kinds.applies_on_allow(k.id)),
                 reason,
                 r.evidence,
                 r.tool_use_id,
@@ -261,7 +297,7 @@ fn by_tool_use(tx: &Transaction<'_>, chat: &str, id: &str) -> rusqlite::Result<O
 }
 
 const COLUMNS: &str = "id, chat_id, kind, summary, reason, evidence, state, grant_minutes,
-    created_at, expires_at, decided_at, grant_expires_at, note";
+    created_at, expires_at, decided_at, grant_expires_at, note, outcome";
 
 fn row_to_view(kinds: &AllowKinds, r: &rusqlite::Row<'_>) -> rusqlite::Result<ConsentRequest> {
     let kind: String = r.get(2)?;
@@ -272,7 +308,6 @@ fn row_to_view(kinds: &AllowKinds, r: &rusqlite::Row<'_>) -> rusqlite::Result<Co
             .get(&kind)
             .map(|k| k.label.to_owned())
             .unwrap_or_else(|| kind.clone()),
-        kind,
         summary: r.get(3)?,
         reason: r.get(4)?,
         evidence: r.get(5)?,
@@ -283,6 +318,9 @@ fn row_to_view(kinds: &AllowKinds, r: &rusqlite::Row<'_>) -> rusqlite::Result<Co
         decided_at: r.get(10)?,
         grant_expires_at: r.get(11)?,
         note: r.get(12)?,
+        applies_on_allow: kinds.applies_on_allow(&kind),
+        outcome: r.get(13)?,
+        kind,
     })
 }
 
@@ -326,8 +364,7 @@ pub fn list(
     .map_err(|e: rusqlite::Error| ApiError::internal(e.to_string()))
 }
 
-/// The user's decision: one compare-and-set out of `pending`. A repeat, an outdated card or a
-/// race is refused with `conflict`, so nothing is applied twice.
+/// The user's decision in this PC's main window: [`decide_via`] with `app`.
 pub fn decide(
     db: &Database,
     kinds: &AllowKinds,
@@ -335,6 +372,32 @@ pub fn decide(
     decision: Decision,
     grant_minutes: Option<i64>,
     note: Option<&str>,
+    now: i64,
+) -> Result<ConsentRequest, ApiError> {
+    decide_via(
+        db,
+        kinds,
+        request_id,
+        decision,
+        grant_minutes,
+        note,
+        "app",
+        now,
+    )
+}
+
+/// The user's decision: one compare-and-set out of `pending`. A repeat, an outdated card or a
+/// race is refused with `conflict`, so nothing is applied twice. `via` records where the user
+/// answered.
+#[allow(clippy::too_many_arguments)]
+pub fn decide_via(
+    db: &Database,
+    kinds: &AllowKinds,
+    request_id: &str,
+    decision: Decision,
+    grant_minutes: Option<i64>,
+    note: Option<&str>,
+    via: &str,
     now: i64,
 ) -> Result<ConsentRequest, ApiError> {
     if let Some(n) = note {
@@ -356,15 +419,15 @@ pub fn decide(
                 "UPDATE consent_requests SET state = 'allowed', decided_at = ?2,
                      grant_minutes = COALESCE(?3, grant_minutes),
                      grant_expires_at = ?2 + COALESCE(?3, grant_minutes) * 60000,
-                     note = ?4, delivered_at = NULL
+                     note = ?4, decided_via = ?5, delivered_at = NULL
                  WHERE id = ?1 AND state = 'pending' AND expires_at > ?2",
-                params![request_id, now, grant_minutes, note],
+                params![request_id, now, grant_minutes, note, via],
             )?,
             Decision::Deny => tx.execute(
                 "UPDATE consent_requests SET state = 'denied', decided_at = ?2, note = ?3,
-                     delivered_at = NULL
+                     decided_via = ?4, delivered_at = NULL
                  WHERE id = ?1 AND state = 'pending' AND expires_at > ?2",
-                params![request_id, now, note],
+                params![request_id, now, note, via],
             )?,
         };
         Ok((changed, view(tx, kinds, request_id)?))
@@ -447,6 +510,11 @@ pub fn spend_grant(
     now: i64,
 ) -> Result<ConsentRecord, Refusal> {
     let k = kind(kinds, kind_id)?;
+    if kinds.applies_on_allow(k.id) {
+        return Err(Refusal::new(
+            "Helm applies this itself when the user approves; there is nothing to spend.",
+        ));
+    }
     let (c, hash) = build(tx, k, chat_id, target)?;
     let grant: Option<String> = tx
         .query_row(
@@ -600,6 +668,89 @@ pub fn spend_words(
     )?)
 }
 
+/// What an approved applying request asks Helm to do.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Approved {
+    pub request_id: String,
+    pub chat_id: String,
+    pub kind: String,
+    pub target: Value,
+}
+
+/// Spend an applying kind's grant, by request id: one compare-and-set from `allowed` to `used`,
+/// committed before anything is applied. `None` when it is not (or no longer) an unexpired
+/// grant of an applying kind, so nothing may be applied.
+pub fn spend_for_apply(
+    db: &Database,
+    kinds: &AllowKinds,
+    request_id: &str,
+    now: i64,
+) -> Result<Option<Approved>, ApiError> {
+    db.write::<_, rusqlite::Error>(|tx| {
+        let row: Option<(String, String, String, String)> = tx
+            .query_row(
+                "SELECT chat_id, kind, target, target_hash FROM consent_requests
+                 WHERE id = ?1 AND state = 'allowed' AND grant_expires_at > ?2",
+                params![request_id, now],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((chat_id, kind, target, hash)) = row else {
+            return Ok(None);
+        };
+        if !kinds.applies_on_allow(&kind) {
+            return Ok(None);
+        }
+        // The note waits for the outcome: upkeep delivers a used row once it has one.
+        let n = tx.execute(
+            "UPDATE consent_requests SET state = 'used', used_at = ?2, delivered_at = NULL
+             WHERE id = ?1 AND state = 'allowed'",
+            params![request_id, now],
+        )?;
+        if n != 1 {
+            return Ok(None);
+        }
+        insert_record(
+            tx,
+            &chat_id,
+            &kind,
+            &hash,
+            "grant",
+            Some(request_id),
+            None,
+            "apply",
+            now,
+        )?;
+        Ok(Some(Approved {
+            request_id: request_id.to_owned(),
+            chat_id,
+            kind,
+            target: serde_json::from_str(&target).unwrap_or(Value::Null),
+        }))
+    })
+    .map_err(|e| ApiError::internal(e.to_string()))
+}
+
+/// Longest stored outcome.
+pub const MAX_OUTCOME: usize = 1_200;
+
+/// How long an applying request may sit used with no outcome before upkeep reports that Helm
+/// stopped while applying it.
+pub const APPLY_STALE: i64 = 10 * MINUTE;
+
+/// Record what applying did, once; the agent's note goes out at the next upkeep.
+pub fn set_outcome(db: &Database, request_id: &str, outcome: &str) -> Result<(), ApiError> {
+    db.write::<_, rusqlite::Error>(|tx| {
+        tx.execute(
+            "UPDATE consent_requests SET outcome = ?2
+             WHERE id = ?1 AND state = 'used' AND outcome IS NULL",
+            params![request_id, cut(outcome, MAX_OUTCOME)],
+        )
+        .map(|_| ())
+    })
+    .map_err(|e| ApiError::internal(e.to_string()))
+}
+
 /// The fixed Allow hint appended to a refusal that consent could unlock.
 /// The body is cut to 1,600 characters first, so the hint is never cut or doubled. No
 /// hint while a request for this target is pending or after the user denied one.
@@ -660,12 +811,18 @@ pub fn upkeep(db: &Database, kinds: &AllowKinds, now: i64) -> Result<Upkeep, Api
                 "UPDATE consent_requests SET state = 'expired', delivered_at = NULL
                  WHERE state = 'pending' AND expires_at <= ?1 RETURNING chat_id",
             )?;
-            changed.extend(st.query_map([now], |r| r.get(0))?.collect::<Result<Vec<String>, _>>()?);
+            changed.extend(
+                st.query_map([now], |r| r.get(0))?
+                    .collect::<Result<Vec<String>, _>>()?,
+            );
             let mut st = tx.prepare(
                 "UPDATE consent_requests SET state = 'expired'
                  WHERE state = 'allowed' AND grant_expires_at <= ?1 RETURNING chat_id",
             )?;
-            changed.extend(st.query_map([now], |r| r.get(0))?.collect::<Result<Vec<String>, _>>()?);
+            changed.extend(
+                st.query_map([now], |r| r.get(0))?
+                    .collect::<Result<Vec<String>, _>>()?,
+            );
         }
         tx.execute(
             "DELETE FROM consent_asks WHERE created_at <= ?1",
@@ -674,14 +831,30 @@ pub fn upkeep(db: &Database, kinds: &AllowKinds, now: i64) -> Result<Upkeep, Api
         changed.sort();
         changed.dedup();
         let mut st = tx.prepare(&format!(
-            "SELECT {COLUMNS} FROM consent_requests WHERE delivered_at IS NULL AND state <> 'pending'
+            "SELECT {COLUMNS}, used_at FROM consent_requests
+             WHERE delivered_at IS NULL AND state <> 'pending'
              ORDER BY COALESCE(decided_at, expires_at), id"
         ))?;
         let deliveries = st
-            .query_map([], |r| row_to_view(kinds, r))?
+            .query_map([], |r| {
+                Ok((row_to_view(kinds, r)?, r.get::<_, Option<i64>>(14)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .map(|v| Delivery {
+            // A request Helm applies itself is owed its note once applied: never while only
+            // allowed (applying is about to start), and while used only once the outcome is
+            // written or applying has plainly stopped.
+            .filter(|(v, used_at)| {
+                !v.applies_on_allow
+                    || match v.state {
+                        RequestState::Allowed => false,
+                        RequestState::Used => {
+                            v.outcome.is_some() || used_at.is_none_or(|u| u <= now - APPLY_STALE)
+                        }
+                        _ => true,
+                    }
+            })
+            .map(|(v, _)| Delivery {
                 // The request id is the submission id: a UUID, fixed per request, so a
                 // retried delivery is the same submission and is held at most once.
                 submission_id: v.id.clone(),
@@ -711,6 +884,9 @@ pub fn mark_delivered(db: &Database, request_id: &str, now: i64) -> Result<(), A
 
 /// The app note an agent gets for a decision (≤ 2,048 characters; never the user's words).
 pub fn decision_text(v: &ConsentRequest) -> String {
+    if v.applies_on_allow {
+        return applied_text(v);
+    }
     let what = format!("{}: {}", v.label, v.summary);
     let mut s = match (v.state, v.decided_at) {
         (RequestState::Allowed, _) | (RequestState::Used, _) => format!(
@@ -725,6 +901,36 @@ pub fn decision_text(v: &ConsentRequest) -> String {
             format!("[Helm] The user's Allow for ({what}) expired unused.")
         }
         (RequestState::Pending, _) => format!("[Helm] Your Allow request ({what}) is waiting."),
+    };
+    if let Some(n) = &v.note {
+        s.push_str(&format!(" The user's note: {n}"));
+    }
+    cut(&s, MAX_DECISION_MESSAGE)
+}
+
+/// The note for a request Helm applies itself: never a grant to spend, always what changed.
+fn applied_text(v: &ConsentRequest) -> String {
+    let title = summary_title(&v.summary);
+    let mut s = match (v.state, v.decided_at, &v.outcome) {
+        (RequestState::Used, _, Some(outcome)) => {
+            format!("[Helm] The user approved: {title}. {outcome}")
+        }
+        (RequestState::Used, _, None) => format!(
+            "[Helm] The user approved: {title}. Helm stopped while applying these changes; check with app_get_settings."
+        ),
+        (RequestState::Allowed, _, _) => {
+            format!("[Helm] The user approved: {title}. Helm is applying it now.")
+        }
+        (RequestState::Denied, _, _) => {
+            format!("[Helm] The user denied your request ({title}). Nothing changed.")
+        }
+        (RequestState::Expired, Some(_), _) => format!(
+            "[Helm] The user approved ({title}), but Helm stopped before applying it. Nothing changed; stage it again if it is still wanted."
+        ),
+        (RequestState::Expired, None, _) => {
+            format!("[Helm] Your request ({title}) expired without an answer. Nothing changed.")
+        }
+        (RequestState::Pending, _, _) => format!("[Helm] Your request ({title}) is waiting."),
     };
     if let Some(n) = &v.note {
         s.push_str(&format!(" The user's note: {n}"));
