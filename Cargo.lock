@@ -2101,6 +2101,8 @@ dependencies = [
 name = "helm-mcp"
 version = "2.0.4"
 dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.3.4",
  "helm-core",
  "helm-hosttools",
  "helm-ipc",
@@ -2109,6 +2111,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "ts-rs",
