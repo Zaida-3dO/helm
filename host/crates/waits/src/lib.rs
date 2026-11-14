@@ -15,8 +15,10 @@
 //! | [`tools`] | `app_wait_for` and `app_background_result` |
 //!
 //! Kinds: another chat finishing its turn, a process exiting, a file appearing or changing, and
-//! a GitHub pull request's checks or review (through the `gh` tool). Waiting on a board item is
-//! not offered.
+//! a GitHub pull request's checks or review (through the `gh` tool). A file may be on this PC or
+//! on a network share (`\\server\share\...` or a mapped drive); share files are watched by the
+//! network sweep, and a share that cannot be reached never counts as the file being removed.
+//! Waiting on a board item is not offered.
 
 pub mod model;
 pub mod probes;

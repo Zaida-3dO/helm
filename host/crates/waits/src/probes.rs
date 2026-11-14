@@ -21,7 +21,13 @@ pub trait Probes: Send + Sync {
     /// never treated as the chat being gone.
     fn chat(&self, chat_id: &str) -> Result<Option<ChatObs>, String>;
     fn process(&self, pid: u32) -> ProcessObs;
-    fn file(&self, path: &str) -> FileObs;
+    /// `None` is "could not look" (a share that is down, a folder that cannot be read): it is
+    /// never treated as the file being gone.
+    fn file(&self, path: &str) -> Option<FileObs>;
+    /// Whether the file lives on a network share (a `\\server\share` path, or a mapped
+    /// drive). Such files are watched by the network sweep, so a share that hangs never holds
+    /// up the waits on chats and processes.
+    fn on_share(&self, path: &str) -> bool;
     /// Blocking; runs on the blocking pool.
     fn pr(&self, url: &str) -> Result<PrObs, String>;
 }
@@ -56,29 +62,68 @@ impl Probes for RealProbes {
         process_state(pid)
     }
 
-    fn file(&self, path: &str) -> FileObs {
-        match std::fs::metadata(path) {
-            Ok(m) => FileObs {
-                exists: true,
-                len: m.len(),
-                modified_ms: m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0),
-            },
-            Err(_) => FileObs {
-                exists: false,
-                len: 0,
-                modified_ms: 0,
-            },
-        }
+    fn file(&self, path: &str) -> Option<FileObs> {
+        look_at_file(std::path::Path::new(path))
+    }
+
+    fn on_share(&self, path: &str) -> bool {
+        is_share_path(path)
     }
 
     fn pr(&self, url: &str) -> Result<PrObs, String> {
         gh_pr_view(url)
     }
+}
+
+/// One file as the watcher sees it. A missing file counts as gone only when the folder that
+/// held it can still be read: an error from a share that is down, a drive that is unplugged or a
+/// folder that cannot be opened is "could not look", not "disappeared".
+fn look_at_file(p: &std::path::Path) -> Option<FileObs> {
+    match std::fs::metadata(p) {
+        Ok(m) => Some(FileObs {
+            exists: true,
+            len: m.len(),
+            modified_ms: m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::read_dir(p.parent()?).ok().map(|_| FileObs {
+                exists: false,
+                len: 0,
+                modified_ms: 0,
+            })
+        }
+        Err(_) => None,
+    }
+}
+
+/// A `\\server\share` path, or a path on a drive letter the system reports as a network drive.
+fn is_share_path(path: &str) -> bool {
+    path.starts_with("\\\\") || path.starts_with("//") || drive_is_remote(path)
+}
+
+#[cfg(windows)]
+fn drive_is_remote(path: &str) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+    // `DRIVE_REMOTE` of the Windows API.
+    const DRIVE_REMOTE: u32 = 4;
+    let b = path.as_bytes();
+    if b.len() < 2 || !b[0].is_ascii_alphabetic() || b[1] != b':' {
+        return false;
+    }
+    // The call wants the drive's root, `X:\`, as a zero-ended wide string.
+    let root = [b[0] as u16, b':' as u16, b'\\' as u16, 0];
+    // SAFETY: `root` is a valid zero-ended string that outlives the call.
+    unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
+}
+
+#[cfg(not(windows))]
+fn drive_is_remote(_: &str) -> bool {
+    false
 }
 
 #[cfg(windows)]
@@ -276,4 +321,28 @@ pub fn parse_pr(json: &str) -> Result<PrObs, String> {
         latest_review: latest_review.map(|(a, st)| (crate::model::clean(&a, 60), st)),
         checks,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_is_gone_only_when_its_folder_can_still_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        assert!(
+            !look_at_file(&file).unwrap().exists,
+            "missing, folder readable"
+        );
+        std::fs::write(&file, b"hi").unwrap();
+        let seen = look_at_file(&file).unwrap();
+        assert!(seen.exists && seen.len == 2);
+        let lost = dir.path().join("down").join("b.txt");
+        assert!(
+            look_at_file(&lost).is_none(),
+            "its folder is missing too: could not look"
+        );
+        assert!(is_share_path("\\\\host\\share\\x") && is_share_path("//host/share/x"));
+    }
 }
