@@ -1,9 +1,11 @@
 //! The watcher: two loops over the open waits, and the one delivery each fired wait gets.
 //!
-//! - The local sweep (every 2 s) looks at chats, processes and files, applies timeouts, and
-//!   cancels the waits of a chat that was stopped or archived.
-//! - The network sweep (every 5 s) polls pull requests that are due: 30 s apart at first,
-//!   doubling to 5 minutes, one `gh` call per distinct pull request.
+//! - The local sweep (every 2 s) looks at chats, processes and files on this PC, applies
+//!   timeouts, and cancels the waits of a chat that was stopped or archived.
+//! - The network sweep (every 5 s) looks at files on a network share (a `\server\share` path
+//!   or a mapped drive) and polls pull requests that are due: 30 s apart at first, doubling to
+//!   5 minutes, one `gh` call per distinct pull request. A share that hangs can only hold up
+//!   this sweep. A file that cannot be looked at (the share is down) never fires its wait.
 //! - A wait is settled by one conditional update, so it fires at most once. Delivery is a
 //!   separate, retried step under a fixed submission id, so a message is never sent twice either.
 //!
@@ -132,12 +134,25 @@ impl WaitsService {
         gone
     }
 
+    /// A file on a network share: watched by the network sweep.
+    fn on_share(&self, t: &Target) -> bool {
+        matches!(t, Target::File { path } if self.probes.on_share(path))
+    }
+
+    /// "Could not look" is not an observation: only the timeout can fire on it.
+    fn file_obs(&self, path: &str) -> Observation {
+        match self.probes.file(path) {
+            Some(f) => Observation::File(f),
+            None => Observation::Skipped,
+        }
+    }
+
     /// One pass over the waits that need no network.
     pub fn sweep_local(&self, now: i64) {
         let Ok(waits) = self.list(None) else { return };
         let cancelled = self.cancel_orphans(&waits, now);
         for w in waits {
-            if w.target.is_network() || cancelled.contains(&w.id) {
+            if w.target.is_network() || self.on_share(&w.target) || cancelled.contains(&w.id) {
                 continue;
             }
             let obs = match &w.target {
@@ -146,7 +161,7 @@ impl WaitsService {
                     Err(_) => Observation::Skipped,
                 },
                 Target::Process { pid } => Observation::Process(self.probes.process(*pid)),
-                Target::File { path } => Observation::File(self.probes.file(path)),
+                Target::File { path } => self.file_obs(path),
                 _ => Observation::Skipped,
             };
             self.step(w, &obs, now);
@@ -158,12 +173,13 @@ impl WaitsService {
         }
     }
 
-    /// One pass over the pull-request waits: the due ones are polled, the rest only time out.
+    /// One pass over the waits that need the network: files on a share are looked at every
+    /// sweep; pull requests are polled when due, and the rest only time out.
     pub fn sweep_network(&self, now: i64) {
         let Ok(waits) = self.list(None) else { return };
         let waits: Vec<Wait> = waits
             .into_iter()
-            .filter(|w| w.target.is_network())
+            .filter(|w| w.target.is_network() || self.on_share(&w.target))
             .collect();
         let cancelled = self.cancel_orphans(&waits, now);
         let mut fetched: HashMap<String, Result<model::PrObs, String>> = HashMap::new();
@@ -172,6 +188,11 @@ impl WaitsService {
                 continue;
             }
             let url = match &w.target {
+                Target::File { path } => {
+                    let obs = self.file_obs(path);
+                    self.step(w, &obs, now);
+                    continue;
+                }
                 Target::PrChecks { url } | Target::PrReview { url } => url.clone(),
                 _ => continue,
             };
@@ -548,6 +569,62 @@ mod tests {
         svc.sweep_network(t0 + 101_000);
         assert_eq!(probes.polls.load(Ordering::SeqCst), 2);
         assert!(svc.list(Some("c5")).unwrap().len() == 1);
+
+        // A file on a share is looked at by the network sweep only, a file on this PC by the
+        // local sweep only. A share that cannot be looked at never fires; a confirmed removal does.
+        let (on_share, on_disk) = ("\\\\host\\share\\x.txt", "C:\\work\\y.txt");
+        probes.shares.lock().unwrap().insert(on_share.into());
+        for p in [on_share, on_disk] {
+            probes.files.lock().unwrap().insert(
+                p.into(),
+                crate::model::FileObs {
+                    exists: true,
+                    len: 1,
+                    modified_ms: 1,
+                },
+            );
+        }
+        for (id, path) in [("f1", on_share), ("f2", on_disk)] {
+            let target = Target::File { path: path.into() };
+            svc.declare(&wait(id, "c5", target, t0, 3_600))
+                .unwrap()
+                .unwrap();
+        }
+        let reads = || probes.file_reads.load(Ordering::SeqCst);
+        let before = reads();
+        svc.sweep_network(t0 + 110_000);
+        assert_eq!(
+            reads() - before,
+            1,
+            "the network sweep reads the share file only"
+        );
+        svc.sweep_local(t0 + 112_000);
+        assert_eq!(
+            reads() - before,
+            2,
+            "the local sweep reads the other file only"
+        );
+        probes.unreachable.store(true, Ordering::SeqCst);
+        svc.sweep_network(t0 + 115_000);
+        svc.sweep_local(t0 + 116_000);
+        probes.unreachable.store(false, Ordering::SeqCst);
+        let open: Vec<String> = svc.list(None).unwrap().into_iter().map(|w| w.id).collect();
+        assert!(open.contains(&"f1".to_string()) && open.contains(&"f2".to_string()));
+        probes.files.lock().unwrap().remove(on_share);
+        svc.sweep_local(t0 + 118_000);
+        assert!(
+            svc.list(None).unwrap().iter().any(|w| w.id == "f1"),
+            "a local sweep leaves a share file alone"
+        );
+        svc.sweep_network(t0 + 120_000);
+        assert!(svc.list(None).unwrap().iter().all(|w| w.id != "f1"));
+        assert!(sink
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m.1 == delivery_id("f1") && m.2.contains("removed")));
+        svc.cancel("f2", None).unwrap();
 
         // A chat that cannot be read is unknown, not gone: nothing is cancelled or fired.
         probes.fail_chat.store(true, Ordering::SeqCst);

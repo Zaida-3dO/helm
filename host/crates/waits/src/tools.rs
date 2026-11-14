@@ -77,6 +77,23 @@ fn pr_url(a: &Value) -> Result<String, ToolError> {
     canonical_pr_url(str_arg(a, "host").unwrap_or("github.com"), repo, number).map_err(refuse)
 }
 
+/// An absolute path on this PC (`C:\work\x`) or on a share (`\\server\share\x`), with no `..`
+/// part. The `\\?\` and `\\.\` forms are refused: they skip the system's own path checks.
+fn file_path_ok(path: &str) -> bool {
+    let norm = path.replace('/', "\\");
+    if path.len() > 1000 || norm.split('\\').any(|part| part == "..") {
+        return false;
+    }
+    match norm.strip_prefix("\\\\") {
+        Some(rest) => {
+            let mut parts = rest.split('\\');
+            let (server, share) = (parts.next(), parts.next());
+            !matches!(server, None | Some("" | "?" | ".")) && !share.unwrap_or_default().is_empty()
+        }
+        None => std::path::Path::new(path).is_absolute(),
+    }
+}
+
 /// The target the arguments name, checked against what exists right now.
 fn target(ctx: &ToolCtx, svc: &WaitsService, a: &Value) -> Result<Target, ToolError> {
     let kind = str_arg(a, "kind").ok_or_else(|| refuse("kind is required."))?;
@@ -111,12 +128,9 @@ fn target(ctx: &ToolCtx, svc: &WaitsService, a: &Value) -> Result<Target, ToolEr
         }
         "file" => {
             let path = str_arg(a, "path").ok_or_else(|| refuse("path is required."))?;
-            let p = std::path::Path::new(path);
-            let unc = path.starts_with("\\\\") || path.starts_with("//");
-            let climbs = path.split(['/', '\\']).any(|part| part == "..");
-            if !p.is_absolute() || path.len() > 1000 || unc || climbs {
+            if !file_path_ok(path) {
                 return Err(refuse(
-                    "path must be an absolute local path (not a network share) with no '..' part.",
+                    "path must be an absolute path on this PC or a share, with no '..' part.",
                 ));
             }
             Ok(Target::File {
@@ -161,7 +175,15 @@ async fn declare(ctx: &ToolCtx, svc: std::sync::Arc<WaitsService>, a: &Value) ->
     // Baselines are taken now, so "changed" means changed since the agent declared.
     match &target {
         Target::File { path } => {
-            state["file"] = file_state(&svc.probes().file(path));
+            // A path that cannot be looked at now has no baseline: the first real look would
+            // become one, and a change in the meantime would be missed.
+            let seen = svc.probes().file(path).ok_or_else(|| {
+                refuse(
+                    "Helm cannot look at that path right now (the folder or share is not \
+                     reachable). Try again when it is.",
+                )
+            })?;
+            state["file"] = file_state(&seen);
         }
         Target::ChatIdle { chat_id } => {
             let busy = svc
@@ -246,8 +268,9 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
                  model and sends this chat exactly one message when it finishes, changes, dies or \
                  times out (outcome timeout). Use this instead of sleeping, polling or re-reading \
                  output in a loop. Kinds: chat_idle (chatId: another chat's turn ends, it stops or \
-                 errors), process (pid, a Windows process id: it exits), file (path, absolute: it appears, changes or is \
-                 removed), pr_checks and pr_review (url, or repo owner/name and number: a github.com \
+                 errors), process (pid, a Windows process id: it exits), file (path, absolute, on this PC or on a \
+                 share such as \\\\server\\share\\x.txt: it appears, changes or is removed; a \
+                 share that cannot be reached never counts as removed), pr_checks and pr_review (url, or repo owner/name and number: a github.com \
                  pull request, read through the gh tool). timeoutSeconds is required, 60 to \
                  {MAX_TIMEOUT_SECS}. note (optional) is returned to you in the message. At most \
                  {MAX_PER_CHAT} open waits per chat. action list shows this chat's open waits; \
@@ -318,6 +341,7 @@ mod tests {
     use helm_core::db::{Database, MigrationRegistry};
     use helm_hosttools::dispatch::{Caller, CallerBinding, ChatRequest};
     use helm_hosttools::HostTools;
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -418,8 +442,20 @@ mod tests {
                 "absolute",
             ),
             (
-                wait(json!({"kind": "file", "path": "\\\\host\\share\\x.txt"})),
-                "network share",
+                wait(json!({"kind": "file", "path": "\\\\?\\C:\\work\\x.txt"})),
+                "absolute path on this PC or a share",
+            ),
+            (
+                wait(json!({"kind": "file", "path": "\\\\.\\pipe\\x"})),
+                "absolute path on this PC or a share",
+            ),
+            (
+                wait(json!({"kind": "file", "path": "\\\\host"})),
+                "absolute path on this PC or a share",
+            ),
+            (
+                wait(json!({"kind": "file", "path": "\\\\host\\share\\..\\x.txt"})),
+                "no '..'",
             ),
             (
                 wait(json!({"kind": "file", "path": "C:/work/../x.txt"})),
@@ -441,6 +477,19 @@ mod tests {
         }
         assert!(svc.list(None).unwrap().is_empty());
 
+        // A path that cannot be looked at (a share that is down) gets no wait, since there is no
+        // baseline to compare with.
+        probes.unreachable.store(true, Ordering::SeqCst);
+        let r = call(
+            "app_wait_for",
+            wait(json!({"kind": "file", "path": "\\\\host\\share\\x.txt"})),
+        )
+        .await;
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("cannot look"), "{r}");
+        probes.unreachable.store(false, Ordering::SeqCst);
+        assert!(svc.list(None).unwrap().is_empty());
+
         // Declaring: a chat, a file, and a pull request once `gh` can read it.
         *probes.pr_ok.lock().unwrap() = Some(PrObs {
             state: "OPEN".into(),
@@ -458,6 +507,7 @@ mod tests {
             wait(json!({"kind": "chat_idle", "chatId": other, "note": "the reviewer"})),
             wait(json!({"kind": "file", "path": "C:/work/a..b.txt"})),
             wait(json!({"kind": "pr_checks", "repo": "o/r", "number": 3})),
+            wait(json!({"kind": "file", "path": "\\\\host\\share\\x.txt"})),
         ] {
             let r = call("app_wait_for", args).await;
             assert_eq!(r["ok"], true, "{r}");
@@ -466,12 +516,13 @@ mod tests {
         }
         let r = call("app_wait_for", json!({"action": "list"})).await;
         let listed = r["result"]["waits"].as_array().unwrap();
-        assert_eq!(listed.len(), 3);
+        assert_eq!(listed.len(), 4);
         assert_eq!(listed[0]["note"], "the reviewer");
         assert_eq!(
             listed[2]["target"],
             "the checks on https://github.com/o/r/pull/3"
         );
+        assert_eq!(listed[3]["target"], "file \\\\host\\share\\x.txt");
         // The chat that was busy when declared is remembered as seen working.
         assert_eq!(svc.list(None).unwrap()[0].state["seenBusy"], true);
 
@@ -488,7 +539,7 @@ mod tests {
         )
         .await;
         assert_eq!(r["result"]["cancelled"], false);
-        assert_eq!(svc.list(None).unwrap().len(), 2);
+        assert_eq!(svc.list(None).unwrap().len(), 3);
 
         // Background results come from the chat's worker; a call that reaches the host has none.
         let r = call("app_background_result", json!({"callId": "tu_1"})).await;
