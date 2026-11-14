@@ -1,0 +1,67 @@
+{
+  "description": "Scripts the gatekeeper helper's answer from a tag in the prompt it is given: [GATE-DECIDE] takes the default, [GATE-ASK] escalates with a brief, [GATE-BAD] answers prose (every time, so the retry fails too), [GATE-HANG] never answers, anything else escalates with nothing else said.",
+  "steps": [
+    {
+      "await": {
+        "type": "user"
+      },
+      "as": "p",
+      "timeoutMs": 600000
+    },
+    {
+      "if": {
+        "saved": "p",
+        "contains": "[GATE-DECIDE]"
+      },
+      "then": [
+        {
+          "result": "{\"verdict\": \"decide\", \"choice\": \"Rename it\", \"reason\": \"Renaming a scratch note is easy to undo and nothing depends on the old name.\", \"confidence\": 0.9, \"risk\": \"low\", \"reversible\": true}"
+        }
+      ],
+      "else": [
+        {
+          "if": {
+            "saved": "p",
+            "contains": "[GATE-ASK]"
+          },
+          "then": [
+            {
+              "result": "{\"verdict\": \"escalate\", \"reason\": \"Deleting the backups cannot be undone.\", \"confidence\": 0.4, \"risk\": \"high\", \"reversible\": false, \"brief\": {\"problem\": \"The chat wants to delete the old backups and only you know whether they are still needed.\", \"options\": [{\"label\": \"Delete them\", \"means\": \"The old copies go away for good.\", \"pros\": \"Frees the disk.\", \"cons\": \"Nothing can be brought back.\", \"cost\": \"A few gigabytes.\"}, {\"label\": \"Keep them\", \"means\": \"Nothing is removed.\", \"pros\": \"Safe.\", \"cons\": \"The disk stays full.\", \"cost\": \"No effort.\"}], \"recommendation\": \"Keep them\", \"why\": \"Deletion cannot be undone, and keeping costs nothing.\"}}"
+            }
+          ],
+          "else": [
+            {
+              "if": {
+                "saved": "p",
+                "contains": "[GATE-HANG]"
+              },
+              "then": [
+                {
+                  "hang": true
+                }
+              ],
+              "else": [
+                {
+                  "if": {
+                    "saved": "p",
+                    "contains": "[GATE-BAD]"
+                  },
+                  "then": [
+                    {
+                      "result": "I think you should just ask the user."
+                    }
+                  ],
+                  "else": [
+                    {
+                      "result": "{\"verdict\": \"escalate\"}"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

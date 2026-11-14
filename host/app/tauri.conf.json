@@ -51,7 +51,8 @@
       "../../helpers/usage/src/": "helpers/usage/src/",
       "../../helpers/titles/src/": "helpers/titles/src/",
       "../../helpers/triage/src/": "helpers/triage/src/",
-      "../../helpers/autocomplete/src/": "helpers/autocomplete/src/"
+      "../../helpers/autocomplete/src/": "helpers/autocomplete/src/",
+      "../../helpers/gatekeeper/src/": "helpers/gatekeeper/src/"
     },
     "targets": [
       "nsis"
