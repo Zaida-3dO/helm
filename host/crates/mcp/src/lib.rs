@@ -12,6 +12,7 @@
 //! | [`probe`] | Settings → MCP's Test connection: one handshake and a tool count |
 //! | [`presets`] | Agent Standup, Home Assistant, hub and Google accounts presets |
 //! | [`google`] | several Google accounts through `workspace-mcp`: the account list, sign-in and the permission level |
+//! | [`oauth`] | a reusable OAuth 2.x client: metadata discovery, dynamic registration, PKCE sign-in over a loopback redirect, tokens kept in the credential store |
 //! | [`repo_gate`] | the repository-server gate and its seeding from Claude Code |
 //! | [`status`] | the newest per-server status across workers (MC3) |
 //! | [`tools`] | their registration with the host-tool registry |
@@ -27,6 +28,7 @@ pub mod config;
 pub mod google;
 pub mod lines;
 pub mod memory;
+pub mod oauth;
 mod ops;
 pub mod presets;
 pub mod probe;
