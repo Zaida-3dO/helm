@@ -163,6 +163,12 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
         "governor_settings",
         UserOnly("The usage governor can stop your chats, so only you set it."),
     ),
+    // The question gatekeeper: its settings and its audit trail of the asks it looked at.
+    (
+        "gate_settings",
+        UserOnly("The gatekeeper decides when Helm answers questions for you, so only you set it."),
+    ),
+    ("gate_asks", Data),
     // Local model servers: the addresses, switches and numbers around them.
     (
         "local_model_settings",
