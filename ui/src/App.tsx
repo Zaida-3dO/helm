@@ -1,7 +1,7 @@
 // The app frame: sidebar | main pane (top bar, chat, terminal
 // dock) | side panel, plus the toast overlay and the dialogs.
 
-import { useEffect, useMemo, useState, useSyncExternalStore, type CSSProperties } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import type { Api } from './api/client.ts';
 import type { EventBus } from './api/events.ts';
 import { ActionRow, LeafSlots } from './actions/index.ts';
@@ -168,9 +168,25 @@ function Frame({ flushers }: { flushers: Flushers }) {
     void Promise.all([read(SIDEBAR_WIDTH_PREF), read(SIDEBAR_VISIBLE_PREF)]).then(([w, v]) => sidebarLayout.load(w, v));
     return () => sidebarLayout.connect(() => undefined);
   }, [shell]);
+  // The chat area's top places the toasts under the top bar and whatever the tag strip takes
+  // (nothing with no chat, two lines when it wraps).
+  const frame = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = frame.current;
+    const main = el?.querySelector<HTMLElement>(':scope > .shell-main');
+    const chat = main?.querySelector<HTMLElement>(':scope > .shell-chat');
+    if (!el || !main || !chat) return;
+    const measure = () => {
+      main.style.setProperty('--toast-top', `${chat.offsetTop}px`);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    for (const x of [el, main, chat]) ro.observe(x);
+    return () => ro.disconnect();
+  }, []);
 
   return (
-    <div className="shell" data-testid="shell">
+    <div ref={frame} className="shell" data-testid="shell">
       <aside className="shell-sidebar" aria-label="Sidebar" hidden={!layout.visible} style={{ '--sidebar-width': `${layout.width}px` } as CSSProperties}>
         <ErrorBoundary name="sidebar">
           <Sidebar /> {/* chat and project tree */}
