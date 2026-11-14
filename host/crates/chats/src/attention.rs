@@ -43,6 +43,13 @@ pub(crate) fn live_needs(sh: &Shared) -> Needs {
             .thread
             .interactions
             .iter()
+            // A card the question gate is still holding stays quiet: the badge, tray, toasts
+            // and alerts wake only if the hold ends with the card still waiting.
+            .filter(|i| {
+                !i.gate
+                    .as_ref()
+                    .is_some_and(|g| g.state == crate::types::GateStatus::Checking)
+            })
             .find_map(|i| match i.attention {
                 Some(InteractionAttention::Approval) | Some(InteractionAttention::Trust) => {
                     Some(AttentionKind::Approval)

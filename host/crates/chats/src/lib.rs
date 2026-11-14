@@ -30,7 +30,7 @@
 //! | [`fork`] | forks and side-chat creation |
 //! | [`checkpoint`] | going back to before one of the user's messages: what it means, as a fork |
 //! | [`manage`] | archive, restore, delete, unread marks and completion acks |
-//! | [`seams`] | traits other crates implement (panel context, project gate) |
+//! | [`seams`] | traits other crates implement (panel context, project gate, AFK, question gate) |
 //! | [`remote`] | chats that run on another device: the ops that name one are answered from the mirror kept for it |
 //! | [`local`] | chats on local model servers: the model id, the thinking budget and the server seam |
 //! | [`search_source`] | the searchable message text the search crate indexes |

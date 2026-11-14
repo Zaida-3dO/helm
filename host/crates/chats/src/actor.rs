@@ -102,6 +102,14 @@ pub(crate) enum Cmd {
     Warm,
     /// AFK just turned on: run the interactions already waiting past the AFK policy.
     AfkSweep,
+    /// The question gate answered a card it was holding. The actor is that card's only owner,
+    /// so every race (the user answered first, the card went away) settles here; `reply` gets
+    /// whether the verdict was applied.
+    GateVerdict {
+        interaction_id: String,
+        outcome: Box<crate::seams::GateOutcome>,
+        reply: std::sync::mpsc::Sender<bool>,
+    },
     /// A local chat's model is being made ready for the turn `token` names: a line to show.
     LocalNote {
         token: u64,
@@ -155,6 +163,8 @@ enum Timer {
     ModelAck(String),
     StopDeadline,
     WaitLimit(String),
+    /// A held question-card's hold ends: the card becomes a normal card. One per held card.
+    GateDeadline(String),
 }
 
 struct LiveMsg {
@@ -884,6 +894,134 @@ impl Actor {
         }
     }
 
+    /// Offer one new card to the question gate. True when the gate holds it: the card is marked
+    /// as being checked, and until its verdict or the hold deadline it reaches neither AFK nor
+    /// the waiting tracker. The safety line is checked here as well as in the gate: a card that
+    /// grants authority to act (a permission or trust card) or takes a secret input is never
+    /// offered — those are safety gates, not questions.
+    fn gate_hold(&mut self, i: &mut Interaction) -> bool {
+        if i.secret == Some(true) || !matches!(i.attention, Some(InteractionAttention::Question)) {
+            return false;
+        }
+        let Some(gate) = self.sh.gate.get().cloned() else {
+            return false;
+        };
+        if gate.offer(&self.chat_id, i) != crate::seams::GateOffer::Hold {
+            return false;
+        }
+        i.gate = Some(GateState {
+            state: GateStatus::Checking,
+            brief: None,
+            note: None,
+        });
+        self.add_timer(
+            self.sh.cfg.limits.gate_deadline,
+            Timer::GateDeadline(i.id.clone()),
+        );
+        true
+    }
+
+    /// The hold on a card ended without a decision: it is a normal card again, with a quiet
+    /// line. AFK then gets its usual say over it, exactly as if the gate had passed it.
+    fn gate_fail_card(&mut self, id: &str, note: &str) {
+        self.clear_timer(|t| *t == Timer::GateDeadline(id.to_owned()));
+        {
+            let mut live = self.live.lock().unwrap();
+            if let Some(i) = live.thread.interactions.iter_mut().find(|i| i.id == id) {
+                if i.gate
+                    .as_ref()
+                    .is_some_and(|g| g.state == GateStatus::Checking)
+                {
+                    i.gate = Some(GateState {
+                        state: GateStatus::Failed,
+                        brief: None,
+                        note: Some(note.to_owned()),
+                    });
+                }
+            }
+        }
+        let card = self
+            .live
+            .lock()
+            .unwrap()
+            .thread
+            .interactions
+            .iter()
+            .find(|i| i.id == id)
+            .cloned();
+        if let Some(i) = card {
+            if self.afk_handle(&i, false) {
+                self.live
+                    .lock()
+                    .unwrap()
+                    .thread
+                    .interactions
+                    .retain(|x| x.id != id);
+            }
+        }
+        self.emit_thread();
+    }
+
+    /// Apply the question gate's verdict to a card it was holding. Only a card still being
+    /// checked accepts one: a card the user answered first, or that went away another way, is
+    /// not here, and the answer comes back false. The actor is the card's only owner, so this
+    /// is where every race settles.
+    fn gate_verdict(&mut self, id: &str, outcome: crate::seams::GateOutcome) -> bool {
+        self.clear_timer(|t| *t == Timer::GateDeadline(id.to_owned()));
+        let held = self
+            .live
+            .lock()
+            .unwrap()
+            .thread
+            .interactions
+            .iter()
+            .any(|i| {
+                i.id == id
+                    && i.gate
+                        .as_ref()
+                        .is_some_and(|g| g.state == GateStatus::Checking)
+            });
+        if !held {
+            return false;
+        }
+        match outcome {
+            crate::seams::GateOutcome::Decide { mut fields, marker } => {
+                fields.insert("id".into(), json!(id));
+                fields.insert("type".into(), json!("extension_ui_response"));
+                self.send(Value::Object(fields));
+                self.live
+                    .lock()
+                    .unwrap()
+                    .thread
+                    .interactions
+                    .retain(|i| i.id != id);
+                self.context_row(ContextKind::Gatekeeper, &marker);
+            }
+            crate::seams::GateOutcome::Escalate { brief } => {
+                let mut live = self.live.lock().unwrap();
+                if let Some(i) = live.thread.interactions.iter_mut().find(|i| i.id == id) {
+                    let rec = brief.recommendation.trim().to_owned();
+                    i.gate = Some(GateState {
+                        state: GateStatus::Escalated,
+                        brief: Some(brief),
+                        note: None,
+                    });
+                    // The recommended option arrives pre-filled, so one click answers it.
+                    if !rec.is_empty()
+                        && i.options
+                            .as_ref()
+                            .is_some_and(|o| o.iter().any(|x| x.trim() == rec))
+                    {
+                        i.prefill = Some(rec);
+                    }
+                }
+            }
+            crate::seams::GateOutcome::Failed { note } => self.gate_fail_card(id, &note),
+        }
+        self.emit_thread();
+        true
+    }
+
     fn context_row(&mut self, kind: ContextKind, text: &str) {
         self.record(Entry::Context(ContextEntry {
             id: format!("c:{}", uuid::Uuid::new_v4()),
@@ -1393,6 +1531,8 @@ impl Actor {
             live.thread.compacting = None;
             live.thread.loading = None;
         }
+        // Held cards went with them: no hold timer may fire for a card that no longer exists.
+        self.clear_timer(|t| matches!(t, Timer::GateDeadline(_)));
         self.set_status(status, error);
         self.save_binding();
         self.emit_thread();
@@ -1731,6 +1871,14 @@ impl Actor {
                 let waiting: Vec<Interaction> =
                     self.live.lock().unwrap().thread.interactions.clone();
                 for i in waiting {
+                    // A card the question gate is still holding is not AFK's yet: the gate's
+                    // verdict, or the hold ending, decides what happens to it.
+                    if i.gate
+                        .as_ref()
+                        .is_some_and(|g| g.state == GateStatus::Checking)
+                    {
+                        continue;
+                    }
                     if self.afk_handle(&i, true) {
                         self.live
                             .lock()
@@ -1750,6 +1898,9 @@ impl Actor {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
+                // The user answering ends any hold on that card; the gate's later verdict,
+                // if one is on its way, will find nothing and answer false.
+                self.clear_timer(|t| *t == Timer::GateDeadline(rid.clone()));
                 fields.insert("type".into(), json!("extension_ui_response"));
                 self.send(Value::Object(fields));
                 self.live
@@ -1759,6 +1910,14 @@ impl Actor {
                     .interactions
                     .retain(|i| i.id != rid);
                 self.emit_thread();
+            }
+            Cmd::GateVerdict {
+                interaction_id,
+                outcome,
+                reply,
+            } => {
+                let applied = self.gate_verdict(&interaction_id, *outcome);
+                let _ = reply.send(applied);
             }
             Cmd::ApplyModel { model, effort } => {
                 // A send that is waiting on the old model's preparation must not go out on it:
@@ -2738,6 +2897,11 @@ impl Actor {
                         self.deliver_now(&sid, "wait_limit");
                     }
                 }
+                Timer::GateDeadline(id) => {
+                    // A verdict that never arrived. Nothing is ever dropped: the card becomes
+                    // a normal card again, shown and counted, and AFK gets its usual say.
+                    self.gate_fail_card(&id, "Helm couldn't check this one.");
+                }
             }
         }
     }
@@ -3054,6 +3218,8 @@ impl Actor {
             "extension_ui_request" => {
                 let method = str_of(&v, "method").unwrap_or_default();
                 let id = str_of(&v, "id").unwrap_or_default();
+                // A re-request or dismissal ends any hold on that card id.
+                self.clear_timer(|t| *t == Timer::GateDeadline(id.clone()));
                 let mut parsed = None;
                 {
                     let mut live = self.live.lock().unwrap();
@@ -3071,10 +3237,12 @@ impl Actor {
                         }
                     }
                 }
-                if let Some(i) = parsed {
-                    // While AFK is on, AFK may answer it at once; otherwise (or when it defers)
-                    // the card waits for the user.
-                    if !self.afk_handle(&i, false) {
+                if let Some(mut i) = parsed {
+                    // The question gate goes first: a card it holds waits for its verdict (or
+                    // the hold deadline), marked as being checked. Everything it passes follows
+                    // the old path: while AFK is on it may answer it at once; otherwise (or when
+                    // it defers) the card waits for the user.
+                    if self.gate_hold(&mut i) || !self.afk_handle(&i, false) {
                         self.live.lock().unwrap().thread.interactions.push(i);
                     }
                 }

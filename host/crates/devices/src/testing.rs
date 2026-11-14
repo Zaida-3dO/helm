@@ -96,6 +96,7 @@ pub fn fake_interaction(
         steps: None,
         answer: None,
         prefill: None,
+        gate: None,
     }
 }
 

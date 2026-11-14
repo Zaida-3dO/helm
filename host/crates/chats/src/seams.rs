@@ -6,6 +6,7 @@
 //! | [`SendContextBuilder`] (service [`SendContext`]) | `helm_panel` (panel context) | `chat_send`, for a composer send that carries `context` |
 //! | [`ProjectGate`] (service [`ProjectGates`]) | `helm_projects` | `chat_restore` and `chat_create`: an archived project refuses both. It also answers which board a chat is on and puts new chats on one ([`crate::store::Boards`]) |
 //! | [`AfkPolicy`] (installed with [`crate::ChatRuntime::set_afk_policy`]) | `helm_afk` | each new interaction a worker raises, and each turn's context block |
+//! | [`QuestionGate`] (installed with [`crate::ChatRuntime::set_question_gate`]) | `helm_gatekeeper` | each new interaction, before AFK; its verdict arrives through [`crate::ChatRuntime::gate_verdict`] |
 //!
 //! A seam with nothing registered is skipped: a context payload is dropped (logged once per send)
 //! and every project counts as open.
@@ -138,6 +139,59 @@ pub enum AfkAction {
     },
     /// Leave it waiting for the user, and say so in the transcript.
     Defer { marker: String },
+}
+
+/// What the question gate makes of one new card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateOffer {
+    /// Not the gate's business (the gate is off, this is not a question it may judge, or it is
+    /// over its limits): the card follows the normal path — AFK, then the user.
+    Pass,
+    /// The gate takes it: the card waits, marked as being checked, until the gate answers with
+    /// [`crate::ChatRuntime::gate_verdict`].
+    Hold,
+}
+
+/// A question arriving through a tool channel rather than as a card: what the gate judges.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AskSpec {
+    /// Which channel raised it (`flag`, `telegram_ask`, `board_pick`, …).
+    pub channel: String,
+    pub question: String,
+    pub options: Vec<String>,
+    pub recommended: Option<String>,
+}
+
+/// The gate's say over a card, answered later through [`crate::ChatRuntime::gate_verdict`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum GateOutcome {
+    /// The gate answered for the user. `fields` are the answer's fields (`value`, or
+    /// `confirmed` and `value` for a plan); `marker` is the transcript line recording it.
+    Decide {
+        fields: serde_json::Map<String, Value>,
+        marker: String,
+    },
+    /// This one needs the user: the card stays, shown with the gate's brief on top.
+    Escalate { brief: crate::types::GateBrief },
+    /// The gate could not judge this card: it becomes a normal card with a quiet note.
+    Failed { note: String },
+}
+
+/// The question gate: it decides whether an ask really needs the user, or whether a reasonable
+/// default answers it. Implemented by the gatekeeper crate; with nothing installed every card
+/// follows the normal path. The actor never waits on it: after a [`GateOffer::Hold`] the gate
+/// calls `ChatRuntime::gate_verdict` for that card, and a deadline in the actor ends the hold
+/// whatever the gate is doing.
+pub trait QuestionGate: Send + Sync {
+    /// Called on the actor for each new question or plan card. Returns at once; after a Hold the
+    /// gate later calls [`crate::ChatRuntime::gate_verdict`] for this card.
+    fn offer(&self, chat_id: &str, i: &crate::types::Interaction) -> GateOffer;
+
+    /// A question raised through a tool channel. The default passes, so a build that has not
+    /// wired the channels keeps their old behaviour.
+    fn offer_ask(&self, _chat_id: &str, _ask: &AskSpec) -> GateOffer {
+        GateOffer::Pass
+    }
 }
 
 /// AFK's say over a chat, asked by the chat's actor. Implemented by the AFK crate; with nothing

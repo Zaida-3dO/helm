@@ -59,6 +59,10 @@ pub struct Limits {
     pub stall_unit: Duration,
     /// How long a "send soon" keeps retrying a full actor channel (60 s).
     pub send_soon: Duration,
+    /// How long the question gate gets with a card before the actor lets it through to the user
+    /// as a normal card (75 s). The gate's own helper timeout is shorter, so it fails quietly
+    /// inside this.
+    pub gate_deadline: Duration,
 }
 
 impl Default for Limits {
@@ -77,6 +81,7 @@ impl Default for Limits {
             tick: Duration::from_secs(30),
             stall_unit: Duration::from_secs(60),
             send_soon: Duration::from_secs(60),
+            gate_deadline: Duration::from_secs(75),
         }
     }
 }
@@ -183,7 +188,17 @@ pub trait Spawner: Send + Sync {
     fn run_autocomplete(&self, _job: &Value) -> Result<String, String> {
         Err("autocomplete is not available".into())
     }
+
+    /// Run the gatekeeper helper on one job and answer its verdict JSON line. The chats crate
+    /// never reads that JSON itself: the crate that runs the gate parses it.
+    fn run_gatekeeper(&self, _job: &Value) -> Result<Value, String> {
+        Err("the gatekeeper helper is not available".into())
+    }
 }
+
+/// How long the gatekeeper helper gets for one job. It sits inside the actor's hold deadline
+/// ([`Limits::gate_deadline`], 75 s), so a helper that hangs fails the hold quietly.
+pub const GATEKEEPER_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The title-job limits: at most 2 helper runs at once, 8 jobs in all.
 pub(crate) struct TitleQueue {
@@ -458,6 +473,10 @@ impl Spawner for ProcessSpawner {
             _ => Err("the helper gave no completion".into()),
         }
     }
+
+    fn run_gatekeeper(&self, job: &Value) -> Result<Value, String> {
+        self.run_helper("gatekeeper", job, GATEKEEPER_TIMEOUT)
+    }
 }
 
 impl ProcessSpawner {
@@ -571,6 +590,9 @@ pub(crate) struct Shared {
     pub host: std::sync::OnceLock<crate::hostcalls::HostSeam>,
     /// AFK's say over interactions and turns ([`crate::seams::AfkPolicy`]), installed once.
     pub afk: std::sync::OnceLock<Arc<dyn crate::seams::AfkPolicy>>,
+    /// The question gate ([`crate::seams::QuestionGate`]), installed once. Without it every card
+    /// follows the normal path.
+    pub gate: std::sync::OnceLock<Arc<dyn crate::seams::QuestionGate>>,
     /// The local model servers ([`crate::local::LocalModels`]), installed once.
     pub local: std::sync::OnceLock<crate::local::SharedLocal>,
     /// Per local server: what it last said about requests waiting on it ([`QueueSeen`]).
@@ -615,6 +637,7 @@ impl ChatRuntime {
                 autocomplete: Mutex::new(Default::default()),
                 host: std::sync::OnceLock::new(),
                 afk: std::sync::OnceLock::new(),
+                gate: std::sync::OnceLock::new(),
                 local: std::sync::OnceLock::new(),
                 local_queue: Mutex::new(HashMap::new()),
                 exits: crate::exits::ExitLog::new(&cfg_profile),
@@ -925,6 +948,44 @@ impl ChatRuntime {
         if self.sh.afk.set(p).is_err() {
             log::warn!("an AFK policy is already installed; keeping the first");
         }
+    }
+
+    /// Install the question gate (once). Without it no card is ever held.
+    pub fn set_question_gate(&self, g: Arc<dyn crate::seams::QuestionGate>) {
+        if self.sh.gate.set(g).is_err() {
+            log::warn!("a question gate is already installed; keeping the first");
+        }
+    }
+
+    /// Answer for a card the gate is holding ([`crate::seams::GateOffer::Hold`]). The command
+    /// goes to the card's only owner, the chat's actor, so a verdict that arrives after the user
+    /// answered (or after the card went away some other way) finds nothing and answers false —
+    /// the caller records "the user answered first". True when the verdict was applied.
+    pub fn gate_verdict(
+        &self,
+        chat_id: &str,
+        interaction_id: &str,
+        outcome: crate::seams::GateOutcome,
+    ) -> bool {
+        if self.sh.shutting_down.load(Ordering::SeqCst) {
+            return false;
+        }
+        let tx = match self.sh.actors.lock().unwrap().get(chat_id) {
+            Some(h) if !h.tx.is_closed() => h.tx.clone(),
+            // No live chat: no card to answer.
+            _ => return false,
+        };
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let cmd = Cmd::GateVerdict {
+            interaction_id: interaction_id.to_owned(),
+            outcome: Box::new(outcome),
+            reply: reply_tx,
+        };
+        if enqueue(&tx, cmd).is_err() {
+            return false;
+        }
+        // The actor answers from its own loop, which never waits on the caller.
+        reply_rx.recv().unwrap_or(false)
     }
 
     /// Ask every live chat to run its waiting interactions past the AFK policy again (AFK just

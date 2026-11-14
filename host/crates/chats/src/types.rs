@@ -431,6 +431,63 @@ pub struct Interaction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub prefill: Option<String>,
+    /// What the question gate has made of this card, while it checks it or once it has judged
+    /// it. Absent when no gate took it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub gate: Option<GateState>,
+}
+
+/// Where the question gate has got to with a card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum GateStatus {
+    /// The gate is judging it: the chat shows "Checking whether this needs you…", and the card
+    /// raises no badge, toast or alert until the hold ends.
+    Checking,
+    /// The gate decided this one needs the user; the brief sits above the options.
+    Escalated,
+    /// The gate could not judge it (or ran out of time): a normal card with a quiet note.
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GateState {
+    pub state: GateStatus,
+    /// The gate's write-up of the question, for an escalated card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub brief: Option<GateBrief>,
+    /// The quiet line a failed hold leaves on the card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
+}
+
+/// One option in the gate's brief of a question, written in the user's terms.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GateBriefOption {
+    pub label: String,
+    /// What choosing it means, in one plain line.
+    pub means: String,
+    pub pros: String,
+    pub cons: String,
+    /// Rough cost: time, money or effort.
+    pub cost: String,
+}
+
+/// The gate's rewrite of an escalated question: the problem, the real choices, and what the gate
+/// would pick.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GateBrief {
+    pub problem: String,
+    pub options: Vec<GateBriefOption>,
+    pub recommendation: String,
+    /// Why that recommendation, in one line.
+    pub why: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -578,6 +635,9 @@ pub enum ContextKind {
     /// Something AFK did with an ask while the user was away (an automatic answer, or an ask it
     /// left waiting for them).
     Afk,
+    /// Something the question gate did with an ask: an answer it chose for the user, which they
+    /// can review and change later.
+    Gatekeeper,
     /// A gap in the chat's work that was not its doing: the computer slept, the connection was
     /// down, or Helm asked the chat to carry on after one.
     Interruption,

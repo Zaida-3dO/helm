@@ -411,6 +411,7 @@ mod tests {
             steps: None,
             answer: None,
             prefill: None,
+            gate: None,
         }
     }
 

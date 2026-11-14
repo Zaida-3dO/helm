@@ -322,8 +322,9 @@ fn tail_chars(text: &str, max: usize) -> String {
     }
 }
 
-/// The last four user and four assistant messages with text, oldest first.
-fn turns(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Vec<Value>> {
+/// The last four user and four assistant messages with text, oldest first. The question gate
+/// builds its job on the same reader.
+pub fn recent_turns(tx: &Transaction<'_>, chat_id: &str) -> rusqlite::Result<Vec<Value>> {
     let mut all: Vec<(i64, i64, &'static str, String)> = Vec::new();
     for role in ["user", "assistant"] {
         let mut st = tx.prepare(
@@ -386,7 +387,7 @@ pub(crate) fn pass(sh: &Arc<Shared>) {
             "title": c.title,
             "status": c.status.as_str(),
             "idleMinutes": (now - c.stamp) / 60_000,
-            "turns": turns(tx, &c.id)?,
+            "turns": recent_turns(tx, &c.id)?,
         });
         if let Some(p) = &s.prompt {
             job["customPrompt"] = json!(p);
