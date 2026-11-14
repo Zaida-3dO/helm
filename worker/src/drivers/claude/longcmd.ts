@@ -5,12 +5,16 @@
 // The same hook refuses, every time, a command that ends Node or Claude Code by name
 // (`taskkill /IM node.exe`, `Stop-Process -Name node`, `pkill node`): every chat's worker is a
 // node.exe and every chat's agent a claude.exe, so such a command ends all of them, not only the
-// process the agent meant.
+// process the agent meant. That refusal covers every Bash and PowerShell call, a sub-agent's
+// too, and holds with the long-command rule off.
 //
 // The parse is deliberately forgiving: anything it cannot follow is "not classified", so a parse
 // failure never blocks a tool.
 
 export type LongCommandLevel = "off" | "warn" | "redirect";
+
+/** The tools the hook is registered for: every shell that can end processes by name. */
+export const SHELL_TOOLS_MATCHER = "Bash|PowerShell";
 
 export function isLongCommandLevel(v: unknown): v is LongCommandLevel {
   return v === "off" || v === "warn" || v === "redirect";
@@ -572,16 +576,24 @@ export class LongCommandPolicy {
     return this.level !== "off";
   }
 
+  /**
+   * Decides one shell call. The long-command rule covers only the main agent's Bash calls; every
+   * other call (a sub-agent's, or PowerShell) is checked for a kill by name and nothing else.
+   */
+  decideCall(tool: string, root: boolean, input: { command?: unknown; timeout?: unknown; run_in_background?: unknown }): HookDecision {
+    return tool === "Bash" && root ? this.decide(input) : refuseKill(input);
+  }
+
   /** Decides one root Bash call. Subagent calls must not be passed here (they are exempt). */
   decide(input: { command?: unknown; timeout?: unknown; run_in_background?: unknown }): HookDecision {
-    if (this.level === "off") return { kind: "allow" };
+    if (this.level === "off") return refuseKill(input);
     const command = typeof input.command === "string" ? input.command : "";
     const escape = this.escape;
     this.escape = undefined; // any root Bash call clears the escape
     const hit = classifyBashCall(input);
     if (!hit) return { kind: "allow" };
     // Refused at either level, and never let through on a repeat.
-    if (hit.kill) return { kind: "deny", reason: hit.reason, text: KILL_TEXT.replace("REASON", hit.reason) };
+    if (hit.kill) return killDenial(hit.reason);
     if (this.level === "warn") return { kind: "remind", reason: hit.reason, text: REMIND_TEXT.replace("REASON", hit.reason) };
     if (escape !== undefined && escape === command) return { kind: "escape", reason: hit.reason };
     this.escape = command;
@@ -592,4 +604,14 @@ export class LongCommandPolicy {
   endTurn(): void {
     this.escape = undefined;
   }
+}
+
+/** Only the kill-by-name check: anything else is allowed. */
+function refuseKill(input: { command?: unknown }): HookDecision {
+  const hit = classifyBashCall({ command: input.command });
+  return hit?.kill ? killDenial(hit.reason) : { kind: "allow" };
+}
+
+function killDenial(reason: string): HookDecision {
+  return { kind: "deny", reason, text: KILL_TEXT.replace("REASON", reason) };
 }

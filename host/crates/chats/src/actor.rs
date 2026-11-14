@@ -198,7 +198,13 @@ struct Actor {
     pending: HashMap<String, Pending>,
     timers: Vec<(TInstant, Timer)>,
     run_id: Option<String>,
+    /// The submission that opened the current turn. Until Claude has read it, a worker that dies
+    /// is not a crash to carry on from: Claude never saw what it would be continuing.
+    turn_opener: Option<String>,
     stopping: Option<StopState>,
+    /// A Stop ended this run, so an exit before the next run is one Helm asked for, even once
+    /// `stopping` has been settled (a worker that ends itself after an interrupt).
+    stop_ended: bool,
     stream: HashMap<String, LiveMsg>,
     dirty: BTreeSet<String>,
     /// Streaming rows whose database copy is behind what the UI was sent.
@@ -369,7 +375,9 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         pending: HashMap::new(),
         timers: Vec::new(),
         run_id: None,
+        turn_opener: None,
         stopping: None,
+        stop_ended: false,
         stream: HashMap::new(),
         dirty: BTreeSet::new(),
         db_behind: BTreeSet::new(),
@@ -1175,6 +1183,7 @@ impl Actor {
     }
 
     fn on_exit(&mut self, reason: String) {
+        self.stop_ended = false;
         self.link = None;
         self.link_closing = false;
         self.out = None;
@@ -1307,6 +1316,7 @@ impl Actor {
     /// Start a run in memory: the caller writes the row (see `insert_run`).
     fn new_run_id(&mut self) -> String {
         self.last_output = Instant::now();
+        self.stop_ended = false;
         let run = uuid::Uuid::new_v4().to_string();
         self.run_id = Some(run.clone());
         run
@@ -2099,6 +2109,9 @@ impl Actor {
             let run = self.new_run_id();
             new_run = Some((run, self.chat()));
         }
+        if !busy {
+            self.turn_opener = Some(sid.to_owned());
+        }
         let row = if !busy {
             // A prompt that opens a turn: its user row shows at once, as saved.
             let mut details = json!({"submissionId": sid, "mode": sub.mode});
@@ -2783,7 +2796,7 @@ impl Actor {
             Some(HostReason::Quit)
         } else if self.archived {
             Some(HostReason::Archive)
-        } else if self.stopping.is_some() {
+        } else if self.stopping.is_some() || self.stop_ended {
             Some(HostReason::Stop)
         } else if by_host {
             Some(HostReason::Ended)
@@ -2805,6 +2818,15 @@ impl Actor {
                 .unwrap_or_else(|| t.args.clone());
             (t.name.clone(), command)
         });
+        // Claude had read the prompt that opened the turn (a turn it opened by itself has none).
+        let prompt_read = self.turn_opener.as_deref().is_none_or(|sid| {
+            self.submission(sid).is_some_and(|s| {
+                matches!(
+                    s.state,
+                    SubmissionState::Delivered | SubmissionState::Complete
+                )
+            })
+        });
         let chat = self.chat();
         crate::exits::ExitFacts {
             chat_id: self.chat_id.clone(),
@@ -2824,6 +2846,7 @@ impl Actor {
                 .or_else(|| chat.as_ref().and_then(|c| c.model.clone())),
             provider: self.launched_local.as_ref().map(|(s, _)| s.clone()),
             turn_open: self.status().is_busy(),
+            prompt_read,
             run_id: self.run_id.clone(),
             launch_path: Some(
                 self.sh
@@ -3868,6 +3891,7 @@ impl Actor {
                     None
                 };
                 self.end_run(status, err.as_deref(), outcome);
+                self.stop_ended = true;
                 // The stop's answer is how the turn ended; what Claude had not read is sent
                 // again right after, which may open the next turn at once.
                 let final_status = self.status();

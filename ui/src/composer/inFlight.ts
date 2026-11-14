@@ -3,7 +3,7 @@
 // message is in flight until Claude has read it or it has been put back to the composer.
 
 import type { Capabilities, MessageRow, Submission } from '../api/types.ts';
-import { toolLabel, toolStatus } from '../transcript/toolKinds.ts';
+import { toolArgs, toolIdentity, toolLabel, toolStatus } from '../transcript/toolKinds.ts';
 
 export type InFlightState = 'pending' | 'sending' | 'uncertain' | 'failed';
 
@@ -38,11 +38,23 @@ const NEXT_STEP = 'Claude reads it at its next step';
 export function waitReason(rows: readonly MessageRow[]): string {
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i]!;
-    if (r.role === 'toolResult' && toolStatus(r) === 'running') return `Waiting for ${toolLabel(r.toolName)} to finish`;
+    if (r.role === 'toolResult' && toolStatus(r) === 'running') return `Waiting for ${waitingFor(r)} to finish`;
     // The turn's own start: tools before it are history.
     if (r.role === 'user' && r.details?.mode !== 'steer') break;
   }
   return NEXT_STEP;
+}
+
+/** The running call, in words a user knows: Helm's own tools are "a Helm tool", and a call made
+ *  through `app_mcp_call` is named by the MCP tool it reaches. */
+function waitingFor(r: MessageRow): string {
+  const { source, server, tool } = toolIdentity(r);
+  if (source === 'host' && tool === 'app_mcp_call') {
+    const target = toolArgs(r).name;
+    if (typeof target === 'string' && target && !target.startsWith('app_')) return toolLabel(`mcp__${target}`);
+  }
+  if (source === 'host') return 'a Helm tool';
+  return source === 'mcp' ? `${server} · ${tool}` : toolLabel(r.toolName);
 }
 
 /** In flight in the order they were sent. The host's list already excludes settled rows. */

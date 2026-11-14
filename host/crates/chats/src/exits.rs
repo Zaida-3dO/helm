@@ -27,6 +27,9 @@ pub const INCIDENT_GAP_MS: i64 = 5_000;
 const FILE_CAP: u64 = 1024 * 1024;
 /// Characters of the in-flight tool's command kept in the log.
 const COMMAND_KEEP: usize = 300;
+/// Bytes of stderr kept (the end of it) for an exit Helm asked for. A crash, or an exit with no
+/// known cause, keeps all of it, so ordinary ends never roll a crash's evidence out of the log.
+const ASKED_STDERR_KEEP: usize = 2 * 1024;
 /// Crashes older than this are forgotten (the outage watch no longer carries such a turn on).
 const CRASH_KEEP_MS: i64 = 6 * 60 * 60 * 1000;
 /// At most this many crashes are remembered at once; the oldest go first.
@@ -45,21 +48,45 @@ const NOISE: &[&str] = &[
     GOODBYE,
 ];
 
-/// The last line of `stderr` that says something: blank lines, stack frames (`at …`) and known
-/// noise are skipped. `None` when nothing is left.
+/// The line of `stderr` that best explains an exit: the last one that looks like an error
+/// (`TypeError: …`, `FATAL ERROR: …`, the worker's own `[helm-worker] …`), else the last line that
+/// says anything at all. Blank lines, stack frames (`at …` and native `13: 00007FF6… …`), Node's
+/// closing `Node.js v…` and known noise are skipped. `None` when nothing is left.
 pub fn meaningful_line(stderr: &str) -> Option<String> {
-    stderr
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|l| {
-            if l.is_empty() || l.starts_with("at ") {
-                return false;
-            }
-            let lower = l.to_ascii_lowercase();
-            !NOISE.iter().any(|n| lower.contains(n))
-        })
-        .map(|l| l.chars().take(500).collect())
+    let mut said = stderr.lines().rev().map(str::trim).filter(|l| !is_noise(l));
+    let last = said.clone().next()?;
+    let line = said.find(|l| looks_like_error(l)).unwrap_or(last);
+    Some(line.chars().take(500).collect())
+}
+
+fn is_noise(l: &str) -> bool {
+    if l.is_empty()
+        || l.starts_with("at ")
+        || is_native_frame(l)
+        || (l.starts_with("-----") && l.ends_with("-----"))
+        || l.strip_prefix("Node.js v")
+            .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+    {
+        return true;
+    }
+    let lower = l.to_ascii_lowercase();
+    NOISE.iter().any(|n| lower.contains(n))
+}
+
+/// A frame of Node's native stack trace: `13: 00007FF6A1B2C3D4 RtlUserThreadStart+40`.
+fn is_native_frame(l: &str) -> bool {
+    l.split_once(": ").is_some_and(|(n, rest)| {
+        !n.is_empty()
+            && n.chars().all(|c| c.is_ascii_digit())
+            && rest.chars().take_while(char::is_ascii_hexdigit).count() >= 8
+    })
+}
+
+fn looks_like_error(l: &str) -> bool {
+    l.starts_with("[helm-worker]")
+        || l.contains("FATAL ERROR")
+        || l.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|w| w.ends_with("Error") || w.ends_with("Exception"))
 }
 
 /// Why Helm itself ended (or was ending) a worker. `None` in [`ExitFacts::host_reason`] means
@@ -111,6 +138,9 @@ pub struct ExitFacts {
     pub provider: Option<String>,
     /// A turn was open: the user (or an agent) was waiting on this worker.
     pub turn_open: bool,
+    /// Claude had read the prompt that opened the turn. A worker that dies before that leaves
+    /// nothing to continue: the message stays unsent, for the user to recover.
+    pub prompt_read: bool,
     /// The turn's run, which a continuation must still find to be the chat's latest.
     pub run_id: Option<String>,
     pub launch_path: Option<PathBuf>,
@@ -118,9 +148,9 @@ pub struct ExitFacts {
 }
 
 impl ExitFacts {
-    /// A crash: an end Helm did not ask for, while a turn was open.
+    /// A crash: an end Helm did not ask for, while a turn Claude had started on was open.
     pub fn is_crash(&self) -> bool {
-        self.host_reason.is_none() && self.turn_open && self.run_id.is_some()
+        self.host_reason.is_none() && self.turn_open && self.prompt_read && self.run_id.is_some()
     }
 }
 
@@ -137,18 +167,19 @@ pub fn exit_reason(f: &ExitFacts) -> String {
     if let Some(line) = meaningful_line(&f.stderr) {
         return format!("The worker stopped ({code}): {line}");
     }
-    if f.job_active.is_some_and(|n| n > 0) {
+    if said_goodbye(&f.stderr) {
+        // It ended itself; what is left of its tree may still be closing.
+        format!("The worker process ended without saying why ({code}).")
+    } else if f.job_active.is_some_and(|n| n > 0) {
         format!(
             "The worker process was ended from outside Helm while Claude Code was still running ({code})."
         )
-    } else if !said_goodbye(&f.stderr) {
+    } else {
         // Every way the worker ends itself writes its closing line; only a process ended from
         // outside (or one that crashed outright) leaves none.
         format!(
             "The worker process was ended from outside Helm, or crashed without a word ({code})."
         )
-    } else {
-        format!("The worker process ended without saying why ({code}).")
     }
 }
 
@@ -352,6 +383,7 @@ fn exit_line(f: &ExitFacts, shown: &str, rec: &Recorded) -> String {
         "hostReason": f.host_reason.map(HostReason::as_str),
         "crash": rec.crash,
         "turnOpen": f.turn_open,
+        "promptRead": f.prompt_read,
         "workerError": f.worker_error,
         "jobActive": f.job_active,
         "saidGoodbye": said_goodbye(&f.stderr),
@@ -362,9 +394,18 @@ fn exit_line(f: &ExitFacts, shown: &str, rec: &Recorded) -> String {
         "provider": f.provider,
         "launch": f.launch_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
         "cwd": f.cwd,
-        "stderr": f.stderr,
+        "stderr": if f.host_reason.is_some() { tail(&f.stderr, ASKED_STDERR_KEEP) } else { &f.stderr },
     })
     .to_string()
+}
+
+/// The last `max` bytes of `s`, cut at a character boundary.
+fn tail(s: &str, max: usize) -> &str {
+    let mut from = s.len().saturating_sub(max);
+    while !s.is_char_boundary(from) {
+        from += 1;
+    }
+    &s[from..]
 }
 
 fn append(dir: &Path, text: &str) -> std::io::Result<()> {
@@ -411,6 +452,23 @@ To eliminate this warning, add \"type\": \"module\" to C:\\Users\\x\\package.jso
                 Some("FATAL ERROR: Reached heap limit Allocation failed"),
             ),
             ("[helm-worker] claude stdin: write EPIPE\n".to_owned(), Some("[helm-worker] claude stdin: write EPIPE")),
+            // An import that fails before the worker's handlers exist: Node's error, an object
+            // dump and its version line. The error wins.
+            (
+                "node:internal/modules/esm/resolve:275\n    throw new ERR_MODULE_NOT_FOUND(\n          ^\n\nError [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\p\\x.ts' imported from C:\\p\\main.ts\n    at finalizeResolution (node:internal:1:1)\n{\n  code: 'ERR_MODULE_NOT_FOUND',\n  url: 'file:///C:/p/x.ts'\n}\n\nNode.js v24.14.0\n".to_owned(),
+                Some("Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\p\\x.ts' imported from C:\\p\\main.ts"),
+            ),
+            // Out of memory: the fatal line, not the native frames after it.
+            (
+                "<--- JS stacktrace --->\n\nFATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n----- Native stack trace -----\n\n 1: 00007FF6A1B2C3D4 node::SetCppgcReference+17979\n13: 00007FF6A1B2C3D4 RtlUserThreadStart+40\n".to_owned(),
+                Some("FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory"),
+            ),
+            // Only Node's own closing lines: nothing to show.
+            ("----- Native stack trace -----\n 1: 00007FF6A1B2C3D4 x+1\nNode.js v24.14.0\n".to_owned(), None),
+            // An error-looking line beats a plainer one written after it.
+            ("RangeError: Invalid array length\ncleaning up\n".to_owned(), Some("RangeError: Invalid array length")),
+            // No error-looking line: the last line that says something.
+            ("first\nlast\n".to_owned(), Some("last")),
         ] {
             assert_eq!(meaningful_line(&stderr).as_deref(), want, "{stderr}");
         }
@@ -422,6 +480,7 @@ To eliminate this warning, add \"type\": \"module\" to C:\\Users\\x\\package.jso
             at_ms: at,
             code: Some(1),
             turn_open: true,
+            prompt_read: true,
             run_id: Some(format!("run-{chat}")),
             ..Default::default()
         }
@@ -444,6 +503,12 @@ To eliminate this warning, add \"type\": \"module\" to C:\\Users\\x\\package.jso
             "The worker process was ended from outside Helm, or crashed without a word (exit code 1)."
         );
         f.stderr = format!("{noise}[helm-worker] exiting with code 1\n");
+        assert_eq!(
+            exit_reason(&f),
+            "The worker process ended without saying why (exit code 1)."
+        );
+        // It ended itself while the rest of its tree was still closing: not an outside end.
+        f.job_active = Some(2);
         assert_eq!(
             exit_reason(&f),
             "The worker process ended without saying why (exit code 1)."
@@ -508,7 +573,9 @@ To eliminate this warning, add \"type\": \"module\" to C:\\Users\\x\\package.jso
                 6,
             ),
             ("idle", 9_000, |f| f.turn_open = false, false, 7),
-            ("second", 13_000, |_| {}, true, 8),
+            // Claude had not read the turn's prompt yet: nothing to carry on.
+            ("unread", 9_500, |f| f.prompt_read = false, false, 8),
+            ("second", 13_000, |_| {}, true, 9),
             // More than 5 s after the last exit: a new incident.
             ("alone", 30_000, |_| {}, true, 1),
         ];
@@ -551,7 +618,7 @@ To eliminate this warning, add \"type\": \"module\" to C:\\Users\\x\\package.jso
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
         let count = |k: &str| lines.iter().filter(|l| l["kind"] == k).count();
-        assert_eq!((count("exit"), count("incident")), (10, 7));
+        assert_eq!((count("exit"), count("incident")), (11, 8));
         let first = &lines[0];
         assert_eq!(first["chatId"], "crashed");
         assert_eq!(first["crash"], true);
@@ -562,7 +629,7 @@ To eliminate this warning, add \"type\": \"module\" to C:\\Users\\x\\package.jso
             .rev()
             .find(|l| l["kind"] == "incident")
             .unwrap();
-        assert_eq!(last_incident["exits"], 8);
+        assert_eq!(last_incident["exits"], 9);
         assert_eq!(last_incident["crashes"], 2);
         // The chat's note counts the crashes of its incident, and only a crash gets one.
         let rec = |crash, crashes| Recorded {
@@ -599,6 +666,20 @@ To eliminate this warning, add \"type\": \"module\" to C:\\Users\\x\\package.jso
         .unwrap();
         assert_eq!(line["lastTool"]["name"], "Bash");
         assert_eq!(line["lastTool"]["command"].as_str().unwrap().len(), 300);
+        // A crash keeps all of its stderr; an exit Helm asked for keeps only the end of it.
+        assert_eq!(line["stderr"].as_str().unwrap().len(), 16 * 1024);
+        let mut f = facts("b", 50_000);
+        f.host_reason = Some(HostReason::Close);
+        f.stderr = format!("{}é{}the end", "e".repeat(16 * 1024), "x".repeat(2040));
+        log.record(&f, "shown");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let asked: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        let kept = asked["stderr"].as_str().unwrap();
+        assert!(
+            kept.ends_with("the end") && kept.len() <= ASKED_STDERR_KEEP,
+            "{}",
+            kept.len()
+        );
         for i in 0..70 {
             let mut f = facts("a", 100_000 * (i + 1));
             f.stderr = "e".repeat(16 * 1024);

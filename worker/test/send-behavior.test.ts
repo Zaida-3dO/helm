@@ -177,7 +177,7 @@ describe("long-command rule", () => {
     try {
       await s.host.ready();
       const init = s.received().find(ctl("initialize"))!;
-      assert.deepEqual((init.request as Json).hooks, { PreToolUse: [{ matcher: "Bash", hookCallbackIds: ["helm-long-commands"] }] });
+      assert.deepEqual((init.request as Json).hooks, { PreToolUse: [{ matcher: "Bash|PowerShell", hookCallbackIds: ["helm-long-commands"] }] });
       const argv = s.fakeStart()?.argv as string[];
       const append = argv[argv.indexOf("--append-system-prompt") + 1];
       assert.equal(append, `Base instructions.\n\n${PROMPT_RULE}`);
@@ -232,12 +232,12 @@ describe("long-command rule", () => {
     }
   });
 
-  test("off: no hook is registered and no prompt rule is appended", async () => {
+  test("off: no prompt rule and nothing redirected, but the hook stays for the kill-by-name check", async () => {
     const s = startWithFixture("long-command", { sendBehavior: { longCommands: "off" } });
     try {
       await s.host.ready();
       const init = s.received().find(ctl("initialize"))!;
-      assert.equal((init.request as Json).hooks, undefined);
+      assert.deepEqual((init.request as Json).hooks, { PreToolUse: [{ matcher: "Bash|PowerShell", hookCallbackIds: ["helm-long-commands"] }] });
       assert.equal((s.fakeStart()?.argv as string[]).includes("--append-system-prompt"), false);
       await prompt(s.host, "run the tests");
       await s.host.waitForType("agent_settled", 5000, 0);

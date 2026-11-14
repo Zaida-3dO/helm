@@ -1397,12 +1397,16 @@ dd {
   gap: 4px 12px;
   padding: 2px 20px 12px;
 }
-/* Tab groups: a small caption and its buttons move and wrap as one unit. */
+/* Tab groups: a small caption and its buttons move and wrap as one unit. A group wider than the
+   strip takes a line of its own and wraps its buttons inside it, so no tab runs off the dialog. */
 .settings-tab-group {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 2px;
-  flex: none;
+  gap: 4px 2px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
 }
 .settings-tab-group-label {
   font-size: calc(10 * var(--ui-unit));
