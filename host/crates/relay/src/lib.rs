@@ -72,6 +72,7 @@ pub mod devlink;
 pub mod exec;
 pub mod gate;
 pub mod household;
+pub mod hub_view;
 pub mod knowledge_line;
 pub mod notify;
 pub mod pair;
