@@ -46,7 +46,8 @@ pub struct ConsentRequest {
     pub kind: String,
     /// The kind's card label.
     pub label: String,
-    /// The host's one-line summary of the canonical target.
+    /// The host's summary of the canonical target: one line, or for a card that applies on
+    /// Approve, a title and one line per change, one per text line.
     pub summary: String,
     pub reason: String,
     pub evidence: String,
@@ -66,6 +67,11 @@ pub struct ConsentRequest {
     pub grant_expires_at: Option<i64>,
     /// The user's note, sent with Deny.
     pub note: Option<String>,
+    /// Helm applies this request itself the moment the user approves: the card says Approve,
+    /// shows each summary line on its own and has no grant length.
+    pub applies_on_allow: bool,
+    /// For a request Helm applied: what happened, once it is done.
+    pub outcome: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
