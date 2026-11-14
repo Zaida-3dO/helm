@@ -166,6 +166,15 @@
 .composer-dock .composer-selects > * {
   min-width: 0;
 }
+/* A toolbar accessory centres on the chips (not on the text baseline); one with nothing to show takes no gap. */
+.composer-dock .composer-accessory {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.composer-dock .composer-accessory:empty {
+  display: none;
+}
 .composer-dock .model-picker {
   display: inline-flex;
   align-items: center;
@@ -210,7 +219,8 @@
 }
 /* The toolbar's left group is what the chips are sized against: as it narrows, the permission
    chip falls back to its icon first (its name and mode stay in the tooltip), then the model's
-   effort word goes, then the chevrons go and the model's name is ellipsised. A chip is never a caret on its own. */
+   effort word goes, then the chevrons go and the model's name is ellipsised. A chip is never a caret on its own.
+   The model chip keeps a wider minimum than the permission chip's icon, so its name stays readable. */
 .composer-dock .composer-selects {
   container-type: inline-size;
   container-name: composer-selects;
@@ -223,20 +233,12 @@
     display: none;
   }
 }
-@container composer-selects (max-width: 110px) {
-  .composer-dock .composer-selects {
-    gap: 2px;
-  }
-  .composer-dock .composer-selects .ui-picker-trigger {
-    padding: 0 5px;
-  }
-  .composer-dock .model-picker {
-    min-width: calc(36 * var(--ui-unit));
-  }
-}
 @container composer-selects (max-width: 140px) {
   .composer-dock .composer-selects .ui-picker-chevron {
     display: none;
+  }
+  .composer-dock .composer-selects .ui-picker-trigger {
+    padding: 0 5px;
   }
 }
 @container composer-selects (max-width: 325px) {
