@@ -79,13 +79,13 @@ impl GateService {
     /// characters. The first mark wins; re-marking answers with the row as it stands.
     pub fn review(&self, id: &str, review: &str, note: Option<&str>) -> Result<GateAsk, ApiError> {
         let note = note.map(str::trim).filter(|s| !s.is_empty());
-        if let Some(n) = note.as_deref() {
+        if let Some(n) = note {
             if n.chars().count() > 300 {
                 return Err(ApiError::bad_args("The note is at most 300 characters."));
             }
         }
         if !matches!(review, "fine" | "should_have_asked" | "didnt_need_me") {
-            return Err(ApiError::bad_args(&format!(
+            return Err(ApiError::bad_args(format!(
                 "\"{review}\" is not a mark the gatekeeper keeps."
             )));
         }
@@ -127,13 +127,12 @@ impl GateService {
         let text = correction(&chose, &row.question, new_answer);
         let now = helm_core::now_ms();
         let sub_id = uuid::Uuid::new_v4().to_string();
-        match self
+        if let Err(r) = self
             .db
             .write(|tx| helm_chats::archive::restore_in_tx(tx, &row.chat_id, now))
             .map_err(|e| ApiError::internal(e.to_string()))?
         {
-            Err(r) => return Err(r.into()),
-            Ok(_) => {}
+            return Err(r.into());
         }
         helm_chats::submit::host_send(
             &self.rt,
@@ -394,6 +393,179 @@ fn judge(
     }
 }
 
+/// The helper's line, checked: a decision needs a choice, a confidence and a risk. Anything
+/// shaped wrong counts as a failure to judge. The helper says `"escalate"`; `"ask"` stays
+/// accepted as a synonym.
+fn parse_answer(v: &Value) -> Option<ModelAnswer> {
+    let o = v.as_object()?;
+    let decide = match o.get("verdict")?.as_str()? {
+        "decide" => true,
+        "escalate" | "ask" => false,
+        _ => return None,
+    };
+    let choice = o.get("choice").and_then(Value::as_str).map(str::to_owned);
+    if decide && choice.is_none() {
+        return None;
+    }
+    Some(ModelAnswer {
+        decide,
+        choice,
+        reason: o
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(240)
+            .collect(),
+        confidence: o
+            .get("confidence")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0),
+        risk: o
+            .get("risk")
+            .and_then(Value::as_str)
+            .and_then(Risk::parse)
+            .unwrap_or(Risk::Medium),
+        reversible: o
+            .get("reversible")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        brief: o.get("brief").cloned(),
+    })
+}
+
+/// Apply one decision: answer the card through the runtime, then write the audit row once.
+/// Returns whether the verdict reached the card.
+/// The audit facts of one decision: the choice, the reason, the confidence and the risk word.
+type Audit = (String, Option<String>, Option<f64>, Option<&'static str>);
+
+#[allow(clippy::too_many_arguments)]
+fn settle(
+    db: &Arc<Database>,
+    events: &Arc<dyn EventSink>,
+    rt: &ChatRuntime,
+    card: &Interaction,
+    ask_id: &str,
+    settings: &GateSettings,
+    decision: Decision,
+    brief: GateBrief,
+    local_chat: bool,
+    started: i64,
+) -> bool {
+    let now = helm_core::now_ms();
+    let took = now.max(started) - started;
+    let (verdict, outcome, audit): (&str, GateOutcome, Option<Audit>) = match &decision {
+        Decision::Decide {
+            choice,
+            reason,
+            confidence,
+            risk,
+        } => {
+            let mut fields = serde_json::Map::new();
+            fields.insert(
+                "value".into(),
+                json!(format!(
+                    "{choice} (Helm chose this default for the user; \
+                     they may change it later, so keep it easy to undo)"
+                )),
+            );
+            (
+                "decided",
+                GateOutcome::Decide {
+                    fields,
+                    marker: format!(
+                        "Helm answered for you: \u{ab}{choice}\u{ab}, because {reason}."
+                    ),
+                },
+                Some((
+                    choice.clone(),
+                    Some(reason.clone()),
+                    Some(*confidence),
+                    Some(risk.as_str()),
+                )),
+            )
+        }
+        Decision::Escalate => (
+            "escalated",
+            GateOutcome::Escalate {
+                brief: brief.clone(),
+            },
+            Some((
+                String::new(),
+                Some("This one needs the user.".to_owned()),
+                None,
+                None,
+            )),
+        ),
+        Decision::Failed | Decision::Pass(_) => (
+            "failed",
+            GateOutcome::Failed {
+                note: "Helm couldn't check this one.".into(),
+            },
+            Some((
+                String::new(),
+                Some("The check did not finish.".to_owned()),
+                None,
+                None,
+            )),
+        ),
+    };
+    let applied = rt.gate_verdict(&card.chat_id, &card.id, outcome);
+    // A verdict that finds no card means the user (or a dismissal) settled the card first;
+    // the audit says the chat answered it. A failure keeps the row open: there is nothing
+    // the user could have answered differently, the card simply went back to being normal.
+    let (state, answered_via) = if !applied && !matches!(&decision, Decision::Failed) {
+        ("answered", Some("chat"))
+    } else {
+        ("open", None)
+    };
+    let wrote = db
+        .write(|tx| {
+            store::finish_ask(
+                tx,
+                ask_id,
+                verdict,
+                None,
+                match &decision {
+                    Decision::Decide { .. } | Decision::Escalate => {
+                        Some(if local_chat { "rule" } else { "claude" })
+                    }
+                    _ => Some("rule"),
+                },
+                if local_chat {
+                    None
+                } else {
+                    Some(&settings.model)
+                },
+                audit.as_ref().and_then(|a| a.2),
+                audit.as_ref().and_then(|a| a.3),
+                audit.as_ref().and_then(|a| a.1.as_deref()),
+                audit
+                    .as_ref()
+                    .map(|a| a.0.as_str())
+                    .filter(|c| !c.is_empty()),
+                matches!(&decision, Decision::Escalate).then_some(&brief),
+                took,
+                state,
+                answered_via,
+                now,
+            )
+        })
+        .unwrap_or(false);
+    if wrote {
+        if let Ok(Some(row)) = db.snapshot(|tx| store::ask(tx, ask_id)) {
+            events.emit(
+                AppEvent::new("gate")
+                    .with("askId", row.id)
+                    .with("chatId", row.chat_id)
+                    .with("what", verdict.to_owned()),
+            );
+        }
+    }
+    applied
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,176 +745,32 @@ mod tests {
             .iter()
             .all(|r| r.verdict == "passed" && r.pass_reason.as_deref() == Some("safety")));
     }
-}
 
-/// The helper's line, checked: a decision needs a choice, a confidence and a risk. Anything
-/// shaped wrong counts as a failure to judge.
-fn parse_answer(v: &Value) -> Option<ModelAnswer> {
-    let o = v.as_object()?;
-    let decide = match o.get("verdict")?.as_str()? {
-        "decide" => true,
-        "ask" => false,
-        _ => return None,
-    };
-    let choice = o.get("choice").and_then(Value::as_str).map(str::to_owned);
-    if decide && choice.is_none() {
-        return None;
-    }
-    Some(ModelAnswer {
-        decide,
-        choice,
-        reason: o
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .chars()
-            .take(240)
-            .collect(),
-        confidence: o
-            .get("confidence")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0)
-            .clamp(0.0, 1.0),
-        risk: o
-            .get("risk")
-            .and_then(Value::as_str)
-            .and_then(Risk::parse)
-            .unwrap_or(Risk::Medium),
-        reversible: o
-            .get("reversible")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        brief: o.get("brief").cloned(),
-    })
-}
-
-/// Apply one decision: answer the card through the runtime, then write the audit row once.
-/// Returns whether the verdict reached the card.
-/// The audit facts of one decision: the choice, the reason, the confidence and the risk word.
-type Audit = (String, Option<String>, Option<f64>, Option<&'static str>);
-
-#[allow(clippy::too_many_arguments)]
-fn settle(
-    db: &Arc<Database>,
-    events: &Arc<dyn EventSink>,
-    rt: &ChatRuntime,
-    card: &Interaction,
-    ask_id: &str,
-    settings: &GateSettings,
-    decision: Decision,
-    brief: GateBrief,
-    local_chat: bool,
-    started: i64,
-) -> bool {
-    let now = helm_core::now_ms();
-    let took = now.max(started) - started;
-    let (verdict, outcome, audit): (&str, GateOutcome, Option<Audit>) = match &decision {
-        Decision::Decide {
-            choice,
-            reason,
-            confidence,
-            risk,
-        } => {
-            let mut fields = serde_json::Map::new();
-            fields.insert(
-                "value".into(),
-                json!(format!(
-                    "{choice} (Helm chose this default for the user; \
-                     they may change it later, so keep it easy to undo)"
-                )),
-            );
-            (
-                "decided",
-                GateOutcome::Decide {
-                    fields,
-                    marker: format!(
-                        "Helm answered for you: \u{ab}{choice}\u{ab}, because {reason}."
-                    ),
-                },
-                Some((
-                    choice.clone(),
-                    Some(reason.clone()),
-                    Some(*confidence),
-                    Some(risk.as_str()),
-                )),
-            )
+    #[test]
+    fn the_answer_line_is_checked() {
+        let ok = parse_answer(&json!({
+            "verdict": "decide", "choice": "Yes", "reason": "routine",
+            "confidence": 0.9, "risk": "low", "reversible": true
+        }))
+        .unwrap();
+        assert!(ok.decide);
+        assert_eq!(ok.choice.as_deref(), Some("Yes"));
+        // The helper says "escalate"; "ask" is accepted as a synonym.
+        for verdict in ["escalate", "ask"] {
+            let a = parse_answer(&json!({"verdict": verdict, "reason": "needs you"})).unwrap();
+            assert!(!a.decide, "{verdict} means ask the user");
+            assert_eq!(a.risk, Risk::Medium, "missing risk errs to medium");
+            assert!(!a.reversible, "missing reversible errs to unsafe");
         }
-        Decision::Escalate => (
-            "escalated",
-            GateOutcome::Escalate {
-                brief: brief.clone(),
-            },
-            Some((
-                String::new(),
-                Some("This one needs the user.".to_owned()),
-                None,
-                None,
-            )),
-        ),
-        Decision::Failed | Decision::Pass(_) => (
-            "failed",
-            GateOutcome::Failed {
-                note: "Helm couldn't check this one.".into(),
-            },
-            Some((
-                String::new(),
-                Some("The check did not finish.".to_owned()),
-                None,
-                None,
-            )),
-        ),
-    };
-    let applied = rt.gate_verdict(&card.chat_id, &card.id, outcome);
-    // A verdict that finds no card means the user (or a dismissal) settled the card first;
-    // the audit says the chat answered it. A failure keeps the row open: there is nothing
-    // the user could have answered differently, the card simply went back to being normal.
-    let (state, answered_via) = if !applied && !matches!(&decision, Decision::Failed) {
-        ("answered", Some("chat"))
-    } else {
-        ("open", None)
-    };
-    let wrote = db
-        .write(|tx| {
-            store::finish_ask(
-                tx,
-                ask_id,
-                verdict,
-                None,
-                match &decision {
-                    Decision::Decide { .. } | Decision::Escalate => {
-                        Some(if local_chat { "rule" } else { "claude" })
-                    }
-                    _ => Some("rule"),
-                },
-                if local_chat {
-                    None
-                } else {
-                    Some(&settings.model)
-                },
-                audit.as_ref().and_then(|a| a.2),
-                audit.as_ref().and_then(|a| a.3),
-                audit.as_ref().and_then(|a| a.1.as_deref()),
-                audit
-                    .as_ref()
-                    .map(|a| a.0.as_str())
-                    .filter(|c| !c.is_empty()),
-                matches!(&decision, Decision::Escalate).then_some(&brief),
-                took,
-                state,
-                answered_via,
-                now,
-            )
-        })
-        .unwrap_or(false);
-    if wrote {
-        if let Ok(Some(row)) = db.snapshot(|tx| store::ask(tx, ask_id)) {
-            events.emit(
-                AppEvent::new("gate")
-                    .with("askId", row.id)
-                    .with("chatId", row.chat_id)
-                    .with("what", verdict.to_owned()),
-            );
-        }
+        assert!(
+            parse_answer(&json!({"verdict": "decide"})).is_none(),
+            "a decide with no choice is not an answer"
+        );
+        assert!(parse_answer(&json!({"verdict": "maybe"})).is_none());
+        assert!(parse_answer(&json!("junk")).is_none());
+        assert!(
+            parse_answer(&json!({"confidence": 0.9})).is_none(),
+            "no verdict at all"
+        );
     }
-    applied
 }

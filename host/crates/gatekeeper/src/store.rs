@@ -209,6 +209,7 @@ const COLS: &str = "id, profile_id, chat_id, chat_title, channel, request_ref, a
 
 /// Open a card the gate is holding. One row per (chat, request): a re-request of the same id
 /// answers `false` and writes nothing, so a worker replay cannot stack rows.
+#[allow(clippy::too_many_arguments)]
 pub fn open_ask(
     tx: &Transaction<'_>,
     id: &str,

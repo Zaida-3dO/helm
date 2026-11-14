@@ -132,7 +132,7 @@ pub fn read_lenient(v: &Value) -> GateSettings {
     {
         s.ask = a;
     }
-    if let Some(p) = o.get("policy").and_then(|v| policy_of(v)) {
+    if let Some(p) = o.get("policy").and_then(policy_of) {
         s.policy = p;
     }
     if let Some(m) = o.get("model").and_then(model_of) {
