@@ -191,13 +191,14 @@ function Frame({ flushers }: { flushers: Flushers }) {
         </div>
         <TerminalDock />
         <SavedDueNotice /> {/* the one notice for saved items that came due */}
+        {/* Toasts sit in the main area, below the tag strip, so they never cover the title or the project chips. */}
+        <ToastSlotView />
+        <SettingsToast api={shell.api} bus={shell.bus} onOpenChat={(id) => shell.select(id)} /> {/* settings-change toast */}
       </main>
       <ErrorBoundary name="side panel" resetKey={chatId}>
         <SidePanel api={shell.api} chatId={chatId} /> {/* side panel */}
       </ErrorBoundary>
-      <ToastSlotView />
       <ShellShortcuts />
-      <SettingsToast api={shell.api} bus={shell.bus} onOpenChat={(id) => shell.select(id)} /> {/* settings-change toast */}
       <SettingsDialog />
       <SearchDialog /> {/* Mod+K search */}
       <ClaudeChatViewer /> {/* one of Claude Code's own chats, read */}

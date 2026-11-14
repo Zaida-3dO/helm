@@ -162,19 +162,21 @@ export function AllowCards({ chatId }: { chatId: string }) {
               className="allow-note"
               type="text"
               maxLength={500}
-              placeholder="Note for the agent (sent with Deny)"
+              placeholder="Optional note, sent with Deny"
               value={notes[c.id] ?? ''}
               onChange={(e) => setNotes({ ...notes, [c.id]: e.target.value })}
             />
-            <span className="allow-slot" ref={slotRef(`${c.id}:deny`)}>
-              <button type="button" className="ui-btn" data-testid="allow-deny" onClick={decide(c, 'deny', `${c.id}:deny`)}>
-                Deny
-              </button>
-            </span>
-            <span className="allow-slot" ref={slotRef(`${c.id}:allow`)}>
-              <button type="button" className="ui-btn" data-testid="allow-allow" onClick={decide(c, 'allow', `${c.id}:allow`)}>
-                Allow
-              </button>
+            <span className="allow-buttons">
+              <span className="allow-slot" ref={slotRef(`${c.id}:deny`)}>
+                <button type="button" className="ui-btn" data-testid="allow-deny" onClick={decide(c, 'deny', `${c.id}:deny`)}>
+                  Deny
+                </button>
+              </span>
+              <span className="allow-slot" ref={slotRef(`${c.id}:allow`)}>
+                <button type="button" className="ui-btn" data-testid="allow-allow" onClick={decide(c, 'allow', `${c.id}:allow`)}>
+                  Allow
+                </button>
+              </span>
             </span>
           </div>
         </div>
