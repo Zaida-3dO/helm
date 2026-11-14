@@ -1974,7 +1974,7 @@ dependencies = [
 
 [[package]]
 name = "helm-gatekeeper"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "helm-chats",
  "helm-core",
