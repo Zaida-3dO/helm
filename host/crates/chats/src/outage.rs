@@ -339,7 +339,13 @@ impl Outages {
                 // Stopped again since the last look (or since it was continued).
                 s.stamp = stamp;
                 s.cause = cause;
-                s.next_at = now + wait_before_try(cause, s.attempts) + extra;
+                // A crash with no try left is given up on at this look: there is nothing to wait
+                // for, and the attention flag should not come minutes after the crash.
+                s.next_at = if cause == Cause::WorkerExit && s.attempts >= MAX_ATTEMPTS {
+                    now
+                } else {
+                    now + wait_before_try(cause, s.attempts) + extra
+                };
                 s.gave_up = false;
                 s.stopped_now = true;
             }
@@ -745,7 +751,15 @@ impl OutageWatch {
                         (c.at_ms - now) + i64::from(c.order) * WORKER_EXIT_STAGGER_MS,
                     ),
                     (Some(c), _) => t.note_stopped(now, id, *stamp, *c),
-                    (None, _) => t.forget(id),
+                    (None, crash) => {
+                        t.forget(id);
+                        // A remembered crash that is not carried on (the user is writing in the
+                        // chat, or a newer run replaced it) is done with: clearing that draft
+                        // later must not bring a resume back.
+                        if crash.is_some() {
+                            self.rt.sh.exits.forget(id);
+                        }
+                    }
                 }
             }
             for (id, status) in &look.status {
@@ -1082,14 +1096,12 @@ mod tests {
             assert_eq!(ids(o.due(now + wait)).len(), 1);
             now += wait + MIN;
         }
-        // A fourth crash is not carried on; it is given up on once, with its cause.
+        // A fourth crash is not carried on; it is given up on once, with its cause, at the
+        // look that sees it.
         o.begin_look();
         o.note_stopped(now, "a", 4, Cause::WorkerExit);
         assert!(o.due(now + 60 * MIN).is_empty());
-        assert_eq!(
-            o.give_up(now + 60 * MIN),
-            [("a".to_owned(), Cause::WorkerExit)]
-        );
+        assert_eq!(o.give_up(now), [("a".to_owned(), Cause::WorkerExit)]);
         o.begin_look();
         o.note_stopped(now, "a", 4, Cause::WorkerExit);
         assert_eq!(o.give_up(now + 61 * MIN), vec![]);

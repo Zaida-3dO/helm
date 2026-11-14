@@ -13,7 +13,7 @@ import { buildClaudeArgs, modelTakesEffort } from "./args.ts";
 import { buildClaudeEnv, contextRefusalNote, localThinkingTokens } from "./env.ts";
 import { Interactions } from "./interactions.ts";
 import { BUDGET_HOOK_ID, SubagentBudget, subagentRule } from "./limits.ts";
-import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE } from "./longcmd.ts";
+import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE, SHELL_TOOLS_MATCHER } from "./longcmd.ts";
 import { LANDING_GUARD_HOOK_ID, LANDING_GUARD_MATCHER, LandingGuard } from "./guard.ts";
 import { assertNotShim, resolveClaude, type Resolved } from "./resolve.ts";
 import { NATIVE_SCHEDULE_MATCHER, SCHEDULE_REDIRECT_HOOK_ID, scheduleRedirect } from "./schedulecalls.ts";
@@ -285,7 +285,8 @@ export class ClaudeDriver implements Driver {
 
     const initRequest: Json = { subtype: "initialize" };
     const preToolUse: Json[] = [];
-    if (this.longCommands.enabled) preToolUse.push({ matcher: "Bash", hookCallbackIds: [LONG_COMMAND_HOOK_ID] });
+    // Always registered: with the long-command rule off it still refuses a kill by name.
+    preToolUse.push({ matcher: SHELL_TOOLS_MATCHER, hookCallbackIds: [LONG_COMMAND_HOOK_ID] });
     if (this.hostTools) {
       preToolUse.push({ matcher: `${toolPrefix}.*`, hookCallbackIds: [HOST_TOOL_HOOK_ID] });
       if (this.mcp) preToolUse.push({ matcher: "mcp__.*", hookCallbackIds: [DUPLICATE_MCP_HOOK_ID] });
@@ -821,9 +822,9 @@ export class ClaudeDriver implements Driver {
       return this.controlReply(requestId, { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } });
     }
     const toolUseId = String(req.tool_use_id ?? input.tool_use_id ?? "");
-    const isRootBash = req.callback_id === LONG_COMMAND_HOOK_ID && input.tool_name === "Bash" && !input.agent_id && !this.subagentTools.has(toolUseId);
-    if (!isRootBash) return this.controlReply(requestId, {});
-    const d = this.longCommands.decide(obj(input.tool_input));
+    if (req.callback_id !== LONG_COMMAND_HOOK_ID) return this.controlReply(requestId, {});
+    const root = !input.agent_id && !this.subagentTools.has(toolUseId);
+    const d = this.longCommands.decideCall(String(input.tool_name ?? ""), root, obj(input.tool_input));
     switch (d.kind) {
       case "allow":
         return this.controlReply(requestId, {});

@@ -151,7 +151,10 @@ test('wait reason: the running tool of this turn, else the next step', () => {
     [[], 'Claude reads it at its next step'],
     [[user, row({ id: 2, role: 'toolResult', toolName: 'Read' })], 'Claude reads it at its next step'],
     [[user, running('Bash')], 'Waiting for Bash to finish'],
-    [[user, running('mcp__helm__app_wait_for')], 'Waiting for helm · app_wait_for to finish'],
+    [[user, running('mcp__helm__app_wait_for')], 'Waiting for a Helm tool to finish'],
+    [[user, running('mcp__github__search_code')], 'Waiting for github · search_code to finish'],
+    [[user, { ...running('mcp__helm__app_mcp_call'), details: { toolArgs: { name: 'github__search_code', arguments: {} } } }], 'Waiting for github · search_code to finish'],
+    [[user, { ...running('mcp__helm__app_mcp_call'), details: { toolArgs: '{"name":"app_slow"}' } }], 'Waiting for a Helm tool to finish'],
     [[user, running('Bash', 2), steer, row({ id: 5, role: 'assistant', text: 'ok' })], 'Waiting for Bash to finish'],
     [[row({ id: 0, role: 'toolResult', toolName: 'Bash', status: 'streaming' }), user], 'Claude reads it at its next step'],
   ] as const) assert.equal(waitReason(rows as never), want, JSON.stringify(rows.map((r) => r.id)));

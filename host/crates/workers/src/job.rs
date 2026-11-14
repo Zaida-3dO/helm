@@ -114,7 +114,17 @@ mod win {
                 }
                 let list = &*(buf.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST);
                 let n = (list.NumberOfProcessIdsInList as usize).min(MAX_IDS);
-                std::slice::from_raw_parts(list.ProcessIdList.as_ptr(), n)
+                // The list runs on past the structure's one-element array, so it is read from the
+                // buffer itself rather than through that array.
+                let first = buf
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(std::mem::offset_of!(
+                        JOBOBJECT_BASIC_PROCESS_ID_LIST,
+                        ProcessIdList
+                    ))
+                    .cast::<usize>();
+                std::slice::from_raw_parts(first, n)
                     .iter()
                     .map(|&id| id as u32)
                     .collect()
