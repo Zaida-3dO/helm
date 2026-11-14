@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { handleLink } from '../panel/index.ts';
 import { useDialog, useShell } from '../shell/context.ts';
 import { Checkbox, Dialog, Icon, Picker, useBinding, useLayer, type PickerOption } from '../ui/index.ts';
-import { emptyHint, enterTarget, flatRows, moveHighlight, movePage, statusLine, UniversalSearch } from './controller.ts';
+import { emptyHint, enterTarget, flatRows, moveHighlight, movePage, nothingTitle, statusLine, UniversalSearch } from './controller.ts';
 import { openTasks, tasksStoreFor } from '../tasks/index.ts';
 import { openClaudeChatViewer } from '../claudechats/index.ts';
 import { boardSource } from './boardSource.ts';
@@ -215,7 +215,7 @@ function SearchBody({ close }: { close: () => void }) {
       )}
       {nothing && (
         <div className="search-empty search-nothing" role="status" aria-live="polite" data-testid="search-nothing">
-          <p className="search-nothing-title">No chats match “{state.query}”</p>
+          <p className="search-nothing-title">{nothingTitle(state)}</p>
           <p className="search-nothing-hint muted">{emptyHint(archived)}</p>
         </div>
       )}

@@ -179,6 +179,12 @@ export function emptyHint(archived: boolean): string {
   return archived ? 'Try fewer words.' : 'Try fewer words, or include archived chats.';
 }
 
+/** The title over an empty result. While a source could not be searched it speaks only for the ones that answered. */
+export function nothingTitle(state: SearchState): string {
+  const failed = Object.values(state.groups).some((g) => g?.status === 'error');
+  return `No chats match “${state.query}”${failed ? ' in the sources that answered' : ''}`;
+}
+
 /** The polite status line: what is happening, or how many results there are. */
 export function statusLine(state: SearchState): string {
   if (state.query === '') return 'Type to search.';

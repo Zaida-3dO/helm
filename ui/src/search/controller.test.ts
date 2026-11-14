@@ -8,6 +8,7 @@ import {
   movePage,
   normaliseQuery,
   emptyHint,
+  nothingTitle,
   statusLine,
   UniversalSearch,
   type Timers,
@@ -85,6 +86,17 @@ test('a source that rejects settles as an error while the others still show thei
   assert.equal(s.snapshot().status, 'done');
   assert.deepEqual([s.snapshot().groups.files?.status, s.snapshot().groups.files?.error], ['error', 'quick open is down']);
   assert.equal(s.snapshot().groups.chats?.rows.length, 1);
+  // With nothing found, the empty title speaks only for the sources that answered.
+  const none = new UniversalSearch([answers('chats', []), bad], clock);
+  none.update('x');
+  clock.advance(DEBOUNCE_MS);
+  await flush();
+  assert.equal(nothingTitle(none.snapshot()), 'No chats match “x” in the sources that answered');
+  const clean = new UniversalSearch([answers('chats', [])], clock);
+  clean.update('x');
+  clock.advance(DEBOUNCE_MS);
+  await flush();
+  assert.equal(nothingTitle(clean.snapshot()), 'No chats match “x”');
 });
 
 test('a source that throws before returning a promise still settles', async () => {
