@@ -104,6 +104,20 @@ pub(crate) fn get_or_seed_with(
         let room = MAX_BUTTONS.saturating_sub(set.buttons.len());
         fresh.truncate(room);
         set.buttons.extend(fresh);
+        if set.seed_version < target {
+            // Seeds renamed by a later build: a stored button of that seed still carrying the old
+            // label exactly gets the new one; a label the user edited is left alone.
+            for s in list {
+                let Some(old) = s.relabel_from else { continue };
+                if let Some(b) = set
+                    .buttons
+                    .iter_mut()
+                    .find(|b| b.seed_id.as_deref() == Some(s.id) && b.label == old)
+                {
+                    b.label = s.label.into();
+                }
+            }
+        }
         set.seed_version = target;
         set.revision += 1;
         write_row(tx, &set)?;
@@ -226,7 +240,7 @@ mod tests {
             seeded,
             [
                 (
-                    "Update",
+                    "Report progress",
                     "Please give me a brief plain-language status: what is finished, what is under way, what is stuck, and what you need from me."
                 ),
                 (
@@ -272,38 +286,67 @@ mod tests {
     }
 
     #[test]
-    fn a_later_seed_is_added_without_touching_edits_or_reviving_deleted_seeds() {
+    fn a_later_seed_version_adds_seeds_relabels_untouched_labels_and_keeps_edits() {
         let (_d, db) = db();
-        let mut a = get_or_seed(&db).unwrap();
-        // The user edits "Update", deletes "Ship it", then saves.
-        a.buttons[0].label = "Status".into();
+        // An install made by an older build: its status button still says "Update".
+        let v1: Vec<Seed> = seeds::SEEDS
+            .iter()
+            .map(|s| Seed {
+                label: if s.id == "update" { "Update" } else { s.label },
+                relabel_from: None,
+                ..*s
+            })
+            .collect();
+        let mut a = get_or_seed_with(&db, &v1, 1).unwrap();
+        // The user renames "Needs me", deletes "Ship it", and writes the set back.
+        a.buttons[1].label = "Needs you".into();
         a.buttons
             .retain(|b| b.seed_id.as_deref() != Some("ship-it"));
-        let a = save(
-            &db,
-            ActionsSaveArgs {
-                revision: a.revision,
-                buttons: a.buttons,
-            },
-        )
+        db.write::<_, Fail>(|tx| {
+            let mut set = read(tx)?.unwrap();
+            set.buttons = a.buttons;
+            set.revision += 1;
+            Ok(write_row(tx, &set)?)
+        })
+        .map_err(|f| f.0)
         .unwrap();
-        // A newer build ships one more seed (since 2).
+        // A newer build ships one more seed (since 2) and renames two buttons: the untouched
+        // "Update" and an edited "Needs me".
         let mut list: Vec<Seed> = Vec::new();
         for s in seeds::SEEDS {
-            list.push(Seed { ..*s });
+            let mut s = Seed { ..*s };
+            if s.id == "needs-me" {
+                s.label = "Needs attention";
+                s.relabel_from = Some("Needs me");
+            }
+            list.push(s);
         }
         list.push(Seed {
             id: "extra",
             since: 2,
             label: "Extra",
+            relabel_from: None,
             kind: ActionKind::Prompt,
             text: "extra",
             placement: Placement::Overflow,
             hidden: false,
         });
         let b = get_or_seed_with(&db, &list, 2).unwrap();
-        assert_eq!(b.buttons.len(), a.buttons.len() + 1);
-        assert_eq!(b.buttons[0].label, "Status", "the edit stays");
+        assert_eq!(
+            b.buttons.len(),
+            6,
+            "the five kept buttons plus the new seed"
+        );
+        assert_eq!(
+            b.buttons[0].label, "Report progress",
+            "an untouched label relabels"
+        );
+        let edited = b
+            .buttons
+            .iter()
+            .find(|x| x.seed_id.as_deref() == Some("needs-me"))
+            .unwrap();
+        assert_eq!(edited.label, "Needs you", "the user's edit stays");
         assert!(!b
             .buttons
             .iter()

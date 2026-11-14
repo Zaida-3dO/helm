@@ -6,14 +6,19 @@
 
 use crate::types::{ActionButton, ActionKind, Placement};
 
-/// Bump when a seed is added, and give the new seed that version in `since`.
-pub const SEED_VERSION: i64 = 1;
+/// Bump when a seed is added, and give the new seed that version in `since`. Bumping also applies
+/// the `relabel_from` fixes below to installs made by an older build.
+pub const SEED_VERSION: i64 = 2;
 
 #[derive(Clone, Copy)]
 pub struct Seed {
     pub id: &'static str,
     pub since: i64,
     pub label: &'static str,
+    /// A label this button shipped with in an older build. On the version bump, a stored copy of
+    /// this seed still carrying exactly that label gets the current one; a label the user changed
+    /// is left alone.
+    pub relabel_from: Option<&'static str>,
     pub kind: ActionKind,
     pub text: &'static str,
     pub placement: Placement,
@@ -24,7 +29,8 @@ pub const SEEDS: &[Seed] = &[
     Seed {
         id: "update",
         since: 1,
-        label: "Update",
+        label: "Report progress",
+        relabel_from: Some("Update"),
         kind: ActionKind::Prompt,
         text: "Please give me a brief plain-language status: what is finished, what is under way, what is stuck, and what you need from me.",
         placement: Placement::Topbar,
@@ -34,6 +40,7 @@ pub const SEEDS: &[Seed] = &[
         id: "needs-me",
         since: 1,
         label: "Needs me",
+        relabel_from: None,
         kind: ActionKind::Prompt,
         text: "What needs my attention right now, and why? Only list things that truly need a decision from me (check each one) and give me the options for each.",
         placement: Placement::Topbar,
@@ -43,6 +50,7 @@ pub const SEEDS: &[Seed] = &[
         id: "ship-it",
         since: 1,
         label: "Ship it",
+        relabel_from: None,
         kind: ActionKind::Prompt,
         text: "I am happy with this. Commit only your own changes, push, open or update the pull request, and merge to main once review passes. Tell me what landed.",
         placement: Placement::Topbar,
@@ -52,6 +60,7 @@ pub const SEEDS: &[Seed] = &[
         id: "close-session",
         since: 1,
         label: "Close session",
+        relabel_from: None,
         kind: ActionKind::Prompt,
         text: "Please wrap up this session: record what we learned, clean up worktrees and branches, then commit and push. Report each step as pass or fail.",
         placement: Placement::Topbar,
@@ -61,6 +70,7 @@ pub const SEEDS: &[Seed] = &[
         id: "new-session",
         since: 1,
         label: "New session",
+        relabel_from: None,
         kind: ActionKind::NewChat,
         text: "Let's start a new session.",
         placement: Placement::Topbar,
@@ -70,6 +80,7 @@ pub const SEEDS: &[Seed] = &[
         id: "git-sync",
         since: 1,
         label: "Git sync",
+        relabel_from: None,
         kind: ActionKind::Prompt,
         text: "Please sync this repo: fetch, fast-forward only if that is safe, and tell me about anything unexpected. Do not commit.",
         placement: Placement::Overflow,

@@ -1394,8 +1394,24 @@ dd {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 6px;
+  gap: 4px 12px;
   padding: 2px 20px 12px;
+}
+/* Tab groups: a small caption and its buttons move and wrap as one unit. */
+.settings-tab-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.settings-tab-group-label {
+  font-size: calc(10 * var(--ui-unit));
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 0 4px 0 2px;
+  white-space: nowrap;
 }
 .settings-tab {
   border: 1px solid transparent;

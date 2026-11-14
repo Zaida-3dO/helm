@@ -10,6 +10,7 @@ import { IconSearch } from '../ui/icons.tsx';
 import { applySearch, clearHighlight } from './search.ts';
 import { SettingsWatchers } from './watchers.tsx';
 import { settingsPanes, subscribeSettingsPanes, peekRequestedPane, clearRequestedPane } from './registry.ts';
+import { groupSettingsTabs } from './layout.ts';
 
 export const SETTINGS_DIALOG = 'settings';
 
@@ -76,22 +77,27 @@ function SettingsBody({ close }: { close: () => void }) {
   );
   const tabs = (
     <div className="settings-tabs" role="tablist">
-        {panes.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            role="tab"
-            className="settings-tab"
-            aria-selected={query.trim() === '' && p.id === current?.id}
-            data-tab={p.id}
-            onClick={() => {
-              setQuery('');
-              setApplied('');
-              setTab(p.id);
-            }}
-          >
-            {p.title}
-          </button>
+        {groupSettingsTabs(panes).map((g) => (
+          <span className="settings-tab-group" key={g.title}>
+            <span className="settings-tab-group-label" aria-hidden="true">{g.title}</span>
+            {g.panes.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                role="tab"
+                className="settings-tab"
+                aria-selected={query.trim() === '' && p.id === current?.id}
+                data-tab={p.id}
+                onClick={() => {
+                  setQuery('');
+                  setApplied('');
+                  setTab(p.id);
+                }}
+              >
+                {p.title}
+              </button>
+            ))}
+          </span>
         ))}
         <input
           type="search"
