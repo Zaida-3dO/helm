@@ -41,8 +41,27 @@
   content: 'Allow request · ';
   font-weight: 600;
 }
+.allow-card[data-applies='true'] .allow-title strong::before {
+  content: 'Approval needed · ';
+}
 .allow-title .allow-agent-line {
   color: var(--secondary);
+}
+/* A card Helm applies itself: one row per change, before → after, never wrapped into one line. */
+.allow-changes {
+  display: flex;
+  flex-direction: column;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-alt);
+}
+.allow-change {
+  padding: 5px 10px;
+  color: var(--text);
+}
+.allow-change + .allow-change {
+  border-top: 1px solid var(--line);
 }
 .allow-agent-text {
   margin-top: 8px;

@@ -62,7 +62,8 @@ test('an Allow request call names its request, and the chip reads waiting, allow
   assert.equal(allowRequestId(call('{"requestId":"r1","state":"pending"}')), 'r1');
   assert.equal(allowRequestId(call('{"requestId":"r2","state":"pending","summary":"cut off...')), 'r2');
   assert.equal(allowRequestId(call('nothing here')), null);
-  assert.equal(allowRequestId(call('{"requestId":"r1"}', 'app_workflow')), null, 'only the Allow request tool');
+  assert.equal(allowRequestId(call('{"requestId":"r3","state":"pending","changes":["Update folder: none → D:/x"]}', 'app_stage_settings')), 'r3', 'staged settings wait on a card too');
+  assert.equal(allowRequestId(call('{"requestId":"r1"}', 'app_workflow')), null, 'only the Allow request tools');
   assert.equal(allowRequestId(row({ role: 'toolResult', toolName: 'Bash', text: '{"requestId":"r1"}' })), null);
   const want: Record<string, string | null> = { pending: 'waiting', allowed: 'allowed', used: 'allowed', denied: 'refused', expired: 'refused', other: null };
   for (const [state, chip] of Object.entries(want)) assert.equal(allowChipState(state), chip, state);

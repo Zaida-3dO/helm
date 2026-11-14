@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { inertLines } from './inert.ts';
+import { inertLines, summaryParts } from './inert.ts';
 import { SETTLE_MS, SettleGate } from './settle.ts';
 
 const r = (y = 10) => ({ x: 10, y, width: 80, height: 28 });
@@ -43,4 +43,11 @@ test('agent text renders inert: hidden and bidi characters become visible tokens
   assert.deepEqual(inertLines('a bㅤc️d\u0007'), ['a⟨U+00A0⟩b⟨U+3164⟩c⟨U+FE0F⟩d⟨U+0007⟩']);
   assert.deepEqual(inertLines('tab\tok space'), ['tab\tok space']);
   assert.deepEqual(inertLines('tag\u{E0041}'), ['tag⟨U+E0041⟩']);
+});
+
+test('an applying card shows its title, then each change as its own line; other cards stay one line', () => {
+  const text = 'Change 2 settings\nUpdate folder: none → \\\\srv\\x\n\nShare chats: on → off\n';
+  assert.deepEqual(summaryParts({ summary: text, appliesOnAllow: true }), { title: 'Change 2 settings', changes: ['Update folder: none → \\\\srv\\x', 'Share chats: on → off'] });
+  assert.deepEqual(summaryParts({ summary: text, appliesOnAllow: false }), { title: text, changes: [] });
+  assert.deepEqual(summaryParts({ summary: '', appliesOnAllow: true }), { title: '', changes: [] });
 });
