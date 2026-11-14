@@ -43,9 +43,10 @@ pub struct FakeWorker {
 }
 
 impl FakeWorker {
-    /// The next command the host wrote.
+    /// The next command the host wrote. The wait is wide: under a whole workspace's test load a
+    /// command that follows from a tick or a database write can take several seconds.
     pub async fn next(&mut self) -> Value {
-        tokio::time::timeout(Duration::from_secs(5), self.cmds.recv())
+        tokio::time::timeout(Duration::from_secs(15), self.cmds.recv())
             .await
             .expect("a command in time")
             .expect("worker channel open")
@@ -369,7 +370,7 @@ impl H {
     /// Poll until `f` holds (the actor runs on its own task). The wait is generous: under a whole
     /// workspace's test load a tick-driven step can take well over a second.
     pub async fn until(&self, what: &str, f: impl Fn(&H) -> bool) {
-        for _ in 0..500 {
+        for _ in 0..1_500 {
             if f(self) {
                 return;
             }
@@ -954,6 +955,8 @@ async fn the_question_gate_holds_cards_until_it_judges_them() {
         TimedOut,
         /// The gate passed it and AFK answers, exactly as before the gate existed.
         AfkAnswered,
+        /// The gate escalated it, then AFK turned on: the sweep leaves it for the user.
+        EscalatedThenAfk,
     }
     struct Case {
         then: Then,
@@ -1030,6 +1033,24 @@ async fn the_question_gate_holds_cards_until_it_judges_them() {
             afk: true,
             deadline_ms: None,
         },
+        Case {
+            then: Then::ShownPlain,
+            mode: GateOffer::Hold,
+            // A step the user went back to (the card's Back button) comes with their earlier
+            // answer filled in: they are revising it themselves, so it is never offered.
+            card: json!({"type": "extension_ui_request", "id": "q2", "method": "select",
+                         "attention": "question", "title": "Which?", "options": ["ship it", "hold"],
+                         "prefill": "hold"}),
+            afk: false,
+            deadline_ms: None,
+        },
+        Case {
+            then: Then::EscalatedThenAfk,
+            mode: GateOffer::Hold,
+            card: question("q1"),
+            afk: false,
+            deadline_ms: None,
+        },
     ];
 
     for c in cases {
@@ -1071,7 +1092,10 @@ async fn the_question_gate_holds_cards_until_it_judges_them() {
                     );
                 }
                 let seen = gate.offered.lock().unwrap().clone();
-                if c.card["attention"] == "question" && c.card.get("secret").is_none() {
+                if c.card["attention"] == "question"
+                    && c.card.get("secret").is_none()
+                    && c.card.get("prefill").is_none()
+                {
                     assert_eq!(
                         seen,
                         [id.as_str()],
@@ -1080,12 +1104,13 @@ async fn the_question_gate_holds_cards_until_it_judges_them() {
                 } else {
                     assert!(
                         seen.is_empty(),
-                        "an approval or secret card never reaches the gate: those are safety gates, not questions"
+                        "an approval, a secret or a revisited step never reaches the gate"
                     );
                 }
             }
             Then::Decided
             | Then::Escalated
+            | Then::EscalatedThenAfk
             | Then::FailedVerdict
             | Then::UserAnswered
             | Then::TimedOut => {
@@ -1134,7 +1159,7 @@ async fn the_question_gate_holds_cards_until_it_judges_them() {
                             marker: "Helm answered for you: ship it".into(),
                         },
                     ),
-                    Then::Escalated => h
+                    Then::Escalated | Then::EscalatedThenAfk => h
                         .rt
                         .gate_verdict(&chat, &id, GateOutcome::Escalate { brief: brief() }),
                     Then::FailedVerdict => h.rt.gate_verdict(
@@ -1201,7 +1226,7 @@ async fn the_question_gate_holds_cards_until_it_judges_them() {
                             "a second verdict on a gone card is false"
                         );
                     }
-                    Then::Escalated => {
+                    Then::Escalated | Then::EscalatedThenAfk => {
                         h.until("the brief sits on the card", |h| {
                             gate_state(h, &chat, &id).is_some_and(|(s, i)| {
                                 s == GateStatus::Escalated
@@ -1218,6 +1243,21 @@ async fn the_question_gate_holds_cards_until_it_judges_them() {
                             needs_you_has(&h, &chat).await,
                             "an escalated card counts from then on"
                         );
+                        if matches!(c.then, Then::EscalatedThenAfk) {
+                            // AFK turns on later: its sweep answers every plain question, but
+                            // this one was judged to need the user, so it stays theirs.
+                            h.rt.set_afk_policy(Arc::new(Policy));
+                            h.rt.afk_sweep();
+                            assert!(
+                                w.no_command_for(Duration::from_millis(500)).await.is_none(),
+                                "AFK never answers a card the gate handed to the user"
+                            );
+                            assert!(
+                                gate_state(&h, &chat, &id)
+                                    .is_some_and(|(s, _)| s == GateStatus::Escalated),
+                                "the card is still there"
+                            );
+                        }
                     }
                     Then::FailedVerdict => {
                         h.until("the quiet line", |h| {

@@ -899,8 +899,15 @@ impl Actor {
     /// the waiting tracker. The safety line is checked here as well as in the gate: a card that
     /// grants authority to act (a permission or trust card) or takes a secret input is never
     /// offered — those are safety gates, not questions.
+    ///
+    /// A card the worker sends with a prefill is a step the user went back to (the card's Back
+    /// button asks it again with their earlier answer filled in): they are revising their own
+    /// answer, so it is theirs and never offered.
     fn gate_hold(&mut self, i: &mut Interaction) -> bool {
         if i.secret == Some(true) || !matches!(i.attention, Some(InteractionAttention::Question)) {
+            return false;
+        }
+        if i.prefill.is_some() {
             return false;
         }
         let Some(gate) = self.sh.gate.get().cloned() else {
@@ -1872,11 +1879,12 @@ impl Actor {
                     self.live.lock().unwrap().thread.interactions.clone();
                 for i in waiting {
                     // A card the question gate is still holding is not AFK's yet: the gate's
-                    // verdict, or the hold ending, decides what happens to it.
-                    if i.gate
-                        .as_ref()
-                        .is_some_and(|g| g.state == GateStatus::Checking)
-                    {
+                    // verdict, or the hold ending, decides what happens to it. A card the gate
+                    // handed to the user was judged to need them, so AFK's automatic answer
+                    // must not take it either: it waits for the user.
+                    if i.gate.as_ref().is_some_and(|g| {
+                        matches!(g.state, GateStatus::Checking | GateStatus::Escalated)
+                    }) {
                         continue;
                     }
                     if self.afk_handle(&i, true) {
