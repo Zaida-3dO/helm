@@ -7,6 +7,7 @@ import {
   moveHighlight,
   movePage,
   normaliseQuery,
+  emptyHint,
   statusLine,
   UniversalSearch,
   type Timers,
@@ -245,4 +246,7 @@ test('the status line reports typing, searching and the number of results', asyn
   clock.advance(DEBOUNCE_MS);
   await flush();
   assert.equal(statusLine(s.snapshot()), '2 results.');
+  // An empty result's hint offers archived chats only while the Archived box is off.
+  assert.match(emptyHint(false), /archived/);
+  assert.doesNotMatch(emptyHint(true), /archived/);
 });

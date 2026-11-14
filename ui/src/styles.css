@@ -768,6 +768,7 @@
   --inspector-width: 370px;
   --inspector-min: 280px;
   --topbar-height: 49px;
+  --tags-strip-height: 34px;
 
   /* Older names, kept as aliases so existing stylesheets keep working. New code uses the names above. */
   --panel: var(--surface);
@@ -1602,6 +1603,20 @@ dd {
   margin-left: 6px;
   color: var(--muted);
 }
+/* The local-model chip: one line at every width (glyph and one word). It never shrinks, so the title
+   gives way first; a short bar drops the word and keeps the glyph. */
+.crumb-status {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+.topbar[data-tier='narrow'] .crumb-status-word,
+.topbar[data-tier='tight'] .crumb-status-word {
+  display: none;
+}
 .crumb-rename {
   font-size: calc(12 * var(--ui-unit));
   padding: 3px 6px !important;
@@ -1612,7 +1627,7 @@ dd {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 34px;
+  min-height: var(--tags-strip-height);
   padding: 0 22px;
   border-bottom: 1px solid var(--line);
 }

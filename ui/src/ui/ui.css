@@ -817,12 +817,16 @@ button.ui-chip-main:hover {
 .ui-toast-x {
   flex: none;
 }
+/* In the main area (see App), right-aligned and below the top bar and the tag strip. */
 .ui-toast-slot {
-  position: fixed;
+  position: absolute;
   z-index: var(--z-toast);
-  top: calc(var(--topbar-height) + 10px);
-  left: 50%;
-  transform: translateX(-50%);
+  top: calc(var(--topbar-height) + var(--tags-strip-height) + 10px);
+  right: 16px;
+  max-width: calc(100% - 32px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
   pointer-events: none;
 }
 .ui-toast-slot > * {

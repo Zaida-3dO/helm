@@ -12,7 +12,7 @@ import { projectOps } from '../api/projects.ts';
 import { panelStore, togglePanel } from '../panel/index.ts';
 import { useSelection, useShell } from '../shell/context.ts';
 import { Button, layers, TextInput, toast, useBinding, useHint } from '../ui/index.ts';
-import { IconArchive, IconChevronRight, IconFolder, IconFork, IconMute, IconPanelLeft, IconPanelRight, IconPin, IconRestore } from '../ui/icons.tsx';
+import { IconArchive, IconChevronRight, IconFolder, IconFork, IconMute, IconPanelLeft, IconPanelRight, IconPin, IconRestore, IconServer } from '../ui/icons.tsx';
 import { TitleSuggestions } from '../chat/TitleSuggestions.tsx';
 import { sidebarLayout } from '../shell/layout.ts';
 import { SidebarActions } from '../sidebar/actions.ts';
@@ -42,6 +42,8 @@ export interface TopBarProps {
 }
 
 export { folderLabel };
+
+const localStatus = (ahead: number | null | undefined) => (ahead != null ? localWaitLabel(ahead) : LOCAL_WORKING_LABEL);
 
 const err = (e: unknown) => toast.show({ kind: 'error', text: String((e as Error).message ?? e) });
 
@@ -142,7 +144,8 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
               type="button"
               className="crumb-title"
               data-testid="topbar-title"
-              title={chat ? renameHint : undefined}
+              title={chat ? `${chat.title}
+${renameHint}` : undefined}
               onDoubleClick={() => chat && startRename(chat.title)}
               onKeyDown={(e) => {
                 if (chat && (e.key === 'Enter' || e.key === ' ')) {
@@ -161,14 +164,20 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
             </span>
           )}
           {/* A busy chat on a local model server says which half of its wait it is in: queued
-              behind other work, or being answered. The model server answers one request at a time. */}
+              behind other work, or being answered. The model server answers one request at a time.
+              The chip is one line at every width: the glyph and one word, with the full wording in
+              its tooltip; a short bar drops the word and keeps the glyph. */}
           {chat && isBusy(chat.status) && isLocalModelId(chat.model) && (
             <span
               className="crumb-status muted"
               data-testid="topbar-local-status"
               data-ahead={chat.localAhead != null ? String(chat.localAhead) : undefined}
+              role="img"
+              aria-label={localStatus(chat.localAhead)}
+              title={localStatus(chat.localAhead)}
             >
-              {chat.localAhead != null ? localWaitLabel(chat.localAhead) : LOCAL_WORKING_LABEL}
+              <IconServer size={13} />
+              <span className="crumb-status-word">Local</span>
             </span>
           )}
         </nav>

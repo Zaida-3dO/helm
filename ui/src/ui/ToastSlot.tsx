@@ -1,4 +1,4 @@
-// The main toast slot's view: fixed top-centre below the top bar.
+// The main toast slot's view: top-right of the main area, below the top bar and the tag strip.
 
 import { useSyncExternalStore } from 'react';
 import { IconArchive } from './icons.tsx';

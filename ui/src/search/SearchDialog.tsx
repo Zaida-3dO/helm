@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { handleLink } from '../panel/index.ts';
 import { useDialog, useShell } from '../shell/context.ts';
 import { Checkbox, Dialog, Icon, Picker, useBinding, useLayer, type PickerOption } from '../ui/index.ts';
-import { enterTarget, flatRows, moveHighlight, movePage, statusLine, UniversalSearch } from './controller.ts';
+import { emptyHint, enterTarget, flatRows, moveHighlight, movePage, statusLine, UniversalSearch } from './controller.ts';
 import { openTasks, tasksStoreFor } from '../tasks/index.ts';
 import { openClaudeChatViewer } from '../claudechats/index.ts';
 import { boardSource } from './boardSource.ts';
@@ -154,7 +154,8 @@ function SearchBody({ close }: { close: () => void }) {
   const present = Object.keys(state.groups) as SourceId[];
   const order = groupOrder(state.query, present);
   const typed = state.query !== '';
-  const nothing = typed && state.status === 'done' && rows.length === 0 && order.every((g) => state.groups[g]?.status !== 'error');
+  // A source that could not be searched says so in the list below; the empty message is about the rest.
+  const nothing = typed && state.status === 'done' && rows.length === 0;
   return (
     <Dialog title="Search chats" wide onClose={close} testId="search-dialog">
       <div className="search-box">
@@ -195,9 +196,11 @@ function SearchBody({ close }: { close: () => void }) {
             />
           )}
           <Checkbox className="search-archived" checked={archived} onChange={setArchived} label="Archived chats" />
-          <span className="search-status muted" role="status" aria-live="polite" data-testid="search-status" data-state={state.status}>
-            {statusLine(state)}
-          </span>
+          {!nothing && (
+            <span className="search-status muted" role="status" aria-live="polite" data-testid="search-status" data-state={state.status}>
+              {statusLine(state)}
+            </span>
+          )}
         </div>
       </div>
       {!typed && (
@@ -210,7 +213,12 @@ function SearchBody({ close }: { close: () => void }) {
           Search stays on this PC and never calls a model.
         </p>
       )}
-      {nothing && <p className="search-empty muted">Nothing matches.</p>}
+      {nothing && (
+        <div className="search-empty search-nothing" role="status" aria-live="polite" data-testid="search-nothing">
+          <p className="search-nothing-title">No chats match “{state.query}”</p>
+          <p className="search-nothing-hint muted">{emptyHint(archived)}</p>
+        </div>
+      )}
       <div id="search-results" role="listbox" aria-label="Results" className="search-results" ref={listRef} data-testid="search-results">
         {order.map((g) => {
           const group = state.groups[g];

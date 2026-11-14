@@ -1,6 +1,6 @@
 /* The settings-change toast's own slot, just below the main toast slot. */
 .ui-toast-slot.ui-toast-slot-settings {
-  top: calc(var(--topbar-height) + 64px);
+  top: calc(var(--topbar-height) + var(--tags-strip-height) + 64px);
 }
 
 /* Allow cards in the composer dock, in the dock's column: padding 10 x 12, a --line-strong border, radius 8, --surface, 12 px / 1.45; the
@@ -24,6 +24,8 @@
   line-height: 1.45;
   direction: ltr;
   unicode-bidi: isolate;
+  /* The controls below answer to the card's own width, not the window's. */
+  container-type: inline-size;
 }
 .allow-title {
   display: flex;
@@ -82,16 +84,31 @@
   color: var(--text);
 }
 .allow-note {
-  flex: 1;
+  flex: 1 1 14em;
   min-width: 12em;
+  text-overflow: ellipsis;
   padding: 4px 6px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--surface);
   color: var(--text);
 }
+/* Deny and Allow are one unit: they never split across lines, and sit at the right. */
+.allow-buttons {
+  display: inline-flex;
+  flex: none;
+  gap: 8px;
+  margin-left: auto;
+}
 .allow-slot {
   display: inline-block;
+}
+/* A narrow card: the note takes its own full-width line above the grant length and the buttons. */
+@container (max-width: 480px) {
+  .allow-note {
+    order: -1;
+    flex: 1 1 100%;
+  }
 }
 .allow-slot .ui-btn {
   padding: 5px 12px;
