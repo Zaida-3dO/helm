@@ -244,6 +244,17 @@ Send now `Ctrl+Alt+Enter`, Stop and send waiting messages `Esc`.
 | `topbar-muted` | The bell-off mark after the chat title in the top bar while the chat is muted (tooltip "Muted: no notices or flags") | |
 | `attention-muted` / `attention-muted-row` | The Needs attention dialog's collapsed "Muted (N)" group, and one muted chat's row in it (Open opens the chat) | row: `data-chat-id`, `data-kind` (`approval` `question` `plan` `flag`) |
 | `triage-retry` / `triage-priority` | Retry on a card whose idle check gave up (`data-group="triageFailed"`), and the priority chip on a flagged card | chip: `data-priority` (`normal` `high`) |
+
+## Gatekeeper
+
+| Hook | Element | Attributes |
+|---|---|---|
+| `gate-line` | The quiet line on an answer card while the question gate holds it or after a failed hold | `data-state` (`checking` `failed`) |
+| `gate-brief` / `gate-brief-option` | On an escalated card, the gate's write-up above the choices (problem, the real options with what each means, pros, cons and cost, and what Helm would pick), and one option in it | `gate-brief-option`: `data-label` |
+| `gate-review-link` | The (Review) link on a "Helm answered for you" transcript row; opens Settings → Gatekeeper | |
+| `gate-decided` / `gate-decided-row` / `gate-review-fine` / `gate-review-asked` / `gate-change-open` / `gate-change-input` / `gate-change-send` / `gate-change-cancel` | The Needs attention dialog's "Decided for you" section at its foot (never counted in the badge), one row in it, its Fine and Should have asked me buttons, and the Change answer form: its button, the text field, Send and Cancel | `gate-decided-row`: `data-ask-id` |
+| `settings-gatekeeper` / `gate-enabled` / `gate-paused` / `gate-frequency` / `gate-bar-note` / `gate-model` / `gate-policy` / `gate-save` / `gate-error` | Settings → Gatekeeper: the pane, the switch, the paused line, the Less/Balanced/More picker, the line saying what the pick means, the model and policy fields, Save and a refused save's message | `gate-frequency` tabs are `[data-tab]` (`less` `balanced` `more`) |
+| `gate-history-filter` / `gate-history-search` / `gate-history-row` / `gate-history-detail` / `gate-history-empty` | Settings → Gatekeeper's History: the All/Decided/Asked you/Couldn't check tabs, the search field, one record row (click opens its detail), the open detail and the empty note | `gate-history-row`: `data-ask-id`, `data-verdict` |
 | `appearance-section-pet`, `setting-pet`, `pet-toggle`, `setting-pet-kind`, `pet-kind-puffin`, `pet-kind-crab`, `pet-kind-lantern`, `setting-pet-size`, `pet-size`, `setting-pet-bubble`, `pet-bubble-toggle` | Appearance → Desktop pet: the section, Show pet and its checkbox, the three companion cards (each with a live preview), the Size segments and the Speech bubble checkbox | `pet-kind-*`: `aria-checked` marks the chosen one |
 | `pet-creature`, `pet-bubble`, `pet-menu` | The desktop pet's own window (the page opened with `?window=pet`): the creature, its speech bubble and the right-click menu (Open Helm, Hide pet, Pet settings…) | `pet-creature`: `data-pose` (`idle` `working` `waiting` `celebrate` `failed` `sleeping`) and `data-kind` |
 | `intro` | The first-run intro over the app, shown once per profile on this device; a click or any key skips it | `data-phase` (`motion` `still`) |

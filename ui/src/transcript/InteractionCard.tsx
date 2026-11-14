@@ -16,7 +16,9 @@ import type { InteractionAnswer } from '../api/ops.ts';
 import { IconChevronRight, IconHelp, IconPlan, IconSend, IconShield } from '../ui/icons.tsx';
 import { Markdown } from './Markdown.tsx';
 import { defaultIndex, eyebrowOf, moveIndex, optionAnswer, pickIndex, splitRecommended, KEY_GUARD_MS } from './interactionModel.ts';
+import { gateLine } from '../gatekeeper/model.ts';
 import '../composer/dock.css';
+import '../gatekeeper/gatekeeper.css';
 
 export interface InteractionCardProps {
   interaction: Interaction;
@@ -41,6 +43,41 @@ function Context({ i }: { i: Interaction }) {
   );
 }
 
+// The gate's write-up of an escalated question: the problem in plain words, the real choices
+// with what each means, its pros, cons and rough cost, and what the gate would pick and why.
+// It sits above the card's own choices; picking one of those stays the answer.
+function GateBrief({ brief }: { brief: NonNullable<Interaction['gate']>['brief'] }) {
+  if (!brief) return null;
+  return (
+    <div className="ia-gate-brief" data-testid="gate-brief">
+      <div className="ia-gate-brief-problem">{brief.problem}</div>
+      {brief.options.length > 0 && (
+        <ul className="ia-gate-brief-options">
+          {brief.options.map((o, n) => (
+            <li key={n} className="ia-gate-brief-option" data-testid="gate-brief-option" data-label={o.label}>
+              <span className="ia-gate-brief-option-head">
+                <span className="ia-gate-brief-option-label">{o.label}</span>
+                {o.cost && <span className="ia-gate-brief-option-facts">· {o.cost}</span>}
+              </span>
+              {o.means && <span className="ia-gate-brief-option-means">{o.means}</span>}
+              {(o.pros || o.cons) && (
+                <span className="ia-gate-brief-option-facts">
+                  {o.pros && <span>Good: {o.pros}. </span>}
+                  {o.cons && <span>Bad: {o.cons}.</span>}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="ia-gate-brief-reco">
+        <span className="ia-gate-brief-reco-label">Helm would pick: {brief.recommendation}</span>
+        {brief.why && <span>{brief.why}</span>}
+      </div>
+    </div>
+  );
+}
+
 function Badge({ kind }: { kind: string }) {
   return (
     <span className="ia-badge" aria-hidden="true">
@@ -61,6 +98,10 @@ export function InteractionCard({ interaction: i, onAnswer, popup, lock = null }
   };
   const kind = i.attention ?? 'approval';
   const options = i.options ?? [];
+  // What the question gate has made of this card: a quiet line while it checks or after a failed
+  // hold, or the brief it wrote when it decided this one really needs you.
+  const gateNote = i.gate ? gateLine(i.gate.state, i.gate.note) : null;
+  const gatePick = i.gate?.state === 'escalated' ? i.gate.brief?.recommendation : undefined;
   const testId = kind === 'plan' ? 'plan-button' : kind === 'question' ? 'question-button' : 'approval-button';
   const focusAt = popup ? defaultIndex(kind, options) : null;
   const confirmOnly = kind !== 'plan' && kind !== 'question' && i.method === 'confirm' && options.length === 0;
@@ -114,6 +155,12 @@ export function InteractionCard({ interaction: i, onAnswer, popup, lock = null }
               {lock}
             </div>
           )}
+          {gateNote && (
+            <div className="ia-gate" role="status" data-testid="gate-line" data-state={i.gate!.state}>
+              {gateNote}
+            </div>
+          )}
+          {i.gate?.state === 'escalated' && i.gate.brief && <GateBrief brief={i.gate.brief} />}
 
           {options.length > 0 && (
             <div className="ia-options" role="group" aria-label="Choices">
@@ -121,11 +168,12 @@ export function InteractionCard({ interaction: i, onAnswer, popup, lock = null }
                 const chosen = kind === 'question' && i.prefill === o;
                 const tag = splitRecommended(o);
                 const danger = kind !== 'plan' && kind !== 'question' && (o === 'Deny' || o === 'Stop turn');
+                const gateChosen = gatePick !== undefined && gatePick === o;
                 return (
                   <button
                     key={o}
                     type="button"
-                    className={`ia-option${chosen ? ' chosen' : ''}${danger ? ' ia-danger' : ''}`}
+                    className={`ia-option${chosen ? ' chosen' : ''}${gateChosen ? ' ia-gate-recommended' : ''}${danger ? ' ia-danger' : ''}`}
                     data-testid={testId}
                     data-option={o}
                     data-autofocus={focusAt === n ? '' : undefined}
@@ -139,7 +187,7 @@ export function InteractionCard({ interaction: i, onAnswer, popup, lock = null }
                       {i.optionDescriptions?.[n] && <span className="ia-option-desc">{i.optionDescriptions[n]}</span>}
                     </span>
                     {tag.recommended && <span className="ia-pill">Recommended</span>}
-                    {chosen && <span className="ia-pill">Your answer</span>}
+                    {chosen && <span className="ia-pill">{gatePick !== undefined ? 'Helm suggests' : 'Your answer'}</span>}
                     <span className="ia-arrow" aria-hidden="true">
                       <IconChevronRight size={14} />
                     </span>

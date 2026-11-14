@@ -1,0 +1,333 @@
+/* The gatekeeper's screens: the hold and brief lines on an interaction card, the "Decided for
+   you" review section in the Needs attention inbox, and the Settings pane. The gate's own colour
+   mark: a calm blue-green, used thinly (a hairline and the chip), never a fill. */
+
+:root {
+  --gk-mark: #2f6f6a;
+  --gk-warn: #956116;
+  --gk-bad: #8f2f2a;
+}
+
+:root[data-theme='dark'] {
+  --gk-mark: #6cc0b8;
+  --gk-warn: #dca24b;
+  --gk-bad: #e07b74;
+}
+
+/* On an interaction card the gate writes one quiet line, or a brief above the choices. */
+
+.ia-gate {
+  margin: 10px 0 2px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.ia-gate-brief {
+  margin: 12px 0 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--gk-mark);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--gk-mark) 5%, var(--surface));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ia-gate-brief-problem {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.ia-gate-brief-options {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ia-gate-brief-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ia-gate-brief-option-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.ia-gate-brief-option-label {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ia-gate-brief-option-means,
+.ia-gate-brief-option-facts {
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.ia-gate-brief-reco {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.ia-gate-brief-reco-label {
+  color: var(--gk-mark);
+  font-weight: 600;
+}
+
+.ia-gate-recommended {
+  border-color: color-mix(in srgb, var(--gk-mark) 55%, var(--line));
+}
+
+/* The Needs attention inbox's "Decided for you" section at its foot. */
+
+.att-decided {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.att-decided-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--secondary);
+}
+
+.att-decided-note {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.att-decided-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.att-decided-row[aria-busy='true'] {
+  opacity: 0.6;
+}
+
+.att-decided-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.att-decided-line {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.att-decided-where {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.att-decided-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+.att-change {
+  display: flex;
+  flex: 1;
+  gap: 6px;
+  min-width: 0;
+}
+
+.att-change input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Settings → Gatekeeper. */
+
+.gk-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 20px 18px;
+  max-width: 760px;
+}
+
+.gk-note,
+.gk-foot {
+  margin: 0;
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.gk-foot {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.gk-paused {
+  margin: 0;
+  font-size: 12px;
+  color: var(--gk-warn);
+}
+
+.gk-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.gk-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gk-field > span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--secondary);
+}
+
+.gk-field textarea,
+.gk-field input {
+  width: 100%;
+}
+
+.gk-save-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.gk-error {
+  font-size: 12px;
+  color: var(--gk-bad);
+}
+
+/* History: the filter tabs, search, one row per record, and the open detail. */
+
+.gk-history {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.gk-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.gk-history-search {
+  width: 240px;
+}
+
+.gk-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.gk-row-question {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.gk-row-line {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.gk-row-where {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.gk-chip {
+  flex: none;
+  font-size: 11px;
+  color: var(--secondary);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.gk-detail {
+  margin: -6px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 9px 9px;
+  background: color-mix(in srgb, var(--gk-mark) 4%, var(--surface));
+}
+
+.gk-detail-row {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  padding: 2px 0;
+}
+
+.gk-detail-label {
+  flex: none;
+  width: 110px;
+  color: var(--muted);
+}
+
+.gk-detail-value {
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.gk-detail-brief {
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.gk-empty {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 2px;
+}

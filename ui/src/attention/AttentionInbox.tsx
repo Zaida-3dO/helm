@@ -3,11 +3,16 @@
 // it), Snooze (a menu of times) and Mark addressed. Both actions hide the chat until something new
 // happens in it; the host publishes a fresh summary, which this dialog re-renders from.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { AttentionSummary } from '../api/types.ts';
+import { useShell } from '../shell/context.ts';
 import { Button, Checkbox, ContextMenu, Dialog, TextArea, TextInput, toast, type MenuItem } from '../ui/index.ts';
 import { IconCheck, IconClock, IconExternalLink, IconFlag, IconMute } from '../ui/icons.tsx';
 import { failedChecks, groupLabel, inboxRows, mutedKindLabel, mutedRows, parseDelayMinutes, priorityFor, snoozeChoices, type InboxRow, type TriageSettings } from './model.ts';
+import { gateOps } from '../gatekeeper/api.ts';
+import { agoText, reviewLine } from '../gatekeeper/model.ts';
+import type { GateAsk } from '../gatekeeper/types.ts';
+import '../gatekeeper/gatekeeper.css';
 import './attention.css';
 
 export const ATTENTION_DIALOG = 'attention';
@@ -87,6 +92,31 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
   };
   const [busy, setBusy] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; row: InboxRow } | null>(null);
+
+  // The "Decided for you" section at the foot: questions the gatekeeper answered for the user
+  // that have not settled yet. It reads the gatekeeper's own list, never the attention summary,
+  // so these rows are never counted in the badge. The host pushes a `gate` event on every change.
+  const shell = useShell();
+  const gates = useMemo(() => gateOps(shell.api), [shell]);
+  const [decided, setDecided] = useState<GateAsk[]>([]);
+  const [askBusy, setAskBusy] = useState<string | null>(null);
+  const [changeFor, setChangeFor] = useState<string | null>(null);
+  const [changeText, setChangeText] = useState('');
+  useEffect(() => {
+    let live = true;
+    const load = () => void gates.list({ filter: 'review', limit: 50 }).then((rows) => live && setDecided(rows)).catch(() => live && setDecided([]));
+    load();
+    const off = shell.bus.on('gate', load);
+    return () => {
+      live = false;
+      off();
+    };
+  }, [gates, shell]);
+  const gateAct = (id: string, f: () => Promise<unknown>) => {
+    setAskBusy(id);
+    const reload = () => gates.list({ filter: 'review', limit: 50 }).then(setDecided).catch(() => undefined);
+    f().then(reload, (e) => toast.show({ kind: 'error', text: `Could not update this: ${String((e as Error)?.message ?? e)}` })).finally(() => setAskBusy(null));
+  };
 
   const act = async (chatId: string, f: () => Promise<unknown>) => {
     setBusy(chatId);
@@ -295,6 +325,65 @@ export function AttentionInbox({ summary, ops, onOpen, onClose }: AttentionInbox
             </div>
           )}
         </div>
+        {decided.length > 0 && (
+          <section className="att-decided" data-testid="gate-decided">
+            <div className="att-decided-head">
+              Decided for you
+              <span className="att-decided-note">Questions Helm answered for you recently. These do not count in the badge; you can change any answer here.</span>
+            </div>
+            {decided.map((r) => (
+              <div key={r.id} className="att-decided-row" data-testid="gate-decided-row" data-ask-id={r.id} aria-busy={askBusy === r.id ? true : undefined}>
+                <div className="att-decided-text">
+                  <span className="att-decided-line">{reviewLine(r)}</span>
+                  <button type="button" className="att-decided-where ia-link" onClick={() => { onOpen(r.chatId); onClose(); }}>
+                    In {r.chatTitle || 'Untitled'} · {agoText(Date.now(), r.askedAt)}
+                  </button>
+                </div>
+                {changeFor === r.id ? (
+                  <form
+                    className="att-change"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (!changeText.trim()) return;
+                      gateAct(r.id, () => gates.changeAnswer(r.id, changeText.trim()));
+                      setChangeFor(null);
+                      setChangeText('');
+                    }}
+                  >
+                    <TextInput
+                      autoFocus
+                      value={changeText}
+                      onChange={(e) => setChangeText(e.target.value)}
+                      placeholder="What you want instead…"
+                      maxLength={1000}
+                      data-testid="gate-change-input"
+                      aria-label="Your answer instead"
+                    />
+                    <Button variant="primary" type="submit" disabled={!changeText.trim()} data-testid="gate-change-send">
+                      Send
+                    </Button>
+                    <Button variant="ghost" type="button" data-testid="gate-change-cancel" onClick={() => setChangeFor(null)}>
+                      Cancel
+                    </Button>
+                  </form>
+                ) : (
+                  <div className="att-decided-actions">
+                    <Button variant="ghost" disabled={askBusy === r.id} data-testid="gate-review-fine" onClick={() => gateAct(r.id, () => gates.review(r.id, 'fine'))}>
+                      <IconCheck size={13} />
+                      Fine
+                    </Button>
+                    <Button variant="ghost" disabled={askBusy === r.id} data-testid="gate-review-asked" onClick={() => gateAct(r.id, () => gates.review(r.id, 'should_have_asked'))}>
+                      Should have asked me
+                    </Button>
+                    <Button variant="secondary" disabled={askBusy === r.id} data-testid="gate-change-open" onClick={() => setChangeFor(r.id)}>
+                      Change answer
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </section>
+        )}
       </div>
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={snoozeItems(menu.row)} label={`Snooze ${menu.row.title}`} onClose={() => setMenu(null)} testId="attention-snooze-menu" />

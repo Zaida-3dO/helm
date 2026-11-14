@@ -1,6 +1,6 @@
 // A fake host for checking the UI in a plain browser. It implements the host's ops and
 // events with a scripted turn: streamed text, a tool card, and an approval, question or plan
-// card when the prompt asks for one ("approve", "question", "plan"). "signin" fails the turn with an expired-sign-in error. "todo" keeps a live checklist across the turn (a recap card follows any turn with a checklist or three tool steps), "pictures" shows a gallery card, "board" offers an option board ("board multi" lets several be picked) and "code" streams a fenced code block. "options" ends the reply with a numbered list of choices. "long" in a prompt adds a
+// card when the prompt asks for one ("approve", "question", "plan"). "gate" holds a question card and answers it for you, "gate escalate" hands it over with the gatekeeper's write-up, and "gate fail" shows the quiet line. "signin" fails the turn with an expired-sign-in error. "todo" keeps a live checklist across the turn (a recap card follows any turn with a checklist or three tool steps), "pictures" shows a gallery card, "board" offers an option board ("board multi" lets several be picked) and "code" streams a fenced code block. "options" ends the reply with a numbered list of choices. "long" in a prompt adds a
 // background task. A steer sent mid-turn shows as Pending and is read about 1.5 s later.
 //
 // Dev builds only: main.tsx imports it behind `import.meta.env.DEV`, so production drops it.
@@ -36,6 +36,7 @@ import { knowledgeFakeOps } from './fake-knowledge.ts';
 import { githubFakeOps } from './fake-github.ts';
 import { webSearchFakeOps } from './fake-websearch.ts';
 import { dictationFakeOps } from './fake-dictation.ts';
+import { fakeGateAddDecided, gatekeeperFakeOps } from './fake-gatekeeper.ts';
 import { localModelsFakeOps } from './fake-localmodels.ts';
 import { gpuFakeOps } from './fake-gpu.ts';
 import { orchestratorFakeOps } from './fake-orchestrator.ts';
@@ -85,6 +86,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 { const gh = githubFakeOps(); registerFakeOps(gh.prefixes, gh.handler); }
 { const ws = webSearchFakeOps(); registerFakeOps(ws.prefixes, ws.handler); }
 { const dc = dictationFakeOps(); registerFakeOps(dc.prefixes, dc.handler); }
+{ const gk = gatekeeperFakeOps(); registerFakeOps(gk.prefixes, gk.handler); }
 // Local models: the catalogue holds nothing until a refresh asks the (made-up) servers, as in the real host.
 const localModels = localModelsFakeOps();
 registerFakeOps(localModels.prefixes, localModels.handler);
@@ -477,6 +479,58 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       }
       if (/code/i.test(text)) await streamText(c, 'Here is the change:\n\n```ts\nexport const x = 1;\nexport const y = 2;\n```\n\n', cancelled);
       if (/subagent/i.test(text)) runFakeSubagents(c, { addRow, updateRow, emitThread, uid });
+      // The gatekeeper's card lifecycle by eye: "gate" holds a card and answers it, "gate
+      // escalate" hands it over with the brief, "gate fail" leaves the quiet line.
+      if (/gate/i.test(text)) {
+        const mode = /escalate/i.test(text) ? 'escalate' : /fail/i.test(text) ? 'fail' : 'decide';
+        const id = uid();
+        const card: Interaction = {
+          chatId: c.chat.id, id, method: 'select', attention: 'question',
+          title: 'Which export format?', options: ['CSV', 'JSON'],
+          optionDescriptions: ['Opens straight in a spreadsheet', 'Keeps the nested lists'],
+          allowOther: true, gate: { state: 'checking' },
+        };
+        c.thread = { ...c.thread, interactions: [...c.thread.interactions, card] };
+        emitThread(c);
+        emitAttention();
+        const answered = new Promise<Record<string, unknown>>((resolve) => answers.set(id, resolve));
+        await sleep(2500, cancelled);
+        if (mode === 'decide') {
+          c.thread = { ...c.thread, interactions: c.thread.interactions.filter((x) => x.id !== id) };
+          emitThread(c);
+          emitAttention();
+          const rec = fakeGateAddDecided(c.chat.id, c.chat.title || 'Untitled', 'Which export format?', 'CSV', 'it opens straight in a spreadsheet and the import accepts it back');
+          emit({ kind: 'gate', askId: rec.id, chatId: c.chat.id, what: 'decided' });
+          addRow(c, { role: 'context', text: `Helm answered for you: «CSV», because ${rec.reason}.`, details: { contextKind: 'gatekeeper' } });
+          await streamText(c, 'Exported as CSV. If you would rather have JSON, the Needs attention list can change that answer. ', cancelled);
+        } else {
+          const next: Interaction =
+            mode === 'escalate'
+              ? {
+                  ...card,
+                  prefill: 'JSON',
+                  gate: {
+                    state: 'escalated',
+                    brief: {
+                      problem: 'The chat wants to pick one export format for every note. Changing it later means exporting everything again.',
+                      options: [
+                        { label: 'CSV', means: 'A plain table in one file.', pros: 'Opens anywhere', cons: 'Flattens the nested lists', cost: 'None' },
+                        { label: 'JSON', means: 'Keeps the structure as it is.', pros: 'Nothing is lost', cons: 'Awkward in a spreadsheet', cost: 'None' },
+                      ],
+                      recommendation: 'JSON',
+                      why: 'These notes have nested lists that CSV would flatten.',
+                    },
+                  },
+                }
+              : { ...card, gate: { state: 'failed', note: "Helm couldn't check this one." } };
+          c.thread = { ...c.thread, interactions: c.thread.interactions.map((x) => (x.id === id ? next : x)) };
+          emitThread(c);
+          emitAttention();
+          emit({ kind: 'gate', askId: id, chatId: c.chat.id, what: mode === 'escalate' ? 'escalated' : 'failed' });
+          const a = await answered;
+          await streamText(c, `You picked ${String(a.value ?? 'nothing')}. `, cancelled);
+        }
+      }
       if (/question/i.test(text)) {
         const questions = ['Which colour?', 'Which size?'];
         const out: string[] = [];
@@ -533,23 +587,26 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
     const all = [...chats.values()].filter((c) => !c.chat.archived && !c.chat.sideSourceId);
     const list = all.filter((c) => !c.chat.muted);
     const row = (c: FakeChat, kind: string) => ({ chatId: c.chat.id, title: c.chat.title || 'Untitled', project: folderName(c.chat.cwd), kind, reason: kind });
+    // A card the gatekeeper is still holding is not waiting on you yet: like the host, it is
+    // left out of the badge, the inbox and the muted list until the gate answers or fails.
+    const awaiting = (i: Interaction) => i.attention && i.gate?.state !== 'checking';
     const busy = list.filter((c) => ['starting', 'running', 'stopping'].includes(c.chat.status));
-    const needs = list.filter((c) => c.thread.interactions.some((i) => i.attention));
+    const needs = list.filter((c) => c.thread.interactions.some(awaiting));
     const unread = list.filter((c) => c.chat.unread.markToken || (c.chat.unread.completionId && c.chat.status === 'idle' && !c.chat.error));
     return {
       badge: new Set([...needs, ...unread]).size,
       busy: all.filter((c) => ['starting', 'running', 'stopping'].includes(c.chat.status)).length,
       needsYou: needs.slice(0, 8).map((c) => {
-        const a = c.thread.interactions.find((i) => i.attention)?.attention;
+        const a = c.thread.interactions.find(awaiting)?.attention;
         return row(c, a === 'trust' ? 'approval' : String(a));
       }),
       running: busy.slice(0, 8).map((c) => row(c, 'running')),
       unread: unread.slice(0, 8).map((c) => row(c, 'unread')),
       stalled: [],
       muted: all
-        .filter((c) => c.chat.muted && c.thread.interactions.some((i) => i.attention))
+        .filter((c) => c.chat.muted && c.thread.interactions.some(awaiting))
         .map((c) => {
-          const a = c.thread.interactions.find((i) => i.attention)?.attention;
+          const a = c.thread.interactions.find(awaiting)?.attention;
           return { ...row(c, a === 'trust' ? 'approval' : String(a)), reason: a === 'plan' ? 'Has a plan for you to review' : 'Waiting for your approval' };
         }),
       triage: [

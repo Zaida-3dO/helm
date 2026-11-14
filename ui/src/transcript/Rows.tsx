@@ -21,6 +21,7 @@ import { Glyph } from './icons.tsx';
 import { SignInAgain } from './SignInAgain.tsx';
 import { isSignInError } from './signin.ts';
 import { ToolCard } from './ToolCard.tsx';
+import { GatekeeperReviewLink } from '../gatekeeper/ReviewLink.tsx';
 import { usePacedText, useThinkingPreview } from './usePaced.ts';
 import { formatElapsed, type RowFlags } from './workBlocks.ts';
 
@@ -95,6 +96,7 @@ const CONTEXT_LABEL: Record<string, string> = {
   orchestrator: 'Orchestrator',
   telegram: 'Telegram',
   afk: 'AFK',
+  gatekeeper: 'Answered for you',
   interruption: 'Interruption',
 };
 
@@ -204,6 +206,14 @@ export const Row = memo(function Row({ row, ctx, final, afterTool, indent, after
       <div className={`row row-context${notice ? ' row-notice' : ''}${place}`} {...common} role={notice && noticeLive ? 'status' : undefined}>
         <span className="context-label">{label}</span>
         {row.text && <span className={notice ? 'context-notice-text' : 'muted'}> · {row.text}</span>}
+        {/* A decision taken for you can be reviewed or reversed from Settings → Gatekeeper. */}
+        {kind === 'gatekeeper' && (
+          <span className="muted">
+            {' ('}
+            <GatekeeperReviewLink />
+            {')'}
+          </span>
+        )}
       </div>
     );
   }
