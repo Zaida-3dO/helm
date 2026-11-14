@@ -2,6 +2,11 @@
 // root Bash call is a build or test run, a server or watcher, or a long sleep, and a per-turn
 // policy that denies such a call once (`redirect`) or adds a reminder (`warn`).
 //
+// The same hook refuses, every time, a command that ends Node or Claude Code by name
+// (`taskkill /IM node.exe`, `Stop-Process -Name node`, `pkill node`): every chat's worker is a
+// node.exe and every chat's agent a claude.exe, so such a command ends all of them, not only the
+// process the agent meant.
+//
 // The parse is deliberately forgiving: anything it cannot follow is "not classified", so a parse
 // failure never blocks a tool.
 
@@ -14,6 +19,8 @@ export function isLongCommandLevel(v: unknown): v is LongCommandLevel {
 export interface Classification {
   /** Short reason, shown to the agent and in the `long_command` event. */
   reason: string;
+  /** Ends shared processes by name: refused every time, never escaped. */
+  kill?: true;
 }
 
 const MAX_DEPTH = 16;
@@ -202,13 +209,15 @@ function tokenize(src: string): Tok[] {
 interface SimpleCommand {
   words: string[];
   background: boolean;
+  /** Its output is piped into the next command. */
+  piped: boolean;
 }
 
 function splitCommands(toks: Tok[], subs: string[]): SimpleCommand[] {
   const out: SimpleCommand[] = [];
   let words: string[] = [];
-  const end = (background: boolean) => {
-    if (words.length) out.push({ words, background });
+  const end = (background: boolean, piped = false) => {
+    if (words.length) out.push({ words, background, piped });
     words = [];
   };
   for (const t of toks) {
@@ -216,10 +225,87 @@ function splitCommands(toks: Tok[], subs: string[]): SimpleCommand[] {
       words.push(t.word.text);
       subs.push(...t.word.subs);
     } else if (t.op === "&") end(true);
+    else if (t.op === "|") end(false, true);
     else end(false);
   }
   end(false);
   return out;
+}
+
+// ---- ending shared processes by name ----------------------------------------------------
+
+/** Processes every chat shares: a kill by one of these names ends every chat's worker or agent. */
+const SHARED_NAMES = new Set(["node", "claude"]);
+
+/** The shared name a process-name argument picks out (`node.exe`, `"node*"`, `Claude`), if any. */
+function sharedName(w: string | undefined): string | undefined {
+  if (!w) return undefined;
+  const name = w
+    .replace(/^["']|["']$/g, "")
+    .toLowerCase()
+    .replace(/\*$/, "")
+    .replace(/\.exe$/, "");
+  return SHARED_NAMES.has(name) ? name : undefined;
+}
+
+function killHit(name: string, how: string): Classification {
+  return { reason: `ends every ${name} process by name (${how})`, kill: true };
+}
+
+/** `taskkill /IM node.exe`, `Stop-Process -Name node`, `pkill node`, `killall node.exe`, `wmic
+ *  process where name="node.exe" delete`, in any of their usual spellings. */
+function killByName(cmd: string, args: string[]): Classification | undefined {
+  if (cmd === "taskkill") {
+    // Flags are case-free and may start with /, // (Git Bash) or -.
+    const flags = args.map((a) => a.replace(/^(\/\/|\/|-)/, "").toLowerCase());
+    for (let k = 0; k < args.length; k++) {
+      if (flags[k] === "im") {
+        const name = sharedName(args[k + 1]);
+        if (name) return killHit(name, "taskkill /IM");
+      }
+      if (flags[k] === "fi") {
+        const m = /imagename\s+eq\s+(\S+)/i.exec(args[k + 1] ?? "");
+        const name = sharedName(m?.[1]);
+        if (name) return killHit(name, "taskkill /FI");
+      }
+    }
+    return undefined;
+  }
+  if (cmd === "stop-process" || cmd === "spps" || cmd === "kill") {
+    for (let k = 0; k < args.length; k++) {
+      if (/^-(name|processname)$/i.test(args[k])) {
+        const names = (args[k + 1] ?? "").split(",");
+        const name = names.map(sharedName).find(Boolean);
+        if (name) return killHit(name, `${cmd} -Name`);
+      }
+    }
+    return undefined;
+  }
+  if (cmd === "pkill" || cmd === "killall") {
+    const name = args.filter((a) => !a.startsWith("-")).map(sharedName).find(Boolean);
+    return name ? killHit(name, cmd) : undefined;
+  }
+  if (cmd === "wmic" && args.some((a) => /^(delete|terminate)$/i.test(a))) {
+    const m = args.map((a) => /name\s*=\s*['"]?([^'"\s]+)/i.exec(a)).find(Boolean);
+    const name = sharedName(m?.[1]);
+    return name ? killHit(name, "wmic ... delete") : undefined;
+  }
+  return undefined;
+}
+
+/** `Get-Process node | Stop-Process`: a process list by a shared name piped into a kill. */
+function pipedKill(from: SimpleCommand, into: SimpleCommand | undefined): Classification | undefined {
+  if (!from.piped || !into) return undefined;
+  const cmd = baseName(from.words[0] ?? "");
+  if (cmd !== "get-process" && cmd !== "gps" && cmd !== "ps") return undefined;
+  const target = baseName(into.words[0] ?? "");
+  if (target !== "stop-process" && target !== "spps" && target !== "kill") return undefined;
+  // The kill takes its processes from the pipe, not from an id of its own.
+  if (into.words.slice(1).some((a) => !a.startsWith("-"))) return undefined;
+  // `Get-Process node`, `Get-Process -Name node,claude`: every name it lists.
+  const names = from.words.slice(1).filter((a) => !a.startsWith("-")).flatMap((a) => a.split(","));
+  const name = names.map(sharedName).find(Boolean);
+  return name ? killHit(name, `${cmd} | ${target}`) : undefined;
 }
 
 // ---- classifying ------------------------------------------------------------------------
@@ -311,6 +397,8 @@ function classifyWords(words: string[], depth: number): Classification | undefin
   if (i >= words.length) return undefined;
   const cmd = baseName(words[i]);
   const args = words.slice(i + 1);
+  const kill = killByName(cmd, args);
+  if (kill) return kill;
   if (cmd === "nohup" || cmd === "start-job" || cmd === "start-process") return undefined; // already detached
   if (isVersionOrHelp(args)) return undefined;
 
@@ -412,16 +500,22 @@ function classifyLine(line: string, depth: number): Classification | undefined {
   if (depth > MAX_DEPTH) throw new ParseError("nested too deeply");
   const subs: string[] = [];
   const commands = splitCommands(tokenize(line), subs);
-  for (const c of commands) {
-    if (c.background) continue; // `cmd &` already runs in the background
+  // A kill by name anywhere wins, even in the background; otherwise the first long command.
+  let first: Classification | undefined;
+  for (let k = 0; k < commands.length; k++) {
+    const c = commands[k];
+    const piped = pipedKill(c, commands[k + 1]);
+    if (piped) return piped;
     const hit = classifyWords(c.words, depth);
-    if (hit) return hit;
+    if (hit?.kill) return hit;
+    if (!c.background) first ??= hit; // `cmd &` already runs in the background
   }
   for (const s of subs) {
     const hit = classifyLine(s, depth + 1);
-    if (hit) return hit;
+    if (hit?.kill) return hit;
+    first ??= hit;
   }
-  return undefined;
+  return first;
 }
 
 /**
@@ -429,14 +523,17 @@ function classifyLine(line: string, depth: number): Classification | undefined {
  * command, is already in the background, or cannot be parsed.
  */
 export function classifyBashCall(input: { command?: unknown; timeout?: unknown; run_in_background?: unknown }): Classification | undefined {
-  if (input.run_in_background === true) return undefined;
   const command = typeof input.command === "string" ? input.command : "";
+  let hit: Classification | undefined;
   try {
-    const hit = command ? classifyLine(command, 0) : undefined;
-    if (hit) return hit;
+    hit = command ? classifyLine(command, 0) : undefined;
   } catch {
     return undefined; // a parse failure never blocks a tool
   }
+  // Running it in the background does not make a kill by name any safer.
+  if (hit?.kill) return hit;
+  if (input.run_in_background === true) return undefined;
+  if (hit) return hit;
   if (typeof input.timeout === "number" && input.timeout > TOOL_TIMEOUT_LIMIT_MS) return { reason: `a tool timeout over 2 minutes (${Math.round(input.timeout / 1000)} s)` };
   return undefined;
 }
@@ -448,6 +545,9 @@ export const DENY_TEXT =
 
 export const REMIND_TEXT =
   "Helm reminder: this looks like a long-running command (REASON). Prefer running builds, tests, servers and watchers in the background (run_in_background: true) so the conversation is not blocked.";
+
+export const KILL_TEXT =
+  "Helm: this command ends processes by name (REASON). Every Helm chat on this computer runs its own node.exe worker and claude.exe agent, so it would end the other chats' work too, not only yours. End only the process you started, by its process ID: note the PID when you start it (or find it with netstat -ano, tasklist or Get-Process), then run taskkill /PID <pid> /F or Stop-Process -Id <pid>.";
 
 /** Appended to the main chat's instructions when the rule is on. */
 export const PROMPT_RULE =
@@ -480,6 +580,8 @@ export class LongCommandPolicy {
     this.escape = undefined; // any root Bash call clears the escape
     const hit = classifyBashCall(input);
     if (!hit) return { kind: "allow" };
+    // Refused at either level, and never let through on a repeat.
+    if (hit.kill) return { kind: "deny", reason: hit.reason, text: KILL_TEXT.replace("REASON", hit.reason) };
     if (this.level === "warn") return { kind: "remind", reason: hit.reason, text: REMIND_TEXT.replace("REASON", hit.reason) };
     if (escape !== undefined && escape === command) return { kind: "escape", reason: hit.reason };
     this.escape = command;

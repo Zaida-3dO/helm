@@ -11,6 +11,7 @@ use crate::job::{self, Job};
 use serde_json::{Map, Value};
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -43,6 +44,14 @@ pub enum WorkerOutput {
     Exited {
         code: Option<i32>,
         stderr: String,
+        /// Helm ended it: [`WorkerProcess::terminate`], or a broken record.
+        by_host: bool,
+        /// Processes still running in the worker's job when its exit was seen (`None` where the
+        /// platform does not count them). One or more means the worker alone was ended while
+        /// what it started (Claude Code) was still running.
+        job_active: Option<u32>,
+        /// The signal that ended it (Linux only).
+        signal: Option<i32>,
     },
     /// The worker never started (the start ran off the caller's task); nothing reached it. The
     /// text is for the user.
@@ -73,6 +82,7 @@ pub struct WorkerProcess {
     stdin: mpsc::UnboundedSender<String>,
     job: Arc<Job>,
     stderr: Arc<Mutex<StderrTail>>,
+    by_host: Arc<AtomicBool>,
 }
 
 impl WorkerProcess {
@@ -83,6 +93,7 @@ impl WorkerProcess {
 
     /// End the whole worker tree now.
     pub fn terminate(&self) {
+        self.by_host.store(true, Ordering::SeqCst);
         self.job.terminate();
     }
 
@@ -122,6 +133,7 @@ pub fn spawn(spec: SpawnSpec) -> std::io::Result<(WorkerProcess, mpsc::Receiver<
     let (out_tx, out_rx) = mpsc::channel::<WorkerOutput>(256);
     let (in_tx, mut in_rx) = mpsc::unbounded_channel::<String>();
     let tail = Arc::new(Mutex::new(StderrTail::default()));
+    let by_host = Arc::new(AtomicBool::new(false));
 
     // stdin writer: one line per command; closing the channel closes stdin.
     tokio::spawn(async move {
@@ -152,19 +164,27 @@ pub fn spawn(spec: SpawnSpec) -> std::io::Result<(WorkerProcess, mpsc::Receiver<
     let job2 = job.clone();
     let tail3 = tail.clone();
     let limit = spec.max_record_bytes;
+    let by_host2 = by_host.clone();
     tokio::spawn(async move {
         let fault = read_records(&mut stdout, limit, &out_tx).await;
         if let Some(f) = fault {
+            by_host2.store(true, Ordering::SeqCst);
             job2.terminate();
             let _ = out_tx.send(WorkerOutput::Fault(f)).await;
         }
         let status = child.wait().await.ok();
+        // Counted at once, while this task still holds the job: what the worker started may
+        // outlive it only until the job is closed.
+        let job_active = job2.active_processes();
         let _ = stderr_done.await;
         let stderr = tail3.lock().unwrap().text();
         let _ = out_tx
             .send(WorkerOutput::Exited {
                 code: status.and_then(|s| s.code()),
                 stderr,
+                by_host: by_host2.load(Ordering::SeqCst),
+                job_active,
+                signal: status.and_then(exit_signal),
             })
             .await;
     });
@@ -175,9 +195,20 @@ pub fn spawn(spec: SpawnSpec) -> std::io::Result<(WorkerProcess, mpsc::Receiver<
             stdin: in_tx,
             job,
             stderr: tail,
+            by_host,
         },
         out_rx,
     ))
+}
+
+#[cfg(unix)]
+fn exit_signal(s: std::process::ExitStatus) -> Option<i32> {
+    std::os::unix::process::ExitStatusExt::signal(&s)
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_: std::process::ExitStatus) -> Option<i32> {
+    None
 }
 
 /// Read JSON-object lines until EOF or a fault. Returns the fault, if any.
@@ -288,7 +319,14 @@ mod tests {
             panic!("{out:?}")
         };
         assert_eq!(r["id"], "ready");
-        assert!(matches!(out[1], WorkerOutput::Exited { code: Some(0), .. }));
+        assert!(matches!(
+            out[1],
+            WorkerOutput::Exited {
+                code: Some(0),
+                by_host: false,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -302,7 +340,7 @@ mod tests {
         assert!(matches!(out[0], WorkerOutput::Record(_)));
         assert_eq!(out[1], WorkerOutput::Fault("bad_json".into()));
         assert!(
-            matches!(out[2], WorkerOutput::Exited { .. }),
+            matches!(out[2], WorkerOutput::Exited { by_host: true, .. }),
             "job killed it"
         );
     }
@@ -327,12 +365,90 @@ mod tests {
             None,
         )
         .await;
-        let WorkerOutput::Exited { code, stderr } = out.last().unwrap() else {
+        let WorkerOutput::Exited { code, stderr, .. } = out.last().unwrap() else {
             panic!("{out:?}")
         };
         assert_eq!(*code, Some(3));
         assert_eq!(stderr.len(), STDERR_KEEP);
         assert!(stderr.ends_with("THE-END"));
+    }
+
+    /// The exit says who ended it and what was still running: a worker ended from outside by its
+    /// process id while a detached child of it ran on, then one Helm ended itself. (Node ends the
+    /// children it did not detach together with itself, so after a real outside kill of a worker
+    /// the count is usually 0: Claude Code goes with it.)
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn an_exit_says_who_ended_it_and_what_still_ran() {
+        let node = resolve_node(&NodeLookup::from_env()).expect("node installed");
+        for by_helm in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("w.js");
+            std::fs::write(
+                &file,
+                "require('child_process').spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 60000)'], {stdio: 'ignore', detached: true}); \
+                 process.stdout.write('{\"type\":\"up\"}\\n'); setTimeout(()=>{}, 60000);",
+            )
+            .unwrap();
+            let launch = dir.path().join("launch.json");
+            std::fs::write(&launch, "{}").unwrap();
+            let (proc_, mut rx) = spawn(SpawnSpec {
+                node: node.path.clone(),
+                script: file,
+                launch,
+                cwd: dir.path().to_path_buf(),
+                env: crate::env::EnvMap::from_process().into_pairs(),
+                max_record_bytes: MAX_RECORD_BYTES,
+                low_priority: false,
+            })
+            .unwrap();
+            let first = tokio::time::timeout(Duration::from_secs(20), rx.recv()).await;
+            assert!(
+                matches!(first, Ok(Some(WorkerOutput::Record(_)))),
+                "{first:?}"
+            );
+            assert_eq!(
+                proc_.job().active_processes(),
+                Some(2),
+                "the worker and its child"
+            );
+            if by_helm {
+                proc_.terminate();
+            } else {
+                // Only the worker's own process, by its id: its detached child stays in the job.
+                let status = std::process::Command::new("taskkill")
+                    .args(["/PID", &proc_.pid.to_string(), "/F"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+            }
+            let exited = loop {
+                match tokio::time::timeout(Duration::from_secs(20), rx.recv()).await {
+                    Ok(Some(o @ WorkerOutput::Exited { .. })) => break o,
+                    Ok(Some(_)) => continue,
+                    other => panic!("{other:?}"),
+                }
+            };
+            let WorkerOutput::Exited {
+                code,
+                by_host,
+                job_active,
+                ..
+            } = exited
+            else {
+                unreachable!()
+            };
+            assert_eq!(code, Some(1), "both ends give exit code 1");
+            assert_eq!(by_host, by_helm);
+            if by_helm {
+                assert_eq!(job_active, Some(0));
+            } else {
+                assert!(job_active >= Some(1), "the child still ran: {job_active:?}");
+            }
+            proc_.terminate();
+        }
     }
 
     #[tokio::test]

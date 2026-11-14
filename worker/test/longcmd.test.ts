@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { classifyBashCall, DENY_TEXT, LongCommandPolicy } from "../src/drivers/claude/longcmd.ts";
+import { classifyBashCall, DENY_TEXT, KILL_TEXT, LongCommandPolicy } from "../src/drivers/claude/longcmd.ts";
 
 // [command, expected: true = classified as long, false = not]
 const TABLE: [string, boolean][] = [
@@ -112,6 +112,64 @@ describe("long-command classifier", () => {
   test("the reason names the class", () => {
     assert.match(classifyBashCall({ command: "sleep 45" })!.reason, /sleep of 45 s/);
     assert.match(classifyBashCall({ command: "npm run dev" })!.reason, /server or watcher/);
+  });
+});
+
+// [command, true = refused as ending Node or Claude Code by name]
+const KILLS: [string, boolean][] = [
+  ["taskkill /F /IM node.exe", true],
+  ["taskkill //F //IM node.exe", true],
+  ["taskkill /im NODE.EXE /f /t", true],
+  ["taskkill -f -im node*", true],
+  ["taskkill /F /IM claude.exe", true],
+  ['taskkill /F /FI "IMAGENAME eq node.exe"', true],
+  ['cmd /c "taskkill /F /IM node.exe"', true],
+  ["Stop-Process -Name node -Force", true],
+  ["Stop-Process -ProcessName node,chrome", true],
+  ['powershell -Command "Stop-Process -Name node"', true],
+  ["kill -Name claude", true],
+  ["Get-Process node | Stop-Process -Force", true],
+  ["Get-Process -Name node | Stop-Process", true],
+  ["gps node | kill", true],
+  ["pkill node", true],
+  ["pkill -9 -f node", true],
+  ["killall node.exe", true],
+  ['wmic process where name="node.exe" delete', true],
+  ["cd x && taskkill /F /IM node.exe", true],
+  ["taskkill /F /IM node.exe &", true],
+  // ending one process, or a process that is not shared
+  ["taskkill /F /PID 4242", false],
+  ["taskkill /F /T /PID 4242", false],
+  ["taskkill /F /IM vite.exe", false],
+  ["Stop-Process -Id 4242", false],
+  ["kill 4242", false],
+  ["kill -9 4242", false],
+  ["pkill -f 'node server.js'", false],
+  ["Get-Process node", false],
+  ["Get-Process node | Select-Object Id", false],
+  ["gps node; kill 4242", false],
+  ["echo taskkill /IM node.exe", false],
+  ["grep -n 'taskkill /IM node.exe' notes.md", false],
+];
+
+describe("kill by name guard", () => {
+  test(`table of ${KILLS.length} commands`, () => {
+    const wrong = KILLS.filter(([cmd, kill]) => (classifyBashCall({ command: cmd })?.kill === true) !== kill).map(([cmd, kill]) => `${kill ? "missed" : "false hit"}: ${cmd}`);
+    assert.deepEqual(wrong, []);
+  });
+
+  test("refused every time at either level, in the background too, and never escaped; a kill wins over a long command", () => {
+    for (const level of ["warn", "redirect"] as const) {
+      const p = new LongCommandPolicy(level);
+      for (let i = 0; i < 3; i++) {
+        const d = p.decide({ command: "taskkill /F /IM node.exe" });
+        assert.equal(d.kind, "deny", `${level} #${i}`);
+        assert.equal((d as { text: string }).text, KILL_TEXT.replace("REASON", (d as { reason: string }).reason));
+      }
+      assert.equal(p.decide({ command: "pkill node", run_in_background: true }).kind, "deny");
+    }
+    assert.match(classifyBashCall({ command: "npm test; taskkill /IM node.exe /F" })!.reason, /ends every node process by name/);
+    assert.match(KILL_TEXT, /taskkill \/PID <pid> \/F/);
   });
 });
 
