@@ -51,6 +51,9 @@ pub const DEVICE_RUN_FROM_OTHERS: PrefKey = PrefKey::classified("deviceRunFromOt
 /// Settings > Devices: whether people in the household may run their own chats on this PC (on
 /// when unset).
 pub const DEVICE_HOUSEHOLD_RUN: PrefKey = PrefKey::classified("deviceHouseholdRun");
+/// The device whose chats New creates and the sidebar toggle shows (a device uid);
+/// unset or null is this device.
+pub const SELECTED_DEVICE: PrefKey = PrefKey::classified("selectedDevice");
 /// Settings > Chat: whether agents may read the code editor's open file and selection.
 pub const IDE_CONTEXT: PrefKey = PrefKey::classified("ideContext");
 /// Settings > Chat: whether sending a message scrolls the chat to the newest message (on when missing).
@@ -119,6 +122,7 @@ pub const GENERIC_ALLOWLIST: &[PrefKey] = &[
     MCP_ENABLED,
     DEVICE_RUN_FROM_OTHERS,
     DEVICE_HOUSEHOLD_RUN,
+    SELECTED_DEVICE,
     IDE_CONTEXT,
     SCROLL_ON_SEND,
     DOUBLE_SHIFT,
@@ -267,6 +271,20 @@ pub fn validate(key: PrefKey, value: &Value) -> Result<(), PrefError> {
                 why: "maps interface (11-20), response (11-24) and review (9-20) to whole sizes",
             }),
         },
+        "selectedDevice" => {
+            if value.is_null()
+                || value
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty() && s.len() <= 200)
+            {
+                Ok(())
+            } else {
+                Err(PrefError::Invalid {
+                    key: k,
+                    why: "must be null or a device id of 1 to 200 bytes",
+                })
+            }
+        }
         "sidebarWidth" => int_in(200, 4096, "must be 200 to 4096"),
         "inspectorWidth" => int_in(280, 4096, "must be 280 to 4096"),
         "terminalHeight" => int_in(80, 4096, "must be 80 to 4096"),
@@ -725,6 +743,8 @@ mod tests {
             ("sendShortcut", json!("enter"), json!("ctrl-enter")),
             ("nativeMcp", json!(false), json!("no")),
             ("mcpEnabled", json!(false), json!("no")),
+            ("selectedDevice", json!("dev-7"), json!(42)),
+            ("selectedDevice", Value::Null, json!("")),
             ("ideContext", json!(true), json!(1)),
             ("scrollOnSend", json!(false), json!("no")),
             ("doubleShift", json!(false), json!("no")),
