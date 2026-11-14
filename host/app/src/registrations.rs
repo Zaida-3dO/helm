@@ -25,6 +25,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_schedules::register_ops(reg);
     helm_workflow::register_ops(reg);
     helm_afk::register_ops(reg);
+    helm_gatekeeper::register_ops(reg);
     helm_governor::register_ops(reg);
     helm_localmodels::register_ops(reg);
     helm_relay::register_ops(reg);
@@ -58,6 +59,7 @@ pub fn migrations(reg: &mut MigrationRegistry) {
     helm_schedules::register_migrations(reg);
     helm_workflow::register_migrations(reg);
     helm_afk::register_migrations(reg);
+    helm_gatekeeper::register_migrations(reg);
     helm_governor::register_migrations(reg);
     helm_localmodels::register_migrations(reg);
     helm_waits::register_migrations(reg);
@@ -89,6 +91,8 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
 
     // After usage, which the governor reads.
     helm_afk::register_services(services, events);
+    // The question gate, installed on the chat runtime before any chat can raise a card.
+    helm_gatekeeper::register_services(services, events);
     helm_governor::register_services(services, events);
     helm_localmodels::register_services(services, events);
     helm_relay::register_services(services, events);

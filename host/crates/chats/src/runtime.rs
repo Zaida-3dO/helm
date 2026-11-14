@@ -750,6 +750,11 @@ impl ChatRuntime {
     pub fn clock(&self) -> &Arc<Clock> {
         &self.sh.clock
     }
+    /// The spawner this runtime runs its workers and helpers with, for the crate that runs
+    /// the gatekeeper helper (the gatekeeper itself never starts workers).
+    pub fn spawner(&self) -> Arc<dyn Spawner> {
+        self.sh.spawner.clone()
+    }
     pub fn limits(&self) -> &Limits {
         &self.sh.cfg.limits
     }

@@ -1,0 +1,23 @@
+[package]
+name = "helm-gatekeeper"
+description = "The question gatekeeper: every ask a chat raises is judged against a policy, decided when a reasonable default is safe, or rewritten in the user's terms and kept for them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+helm-core.workspace = true
+helm-ipc.workspace = true
+helm-chats.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true
+log.workspace = true
+tokio.workspace = true
+ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

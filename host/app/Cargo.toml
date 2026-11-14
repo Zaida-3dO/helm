@@ -38,6 +38,7 @@ helm-itemlinks = { path = "../crates/itemlinks" }
 helm-schedules = { path = "../crates/schedules" }
 helm-workflow = { path = "../crates/workflow" }
 helm-afk = { path = "../crates/afk" }
+helm-gatekeeper = { path = "../crates/gatekeeper" }
 helm-governor = { path = "../crates/governor" }
 helm-localmodels = { path = "../crates/localmodels" }
 helm-relay = { path = "../crates/relay" }

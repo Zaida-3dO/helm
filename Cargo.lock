@@ -1799,6 +1799,7 @@ dependencies = [
  "helm-core",
  "helm-devices",
  "helm-dictation",
+ "helm-gatekeeper",
  "helm-github",
  "helm-governor",
  "helm-hosttools",
@@ -1968,6 +1969,23 @@ dependencies = [
  "tempfile",
  "ts-rs",
  "ureq",
+ "uuid",
+]
+
+[[package]]
+name = "helm-gatekeeper"
+version = "2.0.0"
+dependencies = [
+ "helm-chats",
+ "helm-core",
+ "helm-ipc",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "ts-rs",
  "uuid",
 ]
 
