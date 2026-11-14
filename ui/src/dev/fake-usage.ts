@@ -1,7 +1,8 @@
 // The dev fake host's plan-usage ops (the top-bar meter and Settings → Usage in a plain browser).
 // fakeHost.ts registers it through `registerFakeOps`. `?usage=` in the page URL picks the state:
 // `live` (default), `stale`, `none` (nothing read yet), `unsupported` (the binary did not answer)
-// or `chat` (only a chat's rate-limit line has reported).
+// `nofigures` (the last read gave no figures; the older numbers stay, with their age) or `chat`
+// (only a chat's rate-limit line has reported).
 //
 // Dev builds only. fakeHost.ts imports this file, so this file only imports types from it.
 
@@ -10,11 +11,11 @@ import type { FeedbackEntryRow, FeedbackItemRow, FeedbackStatus, FeedbackThread 
 import type { CostReport, CostTotals, RequestModes, UsageSnapshot } from '../api/usage.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
 
-type Mode = 'live' | 'stale' | 'none' | 'unsupported' | 'chat';
+type Mode = 'live' | 'stale' | 'none' | 'unsupported' | 'chat' | 'nofigures';
 
 function modeOf(): Mode {
   const v = typeof location === 'undefined' ? '' : new URLSearchParams(location.search).get('usage');
-  return v === 'stale' || v === 'none' || v === 'unsupported' || v === 'chat' ? v : 'live';
+  return v === 'stale' || v === 'none' || v === 'unsupported' || v === 'chat' || v === 'nofigures' ? v : 'live';
 }
 
 const HOUR = 3_600_000;
@@ -24,7 +25,7 @@ export function usageFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   const t0 = Date.now();
   const snapshot = (): UsageSnapshot => {
     const now = Date.now();
-    const at = mode === 'stale' ? now - 40 * 60_000 : mode === 'chat' ? now - 2 * 60_000 : now - 30_000;
+    const at = mode === 'stale' ? now - 40 * 60_000 : mode === 'nofigures' ? now - 7 * 60_000 : mode === 'chat' ? now - 2 * 60_000 : now - 30_000;
     const source = mode === 'chat' ? ('rate_limit_event' as const) : ('control' as const);
     if (mode === 'none') {
       return { readiness: { state: 'inactive', reason: 'No plan usage has been read yet. Try Refresh', actionLabel: 'Open Settings → Usage', actionTarget: 'settings:usage' }, refreshing: false };
@@ -48,7 +49,9 @@ export function usageFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
       readiness:
         mode === 'chat'
           ? { state: 'ready', reason: 'This Claude Code version did not report plan usage; showing the last reading from a chat (Claude Code 1.0.0)', binaryVersion: '1.0.0' }
-          : { state: 'ready', reason: 'Plan usage is up to date.' },
+          : mode === 'nofigures'
+            ? { state: 'ready', reason: "Claude Code didn't return usage figures this time; showing the last numbers from 7 min ago." }
+            : { state: 'ready', reason: 'Plan usage is up to date.' },
       refreshing: false,
     };
   };

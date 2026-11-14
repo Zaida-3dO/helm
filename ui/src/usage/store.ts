@@ -1,12 +1,16 @@
 // The meter's UI store: holds the host's snapshot, applies the `plan_usage` event, and runs
-// the cadence. A read is asked for on start, every 10 minutes while the window is visible, and on
-// Refresh. The host enforces the 60 s floor; asking early just returns the current snapshot.
+// the cadence. A read is asked for on start, about every minute while the window is visible, on
+// becoming visible again when the numbers are over a minute old, and on Refresh. The host enforces
+// the 60 s floor; asking early just returns the current snapshot.
 
 import type { Api } from '../api/client.ts';
 import type { EventBus } from '../api/events.ts';
 import { usageOps, type UsageSnapshot } from '../api/usage.ts';
 
-export const POLL_MS = 10 * 60_000;
+/** A little over the host's 60 s floor, so each tick is allowed to start a read. */
+export const POLL_MS = 62_000;
+/** Coming back to a visible window refreshes at once when the newest number is older than this. */
+export const STALE_ON_SHOW_MS = 60_000;
 
 type Listener = () => void;
 
@@ -15,6 +19,9 @@ export interface UsageStoreDeps {
   bus: EventBus;
   /** Whether the window is visible now (document.visibilityState). */
   visible?: () => boolean;
+  /** Calls `f` whenever the window's visibility changes; returns the way to stop listening. */
+  onVisibility?: (f: () => void) => () => void;
+  now?: () => number;
   setInterval?: (f: () => void, ms: number) => unknown;
   clearInterval?: (h: unknown) => void;
 }
@@ -26,6 +33,7 @@ export class UsageStore {
   private readonly ops: ReturnType<typeof usageOps>;
   private readonly deps: UsageStoreDeps;
   private off: (() => void) | undefined;
+  private offVisibility: (() => void) | undefined;
   private timer: unknown;
   private started = false;
 
@@ -70,10 +78,17 @@ export class UsageStore {
     this.timer = every(() => {
       if (this.deps.visible?.() ?? true) void this.refresh();
     }, POLL_MS);
+    this.offVisibility = this.deps.onVisibility?.(() => {
+      if (!(this.deps.visible?.() ?? true)) return;
+      const at = this.snap?.reading?.fetchedAt;
+      if (at === undefined || (this.deps.now ?? Date.now)() - at > STALE_ON_SHOW_MS) void this.refresh();
+    });
   }
 
   stop(): void {
     this.off?.();
+    this.offVisibility?.();
+    this.offVisibility = undefined;
     if (this.timer !== undefined) (this.deps.clearInterval ?? ((h) => clearInterval(h as ReturnType<typeof setInterval>)))(this.timer);
     this.timer = undefined;
     this.started = false;
@@ -99,7 +114,16 @@ const stores = new WeakMap<Api, UsageStore>();
 export function usageStoreFor(api: Api, bus: EventBus): UsageStore {
   let s = stores.get(api);
   if (!s) {
-    s = new UsageStore({ api, bus, visible: () => typeof document === 'undefined' || document.visibilityState !== 'hidden' });
+    const doc = typeof document === 'undefined' ? undefined : document;
+    s = new UsageStore({
+      api,
+      bus,
+      visible: () => !doc || doc.visibilityState !== 'hidden',
+      onVisibility: (f) => {
+        doc?.addEventListener('visibilitychange', f);
+        return () => doc?.removeEventListener('visibilitychange', f);
+      },
+    });
     stores.set(api, s);
   }
   return s;

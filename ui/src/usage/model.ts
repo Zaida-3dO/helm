@@ -11,8 +11,10 @@ export interface BarModel {
   short: string;
   /** 0 to 100, or null when the binary gave a reset time and no number. */
   pct: number | null;
-  /** "56%", or "?" when there is no number. */
+  /** "56%", "≈56%" for a chat's estimate, or "—" when there is no number. */
   text: string;
+  /** The number is an estimate from a chat's report, not a Claude Code usage reading. */
+  estimate: boolean;
   /** Greyed: the reading is older than 15 minutes, or its window has already reset. */
   stale: boolean;
   tooltip: string;
@@ -55,6 +57,29 @@ export function expired(w: UsageWindow | { resetsAt?: number }, now: number): bo
   return typeof w.resetsAt === 'number' && w.resetsAt <= now;
 }
 
+/** What a window says when the binary gave a reset time but no number. */
+export const UNKNOWN_WINDOW = 'Usage unknown for this window';
+
+export const ESTIMATE_TITLE = 'Estimate from a chat’s report';
+
+type Numbered = { pct?: number | null; source: 'control' | 'rate_limit_event' };
+
+/** True when the window's number came from a chat's rate-limit message, not a usage reading. */
+export function isEstimate(w: Numbered): boolean {
+  return w.source === 'rate_limit_event' && typeof w.pct === 'number';
+}
+
+/** The window's number as shown: "56%", "≈56%" for an estimate, "—" for none. */
+export function windowText(w: Numbered): string {
+  return `${isEstimate(w) ? '≈' : ''}${percentText(w.pct)}`;
+}
+
+/** "Read 5 min ago from …", or the unknown line for a window with no number to date. */
+export function readLine(w: Numbered & { at: number }, now: number): string {
+  if (typeof w.pct !== 'number') return UNKNOWN_WINDOW;
+  return `Read ${asOf(w.at, now)} from ${sourceLabel(w.source)}${isEstimate(w) ? ' (an estimate)' : ''}`;
+}
+
 export function resetLine(w: { resetsAt?: number }, now: number): string {
   if (typeof w.resetsAt !== 'number') return 'Reset time unknown';
   return expired(w, now) ? 'Window has reset' : `Resets ${clock(w.resetsAt)} (${relativeFuture(w.resetsAt, now)})`;
@@ -71,12 +96,22 @@ export function bars(snap: UsageSnapshot | null, now: number): BarModel[] {
   const one = (id: BarId, label: string, short: string, w: UsageWindow | undefined): BarModel[] => {
     if (!w) return [];
     const stale = r.stale || expired(w, now);
-    const tooltip = [`${label}: ${percentText(w.pct)} used`, resetLine(w, now), `Read ${asOf(w.at, now)} from ${sourceLabel(w.source)}`, stale ? 'Out of date' : '']
-      .filter(Boolean)
-      .join('\n');
-    return [{ id, label, short, pct: w.pct ?? null, text: percentText(w.pct), stale, tooltip }];
+    const used = typeof w.pct === 'number' ? `${label}: ${windowText(w)} used` : `${label}: ${UNKNOWN_WINDOW.toLowerCase()}`;
+    const tooltip = [used, resetLine(w, now), typeof w.pct === 'number' ? readLine(w, now) : '', stale ? 'Out of date' : ''].filter(Boolean).join('\n');
+    return [{ id, label, short, pct: w.pct ?? null, text: windowText(w), estimate: isEstimate(w), stale, tooltip }];
   };
   return [...one('five_hour', '5-hour window', '5h', r.fiveHour), ...one('weekly', 'Weekly window', 'Wk', r.weekly)];
+}
+
+/**
+ * What to add under the bars when the last read did not go well but numbers are still held (no
+ * figures this time, a timeout…): the host's reason, which carries the numbers' age. Null when
+ * all is well.
+ */
+export function readNote(snap: UsageSnapshot | null): string | null {
+  if (!snap?.reading) return null;
+  const { state, reason } = snap.readiness;
+  return state === 'ready' && reason !== 'Plan usage is up to date.' ? reason : null;
 }
 
 /** The line the meter shows instead of bars when there is no reading: the readiness reason. */

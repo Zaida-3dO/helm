@@ -1,13 +1,16 @@
 //! The meter's host service: one place that holds the reading, runs the control reader at
 //! the allowed cadence and merges what chats report.
 //!
-//! - A read starts on launch, every 10 minutes while the window is visible, and on Refresh. The UI
-//!   asks (`usage_refresh`); the host enforces the floor: **never more often than once per 60 s**,
-//!   and never two at once.
+//! - A read starts on launch, about every minute while the window is visible, and on Refresh. The
+//!   UI asks (`usage_refresh`); the host enforces the floor: **never more often than once per
+//!   60 s**, and never two at once.
 //! - A cold first read can come back `no_limits` and then succeed seconds later (Claude Code
 //!   2.1.289), so a `no_limits` answer is re-read after 15 s and again after 60 s
-//!   ([`NO_LIMITS_RETRIES`]) instead of waiting for the UI's next 10-minute poll. These re-reads
-//!   are the host's own and do not move the floor's clock.
+//!   ([`NO_LIMITS_RETRIES`]) instead of waiting for the UI's next poll. These re-reads are the
+//!   host's own and do not move the floor's clock.
+//! - A `no_figures` answer (the binary has limits but gave no numbers this time) is not re-read
+//!   that way: the last numbers stay on show with their age, and the UI's next poll reads again.
+//!   After an hour of it the readiness line offers signing in again.
 //! - A read runs in a short-lived helper (`helpers/usage`) on a thread of its own; the op answers
 //!   at once and the result arrives as the `plan_usage` event.
 //! - Whatever the helper cannot read is a readiness state with a reason, never an error toast.
@@ -37,7 +40,7 @@ pub enum ControlAnswer {
         per_model: Vec<(String, Option<f64>, Option<i64>)>,
         version: Option<String>,
     },
-    /// `no_binary`, `unsupported`, `no_limits`, `timeout` or `error`.
+    /// `no_binary`, `unsupported`, `no_limits`, `no_figures`, `timeout` or `error`.
     Failed {
         reason: String,
         message: String,
@@ -130,6 +133,8 @@ struct State {
     failure: Option<(String, String)>,
     /// `no_limits` re-reads used since the last reading.
     no_limits_retries: usize,
+    /// When `no_figures` answers began, while they last; a reading or another failure clears it.
+    no_figures_since: Option<i64>,
     version: Option<String>,
 }
 
@@ -208,6 +213,7 @@ impl UsageService {
                     version,
                 } => {
                     st.failure = None;
+                    st.no_figures_since = None;
                     st.no_limits_retries = 0;
                     if version.is_some() {
                         st.version = version;
@@ -222,6 +228,11 @@ impl UsageService {
                 } => {
                     if version.is_some() {
                         st.version = version;
+                    }
+                    if reason == "no_figures" {
+                        st.no_figures_since.get_or_insert(now);
+                    } else {
+                        st.no_figures_since = None;
                     }
                     if reason == "no_limits" {
                         retry = self.retry_delays.get(st.no_limits_retries).copied();
@@ -336,9 +347,11 @@ fn snapshot_of(st: &State, now: i64) -> UsageSnapshot {
     let readiness = readiness(
         &st.failure,
         st.version.as_deref(),
-        reading.is_some(),
+        reading.as_ref().map(|r| r.fetched_at),
         st.running,
         st.last_attempt.is_some(),
+        st.no_figures_since,
+        now,
     );
     UsageSnapshot {
         reading,
@@ -350,15 +363,32 @@ fn snapshot_of(st: &State, now: i64) -> UsageSnapshot {
 
 const WHERE_TO_ACT: &str = "Open Settings → Usage";
 const ACT_TARGET: &str = "settings:usage";
+/// After this long of `no_figures` answers, the readiness line offers signing in again.
+const SIGN_IN_HINT_AFTER_MS: i64 = 60 * 60_000;
 
-/// The readiness rule: with no reading, say why and where to act.
+/// "less than a minute ago", "5 min ago", "2 h ago", "3 d ago".
+fn age_text(ms: i64) -> String {
+    let (min, hour, day) = (60_000, 3_600_000, 86_400_000);
+    match ms.max(0) {
+        d if d < min => "less than a minute ago".into(),
+        d if d < hour => format!("{} min ago", d / min),
+        d if d < day => format!("{} h ago", d / hour),
+        d => format!("{} d ago", d / day),
+    }
+}
+
+/// The readiness rule: with no reading, say why and where to act. `reading_at` is when the numbers
+/// held were read, if any are held.
 fn readiness(
     failure: &Option<(String, String)>,
     version: Option<&str>,
-    have_reading: bool,
+    reading_at: Option<i64>,
     running: bool,
     tried: bool,
+    no_figures_since: Option<i64>,
+    now: i64,
 ) -> UsageReadiness {
+    let have_reading = reading_at.is_some();
     let mk = |state, reason: String, act: bool| UsageReadiness {
         state,
         reason,
@@ -383,6 +413,31 @@ fn readiness(
                 "no_limits" => with_version(
                     "Claude Code reports no plan limits for this sign-in (an API key or another provider has none). The meter is off",
                 ),
+                "no_figures" => {
+                    let mut text = "Claude Code didn't return usage figures this time".to_owned();
+                    if let Some(at) = reading_at {
+                        text.push_str(&format!(
+                            "; showing the last numbers from {}",
+                            age_text(now - at)
+                        ));
+                    }
+                    text.push('.');
+                    let long = no_figures_since.is_some_and(|t| now - t > SIGN_IN_HINT_AFTER_MS);
+                    if long {
+                        text.push_str(" Signing in again may fix it.");
+                    }
+                    return UsageReadiness {
+                        state: if have_reading {
+                            ReadinessState::Ready
+                        } else {
+                            ReadinessState::Inactive
+                        },
+                        reason: text,
+                        action_label: long.then(|| "Sign in again".to_owned()),
+                        action_target: long.then(|| "signin".to_owned()),
+                        binary_version: version.map(str::to_owned),
+                    };
+                }
                 "timeout" => "Claude Code did not answer the usage request in time. Try Refresh".to_owned(),
                 _ => format!("Plan usage could not be read: {message}"),
             };
@@ -494,6 +549,14 @@ mod tests {
         }
     }
 
+    fn no_figures() -> ControlAnswer {
+        ControlAnswer::Failed {
+            reason: "no_figures".into(),
+            message: "The binary returned no usage figures this time".into(),
+            version: None,
+        }
+    }
+
     fn quick(svc: Arc<UsageService>) -> Arc<UsageService> {
         let d = std::time::Duration::from_millis(30);
         let svc = Arc::into_inner(svc).unwrap().with_retry_delays(vec![d, d]);
@@ -529,6 +592,43 @@ mod tests {
             3,
             "no fourth read on its own"
         );
+
+        // A `no_figures` answer keeps the last numbers and shows their age; it uses none of the
+        // `no_limits` re-reads, and an hour of it adds the sign-in offer. A reading clears all that.
+        let (svc, reader, _sink, _d) =
+            service(vec![reading(7.0), no_figures(), no_figures(), reading(8.0)]);
+        let budget = std::time::Duration::from_secs(1);
+        let pct = |s: &UsageSnapshot| s.reading.as_ref().unwrap().five_hour.as_ref().unwrap().pct;
+        svc.fresh_read(t0, budget);
+        let (snap, outcome) = svc.fresh_read(t0 + MIN_GAP_MS, budget);
+        assert_eq!(outcome, FreshOutcome::Failed);
+        assert_eq!(pct(&snap), Some(7.0), "the last numbers stay");
+        assert_eq!(snap.readiness.state, ReadinessState::Ready);
+        assert!(
+            snap.readiness
+                .reason
+                .contains("showing the last numbers from 1 min ago"),
+            "{}",
+            snap.readiness.reason
+        );
+        assert_eq!(snap.readiness.action_target, None, "no sign-in offer yet");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            reader.calls.load(Ordering::SeqCst),
+            2,
+            "no re-read of its own"
+        );
+        let later = t0 + MIN_GAP_MS + SIGN_IN_HINT_AFTER_MS + 1;
+        let (snap, _) = svc.fresh_read(later, budget);
+        assert!(snap
+            .readiness
+            .reason
+            .contains("Signing in again may fix it."));
+        assert!(snap.readiness.reason.contains("1 h ago"));
+        assert_eq!(snap.readiness.action_target.as_deref(), Some("signin"));
+        let (snap, _) = svc.fresh_read(later + MIN_GAP_MS, budget);
+        assert_eq!(pct(&snap), Some(8.0));
+        assert_eq!(snap.readiness.reason, "Plan usage is up to date.");
     }
 
     #[test]

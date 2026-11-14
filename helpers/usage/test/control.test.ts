@@ -89,6 +89,9 @@ test("a binary that refuses, exits or says nothing is reported, never thrown", a
   const none = scenario({ usage: { rate_limits_available: false } });
   const r4 = await readControlUsage({ command: none.command, commandArgs: none.commandArgs, timeoutMs: 10_000 });
   assert.ok(!r4.ok && r4.reason === "no_limits");
+  const empty = scenario({ usage: { subscription_type: "max", rate_limits_available: true, rate_limits: {} } });
+  const r5 = await readControlUsage({ command: empty.command, commandArgs: empty.commandArgs, timeoutMs: 10_000 });
+  assert.ok(!r5.ok && r5.reason === "no_figures");
   const missing = await readControlUsage({ command: path.join(os.tmpdir(), "no-such-claude-binary.exe"), timeoutMs: 5_000 });
   assert.ok(!missing.ok && missing.reason === "error");
 });
@@ -98,12 +101,22 @@ test("normalising: seconds, milliseconds and ISO strings all become milliseconds
   assert.equal(toMillis(1_792_296_000_000), 1_792_296_000_000);
   assert.equal(toMillis("2026-10-18T04:00:00Z"), Date.parse("2026-10-18T04:00:00Z"));
   assert.equal(toMillis("soon"), null);
-  assert.equal(normaliseControl({ rate_limits: {} }), null);
-  assert.equal(normaliseControl("nope"), null);
-  assert.equal(normaliseControl({ rate_limits_available: false, rate_limits: { five_hour: { utilization: 1 } } }), null);
+  // No limits at all, against limits that gave no figures this time.
+  const kinds: [unknown, string][] = [
+    [{ rate_limits: {} }, "no_limits"],
+    ["nope", "no_limits"],
+    [{ rate_limits_available: false, rate_limits: { five_hour: { utilization: 1 } } }, "no_limits"],
+    [{ subscription_type: "max", rate_limits_available: false, rate_limits: {} }, "no_limits"],
+    [{ rate_limits_available: true, rate_limits: null }, "no_figures"],
+    [{ subscription_type: "max", rate_limits_available: true, rate_limits: {} }, "no_figures"],
+    [{ subscription_type: "max", rate_limits: {} }, "no_figures"],
+    [BODY, "reading"],
+  ];
+  for (const [body, kind] of kinds) assert.equal(normaliseControl(body).kind, kind, JSON.stringify(body));
   const only = normaliseControl({ rate_limits: { five_hour: { utilization: null, resets_at: "2026-10-18T04:00:00Z" } } });
-  assert.deepEqual(only?.fiveHour, { pct: null, resetsAt: Date.parse("2026-10-18T04:00:00Z") });
-  assert.equal(only?.weekly, null);
+  assert.ok(only.kind === "reading");
+  assert.deepEqual(only.reading.fiveHour, { pct: null, resetsAt: Date.parse("2026-10-18T04:00:00Z") });
+  assert.equal(only.reading.weekly, null);
 });
 
 test("the helper's source never touches a credential store or the OAuth endpoints", () => {
