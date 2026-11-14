@@ -504,7 +504,7 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
 
     // Without the key Strata refuses; the picker still gets Ollama's models.
     let rows = r.svc().catalogue(true);
-    let names: Vec<&str> = rows.iter().map(|m| m.name.as_str()).collect();
+    let names: Vec<&str> = rows.iter().map(|m| m.model.as_str()).collect();
     assert_eq!(
         names,
         ["qwen3:8b", "llama3:latest"],
@@ -537,6 +537,52 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
         .contains("refused the key"));
     assert!(!view.servers[0].has_key);
 
+    // Names: a default from the model's own name, the user's own name over it, cleared by empty
+    // text, and a refused one changes nothing.
+    let id = "local/ollama/qwen3:8b".to_owned();
+    let names = |r: &Rig| -> Vec<String> {
+        r.svc()
+            .catalogue(false)
+            .into_iter()
+            .map(|m| m.name)
+            .collect()
+    };
+    assert_eq!(names(&r), ["Qwen 3 8B", "Llama 3"]);
+    assert_eq!(view.alias_max, 40);
+    assert_eq!(view.model_names[0].default_name, "Qwen 3 8B");
+    let alias = |text: &str| Changes {
+        aliases: Some([(id.clone(), text.to_owned())].into()),
+        ..Default::default()
+    };
+    let saved = r.svc().save(&alias("  My coder  ")).unwrap();
+    assert_eq!(saved.model_names[0].alias.as_deref(), Some("My coder"));
+    assert_eq!(names(&r), ["My coder", "Llama 3"]);
+    assert_eq!(
+        r.svc().catalogue(false)[0].model,
+        "qwen3:8b",
+        "the server's name stays"
+    );
+    for bad in [
+        "x".repeat(41),
+        "two
+lines"
+            .to_owned(),
+    ] {
+        assert!(r.svc().save(&alias(&bad)).is_err());
+    }
+    let elsewhere = Changes {
+        aliases: Some([("claude-opus".to_owned(), "No".to_owned())].into()),
+        ..Default::default()
+    };
+    assert!(
+        r.svc().save(&elsewhere).is_err(),
+        "only a local model can be named"
+    );
+    assert_eq!(names(&r)[0], "My coder");
+    let cleared = r.svc().save(&alias("")).unwrap();
+    assert_eq!(cleared.model_names[0].alias, None);
+    assert_eq!(names(&r), ["Qwen 3 8B", "Llama 3"]);
+
     // The key goes to Strata as a bearer token and to nobody else; no result carries it.
     r.svc().set_key("strata", &format!("  {KEY} ")).unwrap();
     assert!(r.svc().set_key("nope", "x").is_err());
@@ -556,7 +602,7 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
         (Some(262_144), Some(true), true),
         "a model that does not name its window takes the server's from /health"
     );
-    let small = rows.iter().find(|m| m.name == "qwen-small").unwrap();
+    let small = rows.iter().find(|m| m.model == "qwen-small").unwrap();
     assert_eq!(
         small.context_tokens,
         Some(131_072),
@@ -585,7 +631,7 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     // A server that stops answering stays listed, greyed, with a reason.
     r.svc().save(&servers(&s.base, &dead_url())).unwrap();
     let rows = r.svc().catalogue(true);
-    let gone = rows.iter().find(|m| m.name == "qwen3:8b").unwrap();
+    let gone = rows.iter().find(|m| m.model == "qwen3:8b").unwrap();
     assert!(!gone.reachable && gone.loaded.is_none());
     assert!(!gone.startable, "Ollama is never started by Helm");
     assert!(r.svc().view().servers[1]
@@ -601,7 +647,7 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     r.svc().save(&servers(&staged.base, &o.base)).unwrap();
     r.svc().set_key("strata", KEY).unwrap();
     let rows = r.svc().catalogue(true);
-    let q = rows.iter().find(|m| m.name == "qwen-flash").unwrap();
+    let q = rows.iter().find(|m| m.model == "qwen-flash").unwrap();
     assert!(!q.reachable && q.startable, "down, but it starts when used");
     let calls = r.starter.calls();
     assert_eq!(calls.len(), 1, "the refresh asked to start it once");
@@ -628,7 +674,7 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     si.preset = Some("Fast".into());
     r.svc().save(&tuned).unwrap();
     let rows = r.svc().catalogue(true);
-    let q = rows.iter().find(|m| m.name == "qwen-flash").unwrap();
+    let q = rows.iter().find(|m| m.model == "qwen-flash").unwrap();
     assert!(
         q.reachable && q.loaded == Some(false) && !q.startable,
         "started and answering, nothing loaded: {q:?}"
@@ -653,7 +699,7 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     no_start.servers.as_mut().unwrap()[0].auto_start = false;
     r.svc().save(&no_start).unwrap();
     let rows = r.svc().catalogue(true);
-    let gone = rows.iter().find(|m| m.name == "qwen-flash").unwrap();
+    let gone = rows.iter().find(|m| m.model == "qwen-flash").unwrap();
     assert!(!gone.reachable && !gone.startable);
     assert!(r.svc().view().servers[0]
         .note
@@ -1574,5 +1620,45 @@ fn a_game_on_the_list_locks_and_lifts_by_the_table() {
             .any(|n| me.starts_with(n.trim_end_matches(".exe"))),
         "{me} not among {} processes",
         names.len()
+    );
+}
+
+#[test]
+fn a_models_default_name_drops_what_does_not_tell_it_apart() {
+    use crate::names::{default_alias, default_aliases};
+    for (raw, want) in [
+        ("qwen3.8-flash-next-iq3_s", "Qwen 3.8"),
+        ("qwen3:32b", "Qwen 3 32B"),
+        ("qwen3:8b-instruct-q4_K_M", "Qwen 3 8B"),
+        ("llama3.2:latest", "Llama 3.2"),
+        ("hf.co/org/llama:3b", "Llama 3B"),
+        ("llama-3.1-8b-instruct-q8_0.gguf", "Llama 3.1 8B"),
+        ("gpt-oss-20b", "Gpt 20B"),
+        ("gemma-3-27b-it-q4-k-m", "Gemma 3 27B"),
+        ("mistral", "Mistral"),
+        ("12345", "12345"),
+        ("", ""),
+    ] {
+        assert_eq!(default_alias(raw), want, "{raw}");
+    }
+    // Names that come out the same take their model's next distinguishing word, one at a time.
+    assert_eq!(
+        default_aliases(&[
+            "qwen3.8-flash-next-iq3_s",
+            "qwen3.8-coder-iq3_s",
+            "qwen3.8-flash-iq3_s",
+            "llama3:latest",
+        ]),
+        [
+            "Qwen 3.8 Flash Next",
+            "Qwen 3.8 Coder",
+            "Qwen 3.8 Flash",
+            "Llama 3"
+        ],
+    );
+    // The same model on two servers cannot be told apart by its name, and does not loop.
+    assert_eq!(
+        default_aliases(&["qwen3:8b", "qwen3:8b"]),
+        ["Qwen 3 8B", "Qwen 3 8B"]
     );
 }

@@ -16,6 +16,23 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 const MARKER: &str = ".complete";
+/// Written beside the staged `src`, so Node reads the worker's files as ES modules from the start.
+/// Without it Node walks up to whatever `package.json` it finds above the profile (one in the
+/// user's home folder, say), and if that one has no `"type"` it warns at every start and parses
+/// every file twice.
+const PACKAGE_JSON: &str = "package.json";
+const PACKAGE_TEXT: &str = "{\"type\":\"module\"}\n";
+
+/// Give a staged copy its `package.json` if it has none (copies staged by older builds). Best
+/// effort: without it the worker still runs, only with the warning.
+fn ensure_package_json(dest: &Path) {
+    let p = dest.join(PACKAGE_JSON);
+    if !p.is_file() {
+        if let Err(e) = std::fs::write(&p, PACKAGE_TEXT) {
+            log::warn!("could not write {}: {e}", p.display());
+        }
+    }
+}
 
 /// Every regular file under `root`, as sorted relative paths with `/` separators.
 fn list_files(root: &Path) -> io::Result<Vec<String>> {
@@ -70,6 +87,7 @@ pub fn stage_worker(source: &Path, runtime_root: &Path) -> io::Result<PathBuf> {
     let dest = base.join(&hash);
     let main = dest.join("src").join("main.ts");
     if dest.join(MARKER).is_file() && main.is_file() {
+        ensure_package_json(&dest);
         return Ok(main);
     }
     helm_core::privfs::create_private_dir_all(&base)?;
@@ -82,6 +100,7 @@ pub fn stage_worker(source: &Path, runtime_root: &Path) -> io::Result<PathBuf> {
             }
             std::fs::copy(source.join(&rel), &to)?;
         }
+        std::fs::write(temp.join(PACKAGE_JSON), PACKAGE_TEXT)?;
         std::fs::write(temp.join(MARKER), hash.as_bytes())
     })();
     if let Err(e) = copy {
@@ -92,6 +111,7 @@ pub fn stage_worker(source: &Path, runtime_root: &Path) -> io::Result<PathBuf> {
         // Another launch finished staging the same hash meanwhile: use its copy, never delete it
         // (a worker may already be loading files from it).
         let _ = std::fs::remove_dir_all(&temp);
+        ensure_package_json(&dest);
         return Ok(main);
     }
     if dest.exists() {
@@ -103,6 +123,7 @@ pub fn stage_worker(source: &Path, runtime_root: &Path) -> io::Result<PathBuf> {
         Err(_) if dest.join(MARKER).is_file() => {
             // Another launch staged the same hash first.
             let _ = std::fs::remove_dir_all(&temp);
+            ensure_package_json(&dest);
         }
         Err(e) => {
             let _ = std::fs::remove_dir_all(&temp);
@@ -170,8 +191,17 @@ mod tests {
             std::fs::read_to_string(staged.join("protocol/lines.ts")).unwrap(),
             "lines"
         );
-        // Same content: same folder, not re-copied.
+        // A package.json beside `src` makes the files ES modules, so Node never looks above it.
+        let package = staged.parent().unwrap().join("package.json");
+        assert_eq!(
+            std::fs::read_to_string(&package).unwrap(),
+            "{\"type\":\"module\"}\n"
+        );
+        // Same content: same folder, not re-copied; a copy staged before package.json was
+        // written (an older build's) gets one in place.
+        std::fs::remove_file(&package).unwrap();
         assert_eq!(stage_worker(src.path(), rt.path()).unwrap(), main);
+        assert!(package.is_file());
         // Changed content: a new folder.
         std::fs::write(src.path().join("protocol/lines.ts"), "lines v2").unwrap();
         let main2 = stage_worker(src.path(), rt.path()).unwrap();

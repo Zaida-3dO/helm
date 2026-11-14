@@ -8,6 +8,10 @@ use rusqlite::{params, OptionalExtension, Transaction};
 /// A reading is stale after 15 minutes.
 pub const STALE_AFTER_MS: i64 = 15 * 60_000;
 
+/// A number the control read gave is not replaced by a chat's estimate for the same window while it
+/// is this young: the chat's line is a guess from its own traffic, the control read is the figure.
+pub const CONTROL_HOLD_MS: i64 = 15 * 60_000;
+
 /// Reset times of one window drift by milliseconds between reads; this is "the same window".
 const SAME_WINDOW_MS: i64 = 5 * 60_000;
 
@@ -66,12 +70,22 @@ pub fn merge_window(old: Option<&UsageWindow>, new: UsageWindow) -> UsageWindow 
     if new.at < o.at {
         return o.clone();
     }
-    // A chat's rate-limit line often carries a reset time but no number. It must not wipe a
-    // number we hold for the same window; a different reset time is a new window, so it replaces.
+    // A reading with a reset time but no number (a chat's rate-limit line, or a control read that
+    // came back without figures) must not wipe a number we hold for the same window, and must not
+    // make it look newer than it is: the number keeps the time it was read. A different reset time
+    // is a new window, so it replaces.
     if new.pct.is_none() && o.pct.is_some() && same_window(o.resets_at, new.resets_at) {
-        let mut kept = o.clone();
-        kept.at = new.at.max(o.at);
-        return kept;
+        return o.clone();
+    }
+    // A chat's estimate does not replace a control number that is still fresh. After that it may
+    // (the number then shows as an estimate), and a new window always does.
+    if new.source == UsageSource::RateLimitEvent
+        && o.source == UsageSource::Control
+        && o.pct.is_some()
+        && new.at - o.at < CONTROL_HOLD_MS
+        && same_window(o.resets_at, new.resets_at)
+    {
+        return o.clone();
     }
     new
 }
@@ -100,15 +114,34 @@ pub fn apply_control(
     if let Some(w) = weekly {
         s.weekly = Some(merge_window(s.weekly.as_ref(), win(w)));
     }
-    // The control answer lists every per-model window the plan has, so it replaces the list.
+    // The control answer lists every per-model window the plan has, so it replaces the list; a
+    // window it gives no number for keeps the number held for the same model.
+    let held = std::mem::take(&mut s.per_model);
     s.per_model = per_model
         .into_iter()
-        .map(|(model, pct, resets_at)| ModelUsage {
-            model,
-            pct,
-            resets_at,
-            at,
-            source: UsageSource::Control,
+        .map(|(model, pct, resets_at)| {
+            let prev = held.iter().find(|m| m.model == model).map(|m| UsageWindow {
+                pct: m.pct,
+                resets_at: m.resets_at,
+                at: m.at,
+                source: m.source,
+            });
+            let kept = merge_window(
+                prev.as_ref(),
+                UsageWindow {
+                    pct,
+                    resets_at,
+                    at,
+                    source: UsageSource::Control,
+                },
+            );
+            ModelUsage {
+                model,
+                pct: kept.pct,
+                resets_at: kept.resets_at,
+                at: kept.at,
+                source: kept.source,
+            }
         })
         .collect();
 }
@@ -210,12 +243,7 @@ mod tests {
     #[test]
     fn newer_wins_per_window_and_older_never_overwrites() {
         let old = w(Some(10.0), Some(1_000_000), 100, UsageSource::Control);
-        let newer = w(
-            Some(20.0),
-            Some(1_000_000),
-            200,
-            UsageSource::RateLimitEvent,
-        );
+        let newer = w(Some(20.0), Some(1_000_000), 200, UsageSource::Control);
         assert_eq!(merge_window(Some(&old), newer.clone()).pct, Some(20.0));
         let older = w(Some(5.0), Some(1_000_000), 50, UsageSource::RateLimitEvent);
         assert_eq!(merge_window(Some(&old), older).pct, Some(10.0));
@@ -233,6 +261,7 @@ mod tests {
             UsageSource::Control,
             "the number is still the control's"
         );
+        assert_eq!(kept.at, 100, "the number keeps the time it was read");
         // A reset time an hour later is a new window: the old number no longer applies.
         let fresh = w(
             None,
@@ -241,6 +270,87 @@ mod tests {
             UsageSource::RateLimitEvent,
         );
         assert_eq!(merge_window(Some(&old), fresh).pct, None);
+    }
+
+    /// A chat's estimate does not replace a control number under 15 minutes old for the same
+    /// window, and does after; a new window and a control read always replace.
+    #[test]
+    fn a_chats_estimate_waits_out_a_fresh_control_number() {
+        let old = w(Some(10.0), Some(1_000_000), 100, UsageSource::Control);
+        let est = |pct, resets, at| w(Some(pct), Some(resets), at, UsageSource::RateLimitEvent);
+        let held = merge_window(Some(&old), est(30.0, 1_000_400, 100 + CONTROL_HOLD_MS - 1));
+        assert_eq!(
+            (held.pct, held.source, held.at),
+            (Some(10.0), UsageSource::Control, 100)
+        );
+        let after = merge_window(Some(&old), est(30.0, 1_000_400, 100 + CONTROL_HOLD_MS));
+        assert_eq!(
+            (after.pct, after.source),
+            (Some(30.0), UsageSource::RateLimitEvent)
+        );
+        let fresh_window = merge_window(Some(&old), est(2.0, 1_000_000 + 3_600_000, 200));
+        assert_eq!(fresh_window.pct, Some(2.0), "a new window replaces at once");
+        let control = w(Some(12.0), Some(1_000_000), 300, UsageSource::Control);
+        assert_eq!(merge_window(Some(&old), control).pct, Some(12.0));
+        // The same through the store: the pill and the summary both read these numbers.
+        let mut s = StoredUsage::default();
+        apply_control(
+            &mut s,
+            None,
+            Some((Some(10.0), Some(1_000_000))),
+            None,
+            vec![],
+            100,
+        );
+        let line = || {
+            [Passive {
+                kind: "five_hour".into(),
+                pct: Some(30.0),
+                resets_at: Some(1_000_000),
+            }]
+        };
+        assert!(
+            !apply_passive(&mut s, &line(), 200),
+            "nothing changed, so nothing is signalled"
+        );
+        assert_eq!(reading(&s, 300).unwrap().five_hour.unwrap().pct, Some(10.0));
+        let at = 100 + CONTROL_HOLD_MS;
+        assert!(apply_passive(&mut s, &line(), at));
+        assert_eq!(reading(&s, at).unwrap().five_hour.unwrap().pct, Some(30.0));
+    }
+
+    #[test]
+    fn a_control_read_without_numbers_keeps_the_old_ones_and_their_time() {
+        let mut s = StoredUsage::default();
+        apply_control(
+            &mut s,
+            None,
+            Some((Some(10.0), Some(1_000_000))),
+            None,
+            vec![("Fable".into(), Some(3.0), Some(20))],
+            100,
+        );
+        apply_control(
+            &mut s,
+            None,
+            Some((None, Some(1_000_100))),
+            None,
+            vec![("Fable".into(), None, Some(20))],
+            500,
+        );
+        let five = s.five_hour.clone().unwrap();
+        assert_eq!((five.pct, five.at), (Some(10.0), 100));
+        assert_eq!((s.per_model[0].pct, s.per_model[0].at), (Some(3.0), 100));
+        // A window that is new (a later reset) with no number stays unknown.
+        apply_control(
+            &mut s,
+            None,
+            Some((None, Some(9_000_000))),
+            None,
+            vec![],
+            600,
+        );
+        assert_eq!(s.five_hour.unwrap().pct, None);
     }
 
     #[test]

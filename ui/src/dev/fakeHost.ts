@@ -120,6 +120,8 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
   let sendBehavior: SendBehavior = { ...HOME_SEND_BEHAVIOR };
   const prefs = new Map<string, unknown>();
   const answers = new Map<string, (a: Record<string, unknown>) => void>();
+  /** forkId → the chat that fork made, so a repeated request answers the same chat. */
+  const forks = new Map<string, string>();
 
   const rev = () => ++revision;
   const now = () => Date.now();
@@ -637,6 +639,44 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
       // The board it asked for: the projects fake shows it there (without one it picks the board itself).
       if (typeof a.boardId === 'string') fakeOpFor('chat_organize')?.('chat_organize', { chatId: chat.id, groupProjectId: a.boardId }, { emit, call: (o, x = {}) => ops[o]?.(x) });
       return chat;
+    },
+    // As the host: a copy of the chat (whole, or up to a reply) titled "Fork · <source>"; a side chat
+    // starts from a quoted excerpt and stays out of the list. A repeat of one forkId answers the same fork.
+    chat_fork: (a) => {
+      const src = find(a.chatId);
+      remoteGuard(src);
+      const known = forks.get(String(a.forkId));
+      if (known) return chats.get(known)!.chat;
+      const side = a.side === true;
+      const excerpt = typeof a.excerpt === 'string' ? a.excerpt : '';
+      if (side && (excerpt.trim() === '' || excerpt.length > 16000)) throw { code: 'bad_args', message: 'A side chat needs an excerpt of 1 to 16,000 characters.' };
+      let rows = src.rows;
+      if (typeof a.messageId === 'number') {
+        const at = rows.findIndex((r) => r.id === a.messageId);
+        if (at < 0) throw { code: 'not_found', message: 'No such message.' };
+        rows = rows.slice(0, at + 1);
+      }
+      const c = newChat(src.chat.cwd, src.chat.model ?? undefined, src.chat.effort ?? undefined);
+      const base = src.chat.title.replace(/^(?:Fork|Side chat) · /, '').trim() || 'New chat';
+      const quoted = excerpt.split('\n').map((l) => (l ? `> ${l}` : '>')).join('\n');
+      const draft = side ? `Regarding this excerpt:\n\n${quoted}\n\n` : typeof a.messageId === 'number' ? '' : src.chat.draft;
+      c.chat = { ...c.chat, projectId: src.chat.projectId, title: `${side ? 'Side chat' : 'Fork'} · ${base}`, titleState: 'generated', draft, sideSourceId: side ? src.chat.id : null, started: false };
+      c.rows = rows.map((r) => {
+        const id = rowId++;
+        return { ...r, id, chatId: c.chat.id, sourceKey: `${r.sourceKey}-fork-${id}`, sequence: id, revision: rev() };
+      });
+      forks.set(String(a.forkId), c.chat.id);
+      emitChat(c);
+      // A fork is shown on its source's board (a side chat is not shown in the sidebar at all).
+      if (!side) {
+        const ctx = { emit, call: (o: string, x: Record<string, unknown> = {}) => ops[o]?.(x) };
+        const [from] = (fakeOpFor('sidebar_rows')?.('sidebar_rows', { chatIds: [src.chat.id] }, ctx) as { groupProjectId: string }[] | undefined) ?? [];
+        if (from) fakeOpFor('chat_organize')?.('chat_organize', { chatId: c.chat.id, groupProjectId: from.groupProjectId }, ctx);
+        emit({ kind: 'sidebar', chatIds: [c.chat.id] });
+        // The profiles fake reads the new chat's owner the next time it is asked.
+        emit({ kind: 'profiles_changed' });
+      }
+      return c.chat;
     },
     chat_list: () => [...chats.values()].map((c) => c.chat).filter((c) => !c.archived && !c.sideSourceId && !c.hostDeviceId).sort((x, y) => y.createdAt - x.createdAt),
     chat_get: (a) => {

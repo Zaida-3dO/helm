@@ -10,7 +10,9 @@
 //!   not repeat anything that may already have happened, then carry on. That is the same wording
 //!   discipline as the restart continuation. It is sent at most [`MAX_ATTEMPTS`] times for one
 //!   run of failures, never to a chat the user stopped, archived or wrote to since, and never to
-//!   a chat on a local model server (its outages are not the internet's).
+//!   a chat on a local model server (its outages are not the internet's). A turn whose worker
+//!   died under it (an end Helm did not ask for, see [`crate::exits`]) is carried on the same
+//!   way, local model chats included, and a chat Helm gives up on gets one attention flag.
 //! - **Probe.** Whether the connection is back is read by opening (and at once closing) a plain
 //!   TCP connection to Claude's API host: no request is made and no credential is involved. It
 //!   only runs while a chat is working or waiting to be continued.
@@ -19,6 +21,7 @@
 //! database, the probe and the system's sleep and wake notices, and carries out what it decides.
 
 use crate::actor::Cmd;
+use crate::exits::Crash;
 use crate::runtime::ChatRuntime;
 use crate::session_log::{self, RowWrite};
 use crate::submit::{insert_submission, NewSubmission};
@@ -48,6 +51,10 @@ pub const MAX_ATTEMPTS: u32 = 3;
 const CONNECTION_SETTLE_MS: i64 = 20_000;
 /// After a service error, wait this long before the first, second and third continuation.
 const SERVICE_WAIT_MS: [i64; 3] = [2 * 60_000, 5 * 60_000, 15 * 60_000];
+/// After a worker crash, wait this long before the first, second and third continuation.
+const WORKER_EXIT_WAIT_MS: [i64; 3] = [30_000, 2 * 60_000, 10 * 60_000];
+/// Chats whose workers crashed together are continued this far apart, in the order they stopped.
+pub const WORKER_EXIT_STAGGER_MS: i64 = 10_000;
 /// After sending one, do not send another for this long even if the chat is still stopped.
 const AFTER_SEND_MS: i64 = 10 * 60_000;
 
@@ -56,6 +63,17 @@ pub const OUTAGE_CONTINUATION_TEXT: &str = "Your last turn was cut short because
 or the service failed, not because of anything you did. Before you carry on, check the current \
 state (files, branches, running processes and any command you had started) and do not repeat an \
 action that may already have completed. Then continue the task.";
+
+/// The fixed prompt for a chat whose turn ended because its worker stopped unexpectedly.
+pub const WORKER_EXIT_CONTINUATION_TEXT: &str = "Your last turn was cut short because Helm's \
+worker process stopped unexpectedly, not because of anything you did. Before you carry on, check \
+the current state (files, branches, running processes and any command you had started) and do \
+not repeat an action that may already have completed. Then continue the task.";
+
+/// The attention flag left on a chat whose worker kept stopping.
+pub const WORKER_EXIT_FLAG_QUESTION: &str = "Helm asked Claude to carry on three times after its \
+worker stopped, and it stopped again. Look at the chat and send a message when you want it to go \
+on.";
 
 /// The line left when Helm has stopped trying.
 pub const GAVE_UP_TEXT: &str = "Helm asked Claude to carry on three times and it stopped again. \
@@ -68,6 +86,17 @@ pub enum Cause {
     Connection,
     /// The service answered with a failure (overloaded, unavailable, a server error).
     Service,
+    /// The chat's worker ended mid-turn without Helm asking it to.
+    WorkerExit,
+}
+
+impl Cause {
+    fn continuation_text(self) -> &'static str {
+        match self {
+            Self::Connection | Self::Service => OUTAGE_CONTINUATION_TEXT,
+            Self::WorkerExit => WORKER_EXIT_CONTINUATION_TEXT,
+        }
+    }
 }
 
 /// Read a turn's error text. `None` for everything that is not an outage (a usage limit, a
@@ -134,6 +163,9 @@ fn wait_before_try(cause: Cause, attempts: u32) -> i64 {
     match cause {
         Cause::Connection => CONNECTION_SETTLE_MS,
         Cause::Service => SERVICE_WAIT_MS[(attempts as usize).min(SERVICE_WAIT_MS.len() - 1)],
+        Cause::WorkerExit => {
+            WORKER_EXIT_WAIT_MS[(attempts as usize).min(WORKER_EXIT_WAIT_MS.len() - 1)]
+        }
     }
 }
 
@@ -184,6 +216,7 @@ pub(crate) struct Due {
     /// The `updated_at` the stop was seen at: the send is refused if the chat has moved on.
     pub stamp: i64,
     pub attempt: u32,
+    pub cause: Cause,
 }
 
 #[derive(Debug)]
@@ -287,13 +320,32 @@ impl Outages {
 
     /// A chat is stopped by an outage, as of `stamp`.
     pub fn note_stopped(&mut self, now: i64, chat_id: &str, stamp: i64, cause: Cause) {
+        self.note_stopped_later(now, chat_id, stamp, cause, 0);
+    }
+
+    /// As [`Self::note_stopped`], with `extra` ms added to the wait (to spread out chats that
+    /// stopped together).
+    pub fn note_stopped_later(
+        &mut self,
+        now: i64,
+        chat_id: &str,
+        stamp: i64,
+        cause: Cause,
+        extra: i64,
+    ) {
         match self.stopped.get_mut(chat_id) {
             Some(s) if s.stamp == stamp => s.stopped_now = true,
             Some(s) => {
                 // Stopped again since the last look (or since it was continued).
                 s.stamp = stamp;
                 s.cause = cause;
-                s.next_at = now + wait_before_try(cause, s.attempts);
+                // A crash with no try left is given up on at this look: there is nothing to wait
+                // for, and the attention flag should not come minutes after the crash.
+                s.next_at = if cause == Cause::WorkerExit && s.attempts >= MAX_ATTEMPTS {
+                    now
+                } else {
+                    now + wait_before_try(cause, s.attempts) + extra
+                };
                 s.gave_up = false;
                 s.stopped_now = true;
             }
@@ -304,7 +356,7 @@ impl Outages {
                         stamp,
                         cause,
                         attempts: 0,
-                        next_at: now + wait_before_try(cause, 0),
+                        next_at: now + wait_before_try(cause, 0) + extra,
                         gave_up: false,
                         stopped_now: true,
                     },
@@ -327,7 +379,7 @@ impl Outages {
                 && !s.gave_up
                 && s.attempts < MAX_ATTEMPTS
                 && now >= s.next_at
-                && (s.cause == Cause::Service || online);
+                && (s.cause != Cause::Connection || online);
             if ready {
                 s.attempts += 1;
                 s.next_at = now + AFTER_SEND_MS;
@@ -335,6 +387,7 @@ impl Outages {
                     chat_id: id.clone(),
                     stamp: s.stamp,
                     attempt: s.attempts,
+                    cause: s.cause,
                 });
             }
         }
@@ -342,16 +395,17 @@ impl Outages {
         out
     }
 
-    /// Chats that stopped again after their last allowed continuation: they get one closing line.
-    pub fn give_up(&mut self, now: i64) -> Vec<String> {
+    /// Chats that stopped again after their last allowed continuation: they get one closing line
+    /// (and, after worker crashes, one attention flag), once per run of failures.
+    pub fn give_up(&mut self, now: i64) -> Vec<(String, Cause)> {
         let mut out = Vec::new();
         for (id, s) in self.stopped.iter_mut() {
             if s.stopped_now && !s.gave_up && s.attempts >= MAX_ATTEMPTS && now >= s.next_at {
                 s.gave_up = true;
-                out.push(id.clone());
+                out.push((id.clone(), s.cause));
             }
         }
-        out.sort();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
         out
     }
 }
@@ -397,15 +451,21 @@ const RUN_STAMP: &str = "COALESCE(
      LIMIT 1),
     c.updated_at)";
 
+/// `crashes`: the chats whose worker died mid-turn, with that turn's run. A chat is read as stopped
+/// by that crash only while that run is still its latest.
 fn read_look(
     db: &helm_core::db::Database,
     tracked: &[String],
     since: i64,
+    crashes: &HashMap<String, Crash>,
 ) -> rusqlite::Result<Look> {
     db.snapshot(|tx| {
         let mut look = Look::default();
         let mut st = tx.prepare(&format!(
-            "SELECT c.id, c.status, c.error, {RUN_STAMP}, c.provider, c.draft FROM chats c
+            "SELECT c.id, c.status, c.error, {RUN_STAMP}, c.provider, c.draft,
+                    (SELECT r.id FROM runs r WHERE r.chat_id = c.id
+                     ORDER BY r.started_at DESC, r.rowid DESC LIMIT 1)
+             FROM chats c
              WHERE c.archived = 0
                AND (c.status IN ('starting', 'running')
                     OR (c.status = 'interrupted'
@@ -421,18 +481,30 @@ fn read_look(
                 r.get::<_, i64>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<String>>(6)?,
             ))
         })?;
         for row in rows {
-            let (id, status, error, stamp, provider, draft) = row?;
-            // A chat on a local model server does not depend on the internet.
-            if provider.is_some_and(|p| !p.is_empty()) {
+            let (id, status, error, stamp, provider, draft, run) = row?;
+            let crashed = status == "interrupted"
+                && run.is_some_and(|r| crashes.get(&id).is_some_and(|c| c.run_id == r));
+            // A chat on a local model server does not depend on the internet: only its worker
+            // dying mid-turn is carried on.
+            let local = provider.is_some_and(|p| !p.is_empty());
+            if local && !crashed {
                 continue;
             }
             if status == "interrupted" {
                 // A chat the user is writing in is theirs to carry on.
                 let typing = draft.is_some_and(|d| !d.trim().is_empty());
-                let cause = error.as_deref().and_then(classify).filter(|_| !typing);
+                let outage = if local {
+                    None
+                } else {
+                    error.as_deref().and_then(classify)
+                };
+                let cause = outage
+                    .or(crashed.then_some(Cause::WorkerExit))
+                    .filter(|_| !typing);
                 look.interrupted.push((id, stamp, cause));
             } else {
                 look.working.push(id);
@@ -482,7 +554,7 @@ fn send_continuation(rt: &ChatRuntime, due: &Due) -> Result<bool, ApiError> {
                 &NewSubmission {
                     id: &sid,
                     chat_id: &due.chat_id,
-                    text: OUTAGE_CONTINUATION_TEXT,
+                    text: due.cause.continuation_text(),
                     mode: SubmissionMode::Prompt,
                     state: SubmissionState::Saved,
                     origin: SubmissionOrigin::App,
@@ -520,6 +592,40 @@ fn send_continuation(rt: &ChatRuntime, due: &Due) -> Result<bool, ApiError> {
         rt.command(&due.chat_id, Cmd::Dispatch(sid))?;
     }
     Ok(sent)
+}
+
+/// Carry on turns whose worker died under them. Off: such chats are left interrupted with their
+/// reason, as before (the exit is still logged and explained).
+const RESUME_AFTER_WORKER_EXIT: bool = true;
+
+/// File the one attention flag for a chat Helm stopped carrying on after worker crashes. Its
+/// reason is the chat's own error line. A muted chat's flag is kept in the Muted group.
+fn flag_gave_up(rt: &ChatRuntime, chat_id: &str, now: i64) -> rusqlite::Result<()> {
+    let filed = rt.db().write(|tx| {
+        let error: Option<String> = tx
+            .query_row("SELECT error FROM chats WHERE id = ?1", [chat_id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten();
+        let reason: String = error
+            .unwrap_or_else(|| "The worker stopped.".to_owned())
+            .chars()
+            .take(240)
+            .collect();
+        crate::flags::file(
+            tx,
+            chat_id,
+            WORKER_EXIT_FLAG_QUESTION,
+            &reason,
+            "normal",
+            now,
+        )
+    })?;
+    if filed.is_some_and(|f| f != crate::flags::Filed::Duplicate) {
+        rt.publish_attention();
+    }
+    Ok(())
 }
 
 /// Watches for outages and sleep on behalf of the chats. Created once by the app; the system's
@@ -598,15 +704,29 @@ impl OutageWatch {
 
     /// One look: read the chats, probe if there is a reason, then do what the state machine says.
     async fn look(self: &Arc<Self>) {
+        self.look_at(helm_core::now_ms()).await
+    }
+
+    /// One look, as of `now` (tests pass a later time to skip a wait).
+    pub(crate) async fn look_at(self: &Arc<Self>, now: i64) {
         let tracked = self.state.lock().unwrap().tracked();
         let rt = self.rt.clone();
-        let since = helm_core::now_ms() - RECENT_MS;
-        let look =
-            match tokio::task::spawn_blocking(move || read_look(rt.db(), &tracked, since)).await {
-                Ok(Ok(l)) => l,
-                Ok(Err(e)) => return log::warn!("outage watch could not read the chats: {e}"),
-                Err(_) => return,
-            };
+        let since = now - RECENT_MS;
+        let crashes = if RESUME_AFTER_WORKER_EXIT {
+            self.rt.sh.exits.recent_crashes(now)
+        } else {
+            HashMap::new()
+        };
+        let seen = crashes.clone();
+        let look = match tokio::task::spawn_blocking(move || {
+            read_look(rt.db(), &tracked, since, &crashes)
+        })
+        .await
+        {
+            Ok(Ok(l)) => l,
+            Ok(Err(e)) => return log::warn!("outage watch could not read the chats: {e}"),
+            Err(_) => return,
+        };
         let probe_now = {
             let mut t = self.state.lock().unwrap();
             t.begin_look();
@@ -617,13 +737,29 @@ impl OutageWatch {
         } else {
             None
         };
-        let now = helm_core::now_ms();
         let (marker, due, gave_up) = {
             let mut t = self.state.lock().unwrap();
             for (id, stamp, cause) in &look.interrupted {
-                match cause {
-                    Some(c) => t.note_stopped(now, id, *stamp, *c),
-                    None => t.forget(id),
+                match (cause, seen.get(id)) {
+                    // Counted from the crash itself, and spread out across the chats that
+                    // crashed together.
+                    (Some(Cause::WorkerExit), Some(c)) => t.note_stopped_later(
+                        now,
+                        id,
+                        *stamp,
+                        Cause::WorkerExit,
+                        (c.at_ms - now) + i64::from(c.order) * WORKER_EXIT_STAGGER_MS,
+                    ),
+                    (Some(c), _) => t.note_stopped(now, id, *stamp, *c),
+                    (None, crash) => {
+                        t.forget(id);
+                        // A remembered crash that is not carried on (the user is writing in the
+                        // chat, or a newer run replaced it) is done with: clearing that draft
+                        // later must not bring a resume back.
+                        if crash.is_some() {
+                            self.rt.sh.exits.forget(id);
+                        }
+                    }
                 }
             }
             for (id, status) in &look.status {
@@ -646,9 +782,16 @@ impl OutageWatch {
                 Err(_) => {}
             }
         }
-        for id in gave_up {
+        for (id, cause) in gave_up {
             self.rt
                 .add_context_row(&id, ContextKind::Interruption, GAVE_UP_TEXT);
+            if cause == Cause::WorkerExit {
+                let rt = self.rt.clone();
+                let filed = tokio::task::spawn_blocking(move || flag_gave_up(&rt, &id, now)).await;
+                if let Ok(Err(e)) = filed {
+                    log::warn!("worker-exit flag not filed: {e}");
+                }
+            }
         }
     }
 }
@@ -671,23 +814,65 @@ mod tests {
                         ('local', 'p', 't', 'interrupted', 'fetch failed', 'srv', '', 1, 900),
                         ('typing', 'p', 't', 'interrupted', 'fetch failed', NULL, 'half a thou', 1, 900),
                         ('other', 'p', 't', 'interrupted', 'bad request', NULL, '', 1, 900),
-                        ('busy', 'p', 't', 'running', NULL, NULL, '', 1, 900);
+                        ('busy', 'p', 't', 'running', NULL, NULL, '', 1, 900),
+                        ('crash', 'p', 't', 'interrupted', 'The worker stopped', NULL, '', 1, 900),
+                        ('lcrash', 'p', 't', 'interrupted', 'The worker stopped', 'srv', '', 1, 900),
+                        ('tcrash', 'p', 't', 'interrupted', 'The worker stopped', 'srv', 'half', 1, 900),
+                        ('old', 'p', 't', 'interrupted', 'The worker stopped', NULL, '', 1, 900);
                  INSERT INTO runs (id, chat_id, cwd, model, thinking, status, started_at, ended_at)
-                 VALUES ('r1', 'net', '.', NULL, NULL, 'interrupted', 100, 800);",
+                 VALUES ('r1', 'net', '.', NULL, NULL, 'interrupted', 100, 800),
+                        ('r2', 'crash', '.', NULL, NULL, 'interrupted', 100, 800),
+                        ('r3', 'lcrash', '.', NULL, NULL, 'interrupted', 100, 800),
+                        ('r4', 'tcrash', '.', NULL, NULL, 'interrupted', 100, 800),
+                        ('r5', 'old', '.', NULL, NULL, 'interrupted', 100, 800),
+                        ('r6', 'old', '.', NULL, NULL, 'interrupted', 200, 800);",
             )
         })
         .unwrap();
-        let look = read_look(&db, &[], 500).unwrap();
+        // The worker crashes Helm remembers: each with the run it cut short. `old` has had a
+        // newer run since its crash, so that crash is no longer its latest stop.
+        let crash = |run: &str| Crash {
+            run_id: run.into(),
+            at_ms: 800,
+            order: 0,
+        };
+        let crashes: HashMap<String, Crash> = [
+            ("crash", "r2"),
+            ("lcrash", "r3"),
+            ("tcrash", "r4"),
+            ("old", "r5"),
+        ]
+        .into_iter()
+        .map(|(c, r)| (c.to_owned(), crash(r)))
+        .collect();
+        let look = read_look(&db, &[], 500, &crashes).unwrap();
         let mut got: Vec<_> = look
             .interrupted
             .iter()
-            .map(|(id, _, c)| (id.as_str(), c.is_some()))
+            .map(|(id, _, c)| (id.as_str(), *c))
             .collect();
-        got.sort();
-        // A local model's chat is not tracked at all; one the user is typing in, or that stopped
-        // for another reason, is seen but not continued.
-        assert_eq!(got, [("net", true), ("other", false), ("typing", false)]);
+        got.sort_by_key(|g| g.0);
+        // A local model's chat is tracked only after a crash; one the user is typing in, or that
+        // stopped for another reason, is seen but not continued.
+        assert_eq!(
+            got,
+            [
+                ("crash", Some(Cause::WorkerExit)),
+                ("lcrash", Some(Cause::WorkerExit)),
+                ("net", Some(Cause::Connection)),
+                ("old", None),
+                ("other", None),
+                ("tcrash", None),
+                ("typing", None)
+            ]
+        );
         assert_eq!(look.working, ["busy"]);
+        // Without the crashes, only the outage is continued and the local chats are not seen.
+        let plain = read_look(&db, &[], 500, &HashMap::new()).unwrap();
+        assert!(plain
+            .interrupted
+            .iter()
+            .all(|(id, _, c)| (id == "net") == c.is_some() && !id.contains("lcrash")));
         // The stamp is the run, so a draft save (which moves `updated_at`) does not renew it.
         let stamp = |look: &Look| {
             look.interrupted
@@ -704,9 +889,12 @@ mod tests {
             )
         })
         .unwrap();
-        assert_eq!(stamp(&read_look(&db, &[], 500).unwrap()), before);
+        assert_eq!(
+            stamp(&read_look(&db, &[], 500, &HashMap::new()).unwrap()),
+            before
+        );
         // A stop long ago is not picked up, however recently the chat was touched.
-        assert!(read_look(&db, &[], 850)
+        assert!(read_look(&db, &[], 850, &HashMap::new())
             .unwrap()
             .interrupted
             .iter()
@@ -828,7 +1016,8 @@ mod tests {
             vec![Due {
                 chat_id: "a".into(),
                 stamp: 10,
-                attempt: 1
+                attempt: 1,
+                cause: Cause::Connection,
             }]
         );
         // Sent: not sent again while the chat works (it is no longer seen stopped).
@@ -839,14 +1028,15 @@ mod tests {
         for attempt in 2..=MAX_ATTEMPTS {
             o.begin_look();
             o.note_stopped(now, "a", 10 * attempt as i64, Cause::Connection);
-            assert_eq!(o.give_up(now + 1_000_000), Vec::<String>::new());
+            assert_eq!(o.give_up(now + 1_000_000), vec![]);
             now += 30_000;
             assert_eq!(
                 o.due(now),
                 vec![Due {
                     chat_id: "a".into(),
                     stamp: 10 * attempt as i64,
-                    attempt
+                    attempt,
+                    cause: Cause::Connection,
                 }]
             );
             now += 100_000;
@@ -855,13 +1045,66 @@ mod tests {
         o.begin_look();
         o.note_stopped(now, "a", 99, Cause::Connection);
         assert!(o.due(now + 60_000).is_empty());
-        assert_eq!(o.give_up(now + 60_000), ["a"]);
+        assert_eq!(
+            o.give_up(now + 60_000),
+            [("a".to_owned(), Cause::Connection)]
+        );
         o.begin_look();
         o.note_stopped(now, "a", 99, Cause::Connection);
-        assert_eq!(o.give_up(now + 120_000), Vec::<String>::new());
+        assert_eq!(o.give_up(now + 120_000), vec![]);
         // Once the chat is back to normal it is forgotten and starts afresh next time.
         o.forget("a");
         assert!(o.tracked().is_empty());
+    }
+
+    /// Worker crashes wait 30 s, 2 min and 10 min, do not need the connection, are spread 10 s
+    /// apart across the chats of one incident, and are tried three times before the one give-up.
+    #[test]
+    fn a_crashed_chat_is_carried_on_after_its_waits_staggered_then_given_up_on() {
+        let mut o = Outages::default();
+        o.probe(0, false, &[]);
+        o.probe(1, false, &[]);
+        assert!(!o.online(), "the connection does not matter for a crash");
+        let t0 = 10 * MIN;
+        o.begin_look();
+        o.note_stopped_later(t0, "a", 1, Cause::WorkerExit, 0);
+        o.note_stopped_later(t0, "b", 1, Cause::WorkerExit, WORKER_EXIT_STAGGER_MS);
+        let ids = |d: Vec<Due>| {
+            d.into_iter()
+                .map(|d| (d.chat_id, d.attempt, d.cause))
+                .collect::<Vec<_>>()
+        };
+        assert!(o.due(t0 + 29_000).is_empty());
+        assert_eq!(
+            ids(o.due(t0 + 30_000)),
+            [("a".to_owned(), 1, Cause::WorkerExit)]
+        );
+        assert!(
+            o.due(t0 + 39_000).is_empty(),
+            "the second chat ten seconds later"
+        );
+        assert_eq!(
+            ids(o.due(t0 + 40_000)),
+            [("b".to_owned(), 1, Cause::WorkerExit)]
+        );
+        // Crashed again, twice: two minutes, then ten.
+        let mut now = t0 + MIN;
+        for (stamp, wait) in [(2, 2 * MIN), (3, 10 * MIN)] {
+            o.begin_look();
+            o.note_stopped(now, "a", stamp, Cause::WorkerExit);
+            assert!(o.due(now + wait - 1_000).is_empty());
+            assert_eq!(ids(o.due(now + wait)).len(), 1);
+            now += wait + MIN;
+        }
+        // A fourth crash is not carried on; it is given up on once, with its cause, at the
+        // look that sees it.
+        o.begin_look();
+        o.note_stopped(now, "a", 4, Cause::WorkerExit);
+        assert!(o.due(now + 60 * MIN).is_empty());
+        assert_eq!(o.give_up(now), [("a".to_owned(), Cause::WorkerExit)]);
+        o.begin_look();
+        o.note_stopped(now, "a", 4, Cause::WorkerExit);
+        assert_eq!(o.give_up(now + 61 * MIN), vec![]);
     }
 
     #[test]

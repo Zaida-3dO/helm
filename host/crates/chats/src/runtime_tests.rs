@@ -28,6 +28,9 @@ impl WorkerLink for FakeLink {
             let _ = self.out.try_send(WorkerOutput::Exited {
                 code: Some(1),
                 stderr: String::new(),
+                by_host: true,
+                job_active: Some(0),
+                signal: None,
             });
         }
     }
@@ -96,6 +99,26 @@ impl FakeWorker {
             .send(WorkerOutput::Exited {
                 code: Some(0),
                 stderr: String::new(),
+                by_host: false,
+                job_active: None,
+                signal: None,
+            })
+            .await;
+    }
+
+    /// The worker's process ended from outside (a kill by name, say): exit code 1, only Node's
+    /// start-up warning on stderr, and Claude Code still running in its job.
+    pub async fn killed(&self) {
+        let _ = self
+            .out
+            .send(WorkerOutput::Exited {
+                code: Some(1),
+                stderr: "(node:7) Warning: [MODULE_TYPELESS_PACKAGE_JSON] Warning: main.ts parsed as an ES module\n\
+                         (Use `node --trace-warnings ...` to show where the warning was created)\n"
+                    .into(),
+                by_host: false,
+                job_active: Some(1),
+                signal: None,
             })
             .await;
     }
@@ -1389,6 +1412,154 @@ async fn a_worker_crash_interrupts_the_run() {
         ["claude crashed"]
     );
     assert_eq!(h.state(&sid), "uncertain");
+}
+
+/// The outage watch's probe, always answered.
+struct Reached;
+
+impl crate::outage::Probe for Reached {
+    fn reach(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        Box::pin(async { true })
+    }
+}
+
+/// A worker ended from outside mid-turn: the chat says so (not Node's warning), the exit is
+/// logged as a crash, and the outage watch asks the chat to carry on once the wait is over,
+/// resuming the conversation with the fixed prompt rather than re-running anything. A chat the
+/// user stopped, whose worker died the same way, is never carried on, and neither is one whose
+/// worker died before Claude read the turn's prompt (there is nothing to continue).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worker_killed_mid_turn_is_carried_on_after_the_wait_but_a_stopped_one_is_not() {
+    let mut h = harness();
+    let (chat, sid, w) = running_turn(&mut h).await;
+    w.emit(json!({"type": "submission_delivered", "submissionId": sid}))
+        .await;
+    h.until("delivered", |h| h.state(&sid) == "delivered").await;
+    w.killed().await;
+    h.until("interrupted", |h| h.status(&chat) == "interrupted")
+        .await;
+    assert_eq!(
+        h.col(&format!("SELECT error FROM chats WHERE id = '{chat}'")),
+        ["The worker process was ended from outside Helm while Claude Code was still running (exit code 1)."]
+    );
+    assert_eq!(h.state(&sid), "delivered");
+    let exit_line = |h: &H, chat: &str| -> Value {
+        let log = std::fs::read_to_string(h.profile.path("diagnostics/worker-exits.log")).unwrap();
+        log.lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .find(|l| l["kind"] == "exit" && l["chatId"] == chat)
+            .unwrap()
+    };
+    let line = exit_line(&h, &chat);
+    assert_eq!(
+        (&line["crash"], &line["jobActive"], &line["hostAsked"]),
+        (&json!(true), &json!(1), &json!(false))
+    );
+
+    // This chat's prompt was taken but never read: the message stays unsent, to recover.
+    let (unread, unread_sid, w4) = running_turn(&mut h).await;
+    w4.killed().await;
+    h.until("unread chat interrupted", |h| {
+        h.status(&unread) == "interrupted"
+    })
+    .await;
+    assert_eq!(h.state(&unread_sid), "uncertain");
+    let line = exit_line(&h, &unread);
+    assert_eq!(
+        (&line["crash"], &line["promptRead"], &line["hostAsked"]),
+        (&json!(false), &json!(false), &json!(false))
+    );
+
+    // The second chat is stopped by the user, and its worker dies while it stops.
+    let (stopped, _, mut w2) = running_turn(&mut h).await;
+    let api = h.api.clone();
+    let c2 = stopped.clone();
+    let stop =
+        tokio::spawn(async move { api.call(&main(), "chat_stop", json!({"chatId": c2})).await });
+    w2.expect("abort").await;
+    w2.killed().await;
+    stop.await.unwrap().unwrap();
+    h.until("stopped chat interrupted", |h| {
+        h.status(&stopped) == "interrupted"
+    })
+    .await;
+    assert_eq!(exit_line(&h, &stopped)["hostReason"], "stop");
+
+    // A stop that settles, then a worker that ends itself: still an end Helm asked for.
+    let (settled, _, mut w6) = running_turn(&mut h).await;
+    let api = h.api.clone();
+    let c6 = settled.clone();
+    let stop =
+        tokio::spawn(async move { api.call(&main(), "chat_stop", json!({"chatId": c6})).await });
+    w6.expect("abort").await;
+    w6.emit(json!({"type": "agent_settled", "outcome": "stopped"}))
+        .await;
+    stop.await.unwrap().unwrap();
+    w6.exit().await;
+    h.until("settled chat's exit logged", |h| {
+        std::fs::read_to_string(h.profile.path("diagnostics/worker-exits.log"))
+            .is_ok_and(|l| l.contains(&format!("\"chatId\":\"{settled}\"")))
+    })
+    .await;
+    assert_eq!(exit_line(&h, &settled)["hostReason"], "stop");
+
+    // A crashed chat the user starts writing in is theirs: its crash is forgotten at the next
+    // look, so clearing the draft later never brings a resume back.
+    let (drafted, drafted_sid, w5) = running_turn(&mut h).await;
+    w5.emit(json!({"type": "submission_delivered", "submissionId": drafted_sid}))
+        .await;
+    h.until("drafted delivered", |h| {
+        h.state(&drafted_sid) == "delivered"
+    })
+    .await;
+    w5.killed().await;
+    h.until("drafted chat interrupted", |h| {
+        h.status(&drafted) == "interrupted"
+    })
+    .await;
+    assert_eq!(exit_line(&h, &drafted)["crash"], true);
+    h.db.write(|tx| {
+        tx.execute(
+            "UPDATE chats SET draft = 'my own next step' WHERE id = ?1",
+            [&drafted],
+        )
+    })
+    .unwrap();
+
+    let watch = crate::outage::OutageWatch::with_probe(h.rt.clone(), Arc::new(Reached));
+    // Looks are timed from the crash itself, so a slow machine cannot make a wait look over.
+    let now = h.rt.sh.exits.recent_crashes(helm_core::now_ms())[&chat].at_ms;
+    let prompts = |h: &H, chat: &str| {
+        h.col(&format!(
+            "SELECT text FROM submissions WHERE chat_id = '{chat}' ORDER BY created_at, rowid"
+        ))
+    };
+    watch.look_at(now).await;
+    assert!(!h.rt.sh.exits.recent_crashes(now).contains_key(&drafted));
+    h.db.write(|tx| tx.execute("UPDATE chats SET draft = '' WHERE id = ?1", [&drafted]))
+        .unwrap();
+    watch.look_at(now + 20_000).await;
+    assert_eq!(prompts(&h, &chat), ["start"], "not before 30 s");
+    watch.look_at(now + 31_000).await;
+    let mut w3 = h.worker().await;
+    w3.ready().await;
+    let p = w3.expect("prompt").await;
+    assert_eq!(p["text"], crate::outage::WORKER_EXIT_CONTINUATION_TEXT);
+    assert_eq!(
+        prompts(&h, &chat),
+        ["start", crate::outage::WORKER_EXIT_CONTINUATION_TEXT]
+    );
+    // Long after: still nothing for the stopped or the unread chat, and no worker for either.
+    watch.look_at(now + 30 * 60_000).await;
+    assert_eq!(prompts(&h, &stopped), ["start"]);
+    assert_eq!(prompts(&h, &unread), ["start"]);
+    assert_eq!(prompts(&h, &drafted), ["start"]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), h.workers.recv())
+            .await
+            .is_err(),
+        "no worker for the stopped chat"
+    );
 }
 
 /// A chat owed a continuation gets one prompt, of harness origin, resuming the native session;
@@ -4946,6 +5117,7 @@ impl crate::local::LocalModels for FakeLocal {
         vec![crate::types::LocalModelInfo {
             id: "local/ollama/qwen3:8b".into(),
             name: "qwen3:8b".into(),
+            model: "qwen3:8b".into(),
             server: "Ollama".into(),
             kind: crate::types::LocalServerKind::Ollama,
             context_tokens: Some(65_536),

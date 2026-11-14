@@ -768,6 +768,7 @@
   --inspector-width: 370px;
   --inspector-min: 280px;
   --topbar-height: 49px;
+  --tags-strip-height: 34px;
 
   /* Older names, kept as aliases so existing stylesheets keep working. New code uses the names above. */
   --panel: var(--surface);
@@ -1394,8 +1395,28 @@ dd {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 6px;
+  gap: 4px 12px;
   padding: 2px 20px 12px;
+}
+/* Tab groups: a small caption and its buttons move and wrap as one unit. A group wider than the
+   strip takes a line of its own and wraps its buttons inside it, so no tab runs off the dialog. */
+.settings-tab-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 2px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+.settings-tab-group-label {
+  font-size: calc(10 * var(--ui-unit));
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 0 4px 0 2px;
+  white-space: nowrap;
 }
 .settings-tab {
   border: 1px solid transparent;
@@ -1417,9 +1438,10 @@ dd {
   font-weight: 560;
 }
 .settings-search {
-  margin-left: auto;
-  flex: 0 1 230px;
-  min-width: 160px;
+  /* Its own full-width row above the tab groups. */
+  flex: 1 1 100%;
+  min-width: 0;
+  margin-bottom: 4px;
   height: 28px;
   padding: 0 10px !important;
   border: 1px solid var(--line) !important;
@@ -1432,6 +1454,20 @@ dd {
 }
 .settings-body {
   padding: 4px 24px 24px;
+}
+/* A soft fade on the edge of the settings pane that has more rows beyond it; SettingsDialog sets
+   the attributes from the scroll position. */
+.ui-dialog[data-testid='settings'] .ui-dialog-body {
+  --fade-top: 0px;
+  --fade-bottom: 0px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent 100%);
+}
+.ui-dialog[data-testid='settings'] .ui-dialog-body[data-fade-top] {
+  --fade-top: 28px;
+}
+.ui-dialog[data-testid='settings'] .ui-dialog-body[data-fade-bottom] {
+  --fade-bottom: 28px;
 }
 .settings-body h3 {
   font-size: calc(12 * var(--ui-unit));
@@ -1586,6 +1622,20 @@ dd {
   margin-left: 6px;
   color: var(--muted);
 }
+/* The local-model chip: one line at every width (glyph and one word). It never shrinks, so the title
+   gives way first; a short bar drops the word and keeps the glyph. */
+.crumb-status {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+.topbar[data-tier='narrow'] .crumb-status-word,
+.topbar[data-tier='tight'] .crumb-status-word {
+  display: none;
+}
 .crumb-rename {
   font-size: calc(12 * var(--ui-unit));
   padding: 3px 6px !important;
@@ -1596,7 +1646,7 @@ dd {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 34px;
+  min-height: var(--tags-strip-height);
   padding: 0 22px;
   border-bottom: 1px solid var(--line);
 }

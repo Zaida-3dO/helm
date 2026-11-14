@@ -34,6 +34,13 @@ void boot().then(async ({ api, bus }) => {
     if (petRoot) createRoot(petRoot).render(<PetApp api={api} bus={bus} />);
     return;
   }
+  // The roaming pet (debug builds only) likewise.
+  if (new URLSearchParams(location.search).get('window') === 'petworld') {
+    const { PetWorldApp } = await import('./petworld/PetWorldApp.tsx');
+    const worldRoot = document.getElementById('root');
+    if (worldRoot) createRoot(worldRoot).render(<PetWorldApp api={api} bus={bus} />);
+    return;
+  }
   const flushers = new Flushers();
   installErrorReporting(api);
   installContextMenuPolicy(document, import.meta.env.DEV);

@@ -198,7 +198,13 @@ struct Actor {
     pending: HashMap<String, Pending>,
     timers: Vec<(TInstant, Timer)>,
     run_id: Option<String>,
+    /// The submission that opened the current turn. Until Claude has read it, a worker that dies
+    /// is not a crash to carry on from: Claude never saw what it would be continuing.
+    turn_opener: Option<String>,
     stopping: Option<StopState>,
+    /// A Stop ended this run, so an exit before the next run is one Helm asked for, even once
+    /// `stopping` has been settled (a worker that ends itself after an interrupt).
+    stop_ended: bool,
     stream: HashMap<String, LiveMsg>,
     dirty: BTreeSet<String>,
     /// Streaming rows whose database copy is behind what the UI was sent.
@@ -246,8 +252,12 @@ struct Actor {
     evicted: Vec<Subagent>,
     /// The turn-opening send being timed, until its first output ([`crate::timeline`]).
     timeline: Option<crate::timeline::SendTimeline>,
+    /// Steers the worker answered `waiting` for, logged to the same file until each is read.
+    steer_waits: crate::timeline::SteerWaits,
     /// The last worker start that failed: pre-warm waits [`PREWARM_RETRY`] before trying again.
     spawn_failed_at: Option<Instant>,
+    /// When the running worker was started, for the exit log.
+    worker_started: Option<Instant>,
     /// This actor's own channel, held weakly, for work it hands to another thread.
     me: mpsc::WeakSender<Cmd>,
     /// A local chat's turn waiting for its model to be made ready.
@@ -365,7 +375,9 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         pending: HashMap::new(),
         timers: Vec::new(),
         run_id: None,
+        turn_opener: None,
         stopping: None,
+        stop_ended: false,
         stream: HashMap::new(),
         dirty: BTreeSet::new(),
         db_behind: BTreeSet::new(),
@@ -390,7 +402,9 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         provider_switch_pending: false,
         evicted: Vec::new(),
         timeline: None,
+        steer_waits: Default::default(),
         spawn_failed_at: None,
+        worker_started: None,
         me: tx.downgrade(),
         prepare: None,
         prepare_count: 0,
@@ -1020,6 +1034,7 @@ impl Actor {
         // The start itself runs on the blocking pool; a failure comes back as `SpawnFailed`.
         let (link, out) = crate::spawning::spawn_off_actor(&self.sh, req);
         self.link = Some(link);
+        self.worker_started = Some(Instant::now());
         self.out = Some(out);
         self.ready = false;
         self.worker_error = None;
@@ -1168,6 +1183,7 @@ impl Actor {
     }
 
     fn on_exit(&mut self, reason: String) {
+        self.stop_ended = false;
         self.link = None;
         self.link_closing = false;
         self.out = None;
@@ -1300,6 +1316,7 @@ impl Actor {
     /// Start a run in memory: the caller writes the row (see `insert_run`).
     fn new_run_id(&mut self) -> String {
         self.last_output = Instant::now();
+        self.stop_ended = false;
         let run = uuid::Uuid::new_v4().to_string();
         self.run_id = Some(run.clone());
         run
@@ -2092,6 +2109,9 @@ impl Actor {
             let run = self.new_run_id();
             new_run = Some((run, self.chat()));
         }
+        if !busy {
+            self.turn_opener = Some(sid.to_owned());
+        }
         let row = if !busy {
             // A prompt that opens a turn: its user row shows at once, as saved.
             let mut details = json!({"submissionId": sid, "mode": sub.mode});
@@ -2628,6 +2648,35 @@ impl Actor {
         );
     }
 
+    /// A `waiting` answer to `deliver_now`: the first one for a steer, and one every 30 s after,
+    /// goes to the send-timeline log with what holds it back.
+    fn log_steer_wait(&mut self, sid: &str, data: &Value) {
+        let at = now();
+        let Some(answer) = self.steer_waits.waiting(sid, at) else {
+            return;
+        };
+        let Some(saved) = self.submission(sid).map(|s| s.created_at) else {
+            return;
+        };
+        let line = crate::timeline::steer_wait_line(sid, saved, at, answer, data);
+        crate::timeline::log_line(&self.sh.cfg.profile_dir, &self.chat_id, saved, &line);
+    }
+
+    /// Claude read a steer: log how long after it was saved, and how often it was held.
+    fn log_steer_read(&mut self, sub: &Submission) {
+        let answers = self.steer_waits.read(&sub.id);
+        if sub.mode != SubmissionMode::Steer {
+            return;
+        }
+        let line = crate::timeline::steer_read_line(&sub.id, sub.created_at, now(), answers);
+        crate::timeline::log_line(
+            &self.sh.cfg.profile_dir,
+            &self.chat_id,
+            sub.created_at,
+            &line,
+        );
+    }
+
     // ------------------------------------------------------------------ timers
 
     fn on_timers(&mut self) {
@@ -2698,12 +2747,21 @@ impl Actor {
     fn on_output(&mut self, out: Option<WorkerOutput>) {
         match out {
             None => self.on_exit("The worker stopped unexpectedly.".into()),
-            Some(WorkerOutput::Exited { code, stderr }) => {
-                let tail: String = stderr.lines().rev().take(3).collect::<Vec<_>>().join(" / ");
-                let reason = if tail.is_empty() {
-                    format!("The worker stopped (exit code {code:?}).")
-                } else {
-                    format!("The worker stopped (exit code {code:?}): {tail}")
+            Some(WorkerOutput::Exited {
+                code,
+                stderr,
+                by_host,
+                job_active,
+                signal,
+            }) => {
+                let facts = self.exit_facts(code, signal, by_host, job_active, stderr);
+                let shown = crate::exits::exit_reason(&facts);
+                let rec = self.sh.exits.record(&facts, &shown);
+                // What the worker said is in `shown` now, with the incident it belongs to.
+                self.worker_error = None;
+                let reason = match crate::exits::incident_note(&rec) {
+                    Some(note) => format!("{shown} {note}"),
+                    None => shown,
                 };
                 self.on_exit(reason)
             }
@@ -2717,6 +2775,88 @@ impl Actor {
                 self.note_output();
                 self.on_record(r)
             }
+        }
+    }
+
+    /// What is known about the worker that just exited, read before [`Self::on_exit`] clears it.
+    fn exit_facts(
+        &self,
+        code: Option<i32>,
+        signal: Option<i32>,
+        by_host: bool,
+        job_active: Option<u32>,
+        stderr: String,
+    ) -> crate::exits::ExitFacts {
+        use crate::exits::HostReason;
+        let quitting = self
+            .sh
+            .shutting_down
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let host_reason = if quitting {
+            Some(HostReason::Quit)
+        } else if self.archived {
+            Some(HostReason::Archive)
+        } else if self.stopping.is_some() || self.stop_ended {
+            Some(HostReason::Stop)
+        } else if by_host {
+            Some(HostReason::Ended)
+        } else if self.link_closing
+            || self.retiring
+            || self.edit_waiting
+            || !self.shutdown_replies.is_empty()
+        {
+            Some(HostReason::Close)
+        } else {
+            None
+        };
+        // The call that started last is the one most likely to say what ended the worker (a
+        // command of the agent's own, say).
+        let last_tool = self.tools.values().max_by_key(|t| t.started_at).map(|t| {
+            let command = serde_json::from_str::<Value>(&t.args)
+                .ok()
+                .and_then(|a| a.get("command").and_then(Value::as_str).map(str::to_owned))
+                .unwrap_or_else(|| t.args.clone());
+            (t.name.clone(), command)
+        });
+        // Claude had read the prompt that opened the turn (a turn it opened by itself has none).
+        let prompt_read = self.turn_opener.as_deref().is_none_or(|sid| {
+            self.submission(sid).is_some_and(|s| {
+                matches!(
+                    s.state,
+                    SubmissionState::Delivered | SubmissionState::Complete
+                )
+            })
+        });
+        let chat = self.chat();
+        crate::exits::ExitFacts {
+            chat_id: self.chat_id.clone(),
+            at_ms: now(),
+            code,
+            signal,
+            host_reason,
+            worker_error: self.worker_error.clone(),
+            job_active,
+            stderr,
+            last_tool,
+            uptime_ms: self.worker_started.map(|t| t.elapsed().as_millis() as i64),
+            model: self
+                .launched_local
+                .as_ref()
+                .map(|(_, m)| m.clone())
+                .or_else(|| chat.as_ref().and_then(|c| c.model.clone())),
+            provider: self.launched_local.as_ref().map(|(s, _)| s.clone()),
+            turn_open: self.status().is_busy(),
+            prompt_read,
+            run_id: self.run_id.clone(),
+            launch_path: Some(
+                self.sh
+                    .cfg
+                    .profile_dir
+                    .join("workers")
+                    .join(&self.chat_id)
+                    .join("launch.json"),
+            ),
+            cwd: chat.map(|c| c.cwd),
         }
     }
 
@@ -2950,13 +3090,14 @@ impl Actor {
             }
             "submission_delivered" => {
                 if let Some(sid) = str_of(&v, "submissionId") {
-                    let accepted = self
+                    let sub = self
                         .submission(&sid)
-                        .is_some_and(|s| s.state == SubmissionState::Accepted);
-                    if accepted {
+                        .filter(|s| s.state == SubmissionState::Accepted);
+                    if let Some(sub) = sub {
                         self.set_submission(&sid, SubmissionState::Delivered);
                         self.clear_timer(|t| *t == Timer::WaitLimit(sid.clone()));
                         self.emit_pending();
+                        self.log_steer_read(&sub);
                     }
                 }
             }
@@ -3638,6 +3779,7 @@ impl Actor {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if ok && result == "waiting" {
+                    self.log_steer_wait(&submission_id, &data);
                     // Nothing movable yet: try again in a second (never an interrupt).
                     let lim = self.sh.cfg.limits.wait_retry;
                     self.add_timer(lim, Timer::WaitLimit(submission_id));
@@ -3749,6 +3891,7 @@ impl Actor {
                     None
                 };
                 self.end_run(status, err.as_deref(), outcome);
+                self.stop_ended = true;
                 // The stop's answer is how the turn ended; what Claude had not read is sent
                 // again right after, which may open the next turn at once.
                 let final_status = self.status();

@@ -47,7 +47,7 @@ const LINKS: &str = " Each chat in the answer has a link field: when you point t
 const REPORT_BACK: &str = " The other chat does not report back by itself: end your message with an explicit report instruction saying what to report, when (on finishing, when blocked, when it finds something that changes the plan) and that the report goes to your own chat id with app_send_message; then end your turn. Its report arrives here as a new message. If it might finish or fail without reporting, also declare app_wait_for with kind chat_idle on it as a backstop.";
 
 /// What `app_create_chat` says about `muted`: the rule for when an agent mutes the chat it makes.
-const MUTED_ARG: &str = "Set muted for internal chats that another agent creates, manages and archives (crews, reviewers, planners, helpers): they never notify the user or raise flags. They may still message the user on Telegram when told to. Leave it unset for any chat the user is expected to read or talk to.";
+const MUTED_ARG: &str = "Defaults to true: a chat you create is muted, so it never notifies the user or raises flags (what it holds waits in the inbox's Muted group). They may still message the user on Telegram when told to. Pass false only for a chat the user is expected to read or talk to.";
 
 const EXPLICIT: &str = " Act only when the user explicitly asked for this change; confirm an ambiguous target with app_list_chats first; report what changed. If the reply is lost, check the current state before trying again and never retry automatically.";
 
@@ -1121,7 +1121,8 @@ async fn create_chat(ctx: ToolCtx, a: Value, limits: Arc<SendLimits>) -> ToolRes
         )),
     };
     let muted = match a.get("muted") {
-        None | Some(Value::Null) => false,
+        // A chat an agent makes is the agent's own working chat until it says otherwise.
+        None | Some(Value::Null) => true,
         Some(m) => m
             .as_bool()
             .ok_or_else(|| refuse("muted must be true or false."))?,
@@ -1512,7 +1513,7 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.async_tool(
         ToolSpec::write(
             "app_create_chat",
-            format!("Start a new chat on a board and send it a first message (framed like app_send_message). projectId is the board to show it on: a board's id from app_list_projects, or the projectId in a chat's details; it defaults to this chat's own board, and a folder project's id is refused. When this chat is on the default board, or the user is talking to it from Telegram or by voice, projectId is required and the refusal lists the open boards. Pass muted for internal chats (see its description); you can change it later with app_update_chat. Your own chat id, for the new chat to report back to, is the chatId app_this_chat returns. The chat runs in the board's folder, or in folder (an absolute path) when you name another. It nests under this chat by default; pass parentChatId to nest it under another chat on the same board, or null for top level. Chats nest at most three deep: a new chat under a chat at the deepest level goes beside it instead (under that chat's parent). Omitted model and effort use the new-chat defaults. model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>), whichever provider this chat itself runs on.{REPORT_BACK}{LINKS}{EXPLICIT}"),
+            format!("Start a new chat on a board and send it a first message (framed like app_send_message). projectId is the board to show it on: a board's id from app_list_projects, or the projectId in a chat's details; it defaults to this chat's own board, and a folder project's id is refused. When this chat is on the default board, or the user is talking to it from Telegram or by voice, projectId is required and the refusal lists the open boards. It starts muted unless you pass muted false; app_update_chat changes that later. Your own chat id, for the new chat to report back to, is the chatId app_this_chat returns. The chat runs in the board's folder, or in folder (an absolute path) when you name another. It nests under this chat by default; pass parentChatId to nest it under another chat on the same board, or null for top level. Chats nest at most three deep: a new chat under a chat at the deepest level goes beside it instead (under that chat's parent). Omitted model and effort use the new-chat defaults. model can name a Claude model (sonnet, opus, ...) or a local model (local/<server>/<model>), whichever provider this chat itself runs on.{REPORT_BACK}{LINKS}{EXPLICIT}"),
             obj(
                 json!({
                     "projectId": {"type": "string", "description": "The board to show the chat on; defaults to this chat's board."},
@@ -2174,14 +2175,21 @@ mod tests {
              WHERE s.chat_id = '{c1}' AND m.origin = 'other_chat'"
         ));
         assert_eq!(n, ["1"]);
-        // A chat made muted is muted before its first message, and records its creator; one made
-        // without `muted` is not muted. `muted` must be a boolean.
+        // A chat an agent makes is muted before its first message, unless `muted` is false, and
+        // records its creator. `muted` must be a boolean.
         let quiet_crew = id(create(&h, &t, &a, json!({"muted": true})).await);
-        assert_eq!(
-            h.col("SELECT chat_id FROM chat_mutes"),
-            std::slice::from_ref(&quiet_crew)
-        );
+        let visible = id(create(&h, &t, &a, json!({"muted": false})).await);
+        let muted_now = h.col("SELECT chat_id FROM chat_mutes");
+        for made_muted in [&c1, &c2, &c3, &c4, &c5, &quiet_crew] {
+            assert!(
+                muted_now.contains(made_muted),
+                "no flag means muted: {made_muted}"
+            );
+        }
+        assert!(!muted_now.contains(&a), "the caller is not muted");
+        assert!(!muted_now.contains(&visible), "false makes a visible chat");
         assert_eq!(made(&quiet_crew, "c.created_by_chat"), a);
+        assert_eq!(made(&visible, "c.created_by_chat"), a);
         assert_eq!(made(&c1, "c.created_by_chat"), a);
         let r = create(&h, &t, &a, json!({"muted": "yes"})).await;
         assert_eq!(r["ok"], false, "muted must be a boolean: {r}");

@@ -282,21 +282,28 @@ pub fn register_host_tools(r: &mut HostToolRegistry) {
     .blocking(
         ToolSpec::read(
             "app_background_result",
-            "Read the output of a call Helm moved to the background so a message could be read. \
-             Helm does not move calls to the background yet, so there is never a result here: this \
-             tool refuses and says so. To wait on something long, run it where you can read its \
-             output and use app_wait_for, not a sleep loop.",
+            "Read the result of one of Helm's tool calls that Helm moved to the background. A \
+             call to Helm's tools (or an MCP tool through Helm) that runs for more than about 30 \
+             seconds, or that holds back a message the user sent while you work, is answered \
+             early with state \"background\" and a callId, and keeps running. Do not call that \
+             tool again: pass the callId here. A finished call returns its result; a running one \
+             is waited on for up to 20 seconds, then reported as still running, so carry on and \
+             ask again later. With no callId it lists the calls Helm still holds. Results are kept \
+             30 minutes after a call finishes and 10 minutes after they are read. Only the chat's \
+             own agent can use it.",
             json!({
                 "type": "object",
                 "properties": {"callId": {"type": "string", "maxLength": 128}},
                 "additionalProperties": false
             }),
         ),
+        // The chat's worker answers this tool itself, from the calls it moved; a call that
+        // reaches the host comes from a chat whose worker holds no such store.
         |_ctx: &ToolCtx, _a| {
             Err(refuse(
-                "No call has been moved to the background in this version of Helm, so there is no \
-                 result to read. Read the command's output where you started it, and use \
-                 app_wait_for to be woken when something long finishes.",
+                "This chat has no calls in the background, so there is no result to read. Read \
+                 the command's output where you started it, and use app_wait_for to be woken \
+                 when something long finishes.",
             ))
         },
     );
@@ -483,12 +490,12 @@ mod tests {
         assert_eq!(r["result"]["cancelled"], false);
         assert_eq!(svc.list(None).unwrap().len(), 2);
 
-        // Background results: nothing is ever moved, and the refusal says so.
-        let r = call("app_background_result", json!({})).await;
+        // Background results come from the chat's worker; a call that reaches the host has none.
+        let r = call("app_background_result", json!({"callId": "tu_1"})).await;
         assert_eq!(r["ok"], false);
         assert!(r["error"]
             .as_str()
             .unwrap()
-            .contains("No call has been moved"));
+            .contains("no calls in the background"));
     }
 }

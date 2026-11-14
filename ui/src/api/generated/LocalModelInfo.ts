@@ -6,7 +6,15 @@ import type { LocalServerKind } from "./LocalServerKind";
  * itself hold `/` and `:`, so split on the first two `/` only. A chat on it stores the server id
  * in `provider` and the model part in `model`.
  */
-export type LocalModelInfo = { id: string, name: string, 
+export type LocalModelInfo = { id: string, 
+/**
+ * What the model is called in the app: the name the user gave it, else a short default.
+ */
+name: string, 
+/**
+ * The name as the server gives it.
+ */
+model: string, 
 /**
  * The server's display name.
  */

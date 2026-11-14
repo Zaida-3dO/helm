@@ -4,7 +4,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { usageOps, type RequestModes, type UsageSnapshot } from '../../api/usage.ts';
 import { useShell } from '../../shell/context.ts';
-import { asOf, customRange, percentText, RANGES, rangeOf, resetLine, expired, sourceLabel, type RangeId } from '../../usage/model.ts';
+import { SignInAgain } from '../../transcript/SignInAgain.tsx';
+import { customRange, ESTIMATE_TITLE, expired, isEstimate, RANGES, rangeOf, readLine, resetLine, windowText, type RangeId } from '../../usage/model.ts';
 import { useUsageStore } from '../../usage/UsageMeter.tsx';
 import { Button, PillTabs, Segmented, TextInput } from '../../ui/index.ts';
 import { FeedbackTab } from './FeedbackTab.tsx';
@@ -50,10 +51,13 @@ function Readiness({ snap, error }: { snap: UsageSnapshot | null; error: string 
   // A ready reading with nothing to say needs no notice.
   if (r.state === 'ready' && snap.reading && !snap.reading.stale && r.reason === 'Plan usage is up to date.') return null;
   return (
-    <p className="usage-notice" data-testid="usage-readiness" data-state={r.state}>
-      {r.reason}
-      {r.state === 'ready' && snap.reading?.stale ? ' The numbers below are out of date.' : ''}
-    </p>
+    <>
+      <p className="usage-notice" data-testid="usage-readiness" data-state={r.state}>
+        {r.reason}
+        {r.state === 'ready' && snap.reading?.stale ? ' The numbers below are out of date.' : ''}
+      </p>
+      {r.actionTarget === 'signin' && <SignInAgain />}
+    </>
   );
 }
 
@@ -71,13 +75,11 @@ function PlanCards({ snap, now }: { snap: UsageSnapshot | null; now: number }) {
     return (
       <div className="usage-card" key={id} data-testid={`usage-card-${id}`} data-stale={stale ? 'true' : undefined}>
         <div className="usage-card-title">{title}</div>
-        <div className="usage-card-value" data-testid={`usage-card-${id}-pct`}>
-          {percentText(w.pct)}
+        <div className="usage-card-value" data-testid={`usage-card-${id}-pct`} title={isEstimate(w) ? ESTIMATE_TITLE : undefined}>
+          {windowText(w)}
         </div>
         <div className="usage-card-meta">{resetLine(w, now)}</div>
-        <div className="usage-card-meta">
-          As of {asOf(w.at, now)} · {sourceLabel(w.source)}
-        </div>
+        <div className="usage-card-meta">{readLine(w, now)}</div>
       </div>
     );
   };

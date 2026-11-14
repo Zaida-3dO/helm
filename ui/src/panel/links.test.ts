@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { configureLinks, gateTarget, handleLink, REFUSED, registerLinkRoute, registerWebRoute } from './links.ts';
+import { configureLinks, gateTarget, handleLink, onQuickOpenRequest, REFUSED, registerLinkRoute, registerWebRoute } from './links.ts';
 
 const r = String.raw;
 const url = (href: string) => ({ kind: 'url' as const, href });
@@ -160,6 +160,27 @@ test('written paths: drives open directly, everything else is resolved by the ho
     assert.deepEqual(p(bad), { action: 'refuse', reason: REFUSED.share }, bad);
   }
   assert.equal(p('').action, 'refuse');
+});
+
+test('a written path the host cannot find opens Go to file on its name, with no notice; other failures are notices', async () => {
+  const notices: string[] = [];
+  configureLinks({ notify: (m) => void notices.push(m) });
+  const asked: string[] = [];
+  let answer: boolean | string | { notFound: true; message: string } = { notFound: true, message: 'Not found: src/income' };
+  const off = registerLinkRoute('path', () => answer);
+  const click = () => handleLink({ kind: 'path', href: 'src/old/income.ts:12' }, { chatId: null });
+  // Nothing listening yet: the host's words are shown instead.
+  assert.deepEqual(await click(), { ok: false, reason: 'Not found: src/income' });
+  assert.deepEqual(notices, ['Not found: src/income']);
+  notices.length = 0;
+  const unlisten = onQuickOpenRequest((q) => void asked.push(q));
+  assert.deepEqual(await click(), { ok: false, reason: 'Not found: src/income' });
+  assert.deepEqual([asked, notices], [['income.ts'], []]);
+  answer = 'That folder is not readable.';
+  assert.deepEqual(await click(), { ok: false, reason: 'That folder is not readable.' });
+  assert.deepEqual([asked.length, notices], [1, ['That folder is not readable.']]);
+  unlisten();
+  off();
 });
 
 test('a web route may open an address in the app; a route that declines, an unmatched address and skipWebRoutes go to the browser', async () => {

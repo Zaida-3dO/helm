@@ -4,6 +4,7 @@ export type { CompareModel } from './CompareModel.ts';
 export type { LocalModelsState } from './LocalModelsState.ts';
 export type { LockKind } from './LockKind.ts';
 export type { LockView } from './LockView.ts';
+export type { ModelNameView } from './ModelNameView.ts';
 export type { Range } from './Range.ts';
 export type { RefreshResult } from './RefreshResult.ts';
 export type { ServerView } from './ServerView.ts';

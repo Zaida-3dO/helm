@@ -60,8 +60,9 @@ breaks those checks, so change them only together with the checks. Everything el
 | `question-other` | Free-text input of a question | |
 | `question-back` / `question-cancel` | Back to the previous step / skip the question | |
 | `plan-button` | Plan approval option | `data-option` = `Approve plan` or `Keep planning` |
-| `queue-item` | One in-flight message under the transcript | `data-state` (`pending` `sending` `uncertain` `failed`), `data-tone` (`amber` `muted` `error`), `data-submission` |
+| `queue-item` | One in-flight message, drawn as the last item of the transcript (stacked above the composer when the transcript is not at its newest page) | `data-state` (`pending` `sending` `uncertain` `failed`), `data-tone` (`amber` `muted` `error`), `data-submission` |
 | `queue-pending` | The "Pending" label of an unread asap steer | |
+| `queue-reason` | Why a pending message waits ("Waiting for Bash to finish", else "Claude reads it at its next step") | |
 | `queue-withdraw` | Withdraw on a pending steer (only when the worker can withdraw) | |
 | `queue-recover` | Recover an unsent message back to the composer | |
 | `background-chip` | Background-tasks chip in the activity dock | `data-count` = number of tasks |
@@ -130,7 +131,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `shell` / `topbar` / `topbar-title` / `panel-toggle` | App frame and top bar | `panel-toggle`: `aria-pressed` |
 | `topbar-local-status` | The top bar's wording for a busy chat on a local model server (queued behind other work, or being answered) | `data-ahead` (count ahead, 0 when unknown) |
 | `settings` / `settings-pane` / `appearance` / `theme` / `motion` / `sound-level` | Settings dialog, a pane, the Appearance pane's colour-mode control, its Theme skin picker, its Motion and flair picker (Quiet / Standard / Maximal) and its Sound level picker | `settings-pane`: `data-pane` = pane id; tabs are `.settings-tab[data-tab]`; `appearance` segments are `[data-value]` (`system` `light` `dark`) |
-| `toast-slot` / `notice` | The generic toast slot (top-centre) and its toast | `notice`: `data-kind` (`error` `info` `restored` `undo` `reorganize`) |
+| `toast-slot` / `notice` | The generic toast slot (top-right of the main area, below the tag strip) and its toast | `notice`: `data-kind` (`error` `info` `restored` `undo` `reorganize`) |
 | `toast` | A small notice from the toast slot (an error, a saved item that came due). There is no completion notice stack: a finished chat is shown by its flags, and Windows notifications are opt-in | |
 | `caption` / `topbar-fork` / `topbar-pin` / `topbar-archive` | Helm's caption buttons and the top bar's chat actions | |
 | `terminal-dock` / `terminal-tab` / `terminal-session` | Terminal dock, a session tab, a session's view | `terminal-dock`: `data-open`; `terminal-tab`: `data-state` (`idle` `unseen` `running` `exited`), `aria-selected`; `terminal-session`: `data-session` = id, `data-tail` = the last lines of output (the WebGL renderer has no DOM rows) |

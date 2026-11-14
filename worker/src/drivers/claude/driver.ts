@@ -13,7 +13,7 @@ import { buildClaudeArgs, modelTakesEffort } from "./args.ts";
 import { buildClaudeEnv, contextRefusalNote, localThinkingTokens } from "./env.ts";
 import { Interactions } from "./interactions.ts";
 import { BUDGET_HOOK_ID, SubagentBudget, subagentRule } from "./limits.ts";
-import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE } from "./longcmd.ts";
+import { isLongCommandLevel, LongCommandPolicy, PROMPT_RULE, SHELL_TOOLS_MATCHER } from "./longcmd.ts";
 import { LANDING_GUARD_HOOK_ID, LANDING_GUARD_MATCHER, LandingGuard } from "./guard.ts";
 import { assertNotShim, resolveClaude, type Resolved } from "./resolve.ts";
 import { NATIVE_SCHEDULE_MATCHER, SCHEDULE_REDIRECT_HOOK_ID, scheduleRedirect } from "./schedulecalls.ts";
@@ -110,6 +110,15 @@ export interface DriverDeps {
   onFatal: (code: number) => void;
 }
 
+/** What kind of call holds a message back: Helm's server can answer its own calls early, the CLI can move shells and sub-agents, nothing moves the rest. */
+function blockerKind(t: LiveTool): string {
+  if (t.name.startsWith(toolPrefix)) return "helm";
+  if (t.name.startsWith("mcp__")) return "mcp";
+  if (t.taskKind === "agent") return "agent";
+  if (t.taskKind === "shell" || t.name === "Bash" || t.name === "PowerShell") return "shell";
+  return "native";
+}
+
 export class ClaudeDriver implements Driver {
   private readonly launch: Launch;
   private readonly ch: HostChannel;
@@ -154,6 +163,8 @@ export class ClaudeDriver implements Driver {
   /** Tool call ids that belong to subagents (exempt from the long-command rule). */
   private readonly subagentTools = new Set<string>();
   private readonly backgroundTasks = new Map<string, BackgroundTask>();
+  /** When the model last had no tool running (the turn opened or a tool returned). */
+  private quietSince = 0;
   /** A send-now interrupt is in flight: the turn ends superseded, not stopped by the user. */
   private superseding = false;
   private compacting: { boundary: boolean } | undefined;
@@ -208,6 +219,7 @@ export class ClaudeDriver implements Driver {
         hostTools: launch.hostTools,
         outputCap: c.toolOutputCap === true ? { maxChars: DEFAULT_MAX_CHARS, save: fileSaver(launch.chatId) } : undefined,
         channel,
+        notify: (text) => this.ch.emit({ type: "notice", text }),
         // A successful self-archive ends the turn.
         onEndTurn: () => {
           if (this.turnOpen) this.control({ subtype: "interrupt" }, this.limits.controlTimeoutMs).catch((e: Error) => this.deps.diag(`self-archive interrupt failed: ${e.message}`));
@@ -273,7 +285,8 @@ export class ClaudeDriver implements Driver {
 
     const initRequest: Json = { subtype: "initialize" };
     const preToolUse: Json[] = [];
-    if (this.longCommands.enabled) preToolUse.push({ matcher: "Bash", hookCallbackIds: [LONG_COMMAND_HOOK_ID] });
+    // Always registered: with the long-command rule off it still refuses a kill by name.
+    preToolUse.push({ matcher: SHELL_TOOLS_MATCHER, hookCallbackIds: [LONG_COMMAND_HOOK_ID] });
     if (this.hostTools) {
       preToolUse.push({ matcher: `${toolPrefix}.*`, hookCallbackIds: [HOST_TOOL_HOOK_ID] });
       if (this.mcp) preToolUse.push({ matcher: "mcp__.*", hookCallbackIds: [DUPLICATE_MCP_HOOK_ID] });
@@ -349,6 +362,7 @@ export class ClaudeDriver implements Driver {
       const t = this.liveTools.get(String(e.toolCallId));
       if (t?.taskId) this.taskTools.delete(t.taskId);
       this.liveTools.delete(String(e.toolCallId));
+      this.quietSince = Date.now();
       this.reportShellChanges(String(e.toolCallId));
     }
     if (e.type === "compaction_start") {
@@ -808,9 +822,9 @@ export class ClaudeDriver implements Driver {
       return this.controlReply(requestId, { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } });
     }
     const toolUseId = String(req.tool_use_id ?? input.tool_use_id ?? "");
-    const isRootBash = req.callback_id === LONG_COMMAND_HOOK_ID && input.tool_name === "Bash" && !input.agent_id && !this.subagentTools.has(toolUseId);
-    if (!isRootBash) return this.controlReply(requestId, {});
-    const d = this.longCommands.decide(obj(input.tool_input));
+    if (req.callback_id !== LONG_COMMAND_HOOK_ID) return this.controlReply(requestId, {});
+    const root = !input.agent_id && !this.subagentTools.has(toolUseId);
+    const d = this.longCommands.decideCall(String(input.tool_name ?? ""), root, obj(input.tool_input));
     switch (d.kind) {
       case "allow":
         return this.controlReply(requestId, {});
@@ -829,6 +843,7 @@ export class ClaudeDriver implements Driver {
   private openTurnIfNeeded(): void {
     if (this.turnOpen) return;
     this.turnOpen = true;
+    this.quietSince = Date.now();
     this.ch.emit({ type: "agent_start" });
   }
 
@@ -987,17 +1002,25 @@ export class ClaudeDriver implements Driver {
     const sub = this.subs.get(sid);
     if (!sub || sub.state !== "accepted" || sub.delivered || sub.dropped) return { success: true, data: { result: "nothing_waiting" } };
     // Never act while the task waits on the user (approval, question or plan).
-    if (this.interactions.size > 0) return { success: true, data: { result: "waiting" } };
+    if (this.interactions.size > 0) return { success: true, data: { result: "waiting", blockers: this.blockers() } };
     const now = Date.now();
-    const eligible = [...this.liveTools.values()].filter((t) => t.taskId && !t.background && now - t.startedAt >= minRunMs);
-    if (eligible.length === 0) {
+    const old = (t: LiveTool) => !t.background && now - t.startedAt >= minRunMs;
+    const moved: string[] = [];
+    // A call through Helm's own server is answered early; its request carries on in the background.
+    for (const t of this.liveTools.values()) {
+      if (old(t) && t.name.startsWith(toolPrefix) && this.hostTools?.background(t.id)) {
+        t.background = true;
+        moved.push(t.id);
+      }
+    }
+    const eligible = [...this.liveTools.values()].filter((t) => t.taskId && old(t));
+    if (eligible.length === 0 && moved.length === 0) {
       if (reason === "send_now") {
         this.sendNowInterrupt();
         return { success: true, data: { result: "delivering" } };
       }
-      return { success: true, data: { result: "waiting" } };
+      return { success: true, data: { result: "waiting", blockers: this.blockers() } };
     }
-    const moved: string[] = [];
     for (const t of eligible) {
       try {
         const r = await this.control({ subtype: "background_tasks", tool_use_id: t.id }, QUICK_CONTROL_MS);
@@ -1009,7 +1032,16 @@ export class ClaudeDriver implements Driver {
         this.deps.diag(`background_tasks for ${t.id} failed: ${(e as Error).message}`);
       }
     }
-    return { success: true, data: moved.length > 0 ? { result: "unblocked", moved } : { result: "waiting" } };
+    return { success: true, data: moved.length > 0 ? { result: "unblocked", moved } : { result: "waiting", blockers: this.blockers() } };
+  }
+
+  /** What a waiting message is held behind, for the host's log: the open card, the running calls, or the model itself. */
+  private blockers(): Json[] {
+    const now = Date.now();
+    if (this.interactions.size > 0) return [{ kind: "user", runningMs: 0 }];
+    const live = [...this.liveTools.values()].filter((t) => !t.background);
+    if (live.length === 0) return [{ kind: "model", runningMs: now - this.quietSince }];
+    return live.map((t) => ({ toolCallId: t.id, name: t.name, kind: blockerKind(t), runningMs: now - t.startedAt }));
   }
 
   /** Takes back a steer Claude has not read yet (cancel async message). */

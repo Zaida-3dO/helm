@@ -35,6 +35,7 @@ pub mod ext;
 pub mod games;
 pub mod gpu;
 pub mod lock;
+pub mod names;
 pub mod net;
 mod ops;
 pub mod servers;

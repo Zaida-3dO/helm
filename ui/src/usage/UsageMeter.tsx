@@ -6,7 +6,7 @@ import { useEffect, useSyncExternalStore } from 'react';
 import { SETTINGS_DIALOG } from '../settings/SettingsDialog.tsx';
 import { requestPane } from '../settings/registry.ts';
 import { useShell } from '../shell/context.ts';
-import { bars, emptyTitle } from './model.ts';
+import { bars, emptyTitle, ESTIMATE_TITLE, readNote } from './model.ts';
 import { usageStoreFor } from './store.ts';
 import './usage.css';
 
@@ -47,7 +47,7 @@ export function UsageMeter() {
       className="usage-meter"
       data-testid="usage-meter"
       data-state={list.some((b) => b.stale) ? 'stale' : 'live'}
-      title={list.map((b) => b.tooltip).join('\n\n')}
+      title={[...list.map((b) => b.tooltip), readNote(snap)].filter(Boolean).join('\n\n')}
       aria-label={`Plan usage: ${list.map((b) => `${b.label} ${b.text}`).join(', ')}. Open Settings, Usage`}
       onClick={open}
     >
@@ -58,6 +58,8 @@ export function UsageMeter() {
           data-testid={`usage-bar-${b.id}`}
           data-stale={b.stale ? 'true' : undefined}
           data-unknown={b.pct === null ? 'true' : undefined}
+          data-estimate={b.estimate ? 'true' : undefined}
+          title={b.estimate ? ESTIMATE_TITLE : undefined}
           data-pct={b.pct ?? ''}
         >
           <span className="usage-label">{b.short}</span>

@@ -87,6 +87,25 @@
   font-size: 12px;
 }
 
+.search-nothing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 36px 20px 40px;
+}
+
+.search-nothing p {
+  margin: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.search-nothing-title {
+  font-size: 13px;
+  color: var(--text);
+}
+
 .search-empty-icon {
   display: flex;
   justify-content: center;

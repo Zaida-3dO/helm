@@ -575,6 +575,9 @@ pub(crate) struct Shared {
     pub local: std::sync::OnceLock<crate::local::SharedLocal>,
     /// Per local server: what it last said about requests waiting on it ([`QueueSeen`]).
     pub local_queue: Mutex<HashMap<String, QueueSeen>>,
+    /// Every worker exit, logged, grouped into incidents, and its crashes remembered for the
+    /// outage watch ([`crate::exits`]).
+    pub exits: crate::exits::ExitLog,
 }
 
 /// The runtime service.
@@ -592,6 +595,7 @@ impl ChatRuntime {
         cfg: RuntimeConfig,
         handle: tokio::runtime::Handle,
     ) -> Self {
+        let cfg_profile = cfg.profile_dir.clone();
         let rt = Self {
             sh: Arc::new(Shared {
                 db,
@@ -613,6 +617,7 @@ impl ChatRuntime {
                 afk: std::sync::OnceLock::new(),
                 local: std::sync::OnceLock::new(),
                 local_queue: Mutex::new(HashMap::new()),
+                exits: crate::exits::ExitLog::new(&cfg_profile),
             }),
         };
         rt.start_tick();

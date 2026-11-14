@@ -176,6 +176,110 @@ test("very long results of Helm's tools are cut to a head and a tail; short ones
   }
 });
 
+test("a slow root call moves to the background and is fetched later; sub-agents never move; the store forgets", async () => {
+  const { HostToolServer } = await import("../src/hosttools/server.ts");
+  const { BackgroundStore } = await import("../src/hosttools/background.ts");
+  // A fake channel: each call waits for the test to settle it by its "k" argument; a cancel ends it.
+  type Settle = (r: { ok: true; result: unknown }) => void;
+  const open = new Map<string, { settle: Settle; signal?: AbortSignal }>();
+  const sent: string[] = [];
+  const channel = {
+    call: (op: string, args: Json, opts: { signal?: AbortSignal }) =>
+      new Promise((resolve) => {
+        sent.push(op);
+        open.set(String(args.k), { settle: resolve, signal: opts.signal });
+        opts.signal?.addEventListener("abort", () => resolve({ ok: false, error: "cancelled", changed: "maybe" }));
+      }),
+  };
+  const tool = (name: string, mutating: boolean) => ({ name, description: name, inputSchema: { type: "object" }, requestLimitBytes: 8192, timeoutMs: 120_000, children: false, mutating });
+  const bridge = {
+    enabled: () => true,
+    tools: async () => ({}),
+    has: (n: string) => n === "mcp_slow",
+    call: (n: string, args: Json, signal?: AbortSignal) => channel.call(n, args, { signal }) as Promise<{ ok: true; result: unknown }>,
+  };
+  const notes: string[] = [];
+  const make = (afterMs: number) =>
+    new HostToolServer({ hostTools: [tool("app_slow", true), tool("app_background_result", false)], channel: channel as never, bridge, notify: (t) => notes.push(t), backgroundAfterMs: afterMs, resultWaitMs: 50 });
+  const server = make(50);
+  const call = async (name: string, args: Json, caller: { child: boolean; toolCallId?: string; unattributed?: boolean }, signal?: AbortSignal, on = server) => {
+    const r = ((await on.handle({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, caller, signal)) as Json).result as Json;
+    return { error: r.isError === true, text: String((r.content as Json[])[0].text), data: (r.structuredContent ?? {}) as Json };
+  };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  // The root agent's call: answered early, and a cancel from the CLI after that no longer reaches it.
+  const cli = new AbortController();
+  const moved = await call("app_slow", { k: "a" }, { child: false, toolCallId: "tu_a" }, cli.signal);
+  assert.deepEqual([moved.data.state, moved.data.callId, moved.data.tool], ["background", "tu_a", "app_slow"]);
+  assert.match(String(moved.data.message), /Do not call it again.*app_background_result \{"callId": "tu_a"\}.*may still change things/);
+  cli.abort();
+  assert.equal(open.get("a")?.signal?.aborted, false, "moving the call detached the CLI's cancel");
+  // Still running: the fetch waits a little, then says so.
+  const running = await call("app_background_result", { callId: "tu_a" }, { child: false, toolCallId: "tu_f1" });
+  assert.equal(running.data.state, "running");
+  open.get("a")?.settle({ ok: true, result: { v: 1 } });
+  await sleep(0);
+  assert.match(notes[0] ?? "", /^app_slow finished in the background after \d+ s\. The agent can read its result with app_background_result\.$/);
+  // Through app_mcp_call too; the fetch itself is never sent to the host.
+  const done = await call("app_mcp_call", { name: "app_background_result", arguments: { callId: "tu_a" } }, { child: false, toolCallId: "tu_f2" });
+  assert.deepEqual(done.data, { state: "done", callId: "tu_a", tool: "app_slow", result: { v: 1 } });
+  const list = await call("app_background_result", {}, { child: false, toolCallId: "tu_f3" });
+  assert.deepEqual((list.data.calls as Json[]).map((c) => [c.callId, c.state, c.read]), [["tu_a", "done", true]]);
+  assert.deepEqual(sent, ["app_slow"]);
+  for (const [args, caller, why] of [
+    [{ callId: "nope" }, { child: false, toolCallId: "tu_f4" }, /There is no background call nope/],
+    [{ callId: "tu_a" }, { child: true, toolCallId: "tu_f5" }, /only available to the parent chat/],
+  ] as const) {
+    const r = await call("app_background_result", args, caller);
+    assert.ok(r.error && why.test(r.text), r.text);
+  }
+
+  // A sub-agent's call and an unattributed one wait in the foreground, however long they run.
+  for (const [k, caller] of [["c", { child: true, toolCallId: "tu_c" }], ["u", { child: true, unattributed: true }]] as const) {
+    let answered = false;
+    const p = call("mcp_slow", { k }, caller).then((r) => ((answered = true), r));
+    await sleep(120);
+    assert.equal(answered, false, `${k}: still in the foreground`);
+    open.get(k)?.settle({ ok: true, result: { k } });
+    assert.deepEqual((await p).data, { k });
+  }
+  // A root call to a bridged MCP tool moves like a host tool, and counts as one that may change things.
+  const mcpMoved = await call("mcp_slow", { k: "m" }, { child: false, toolCallId: "tu_m" });
+  assert.match(String(mcpMoved.data.message), /may still change things/);
+  open.get("m")?.settle({ ok: true, result: {} });
+
+  // background(): moves a running call at once (deliver_now), and only one that is running.
+  const slow = make(60_000);
+  const p = call("app_slow", { k: "b" }, { child: false, toolCallId: "tu_b" }, undefined, slow);
+  await sleep(10);
+  assert.equal(slow.background("tu_x"), false);
+  assert.equal(slow.background("tu_b"), true);
+  assert.equal(slow.background("tu_b"), false, "once");
+  assert.equal((await p).data.state, "background");
+  open.get("b")?.settle({ ok: true, result: {} });
+
+  // The store: at most `max` calls, finished ones make room, running ones never go; results expire.
+  let now = 0;
+  const store = new BackgroundStore({ max: 2, readKeepMs: 10, doneKeepMs: 30, now: () => now });
+  const never = new Promise<never>(() => {});
+  const ok = Promise.resolve({ ok: true as const, result: 1 });
+  assert.ok(store.add("r1", "t", false, 0, never));
+  const d1 = store.add("d1", "t", false, 0, ok);
+  await d1?.done;
+  assert.ok(store.add("r2", "t", false, 0, never), "the finished result made room");
+  assert.equal(store.get("d1"), undefined);
+  assert.equal(store.add("r3", "t", false, 0, never), undefined, "full of running calls: the next one stays in the foreground");
+  assert.equal(store.add("r1", "t", false, 0, never), undefined, "an id is taken once");
+  const wide = new BackgroundStore({ readKeepMs: 10, doneKeepMs: 30, now: () => now });
+  for (const id of ["read", "unread"]) await wide.add(id, "t", false, 0, ok)?.done;
+  wide.markRead(wide.get("read")!);
+  now = 10;
+  assert.deepEqual(wide.list().map((c) => c.callId), ["unread"], "dropped 10 after it was read");
+  now = 30;
+  assert.deepEqual(wide.list(), [], "dropped 30 after it finished");
+});
+
 test("sub-agent limits register one hook and add a rule to the chat's instructions, only when the launch sets them", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-ht-w-"));
   const run = async (claude: Json) => {

@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FileView } from '../../api/panel.ts';
+import { ApiError } from '../../api/client.ts';
 import { panelOps } from '../../api/panel.ts';
 import { ExternalIcon, FileTextIcon, FolderOpenIcon } from '../icons.tsx';
 import { IconPlay } from '../../ui/icons.tsx';
@@ -208,7 +209,8 @@ registerLinkRoute('file', (req, ctx) => {
 });
 
 /** Paths written in replies: the host resolves `~`, chat-relative and `/c/` forms, then they open
- *  like any file link. A missing path is explained by the host's message. */
+ *  like any file link. A missing path opens Go to file on its name; any other failure is explained
+ *  by the host's message. */
 registerLinkRoute('path', async (req, ctx) => {
   try {
     const r = await ops().pathResolve(req.path, ctx.chatId);
@@ -222,7 +224,9 @@ registerLinkRoute('path', async (req, ctx) => {
     }
     return true;
   } catch (e) {
-    return e instanceof Error ? e.message : String(e);
+    const message = e instanceof Error ? e.message : String(e);
+    // Decided by the host's code, not its wording: a miss goes to Go to file, anything else is a notice.
+    return e instanceof ApiError && e.code === 'not_found' ? { notFound: true, message } : message;
   }
 });
 

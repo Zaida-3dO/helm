@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "petworld",
+  "description": "The roaming pet's window (debug builds only): the api command (the dispatcher lets it call seven ops only) and host events. The host moves the window itself, so it may not drag itself.",
+  "windows": ["petworld"],
+  "permissions": [
+    "allow-api",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

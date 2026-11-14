@@ -39,6 +39,7 @@ pub fn ops(reg: &mut OpRegistry) {
     helm_pages::register_ops(reg);
     helm_devices::register_ops(reg);
     crate::pet::register_ops(reg);
+    crate::petworld::register_ops(reg);
     helm_dictation::register_ops(reg);
 }
 

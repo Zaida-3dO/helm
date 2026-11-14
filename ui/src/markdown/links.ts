@@ -4,6 +4,7 @@
 // attributes, and the component turns a click into an `onLink(target)` call (index.ts contract).
 
 import { driveForm, isRemoteOrDevicePath } from './paths.ts';
+import { hasExtension } from './pathrefs.ts';
 
 export interface LinkTarget {
   /** `path`: a file path written in inline code or plain text, resolved by the host on click. */
@@ -118,6 +119,9 @@ export function classifyHref(rawHref: string): LinkTarget | null {
   // the handler may decide to open.
   const hash = href.indexOf('#');
   const pathPart = safeDecode(hash < 0 ? href : href.slice(0, hash));
+  // A bare word ("income") names no folder and no kind of file: a model's loose wording, not a path.
+  // It stays text instead of becoming a link that can only miss.
+  if (!/[\\/]/.test(pathPart) && !hasExtension(pathPart)) return null;
   if (/\.md$/i.test(pathPart)) {
     const fragment = hash < 0 ? '' : safeDecode(href.slice(hash));
     return { kind: 'vault', ...splitNoteAndFragment(pathPart.replace(/\.md$/i, '') + fragment) };

@@ -174,6 +174,11 @@ export function movePage(index: number, delta: -1 | 1, count: number): number {
   return Math.min(count - 1, Math.max(0, index + delta * PAGE_STEP));
 }
 
+/** The hint under an empty result: fewer words, and (when the Archived box is off) archived chats. */
+export function emptyHint(archived: boolean): string {
+  return archived ? 'Try fewer words.' : 'Try fewer words, or include archived chats.';
+}
+
 /** The polite status line: what is happening, or how many results there are. */
 export function statusLine(state: SearchState): string {
   if (state.query === '') return 'Type to search.';

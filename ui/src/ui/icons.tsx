@@ -93,6 +93,7 @@ import {
   RotateCw,
   Search,
   Send,
+  Server,
   Settings,
   ShieldCheck,
   ShieldOff,
@@ -227,6 +228,8 @@ export const IconClock = kitIcon(Clock, 'clock');
 export const IconCoins = kitIcon(Coins, 'coins');
 /** The graphics card: the top bar's Unload local models. */
 export const IconGpu = kitIcon(Cpu, 'cpu');
+/** A model server on this machine: the top bar's local-model chip. */
+export const IconServer = kitIcon(Server, 'server');
 export const IconTerminal = kitIcon(Terminal, 'terminal');
 export const IconScrollDown = kitIcon(ArrowDown, 'arrow-down');
 

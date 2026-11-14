@@ -9,7 +9,7 @@ import type { SearchHit } from '../api/search.ts';
 import type { FakeOpHandler } from './fakeHost.ts';
 
 export const FAKE_SEED_BUTTONS: ActionButton[] = [
-  ['update', 'Update', 'Please give me a brief plain-language status: what is finished, what is under way, what is stuck, and what you need from me.', 'topbar', false, 'prompt'],
+  ['update', 'Report progress', 'Please give me a brief plain-language status: what is finished, what is under way, what is stuck, and what you need from me.', 'topbar', false, 'prompt'],
   ['needs-me', 'Needs me', 'What needs my attention right now, and why? Only list things that truly need a decision from me (check each one) and give me the options for each.', 'topbar', false, 'prompt'],
   ['ship-it', 'Ship it', 'I am happy with this. Commit only your own changes, push, open or update the pull request, and merge to main once review passes. Tell me what landed.', 'topbar', false, 'prompt'],
   ['close-session', 'Close session', 'Please wrap up this session: record what we learned, clean up worktrees and branches, then commit and push. Report each step as pass or fail.', 'topbar', false, 'prompt'],
