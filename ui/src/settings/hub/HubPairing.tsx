@@ -74,7 +74,10 @@ export function HubPairing() {
     <div data-testid="hub-pairing">
       <h3 className="hub-heading">Pair with a code</h3>
       {(done ?? paired) && (
-        <SettingRow testId="hub-paired" title={done ?? paired} description={done ? 'Shared memory and the hub line are set up; no token to paste.' : (pairedDetail ?? 'Shared memory and the hub line are set up; no token to paste.')}
+        <SettingRow
+          testId="hub-paired"
+          title={done ?? paired}
+          description={done ? 'Shared memory and the hub line are set up.' : (pairedDetail ?? 'Shared memory and the hub line are set up.')}
         />
       )}
       <SettingRow
