@@ -11,6 +11,7 @@ import { IconGrid, IconUnpin } from '../ui/icons.tsx';
 import { pageOps } from './api.ts';
 import type { PinnedPage } from './api.ts';
 import { openPageTab } from './open.ts';
+import { displayPath, shortPath } from '../panel/viewer/paths.ts';
 
 export function PagesEntry({ api, bus, profileId }: { api: Api; bus: EventBus; profileId?: string | null }) {
   const ops = useMemo(() => pageOps(api), [api]);
@@ -63,9 +64,9 @@ export function PagesEntry({ api, bus, profileId }: { api: Api; bus: EventBus; p
           <ul className="pg-list">
             {(pages ?? []).map((p) => (
               <li key={p.id} className="pg-list-row">
-                <button type="button" className="pg-list-open" onClick={() => show(p)} data-testid="pages-row">
+                <button type="button" className="pg-list-open" onClick={() => show(p)} title={`${p.title}\n${displayPath(p.path)}`} data-testid="pages-row">
                   <span className="pg-list-title">{p.title}</span>
-                  <span className="pg-list-path">{p.path}</span>
+                  <span className="pg-list-path">{shortPath(p.path)}</span>
                 </button>
                 <Button
                   variant="icon"

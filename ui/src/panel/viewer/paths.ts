@@ -28,6 +28,13 @@ export function basename(p: string): string {
   return at < 0 ? s : s.slice(at + 1) || s;
 }
 
+/** A short locator for a list row: the folder and file name (`…\folder\page.html`), or the whole path when that is all there is. */
+export function shortPath(p: string): string {
+  const s = displayPath(p);
+  const parts = s.split('\\');
+  return parts.length <= 3 ? s : `…\\${parts.slice(-2).join('\\')}`;
+}
+
 /** True when `path` is `root` or below it (compared the way tabs are: case-insensitively). */
 export function isInside(root: string, path: string): boolean {
   const r = pathKey(root);

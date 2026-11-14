@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ancestorsWithin, basename, dirname, displayPath, isInside, joinPath, matchSegments, pathKey, splitSegments } from './paths.ts';
+import { ancestorsWithin, basename, dirname, displayPath, isInside, joinPath, matchSegments, pathKey, shortPath, splitSegments } from './paths.ts';
 
 const r = String.raw;
 const ROOT = 'C:\\';
@@ -16,6 +16,9 @@ test('dirname stops at the drive root', () => {
   assert.equal(dirname(r`C:\a`), ROOT);
   assert.equal(dirname(ROOT), null);
   assert.equal(basename(r`C:\a\b.txt`), 'b.txt');
+  assert.equal(shortPath(r`C:\Users\me\pages\budget\page.html`), r`…\budget\page.html`);
+  assert.equal(shortPath('c:/x/page.html'), r`C:\x\page.html`);
+  assert.equal(shortPath(r`C:\page.html`), r`C:\page.html`);
 });
 
 test('joinPath resolves . and .. without climbing above the drive', () => {

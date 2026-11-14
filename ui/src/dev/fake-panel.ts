@@ -86,6 +86,11 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
   let saved: unknown = { version: 1, sets: {} };
   const contextOn = new Set<string>();
   let comments: Array<Record<string, unknown>> = [];
+  // Two pinned pages, one with a long title, so the Pages list has rows to show.
+  let pinned = [
+    { id: 'pg1', profileId: '', path: `${FAKE_ROOT}\\pages\\budget\\page.html`, title: 'Budget', chatId: null, pinnedAt: 1 },
+    { id: 'pg2', profileId: '', path: `${FAKE_ROOT}\\notes\\weekly-plans\\garden\\planting-calendar.html`, title: 'Planting calendar for the spring beds and the greenhouse', chatId: null, pinnedAt: 2 },
+  ];
   // A made-up working tree: one staged, one partly staged, one untracked file and a conflict.
   let records = [
     { path: 'src/app.ts', status: 'M', section: 'staged', partial: false, added: 2, removed: 1 },
@@ -229,6 +234,11 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
           .map((k, i) => ({ path: `${FAKE_ROOT}\\${k}`, label: k, kind: 'file', score: 100 - i }));
         return { mode: 'files', items, partial: false };
       }
+      case 'page_list':
+        return { pages: pinned };
+      case 'page_unpin':
+        pinned = pinned.filter((p) => p.id !== args.id);
+        return { removed: true };
       case 'panel_tabs_get':
         return saved;
       case 'panel_tabs_save':
@@ -238,5 +248,5 @@ export function panelFakeOps(): { prefixes: string[]; handler: FakeOpHandler } {
         throw new ApiError('refused', 'This operation is not available here.');
     }
   };
-  return { prefixes: ['file_', 'archive_list', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_', 'path_resolve', 'quick_open', 'changes', 'diff', 'vault_', 'panel_context_', 'review_comment_', 'review_turns', 'review_turn_diff'], handler };
+  return { prefixes: ['file_', 'archive_list', 'dir_list', 'default_handler', 'chat_folder', 'panel_tabs_', 'path_resolve', 'quick_open', 'changes', 'diff', 'vault_', 'panel_context_', 'review_comment_', 'review_turns', 'review_turn_diff', 'page_list', 'page_unpin'], handler };
 }
