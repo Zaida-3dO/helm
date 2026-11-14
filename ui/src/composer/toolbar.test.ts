@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { commitPatch, effortLabel, filterRows, formatContext, isLocalModel, localHint, localModelChoices, localModelName, localServerId, modelRows, shortName, stepEffort, thinkingLabel, triggerLabel, withDefaultRow } from './modelEffort.ts';
+import { commitPatch, effortLabel, filterRows, formatContext, isLocalModel, localHint, localModelChoices, localModelName, localServerId, modelRows, shortName, stepEffort, thinkingLabel, triggerLabel, triggerParts, withDefaultRow } from './modelEffort.ts';
 import { afterTurn, newPick, permissionTooltip, pickedMode, setPickedMode, shownMode } from './permission.ts';
 import { sendLabel } from './keymap.ts';
 import type { ModelCatalogue } from '../api/types.ts';
@@ -74,6 +74,9 @@ test('local models: their own group with server and context, greyed only when th
   assert.equal(triggerLabel('Qwen Flash', 'xhigh', true), 'Qwen Flash · Extra high');
   assert.equal(triggerLabel('Qwen 3.8 (fast)', 'high', true), 'Qwen 3.8 (fast) · High', 'a local alias is kept whole');
   assert.equal(triggerLabel('Qwen Flash', 'low', true), 'Qwen Flash · No thinking');
+  // The name and the effort word are separate, so a narrow toolbar can drop the effort and keep the name.
+  assert.deepEqual(triggerParts('Opus 5.5 (1M)', 'xhigh'), { name: 'Opus 5.5', rest: 'Extra high' });
+  assert.deepEqual(triggerParts('Qwen Flash', 'low', true), { name: 'Qwen Flash', rest: 'No thinking' });
   assert.equal(thinkingLabel('xhigh'), 'Extra high thinking');
 
   // Before the first turn: every reachable row can be picked; the group headings only exist with local models.

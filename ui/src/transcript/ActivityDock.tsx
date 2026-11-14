@@ -17,7 +17,7 @@ import { formatElapsed } from './workBlocks.ts';
 import { SubagentRosterChip } from './subagents/SubagentRoster.tsx';
 import { newestTurn, turnChecklist } from './checklist.ts';
 import { LiveChecklist } from './LiveChecklist.tsx';
-import { backgroundShells, dockActivity, dockShown, dockState, finishedCount, finishedTurn, type FinishedTurn } from './dockModel.ts';
+import { backgroundShells, dockActivity, dockShown, dockState, finishedCount, finishedTurn, turnClockText, type FinishedTurn } from './dockModel.ts';
 import '../composer/dock.css';
 import './activityDock.css';
 
@@ -117,24 +117,24 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows, ru
           </span>
           <div className="ad-lines">
             <div className="ad-line1">
-              <span className="ad-state">{state.label}</span>
-              {narration && <span className="ad-preview">{narration}</span>}
+              <span className="ad-state" title={state.label}>{state.label}</span>
+              {narration && <span className="ad-preview" title={narration}>{narration}</span>}
             </div>
             <div className="ad-line2">
               {loading ? (
                 <span className="ad-phase" data-phase="loading" data-testid="dock-loading">
-                  <span>Waiting for the model server</span>
+                  <span title="Waiting for the model server">Waiting for the model server</span>
                   <span className="ad-tool-time">{formatElapsed(Math.max(0, now - loading.startedAt))}</span>
                 </span>
               ) : state.key === 'compacting' && thread.compacting ? (
                 <span className="ad-phase" data-phase="compacting" data-testid="dock-compacting">
-                  <span>Summarising the conversation so far</span>
+                  <span title="Summarising the conversation so far">Summarising the conversation so far</span>
                   <span className="ad-tool-time">{formatElapsed(Math.max(0, now - thread.compacting.startedAt))}</span>
                 </span>
               ) : latest ? (
                 <span className="ad-tool">
                   <ToolIcon name={latest.name} />
-                  <span className="ad-tool-name">{latest.summary || toolLabel(latest.name)}</span>
+                  <span className="ad-tool-name" title={latest.summary || toolLabel(latest.name)}>{latest.summary || toolLabel(latest.name)}</span>
                   <span className="ad-tool-time">{formatElapsed(now - latest.startedAt)}</span>
                   {canStop && (
                     <button
@@ -151,7 +151,7 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows, ru
                 </span>
               ) : activity ? (
                 <span className="ad-phase" data-phase={activity.phase} data-testid="dock-phase">
-                  <span>{activity.label}</span>
+                  <span title={activity.label}>{activity.label}</span>
                   <span className="ad-tool-time">{formatElapsed(Math.max(0, now - (phaseSince ?? activity.since)))}</span>
                 </span>
               ) : (
@@ -201,7 +201,11 @@ export function ActivityDock({ chat, thread, turnStartedAt, onStopTool, rows, ru
                 </span>
               )}
               <SubagentRosterChip thread={thread} />
-              {live && turnStartedAt !== null && <span className="ad-clock">{formatElapsed(now - turnStartedAt)}</span>}
+              {live && turnStartedAt !== null && (
+                <span className="ad-clock" title="How long this turn has been running" data-testid="dock-turn-clock">
+                  {turnClockText(now - turnStartedAt)}
+                </span>
+              )}
             </div>
           </div>
         </div>

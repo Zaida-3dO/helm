@@ -77,8 +77,14 @@ export function shortName(name: string): string {
  * alias is kept whole) and reads the lowest stop, which turns thinking off, as "No thinking".
  */
 export function triggerLabel(modelName: string, effort: string, local = false): string {
-  if (local) return `${modelName} · ${effort === 'low' ? 'No thinking' : effortLabel(effort)}`;
-  return `${shortName(modelName)} · ${effortLabel(effort)}`;
+  const { name, rest } = triggerParts(modelName, effort, local);
+  return `${name} · ${rest}`;
+}
+
+/** The trigger's label in two parts: the name that always shows and the effort word that gives way first. */
+export function triggerParts(modelName: string, effort: string, local = false): { name: string; rest: string } {
+  if (local) return { name: modelName, rest: effort === 'low' ? 'No thinking' : effortLabel(effort) };
+  return { name: shortName(modelName), rest: effortLabel(effort) };
 }
 
 /** One step left (-1) or right (+1) along the efforts, stopping at the ends. */

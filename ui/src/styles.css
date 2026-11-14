@@ -1438,9 +1438,10 @@ dd {
   font-weight: 560;
 }
 .settings-search {
-  margin-left: auto;
-  flex: 0 1 230px;
-  min-width: 160px;
+  /* Its own full-width row above the tab groups. */
+  flex: 1 1 100%;
+  min-width: 0;
+  margin-bottom: 4px;
   height: 28px;
   padding: 0 10px !important;
   border: 1px solid var(--line) !important;
@@ -1453,6 +1454,20 @@ dd {
 }
 .settings-body {
   padding: 4px 24px 24px;
+}
+/* A soft fade on the edge of the settings pane that has more rows beyond it; SettingsDialog sets
+   the attributes from the scroll position. */
+.ui-dialog[data-testid='settings'] .ui-dialog-body {
+  --fade-top: 0px;
+  --fade-bottom: 0px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent 100%);
+}
+.ui-dialog[data-testid='settings'] .ui-dialog-body[data-fade-top] {
+  --fade-top: 28px;
+}
+.ui-dialog[data-testid='settings'] .ui-dialog-body[data-fade-bottom] {
+  --fade-bottom: 28px;
 }
 .settings-body h3 {
   font-size: calc(12 * var(--ui-unit));

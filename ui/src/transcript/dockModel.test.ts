@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { backgroundShells, dockShown } from './dockModel.ts';
+import { backgroundShells, dockShown, turnClockText } from './dockModel.ts';
 
 const shell = { id: 's', title: 'npm run dev', command: 'npm run dev', kind: 'shell' as const, startedAt: 1 };
 const agent = { id: 'a', title: 'Survey', command: null, kind: 'agent' as const, startedAt: 1 };
@@ -101,4 +101,10 @@ test('with no tool running the dock says what the turn is doing, and since when'
   assert.equal(dockActivity([user], none, 700, 0).label, 'Waiting for the local model');
   assert.equal(dockActivity(queued, none, 700, null).label, 'Thinking about the result');
   assert.equal(lastLine('1. First\n\n## Second line  \n'), 'Second line');
+});
+
+test('the right-hand clock names the turn, so it never reads as a second step timer', () => {
+  assert.equal(turnClockText(4_400), 'turn 4s');
+  assert.equal(turnClockText(65_000), 'turn 1m 5s');
+  assert.equal(turnClockText(-50), 'turn 0s');
 });

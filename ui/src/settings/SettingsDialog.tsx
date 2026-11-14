@@ -10,7 +10,7 @@ import { IconSearch } from '../ui/icons.tsx';
 import { applySearch, clearHighlight } from './search.ts';
 import { SettingsWatchers } from './watchers.tsx';
 import { settingsPanes, subscribeSettingsPanes, peekRequestedPane, clearRequestedPane } from './registry.ts';
-import { groupSettingsTabs } from './layout.ts';
+import { groupSettingsTabs, scrollEdges } from './layout.ts';
 
 export const SETTINGS_DIALOG = 'settings';
 
@@ -67,6 +67,26 @@ function SettingsBody({ close }: { close: () => void }) {
     };
   }, [applied, searching, panes]);
   useEffect(() => clearHighlight, []);
+  // A soft fade on whichever edge of the scrolling pane has more rows beyond it (see styles.css).
+  useEffect(() => {
+    const body = bodyRef.current;
+    const scroller = body?.parentElement;
+    if (!body || !scroller) return;
+    const update = () => {
+      const edges = scrollEdges(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight);
+      scroller.toggleAttribute('data-fade-top', edges.top);
+      scroller.toggleAttribute('data-fade-bottom', edges.bottom);
+    };
+    update();
+    scroller.addEventListener('scroll', update, { passive: true });
+    const watch = new ResizeObserver(update);
+    watch.observe(scroller);
+    watch.observe(body);
+    return () => {
+      scroller.removeEventListener('scroll', update);
+      watch.disconnect();
+    };
+  }, []);
   const footer = (
     <>
       <span className="settings-version" data-testid="settings-version">
@@ -77,6 +97,15 @@ function SettingsBody({ close }: { close: () => void }) {
   );
   const tabs = (
     <div className="settings-tabs" role="tablist">
+        <input
+          type="search"
+          className="settings-search"
+          placeholder="Search settings"
+          aria-label="Search settings"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          data-autofocus=""
+        />
         {groupSettingsTabs(panes).map((g) => (
           <span className="settings-tab-group" key={g.title}>
             <span className="settings-tab-group-label" aria-hidden="true">{g.title}</span>
@@ -99,15 +128,6 @@ function SettingsBody({ close }: { close: () => void }) {
             ))}
           </span>
         ))}
-        <input
-          type="search"
-          className="settings-search"
-          placeholder="Search settings"
-          aria-label="Search settings"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          data-autofocus=""
-        />
       </div>
   );
   return (
