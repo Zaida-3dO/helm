@@ -24,6 +24,13 @@ fn request_allow(ctx: &ToolCtx, a: Value) -> ToolResult {
         .get::<Database>()
         .ok_or_else(|| ToolError::refused("Allow requests are not available here."))?;
     let action = a.get("action").and_then(Value::as_str).unwrap_or("");
+    // A kind Helm applies itself has its own staging tool, which builds every line of its card.
+    if let Some(applier) = kinds.applier(action) {
+        return Err(ToolError::refused(format!(
+            "[Helm] Your Allow request was refused: stage it with {}, and Helm applies it when the user approves.",
+            applier.staged_with()
+        )));
+    }
     let target = a.get("target").cloned().unwrap_or(Value::Null);
     if !target.is_object() {
         return Err(ToolError::refused("target must be an object."));

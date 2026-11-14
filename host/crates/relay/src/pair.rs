@@ -16,7 +16,12 @@
 //! heard it and refused it, the other address is not tried.
 //!
 //! Op: `hub_pair {address, fallback?, code}` → `{connection, personId, personName, machineId,
-//! machineName, memoryServer, profileId}`.
+//! machineName, memoryServer, profileId}`. The op and an approved `app_stage_settings`
+//! ([`crate::setup`]) both pair through [`pair_with`]; the staged one names the person and
+//! computer it expects, and nothing is saved when the hub names others.
+//!
+//! The hub has sent the person and machine ids as numbers and as strings; both read as the
+//! decimal string.
 
 use crate::config::{self, RelayConfig, MIN_TOKEN};
 use helm_ipc::{ApiError, AppEvent, OpClass, OpCtx, OpRegistry};
@@ -48,13 +53,29 @@ struct PairArgs {
 #[serde(rename_all = "camelCase")]
 pub struct Paired {
     pub token: String,
+    #[serde(deserialize_with = "id_text")]
     pub person_id: String,
     #[serde(default)]
     pub person_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "id_text")]
     pub machine_id: String,
     #[serde(default)]
     pub machine_name: String,
+}
+
+/// An id the hub may send as a number or as a string: a number becomes its decimal string, the
+/// form every other hub route sends ids in, so profile links and device lists agree.
+fn id_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Id {
+        Number(u64),
+        Text(String),
+    }
+    Ok(match Id::deserialize(d)? {
+        Id::Number(n) => n.to_string(),
+        Id::Text(s) => s,
+    })
 }
 
 impl std::fmt::Debug for Paired {
@@ -90,7 +111,7 @@ pub fn normalize_code(raw: &str) -> Result<String, String> {
 }
 
 /// The `host:port` of a normalised line address (`ws://host:port/relay`).
-fn authority(line_url: &str) -> Option<&str> {
+pub(crate) fn authority(line_url: &str) -> Option<&str> {
     let rest = line_url.strip_prefix("ws://")?;
     Some(rest.split('/').next().unwrap_or(rest))
 }
@@ -199,33 +220,62 @@ pub fn memory_server(line_url: &str, token: &str) -> Option<helm_mcp::McpServer>
     })
 }
 
-fn hub_pair(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    // Errors never echo the input: it holds the code.
-    let a: PairArgs = serde_json::from_value(args)
-        .map_err(|_| ApiError::bad_args("Expected address, code, and optionally fallback."))?;
-    let lan = config::normalize_url(&a.address).map_err(ApiError::bad_args)?;
-    let fallback = match a
-        .fallback
-        .as_deref()
-        .map(str::trim)
-        .filter(|f| !f.is_empty())
-    {
-        Some(f) => config::normalize_url(f).map_err(ApiError::bad_args)?,
-        None => String::new(),
-    };
-    let code = normalize_code(&a.code).map_err(ApiError::bad_args)?;
-    let paired = exchange_any(&[lan.clone(), fallback.clone()], &code).map_err(|e| match e {
+/// What one pairing did. Holds no token.
+#[derive(Debug)]
+pub struct PairedHere {
+    pub person_id: String,
+    pub person_name: String,
+    pub machine_id: String,
+    pub machine_name: String,
+    /// The shared-memory server was added (or refreshed) in Settings → MCP.
+    pub memory_server: bool,
+    /// The home profile linked to the person, when that worked.
+    pub profile_id: Option<String>,
+}
+
+/// Names as a person types them: trimmed, compared without regard to case.
+fn same_name(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
+}
+
+/// Pair with the hub: exchange `code` at `lan` (then `fallback`), and when `expect` names a
+/// person and computer, save nothing unless the hub names the same ones. Then seal the
+/// connection, wake the line, and (best effort) add the shared-memory server and link the home
+/// profile. Errors carry fixed text only, never the code: `unavailable`, `refused` (the code is
+/// spent), `mismatch` (spent too, and the hub made a machine record) or `internal`.
+pub fn pair_with(
+    services: &helm_ipc::Services,
+    events: &std::sync::Arc<dyn helm_ipc::EventSink>,
+    lan: &str,
+    fallback: &str,
+    code: &str,
+    expect: Option<(&str, &str)>,
+) -> Result<PairedHere, ApiError> {
+    let paired = exchange_any(&[lan.to_owned(), fallback.to_owned()], code).map_err(|e| match e {
         PairError::Unreachable => ApiError::new(
             "unavailable",
             "The hub could not be reached. Check the address, and that this computer is on the home network or Tailscale.",
         ),
         PairError::Refused(m) => ApiError::new("refused", m),
     })?;
+    if let Some((person, machine)) = expect {
+        if !same_name(&paired.person_name, person) || !same_name(&paired.machine_name, machine) {
+            return Err(ApiError::new(
+                "mismatch",
+                format!(
+                    "The hub paired this code as {} on {}, not {person} on {machine}, so Helm saved nothing. Remove the computer record \"{}\" on the hub.",
+                    paired.person_name, paired.machine_name, paired.machine_name
+                ),
+            ));
+        }
+    }
 
-    let creds = crate::ctx_credentials(ctx)?;
+    let profile = services.need::<helm_core::profile::Profile>()?;
+    let platform = services.need::<helm_platform::Platform>()?;
+    let creds = crate::credentials(&profile, &platform);
     let cfg = RelayConfig {
-        lan_url: lan.clone(),
-        fallback_url: fallback,
+        lan_url: lan.to_owned(),
+        fallback_url: fallback.to_owned(),
         token: paired.token.clone(),
         person_id: paired.person_id.clone(),
         person_name: paired.person_name.clone(),
@@ -233,14 +283,14 @@ fn hub_pair(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         machine_name: paired.machine_name.clone(),
     };
     config::save_paired(&creds, &cfg).map_err(ApiError::internal)?;
-    if let Some(c) = ctx.services.get::<crate::client::Client>() {
+    if let Some(c) = services.get::<crate::client::Client>() {
         c.reconfigured.notify_waiters();
     }
 
     // The rest is best effort: the line is paired either way, and each part says how it went.
     let memory_server = match (
-        ctx.services.get::<helm_mcp::McpStore>(),
-        memory_server(&lan, &paired.token),
+        services.get::<helm_mcp::McpStore>(),
+        memory_server(lan, &paired.token),
     ) {
         (Some(store), Some(server)) => store
             .mutate(None, |list| {
@@ -252,8 +302,7 @@ fn hub_pair(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
             .is_ok(),
         _ => false,
     };
-    let profile_id = ctx
-        .services
+    let profile_id = services
         .get::<helm_core::db::Database>()
         .and_then(|db| {
             db.write(|tx| {
@@ -269,32 +318,61 @@ fn hub_pair(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         })
         .map(|p| p.id);
     if profile_id.is_some() {
-        ctx.events.emit(AppEvent::new("profiles_changed"));
+        events.emit(AppEvent::new("profiles_changed"));
     }
+    Ok(PairedHere {
+        person_id: paired.person_id.clone(),
+        person_name: paired.person_name.clone(),
+        machine_id: paired.machine_id.clone(),
+        machine_name: paired.machine_name.clone(),
+        memory_server,
+        profile_id,
+    })
+}
 
+fn hub_pair(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    // Errors never echo the input: it holds the code.
+    let a: PairArgs = serde_json::from_value(args)
+        .map_err(|_| ApiError::bad_args("Expected address, code, and optionally fallback."))?;
+    let lan = config::normalize_url(&a.address).map_err(ApiError::bad_args)?;
+    let fallback = match a
+        .fallback
+        .as_deref()
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+    {
+        Some(f) => config::normalize_url(f).map_err(ApiError::bad_args)?,
+        None => String::new(),
+    };
+    let code = normalize_code(&a.code).map_err(ApiError::bad_args)?;
+    let p = pair_with(&ctx.services, &ctx.events, &lan, &fallback, &code, None)?;
+    let cfg = config::load(&crate::ctx_credentials(ctx)?);
     Ok(json!({
         "connection": config::view(&cfg, crate::line_state(ctx)),
-        "personId": paired.person_id,
-        "personName": paired.person_name,
-        "machineId": paired.machine_id,
-        "machineName": paired.machine_name,
-        "memoryServer": memory_server,
-        "profileId": profile_id,
+        "personId": p.person_id,
+        "personName": p.person_name,
+        "machineId": p.machine_id,
+        "machineName": p.machine_name,
+        "memoryServer": p.memory_server,
+        "profileId": p.profile_id,
     }))
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use helm_platform::keychain::MemoryKeychain;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::Arc;
 
-    const TOKEN: &str = "paired-secret-token-0123456789abcdef";
+    pub(crate) const TOKEN: &str = "paired-secret-token-0123456789abcdef";
 
     /// A hub that answers one request: returns its line address and the request text it saw.
-    fn fake_hub(status: &str, body: String) -> (String, std::thread::JoinHandle<String>) {
+    pub(crate) fn fake_hub(
+        status: &str,
+        body: String,
+    ) -> (String, std::thread::JoinHandle<String>) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let status = status.to_owned();
@@ -347,6 +425,23 @@ mod tests {
             ("Pat", "Laptop")
         );
         assert!(!format!("{paired:?}").contains(TOKEN));
+
+        // The hub sends ids as numbers or as strings; both read as the decimal string.
+        for body in [
+            json!({"token": TOKEN, "personId": 3, "personName": "Pat", "machineId": 7,
+                   "machineName": "Laptop", "scopes": ["relay", "memory"]}),
+            json!({"token": TOKEN, "personId": "3", "personName": "Pat", "machineId": "7",
+                   "machineName": "Laptop"}),
+        ] {
+            let (url, hub) = fake_hub("200 OK", body.to_string());
+            let paired = exchange(&url, "ABCD1234").unwrap();
+            hub.join().unwrap();
+            assert_eq!(
+                (paired.person_id.as_str(), paired.machine_id.as_str()),
+                ("3", "7"),
+                "{body}"
+            );
+        }
 
         // Refusals say what to do, a spent code is not retried on the other address, and a hub
         // that is not there lets the next address be tried.

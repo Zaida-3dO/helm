@@ -4,13 +4,22 @@
 //! card's one-line summary from its own records; the agent's target is only the key it looks
 //! records up by. The MCP crate registers `mcp_repo_server` and, in tests and debug builds
 //! only, [`test_kind`].
+//!
+//! An **applying** kind ([`AllowKinds::register_applying`]) is one Helm applies itself the moment
+//! the user approves ([`crate::apply`]): its requests are filed only by the tool that stages them,
+//! never through `app_request_allow`, and its card summary may run to several lines.
 
+use crate::apply::Applier;
 use rusqlite::Transaction;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
-/// Longest host summary on a card (≤ 240 characters).
-pub const MAX_SUMMARY: usize = 240;
+/// Longest host summary on a card. An ordinary kind's summary is one line of at most
+/// [`MAX_SUMMARY_LINE`]; an applying kind's is a title and one line per change.
+pub const MAX_SUMMARY: usize = 1_200;
+/// Longest single line of a summary.
+pub const MAX_SUMMARY_LINE: usize = 240;
 /// Longest serialised canonical target.
 pub const MAX_TARGET: usize = 20_000;
 
@@ -45,6 +54,7 @@ pub struct AllowKind {
 #[derive(Clone, Default)]
 pub struct AllowKinds {
     kinds: Vec<AllowKind>,
+    appliers: Vec<(&'static str, Arc<dyn Applier>)>,
 }
 
 impl AllowKinds {
@@ -65,6 +75,32 @@ impl AllowKinds {
         );
         self.kinds.push(k);
         self
+    }
+
+    /// Register a kind Helm applies itself when the user approves. It never accepts the user's
+    /// typed words: only the click approves it.
+    pub fn register_applying(&mut self, k: AllowKind, applier: Arc<dyn Applier>) -> &mut Self {
+        assert!(
+            !k.accepts_words,
+            "an applying kind takes no words: {}",
+            k.id
+        );
+        self.register(k);
+        self.appliers.push((k.id, applier));
+        self
+    }
+
+    /// The applier of an applying kind.
+    pub fn applier(&self, id: &str) -> Option<Arc<dyn Applier>> {
+        self.appliers
+            .iter()
+            .find(|(k, _)| *k == id)
+            .map(|(_, a)| a.clone())
+    }
+
+    /// Whether Helm applies this kind itself on Approve.
+    pub fn applies_on_allow(&self, id: &str) -> bool {
+        self.appliers.iter().any(|(k, _)| *k == id)
     }
 
     pub fn get(&self, id: &str) -> Option<&AllowKind> {

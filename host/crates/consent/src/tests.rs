@@ -1,7 +1,7 @@
 //! Store tests: caps, compare-and-set decide, single-use spend, the words episode, upkeep, the
 //! hint and the ops.
 
-use crate::kinds::{test_kind, AllowKind, AllowKinds};
+use crate::kinds::{test_kind, AllowKind, AllowKinds, Canonical};
 use crate::store::{self, NewRequest, HOUR, MINUTE, PENDING_LIFE};
 use crate::types::{Decision, RequestState};
 use helm_core::db::{Database, MigrationRegistry};
@@ -641,4 +641,244 @@ fn app_request_allow_files_a_pending_request_and_signals() {
     );
     // Nothing an agent does mints a grant: the request is still only pending.
     assert!(spend(&e, "c0", &t("alpha"), crate::tests::now()).is_err());
+}
+
+/// An applying kind for tests: records what it applied and answers a fixed outcome.
+#[derive(Default)]
+struct Recorder(std::sync::Mutex<Vec<Value>>);
+
+impl crate::Applier for Recorder {
+    fn apply(&self, job: &crate::ApplyJob<'_>) -> String {
+        self.0.lock().unwrap().push(job.target.clone());
+        "Done: the test setting changed.".into()
+    }
+    fn staged_with(&self) -> &'static str {
+        "app_stage_test"
+    }
+}
+
+fn applying_kind() -> AllowKind {
+    fn canonical(_tx: &Transaction<'_>, _chat: &str, t: &Value) -> Result<Canonical, String> {
+        let name = t.get("name").and_then(Value::as_str).ok_or("name")?;
+        Ok(Canonical {
+            target: json!({ "name": name }),
+            summary: format!(
+                "Change test settings\nName: none → {name}\n{}",
+                "y".repeat(300)
+            ),
+            fixed_form: String::new(),
+        })
+    }
+    AllowKind {
+        id: "test_apply",
+        label: "Change settings that need your approval",
+        accepts_words: false,
+        canonical,
+    }
+}
+
+fn stage(e: &Env, chat: &str, name: &str, at: i64) -> crate::ConsentRequest {
+    let target = t(name);
+    store::request(
+        &e.db,
+        &e.kinds,
+        NewRequest {
+            kind: "test_apply",
+            ..ask(chat, &target)
+        },
+        at,
+    )
+    .unwrap()
+}
+
+#[test]
+fn an_applying_kind_applies_once_on_approve_and_reports_the_outcome() {
+    let mut e = env();
+    let rec = Arc::new(Recorder::default());
+    e.kinds.register_applying(applying_kind(), rec.clone());
+    let mut services = Services::new();
+    services.insert(e.db.clone());
+    services.insert(Arc::new(e.kinds.clone()));
+    services.insert(Arc::new(crate::MaintenanceLock::default()));
+    let services = Arc::new(services);
+    let sink = Arc::new(RecordingSink::default());
+    let events: Arc<dyn helm_ipc::EventSink> = sink.clone();
+    let decide = |id: &str, decision: Decision| {
+        crate::decide_and_apply(
+            &services,
+            &events,
+            &crate::ConsentDecideArgs {
+                request_id: id.into(),
+                decision,
+                grant_minutes: None,
+                note: None,
+            },
+            "app",
+        )
+    };
+
+    // The card: an Approve card, the title then one line per change, each cut to 240.
+    let now = now();
+    let r = stage(&e, "c0", "alpha", now);
+    assert!(r.applies_on_allow);
+    let lines: Vec<&str> = r.summary.lines().collect();
+    assert_eq!(lines[..2], ["Change test settings", "Name: none → alpha"]);
+    assert_eq!(lines[2].chars().count(), 240);
+    // An ordinary kind keeps one line.
+    let plain = store::request(&e.db, &e.kinds, ask("c1", &t("a\nb")), now).unwrap();
+    assert!(!plain.applies_on_allow && !plain.summary.contains('\n'));
+
+    // Nothing an agent does spends it.
+    let spent = e.db.write::<_, store::Refusal>(|tx| {
+        store::spend_grant(tx, &e.kinds, "c0", "test_apply", &t("alpha"), "x", now)
+    });
+    assert!(spent.unwrap_err().0.contains("applies this itself"));
+    // Only the main window's surface is known.
+    assert!(crate::decide_and_apply(
+        &services,
+        &events,
+        &crate::ConsentDecideArgs {
+            request_id: r.id.clone(),
+            decision: Decision::Allow,
+            grant_minutes: None,
+            note: None,
+        },
+        "telegram",
+    )
+    .is_err());
+
+    // Approve: applied once, on its own thread; a second answer is a conflict.
+    let d = decide(&r.id, Decision::Allow).unwrap();
+    d.applying.expect("applying started").join().unwrap();
+    assert_eq!(*rec.0.lock().unwrap(), [t("alpha")]);
+    assert_eq!(
+        decide(&r.id, Decision::Allow).err().unwrap().code,
+        "conflict"
+    );
+    assert_eq!(
+        decide(&r.id, Decision::Deny).err().unwrap().code,
+        "conflict"
+    );
+    assert_eq!(rec.0.lock().unwrap().len(), 1);
+    assert!(store::spend_for_apply(&e.db, &e.kinds, &r.id, now)
+        .unwrap()
+        .is_none());
+    let l = store::list(&e.db, &e.kinds, "c0", now).unwrap();
+    assert_eq!(l.decided[0].state, RequestState::Used);
+    assert_eq!(
+        l.decided[0].outcome.as_deref(),
+        Some("Done: the test setting changed.")
+    );
+    let via: String =
+        e.db.snapshot(|tx| {
+            tx.query_row(
+                "SELECT decided_via FROM consent_requests WHERE id = ?1",
+                [&r.id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(via, "app");
+    let u = store::upkeep(&e.db, &e.kinds, now).unwrap();
+    let note = u.deliveries.iter().find(|d| d.request_id == r.id).unwrap();
+    assert_eq!(
+        note.text,
+        "[Helm] The user approved: Change test settings. Done: the test setting changed."
+    );
+
+    // Deny: nothing applied, and the note says nothing changed.
+    let r2 = stage(&e, "c0", "beta", now);
+    assert!(decide(&r2.id, Decision::Deny).unwrap().applying.is_none());
+    assert_eq!(rec.0.lock().unwrap().len(), 1);
+    let u = store::upkeep(&e.db, &e.kinds, now).unwrap();
+    let note = u.deliveries.iter().find(|d| d.request_id == r2.id).unwrap();
+    assert!(note.text.ends_with("Nothing changed."), "{}", note.text);
+}
+
+#[test]
+fn upkeep_holds_an_applying_note_until_the_outcome_or_a_stop() {
+    let mut e = env();
+    e.kinds
+        .register_applying(applying_kind(), Arc::new(Recorder::default()));
+    let owed = |at: i64| -> Vec<String> {
+        store::upkeep(&e.db, &e.kinds, at)
+            .unwrap()
+            .deliveries
+            .into_iter()
+            .map(|d| d.text)
+            .collect()
+    };
+    // Allowed (applying about to start): no note.
+    let a = stage(&e, "c0", "alpha", T0);
+    store::decide(&e.db, &e.kinds, &a.id, Decision::Allow, None, None, T0).unwrap();
+    assert!(owed(T0 + 1).is_empty());
+    // Spent, no outcome yet: still none; ten minutes on, Helm says it stopped while applying.
+    assert!(store::spend_for_apply(&e.db, &e.kinds, &a.id, T0 + 2)
+        .unwrap()
+        .is_some());
+    assert!(owed(T0 + 3).is_empty());
+    let late = owed(T0 + 2 + store::APPLY_STALE);
+    assert_eq!(late.len(), 1);
+    assert!(late[0].contains("Helm stopped while applying"), "{late:?}");
+    // The outcome is written once.
+    store::set_outcome(&e.db, &a.id, "first").unwrap();
+    store::set_outcome(&e.db, &a.id, "second").unwrap();
+    let l = store::list(&e.db, &e.kinds, "c0", T0).unwrap();
+    assert_eq!(l.decided[0].outcome.as_deref(), Some("first"));
+    // Approved but never spent (Helm stopped first): the grant lapses, the note says nothing
+    // changed, and it can no longer be applied.
+    let b = stage(&e, "c1", "beta", T0);
+    store::decide(&e.db, &e.kinds, &b.id, Decision::Allow, None, None, T0).unwrap();
+    let lapsed = owed(T0 + 31 * MINUTE);
+    assert!(
+        lapsed
+            .iter()
+            .any(|t| t.contains("stopped before applying it. Nothing changed")),
+        "{lapsed:?}"
+    );
+    assert!(
+        store::spend_for_apply(&e.db, &e.kinds, &b.id, T0 + 32 * MINUTE)
+            .unwrap()
+            .is_none()
+    );
+    // The added columns are added once: running the initializer again changes nothing.
+    e.db.write::<_, rusqlite::Error>(store::init).unwrap();
+}
+
+#[test]
+fn app_request_allow_refuses_an_applying_kind() {
+    let mut e = env();
+    let rec = Arc::new(Recorder::default());
+    e.kinds.register_applying(applying_kind(), rec.clone());
+    let mut services = Services::new();
+    services.insert(e.db.clone());
+    services.insert(Arc::new(e.kinds.clone()));
+    let ctx = helm_hosttools::ToolCtx {
+        caller_chat_id: "c0".into(),
+        is_child: false,
+        tool_call_id: None,
+        origin: helm_hosttools::CallOrigin::Agent,
+        services: Arc::new(services),
+        events: Arc::new(RecordingSink::default()),
+        ops: None,
+    };
+    let mut reg = helm_hosttools::HostToolRegistry::new();
+    crate::register_host_tools(&mut reg);
+    let helm_hosttools::ToolHandler::Blocking(f) =
+        reg.get("app_request_allow").unwrap().handler.clone()
+    else {
+        panic!("blocking tool")
+    };
+    let err = f(
+        &ctx,
+        json!({"action": "test_apply", "target": {"name": "alpha"}, "reason": "x"}),
+    )
+    .unwrap_err();
+    assert!(
+        err.public.contains("stage it with app_stage_test"),
+        "{}",
+        err.public
+    );
+    let l = store::list(&e.db, &e.kinds, "c0", now()).unwrap();
+    assert!(l.pending.is_empty() && rec.0.lock().unwrap().is_empty());
 }

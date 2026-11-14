@@ -11,7 +11,8 @@ export type ConsentRequest = { id: string, chatId: string, kind: string,
  */
 label: string, 
 /**
- * The host's one-line summary of the canonical target.
+ * The host's summary of the canonical target: one line, or for a card that applies on
+ * Approve, a title and one line per change, one per text line.
  */
 summary: string, reason: string, evidence: string, state: RequestState, 
 /**
@@ -29,4 +30,13 @@ grantExpiresAt: number | null,
 /**
  * The user's note, sent with Deny.
  */
-note: string | null, };
+note: string | null, 
+/**
+ * Helm applies this request itself the moment the user approves: the card says Approve,
+ * shows each summary line on its own and has no grant length.
+ */
+appliesOnAllow: boolean, 
+/**
+ * For a request Helm applied: what happened, once it is done.
+ */
+outcome: string | null, };

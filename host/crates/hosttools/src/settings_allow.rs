@@ -43,6 +43,17 @@ pub const USER_ONLY: &[(&str, &str)] = &[
     ("newChatPermissionMode", "Settings > Runtime"),
 ];
 
+/// User-only settings a chat may still stage for the user to approve (`app_stage_settings`).
+pub const STAGEABLE: &[&str] = &["updateSource", "deviceRunFromOthers", "deviceHouseholdRun"];
+
+fn stage_hint(key: &str) -> &'static str {
+    if STAGEABLE.contains(&key) {
+        " Or stage it with app_stage_settings for the user to approve."
+    } else {
+        ""
+    }
+}
+
 /// Where the user changes a user-only setting, or `None` when it is not user-only.
 pub fn user_only_page(key: &str) -> Option<&'static str> {
     USER_ONLY.iter().find(|(k, _)| *k == key).map(|(_, p)| *p)
@@ -75,14 +86,17 @@ pub fn needs_all_refusal(key: &str) -> String {
 pub fn refusal(key: &str, all_settings: bool) -> Option<String> {
     if let Some(page) = user_only_page(key) {
         return Some(format!(
-            "{key} is yours to change only: ask the user to change it in {page}."
+            "{key} is yours to change only: ask the user to change it in {page}.{}",
+            stage_hint(key)
         ));
     }
     match classify(key) {
         Some(PrefClass::Registry(Tier::Base)) => None,
         Some(PrefClass::Registry(Tier::All)) if all_settings => None,
         Some(PrefClass::Registry(Tier::All)) => Some(needs_all_refusal(key)),
-        Some(PrefClass::UserOnly(why)) => Some(format!("{why} Change it in Settings.")),
+        Some(PrefClass::UserOnly(why)) => {
+            Some(format!("{why} Change it in Settings.{}", stage_hint(key)))
+        }
         _ => Some(format!("{key} is not a setting chats can change.")),
     }
 }
@@ -135,5 +149,13 @@ mod tests {
             .unwrap()
             .contains("not a setting"));
         assert!(refusal("nonsense", true).is_some());
+        // The setup settings a chat may stage for the user to approve say so; others do not.
+        for k in STAGEABLE {
+            let r = refusal(k, true).unwrap();
+            assert!(r.contains("stage it with app_stage_settings"), "{r}");
+        }
+        assert!(!refusal("fastMode", true)
+            .unwrap()
+            .contains("app_stage_settings"));
     }
 }

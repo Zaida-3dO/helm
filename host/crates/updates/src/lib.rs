@@ -206,25 +206,46 @@ fn update_check(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
     Ok(ctx.services.need::<UpdateService>()?.check())
 }
 
-fn update_source_set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
-    let svc = ctx.services.need::<UpdateService>()?;
-    let value = match args.get("path") {
-        None | Some(Value::Null) => Value::Null,
-        Some(Value::String(s)) if s.trim().is_empty() => Value::Null,
-        Some(Value::String(s)) => {
-            let dir = Path::new(s.trim());
+/// The update folder as it would be saved: `None` (no folder) for nothing or blank, else an
+/// absolute path to an existing folder that is not a link (a share path is fine).
+pub fn checked_source(path: Option<&str>) -> Result<Option<String>, ApiError> {
+    match path.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(s) => {
+            let dir = Path::new(s);
             std::fs::symlink_metadata(dir)
                 .ok()
                 .filter(|m| dir.is_absolute() && m.is_dir() && !helm_platform::fs::is_link_like(m))
                 .ok_or_else(|| ApiError::bad_args("Choose an existing folder."))?;
-            Value::String(s.trim().to_owned())
+            Ok(Some(s.to_owned()))
         }
-        Some(_) => return Err(ApiError::bad_args("path must be a string or null")),
-    };
+    }
+}
+
+/// The saved update folder, if any.
+pub fn current_source(tx: &rusqlite::Connection) -> Option<String> {
+    prefs::read(tx, UPDATE_SOURCE.name())
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .filter(|s| !s.is_empty())
+}
+
+/// Choose the update folder (or none), then look in it at once.
+pub fn set_source(svc: &UpdateService, path: Option<&str>) -> Result<Value, ApiError> {
+    let value = checked_source(path)?.map_or(Value::Null, Value::String);
     svc.db
         .write(|tx| prefs::set(tx, UPDATE_SOURCE, &value))
         .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(svc.check())
+}
+
+fn update_source_set(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
+    let svc = ctx.services.need::<UpdateService>()?;
+    let path = match args.get("path") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.as_str()),
+        Some(_) => return Err(ApiError::bad_args("path must be a string or null")),
+    };
+    set_source(&svc, path)
 }
 
 fn update_prepare(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {

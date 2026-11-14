@@ -1,12 +1,13 @@
 //! The consent `api` ops. Both are main-window only, like every op: the
 //! dispatcher refuses any other caller, so no agent, box, schedule or other chat can
-//! decide.
+//! decide. `consent_decide` goes through [`crate::apply::decide_and_apply`], which applies an
+//! approved request of an applying kind.
 
 use crate::kinds::AllowKinds;
 use crate::store;
 use crate::types::{ConsentDecideArgs, ConsentListArgs};
 use helm_core::db::Database;
-use helm_ipc::{ApiError, AppEvent, OpClass, OpCtx, OpRegistry};
+use helm_ipc::{ApiError, OpClass, OpCtx, OpRegistry};
 use serde_json::Value;
 
 pub fn register_ops(reg: &mut OpRegistry) {
@@ -39,22 +40,8 @@ pub(crate) fn consent_list(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> 
 pub(crate) fn consent_decide(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
     let a: ConsentDecideArgs =
         serde_json::from_value(args).map_err(|e| ApiError::bad_args(e.to_string()))?;
-    let db = ctx.services.need::<Database>()?;
-    let v = store::decide(
-        &db,
-        &kinds(ctx),
-        &a.request_id,
-        a.decision,
-        a.grant_minutes,
-        a.note.as_deref(),
-        helm_core::now_ms(),
-    )?;
-    // A signal only: the card is rebuilt from consent_list, never from an event payload.
-    ctx.events
-        .emit(AppEvent::new("consent").with("chatId", v.chat_id.clone()));
-    // The decision is owed to the agent: wake the delivery loop.
-    if let Some(w) = ctx.services.get::<crate::ConsentWake>() {
-        w.0.notify_one();
-    }
-    to_value(&v)
+    // The click in this PC's main window. A request Helm applies itself starts applying here,
+    // on its own thread; the click does not wait for it.
+    let d = crate::apply::decide_and_apply(&ctx.services, &ctx.events, &a, "app")?;
+    to_value(&d.request)
 }
