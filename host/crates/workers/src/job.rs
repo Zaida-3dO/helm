@@ -23,8 +23,9 @@ mod win {
     use super::*;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+        TerminateJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PRIORITY_CLASS,
     };
     use windows_sys::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS;
@@ -87,6 +88,66 @@ mod win {
                 TerminateJobObject(self.handle, 1);
             }
         }
+
+        /// How many processes in the job are still running, not counting the console host
+        /// Windows attaches to a windowless console program (it ends on its own once its
+        /// program has). Read while the job is still held: once it is closed, kill-on-close has
+        /// already ended them.
+        pub fn active_processes(&self) -> Option<u32> {
+            const MAX_IDS: usize = 512;
+            // Room for the two counts ahead of the list, in whole `usize`s so the buffer has the
+            // structure's alignment.
+            let head = (2 * std::mem::size_of::<u32>()).div_ceil(std::mem::size_of::<usize>());
+            let mut buf = vec![0usize; head + MAX_IDS];
+            // SAFETY: the buffer is as long as the size passed and aligned for the structure the
+            // call fills; the list is read only up to the count the call wrote.
+            let ids: Vec<u32> = unsafe {
+                let ok = QueryInformationJobObject(
+                    self.handle,
+                    JobObjectBasicProcessIdList,
+                    buf.as_mut_ptr() as *mut _,
+                    (buf.len() * std::mem::size_of::<usize>()) as u32,
+                    std::ptr::null_mut(),
+                );
+                if ok == 0 {
+                    return None;
+                }
+                let list = &*(buf.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST);
+                let n = (list.NumberOfProcessIdsInList as usize).min(MAX_IDS);
+                std::slice::from_raw_parts(list.ProcessIdList.as_ptr(), n)
+                    .iter()
+                    .map(|&id| id as u32)
+                    .collect()
+            };
+            Some(ids.into_iter().filter(|&id| !is_console_host(id)).count() as u32)
+        }
+    }
+
+    /// Whether `pid` is Windows' console host. A process that cannot be read (already gone) is
+    /// not one, and counts as whatever it was.
+    fn is_console_host(pid: u32) -> bool {
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: a query-only handle, closed before returning; the name buffer's length is
+        // passed in and the call writes at most that many characters.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let mut name = [0u16; 1024];
+            let mut len = name.len() as u32;
+            let ok = QueryFullProcessImageNameW(h, 0, name.as_mut_ptr(), &mut len);
+            CloseHandle(h);
+            if ok == 0 {
+                return false;
+            }
+            let path = String::from_utf16_lossy(&name[..len as usize]);
+            path.rsplit(['\\', '/'])
+                .next()
+                .is_some_and(|f| f.eq_ignore_ascii_case("conhost.exe"))
+        }
     }
 
     impl Drop for Job {
@@ -124,6 +185,11 @@ mod unix {
                 .ok_or_else(|| io::Error::other("the process has already exited"))?;
             self.pgid.store(pid as i32, Ordering::SeqCst);
             Ok(())
+        }
+
+        /// Not counted on this platform.
+        pub fn active_processes(&self) -> Option<u32> {
+            None
         }
 
         pub fn terminate(&self) {
@@ -211,6 +277,11 @@ mod tests {
             let grandchild = grandchild.expect("grandchild started");
             assert!(process_alive(grandchild), "grandchild runs before the kill");
             assert_eq!(
+                job.active_processes(),
+                Some(2),
+                "the child and the grandchild"
+            );
+            assert_eq!(
                 priority_class(grandchild),
                 expected,
                 "the grandchild's priority class with low priority {low}"
@@ -226,6 +297,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             assert!(gone, "the grandchild was ended with the job");
+            assert_eq!(job.active_processes(), Some(0));
         }
     }
 

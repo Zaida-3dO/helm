@@ -250,6 +250,8 @@ struct Actor {
     steer_waits: crate::timeline::SteerWaits,
     /// The last worker start that failed: pre-warm waits [`PREWARM_RETRY`] before trying again.
     spawn_failed_at: Option<Instant>,
+    /// When the running worker was started, for the exit log.
+    worker_started: Option<Instant>,
     /// This actor's own channel, held weakly, for work it hands to another thread.
     me: mpsc::WeakSender<Cmd>,
     /// A local chat's turn waiting for its model to be made ready.
@@ -394,6 +396,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         timeline: None,
         steer_waits: Default::default(),
         spawn_failed_at: None,
+        worker_started: None,
         me: tx.downgrade(),
         prepare: None,
         prepare_count: 0,
@@ -1023,6 +1026,7 @@ impl Actor {
         // The start itself runs on the blocking pool; a failure comes back as `SpawnFailed`.
         let (link, out) = crate::spawning::spawn_off_actor(&self.sh, req);
         self.link = Some(link);
+        self.worker_started = Some(Instant::now());
         self.out = Some(out);
         self.ready = false;
         self.worker_error = None;
@@ -2730,12 +2734,21 @@ impl Actor {
     fn on_output(&mut self, out: Option<WorkerOutput>) {
         match out {
             None => self.on_exit("The worker stopped unexpectedly.".into()),
-            Some(WorkerOutput::Exited { code, stderr }) => {
-                let tail: String = stderr.lines().rev().take(3).collect::<Vec<_>>().join(" / ");
-                let reason = if tail.is_empty() {
-                    format!("The worker stopped (exit code {code:?}).")
-                } else {
-                    format!("The worker stopped (exit code {code:?}): {tail}")
+            Some(WorkerOutput::Exited {
+                code,
+                stderr,
+                by_host,
+                job_active,
+                signal,
+            }) => {
+                let facts = self.exit_facts(code, signal, by_host, job_active, stderr);
+                let shown = crate::exits::exit_reason(&facts);
+                let rec = self.sh.exits.record(&facts, &shown);
+                // What the worker said is in `shown` now, with the incident it belongs to.
+                self.worker_error = None;
+                let reason = match crate::exits::incident_note(&rec) {
+                    Some(note) => format!("{shown} {note}"),
+                    None => shown,
                 };
                 self.on_exit(reason)
             }
@@ -2749,6 +2762,78 @@ impl Actor {
                 self.note_output();
                 self.on_record(r)
             }
+        }
+    }
+
+    /// What is known about the worker that just exited, read before [`Self::on_exit`] clears it.
+    fn exit_facts(
+        &self,
+        code: Option<i32>,
+        signal: Option<i32>,
+        by_host: bool,
+        job_active: Option<u32>,
+        stderr: String,
+    ) -> crate::exits::ExitFacts {
+        use crate::exits::HostReason;
+        let quitting = self
+            .sh
+            .shutting_down
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let host_reason = if quitting {
+            Some(HostReason::Quit)
+        } else if self.archived {
+            Some(HostReason::Archive)
+        } else if self.stopping.is_some() {
+            Some(HostReason::Stop)
+        } else if by_host {
+            Some(HostReason::Ended)
+        } else if self.link_closing
+            || self.retiring
+            || self.edit_waiting
+            || !self.shutdown_replies.is_empty()
+        {
+            Some(HostReason::Close)
+        } else {
+            None
+        };
+        // The call that started last is the one most likely to say what ended the worker (a
+        // command of the agent's own, say).
+        let last_tool = self.tools.values().max_by_key(|t| t.started_at).map(|t| {
+            let command = serde_json::from_str::<Value>(&t.args)
+                .ok()
+                .and_then(|a| a.get("command").and_then(Value::as_str).map(str::to_owned))
+                .unwrap_or_else(|| t.args.clone());
+            (t.name.clone(), command)
+        });
+        let chat = self.chat();
+        crate::exits::ExitFacts {
+            chat_id: self.chat_id.clone(),
+            at_ms: now(),
+            code,
+            signal,
+            host_reason,
+            worker_error: self.worker_error.clone(),
+            job_active,
+            stderr,
+            last_tool,
+            uptime_ms: self.worker_started.map(|t| t.elapsed().as_millis() as i64),
+            model: self
+                .launched_local
+                .as_ref()
+                .map(|(_, m)| m.clone())
+                .or_else(|| chat.as_ref().and_then(|c| c.model.clone())),
+            provider: self.launched_local.as_ref().map(|(s, _)| s.clone()),
+            turn_open: self.status().is_busy(),
+            run_id: self.run_id.clone(),
+            launch_path: Some(
+                self.sh
+                    .cfg
+                    .profile_dir
+                    .join("workers")
+                    .join(&self.chat_id)
+                    .join("launch.json"),
+            ),
+            cwd: chat.map(|c| c.cwd),
         }
     }
 

@@ -20,6 +20,30 @@ function diag(msg: string): void {
   process.stderr.write(line);
 }
 
+/** A line that must reach the host whatever was written before: the host keeps only the tail, so
+ *  the last words of a dying worker matter more than the cap. */
+function lastWords(msg: string): void {
+  try {
+    process.stderr.write(`[helm-worker] ${msg}\n`);
+  } catch {
+    // stderr is gone: nothing more can be said.
+  }
+}
+
+// Anything thrown outside a handler would otherwise end the worker with Node's own report, which
+// the host may not see whole. Say what happened, then end with code 1.
+process.on("uncaughtException", (e) => {
+  lastWords(`uncaught exception: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+  process.exit(1);
+});
+process.on("unhandledRejection", (e) => {
+  lastWords(`unhandled rejection: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+  process.exit(1);
+});
+// Written synchronously as the process ends, so an exit with no line at all means the worker was
+// ended from outside.
+process.on("exit", (code) => lastWords(`exiting with code ${code}`));
+
 function readLaunch(file: string | undefined): Launch {
   if (!file) throw new Error("usage: node main.ts <launch.json>");
   const raw = fs.readFileSync(file, "utf8");
