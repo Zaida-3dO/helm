@@ -131,6 +131,15 @@ test('classifyHref refuses UNC and device paths before anything can touch them',
   }
 });
 
+test('a bare relative word is text, while anything path-like or an in-page anchor still links', () => {
+  for (const bare of ['income', 'Income#x', 'notes ', '%69ncome']) assert.equal(classifyHref(bare), null, bare);
+  assert.deepEqual(classifyHref('docs/x'), { kind: 'url', href: 'docs/x' });
+  assert.deepEqual(classifyHref('notes.txt'), { kind: 'url', href: 'notes.txt' });
+  assert.deepEqual(classifyHref('Makefile'), { kind: 'url', href: 'Makefile' });
+  assert.deepEqual(classifyHref('Note.md'), { kind: 'vault', note: 'Note' });
+  assert.deepEqual(classifyHref('#a'), { kind: 'vault', note: '', heading: 'a' });
+});
+
 test('classifyHref keeps local file URLs', () => {
   assert.deepEqual(classifyHref('file:///C:/x/a.txt'), { kind: 'url', href: 'file:///C:/x/a.txt' });
   assert.deepEqual(classifyHref('file://localhost/C:/a.txt'), { kind: 'url', href: 'file://localhost/C:/a.txt' });

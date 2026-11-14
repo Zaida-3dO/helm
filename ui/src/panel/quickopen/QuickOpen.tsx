@@ -9,6 +9,7 @@ import type { QuickItem } from '../../api/panel.ts';
 import { panelOps } from '../../api/panel.ts';
 import { Dialog, useBinding, useLayer } from '../../ui/index.ts';
 import { FileTextIcon, FolderOpenIcon, ReloadIcon } from '../icons.tsx';
+import { onQuickOpenRequest } from '../links.ts';
 import { openInPanel, panelStore } from '../registry.ts';
 import { basename, displayPath, matchSegments, pathKey } from '../viewer/paths.ts';
 import { DoubleShift, useDoubleShift } from './doubleShift.ts';
@@ -77,13 +78,27 @@ export function QuickOpen({ chatId }: { chatId: string | null }) {
       window.removeEventListener('mousedown', reset, true);
     };
   }, [doubleShift]);
+  // A path link that missed opens the dialog on its name. A new request is a new open, even while open.
+  const [preset, setPreset] = useState({ query: '', nonce: 0 });
+  useEffect(
+    () =>
+      onQuickOpenRequest((query) => {
+        setPreset((p) => ({ query, nonce: p.nonce + 1 }));
+        setOpen(true);
+      }),
+    [],
+  );
+  // Closing forgets the name, so Ctrl+P opens empty again.
+  useEffect(() => {
+    if (!open) setPreset((p) => (p.query ? { query: '', nonce: p.nonce } : p));
+  }, [open]);
   if (!open || !panelStore.api) return null;
-  return <QuickOpenDialog chatId={chatId} onClose={() => setOpen(false)} />;
+  return <QuickOpenDialog key={preset.nonce} initialQuery={preset.query} chatId={chatId} onClose={() => setOpen(false)} />;
 }
 
-function QuickOpenDialog({ chatId, onClose }: { chatId: string | null; onClose: () => void }) {
+function QuickOpenDialog({ chatId, initialQuery, onClose }: { chatId: string | null; initialQuery: string; onClose: () => void }) {
   const ops = useMemo(() => panelOps(panelStore.api!), []);
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(initialQuery);
   const [remote, setRemote] = useState<{ q: string; items: QuickItem[]; mode: string; partial: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState(0);

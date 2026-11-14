@@ -185,7 +185,12 @@ export interface LinkContext {
 }
 
 type FileRoute = (req: Extract<GateResult, { action: 'file' }>, ctx: LinkContext) => Promise<boolean> | boolean;
-type PathRoute = (req: Extract<GateResult, { action: 'path' }>, ctx: LinkContext) => Promise<boolean | string> | boolean | string;
+/** What a path route answers when the host found nothing at the path; `message` is the host's own words. */
+export interface PathMiss {
+  notFound: true;
+  message: string;
+}
+type PathRoute = (req: Extract<GateResult, { action: 'path' }>, ctx: LinkContext) => Promise<boolean | string | PathMiss> | boolean | string | PathMiss;
 type VaultRoute = (
   req: Extract<GateResult, { action: 'vault' | 'anchor' }>,
   ctx: LinkContext,
@@ -239,6 +244,27 @@ export function registerWebRoute<T>(match: (url: string) => T | null, open: (mat
   };
 }
 
+const quickOpenListeners = new Set<(query: string) => void>();
+
+/** Quick-open listens here (while the panel is mounted); a path link that missed asks it to open on the name. */
+export function onQuickOpenRequest(listener: (query: string) => void): () => void {
+  quickOpenListeners.add(listener);
+  return () => {
+    quickOpenListeners.delete(listener);
+  };
+}
+
+/** Asks Go to file to open with `query` filled in. False when nothing is listening. */
+export function requestQuickOpen(query: string): boolean {
+  for (const l of [...quickOpenListeners]) l(query);
+  return quickOpenListeners.size > 0;
+}
+
+/** The last name in a path, without the surrounding separators. */
+function lastSegment(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
 const NOT_AVAILABLE = 'This kind of link cannot be opened in this version of Helm yet.';
 
 /**
@@ -274,6 +300,11 @@ export async function handleLink(target: LinkTarget, ctx: LinkContext, opts: { s
         if (!route) return fail(NOT_AVAILABLE);
         const r = await route(gate, ctx);
         if (r === true) return { ok: true, action: 'path' };
+        // A miss is not an error: the name is probably close, so Go to file offers the nearest files.
+        if (typeof r === 'object') {
+          if (requestQuickOpen(lastSegment(gate.path))) return { ok: false, reason: r.message };
+          return fail(r.message);
+        }
         return fail(typeof r === 'string' ? r : 'The file could not be opened.');
       }
       case 'chat': {
