@@ -216,6 +216,9 @@ pub fn limits() -> Limits {
         tick: Duration::from_secs(5),
         stall_unit: Duration::from_millis(100),
         send_soon: Duration::from_secs(5),
+        // Long enough that a test handing a verdict by hand always beats the hold ending;
+        // the row that wants the hold to end shortens it.
+        gate_deadline: Duration::from_secs(10),
     }
 }
 
@@ -860,6 +863,398 @@ async fn afk_policy_answers_questions_and_defers_cards() {
     .unwrap();
     let p = w.expect("prompt").await;
     assert!(p.get("context").is_none(), "the note says it itself");
+}
+
+/// The question gate's hold, one table beside the AFK test. A fake gate only decides whether to
+/// hold a card; the test plays the gate's late verdict by hand (`gate_verdict`), the user's
+/// answer during the hold, and the hold deadline (shortened). Every row ends with the card in
+/// the user's hands, the gate's hands, or answered — nothing is ever dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_question_gate_holds_cards_until_it_judges_them() {
+    use crate::seams::{GateOffer, GateOutcome, QuestionGate};
+    use crate::types::{
+        ContextKind, GateBrief, GateBriefOption, GateStatus, Interaction, InteractionAttention,
+    };
+
+    struct FakeGate {
+        mode: GateOffer,
+        offered: Mutex<Vec<String>>,
+    }
+    impl QuestionGate for FakeGate {
+        fn offer(&self, _: &str, i: &Interaction) -> GateOffer {
+            self.offered.lock().unwrap().push(i.id.clone());
+            self.mode
+        }
+    }
+
+    struct Policy;
+    impl crate::seams::AfkPolicy for Policy {
+        fn turn_text(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn decide(&self, _: &str, i: &Interaction, _: bool) -> crate::seams::AfkAction {
+            match i.attention {
+                Some(InteractionAttention::Question) => crate::seams::AfkAction::Answer {
+                    fields: serde_json::from_value(json!({"value": "AFK default"})).unwrap(),
+                    marker: "AFK answered a question".into(),
+                },
+                _ => crate::seams::AfkAction::Leave,
+            }
+        }
+    }
+
+    fn question(id: &str) -> Value {
+        json!({"type": "extension_ui_request", "id": id, "method": "select",
+               "attention": "question", "title": "Which?", "options": ["ship it", "hold"]})
+    }
+    fn brief() -> GateBrief {
+        GateBrief {
+            problem: "It asks which route to take.".into(),
+            options: vec![GateBriefOption {
+                label: "ship it".into(),
+                means: "carry on now".into(),
+                pros: "fastest".into(),
+                cons: "less checking".into(),
+                cost: "none".into(),
+            }],
+            recommendation: "ship it".into(),
+            why: "the cheap choice, easy to undo".into(),
+        }
+    }
+    fn gate_state(h: &H, chat: &str, id: &str) -> Option<(GateStatus, Interaction)> {
+        h.rt.live_thread(chat)
+            .and_then(|t| t.interactions.into_iter().find(|i| i.id == id))
+            .and_then(|i| {
+                let s = i.gate.as_ref()?.state;
+                Some((s, i))
+            })
+    }
+    async fn needs_you_has(h: &H, chat: &str) -> bool {
+        let a = h.call("attention_get", json!({})).await.unwrap();
+        a["needsYou"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["chatId"] == chat)
+    }
+
+    enum Then {
+        /// The gate passed it: a normal card, no gate mark.
+        ShownPlain,
+        /// The gate decided: answered, card gone, a transcript line, and a second verdict is false.
+        Decided,
+        /// The gate escalated: the card stays with the brief, the recommendation pre-filled,
+        /// and it counts in the inbox.
+        Escalated,
+        /// The gate failed it: a normal card with the quiet line.
+        FailedVerdict,
+        /// The user answered during the hold; the late verdict comes back false.
+        UserAnswered,
+        /// The hold deadline passed with no verdict: the card becomes a normal failed card.
+        TimedOut,
+        /// The gate passed it and AFK answers, exactly as before the gate existed.
+        AfkAnswered,
+    }
+    struct Case {
+        then: Then,
+        mode: GateOffer,
+        card: Value,
+        afk: bool,
+        deadline_ms: Option<u64>,
+    }
+    let cases = [
+        Case {
+            then: Then::ShownPlain,
+            mode: GateOffer::Pass,
+            card: question("q1"),
+            afk: false,
+            deadline_ms: None,
+        },
+        Case {
+            then: Then::Decided,
+            mode: GateOffer::Hold,
+            card: question("q1"),
+            afk: false,
+            deadline_ms: None,
+        },
+        Case {
+            then: Then::Escalated,
+            mode: GateOffer::Hold,
+            card: question("q1"),
+            afk: false,
+            deadline_ms: None,
+        },
+        Case {
+            then: Then::FailedVerdict,
+            mode: GateOffer::Hold,
+            card: question("q1"),
+            afk: false,
+            deadline_ms: None,
+        },
+        Case {
+            then: Then::UserAnswered,
+            mode: GateOffer::Hold,
+            card: question("q1"),
+            afk: false,
+            deadline_ms: None,
+        },
+        Case {
+            then: Then::TimedOut,
+            mode: GateOffer::Hold,
+            card: question("q1"),
+            afk: false,
+            deadline_ms: Some(150),
+        },
+        Case {
+            then: Then::ShownPlain,
+            mode: GateOffer::Hold,
+            // The safety line: an approval card is never offered, whatever the gate would say.
+            card: json!({"type": "extension_ui_request", "id": "a1", "method": "select",
+                         "attention": "approval", "title": "Run ls?", "options": ["Allow once", "Deny"]}),
+            afk: false,
+            deadline_ms: None,
+        },
+        Case {
+            then: Then::ShownPlain,
+            mode: GateOffer::Hold,
+            // Nor a secret input.
+            card: json!({"type": "extension_ui_request", "id": "s1", "method": "input",
+                         "attention": "question", "title": "Token?", "secret": true}),
+            afk: false,
+            deadline_ms: None,
+        },
+        Case {
+            then: Then::AfkAnswered,
+            mode: GateOffer::Pass,
+            card: question("q1"),
+            afk: true,
+            deadline_ms: None,
+        },
+    ];
+
+    for c in cases {
+        let mut limits = limits();
+        if let Some(ms) = c.deadline_ms {
+            limits.gate_deadline = Duration::from_millis(ms);
+        }
+        let mut h = harness_with(limits);
+        let gate = Arc::new(FakeGate {
+            mode: c.mode,
+            offered: Mutex::new(Vec::new()),
+        });
+        h.rt.set_question_gate(gate.clone());
+        if c.afk {
+            h.rt.set_afk_policy(Arc::new(Policy));
+        }
+        let (chat, _, mut w) = running_turn(&mut h).await;
+        w.emit(c.card.clone()).await;
+        let id = c.card["id"].as_str().unwrap().to_owned();
+
+        match c.then {
+            Then::ShownPlain | Then::AfkAnswered => {
+                if matches!(c.then, Then::AfkAnswered) {
+                    let ans = w.expect("extension_ui_response").await;
+                    assert_eq!(
+                        ans["value"], "AFK default",
+                        "AFK still answers a passed card"
+                    );
+                } else {
+                    h.until("the card waits for the user", |h| {
+                        h.rt.live_thread(&chat)
+                            .is_some_and(|t| t.interactions.len() == 1)
+                    })
+                    .await;
+                    assert_eq!(
+                        h.rt.live_thread(&chat).unwrap().interactions[0].gate,
+                        None,
+                        "a passed card carries no gate mark"
+                    );
+                }
+                let seen = gate.offered.lock().unwrap().clone();
+                if c.card["attention"] == "question" && c.card.get("secret").is_none() {
+                    assert_eq!(
+                        seen,
+                        [id.as_str()],
+                        "a question card is offered to the gate"
+                    );
+                } else {
+                    assert!(
+                        seen.is_empty(),
+                        "an approval or secret card never reaches the gate: those are safety gates, not questions"
+                    );
+                }
+            }
+            Then::Decided
+            | Then::Escalated
+            | Then::FailedVerdict
+            | Then::UserAnswered
+            | Then::TimedOut => {
+                let applied = if matches!(c.then, Then::TimedOut) {
+                    // No verdict ever comes: the shortened hold ends by itself and the card
+                    // is the user's again, counted like any other.
+                    h.until("the hold ends by itself", |h| {
+                        h.rt.live_thread(&chat).is_some_and(|t| {
+                            t.interactions.iter().any(|i| {
+                                i.id == id
+                                    && i.gate
+                                        .as_ref()
+                                        .is_some_and(|g| g.state == GateStatus::Failed)
+                            })
+                        })
+                    })
+                    .await;
+                    assert!(
+                        needs_you_has(&h, &chat).await,
+                        "a timed-out card counts as normal"
+                    );
+                    assert!(
+                        w.no_command_for(Duration::from_millis(120)).await.is_none(),
+                        "nothing was answered for the user"
+                    );
+                    true
+                } else {
+                    h.until("the card is held", |h| {
+                        gate_state(h, &chat, &id).is_some_and(|(s, _)| s == GateStatus::Checking)
+                    })
+                    .await;
+                    // During the hold the badge stays quiet.
+                    assert!(
+                        !needs_you_has(&h, &chat).await,
+                        "a held card is not counted"
+                    );
+                    match c.then {
+                    Then::Decided => h.rt.gate_verdict(
+                        &chat,
+                        &id,
+                        GateOutcome::Decide {
+                            fields: serde_json::from_value(
+                                json!({"value": "ship it (Helm chose this default for the user)"}),
+                            )
+                            .unwrap(),
+                            marker: "Helm answered for you: ship it".into(),
+                        },
+                    ),
+                    Then::Escalated => h
+                        .rt
+                        .gate_verdict(&chat, &id, GateOutcome::Escalate { brief: brief() }),
+                    Then::FailedVerdict => h.rt.gate_verdict(
+                        &chat,
+                        &id,
+                        GateOutcome::Failed {
+                            note: "Helm couldn't check this one.".into(),
+                        },
+                    ),
+                    Then::UserAnswered => {
+                        h.call(
+                            "interaction_answer",
+                            json!({"chatId": chat, "requestId": id, "value": "hold"}),
+                        )
+                        .await
+                        .unwrap();
+                        let ans = w.expect("extension_ui_response").await;
+                        assert_eq!((ans["id"].as_str(), ans["value"].as_str()), (Some(id.as_str()), Some("hold")));
+                        // The verdict arrives after the user answered: it finds no card.
+                        h.rt.gate_verdict(
+                            &chat,
+                            &id,
+                            GateOutcome::Escalate { brief: brief() },
+                        )
+                    }
+                        _ => unreachable!(),
+                    }
+                };
+                let expect_applied = !matches!(c.then, Then::UserAnswered);
+                assert_eq!(
+                    applied, expect_applied,
+                    "the verdict finds the card it is for"
+                );
+                match c.then {
+                    Then::Decided => {
+                        let ans = w.expect("extension_ui_response").await;
+                        assert_eq!(
+                            (ans["id"].as_str(), ans["value"].as_str()),
+                            (
+                                Some(id.as_str()),
+                                Some("ship it (Helm chose this default for the user)")
+                            )
+                        );
+                        h.until("the card is gone", |h| {
+                            h.rt.live_thread(&chat)
+                                .is_some_and(|t| t.interactions.iter().all(|i| i.id != id))
+                        })
+                        .await;
+                        h.until("the transcript line", |h| {
+                            h.col("SELECT text FROM messages WHERE role = 'context'")
+                                == ["Helm answered for you: ship it"]
+                                && h.col("SELECT json_extract(details, '$.contextKind') FROM messages WHERE role = 'context'")
+                                    == [serde_json::to_value(ContextKind::Gatekeeper).unwrap().as_str().unwrap()]
+                        })
+                        .await;
+                        assert!(
+                            !h.rt.gate_verdict(
+                                &chat,
+                                &id,
+                                GateOutcome::Failed {
+                                    note: "late".into()
+                                }
+                            ),
+                            "a second verdict on a gone card is false"
+                        );
+                    }
+                    Then::Escalated => {
+                        h.until("the brief sits on the card", |h| {
+                            gate_state(h, &chat, &id).is_some_and(|(s, i)| {
+                                s == GateStatus::Escalated
+                                    && i.prefill.as_deref() == Some("ship it")
+                                    && i.gate.as_ref().is_some_and(|g| {
+                                        g.brief
+                                            .as_ref()
+                                            .is_some_and(|b| b.problem.starts_with("It asks"))
+                                    })
+                            })
+                        })
+                        .await;
+                        assert!(
+                            needs_you_has(&h, &chat).await,
+                            "an escalated card counts from then on"
+                        );
+                    }
+                    Then::FailedVerdict => {
+                        h.until("the quiet line", |h| {
+                            h.rt.live_thread(&chat).is_some_and(|t| {
+                                t.interactions.iter().any(|i| {
+                                    i.id == id
+                                        && i.gate.as_ref().is_some_and(|g| {
+                                            g.state == GateStatus::Failed
+                                                && g.note.as_deref()
+                                                    == Some("Helm couldn't check this one.")
+                                        })
+                                })
+                            })
+                        })
+                        .await;
+                        assert!(
+                            needs_you_has(&h, &chat).await,
+                            "a failed card counts as normal"
+                        );
+                    }
+                    Then::UserAnswered => {
+                        assert!(h
+                            .rt
+                            .live_thread(&chat)
+                            .is_some_and(|t| t.interactions.iter().all(|i| i.id != id)));
+                    }
+                    _ => {}
+                }
+                let seen = gate.offered.lock().unwrap().clone();
+                assert_eq!(
+                    seen,
+                    [id.as_str()],
+                    "the gate was asked about the card once"
+                );
+            }
+        }
+    }
 }
 
 /// Tool start and end are written as they happen, with the live tool on the thread.
