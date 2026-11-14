@@ -56,6 +56,7 @@
     "app_send_message",
     "app_set_chat_archived",
     "app_show_images",
+    "app_stage_settings",
     "app_stop_chat",
     "app_telegram_ask",
     "app_telegram_send",

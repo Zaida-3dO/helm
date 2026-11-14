@@ -158,6 +158,8 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
     }
     services.insert(Arc::new(allow_kinds()));
     services.insert(Arc::new(helm_consent::ConsentWake::default()));
+    // Set once the op dispatcher exists (attach_host_tools): approved changes apply under it.
+    services.insert(Arc::new(helm_consent::MaintenanceLock::default()));
     // The MCP crate decides each launch's native-server flags.
     if let (Some(gate), Some(db)) = (
         services.get::<helm_mcp::RepoGate>(),
@@ -277,6 +279,13 @@ pub fn attach_host_tools(
     dispatcher: &Arc<helm_ipc::Dispatcher>,
 ) {
     runtime.attach_host(host_seam(dispatcher));
+    if let Some(lock) = dispatcher
+        .ctx()
+        .services
+        .get::<helm_consent::MaintenanceLock>()
+    {
+        lock.set(dispatcher.maintenance());
+    }
     start_consent_upkeep(runtime, dispatcher.ctx());
     // Send the workflow's Agent Standup stage records every minute.
     helm_workflow::start_standup_upkeep(runtime.handle(), dispatcher.ctx());
@@ -406,6 +415,7 @@ pub fn allow_kinds() -> helm_consent::AllowKinds {
     let mut k = helm_consent::AllowKinds::new();
     helm_consent::register_allow_kinds(&mut k);
     helm_workflow::register_allow_kinds(&mut k);
+    helm_relay::register_allow_kinds(&mut k);
     k
 }
 
@@ -561,6 +571,7 @@ mod host_tool_tests {
             "app_telegram_ask",
             "app_telegram_send",
             "app_voice_show",
+            "app_stage_settings",
             "app_wait_for",
             "app_background_result",
             "app_usage_summary",
@@ -639,6 +650,7 @@ mod host_tool_tests {
         // Building the kinds panics on a bad or duplicate kind; debug builds carry the test kind.
         let kinds = super::allow_kinds();
         assert_eq!(kinds.get("test_action").is_some(), cfg!(debug_assertions));
+        assert!(kinds.applies_on_allow("protected_settings"));
     }
 }
 

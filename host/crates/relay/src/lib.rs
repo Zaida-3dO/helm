@@ -21,6 +21,7 @@
 //! | [`voice_watch`] | the voice chat watching the other chats: attention notes, coalesced and rate-limited, and telling the sink when the chat wakes |
 //! | [`voice_show`] | the `app_voice_show` tool: pictures, tables, lists, links, text and files queued for the phone's screen |
 //! | [`pair`] | pairing with the hub by a one-time code: token, names, the shared-memory server and the home profile in one step |
+//! | [`setup`] | `app_stage_settings`: a chat stages pairing, the update folder and the Devices switches; Helm applies them when the user clicks Approve |
 //! | [`household`] | other people's Helms through the hub: the three sharing switches, serving their calls, and asking theirs |
 //! | [`knowledge_line`] | the household's knowledge files over the line: pull and push, the hub's people as profiles, and the sync loop |
 //! | [`devlink`] | the household's devices over the line: the device crate's frames up and down, and the service that answers other devices |
@@ -48,7 +49,8 @@
 //! `app_update_settings`, and may change only the model and effort.
 //!
 //! Identity and the household (Settings → Hub, the sidebar's profile popover). All of these are
-//! the user's own; no agent tool reaches them.
+//! the user's own; no agent tool reaches them, except that a chat may stage a pairing with
+//! `app_stage_settings` ([`setup`]) for the user to approve.
 //!
 //! - `hub_pair {address, fallback?, code}` ([`pair`]): answers `{connection, personId,
 //!   personName, machineId, machineName, memoryServer, profileId}`. `relay_connection_get` now
@@ -76,6 +78,7 @@ pub mod knowledge_line;
 pub mod notify;
 pub mod pair;
 pub mod remote;
+pub mod setup;
 pub mod sink;
 pub mod speakable;
 pub mod telegram;
@@ -183,11 +186,17 @@ pub fn start(handle: &tokio::runtime::Handle, ctx: &OpCtx, tools: Arc<helm_hostt
     }
 }
 
-/// This crate's host tools: `app_telegram_send` and `app_telegram_ask` ([`notify`]) and
-/// `app_voice_show` ([`voice_show`]).
+/// This crate's host tools: `app_telegram_send` and `app_telegram_ask` ([`notify`]),
+/// `app_voice_show` ([`voice_show`]) and `app_stage_settings` ([`setup`]).
 pub fn register_host_tools(r: &mut helm_hosttools::HostToolRegistry) {
     notify::register_host_tools(r);
     voice_show::register_host_tools(r);
+    setup::register_host_tools(r);
+}
+
+/// This crate's allow kinds: `protected_settings`, which Helm applies on Approve ([`setup`]).
+pub fn register_allow_kinds(k: &mut helm_consent::AllowKinds) {
+    setup::register_allow_kinds(k);
 }
 
 /// Give the Telegram sink the op dispatcher: it creates the Telegram chat, stops it on `/stop`

@@ -97,6 +97,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("app_send_message", Class::Allowed),
     ("app_set_chat_archived", Class::Denied(CHANGES)),
     ("app_show_images", Class::Denied(LOCAL)),
+    ("app_stage_settings", Class::Denied(CONSENT)),
     ("app_stop_chat", Class::Allowed),
     ("app_telegram_ask", Class::Denied(LOCAL)),
     ("app_telegram_send", Class::Denied(LOCAL)),

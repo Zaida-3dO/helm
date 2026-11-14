@@ -2227,6 +2227,7 @@ dependencies = [
  "helm-platform",
  "helm-profiles",
  "helm-skills",
+ "helm-updates",
  "log",
  "rusqlite",
  "serde",
