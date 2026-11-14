@@ -571,6 +571,7 @@ impl RemoteChats for Mirror {
             hello
                 .and_then(|h| serde_json::from_str::<Value>(&h).ok())
                 .and_then(|h| h.get("catalogue").cloned())
+                .filter(|c| !c.is_null())
                 .ok_or_else(|| {
                     ApiError::new("unavailable", "That device's models are not known yet.")
                 })

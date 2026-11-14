@@ -9,11 +9,12 @@ use helm_chats::types::{
     ChatEvent, Interaction, InteractionAttention as Att, InteractionMethod as Meth,
 };
 use helm_core::db::{Database, MigrationRegistry};
+use helm_devices::host::HostPort;
 use helm_devices::link::{DeviceLink, MemLink, MemRouter, Rpc};
 use helm_devices::mirror::{self, Mirror, PeopleSync};
 use helm_devices::testing::{fake_interaction, fake_record, fake_row, FakePort};
 use helm_devices::wire::{code, DeviceFrame, Frame, Push};
-use helm_devices::Service;
+use helm_devices::{ChatPort, Service};
 use helm_ipc::{Dispatcher, OpCtx, OpIntercept, OpRegistry, RecordingSink, Services};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -868,6 +869,67 @@ async fn a_watcher_keeps_a_copy_of_the_chats_of_another_device() {
         0
     );
     assert!(b.mirror.owner("c1").is_some());
+}
+
+/// The hello on the production port, through the real op dispatcher: the catalogue op is
+/// called the way the app calls it, and a failed catalogue leaves the hello standing without one.
+#[tokio::test(start_paused = true)]
+async fn hello_works_on_the_production_port_through_the_real_ops() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut reg = MigrationRegistry::new();
+    helm_devices::register_migrations(&mut reg);
+    let db = Arc::new(Database::open(&dir.path().join("host.sqlite3"), &reg).unwrap());
+    // The profiles table is the profiles crate's, read here directly: make just enough of it.
+    db.write(|tx| {
+        tx.execute_batch(
+            "CREATE TABLE profiles (id TEXT PRIMARY KEY, hub_person_id TEXT, name TEXT, colour TEXT, about TEXT);
+             INSERT INTO profiles VALUES ('p-a', 'person-a', 'Alex', 'red', '');
+             INSERT INTO projects (id, kind, name, path, color, created_at)
+             VALUES ('proj-1', 'folder', 'Work', '/work', 'blue', 0);",
+        )
+    })
+    .unwrap();
+
+    // The full host: the real dispatcher with the real chat ops, and the profile the
+    // catalogue op reads.
+    let mut services = Services::new();
+    services.insert(db.clone());
+    services.insert(Arc::new(
+        helm_core::profile::Profile::open(&dir.path().join("prof")).unwrap(),
+    ));
+    let mut ops = OpRegistry::new();
+    helm_chats::register_ops(&mut ops);
+    let api = Dispatcher::new(
+        ops,
+        OpCtx {
+            services: Arc::new(services),
+            events: Arc::new(RecordingSink::default()),
+        },
+        false,
+    );
+    let hello = HostPort::new(Arc::new(api)).hello().await.unwrap();
+    assert!(!hello.device.uid.is_empty());
+    assert_eq!(hello.people[0].person_id, "person-a");
+    assert_eq!(hello.projects[0].path, "/work");
+    assert_eq!(hello.catalogue.expect("a catalogue")["harness"], "claude");
+
+    // The catalogue op failing (here: no profile folder for it to read) is logged, not fatal:
+    // the hello still answers, with no catalogue.
+    let mut bare = Services::new();
+    bare.insert(db);
+    let mut ops = OpRegistry::new();
+    helm_chats::register_ops(&mut ops);
+    let api = Dispatcher::new(
+        ops,
+        OpCtx {
+            services: Arc::new(bare),
+            events: Arc::new(RecordingSink::default()),
+        },
+        false,
+    );
+    let hello = HostPort::new(Arc::new(api)).hello().await.unwrap();
+    assert_eq!(hello.people[0].person_id, "person-a");
+    assert_eq!(hello.catalogue, None);
 }
 
 #[tokio::test(start_paused = true)]

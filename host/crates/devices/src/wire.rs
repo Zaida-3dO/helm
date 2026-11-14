@@ -435,7 +435,8 @@ pub struct Hello {
     pub device: DeviceInfo,
     pub people: Vec<PersonInfo>,
     pub projects: Vec<ProjectInfo>,
-    pub catalogue: Value,
+    /// `null` when this device's `model_catalogue` op failed at hello time.
+    pub catalogue: Option<Value>,
 }
 
 /// A chat as another device sees it: the chat record with the profile replaced by the person it

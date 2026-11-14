@@ -230,7 +230,15 @@ impl ChatPort for HostPort {
     fn hello(&self) -> BoxFut<'_, PortResult<Hello>> {
         Box::pin(async move {
             let (people, projects) = self.people_and_projects()?;
-            let catalogue = self.op("model_catalogue", json!({})).await?;
+            // The catalogue is a bonus: if the op fails the hello still stands, with no
+            // catalogue, and the reader answers "that device's models are not known yet".
+            let catalogue = match self.op("model_catalogue", json!({ "harness": "claude" })).await {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    log::warn!("devices: no model catalogue in the hello: {e}");
+                    None
+                }
+            };
             Ok(Hello {
                 device: self.device(),
                 people,

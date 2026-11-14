@@ -241,7 +241,7 @@ impl ChatPort for FakePort {
                 kind: "folder".to_owned(),
                 path: "/work".to_owned(),
             }],
-            catalogue: json!({ "models": [] }),
+            catalogue: Some(json!({ "models": [] })),
         }))
     }
 
