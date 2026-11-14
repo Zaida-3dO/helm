@@ -351,6 +351,39 @@ const MEASURE_TOASTS = (rootSel: string) => {
   return out;
 };
 
+/**
+ * One-line controls matching `sel`: a text run that spreads over two lines wraps; one that runs past
+ * the nearest box that clips it, with no ellipsis on the way, is cut off hard.
+ */
+const ONE_LINE = (sel: string) => {
+  const out: string[] = [];
+  const name = (el: Element) => el.getAttribute("data-testid") ?? el.getAttribute("aria-label") ?? `${el.tagName.toLowerCase()}.${String(el.className).split(" ")[0]}`;
+  for (const el of document.querySelectorAll<HTMLElement>(sel)) {
+    if (!el.getClientRects().length || getComputedStyle(el).visibility === "hidden") continue;
+    const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+      const text = (n.textContent ?? "").trim();
+      if (!text || n.parentElement?.closest(".visually-hidden, [hidden]")) continue;
+      const range = document.createRange();
+      range.selectNodeContents(n);
+      const rects = [...range.getClientRects()].filter((r) => r.width > 0);
+      if (!rects.length) continue;
+      if (new Set(rects.map((r) => Math.round(r.top))).size > 1) out.push(`${name(el)} "${text.slice(0, 40)}" wraps`);
+      let ellipsis = false;
+      for (let a = n.parentElement; a && a !== document.body; a = a.parentElement) {
+        const cs = getComputedStyle(a);
+        ellipsis ||= cs.textOverflow === "ellipsis";
+        if (cs.overflowX === "visible") continue;
+        const box = a.getBoundingClientRect();
+        const past = rects.some((r) => r.right > box.right + 1 || r.left < box.left - 1);
+        if (past && !ellipsis) out.push(`${name(el)} "${text.slice(0, 40)}" is cut off by ${name(a)}`);
+        break;
+      }
+    }
+  }
+  return [...new Set(out)];
+};
+
 /** Adds one toast of every kind, built like ui/src/ui/misc.tsx's Toast, one under the other. */
 const INJECT_TOASTS = () => {
   const svg = (d: string) => `<svg class="ui-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
@@ -617,6 +650,47 @@ describe("visual sweep", { timeout: 20 * 60_000 }, () => {
     measured["narrow"] = spill;
     assert.ok(spill.scrollWidth <= spill.w + 1, `the page is ${spill.scrollWidth} px wide in a ${spill.w} px window: ${spill.over.join(", ")}`);
     await audit("narrow", { chrome: true });
+    await page().setViewportSize({ width: 1280, height: 800 }).catch(() => undefined);
+  });
+
+  test("width sweep: one-line controls neither wrap nor clip; a toast leaves a dialog's close button clear", async () => {
+    // A finished turn, so the chat has an activity dock to measure.
+    await newChat(page(), scratchDir("helm-w5v-sweep-"));
+    await send(page(), "a reply for the width sweep");
+    await waitStatus(page(), "idle", 30_000);
+    await page().waitForSelector(tid("activity-dock"), { timeout: 20_000 });
+    const surfaces: [name: string, selector: string][] = [
+      ["top bar", `${tid("topbar")} button, ${tid("topbar")} .crumbs > *`],
+      ["composer chips", ".composer-bar .ui-picker-trigger, .composer-bar button, .composer-bar .composer-accessory"],
+      ["activity dock", tid("activity-dock")],
+    ];
+    for (const width of [1440, 950, 760]) {
+      await page().setViewportSize({ width, height: 900 }).catch(() => undefined);
+      await page().waitForTimeout(400);
+      const bad: string[] = [];
+      for (const [name, sel] of surfaces) bad.push(...(await page().evaluate(ONE_LINE, sel)).map((b) => `${name}: ${b}`));
+      await page().keyboard.press("Control+Comma");
+      await page().waitForSelector(tid("settings"), { timeout: 10_000 });
+      bad.push(...(await page().evaluate(ONE_LINE, ".settings-tab")).map((b) => `settings tabs: ${b}`));
+      await page().keyboard.press("Escape");
+      await page().waitForSelector(tid("settings"), { state: "detached", timeout: 5_000 });
+      measured[`sweep/${width}`] = bad;
+      assert.deepEqual(bad, [], `at ${width} px`);
+    }
+    // At 760 px: a real toast (archiving a chat) is up while Settings opens; its close button takes the click.
+    await page().setViewportSize({ width: 1280, height: 800 }).catch(() => undefined);
+    // The bar's chat actions show on hover; a DOM click needs none.
+    await page().locator(tid("topbar-archive")).dispatchEvent("click");
+    await page().setViewportSize({ width: 760, height: 800 }).catch(() => undefined);
+    await page().keyboard.press("Control+Comma");
+    await page().waitForSelector(tid("settings"), { timeout: 10_000 });
+    await page().waitForSelector(tid("toast-slot"), { timeout: 2_000 });
+    const close = (await page().locator(`${tid("settings")} [aria-label="Close dialog"]`).boundingBox())!;
+    const at = { x: close.x + close.width / 2, y: close.y + close.height / 2 };
+    const hit = await page().evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest("button")?.getAttribute("aria-label") ?? null, at);
+    assert.equal(hit, "Close dialog", "the toast is not over the dialog's close button");
+    await page().mouse.click(at.x, at.y);
+    await page().waitForSelector(tid("settings"), { state: "detached", timeout: 5_000 });
     await page().setViewportSize({ width: 1280, height: 800 }).catch(() => undefined);
   });
 
