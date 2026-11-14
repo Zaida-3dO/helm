@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SETTINGS_TAB_GROUPS, OTHER_GROUP_TITLE, groupSettingsTabs } from './layout.ts';
+import { SETTINGS_TAB_GROUPS, OTHER_GROUP_TITLE, groupSettingsTabs, scrollEdges } from './layout.ts';
 
 // Every settings pane registers with its own order, so the tab order never depends on which file
 // happens to be imported first. This reads the registrations from the source.
@@ -52,4 +52,17 @@ test('every settings pane sits in exactly one tab group, and unknown ids land in
   assert.deepEqual([...flat].sort(), [...ids].sort(), 'the groups together show every registered pane once');
   const unknown = groupSettingsTabs([{ id: 'a-unknown-pane' }, { id: 'chat' }]);
   assert.deepEqual(unknown.at(-1), { title: OTHER_GROUP_TITLE, panes: [{ id: 'a-unknown-pane' }] });
+});
+
+test('scroll fades show only on the edges that have more content', () => {
+  const rows: [number, number, number, { top: boolean; bottom: boolean }][] = [
+    [0, 400, 400, { top: false, bottom: false }], // fits
+    [0, 400, 900, { top: false, bottom: true }], // at the top
+    [200, 400, 900, { top: true, bottom: true }], // in the middle
+    [500, 400, 900, { top: true, bottom: false }], // at the end
+    [499.4, 400, 900, { top: true, bottom: false }], // fractional pixels at the end
+  ];
+  for (const [top, client, scroll, want] of rows) {
+    assert.deepEqual(scrollEdges(top, client, scroll), want, `${top}/${client}/${scroll}`);
+  }
 });

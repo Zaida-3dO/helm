@@ -40,3 +40,18 @@ export function groupSettingsTabs<T extends { id: string }>(panes: readonly T[])
   if (other.length > 0) groups.push({ title: OTHER_GROUP_TITLE, panes: other });
   return groups;
 }
+
+/**
+ * Which edges of a scrolling pane have more content beyond them, so a soft fade can hint at it.
+ * A pane that fits (or is within a pixel of its end) has none.
+ */
+export function scrollEdges(
+  scrollTop: number,
+  clientHeight: number,
+  scrollHeight: number,
+): { top: boolean; bottom: boolean } {
+  return {
+    top: scrollTop > 1,
+    bottom: scrollTop + clientHeight < scrollHeight - 1,
+  };
+}

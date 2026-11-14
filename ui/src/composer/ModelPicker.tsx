@@ -30,7 +30,7 @@ import { ConfirmDialog, Segmented, type ConfirmSpec } from '../ui/index.ts';
 import { useBinding } from '../ui/hooks.ts';
 import { IconChevronDown, IconStar } from '../ui/icons.tsx';
 import { PickerPopover, type PickerOption } from '../ui/Picker.tsx';
-import { commitPatch, effortLabel, FALLBACK_EFFORTS, isLocalModel, localHint, modelRows, stepEffort, thinkingLabel, triggerLabel, withDefaultRow } from './modelEffort.ts';
+import { commitPatch, effortLabel, FALLBACK_EFFORTS, isLocalModel, localHint, modelRows, stepEffort, thinkingLabel, triggerParts, withDefaultRow } from './modelEffort.ts';
 
 let cached: Promise<ModelCatalogue> | null = null;
 
@@ -216,7 +216,8 @@ function ModelEffortPicker({
   const local = isLocalModel(model);
   const stopLabel = local ? thinkingLabel : effortLabel;
   // While the app is still checking its runtimes the chip says so, muted, instead of a model name.
-  const label = loading ? 'Loading…' : triggerLabel(current?.title ?? (model || 'Default'), effort, local);
+  const parts = loading ? null : triggerParts(current?.title ?? (model || 'Default'), effort, local);
+  const label = parts ? `${parts.name} · ${parts.rest}` : 'Loading…';
   // A chat with its own reply length says so after the effort.
   const shown = !loading && source.verbosityOwn && !settingsRow && source.verbosity ? `${label} · ${verbosityTitle(source.verbosity)}` : label;
 
@@ -327,7 +328,11 @@ function ModelEffortPicker({
           }
         }}
       >
-        <span className="ui-picker-value">{shown}</span>
+        <span className="ui-picker-value">
+          {parts && !settingsRow ? parts.name : shown}
+          {/* The effort and reply length give way before the model's name does (see composer.css). */}
+          {parts && !settingsRow && <span className="ui-picker-extra">{shown.slice(parts.name.length)}</span>}
+        </span>
         <span className={`ui-picker-chevron${open ? ' open' : ''}`}>
           <IconChevronDown size={12} />
         </span>

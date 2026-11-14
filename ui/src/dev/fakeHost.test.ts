@@ -12,6 +12,17 @@ test('registered fake ops answer by prefix; an action send keeps the draft', asy
   await call('draft_save', { chatId: chat.id, text: 'typed', revision: 10 });
   const r = await call('chat_send', { chatId: chat.id, submissionId: 'a', text: 'Update', action: 'default', draftRevision: 0, origin: 'action' });
   assert.equal((r.chat as { draft: string }).draft, 'typed');
+  // chat_fork: a copy titled "Fork · …" (no stacked prefix), the same fork id answers the same chat,
+  // and a side chat quotes its excerpt and stays out of the list.
+  const fork = await call('chat_fork', { chatId: chat.id, forkId: 'f1' });
+  assert.equal(fork.title, 'Fork · Update');
+  assert.equal((await call('chat_fork', { chatId: chat.id, forkId: 'f1' })).id, fork.id);
+  assert.equal((await call('chat_fork', { chatId: fork.id, forkId: 'f2' })).title, 'Fork · Update');
+  const side = await call('chat_fork', { chatId: chat.id, forkId: 'f3', side: true, excerpt: 'one\ntwo' });
+  assert.equal(side.sideSourceId, chat.id);
+  assert.match(String(side.draft), /^Regarding this excerpt:\n\n> one\n> two/);
+  await assert.rejects(call('chat_fork', { chatId: chat.id, forkId: 'f4', side: true }), (e: { code: string }) => e.code === 'bad_args');
+  assert.ok(!((await call('chat_list')) as unknown as { id: string }[]).some((c) => c.id === side.id));
   const att = await call('attention_get');
   assert.equal(att.busy, 1);
 });

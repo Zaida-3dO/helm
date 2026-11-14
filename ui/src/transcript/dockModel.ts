@@ -3,6 +3,15 @@
 import type { MessageRow, ThreadState } from '../api/types.ts';
 import { LOCAL_WORKING_LABEL, isLocalModelId, localWaitLabel } from '../state/localModel.ts';
 import { toolKind, toolStatus, toolTarget } from './toolKinds.ts';
+import { formatElapsed } from './workBlocks.ts';
+
+/**
+ * The dock's right-hand clock. It times the whole turn, while the step line beside the status has its
+ * own timer that starts over with every step, so the two never read as one number disagreeing with itself.
+ */
+export function turnClockText(elapsedMs: number): string {
+  return `turn ${formatElapsed(Math.max(0, elapsedMs))}`;
+}
 
 /**
  * The background chip's tasks: shells only. Background subagents are counted once, by the

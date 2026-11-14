@@ -67,7 +67,7 @@ export function PermissionChip({ chatId, mode: live, busy, ops }: { chatId: stri
         display={
           <span className="permission-chip-label">
             <ModeIcon mode={mode} />
-            {permissionLabel(mode)}
+            <span className="permission-chip-text">{permissionLabel(mode)}</span>
           </span>
         }
         title={permissionTooltip(mode, pending)}
