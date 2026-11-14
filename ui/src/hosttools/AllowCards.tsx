@@ -6,11 +6,13 @@
 //   0.5 px), from trusted events outside dev builds. Neither button is default or focused, there
 //   is no shortcut, and the cards are not a form.
 // - The agent's reason and evidence render inert, marked as the agent's words.
+// - A card Helm applies itself (appliesOnAllow) says Approve, has no grant length, and shows the
+//   summary's title line, then each change as its own inert row.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { consentOps, type ConsentRequest } from '../api/consent.ts';
 import { useShell } from '../shell/context.ts';
-import { inertLines } from './inert.ts';
+import { inertLines, summaryParts } from './inert.ts';
 import { SettleGate, type Rect } from './settle.ts';
 import './hosttools.css';
 
@@ -136,28 +138,39 @@ export function AllowCards({ chatId }: { chatId: string }) {
     <div className="allow-cards" ref={box} tabIndex={-1} role="group" aria-label="Allow requests" data-testid="allow-cards">
       {error && <div className="allow-error">{error}</div>}
       {cards.map((c) => (
-        <div key={c.id} className="allow-card" data-testid="allow-card" data-request={c.id}>
+        <div key={c.id} className="allow-card" data-testid="allow-card" data-request={c.id} data-applies={c.appliesOnAllow ? 'true' : undefined}>
           <div className="allow-title">
             <strong>{c.label}</strong>
             {/* Host-built, but it names agent- or repository-supplied targets: inert too. */}
             <span className="allow-agent-line" dir="auto">
-              {inertLines(c.summary).join(' ')}
+              {inertLines(summaryParts(c).title).join(' ')}
             </span>
           </div>
+          {summaryParts(c).changes.length > 0 && (
+            <div className="allow-changes" role="list">
+              {summaryParts(c).changes.map((line, i) => (
+                <div key={i} className="allow-change allow-agent-line" role="listitem" data-testid="allow-change" dir="auto">
+                  {inertLines(line).join(' ')}
+                </div>
+              ))}
+            </div>
+          )}
           <Inert label="The agent's reason (its words; Helm has not checked them)" text={c.reason} />
           <Inert label="The agent's evidence (its words; Helm has not checked them)" text={c.evidence} />
           <div className="allow-controls">
-            <label>
-              Grant lasts
-              <input
-                type="number"
-                min={5}
-                max={240}
-                value={minutes[c.id] ?? c.grantMinutes}
-                onChange={(e) => setMinutes({ ...minutes, [c.id]: Math.max(5, Math.min(240, Number(e.target.value) || c.grantMinutes)) })}
-              />
-              minutes
-            </label>
+            {!c.appliesOnAllow && (
+              <label>
+                Grant lasts
+                <input
+                  type="number"
+                  min={5}
+                  max={240}
+                  value={minutes[c.id] ?? c.grantMinutes}
+                  onChange={(e) => setMinutes({ ...minutes, [c.id]: Math.max(5, Math.min(240, Number(e.target.value) || c.grantMinutes)) })}
+                />
+                minutes
+              </label>
+            )}
             <input
               className="allow-note"
               type="text"
@@ -174,7 +187,7 @@ export function AllowCards({ chatId }: { chatId: string }) {
               </span>
               <span className="allow-slot" ref={slotRef(`${c.id}:allow`)}>
                 <button type="button" className="ui-btn" data-testid="allow-allow" onClick={decide(c, 'allow', `${c.id}:allow`)}>
-                  Allow
+                  {c.appliesOnAllow ? 'Approve' : 'Allow'}
                 </button>
               </span>
             </span>

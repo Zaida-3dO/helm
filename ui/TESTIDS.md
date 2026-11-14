@@ -127,6 +127,7 @@ breaks those checks, so change them only together with the checks. Everything el
 | `find-bar` / `find-input` / `find-count` | Find in chat (Ctrl+F): the bar, its text field, and the "n of m" count (an `aria-live` region) |  |
 | `timeline-rail` / `timeline-band` / `timeline-card` | The work-timeline rail in the transcript's right gutter, its visible-range band, and the marker preview card (hover or click a marker); markers are `.tl-marker[data-row-id]` |  |
 | `timeline-history` | The history button at the top of the timeline rail: opens Go back for the focused prompt, else the newest message the reader sent | |
+| `allow-change` | One change on an Allow card that Helm applies itself (the button reads Approve, there is no grant length): one row per change, in order | the card has `data-applies="true"` |
 | `tool-allow-state` / `skill-chip` | An Allow request tool row's chip (`data-state` `waiting` `allowed` `refused`), and a skill chip in a reply's action row (one per skill the turn used) | |
 | `shell` / `topbar` / `topbar-title` / `panel-toggle` | App frame and top bar | `panel-toggle`: `aria-pressed` |
 | `topbar-local-status` | The top bar's wording for a busy chat on a local model server (queued behind other work, or being answered) | `data-ahead` (count ahead, 0 when unknown) |
