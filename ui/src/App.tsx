@@ -168,8 +168,8 @@ function Frame({ flushers }: { flushers: Flushers }) {
     void Promise.all([read(SIDEBAR_WIDTH_PREF), read(SIDEBAR_VISIBLE_PREF)]).then(([w, v]) => sidebarLayout.load(w, v));
     return () => sidebarLayout.connect(() => undefined);
   }, [shell]);
-  // The chat area's top places the toasts under the top bar and whatever the tag strip takes
-  // (nothing with no chat, two lines when it wraps).
+  // The frame's room (less the side panel) fits the sidebar; the chat area's top places the toasts
+  // under the top bar and whatever the tag strip takes (nothing with no chat, two lines when it wraps).
   const frame = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const el = frame.current;
@@ -177,6 +177,8 @@ function Frame({ flushers }: { flushers: Flushers }) {
     const chat = main?.querySelector<HTMLElement>(':scope > .shell-chat');
     if (!el || !main || !chat) return;
     const measure = () => {
+      const panel = el.querySelector<HTMLElement>(':scope > .side-panel');
+      sidebarLayout.setRoom(el.getBoundingClientRect().width - (panel?.getBoundingClientRect().width ?? 0));
       main.style.setProperty('--toast-top', `${chat.offsetTop}px`);
     };
     measure();
@@ -186,7 +188,7 @@ function Frame({ flushers }: { flushers: Flushers }) {
   }, []);
 
   return (
-    <div ref={frame} className="shell" data-testid="shell">
+    <div ref={frame} className="shell" data-testid="shell" data-sidebar-fitted={layout.fitted ?? undefined}>
       <aside className="shell-sidebar" aria-label="Sidebar" hidden={!layout.visible} style={{ '--sidebar-width': `${layout.width}px` } as CSSProperties}>
         <ErrorBoundary name="sidebar">
           <Sidebar /> {/* chat and project tree */}

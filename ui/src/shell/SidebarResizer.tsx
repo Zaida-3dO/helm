@@ -17,7 +17,7 @@ export function SidebarResizer() {
     document.documentElement.classList.remove('is-col-resizing');
     if (el && pointerId !== undefined && el.hasPointerCapture(pointerId)) el.releasePointerCapture(pointerId);
     if (commit && d.next !== d.start) sidebarLayout.setWidth(d.next, true);
-    else sidebarLayout.setWidth(d.start, false);
+    sidebarLayout.preview(null);
   };
 
   return (
@@ -64,7 +64,7 @@ export function SidebarResizer() {
         if (!d) return;
         d.next = dragWidth(d.start, e.clientX - d.x, d.main);
         cancelAnimationFrame(d.frame);
-        d.frame = requestAnimationFrame(() => sidebarLayout.setWidth(d.next, false));
+        d.frame = requestAnimationFrame(() => sidebarLayout.preview(d.next));
       }}
       onPointerUp={(e) => end(true, e.currentTarget, e.pointerId)}
       onPointerCancel={(e) => end(false, e.currentTarget, e.pointerId)}
