@@ -3,6 +3,9 @@
 // disallowed native tools, background tasks and stoppable calls.
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, test } from "node:test";
 import type { Json } from "../../fakes/host/fake-host.ts";
 import { DISALLOWED_TOOLS } from "../src/drivers/claude/args.ts";
@@ -73,7 +76,9 @@ describe("wait limit", () => {
       await s.host.waitFor((e) => e.type === "tool_execution_update" && e.stoppable === true, 5000, 0);
       const sid = await steerDuringTool(s);
       const early = await s.host.request({ type: "deliver_now", submissionId: sid, reason: "wait_limit", minRunMs: 60_000 });
-      assert.deepEqual(early.data, { result: "waiting" });
+      const held = (early.data as Json).blockers as Json[];
+      assert.deepEqual({ ...(early.data as Json), blockers: held.map((b) => [b.toolCallId, b.name, b.kind]) }, { result: "waiting", blockers: [["tu_1", "Bash", "shell"]] });
+      assert.ok((held[0].runningMs as number) >= 0);
       assert.equal(s.received().some(ctl("background_tasks")), false, "nothing moved while not eligible");
       const r = await s.host.request({ type: "deliver_now", submissionId: sid, reason: "wait_limit", minRunMs: 0 });
       assert.deepEqual(r.data, { result: "unblocked", moved: ["tu_1"] });
@@ -91,6 +96,39 @@ describe("wait limit", () => {
     }
   });
 
+  test("deliver_now answers a slow call to Helm's own server early and reports what still holds a steer", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "helm-dn-"));
+    const SLOW = { name: "app_slow", description: "Slow.", inputSchema: { type: "object" }, requestLimitBytes: 8192, timeoutMs: 120_000, children: false, mutating: true };
+    const s = startWithFixture("wait-limit-helm", { launch: { hostTools: [SLOW], chatToolsDirectory: dir } });
+    try {
+      await s.host.ready();
+      await prompt(s.host, "run the slow tool");
+      const req = await s.host.waitForType("chat_request", 10_000, 0);
+      const sid = await steerDuringTool(s);
+      const early = await s.host.request({ type: "deliver_now", submissionId: sid, reason: "wait_limit", minRunMs: 60_000 });
+      const held = (early.data as Json).blockers as Json[];
+      assert.deepEqual(held.map((b) => [b.toolCallId, b.name, b.kind]), [["tu_h", "mcp__helm__app_slow", "helm"]], "a young Helm call is named, not moved");
+      const r = await s.host.request({ type: "deliver_now", submissionId: sid, reason: "wait_limit", minRunMs: 0 });
+      assert.deepEqual(r.data, { result: "unblocked", moved: ["tu_h"] });
+      assert.equal(s.received().some(ctl("background_tasks")), false, "the CLI is not asked to move a call Helm answers itself");
+      await s.host.waitFor((e) => e.type === "submission_delivered" && e.submissionId === sid, 5000, 0);
+      const answer = s.received().find((x) => x.type === "control_response" && (((x.response as Json).response as Json | undefined)?.mcp_response as Json | undefined)?.id === 7);
+      const moved = ((((answer?.response as Json).response as Json).mcp_response as Json).result as Json).structuredContent as Json;
+      assert.equal(moved.state, "background");
+      assert.equal(moved.callId, "tu_h");
+      assert.match(String(moved.message), /Do not call it again.*app_background_result.*may still change things/);
+      // The real request is still open; the host answers it later and the user hears of it.
+      assert.equal(s.host.ofType("chat_cancel").length, 0, "moving the call does not cancel it");
+      fs.writeFileSync(path.join(dir, String(req.id), "response.json"), JSON.stringify({ id: req.id, ok: true, result: { done: 1 } }));
+      const note = await s.host.waitFor((e) => e.type === "notice" && /app_slow finished in the background/.test(String(e.text)), 5000, 0);
+      assert.match(String(note.text), /app_background_result/);
+      await s.host.waitForType("agent_settled", 5000, 0);
+    } finally {
+      await s.done();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("deliver_now: nothing_waiting for a steer already read; waiting while an approval is open", async () => {
     const s = startWithFixture("approval");
     try {
@@ -103,7 +141,7 @@ describe("wait limit", () => {
       const sid = uuid();
       await prompt(s.host, "steer", { streamingBehavior: "steer" }, sid);
       const r = await s.host.request({ type: "deliver_now", submissionId: sid, reason: "wait_limit", minRunMs: 0 });
-      assert.deepEqual(r.data, { result: "waiting" });
+      assert.deepEqual(r.data, { result: "waiting", blockers: [{ kind: "user", runningMs: 0 }] }, "the open card is what it waits on");
       s.host.send({ type: "extension_ui_response", id: (s.host.ofType("extension_ui_request")[0].id as string), value: "Deny" });
       await s.host.waitForType("agent_settled", 5000, 0);
     } finally {
@@ -123,7 +161,7 @@ describe("wait limit holds off while the user is being asked", () => {
       const sid = uuid();
       await prompt(s.host, "steer", { streamingBehavior: "steer" }, sid);
       const r = await s.host.request({ type: "deliver_now", submissionId: sid, reason: "wait_limit", minRunMs: 0 });
-      assert.deepEqual(r.data, { result: "waiting" });
+      assert.deepEqual(r.data, { result: "waiting", blockers: [{ kind: "user", runningMs: 0 }] });
       assert.equal(s.received().some(ctl("background_tasks")), false, "nothing moved while the approval is open");
       s.host.send({ type: "extension_ui_response", id: ask.id as string, value: "Deny" });
       await s.host.waitForType("agent_settled", 5000, 0);
