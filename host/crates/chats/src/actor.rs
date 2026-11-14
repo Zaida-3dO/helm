@@ -246,6 +246,8 @@ struct Actor {
     evicted: Vec<Subagent>,
     /// The turn-opening send being timed, until its first output ([`crate::timeline`]).
     timeline: Option<crate::timeline::SendTimeline>,
+    /// Steers the worker answered `waiting` for, logged to the same file until each is read.
+    steer_waits: crate::timeline::SteerWaits,
     /// The last worker start that failed: pre-warm waits [`PREWARM_RETRY`] before trying again.
     spawn_failed_at: Option<Instant>,
     /// This actor's own channel, held weakly, for work it hands to another thread.
@@ -390,6 +392,7 @@ pub(crate) fn start(sh: Arc<Shared>, chat_id: String) -> ActorHandle {
         provider_switch_pending: false,
         evicted: Vec::new(),
         timeline: None,
+        steer_waits: Default::default(),
         spawn_failed_at: None,
         me: tx.downgrade(),
         prepare: None,
@@ -2628,6 +2631,35 @@ impl Actor {
         );
     }
 
+    /// A `waiting` answer to `deliver_now`: the first one for a steer, and one every 30 s after,
+    /// goes to the send-timeline log with what holds it back.
+    fn log_steer_wait(&mut self, sid: &str, data: &Value) {
+        let at = now();
+        let Some(answer) = self.steer_waits.waiting(sid, at) else {
+            return;
+        };
+        let Some(saved) = self.submission(sid).map(|s| s.created_at) else {
+            return;
+        };
+        let line = crate::timeline::steer_wait_line(sid, saved, at, answer, data);
+        crate::timeline::log_line(&self.sh.cfg.profile_dir, &self.chat_id, saved, &line);
+    }
+
+    /// Claude read a steer: log how long after it was saved, and how often it was held.
+    fn log_steer_read(&mut self, sub: &Submission) {
+        let answers = self.steer_waits.read(&sub.id);
+        if sub.mode != SubmissionMode::Steer {
+            return;
+        }
+        let line = crate::timeline::steer_read_line(&sub.id, sub.created_at, now(), answers);
+        crate::timeline::log_line(
+            &self.sh.cfg.profile_dir,
+            &self.chat_id,
+            sub.created_at,
+            &line,
+        );
+    }
+
     // ------------------------------------------------------------------ timers
 
     fn on_timers(&mut self) {
@@ -2950,13 +2982,14 @@ impl Actor {
             }
             "submission_delivered" => {
                 if let Some(sid) = str_of(&v, "submissionId") {
-                    let accepted = self
+                    let sub = self
                         .submission(&sid)
-                        .is_some_and(|s| s.state == SubmissionState::Accepted);
-                    if accepted {
+                        .filter(|s| s.state == SubmissionState::Accepted);
+                    if let Some(sub) = sub {
                         self.set_submission(&sid, SubmissionState::Delivered);
                         self.clear_timer(|t| *t == Timer::WaitLimit(sid.clone()));
                         self.emit_pending();
+                        self.log_steer_read(&sub);
                     }
                 }
             }
@@ -3638,6 +3671,7 @@ impl Actor {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if ok && result == "waiting" {
+                    self.log_steer_wait(&submission_id, &data);
                     // Nothing movable yet: try again in a second (never an interrupt).
                     let lim = self.sh.cfg.limits.wait_retry;
                     self.add_timer(lim, Timer::WaitLimit(submission_id));

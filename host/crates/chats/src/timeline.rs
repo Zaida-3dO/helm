@@ -12,13 +12,31 @@
 //! chat c1: send 1b2c3d4e timeline (ms after saved): dispatched +2, spawn +3, worker +210,
 //! claude +260, initialized +301, ready +305, written +307, acked +312, first output +318; cold
 //! ```
+//!
+//! A steer (a message sent while a turn runs) that is still unread when the wait limit asks the
+//! worker to deliver it gets lines of its own in the same file: one at the worker's first
+//! `waiting` answer, then at most one every [`WAIT_LOG_EVERY_MS`], each naming what holds it
+//! (a running call by its tool name and kind, an open card, or the model itself), and one when
+//! Claude reads it.
+//!
+//! ```text
+//! chat c1: steer 1b2c3d4e waiting +31004 (answer 1): helm mcp__helm__app_slow 31 s
+//! chat c1: steer 1b2c3d4e read +32110 after 2 waiting answers
+//! ```
 
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
 /// The file is moved to `send-timeline.old.log` once it passes this.
 const FILE_CAP: u64 = 256 * 1024;
+/// A steer that keeps waiting is logged again at most this often.
+pub(crate) const WAIT_LOG_EVERY_MS: i64 = 30_000;
+/// Steers tracked at once; one never read (withdrawn, or the worker went away) is dropped first.
+const MAX_STEER_WAITS: usize = 64;
+/// What holds a steer: at most this many calls per line.
+const MAX_BLOCKERS: usize = 8;
 
 /// One send, from the actor taking it to its first output.
 #[derive(Debug, Clone, Default)]
@@ -120,12 +138,123 @@ pub(crate) fn finish(
 ) {
     if let Some(mut t) = slot.take() {
         t.first_output = first_output;
-        let line = format!("chat {chat_id}: {}", t.line());
-        log::info!("{line}");
-        if let Err(e) = append(&profile.join("diagnostics"), t.saved, &line) {
-            log::warn!("send timeline not written: {e}");
+        log_line(profile, chat_id, t.saved, &t.line());
+    }
+}
+
+/// Log one line for a chat and append it to the diagnostics file.
+pub(crate) fn log_line(profile: &Path, chat_id: &str, saved: i64, line: &str) {
+    let line = format!("chat {chat_id}: {line}");
+    log::info!("{line}");
+    if let Err(e) = append(&profile.join("diagnostics"), saved, &line) {
+        log::warn!("send timeline not written: {e}");
+    }
+}
+
+/// The steers a chat's worker has answered `waiting` for, until each is read.
+#[derive(Debug, Default)]
+pub(crate) struct SteerWaits {
+    /// Submission id → (waiting answers so far, when its last line was written).
+    seen: HashMap<String, (u32, i64)>,
+}
+
+impl SteerWaits {
+    /// A `waiting` answer at `now`: the answer's number when it gets a line (the first, then one
+    /// per [`WAIT_LOG_EVERY_MS`]), otherwise `None`.
+    pub fn waiting(&mut self, sid: &str, now: i64) -> Option<u32> {
+        if !self.seen.contains_key(sid) && self.seen.len() >= MAX_STEER_WAITS {
+            let stale = self
+                .seen
+                .iter()
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = stale {
+                self.seen.remove(&k);
+            }
+        }
+        let (answers, logged) = self.seen.entry(sid.to_owned()).or_insert((0, i64::MIN));
+        *answers += 1;
+        if *logged == i64::MIN || now - *logged >= WAIT_LOG_EVERY_MS {
+            *logged = now;
+            Some(*answers)
+        } else {
+            None
         }
     }
+
+    /// The steer was read: how many `waiting` answers it had. It is forgotten.
+    pub fn read(&mut self, sid: &str) -> u32 {
+        self.seen.remove(sid).map_or(0, |(n, _)| n)
+    }
+}
+
+fn short(sid: &str) -> String {
+    sid.chars().take(8).collect()
+}
+
+fn rel(saved: i64, t: i64) -> String {
+    let d = t - saved;
+    if d >= 0 {
+        format!("+{d}")
+    } else {
+        d.to_string()
+    }
+}
+
+/// The line for a `waiting` answer: how long the steer has waited and what holds it (the
+/// answer's `blockers`; kinds `helm`, `mcp`, `shell`, `agent`, `native`, `model`, `user`).
+pub(crate) fn steer_wait_line(
+    sid: &str,
+    saved: i64,
+    now: i64,
+    answer: u32,
+    data: &Value,
+) -> String {
+    let blockers = data
+        .get("blockers")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut parts: Vec<String> = blockers
+        .iter()
+        .take(MAX_BLOCKERS)
+        .map(|b| {
+            let kind = b.get("kind").and_then(Value::as_str).unwrap_or("unknown");
+            let mut p: String = kind.chars().take(16).collect();
+            if let Some(name) = b.get("name").and_then(Value::as_str) {
+                p.push(' ');
+                p.extend(name.chars().take(80));
+            }
+            if kind != "user" {
+                let secs = b.get("runningMs").and_then(Value::as_i64).unwrap_or(0) / 1000;
+                p.push_str(&format!(" {secs} s"));
+            }
+            p
+        })
+        .collect();
+    if blockers.len() > MAX_BLOCKERS {
+        parts.push(format!("{} more", blockers.len() - MAX_BLOCKERS));
+    }
+    let held = if parts.is_empty() {
+        "nothing named".to_owned()
+    } else {
+        parts.join(", ")
+    };
+    format!(
+        "steer {} waiting {} (answer {answer}): {held}",
+        short(sid),
+        rel(saved, now)
+    )
+}
+
+/// The line for a steer Claude has read.
+pub(crate) fn steer_read_line(sid: &str, saved: i64, now: i64, answers: u32) -> String {
+    let waits = match answers {
+        0 => "with no waiting answer".to_owned(),
+        1 => "after 1 waiting answer".to_owned(),
+        n => format!("after {n} waiting answers"),
+    };
+    format!("steer {} read {} {waits}", short(sid), rel(saved, now))
 }
 
 /// Append `<saved> <line>` to `send-timeline.log`, rolling it over past [`FILE_CAP`].
@@ -189,6 +318,63 @@ mod tests {
         append(dir.path(), 1, "new").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "1 new\n");
         assert!(dir.path().join("send-timeline.old.log").is_file());
+    }
+
+    #[test]
+    fn a_waiting_steer_is_logged_first_then_every_thirty_seconds_and_when_read() {
+        let mut w = SteerWaits::default();
+        // One answer a second from 10 s after saved: lines at the first answer and 30 s on.
+        let logged: Vec<(i64, u32)> = (0..45)
+            .filter_map(|i| {
+                let now = 10_000 + i * 1_000;
+                w.waiting("1b2c3d4e-9", now).map(|n| (now, n))
+            })
+            .collect();
+        assert_eq!(logged, [(10_000, 1), (40_000, 31)]);
+        for (data, want) in [
+            (
+                json!({"result": "waiting", "blockers": [
+                    {"toolCallId": "tu_h", "name": "mcp__helm__app_slow", "kind": "helm", "runningMs": 31_400},
+                    {"toolCallId": "tu_r", "name": "Read", "kind": "native", "runningMs": 900}
+                ]}),
+                "helm mcp__helm__app_slow 31 s, native Read 0 s",
+            ),
+            (
+                json!({"blockers": [{"kind": "model", "runningMs": 64_000}]}),
+                "model 64 s",
+            ),
+            (json!({"blockers": [{"kind": "user", "runningMs": 0}]}), "user"),
+            (json!({"result": "waiting"}), "nothing named"),
+            (
+                json!({"blockers": (0..10).map(|_| json!({"kind": "native", "name": "Grep", "runningMs": 0})).collect::<Vec<_>>()}),
+                "native Grep 0 s, native Grep 0 s, native Grep 0 s, native Grep 0 s, native Grep 0 s, \
+                 native Grep 0 s, native Grep 0 s, native Grep 0 s, 2 more",
+            ),
+        ] {
+            assert_eq!(
+                steer_wait_line("1b2c3d4e-9", 0, 10_000, 1, &data),
+                format!("steer 1b2c3d4e waiting +10000 (answer 1): {want}")
+            );
+        }
+        assert_eq!(w.read("1b2c3d4e-9"), 45);
+        assert_eq!(w.read("1b2c3d4e-9"), 0, "forgotten once read");
+        assert_eq!(
+            steer_read_line("1b2c3d4e-9", 1_000, 55_000, 45),
+            "steer 1b2c3d4e read +54000 after 45 waiting answers"
+        );
+        // Never more than a bounded number tracked: the stalest goes first.
+        for i in 0..(MAX_STEER_WAITS as i64 + 1) {
+            w.waiting(&format!("s{i}"), i);
+        }
+        assert_eq!(w.seen.len(), MAX_STEER_WAITS);
+        assert!(!w.seen.contains_key("s0"));
+        // The lines reach the same file as the send timeline.
+        let dir = tempfile::tempdir().unwrap();
+        log_line(dir.path(), "c1", 5, &steer_read_line("abc", 5, 8, 0));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("diagnostics/send-timeline.log")).unwrap(),
+            "5 chat c1: steer abc read +3 with no waiting answer\n"
+        );
     }
 
     #[test]

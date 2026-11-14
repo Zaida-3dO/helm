@@ -1,0 +1,13 @@
+{
+  "description": "A slow call to one of Helm's host tools holds a steer back; the client answers the call early (moved to the background), the turn reaches its next tool boundary and the steer is read.",
+  "steps": [
+    { "await": { "type": "user" }, "as": "p" },
+    { "init": { "tools": [] } },
+    { "tool": { "id": "tu_h", "name": "mcp__helm__app_slow", "input": { "n": 1 } } },
+    { "mcp": { "hook": { "toolUseId": "tu_h" }, "message": { "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "app_slow", "arguments": { "n": 1 } } } }, "as": "slow", "timeoutMs": 60000 },
+    { "toolResult": { "id": "tu_h", "text": "moved to the background" } },
+    { "read": true },
+    { "text": "Noted your message while the slow call runs." },
+    { "result": "done" }
+  ]
+}

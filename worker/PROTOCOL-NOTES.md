@@ -315,7 +315,7 @@ registers the PreToolUse hook in `initialize`.
 | `get_state` | `data` adds `capabilities {withdraw, deliverNow, stopTool, compact}` (all `true` for Claude Code 2.1.289) and `cliVersion` (the CLI's `get_binary_version` answer; `null` if it does not answer within 3 s). |
 | `abort` | Before the interrupt, any foreground tasks are moved to the background (otherwise the interrupt waits for the shell). The interrupt is sent with `cancel_queued:true`; `data` adds `cancelledSubmissionIds`: our submissions the CLI dropped, which the host sends to it again at once, as the next turn. |
 | `withdraw` | `{id, submissionId}` → `data {withdrawn}`; `false` when Claude has already read it (or it is unknown). Uses `cancel_async_message`. |
-| `deliver_now` | `{id, submissionId, reason:"wait_limit"\|"send_now", minRunMs}` → `data {result, moved?}`. `stopped`: no turn is running. `nothing_waiting`: that submission is no longer unread. `waiting`: an approval, question or plan is open, or no foreground Bash or subagent call has run for `minRunMs` yet. `unblocked` with `moved:[toolCallId...]`: those calls were moved to the background. It never ends the turn. With `reason:"send_now"` and nothing to move, a plain interrupt is sent instead and the answer is `delivering`. |
+| `deliver_now` | `{id, submissionId, reason:"wait_limit"\|"send_now", minRunMs}` → `data {result, moved?, blockers?}`. `stopped`: no turn is running. `nothing_waiting`: that submission is no longer unread. `waiting`: an approval, question or plan is open, or no call that can be moved has run for `minRunMs` yet; `blockers [{toolCallId?, name?, kind, runningMs}]` says what holds the message: `kind` is `helm` (a call to Helm's own server), `mcp` (another MCP server's tool), `shell`, `agent`, `native` (a built-in tool that never becomes a task: Read, Grep, WebFetch and the rest), `model` (no tool is running: the model is still writing or thinking; `runningMs` counts from the last tool's end or the turn's start) or `user` (an open card). `unblocked` with `moved:[toolCallId...]`: those calls were moved to the background: foreground Bash and subagent tasks through the CLI's `background_tasks`, calls to Helm's own server by answering them early (see "Calls moved to the background"). It never ends the turn. With `reason:"send_now"` and nothing to move, a plain interrupt is sent instead and the answer is `delivering`. The host writes the first `waiting` answer per message, one every 30 s after, and the moment Claude reads it to `diagnostics/send-timeline.log`. |
 | `stop_tool` | `{id, toolCallId, sentAtMs}` → `data {stopped}`. A missing or more than 5 s old `sentAtMs` is refused (`success:false`). A call that is not a stoppable foreground Bash task or a running subagent's Agent call answers `stopped:false`. Uses `stop_task`. |
 | `compact` | `{id}`; refused while a turn runs. Sends an internal `/compact` user message and answers `data {state:"compacting"}`; emits `compaction_start {}` then `compaction_end {trigger, ok}` (`ok:false` when the turn ends without a compaction boundary). The compaction runs as a CLI turn, so the host also sees `agent_start` / `agent_settled` for it. |
 
@@ -459,6 +459,26 @@ keeps its first ~3,250 and last ~1,750 characters around a marker saying how muc
 where the whole text is (a file under the system temp folder, `helm-tool-output`, cleared after a
 day; if it cannot be written the marker says to ask for less). The structured copy of the result is
 dropped when it is cut. Tool discovery (`app_list_tools`, `app_mcp_tools`) is exempt.
+
+**Calls moved to the background** (`worker/src/hosttools/server.ts`, `background.ts`). Claude Code
+reads a message sent during a turn only once every running tool call has returned, so one slow call
+to Helm's server holds the message until it ends. A root agent's call through the helm server (a
+host tool, or an MCP tool Helm proxies) that is still running after 30 s, or that `deliver_now`
+asks to move once it has run `minRunMs`, is answered early with
+`{state:"background", callId, tool, message}`; `callId` is the call's tool-use id. The message tells
+the agent the call is still running, not to call it again, how to fetch it, and (for a tool that
+may change things, which includes every proxied MCP tool) that it may still change things. The
+request keeps running with its own cancel, so a cancel from the CLI after the move does not reach
+it; when it ends the worker writes a `notice` line for the transcript. Never moved: a sub-agent's
+call, an unattributed call, `app_list_tools`, `app_mcp_tools` and `app_background_result`.
+
+The worker answers `app_background_result` itself (when the host lists it): with a `callId`, a
+finished call's result (`{state:"done", callId, tool, result}`, or the call's own error), or for a
+running one `{state:"running", ...}` after waiting up to 20 s; an unknown id is refused; with no
+`callId`, the list of held calls. It keeps at most 32 calls; a result goes 10 minutes after it is
+read or 30 minutes after its call finished. Running calls are never dropped, so when all 32 slots
+are running calls the next slow call simply stays in the foreground. Nothing is pushed to the
+agent when a call finishes: it asks.
 
 What cannot be done: Claude Code's built-in tools (Read, Bash, Grep and the rest) produce their
 output inside the CLI. A `PostToolUse` hook may add context but, per the hook documentation, can
