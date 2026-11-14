@@ -517,9 +517,10 @@ async fn pair(State(state): State<Arc<AppState>>, req: Request) -> Response {
             let scopes: Vec<&str> = p.client.scopes.iter().map(Scope::label).collect();
             Json(json!({
                 "token": p.token,
-                "personId": p.client.person_id,
+                // Ids go out as decimal strings, as in every other frame Helm reads.
+                "personId": p.client.person_id.to_string(),
                 "personName": p.client.person,
-                "machineId": p.client.id,
+                "machineId": p.client.id.to_string(),
                 "machineName": p.client.machine,
                 "scopes": scopes,
             }))

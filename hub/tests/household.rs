@@ -224,6 +224,11 @@ async fn pairing_connects_machines_side_by_side_and_a_revoke_drops_only_that_one
     assert_eq!(status, 200, "{paired}");
     assert_eq!(paired["personName"], "Bea");
     assert_eq!(paired["machineName"], "laptop");
+    // Helm reads both ids as strings; a number here makes it refuse the reply after the code is spent.
+    assert!(
+        paired["personId"].is_string() && paired["machineId"].is_string(),
+        "{paired}"
+    );
     let bea = paired["token"].as_str().unwrap().to_owned();
     let (status, _) = post(&hub, "/pair", None, json!({ "code": code })).await;
     assert_eq!(status, 403, "a code works once");
@@ -232,7 +237,7 @@ async fn pairing_connects_machines_side_by_side_and_a_revoke_drops_only_that_one
     let (mut ann_ws, ann_person, ann_id) = join(&hub, &ann).await;
     let (mut bea_ws, bea_person, bea_id) = join(&hub, &bea).await;
     assert_ne!(ann_person, bea_person);
-    assert_eq!(bea_id, paired["machineId"].as_i64().unwrap());
+    assert_eq!(bea_id.to_string(), paired["machineId"].as_str().unwrap());
     let (_second_ws, _, again) = join(&hub, &ann).await;
     assert_eq!(again, ann_id);
     assert!(closed(&mut ann_ws, Duration::from_secs(5)).await);
