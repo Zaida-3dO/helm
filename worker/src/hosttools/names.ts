@@ -34,6 +34,8 @@ export const LOCAL_CORE_TOOLS: readonly string[] = [
   "app_worktree_status",
   "app_workflow",
   "app_workflow_report",
+  // A long call moved to the background tells the agent to read its result with this one.
+  "app_background_result",
 ];
 
 export const WORKER_SERVED: readonly string[] = [...COMPAT_ALWAYS, ...COMPAT_WITH_MCP];
