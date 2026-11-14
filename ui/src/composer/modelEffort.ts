@@ -72,9 +72,13 @@ export function shortName(name: string): string {
   return name.replace(/\s*\([^)]*\)\s*$/, '').trim() || name;
 }
 
-/** The trigger's label: "Model · Effort", or "Model · High thinking" for a local model. */
+/**
+ * The trigger's label: "Model · Effort". A local model shows its name as the user chose it (an
+ * alias is kept whole) and reads the lowest stop, which turns thinking off, as "No thinking".
+ */
 export function triggerLabel(modelName: string, effort: string, local = false): string {
-  return `${shortName(modelName)} · ${local ? thinkingLabel(effort) : effortLabel(effort)}`;
+  if (local) return `${modelName} · ${effort === 'low' ? 'No thinking' : effortLabel(effort)}`;
+  return `${shortName(modelName)} · ${effortLabel(effort)}`;
 }
 
 /** One step left (-1) or right (+1) along the efforts, stopping at the ends. */
@@ -97,7 +101,8 @@ export interface ModelRow {
 }
 
 function localRow(m: LocalModelInfo): ModelRow {
-  const parts = [m.server, formatContext(m.contextTokens)].filter(Boolean);
+  // The row is titled by the name the app gives the model; its own name goes in the detail.
+  const parts = [m.model !== m.name ? m.model : '', m.server, formatContext(m.contextTokens)].filter(Boolean);
   let hint: string | undefined;
   if (!m.reachable) {
     // A Strata Helm can start is choosable even while down: using it starts it.

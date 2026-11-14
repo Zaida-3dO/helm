@@ -24,6 +24,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
     let mut names = vec![
         LocalModelsState::ident(),
         ServerView::ident(),
+        ModelNameView::ident(),
         Range::ident(),
         TestResult::ident(),
         RefreshResult::ident(),

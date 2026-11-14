@@ -15,12 +15,12 @@ const SHELF: Record<string, { answers: boolean; models: Omit<LocalModelInfo, 'se
   strata: {
     answers: true,
     models: [
-      { id: 'local/strata/qwen3.8-flash', name: 'Qwen 3.8 Flash', contextTokens: 262144, loaded: true },
-      { id: 'local/strata/qwen3.8-coder', name: 'Qwen 3.8 Coder', contextTokens: 131072, loaded: false },
+      { id: 'local/strata/qwen3.8-flash-next-iq3_s', model: 'qwen3.8-flash-next-iq3_s', name: 'Qwen 3.8 Flash Next', contextTokens: 262144, loaded: true },
+      { id: 'local/strata/qwen3.8-coder-iq3_s', model: 'qwen3.8-coder-iq3_s', name: 'Qwen 3.8 Coder', contextTokens: 131072, loaded: false },
     ],
   },
-  ollama: { answers: true, models: [{ id: 'local/ollama/llama3.2:3b', name: 'Llama 3.2 3B', contextTokens: 131072, sizeBytes: 2_000_000_000, loaded: false }] },
-  office: { answers: false, models: [{ id: 'local/office/qwen3:30b-a3b', name: 'Qwen3 30B A3B', contextTokens: 40960 }] },
+  ollama: { answers: true, models: [{ id: 'local/ollama/llama3.2:3b', model: 'llama3.2:3b', name: 'Llama 3.2 3B', contextTokens: 131072, sizeBytes: 2_000_000_000, loaded: false }] },
+  office: { answers: false, models: [{ id: 'local/office/qwen3:30b-a3b', model: 'qwen3:30b-a3b', name: 'Qwen 3 30B', contextTokens: 40960 }] },
 };
 
 const here = (url: string) => /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/.test(url.trim());
@@ -44,6 +44,8 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
     { id: 'office', name: 'Ollama (office)', kind: 'ollama', baseUrl: 'http://127.0.0.1:8083', enabled: true, autoStart: true, hasKey: false },
   ];
   const settings = { ollamaContext: 65536, keepAliveMinutes: 15, strataNeedGb: 12, tools: 'lean' as const, compareWith: 'sonnet' as 'opus' | 'sonnet' | 'haiku', games: [] as string[], gameLiftMinutes: 5, restartTask: undefined as string | undefined, pauseFile: undefined as string | undefined };
+  /** The names the user gave models, by id. */
+  const aliases = new Map<string, string>();
   const ranges = {
     ollamaContextRange: { min: 8192, max: 262144, default: 65536 },
     keepAliveRange: { min: 1, max: 240, default: 15 },
@@ -61,7 +63,11 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
     }),
     ...settings,
     ...ranges,
+    modelNames: allRows().map((m) => ({ id: m.id, model: m.model, server: m.server, defaultName: SHELF[m.id.split('/')[1]!]?.models.find((x) => x.id === m.id)?.name ?? m.model, ...(aliases.has(m.id) ? { alias: aliases.get(m.id)! } : {}) })),
+    aliasMax: 40,
   });
+
+  const allRows = (): LocalModelInfo[] => rows();
 
   const rows = (): LocalModelInfo[] =>
     servers
@@ -69,6 +75,7 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
       .flatMap((s) =>
         (SHELF[s.id]?.models ?? []).map((m) => ({
           ...m,
+          name: aliases.get(m.id) ?? m.name,
           server: s.name,
           kind: s.kind,
           reachable: SHELF[s.id]?.answers === true,
@@ -126,6 +133,16 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
           if (games.some((g) => /[\\/]/.test(g))) throw new ApiError('refused', 'List a game by its program name, such as game.exe, not a path.');
           const named = games.map((g) => (/\.exe$/i.test(g) ? g : `${g}.exe`));
           settings.games = named.filter((g, i) => named.findIndex((x) => x.toLowerCase() === g.toLowerCase()) === i);
+        }
+        if (a.aliases && typeof a.aliases === 'object') {
+          for (const [id, text] of Object.entries(a.aliases as Record<string, unknown>)) {
+            const name = String(text).trim();
+            if (!id.startsWith('local/')) throw new ApiError('refused', 'That is not a local model.');
+            if (name.length > 40) throw new ApiError('refused', "A model's name must be one line of text, up to 40 characters.");
+            if (name) aliases.set(id, name);
+            else aliases.delete(id);
+          }
+          cached = cached.length ? rows() : cached;
         }
         if (a.gameLiftMinutes !== undefined) settings.gameLiftMinutes = num(a.gameLiftMinutes, ranges.gameLiftRange, 'The wait after a game closes');
         if (typeof a.restartTask === 'string') settings.restartTask = a.restartTask.trim() || undefined;

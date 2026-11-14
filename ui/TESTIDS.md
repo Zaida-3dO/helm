@@ -60,8 +60,9 @@ breaks those checks, so change them only together with the checks. Everything el
 | `question-other` | Free-text input of a question | |
 | `question-back` / `question-cancel` | Back to the previous step / skip the question | |
 | `plan-button` | Plan approval option | `data-option` = `Approve plan` or `Keep planning` |
-| `queue-item` | One in-flight message under the transcript | `data-state` (`pending` `sending` `uncertain` `failed`), `data-tone` (`amber` `muted` `error`), `data-submission` |
+| `queue-item` | One in-flight message, drawn as the last item of the transcript (stacked above the composer when the transcript is not at its newest page) | `data-state` (`pending` `sending` `uncertain` `failed`), `data-tone` (`amber` `muted` `error`), `data-submission` |
 | `queue-pending` | The "Pending" label of an unread asap steer | |
+| `queue-reason` | Why a pending message waits ("Waiting for Bash to finish", else "Claude reads it at its next step") | |
 | `queue-withdraw` | Withdraw on a pending steer (only when the worker can withdraw) | |
 | `queue-recover` | Recover an unsent message back to the composer | |
 | `background-chip` | Background-tasks chip in the activity dock | `data-count` = number of tasks |

@@ -12,6 +12,8 @@ export interface SettingsPatch {
   tools?: LocalModelsState['tools'];
   compareWith?: LocalModelsState['compareWith'];
   games?: string[];
+  /** Model id to the name the user gives it; an empty string clears that model's name. */
+  aliases?: Record<string, string>;
   gameLiftMinutes?: number;
   /** An empty string clears the task or the file. */
   restartTask?: string;

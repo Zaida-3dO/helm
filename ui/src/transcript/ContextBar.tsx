@@ -4,6 +4,7 @@
 // it, and large means near that window (which for a small local window comes well before 250k).
 
 import type { ChatRecord, MessageRow } from '../api/types.ts';
+import { isLocalModelId } from '../state/localModel.ts';
 import { Button } from '../ui/index.ts';
 import { compactCount, CONTEXT_SHOWN_TOKENS, contextSize, ROLL_OVER_TOKENS, type ChatContextReading } from './rowMeta.ts';
 
@@ -18,8 +19,10 @@ export interface ContextBarProps {
   onRollOver: () => void;
 }
 
-/** Below this share of the model's window the chat does not read as large. */
+/** Below this share of the model's window the chat does not read as large. A local model slows and
+ * loses track of long contexts well before its window is full, so its line speaks up sooner. */
 const NEAR_WINDOW_PCT = 90;
+const NEAR_LOCAL_WINDOW_PCT = 70;
 /** With no window stated, a percent that still earns showing the line. */
 const SHOWN_PCT = 60;
 
@@ -28,7 +31,7 @@ export function ContextBar({ chat, rows, host, hasNewer, busy, onRollOver }: Con
   const size = contextSize(rows, host);
   if (!size || (size.tokens < CONTEXT_SHOWN_TOKENS && (size.pct ?? 0) < SHOWN_PCT)) return null;
   const { tokens, window, pct } = size;
-  const large = pct !== null ? pct >= NEAR_WINDOW_PCT : tokens >= ROLL_OVER_TOKENS;
+  const large = pct !== null ? pct >= (isLocalModelId(chat.model) ? NEAR_LOCAL_WINDOW_PCT : NEAR_WINDOW_PCT) : tokens >= ROLL_OVER_TOKENS;
   const where = pct !== null ? ` of ${compactCount(window!)} (${Math.round(pct)}%)` : '';
   const label = `${compactCount(tokens)} tokens of context${where}`;
   const title =

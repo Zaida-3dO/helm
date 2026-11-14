@@ -40,6 +40,24 @@ pub struct ServerView {
     pub note: Option<String>,
 }
 
+/// One listed model and what it is called, for the "Model names" card.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelNameView {
+    /// `local/<serverId>/<model>`.
+    pub id: String,
+    /// The name as the server gives it.
+    pub model: String,
+    /// The server's display name.
+    pub server: String,
+    /// What it is called when the user has given it no name.
+    pub default_name: String,
+    /// The name the user gave it, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub alias: Option<String>,
+}
+
 /// The allowed range of a number setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +87,10 @@ pub struct LocalModelsState {
     /// Minutes after a listed game closes before local models come back.
     pub game_lift_minutes: u32,
     pub game_lift_range: Range,
+    /// The models the servers last listed, with their names.
+    pub model_names: Vec<ModelNameView>,
+    /// The longest a model's name may be, in characters.
+    pub alias_max: u32,
     /// The scheduled task that restarts a model server, paused while local models are unloaded.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

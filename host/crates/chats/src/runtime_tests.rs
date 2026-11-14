@@ -4946,6 +4946,7 @@ impl crate::local::LocalModels for FakeLocal {
         vec![crate::types::LocalModelInfo {
             id: "local/ollama/qwen3:8b".into(),
             name: "qwen3:8b".into(),
+            model: "qwen3:8b".into(),
             server: "Ollama".into(),
             kind: crate::types::LocalServerKind::Ollama,
             context_tokens: Some(65_536),

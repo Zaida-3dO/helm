@@ -908,7 +908,10 @@ pub enum LocalServerKind {
 #[serde(rename_all = "camelCase")]
 pub struct LocalModelInfo {
     pub id: String,
+    /// What the model is called in the app: the name the user gave it, else a short default.
     pub name: String,
+    /// The name as the server gives it.
+    pub model: String,
     /// The server's display name.
     pub server: String,
     pub kind: LocalServerKind,
