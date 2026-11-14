@@ -1,0 +1,41 @@
+/* The top bar's graphics-card control: the unload button, the "GPU reserved" pill and its popover. */
+
+.gpu-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: calc(24 * var(--ui-unit));
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill, 999px);
+  background: var(--accent-bg);
+  /* The accent on its own tint is just under AA in the light theme. */
+  color: var(--text);
+  font-size: calc(11 * var(--ui-unit));
+  white-space: nowrap;
+  cursor: var(--cursor-pointer);
+}
+
+.gpu-pill:hover {
+  border-color: var(--accent);
+}
+
+.gpu-confirm-line {
+  display: block;
+  margin-top: 8px;
+}
+
+.gpu-popover-lead {
+  margin: 0 0 6px;
+  font-size: calc(12 * var(--ui-unit));
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.gpu-report {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: calc(11 * var(--ui-unit));
+  line-height: 1.6;
+  color: var(--secondary);
+}

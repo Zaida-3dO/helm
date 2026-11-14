@@ -134,7 +134,7 @@ impl Launch {
     }
 }
 
-/// `<profile>/claude-runtime.json` (settings-schema): `{executable, skipPermissions, fastMode, worktreeTools, scheduleTools}`.
+/// `<profile>/claude-runtime.json` (settings-schema): `{executable, skipPermissions, fastMode, worktreeTools, scheduleTools, lowPriority}`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClaudeRuntime {
@@ -171,6 +171,12 @@ pub struct ClaudeRuntime {
     /// missing key means on.
     #[serde(default = "yes")]
     pub shell_changes: bool,
+    /// Run chats' agents, their tools and Helm's helpers at below-normal priority, so games and
+    /// the rest of the PC stay responsive. On by default: a missing key means on. It reaches a
+    /// chat at its next worker start. It lives in this file, not in preferences, so no agent can
+    /// change it.
+    #[serde(default = "yes")]
+    pub low_priority: bool,
 }
 
 /// Which chats the sub-agent limits apply to.
@@ -226,6 +232,7 @@ impl Default for ClaudeRuntime {
             tool_output_cap: true,
             schedule_tools: false,
             shell_changes: true,
+            low_priority: true,
         }
     }
 }
@@ -359,6 +366,14 @@ mod tests {
         let (rt, err) = ClaudeRuntime::load(dir.path());
         assert!(rt.skip_permissions, "an invalid file reads as the defaults");
         assert!(err.is_some());
+        // A missing key means low priority is on; an explicit false is kept.
+        assert!(ClaudeRuntime::load(dir.path()).0.low_priority);
+        std::fs::write(
+            dir.path().join("claude-runtime.json"),
+            r#"{"lowPriority": false}"#,
+        )
+        .unwrap();
+        assert!(!ClaudeRuntime::load(dir.path()).0.low_priority);
         // An explicit false turns fast mode off; a save reads back as written.
         std::fs::write(
             dir.path().join("claude-runtime.json"),
@@ -378,6 +393,7 @@ mod tests {
             tool_output_cap: false,
             schedule_tools: true,
             shell_changes: false,
+            low_priority: false,
         };
         mine.save(dir.path()).unwrap();
         assert_eq!(ClaudeRuntime::load(dir.path()), (mine.clone(), None));

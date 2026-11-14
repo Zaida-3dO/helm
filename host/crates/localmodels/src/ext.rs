@@ -6,12 +6,13 @@
 //! | `localOllamaContext` | Ollama context window for Helm's variants, 8192 to 262144 tokens |
 //! | `localKeepAliveMinutes` | how long Ollama keeps a model after a turn, 1 to 240 |
 //! | `localServersEnabled` | `{serverId: true or false}`: which servers Helm uses |
-//! | `localSpeechReserveGb` | graphics memory (GB, 0 to 24) a model load leaves free for speech-to-text |
+//! | `localSpeechReserveGb` | graphics memory (GB, 0 to 24) also freed for speech-to-text when a model load has to unload others |
 //! | `localToolsSetup` | `lean` or `full`: the tools a local chat is offered |
 //! | `localCompareModel` | `opus`, `sonnet` or `haiku`: the Claude model local usage is priced against |
 //!
 //! These are in the base tier: each is bounded, shows in "Changed by chats" with Undo, and none
-//! can reach outside this machine. **Never here:** a server's address, name or key. Those are the
+//! can reach outside this machine. **Never here:** a server's address, name or key, the games that
+//! unload local models, the restart task Helm ends and the pause file it writes. Those are the
 //! user's, in Settings > Local models.
 
 use crate::settings::{self, Changes, CompareModel, LocalSettings, ToolsSetup};
@@ -214,7 +215,7 @@ impl SettingsExtension for LocalKeys {
                 "min": settings::MIN_SPEECH_RESERVE_GB,
                 "max": settings::MAX_SPEECH_RESERVE_GB,
                 "default": d.speech_reserve_gb,
-                "about": format!("{PAGE} and Settings > Shell > Dictation, Keep GPU memory for speech: graphics memory, in GB, that Helm leaves free when it loads a local model, so speech-to-text (dictation, and the voice line's transcription) still fits beside it. 0 keeps none. It applies to the next model load."),
+                "about": format!("{PAGE} and Settings > Shell > Dictation, Keep GPU memory for speech: graphics memory, in GB, that Helm frees as well when it has to unload other local models to load one, so speech-to-text (dictation, and the voice line's transcription) still fits beside it. Speech-to-text never unloads a model, and this alone never does either. 0 keeps none. It applies to the next model load."),
             })),
             TOOLS => Some(json!({
                 "type": "enum",

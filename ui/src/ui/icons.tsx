@@ -35,6 +35,7 @@ import {
   Clock,
   Coins,
   Copy,
+  Cpu,
   CornerDownLeft,
   CornerDownRight,
   CornerLeftUp,
@@ -224,6 +225,8 @@ export const IconUndo = kitIcon(Undo2, 'undo-2');
 export const IconClock = kitIcon(Clock, 'clock');
 /** What a chat or project has used (tokens and cost). */
 export const IconCoins = kitIcon(Coins, 'coins');
+/** The graphics card: the top bar's Unload local models. */
+export const IconGpu = kitIcon(Cpu, 'cpu');
 export const IconTerminal = kitIcon(Terminal, 'terminal');
 export const IconScrollDown = kitIcon(ArrowDown, 'arrow-down');
 

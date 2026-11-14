@@ -6,33 +6,13 @@
 //! and the configured time to answer, and reads at most 1 MB back. Anything but a transcript comes
 //! back as a reason in plain words.
 
-use crate::relay::Line;
 use crate::telegram::cut;
-use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
 /// A voice step's result; the error is a reason in plain words for the user.
 pub type VoiceFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
-
-/// The Helm tool that frees the PC's graphics memory for speech-to-text. It takes no arguments.
-/// The hub does not offer it over MCP: only the hub itself calls it, down the person's own line.
-pub const ROOM_TOOL: &str = "app_make_room_for_speech";
-/// How long a recording waits for Helm to make room before it is transcribed anyway.
-pub const ROOM_WAIT: Duration = Duration::from_secs(4);
-/// The caller name Helm sees (it runs the call as `external:hub-speech`).
-const ROOM_CLIENT: &str = "hub-speech";
-
-/// Ask the Helm on `line` to unload idle local models before a recording is transcribed. Waits at
-/// most `wait` and ignores every failure (Helm offline, an older Helm without the tool, a refusal,
-/// no answer): the transcription goes ahead whatever happens, and nothing here assumes where the
-/// speech-to-text server runs.
-pub async fn make_room_on(line: &Line, wait: Duration) {
-    let _ = line
-        .call_with_timeout(ROOM_CLIENT, ROOM_TOOL, &json!({}), wait)
-        .await;
-}
 
 /// How long a connection may take to open.
 pub const STT_CONNECT: Duration = Duration::from_secs(5);

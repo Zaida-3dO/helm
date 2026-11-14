@@ -5,7 +5,7 @@
 //! | [`settings`] | the saved settings and the address rule for the speech-to-text server |
 //! | [`transcribe`] | the multipart call that turns a WAV into text |
 //! | `ops` | the ops behind the composer's microphone button and Settings > Shell > Dictation |
-//! | `tool` | the `app_make_room_for_speech` host tool |
+//! | `tool` | the `app_make_room_for_speech` host tool, kept for hubs that still call it; it does nothing |
 //!
 //! **The page records and Helm sends.** The renderer is not allowed to reach the network, so the
 //! composer records the user's voice, encodes it as a 16 kHz mono WAV and hands it to the host,
@@ -17,10 +17,10 @@
 //! **Nothing here logs or stores a recording or its text.** A recording is held in memory for the
 //! length of one call.
 //!
-//! **Room for speech.** When the graphics card has less free memory than the speech reserve (a
-//! setting of Local models), idle local models are unloaded before the call
-//! ([`helm_localmodels::LocalService::free_for_speech`]). The hub does the same before its own
-//! transcription through `app_make_room_for_speech`.
+//! **Speech-to-text never unloads a local model.** A recording goes straight to the server, loaded
+//! model or not: a slower transcription costs less than a model that has to load again. The
+//! speech reserve (a setting of Local models) is still kept, but only when a local model has to
+//! unload others to fit anyway: then Helm frees that much more, so speech-to-text fits beside it.
 //!
 //! Ops (the renderer only):
 //!
@@ -51,7 +51,7 @@ pub fn register_ops(reg: &mut helm_ipc::OpRegistry) {
     ops::register_ops(reg);
 }
 
-/// `app_make_room_for_speech`.
+/// `app_make_room_for_speech`, which answers at once and unloads nothing.
 pub fn register_host_tools(r: &mut helm_hosttools::HostToolRegistry) {
     tool::register_host_tools(r);
 }

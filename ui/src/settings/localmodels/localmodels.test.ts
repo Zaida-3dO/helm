@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { localModelsFakeOps } from '../../dev/fake-localmodels.ts';
 import { localModelsOps } from './api.ts';
-import { clampTo, draftProblem, newDraft, rangeText, reachText, sameDrafts, savePayload, toDraft, type ServerView } from './model.ts';
+import { clampTo, draftProblem, gamesProblem, newDraft, parseGames, rangeText, reachText, sameDrafts, savePayload, toDraft, type ServerView } from './model.ts';
 
 const view = (p: Partial<ServerView> = {}): ServerView => ({ id: 's1', name: 'Strata', kind: 'strata', baseUrl: 'http://127.0.0.1:8081', enabled: true, autoStart: true, hasKey: false, ...p });
 
@@ -77,4 +77,25 @@ test('the pane\'s flow against the dev host: opening asks no server, only Check 
   assert.deepEqual([tuned.ollamaContext, tuned.keepAliveMinutes, tuned.strataNeedGb, tuned.tools, tuned.compareWith], [32768, 30, 20, 'full', 'opus']);
   assert.equal((await ops.test('strata')).ok, true);
   assert.equal(events.every((e) => (e as { kind: string }).kind === 'local_models'), true);
+});
+
+test('the game list: trimmed, blank lines and repeats dropped, too many or a path refused; the graphics-card settings save through the dev host', async () => {
+  assert.deepEqual(parseGames(' game.exe \r\n\n\nOther.EXE\nGAME.exe\n  '), ['game.exe', 'Other.EXE']);
+  assert.deepEqual(parseGames('somegame\nSomeGame.exe\nother'), ['somegame', 'other']);
+  assert.deepEqual(parseGames(''), []);
+  const many = Array.from({ length: 21 }, (_, i) => `game${i}.exe`);
+  assert.equal(gamesProblem(many.slice(0, 20)), null);
+  assert.match(gamesProblem(many) ?? '', /at most 20/);
+  assert.match(gamesProblem(['C:\\Games\\x.exe']) ?? '', /not a path/);
+
+  const fake = localModelsFakeOps();
+  const api = async <T,>(op: string, args: unknown = {}): Promise<T> => fake.handler(op, args as Record<string, unknown>, { emit: () => undefined } as never) as T;
+  const ops = localModelsOps(api);
+  const start = await ops.state();
+  assert.deepEqual([start.games, start.gameLiftMinutes, start.restartTask, start.pauseFile], [[], 5, undefined, undefined]);
+  const saved = await ops.saveSettings({ games: ['game'], gameLiftMinutes: 10, restartTask: ' Model Restart ', pauseFile: 'C:/models/paused.flag' });
+  assert.deepEqual([saved.games, saved.gameLiftMinutes, saved.restartTask, saved.pauseFile], [['game.exe'], 10, 'Model Restart', 'C:/models/paused.flag']);
+  await assert.rejects(ops.saveSettings({ gameLiftMinutes: 61 }), /between 1 and 60/);
+  await assert.rejects(ops.saveSettings({ pauseFile: 'paused.flag' }), /full path/);
+  assert.equal((await ops.saveSettings({ restartTask: '', pauseFile: '' })).restartTask, undefined);
 });

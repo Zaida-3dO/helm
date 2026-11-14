@@ -372,6 +372,7 @@ impl Spawner for ProcessSpawner {
             cwd: PathBuf::from(&req.cwd),
             env: env.into_pairs(),
             max_record_bytes: MAX_RECORD_BYTES,
+            low_priority: runtime.low_priority,
         })
         .map_err(|e| format!("Helm could not start the worker: {e}"))?;
         Ok((Arc::new(ProcessLink(proc_)), rx))
@@ -491,6 +492,7 @@ impl ProcessSpawner {
             env.set(helm_workers::launch::LOCAL_KEY_ENV, k);
         }
         let (runtime, _) = ClaudeRuntime::load(&self.profile_dir);
+        let low = runtime.low_priority;
         if let Some(t) = test_claude(
             self.debug,
             std::env::var("HELM_TEST_CLAUDE").ok().as_deref(),
@@ -500,7 +502,7 @@ impl ProcessSpawner {
         } else if !runtime.executable.is_empty() {
             job["command"] = Value::String(runtime.executable);
         }
-        crate::titles::run_helper(&node.path, &script, env.into_pairs(), &job, timeout)
+        crate::titles::run_helper(&node.path, &script, env.into_pairs(), &job, timeout, low)
     }
 }
 

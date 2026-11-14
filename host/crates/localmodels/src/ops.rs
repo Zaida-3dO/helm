@@ -3,14 +3,18 @@
 //! | Op | Class | Args | Result |
 //! |---|---|---|---|
 //! | `local_models_state` | blocking | none | `LocalModelsState` |
-//! | `local_models_save` | maintenance | `{servers?, ollamaContext?, keepAliveMinutes?, strataNeedGb?, speechReserveGb?, tools?, compareWith?}` | `LocalModelsState` |
+//! | `local_models_save` | maintenance | `{servers?, ollamaContext?, keepAliveMinutes?, strataNeedGb?, speechReserveGb?, tools?, compareWith?, games?, gameLiftMinutes?, restartTask?, pauseFile?}` | `LocalModelsState` |
 //! | `local_server_key_set` | maintenance | `{serverId, key}` | `LocalModelsState` |
 //! | `local_server_key_forget` | maintenance | `{serverId}` | `LocalModelsState` |
 //! | `local_server_test` | blocking | `{serverId}` | `TestResult` |
 //! | `local_models_refresh` | blocking | none | `RefreshResult` |
+//! | `local_lock_state` | blocking | none | `LockView` |
+//! | `local_unload` | blocking | none | `LockView` with `working` true; refused when local models are already unloaded |
+//! | `local_reload` | blocking | none | `LockView` |
 //!
-//! No op returns a key: the state only says whether one is set. Test and refresh are the only ops
-//! that contact a server, and they do so only when called.
+//! No op returns a key: the state only says whether one is set. Test, refresh and unload are the
+//! only ops that contact a server, and they do so only when called. An unload stores the lock and
+//! returns at once; the unloading runs off the op, and the `local_lock` event says when it is done.
 
 use crate::service::LocalService;
 use crate::settings::Changes;
@@ -75,5 +79,14 @@ pub fn register_ops(reg: &mut OpRegistry) {
             models: s.refresh(),
             notes: s.notes(),
         })
+    })
+    .blocking("local_lock_state", OpClass::Blocking, |ctx, _| {
+        to_value(&svc(ctx)?.lock_view())
+    })
+    .blocking("local_unload", OpClass::Blocking, |ctx, _| {
+        to_value(&svc(ctx)?.unload().map_err(refused)?)
+    })
+    .blocking("local_reload", OpClass::Blocking, |ctx, _| {
+        to_value(&svc(ctx)?.reload())
     });
 }

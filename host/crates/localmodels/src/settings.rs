@@ -33,6 +33,17 @@ pub const MIN_SPEECH_RESERVE_GB: u32 = 0;
 pub const MAX_SPEECH_RESERVE_GB: u32 = 24;
 pub const DEFAULT_SPEECH_RESERVE_GB: u32 = 2;
 
+/// Games that unload local models while they run: at most this many, each 1 to 100 characters.
+pub const MAX_GAMES: usize = 20;
+pub const MAX_GAME_NAME: usize = 100;
+/// Minutes after a listed game closes before local models come back.
+pub const MIN_GAME_LIFT: u32 = 1;
+pub const MAX_GAME_LIFT: u32 = 60;
+pub const DEFAULT_GAME_LIFT: u32 = 5;
+/// The longest a restart task name and a pause file path may be.
+pub const MAX_TASK: usize = 200;
+pub const MAX_PAUSE_FILE: usize = 500;
+
 /// The longest a Strata folder path or a preset name may be.
 pub const MAX_FOLDER: usize = 500;
 pub const MAX_PRESET: usize = 60;
@@ -116,6 +127,17 @@ pub struct LocalSettings {
     pub speech_reserve_gb: u32,
     pub tools: ToolsSetup,
     pub compare_with: CompareModel,
+    /// Process names (`game.exe`) that unload local models while they run. Empty: nothing is
+    /// watched.
+    pub games: Vec<String>,
+    /// Minutes after the last listed game closes before local models come back.
+    pub game_lift_minutes: u32,
+    /// A Windows scheduled task that restarts a model server: ended while local models are
+    /// unloaded, started again after. Set in Settings only, never by an agent.
+    pub restart_task: Option<String>,
+    /// A file written while local models are unloaded, for the user's own restart script to
+    /// check. Set in Settings only, never by an agent.
+    pub pause_file: Option<String>,
 }
 
 pub fn kind_name(k: LocalServerKind) -> &'static str {
@@ -163,6 +185,10 @@ impl Default for LocalSettings {
             speech_reserve_gb: DEFAULT_SPEECH_RESERVE_GB,
             tools: ToolsSetup::Lean,
             compare_with: CompareModel::Sonnet,
+            games: Vec::new(),
+            game_lift_minutes: DEFAULT_GAME_LIFT,
+            restart_task: None,
+            pause_file: None,
         }
     }
 }
@@ -280,6 +306,39 @@ fn full_local_path(f: &str) -> bool {
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/')
 }
 
+/// A game as the list holds it: a bare process name, `.exe` added when it is missing. `None` for
+/// a name with a path in it, control characters, or the wrong length.
+pub fn game_name(raw: &str) -> Option<String> {
+    let g = raw.trim();
+    if !plain_text(g, MAX_GAME_NAME) || g.contains(['/', '\\', ':']) {
+        return None;
+    }
+    Some(if g.to_ascii_lowercase().ends_with(".exe") {
+        g.to_owned()
+    } else {
+        format!("{g}.exe")
+    })
+}
+
+/// The list with bad names and repeats (in any case) left out.
+fn game_list<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for g in names.filter_map(game_name) {
+        if !out.iter().any(|x| x.eq_ignore_ascii_case(&g)) {
+            out.push(g);
+        }
+    }
+    out
+}
+
+fn task_ok(t: &str) -> bool {
+    plain_text(t, MAX_TASK) && !t.contains('"')
+}
+
+fn pause_file_ok(f: &str) -> bool {
+    plain_text(f, MAX_PAUSE_FILE) && full_local_path(f)
+}
+
 fn int_in(v: &Value, lo: u32, hi: u32) -> Option<u32> {
     let n = v.as_u64()?;
     (n >= u64::from(lo) && n <= u64::from(hi)).then_some(n as u32)
@@ -376,6 +435,28 @@ pub fn read_lenient(v: &Value) -> LocalSettings {
     {
         s.compare_with = c;
     }
+    if let Some(list) = o.get("games").and_then(Value::as_array) {
+        s.games = game_list(list.iter().filter_map(Value::as_str));
+        s.games.truncate(MAX_GAMES);
+    }
+    if let Some(n) = o
+        .get("gameLiftMinutes")
+        .and_then(|v| int_in(v, MIN_GAME_LIFT, MAX_GAME_LIFT))
+    {
+        s.game_lift_minutes = n;
+    }
+    s.restart_task = o
+        .get("restartTask")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| task_ok(t))
+        .map(str::to_owned);
+    s.pause_file = o
+        .get("pauseFile")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|f| pause_file_ok(f))
+        .map(str::to_owned);
     s
 }
 
@@ -435,6 +516,13 @@ pub struct Changes {
     pub speech_reserve_gb: Option<u32>,
     pub tools: Option<ToolsSetup>,
     pub compare_with: Option<CompareModel>,
+    /// Replaces the whole list.
+    pub games: Option<Vec<String>>,
+    pub game_lift_minutes: Option<u32>,
+    /// Empty text clears it.
+    pub restart_task: Option<String>,
+    /// Empty text clears it.
+    pub pause_file: Option<String>,
 }
 
 fn range_err(what: &str, lo: u32, hi: u32) -> String {
@@ -572,6 +660,55 @@ pub fn apply_changes(current: &LocalSettings, changes: &Changes) -> Result<Local
     if let Some(c) = changes.compare_with {
         s.compare_with = c;
     }
+    if let Some(list) = &changes.games {
+        let named: Vec<&str> = list
+            .iter()
+            .map(|g| g.trim())
+            .filter(|g| !g.is_empty())
+            .collect();
+        if let Some(bad) = named.iter().find(|g| game_name(g).is_none()) {
+            return Err(format!(
+                "\"{}\" is not a program name. Name the game's program, like game.exe, without a folder.",
+                bad.chars().take(40).collect::<String>()
+            ));
+        }
+        let games = game_list(named.into_iter());
+        if games.len() > MAX_GAMES {
+            return Err(format!("At most {MAX_GAMES} games can be listed."));
+        }
+        s.games = games;
+    }
+    if let Some(n) = changes.game_lift_minutes {
+        if !(MIN_GAME_LIFT..=MAX_GAME_LIFT).contains(&n) {
+            return Err(range_err(
+                "The wait after a game closes (minutes)",
+                MIN_GAME_LIFT,
+                MAX_GAME_LIFT,
+            ));
+        }
+        s.game_lift_minutes = n;
+    }
+    if let Some(t) = &changes.restart_task {
+        s.restart_task = match t.trim() {
+            "" => None,
+            t if task_ok(t) => Some(t.to_owned()),
+            _ => {
+                return Err(format!(
+                    "The restart task must be the task's name, up to {MAX_TASK} characters on one line, without quotes."
+                ))
+            }
+        };
+    }
+    if let Some(f) = &changes.pause_file {
+        s.pause_file = match f.trim() {
+            "" => None,
+            f if pause_file_ok(f) => Some(f.to_owned()),
+            _ => return Err(
+                "The pause file must be a full path on this machine, like C:\\Models\\paused.flag."
+                    .to_owned(),
+            ),
+        };
+    }
     Ok(s)
 }
 
@@ -671,6 +808,39 @@ mod tests {
             ),
             (0, 6, DEFAULT_SPEECH_RESERVE_GB),
             "the speech reserve reads back, and a value out of range is the default"
+        );
+        // The graphics-card settings: bad names and paths drop, repeats fold, the list is capped.
+        let many: Vec<String> = (0..25).map(|i| format!("game{i}.exe")).collect();
+        let g = read_lenient(&json!({
+            "games": ["somegame", "SomeGame.EXE", "C:\\Games\\x.exe", "", "other.exe"],
+            "gameLiftMinutes": 10, "restartTask": " Model Restart ", "pauseFile": "C:/models/paused.flag"
+        }));
+        assert_eq!(
+            (
+                g.games.as_slice(),
+                g.game_lift_minutes,
+                g.restart_task.as_deref(),
+                g.pause_file.as_deref()
+            ),
+            (
+                ["somegame.exe".to_owned(), "other.exe".to_owned()].as_slice(),
+                10,
+                Some("Model Restart"),
+                Some("C:/models/paused.flag")
+            )
+        );
+        let g = read_lenient(&json!({
+            "games": many, "gameLiftMinutes": 0, "restartTask": "a\"b", "pauseFile": "paused.flag"
+        }));
+        assert_eq!(
+            (
+                g.games.len(),
+                g.game_lift_minutes,
+                g.restart_task,
+                g.pause_file
+            ),
+            (MAX_GAMES, DEFAULT_GAME_LIFT, None, None),
+            "out of range or unsafe values fall back"
         );
         assert_eq!(read_lenient(&json!("junk")), LocalSettings::default());
         assert_eq!(
@@ -835,10 +1005,103 @@ mod tests {
                 },
                 "kept for speech",
             ),
+            (
+                Changes {
+                    restart_task: Some("Model \"Restart\"".into()),
+                    ..Default::default()
+                },
+                "restart task",
+            ),
+            (
+                Changes {
+                    restart_task: Some("x".repeat(MAX_TASK + 1)),
+                    ..Default::default()
+                },
+                "restart task",
+            ),
+            (
+                Changes {
+                    pause_file: Some("models\\paused.flag".into()),
+                    ..Default::default()
+                },
+                "full path",
+            ),
+            (
+                Changes {
+                    games: Some((0..21).map(|i| format!("game{i}.exe")).collect()),
+                    ..Default::default()
+                },
+                "At most 20",
+            ),
+            (
+                Changes {
+                    games: Some(vec!["C:\\Games\\somegame.exe".into()]),
+                    ..Default::default()
+                },
+                "without a folder",
+            ),
+            (
+                Changes {
+                    game_lift_minutes: Some(0),
+                    ..Default::default()
+                },
+                "after a game closes",
+            ),
+            (
+                Changes {
+                    game_lift_minutes: Some(61),
+                    ..Default::default()
+                },
+                "after a game closes",
+            ),
         ] {
             let e = apply_changes(&cur, &changes).unwrap_err();
             assert!(e.contains(why), "{e}");
         }
+        // A good save: `.exe` is added, repeats in any case and blank lines go, empty text clears.
+        let set = apply_changes(
+            &cur,
+            &Changes {
+                games: Some(vec![
+                    " somegame ".into(),
+                    "SOMEGAME.exe".into(),
+                    "".into(),
+                    "other.exe".into(),
+                ]),
+                game_lift_minutes: Some(60),
+                restart_task: Some(" Model Restart ".into()),
+                pause_file: Some("D:\\models\\paused.flag".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(set.games, ["somegame.exe", "other.exe"]);
+        assert_eq!(
+            (
+                set.game_lift_minutes,
+                set.restart_task.as_deref(),
+                set.pause_file.as_deref()
+            ),
+            (60, Some("Model Restart"), Some("D:\\models\\paused.flag"))
+        );
+        let cleared = apply_changes(
+            &set,
+            &Changes {
+                games: Some(Vec::new()),
+                restart_task: Some(" ".into()),
+                pause_file: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                cleared.games.len(),
+                cleared.restart_task,
+                cleared.pause_file
+            ),
+            (0, None, None)
+        );
         let mut bad = servers.clone();
         bad[2].base_url = "http://example.com:1".into();
         assert!(apply_changes(

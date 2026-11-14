@@ -1,11 +1,12 @@
-//! `app_make_room_for_speech`: the hub asks the PC to free graphics memory before it transcribes.
+//! `app_make_room_for_speech`: once the hub's way to ask the PC to free graphics memory before it
+//! transcribed. Speech-to-text no longer unloads local models, so the tool does nothing and says
+//! so at once (`{freedGb: 0, unloaded: 0}`). It stays registered so a hub that still asks gets a
+//! quick answer rather than an unknown-tool error.
 //!
 //! The tool is unlisted (no chat is offered it) and answers only a caller that came down the hub
-//! line. It unloads idle local models and leaves any model that is mid-reply alone, so it can
-//! only ever cost a model its warm start.
+//! line.
 
 use helm_hosttools::{Condition, HostToolRegistry, ToolCtx, ToolError, ToolResult, ToolSpec};
-use helm_localmodels::LocalService;
 use serde_json::{json, Value};
 
 /// Callers that came in from outside Helm over the hub line are named like this.
@@ -17,24 +18,18 @@ fn make_room(ctx: &ToolCtx, _args: Value) -> ToolResult {
             "app_make_room_for_speech is for the Helm hub only.",
         ));
     }
-    // Without local models there is nothing to free.
-    let Some(local) = ctx.services.get::<LocalService>() else {
-        return Ok(json!({"freedGb": 0.0, "unloaded": 0}));
-    };
-    let room = local.free_for_speech();
-    Ok(json!({"freedGb": room.freed_gb, "unloaded": room.unloaded}))
+    Ok(json!({"freedGb": 0.0, "unloaded": 0}))
 }
 
 pub fn register_host_tools(r: &mut HostToolRegistry) {
     r.blocking(
         ToolSpec::read(
             "app_make_room_for_speech",
-            "Frees graphics memory for speech-to-text by unloading idle local models. The Helm \
-             hub asks it just before it transcribes; chats never see it.",
+            "Kept for Helm hubs that ask before they transcribe. Speech-to-text no longer unloads \
+             local models, so it unloads nothing and answers at once; chats never see it.",
             json!({"type": "object", "properties": {}, "additionalProperties": false}),
         )
         .when(Condition::Worker)
-        // Unloads can take a while on a busy card; the hub gives up sooner and goes ahead.
         .timeout_ms(30_000),
         make_room,
     );

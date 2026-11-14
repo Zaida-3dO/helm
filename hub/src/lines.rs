@@ -23,10 +23,7 @@ use crate::relay::{Line, Route, Upstream};
 use crate::server::AppState;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
@@ -326,18 +323,6 @@ impl Route for PersonRoute {
         self.lines
             .up_on(self.person_id, generation)
             .is_some_and(|l| l.send(frame))
-    }
-
-    fn make_room(&self, wait: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(make_room(self.lines.clone(), self.person_id, wait))
-    }
-}
-
-/// Ask the person's most recently active Helm to free the PC's graphics memory before speech is
-/// transcribed. Nothing happens when none is connected, and no failure is passed on.
-pub async fn make_room(lines: Arc<Lines>, person_id: i64, wait: Duration) {
-    if let Some(line) = lines.pick(person_id, None) {
-        crate::stt::make_room_on(&line, wait).await;
     }
 }
 

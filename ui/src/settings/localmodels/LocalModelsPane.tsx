@@ -5,14 +5,18 @@
 // Server fields are drafts until Save; the settings below the list save as they change.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useGpuActions, useLockView } from '../../gpu/GpuControl.tsx';
+import { lockSentence } from '../../gpu/model.ts';
 import { useShell } from '../../shell/context.ts';
-import { Button, Checkbox, Picker, SettingRow, TextInput } from '../../ui/index.ts';
+import { Button, Checkbox, Picker, SettingRow, TextArea, TextInput } from '../../ui/index.ts';
 import { localModelsOps, type SettingsPatch } from './api.ts';
 import {
   clampTo,
   COMPARE_OPTIONS,
   draftProblem,
+  gamesProblem,
   newDraft,
+  parseGames,
   rangeText,
   reachText,
   sameDrafts,
@@ -42,6 +46,9 @@ export function LocalModelsPane() {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [gamesText, setGamesText] = useState<string | null>(null);
+  const lock = useLockView();
+  const gpu = useGpuActions(lock.view, lock.set);
 
   const baseline = useMemo(() => (state?.servers ?? []).map(toDraft), [state]);
   const dirty = !sameDrafts(drafts, baseline);
@@ -324,6 +331,87 @@ export function LocalModelsPane() {
         </div>
       </section>
 
+      <section className="lm-section" data-testid="localmodels-gpu">
+        <h3>Graphics card</h3>
+        <p className="lm-help">
+          Free the graphics card for a game or other work: unloading stops local-model chats, unloads Strata and Ollama, pauses the restart task below, and refuses every attempt to load a model until you turn them back on.
+        </p>
+        <SettingRow
+          testId="localmodels-gpu-row"
+          title={lock.view && lock.view.state !== 'on' ? 'Local models are unloaded' : 'Unload local models'}
+          description={lock.view && lock.view.state !== 'on' ? `${lockSentence(lock.view)}.` : 'Frees the graphics card now. Asks first.'}
+        >
+          {lock.view && lock.view.state !== 'on' ? (
+            <Button variant="primary" data-testid="localmodels-gpu-reload" busy={gpu.turningOn} disabled={gpu.turningOn} onClick={() => void gpu.turnOn()}>
+              Turn local models back on
+            </Button>
+          ) : (
+            <Button variant="secondary" danger data-testid="localmodels-gpu-unload" disabled={!lock.view || lock.view.working || !lock.view.anyLocal} onClick={gpu.askUnload}>
+              Unload local models
+            </Button>
+          )}
+        </SettingRow>
+        <SettingRow
+          testId="localmodels-games-row"
+          title="Games that unload local models"
+          description="One program name per line, such as game.exe. While one of them is running Helm unloads local models, and brings them back after it closes. Empty means Helm does not watch for games."
+        >
+          <TextArea
+            className="lm-games"
+            rows={3}
+            spellCheck={false}
+            placeholder="game.exe"
+            aria-label="Games that unload local models"
+            data-testid="localmodels-games"
+            disabled={!s || busy}
+            value={gamesText ?? (s?.games ?? []).join('\n')}
+            onChange={(e) => setGamesText(e.target.value)}
+            onBlur={() => {
+              if (gamesText === null || !s) return;
+              const games = parseGames(gamesText);
+              const bad = gamesProblem(games);
+              if (bad) return;
+              setGamesText(null);
+              if (games.join('\n') !== s.games.join('\n')) void saveSettings({ games });
+            }}
+          />
+        </SettingRow>
+        {gamesText !== null && gamesProblem(parseGames(gamesText)) && (
+          <div className="ui-field-error" role="alert" data-testid="localmodels-games-problem">
+            {gamesProblem(parseGames(gamesText))}
+          </div>
+        )}
+        <NumberRow
+          testId="localmodels-game-lift"
+          title="Bring local models back after a game closes"
+          unit="minutes"
+          description="How long after the last listed game closes Helm waits before it lets local models load again."
+          value={s?.gameLiftMinutes}
+          range={s?.gameLiftRange}
+          busy={busy}
+          onSave={(n) => void saveSettings({ gameLiftMinutes: n })}
+        />
+        <TextRow
+          testId="localmodels-restart-task"
+          title="Restart task to pause"
+          description="A Windows scheduled task that restarts your model server. Helm ends it while local models are unloaded and starts it again after."
+          placeholder="None"
+          value={s?.restartTask ?? ''}
+          disabled={!s || busy}
+          onSave={(v) => void saveSettings({ restartTask: v })}
+        />
+        <TextRow
+          testId="localmodels-pause-file"
+          title="Pause file"
+          description="Helm writes this file while local models are unloaded, for a restart script of your own to check."
+          placeholder="None"
+          value={s?.pauseFile ?? ''}
+          disabled={!s || busy}
+          onSave={(v) => void saveSettings({ pauseFile: v })}
+        />
+        {gpu.dialog}
+      </section>
+
       <section className="lm-section">
         <h3>Chats on local models</h3>
         <SettingRow
@@ -403,6 +491,52 @@ export function LocalModelsPane() {
         </div>
       )}
     </div>
+  );
+}
+
+/** A text setting, saved when committed (Enter or leaving the field); an empty value clears it. */
+function TextRow({
+  testId,
+  title,
+  description,
+  placeholder,
+  value,
+  disabled,
+  onSave,
+}: {
+  testId: string;
+  title: string;
+  description: string;
+  placeholder: string;
+  value: string;
+  disabled: boolean;
+  onSave: (v: string) => void;
+}) {
+  const [text, setText] = useState<string | null>(null);
+  const commit = () => {
+    if (text === null) return;
+    const v = text.trim();
+    setText(null);
+    if (v !== value) onSave(v);
+  };
+  return (
+    <SettingRow testId={testId} title={title} description={description}>
+      <TextInput
+        className="lm-wide"
+        spellCheck={false}
+        placeholder={placeholder}
+        aria-label={title}
+        data-testid={`${testId}-input`}
+        disabled={disabled}
+        value={text ?? value}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit();
+          if (e.key === 'Escape') setText(null);
+        }}
+      />
+    </SettingRow>
   );
 }
 

@@ -170,6 +170,11 @@ pub const CLASSIFIED_TABLES: &[(&str, TableClass)] = &[
     ),
     // Which Ollama variants Helm made for chat windows; written and pruned by Helm alone.
     ("local_model_variants", Data),
+    // Whether local models are unloaded and kept off, and since when.
+    (
+        "local_model_lock",
+        UserOnly("Only you unload local models or turn them back on; a game on your list can set it too."),
+    ),
     // Web search: the Claude-chats switch (agents may change it through the settings tools) and
     // the last settings file imported from. The Brave key is in the credential store, not here.
     ("web_search_settings", Tool),

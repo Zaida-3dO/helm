@@ -415,13 +415,14 @@ pub async fn suggest(rt: &ChatRuntime, chat_id: &str) -> Result<Vec<String>, hel
 }
 
 /// Start `node <script>`, write the job to stdin, read one JSON line back. Killed after
-/// [`HOST_TIMEOUT`].
+/// [`HOST_TIMEOUT`]. `low` runs the helper at below-normal priority.
 pub fn run_helper(
     node: &std::path::Path,
     script: &std::path::Path,
     env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     job: &Value,
     timeout: Duration,
+    low: bool,
 ) -> Result<Value, String> {
     use std::io::{Read, Write};
     let mut cmd = std::process::Command::new(node);
@@ -434,12 +435,12 @@ pub fn run_helper(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(helm_workers::priority::creation_flags(low));
     }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("the helper did not start: {e}"))?;
+    helm_workers::priority::lower_after_spawn(Some(child.id()), low);
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(job.to_string().as_bytes());
     }

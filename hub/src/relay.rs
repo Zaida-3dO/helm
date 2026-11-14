@@ -63,8 +63,6 @@
 use crate::voice::{Attachment, ReplyIn, MAX_STATUS_CHARS};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -220,12 +218,6 @@ pub trait Route: Send + Sync {
     /// Send down the connection `generation` only; false when it is not up.
     fn send_on(&self, generation: u64, frame: &Value) -> bool {
         self.holds(generation) && self.send(frame)
-    }
-    /// Ask this route's Helm to free the graphics memory speech-to-text needs, waiting at most
-    /// `wait` and ignoring any failure (see [`crate::stt::make_room_on`]). A route that is one
-    /// bare [`Line`] does nothing; a person's route (see `lines.rs`) asks their Helm.
-    fn make_room(&self, _wait: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async {})
     }
 }
 

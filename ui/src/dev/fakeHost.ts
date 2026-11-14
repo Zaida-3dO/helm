@@ -37,6 +37,7 @@ import { githubFakeOps } from './fake-github.ts';
 import { webSearchFakeOps } from './fake-websearch.ts';
 import { dictationFakeOps } from './fake-dictation.ts';
 import { localModelsFakeOps } from './fake-localmodels.ts';
+import { gpuFakeOps } from './fake-gpu.ts';
 import { orchestratorFakeOps } from './fake-orchestrator.ts';
 import { newChatFakeOps } from '../newchat/fake.ts';
 import { runFakeSubagents } from '../transcript/subagents/fake.ts';
@@ -87,6 +88,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 // Local models: the catalogue holds nothing until a refresh asks the (made-up) servers, as in the real host.
 const localModels = localModelsFakeOps();
 registerFakeOps(localModels.prefixes, localModels.handler);
+{ const gpu = gpuFakeOps(localModels.gpu); registerFakeOps(gpu.prefixes, gpu.handler); }
 
 export function fakeOpFor(op: string): FakeOpHandler | undefined {
   return extraOps.find((r) => r.prefixes.some((p) => op.startsWith(p)))?.handler;
@@ -562,7 +564,7 @@ export function createFakeHost(emit: Emit, opts: { seedRows?: number; stepMs?: n
 
   // Settings → Runtime's stored settings.
   const chatVerbosity = new Map<string, string>();
-  const runtimeSettings: Record<string, unknown> = { executable: '', skipPermissions: true, fastMode: true, worktreeTools: false, scheduleTools: false, shellChanges: true, subagentLimits: 'orchestrator', subagentHardStop: false, subagentSoftTurns: 100, toolOutputCap: true, model: null, effort: 'xhigh', responseVerbosity: 'low', problem: null };
+  const runtimeSettings: Record<string, unknown> = { executable: '', skipPermissions: true, fastMode: true, worktreeTools: false, scheduleTools: false, shellChanges: true, lowPriority: true, subagentLimits: 'orchestrator', subagentHardStop: false, subagentSoftTurns: 100, toolOutputCap: true, model: null, effort: 'xhigh', responseVerbosity: 'low', problem: null };
 
   // Settings → Runtime's repositories.
   const repos: { repoId: string; remoteUrl?: string; worktreesAllowed: boolean; locations: { id: string; path: string }[] }[] = [

@@ -125,7 +125,7 @@ export function DictationRows() {
       </SettingRow>
       <SettingRow
         title="Keep GPU memory for speech"
-        description={`When a local model loads, leave this much graphics memory free so speech-to-text still fits beside it (0 to ${view.speechReserveMaxGb} GB). Idle local models are also unloaded when dictation starts and the card is short.`}
+        description={`When Helm has to unload other local models to load one, it frees this much more so speech-to-text still fits (0 to ${view.speechReserveMaxGb} GB). Speech-to-text never unloads a model.`}
         testId="setting-dictation-reserve"
       >
         <TextInput

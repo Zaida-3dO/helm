@@ -490,19 +490,19 @@ fn a_recording_goes_to_the_server_and_text_comes_back() {
     };
     let wav = silent_wav(1);
     assert_eq!(
-        transcribe_with(&s, &wav, Duration::from_secs(5), || {}),
+        transcribe_with(&s, &wav, Duration::from_secs(5)),
         Err(Failure::Unreachable)
     );
     *mode.lock().unwrap() = (200, "late".into(), 1_000);
     s.stt_url = Some(server.clone());
     assert_eq!(
-        transcribe_with(&s, &wav, Duration::from_millis(200), || {}),
+        transcribe_with(&s, &wav, Duration::from_millis(200)),
         Err(Failure::Unreachable)
     );
     // An address that stopped passing the rule is refused before anything is sent.
     s.stt_url = Some("http://192.168.1.20:8000".into());
     assert!(matches!(
-        transcribe_with(&s, &wav, Duration::from_secs(1), || {}),
+        transcribe_with(&s, &wav, Duration::from_secs(1)),
         Err(Failure::Address(_))
     ));
 
@@ -527,29 +527,25 @@ fn a_recording_goes_to_the_server_and_text_comes_back() {
     set(json!({"sttUrl": server.as_str()})).unwrap();
     *mode.lock().unwrap() = (200, "ok".into(), 0);
 
-    // 6. A card with less free memory than the reserve has its idle models unloaded first; one
-    //    with enough is left alone, and the recording goes either way.
+    // 6. Speech-to-text never unloads a local model: with a model loaded and the card short of
+    //    the 4 GB reserve set above, the recording goes straight to the server.
     let (o_url, o_log) = ollama();
     env.use_ollama(&o_url);
-    env.free.store(GB, Ordering::SeqCst); // under the 4 GB reserve set above
+    env.free.store(GB, Ordering::SeqCst);
     assert_eq!(
         say(json!({"wavBase64": wav_b64()})).unwrap(),
         json!({"text": "ok"})
     );
-    assert_eq!(unloads(&o_log), 1);
-    env.free.store(16 * GB, Ordering::SeqCst);
-    say(json!({"wavBase64": wav_b64()})).unwrap();
-    assert_eq!(unloads(&o_log), 1, "no unload when the reserve is free");
-    // A recording that is refused makes no room.
-    env.free.store(GB, Ordering::SeqCst);
-    assert_eq!(code_of(say(json!({"wavBase64": "AAAA"}))), "bad_audio");
-    assert_eq!(unloads(&o_log), 1);
+    assert_eq!(unloads(&o_log), 0);
+    assert!(
+        o_log.lock().unwrap().is_empty(),
+        "the model server is not even asked"
+    );
 
-    // 7. The hub's tool: only a caller that came down the hub line, and it says what it freed.
+    // 7. The hub's old tool: only a caller that came down the hub line, and it unloads nothing.
     let why = env.tool("chat-1").unwrap_err().text();
     assert!(why.contains("hub"), "{why}");
-    assert_eq!(unloads(&o_log), 1);
     let freed = env.tool("external:hub").unwrap();
-    assert_eq!(freed["unloaded"], json!(1));
-    assert_eq!(unloads(&o_log), 2);
+    assert_eq!(freed, json!({"freedGb": 0.0, "unloaded": 0}));
+    assert!(o_log.lock().unwrap().is_empty());
 }

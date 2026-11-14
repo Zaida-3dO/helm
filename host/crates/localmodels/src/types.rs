@@ -64,6 +64,55 @@ pub struct LocalModelsState {
     pub strata_need_range: Range,
     pub tools: ToolsSetup,
     pub compare_with: CompareModel,
+    /// Program names (`game.exe`) that unload local models while they run.
+    pub games: Vec<String>,
+    /// Minutes after a listed game closes before local models come back.
+    pub game_lift_minutes: u32,
+    pub game_lift_range: Range,
+    /// The scheduled task that restarts a model server, paused while local models are unloaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub restart_task: Option<String>,
+    /// The file written while local models are unloaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pause_file: Option<String>,
+}
+
+/// Whether local models may load: `on`, or unloaded by the user (`manual`) or by a game.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum LockKind {
+    On,
+    Manual,
+    Game,
+}
+
+/// The graphics-card lock as the top bar and Settings show it (`local_lock_state`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LockView {
+    pub state: LockKind,
+    /// When the lock was set, in ms since the epoch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub since: Option<i64>,
+    /// The game that set it, for a game lock.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub game: Option<String>,
+    /// An unload or a turn back on is still running.
+    pub working: bool,
+    /// One sentence per step of the last unload or turn back on.
+    pub report: Vec<String>,
+    /// At least one server is switched on, so there is something to unload.
+    pub any_local: bool,
+    /// Minutes after a game closes before local models come back.
+    pub lift_minutes: u32,
+    /// The restart task that is paused while local models are unloaded, if one is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub restart_task: Option<String>,
 }
 
 /// What `local_server_test` found.

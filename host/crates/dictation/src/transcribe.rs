@@ -139,21 +139,15 @@ pub fn read_reply(body: &str) -> String {
 }
 
 /// Send `wav` to the saved server and return what was said (empty when nothing was). The
-/// recording and the address are checked first; `before_send` then runs once, just before the
-/// request (it is where the caller makes graphics memory room).
-pub fn transcribe(
-    settings: &Settings,
-    wav: &[u8],
-    before_send: impl FnOnce(),
-) -> Result<String, Failure> {
-    transcribe_with(settings, wav, TIMEOUT, before_send)
+/// recording and the address are checked first.
+pub fn transcribe(settings: &Settings, wav: &[u8]) -> Result<String, Failure> {
+    transcribe_with(settings, wav, TIMEOUT)
 }
 
 pub(crate) fn transcribe_with(
     settings: &Settings,
     wav: &[u8],
     timeout: Duration,
-    before_send: impl FnOnce(),
 ) -> Result<String, Failure> {
     let Some(raw) = settings.stt_url.as_deref() else {
         return Err(Failure::NotSetUp);
@@ -166,7 +160,6 @@ pub(crate) fn transcribe_with(
         return Err(Failure::NotWav);
     }
     let (content_type, body) = multipart(settings, wav);
-    before_send();
     let agent = ureq::Agent::config_builder()
         .proxy(None)
         .max_redirects(0)

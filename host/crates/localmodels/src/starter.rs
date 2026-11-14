@@ -1,15 +1,17 @@
-//! Starting a Strata server that is not running, when its settings allow it.
+//! Starting a Strata server that is not running, when its settings allow it, and stopping one
+//! when the user unloads local models.
 //!
 //! The install is the ordinary Python one: `strata.py` run by the interpreter the install ships
 //! (or its own venv), never a command-file shim. It is started the way a detached background
 //! service is started — its own process group, no window, no console — so it outlives Helm
 //! entirely, and Helm never reads or logs a word of its output: stdin, stdout and stderr all go
-//! nowhere. Stopping, restarting or unloading anything on a running server is never done from
-//! here.
+//! nowhere.
 //!
-//! The service only calls this for a Strata its own checks found unreachable, at most one start
-//! at a time, and never when the run has the test override in effect: in tests and checks the
-//! starter installed is a stand-in, so the real one never runs there.
+//! The service only starts a Strata its own checks found unreachable, at most one start at a
+//! time. It stops one only when the user (or a game on their list) unloads local models: the
+//! install's own `launch --stop`, which closes every server it launched. Neither is ever done when
+//! the run has the test override in effect: in tests and checks the starter installed is a
+//! stand-in, so the real one never runs there.
 
 use crate::settings::{Server, DEFAULT_PRESET};
 use std::path::{Path, PathBuf};
@@ -19,7 +21,22 @@ use std::path::{Path, PathBuf};
 /// handle (where one exists) lets that wait notice a launcher that died at once.
 pub trait StrataStarter: Send + Sync {
     fn start(&self, server: &Server) -> Result<Option<std::process::Child>, String>;
+    /// Stop the server's process, waiting for it to close.
+    fn stop(&self, server: &Server) -> Result<Stopped, String>;
 }
+
+/// What a stop did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stopped {
+    /// The install's stop ran to the end.
+    Done,
+    /// No install was found to run the stop from; the server, if any, keeps running.
+    NoInstall,
+}
+
+/// How long the install's stop gets before it is killed. It waits for each server it launched
+/// to close, which can take a few minutes for a large model.
+pub const STOP_LIMIT: std::time::Duration = std::time::Duration::from_secs(200);
 
 /// The standard install folder: the terminal install's current version.
 pub fn default_folder() -> Option<PathBuf> {
@@ -88,6 +105,17 @@ pub fn launch_plan(python: &Path, folder: &Path, preset: &str) -> (PathBuf, Vec<
     (python.to_path_buf(), args)
 }
 
+/// The stop: the folder's `strata.py`, `launch --stop`, which asks nothing.
+pub fn stop_plan(python: &Path, folder: &Path) -> (PathBuf, Vec<String>) {
+    let script = folder.join("strata.py");
+    let args = vec![
+        script.to_string_lossy().into_owned(),
+        "launch".into(),
+        "--stop".into(),
+    ];
+    (python.to_path_buf(), args)
+}
+
 pub struct ProcessStarter;
 
 impl StrataStarter for ProcessStarter {
@@ -114,6 +142,30 @@ impl StrataStarter for ProcessStarter {
         cmd.spawn()
             .map(Some)
             .map_err(|e| format!("Strata could not be started: {e}"))
+    }
+
+    fn stop(&self, server: &Server) -> Result<Stopped, String> {
+        let Some(folder) = folder_for(server) else {
+            return Ok(Stopped::NoInstall);
+        };
+        let Some(python) = python_in(&folder) else {
+            return Ok(Stopped::NoInstall);
+        };
+        let (program, args) = stop_plan(&python, &folder);
+        let child = crate::task::quiet(&program)
+            .args(args)
+            .current_dir(&folder)
+            .env("PYTHONUTF8", "1")
+            .spawn()
+            .map_err(|e| format!("its stop could not be run: {e}"))?;
+        match crate::task::wait_or_kill(child, STOP_LIMIT) {
+            Ok(s) if s.success() => Ok(Stopped::Done),
+            Ok(s) => Err(match s.code() {
+                Some(c) => format!("its stop exited with code {c}"),
+                None => "its stop did not finish normally".to_owned(),
+            }),
+            Err(e) => Err(format!("its stop failed: {e}")),
+        }
     }
 }
 
@@ -198,6 +250,17 @@ mod tests {
         assert!(
             !joined.contains("stop") && !joined.contains("unload"),
             "starting never says stop"
+        );
+        // The stop is the same install's own verb, by the same interpreter, and asks nothing.
+        let (program, args) = stop_plan(&python, folder);
+        assert_eq!(program, python);
+        assert_eq!(
+            args,
+            [
+                folder.join("strata.py").to_string_lossy(),
+                "launch".into(),
+                "--stop".into(),
+            ]
         );
         assert!(
             program.to_string_lossy().ends_with("python.exe"),

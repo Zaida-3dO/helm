@@ -27,7 +27,8 @@ pub struct View {
     pub language: String,
     /// An address is saved and passes the address rule: dictation can be used.
     pub configured: bool,
-    /// Graphics memory (GB) a local model load leaves free for speech, from Local models.
+    /// Graphics memory (GB) Helm tries to keep free for speech when it makes room for a local
+    /// model, from Local models. It is only waited for after something was unloaded.
     pub speech_reserve_gb: u32,
     pub speech_reserve_max_gb: u32,
 }
@@ -180,8 +181,8 @@ pub(crate) fn set(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
     to_value(&view(ctx, &s))
 }
 
-/// Turn a recording into text: `{text}`, empty when nothing was said. When the card is short of
-/// the speech reserve, idle local models are unloaded first.
+/// Turn a recording into text: `{text}`, empty when nothing was said. No local model is unloaded
+/// for it.
 pub(crate) fn transcribe(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
     let a: TranscribeArgs = args(v, "wavBase64")?;
     // Over the cap before the copy is decoded: a base64 string is a third longer than its bytes.
@@ -192,15 +193,7 @@ pub(crate) fn transcribe(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
         .decode(a.wav_base64.as_bytes())
         .map_err(|_| failed(&Failure::NotWav))?;
     let s = load(&*db(ctx)?);
-    let models = ctx.services.get::<LocalService>();
-    let text = transcribe::transcribe(&s, &wav, || {
-        if let Some(l) = &models {
-            if l.speech_room_short() {
-                l.free_for_speech();
-            }
-        }
-    })
-    .map_err(|f| failed(&f))?;
+    let text = transcribe::transcribe(&s, &wav).map_err(|f| failed(&f))?;
     Ok(json!({"text": text}))
 }
 
@@ -209,7 +202,7 @@ pub(crate) fn transcribe(ctx: &OpCtx, v: Value) -> Result<Value, ApiError> {
 pub(crate) fn test(ctx: &OpCtx, _args: Value) -> Result<Value, ApiError> {
     let s = load(&*db(ctx)?);
     Ok(
-        match transcribe::transcribe(&s, &transcribe::silent_wav(1), || {}) {
+        match transcribe::transcribe(&s, &transcribe::silent_wav(1)) {
             Ok(_) => json!({"ok": true, "message": "The speech-to-text server answered."}),
             Err(f) => json!({"ok": false, "message": f.say()}),
         },

@@ -165,6 +165,10 @@ pub const FILES_OFF: &str = "Files are off on this hub.";
 pub const STT_DOWN: &str = "Transcription is unavailable right now: ";
 /// Behind the reason: what happened to the recording instead.
 pub const STT_DOWN_AFTER: &str = ". The recording went to Helm without its text.";
+/// How long a transcription runs before the chat is told it is still going.
+pub const SLOW_AFTER: Duration = Duration::from_secs(30);
+/// Sent once to a chat whose voice note is still being transcribed; removed when it is done.
+pub const STILL_TRANSCRIBING: &str = "Still transcribing your voice note…";
 pub const TAP_SENT: &str = "Sent to Helm";
 pub const TAP_OFFLINE: &str = "Helm is offline; nothing was sent.";
 pub const TAP_STALE: &str = "This request is no longer waiting.";
@@ -645,8 +649,8 @@ pub struct Bridge {
     downloads: tokio::sync::Semaphore,
     /// One recording is transcribed at a time, as the server's graphics memory allows.
     transcribing: tokio::sync::Semaphore,
-    /// How long a recording waits for Helm to free the PC's graphics memory.
-    room_wait: Duration,
+    /// How long a transcription runs before the chat is told it is still going.
+    slow_after: Duration,
     /// Every person's bridge of this bot (this one too), so the files they hold share one
     /// budget. Filled once the bridges are made.
     household: Arc<OnceLock<Vec<Weak<Bridge>>>>,
@@ -932,7 +936,7 @@ impl Bridge {
             ops: tokio::sync::Mutex::new(()),
             downloads: tokio::sync::Semaphore::new(MAX_DOWNLOADS),
             transcribing: tokio::sync::Semaphore::new(1),
-            room_wait: crate::stt::ROOM_WAIT,
+            slow_after: SLOW_AFTER,
             household: Arc::new(OnceLock::new()),
         }
     }
@@ -950,9 +954,9 @@ impl Bridge {
             .sum()
     }
 
-    /// Wait `wait` (instead of [`crate::stt::ROOM_WAIT`]) for Helm to make room for speech.
-    pub fn with_room_wait(mut self, wait: Duration) -> Self {
-        self.room_wait = wait;
+    /// Say "still transcribing" after `wait` (instead of [`SLOW_AFTER`]).
+    pub fn with_slow_after(mut self, wait: Duration) -> Self {
+        self.slow_after = wait;
         self
     }
 
@@ -1292,7 +1296,7 @@ impl Bridge {
         let me = self.clone();
         let media = job.media;
         tokio::spawn(async move {
-            let got = me.fetch_part(&job).await;
+            let got = me.fetch_part(&job, chat).await;
             me.part_done(&slot, index, &job, got).await;
         });
         media.handled()
@@ -1307,9 +1311,56 @@ impl Bridge {
         }
     }
 
+    /// Transcribe a recording. When it takes longer than [`SLOW_AFTER`], the chat is told once that
+    /// it is still going, and that message is removed when the transcription ends, either way.
+    async fn transcribe(
+        &self,
+        voice: &Arc<dyn Voice>,
+        chat: i64,
+        audio: Vec<u8>,
+        name: &str,
+        mime: &str,
+    ) -> Result<String, String> {
+        let mut work = voice.transcribe(audio, name, mime);
+        if let Ok(done) = tokio::time::timeout(self.slow_after, &mut work).await {
+            return done;
+        }
+        let notice = {
+            let _g = self.ops.lock().await;
+            match self.send(chat, STILL_TRANSCRIBING, true).await {
+                Ok(sent) => sent.get("message_id").and_then(Value::as_i64),
+                Err(e) => {
+                    eprintln!(
+                        "telegram: the still-transcribing note failed: {}",
+                        e.description
+                    );
+                    None
+                }
+            }
+        };
+        let done = work.await;
+        if let Some(message_id) = notice {
+            let _g = self.ops.lock().await;
+            if let Err(e) = self
+                .api
+                .call(
+                    "deleteMessage",
+                    json!({ "chat_id": chat, "message_id": message_id }),
+                )
+                .await
+            {
+                eprintln!(
+                    "telegram: removing the still-transcribing note failed: {}",
+                    e.description
+                );
+            }
+        }
+        done
+    }
+
     /// `getFile`, the download, then a look at the bytes (is it a picture Helm shows?) and, for a
     /// recording, the speech-to-text server.
-    async fn fetch_part(&self, job: &Job) -> Result<Part, String> {
+    async fn fetch_part(&self, job: &Job, chat: i64) -> Result<Part, String> {
         // A few at a time, so only those few files' bytes are in memory while they are fetched.
         let turn = self
             .downloads
@@ -1363,12 +1414,15 @@ impl Bridge {
                     .acquire()
                     .await
                     .map_err(|_| "the hub is shutting down".to_owned())?;
-                // Free the PC's graphics memory first; a failure only costs the wait.
-                self.line.make_room(self.room_wait).await;
-                Some(match voice.transcribe(bytes.clone(), &name, &mime).await {
-                    Ok(t) => Heard::Text(t.trim().to_owned()),
-                    Err(why) => Heard::Failed(why),
-                })
+                Some(
+                    match self
+                        .transcribe(voice, chat, bytes.clone(), &name, &mime)
+                        .await
+                    {
+                        Ok(t) => Heard::Text(t.trim().to_owned()),
+                        Err(why) => Heard::Failed(why),
+                    },
+                )
             }
         };
         let picture = job.media.picture();

@@ -10,7 +10,8 @@
 //! Where each setting lives:
 //! - `executable`, `skipPermissions` (the launch permission mode: Bypass or Asks) and `fastMode`:
 //!   `claude-runtime.json`, as does `worktreeTools` (let Claude Code's own worktree tools through,
-//!   off by default). A worker reads it when it starts, so a change reaches a chat at its
+//!   off by default) and `lowPriority` (run agents and helpers at below-normal priority, on by
+//!   default). A worker reads it when it starts, so a change reaches a chat at its
 //!   next worker start.
 //! - `model` and `effort` for new chats: the `newChat` preference (`{model, effort}`), read by
 //!   `chat_create` through [`new_chat_defaults`]; an unset effort is the catalogue's default.
@@ -132,6 +133,8 @@ pub struct RuntimeSettings {
     pub schedule_tools: bool,
     /// Record which files shell commands change, for the turn's change card.
     pub shell_changes: bool,
+    /// Run agents, their tools and Helm's helpers at below-normal priority.
+    pub low_priority: bool,
     /// `None`: Claude Code's default model.
     pub model: Option<String>,
     pub effort: String,
@@ -156,6 +159,7 @@ pub struct RuntimeSettingsPatch {
     pub tool_output_cap: Option<bool>,
     pub schedule_tools: Option<bool>,
     pub shell_changes: Option<bool>,
+    pub low_priority: Option<bool>,
     /// An empty string clears it (Claude Code's default).
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -190,6 +194,7 @@ fn read_settings(ctx: &OpCtx) -> Result<RuntimeSettings, ApiError> {
         tool_output_cap: rt.tool_output_cap,
         schedule_tools: rt.schedule_tools,
         shell_changes: rt.shell_changes,
+        low_priority: rt.low_priority,
         model,
         effort,
         response_verbosity,
@@ -255,6 +260,7 @@ fn runtime_settings_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         || p.tool_output_cap.is_some()
         || p.schedule_tools.is_some()
         || p.shell_changes.is_some()
+        || p.low_priority.is_some()
     {
         let (mut rt, _) = ClaudeRuntime::load(&profile.dir);
         if let Some(x) = p.executable {
@@ -286,6 +292,9 @@ fn runtime_settings_save(ctx: &OpCtx, args: Value) -> Result<Value, ApiError> {
         }
         if let Some(v) = p.shell_changes {
             rt.shell_changes = v;
+        }
+        if let Some(v) = p.low_priority {
+            rt.low_priority = v;
         }
         rt.save(&profile.dir)
             .map_err(|e| ApiError::internal(format!("claude-runtime.json not saved: {e}")))?;
@@ -378,6 +387,10 @@ mod tests {
             s["shellChanges"], true,
             "shell-command change capture defaults on"
         );
+        assert_eq!(
+            s["lowPriority"], true,
+            "agents run at lower priority by default"
+        );
         assert_eq!(s["effort"], catalogue::DEFAULT_EFFORT);
         assert_eq!(s["model"], Value::Null);
         assert_eq!(s["responseVerbosity"], "low");
@@ -431,7 +444,7 @@ mod tests {
         assert_eq!(bad.code, "bad_args");
         let s = api(
             "runtime_settings_save",
-            json!({"fastMode": false, "worktreeTools": true, "scheduleTools": true, "shellChanges": false, "skipPermissions": false, "model": "sonnet", "effort": "high", "responseVerbosity": "medium"}),
+            json!({"fastMode": false, "worktreeTools": true, "scheduleTools": true, "shellChanges": false, "lowPriority": false, "skipPermissions": false, "model": "sonnet", "effort": "high", "responseVerbosity": "medium"}),
         )
         .await
         .unwrap();
@@ -459,6 +472,7 @@ mod tests {
         assert_eq!(file["worktreeTools"], true);
         assert_eq!(file["scheduleTools"], true);
         assert_eq!(file["shellChanges"], false);
+        assert_eq!(file["lowPriority"], false);
         assert_eq!(file["skipPermissions"], false);
         // A new chat starts with the defaults; explicit arguments still win.
         let c = api("chat_create", json!({"cwd": h.work.to_string_lossy()}))

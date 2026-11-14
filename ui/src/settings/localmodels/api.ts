@@ -11,6 +11,11 @@ export interface SettingsPatch {
   strataNeedGb?: number;
   tools?: LocalModelsState['tools'];
   compareWith?: LocalModelsState['compareWith'];
+  games?: string[];
+  gameLiftMinutes?: number;
+  /** An empty string clears the task or the file. */
+  restartTask?: string;
+  pauseFile?: string;
 }
 
 export function localModelsOps(api: Api) {

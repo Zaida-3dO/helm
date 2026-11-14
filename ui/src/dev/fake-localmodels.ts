@@ -30,17 +30,25 @@ export interface LocalCatalogue {
   local(): LocalModelInfo[];
 }
 
-export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandler; catalogue: LocalCatalogue } {
+/** What the graphics-card lock fake (fake-gpu.ts) reads from these settings. */
+export interface GpuSource {
+  anyLocal(): boolean;
+  liftMinutes(): number;
+  restartTask(): string | undefined;
+}
+
+export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandler; catalogue: LocalCatalogue; gpu: GpuSource } {
   const servers: Server[] = [
     { id: 'strata', name: 'Strata', kind: 'strata', baseUrl: 'http://127.0.0.1:8081', enabled: true, model: 'qwen3.8-flash', autoStart: true, hasKey: false },
     { id: 'ollama', name: 'Ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:8082', enabled: true, autoStart: true, hasKey: false },
     { id: 'office', name: 'Ollama (office)', kind: 'ollama', baseUrl: 'http://127.0.0.1:8083', enabled: true, autoStart: true, hasKey: false },
   ];
-  const settings = { ollamaContext: 65536, keepAliveMinutes: 15, strataNeedGb: 12, tools: 'lean' as const, compareWith: 'sonnet' as 'opus' | 'sonnet' | 'haiku' };
+  const settings = { ollamaContext: 65536, keepAliveMinutes: 15, strataNeedGb: 12, tools: 'lean' as const, compareWith: 'sonnet' as 'opus' | 'sonnet' | 'haiku', games: [] as string[], gameLiftMinutes: 5, restartTask: undefined as string | undefined, pauseFile: undefined as string | undefined };
   const ranges = {
     ollamaContextRange: { min: 8192, max: 262144, default: 65536 },
     keepAliveRange: { min: 1, max: 240, default: 15 },
     strataNeedRange: { min: 4, max: 48, default: 12 },
+    gameLiftRange: { min: 1, max: 60, default: 5 },
   };
   /** Which servers have been asked, and what they said; empty until a refresh or a test. */
   const asked = new Map<string, boolean>();
@@ -112,6 +120,20 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
         if (a.strataNeedGb !== undefined) settings.strataNeedGb = num(a.strataNeedGb, ranges.strataNeedRange, 'The memory figure');
         if (a.tools === 'lean' || a.tools === 'full') settings.tools = a.tools as 'lean';
         if (a.compareWith === 'opus' || a.compareWith === 'sonnet' || a.compareWith === 'haiku') settings.compareWith = a.compareWith;
+        if (Array.isArray(a.games)) {
+          const games = (a.games as unknown[]).map((g) => String(g).trim()).filter(Boolean);
+          if (games.length > 20) throw new ApiError('refused', 'At most 20 games can be listed.');
+          if (games.some((g) => /[\\/]/.test(g))) throw new ApiError('refused', 'List a game by its program name, such as game.exe, not a path.');
+          const named = games.map((g) => (/\.exe$/i.test(g) ? g : `${g}.exe`));
+          settings.games = named.filter((g, i) => named.findIndex((x) => x.toLowerCase() === g.toLowerCase()) === i);
+        }
+        if (a.gameLiftMinutes !== undefined) settings.gameLiftMinutes = num(a.gameLiftMinutes, ranges.gameLiftRange, 'The wait after a game closes');
+        if (typeof a.restartTask === 'string') settings.restartTask = a.restartTask.trim() || undefined;
+        if (typeof a.pauseFile === 'string') {
+          const f = a.pauseFile.trim();
+          if (f && !/^([a-z]:[\\/]|\\\\)/i.test(f)) throw new ApiError('refused', 'The pause file needs a full path on this computer.');
+          settings.pauseFile = f || undefined;
+        }
         changed();
         return view();
       }
@@ -144,5 +166,10 @@ export function localModelsFakeOps(): { prefixes: string[]; handler: FakeOpHandl
         throw new ApiError('unknown_op', op);
     }
   };
-  return { prefixes: ['local_models_', 'local_server_'], handler, catalogue: { local: () => cached } };
+  return {
+    prefixes: ['local_models_', 'local_server_'],
+    handler,
+    catalogue: { local: () => cached },
+    gpu: { anyLocal: () => servers.some((s) => s.enabled), liftMinutes: () => settings.gameLiftMinutes, restartTask: () => settings.restartTask },
+  };
 }

@@ -156,3 +156,12 @@
   font-size: calc(11 * var(--ui-unit));
   color: var(--secondary);
 }
+
+.lm-games {
+  width: 220px;
+  resize: vertical;
+}
+
+.lm-wide {
+  width: 260px;
+}

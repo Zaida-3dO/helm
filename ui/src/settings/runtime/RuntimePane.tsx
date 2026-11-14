@@ -219,6 +219,12 @@ export function RuntimePane() {
           <Checkbox checked={s?.shellChanges ?? true} disabled={!s} onChange={(on) => save({ shellChanges: on })} data-testid="runtime-shell-changes" aria-label="Record files that shell commands change" />
         </SettingRow>
         <SettingRow
+          title="Run agents at lower priority"
+          description="Chats' agents, their tools and Helm's helpers run at Windows' below-normal priority, so games and the rest of the PC stay responsive. Applies when a chat's agent next starts."
+        >
+          <Checkbox checked={s?.lowPriority ?? true} disabled={!s} onChange={(on) => save({ lowPriority: on })} data-testid="runtime-low-priority" aria-label="Run agents at lower priority" />
+        </SettingRow>
+        <SettingRow
           title="Offer Claude Code's schedule tools"
           description="Claude Code's own cron, wake-up and remote-trigger tools. They never run: Helm turns each call down and points the chat at Helm's schedules, where you can see, pause and cancel them. Off by default."
         >

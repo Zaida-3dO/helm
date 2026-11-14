@@ -16,4 +16,20 @@ keepAliveMinutes: number, keepAliveRange: Range,
 /**
  * Memory (GB) a Strata model needs, for the check before it loads.
  */
-strataNeedGb: number, strataNeedRange: Range, tools: ToolsSetup, compareWith: CompareModel, };
+strataNeedGb: number, strataNeedRange: Range, tools: ToolsSetup, compareWith: CompareModel, 
+/**
+ * Program names (`game.exe`) that unload local models while they run.
+ */
+games: Array<string>, 
+/**
+ * Minutes after a listed game closes before local models come back.
+ */
+gameLiftMinutes: number, gameLiftRange: Range, 
+/**
+ * The scheduled task that restarts a model server, paused while local models are unloaded.
+ */
+restartTask?: string, 
+/**
+ * The file written while local models are unloaded.
+ */
+pauseFile?: string, };

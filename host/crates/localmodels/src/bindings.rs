@@ -20,6 +20,7 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
     LocalModelsState::export_all_to(dir).map_err(|e| e.to_string())?;
     TestResult::export_all_to(dir).map_err(|e| e.to_string())?;
     RefreshResult::export_all_to(dir).map_err(|e| e.to_string())?;
+    LockView::export_all_to(dir).map_err(|e| e.to_string())?;
     let mut names = vec![
         LocalModelsState::ident(),
         ServerView::ident(),
@@ -28,6 +29,8 @@ pub fn export(dir: &Path) -> Result<Vec<String>, String> {
         RefreshResult::ident(),
         ToolsSetup::ident(),
         CompareModel::ident(),
+        LockView::ident(),
+        LockKind::ident(),
     ];
     names.sort();
     let mut index = String::from(

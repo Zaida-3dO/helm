@@ -2,6 +2,8 @@
 // regenerate with `HELM_UPDATE_BINDINGS=1 cargo test -p helm-localmodels bindings_are_current`.
 export type { CompareModel } from './CompareModel.ts';
 export type { LocalModelsState } from './LocalModelsState.ts';
+export type { LockKind } from './LockKind.ts';
+export type { LockView } from './LockView.ts';
 export type { Range } from './Range.ts';
 export type { RefreshResult } from './RefreshResult.ts';
 export type { ServerView } from './ServerView.ts';

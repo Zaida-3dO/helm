@@ -44,6 +44,8 @@ export interface RuntimeSettings {
   scheduleTools: boolean;
   /** Record which files shell commands change, for the turn's change card. */
   shellChanges: boolean;
+  /** Agents, their tools and Helm's helpers run at below-normal priority. */
+  lowPriority: boolean;
   /** null: Claude Code's default model. */
   model: string | null;
   effort: string;

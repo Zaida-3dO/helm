@@ -341,12 +341,10 @@ about 67 MB as base64) and ignores the `files` list, so files would be lost or s
   JSON error gets a plain reply ("Transcription is unavailable right now: ..."), and the recording
   still goes, marked as not transcribed; a video note it cannot transcribe just goes as a file.
   Without a server the recordings go untranscribed, and a voice note gets a reply saying so.
-  One recording is transcribed at a time. Before each one the hub asks the person's own Helm,
-  over their most recently active relay line, to free the PC's graphics memory (the Helm tool
-  `app_make_room_for_speech`, called as `hub-speech`; Helm unloads idle local models). It waits at
-  most 4 s and ignores any failure, so an offline Helm, an older Helm or a refusal only means the
-  recording is transcribed without the extra room. The hub assumes nothing about where the
-  speech-to-text server runs, and does not offer that tool over MCP.
+  One recording is transcribed at a time, and the hub asks nothing of Helm first: it assumes
+  nothing about where the speech-to-text server runs. When a transcription is still running after
+  30 s, the bot sends one quiet message, "Still transcribing your voice note…", to that chat and
+  deletes it when the transcription ends, whether it gave a transcript or a failure.
 - **Long messages arrive whole.** Telegram cuts a long message at 4,096 UTF-16 units and delivers
   the parts in a burst. A text message of 3,500 units or more (counted in UTF-16 units, as
   Telegram counts, so emoji count twice) is therefore held for 2 s. A text message that follows it,

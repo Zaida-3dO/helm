@@ -1,6 +1,6 @@
 [package]
 name = "helm-localmodels"
-description = "Local model servers (Strata, Ollama) on this machine: their settings and keys, the model catalogue, the memory check and model loading before a turn."
+description = "Local model servers (Strata, Ollama) on this machine: their settings and keys, the model catalogue, the memory check and model loading before a turn, and unloading them all to free the graphics card."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,6 +19,12 @@ rusqlite.workspace = true
 log.workspace = true
 ureq = { version = "3", default-features = false }
 ts-rs = { version = "10.1", features = ["serde-json-impl", "no-serde-warnings"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Diagnostics_ToolHelp",
+] }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -2,8 +2,10 @@
 //! Ollama is ever contacted: every address in these tests is one a fake bound a moment ago.
 
 use crate::gpu::Gpu;
-use crate::service::{override_from, LocalService, Override, Timings};
+use crate::lock::{LockState, MANUAL_TEXT};
+use crate::service::{override_from, LocalService, Override, Timings, ALREADY_UNLOADED};
 use crate::settings::{self, Changes, ServerInput};
+use crate::types::LockKind;
 use helm_chats::local::{LocalModels, LocalTurn};
 use helm_chats::types::LocalServerKind;
 use helm_core::credentials::CredentialStore;
@@ -249,6 +251,8 @@ type StartCall = (String, Option<String>, Option<String>);
 struct TestStarter {
     calls: Mutex<Vec<StartCall>>,
     armed: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The servers it was asked to stop.
+    stops: Mutex<Vec<String>>,
 }
 
 impl TestStarter {
@@ -274,61 +278,143 @@ impl crate::starter::StrataStarter for TestStarter {
             None => Err("nothing was armed to start in this test".into()),
         }
     }
+
+    fn stop(&self, s: &crate::settings::Server) -> Result<crate::starter::Stopped, String> {
+        self.stops.lock().unwrap().push(s.id.clone());
+        Ok(crate::starter::Stopped::Done)
+    }
 }
 
-struct FakeGpu(Arc<AtomicU64>);
+/// The stand-in restart task: records `end` and `run`, never runs anything.
+#[derive(Default)]
+struct TestTask(Mutex<Vec<(String, String)>>);
+
+impl crate::task::RestartTask for TestTask {
+    fn end(&self, name: &str) -> Result<(), String> {
+        self.0.lock().unwrap().push(("end".into(), name.into()));
+        Ok(())
+    }
+    fn run(&self, name: &str) -> Result<(), String> {
+        self.0.lock().unwrap().push(("run".into(), name.into()));
+        Ok(())
+    }
+}
+
+/// The stand-in for stopping chats: records each stop and marks the chat idle at once.
+struct TestChats {
+    db: Arc<Database>,
+    stops: Mutex<Vec<(String, String)>>,
+}
+
+impl crate::service::ChatControl for TestChats {
+    fn stop(&self, chat_id: &str, note: &str) {
+        self.stops
+            .lock()
+            .unwrap()
+            .push((chat_id.into(), note.into()));
+        self.db
+            .write(|tx| tx.execute("UPDATE chats SET status = 'idle' WHERE id = ?1", [chat_id]))
+            .unwrap();
+    }
+    fn stop_limit(&self) -> Duration {
+        Duration::from_secs(2)
+    }
+}
+
+/// A fake process list.
+struct TestProcs(Mutex<Vec<String>>);
+
+impl crate::games::ProcessNames for TestProcs {
+    fn names(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// The free memory the card reports, and how many times it was asked.
+struct FakeGpu(Arc<AtomicU64>, Arc<AtomicU64>);
 
 impl Gpu for FakeGpu {
     fn free_bytes(&self) -> Option<u64> {
+        self.1.fetch_add(1, Ordering::SeqCst);
         Some(self.0.load(Ordering::SeqCst))
     }
 }
 
 struct Rig {
     _dir: tempfile::TempDir,
-    svc: LocalService,
+    svc: Option<Arc<LocalService>>,
     db: Arc<Database>,
     free: Arc<AtomicU64>,
+    reads: Arc<AtomicU64>,
     sink: Arc<RecordingSink>,
     starter: Arc<TestStarter>,
+    task: Arc<TestTask>,
+    keychain: Arc<MemoryKeychain>,
+    memory_wait: Duration,
 }
 
 fn rig() -> Rig {
+    rig_waiting(Duration::from_millis(200))
+}
+
+/// A rig whose memory check waits `memory_wait` for memory to come free.
+fn rig_waiting(memory_wait: Duration) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let mut reg = MigrationRegistry::new();
     helm_chats::register_migrations(&mut reg);
     crate::register_migrations(&mut reg);
     let db = Arc::new(Database::open(&dir.path().join("t.sqlite3"), &reg).unwrap());
-    let creds = CredentialStore::new(
-        &dir.path().join("credentials"),
-        "p",
-        Arc::new(MemoryKeychain::default()),
-    );
-    let free = Arc::new(AtomicU64::new(4 * GB));
-    let sink = Arc::new(RecordingSink::default());
-    let events: Arc<dyn EventSink> = sink.clone();
-    let starter = Arc::new(TestStarter::default());
-    let svc = LocalService::new(
-        db.clone(),
-        creds,
-        events,
-        Arc::new(FakeGpu(free.clone())),
-        dir.path().join("catalogue").join("local.json"),
-    )
-    .with_timings(Timings {
-        memory_wait: Duration::from_millis(200),
-        memory_poll: Duration::from_millis(20),
-        start_wait: Duration::from_secs(2),
-        start_poll: Duration::from_millis(20),
-    })
-    .with_starter(starter.clone());
-    Rig {
+    let mut r = Rig {
+        svc: None,
         _dir: dir,
-        svc,
         db,
-        free,
-        sink,
-        starter,
+        free: Arc::new(AtomicU64::new(4 * GB)),
+        reads: Arc::default(),
+        sink: Arc::default(),
+        starter: Arc::default(),
+        task: Arc::default(),
+        keychain: Arc::default(),
+        memory_wait,
+    };
+    r.svc = Some(r.service());
+    r
+}
+
+impl Rig {
+    /// A service over this rig's database, keys, card and stand-ins, as Helm builds one at start.
+    fn service(&self) -> Arc<LocalService> {
+        let events: Arc<dyn EventSink> = self.sink.clone();
+        Arc::new(
+            LocalService::new(
+                self.db.clone(),
+                CredentialStore::new(
+                    &self._dir.path().join("credentials"),
+                    "p",
+                    self.keychain.clone(),
+                ),
+                events,
+                Arc::new(FakeGpu(self.free.clone(), self.reads.clone())),
+                self._dir.path().join("catalogue").join("local.json"),
+            )
+            .with_timings(Timings {
+                memory_wait: self.memory_wait,
+                memory_poll: Duration::from_millis(20),
+                start_wait: Duration::from_secs(2),
+                start_poll: Duration::from_millis(20),
+            })
+            .with_starter(self.starter.clone())
+            .with_task(self.task.clone()),
+        )
+    }
+
+    /// The service the test drives.
+    fn svc(&self) -> &Arc<LocalService> {
+        self.svc.as_ref().expect("built in rig_waiting")
+    }
+
+    /// Wait until no unload or turn back on is running.
+    fn settle(&self) {
+        wait_for("the unload to finish", || !self.svc().lock_view().working);
     }
 }
 
@@ -404,11 +490,11 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
         fake_ollama(ollama.clone()),
         fake_strata(strata, r.free.clone()),
     );
-    r.svc.save(&servers(&s.base, &o.base)).unwrap();
+    r.svc().save(&servers(&s.base, &o.base)).unwrap();
 
     // Reading the catalogue, the state and the settings contacts nobody.
-    assert!(r.svc.catalogue(false).is_empty());
-    let state = r.svc.view();
+    assert!(r.svc().catalogue(false).is_empty());
+    let state = r.svc().view();
     assert_eq!(state.servers.len(), 2);
     assert_eq!(
         (o.total(), s.total()),
@@ -417,7 +503,7 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     );
 
     // Without the key Strata refuses; the picker still gets Ollama's models.
-    let rows = r.svc.catalogue(true);
+    let rows = r.svc().catalogue(true);
     let names: Vec<&str> = rows.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(
         names,
@@ -442,7 +528,7 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
         "the setting, under the model's limit"
     );
     assert_eq!(rows[1].loaded, Some(true));
-    let view = r.svc.view();
+    let view = r.svc().view();
     assert_eq!(view.servers[0].reachable, Some(false));
     assert!(view.servers[0]
         .note
@@ -452,10 +538,10 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     assert!(!view.servers[0].has_key);
 
     // The key goes to Strata as a bearer token and to nobody else; no result carries it.
-    r.svc.set_key("strata", &format!("  {KEY} ")).unwrap();
-    assert!(r.svc.set_key("nope", "x").is_err());
-    assert!(r.svc.set_key("strata", "two\nlines").is_err());
-    let rows = r.svc.catalogue(true);
+    r.svc().set_key("strata", &format!("  {KEY} ")).unwrap();
+    assert!(r.svc().set_key("nope", "x").is_err());
+    assert!(r.svc().set_key("strata", "two\nlines").is_err());
+    let rows = r.svc().catalogue(true);
     let strata_row = rows
         .iter()
         .find(|m| m.kind == LocalServerKind::Strata)
@@ -480,29 +566,29 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
         o.log.lock().unwrap().iter().all(|q| q.auth.is_empty()),
         "Ollama never sees Strata's key"
     );
-    let shown = serde_json::to_string(&r.svc.view()).unwrap();
-    assert!(!shown.contains(KEY) && r.svc.view().servers[0].has_key);
+    let shown = serde_json::to_string(&r.svc().view()).unwrap();
+    assert!(!shown.contains(KEY) && r.svc().view().servers[0].has_key);
     // The cache is on disk and survives a restart.
-    assert!(r.svc.catalogue(false).len() >= 3);
+    assert!(r.svc().catalogue(false).len() >= 3);
     assert!(r._dir.path().join("catalogue").join("local.json").is_file());
 
     // Test reports a sentence either way.
-    let t = r.svc.test("ollama").unwrap();
+    let t = r.svc().test("ollama").unwrap();
     assert!(
         t.ok && t.message.contains("2 models") && t.models == Some(2),
         "{t:?}"
     );
-    r.svc.forget_key("strata").unwrap();
-    assert!(!r.svc.test("strata").unwrap().ok);
-    assert!(r.svc.test("nope").is_err());
+    r.svc().forget_key("strata").unwrap();
+    assert!(!r.svc().test("strata").unwrap().ok);
+    assert!(r.svc().test("nope").is_err());
 
     // A server that stops answering stays listed, greyed, with a reason.
-    r.svc.save(&servers(&s.base, &dead_url())).unwrap();
-    let rows = r.svc.catalogue(true);
+    r.svc().save(&servers(&s.base, &dead_url())).unwrap();
+    let rows = r.svc().catalogue(true);
     let gone = rows.iter().find(|m| m.name == "qwen3:8b").unwrap();
     assert!(!gone.reachable && gone.loaded.is_none());
     assert!(!gone.startable, "Ollama is never started by Helm");
-    assert!(r.svc.view().servers[1]
+    assert!(r.svc().view().servers[1]
         .note
         .as_deref()
         .unwrap()
@@ -512,15 +598,15 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     // refresh starts it. First nothing is armed to start it, and that comes through plainly.
     let mut staged = Fake::bind();
     let (staged_log, staged_listener) = (staged.log.clone(), staged.listener.take().unwrap());
-    r.svc.save(&servers(&staged.base, &o.base)).unwrap();
-    r.svc.set_key("strata", KEY).unwrap();
-    let rows = r.svc.catalogue(true);
+    r.svc().save(&servers(&staged.base, &o.base)).unwrap();
+    r.svc().set_key("strata", KEY).unwrap();
+    let rows = r.svc().catalogue(true);
     let q = rows.iter().find(|m| m.name == "qwen-flash").unwrap();
     assert!(!q.reachable && q.startable, "down, but it starts when used");
     let calls = r.starter.calls();
     assert_eq!(calls.len(), 1, "the refresh asked to start it once");
     assert_eq!(calls[0], ("strata".into(), None, None));
-    assert!(r.svc.view().servers[0]
+    assert!(r.svc().view().servers[0]
         .note
         .as_deref()
         .unwrap()
@@ -540,8 +626,8 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     let si = &mut tuned.servers.as_mut().unwrap()[0];
     si.folder = Some("C:/strata-test".into());
     si.preset = Some("Fast".into());
-    r.svc.save(&tuned).unwrap();
-    let rows = r.svc.catalogue(true);
+    r.svc().save(&tuned).unwrap();
+    let rows = r.svc().catalogue(true);
     let q = rows.iter().find(|m| m.name == "qwen-flash").unwrap();
     assert!(
         q.reachable && q.loaded == Some(false) && !q.startable,
@@ -565,11 +651,11 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
     let started = r.starter.calls().len();
     let mut no_start = servers(&dead_url(), &o.base);
     no_start.servers.as_mut().unwrap()[0].auto_start = false;
-    r.svc.save(&no_start).unwrap();
-    let rows = r.svc.catalogue(true);
+    r.svc().save(&no_start).unwrap();
+    let rows = r.svc().catalogue(true);
     let gone = rows.iter().find(|m| m.name == "qwen-flash").unwrap();
     assert!(!gone.reachable && !gone.startable);
-    assert!(r.svc.view().servers[0]
+    assert!(r.svc().view().servers[0]
         .note
         .as_deref()
         .unwrap()
@@ -586,17 +672,17 @@ fn the_catalogue_is_asked_for_only_on_request_and_keys_stay_hidden() {
             staged2_log,
         )
     });
-    r.svc.save(&servers(&staged2.base, &o.base)).unwrap();
-    let t = r.svc.test("strata").unwrap();
+    r.svc().save(&servers(&staged2.base, &o.base)).unwrap();
+    let t = r.svc().test("strata").unwrap();
     assert!(t.ok && t.message.contains("nothing is loaded"), "{t:?}");
     assert_eq!(r.starter.calls().len(), started + 1, "Test started it");
-    r.svc.save(&servers(&s.base, &o.base)).unwrap();
+    r.svc().save(&servers(&s.base, &o.base)).unwrap();
     // Switching a server off hides its models; removing one also removes its key.
     let mut off = servers(&s.base, &o.base);
     off.servers.as_mut().unwrap()[1].enabled = false;
-    r.svc.save(&off).unwrap();
+    r.svc().save(&off).unwrap();
     assert!(r
-        .svc
+        .svc()
         .catalogue(false)
         .iter()
         .all(|m| m.kind == LocalServerKind::Strata));
@@ -650,10 +736,10 @@ fn only_the_single_slot_server_is_asked_what_it_is_busy_with() {
         }
     });
     let ollama = fake_ollama(Arc::new(Mutex::new(OllamaState::default())));
-    r.svc.save(&servers(&strata.base, &ollama.base)).unwrap();
-    r.svc.set_key("strata", KEY).unwrap();
+    r.svc().save(&servers(&strata.base, &ollama.base)).unwrap();
+    r.svc().set_key("strata", KEY).unwrap();
 
-    let q = r.svc.queue("strata").expect("the slot answer arrives");
+    let q = r.svc().queue("strata").expect("the slot answer arrives");
     assert!(q.busy, "one request is being answered");
     assert_eq!(
         q.queued, None,
@@ -662,10 +748,10 @@ fn only_the_single_slot_server_is_asked_what_it_is_busy_with() {
     assert_eq!(strata.calls("GET", "/slots").len(), 1);
 
     // Ollama answers several requests at once: never asked, and says nothing.
-    assert_eq!(r.svc.queue("ollama"), None);
+    assert_eq!(r.svc().queue("ollama"), None);
     assert!(ollama.calls("GET", "/slots").is_empty());
     // A server the settings do not know says nothing either.
-    assert_eq!(r.svc.queue("nope"), None);
+    assert_eq!(r.svc().queue("nope"), None);
 
     // A server with no slot answer (an older build) says nothing — and a failed read changes
     // nothing about its standing: it is still up, and still listed.
@@ -673,10 +759,10 @@ fn only_the_single_slot_server_is_asked_what_it_is_busy_with() {
         Arc::new(Mutex::new(StrataState { loaded: None })),
         r.free.clone(),
     ));
-    r.svc.save(&servers(&plain.base, &ollama.base)).unwrap();
-    assert_eq!(r.svc.queue("strata"), None, "no route: no answer");
+    r.svc().save(&servers(&plain.base, &ollama.base)).unwrap();
+    assert_eq!(r.svc().queue("strata"), None, "no route: no answer");
     assert!(
-        r.svc
+        r.svc()
             .catalogue(true)
             .iter()
             .any(|m| m.kind == LocalServerKind::Strata && m.reachable),
@@ -701,8 +787,8 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
         fake_ollama(ollama.clone()),
         fake_strata(strata.clone(), r.free.clone()),
     );
-    r.svc.save(&servers(&s.base, &o.base)).unwrap();
-    r.svc.set_key("strata", KEY).unwrap();
+    r.svc().save(&servers(&s.base, &o.base)).unwrap();
+    r.svc().set_key("strata", KEY).unwrap();
     let lines = Mutex::new(Vec::<String>::new());
     let progress = |l: &str| lines.lock().unwrap().push(l.to_owned());
     let ledger = || -> Vec<(String, String, String, i64)> {
@@ -732,7 +818,7 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     //    for the context setting, the older one removed, the model loaded with Helm's keep-alive.
     let mut t = turn("ollama", "qwen3:8b");
     t.in_use = vec!["somebody-else:1b-helm-8k".into()];
-    let name = r.svc.prepare(&t, &progress).unwrap();
+    let name = r.svc().prepare(&t, &progress).unwrap();
     assert_eq!(name, "qwen3:8b-helm-64k");
     assert_eq!(lines.lock().unwrap().as_slice(), ["Loading qwen3:8b…"]);
     assert_eq!(s.calls("POST", "/unload").len(), 1);
@@ -764,7 +850,7 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     //     still closing) is not the one to prepare: this model gets its own variant.
     let mut t = turn("ollama", "qwen3:8b");
     t.launched = Some("llama3-helm-64k".into());
-    assert_eq!(r.svc.prepare(&t, &progress).unwrap(), "qwen3:8b-helm-64k");
+    assert_eq!(r.svc().prepare(&t, &progress).unwrap(), "qwen3:8b-helm-64k");
 
     // 2. Already loaded: no line, no check, only the keep-alive timer is set again. A variant a
     //    worker still uses is never removed.
@@ -777,7 +863,7 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     let mut t = turn("ollama", "qwen3:8b");
     t.launched = Some("qwen3:8b-helm-64k".into());
     t.in_use = vec!["qwen3:8b-helm-16k".into()];
-    assert_eq!(r.svc.prepare(&t, &progress).unwrap(), "qwen3:8b-helm-64k");
+    assert_eq!(r.svc().prepare(&t, &progress).unwrap(), "qwen3:8b-helm-64k");
     assert!(lines.lock().unwrap().is_empty());
     assert_eq!(
         o.calls("DELETE", "/api/delete").len(),
@@ -793,7 +879,7 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     busy_chat(&r.db, "c-busy", "Refactor parser", "strata", "qwen-flash");
     let loads_before = o.calls("POST", "/api/generate").len();
     let why = r
-        .svc
+        .svc()
         .prepare(&turn("ollama", "qwen3:8b"), &progress)
         .unwrap_err();
     assert_eq!(
@@ -812,10 +898,10 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     mine.chat_id = "c-busy".into();
     strata.lock().unwrap().loaded = Some("qwen-flash".into());
     lines.lock().unwrap().clear();
-    assert_eq!(r.svc.prepare(&mine, &progress).unwrap(), "qwen-flash");
+    assert_eq!(r.svc().prepare(&mine, &progress).unwrap(), "qwen-flash");
     assert!(lines.lock().unwrap().is_empty(), "already loaded");
     strata.lock().unwrap().loaded = None;
-    assert_eq!(r.svc.prepare(&mine, &progress).unwrap(), "qwen-flash");
+    assert_eq!(r.svc().prepare(&mine, &progress).unwrap(), "qwen-flash");
     assert_eq!(lines.lock().unwrap().as_slice(), ["Loading qwen-flash…"]);
 
     // 4b. A Strata that is not running at all is started for the turn, on the address the
@@ -832,10 +918,10 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
             staged_log2,
         )
     });
-    r.svc.save(&servers(&staged.base, &o.base)).unwrap();
+    r.svc().save(&servers(&staged.base, &o.base)).unwrap();
     lines.lock().unwrap().clear();
     let got = r
-        .svc
+        .svc()
         .prepare(&turn("strata", "qwen-flash"), &progress)
         .unwrap();
     assert_eq!(got, "qwen-flash");
@@ -854,7 +940,7 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
         ["Starting Strata…", "Loading qwen-flash…"],
         "the turn was told a start was happening, then proceeded as an ordinary Strata turn"
     );
-    r.svc.save(&servers(&s.base, &o.base)).unwrap();
+    r.svc().save(&servers(&s.base, &o.base)).unwrap();
 
     // 5. After a turn the timer is set again, but only for a model that is still loaded.
     ollama
@@ -863,13 +949,13 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
         .loaded
         .push("qwen3:8b-helm-64k".into());
     let before = o.calls("POST", "/api/generate").len();
-    r.svc.finished("ollama", "qwen3:8b-helm-64k");
+    r.svc().finished("ollama", "qwen3:8b-helm-64k");
     wait_for("the keep-alive reset", || {
         o.calls("POST", "/api/generate").len() > before
     });
     ollama.lock().unwrap().loaded.clear();
     let before = o.calls("POST", "/api/generate").len();
-    r.svc.finished("ollama", "qwen3:8b-helm-64k");
+    r.svc().finished("ollama", "qwen3:8b-helm-64k");
     std::thread::sleep(Duration::from_millis(150));
     assert_eq!(
         o.calls("POST", "/api/generate").len(),
@@ -879,18 +965,18 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
 
     // 6. Problems read as sentences, and a server that is off or gone starts no turn.
     assert!(r
-        .svc
+        .svc()
         .prepare(&turn("ollama", "missing:1b"), &progress)
         .unwrap_err()
         .contains("not installed"));
     assert!(r
-        .svc
+        .svc()
         .prepare(&turn("nope", "x"), &progress)
         .unwrap_err()
         .contains("not set up"));
-    r.svc.save(&servers(&s.base, &dead_url())).unwrap();
+    r.svc().save(&servers(&s.base, &dead_url())).unwrap();
     assert!(r
-        .svc
+        .svc()
         .prepare(&turn("ollama", "qwen3:8b"), &progress)
         .unwrap_err()
         .contains("did not answer"));
@@ -902,8 +988,8 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
     );
 
     // 7. What a worker is launched with: the key (or a stand-in), the window and lean tools.
-    r.svc.save(&servers(&s.base, &o.base)).unwrap();
-    let launch = r.svc.server("ollama", "qwen3:8b-helm-64k").unwrap();
+    r.svc().save(&servers(&s.base, &o.base)).unwrap();
+    let launch = r.svc().server("ollama", "qwen3:8b-helm-64k").unwrap();
     assert_eq!(
         (launch.base_url.as_str(), launch.key.as_str()),
         (o.base.as_str(), "local")
@@ -912,18 +998,18 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
         (launch.context_tokens, launch.max_output_tokens, launch.lean),
         (Some(65_536), Some(16_384), true)
     );
-    let launch = r.svc.server("strata", "qwen-flash").unwrap();
+    let launch = r.svc().server("strata", "qwen-flash").unwrap();
     assert_eq!(launch.key, KEY);
     assert!(
         !format!("{launch:?}").contains(KEY),
         "a launch never prints its key"
     );
-    assert!(r.svc.knows("strata") && !r.svc.knows("other"));
+    assert!(r.svc().knows("strata") && !r.svc().knows("other"));
     let mut off = servers(&s.base, &o.base);
     off.servers.as_mut().unwrap()[0].enabled = false;
-    r.svc.save(&off).unwrap();
+    r.svc().save(&off).unwrap();
     assert!(r
-        .svc
+        .svc()
         .server("strata", "qwen-flash")
         .unwrap_err()
         .contains("switched off"));
@@ -932,116 +1018,51 @@ fn a_turn_gets_its_model_ready_and_the_memory_checked_first() {
 }
 
 #[test]
-fn room_is_kept_for_speech_and_made_on_request() {
-    let r = rig();
-    let ollama = Arc::new(Mutex::new(OllamaState {
-        installed: vec![("big:7b".into(), 5 * GB)],
-        loaded: vec![],
-    }));
-    let strata = Arc::new(Mutex::new(StrataState {
-        loaded: Some("qwen-flash".into()),
-    }));
-    let (o, s) = (
-        fake_ollama(ollama.clone()),
-        fake_strata(strata.clone(), r.free.clone()),
-    );
-    r.svc.save(&servers(&s.base, &o.base)).unwrap();
-    r.svc.set_key("strata", KEY).unwrap();
-    let nothing = |_: &str| {};
-    let reserve = |gb: u32| {
-        r.svc
+fn the_speech_reserve_never_unloads_on_its_own() {
+    // The memory check unloads only when a model does not fit. When it has to unload anyway, it
+    // waits for the speech reserve to come free as well (seen as more reads of the card), once
+    // speech-to-text is set up. Strata's idle model hands back 12 GB when it goes; an Ollama
+    // model needs 1.2 times its size.
+    for (free_gb, model_gb, reserve_gb, set_up, unloads, waits) in [
+        // Fits: nothing goes, with or without a reserve on top.
+        (7, 5, 2, true, 0, false),
+        (7, 5, 0, true, 0, false),
+        // Does not fit: Strata's model goes; 16 GB is then more than enough either way.
+        (4, 5, 2, true, 1, false),
+        (4, 5, 2, false, 1, false),
+        // 25 GB after the unload: enough for the 24 GB model, short of it plus the reserve.
+        (13, 20, 2, true, 1, true),
+        (13, 20, 0, true, 1, false),
+        (13, 20, 2, false, 1, false),
+    ] {
+        let r = rig();
+        let ollama = Arc::new(Mutex::new(OllamaState {
+            installed: vec![("big:7b".into(), model_gb * GB)],
+            loaded: vec![],
+        }));
+        let strata = Arc::new(Mutex::new(StrataState {
+            loaded: Some("qwen-flash".into()),
+        }));
+        let (o, s) = (fake_ollama(ollama), fake_strata(strata, r.free.clone()));
+        r.svc().save(&servers(&s.base, &o.base)).unwrap();
+        r.svc().set_key("strata", KEY).unwrap();
+        r.svc()
             .save(&Changes {
-                speech_reserve_gb: Some(gb),
+                speech_reserve_gb: Some(reserve_gb),
                 ..Default::default()
             })
             .unwrap();
-    };
-
-    // 1. The reserve is part of what a load asks for, once speech-to-text is set up. The model
-    //    needs 6 GB and 7 are free: with no reserve, or with speech not set up, it just loads;
-    //    with the default 2 GB and speech set up, Strata's idle model goes first.
-    let speech = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let probe = speech.clone();
-    r.svc
-        .set_speech_probe(Arc::new(move || probe.load(Ordering::SeqCst)));
-    for (gb, set_up) in [(0, true), (2, false)] {
-        reserve(gb);
-        speech.store(set_up, Ordering::SeqCst);
-        ollama.lock().unwrap().loaded.clear();
-        r.free.store(7 * GB, Ordering::SeqCst);
-        r.svc.prepare(&turn("ollama", "big:7b"), &nothing).unwrap();
-        assert_eq!(
-            s.calls("POST", "/unload").len(),
-            0,
-            "{gb} GB, set up {set_up}"
+        r.svc().set_speech_probe(Arc::new(move || set_up));
+        r.free.store(free_gb * GB, Ordering::SeqCst);
+        r.svc().prepare(&turn("ollama", "big:7b"), &|_| {}).unwrap();
+        let row = format!(
+            "{free_gb} GB free, {model_gb} GB model, {reserve_gb} GB reserve, set up {set_up}"
         );
+        assert_eq!(s.calls("POST", "/unload").len(), unloads, "{row}");
+        assert_eq!(r.reads.load(Ordering::SeqCst) > 2, waits, "{row}");
     }
-    r.free.store(GB, Ordering::SeqCst);
-    assert!(
-        !r.svc.speech_room_short(),
-        "no reserve while speech is not set up"
-    );
-    speech.store(true, Ordering::SeqCst);
-    assert!(r.svc.speech_room_short());
-    reserve(2);
-    ollama.lock().unwrap().loaded.clear();
-    r.free.store(7 * GB, Ordering::SeqCst);
-    r.svc.prepare(&turn("ollama", "big:7b"), &nothing).unwrap();
-    assert_eq!(s.calls("POST", "/unload").len(), 1);
 
-    // 2. The reserve is a wish: when what stands in the way is a reply in progress, a model that
-    //    fits without it still loads.
-    strata.lock().unwrap().loaded = Some("qwen-flash".into());
-    ollama.lock().unwrap().loaded.clear();
-    r.free.store(7 * GB, Ordering::SeqCst);
-    busy_chat(&r.db, "c-sb", "Write tests", "strata", "qwen-flash");
-    r.svc.prepare(&turn("ollama", "big:7b"), &nothing).unwrap();
-    assert_eq!(
-        s.calls("POST", "/unload").len(),
-        1,
-        "a reply is not cut off"
-    );
-    r.db.write(|tx| tx.execute("DELETE FROM chats WHERE id = 'c-sb'", []))
-        .unwrap();
-
-    // 3. Making room for speech unloads every idle model, on every server, and says how much came
-    //    back. A model in the middle of a reply stays, and so does the one on the same server
-    //    that the reply is not using.
-    ollama.lock().unwrap().loaded = vec!["big:7b-helm-64k".into(), "other:1b".into()];
-    strata.lock().unwrap().loaded = Some("qwen-flash".into());
-    r.free.store(GB, Ordering::SeqCst);
-    busy_chat(&r.db, "c-ob", "Review diff", "ollama", "big:7b");
-    let before = s.calls("POST", "/unload").len();
-    let room = r.svc.free_for_speech();
-    assert_eq!(room.unloaded, 2, "the idle Ollama model and Strata's");
-    assert_eq!(room.freed_gb, 12.0);
-    assert_eq!(s.calls("POST", "/unload").len(), before + 1);
-    assert_eq!(
-        ollama.lock().unwrap().loaded,
-        ["big:7b-helm-64k"],
-        "the model that is answering stays loaded"
-    );
-    busy_chat(&r.db, "c-sb", "Write tests", "strata", "qwen-flash");
-    strata.lock().unwrap().loaded = Some("qwen-flash".into());
-    ollama.lock().unwrap().loaded = vec!["big:7b-helm-64k".into()];
-    let room = r.svc.free_for_speech();
-    assert_eq!(
-        (room.unloaded, room.freed_gb),
-        (0, 0.0),
-        "nothing idle to free"
-    );
-    assert_eq!(s.calls("POST", "/unload").len(), before + 1);
-
-    // 4. Dictation asks only when the card is short of the reserve.
-    r.free.store(GB, Ordering::SeqCst);
-    assert!(r.svc.speech_room_short());
-    r.free.store(3 * GB, Ordering::SeqCst);
-    assert!(!r.svc.speech_room_short());
-    reserve(0);
-    r.free.store(0, Ordering::SeqCst);
-    assert!(!r.svc.speech_room_short(), "a reserve of 0 keeps none");
-
-    // 5. Strata's reported window is believed only between 4k and 1M tokens.
+    // Strata's reported window is believed only between 4k and 1M tokens.
     for (reported, want) in [
         (json!(262_144), Some(262_144)),
         (json!(4_096), Some(4_096)),
@@ -1066,4 +1087,492 @@ fn room_is_kept_for_speech_and_made_on_request() {
             want
         );
     }
+}
+
+/// While local models are unloaded every load path refuses with the lock's sentence, and no server
+/// is asked anything: not a turn on either kind, a worker's start, a refresh, a Test, the queue,
+/// the keep-alive after a turn, nor a Strata that is down and set to start when needed. A load
+/// that was already waiting for memory when the lock landed gives up at once.
+#[test]
+fn while_unloaded_nothing_loads_and_no_server_is_asked() {
+    let r = rig_waiting(Duration::from_secs(5));
+    let ollama = Arc::new(Mutex::new(OllamaState {
+        installed: vec![("qwen3:8b".into(), 5 * GB)],
+        loaded: vec![],
+    }));
+    let strata = Arc::new(Mutex::new(StrataState { loaded: None }));
+    let (o, s) = (
+        fake_ollama(ollama.clone()),
+        fake_strata(strata, r.free.clone()),
+    );
+    r.svc().save(&servers(&s.base, &o.base)).unwrap();
+    r.svc().set_key("strata", KEY).unwrap();
+    assert!(r.svc().catalogue(true).iter().all(|m| m.reachable));
+
+    // A turn waiting for memory that will not come (nothing idle to unload, 4 GB free, 6 needed)
+    // stops waiting when the lock lands, long before its 5 s are up.
+    let waiting = {
+        let svc = r.svc().clone();
+        std::thread::spawn(move || {
+            let t0 = Instant::now();
+            (
+                svc.prepare(&turn("ollama", "qwen3:8b"), &|_| {}),
+                t0.elapsed(),
+            )
+        })
+    };
+    wait_for("the turn to wait for memory", || {
+        r.reads.load(Ordering::SeqCst) >= 2
+    });
+    let view = r.svc().unload().unwrap();
+    assert_eq!((view.state, view.working), (LockKind::Manual, true));
+    let (got, took) = waiting.join().unwrap();
+    assert_eq!(got.unwrap_err(), MANUAL_TEXT);
+    assert!(took < Duration::from_secs(3), "{took:?}");
+    r.settle();
+    assert!(
+        ollama.lock().unwrap().loaded.is_empty(),
+        "the waiting turn loaded nothing"
+    );
+
+    let before = (o.total(), s.total());
+    let nothing = |_: &str| {};
+    let refused: Vec<(&str, Result<(), String>)> = vec![
+        (
+            "a turn on Ollama",
+            r.svc()
+                .prepare(&turn("ollama", "qwen3:8b"), &nothing)
+                .map(drop),
+        ),
+        (
+            "a turn on Strata",
+            r.svc()
+                .prepare(&turn("strata", "qwen-flash"), &nothing)
+                .map(drop),
+        ),
+        (
+            "a worker's start",
+            r.svc().server("ollama", "qwen3:8b-helm-64k").map(drop),
+        ),
+        ("a Test", {
+            let t = r.svc().test("strata").unwrap();
+            if t.ok {
+                Ok(())
+            } else {
+                Err(t.message)
+            }
+        }),
+        ("a refresh", {
+            let rows = r.svc().catalogue(true);
+            assert!(!rows.is_empty(), "the cached rows stay listed");
+            assert!(rows
+                .iter()
+                .all(|m| !m.reachable && !m.startable && m.loaded == Some(false)));
+            Err(r.svc().notes()[0].clone())
+        }),
+    ];
+    for (what, got) in refused {
+        assert_eq!(got.unwrap_err(), MANUAL_TEXT, "{what}");
+    }
+    assert_eq!(r.svc().queue("strata"), None);
+    ollama.lock().unwrap().loaded = vec!["qwen3:8b-helm-64k".into()];
+    r.svc().finished("ollama", "qwen3:8b-helm-64k");
+    std::thread::sleep(Duration::from_millis(100));
+    // A Strata that is down and would start when needed is not started.
+    r.svc().save(&servers(&dead_url(), &o.base)).unwrap();
+    assert_eq!(
+        r.svc()
+            .prepare(&turn("strata", "qwen-flash"), &nothing)
+            .unwrap_err(),
+        MANUAL_TEXT
+    );
+    assert!(!r.svc().catalogue(true)[0].startable);
+    assert_eq!(
+        (o.total(), s.total()),
+        before,
+        "no server was asked anything"
+    );
+    assert!(r.starter.calls().is_empty(), "nothing was started");
+}
+
+/// Unload from start to finish: the lock first, then the restart task paused, the busy local
+/// chat stopped with a line in it, every model on every server unloaded and Strata stopped. It
+/// survives a restart of Helm, which unloads once more; turning models back on undoes the
+/// pause, and a game on the list sets and lifts its own lock.
+#[test]
+fn unload_frees_the_card_and_turning_back_on_undoes_it() {
+    let r = rig();
+    let ollama = Arc::new(Mutex::new(OllamaState {
+        installed: vec![("qwen3:8b".into(), 5 * GB)],
+        loaded: vec!["qwen3:8b-helm-64k".into(), "other:1b".into()],
+    }));
+    let strata = Arc::new(Mutex::new(StrataState {
+        loaded: Some("qwen-flash".into()),
+    }));
+    let (o, s) = (
+        fake_ollama(ollama.clone()),
+        fake_strata(strata.clone(), r.free.clone()),
+    );
+    let pause = r._dir.path().join("paused.flag");
+    let mut setup = servers(&s.base, &o.base);
+    setup.restart_task = Some("Model Restart".into());
+    setup.pause_file = Some(pause.to_string_lossy().into_owned());
+    r.svc().save(&setup).unwrap();
+    r.svc().set_key("strata", KEY).unwrap();
+    let chats = Arc::new(TestChats {
+        db: r.db.clone(),
+        stops: Mutex::default(),
+    });
+    r.svc().attach_chats(chats.clone());
+    busy_chat(&r.db, "c-busy", "Refactor parser", "strata", "qwen-flash");
+    busy_chat(&r.db, "c-claude", "Plan", "claude", "opus");
+    assert_eq!(r.svc().lock_view().state, LockKind::On);
+
+    // 1. Unload.
+    let view = r.svc().unload().unwrap();
+    assert_eq!(
+        (view.state, view.working, view.any_local),
+        (LockKind::Manual, true, true)
+    );
+    r.settle();
+    assert_eq!(
+        chats.stops.lock().unwrap().as_slice(),
+        [("c-busy".to_owned(), crate::lock::STOPPED_TEXT.to_owned())],
+        "only the local chat is stopped, and it is told why"
+    );
+    let dropped: Vec<Value> = o
+        .calls("POST", "/api/generate")
+        .into_iter()
+        .filter(|q| q.body["keep_alive"] == json!(0))
+        .map(|q| q.body["model"].clone())
+        .collect();
+    assert_eq!(
+        dropped,
+        [json!("qwen3:8b-helm-64k"), json!("other:1b")],
+        "every resident model, Helm's or not"
+    );
+    assert_eq!(s.calls("POST", "/unload").len(), 1);
+    assert_eq!(r.starter.stops.lock().unwrap().as_slice(), ["strata"]);
+    assert_eq!(
+        r.task.0.lock().unwrap().as_slice(),
+        [("end".to_owned(), "Model Restart".to_owned())]
+    );
+    assert!(std::fs::read_to_string(&pause)
+        .unwrap()
+        .contains("Paused by Helm"));
+    assert_eq!(
+        r.svc().lock_view().report,
+        [
+            "Wrote the pause file.",
+            "Paused the restart task \"Model Restart\".",
+            "Stopped 1 local-model chat.",
+            "Strata's model was unloaded and its server stopped.",
+            "Ollama unloaded 2 models.",
+        ]
+    );
+    assert!(r.sink.kinds().iter().any(|k| k == "local_lock"));
+    assert_eq!(r.svc().unload().unwrap_err(), ALREADY_UNLOADED);
+
+    // 2. Helm restarts: still unloaded, and the start-up pass unloads again without stopping
+    //    chats (none are running yet).
+    strata.lock().unwrap().loaded = Some("qwen-flash".into());
+    let again = r.service();
+    assert!(matches!(again.lock_state(), LockState::Manual { .. }));
+    again.resume();
+    assert_eq!(s.calls("POST", "/unload").len(), 2);
+    assert_eq!(r.starter.stops.lock().unwrap().len(), 2);
+    assert_eq!(chats.stops.lock().unwrap().len(), 1);
+    assert!(!again.lock_view().working);
+
+    // 3. Turn back on: the task runs again, the pause file goes, and turns load again.
+    let view = r.svc().reload();
+    assert_eq!((view.state, view.working), (LockKind::On, false));
+    assert_eq!(view.report[0], "Local models are back on.");
+    assert_eq!(
+        r.task.0.lock().unwrap().last().unwrap(),
+        &("run".to_owned(), "Model Restart".to_owned())
+    );
+    assert!(!pause.exists());
+    assert!(r
+        .svc()
+        .prepare(&turn("ollama", "qwen3:8b"), &|_| {})
+        .is_ok());
+
+    // 4. A game on the list sets a game lock at its first sighting, and lifts it once it has been
+    //    gone for the delay. Turning models back on during the game holds until it closes.
+    let mut games = Changes {
+        games: Some(vec!["SomeGame".into()]),
+        game_lift_minutes: Some(2),
+        ..Default::default()
+    };
+    r.svc().save(&games).unwrap();
+    let procs = TestProcs(Mutex::new(vec![
+        "explorer.exe".into(),
+        "somegame.EXE".into(),
+    ]));
+    let t0 = 1_000_000;
+    r.svc().game_tick(&procs, t0);
+    r.settle();
+    let view = r.svc().lock_view();
+    assert_eq!(
+        (view.state, view.game.as_deref(), view.lift_minutes),
+        (LockKind::Game, Some("somegame.exe"), 2)
+    );
+    assert_eq!(
+        r.svc().prepare(&turn("ollama", "qwen3:8b"), &|_| {}).unwrap_err(),
+        "GPU reserved while somegame.exe is running: local models are unloaded. They come back 2 minutes after it closes, or turn them back on from the top bar."
+    );
+    procs.0.lock().unwrap().clear();
+    r.svc().game_tick(&procs, t0 + 60_000);
+    assert_eq!(r.svc().lock_view().state, LockKind::Game, "not yet");
+    r.svc().game_tick(&procs, t0 + 120_000);
+    assert_eq!(r.svc().lock_view().state, LockKind::On, "lifted");
+    *procs.0.lock().unwrap() = vec!["somegame.exe".into()];
+    r.svc().game_tick(&procs, t0 + 130_000);
+    r.settle();
+    assert_eq!(r.svc().reload().state, LockKind::On);
+    r.svc().game_tick(&procs, t0 + 145_000);
+    assert_eq!(
+        r.svc().lock_view().state,
+        LockKind::On,
+        "turned back on during the game: it holds"
+    );
+    // A game lock whose list is emptied is lifted when Helm starts.
+    procs.0.lock().unwrap().clear();
+    r.svc().game_tick(&procs, t0 + 160_000);
+    *procs.0.lock().unwrap() = vec!["somegame.exe".into()];
+    r.svc().game_tick(&procs, t0 + 175_000);
+    r.settle();
+    assert_eq!(r.svc().lock_view().state, LockKind::Game);
+    games.games = Some(Vec::new());
+    r.svc().save(&games).unwrap();
+    let restarted = r.service();
+    restarted.resume();
+    assert_eq!(restarted.lock_view().state, LockKind::On);
+
+    // 5. Unload during a game keeps the lock past the game: it becomes manual, keeping its time,
+    //    with no second unloading; a further Unload is refused.
+    games.games = Some(vec!["SomeGame".into()]);
+    restarted.save(&games).unwrap();
+    *procs.0.lock().unwrap() = vec!["somegame.exe".into()];
+    restarted.game_tick(&procs, t0 + 215_000);
+    wait_for("the unload to finish", || !restarted.lock_view().working);
+    let unloads = o.calls("POST", "/api/generate").len();
+    let view = restarted.lock_view();
+    assert_eq!(view.state, LockKind::Game);
+    let upgraded = restarted.unload().unwrap();
+    assert_eq!(
+        (upgraded.state, upgraded.since, upgraded.working),
+        (LockKind::Manual, view.since, false)
+    );
+    assert_eq!(o.calls("POST", "/api/generate").len(), unloads);
+    assert_eq!(restarted.unload().unwrap_err(), ALREADY_UNLOADED);
+    procs.0.lock().unwrap().clear();
+    restarted.game_tick(&procs, t0 + 215_000 + 10 * 60_000);
+    assert_eq!(
+        restarted.lock_view().state,
+        LockKind::Manual,
+        "the game closing leaves it"
+    );
+}
+
+#[test]
+fn a_game_on_the_list_locks_and_lifts_by_the_table() {
+    use crate::games::{next, Action, Watch};
+    let manual = LockState::Manual { since: 0 };
+    let game = LockState::Game {
+        since: 0,
+        game: "somegame.exe".into(),
+    };
+    let list: &[String] = &["SomeGame".to_owned()];
+    let none: &[String] = &[];
+    let min = 60_000;
+    let at = |t: i64| Some(t);
+    let overridden = Watch {
+        overridden: vec!["somegame.exe".into()],
+        ..Default::default()
+    };
+    // (what, lock, watch before, processes seen, now, list, want)
+    type Row<'a> = (
+        &'a str,
+        LockState,
+        Watch,
+        Vec<&'a str>,
+        i64,
+        &'a [String],
+        Action,
+    );
+    let rows: Vec<Row> = vec![
+        (
+            "first sighting",
+            LockState::On,
+            Watch::default(),
+            vec!["somegame.exe"],
+            0,
+            list,
+            Action::Lock("somegame.exe".into()),
+        ),
+        (
+            "case and a missing .exe still match",
+            LockState::On,
+            Watch::default(),
+            vec!["SOMEGAME"],
+            0,
+            list,
+            Action::Lock("somegame.exe".into()),
+        ),
+        (
+            "another program",
+            LockState::On,
+            Watch::default(),
+            vec!["other.exe"],
+            0,
+            list,
+            Action::Nothing,
+        ),
+        (
+            "a manual lock wins",
+            manual.clone(),
+            Watch::default(),
+            vec!["somegame.exe"],
+            0,
+            list,
+            Action::Nothing,
+        ),
+        (
+            "still running",
+            game.clone(),
+            Watch {
+                last_seen: at(0),
+                ..Default::default()
+            },
+            vec!["somegame.exe"],
+            10 * min,
+            list,
+            Action::Nothing,
+        ),
+        (
+            "gone for less than the delay",
+            game.clone(),
+            Watch {
+                last_seen: at(0),
+                ..Default::default()
+            },
+            vec![],
+            5 * min - 1,
+            list,
+            Action::Nothing,
+        ),
+        (
+            "gone for the delay",
+            game.clone(),
+            Watch {
+                last_seen: at(0),
+                ..Default::default()
+            },
+            vec![],
+            5 * min,
+            list,
+            Action::Lift,
+        ),
+        (
+            "a manual lock does not lift",
+            manual.clone(),
+            Watch {
+                last_seen: at(0),
+                ..Default::default()
+            },
+            vec![],
+            60 * min,
+            list,
+            Action::Nothing,
+        ),
+        (
+            "the override holds while it runs",
+            LockState::On,
+            overridden.clone(),
+            vec!["somegame.exe"],
+            0,
+            list,
+            Action::Nothing,
+        ),
+        (
+            "an empty list lifts a game lock",
+            game.clone(),
+            Watch::default(),
+            vec!["somegame.exe"],
+            0,
+            none,
+            Action::Lift,
+        ),
+        (
+            "an empty list leaves a manual lock",
+            manual,
+            Watch::default(),
+            vec![],
+            0,
+            none,
+            Action::Nothing,
+        ),
+    ];
+    for (what, lock, mut watch, seen, now, games, want) in rows {
+        let seen: Vec<String> = seen.into_iter().map(str::to_owned).collect();
+        assert_eq!(
+            next(&lock, &mut watch, &seen, now, games, 5),
+            want,
+            "{what}"
+        );
+    }
+    // Turning models back on overrides the games running at the last read (and the lock's own),
+    // not one that starts afterwards.
+    let mut w = Watch::default();
+    next(
+        &LockState::On,
+        &mut w,
+        &["somegame.exe".into()],
+        0,
+        &["somegame.exe".to_owned(), "other.exe".to_owned()],
+        5,
+    );
+    w.override_running(&LockState::Manual { since: 0 });
+    assert_eq!(
+        next(&LockState::On, &mut w, &["somegame.exe".into()], 1, list, 5),
+        Action::Nothing
+    );
+    assert_eq!(
+        next(
+            &LockState::On,
+            &mut w,
+            &["somegame.exe".into(), "other.exe".into()],
+            2,
+            &["somegame.exe".to_owned(), "other.exe".to_owned()],
+            5
+        ),
+        Action::Lock("other.exe".into())
+    );
+    // An override ends when its game closes: seen again, it locks.
+    let mut w = overridden;
+    assert_eq!(
+        next(&LockState::On, &mut w, &[], 0, list, 5),
+        Action::Nothing
+    );
+    assert!(w.overridden.is_empty());
+    assert_eq!(
+        next(&LockState::On, &mut w, &["somegame.exe".into()], 1, list, 5),
+        Action::Lock("somegame.exe".into())
+    );
+    // The real process list holds this test's own program.
+    let me = std::env::current_exe().unwrap();
+    let me = crate::games::norm(&me.file_name().unwrap().to_string_lossy());
+    let names: Vec<String> = crate::games::ProcessNames::names(&crate::games::SystemProcesses)
+        .iter()
+        .map(|n| crate::games::norm(n))
+        .collect();
+    assert!(
+        names
+            .iter()
+            .any(|n| me.starts_with(n.trim_end_matches(".exe"))),
+        "{me} not among {} processes",
+        names.len()
+    );
 }

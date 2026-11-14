@@ -1,5 +1,5 @@
 // The top bar. Left: the breadcrumb (project ›
-// chat title, double-click to rename). Right, in order: [update-pill slot] [Swarm slot] Fork, Pin,
+// chat title, double-click to rename). Right, in order: the graphics-card control, the usage meter, [update-pill slot] [Swarm slot] Fork, Pin,
 // Archive/Restore, the action row, Toggle inspector, [Chat view slot], "…", and at the far right
 // the Windows caption buttons (Helm draws its own caption). Below it, a slot for
 // the Project / Workspace tags strip (the sidebar fills it).
@@ -18,6 +18,7 @@ import { sidebarLayout } from '../shell/layout.ts';
 import { SidebarActions } from '../sidebar/actions.ts';
 import { SidebarData } from '../sidebar/data.ts';
 import { sidebarUndo } from '../sidebar/undo.ts';
+import { GpuControl } from '../gpu/GpuControl.tsx';
 import { UpdatePill } from '../updates/UpdatePill.tsx';
 import { UsageMeter } from '../usage/UsageMeter.tsx';
 import { isBusy } from '../sidebar/status.ts';
@@ -172,6 +173,7 @@ export function TopBar({ actionRow, chatMenu, tags, updatePill, swarm, chatView 
           )}
         </nav>
         <div className="topbar-actions">
+          <GpuControl tier={tier} />
           <UsageMeter />
           {updatePill ?? <UpdatePill />}
           {swarm}

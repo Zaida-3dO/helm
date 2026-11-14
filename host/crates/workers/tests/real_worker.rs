@@ -51,6 +51,7 @@ async fn the_staged_worker_answers_get_state_through_the_fake_claude() {
         cwd: cwd.path().to_path_buf(),
         env: env.into_pairs(),
         max_record_bytes: MAX_RECORD_BYTES,
+        low_priority: true,
     })
     .unwrap();
     assert!(worker.send(&json!({"type": "get_state", "id": "ready"})));

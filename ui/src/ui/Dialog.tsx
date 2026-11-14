@@ -140,7 +140,7 @@ export function AnchoredDialog({ title, onClose, busy, anchor, intro, footer, te
           <h2>{title}</h2>
         </header>
         {intro && <div className="ui-dialog-intro">{intro}</div>}
-        <div className="ui-dialog-body">{children}</div>
+        <div className="ui-dialog-body padded">{children}</div>
         {footer && <footer className="ui-dialog-foot end">{footer}</footer>}
       </div>
     </div>,

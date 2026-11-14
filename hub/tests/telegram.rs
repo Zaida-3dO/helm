@@ -7,20 +7,18 @@ use axum::http::{header, HeaderMap, Request, StatusCode};
 use helm_hub::lines::Lines;
 use helm_hub::mcp::Options;
 use helm_hub::registry::Registry;
-use helm_hub::relay::{Line, Route, Upstream, OFFLINE};
+use helm_hub::relay::{Line, Upstream, OFFLINE};
 use helm_hub::server::{router, AppState};
 use helm_hub::store::Store;
 use helm_hub::telegram::{
     now_ms, parse_allowed, parse_receive, size_text, ApiError, ApiFuture, Bridge, Files, Handled,
     HttpFiles, HttpVoice, Receive, SttConfig, Telegram, TelegramApi, TelegramConfig, Voice,
     VoiceFuture, FILES_OFF, HELLO, IMAGE_FAILED, JOIN_LIMIT, JOIN_WINDOW, LONG_PART, MAX_JOINED,
-    POLL_SECONDS, QUEUED, STT_DOWN, STT_DOWN_AFTER, TAP_OFFLINE, TAP_SENT, TAP_STALE, TEXT_ONLY,
-    VOICE_OFF,
+    POLL_SECONDS, QUEUED, STILL_TRANSCRIBING, STT_DOWN, STT_DOWN_AFTER, TAP_OFFLINE, TAP_SENT,
+    TAP_STALE, TEXT_ONLY, VOICE_OFF,
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -52,6 +50,14 @@ impl FakeApi {
             .into_iter()
             .filter(|(m, _)| m == "sendMessage")
             .map(|(_, b)| b["text"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    /// The message ids removed with `deleteMessage`.
+    fn deleted(&self) -> Vec<i64> {
+        self.calls()
+            .into_iter()
+            .filter(|(m, _)| m == "deleteMessage")
+            .map(|(_, b)| b["message_id"].as_i64().unwrap())
             .collect()
     }
     fn clear(&self) {
@@ -142,29 +148,6 @@ impl Voice for FakeVoice {
             self.gate.acquire().await.unwrap().forget();
             self.heard.clone()
         })
-    }
-}
-
-/// A route that writes "make room" into the voice's own log when it is asked to free the PC's
-/// graphics memory, so a test can see that it happens before a transcription.
-struct RoomRoute {
-    line: Arc<Line>,
-    voice: Arc<FakeVoice>,
-}
-
-impl Route for RoomRoute {
-    fn is_up(&self) -> bool {
-        self.line.is_up()
-    }
-    fn generation(&self) -> Option<u64> {
-        self.line.generation()
-    }
-    fn send(&self, frame: &Value) -> bool {
-        self.line.send(frame)
-    }
-    fn make_room(&self, _wait: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        self.voice.seen.lock().unwrap().push("make room".to_owned());
-        Box::pin(async {})
     }
 }
 
@@ -1271,31 +1254,46 @@ async fn recordings_go_with_their_transcript_and_the_recording_attached() {
     assert_eq!(e.api.sent_texts(), [down_reply(DOWN)]);
 
     // A long transcription does not hold up the downloads behind it: all three notes are
-    // downloaded while the first is still being transcribed. Transcription is one at a time, and
-    // Helm is asked to free the PC's graphics memory before it starts.
+    // downloaded while the first is still being transcribed, and transcription is one at a time.
     let voice = FakeVoice::held(Ok("slow"));
-    let (line, _up) = Line::new();
-    let route = Arc::new(RoomRoute {
-        line: Arc::new(line),
-        voice: voice.clone(),
-    });
-    let bridge = Bridge::with_route(Arc::new(FakeApi::default()), route, &cfg());
-    let bridge = Arc::new(bridge.with_voice(voice.clone()));
+    let e = env_with(Some(voice.clone()));
     for _ in 0..3 {
-        bridge
+        e.bridge
             .on_update(&owner_message(json!({ "voice": note })), now)
             .await;
     }
     settle().await;
     let seen = voice.seen.lock().unwrap().clone();
     let count = |what: &str| seen.iter().filter(|s| s.starts_with(what)).count();
-    assert_eq!(
-        (count("download"), count("make room"), count("transcribe")),
-        (3, 1, 1),
-        "{seen:?}"
-    );
+    assert_eq!((count("download"), count("transcribe")), (3, 1), "{seen:?}");
     let at = |what: &str| seen.iter().position(|s| s.starts_with(what)).unwrap();
-    assert!(at("make room") < at("transcribe"), "{seen:?}");
+    assert!(at("download") < at("transcribe"), "{seen:?}");
+
+    // A transcription that runs past the slow mark tells the chat once, and the note is removed
+    // when it ends, whether it worked or not.
+    for (heard, reply) in [(Ok("done"), vec![]), (Err(DOWN), vec![down_reply(DOWN)])] {
+        let voice = FakeVoice::held(heard);
+        let api = Arc::new(FakeApi::default());
+        let (line, _up) = Line::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        line.attach(tx);
+        let bridge = Bridge::new(api.clone(), Arc::new(line), &cfg())
+            .with_voice(voice.clone())
+            .with_slow_after(Duration::from_millis(40));
+        let bridge = Arc::new(bridge);
+        bridge
+            .on_update(&owner_message(json!({ "voice": note })), now)
+            .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(api.sent_texts(), [STILL_TRANSCRIBING]);
+        assert!(api.deleted().is_empty(), "kept while it runs");
+        voice.gate.add_permits(1);
+        settle().await;
+        let mut sent = vec![STILL_TRANSCRIBING.to_owned()];
+        sent.extend(reply);
+        assert_eq!(api.sent_texts(), sent);
+        assert_eq!(api.deleted(), [1], "the note it sent is the one removed");
+    }
 }
 
 #[tokio::test]

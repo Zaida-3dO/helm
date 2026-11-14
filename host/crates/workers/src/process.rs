@@ -29,6 +29,8 @@ pub struct SpawnSpec {
     pub env: Vec<(OsString, OsString)>,
     /// Lower in tests to exercise the oversize rule cheaply.
     pub max_record_bytes: usize,
+    /// Run the worker and everything it starts at below-normal priority.
+    pub low_priority: bool,
 }
 
 /// What the worker sent, or how it ended.
@@ -105,9 +107,10 @@ pub fn spawn(spec: SpawnSpec) -> std::io::Result<(WorkerProcess, mpsc::Receiver<
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    job::prepare(&mut cmd);
+    job::prepare(&mut cmd, spec.low_priority);
     let mut child = cmd.spawn()?;
-    let job = Arc::new(Job::new()?);
+    crate::priority::lower_after_spawn(child.id(), spec.low_priority);
+    let job = Arc::new(Job::new(spec.low_priority)?);
     if let Err(e) = job.assign(&child) {
         let _ = child.start_kill();
         return Err(e);
@@ -253,6 +256,7 @@ mod tests {
             cwd: dir.path().to_path_buf(),
             env: crate::env::EnvMap::from_process().into_pairs(),
             max_record_bytes: max,
+            low_priority: false,
         })
         .unwrap();
         if let Some(cmd) = input {

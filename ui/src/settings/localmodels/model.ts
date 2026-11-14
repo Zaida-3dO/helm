@@ -114,6 +114,31 @@ export function clampTo(range: Range, text: string): number | null {
   return Math.min(range.max, Math.max(range.min, Math.round(n)));
 }
 
+/** The most programs the list may hold; the host refuses more. */
+export const MAX_GAMES = 20;
+
+/** The games text area as a list: one program per line, trimmed, blank lines dropped, repeats kept once (any case, with or without the `.exe` the host adds). */
+export function parseGames(text: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const g = line.trim();
+    const key = /\.exe$/i.test(g) ? g.toLowerCase() : `${g.toLowerCase()}.exe`;
+    if (g && !seen.has(key)) {
+      seen.add(key);
+      out.push(g);
+    }
+  }
+  return out;
+}
+
+/** A problem with the game list that can be seen before asking the host, or null. */
+export function gamesProblem(games: readonly string[]): string | null {
+  if (games.length > MAX_GAMES) return `List at most ${MAX_GAMES} games.`;
+  if (games.some((g) => /[\\/]/.test(g))) return 'List each game by its program name, such as game.exe, not a path.';
+  return null;
+}
+
 /** "Between 8,192 and 262,144 (default 65,536)". */
 export function rangeText(range: Range, unit = ''): string {
   const f = (n: number) => `${n.toLocaleString('en-US')}${unit}`;

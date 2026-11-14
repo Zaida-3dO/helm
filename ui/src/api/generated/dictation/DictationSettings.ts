@@ -9,6 +9,7 @@ export type DictationSettings = { sttUrl: string | null, allowPrivateNetwork: bo
  */
 configured: boolean, 
 /**
- * Graphics memory (GB) a local model load leaves free for speech, from Local models.
+ * Graphics memory (GB) Helm tries to keep free for speech when it makes room for a local
+ * model, from Local models. It is only waited for after something was unloaded.
  */
 speechReserveGb: number, speechReserveMaxGb: number, };

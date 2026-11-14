@@ -72,7 +72,8 @@ impl ProcessReader {
         };
         let env = helm_workers::env::base_environment();
         let node = resolve_node(&NodeLookup::for_worker(&env)).map_err(|e| e.to_string())?;
-        run_helper(&node.path, script, env.into_pairs(), job, timeout)
+        let low = ClaudeRuntime::load(&self.profile_dir).0.low_priority;
+        run_helper(&node.path, script, env.into_pairs(), job, timeout, low)
     }
 }
 
@@ -123,6 +124,7 @@ fn run_helper(
     env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     job: &Value,
     timeout: Duration,
+    low: bool,
 ) -> Result<Value, String> {
     use std::io::{Read, Write};
     let mut cmd = std::process::Command::new(node);
@@ -135,12 +137,12 @@ fn run_helper(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(helm_workers::priority::creation_flags(low));
     }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("the usage helper did not start: {e}"))?;
+    helm_workers::priority::lower_after_spawn(Some(child.id()), low);
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(job.to_string().as_bytes());
     }

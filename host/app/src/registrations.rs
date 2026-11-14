@@ -280,6 +280,7 @@ pub fn attach_host_tools(
     // Auto-AFK signals and the 30 s AFK tick.
     helm_afk::start(runtime, &dispatcher.ctx().services);
     helm_governor::start(runtime, dispatcher);
+    helm_localmodels::start(runtime, dispatcher);
     // The outbound line to the hub (off until a connection is saved).
     helm_relay::start(
         runtime.handle(),
