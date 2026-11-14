@@ -150,6 +150,8 @@ pub fn services(services: &mut Services, events: &Arc<dyn EventSink>) {
         // A chat's edits to the rules and skills, which Undo puts back.
         extensions.push(helm_skills::undo::settings_extension(&profile.dir));
     }
+    // Whether this PC is connected to the hub, read only (never the address, token or ids).
+    extensions.extend(helm_relay::hub_view::settings_extension(services));
     services.insert(Arc::new(helm_hosttools::SettingsExtensions(extensions)));
     services.insert(Arc::new(worker_lines()));
     // Other crates reach running workers through the chat runtime (helm_hosttools::lines).
