@@ -48,13 +48,29 @@ struct PairArgs {
 #[serde(rename_all = "camelCase")]
 pub struct Paired {
     pub token: String,
+    #[serde(deserialize_with = "id_text")]
     pub person_id: String,
     #[serde(default)]
     pub person_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "id_text")]
     pub machine_id: String,
     #[serde(default)]
     pub machine_name: String,
+}
+
+/// An id the hub may send as a number or as a string: a number becomes its decimal string, the
+/// form every other hub route sends ids in, so profile links and device lists agree.
+fn id_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Id {
+        Number(u64),
+        Text(String),
+    }
+    Ok(match Id::deserialize(d)? {
+        Id::Number(n) => n.to_string(),
+        Id::Text(s) => s,
+    })
 }
 
 impl std::fmt::Debug for Paired {
@@ -347,6 +363,23 @@ mod tests {
             ("Pat", "Laptop")
         );
         assert!(!format!("{paired:?}").contains(TOKEN));
+
+        // The hub sends ids as numbers or as strings; both read as the decimal string.
+        for body in [
+            json!({"token": TOKEN, "personId": 3, "personName": "Pat", "machineId": 7,
+                   "machineName": "Laptop", "scopes": ["relay", "memory"]}),
+            json!({"token": TOKEN, "personId": "3", "personName": "Pat", "machineId": "7",
+                   "machineName": "Laptop"}),
+        ] {
+            let (url, hub) = fake_hub("200 OK", body.to_string());
+            let paired = exchange(&url, "ABCD1234").unwrap();
+            hub.join().unwrap();
+            assert_eq!(
+                (paired.person_id.as_str(), paired.machine_id.as_str()),
+                ("3", "7"),
+                "{body}"
+            );
+        }
 
         // Refusals say what to do, a spent code is not retried on the other address, and a hub
         // that is not there lets the next address be tried.
