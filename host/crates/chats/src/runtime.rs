@@ -81,9 +81,33 @@ impl Default for Limits {
             tick: Duration::from_secs(30),
             stall_unit: Duration::from_secs(60),
             send_soon: Duration::from_secs(60),
-            gate_deadline: Duration::from_secs(75),
+            gate_deadline: test_gate_hold(
+                cfg!(debug_assertions),
+                std::env::var(TEST_GATE_HOLD_ENV).ok().as_deref(),
+            )
+            .unwrap_or(GATE_HOLD),
         }
     }
+}
+
+/// How long the question gate holds a card by default.
+pub const GATE_HOLD: Duration = Duration::from_secs(75);
+
+/// The test override for the question gate's hold: in debug builds only,
+/// `HELM_TEST_GATE_HOLD_MS` sets [`Limits::gate_deadline`], so an end-to-end check of a hold
+/// that runs out does not wait the full minute. Release builds ignore it.
+pub const TEST_GATE_HOLD_ENV: &str = "HELM_TEST_GATE_HOLD_MS";
+
+/// The hold a value of [`TEST_GATE_HOLD_ENV`] stands for: a whole number of milliseconds from
+/// 1 000 to 75 000, in a debug build. Anything else is no override.
+pub fn test_gate_hold(debug: bool, raw: Option<&str>) -> Option<Duration> {
+    if !debug {
+        return None;
+    }
+    let ms: u64 = raw?.trim().parse().ok()?;
+    (1_000..=GATE_HOLD.as_millis() as u64)
+        .contains(&ms)
+        .then(|| Duration::from_millis(ms))
 }
 
 #[derive(Clone, Debug)]
@@ -194,6 +218,9 @@ pub trait Spawner: Send + Sync {
     fn run_gatekeeper(&self, _job: &Value) -> Result<Value, String> {
         Err("the gatekeeper helper is not available".into())
     }
+
+    /// The app is quitting: end any gatekeeper helper still running, so none outlives it.
+    fn close_helpers(&self) {}
 }
 
 /// How long the gatekeeper helper gets for one job. It sits inside the actor's hold deadline
@@ -244,6 +271,8 @@ pub(crate) fn apply_local_launch(
 /// The real spawner: stage `worker/src`, resolve Node on the worker's PATH, write `launch.json`,
 /// and start `node <main.ts> <launch.json>` in a Job Object.
 pub struct ProcessSpawner {
+    /// Set at quit: a gatekeeper helper still running is ended, and none starts.
+    closing: Arc<AtomicBool>,
     profile_dir: PathBuf,
     /// Paths handed to Node: the profile without Windows' verbatim prefix.
     data_root: String,
@@ -261,6 +290,7 @@ impl ProcessSpawner {
         worker_source: Option<PathBuf>,
     ) -> Self {
         Self {
+            closing: Arc::new(AtomicBool::new(false)),
             profile_dir,
             data_root,
             debug,
@@ -475,7 +505,14 @@ impl Spawner for ProcessSpawner {
     }
 
     fn run_gatekeeper(&self, job: &Value) -> Result<Value, String> {
-        self.run_helper("gatekeeper", job, GATEKEEPER_TIMEOUT)
+        if self.closing.load(Ordering::SeqCst) {
+            return Err("Helm is quitting".into());
+        }
+        self.run_helper_until("gatekeeper", job, GATEKEEPER_TIMEOUT, Some(&self.closing))
+    }
+
+    fn close_helpers(&self) {
+        self.closing.store(true, Ordering::SeqCst);
     }
 }
 
@@ -483,6 +520,17 @@ impl ProcessSpawner {
     /// Run `helpers/<name>/src/main.ts` (beside the worker's source: `<repo>/worker/src` →
     /// `<repo>/helpers`) on one job and answer its JSON line.
     fn run_helper(&self, name: &str, job: &Value, timeout: Duration) -> Result<Value, String> {
+        self.run_helper_until(name, job, timeout, None)
+    }
+
+    /// [`Self::run_helper`], ended early once `cancel` is set.
+    fn run_helper_until(
+        &self,
+        name: &str,
+        job: &Value,
+        timeout: Duration,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Value, String> {
         let script = self
             .worker_source
             .as_ref()
@@ -521,7 +569,15 @@ impl ProcessSpawner {
         } else if !runtime.executable.is_empty() {
             job["command"] = Value::String(runtime.executable);
         }
-        crate::titles::run_helper(&node.path, &script, env.into_pairs(), &job, timeout, low)
+        crate::titles::run_helper_until(
+            &node.path,
+            &script,
+            env.into_pairs(),
+            &job,
+            timeout,
+            low,
+            cancel,
+        )
     }
 }
 
@@ -755,6 +811,10 @@ impl ChatRuntime {
     pub fn spawner(&self) -> Arc<dyn Spawner> {
         self.sh.spawner.clone()
     }
+    /// True once the quit sequence has started: nothing new should start.
+    pub fn is_shutting_down(&self) -> bool {
+        self.sh.shutting_down.load(Ordering::SeqCst)
+    }
     pub fn limits(&self) -> &Limits {
         &self.sh.cfg.limits
     }
@@ -986,8 +1046,17 @@ impl ChatRuntime {
             outcome: Box::new(outcome),
             reply: reply_tx,
         };
-        if enqueue(&tx, cmd).is_err() {
-            return false;
+        // The caller is a plain thread, so a full channel gets a short wait rather than losing
+        // the verdict (the card would otherwise sit until its hold ran out).
+        let deadline = Instant::now() + GATE_VERDICT_RETRY;
+        let mut cmd = cmd;
+        loop {
+            match enqueue(&tx, cmd) {
+                Ok(()) => break,
+                Err(_) if tx.is_closed() || Instant::now() >= deadline => return false,
+                Err(c) => cmd = c,
+            }
+            std::thread::sleep(SEND_SOON_POLL);
         }
         // The actor answers from its own loop, which never waits on the caller.
         reply_rx.recv().unwrap_or(false)
@@ -1253,6 +1322,7 @@ impl ChatRuntime {
     /// Job Objects end anything left when the process exits.
     pub async fn drain(&self) {
         self.sh.shutting_down.store(true, Ordering::SeqCst);
+        self.sh.spawner.close_helpers();
         let now = helm_core::now_ms();
         let _ = self.sh.db.write(|tx| {
             let ids: Vec<String> = {
@@ -1362,6 +1432,9 @@ pub(crate) async fn send_soon(
 }
 
 const SEND_SOON_POLL: Duration = Duration::from_millis(25);
+
+/// How long a gate verdict keeps trying a full actor channel before it is given up.
+const GATE_VERDICT_RETRY: Duration = Duration::from_secs(2);
 
 pub const DEFAULT_STALL_MINUTES: u32 = 5;
 

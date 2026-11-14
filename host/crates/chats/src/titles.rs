@@ -424,6 +424,20 @@ pub fn run_helper(
     timeout: Duration,
     low: bool,
 ) -> Result<Value, String> {
+    run_helper_until(node, script, env, job, timeout, low, None)
+}
+
+/// [`run_helper`], ended early (the helper killed) once `cancel` is set: the app is quitting
+/// and no helper may outlive it.
+pub fn run_helper_until(
+    node: &std::path::Path,
+    script: &std::path::Path,
+    env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    job: &Value,
+    timeout: Duration,
+    low: bool,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Value, String> {
     use std::io::{Read, Write};
     let mut cmd = std::process::Command::new(node);
     cmd.arg(script)
@@ -451,11 +465,33 @@ pub fn run_helper(
         let _ = stdout.read_to_string(&mut s);
         let _ = tx.send(s);
     });
-    let out = match rx.recv_timeout(timeout) {
-        Ok(s) => s,
-        Err(_) => {
-            let _ = child.kill();
-            return Err("timed out".into());
+    let deadline = std::time::Instant::now() + timeout;
+    let out = loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        // Look at the cancel flag a few times a second; without one, wait the whole time.
+        let slice = match cancel {
+            Some(_) => left.min(Duration::from_millis(200)),
+            None => left,
+        };
+        match rx.recv_timeout(slice) {
+            Ok(s) => break s,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                if !left.is_zero()
+                    && !cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst)) =>
+            {
+                continue
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(
+                    if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst)) {
+                        "Helm is quitting".into()
+                    } else {
+                        "timed out".into()
+                    },
+                );
+            }
         }
     };
     let _ = child.wait();
