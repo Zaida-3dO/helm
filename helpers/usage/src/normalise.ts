@@ -48,11 +48,18 @@ function window(v: unknown): PlanWindow | null {
   return { pct, resetsAt };
 }
 
-/** The reading for a `get_usage` response body, or null when the binary reports no plan limits. */
-export function normaliseControl(raw: unknown): ControlReading | null {
+/** What a `get_usage` answer came to: figures, no plan limits at all, or limits with no figures this time. */
+export type Normalised = { kind: "reading"; reading: ControlReading } | { kind: "no_limits" } | { kind: "no_figures" };
+
+/**
+ * The reading for a `get_usage` response body. `no_limits` means the sign-in really has none (the
+ * binary says so, or names no plan); `no_figures` means it has limits but gave no windows this time,
+ * which a caller treats as a hiccup and keeps the numbers it already holds.
+ */
+export function normaliseControl(raw: unknown): Normalised {
   const r = obj(raw);
   const rl = obj(r.rate_limits);
-  if (r.rate_limits_available === false || Object.keys(rl).length === 0) return null;
+  if (r.rate_limits_available === false) return { kind: "no_limits" };
   const perModel: ModelWindow[] = [];
   const scoped = Array.isArray(rl.model_scoped) ? rl.model_scoped : [];
   for (const m of scoped) {
@@ -73,6 +80,6 @@ export function normaliseControl(raw: unknown): ControlReading | null {
     weekly: window(rl.seven_day),
     perModel,
   };
-  if (!reading.fiveHour && !reading.weekly && perModel.length === 0) return null;
-  return reading;
+  if (reading.fiveHour || reading.weekly || perModel.length > 0) return { kind: "reading", reading };
+  return r.rate_limits_available === true || reading.plan !== null ? { kind: "no_figures" } : { kind: "no_limits" };
 }

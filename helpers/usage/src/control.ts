@@ -26,7 +26,7 @@ export interface ControlJob {
 
 export type ControlResult =
   | { ok: true; reading: ControlReading; version: string | null }
-  | { ok: false; reason: "no_binary" | "unsupported" | "no_limits" | "timeout" | "error"; message: string; version: string | null };
+  | { ok: false; reason: "no_binary" | "unsupported" | "no_limits" | "no_figures" | "timeout" | "error"; message: string; version: string | null };
 
 export const EMPTY_MCP = '{"mcpServers":{}}';
 export const DEFAULT_TIMEOUT_MS = 60_000;
@@ -151,12 +151,14 @@ export function readControlUsage(job: ControlJob = {}): Promise<ControlResult> {
           finish({ ok: false, reason: "unsupported", message: String(resp.error ?? "The binary refused the usage request."), version });
           return;
         }
-        const reading = normaliseControl(body);
-        if (!reading) {
+        const n = normaliseControl(body);
+        if (n.kind === "no_limits") {
           finish({ ok: false, reason: "no_limits", message: "The binary reports no plan limits for this sign-in.", version });
-          return;
+        } else if (n.kind === "no_figures") {
+          finish({ ok: false, reason: "no_figures", message: "The binary returned no usage figures this time.", version });
+        } else {
+          finish({ ok: true, reading: n.reading, version });
         }
-        finish({ ok: true, reading, version });
         return;
       }
     });

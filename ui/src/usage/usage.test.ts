@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventBus } from '../api/events.ts';
 import type { UsageSnapshot, UsageWindow } from '../api/usage.ts';
-import { asOf, bars, type BarModel, compactTokensText, customRange, emptyTitle, localText, percentText, rangeOf, relativeFuture, shareText, tokensText, usdText } from './model.ts';
+import { asOf, bars, type BarModel, compactTokensText, customRange, emptyTitle, localText, percentText, rangeOf, readLine, readNote, relativeFuture, shareText, tokensText, usdText, windowText } from './model.ts';
 import { POLL_MS, UsageStore } from './store.ts';
 
 const NOW = Date.parse('2026-10-18T12:00:00Z');
@@ -32,8 +32,23 @@ test('an old reading, and a window whose reset has passed, are greyed', () => {
   assert.equal(b[1].stale, false, 'the weekly window is still current');
 });
 
-test('a reset time with no number reads "?", and no reading gives no bars and a reason', () => {
-  assert.equal(bars(snap({ weekly: win(undefined, NOW + 5000) }), NOW)[1]?.text, '—');
+test('a window with no number says it is unknown and never "just now"; a chat estimate is marked ≈', () => {
+  const unknown = bars(snap({ weekly: win(undefined, NOW + 5000) }), NOW)[1];
+  assert.equal(unknown?.text, '—');
+  assert.match(unknown?.tooltip ?? '', /usage unknown for this window/);
+  assert.doesNotMatch(unknown?.tooltip ?? '', /just now|Read /);
+  assert.equal(readLine(win(undefined, NOW + 5000), NOW), 'Usage unknown for this window');
+  // The same number reads as an estimate when only a chat's rate-limit message supplied it.
+  const est = bars(snap({ fiveHour: win(5, NOW + 3_600_000, NOW - 1000, 'rate_limit_event') }), NOW) as [BarModel, BarModel];
+  assert.deepEqual([est[0].text, est[0].estimate, est[1].text, est[1].estimate], ['≈5%', true, '56%', false]);
+  assert.match(est[0].tooltip, /estimate/);
+  assert.equal(windowText(win(undefined, 1, NOW, 'rate_limit_event')), '—', 'no number, nothing to estimate');
+  // The host's reason rides under the bars when numbers are kept past a failed read.
+  const kept = snap();
+  kept.readiness = { state: 'ready', reason: "Claude Code didn't return usage figures this time; showing the last numbers from 7 min ago." };
+  assert.match(readNote(kept) ?? '', /last numbers from 7 min ago/);
+  assert.equal(readNote(snap()), null);
+  assert.equal(readNote(null), null);
   assert.deepEqual(bars(null, NOW), []);
   const none: UsageSnapshot = { readiness: { state: 'inactive', reason: 'No plan usage has been read yet. Try Refresh' }, refreshing: false };
   assert.deepEqual(bars(none, NOW), []);
@@ -90,7 +105,27 @@ test('the store reads at start, applies the event, refreshes on its timer only w
     calls.push(op);
     return snap();
   }) as never;
-  const store = new UsageStore({ api, bus, visible: () => visible, setInterval: (f, ms) => { assert.equal(ms, POLL_MS); tick = f; return 1; }, clearInterval: () => {} });
+  assert.equal(POLL_MS, 62_000, 'a little over the host floor, so each tick may read');
+  let now = NOW;
+  let shown: (() => void) | undefined;
+  const store = new UsageStore({
+    api,
+    bus,
+    visible: () => visible,
+    now: () => now,
+    onVisibility: (f) => {
+      shown = f;
+      return () => {
+        shown = undefined;
+      };
+    },
+    setInterval: (f, ms) => {
+      assert.equal(ms, POLL_MS);
+      tick = f;
+      return 1;
+    },
+    clearInterval: () => {},
+  });
   let changes = 0;
   store.subscribe(() => changes++);
   store.start();
@@ -111,7 +146,23 @@ test('the store reads at start, applies the event, refreshes on its timer only w
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual(calls, ['usage_refresh']);
   assert.ok(changes >= 3);
+  // Becoming visible refreshes at once only when the newest number is over a minute old.
+  calls.length = 0;
+  now = NOW + 30_000;
+  shown?.();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(calls, [], 'fresh: nothing to ask');
+  now = NOW + 61_001;
+  visible = false;
+  shown?.();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(calls, [], 'still hidden: nothing to ask');
+  visible = true;
+  shown?.();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(calls, ['usage_refresh'], 'stale on show: ask');
   store.stop();
+  assert.equal(shown, undefined, 'stopping stops listening');
 });
 
 test('a host failure is kept as the error, not thrown', async () => {
