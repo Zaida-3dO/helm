@@ -235,11 +235,10 @@ impl helm_hosttools::McpLaunchSource for McpLaunchFlags {
                     .ok()
             })
             .is_some_and(|l| l.iter().any(|s| s.enabled));
-        let gmail = any_enabled
-            && self
-                .store
-                .as_ref()
-                .is_some_and(|s| helm_mcp::google::gmail_served(s));
+        let gmail = self
+            .store
+            .as_ref()
+            .is_some_and(|s| helm_mcp::google::gmail_launch(all_on, s));
         let helm_servers = all_on && any_enabled;
         helm_hosttools::McpLaunch {
             native: g.native,

@@ -35,7 +35,7 @@
 
 use crate::config::McpStore;
 use crate::oauth::{self, AuthServer, StoredAuth, TokenSet, TokenStore};
-use crate::types::{McpEditorSnapshot, McpServer, ResolvedServer};
+use crate::types::{McpEditorSnapshot, McpServer, RefKind, ResolvedServer};
 use base64::Engine as _;
 use helm_core::credentials::CredentialStore;
 use helm_ipc::{ApiError, OpClass, OpCtx, OpRegistry};
@@ -119,8 +119,9 @@ impl GooglePermission {
     }
 
     /// The scopes this level asks Google for. `openid email` identify the account. The `send`
-    /// level asks for Google's own send scope: Helm's gate is what keeps drafts-level accounts
-    /// from sending, but Google refuses anything narrower than `gmail.send` for sending.
+    /// level asks for Google's own send scope. It is not what stops a drafts-level account from
+    /// sending: Gmail's send call also accepts the compose and modify scopes a drafts-level token
+    /// holds, so Helm's own level check and the Allow card are the only barrier.
     pub fn scopes(self) -> Vec<&'static str> {
         let mut s = vec![SCOPE_OPENID, SCOPE_EMAIL, SCOPE_READONLY];
         if self != GooglePermission::Readonly {
@@ -444,6 +445,54 @@ fn runs_workspace_mcp(args: &[String]) -> bool {
         .is_some_and(|a| a == "workspace-mcp" || a.starts_with("workspace-mcp=="))
 }
 
+/// `args` with every Gmail value of every `--permissions` flag (either spelling) replaced by one:
+/// `gmail:readonly` when the arguments name nothing but that, `gmail:drafts` otherwise (any
+/// other level, an unknown one, or none at all). Rewritten, not read, so no spelling of the flag
+/// can leave a card-less send in the bridge. The flags the bridge refuses beside a permission
+/// level go too.
+fn clamp_gmail(args: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(args.len() + 2);
+    let mut gmail: Vec<&str> = Vec::new();
+    let mut in_values = false;
+    for a in args {
+        if let Some(v) = a.strip_prefix("--permissions=") {
+            in_values = false;
+            if v.starts_with("gmail:") {
+                gmail.push(v);
+                continue;
+            }
+        } else if a.starts_with("--") {
+            in_values = a == "--permissions";
+        } else if in_values && a.starts_with("gmail:") {
+            gmail.push(a);
+            continue;
+        }
+        out.push(a.clone());
+    }
+    // The clamped value goes into the first flag (kept even when its own values were all
+    // Gmail's); any later flag left with no values at all goes.
+    let first = out.iter().position(|a| a == "--permissions");
+    let mut i = first.map_or(0, |f| f + 1);
+    while i < out.len() {
+        let bare = out[i] == "--permissions" && out.get(i + 1).is_none_or(|n| n.starts_with("--"));
+        if bare {
+            out.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+    let level = if !gmail.is_empty() && gmail.iter().all(|v| *v == "gmail:readonly") {
+        GooglePermission::Readonly
+    } else {
+        GooglePermission::Drafts
+    };
+    match permission_span(&out) {
+        Some(span) => out.insert(span.end, level.flag().to_owned()),
+        None => out.extend(["--permissions".to_owned(), level.flag().to_owned()]),
+    }
+    without_tool_flags(&out)
+}
+
 /// Add what only the host knows to a resolved Google server: the package pin, and — only for a
 /// server that still carries its own client secrets (a setup saved before the per-profile client
 /// existed) — the bridge program's folder and callback port. A server without a client of its
@@ -459,9 +508,7 @@ pub fn prepare(creds: &CredentialStore, profile_dir: &Path, out: &mut ResolvedSe
             .iter()
             .all(|k| out.env.get(*k).is_some_and(|v| !v.is_empty()));
     if legacy {
-        if permission_of(&out.args) == Some(GooglePermission::Send) {
-            out.args = with_permission(&out.args, GooglePermission::Drafts);
-        }
+        out.args = clamp_gmail(&out.args);
         let dir = credentials_dir(profile_dir);
         let _ = helm_core::privfs::create_private_dir_all(&dir);
         out.env
@@ -891,6 +938,12 @@ fn to_value<T: Serialize>(v: &T) -> Result<Value, ApiError> {
     serde_json::to_value(v).map_err(|e| ApiError::internal(e.to_string()))
 }
 
+/// Whether a chat launch lists the Gmail host tools: the MCP master switch is on and Gmail is
+/// served ([`gmail_served`]).
+pub fn gmail_launch(all_on: bool, store: &McpStore) -> bool {
+    all_on && gmail_served(store)
+}
+
 /// Whether Gmail is served by Helm for a chat launch: an enabled server made from this preset
 /// and at least one signed-in account. The Gmail host tools are only listed when this is true.
 pub fn gmail_served(store: &McpStore) -> bool {
@@ -921,9 +974,18 @@ fn google_server(ctx: &OpCtx, id: &str) -> Result<(Arc<McpStore>, McpServer), Ap
 /// has no client env and is served by Helm's own tools.
 pub fn keeps_bridge(server: &McpServer) -> bool {
     runs_workspace_mcp(&server.transport.args)
-        && [CLIENT_ID_ENV, CLIENT_SECRET_ENV]
-            .iter()
-            .all(|k| server.transport.env.contains_key(*k))
+        && [CLIENT_ID_ENV, CLIENT_SECRET_ENV].iter().all(|k| {
+            // A key with nothing behind it counts as absent, as `prepare` sees the resolved env.
+            server.transport.env.get(*k).is_some_and(|v| match v.kind {
+                RefKind::Literal => {
+                    v.secret_id.is_some() || v.value.as_deref().is_some_and(|s| !s.is_empty())
+                }
+                RefKind::Environment | RefKind::File => {
+                    v.value.as_deref().is_some_and(|s| !s.is_empty())
+                }
+                RefKind::ChatPerson => false,
+            })
+        })
 }
 
 /// Forget every Google account: the sealed index and each account's tokens. Called when the last
@@ -1618,6 +1680,140 @@ mod tests {
             },
         );
         assert!(keeps_bridge(&legacy));
+        // A key with nothing behind it is no client: the dialog and the worker agree.
+        legacy.transport.env.get_mut(CLIENT_ID_ENV).unwrap().value = Some(String::new());
+        assert!(!keeps_bridge(&legacy));
+        // The master switch decides what a launch lists, whoever is signed in.
+        sign_in(st.creds(), "a@x.com", "tok", Some("r"));
+        st.mutate(None, |l| {
+            l.push(srv("google_accounts", Some(PRESET_ID)));
+            Ok(())
+        })
+        .unwrap();
+        assert!(gmail_launch(true, &st));
+        assert!(!gmail_launch(false, &st), "switch off: no Gmail tools");
+    }
+
+    /// The legacy bridge never offers a card-less send, whatever shape the saved arguments take:
+    /// every Gmail value of every `--permissions` flag is rewritten to the one clamped level
+    /// (read-only stays read-only; anything else, or nothing, becomes drafts).
+    #[test]
+    fn the_legacy_bridge_is_clamped_by_rewriting_every_shape() {
+        let d = tempfile::tempdir().unwrap();
+        let st = store(d.path());
+        let cases: [(&[&str], &[&str]); 13] = [
+            (
+                &["workspace-mcp", "--permissions", "gmail:send"],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &["workspace-mcp", "--permissions=gmail:send"],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &[
+                    "workspace-mcp==2.0.0",
+                    "--transport",
+                    "streamable-http",
+                    "--permissions",
+                    "gmail:send",
+                    "--single-user",
+                ],
+                &[
+                    "workspace-mcp==2.0.0",
+                    "--transport",
+                    "streamable-http",
+                    "--permissions",
+                    "gmail:drafts",
+                    "--single-user",
+                ],
+            ),
+            (
+                &[
+                    "workspace-mcp",
+                    "--permissions",
+                    "calendar:readonly",
+                    "gmail:send",
+                ],
+                &[
+                    "workspace-mcp==2.4.2",
+                    "--permissions",
+                    "calendar:readonly",
+                    "gmail:drafts",
+                ],
+            ),
+            (
+                &[
+                    "workspace-mcp",
+                    "--permissions",
+                    "gmail:drafts",
+                    "--permissions",
+                    "gmail:send",
+                ],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &[
+                    "workspace-mcp",
+                    "--permissions=gmail:drafts",
+                    "--permissions=gmail:send",
+                ],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &[
+                    "workspace-mcp",
+                    "--permissions",
+                    "gmail:drafts",
+                    "gmail:send",
+                ],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &["workspace-mcp", "--permissions", "gmail:full"],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &["workspace-mcp", "--permissions", "gmail:organize"],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &["workspace-mcp"],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+            (
+                &["workspace-mcp", "--tools", "gmail", "--single-user"],
+                &[
+                    "workspace-mcp==2.4.2",
+                    "--single-user",
+                    "--permissions",
+                    "gmail:drafts",
+                ],
+            ),
+            (
+                &["workspace-mcp", "--permissions", "gmail:readonly"],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:readonly"],
+            ),
+            (
+                &[
+                    "workspace-mcp",
+                    "--permissions",
+                    "gmail:readonly",
+                    "--permissions=gmail:send",
+                    "--read-only",
+                ],
+                &["workspace-mcp==2.4.2", "--permissions", "gmail:drafts"],
+            ),
+        ];
+        for (saved, want) in cases {
+            let mut r = resolved();
+            r.args = strings(saved);
+            r.env.insert(CLIENT_ID_ENV.into(), "id".into());
+            r.env.insert(CLIENT_SECRET_ENV.into(), "secret".into());
+            prepare(st.creds(), d.path(), &mut r);
+            assert!(!r.host_served, "{saved:?} keeps the bridge");
+            assert_eq!(r.args, strings(want), "{saved:?}");
+        }
     }
 
     #[test]
