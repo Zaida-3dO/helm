@@ -791,7 +791,7 @@ async fn trace_search(state: &Arc<AppState>, client: &Client, sa: &SearchArgs) -
     };
     let ask = json!({
         "viewer": client.person_id.to_string(), "chat": target.key, "source": target.source,
-        "kind": target.kind, "query": sa.text, "limit": sa.k,
+        "kind": target.kind, "owner": target.owner, "query": sa.text, "limit": sa.k,
         "after": sa.after.map(rank::iso_from_ms), "before": sa.before.map(rank::iso_from_ms),
     });
     let out = line

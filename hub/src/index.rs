@@ -657,6 +657,22 @@ fn privacy(persons: &[i64], args: &mut Args) -> String {
     )
 }
 
+/// `(d.owner_person IN (...) OR d.source_id IN <this machine's sources>)`: the docs a machine
+/// may write vectors for. A shared doc someone else owns is readable by everyone, but only its
+/// owner's machine (or the machine it came from) may change how it ranks.
+fn embeddable(ctx: &Ctx, args: &mut Args) -> String {
+    let marks: Vec<String> = ctx
+        .acts_for
+        .iter()
+        .map(|p| format!("?{}", args.push(*p)))
+        .collect();
+    let dev = args.push(ctx.device.clone());
+    format!(
+        "(d.owner_person IN ({}) OR d.source_id IN (SELECT id FROM ix_sources WHERE device_uid = ?{dev}))",
+        marks.join(", ")
+    )
+}
+
 /// What a search asks for. `viewer` is who is asking: nothing of anyone else's private is seen.
 #[derive(Debug, Clone, Default)]
 pub struct Query {
@@ -1142,6 +1158,8 @@ pub struct TraceTarget {
     pub key: String,
     pub title: String,
     pub device_uid: Option<String>,
+    /// The person the doc is filed under.
+    pub owner: Option<i64>,
 }
 
 /// The chat `chat` names (`d:<id>[#n]`, a bare id or a key), if `viewer` may read it.
@@ -1157,7 +1175,7 @@ pub fn trace_target(
     };
     let mut args = Args::default();
     let sql = format!(
-        "SELECT d.id, d.source_id, s.kind, d.key, d.title, s.device_uid
+        "SELECT d.id, d.source_id, s.kind, d.key, d.title, s.device_uid, d.owner_person
          FROM ix_docs d JOIN ix_sources s ON s.id = d.source_id
          WHERE d.tier = 'conversation'{} ORDER BY d.id LIMIT 1",
         doc_conditions(&q, &mut args)
@@ -1170,6 +1188,7 @@ pub fn trace_target(
             key: r.get(3)?,
             title: r.get(4)?,
             device_uid: r.get(5)?,
+            owner: r.get(6)?,
         })
     })
     .optional()
@@ -1638,7 +1657,8 @@ fn delete(store: &mut Store, ctx: &Ctx, id: &Value, frame: &Value) -> Value {
     json!({ "type": "ix_delete_result", "id": id, "ok": true, "deleted": deleted })
 }
 
-/// `ix_pending`: chunks with no vector yet for `model`, of the docs this machine's people may read.
+/// `ix_pending`: chunks with no vector yet for `model`, of the docs this machine's people own or
+/// this machine sent.
 fn pending(store: &Store, ctx: &Ctx, id: &Value, frame: &Value, model: &str) -> Value {
     let limit = frame
         .get("limit")
@@ -1652,8 +1672,9 @@ fn pending(store: &Store, ctx: &Ctx, id: &Value, frame: &Value, model: &str) -> 
                      ELSE c.text END
          FROM ix_chunks c JOIN ix_docs d ON d.id = c.doc_id
          WHERE NOT EXISTS (SELECT 1 FROM ix_vectors v WHERE v.chunk_id = c.id AND v.model = ?{m})
-           AND {} ORDER BY c.id LIMIT {limit}",
-        privacy(&ctx.acts_for, &mut args)
+           AND {} AND {} ORDER BY c.id LIMIT {limit}",
+        privacy(&ctx.acts_for, &mut args),
+        embeddable(ctx, &mut args)
     );
     let rows: rusqlite::Result<Vec<Value>> = store.conn().prepare(&sql).and_then(|mut s| {
         s.query_map(params_from_iter(args.0), |r| {
@@ -1669,7 +1690,8 @@ fn pending(store: &Store, ctx: &Ctx, id: &Value, frame: &Value, model: &str) -> 
     }
 }
 
-/// `ix_vectors`: store the vectors a machine computed, for chunks its people may read.
+/// `ix_vectors`: store the vectors a machine computed, for chunks of docs its people own or it
+/// sent.
 fn vectors(store: &mut Store, ctx: &Ctx, id: &Value, frame: &Value) -> Value {
     let Some(items) = frame.get("items").and_then(Value::as_array) else {
         return failed("ix_vectors_result", id, "ix_vectors needs its items");
@@ -1703,8 +1725,9 @@ fn vectors(store: &mut Store, ctx: &Ctx, id: &Value, frame: &Value) -> Value {
         let mut args = Args::default();
         let c = args.push(chunk);
         let sql = format!(
-            "SELECT 1 FROM ix_chunks c JOIN ix_docs d ON d.id = c.doc_id WHERE c.id = ?{c} AND {}",
-            privacy(&ctx.acts_for, &mut args)
+            "SELECT 1 FROM ix_chunks c JOIN ix_docs d ON d.id = c.doc_id WHERE c.id = ?{c} AND {} AND {}",
+            privacy(&ctx.acts_for, &mut args),
+            embeddable(ctx, &mut args)
         );
         if !tx
             .query_row(&sql, params_from_iter(args.0), |_| Ok(()))
@@ -2039,8 +2062,9 @@ mod tests {
             let got = read_doc(store.conn(), viewer, doc_of(key), Some(0), 1).unwrap();
             assert_eq!(got.is_some(), readable, "viewer {viewer} reads {key}");
         }
-        // Chunks waiting for a vector go only to a machine whose people may read them. Chunk 1 of
-        // every doc here has none, and each machine sees its own people's.
+        // Chunks waiting for a vector go only to a machine whose people own them, or that sent
+        // them: a doc that is only readable to a machine is not its to embed. Chunk 1 of every
+        // doc here has none.
         let waiting = |c: &Ctx| -> Vec<String> {
             let r = pending(&store, c, &json!(1), &json!({ "limit": 200 }), MODEL);
             let mut out: Vec<String> = r["chunks"]
@@ -2062,8 +2086,8 @@ mod tests {
             out.sort();
             out
         };
-        assert_eq!(waiting(&ann), ["ann-private", "bea-shared"]);
-        assert_eq!(waiting(&third), ["bea-shared", "bea-some", "third-private"]);
+        assert_eq!(waiting(&ann), ["ann-private"]);
+        assert_eq!(waiting(&third), ["third-private"]);
         // A machine of Ann's that may act for Bea also gets hers; one that may not never does.
         assert_eq!(
             waiting(&ctx(1, &[1, 2])),
@@ -2075,6 +2099,33 @@ mod tests {
                 "bea-some-nobody"
             ]
         );
+        // Vectors are stored only for such chunks: a shared or listed doc another person owns
+        // cannot be made to rank differently by a machine that merely reads it.
+        let store_for = |store: &mut Store, c: &Ctx, key: &str| -> i64 {
+            let chunk: i64 = store
+                .conn()
+                .query_row(
+                    "SELECT c.id FROM ix_chunks c JOIN ix_docs d ON d.id = c.doc_id
+                     WHERE d.key = ?1 AND c.ord = 1",
+                    [key],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let (b, scale) = vec_b64(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            let frame = json!({ "type": "ix_vectors", "id": 1, "model": MODEL,
+                "items": [{ "chunk": chunk, "vec": b, "scale": scale }] });
+            answer(store, c, "ix_vectors", &json!(1), &frame, MODEL)["stored"]
+                .as_i64()
+                .unwrap()
+        };
+        for (c, key, stored) in [
+            (&ann, "bea-shared", 0),
+            (&third, "bea-some", 0),
+            (&ann, "ann-private", 1),
+            (&ctx(1, &[1, 2]), "bea-shared", 1),
+        ] {
+            assert_eq!(store_for(&mut store, c, key), stored, "{key}");
+        }
         // A machine cannot store for someone it does not act for, nor take another's source.
         let r = put_doc(
             &mut store,
