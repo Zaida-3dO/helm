@@ -1,7 +1,8 @@
 // Settings → Projects → Startup: what every new chat on a project is given first. The
 // instructions are done in order before any other work; the context files are listed in the first
-// message and read when the work needs them; the MCP servers are the ones the project's chats
-// get (none ticked leaves every server available, as for a project that names none).
+// message and read when the work needs them; the MCP servers are the ones Helm's own MCP tools
+// find in the project's chats (none ticked leaves every server available, as for a project that
+// names none).
 
 import { useEffect, useMemo, useState } from 'react';
 import { mcpOps, type McpServer } from '../../api/mcp.ts';
@@ -118,7 +119,7 @@ export function StartupSection({ projects, onSaved }: { projects: ProjectNode[];
                 {!s.enabled && <span className="sp-meta"> · off</span>}
               </label>
             ))}
-            {form.servers.length > 0 && <p className="sp-help">Chats on this project get only the ticked servers.</p>}
+            {form.servers.length > 0 && <p className="sp-help">Helm's own MCP tools find only the ticked servers in this project's chats. Servers that Claude Code loads by itself are not narrowed.</p>}
           </fieldset>
           <div className="sp-actions">
             <Button disabled={!update || wrong !== null} onClick={() => void save()} data-testid="startup-save">

@@ -53,6 +53,8 @@ impl QueryEmbedder {
             url: url.map(|u| {
                 if u.ends_with("/embeddings") {
                     u
+                } else if u.ends_with("/v1") {
+                    format!("{u}/embeddings")
                 } else {
                     format!("{u}/v1/embeddings")
                 }

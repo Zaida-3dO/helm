@@ -13,8 +13,9 @@
 //! one topic per action), `helm` (files shipped in `help/`), and any namespace a crate adds through
 //! [`HelpProviders`] (`rule`, `skill`, `project`, `workflow`: read live, never copied).
 
+use crate::lines::LaunchRecords;
 use crate::registry::{HostToolRegistry, ToolCtx, ToolError, ToolResult};
-use crate::spec::ToolSpec;
+use crate::spec::{LaunchKeys, ToolSpec};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -172,9 +173,20 @@ fn cut_summary(s: &str) -> String {
 }
 
 /// What the `tool` namespace holds, from the registry: a topic per tool, per merged tool, and per
-/// action of a merged tool.
-fn tool_topics(reg: &HostToolRegistry) -> BTreeMap<String, (String, String)> {
+/// action of a merged tool, for the tools the chat's launch lists. A tool this launch does not
+/// admit (one the worker itself calls, one of a switched-off integration, one a mode adds) has no
+/// topic. The stubs for a merged tool's old names answer by their exact topic when `aliases` is
+/// set and are left out of the index otherwise.
+fn tool_topics(
+    reg: &HostToolRegistry,
+    keys: &LaunchKeys,
+    aliases: bool,
+) -> BTreeMap<String, (String, String)> {
     let mut out = BTreeMap::new();
+    let admitted = |name: &str| {
+        reg.get(name)
+            .is_some_and(|t| keys.admits(t.spec.availability.when))
+    };
     let text_of = |s: &ToolSpec| {
         let mut t = format!("{}: {}", s.name, s.description);
         if let Some(g) = &s.guidelines {
@@ -184,6 +196,9 @@ fn tool_topics(reg: &HostToolRegistry) -> BTreeMap<String, (String, String)> {
         t
     };
     for f in reg.facades() {
+        if !f.actions.iter().any(|(_, m)| admitted(m)) {
+            continue;
+        }
         let mut text = format!("{}: {}", f.name, f.description);
         if !f.guidelines.is_empty() {
             text.push_str("\n\n");
@@ -193,6 +208,7 @@ fn tool_topics(reg: &HostToolRegistry) -> BTreeMap<String, (String, String)> {
         let acts: Vec<String> = f
             .actions
             .iter()
+            .filter(|(_, m)| admitted(m))
             .map(|(a, _)| format!("tool/{}/{a}", f.name))
             .collect();
         text.push_str(&acts.join(", "));
@@ -201,7 +217,7 @@ fn tool_topics(reg: &HostToolRegistry) -> BTreeMap<String, (String, String)> {
             (first_sentence(f.description), text),
         );
         for (action, member) in f.actions {
-            if let Some(t) = reg.get(member) {
+            if let Some(t) = reg.get(member).filter(|_| admitted(member)) {
                 let mut text = text_of(&t.spec);
                 text.push_str(&format!(
                     "\n\n(Call it as {} {{\"action\": \"{action}\", ...}}; the old name {member} still works.)",
@@ -216,7 +232,13 @@ fn tool_topics(reg: &HostToolRegistry) -> BTreeMap<String, (String, String)> {
     }
     for name in reg.names() {
         let Some(t) = reg.get(name) else { continue };
+        if !keys.admits(t.spec.availability.when) {
+            continue;
+        }
         if let Some((f, action)) = reg.alias_of(name) {
+            if !aliases {
+                continue;
+            }
             out.insert(
                 format!("tool/{name}"),
                 (
@@ -253,6 +275,7 @@ pub fn answer(
     reg: &HostToolRegistry,
     providers: Option<&HelpProviders>,
     chat_id: &str,
+    keys: &LaunchKeys,
     topic: Option<&str>,
     offset: usize,
 ) -> ToolResult {
@@ -260,7 +283,7 @@ pub fn answer(
     let topic = topic.map(str::trim).filter(|t| !t.is_empty());
     let Some(topic) = topic else {
         let mut namespaces = vec![
-            json!({"namespace": "tool", "topics": tool_topics(reg).len(), "about": "How to call a Helm tool: when to use it, its arguments, its actions"}),
+            json!({"namespace": "tool", "topics": tool_topics(reg, keys, false).len(), "about": "How to call a Helm tool: when to use it, its arguments, its actions"}),
             json!({"namespace": "helm", "topics": shipped("helm").len(), "about": "Pages, cards, worktrees, consent: how Helm's own features work"}),
         ];
         for p in &providers {
@@ -285,7 +308,7 @@ pub fn answer(
     let found: Option<(String, String)> = match ns {
         "tool" | "helm" => {
             let all = if ns == "tool" {
-                tool_topics(reg)
+                tool_topics(reg, keys, !rest.is_empty())
             } else {
                 shipped("helm")
             };
@@ -367,6 +390,12 @@ pub fn register(reg: &mut HostToolRegistry) {
         .children(),
         move |ctx: &ToolCtx, args: Value| {
             let providers = ctx.services.get::<HelpProviders>();
+            // What this chat's launch lists; a chat with no record gets the always-on tools only.
+            let keys = ctx
+                .services
+                .get::<LaunchRecords>()
+                .and_then(|r| r.0.keys_of(&ctx.caller_chat_id))
+                .unwrap_or_default();
             let offset = args
                 .get("offset")
                 .and_then(Value::as_u64)
@@ -376,6 +405,7 @@ pub fn register(reg: &mut HostToolRegistry) {
                 &snapshot,
                 providers.as_deref(),
                 &ctx.caller_chat_id,
+                &keys,
                 args.get("topic").and_then(Value::as_str),
                 offset,
             )
@@ -388,6 +418,7 @@ mod tests {
     use super::*;
     use crate::facade::FacadeSpec;
     use crate::registry::ToolResult;
+    use crate::spec::Condition;
 
     fn ok(_: &ToolCtx, _: Value) -> ToolResult {
         Ok(Value::Null)
@@ -409,7 +440,19 @@ mod tests {
                 .guidelines("x".repeat(3_200)),
             ok,
         )
-        .blocking(ToolSpec::read("app_this_chat", "This chat.", obj), ok)
+        .blocking(
+            ToolSpec::read("app_this_chat", "This chat.", obj.clone()),
+            ok,
+        )
+        .blocking(
+            ToolSpec::read("app_workflow_gate", "Agents never see it.", obj.clone())
+                .when(Condition::Worker),
+            ok,
+        )
+        .blocking(
+            ToolSpec::read("app_gmail_search", "Mail.", obj).when(Condition::GmailAccounts),
+            ok,
+        )
         .facade(FacadeSpec {
             name: "app_schedule",
             group: "schedules",
@@ -446,7 +489,7 @@ mod tests {
         let r = reg();
         let p = HelpProviders::default();
         p.register(Arc::new(Rules));
-        let ask = |t: Option<&str>| answer(&r, Some(&p), "c", t, 0);
+        let ask = |t: Option<&str>| answer(&r, Some(&p), "c", &LaunchKeys::default(), t, 0);
         let v = ask(None).unwrap();
         let names: Vec<_> = v["namespaces"]
             .as_array()
@@ -455,7 +498,8 @@ mod tests {
             .map(|n| n["namespace"].as_str().unwrap())
             .collect();
         assert_eq!(names, ["tool", "helm", "rule"]);
-        // A namespace lists its topics, an old name pointing at the merged tool.
+        // A namespace lists the topics this launch admits; an old name of a merged tool is not
+        // indexed but answers by its exact topic, pointing at the merged tool.
         let v = ask(Some("tool")).unwrap();
         let topics: BTreeMap<_, _> = v["topics"]
             .as_array()
@@ -464,11 +508,24 @@ mod tests {
             .map(|t| (t["topic"].as_str().unwrap(), t["summary"].as_str().unwrap()))
             .collect();
         assert_eq!(topics["tool/app_schedule"], "Schedules.");
-        assert_eq!(
-            topics["tool/app_cancel_schedule"],
-            "Now app_schedule {action: cancel}"
-        );
+        assert!(!topics.contains_key("tool/app_cancel_schedule"));
         assert!(topics.contains_key("tool/app_schedule/list"));
+        assert!(ask(Some("tool/app_cancel_schedule")).unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("is now app_schedule"));
+        // A worker-only tool and a switched-off integration's tool are neither indexed nor read;
+        // the integration's tool appears once the launch lists it.
+        for hidden in ["tool/app_workflow_gate", "tool/app_gmail_search"] {
+            assert!(!topics.contains_key(hidden), "{hidden}");
+            assert!(ask(Some(hidden)).is_err(), "{hidden}");
+        }
+        let gmail = LaunchKeys {
+            gmail_accounts: true,
+            ..Default::default()
+        };
+        assert!(answer(&r, Some(&p), "c", &gmail, Some("tool/app_gmail_search"), 0).is_ok());
+        assert!(answer(&r, Some(&p), "c", &gmail, Some("tool/app_workflow_gate"), 0).is_err());
         assert_eq!(
             ask(Some("rule")).unwrap()["topics"][0]["topic"],
             "rule/search"

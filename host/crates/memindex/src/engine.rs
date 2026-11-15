@@ -71,6 +71,8 @@ pub struct SourceState {
     pub last_scan: i64,
 }
 
+const OFF: &str = "Memory indexing is off.";
+
 #[derive(Default)]
 struct Mem {
     /// The line the hub was last greeted on.
@@ -80,6 +82,8 @@ struct Mem {
     hub_only: HashMap<String, Vec<String>>,
     /// `(source, key)` to the stamp it was last skipped at.
     skipped: HashMap<(String, String), String>,
+    /// `(source, key)` to how many passages of it were held back as credentials.
+    withheld: HashMap<(String, String), usize>,
     /// `(source, key, hash)` the hub refused on this line.
     refused: HashSet<(String, String, String)>,
     pending: Option<u32>,
@@ -224,7 +228,7 @@ impl Indexer {
     pub fn pass(&self, only: Option<&HashSet<String>>, force: bool) {
         let settings = self.settings();
         if !settings.enabled {
-            self.say_all("Memory indexing is off.");
+            self.say_all(OFF);
             return;
         }
         match self.hub.status() {
@@ -244,6 +248,10 @@ impl Indexer {
             lock(&self.mem).rescan = false;
         }
         if let Err(why) = done {
+            if why == OFF {
+                self.say_all(OFF);
+                return;
+            }
             log::info!("memory indexing paused: {why}");
             self.say_all(format!("Paused: {why}"));
         }
@@ -445,13 +453,23 @@ impl Indexer {
                 }
                 Ok(Built::Skip(_)) => {
                     skipped += 1;
+                    lock(&self.mem).withheld.remove(&skip_id);
                     lock(&self.mem).skipped.insert(skip_id, e.stamp.clone());
                     if let Some(r) = rows {
                         stale_keys.extend(r.iter().map(|k| (*k).clone()));
                     }
                 }
                 Ok(Built::Docs(docs)) => {
-                    lock(&self.mem).skipped.remove(&skip_id);
+                    {
+                        let mut m = lock(&self.mem);
+                        m.skipped.remove(&skip_id);
+                        let held_back = docs.first().map_or(0, |d| d.withheld);
+                        if held_back > 0 {
+                            m.withheld.insert(skip_id.clone(), held_back);
+                        } else {
+                            m.withheld.remove(&skip_id);
+                        }
+                    }
                     let unchanged = rows.is_some_and(|r| {
                         r.len() == docs.len()
                             && docs
@@ -575,6 +593,16 @@ impl Indexer {
             .db
             .snapshot(|tx| store::docs(tx, &src.id))
             .map_err(|e| e.to_string())?;
+        let withheld: usize = {
+            let mut m = lock(&self.mem);
+            m.withheld
+                .retain(|(s, k), _| s != &src.id || live.contains(k.as_str()));
+            m.withheld
+                .iter()
+                .filter(|((s, _), _)| s == &src.id)
+                .map(|(_, n)| n)
+                .sum()
+        };
         let mut line = format!("{} docs", total.len());
         if sent > 0 {
             line.push_str(&format!(", {sent} sent"));
@@ -584,6 +612,11 @@ impl Indexer {
         }
         if skipped > 0 {
             line.push_str(&format!(", {skipped} left out"));
+        }
+        if withheld > 0 {
+            line.push_str(&format!(
+                ", {withheld} passages held back because they look like credentials"
+            ));
         }
         if refused > 0 {
             line.push_str(&format!(
@@ -611,6 +644,7 @@ impl Indexer {
         src: &Source,
         batch: &mut Vec<PutDoc>,
     ) -> Result<(usize, usize, Option<String>), String> {
+        self.still_on()?;
         let docs: Vec<PutDoc> = std::mem::take(batch);
         let frame = json!({
             "type": "ix_put", "source": hub_id, "kind": src.kind.as_str(),
@@ -662,6 +696,16 @@ impl Indexer {
 
     // ---- vectors -----------------------------------------------------------------------------
 
+    /// Checked before every frame that leaves this PC: a pass already running when indexing is
+    /// switched off stops at the next frame.
+    fn still_on(&self) -> Result<(), String> {
+        if self.settings().enabled {
+            Ok(())
+        } else {
+            Err(OFF.into())
+        }
+    }
+
     fn embedder_wanted(&self, s: &Settings) -> bool {
         !s.server_id.is_empty()
     }
@@ -669,6 +713,7 @@ impl Indexer {
     fn embed_pass(&self, settings: &Settings) -> Result<(), String> {
         let ours = normalise_model(&settings.model);
         loop {
+            self.still_on()?;
             if self.embedder.busy() {
                 self.say_all("Vectors wait while a local chat is working.");
                 return Ok(());
@@ -790,6 +835,7 @@ impl Indexer {
         m.sources.remove(id);
         m.hub_only.remove(id);
         m.skipped.retain(|(s, _), _| s != id);
+        m.withheld.retain(|(s, _), _| s != id);
         Ok(())
     }
 }

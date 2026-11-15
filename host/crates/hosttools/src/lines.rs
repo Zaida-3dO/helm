@@ -137,6 +137,16 @@ pub trait WorkerBroadcast: Send + Sync {
 #[derive(Clone)]
 pub struct Broadcaster(pub Arc<dyn WorkerBroadcast>);
 
+/// What each running chat's worker was launched with; the chat runtime implements it.
+pub trait LaunchRecord: Send + Sync {
+    /// The launch keys of the chat's last launch, or `None` when it has not launched.
+    fn keys_of(&self, chat_id: &str) -> Option<crate::spec::LaunchKeys>;
+}
+
+/// The shared service wrapping the runtime's [`LaunchRecord`].
+#[derive(Clone)]
+pub struct LaunchRecords(pub Arc<dyn LaunchRecord>);
+
 #[cfg(test)]
 mod tests {
     use super::*;

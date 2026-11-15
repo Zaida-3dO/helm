@@ -41,7 +41,7 @@ ENVIRONMENT:
                     people existed, and Telegram users with no person (default owner); set
                     it to the name your own PC is paired under before the first start
   HUB_ALLOW_MUTATE  1 to offer memory_update and memory_delete
-  HUB_EMBED_URL     an OpenAI-style embeddings server (base URL or .../v1/embeddings) that embeds
+  HUB_EMBED_URL     an OpenAI-style embeddings server (base URL, .../v1 or .../v1/embeddings) that embeds
                     search queries when the asker's PC cannot; unset: keywords only then
   HUB_EMBED_MODEL   the embedding model all vectors must come from (default nomic-embed-text)
   TZ                Europe/London reads dates in queries in UK time; anything else reads as UTC

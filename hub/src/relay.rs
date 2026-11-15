@@ -62,10 +62,10 @@
 //! | Helm → hub | `ix_manifest` | `id`, `source`, `afterKey`, `limit` (at most 1000): answered with `ix_manifest_page` (`items` of `{key, hash}` in key order, `more`) |
 //! | Helm → hub | `ix_put` | `id`, `source`, `kind` (when the source is new), `model`, `docs` (`{key, hash, title, locator, owner, scope, readers, tier, occurredAt, chunks}`, at most 200 chunks and 2 MiB in all; a chunk is `{ord, text, heading, at, anchor, vec, scale, model}`, `vec` being base64 int8): answered with `ix_put_result` (`results` of `{key, status: inserted, replaced, unchanged or refused, reason}`). `scope` is `me`, `everyone` or `some` (with `readers`); `owner` must be this machine's person or one it may act for |
 //! | Helm → hub | `ix_delete` | `id`, `source`, `keys`: answered with `ix_delete_result` (`deleted`) |
-//! | Helm → hub | `ix_pending` | `id`, `limit` (at most 200): answered with `ix_pending_list` (`chunks` of `{chunk, text}` and `model`): chunks with no vector for the hub's model, of docs this machine's people may read |
-//! | Helm → hub | `ix_vectors` | `id`, `model`, `items` (`{chunk, vec, scale, model}`): answered with `ix_vectors_result` (`stored`) |
+//! | Helm → hub | `ix_pending` | `id`, `limit` (at most 200): answered with `ix_pending_list` (`chunks` of `{chunk, text}` and `model`): chunks with no vector for the hub's model, of docs this machine's people own or this machine sent |
+//! | Helm → hub | `ix_vectors` | `id`, `model`, `items` (`{chunk, vec, scale, model}`): answered with `ix_vectors_result` (`stored`); only chunks of docs this machine's people own or this machine sent are stored |
 //! | hub → Helm | `ix_embed` | `id`, `text` (already prefixed for a query: embed it as it is): answered with `ix_embedded` (`id`, `vec` as numbers, `model`; or `locked` true when the local models are busy) |
-//! | hub → Helm | `ix_trace` | `id`, `viewer` (person id), `chat` (the doc's key), `source`, `kind`, `query`, `after`, `before`, `limit`: answered with `ix_trace_result` (`id`, `ok`, `results`, or `error`) |
+//! | hub → Helm | `ix_trace` | `id`, `viewer` (person id), `chat` (the doc's key), `source`, `kind`, `owner` (the person the doc is filed under), `query`, `after`, `before`, `limit`: answered with `ix_trace_result` (`id`, `ok`, `results`, or `error`) |
 //!
 //! New frames go in the table above, a `match` arm in [`Line::receive`] and, for what Helm sends
 //! up that is not a call result, an [`Upstream`] variant.

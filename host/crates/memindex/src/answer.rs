@@ -13,7 +13,7 @@
 use crate::engine::{EmbedErr, Embedder};
 use crate::feeds::Env;
 use crate::hub::{Embedded, Responder};
-use crate::model::normalise_model;
+use crate::model::{normalise_model, Kind};
 use crate::sources::claude_code::record_ts;
 use crate::store;
 use helm_profiles::store as profiles;
@@ -38,6 +38,17 @@ fn person_of(v: &Value) -> Option<String> {
     match v {
         Value::Number(n) => Some(n.to_string()),
         Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_owned()),
+        _ => None,
+    }
+}
+
+/// A moment as the hub may send it: milliseconds, or an ISO 8601 string.
+fn millis(v: &Value) -> Option<i64> {
+    match v {
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => chrono::DateTime::parse_from_rfc3339(s.trim())
+            .ok()
+            .map(|t| t.timestamp_millis()),
         _ => None,
     }
 }
@@ -155,9 +166,11 @@ impl Answerer {
             .map_err(|e| e.to_string())?
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn trace_session(
         &self,
         viewer: &str,
+        owner: Option<&str>,
         key: &str,
         query: &str,
         limit: usize,
@@ -169,7 +182,13 @@ impl Answerer {
         if session.is_empty() || session.contains(['/', '\\', '.']) {
             return Err("That is not a session.".into());
         }
-        let home = self.env.home().and_then(|p| p.hub_person_id);
+        // The PC's own person: the home profile's, or the one the hub filed the session under
+        // when the home profile is not linked.
+        let home = self
+            .env
+            .home()
+            .and_then(|p| p.hub_person_id)
+            .or_else(|| owner.map(str::to_owned));
         if home.as_deref() != Some(viewer) {
             return Err("Claude Code sessions on this PC belong to its own person.".into());
         }
@@ -247,15 +266,38 @@ impl Responder for Answerer {
             .get("limit")
             .and_then(Value::as_u64)
             .map_or(DEFAULT_LIMIT, |n| (n as usize).clamp(1, MAX_LIMIT));
-        let after = frame.get("after").and_then(Value::as_i64).unwrap_or(0);
-        let before = frame
-            .get("before")
-            .and_then(Value::as_i64)
-            .unwrap_or(i64::MAX);
+        let after = frame.get("after").and_then(millis).unwrap_or(0);
+        let before = frame.get("before").and_then(millis).unwrap_or(i64::MAX);
+        let source = if text("kind") == "claude_code" {
+            Kind::ClaudeCode
+        } else {
+            Kind::HelmChats
+        };
+        // What the switches say: the hub keeps answering from what it holds, but this PC's own
+        // text is read for a search only while indexing is on and the source is one of its own.
+        let allowed = self
+            .env
+            .db
+            .snapshot(store::load_settings)
+            .is_ok_and(|s| s.enabled)
+            && self
+                .env
+                .db
+                .snapshot(store::sources)
+                .is_ok_and(|all| all.iter().any(|s| s.enabled && s.kind == source));
+        if !allowed {
+            return bad("Indexing is off here for that source.");
+        }
         let done = match text("kind") {
-            "claude_code" => {
-                self.trace_session(&viewer, text("chat"), text("query"), limit, after, before)
-            }
+            "claude_code" => self.trace_session(
+                &viewer,
+                frame.get("owner").and_then(person_of).as_deref(),
+                text("chat"),
+                text("query"),
+                limit,
+                after,
+                before,
+            ),
             _ => self.trace_chat(&viewer, text("chat"), text("query"), limit, after, before),
         };
         match done {

@@ -159,11 +159,11 @@ impl Feed for ClaudeCodeFeed {
         let Some(doc) = build_session_doc(key, &String::from_utf8_lossy(&text)) else {
             return Ok(Built::Skip("nothing was asked".into()));
         };
-        Ok(Built::Docs(super::finish(
+        Ok(super::finish(
             doc,
             &Audience::private(None),
             "conversation",
             &format!("claude-code:{key}"),
-        )))
+        ))
     }
 }

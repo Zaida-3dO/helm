@@ -25,6 +25,8 @@ struct FakeHub {
     docs: Mutex<BTreeMap<(String, String), Value>>,
     vectors: Mutex<HashSet<(String, i64)>>,
     frames: Mutex<Vec<String>>,
+    /// Runs after each put is stored.
+    on_put: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 impl FakeHub {
@@ -126,6 +128,9 @@ impl IndexHub for FakeHub {
                         json!({"key": key, "status": status})
                     })
                     .collect();
+                if let Some(f) = self.on_put.lock().unwrap().as_ref() {
+                    f();
+                }
                 json!({"ok": true, "results": results})
             }
             "ix_delete" => {
@@ -224,6 +229,7 @@ impl Rig {
         let mut reg = MigrationRegistry::new();
         helm_chats::register_migrations(&mut reg);
         helm_profiles::register_migrations(&mut reg);
+        helm_consent::register_migrations(&mut reg);
         crate::register_migrations(&mut reg);
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
@@ -656,6 +662,8 @@ fn the_hubs_questions_are_answered_only_for_a_viewer_who_may_see_the_chat() {
         })
         .unwrap();
     }
+    r.add_source("chats", Kind::HelmChats, Path::new(""), "", Scope::Me);
+    r.add_source("cc", Kind::ClaudeCode, Path::new(""), "", Scope::Me);
     let answerer = Answerer {
         env: r.env.clone(),
         embedder: r.emb.clone(),
@@ -706,6 +714,67 @@ fn the_hubs_questions_are_answered_only_for_a_viewer_who_may_see_the_chat() {
     assert_eq!(ask("7", "claude_code", "sess1", "zebra")["ok"], false);
     assert_eq!(ask("1", "claude_code", "../sess1", "zebra")["ok"], false);
 
+    // The hub's date window arrives as ISO strings (or milliseconds) and is honoured.
+    let window = |after: Value, before: Value| {
+        answerer.trace(
+            &json!({"viewer": "7", "kind": "helm_chats", "chat": "mine", "query": "zebra",
+                               "after": after, "before": before}),
+        )["results"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(
+        window(json!("1970-01-01T00:00:00Z"), json!("1970-01-01T00:00:01Z")),
+        1
+    );
+    assert_eq!(window(json!("2026-01-01T00:00:00Z"), json!(null)), 0);
+    assert_eq!(window(json!(0), json!(100)), 1);
+    assert_eq!(window(json!(100), json!(200)), 0);
+
+    // With the home profile not linked to a person, the hub names the session's owner.
+    r.db.write(|tx| {
+        helm_profiles::store::update(
+            tx,
+            &home.id,
+            helm_profiles::store::Patch {
+                hub_person_id: Some(None),
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+    let owned = |viewer: &str, owner: Value| {
+        answerer.trace(
+            &json!({"viewer": viewer, "owner": owner, "kind": "claude_code",
+                               "chat": "sess1", "query": "zebra"}),
+        )["ok"]
+            .clone()
+    };
+    assert_eq!(owned("1", json!(1)), true);
+    assert_eq!(owned("7", json!(1)), false);
+    assert_eq!(owned("1", json!(null)), false);
+
+    // Nothing is read for a search once indexing, or that kind of source, is switched off.
+    r.db.write(|tx| {
+        let mut s = store::load_settings(tx)?;
+        s.enabled = false;
+        store::save_settings(tx, &s)
+    })
+    .unwrap();
+    assert_eq!(ask("7", "helm_chats", "mine", "zebra")["ok"], false);
+    r.db.write(|tx| {
+        let mut s = store::load_settings(tx)?;
+        s.enabled = true;
+        store::save_settings(tx, &s)?;
+        tx.execute(
+            "UPDATE memindex_sources SET enabled = 0 WHERE kind = 'helm_chats'",
+            [],
+        )
+    })
+    .unwrap();
+    assert_eq!(ask("7", "helm_chats", "mine", "zebra")["ok"], false);
+
     // The query embed: a vector with the model's name, or "locked" while the card is reserved.
     assert_eq!(
         answerer.embed("search_query: zebra"),
@@ -713,4 +782,200 @@ fn the_hubs_questions_are_answered_only_for_a_viewer_who_may_see_the_chat() {
     );
     r.emb.locked.store(true, Ordering::SeqCst);
     assert_eq!(answerer.embed("search_query: zebra"), Embedded::Locked);
+}
+
+#[test]
+fn credential_looking_passages_and_hidden_files_stay_home_and_switching_off_stops_the_next_frame() {
+    let r = Rig::new();
+    let notes = r.root.join("notes");
+    // Built here so no real-looking secret sits in the source.
+    let token = format!("ghp_{}", "a1B2".repeat(6));
+    write(
+        &notes,
+        "a.md",
+        &format!(
+            "# Plain\n\nsome plain words {}\n\n# Keys\n\ntoken: {token}\n",
+            "filler ".repeat(270)
+        ),
+    );
+    write(&notes, "only.md", &format!("# Keys\n\n{token}\n"));
+    write(&notes, ".quiet.md", "# Quiet\n\nhidden words\n");
+    r.add_source("notes", Kind::Folder, &notes, "", Scope::Me);
+    r.ix.pass(None, false);
+    assert_eq!(r.hub.keys(":notes"), ["a.md"], "{}", r.status("notes"));
+    let sent = r.hub.doc("a.md").to_string();
+    assert!(sent.contains("some plain words"), "{sent}");
+    assert!(!sent.contains(&token), "the credential was sent: {sent}");
+    let status = r.status("notes");
+    assert!(
+        status.contains("1 passages held back") && status.contains("1 left out"),
+        "{status}"
+    );
+
+    // Indexing switched off while a pass is sending: the next frame is not sent.
+    let many = r.root.join("many");
+    for i in 0..250 {
+        write(
+            &many,
+            &format!("n{i}.md"),
+            &format!("# N{i}\n\nnote number {i}\n"),
+        );
+    }
+    r.add_source("many", Kind::Folder, &many, "", Scope::Me);
+    let db = r.db.clone();
+    *r.hub.on_put.lock().unwrap() = Some(Box::new(move || {
+        db.write(|tx| {
+            let mut s = store::load_settings(tx)?;
+            s.enabled = false;
+            store::save_settings(tx, &s)
+        })
+        .unwrap();
+    }));
+    let puts = r.hub.count("ix_put");
+    r.ix.pass(Some(&HashSet::from(["many".to_owned()])), false);
+    assert_eq!(r.hub.count("ix_put") - puts, 1, "{}", r.status("many"));
+    assert_eq!(r.ix.note(), "Memory indexing is off.");
+}
+
+#[test]
+fn an_agent_may_only_narrow_memory_indexing_and_files_sources_under_its_own_person() {
+    use helm_consent::kinds::AllowKinds;
+    use helm_hosttools::{CallOrigin, HostToolRegistry, ToolCtx, ToolHandler};
+    let r = Rig::new();
+    let (pat, home) =
+        r.db.write(|tx| {
+            let pat = helm_profiles::store::create(tx, "Pat", None, Some("7"), 5).unwrap();
+            let home = helm_profiles::store::home(tx).unwrap().unwrap();
+            helm_profiles::store::update(
+                tx,
+                &home.id,
+                helm_profiles::store::Patch {
+                    hub_person_id: Some(Some("1".into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO projects(id, kind, name, created_at) VALUES ('p1','folder','Proj',1)",
+                [],
+            )?;
+            for (chat, owner) in [("mine", &home.id), ("pats", &pat.id)] {
+                tx.execute(
+                    "INSERT INTO chats(id, project_id, title, profile_id, created_at, updated_at)
+                     VALUES (?1, 'p1', 't', ?2, 1, 1)",
+                    params![chat, owner],
+                )?;
+            }
+            // Indexing starts off.
+            let mut s = store::load_settings(tx)?;
+            s.enabled = false;
+            store::save_settings(tx, &s)?;
+            Ok::<_, rusqlite::Error>((pat, home))
+        })
+        .unwrap();
+    let mut kinds = AllowKinds::new();
+    crate::tool::register_allow_kinds(&mut kinds);
+    let kinds = Arc::new(kinds);
+    let mut services = helm_ipc::Services::new();
+    services.insert(r.db.clone());
+    services.insert(kinds.clone());
+    services.insert(Arc::new(helm_core::profile::Profile {
+        dir: r.root.clone(),
+        hash: String::new(),
+    }));
+    let sink: Arc<dyn helm_ipc::EventSink> = Arc::new(helm_ipc::RecordingSink::default());
+    crate::service::register_services(&mut services, &sink, r.hub.clone());
+    let services = Arc::new(services);
+    let svc = services.get::<crate::service::Service>().unwrap();
+    let mut reg = HostToolRegistry::new();
+    crate::tool::register_host_tools(&mut reg);
+    let ToolHandler::Blocking(tool) = reg.get("app_memory_index").unwrap().handler.clone() else {
+        panic!("blocking tool")
+    };
+    let call = |chat: &str, args: Value| {
+        tool(
+            &helm_hosttools::ToolCtx {
+                caller_chat_id: chat.into(),
+                is_child: false,
+                tool_call_id: None,
+                origin: CallOrigin::Agent,
+                services: services.clone(),
+                events: sink.clone(),
+                ops: None,
+            },
+            args,
+        )
+        .map_err(|e| e.public)
+    };
+    let _: Option<ToolCtx> = None;
+
+    // What widens what leaves the PC needs the user's card; nothing changes meanwhile.
+    for args in [
+        json!({"action": "switch", "enabled": true}),
+        json!({"action": "switch", "enabled": true, "serverId": "other"}),
+    ] {
+        let why = call("mine", args).unwrap_err();
+        assert!(why.contains("permission"), "{why}");
+        assert!(!svc.view().enabled);
+    }
+    // A household member's chat changes none of the switches, even off.
+    let why = call("pats", json!({"action": "switch", "enabled": false})).unwrap_err();
+    assert!(why.contains("own person"), "{why}");
+    // Another model on the same server needs no card.
+    call(
+        "mine",
+        json!({"action": "switch", "model": "nomic-embed-text"}),
+    )
+    .unwrap();
+    // Moving the embedding to another server needs one; naming the same one, and turning off,
+    // do not.
+    r.db.write(|tx| {
+        let mut s = store::load_settings(tx)?;
+        s.enabled = true;
+        store::save_settings(tx, &s)
+    })
+    .unwrap();
+    let why = call("mine", json!({"action": "switch", "serverId": "other"})).unwrap_err();
+    assert!(why.contains("permission"), "{why}");
+    assert_eq!(svc.view().server_id, "ollama");
+    call(
+        "mine",
+        json!({"action": "switch", "serverId": "ollama", "enabled": true}),
+    )
+    .unwrap();
+    call("mine", json!({"action": "switch", "enabled": false})).unwrap();
+    assert!(!svc.view().enabled);
+
+    // A household member's chat can only file a source under its own profile.
+    let folder = r.root.join("pats-notes");
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.to_string_lossy().into_owned();
+    let why = call(
+        "pats",
+        json!({"action": "add", "kind": "folder", "path": path, "personId": home.id}),
+    )
+    .unwrap_err();
+    assert!(why.contains("own profile"), "{why}");
+    // The card says whose person the source is filed under.
+    let card = |chat: &str, person: &str| {
+        let kind = kinds.get(crate::tool::KIND).unwrap();
+        r.db.snapshot(|tx| {
+            Ok::<_, rusqlite::Error>((kind.canonical)(
+                tx,
+                chat,
+                &json!({"action": "add", "kind": "folder", "path": path, "personId": person}),
+            ))
+        })
+        .unwrap()
+        .map(|c| (c.details, c.target["personId"].as_str().unwrap().to_owned()))
+    };
+    let (details, filed) = card("pats", "").unwrap();
+    assert_eq!(details[0], "Filed under: Pat");
+    assert_eq!(filed, pat.id);
+    assert!(card("pats", &home.id).is_err());
+    assert_eq!(card("mine", &pat.id).unwrap().0[0], "Filed under: Pat");
+    assert_eq!(
+        card("mine", "").unwrap().0[0],
+        format!("Filed under: {}", home.name)
+    );
 }

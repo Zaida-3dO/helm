@@ -122,11 +122,11 @@ impl Feed for HelmChatsFeed {
         let Some(doc) = build_chat_doc(key, &title, &project, &rows) else {
             return Ok(Built::Skip("nothing was asked".into()));
         };
-        Ok(Built::Docs(super::finish(
+        Ok(super::finish(
             doc,
             &audience,
             "conversation",
             &format!("helm://chats/{key}"),
-        )))
+        ))
     }
 }

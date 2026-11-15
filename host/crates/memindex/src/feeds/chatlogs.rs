@@ -96,11 +96,11 @@ impl Feed for ChatLogsFeed {
         let Some(doc) = build_log_doc(key, &String::from_utf8_lossy(&text)) else {
             return Ok(Built::Skip("no messages".into()));
         };
-        Ok(Built::Docs(super::finish(
+        Ok(super::finish(
             doc,
             &Audience::private(owner),
             "conversation",
             key,
-        )))
+        ))
     }
 }
