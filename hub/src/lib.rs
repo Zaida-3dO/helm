@@ -21,3 +21,4 @@ pub mod stt;
 pub mod telegram;
 pub mod voice;
 pub mod voice_http;
+pub mod when;

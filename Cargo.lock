@@ -2128,6 +2128,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "helm-memindex"
+version = "2.0.4"
+dependencies = [
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "helm-pages"
 version = "2.0.4"
 dependencies = [
