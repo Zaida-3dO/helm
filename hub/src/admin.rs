@@ -36,7 +36,9 @@ pub const USAGE: &str = "  helm-hub person add <name> | person list
   Scopes: memory:ro, memory:rw, relay, app, peer, telegram, voice, remote (comma separated;
   telegram, voice and remote stand alone).
   Default for a machine: memory:rw,relay,app,peer. A person that does not exist yet is made.
-  --acts-for takes people who exist, comma separated; a machine always acts for its own person.";
+  --acts-for takes people who exist, comma separated; a machine always acts for its own person.
+  `client list` shows each acts-for with its source: admin (set here) or device (announced by
+  the machine's own Helm, and refreshed every time it says so).";
 
 /// Whether `first` begins an admin command.
 pub fn is_admin_command(first: &str) -> bool {
@@ -157,6 +159,10 @@ pub fn run(registry: &mut Registry, args: &[String], now_ms: i64) -> Result<Stri
                 out.push_str(&describe(c));
                 let others = registry.acts_for(c.id).map_err(|e| e.to_string())?;
                 if !others.is_empty() {
+                    let others: Vec<String> = others
+                        .iter()
+                        .map(|(name, source)| format!("{name} ({source})"))
+                        .collect();
                     out.push_str(&format!("  acts for {}", others.join(", ")));
                 }
                 out.push('\n');
