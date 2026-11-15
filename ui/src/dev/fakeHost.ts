@@ -38,6 +38,7 @@ import { webSearchFakeOps } from './fake-websearch.ts';
 import { dictationFakeOps } from './fake-dictation.ts';
 import { fakeGateAddDecided, gatekeeperFakeOps } from './fake-gatekeeper.ts';
 import { localModelsFakeOps } from './fake-localmodels.ts';
+import { memindexFakeOps } from './fake-memindex.ts';
 import { gpuFakeOps } from './fake-gpu.ts';
 import { orchestratorFakeOps } from './fake-orchestrator.ts';
 import { newChatFakeOps } from '../newchat/fake.ts';
@@ -91,6 +92,7 @@ export function registerFakeOps(prefixes: string[], handler: FakeOpHandler): voi
 const localModels = localModelsFakeOps();
 registerFakeOps(localModels.prefixes, localModels.handler);
 { const gpu = gpuFakeOps(localModels.gpu); registerFakeOps(gpu.prefixes, gpu.handler); }
+{ const mi = memindexFakeOps(); registerFakeOps(mi.prefixes, mi.handler); }
 
 export function fakeOpFor(op: string): FakeOpHandler | undefined {
   return extraOps.find((r) => r.prefixes.some((p) => op.startsWith(p)))?.handler;
