@@ -6,8 +6,9 @@
 // only when the parent is held, in the same group and the same archived state; anything else is
 // drawn at the top level, cycles are cut, and deeper records render at depth index 2.
 // Activity view: every held chat, newest activity first, as two-line rows; no headers or nesting.
-// Archived view: the projects grouping, holding only archived chats, showing only groups that hold
-// one (or are themselves archived).
+// The archived list offers the same Projects / Activity pair: archivedProjects groups only archived
+// chats under the projects that hold one (or are themselves archived), archivedActivity lists them
+// newest activity first.
 // Projects with no chats never show in the projects view (a pinned one, the open chat's project and
 // a parent of a shown project excepted). A finished board project (all its work done on the board)
 // shows only while it still holds chats, so none of them become unreachable.
@@ -15,7 +16,7 @@
 // them), so one shows here only while chats are still shown under it (before they are moved onto a
 // board, or when no task board is connected), never just for being pinned or open.
 
-import type { ProjectNode, SidebarRow, SidebarView } from '../api/projects.ts';
+import type { ProjectNode, SidebarRow } from '../api/projects.ts';
 import { arrange, type ItemRef } from '../itemlinks/folders.ts';
 import { isBusy } from './status.ts';
 
@@ -75,8 +76,12 @@ export type ListItem = (
   | { kind: 'pinBreak'; key: string; height: number }
 ) & { block?: BlockPos };
 
+/** What the list draws: the host's projects/activity/archived paging view plus the archived
+ *  list's own Projects / Activity choice. Paging stays keyed on the host's three views. */
+export type ListView = 'projects' | 'activity' | 'archivedProjects' | 'archivedActivity';
+
 export interface BuildOptions {
-  view: SidebarView;
+  view: ListView;
   compact: boolean;
   /** Parents the user expanded (parents are collapsed by default). */
   expandedChats: ReadonlySet<string>;
@@ -169,9 +174,10 @@ function projectChildren(projects: ProjectNode[]): { roots: ProjectNode[]; kids:
 export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildOptions): ListItem[] {
   const h = o.compact ? HEIGHTS.compact : HEIGHTS.normal;
   const closed = o.closed;
-  if (o.view === 'activity') {
+  const archivedActivity = o.view === 'archivedActivity';
+  if (o.view === 'activity' || archivedActivity) {
     return rows
-      .filter((r) => !r.archived && !closed?.has(r.groupProjectId))
+      .filter((r) => r.archived === archivedActivity && !closed?.has(r.groupProjectId))
       .slice()
       .sort((a, b) => b.updatedAt - a.updatedAt || (a.chatId < b.chatId ? -1 : 1))
       .map((row) => ({
@@ -185,7 +191,7 @@ export function buildList(projects: ProjectNode[], rows: SidebarRow[], o: BuildO
         twoLine: true,
       }));
   }
-  const archivedView = o.view === 'archived';
+  const archivedView = o.view === 'archivedProjects';
   const shown = rows.filter((r) => r.archived === archivedView && !closed?.has(r.groupProjectId));
   const byGroup = new Map<string, SidebarRow[]>();
   for (const r of shown) {

@@ -26,7 +26,7 @@ import { SidebarActions, compactChat, exportChatMarkdown, rollOverChat, rollOver
 import { SidebarData, errorText } from './data.ts';
 import { canSitUnder, dropAction, passedThreshold, type DragSource, type DropTarget } from './drag.ts';
 import { chatMenuItems, projectMenuItems } from './menus.ts';
-import { buildList, chatAncestors, projectsHolding, showsCalmWheel, visibleChatOrder, type ListItem } from './model.ts';
+import { buildList, chatAncestors, projectsHolding, showsCalmWheel, visibleChatOrder, type ListView, type ListItem } from './model.ts';
 import { setVisibleOrder } from './rowOrder.ts';
 import { SidebarTop } from './SidebarTop.tsx';
 import { PromptDialog, type Prompt } from './PromptDialog.tsx';
@@ -122,11 +122,22 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   // data keeps every row it has loaded.
   const activeProfile = prof.view?.activeId ?? null;
   const localRows = useMemo(() => rowsForProfile(snap.rows, activeProfile, prof.ids) as SidebarRow[], [snap.rows, activeProfile, prof.ids]);
-  const [view, setView] = useState<SidebarView>('projects');
+  const [view, setView] = useState<'projects' | 'activity'>('projects');
+  // The archived list offers the same Projects / Activity pair and opens in the Activity view.
+  const [archived, setArchived] = useState(false);
+  const [archivedView, setArchivedView] = useState<'projects' | 'activity'>('activity');
+  const currentView = archived ? archivedView : view;
+  // Paging stays keyed on the host's three views: the archived list reads archived rows either way.
+  const pagingView: SidebarView = archived ? 'archived' : view;
+  const listView: ListView = archived
+    ? archivedView === 'activity'
+      ? 'archivedActivity'
+      : 'archivedProjects'
+    : view;
   // Another device's chats: read through the mirror for the active profile, drawn by the same tree.
   const { snap: dev } = useDevices(api, bus);
   const remote = dev.remote;
-  const { snap: other, loadMore: loadMoreRemote } = useRemoteList(api, bus, remote?.uid ?? null, activeProfile, view === 'archived');
+  const { snap: other, loadMore: loadMoreRemote } = useRemoteList(api, bus, remote?.uid ?? null, activeProfile, archived);
   const shownRows = remote ? other.rows : localRows;
   // Another device's groups collapse on this screen only: its projects are not ours to change.
   const [remoteShut, setRemoteShut] = useState<ReadonlySet<string>>(() => new Set());
@@ -178,8 +189,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     return bus.on('preferences', () => void readCompact());
   }, [data, api, ops, bus]);
   useEffect(() => {
-    if (!snap.paging[view].started) void data.page(view);
-  }, [view, data, snap.paging]);
+    if (!snap.paging[pagingView].started) void data.page(pagingView);
+  }, [pagingView, data, snap.paging]);
 
   // Agent Standup sync triggers. Quiet: nothing is drawn, and a failure shows in Settings → Projects.
   const runSync = useCallback(() => {
@@ -225,16 +236,16 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   const items = useMemo(
     () =>
       buildList(shownProjects, shownRows, {
-        view,
+        view: listView,
         compact,
         expandedChats: expanded,
         selectedChatId: selected,
         keptShut: keptShut.chat === selected ? keptShut.ids : undefined,
         flagged: remote ? undefined : flaggedIds,
         closed: remote ? undefined : snap.closed,
-        itemLinks: view === 'activity' || remote ? undefined : { refs: itemRefs, collapsed: collapsedItems },
+        itemLinks: currentView === 'activity' || remote ? undefined : { refs: itemRefs, collapsed: collapsedItems },
       }),
-    [shownProjects, shownRows, view, compact, expanded, selected, keptShut, flaggedIds, snap.closed, itemRefs, collapsedItems, remote],
+    [shownProjects, shownRows, listView, currentView, compact, expanded, selected, keptShut, flaggedIds, snap.closed, itemRefs, collapsedItems, remote],
   );
   useEffect(() => setVisibleOrder(visibleChatOrder(items)), [items]);
   const projectsById = useMemo(() => new Map(shownProjects.map((p) => [p.id, p])), [shownProjects]);
@@ -303,7 +314,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
       return kids.length === 0 ? 0 : 1 + Math.max(...kids.map((k) => heightOf(k.chatId)));
     };
     const items = withChatIcons(chatMenuItems(
-      { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view, profiles: profileChoices(prof, row.chatId, snap.rows), shares: shareChoices(prof, row.chatId, snap.rows) },
+      { row, projects: snap.projects, hidden: hiddenBoards, siblings, heightOf, depthOf, expanded: expanded.has(row.chatId), view: archived ? 'archived' : currentView, profiles: profileChoices(prof, row.chatId, snap.rows), shares: shareChoices(prof, row.chatId, snap.rows) },
       {
         fork: () => void act.fork(row),
         rename: () => promptRename(row),
@@ -422,7 +433,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   dragRef.current = drag;
   const suppressClick = useRef(false);
   const startDrag = (e: ReactPointerEvent, src: DragSource, title: string) => {
-    if (e.button !== 0 || e.ctrlKey || e.pointerType === 'touch' || view === 'activity' || remote) return;
+    if (e.button !== 0 || e.ctrlKey || e.pointerType === 'touch' || currentView === 'activity' || remote) return;
     setDrag({ src, title, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, active: false, target: null });
   };
   useEffect(() => {
@@ -519,10 +530,17 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     };
   }, [drag !== null, act, data, projectsById]);
 
-  const paging = remote ? { loading: other.loading, complete: !other.more, error: other.error, started: true } : snap.paging[view];
-  const loadMoreChats = () => (remote ? loadMoreRemote() : void data.page(view));
-  const switchView = (v: SidebarView) => {
-    setView(v);
+  const paging = remote ? { loading: other.loading, complete: !other.more, error: other.error, started: true } : snap.paging[pagingView];
+  const loadMoreChats = () => (remote ? loadMoreRemote() : void data.page(pagingView));
+  const switchView = (v: 'projects' | 'activity') => {
+    if (archived) setArchivedView(v);
+    else setView(v);
+    setMenu(null);
+    setPreview(null);
+    listRef.current?.scrollTo({ top: 0 });
+  };
+  const toggleArchived = () => {
+    setArchived((a) => !a);
     setMenu(null);
     setPreview(null);
     listRef.current?.scrollTo({ top: 0 });
@@ -562,7 +580,8 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
   return (
     <div
       className="sb-root"
-      data-view={view}
+      data-view={currentView}
+      data-archived={archived ? 'true' : undefined}
       data-compact={compact ? 'true' : 'false'}
       data-dragging={drag?.active ? 'true' : undefined}
       onContextMenu={(e) => {
@@ -588,24 +607,21 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         </p>
       )}
       <div className="sb-section">
-        {view === 'archived' ? (
-          <span>Archived chats</span>
-        ) : (
-          <div className="sb-switch" role="group" aria-label="Sidebar view">
-            <button type="button" data-testid="sidebar-view-projects" aria-pressed={view === 'projects'} title="Chats grouped by project" onClick={() => switchView('projects')}>
-              Projects
-            </button>
-            <button
-              type="button"
-              data-testid="sidebar-view-activity"
-              aria-pressed={view === 'activity'}
-              title="Recent chat activity across all projects, newest first"
-              onClick={() => switchView('activity')}
-            >
-              Activity
-            </button>
-          </div>
-        )}
+        {archived && <span>Archived chats</span>}
+        <div className="sb-switch" role="group" aria-label="Sidebar view">
+          <button type="button" data-testid="sidebar-view-projects" aria-pressed={currentView === 'projects'} title="Chats grouped by project" onClick={() => switchView('projects')}>
+            Projects
+          </button>
+          <button
+            type="button"
+            data-testid="sidebar-view-activity"
+            aria-pressed={currentView === 'activity'}
+            title="Recent chat activity across all projects, newest first"
+            onClick={() => switchView('activity')}
+          >
+            Activity
+          </button>
+        </div>
         <DeviceToggle api={api} bus={bus} onError={setError} />
       </div>
       {remote && (
@@ -617,7 +633,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         className="sb-list"
         ref={listRef}
         tabIndex={0}
-        aria-label={view === 'activity' ? 'Recent activity' : 'Projects and chats'}
+        aria-label={currentView === 'activity' ? 'Recent activity' : 'Projects and chats'}
         onScroll={(e) => {
           scrolling.current = Date.now();
           setPreview(null);
@@ -655,10 +671,10 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
               ? remote.online
                 ? `No chats on ${remote.name} for this profile`
                 : `${remote.name} is offline and no copy of its chats is held here`
-              : view === 'activity'
-                ? 'No recent activity'
-                : view === 'archived'
-                  ? 'No archived chats'
+              : archived
+                ? 'No archived chats'
+                : currentView === 'activity'
+                  ? 'No recent activity'
                   : 'Add your first project'}
           </div>
         )}
@@ -672,12 +688,12 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
         <button
           type="button"
           className="sb-foot"
-          aria-pressed={view === 'archived'}
+          aria-pressed={archived}
           data-testid="nav-archived"
-          onClick={() => switchView(view === 'archived' ? 'projects' : 'archived')}
+          onClick={toggleArchived}
         >
           <IconArchive />
-          <span>{view === 'archived' ? 'Back to projects' : 'Archived chats'}</span>
+          <span>{archived ? 'Back to projects' : 'Archived chats'}</span>
         </button>
         <PagesEntry api={api} bus={bus} profileId={activeProfile} />
         <ProfileItem api={api} bus={bus} />
@@ -786,7 +802,7 @@ export function SidebarView({ api, bus, store, ops, selected, onSelect, openSett
     return (
       <ChatRow
         item={it}
-        indent={view === 'activity' ? 0 : (groupDepth.get(row.groupProjectId) ?? 0) * 16 + (it.block ? 4 : 0)}
+        indent={currentView === 'activity' ? 0 : (groupDepth.get(row.groupProjectId) ?? 0) * 16 + (it.block ? 4 : 0)}
         project={projectsById.get(row.groupProjectId)}
         selected={row.chatId === selected}
         needsYou={!remote && snap.needsYou.has(row.chatId)}

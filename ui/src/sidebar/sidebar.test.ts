@@ -148,7 +148,7 @@ test('chats in a closed project are never drawn, not even as loose rows, in any 
   const rows = [row('x', 'gone'), row('y', 'a'), row('z', 'gone', { archived: true })];
   const closed = new Set(['gone']);
   const ids = (items: ListItem[]) => items.filter((i) => i.kind === 'chat').map((i) => (i as Extract<ListItem, { kind: 'chat' }>).row.chatId);
-  for (const view of ['projects', 'activity', 'archived'] as const) {
+  for (const view of ['projects', 'activity', 'archivedProjects', 'archivedActivity'] as const) {
     const items = buildList([project('a', { chatCount: 1 })], rows, { ...opts, view, closed });
     assert.ok(!ids(items).some((id) => id === 'x' || id === 'z'), view);
   }
@@ -259,7 +259,7 @@ test('empty projects never show, with no row to bring them back; a finished proj
   assert.equal(headerSubtitle(project('gone', { board: { stale: true } as ProjectNode['board'] }), new Map()), 'Not on the board');
   assert.equal(headerSubtitle(project('f', { board: null }), new Map()), null);
   // The archived view keeps its own rule: a finished project holding an archived chat shows there.
-  assert.deepEqual(shape(buildList(projects, [row('a1', 'done', { archived: true })], { ...opts, view: 'archived' })), ['H0:arch', 'H0:done', 'C0:a1']);
+  assert.deepEqual(shape(buildList(projects, [row('a1', 'done', { archived: true })], { ...opts, view: 'archivedProjects' })), ['H0:arch', 'H0:done', 'C0:a1']);
   // An older board sends no counts, so nothing is finished.
   assert.deepEqual(shape(buildList([boardProject('x', false, { chatCount: 1 })], [], opts)), ['H0:x']);
 });
@@ -325,13 +325,16 @@ test('a chat cycle is cut rather than looping', () => {
   );
 });
 
-test('activity is flat, newest first, two-line; archived shows only groups holding archived chats', () => {
-  const rows = [row('old', 'g', { updatedAt: 1 }), row('new', 'h', { updatedAt: 9 }), row('arc', 'h', { archived: true })];
+test('activity is flat, newest first, two-line; the archived list offers both, grouping or newest first', () => {
+  const rows = [row('old', 'g', { updatedAt: 1 }), row('new', 'h', { updatedAt: 9 }), row('arc', 'h', { archived: true }), row('arc2', 'g', { archived: true, updatedAt: 5 })];
   const act = buildList([project('g'), project('h')], rows, { ...opts, view: 'activity' });
   assert.deepEqual(shape(act), ['C0:new', 'C0:old']);
   assert.equal(act[0]!.height, HEIGHTS.normal.twoLine);
-  const arc = buildList([project('g'), project('h')], rows, { ...opts, view: 'archived' });
-  assert.deepEqual(shape(arc), ['H0:h', 'C0:arc']);
+  const arc = buildList([project('g'), project('h')], rows, { ...opts, view: 'archivedProjects' });
+  assert.deepEqual(shape(arc), ['H0:g', 'C0:arc2', 'H0:h', 'C0:arc'], 'only groups holding an archived chat show');
+  const arcAct = buildList([project('g'), project('h')], rows, { ...opts, view: 'archivedActivity' });
+  assert.deepEqual(shape(arcAct), ['C0:arc2', 'C0:arc'], 'the archived activity list holds only archived chats, newest first');
+  assert.equal(arcAct[0]!.height, HEIGHTS.normal.twoLine, 'its rows are two-line like the main activity list');
 });
 
 test('row heights match the design system, normal and compact', () => {
